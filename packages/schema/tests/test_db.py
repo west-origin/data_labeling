@@ -1,3 +1,11 @@
+"""DB 계층 테스트: 마이그레이션과 테이블 정의 일치(SQLite), 저장소 함수와 트리거(PostgreSQL).
+
+`@pytest.mark.services` 테스트는 실행 중인 PostgreSQL이 필요하다
+(`make up` 뒤 `make test-services`).
+접속 URL은 환경 변수 DLP_DATABASE_URL 또는 개발 기본값. 테스트마다 임시 DB를 만들고 지운다.
+정답 근거: 계약 객체 왕복 동일성, 트리거가 내는 예외, 마이그레이션 백필 규칙.
+"""
+
 from __future__ import annotations
 
 import os
@@ -36,10 +44,15 @@ from dlp_schema.ontology import Ontology
 from dlp_schema.session import LifecycleState, SyncMethod
 from dlp_schema.testing import FIXED_TIME, action_payload, make_label, make_session
 
+# 개발 compose(services/)의 PostgreSQL 기본 접속 정보 (로컬 개발 전용 비밀번호)
 DEFAULT_URL = "postgresql+psycopg://dlp:dlp-dev-password@localhost:5432/dlp"
 
 
 def test_migrations_match_table_definitions(tmp_path: Path) -> None:
+    """SQLite에 모든 마이그레이션을 적용한 스키마가 db.tables 메타데이터와 같다.
+
+    차이가 있으면 diff 목록이 실패 메시지에 나온다. 끝으로 base까지 내릴 수 있는지도 본다.
+    """
     url = f"sqlite:///{tmp_path / 'm.db'}"
     upgrade(url)
     engine = sa.create_engine(url)
@@ -52,7 +65,10 @@ def test_migrations_match_table_definitions(tmp_path: Path) -> None:
 
 @pytest.fixture
 def pg_url() -> Iterator[str]:
-    """테스트마다 새 데이터베이스를 만들고 마이그레이션을 적용한다."""
+    """테스트마다 새 데이터베이스를 만들고 마이그레이션을 적용한다.
+
+    관리 DB(postgres)에 AUTOCOMMIT으로 붙어 `dlp_test_<임의 8자>` DB를 만들고, 끝나면 강제로 지운다.
+    """
     admin_url = sa.make_url(os.environ.get("DLP_DATABASE_URL", DEFAULT_URL))
     name = f"dlp_test_{uuid.uuid4().hex[:8]}"
     admin = sa.create_engine(admin_url.set(database="postgres"), isolation_level="AUTOCOMMIT")
@@ -70,6 +86,7 @@ def pg_url() -> Iterator[str]:
 
 @pytest.fixture
 def pg(pg_url: str, ontology: Ontology) -> Iterator[sa.Engine]:
+    """마이그레이션된 임시 DB 엔진. 온톨로지 v1과 기본 세션 s001을 미리 등록한다."""
     engine = sa.create_engine(pg_url)
     with engine.begin() as conn:
         register_ontology(conn, ontology)
@@ -80,6 +97,10 @@ def pg(pg_url: str, ontology: Ontology) -> Iterator[sa.Engine]:
 
 @pytest.mark.services
 def test_session_and_label_roundtrip(pg: sa.Engine) -> None:
+    """세션과 라벨(모델 행동, 공백, 블러)이 DB 왕복 후 같다.
+
+    get_labels는 (시작, ID) 순서와 종류 필터를 지킨다.
+    """
     model = Provenance(source=Source.MODEL, model_version="vlm-0.1")
     labels = [
         make_label(action_payload(), label_id="a1", provenance=model, confidence=0.7),
@@ -99,6 +120,7 @@ def test_session_and_label_roundtrip(pg: sa.Engine) -> None:
 
 @pytest.mark.services
 def test_stream_order_is_preserved(pg: sa.Engine) -> None:
+    """스트림 순서(imu, bodycam)가 DB 왕복 후에도 유지된다 (streams.position)."""
     base = make_session("s002")
     reordered = base.model_copy(update={"streams": tuple(reversed(base.streams))})
     assert [s.stream_id for s in reordered.streams] == ["imu", "bodycam"]
@@ -110,6 +132,7 @@ def test_stream_order_is_preserved(pg: sa.Engine) -> None:
 
 @pytest.mark.services
 def test_labels_are_immutable_except_review(pg: sa.Engine) -> None:
+    """record_review로 검수 상태만 바꿀 수 있고, 다른 열 수정·삭제는 트리거가 막는다."""
     with pg.begin() as conn:
         insert_labels(conn, [make_label(action_payload(), label_id="a1")])
     with pg.begin() as conn:
@@ -130,6 +153,7 @@ def test_labels_are_immutable_except_review(pg: sa.Engine) -> None:
             conn.execute(sa.text(statement))
 
 
+# TRUNCATE를 막아야 하는 추가 전용 테이블 (0010, 0011)
 APPEND_ONLY_TABLES = (
     "label_records", "raw_access_log", "review_work", "privacy_audits", "retention_decisions",
     "session_lifecycle_events",
@@ -162,6 +186,7 @@ def test_long_model_version_is_stored(pg: sa.Engine) -> None:
 
 @pytest.mark.services
 def test_dataset_version_golden_set_version_fits_golden_set_ids(pg: sa.Engine) -> None:
+    """golden_set_version에 128자 골든셋 ID를 저장할 수 있다 (0010에서 64 → 128)."""
     version = DatasetVersion(
         version_id="ds-0002", ontology_version="1.0.0", created_at=FIXED_TIME,
         snapshot_uri="lakefs://dlp/main@abc", golden_set_version="g" * 128, splits={},
@@ -174,12 +199,17 @@ def test_dataset_version_golden_set_version_fits_golden_set_ids(pg: sa.Engine) -
 
 @pytest.mark.services
 def test_set_model_status_rejects_unknown_version(pg: sa.Engine) -> None:
+    """없는 모델 버전의 상태를 바꾸면 KeyError."""
     with pytest.raises(KeyError, match="nope"), pg.begin() as conn:
         set_model_status(conn, "nope", ModelStatus.DEPLOYED, FIXED_TIME)
 
 
 @pytest.mark.services
 def test_update_stream_sync_keeps_reference_clock(pg: sa.Engine) -> None:
+    """기준 스트림 시계 변경과 다른 스트림의 reference 지정은 거부한다.
+
+    같은 값을 다시 쓰는 것은 허용한다.
+    """
     session = make_session()
     moved = session.reference_stream.model_copy(update={"offset_ms": 10.0})
     with pytest.raises(ValueError, match="기준 스트림"), pg.begin() as conn:
@@ -195,6 +225,7 @@ def test_update_stream_sync_keeps_reference_clock(pg: sa.Engine) -> None:
 
 @pytest.mark.services
 def test_lifecycle_transitions_are_enforced(pg: sa.Engine) -> None:
+    """건너뛰는 전이(privacy_approved → exported)는 TransitionError, withdrawn은 언제나 허용."""
     with pg.begin() as conn:
         set_lifecycle(conn, "s001", LifecycleState.PRIVACY_APPROVED)
         with pytest.raises(TransitionError):
@@ -205,6 +236,9 @@ def test_lifecycle_transitions_are_enforced(pg: sa.Engine) -> None:
 
 @pytest.mark.services
 def test_lifecycle_transitions_are_recorded(pg: sa.Engine) -> None:
+    """전이마다 기록 1행: 등록·전진은 남고 멱등 호출은 남지 않으며, 시각·actor가 그대로 저장된다.
+    시간대 없는 시각은 거부, 기록 테이블은 수정·삭제를 트리거가 막는다.
+    """
     later = FIXED_TIME + timedelta(hours=1)
     with pg.begin() as conn:
         set_lifecycle(conn, "s001", LifecycleState.PRIVACY_APPROVED, at=later, actor="rev01")
@@ -261,6 +295,7 @@ def test_lifecycle_events_are_backfilled_by_migration(pg_url: str) -> None:
 
 @pytest.mark.services
 def test_dataset_version_roundtrip(pg: sa.Engine) -> None:
+    """데이터셋 버전과 분할이 DB 왕복 후 같다."""
     version = DatasetVersion(
         version_id="ds-0001", ontology_version="1.0.0", created_at=FIXED_TIME,
         snapshot_uri="lakefs://dlp/main@abc", splits={"s001": Split.GOLDEN},
@@ -275,6 +310,10 @@ def test_dataset_version_roundtrip(pg: sa.Engine) -> None:
 def test_registering_changed_ontology_under_same_version_fails(
     pg: sa.Engine, ontology: Ontology
 ) -> None:
+    """같은 버전에 상태(draft → frozen)만 바꿔 등록해도 '다른 내용' 오류다.
+
+    상태 변경은 덧붙이기가 아니다.
+    """
     changed = ontology.model_copy(update={"status": "frozen"})
     with pytest.raises(ValueError, match="다른 내용"), pg.begin() as conn:
         register_ontology(conn, changed)
@@ -318,6 +357,7 @@ def test_draft_ontology_accepts_additive_update(pg_url: str, ontology: Ontology)
 
 @pytest.mark.services
 def test_update_stream_sync_changes_only_sync_fields(pg: sa.Engine) -> None:
+    """IMU의 동기화 다섯 필드가 저장되고, 없는 스트림이면 KeyError."""
     imu = make_session().stream("imu")
     synced = imu.model_copy(
         update={"offset_ms": 12.5, "clock_scale": 1.00005, "sync_method": SyncMethod.TAP_EVENT,

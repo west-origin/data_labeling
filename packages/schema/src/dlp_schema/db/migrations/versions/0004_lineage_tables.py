@@ -16,8 +16,12 @@ down_revision: str | None = "0003"
 branch_labels: str | None = None
 depends_on: str | None = None
 
+# 0004 계보 테이블 (WP7, ADR 0007): golden_sets, exports, training_runs, withdrawals.
+# exports.label_states는 0008, model_versions는 0007에서 더한다.
+
 
 def upgrade() -> None:
+    """계보 테이블 네 개와 데이터셋 버전 FK 색인을 만든다."""
     op.create_table(
         "golden_sets",
         sa.Column("version", sa.String(length=128), nullable=False),
@@ -88,6 +92,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    """계보 테이블 네 개를 지운다."""
     op.drop_table("withdrawals")
     op.drop_index(op.f("ix_training_runs_dataset_version_id"), table_name="training_runs")
     op.drop_table("training_runs")

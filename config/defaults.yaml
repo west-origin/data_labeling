@@ -1,52 +1,82 @@
 # 미결정 사항의 기본값. 사람이 결정하면 이 값만 바꾼다 (기준 문서 "미결정 사항" 참조).
 # 코드는 이 값을 하드코딩하지 않고 설정 로더(WP1)를 통해 읽는다.
+#
+# 로더: dlp_schema.config.load_config → PlatformConfig (모르는 키가 있으면 검증 오류, extra=forbid).
+# 키를 추가·삭제하면 PlatformConfig 타입과 `make schemas`(schemas/platform_config.schema.json)를 함께 바꾼다.
+# 주석은 파싱 후 사라지므로 주석만 바꾸는 것은 어떤 동작·해시에도 영향을 주지 않는다.
+# 단계별 세부 정책은 config/policies/<단계>.yaml에 따로 있다.
+
+# 파일 형식 버전 (정수). 구조를 하위 호환이 안 되게 바꾸면 올린다.
 version: 1
 
+# 인프라 구성 요소 선택. 현재 코드는 값을 검증만 하고 분기에 쓰지 않는다
+# (구현은 seaweedfs·lakefs·hybrid·prefect·mlflow 기준). 다른 값으로 바꾸려면 해당 연동을 먼저 구현한다.
 infrastructure:
   object_store: seaweedfs          # seaweedfs | minio
   data_versioning: lakefs          # lakefs | dvc (WP7에서 연동)
   annotation_tools: hybrid         # hybrid(CVAT+Label Studio) | cvat_only (Gate 1 결정)
-  orchestrator: prefect
-  experiment_tracking: mlflow
+  orchestrator: prefect            # prefect | airflow
+  experiment_tracking: mlflow      # mlflow만 지원
 
+# 객체 저장소 버킷 이름. 바꾸면 services/ compose의 버킷 생성과 자격 증명 정책도 함께 바꾼다.
 buckets:
+  # 원본 영상·오디오 (원본 권한자, 학습 서버만). 모든 접근은 감사 저장소(dlp_cli.raw_access.raw_store)로만 하고
+  # raw_access_log에 남는다 (ADR 0020). 이 버킷 URI를 일반 라벨러 경로(블러본·검수 작업·내보내기)에 노출하지 않는다.
   raw: dlp-raw                     # 원본 영상·오디오 (원본 권한자, 학습 서버만)
-  labeling: dlp-labeling           # 블러본·프록시 (일반 라벨러)
+  labeling: dlp-labeling           # 블러본·프록시 (일반 라벨러, 읽기 전용 자격 증명으로 서명)
   datasets: dlp-datasets           # 데이터셋 버전·내보내기
-  mlflow: dlp-mlflow               # 학습 산출물
+  mlflow: dlp-mlflow               # 학습 산출물 (재학습 가중치·리포트)
 
 media:
   proxy:                           # 검수 화면용 프록시 영상 (dlp ingest)
-    max_height: 480                # 이보다 높으면 이 높이로 줄인다 (px)
-    crf: 28                        # libx264 화질 (낮을수록 고화질)
-    keyframe_ms: 1000              # 키프레임 간격 (빠른 스크러빙용)
+    max_height: 480                # 이보다 높으면 이 높이로 줄인다 (px, 짝수여야 한다: libx264 yuv420p)
+    crf: 28                        # libx264 화질 (0~51, 낮을수록 고화질·큰 파일)
+    keyframe_ms: 1000              # 키프레임 간격 (ms, 빠른 스크러빙용. 줄이면 파일이 커진다)
+    # 바꾸면 이후 수집하는 세션의 프록시만 달라진다 (기존 프록시는 다시 만들지 않는다).
 
 privacy:
+  # 탐지가 끊겨도 블러를 유지하는 시간 (ms). 늘리면 누락이 줄고 과잉 블러가 늘어난다.
+  # 프라이버시 파이프라인 버전에 들어가므로 바꾸면 다음 `dlp privacy detect`가 다시 돈다.
   blur_hold_ms: 200
-  render_mode: mosaic              # mosaic | solid
+  render_mode: mosaic              # mosaic | solid (블러본 렌더 방식)
+  # 블러본(공개본)에서 오디오를 뺄지. 현재 false(오디오 유지)는 지원하지 않아 렌더가 오류를 낸다.
   strip_audio_in_release: true
+  # 확장 후보(약봉투, 팔찌 등) 확정 시 추가. 온톨로지 privacy_targets의 required: false 키를 쓴다.
+  # 현재 프라이버시 패키지는 이 값을 읽지 않는다 (탐지 대상은 config/policies/privacy.yaml이 정한다).
   extra_targets_v1: []             # 확장 후보(약봉투, 팔찌 등) 확정 시 추가
+  # 블러 전수 검수를 끝내고 표본 감사로 넘어가는 조건 (`dlp privacy audit-sample`).
+  # 목표치는 success_criteria.residual_blur_miss_per_hour_max (null이면 전수 검수를 계속한다).
   full_review_exit:
-    weeks_below_target: 8
-    audit_sample_ratio: 0.05
+    weeks_below_target: 8          # 잔여 누락률이 목표 이하로 유지되어야 하는 연속 주 수
+    audit_sample_ratio: 0.05       # 전수 검수 종료 후 감사할 표본 비율 (0 초과 1 이하)
 
+# 검수 운영 비율 (0~1). dlp_review.ops.policy가 config/policies/review.yaml과 합쳐 쓴다.
+# 바꾸면 이후 배정(`dlp review plan|assign`)부터 적용된다. 블라인드·이중·오류 삽입 결과는 측정용이라
+# 운영 라벨이 아니다 (비율을 올리면 측정은 정확해지고 검수 비용이 늘어난다).
 review:
-  qa_sample_ratio: 0.05
-  double_annotation_ratio: 0.05
-  blind_task_ratio: 0.03
-  seeded_error_task_ratio: 0.02
+  qa_sample_ratio: 0.05            # 선임 QA 재검수 표본 비율
+  double_annotation_ratio: 0.05    # 같은 구간을 다른 라벨러가 한 번 더 (일치도 측정)
+  blind_task_ratio: 0.03           # 프리라벨 없이 처음부터 (프리라벨 편향 측정)
+  seeded_error_task_ratio: 0.02    # 오류를 넣은 사본을 고치게 함 (검수자 발견율 측정)
 
+# 골든셋 구성. 주의: 현재 코드는 이 절을 읽지 않는다 (분할기 dlp_datasets.splitter는 작업자·장소 둘 다를
+# 항상 누수 방지 단위로 쓰고, 클래스 최소 인스턴스도 이 값으로 검사하지 않는다).
 golden_set:
-  min_instances_per_class: 30
-  split_unit: [worker_id, site_id]
+  min_instances_per_class: 30      # 클래스마다 골든셋에 있어야 하는 최소 인스턴스 수
+  split_unit: [worker_id, site_id] # 이 속성이 같은 세션은 골든·학습·검증 중 한 곳에만 둔다
 
 export:
+  # true면 미검수 모델 라벨도 내보낸다 (`dlp export ... --include-unreviewed`와 같은 효과).
+  # 기본 false: 사람이 만들거나 승인·수정·표본 검증한 라벨만 내보낸다.
   include_unreviewed: false
 
 retention:
+  # 원본 보관 기간 (일, 양수). null이면 미정이라 `dlp ops retention`이 만료 알림을 내지 않는다.
   raw_retention_days: null         # 미정 (원본 보관 기간)
 
+# 운영 성공 기준. null = 미정 (해당 판정·경고를 하지 않는다).
+# 현재 코드에서 읽는 것은 residual_blur_miss_per_hour_max뿐이다 (블러 전수 검수 종료 판정).
 success_criteria:                  # Gate 0 잠정치, Gate 1 확정
-  review_minutes_per_video_hour: null
-  residual_blur_miss_per_hour_max: null
-  boundary_agreement_min: null
+  review_minutes_per_video_hour: null      # 영상 1시간당 검수 분 목표
+  residual_blur_miss_per_hour_max: null    # 영상 1시간당 잔여 블러 누락 허용 상한
+  boundary_agreement_min: null             # 행동 경계 일치율 하한 (0~1)

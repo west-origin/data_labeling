@@ -1,4 +1,29 @@
-"""PostgreSQL 테이블 정의 (SQLAlchemy Core). 스키마 변경은 반드시 Alembic 마이그레이션으로 한다."""
+"""PostgreSQL 테이블 정의 (SQLAlchemy Core). 스키마 변경은 반드시 Alembic 마이그레이션으로 한다.
+
+역할
+    DB 스키마의 "정답" 정의다. `db.repository`가 이 테이블 객체로 질의하고, Alembic 마이그레이션
+    (`db/migrations/versions/*.py`)이 실제 DB를 같은 모양으로 만든다 (WP1, ADR 0002).
+
+규칙 (CLAUDE.md)
+    - 이 파일을 바꾸면 반드시 새 Alembic 리비전을 함께 추가한다. 테스트
+      `test_migrations_match_table_definitions`가 SQLite에 마이그레이션을 적용한 결과와 이
+      메타데이터를 비교해 다르면 실패한다.
+    - 계약(`dlp_schema` Pydantic 타입)을 바꾸면 ADR + 마이그레이션 + 계약 테스트 + `make schemas`를
+      함께 한다.
+
+불변·추가 전용 테이블 (PostgreSQL 트리거, SQLite 테스트 DB에는 트리거 없음)
+    - label_records: 검수 상태 열(verification_state, reviewer_id, reviewed_at) 외 수정 금지, 삭제
+      금지 (0001, 0005), TRUNCATE 금지 (0010).
+    - raw_access_log, review_work, privacy_audits, retention_decisions: 수정·삭제·TRUNCATE 금지
+      (0009, 0010).
+    - session_lifecycle_events: 수정·삭제·TRUNCATE 금지 (0011).
+
+열 규약
+    - 시각(`Ts`)은 모두 `TIMESTAMP WITH TIME ZONE`. 파이썬 쪽도 시간대 있는 datetime만 쓴다.
+    - 라벨·세션의 ms 값은 BIGINT. 프레임 번호는 저장하지 않는다.
+    - 목록·사전 값은 `Json`(PostgreSQL JSONB, 그 밖 JSON)에 계약의 JSON 직렬화 형태로 넣는다.
+    - ID 열은 대부분 VARCHAR(128) = `common.IDENTIFIER_MAX`.
+"""
 
 from __future__ import annotations
 
@@ -7,6 +32,7 @@ from typing import Any
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import JSONB
 
+# 제약 이름 규칙. Alembic 마이그레이션의 `op.f(...)` 이름과 같아야 비교 테스트를 통과한다.
 metadata = sa.MetaData(
     naming_convention={
         "ix": "ix_%(column_0_label)s",
@@ -17,9 +43,13 @@ metadata = sa.MetaData(
     }
 )
 
+# JSON 열 타입: PostgreSQL에서는 JSONB(색인·비교 가능), SQLite 테스트에서는 일반 JSON.
 Json: sa.types.TypeEngine[Any] = sa.JSON().with_variant(JSONB(), "postgresql")
+# 시간대 있는 시각 열 타입.
 Ts = sa.DateTime(timezone=True)
 
+# 등록된 온톨로지 버전 (`register_ontology`). content는 `Ontology.model_dump(mode="json")` 전체.
+# status: draft(덧붙이기 허용) | frozen(확정, 내용 변경 금지).
 ontology_versions = sa.Table(
     "ontology_versions",
     metadata,
@@ -29,6 +59,10 @@ ontology_versions = sa.Table(
     sa.Column("created_at", Ts, nullable=False, server_default=sa.func.now()),
 )
 
+# 세션 (`insert_session`, `get_session`). 계약 `session.Session`과 1:1 (streams는 별도 테이블).
+# calibration: `Calibration` JSON. privacy_state·lifecycle_state: 열거형 값 문자열.
+# worker_id·site_id 색인: 분할기·계보 조회가 작업자·장소로 묶어 찾는다.
+# created_at: DB가 매기는 등록 시각 (계약에는 없다. 0011 백필의 시각으로 쓰였다).
 sessions = sa.Table(
     "sessions",
     metadata,
@@ -74,6 +108,10 @@ session_lifecycle_events = sa.Table(
     sa.Column("actor", sa.Text(), nullable=True),
 )
 
+# 세션의 스트림 (`Stream`). (session_id, stream_id)가
+# 기본 키. 세션을 지우면 함께 지워진다 (CASCADE).
+# position: 세션 안 스트림 순서 (0부터, 0002에서 추가). get_session이 이 순서로 복원한다.
+# offset_ms·clock_scale·sync_*·manual_adjustment_ms만 `update_stream_sync`로 바뀐다.
 streams = sa.Table(
     "streams",
     metadata,
@@ -96,6 +134,13 @@ streams = sa.Table(
     sa.Column("manual_adjustment_ms", sa.Float(), nullable=False),
 )
 
+# 라벨 레코드 (`LabelRecord`, 변환은 `label_to_row`/`row_to_label`).
+# 출처·검수 정보는 평탄화해 열로 두고(source, model_version, sensor_id, verification_state,
+# reviewer_id, reviewed_at), 페이로드는 JSON으로 둔다.
+# kind는 payload.kind의 사본 (종류별 조회 색인용).
+# model_version은 TEXT (정책 해시가 붙어 128자를 넘을 수 있다, 0010).
+# parent_label_id는 자기 참조 FK (수정·삭제 사슬). 부모가 먼저 들어가 있어야 한다.
+# stream_id는 FK가 아니다 (streams와 묶이지 않음).
 label_records = sa.Table(
     "label_records",
     metadata,
@@ -136,6 +181,7 @@ label_records = sa.Table(
     sa.Index("ix_label_records_session_start", "session_id", "t_start_ms"),
 )
 
+# 외부 검수 도구 작업 (`ReviewTask`). 색인 (session_id, stage): 세션별·단계별 작업 조회.
 review_tasks = sa.Table(
     "review_tasks",
     metadata,
@@ -157,6 +203,9 @@ review_tasks = sa.Table(
     sa.Index("ix_review_tasks_session", "session_id", "stage"),
 )
 
+# 검수 배정 (`ReviewAssignment`). 색인 queue (status, priority): 열린 배정을 우선순위 순으로 꺼낸다.
+# 수정 가능한 열은 assignee·task_key·status·completed_at뿐이다 (`update_assignment`가 강제, DB
+# 트리거 없음).
 review_assignments = sa.Table(
     "review_assignments",
     metadata,
@@ -181,6 +230,7 @@ review_assignments = sa.Table(
     sa.Index("ix_review_assignments_queue", "status", "priority"),
 )
 
+# 골든셋 버전 (`GoldenSet`). session_ids는 JSON 목록.
 golden_sets = sa.Table(
     "golden_sets",
     metadata,
@@ -191,6 +241,7 @@ golden_sets = sa.Table(
     sa.Column("note", sa.Text(), nullable=False),
 )
 
+# 학습 실행 (`TrainingRun`). 데이터셋 버전에 FK로 묶인다.
 training_runs = sa.Table(
     "training_runs",
     metadata,
@@ -208,6 +259,8 @@ training_runs = sa.Table(
     sa.Column("created_at", Ts, nullable=False),
 )
 
+# 재학습 모델 레지스트리 (`ModelVersion`, 0007). status·decided_at·report_uri는
+# `set_model_status`로 바뀐다.
 model_versions = sa.Table(
     "model_versions",
     metadata,
@@ -230,6 +283,7 @@ model_versions = sa.Table(
     sa.Column("decided_at", Ts, nullable=True),
 )
 
+# 내보내기 이력 (`ExportRecord`). label_states는 0008에서 추가 (기존 행은 빈 목록).
 exports = sa.Table(
     "exports",
     metadata,
@@ -249,6 +303,7 @@ exports = sa.Table(
     sa.Column("created_at", Ts, nullable=False),
 )
 
+# 세션 사용 중지 (`Withdrawal`). session_id가 기본 키라 세션당 한 번만 기록할 수 있다.
 withdrawals = sa.Table(
     "withdrawals",
     metadata,
@@ -257,6 +312,9 @@ withdrawals = sa.Table(
     sa.Column("withdrawn_at", Ts, nullable=False),
 )
 
+# 데이터셋 버전 (`DatasetVersion`). splits는 dataset_split_assignments에 행으로 따로 둔다.
+# parent_version_id는 자기 참조 FK. golden_set_version은 golden_sets.version과 같은 128자 (FK는
+# 아님, 0010).
 dataset_versions = sa.Table(
     "dataset_versions",
     metadata,
@@ -279,6 +337,8 @@ dataset_versions = sa.Table(
     sa.Column("excluded_sessions", Json, nullable=False),
 )
 
+# 데이터셋 버전의 세션별 분할 (version_id, session_id) → split. 버전을 지우면 함께 지워진다.
+# 계보 조회(`dataset_versions_with_session`)가 세션 → 버전을 이 표로 찾는다.
 dataset_split_assignments = sa.Table(
     "dataset_split_assignments",
     metadata,
@@ -295,6 +355,8 @@ dataset_split_assignments = sa.Table(
 
 # ---------------------------------------------------------------- 운영 기록 (WP16, 추가만 한다)
 
+# 원본 버킷 접근 감사 기록 (`RawAccessEvent`, ADR 0020). 감사
+# 저장소(`dlp_cli.raw_access.raw_store`)만 쓴다.
 raw_access_log = sa.Table(
     "raw_access_log",
     metadata,
@@ -308,6 +370,7 @@ raw_access_log = sa.Table(
     sa.Column("session_id", sa.String(128), nullable=True, index=True),
 )
 
+# 검수 작업 시간 (`ReviewWork`). session_id는 FK가 아니다 (운영 기록 표들은 sessions와 독립적이다).
 review_work = sa.Table(
     "review_work",
     metadata,
@@ -322,6 +385,7 @@ review_work = sa.Table(
     sa.Column("recorded_at", Ts, nullable=False, index=True),
 )
 
+# 잔여 블러 누락 감사 결과 (`PrivacyAuditRecord`).
 privacy_audits = sa.Table(
     "privacy_audits",
     metadata,
@@ -335,6 +399,7 @@ privacy_audits = sa.Table(
     sa.Column("audited_at", Ts, nullable=False, index=True),
 )
 
+# 원본 보관 결정 (`RetentionDecision`). until은 DATE (연장 기한).
 retention_decisions = sa.Table(
     "retention_decisions",
     metadata,

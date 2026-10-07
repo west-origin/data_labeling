@@ -16,8 +16,12 @@ down_revision: str | None = "0002"
 branch_labels: str | None = None
 depends_on: str | None = None
 
+# 0003 review_tasks: 외부 검수 도구(CVAT·Label Studio) 작업과 세션·스트림의 대응 (WP6, ADR 0006).
+# mode·assignment_id는 0005, sent_label_ids는 0006에서 더한다.
+
 
 def upgrade() -> None:
+    """review_tasks 테이블과 (session_id, stage) 색인을 만든다."""
     op.create_table(
         "review_tasks",
         sa.Column("task_key", sa.String(length=128), nullable=False),
@@ -49,5 +53,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    """review_tasks 테이블을 지운다."""
     op.drop_index("ix_review_tasks_session", table_name="review_tasks")
     op.drop_table("review_tasks")

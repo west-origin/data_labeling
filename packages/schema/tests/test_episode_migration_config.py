@@ -1,3 +1,8 @@
+"""에피소드 그래프·현재 라벨·온톨로지 이관·데이터셋 버전·설정 로더·JSON Schema·파생 ID 테스트.
+
+정답 근거: 손으로 만든 작은 라벨 이력과 매핑 표, 실제 config/defaults.yaml 값, 커밋된 schemas/.
+"""
+
 from __future__ import annotations
 
 from datetime import datetime
@@ -15,6 +20,7 @@ from dlp_schema.labels import LabelRecord, Verification, VerificationState
 from dlp_schema.migration import OntologyMigration, load_migration, migrate_labels
 from dlp_schema.testing import FIXED_TIME, action_payload, make_label
 
+# 그래프 테스트용 개체: 걸레(도구)와 세면대(표면)
 ENTITIES = (
     Entity(entity_id="rag_01", kind=EntityKind.TOOL, class_id="rag"),
     Entity(entity_id="sink_01", kind=EntityKind.SURFACE, class_id="sink"),
@@ -22,12 +28,14 @@ ENTITIES = (
 
 
 def _state(label_id: str, t: int, value: str) -> LabelRecord:
+    """sink_01의 청결 상태 구간 라벨 (t ~ t+100ms)."""
     payload = {"kind": "object_state", "entity_id": "sink_01", "class_id": "sink",
                "attribute": "cleanliness", "value": value}  # fmt: skip
     return make_label(payload, label_id=label_id, t_start_ms=t, t_end_ms=t + 100)
 
 
 def _graph(*labels: LabelRecord) -> EpisodeGraph:
+    """세션 s001, 0~10초 에피소드 그래프 (ENTITIES 개체)."""
     return EpisodeGraph(
         episode_id="e1", session_id="s001", ontology_version="1.0.0",
         t_start_ms=0, t_end_ms=10_000, entities=ENTITIES, labels=labels,
@@ -35,6 +43,11 @@ def _graph(*labels: LabelRecord) -> EpisodeGraph:
 
 
 def test_episode_graph_layers_and_state_transitions() -> None:
+    """층별 보기와 상태 전이.
+
+    dirty, dirty, clean 구간에서 전이는 6000ms의 dirty → clean 하나뿐이다
+    (같은 값이 이어지는 것은 전이가 아니다).
+    """
     relation = {
         "kind": "relation",
         "subject_id": "rag_01",
@@ -59,6 +72,7 @@ def test_episode_graph_layers_and_state_transitions() -> None:
 
 
 def test_episode_graph_rejects_unknown_entities_and_foreign_labels() -> None:
+    """없는 개체 참조, 다른 세션 라벨, 에피소드 구간 밖 라벨을 거부한다."""
     with pytest.raises(ValidationError, match="알 수 없는 개체 cup_9"):
         _graph(make_label(action_payload(target_id="cup_9")))
     with pytest.raises(ValidationError, match="다른 세션"):
@@ -68,6 +82,7 @@ def test_episode_graph_rejects_unknown_entities_and_foreign_labels() -> None:
 
 
 def test_current_labels_follow_correction_history() -> None:
+    """수정 사슬(v1 → v2)은 최신 v2만, 삭제된 fp와 삭제 레코드 fp-x는 빠진다."""
     original = make_label(action_payload(), label_id="v1")
     corrected = make_label(action_payload(verb="lift"), label_id="v2", parent_label_id="v1")
     false_positive = make_label(action_payload(), label_id="fp")
@@ -78,6 +93,9 @@ def test_current_labels_follow_correction_history() -> None:
 
 
 def test_migration_renames_and_flags_removed_ids(tmp_path: Path) -> None:
+    """매핑 표 YAML로 이관: grasp → grip 이름 변경, 검증 상태는 미검수로, ID는 `<원래>:v<새 버전>`.
+    제거된 이벤트(slip)와 다른 버전(0.9.0) 라벨은 needs_review로 간다.
+    """
     path = tmp_path / "1.0.0__1.1.0.yaml"
     path.write_text(
         "from_version: 1.0.0\nto_version: 1.1.0\n"
@@ -125,6 +143,10 @@ def test_migration_moves_only_current_labels_of_history() -> None:
 
 
 def test_migration_renames_part_fields() -> None:
+    """부분 ID(parts) 이름 변경이 모든 부분 필드에 적용된다.
+
+    mask의 part, 궤적의 part, 관계의 subject_part·object_part.
+    """
     migration = OntologyMigration.model_validate(
         {"from_version": "1.0.0", "to_version": "1.1.0",
          "renames": {"parts": {"cloth_face": "cloth_side", "corner_0": "origin"}}}
@@ -149,6 +171,7 @@ def test_migration_renames_part_fields() -> None:
 
 
 def test_migration_rejects_unknown_category() -> None:
+    """매핑 표에 모르는 범주(colors)가 있으면 검증 오류다."""
     with pytest.raises(ValidationError):
         OntologyMigration.model_validate(
             {"from_version": "1.0.0", "to_version": "1.1.0", "renames": {"colors": {"a": "b"}}}
@@ -156,6 +179,7 @@ def test_migration_rejects_unknown_category() -> None:
 
 
 def test_dataset_version_excluded_sessions_cannot_be_split() -> None:
+    """제외된 세션이 분할에도 있으면 데이터셋 버전 검증 오류다."""
     with pytest.raises(ValidationError, match="제외된 세션"):
         DatasetVersion(
             version_id="d1", ontology_version="1.0.0", created_at=FIXED_TIME,
@@ -164,6 +188,10 @@ def test_dataset_version_excluded_sessions_cannot_be_split() -> None:
 
 
 def test_defaults_config_loads(repo: Path) -> None:
+    """실제 config/defaults.yaml이 로드되고 대표 값이 맞다.
+
+    blur_hold_ms 200, 분할 단위 (worker_id, site_id), 미검수 제외.
+    """
     cfg = load_config(repo / "config" / "defaults.yaml")
     assert cfg.privacy.blur_hold_ms == 200
     assert cfg.golden_set.split_unit == ("worker_id", "site_id")
@@ -171,6 +199,7 @@ def test_defaults_config_loads(repo: Path) -> None:
 
 
 def test_committed_json_schemas_are_current(repo: Path) -> None:
+    """커밋된 schemas/*.schema.json이 코드에서 생성한 것과 같다 (다르면 `make schemas`)."""
     assert stale_schemas(repo / "schemas") == [], "`dlp schema export`로 다시 생성하세요"
 
 
@@ -196,6 +225,7 @@ def test_derived_ids_stay_within_identifier_length() -> None:
 
 
 def test_retractions_validate_the_contract() -> None:
+    """retractions도 계약 검증을 거친다: 시간대 없는 now는 ValidationError."""
     label = make_label(action_payload(), label_id="s001-a")
     with pytest.raises(ValidationError):
         retractions([label], "m:2", datetime(2026, 1, 1))  # 시간대 없는 시각

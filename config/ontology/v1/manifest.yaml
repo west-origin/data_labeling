@@ -1,6 +1,9 @@
 # 온톨로지 v1 (초안). 기준 문서 "온톨로지 v1" 절을 옮긴 것이다.
 # 식별자는 영어 snake_case, 사람용 이름은 ko 필드에 둔다.
 # 객체 클래스와 하위 단계는 파일럿 후 확정한다 (provisional).
+# version: SemVer 문자열 (따옴표 필수가 아니지만 문자열로 둔다). 라벨의 ontology_version과 대조된다.
+# status: draft(초안, 덧붙이기 허용) | frozen(확정, 같은 버전으로 내용 변경 금지).
+# provisional: 파일럿 후 확정할 범주 (설명용, 동작에 영향 없음).
 version: "1.0.0"
 status: draft
 provisional: [objects, tasks.substeps]

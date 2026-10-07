@@ -16,6 +16,12 @@ down_revision: str | None = "0004"
 branch_labels: str | None = None
 depends_on: str | None = None
 
+# 0005 검수 운영 (WP12, ADR 0014):
+# - label_records.measurement (블라인드·이중 측정 레코드 표시)
+# - review_tasks.mode (기본 standard로 기존 행을 채운 뒤 서버 기본값 제거), review_tasks.assignment_id
+# - review_assignments 테이블과 색인
+# - 라벨 불변 트리거 함수에 measurement 열 추가 (PostgreSQL)
+
 # 불변성 트리거에 measurement 열을 더한다 (검수 상태 외에는 바꿀 수 없다)
 IMMUTABLE_LABEL_FUNCTION = """
 CREATE OR REPLACE FUNCTION dlp_label_records_immutable() RETURNS trigger AS $$
@@ -39,14 +45,17 @@ END;
 $$ LANGUAGE plpgsql;
 """
 
+# downgrade용: 0001의 함수 정의 (measurement 비교를 뺀 것). 문자열 치환으로 만들어 두 정의가 어긋나지 않게 한다.
 PREVIOUS_FUNCTION = IMMUTABLE_LABEL_FUNCTION.replace(" NEW.measurement,", "").replace(
     " OLD.measurement,", ""
 )
 
+# JSON 열 타입 (PostgreSQL은 JSONB). db.tables.Json과 같다.
 JSON = sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), "postgresql")
 
 
 def upgrade() -> None:
+    """측정 열·검수 방식 열·배정 테이블을 더하고 불변 트리거 함수를 갱신한다."""
     op.add_column("label_records", sa.Column("measurement", sa.String(length=16), nullable=True))
     op.add_column(
         "review_tasks",
@@ -92,6 +101,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    """트리거 함수를 0001 정의로 되돌린 뒤(measurement 열을 지우기 전에) 추가한 것을 지운다."""
     if op.get_bind().dialect.name == "postgresql":
         op.execute(PREVIOUS_FUNCTION)
     op.drop_index("ix_review_assignments_queue", table_name="review_assignments")

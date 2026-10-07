@@ -15,8 +15,15 @@ down_revision: str | None = "0008"
 branch_labels: str | None = None
 depends_on: str | None = None
 
+# 0009 운영 기록 (WP16, ADR 0020): raw_access_log, review_work, privacy_audits, retention_decisions.
+# 네 테이블 모두 추가 전용이다: PostgreSQL에서 행 단위 BEFORE UPDATE OR DELETE 트리거가 dlp_append_only()를
+# 불러 예외를 낸다. TRUNCATE는 0010에서 막는다.
+
+# 추가 전용 트리거를 거는 테이블
 TABLES = ("raw_access_log", "review_work", "privacy_audits", "retention_decisions")
 
+# 어떤 수정·삭제든 거부하는 트리거 함수 (TG_TABLE_NAME으로 테이블 이름을 메시지에 넣는다).
+# 0011이 session_lifecycle_events에도 같은 함수를 쓴다.
 APPEND_ONLY_FUNCTION = """
 CREATE OR REPLACE FUNCTION dlp_append_only() RETURNS trigger AS $$
 BEGIN
@@ -27,6 +34,7 @@ $$ LANGUAGE plpgsql;
 
 
 def upgrade() -> None:
+    """운영 기록 테이블 네 개와 색인, (PostgreSQL이면) 추가 전용 트리거를 만든다."""
     ts = sa.DateTime(timezone=True)
     op.create_table(
         "raw_access_log",
@@ -108,6 +116,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    """트리거·함수를 지우고 운영 기록 테이블을 지운다 (감사 기록이 사라진다)."""
     if op.get_bind().dialect.name == "postgresql":
         for table in TABLES:
             op.execute(f"DROP TRIGGER IF EXISTS {table}_append_only ON {table}")
