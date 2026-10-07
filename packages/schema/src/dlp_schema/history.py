@@ -136,7 +136,8 @@ def review_changes(
 
     알고리즘:
         1) 운영 현재 라벨(`current_labels`)마다: 모델 출처면 accepted(states 안일 때만),
-           사람 출처이고 사슬 맨 앞이 모델이면 corrected, 맨 앞도 사람이면 added.
+           사람 출처이고 사슬 맨 앞이 모델이면 corrected, 아니면 added. 센서 출처 현재 라벨
+           (장갑 압력 접촉 등)은 검수 대상인 모델 출력도, 사람이 추가한 라벨도 아니므로 세지 않는다.
         2) 삭제 레코드 중 사람 출처이고 운영 라벨이며 부모가 이력에 있는 것마다: 지운 레코드의
            사슬 맨 앞이 모델이면 deleted. 모델 출처 삭제(버전 교체 `retractions`)는 세지 않는다.
     """
@@ -144,7 +145,12 @@ def review_changes(
     excluded = non_operational_ids(history)
     out: list[ReviewChange] = []
     for x in current_labels(history):
-        # 사람 라벨은 검증 상태와 무관하게 센다. 모델·센서 라벨은 states 안일 때만 센다.
+        # 센서 출처 현재 라벨은 뺀다. 예전에는 states 안의 센서 라벨이 사슬 맨 앞이 모델이 아니라는
+        # 이유로 아래 else로 가 "사람이 추가함(added)"으로 세져, 운영 지표의 추가율·원본 보관
+        # 기산점을 부풀렸다.
+        if x.provenance.source is Source.SENSOR:
+            continue
+        # 사람 라벨은 검증 상태와 무관하게 센다. 모델 라벨은 states 안일 때만 센다.
         if x.provenance.source is not Source.HUMAN and x.verification.state not in states:
             continue
         root = _root(x, by_id)
@@ -157,8 +163,8 @@ def review_changes(
         elif root.provenance.source is Source.MODEL:
             out.append(ReviewChange("corrected", x, root, at, who))
         else:
-            # 사람이 만든 사슬. 주의: 센서 출처 현재 라벨(states 안)도 사슬 맨 앞이 모델이 아니면
-            # 여기로 와 added로 센다 (사람이 추가한 것이 아닌데도).
+            # 사람 출처 현재 라벨이고 사슬 맨 앞도 모델이 아니다 (사람이 만든 사슬, 또는 사람이 고친
+            # 센서 라벨): 사람이 추가한 것으로 센다. 센서 출처 현재 라벨은 위에서 이미 걸렀다.
             out.append(ReviewChange("added", x, None, at, who))
     # 사람이 지운 모델 라벨 (오탐 제거)
     for r in history:

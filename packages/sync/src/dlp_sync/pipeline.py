@@ -317,7 +317,7 @@ def _slate(ref: _Reference, target: StreamMedia, policy: SyncPolicy) -> Attempt:
        드리프트까지, 아니면 오프셋만 맞춘다.
     3. 오차 상한(최대 앵커 잔차 + 드리프트 누적 가능량)으로 신뢰도를 깎는다.
     4. `refine_with_audio`이고 두 영상에 오디오가 있으면 오디오 상관으로 다듬는다 (`_refine_slate`).
-       실패하면 슬레이트 결과를 그대로 쓰고 사유에 적는다.
+       실패하면(결과 없음·어긋남, 또는 `FitError`) 슬레이트 결과를 그대로 쓰고 사유에 적는다.
 
     Raises:
         FitError: 드리프트 추정이 상한을 넘을 때 (`_try`가 잡는다).
@@ -357,7 +357,14 @@ def _slate(ref: _Reference, target: StreamMedia, policy: SyncPolicy) -> Attempt:
     reason = f"슬레이트 {len(anchors)}개, 오차 상한 {bound:.1f} ms (양자화 {quant_ms:.1f} ms)"
     attempt = Attempt("qr_slate", confidence, reason, fit, anchors)
     if sp.refine_with_audio and ref.media.audio is not None and target.audio is not None:
-        refined = _refine_slate(attempt, ref.media.audio, target.audio, quant_ms, policy)
+        try:
+            refined = _refine_slate(attempt, ref.media.audio, target.audio, quant_ms, policy)
+        except FitError as exc:
+            # 오디오 앵커의 드리프트가 상한을 넘는 등 정밀화만 실패했다. 예전에는 이 예외가
+            # `_try`까지 올라가 이미 맞춘 슬레이트 결과까지 신뢰도 0으로 버렸다. 정밀화는 선택
+            # 단계이므로 슬레이트 맞춤으로 물러나고 사유를 보고서에 남긴다.
+            attempt.reason += f", 오디오 정밀화 실패 ({exc})"
+            return attempt
         if refined is not None:
             return refined
         attempt.reason += ", 오디오 정밀화 실패"
@@ -403,8 +410,8 @@ def _refine_slate(
         `min_confidence` 미만이거나, 슬레이트 앵커와 어긋나면 None.
 
     Raises:
-        FitError: 오디오 앵커의 드리프트가 상한을 넘을 때 (`_try`가 잡아 슬레이트 시도 전체가
-            신뢰도 0이 된다).
+        FitError: 오디오 앵커의 드리프트가 상한을 넘을 때. 호출자 `_slate`가 잡아 슬레이트
+            맞춤으로 물러난다 (슬레이트 결과는 버리지 않는다).
     """
     assert slate.fit is not None
     fit = slate.fit

@@ -84,7 +84,7 @@ def session_lineage(conn: sa.Connection, session_id: str) -> SessionLineage:
 
 
 def withdraw_session(
-    conn: sa.Connection, session_id: str, reason: str, now: datetime
+    conn: sa.Connection, session_id: str, reason: str, now: datetime, *, actor: str = "withdraw"
 ) -> SessionLineage:
     """세션을 사용 중지하고, 이미 들어간 버전·학습·내보내기 목록을 돌려준다.
 
@@ -96,9 +96,13 @@ def withdraw_session(
         conn: 호출자가 연 트랜잭션 연결.
         session_id: 사용 중지할 세션.
         reason: 사유 (예: "동의 철회").
-        now: 사용 중지 시각 (시간대 포함).
+        now: 사용 중지 시각 (시간대 포함). 생애주기 기록의 `at`에도 그대로 쓴다.
+        actor: 사용 중지를 실행한 사람·단계. 생애주기 기록의 `actor`가 된다 (CLI는
+            `--actor` 또는 `DLP_ACTOR`/OS 사용자, 기본값은 호출 경로를 알리는 "withdraw").
     """
-    set_lifecycle(conn, session_id, LifecycleState.WITHDRAWN)
+    # 전이 시각·실행자를 함께 남긴다: 동의 철회 대응은 감사 대상이라 "언제·누가"가 필요하다.
+    # (예전에는 둘 다 빠져 기록 시각이 DB 시각, 실행자는 비어 있었다.)
+    set_lifecycle(conn, session_id, LifecycleState.WITHDRAWN, at=now, actor=actor)
     if session_id not in withdrawn_session_ids(conn):
         insert_withdrawal(conn, Withdrawal(session_id=session_id, reason=reason, withdrawn_at=now))
     return session_lineage(conn, session_id)

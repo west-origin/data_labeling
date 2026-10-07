@@ -150,6 +150,23 @@ def test_pseudonyms_are_per_export() -> None:
     assert (off.session("s1"), off.label("l"), off.ref("s1", "s1-x")) == ("s1", "l", "s1-x")
 
 
+def test_ref_replaces_only_whole_session_tokens() -> None:
+    """`ref`는 세션 ID가 온전한 토큰(앞뒤가 시작·끝 또는 구분자)일 때만 바꾼다.
+
+    감사 회귀: 예전에는 부분 문자열 치환이라 세션 "s1"이 "s10-right-…"의 앞부분을 바꿔
+    "session-…0-right-…"가 됐다.
+    """
+    a = Pseudonymizer.for_export("export-a", b"secret", enabled=True)
+    alias = a.session("s1")
+    assert a.ref("s1", "s10-right-a100") == "s10-right-a100"  # 다른 세션 ID의 일부
+    assert a.ref("s1", "xs1-a") == "xs1-a"  # 앞에 영숫자가 붙은 경우
+    assert a.ref("s1", "s1") == alias  # 정확히 일치
+    assert a.ref("s1", "s1-right-a100") == f"{alias}-right-a100"  # 접두사 + 구분자
+    assert a.ref("s1", "person_01:s1") == f"person_01:{alias}"  # 구분자 뒤 토큰
+    # 특수문자("." 등)가 든 세션 ID도 글자 그대로 맞춘다 (정규식 이스케이프)
+    assert a.ref("s.1", "s.1-a") == f"{a.session('s.1')}-a"
+
+
 def test_dev_secret_only_in_dev(policy: ExportPolicy) -> None:
     """.env.example의 개발용 비밀값은 DLP_ENV=dev에서만 받는다 (공개 값이라 가명을 되짚는다)."""
     dev = policy.ids.dev_secrets[0]

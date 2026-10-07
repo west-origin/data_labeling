@@ -59,7 +59,7 @@ from dlp_eval.metrics.temporal import (
     temporal_map,
 )
 from dlp_eval.metrics.tracking import TrackingData, clear, hota, identity
-from dlp_eval.policy import TASKS, EvaluationPolicy, Task
+from dlp_eval.policy import TASKS, EvaluationPolicy, Task, is_class_metric, task_metrics
 from dlp_schema.labels import (
     ActionPayload,
     BlurTrackPayload,
@@ -813,6 +813,16 @@ def evaluate(
         report = EVALUATORS[task](data, policy)
         if report is None:
             continue
+        # 지표 이름 목록(`policy.TASK_METRICS`)과 평가기 출력이 어긋나면 바로 실패한다. 정책 로더는
+        # 그 목록으로 게이트 규칙의 지표 이름을 검사하므로, 목록이 틀리면 오타 검사도 틀린다.
+        # 클래스별 지표("ap/<클래스>" 등)는 접두사만 맞으면 된다.
+        expected = task_metrics(task, policy.segment_iou)
+        extra = {m for m in report.metrics if m not in expected and not is_class_metric(task, m)}
+        if extra or not expected <= set(report.metrics):
+            raise RuntimeError(
+                f"{task} 평가기 지표 {sorted(report.metrics)}가 TASK_METRICS {sorted(expected)}와"
+                " 다릅니다 (dlp_eval.policy.TASK_METRICS·CLASS_METRIC_PREFIXES를 고친다)"
+            )
         overall[task] = report
         for name in policy.subgroups:
             for value in sorted({s.groups.get(name, "unknown") for s in data}):

@@ -6,7 +6,8 @@
 - 새로 나온 것만 넣는다. 사람이 고치거나 지운 적이 있는 내용은 다시 넣지 않는다.
 
 라벨 ID: `<세션>-<rel|cov>-<내용 해시 16자>`. 같은 내용이 지워진 뒤 다시 나오면 `-<n>` 접미사를
-붙인다. 검수자가 승인·표본 검증한 레코드는 규칙이 바뀌어도 지우지 않는다 (ADR 0015).
+붙인다 (n = 지금까지 넣은 같은 내용 레코드 수, 삭제 레코드는 세지 않는다). 새 레코드의 온톨로지
+버전은 세션의 것이다. 검수자가 승인·표본 검증한 레코드는 규칙이 바뀌어도 지우지 않는다 (ADR 0015).
 부작용: DB `labels`에 새 레코드와 삭제 레코드만 추가한다. 호출자가 트랜잭션을 연다.
 """
 
@@ -21,8 +22,8 @@ import sqlalchemy as sa
 
 from dlp_relations.derive import VERSION_PREFIX, derive, is_derived
 from dlp_relations.policy import RelationsPolicy
-from dlp_schema.db.repository import get_labels, insert_labels
-from dlp_schema.episode import current_labels
+from dlp_schema.db.repository import get_labels, get_session, insert_labels
+from dlp_schema.episode import current_labels, retractions
 from dlp_schema.labels import (
     CoveragePayload,
     Evidence,
@@ -30,7 +31,6 @@ from dlp_schema.labels import (
     Provenance,
     RelationPayload,
     Source,
-    Verification,
     VerificationState,
 )
 from dlp_schema.ontology import Ontology
@@ -98,8 +98,10 @@ def run_relations(
         if x.parent_label_id:
             children.setdefault(x.parent_label_id, []).append(x)
     current_ids = {x.label_id for x in current_labels(labels)}
-    # 세션 라벨의 온톨로지 버전 (첫 라벨 기준, 라벨이 없으면 넘겨받은 온톨로지)
-    ontology_version = next((x.ontology_version for x in labels), ontology.version)
+    # 새 레코드의 온톨로지 버전은 세션의 것 (DB sessions.ontology_version). 세션에 아직 없으면
+    # 넘겨받은 온톨로지. 예전에는 시각 순 첫 라벨의 버전을 써서, 이관 전 옛 라벨이 앞에 있으면
+    # 새 관계가 옛 온톨로지 버전으로 기록됐다.
+    ontology_version = get_session(conn, session_id).ontology_version or ontology.version
 
     desired: set[str] = set()
     new: list[LabelRecord] = []
@@ -115,6 +117,9 @@ def run_relations(
         seen.add(base)
         # 같은 내용의 과거 레코드 ID들 (기본 ID와 `-n` 재삽입본, 그 자식 일부)
         history = sorted(i for i in by_id if i == base or i.startswith(base + "-"))
+        # 그중 삭제 레코드(`<ID>:retracted`)가 아닌 것: 재삽입 번호는 이것만 센다. 예전에는
+        # `<기본>-1:retracted`까지 세어 두 번째 재삽입이 `-2`가 아니라 `-3`이 됐다.
+        inserted_ids = [i for i in history if not by_id[i].retracted]
         live = [i for i in history if i in current_ids]
         if live:
             desired.update(live)
@@ -126,8 +131,14 @@ def run_relations(
         if reviewed:  # 검수자가 고치거나 지웠다
             summary.skipped_by_review += 1
             continue
-        # 같은 내용이 지워진 적이 있으면 새 ID로 다시 넣는다 (기존 ID는 이력에 남아 재사용 불가)
-        label_id = base if not history else f"{base}-{len(history)}"
+        # 같은 내용이 지워진 적이 있으면 새 ID로 다시 넣는다 (기존 ID는 이력에 남아 재사용 불가).
+        # 번호는 지금까지 넣은 레코드 수이고, 혹시 그 ID가 이미 있으면(사람이 만든 자식 등)
+        # 다음 번호를 쓴다
+        n = len(inserted_ids)
+        label_id = base if n == 0 else f"{base}-{n}"
+        while n > 0 and label_id in by_id:
+            n += 1
+            label_id = f"{base}-{n}"
         desired.add(label_id)
         new.append(
             LabelRecord(
@@ -152,21 +163,10 @@ def run_relations(
         # 검수자가 승인·표본 검증한 레코드는 규칙이 바뀌어도 지우지 않는다 (ADR 0015)
         and by_id[i].verification.state is VerificationState.UNREVIEWED
     ]
-    # 삭제 레코드: ID `<원래>:retracted`, parent=원래, 출처는 이번 실행 버전.
-    # (dlp_schema.episode.retractions와 같은 모양이지만 128자 초과 ID 줄이기는 하지 않는다)
-    retractions = [
-        x.model_copy(
-            update={
-                "label_id": f"{x.label_id}:retracted",
-                "parent_label_id": x.label_id,
-                "retracted": True,
-                "verification": Verification(),
-                "provenance": Provenance(source=Source.MODEL, model_version=version),
-                "created_at": now,
-            }
-        )
-        for x in stale
-    ]
-    insert_labels(conn, [*new, *retractions])
-    summary.inserted, summary.retracted = len(new), len(retractions)
+    # 삭제 레코드: ID `<원래>:retracted`, parent=원래, 출처는 이번 실행 버전. 공용
+    # `dlp_schema.episode.retractions`로 만든다 (128자를 넘는 ID는 해시로 줄이고 계약 검증을 거친다.
+    # 예전에는 여기서 직접 만들어 긴 세션 ID에서 ID 길이 제한을 넘을 수 있었다)
+    removed = retractions(stale, version, now)
+    insert_labels(conn, [*new, *removed])
+    summary.inserted, summary.retracted = len(new), len(removed)
     return summary

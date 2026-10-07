@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import Any
 
 from dlp_prelabel.contact import ContactInterval
@@ -14,6 +15,7 @@ from dlp_prelabel.runner import (
     _has_live_wearer,  # pyright: ignore[reportPrivateUsage]
     drop_protected_contacts,
     drop_protected_trajectories,
+    pick_hand_tracks,
     wearer_copy,
 )
 from dlp_schema.episode import retractions
@@ -150,3 +152,38 @@ def test_has_live_wearer_after_human_or_model_retraction() -> None:
     # 모델 단계(전신 모델 버전 변경)가 지웠으면 새 트랙으로 다시 찾는다
     assert not _has_live_wearer([wearer, *retractions([wearer], "body-v2", FIXED_TIME)])
     assert not _has_live_wearer([])
+
+
+def _hand_track(label_id: str, hand: Hand, end: int, x: float, **kw: Any) -> LabelRecord:
+    """바디캠 hand21 트랙 (0~end ms, 모든 관절이 x 좌표). x로 어느 트랙이 골렸는지 구별한다."""
+    points = tuple(Keypoint(x=x, y=0.0, visibility=2) for _ in range(21))
+    payload = KeypointTrackPayload(
+        entity_id=f"{hand.value}_hand",
+        skeleton="hand21",
+        hand=hand,
+        keyframes=(KeypointFrame(t_ms=0, points=points),),
+    )
+    return make_label(payload, label_id, 0, end, stream_id="bodycam", **kw)
+
+
+def test_hand_track_choice_is_deterministic() -> None:
+    """같은 손 트랙이 여럿이면 사람·검수 → 최신 → 긴 구간 → 라벨 ID 순으로 하나를 고른다.
+
+    감사 회귀: 예전에는 입력 순서의 마지막 트랙을 썼다. 입력 순서를 뒤집어도 결과가 같아야 한다.
+    """
+    later = {"created_at": FIXED_TIME + timedelta(days=1)}
+    old_long = _hand_track("m-old", Hand.LEFT, 5_000, 1.0, **MODEL)
+    new_short = _hand_track("m-new", Hand.LEFT, 1_000, 2.0, **MODEL, **later)
+    reviewed = _hand_track("m-rev", Hand.LEFT, 500, 3.0, **MODEL, verification=APPROVED)
+    right_a = _hand_track("r-a", Hand.RIGHT, 1_000, 4.0, **MODEL)
+    right_b = _hand_track("r-b", Hand.RIGHT, 2_000, 5.0, **MODEL)
+    for labels in (
+        [old_long, new_short, reviewed, right_a, right_b],
+        [right_b, right_a, reviewed, new_short, old_long],
+    ):
+        picked = pick_hand_tracks(labels)
+        # 왼손: 검수된 트랙이 짧고 오래됐어도 먼저. 오른손: 같은 시각이면 더 긴 구간
+        assert picked[Hand.LEFT].keyframes[0].points[0].x == 3.0
+        assert picked[Hand.RIGHT].keyframes[0].points[0].x == 5.0
+    # 검수된 것이 없으면 더 새로 만든 트랙
+    assert pick_hand_tracks([new_short, old_long])[Hand.LEFT].keyframes[0].points[0].x == 2.0

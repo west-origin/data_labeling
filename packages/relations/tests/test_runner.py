@@ -29,7 +29,7 @@ from dlp_schema.labels import (
     Trajectory3DPayload,
 )
 from dlp_schema.ontology import load_ontology
-from dlp_schema.testing import FIXED_TIME, make_session
+from dlp_schema.testing import FIXED_TIME, action_payload, make_label, make_session
 
 pytestmark = pytest.mark.services
 ROOT = Path(__file__).resolve().parents[3]
@@ -113,6 +113,18 @@ def test_rerun_is_idempotent_and_rule_changes_regenerate(pg: sa.Engine) -> None:
     ]  # fmt: skip
     assert grasp.label_id.endswith("-1")
 
+    # 한 번 더 빼고 되돌리면 `-2` (감사 회귀: 예전에는 `<기본>-1:retracted`까지 세어 `-3`이었다)
+    with pg.begin() as conn:
+        assert run_relations(conn, SID, ontology, no_grasp, FIXED_TIME).retracted == 1
+        again_restored = run_relations(conn, SID, ontology, policy, FIXED_TIME)
+        current = _current(conn)
+    assert again_restored.inserted == 1
+    [grasp2] = [
+        x for x in current
+        if isinstance(x.payload, RelationPayload) and x.payload.derived_by == "hand_grasp"
+    ]  # fmt: skip
+    assert grasp2.label_id == grasp.label_id[: -len("-1")] + "-2"
+
 
 def test_reviewer_deleted_relation_is_not_reinserted(pg: sa.Engine) -> None:
     """검수자가 지운 도구-표면 관계는 다시 실행해도 넣지 않는다 (skipped_by_review=1)."""
@@ -185,3 +197,53 @@ def test_duplicate_tool_trajectory_does_not_crash_the_run(pg: sa.Engine) -> None
         current = _current(conn)
     assert first.inserted == len(wiping.truth_relations) + 1
     assert sum(isinstance(x.payload, CoveragePayload) for x in current) == 1
+
+
+def test_long_session_id_retractions_fit_identifier(pg: sa.Engine) -> None:
+    """세션 ID가 길어 `<라벨 ID>:retracted`가 128자를 넘어도 규칙 변경 재실행이 성공한다.
+
+    감사 회귀: 예전에는 삭제 레코드를 직접 만들어(검증 없는 model_copy) 128자 넘는 ID를 넣으려 했다.
+    지금은 `dlp_schema.episode.retractions`가 해시로 줄인다.
+    """
+    sid = "w" * 100  # 기본 라벨 ID = 100 + "-rel-" + 16 = 121자, ":retracted"를 붙이면 131자
+    ontology = load_ontology(ROOT / "config/ontology/v1")
+    policy = load_policy(ROOT)
+    no_grasp = policy.model_copy(
+        update={"rules": tuple(r for r in policy.rules if r.id != "hand_grasp")}
+    )
+    with pg.begin() as conn:
+        insert_session(conn, make_session(sid))
+        insert_labels(conn, generate_wiping_scenario(0, session_id=sid).labels)
+        run_relations(conn, sid, ontology, policy, FIXED_TIME)
+        changed = run_relations(conn, sid, ontology, no_grasp, FIXED_TIME)
+        removed = [x for x in get_labels(conn, sid, kinds=["relation"]) if x.retracted]
+    assert changed.retracted == 1
+    [r] = removed
+    assert len(r.label_id) <= 128 and r.label_id.endswith(":retracted")
+
+
+def test_new_records_use_the_session_ontology_version(pg: sa.Engine) -> None:
+    """새 관계·커버리지의 온톨로지 버전은 세션의 것이다 (시각 순 첫 라벨의 것이 아니다).
+
+    시각 0에 옛 온톨로지 버전(0.9.0, 이관 전 라벨을 흉내)의 라벨 하나를 앞에 둔다. 감사 회귀:
+    예전에는 그 버전을 새 레코드에 썼다.
+    """
+    ontology = load_ontology(ROOT / "config/ontology/v1")
+    policy = load_policy(ROOT)
+    with pg.begin() as conn:
+        register_ontology(conn, ontology.model_copy(update={"version": "0.9.0"}))
+        insert_labels(
+            conn,
+            [
+                make_label(
+                    action_payload(),
+                    label_id="0000-old",
+                    session_id=SID,
+                    ontology_version="0.9.0",
+                )
+            ],
+        )
+        assert get_labels(conn, SID)[0].ontology_version == "0.9.0"  # 시각 순 첫 라벨
+        run_relations(conn, SID, ontology, policy, FIXED_TIME)
+        current = _current(conn)
+    assert current and {x.ontology_version for x in current} == {"1.0.0"}

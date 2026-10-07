@@ -35,6 +35,7 @@ from dlp_datasets.build import build_dataset_version, propose_golden_set
 from dlp_datasets.lineage import session_lineage, withdraw_session
 from dlp_datasets.policy import load_policy
 from dlp_datasets.snapshot import LakeFSSnapshotStore
+from dlp_media.audit import current_actor
 from dlp_schema import repo_root
 from dlp_schema.db.repository import insert_golden_set
 from dlp_schema.lineage import GoldenSet
@@ -148,10 +149,14 @@ def cmd_withdraw(args: argparse.Namespace) -> int:
     부작용: 한 트랜잭션에서 세션 생애주기를 `withdrawn`으로 바꾸고, 아직 기록이 없으면 `withdrawals`
     INSERT (다시 실행해도 기록은 하나, 멱등). 이미 만든 스냅샷·내보내기는 바꾸지 않으며(불변),
     그 목록을 "이미 들어간 곳"으로 출력해 사람이 후속 조치(재학습·회수)를 판단하게 한다.
+    생애주기 기록의 실행자는 `--actor`, 없으면 `DLP_ACTOR`, 그것도 없으면 OS 사용자다.
     """
+    actor = args.actor or current_actor()
     engine = _engine(args)
     with engine.begin() as conn:
-        lineage = withdraw_session(conn, args.session_id, args.reason, datetime.now(UTC))
+        lineage = withdraw_session(
+            conn, args.session_id, args.reason, datetime.now(UTC), actor=actor
+        )
     engine.dispose()
     print(f"{args.session_id}: 사용 중지. 이후 버전·내보내기에서 자동 제외")
     _print_lineage(
@@ -223,6 +228,7 @@ def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
     w = dsub.add_parser("withdraw", help="세션 사용 중지 (동의 철회·삭제 요청)")
     w.add_argument("session_id")
     w.add_argument("--reason", required=True)
+    w.add_argument("--actor", help="사용 중지를 실행한 사람 (기본: DLP_ACTOR 또는 OS 사용자)")
     w.set_defaults(func=cmd_withdraw)
 
     lin = sub.add_parser("lineage", help="세션 계보: 데이터셋 버전 → 학습 실행 → 내보내기")

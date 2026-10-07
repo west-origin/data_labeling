@@ -56,8 +56,9 @@ subgroups: [glove, site]
 # 지표 이름은 dlp_eval.harness가 내는 키다 (objects: map·ap50·hota·idf1·mota·ece, hands/body: pck,
 # contact: contact_{start,end}_{f1,error_ms}·grasp_macro_f1, actions: segment_f1_<iou>·temporal_map·
 # boundary_f1·verb_macro_f1, relations: relation_f1, states: transition_accuracy·transition_precision,
-# coverage: coverage_abs_error, privacy: blur_recall·blur_precision). 없는 이름을 적으면 NaN으로
-# 취급되어 후보·기존 모두 NaN이면 조용히 건너뛴다 — 오타에 주의한다.
+# coverage: coverage_abs_error, privacy: blur_recall·blur_precision). 목록은 dlp_eval.policy.TASK_METRICS.
+# 그 과제가 내지 않는 이름(오타, segment_iou에 없는 문턱)을 적으면 정책을 읽을 때 실패한다
+# (예전에는 NaN으로 취급되어 후보·기존 모두 NaN이면 그 비교를 조용히 건너뛰었다).
 # 규칙이 없는 과제는 판정하지 않고 경고만 남긴다 (통과로 본다).
 gate:
   objects: {primary: hota, min_gain: 0.0, max_drop: 0.01, guards: [map, idf1, ece], first_deploy: 0.3}
