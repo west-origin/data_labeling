@@ -48,15 +48,32 @@ def test_default_session_prefers_slate_then_tap(
     synced, report = synchronize(built[1], built[2], policy)
     assert _chosen(report, "third_person") == "qr_slate"
     assert synced.stream("third_person").sync_method is SyncMethod.QR_SLATE
-    assert _errors(built, synced, "third_person")[0] <= FRAME_MS  # 완료 기준: 1프레임 이하
-    assert (
-        synced.stream("third_person").clock_scale == 1.0
-    )  # 슬레이트로는 드리프트를 추정하지 않는다
+    # 슬레이트 맞춤을 출발점으로 오디오 상관이 다듬는다 (1프레임 기준보다 훨씬 작다)
+    attempt = next(r for r in report.streams if r.stream_id == "third_person").attempts[0]
+    assert "오디오 정밀화" in attempt.reason
+    assert _errors(built, synced, "third_person")[0] < 1.0
     assert _chosen(report, "glove_right") == "tap_event"
     assert _errors(built, synced, "glove_right")[0] <= FRAME_MS
     # 기준·같은 시계 스트림은 그대로
     assert synced.stream("bodycam") == built[1].stream("bodycam")
     assert synced.stream("imu") == built[1].stream("imu")
+
+
+def test_short_recording_slates_alone_fit_offset_only(
+    build: Callable[..., Built], policy: SyncPolicy
+) -> None:
+    """오디오로 다듬지 않으면 짧은 녹화는 오프셋만 맞춘다.
+
+    슬레이트 간격이 slate.min_drift_span_ms보다 짧다.
+    """
+    built = build()
+    no_refine = policy.model_copy(
+        update={"slate": policy.slate.model_copy(update={"refine_with_audio": False})}
+    )
+    synced, report = synchronize(built[1], built[2], no_refine)
+    assert _chosen(report, "third_person") == "qr_slate"
+    assert synced.stream("third_person").clock_scale == 1.0
+    assert _errors(built, synced, "third_person")[0] <= FRAME_MS  # 완료 기준: 1프레임 이하
 
 
 def test_without_slates_third_person_uses_taps(

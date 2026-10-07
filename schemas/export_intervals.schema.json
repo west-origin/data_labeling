@@ -434,6 +434,7 @@
           "title": "Confidence"
         },
         "label_id": {
+          "description": "가명 (내보내기마다 다른 HMAC)",
           "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
           "title": "Label Id",
           "type": "string"
@@ -1339,12 +1340,13 @@
       "type": "string"
     },
     "session_id": {
+      "description": "가명 (내보내기마다 다른 HMAC)",
       "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
       "title": "Session Id",
       "type": "string"
     },
     "site_id": {
-      "description": "가명",
+      "description": "가명 (내보내기마다 다른 HMAC)",
       "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
       "title": "Site Id",
       "type": "string"
@@ -1360,7 +1362,7 @@
       "type": "array"
     },
     "worker_id": {
-      "description": "가명",
+      "description": "가명 (내보내기마다 다른 HMAC)",
       "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
       "title": "Worker Id",
       "type": "string"

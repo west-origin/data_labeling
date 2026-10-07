@@ -11,7 +11,7 @@ from dlp_media.tables import write_parquet
 from dlp_schema.session import StreamKind
 from dlp_sync.anchors import Anchor, FitError, fit_clock
 from dlp_sync.policy import SyncPolicy
-from dlp_sync.signals import glove_series
+from dlp_sync.signals import glove_pressure_prefixes, glove_series
 from dlp_sync.taps import DoubleTap, detect_double_taps, match_taps
 from dlp_sync.xcorr import correlate, find_peak
 
@@ -68,6 +68,19 @@ def test_tap_matching_tolerates_missing_and_spurious_taps(policy: SyncPolicy) ->
     assert len(anchors) == 4
 
 
+def test_tap_matching_tolerance_grows_with_drift(policy: SyncPolicy) -> None:
+    """20분 떨어진 두드림은 80 ppm 드리프트로 96 ms 어긋난다.
+
+    드리프트 상한만큼 허용 오차를 넓힌다.
+    """
+    scale = 1 + 80e-6
+    ref = [DoubleTap(3_000, 3_200), DoubleTap(1_203_000, 1_203_200)]
+    tgt = [DoubleTap(r.first_ms / scale - 500, r.second_ms / scale - 500) for r in ref]
+    assert len(match_taps(ref, tgt, policy.tap)) == 2  # 드리프트를 감안하지 않으면 한 쌍뿐
+    anchors = match_taps(ref, tgt, policy.tap, max_drift_ppm=policy.max_drift_ppm)
+    assert len(anchors) == 4
+
+
 def test_correlation_peak_is_subsample_accurate() -> None:
     rng = np.random.default_rng(1)
     base = np.convolve(rng.standard_normal(20_000), np.ones(4) / 4, mode="same")
@@ -101,6 +114,9 @@ def test_glove_series_sums_only_pressure_channels(policy: SyncPolicy, tmp_path: 
     series = glove_series(path, policy.glove.pressure_prefixes)
     assert np.array_equal(series.t_ms, t)
     assert np.allclose(series.values, 3.0)
-    assert np.allclose(glove_series(path).values, 3.0)  # 기본값은 sync.yaml에서 읽는다
-    with pytest.raises(ValueError, match="압력 채널"):
+    assert glove_pressure_prefixes(policy) == policy.glove.pressure_prefixes
+    with pytest.warns(DeprecationWarning, match="pressure_prefixes"):
+        assert np.allclose(glove_series(path).values, 3.0)  # 호환: 저장소 sync.yaml을 읽는다
+    # 압력 채널이 없으면 다른 채널을 합치지 않고, 채널 목록과 정책 위치를 알려 준다
+    with pytest.raises(ValueError, match=r"압력 채널.*ax, pressure_0.*glove\.pressure_prefixes"):
         glove_series(path, ("force",))

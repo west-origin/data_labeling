@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import uuid
 from collections.abc import Iterator
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -21,13 +22,14 @@ from dlp_schema.db.repository import (
     insert_dataset_version,
     insert_labels,
     insert_session,
+    list_lifecycle_events,
     record_review,
     register_ontology,
     set_lifecycle,
     set_model_status,
     update_stream_sync,
 )
-from dlp_schema.db.tables import metadata
+from dlp_schema.db.tables import metadata, ontology_versions
 from dlp_schema.labels import Provenance, Source, VerificationState
 from dlp_schema.lineage import ModelStatus
 from dlp_schema.ontology import Ontology
@@ -130,6 +132,7 @@ def test_labels_are_immutable_except_review(pg: sa.Engine) -> None:
 
 APPEND_ONLY_TABLES = (
     "label_records", "raw_access_log", "review_work", "privacy_audits", "retention_decisions",
+    "session_lifecycle_events",
 )  # fmt: skip
 
 
@@ -201,6 +204,62 @@ def test_lifecycle_transitions_are_enforced(pg: sa.Engine) -> None:
 
 
 @pytest.mark.services
+def test_lifecycle_transitions_are_recorded(pg: sa.Engine) -> None:
+    later = FIXED_TIME + timedelta(hours=1)
+    with pg.begin() as conn:
+        set_lifecycle(conn, "s001", LifecycleState.PRIVACY_APPROVED, at=later, actor="rev01")
+        set_lifecycle(conn, "s001", LifecycleState.PRIVACY_APPROVED, at=later)  # 멱등: 기록 없음
+        set_lifecycle(conn, "s001", LifecycleState.PRELABELED)  # 시각을 안 주면 DB 시각
+        with pytest.raises(TransitionError):
+            set_lifecycle(conn, "s001", LifecycleState.EXPORTED, at=later)
+        with pytest.raises(ValueError, match="시간대"):
+            set_lifecycle(conn, "s001", LifecycleState.HUMAN_VERIFIED, at=datetime(2026, 1, 1))
+    with pg.connect() as conn:
+        events = list_lifecycle_events(conn, "s001")
+    assert [(e.from_state, e.to_state) for e in events] == [
+        (None, LifecycleState.RAW_INGESTED),  # 세션 등록
+        (LifecycleState.RAW_INGESTED, LifecycleState.PRIVACY_APPROVED),
+        (LifecycleState.PRIVACY_APPROVED, LifecycleState.PRELABELED),
+    ]
+    assert events[1].at == later and events[1].actor == "rev01"
+    assert all(e.at.utcoffset() is not None for e in events)
+    # 추가만 한다
+    for statement in (
+        "UPDATE session_lifecycle_events SET actor = 'x'",
+        "DELETE FROM session_lifecycle_events",
+    ):
+        with pytest.raises(DBAPIError, match="session_lifecycle_events"), pg.begin() as conn:
+            conn.execute(sa.text(statement))
+
+
+@pytest.mark.services
+def test_lifecycle_events_are_backfilled_by_migration(pg_url: str) -> None:
+    """0011 이전에 등록된 세션은 지금 상태로 한 번 기록된다 (시각 = 세션 등록 시각)."""
+    downgrade(pg_url, "0010")
+    engine = sa.create_engine(pg_url)
+    try:
+        with engine.begin() as conn:
+            register_ontology_row = "INSERT INTO ontology_versions (version, status, content) "
+            conn.execute(sa.text(register_ontology_row + "VALUES ('1.0.0', 'draft', '{}')"))
+            conn.execute(
+                sa.text(
+                    "INSERT INTO sessions (session_id, domain, worker_id, site_id, consent_version,"
+                    " recorded_at, duration_ms, calibration, privacy_state, lifecycle_state,"
+                    " created_at) VALUES ('old1', 'cleaning', 'w1', 'p1', 'c1', :t, 1000, '{}',"
+                    " 'approved', 'prelabeled', :t)"
+                ),
+                {"t": FIXED_TIME},
+            )
+        upgrade(pg_url)
+        with engine.connect() as conn:
+            [event] = list_lifecycle_events(conn, "old1")
+        assert (event.from_state, event.to_state) == (None, LifecycleState.PRELABELED)
+        assert event.at == FIXED_TIME and event.actor == "migration:0011"
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.services
 def test_dataset_version_roundtrip(pg: sa.Engine) -> None:
     version = DatasetVersion(
         version_id="ds-0001", ontology_version="1.0.0", created_at=FIXED_TIME,
@@ -219,6 +278,42 @@ def test_registering_changed_ontology_under_same_version_fails(
     changed = ontology.model_copy(update={"status": "frozen"})
     with pytest.raises(ValueError, match="다른 내용"), pg.begin() as conn:
         register_ontology(conn, changed)
+
+
+@pytest.mark.services
+def test_draft_ontology_accepts_additive_update(pg_url: str, ontology: Ontology) -> None:
+    """3차 검수 전 내용(hand_joints·surface_parts 없음)으로 등록된 DB에 현재 v1을 다시 등록한다."""
+    old = ontology.model_copy(update={"hand_joints": {}, "surface_parts": {}})
+    engine = sa.create_engine(pg_url)
+    try:
+        with engine.begin() as conn:
+            register_ontology(conn, old)
+        with engine.begin() as conn:
+            register_ontology(conn, ontology)  # 덧붙이기만: 내용을 바꾼다
+            register_ontology(conn, ontology)  # 같은 내용: 그대로
+        with engine.connect() as conn:
+            stored = conn.execute(
+                sa.select(ontology_versions.c.content).where(
+                    ontology_versions.c.version == ontology.version
+                )
+            ).scalar_one()
+        assert stored == ontology.model_dump(mode="json")
+        # 키를 지우는 변경(예전 내용으로 되돌리기 포함)은 덧붙이기가 아니다
+        with pytest.raises(ValueError, match="덧붙이기가 아닌"), engine.begin() as conn:
+            register_ontology(conn, old)
+        renamed = dict(ontology.verbs)
+        first = next(iter(renamed))
+        renamed[first] = renamed[first].model_copy(update={"ko": "바뀐 이름"})
+        with pytest.raises(ValueError, match="덧붙이기가 아닌"), engine.begin() as conn:
+            register_ontology(conn, ontology.model_copy(update={"verbs": renamed}))
+        # 확정된 버전은 덧붙이기도 받지 않는다
+        with engine.begin() as conn:
+            conn.execute(ontology_versions.update().values(status="frozen"))
+        extra = {**ontology.hand_joints, "palm_center": next(iter(ontology.hand_joints.values()))}
+        with pytest.raises(ValueError, match="확정된"), engine.begin() as conn:
+            register_ontology(conn, ontology.model_copy(update={"hand_joints": extra}))
+    finally:
+        engine.dispose()
 
 
 @pytest.mark.services

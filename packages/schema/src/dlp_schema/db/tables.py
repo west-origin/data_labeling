@@ -51,6 +51,29 @@ sessions = sa.Table(
     sa.Column("created_at", Ts, nullable=False, server_default=sa.func.now()),
 )
 
+# 세션 생애주기 전이 기록. 추가만 한다 (수정·삭제·TRUNCATE를 트리거로 막는다, ADR 0028)
+session_lifecycle_events = sa.Table(
+    "session_lifecycle_events",
+    metadata,
+    sa.Column(
+        "event_id",
+        sa.BigInteger().with_variant(sa.Integer(), "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    ),
+    sa.Column(
+        "session_id",
+        sa.String(128),
+        sa.ForeignKey("sessions.session_id"),
+        nullable=False,
+        index=True,
+    ),
+    sa.Column("from_state", sa.String(32), nullable=True),
+    sa.Column("to_state", sa.String(32), nullable=False),
+    sa.Column("at", Ts, nullable=False),
+    sa.Column("actor", sa.Text(), nullable=True),
+)
+
 streams = sa.Table(
     "streams",
     metadata,

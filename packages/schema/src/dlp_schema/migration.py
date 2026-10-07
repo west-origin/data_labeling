@@ -25,7 +25,7 @@ from typing import Any, Literal
 import yaml
 from pydantic import Field, ValidationError
 
-from dlp_schema.common import Contract, OntologyId, SemVer
+from dlp_schema.common import Contract, OntologyId, SemVer, derived_id
 from dlp_schema.episode import current_labels
 from dlp_schema.labels import LabelRecord, Verification
 
@@ -110,7 +110,7 @@ def migrate_labels(
             continue
         record: dict[str, Any] = label.model_dump(mode="json")
         record.update(
-            label_id=f"{label.label_id}:v{migration.to_version}",
+            label_id=derived_id(label.label_id, f"v{migration.to_version}"),
             parent_label_id=label.label_id,
             ontology_version=migration.to_version,
             verification=Verification().model_dump(mode="json"),

@@ -29,7 +29,11 @@ class BucketsConfig(Contract):
 class ProxyConfig(Contract):
     """검수 화면용 프록시 영상 인코딩 설정."""
 
-    max_height: int = Field(gt=0)
+    max_height: int = Field(
+        ge=2,
+        multiple_of=2,
+        description="높이 상한 (짝수: libx264 yuv420p는 가로·세로가 짝수여야 한다)",
+    )
     crf: int = Field(ge=0, le=51)
     keyframe_ms: int = Field(gt=0)
 

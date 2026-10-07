@@ -1,8 +1,10 @@
 """내보내기 파일 계약 (구매자에게 주는 형식).
 
 구간 JSON은 세션 하나에 파일 하나다. 라벨마다 검증 상태를 그대로 표시한다.
-검수자 ID 같은 내부 정보와
-원본 저장소 위치는 넣지 않는다. 작업자·장소 ID는 가명이다.
+검수자 ID 같은 내부 정보와 원본 저장소 위치는 넣지 않는다.
+작업자·장소·세션·라벨 ID는 내보내기마다 다른 가명이다 (내보내기 ID로 유도한 키의 HMAC,
+`config/policies/export.yaml ids.pseudonymize`). 같은 원래 ID는 한 내보내기 안에서 같은 가명이라
+파일 사이 참조는 유지되지만, 다른 내보내기와는 이어 붙일 수 없다.
 """
 
 from __future__ import annotations
@@ -26,7 +28,7 @@ class ExportedStream(Contract):
 
 
 class ExportedLabel(Contract):
-    label_id: Identifier
+    label_id: Identifier = Field(description="가명 (내보내기마다 다른 HMAC)")
     stream_id: Identifier | None = None
     t_start_ms: Ms
     t_end_ms: Ms
@@ -57,11 +59,11 @@ class IntervalFile(Contract):
     export_id: Identifier
     dataset_version_id: Identifier
     ontology_version: SemVer
-    session_id: Identifier
+    session_id: Identifier = Field(description="가명 (내보내기마다 다른 HMAC)")
     split: Split
     domain: Domain
-    worker_id: Identifier = Field(description="가명")
-    site_id: Identifier = Field(description="가명")
+    worker_id: Identifier = Field(description="가명 (내보내기마다 다른 HMAC)")
+    site_id: Identifier = Field(description="가명 (내보내기마다 다른 HMAC)")
     duration_ms: Ms
     streams: tuple[ExportedStream, ...]
     labels: tuple[ExportedLabel, ...]

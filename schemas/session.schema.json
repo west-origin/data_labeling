@@ -279,6 +279,9 @@
       }
     },
     "consent_version": {
+      "description": "동의서 버전 (1~64자)",
+      "maxLength": 64,
+      "minLength": 1,
       "title": "Consent Version",
       "type": "string"
     },

@@ -17,10 +17,11 @@ from dlp_schema.migration import OntologyMigration
 from dlp_schema.ontology import Ontology
 from dlp_schema.ops import PrivacyAuditRecord, RawAccessEvent, RetentionDecision, ReviewWork
 from dlp_schema.review import ReviewAssignment, ReviewTask
-from dlp_schema.session import Session
+from dlp_schema.session import LifecycleEvent, Session
 
 CONTRACTS: dict[str, type[BaseModel]] = {
     "session": Session,
+    "lifecycle_event": LifecycleEvent,
     "label_record": LabelRecord,
     "episode_graph": EpisodeGraph,
     "dataset_version": DatasetVersion,
