@@ -16,12 +16,13 @@ from dlp_privacy.detectors import build_detectors
 from dlp_privacy.detectors.codes import CodeDetector
 from dlp_privacy.detectors.open_vocab import OpenVocabDetector
 from dlp_privacy.detectors.oracle import OracleDetector
+from dlp_privacy.geometry import Box
 from dlp_privacy.pipeline import StreamResult, detect_video
 from dlp_privacy.policy import PrivacyPolicy, TargetPolicy
-from dlp_privacy.render import render_blurred
+from dlp_privacy.render import blur_tracks, render_blurred
 from dlp_schema.labels import BlurTrackPayload, BoxKeyframe, LabelRecord
 from dlp_schema.ontology import Ontology, load_ontology
-from dlp_schema.testing import FIXED_TIME
+from dlp_schema.testing import FIXED_TIME, make_label
 from dlp_schema.validation import check_label
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -164,6 +165,52 @@ def test_blur_is_held_after_track_loss(
     assert after and max(after) <= exit_t + hold
 
 
+def test_unblurred_gap_between_split_tracks_is_flagged(
+    blur: tuple[BlurScenario, Path], policy: PrivacyPolicy
+) -> None:
+    """회귀: 오래 끊겨 트랙이 나뉘면 그 사이 블러 없는 프레임을 검수 구간으로 낸다."""
+    scenario = blur[0]
+    oracle = OracleDetector("oracle", scenario.labels, miss_spans_ms=[("face", 1_000, 2_000)])
+    result = run(blur, policy, {"oracle": oracle})
+    unblurred = [
+        t
+        for t in scenario.frame_times
+        if 1_000 < t < 2_000 and not label_box(result.labels, "face", t)
+    ]
+    assert unblurred  # 유지 시간 사이에 블러가 빠진 프레임이 있다
+    splits = [
+        s
+        for s in result.segments
+        if s.reason == "track_gap" and s.target == "face" and s.detail == "split"
+    ]
+    assert splits and all(any(s.t_start_ms <= t <= s.t_end_ms for s in splits) for t in unblurred)
+    # 떨어진 거리가 split_review_ms보다 길면 내지 않는다 (다른 등장으로 본다)
+    far = policy.model_copy(
+        update={"tracker": policy.tracker.model_copy(update={"split_review_ms": 100})}
+    )
+    again = run(blur, far, {"oracle": oracle})
+    assert not [s for s in again.segments if s.detail == "split"]
+
+
+def test_render_interpolates_between_sparse_keyframes() -> None:
+    """회귀: 검수자가 CVAT에서 고친 트랙은 키프레임만 남는다. 블러본은 CVAT처럼 보간해야 한다."""
+    kfs = (
+        BoxKeyframe(t_ms=0, x=0, y=0, w=10, h=10),
+        BoxKeyframe(t_ms=100, x=100, y=50, w=30, h=10),
+        BoxKeyframe(t_ms=200, x=0, y=0, w=0, h=0, outside=True),
+        BoxKeyframe(t_ms=300, x=5, y=5, w=10, h=10),
+    )
+    label = make_label(
+        BlurTrackPayload(target="face", keyframes=kfs), t_end_ms=300, stream_id="bodycam"
+    )
+    [track] = blur_tracks([label])
+    assert track.box_at(50) == Box(50, 25, 20, 10)  # 선형 보간
+    assert track.box_at(150) == Box(100, 50, 30, 10)  # 다음이 화면 밖이면 직전 박스 유지
+    assert track.box_at(250) is None  # 화면 밖
+    assert track.box_at(400) == Box(5, 5, 10, 10)  # 마지막 뒤는 유지
+    assert track.box_at(-1) is None
+
+
 def test_review_segments_cover_low_confidence_disagreement_reflection_and_missing(
     blur: tuple[BlurScenario, Path], policy: PrivacyPolicy
 ) -> None:
@@ -198,7 +245,14 @@ def test_render_mosaics_targets_keeps_pts_and_leaves_rest(
     result = run(blur, policy, {"oracle": OracleDetector("oracle", scenario.labels)})
     dst = tmp_path / "blurred.mp4"
     applied = render_blurred(
-        src, dst, result.labels, mode="mosaic", min_block_px=6, blocks_per_box=5
+        src,
+        dst,
+        result.labels,
+        mode="mosaic",
+        min_block_px=6,
+        blocks_per_box=5,
+        encoder_rate=policy.render.encoder_rate,
+        crf=policy.render.crf,
     )
     assert applied > 0
     assert build_pts_index(dst).ms.tolist() == build_pts_index(src).ms.tolist()
@@ -234,7 +288,10 @@ def test_render_strips_audio(tmp_path: Path, policy: PrivacyPolicy) -> None:
     src = tmp_path / "with_audio.mp4"
     sync.write_video(src, "bodycam")
     dst = tmp_path / "blurred.mp4"
-    render_blurred(src, dst, [], mode="solid", min_block_px=6, blocks_per_box=5)
+    render_blurred(
+        src, dst, [], mode="solid", min_block_px=6, blocks_per_box=5,
+        encoder_rate=policy.render.encoder_rate, crf=policy.render.crf,
+    )  # fmt: skip
     with av.open(str(src)) as c:
         assert c.streams.audio
     with av.open(str(dst)) as c:

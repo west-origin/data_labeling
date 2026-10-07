@@ -21,14 +21,16 @@ from dlp_review.tasks import (
     SPATIAL_PROJECT,
     TEMPORAL_PROJECT,
     ReviewSetup,
+    TaskError,
     create_labeling_tasks,
     create_privacy_tasks,
 )
-from dlp_review.webhook import CollectRequest, serve
+from dlp_review.webhook import CollectRequest, ReviewerMismatchError, resolve_reviewer, serve
 from dlp_schema import load_config, load_ontology, repo_root
 from dlp_schema.db.repository import (
     get_assignment,
     get_golden_set,
+    get_review_task,
     insert_assignment,
     list_assignments,
 )
@@ -59,12 +61,20 @@ def cmd_create(args: argparse.Namespace) -> int:
     setup = _setup(args)
     engine = sa.create_engine(database_url(args.url))
     now = datetime.now(UTC)
+    if not args.assignee:
+        raise SystemExit("검수 작업에는 --assignee가 필요합니다 (블러 검수는 원본 접근 권한자)")
     with engine.begin() as conn:
         if args.stage == "privacy":
-            tasks = create_privacy_tasks(conn, args.session_id, setup, now)
+            # 담당자가 review.yaml reviewers.privacy에 없으면 원본을 올리기 전에 막는다
+            tasks = create_privacy_tasks(
+                conn,
+                args.session_id,
+                setup,
+                now,
+                assignee=args.assignee,
+                privacy_reviewers=load_ops_policy(repo_root()).reviewers.privacy,
+            )
         else:
-            if not args.assignee:
-                raise SystemExit("작업 라벨 검수에는 --assignee가 필요합니다")
             tasks = create_labeling_tasks(conn, args.session_id, setup, args.assignee, now)
     engine.dispose()
     for t in tasks:
@@ -75,7 +85,10 @@ def cmd_create(args: argparse.Namespace) -> int:
 def cmd_collect(args: argparse.Namespace) -> int:
     engine = sa.create_engine(database_url(args.url))
     with engine.begin() as conn:
-        outcome = collect_task(conn, args.task_key, _setup(args), args.reviewer, datetime.now(UTC))
+        outcome = collect_task(
+            conn, args.task_key, _setup(args), args.reviewer, datetime.now(UTC),
+            load_ops_policy(repo_root()),
+        )  # fmt: skip
     engine.dispose()
     if outcome is None:
         print(f"{args.task_key}: 이미 수집함")
@@ -91,10 +104,29 @@ def cmd_serve(args: argparse.Namespace) -> int:
     setup = _setup(args)
     engine = sa.create_engine(database_url(args.url))
 
+    service_user = setup.label_studio.service_user_id() if setup.label_studio else None
+    ops_policy = load_ops_policy(repo_root())
+
     def on_collect(req: CollectRequest) -> None:
         with engine.begin() as conn:
-            outcome = collect_task(conn, req.task_key, setup, req.reviewer, datetime.now(UTC))
-        print(f"{req.task_key} ← {req.reviewer}: {'이미 수집함' if outcome is None else '수집함'}")
+            task = get_review_task(conn, req.task_key)
+            try:
+                # 검수자는 웹훅의 도구 사용자 ID가 아니라 작업 담당자다
+                reviewer = resolve_reviewer(req, task, service_user)
+            except ReviewerMismatchError as exc:
+                print(f"{req.task_key}: 수집하지 않음 ({exc})")
+                return
+            if reviewer is None:
+                print(f"{req.task_key}: 서비스 계정의 주석이라 수집하지 않음")
+                return
+            try:
+                outcome = collect_task(
+                    conn, req.task_key, setup, reviewer, datetime.now(UTC), ops_policy
+                )
+            except TaskError as exc:
+                print(f"{req.task_key}: 수집하지 않음 ({exc})")
+                return
+        print(f"{req.task_key} ← {reviewer}: {'이미 수집함' if outcome is None else '수집함'}")
 
     server = serve(args.port, _secret(), on_collect)
     print(f"웹훅 대기: http://0.0.0.0:{args.port}/webhooks/{{cvat,label_studio}}")
@@ -209,7 +241,11 @@ def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
     create = rsub.add_parser("create", help="세션의 검수 작업 생성")
     create.add_argument("session_id")
     create.add_argument("--stage", choices=["privacy", "labeling"], required=True)
-    create.add_argument("--assignee", help="작업 라벨 검수 담당자 (워터마크에 들어간다)")
+    create.add_argument(
+        "--assignee",
+        required=True,
+        help="검수 담당자 (블러 검수는 review.yaml reviewers.privacy, 작업 라벨은 워터마크)",
+    )
     create.add_argument("--no-cvat", action="store_true")
     create.add_argument("--no-ls", action="store_true")
     create.add_argument("--url", help="DB URL (기본: DLP_DATABASE_URL)")

@@ -12,11 +12,21 @@ import sqlalchemy as sa
 from dlp_cli.raw_access import raw_store
 from dlp_cli.schema_cmds import database_url
 from dlp_media.storage import store_from_spec
+from dlp_privacy.audit import (
+    AuditResult,
+    audit_candidates,
+    iso_week,
+    iso_week_bounds,
+    previous_weeks,
+    review_mode,
+    select_audit_sample,
+    weekly_miss_rates,
+)
 from dlp_privacy.detectors import build_detectors
 from dlp_privacy.policy import load_policy
 from dlp_privacy.runner import approve_session, detect_session, render_session
 from dlp_schema import load_config, repo_root
-from dlp_schema.db.repository import get_session
+from dlp_schema.db.repository import get_session, list_privacy_audits
 from dlp_train.deployed import deployed_predictors
 from dlp_train.policy import load_policy as load_training_policy
 from dlp_train.trainers import LoadContext
@@ -86,6 +96,37 @@ def cmd_render(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_audit_sample(args: argparse.Namespace) -> int:
+    """그 주 승인된 블러본에서 잔여 누락 감사 표본을 뽑고, 블러 검수 방식(전수/표본)을 판정한다."""
+    root = repo_root()
+    config = load_config(root / "config" / "defaults.yaml")
+    exit_policy = config.privacy.full_review_exit
+    week = args.week or iso_week(datetime.now(UTC))
+    weeks = previous_weeks(week, exit_policy.weeks_below_target)
+    engine = _engine(args)
+    with engine.connect() as conn:
+        candidates = audit_candidates(conn, week)
+        start, _ = iso_week_bounds(weeks[0])
+        _, end = iso_week_bounds(week)
+        audits = [
+            (a.audited_at, AuditResult(a.session_id, a.stream_id, a.duration_ms, a.misses,
+                                       a.auditor, a.blur_reviewer))
+            for a in list_privacy_audits(conn, start, end)
+        ]  # fmt: skip
+    engine.dispose()
+    sample = select_audit_sample(candidates, exit_policy.audit_sample_ratio, week)
+    print(f"{week}: 승인된 블러본 {len(candidates)}개 중 감사 표본 {len(sample)}개")
+    for c in sample:
+        print(f"  {c.session_id}/{c.stream_id} (원 검수자 {c.blur_reviewer}, 감사자는 다른 사람)")
+    rates = weekly_miss_rates(audits, weeks)
+    for w, r in zip(weeks, rates, strict=True):
+        print(f"  {w}: " + ("감사 없음 (통과로 보지 않음)" if r is None else f"{r:.3f}/시간"))
+    target = config.success_criteria.residual_blur_miss_per_hour_max
+    mode = review_mode(rates, target, exit_policy.weeks_below_target)
+    print(f"블러 검수 방식: {'표본' if mode == 'sampled' else '전수'} (목표 {target})")
+    return 0
+
+
 def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:  # pyright: ignore[reportPrivateUsage]
     privacy = sub.add_parser("privacy", help="프라이버시 게이트")
     psub = privacy.add_subparsers(dest="privacy_command", required=True)
@@ -100,3 +141,9 @@ def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
         if name != "approve":
             p.add_argument("--store", default="s3", help="'s3' 또는 'local:<디렉터리>'")
         p.set_defaults(func=func)
+    audit = psub.add_parser(
+        "audit-sample", help="그 주 승인된 블러본의 잔여 누락 감사 표본과 블러 검수 방식(전수/표본)"
+    )
+    audit.add_argument("--week", help="ISO 주 (예: 2026-W41, 기본: 이번 주)")
+    audit.add_argument("--url", help="DB URL (기본: DLP_DATABASE_URL)")
+    audit.set_defaults(func=cmd_audit_sample)

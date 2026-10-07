@@ -33,18 +33,21 @@ def watermark_layer(text: str, width: int, height: int) -> NDArray[np.uint8]:
     return np.ascontiguousarray(rotated[oy : oy + height, ox : ox + width], dtype=np.uint8)
 
 
-def burn_watermark(src: Path, dst: Path, text: str, *, opacity: float = 0.18) -> None:
+def burn_watermark(
+    src: Path, dst: Path, text: str, *, opacity: float, crf: int, encoder_rate: int
+) -> None:
+    """opacity·crf·encoder_rate는 config/policies/review.yaml media에서 온다 (PTS는 원본 그대로)."""
     with av.open(str(src)) as inp, av.open(str(dst), "w") as out:
         vin = inp.streams.video[0]
         tb = to_fraction(vin.time_base)
         w, h = vin.codec_context.width, vin.codec_context.height
         mask = watermark_layer(text, w, h).astype(np.float32)[:, :, None] / 255 * opacity
-        vout = out.add_stream("libx264", rate=30)
+        vout = out.add_stream("libx264", rate=encoder_rate)
         assert isinstance(vout, av.VideoStream)
         vout.width, vout.height, vout.pix_fmt = w, h, "yuv420p"
         vout.time_base = tb
         vout.codec_context.time_base = tb
-        vout.options = {"crf": "20", "preset": "veryfast", "threads": "1"}
+        vout.options = {"crf": str(crf), "preset": "veryfast", "threads": "1"}
         for frame in inp.decode(vin):
             if frame.pts is None:
                 continue

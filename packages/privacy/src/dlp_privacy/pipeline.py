@@ -21,7 +21,13 @@ import numpy as np
 from dlp_media.probe import to_fraction
 from dlp_privacy.detection import Detection, FrameDetector, Resettable
 from dlp_privacy.policy import PrivacyPolicy, ReviewReason
-from dlp_privacy.review import ReviewSegment, sort_segments, spans, track_segments
+from dlp_privacy.review import (
+    ReviewSegment,
+    sort_segments,
+    spans,
+    split_gap_segments,
+    track_segments,
+)
 from dlp_privacy.tracker import build_tracks, track_frames
 from dlp_schema.episode import version_tag
 from dlp_schema.labels import (
@@ -99,6 +105,7 @@ def detect_video(
     )
     labels: list[LabelRecord] = []
     segments: list[ReviewSegment] = []
+    covered: dict[str, set[int]] = {}  # 대상 → 블러가 보이는 프레임 시각
     version = model_version(detectors, policy)
     for i, track in enumerate(sorted(tracks, key=lambda tr: (min(tr.obs), tr.target))):
         tf = track_frames(
@@ -138,6 +145,17 @@ def detect_video(
             review_score=policy.review_score,
             available_detectors={d.name for d in target_detectors[track.target]},
             priority=priority,
+        )
+        covered.setdefault(track.target, set()).update(f.t_ms for f in tf if f.box is not None)
+    # 오래 끊겨 나뉜 트랙 사이(블러 없음)도 검수자가 보게 한다
+    for target, shown in sorted(covered.items()):
+        segments += split_gap_segments(
+            stream_id,
+            target,
+            shown,
+            frame_times,
+            max_gap_ms=policy.tracker.split_review_ms,
+            priority=priority["track_gap"],
         )
 
     missing_targets: dict[str, str] = {}

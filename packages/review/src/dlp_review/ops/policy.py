@@ -65,8 +65,18 @@ class ReviewersPolicy(Contract):
     privacy: tuple[str, ...] = Field(default=(), description="원본 접근 권한자 (블러 검수)")
 
 
+class MediaPolicy(Contract):
+    """검수 화면용 매체 (라벨러 워터마크 영상, 시계열 CSV)."""
+
+    watermark_opacity: float = Field(gt=0, le=1)
+    watermark_crf: int = Field(ge=0, le=51)
+    encoder_rate: int = Field(gt=0, description="인코더 명목 프레임레이트 (PTS는 원본 그대로)")
+    timeseries_rate_hz: float = Field(gt=0)
+
+
 class ReviewOpsPolicy(Contract):
     version: int
+    media: MediaPolicy
     units: UnitsPolicy
     priority: PriorityPolicy
     sampling: SamplingPolicy

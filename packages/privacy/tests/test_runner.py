@@ -5,6 +5,7 @@ import os
 import tempfile
 import uuid
 from collections.abc import Iterator
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import av
@@ -20,11 +21,18 @@ from dlp_privacy.detectors.oracle import OracleDetector
 from dlp_privacy.policy import PrivacyPolicy, TargetPolicy
 from dlp_privacy.runner import PrivacyGateError, approve_session, detect_session, render_session
 from dlp_schema.db.migrate import upgrade
-from dlp_schema.db.repository import get_labels, get_session, record_review, register_ontology
+from dlp_schema.db.repository import (
+    get_labels,
+    get_session,
+    insert_review_task,
+    record_review,
+    register_ontology,
+)
 from dlp_schema.episode import current_labels
 from dlp_schema.labels import LabelRecord, Provenance, Source, VerificationState
 from dlp_schema.ontology import load_ontology
 from dlp_schema.predictor import Clip
+from dlp_schema.review import ReviewStage, ReviewTask, ReviewTaskStatus, ReviewTool
 from dlp_schema.session import LifecycleState, PrivacyState
 from dlp_schema.testing import FIXED_TIME
 
@@ -109,6 +117,10 @@ def test_detect_review_approve_render(
     with pg.begin() as conn:
         with pytest.raises(PrivacyGateError, match="승인 전"):
             render_session(conn, sid, raw, labeling, oracle_policy)
+        with pytest.raises(PrivacyGateError, match="블러 검수 작업"):
+            approve_session(conn, sid)
+        for stream in ("bodycam", "third_person"):
+            reviewed_task(conn, sid, stream, FIXED_TIME)
         with pytest.raises(PrivacyGateError, match="사람 검수"):
             approve_session(conn, sid)
         for label in get_labels(conn, sid, kinds=["blur_track"]):
@@ -131,6 +143,76 @@ def test_detect_review_approve_render(
         labeling.get_file(f"sessions/{sid}/blurred/third_person.mp4", dest)
         with av.open(str(dest)) as c:
             assert c.streams.video and not c.streams.audio
+
+    # 회귀: 승인 뒤 다시 탐지해 블러가 바뀌면 승인이 풀리고, 다시 검수·승인하면 블러본을 새로 만든다
+    later = FIXED_TIME + timedelta(hours=1)
+    before = labeling.head(f"sessions/{sid}/blurred/bodycam.mp4")
+    face_only = OracleDetector("oracle", [x for x in scenario.labels if x.kind == "blur_track"][:2])
+    face_only.version = "oracle-2"  # 탐지기 버전이 바뀌었다
+    with pg.begin() as conn:
+        changed = detect_session(conn, sid, raw, {"oracle": face_only}, {}, oracle_policy, later)
+        assert changed.changed
+        assert get_session(conn, sid).privacy_state is PrivacyState.AUTO_BLURRED
+        with pytest.raises(PrivacyGateError, match="승인 전"):
+            render_session(conn, sid, raw, labeling, oracle_policy)
+        with pytest.raises(PrivacyGateError, match="블러 검수 작업"):
+            approve_session(conn, sid)  # 이전 검수 작업은 새 탐지보다 앞이다
+        for stream in ("bodycam", "third_person"):
+            reviewed_task(conn, sid, stream, later + timedelta(minutes=5), "2")
+        for label in current_labels(get_labels(conn, sid, kinds=["blur_track"])):
+            record_review(conn, label.label_id, VerificationState.HUMAN_APPROVED, "rev01", later)
+        again_approved = approve_session(conn, sid)
+        assert again_approved.lifecycle_state is LifecycleState.PRIVACY_APPROVED
+        render_session(conn, sid, raw, labeling, oracle_policy)
+    after = labeling.head(f"sessions/{sid}/blurred/bodycam.mp4")
+    assert before is not None and after is not None and before.sha256 != after.sha256
+
+
+def reviewed_task(conn: sa.Connection, sid: str, stream: str, at: datetime, tag: str = "1") -> None:
+    """수집까지 끝난 블러 검수 작업 기록 (검수 도구 없이 승인 조건만 맞춘다)."""
+    insert_review_task(
+        conn,
+        ReviewTask(
+            task_key=f"cvat:{sid}-{stream}-{tag}", tool=ReviewTool.CVAT, external_id="0",
+            session_id=sid, stream_id=stream, stage=ReviewStage.PRIVACY, assignee="rev01",
+            media_uri=f"s3://dlp-raw/sessions/{sid}/derived/{stream}.proxy.mp4",
+            label_kinds=("blur_track",), created_at=at, status=ReviewTaskStatus.COLLECTED,
+            collected_at=at,
+        ),
+    )  # fmt: skip
+
+
+def test_approval_needs_a_review_task_even_without_detections(
+    pg: sa.Engine, policy: PrivacyPolicy, blur: tuple[BlurScenario, Path], tmp_path: Path
+) -> None:
+    """회귀: 탐지가 하나도 없으면 미검수 라벨이 없어 사람 검수 없이 승인됐다."""
+    _, video = blur
+    sid = f"priv-{uuid.uuid4().hex[:8]}"
+    manifest = {
+        "session_id": sid, "domain": "cleaning", "worker_id": "w01", "site_id": "site01",
+        "consent_version": "c1", "recorded_at": FIXED_TIME.isoformat(), "ontology_version": "1.0.0",
+        "streams": [{"stream_id": "bodycam", "kind": "bodycam", "path": str(video)}],
+    }  # fmt: skip
+    (tmp_path / "m.yaml").write_text(yaml.safe_dump(manifest), encoding="utf-8")
+    raw = S3Store.from_env("dlp-raw")
+    nothing = policy.model_copy(
+        update={
+            "targets": {
+                t: TargetPolicy(margin=tp.margin, detectors=("oracle",))
+                for t, tp in policy.targets.items()
+            }
+        }
+    )
+    with pg.begin() as conn:
+        ingest_session(*load_manifest(tmp_path / "m.yaml"), raw, conn)
+        summary = detect_session(
+            conn, sid, raw, {"oracle": OracleDetector("oracle", [])}, {}, nothing, FIXED_TIME
+        )
+        assert summary.detected == {"bodycam": 0}
+        with pytest.raises(PrivacyGateError, match="블러 검수 작업"):
+            approve_session(conn, sid)
+        reviewed_task(conn, sid, "bodycam", FIXED_TIME)
+        assert approve_session(conn, sid).privacy_state is PrivacyState.APPROVED
 
 
 class TrainedBlur:

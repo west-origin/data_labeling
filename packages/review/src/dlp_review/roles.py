@@ -40,3 +40,17 @@ def check_stage_uris(stage: ReviewStage, uris: Iterable[str], raw_bucket: str) -
     ]
     if leaked:
         raise RawAccessError(f"{stage.value} 단계 작업에 원본 URI가 들어 있습니다: {leaked}")
+
+
+class AccessError(PermissionError):
+    """원본 접근 권한이 없는 사람에게 블러(원본 영상) 검수를 배정하려 했다."""
+
+
+def check_privacy_reviewers(reviewers: Iterable[str | None], allowed: Iterable[str]) -> None:
+    """블러 검수 담당자는 모두 원본 접근 권한자여야 한다 (비어 있는 담당자도 막는다)."""
+    denied = sorted({r or "(미배정)" for r in reviewers} - set(allowed))
+    if denied:
+        raise AccessError(
+            f"원본 접근 권한자가 아닌 검수자에게 블러 검수를 배정할 수 없습니다: {denied} "
+            "(config/policies/review.yaml reviewers.privacy)"
+        )

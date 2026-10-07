@@ -1,14 +1,35 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
 from dlp_privacy.audit import (
     AuditCandidate,
     AuditResult,
+    iso_week,
+    iso_week_bounds,
+    previous_weeks,
     residual_miss_rate,
     review_mode,
     select_audit_sample,
+    weekly_miss_rates,
 )
+
+
+def test_weeks_without_audit_do_not_count_as_passing() -> None:
+    """회귀: 감사가 없던 주를 목표 이하(통과)로 보면 감사 없이 표본 검수로 넘어간다."""
+    weeks = previous_weeks("2026-W41", 3)
+    assert weeks == ["2026-W39", "2026-W40", "2026-W41"]
+    start, end = iso_week_bounds("2026-W41")
+    assert (start, end) == (datetime(2026, 10, 5, tzinfo=UTC), datetime(2026, 10, 12, tzinfo=UTC))
+    assert iso_week(datetime(2026, 10, 11, 23, tzinfo=UTC)) == "2026-W41"
+    hour = AuditResult("s1", "bodycam", 3_600_000, 0, "aud", "rev")
+    audits = [(datetime(2026, 9, 22, tzinfo=UTC), hour), (datetime(2026, 10, 6, tzinfo=UTC), hour)]
+    rates = weekly_miss_rates(audits, weeks)
+    assert rates == [0.0, None, 0.0]  # W40에는 감사가 없다
+    assert review_mode(rates, 0.2, 3) == "full"
+    assert review_mode([0.0, 0.0, 0.0], 0.2, 3) == "sampled"
 
 
 def _candidates(n: int) -> list[AuditCandidate]:

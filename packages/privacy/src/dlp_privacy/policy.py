@@ -24,11 +24,16 @@ class TargetPolicy(Contract):
 class TrackerPolicy(Contract):
     iou_match: float = Field(gt=0, le=1)
     max_gap_ms: float = Field(ge=0)
+    split_review_ms: float = Field(
+        ge=0, description="같은 대상 트랙 사이 블러 없는 틈이 이 이하이면 검수 우선 구간"
+    )
 
 
 class RenderPolicy(Contract):
     min_block_px: int = Field(ge=1)
     blocks_per_box: int = Field(ge=1)
+    encoder_rate: int = Field(gt=0, description="인코더 명목 프레임레이트 (PTS는 원본 그대로)")
+    crf: int = Field(ge=0, le=51)
 
 
 class DetectorSpec(Contract):
@@ -38,6 +43,9 @@ class DetectorSpec(Contract):
     region_detector: str | None = None
     face_detector: str | None = None
     threshold_scale: float | None = None
+    # yunet 전용
+    nms_threshold: float | None = Field(default=None, ge=0, le=1)
+    top_k: int | None = Field(default=None, ge=1)
     score: float | None = Field(default=None, ge=0, le=1, description="고정 신뢰도 (opencv_codes)")
     # open_vocab 전용
     frame_stride_ms: int = Field(default=0, ge=0)

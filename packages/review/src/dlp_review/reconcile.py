@@ -41,6 +41,8 @@ class ReviewedItem:
 class ReviewOutcome:
     approved: list[str] = field(default_factory=list[str])
     new_records: list[LabelRecord] = field(default_factory=list[LabelRecord])
+    # 작업을 보낸 뒤 다른 단계가 지워 검수 결과를 반영하지 않은 원래 라벨 (collect가 채운다)
+    stale: list[str] = field(default_factory=list[str])
 
     @property
     def corrected(self) -> int:
