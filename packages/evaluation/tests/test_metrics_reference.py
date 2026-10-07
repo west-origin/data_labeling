@@ -1,6 +1,11 @@
 """참조 구현과의 일치 테스트.
 
 pycocotools(mAP), TrackEval(HOTA·IDF1·CLEAR), scikit-learn(macro F1·카파).
+
+WP11 완료 기준("가능한 지표는 기존 참조 구현과 결과 일치")의 테스트. 시드를 고정한 무작위 입력을
+우리 구현과 참조 라이브러리에 똑같이 넣고, 참조 라이브러리의 출력을 정답으로 본다. 참조
+라이브러리는 개발 의존성이다 (pycocotools, trackeval, scikit-learn). TrackEval은 numpy 2에서 없어진
+`np.float`·`np.int` 별칭을 써서 테스트 안에서 별칭을 되살린다.
 """
 
 # 참조 라이브러리에는 타입 정보가 없어 이 테스트에서만 관련 경고를 끈다.
@@ -23,6 +28,7 @@ from dlp_eval.metrics.tracking import TrackingData, clear, hota, identity
 
 
 def _random_detection(seed: int) -> tuple[list[GtBox], list[DetBox]]:
+    """이미지 12장의 무작위 정답 박스와, 정답을 흔든 예측(80%)과 오탐을 섞은 예측을 만든다."""
     rng = np.random.default_rng(seed)
     gts: list[GtBox] = []
     dets: list[DetBox] = []
@@ -52,6 +58,7 @@ def _random_detection(seed: int) -> tuple[list[GtBox], list[DetBox]]:
 
 @pytest.mark.parametrize("seed", range(4))
 def test_average_precision_matches_pycocotools(seed: int) -> None:
+    """COCO mAP·AP50·AP75가 pycocotools COCOeval(bbox) stats[0..2]와 1e-9 안에서 같다."""
     from pycocotools.coco import COCO
     from pycocotools.cocoeval import COCOeval
 
@@ -95,6 +102,7 @@ def test_average_precision_matches_pycocotools(seed: int) -> None:
 
 
 def _random_tracking(seed: int) -> TrackingData:
+    """개체 5개가 40 시각 동안 움직이는 시퀀스. 놓침·오탐과 ID 전환 하나(p2 → p_switch)를 넣는다."""
     rng = np.random.default_rng(seed)
     frames = []
     n_obj = 5
@@ -125,6 +133,7 @@ def _random_tracking(seed: int) -> TrackingData:
 
 
 def _trackeval(data: TrackingData) -> dict[str, Any]:
+    """TrackEval의 HOTA·Identity·CLEAR `eval_sequence`로 같은 시퀀스를 계산한다 (참조 값)."""
     np.float = float  # type: ignore[attr-defined]  # TrackEval은 numpy 2에서 없어진 별칭을 쓴다
     np.int = int  # type: ignore[attr-defined]
     with contextlib.redirect_stdout(io.StringIO()):
@@ -149,6 +158,7 @@ def _trackeval(data: TrackingData) -> dict[str, Any]:
 
 @pytest.mark.parametrize("seed", range(4))
 def test_tracking_metrics_match_trackeval(seed: int) -> None:
+    """HOTA·DetA·AssA·LocA·IDF1·MOTA·IDSW가 TrackEval과 1e-12 안에서 같다."""
     data = _random_tracking(seed)
     ref = _trackeval(data)
     h, i, c = hota(data), identity(data), clear(data)
@@ -161,6 +171,7 @@ def test_tracking_metrics_match_trackeval(seed: int) -> None:
 
 
 def test_perfect_tracking_scores_one() -> None:
+    """예측이 정답과 똑같으면(유사도 단위 행렬) HOTA·IDF1·MOTA가 모두 1이다."""
     frames = [(["a", "b"], ["x", "y"], np.eye(2)) for _ in range(10)]
     data = TrackingData.from_frames(frames)
     assert hota(data).hota == pytest.approx(1.0) and identity(data).idf1 == 1.0
@@ -169,6 +180,7 @@ def test_perfect_tracking_scores_one() -> None:
 
 @pytest.mark.parametrize("seed", range(3))
 def test_classification_metrics_match_sklearn(seed: int) -> None:
+    """macro F1과 Cohen 카파가 scikit-learn f1_score(macro)·cohen_kappa_score와 같다."""
     from sklearn.metrics import cohen_kappa_score, f1_score
 
     rng = np.random.default_rng(seed)

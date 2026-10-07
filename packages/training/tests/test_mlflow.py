@@ -1,4 +1,8 @@
-"""MLflow 서버(make up)에 실행·지표·산출물·등록 모델을 남기고 다시 읽어 확인한다."""
+"""MLflow 서버(make up)에 실행·지표·산출물·등록 모델을 남기고 다시 읽어 확인한다.
+
+WP13, ADR 0016. `@pytest.mark.services` (실행 중인 MLflow 필요). 실험 이름에 난수를 붙여 다른
+실행과 겹치지 않게 한다.
+"""
 
 from __future__ import annotations
 
@@ -13,6 +17,8 @@ pytestmark = pytest.mark.services
 
 
 def test_mlflow_tracker_round_trip(tmp_path: Path) -> None:
+    """기록한 것을 REST로 다시 읽어 같은지 본다: NaN 지표는 빠지고, 등록마다 버전이 늘고 별칭이
+    옮겨진다."""
     tracker = MlflowTracker.from_env()
     name = f"dlp-test-{uuid.uuid4().hex[:8]}"
     run = tracker.start(name, "run-1", {"dlp.task": "objects"})

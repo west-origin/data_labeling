@@ -15,6 +15,14 @@ DB에서 정답·예측을 모아 지표·하위 집단·게이트 리포트를 
   합친다 (`load_golden_merged`).
 - 세션마다 버전이 다른 단계(접촉·행동·3D 궤적은 버전에 세션 데이터 해시가 들어간다)는 버전
   앞부분+`*`로 고른다 (예: contact=contact-heuristic-1*, ADR 0013).
+
+WP11, ADR 0013·0015·0025. 진입점: `dlp_cli.eval_cmds`(`dlp eval golden`)와 재학습 루프
+(`dlp_train.loop`). DB는 읽기만 한다 (sessions·streams, label_records, golden_sets, withdrawals
+테이블). 원본 버킷에는 접근하지 않는다. 리포트 파일은 `write_report`가 로컬 경로에 쓴다.
+
+공개 이름: `TASK_KINDS`, `TIMELINE_TASKS`, `is_truth`, `GoldenSession`, `golden_sessions`,
+`load_golden`, `load_golden_merged`, `MissingPredictionsError`, `report_dict`, `markdown`,
+`write_report`.
 """
 
 from __future__ import annotations
@@ -41,6 +49,8 @@ from dlp_schema.episode import current_labels, non_operational_ids
 from dlp_schema.labels import LabelRecord, Source, VerificationState
 from dlp_schema.session import LifecycleState, Session, StreamKind
 
+# 과제 → 평가에 쓰는 라벨 종류 (LabelRecord.kind). 손·전신은 같은 종류를 골격으로 나눈다 (하네스가
+# 거른다). 학습 예제 추출(`dlp_train.extract.matches`)도 이 표를 쓴다.
 TASK_KINDS: dict[Task, tuple[str, ...]] = {
     "objects": ("box_track",),
     "hands": ("keypoint_track",),
@@ -57,22 +67,37 @@ TASK_KINDS: dict[Task, tuple[str, ...]] = {
 TIMELINE_TASKS: frozenset[Task] = frozenset(
     {"contact", "actions", "relations", "states", "coverage"}
 )
+# 모델 라벨이 정답이 되는 검증 상태 (표본 검증 sample_verified는 들지 않는다)
 TRUSTED = {VerificationState.HUMAN_APPROVED, VerificationState.HUMAN_CORRECTED}
 
 
 def is_truth(x: LabelRecord) -> bool:
+    """정답으로 쓰는 라벨인가: 사람이 만들었거나 사람이 승인·수정한 라벨.
+
+    호출자는 이미 `current_labels`로 운영 라벨만 골랐다고 가정한다 (오류 삽입·측정 레코드 제외).
+    """
     return x.provenance.source is Source.HUMAN or x.verification.state in TRUSTED
 
 
 @dataclass(frozen=True)
 class GoldenSession:
+    """골든셋 세션 하나의 평가 재료 (과제와 무관)."""
+
     session: Session
     labels: list[LabelRecord]  # 전체 이력
     truth: list[LabelRecord]  # 정답 (현재 라벨 중 사람이 만들거나 승인·수정한 것)
-    groups: dict[str, str]
+    groups: dict[str, str]  # 하위 집단: {"glove": "glove"|"bare", "site": 장소 ID}
 
 
 def golden_sessions(conn: sa.Connection, golden_version: str) -> list[GoldenSession]:
+    """골든셋 버전의 평가할 세션들 (골든셋에 적힌 순서).
+
+    사용 중지 기록(withdrawals)이 있거나 생애주기가 withdrawn인 세션은 뺀다. 세션마다 라벨 전체
+    이력을 한 번 읽는다 (읽기 전용).
+
+    Raises:
+        KeyError 등: 골든셋 버전이나 세션이 DB에 없으면 저장소 함수가 던진다.
+    """
     golden = get_golden_set(conn, golden_version)
     withdrawn = withdrawn_session_ids(conn)
     out: list[GoldenSession] = []
@@ -84,6 +109,7 @@ def golden_sessions(conn: sa.Connection, golden_version: str) -> list[GoldenSess
             continue
         labels = get_labels(conn, sid)
         truth = [x for x in current_labels(labels) if is_truth(x)]
+        # 장갑 스트림(좌·우 어느 쪽이든)이 있으면 장갑 세션 → 접촉 허용 오차가 다르다
         glove = any(
             s.kind in (StreamKind.GLOVE_LEFT, StreamKind.GLOVE_RIGHT) for s in session.streams
         )
@@ -104,6 +130,17 @@ def _predictions(
     버전이 `*`로 끝나면 그 앞부분으로 시작하는 버전의 레코드 중 새 모델 버전이 지우지 않은 것
     전부다. 관계·커버리지처럼 정책이 바뀌어도 내용이 같은 레코드는 옛 버전을 그대로 두는 모듈용
     (예: relations-*). 검수자가 지우거나 고친 레코드는 그대로 예측이다.
+
+    Args:
+        labels: 세션의 전체 라벨 이력 (`get_labels`).
+        kinds: 과제의 라벨 종류 (`TASK_KINDS`).
+        version: 정확한 모델 버전, 또는 앞부분 + `*`.
+        excluded: 비운영 레코드 ID (`non_operational_ids`: 오류 삽입·측정 레코드와 그 후손).
+        model_retracted: 모델 단계가 지운(retractions) 레코드 ID. 앞부분 고르기에서만 쓴다 — 정확한
+            버전을 주면 그 버전이 낸 레코드를 나중에 다른 버전이 지웠어도 그대로 평가한다.
+
+    Returns:
+        사람 출처·삭제 레코드를 뺀, 버전이 맞는 레코드 (이력 순서).
     """
     prefix = version[:-1] if version.endswith("*") else None
     out: list[LabelRecord] = []
@@ -127,6 +164,17 @@ def _predictions(
 def load_golden(
     conn: sa.Connection, golden_version: str, models: dict[Task, str]
 ) -> dict[Task, list[SessionData]]:
+    """골든셋 세션마다 과제별 정답·예측을 모은다 (과제마다 모델 버전 하나).
+
+    Args:
+        conn: DB 연결 (읽기만 한다).
+        golden_version: 골든셋 버전.
+        models: 과제 → 모델 버전 (끝이 `*`이면 앞부분 고르기).
+
+    Returns:
+        과제 → 세션별 `SessionData` (평가할 세션 모두, 예측이 없어도 넣는다). 정답은 과제의 라벨
+        종류로만 거르고, 골격·접촉 여부는 하네스가 거른다.
+    """
     out: dict[Task, list[SessionData]] = {task: [] for task in models}
     for g in golden_sessions(conn, golden_version):
         sid, labels, truth, groups = g.session.session_id, g.labels, g.truth, g.groups
@@ -164,6 +212,9 @@ def load_golden_merged(
     require_predictions: 골든셋에 예측이 하나도 없는 버전이 있으면 MissingPredictionsError.
     기존(비교) 모델에 쓴다. 잘못 적은 버전은 예측이 비어 기존 지표가 0에 가까워지고 어떤 후보든
     통과하기 때문이다.
+
+    버전마다 `load_golden`을 따로 불러 골든셋을 다시 읽는다 (버전 수만큼 DB 조회). 정답·하위 집단은
+    처음 읽은 버전의 것을 쓴다 (모두 같다). 같은 레코드가 두 버전 패턴에 모두 걸리면 두 번 들어간다.
     """
     out: dict[Task, list[SessionData]] = {}
     for task, versions in models.items():
@@ -187,6 +238,8 @@ def load_golden_merged(
 
 
 def _clean(value: Any) -> Any:
+    """JSON으로 쓸 수 있게 NaN을 None(null)으로 바꾼다 (dict·list는 재귀). 표준 JSON에는 NaN이
+    없다."""
     if isinstance(value, float) and math.isnan(value):
         return None
     if isinstance(value, dict):
@@ -201,7 +254,15 @@ def report_dict(
     decision: GateDecision | None,
     extra: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """extra: 리포트에 함께 남길 값 (예: 재학습 루프가 비교한 배포 모델 버전)."""
+    """extra: 리포트에 함께 남길 값 (예: 재학습 루프가 비교한 배포 모델 버전).
+
+    리포트를 JSON으로 쓸 수 있는 dict로 만든다. 키: golden_version, model_versions, overall,
+    subgroups, lower_is_better, (판정이 있으면) gate, 그리고 extra의 키 (같은 키면 extra가
+    덮어쓴다). 재학습 루프는 extra에 `deployed_baseline`을 넣고, 승인
+    배포(`dlp_train.loop.deploy`)가 다시
+    읽는다.
+    NaN은 null이 된다.
+    """
     data: dict[str, Any] = {
         "golden_version": report.golden_version,
         "model_versions": report.model_versions,
@@ -221,6 +282,10 @@ def report_dict(
 
 
 def markdown(report: EvalReport, decision: GateDecision | None) -> str:
+    """사람이 읽는 Markdown 리포트: 과제마다 지표 x (전체, 하위 집단들) 표, 표본 부족, 게이트 판정.
+
+    하위 집단에 그 과제 리포트가 없으면 "-", 지표 값이 NaN이면 "nan"으로 찍힌다.
+    """
     lines = [f"# 골든셋 평가 {report.golden_version}", ""]
     for task, r in report.overall.items():
         lines += [f"## {task} (모델 {report.model_versions.get(task, '-')}, 세션 {r.sessions})", ""]
@@ -248,6 +313,10 @@ def write_report(
     decision: GateDecision | None,
     extra: Mapping[str, Any] | None = None,
 ) -> None:
+    """리포트를 `path`(JSON)와 같은 이름의 `.md`(Markdown)로 쓴다. 상위 디렉터리를 만들고 덮어쓴다.
+
+    로컬 파일만 쓴다. 저장소 업로드는 호출자(재학습 루프·CLI)가 한다.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(report_dict(report, decision, extra), ensure_ascii=False, indent=2), "utf-8"

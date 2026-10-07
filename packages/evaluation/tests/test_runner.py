@@ -1,3 +1,10 @@
+"""골든셋 평가 실행기(`dlp_eval.runner`)의 DB 통합 테스트 (WP11, ADR 0013·0015·0025).
+
+PostgreSQL이 필요하다 (`make up`, `@pytest.mark.services`). 테스트마다 일회용 DB를 만들고 지운다.
+정답은 합성 행동 시나리오(`dlp_fixtures.actions.generate_action_scenario`)의 행동 라벨이고, 예측은
+그 정답을 모델 출처로 복사한 것(완벽한 예측)과 일부를 뺀 것이다. 그래서 기대 지표를 미리 안다.
+"""
+
 from __future__ import annotations
 
 import json
@@ -37,6 +44,10 @@ ROOT = Path(__file__).resolve().parents[3]
 
 @pytest.fixture
 def pg() -> Iterator[sa.Engine]:
+    """일회용 PostgreSQL DB (마이그레이션 적용). 끝나면 강제로 지운다.
+
+    접속 정보는 `DLP_DATABASE_URL`, 없으면 개발 기본값 (`make up`).
+    """
     url = sa.make_url(
         os.environ.get(
             "DLP_DATABASE_URL", "postgresql+psycopg://dlp:dlp-dev-password@localhost:5432/dlp"
@@ -59,6 +70,7 @@ def pg() -> Iterator[sa.Engine]:
 
 
 def _model(labels: list[LabelRecord], version: str, suffix: str) -> list[LabelRecord]:
+    """라벨을 모델 `version`이 낸 예측으로 복사한다 (ID에 접미사, 신뢰도 0.8)."""
     return [
         x.model_copy(
             update={
@@ -72,6 +84,13 @@ def _model(labels: list[LabelRecord], version: str, suffix: str) -> list[LabelRe
 
 
 def test_golden_evaluation_from_database(pg: sa.Engine, tmp_path: Path) -> None:
+    """DB에서 정답·예측을 모아 평가하고, 나쁜 후보를 게이트가 막으며 리포트 파일이 써진다.
+
+    시나리오: 골든 세션 두 개 (하나는 장갑 스트림 있음). 정답 = 사람 행동 라벨 + 검수자가 승인한
+    모델 라벨(첫 행동). actions-good은 정답 그대로, actions-bad는 첫 행동을 놓친다. 오류 삽입 사본은
+    모델 버전을 달고 있어도 예측에서 빠져야 한다 (ADR 0015 감사 회귀).
+    정답 근거: good은 정답과 같으므로 segment_f1 1.0, bad는 놓친 행동 때문에 1.0 미만.
+    """
     glove_stream: dict[str, Any] = {
         "stream_id": "glove_right", "kind": StreamKind.GLOVE_RIGHT,
         "uri": "s3://dlp-raw/x/glove.parquet", "sync_method": SyncMethod.SHARED_CLOCK,

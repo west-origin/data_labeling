@@ -1,3 +1,10 @@
+"""학습 예제 추출(`dlp_train.extract`), 학습 정책 검증, oracle-stub 학습기·로더의 단위 테스트.
+
+WP13, ADR 0016. DB 없이 라벨 이력(`history`)을 직접 만든다. 이력 하나에 검수 결과 네 가지(승인·수정·
+추가·삭제)와 빠져야 할 레코드(미검수, 모델 버전 교체로 지운 것, 오류 삽입, 측정, 다른 과제)가 들어
+있어 기대 예제 집합을 미리 안다.
+"""
+
 from __future__ import annotations
 
 import json
@@ -26,10 +33,12 @@ ROOT = Path(__file__).resolve().parents[3]
 
 @pytest.fixture(scope="module")
 def policy() -> TrainingPolicy:
+    """저장소의 실제 학습 정책 (config/policies/training.yaml)."""
     return load_policy(ROOT)
 
 
 def box(cls: str, x: float = 10.0) -> dict[str, Any]:
+    """키프레임 하나짜리 박스 트랙 페이로드 (개체 `<cls>_01`)."""
     return {
         "kind": "box_track",
         "entity_id": f"{cls}_01",
@@ -39,6 +48,7 @@ def box(cls: str, x: float = 10.0) -> dict[str, Any]:
 
 
 def model(label_id: str, payload: dict[str, Any], session: str = "s1", **kw: Any) -> LabelRecord:
+    """모델(base-v1)이 낸 바디캠 라벨 (기본 미검수)."""
     return make_label(
         payload,
         label_id=label_id,
@@ -51,6 +61,7 @@ def model(label_id: str, payload: dict[str, Any], session: str = "s1", **kw: Any
 
 
 def human(label_id: str, payload: dict[str, Any], session: str = "s1", **kw: Any) -> LabelRecord:
+    """사람이 만든(수정한) 바디캠 라벨."""
     return make_label(
         payload,
         label_id=label_id,
@@ -64,12 +75,14 @@ def human(label_id: str, payload: dict[str, Any], session: str = "s1", **kw: Any
 
 
 def approved() -> Verification:
+    """검수자 r1이 승인한 검증 상태."""
     return Verification(
         state=VerificationState.HUMAN_APPROVED, reviewer_id="r1", reviewed_at=FIXED_TIME
     )
 
 
 def history(session: str = "s1") -> list[LabelRecord]:
+    """세션 하나의 라벨 이력. 줄마다 주석이 기대 처리(예제 종류 또는 제외)다."""
     return [
         model("m-cup", box("cup"), session, verification=approved()),  # 그대로 승인
         model("m-bucket", box("bucket"), session),  # 사람이 고침
@@ -101,6 +114,7 @@ def history(session: str = "s1") -> list[LabelRecord]:
 
 
 def test_extract_examples_with_auto_vs_corrected_diff(policy: TrainingPolicy) -> None:
+    """예제마다 변화 종류와 모델 원본(origin)이 붙고, 제외 대상은 하나도 들지 않는다."""
     ex = extract_examples(history(), {"s1": Split.TRAIN}, "objects", policy)
     got = {(e.change, e.label.label_id, e.origin.label_id if e.origin else None) for e in ex}
     assert got == {
@@ -112,6 +126,7 @@ def test_extract_examples_with_auto_vs_corrected_diff(policy: TrainingPolicy) ->
 
 
 def test_golden_and_holdout_sessions_never_become_examples(policy: TrainingPolicy) -> None:
+    """골든·holdout·분할 밖 세션은 예제가 되지 않는다 (val 세션만 남는다)."""
     labels = history("s1") + history("g1") + history("h1") + history("x1")
     splits = {"s1": Split.VAL, "g1": Split.GOLDEN, "h1": Split.HOLDOUT}  # x1은 분할 밖
     ex = extract_examples(labels, splits, "objects", policy)
@@ -120,6 +135,7 @@ def test_golden_and_holdout_sessions_never_become_examples(policy: TrainingPolic
 
 
 def test_policy_rejects_golden_split_and_unreviewed(policy: TrainingPolicy) -> None:
+    """정책 검증기: 학습 분할에 golden, 학습 상태에 unreviewed가 있으면 거부한다."""
     data = policy.model_dump(mode="json")
     with pytest.raises(ValidationError, match="골든"):
         TrainingPolicy.model_validate({**data, "splits": ["train", "golden"]})
@@ -128,6 +144,7 @@ def test_policy_rejects_golden_split_and_unreviewed(policy: TrainingPolicy) -> N
 
 
 def test_oracle_stub_learns_only_seen_classes(policy: TrainingPolicy, tmp_path: Path) -> None:
+    """oracle-stub은 배운 클래스만 예측하고(지운 예제 제외), 정답 없이 로드하면 쓸 수 없다."""
     ex = extract_examples(history(), {"s1": Split.TRAIN}, "objects", policy)
     out = OracleStubTrainer().train(
         TrainingData("dv1", "objects", ex), {"jitter_px": 0.0}, tmp_path

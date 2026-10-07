@@ -37,6 +37,7 @@ def _mstcn_segments(frame_labels: Sequence[str]) -> tuple[list[str], list[int], 
 def _mstcn_f_score(
     recognized: Sequence[str], ground_truth: Sequence[str], overlap: float
 ) -> tuple[int, int, int]:
+    """MS-TCN eval.py `f_score` (옮김). 프레임 라벨 열 두 개 → (TP, FP, FN)."""
     p_label, p_start, p_end = _mstcn_segments(recognized)
     y_label, y_start, y_end = _mstcn_segments(ground_truth)
     tp = fp = 0
@@ -68,12 +69,14 @@ def _frames(rng: np.random.Generator, n: int, classes: Sequence[str]) -> list[st
 
 
 def _intervals(frame_labels: Sequence[str]) -> list[tuple[int, int, str]]:
+    """프레임 라벨 열 → 우리 구현 입력 구간 (프레임 하나 = 10 ms로 본다)."""
     labels, starts, ends = _mstcn_segments(frame_labels)
     return [(s * 10, e * 10, c) for c, s, e in zip(labels, starts, ends, strict=True)]  # ms
 
 
 @pytest.mark.parametrize("seed", range(20))
 def test_segment_f1_matches_mstcn(seed: int) -> None:
+    """무작위 프레임 라벨 열에서 구간 F1@{0.1, 0.25, 0.5}의 TP·FP·FN이 MS-TCN과 같다."""
     rng = np.random.default_rng(seed)
     classes = ["rub", "push", "spray", "wring"]
     truth = _frames(rng, 400, classes)
@@ -85,6 +88,7 @@ def test_segment_f1_matches_mstcn(seed: int) -> None:
 
 
 def test_segment_f1_mstcn_hand_example() -> None:
+    """손 계산 예제에서 MS-TCN 참조와 우리 구현이 같은 답(문턱별 TP·FP·FN)을 낸다."""
     # 정답 rub 0~50, push 50~100 / 예측 rub 0~30, push 30~100
     # rub IoU .6, push IoU 50/70=.714 → @0.5 둘 다 TP, @0.65 push만 TP
     truth = ["rub"] * 50 + ["push"] * 50
@@ -99,6 +103,7 @@ def test_segment_f1_mstcn_hand_example() -> None:
 
 
 def _segment_iou(target: np.ndarray, candidates: np.ndarray) -> np.ndarray:
+    """ActivityNet `segment_iou` (옮김): 구간 하나와 후보 구간들의 tIoU."""
     tt1 = np.maximum(target[0], candidates[:, 0])
     tt2 = np.minimum(target[1], candidates[:, 1])
     inter = (tt2 - tt1).clip(0)
@@ -107,6 +112,7 @@ def _segment_iou(target: np.ndarray, candidates: np.ndarray) -> np.ndarray:
 
 
 def _interpolated_prec_rec(prec: np.ndarray, rec: np.ndarray) -> float:
+    """ActivityNet `interpolated_prec_rec` (옮김): 정밀도 포락선 아래 넓이 AP."""
     mprec = np.hstack([[0], prec, [0]])
     mrec = np.hstack([[0], rec, [1]])
     for i in range(len(mprec) - 1)[::-1]:
@@ -120,6 +126,7 @@ def _anet_ap(
     preds: list[tuple[str, int, int, float]],
     thresholds: np.ndarray,
 ) -> np.ndarray:
+    """ActivityNet `compute_average_precision_detection` (옮김, 한 클래스). 문턱별 AP 배열."""
     ap = np.zeros(len(thresholds))
     if not preds:
         return ap
@@ -163,6 +170,7 @@ def _anet_ap(
 
 @pytest.mark.parametrize("seed", range(20))
 def test_temporal_map_matches_activitynet(seed: int) -> None:
+    """영상 3개의 무작위 정답·흔든 예측·오탐에서 클래스별 AP와 mAP가 ActivityNet과 같다."""
     rng = np.random.default_rng(100 + seed)
     classes = ["rub", "push", "spray"]
     videos = ["v1", "v2", "v3"]

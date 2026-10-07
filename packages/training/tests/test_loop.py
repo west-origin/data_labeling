@@ -49,6 +49,7 @@ CLASSES = ("cup", "bucket", "mop")
 
 @pytest.fixture
 def engine() -> Iterator[sa.Engine]:
+    """일회용 PostgreSQL DB (마이그레이션 적용). 끝나면 강제로 지운다."""
     url = sa.make_url(
         os.environ.get(
             "DLP_DATABASE_URL", "postgresql+psycopg://dlp:dlp-dev-password@localhost:5432/dlp"
@@ -71,6 +72,7 @@ def engine() -> Iterator[sa.Engine]:
 
 
 def box(entity: str, cls: str, n: int = 5, dx: float = 0.0) -> dict[str, Any]:
+    """60x60 박스 트랙 (100 ms 간격 n개). 클래스마다 x 위치가 달라 겹치지 않고, dx만큼 민다."""
     i = CLASSES.index(cls)
     return {
         "kind": "box_track",
@@ -84,6 +86,7 @@ def box(entity: str, cls: str, n: int = 5, dx: float = 0.0) -> dict[str, Any]:
 
 
 def blur(entity: str, n: int = 5) -> dict[str, Any]:
+    """얼굴 블러 트랙 (100 ms 간격 n개, 40x40). entity는 쓰지 않는다 (블러에는 개체 ID가 없다)."""
     return {
         "kind": "blur_track",
         "target": "face",
@@ -94,16 +97,19 @@ def blur(entity: str, n: int = 5) -> dict[str, Any]:
 
 
 def label(sid: str, lid: str, payload: dict[str, Any], **kw: Any) -> LabelRecord:
+    """세션 `sid`의 바디캠 라벨 (ID `<sid>-<lid>`, 0~400 ms)."""
     return make_label(
         payload, label_id=f"{sid}-{lid}", session_id=sid, stream_id="bodycam", t_end_ms=400, **kw
     )
 
 
 def reviewed(state: VerificationState) -> Verification:
+    """검수자 r1이 `state`로 검수한 검증 상태."""
     return Verification(state=state, reviewer_id="r1", reviewed_at=FIXED_TIME)
 
 
 def base_model(sid: str, lid: str, payload: dict[str, Any], **kw: Any) -> LabelRecord:
+    """기존 기본 어댑터(base-v1)가 낸 예측 라벨 (신뢰도 0.7)."""
     return label(
         sid,
         lid,
@@ -138,6 +144,8 @@ def golden_labels(sid: str) -> list[LabelRecord]:
 
 
 def populate(conn: sa.Connection) -> None:
+    """온톨로지, 학습 세션 8개(작업자·장소가 모두 다름), 골든 세션 2개와 골든셋 golden-v1을
+    넣는다."""
     register_ontology(conn, load_ontology(ROOT / "config/ontology/v1"))
     sessions: list[Session] = []
     for i in range(8):
@@ -169,6 +177,14 @@ def small(policy: TrainingPolicy) -> TrainingPolicy:
 
 
 def test_training_loop_gate_blocks_or_deploys(engine: sa.Engine, tmp_path: Path) -> None:
+    """WP13 완료 기준: 누적 → 학습 → 골든셋 평가 → 게이트 실패 시 미배포 / 통과 시 배포.
+
+    시나리오(단계 번호는 본문 주석): 누적 부족 건너뜀 → 비교 버전 누락·오기 거부 → 흔들림 큰 후보
+    rejected → 새 예제 없으면 건너뜀 → 정확한 후보 deployed → 배포 모델보다 나쁜 후보 rejected →
+    privacy 승인 대기와 승인 배포 → 배포 모델을 프리라벨 단계에 붙이기·해시 불일치 거부.
+    정답 근거: oracle-stub은 골든 정답을 jitter_px만큼 흔들어 돌려주므로 흔들림 0이면 HOTA가 높고,
+    base-v1 예측은 45 px 밀려 있어 정확한 후보보다 나쁘다.
+    """
     policy = small(load_policy(ROOT))
     eval_policy = load_eval_policy(ROOT)
     snapshots = LocalSnapshotStore(tmp_path / "snapshots")
@@ -178,6 +194,7 @@ def test_training_loop_gate_blocks_or_deploys(engine: sa.Engine, tmp_path: Path)
     video.write_bytes(b"stub")
 
     def run(job: TrainingJob, now_s: int = 0) -> LoopResult:
+        """트랜잭션 하나로 재학습을 돌린다. now_s(초)를 바꿔 모델 버전이 겹치지 않게 한다."""
         with engine.begin() as conn:
             return run_training_job(
                 conn,
@@ -304,10 +321,14 @@ def test_training_loop_gate_blocks_or_deploys(engine: sa.Engine, tmp_path: Path)
 
     # 배포 모델을 프리라벨 단계에 붙인다: objects·tools 기본 어댑터를 빼고 재학습 모델을 넣는다
     class Base:
+        """이름만 있는 가짜 기본 어댑터."""
+
         def __init__(self, name: str) -> None:
+            """name: Predictor.name."""
             self.name, self.version = name, f"{name}-base"
 
         def run(self, clip: object) -> list[LabelRecord]:
+            """아무것도 예측하지 않는다."""
             return []
 
     with engine.connect() as conn:
@@ -370,6 +391,14 @@ def timeline_labels(sid: str, *, shift: int = 0, model: str | None = None) -> li
 
 
 def test_timeline_tasks_withdrawal_and_approval_baseline(engine: sa.Engine, tmp_path: Path) -> None:
+    """타임라인 과제·동의 철회·승인 배포 비교 기준 (ADR 0025).
+
+    - 버전을 만든 뒤 철회한 세션은 학습 예제에서 빠진다.
+    - 접촉·행동은 3인칭 스트림이 있어도 세션마다 한 번만 예측한다 (겹치면 오탐).
+    - 휴리스틱 접촉(세션마다 버전이 다름)은 `contact-heuristic-1*`로 비교하고, 300 ms 늦어 F1 0이다.
+    - 승인 배포는 리포트의 비교 배포 모델이 지금 배포 모델과 같을 때만 된다 (판정 시각은 보지
+      않는다).
+    """
     policy = small(load_policy(ROOT))
     snapshots = LocalSnapshotStore(tmp_path / "snapshots")
     artifacts = LocalStore(tmp_path / "store", "dlp-mlflow")
@@ -409,6 +438,7 @@ def test_timeline_tasks_withdrawal_and_approval_baseline(engine: sa.Engine, tmp_
         withdraw_session(conn, withdrawn, "consent", FIXED_TIME)
 
     def run(job: TrainingJob, now_s: int) -> LoopResult:
+        """트랜잭션 하나로 재학습을 돌린다 (실행마다 새 MemoryTracker)."""
         with engine.begin() as conn:
             return run_training_job(
                 conn, job, snapshots=snapshots, artifacts=artifacts, tracker=MemoryTracker(),

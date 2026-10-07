@@ -1,27 +1,39 @@
 # 재학습 루프 정책 (WP13).
 # 검수 승인 → 데이터셋 버전 → 누적 확인 → 학습 → 골든셋 평가 → 게이트(config/policies/evaluation.yaml) → 배포.
+# 로더: dlp_train.policy.load_policy → TrainingPolicy (모르는 키는 거부, 아래 규칙은 검증기가 막는다).
+# 사용처: dlp train run|approve(dlp_cli.train_cmds), 배포 모델 붙이기(dlp_train.deployed). 관련 ADR 0016·0025.
+# 이 파일은 모델 버전 해시에 들어가지 않는다 (모델 버전 태그는 과제·데이터셋 버전·학습기·파라미터·시각).
+
+# 정책 형식 버전 (정수).
 version: 1
 
 # 학습에 쓰는 분할. 골든·holdout은 절대 쓰지 않는다 (검증기가 막는다).
 splits: [train, val]
 
 # 학습 예제가 되는 라벨: 사람이 만든 라벨과 아래 검증 상태의 라벨 (미검수 모델 라벨은 쓰지 않는다).
+# unreviewed를 넣으면 검증기가 거부한다. sample_verified를 빼면 표본 검증으로 인정된 모델 라벨이 빠진다.
 trainable_states: [human_approved, human_corrected, sample_verified]
 
 # 학습 산출물(가중치·평가 리포트)은 config/defaults.yaml buckets.mlflow 버킷의 이 접두 아래에 둔다.
+# 키: <artifact_prefix>/<과제>/<모델 버전>/<파일>. 바꾸면 이미 등록된 모델의 artifact_uri는 그대로다.
 artifact_prefix: models
 
+# MLflow 이름 규칙. 바꾸면 기존 실험·등록 모델과 이어지지 않는다 (새 이름으로 시작).
 mlflow:
   experiment_prefix: dlp-train-       # 실험 이름 = 접두 + 과제
   registered_model_prefix: dlp-       # MLflow 모델 레지스트리 이름 = 접두 + 과제 (DB 레지스트리의 사본)
-  deployed_alias: deployed
+  deployed_alias: deployed            # 배포 버전에 붙이는 MLflow 별칭
 
 # 과제별 학습 작업 템플릿.
 #   stage: 배포되면 쓰는 단계 (prelabel: 프리라벨 Predictor, privacy: 블러 탐지기, actions: 행동 분류)
 #   replaces: 배포되면 대신하는 기본 어댑터 이름 (Predictor.name). 프라이버시는 탐지기 합집합이라 빼지 않는다
 #   min_examples: 학습을 시작할 최소 예제 수, min_new_examples: 직전 학습 대비 새로 늘어야 할 예제 수
+#     (직전 = 상태와 상관없이 그 과제의 가장 최근 모델 버전. --force로 무시한다)
 #   deploy: auto(게이트 통과 시 바로 배포) | approve(게이트 통과 후 사람이 `dlp train approve`)
+#     privacy는 approve여야 한다 (검증기가 막는다)
 #   trainer·params: 기본 학습기와 하이퍼파라미터 (`dlp train run --trainer --param`으로 바꾼다)
+#     oracle-stub params: jitter_px(정답 좌표 흔들림 표준편차, px), seed, confidence(기본 0.9)
+#   replaces가 있는 과제는 첫 배포 전 비교할 기본 어댑터 예측 버전(--baseline-version)이 필요하다.
 # TODO(real-model): 실제 학습기가 아직 없다. 지금은 oracle-stub(CI용)만 있다. 후보는 객체 YOLOX 미세조정,
 #   손·전신 RTMPose 미세조정, 접촉 영상 분류기(장갑 세션 정답), 블러 탐지기 미세조정이며 GPU 학습 서버가 필요하다.
 tasks:
@@ -44,5 +56,6 @@ tasks:
   #   읽지 않는다. 배포해도 쓰이지 않으므로 연동 전까지 사람 승인으로 둔다 (승인해도 효과가 없다).
   actions:  {stage: actions, replaces: [], min_examples: 200, min_new_examples: 50, deploy: approve,
              trainer: oracle-stub, params: {jitter_px: 0.0}}
+  # privacy: 배포되면 블러 탐지기 목록에 더한다 (기본 탐지기는 빼지 않는다). 블러는 사람 승인 후에만 배포.
   privacy:  {stage: privacy, replaces: [], min_examples: 200, min_new_examples: 50, deploy: approve,
              trainer: oracle-stub, params: {jitter_px: 0.0}}
