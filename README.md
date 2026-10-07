@@ -4,6 +4,7 @@
 
 - 계획: [docs/labeling-platform-plan.md](docs/labeling-platform-plan.md)
 - 구현 계획: [docs/ai-implementation-plan.md](docs/ai-implementation-plan.md)
+- 개발자 안내 (처음 맡는 개발자용 전체 지도): [docs/developer-guide.md](docs/developer-guide.md)
 
 ## 구성
 

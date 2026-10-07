@@ -2,7 +2,7 @@
 
 1인칭 돌봄 영상 라벨링 플랫폼. 기준 문서는 `docs/labeling-platform-plan.md`(무엇을, 왜),
 구현 계획은 `docs/ai-implementation-plan.md`(작업 패키지 WP0~WP16, 순서, 완료 기준)다.
-작업 전에 해당 WP 절을 읽는다.
+작업 전에 해당 WP 절을 읽는다. 처음 맡는 개발자는 `docs/developer-guide.md`(전체 지도, 운영 순서, 리팩토링 후보)부터 본다.
 
 ## 명령어
 
