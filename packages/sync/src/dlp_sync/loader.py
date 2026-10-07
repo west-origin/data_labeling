@@ -7,13 +7,16 @@ from pathlib import Path
 
 from dlp_schema.session import Session, StreamKind
 from dlp_sync.pipeline import StreamMedia
+from dlp_sync.policy import SyncPolicy
 from dlp_sync.signals import glove_series, imu_series, load_audio
 
 VIDEO = {StreamKind.BODYCAM, StreamKind.THIRD_PERSON}
 GLOVE = {StreamKind.GLOVE_LEFT, StreamKind.GLOVE_RIGHT}
 
 
-def load_session_media(session: Session, fetch: Callable[[str], Path]) -> dict[str, StreamMedia]:
+def load_session_media(
+    session: Session, fetch: Callable[[str], Path], policy: SyncPolicy
+) -> dict[str, StreamMedia]:
     """fetch: URI → 로컬 파일 경로 (저장소에서 내려받기 등)."""
     media: dict[str, StreamMedia] = {}
     for s in session.streams:
@@ -21,7 +24,9 @@ def load_session_media(session: Session, fetch: Callable[[str], Path]) -> dict[s
             path = fetch(s.uri)
             media[s.stream_id] = StreamMedia(video=path, audio=load_audio(path))
         elif s.kind in GLOVE:
-            media[s.stream_id] = StreamMedia(series=glove_series(fetch(s.uri)))
+            media[s.stream_id] = StreamMedia(
+                series=glove_series(fetch(s.uri), policy.glove.pressure_prefixes)
+            )
         elif s.kind is StreamKind.IMU:
             media[s.stream_id] = StreamMedia(series=imu_series(fetch(s.uri)))
         elif s.kind is StreamKind.AUDIO:

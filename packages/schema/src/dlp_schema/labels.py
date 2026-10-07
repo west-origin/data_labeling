@@ -334,7 +334,11 @@ LabelPayload = Annotated[
     Field(discriminator="kind"),
 ]
 
-SPATIAL_KINDS = frozenset({"box_track", "mask_track", "keypoint_track", "blur_track"})
+# 공간 라벨: 키프레임 시각이 그 스트림 영상의 PTS 시각이고 stream_id가 필수다 (ADR 0019).
+# 3D 궤적도 특정 영상(보통 바디캠)에서 들어 올린 것이라 공간 라벨이다 (ADR 0022).
+SPATIAL_KINDS = frozenset(
+    {"box_track", "mask_track", "keypoint_track", "blur_track", "trajectory3d"}
+)
 
 
 # ---------------------------------------------------------------- 라벨 레코드

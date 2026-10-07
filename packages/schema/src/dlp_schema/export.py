@@ -9,11 +9,11 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import AwareDatetime, Field
+from pydantic import AwareDatetime, Field, field_validator
 
 from dlp_schema.common import Confidence, Contract, Identifier, Ms, SemVer
 from dlp_schema.dataset import Split
-from dlp_schema.labels import LabelPayload, Source, VerificationState
+from dlp_schema.labels import BlurTrackPayload, LabelPayload, Source, VerificationState
 from dlp_schema.session import Domain, StreamKind
 
 INTERVAL_FORMAT_VERSION = "1.0"
@@ -34,7 +34,16 @@ class ExportedLabel(Contract):
     source: Source
     model_version: str | None = None
     confidence: Confidence | None = None
-    payload: LabelPayload
+    payload: LabelPayload = Field(
+        description="블러 라벨(blur_track)은 어떤 내보내기에도 넣지 않는다"
+    )
+
+    @field_validator("payload")
+    @classmethod
+    def _no_blur(cls, value: LabelPayload) -> LabelPayload:
+        if isinstance(value, BlurTrackPayload):
+            raise ValueError("블러 라벨(blur_track)은 내보낼 수 없습니다")
+        return value
 
 
 class IntervalFile(Contract):

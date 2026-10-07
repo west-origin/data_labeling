@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -12,7 +13,10 @@ import av
 import numpy as np
 from numpy.typing import NDArray
 
+from dlp_media.glove import TIME_KEYS
 from dlp_media.tables import read_parquet
+from dlp_schema.config import repo_root
+from dlp_sync.policy import load_policy
 
 AUDIO_RATE = 16_000
 
@@ -65,11 +69,28 @@ def load_audio(path: Path, rate: int = AUDIO_RATE) -> Audio | None:
     return Audio(samples, rate, start_ms or 0.0)
 
 
-def glove_series(path: Path) -> Series:
-    """정규화된 장갑 Parquet → 압력 채널 합."""
+def glove_series(path: Path, pressure_prefixes: Sequence[str] | None = None) -> Series:
+    """정규화된 장갑 Parquet → 압력 채널 합.
+
+    압력 채널은 이름이 pressure_prefixes(sync.yaml glove.pressure_prefixes) 중 하나로 시작하는
+    열이다. 시각 열과 IMU·온도 같은 다른 채널은 합에 넣지 않는다. 접두사를 주지 않으면 저장소의
+    sync.yaml에서 읽는다.
+    """
+    prefixes = tuple(pressure_prefixes) if pressure_prefixes is not None else _pressure_prefixes()
     cols, _ = read_parquet(path)
-    channels = [np.asarray(v, dtype=np.float64) for k, v in cols.items() if k != "t_ms"]
+    channels = [
+        np.asarray(v, dtype=np.float64)
+        for k, v in sorted(cols.items())
+        if k not in TIME_KEYS and k.startswith(prefixes)
+    ]
+    if not channels:
+        raise ValueError(f"{path.name}: 압력 채널({', '.join(prefixes)}*)이 없습니다")
     return Series(np.asarray(cols["t_ms"], dtype=np.float64), np.sum(channels, axis=0))
+
+
+def _pressure_prefixes() -> tuple[str, ...]:
+    root = repo_root(Path(__file__).parent)
+    return load_policy(root / "config" / "policies" / "sync.yaml").glove.pressure_prefixes
 
 
 def imu_series(path: Path) -> Series:

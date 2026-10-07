@@ -17,7 +17,13 @@ from dlp_media.probe import MediaInfo
 from dlp_media.pts import PtsIndex
 from dlp_media.storage import ImmutableObjectError, LocalStore, S3Store
 from dlp_schema.db.migrate import upgrade
-from dlp_schema.session import StreamKind, SyncMethod
+from dlp_schema.db.repository import (
+    get_session,
+    set_lifecycle,
+    set_privacy_state,
+    update_stream_sync,
+)
+from dlp_schema.session import LifecycleState, PrivacyState, StreamKind, SyncMethod
 from dlp_schema.testing import FIXED_TIME
 
 ManifestWriter = Callable[..., Path]
@@ -110,6 +116,30 @@ def test_embedded_imu_becomes_shared_clock_stream(
     assert imu.sample_rate_hz == pytest.approx(200.0)
 
 
+def test_embedded_extractor_without_samples_adds_no_imu_stream(
+    sync: tuple[SyncScenario, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    write_manifest: ManifestWriter,
+) -> None:
+    """GPMF에 ACCL이 없으면 샘플레이트 0인 IMU 스트림 대신 IMU 없이 수집한다."""
+
+    class EmptyExtractor:
+        name = "empty"
+
+        def can_handle(self, info: MediaInfo) -> bool:
+            return info.video is not None
+
+        def extract(self, path: Path) -> ImuData | None:
+            return None
+
+    monkeypatch.setattr(imu_module, "EXTRACTORS", [EmptyExtractor()])
+    streams = [{"stream_id": "bodycam", "kind": "bodycam", "path": str(sync[1] / "bodycam.mp4")}]
+    manifest, base = load_manifest(write_manifest(tmp_path, sync[1], streams=streams))
+    session = ingest_session(manifest, base, LocalStore(tmp_path / "store", "dlp-raw")).session
+    assert [s.kind for s in session.streams] == [StreamKind.BODYCAM]
+
+
 # ---------------------------------------------------------------- 실제 서비스
 
 
@@ -155,6 +185,20 @@ def test_ingest_into_seaweedfs_and_postgres(
     with pg.begin() as conn:
         second = ingest_session(manifest, base, store, conn)
     assert second.db == "unchanged" and second.uploaded == []
+
+    # 수집 뒤 단계(동기화, 프라이버시, 생애주기)가 바꾼 필드는 재수집 충돌이 아니다
+    third = first.session.stream("third_person").model_copy(
+        update={"offset_ms": 120.0, "sync_method": SyncMethod.MANUAL, "manual_adjustment_ms": 3.0}
+    )
+    with pg.begin() as conn:
+        update_stream_sync(conn, sid, third)
+        set_privacy_state(conn, sid, PrivacyState.APPROVED)
+        set_lifecycle(conn, sid, LifecycleState.PRIVACY_APPROVED)
+    with pg.begin() as conn:
+        third_run = ingest_session(manifest, base, store, conn)
+    assert third_run.db == "unchanged"
+    with pg.connect() as conn:
+        assert get_session(conn, sid).stream("third_person") == third
 
     changed, _ = load_manifest(write_manifest(tmp_path, sync[1], session_id=sid, worker_id="w99"))
     with pytest.raises(SessionConflictError), pg.begin() as conn:

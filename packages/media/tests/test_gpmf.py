@@ -75,8 +75,40 @@ def test_payload_samples_are_spread_over_packet_duration() -> None:
     imu = imu_from_gpmf_payloads(
         [(1_000.0, 1_000.0, payload(acc1, gyro1)), (2_000.0, 1_000.0, payload(acc2, gyro2))]
     )
+    assert imu is not None
     assert imu.t_ms.tolist() == [1000, 1250, 1500, 1750, 2000, 2250, 2500, 2750]
     assert np.allclose(imu.acc[:4, 0], 0) and np.allclose(imu.acc[4:, 0], 1.0)
     assert imu.sample_rate_hz == pytest.approx(4.0)
     # 자이로 시각 1000, 1500, 2000, 2500에 X값 1, 1, 3, 3 → 가속도 시각으로 보간
     assert np.allclose(imu.gyro[:, 0], [1, 1, 1, 2, 3, 3, 3, 3])
+
+
+def accel_only(acc: np.ndarray) -> bytes:
+    return nested(
+        "DEVC", klv("DVID", "L", 4, 1, struct.pack(">I", 1)), sensor("ACCL", acc, 100, "ZXY")
+    )
+
+
+def gyro_only(gyro: np.ndarray) -> bytes:
+    return nested(
+        "DEVC", klv("DVID", "L", 4, 1, struct.pack(">I", 1)), sensor("GYRO", gyro, 1000, "ZXY")
+    )
+
+
+def test_gpmf_without_accelerometer_gives_no_imu() -> None:
+    """ACCL이 없으면 샘플레이트 0인 스트림을 만들지 않고 None을 돌려준다."""
+    gyro = np.tile([[0, 1000, 0]], (4, 1))
+    assert imu_from_gpmf_payloads([(0.0, 1_000.0, gyro_only(gyro))]) is None
+    assert imu_from_gpmf_payloads([]) is None
+    one = np.array([[981, 0, 0]])
+    assert imu_from_gpmf_payloads([(0.0, 1_000.0, accel_only(one))]) is None
+
+
+def test_gpmf_without_gyro_keeps_accelerometer() -> None:
+    acc = np.tile([[981, 0, 0]], (4, 1))
+    imu = imu_from_gpmf_payloads([(0.0, 1_000.0, accel_only(acc))])
+    assert imu is not None
+    assert imu.t_ms.tolist() == [0, 250, 500, 750]
+    assert np.allclose(imu.acc[:, 2], 9.81)
+    assert np.isnan(imu.gyro).all()
+    assert imu.sample_rate_hz == pytest.approx(4.0)

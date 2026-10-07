@@ -97,7 +97,15 @@ def check_label(label: LabelRecord, ontology: Ontology) -> list[str]:
                     problems.append(f"이벤트 {p.event_type}에는 related_entity_id가 필요합니다")
                 if ev.form == "point" and label.t_start_ms != label.t_end_ms:
                     problems.append(f"시점 이벤트 {p.event_type}는 t_start와 t_end가 같아야 합니다")
-        case RelationPayload() | CoveragePayload() | Trajectory3DPayload():
+        case Trajectory3DPayload():
+            # 개체 ID 참조는 에피소드 그래프에서 검증한다. 부분 ID는 사전 안에 있어야 한다.
+            if p.part is not None and p.part not in o.known_parts():
+                problems.append(f"알 수 없는 부분: {p.part}")
+        case RelationPayload():
+            for part in (p.subject_part, p.object_part):
+                if part is not None and part not in o.known_parts():
+                    problems.append(f"알 수 없는 부분: {part}")
+        case CoveragePayload():
             pass  # 개체 ID 참조는 에피소드 그래프에서 검증한다
         case _:
             pass

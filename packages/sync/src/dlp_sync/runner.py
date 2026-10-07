@@ -37,7 +37,7 @@ def run_sync(
                 store.get_file(key, dest)
             return dest
 
-        synced, report = synchronize(session, load_session_media(session, fetch), policy)
+        synced, report = synchronize(session, load_session_media(session, fetch, policy), policy)
         for stream in synced.streams:
             if stream != session.stream(stream.stream_id):
                 update_stream_sync(conn, session_id, stream)

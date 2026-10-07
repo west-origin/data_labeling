@@ -1,6 +1,7 @@
 """검수 화면용 프록시 영상. 원본 PTS를 그대로 유지해 마스터 타임라인과 어긋나지 않게 한다.
 
-해상도를 낮추고 1초마다 키프레임을 넣어 빠른 스크러빙이 가능하게 한다. 오디오는 넣지 않는다
+해상도를 낮추고 일정 간격(설정)마다 키프레임을 넣어 빠른 스크러빙이 가능하게 한다.
+오디오는 넣지 않는다
 (오디오는 원본 저장소에만 둔다).
 """
 
@@ -14,11 +15,12 @@ import av
 from av.video.frame import PictureType
 
 from dlp_media.probe import to_fraction
+from dlp_schema.config import ProxyConfig
 
 
-def make_proxy(
-    src: Path, dst: Path, *, max_height: int = 480, crf: int = 28, keyframe_ms: int = 1_000
-) -> None:
+def make_proxy(src: Path, dst: Path, settings: ProxyConfig) -> None:
+    """settings: config/defaults.yaml media.proxy (높이 상한, CRF, 키프레임 간격)."""
+    max_height, crf, keyframe_ms = settings.max_height, settings.crf, settings.keyframe_ms
     with av.open(str(src)) as inp, av.open(str(dst), "w") as out:
         vin = inp.streams.video[0]
         width, height = vin.codec_context.width, vin.codec_context.height

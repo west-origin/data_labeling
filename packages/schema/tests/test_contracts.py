@@ -6,7 +6,15 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from dlp_schema.labels import LabelRecord, Provenance, Source, Verification, VerificationState
+from dlp_schema.export import ExportedLabel
+from dlp_schema.labels import (
+    SPATIAL_KINDS,
+    LabelRecord,
+    Provenance,
+    Source,
+    Verification,
+    VerificationState,
+)
 from dlp_schema.session import LifecycleState, Session, StreamKind, can_transition
 from dlp_schema.testing import FIXED_TIME, action_payload, make_label, make_session
 
@@ -44,9 +52,7 @@ PAYLOADS: list[dict[str, Any]] = [
 
 
 def _stream(kind: str) -> str | None:
-    return (
-        "bodycam" if kind in {"box_track", "mask_track", "keypoint_track", "blur_track"} else None
-    )
+    return "bodycam" if kind in SPATIAL_KINDS else None
 
 
 @pytest.mark.parametrize("payload", PAYLOADS, ids=lambda p: p["kind"])
@@ -94,6 +100,20 @@ def test_keyframes_must_lie_inside_label_interval() -> None:
 def test_spatial_labels_need_stream() -> None:
     with pytest.raises(ValidationError, match="stream_id"):
         make_label(BOX)
+    # 3D 궤적도 영상 PTS 시각의 공간 라벨이다 (ADR 0019, 0022)
+    with pytest.raises(ValidationError, match="stream_id"):
+        make_label(PAYLOADS[4])
+    assert "trajectory3d" in SPATIAL_KINDS
+
+
+def test_exported_label_rejects_blur_payload() -> None:
+    common: dict[str, Any] = {
+        "label_id": "x1", "stream_id": "bodycam", "t_start_ms": 0, "t_end_ms": 0,
+        "verification": "human_approved", "source": "human",
+    }  # fmt: skip
+    assert ExportedLabel.model_validate({**common, "payload": BOX}).payload.kind == "box_track"
+    with pytest.raises(ValidationError, match="blur_track"):
+        ExportedLabel.model_validate({**common, "payload": PAYLOADS[3]})
 
 
 def test_keypoint_count_must_match_skeleton() -> None:
@@ -147,6 +167,17 @@ def test_session_requires_exactly_one_reference_bodycam() -> None:
         make_session(streams=[*streams, streams[1]])
     with pytest.raises(ValidationError, match="reference"):
         make_session(streams=[{**streams[0], "sync_method": "qr_slate"}, streams[1]])
+    with pytest.raises(ValidationError, match="reference"):
+        make_session(streams=[streams[0], {**streams[1], "sync_method": "reference"}])
+
+
+@pytest.mark.parametrize(
+    "change", [{"offset_ms": 5.0}, {"clock_scale": 1.0001}, {"manual_adjustment_ms": -3.0}]
+)
+def test_reference_stream_has_identity_clock(change: dict[str, float]) -> None:
+    streams = [s.model_dump() for s in make_session().streams]
+    with pytest.raises(ValidationError, match="기준 스트림"):
+        make_session(streams=[{**streams[0], **change}, streams[1]])
 
 
 def test_stream_maps_to_master_timeline() -> None:

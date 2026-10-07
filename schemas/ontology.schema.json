@@ -419,6 +419,16 @@
       "title": "Grasp Types",
       "type": "object"
     },
+    "hand_joints": {
+      "description": "손 3D 궤적의 부분 ID (hand21 골격의 이름 붙은 점)",
+      "patternProperties": {
+        "^[a-z][a-z0-9_]{0,63}$": {
+          "$ref": "#/$defs/Term"
+        }
+      },
+      "title": "Hand Joints",
+      "type": "object"
+    },
     "hand_roles": {
       "patternProperties": {
         "^[a-z][a-z0-9_]{0,63}$": {
@@ -488,6 +498,16 @@
       ],
       "title": "Status",
       "type": "string"
+    },
+    "surface_parts": {
+      "description": "표면 평면 꼭짓점 등 표면 3D 궤적의 부분 ID",
+      "patternProperties": {
+        "^[a-z][a-z0-9_]{0,63}$": {
+          "$ref": "#/$defs/Term"
+        }
+      },
+      "title": "Surface Parts",
+      "type": "object"
     },
     "tasks": {
       "patternProperties": {

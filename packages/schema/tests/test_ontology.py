@@ -102,3 +102,20 @@ def test_version_mismatch_raises(ontology: Ontology) -> None:
     label = make_label(action_payload(), ontology_version="2.0.0")
     with pytest.raises(OntologyViolationError, match="버전"):
         validate_label(label, ontology)
+
+
+def test_trajectory_and_relation_parts_must_be_known(ontology: Ontology) -> None:
+    assert {"corner_0", "corner_3", "wrist", "mop_head", "handle"} <= ontology.known_parts()
+
+    def traj(part: str | None) -> dict[str, Any]:
+        return {"kind": "trajectory3d", "entity_id": "table_01", "part": part,
+                "frame": "camera", "source_3d": "mono_depth",
+                "samples": [{"t_ms": 0, "x": 0, "y": 0, "z": 1}]}  # fmt: skip
+
+    for part in ("corner_0", "cloth_face", "index_tip", None):
+        assert check_label(make_label(traj(part), stream_id="bodycam"), ontology) == []
+    bad = check_label(make_label(traj("corner_9"), stream_id="bodycam"), ontology)
+    assert any("부분: corner_9" in p for p in bad)
+    relation = {"kind": "relation", "subject_id": "rag_01", "subject_part": "cloth_face",
+                "predicate": "contact", "object_id": "table_01", "object_part": "lid"}  # fmt: skip
+    assert check_label(make_label(relation), ontology) == ["알 수 없는 부분: lid"]

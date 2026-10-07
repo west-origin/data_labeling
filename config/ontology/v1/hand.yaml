@@ -20,3 +20,12 @@ hand_roles:
   active: {ko: 주동}
   assist: {ko: 보조·고정}
   inactive: {ko: 비활동}
+
+# 손 관절: 손 3D 궤적(trajectory3d)의 part ID (hand21 골격의 이름 붙은 점)
+hand_joints:
+  wrist: {ko: 손목}
+  thumb_tip: {ko: 엄지 끝}
+  index_tip: {ko: 검지 끝}
+  middle_tip: {ko: 중지 끝}
+  ring_tip: {ko: 약지 끝}
+  pinky_tip: {ko: 소지 끝}

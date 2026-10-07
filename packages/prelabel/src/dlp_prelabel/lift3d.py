@@ -19,7 +19,7 @@ from numpy.typing import NDArray
 from dlp_models.depth import Intrinsics, MetricDepth, sample_depth
 from dlp_models.registry import resolve
 from dlp_prelabel.common import Image, iter_frames, model_label
-from dlp_prelabel.policy import DepthPolicy, PrelabelPolicy
+from dlp_prelabel.policy import HAND21_JOINTS, DepthPolicy, PrelabelPolicy
 from dlp_schema.episode import version_tag
 from dlp_schema.labels import (
     BoxTrackPayload,
@@ -33,9 +33,7 @@ from dlp_schema.labels import (
 from dlp_schema.session import CameraIntrinsics
 
 # hand21 관절 번호 → 이름 (MediaPipe 손 모델 순서)
-HAND21_NAMES = {
-    0: "wrist", 4: "thumb_tip", 8: "index_tip", 12: "middle_tip", 16: "ring_tip", 20: "pinky_tip",
-}  # fmt: skip
+HAND21_NAMES = HAND21_JOINTS
 
 
 class DepthModel(Protocol):
@@ -68,7 +66,7 @@ def lift_tracks(
                 for i in policy.hand_points:
                     kp = f.points[i]
                     if kp.visibility > 0:
-                        name = HAND21_NAMES.get(i, f"joint_{i}")
+                        name = HAND21_NAMES[i]
                         points.setdefault(f.t_ms, []).append((p.entity_id, name, kp.x, kp.y))
         elif isinstance(p, BoxTrackPayload):
             for k in p.keyframes:

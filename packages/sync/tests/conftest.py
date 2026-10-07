@@ -51,7 +51,7 @@ Built = tuple[SyncScenario, Session, dict[str, StreamMedia]]
 
 
 @pytest.fixture(scope="session")
-def build(tmp_path_factory: pytest.TempPathFactory) -> Callable[..., Built]:
+def build(tmp_path_factory: pytest.TempPathFactory, policy: SyncPolicy) -> Callable[..., Built]:
     """시나리오를 30 fps 영상으로 쓰고 세션과 동기화 입력을 만든다 (같은 인자는 한 번만)."""
     cache: dict[tuple[object, ...], Built] = {}
 
@@ -75,7 +75,7 @@ def build(tmp_path_factory: pytest.TempPathFactory) -> Callable[..., Built]:
             for name in ("bodycam", "third_person"):
                 scenario.write_video(d / f"{name}.mp4", name, fps=FPS)
             session = session_for(scenario, d)
-            cache[key] = (scenario, session, load_session_media(session, Path))
+            cache[key] = (scenario, session, load_session_media(session, Path, policy))
         return cache[key]
 
     return make

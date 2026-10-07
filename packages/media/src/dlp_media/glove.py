@@ -86,6 +86,6 @@ def _from_columns(cols: dict[str, NDArray[Any]], source: str) -> GloveData:
     channels = {
         k: np.asarray(v, dtype=np.float64)
         for k, v in cols.items()
-        if k != time_key and np.issubdtype(np.asarray(v).dtype, np.number)
+        if k not in TIME_KEYS and np.issubdtype(np.asarray(v).dtype, np.number)
     }
     return GloveData(np.asarray(cols[time_key], dtype=np.float64), channels, source)

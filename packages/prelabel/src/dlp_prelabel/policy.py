@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from dlp_schema.common import Contract, OntologyId
 
@@ -55,6 +55,12 @@ class OpenVocabObjectsPolicy(Contract):
     queries: dict[str, OntologyId] = Field(min_length=1)
 
 
+# hand21 번호 → 온톨로지 hand_joints 이름 (3D 궤적 part)
+HAND21_JOINTS = {
+    0: "wrist", 4: "thumb_tip", 8: "index_tip", 12: "middle_tip", 16: "ring_tip", 20: "pinky_tip",
+}  # fmt: skip
+
+
 class DepthPolicy(Contract):
     frame_stride_ms: int = Field(ge=0)
     default_hfov_deg: float = Field(gt=0, lt=180)
@@ -63,6 +69,17 @@ class DepthPolicy(Contract):
     max_depth_m: float = Field(gt=0)
     hand_points: tuple[int, ...] = Field(min_length=1)
     confidence: float = Field(ge=0, le=1)
+
+    @field_validator("hand_points")
+    @classmethod
+    def _named_points(cls, v: tuple[int, ...]) -> tuple[int, ...]:
+        # 3D 궤적의 part는 온톨로지 hand_joints 이름이어야 하므로 이름이 있는 번호만 받는다
+        bad = sorted(set(v) - set(HAND21_JOINTS))
+        if bad:
+            raise ValueError(
+                f"hand_points {bad}: 이름이 없는 hand21 번호 (허용 {sorted(HAND21_JOINTS)})"
+            )
+        return v
 
 
 class GloveContactPolicy(Contract):

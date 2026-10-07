@@ -47,3 +47,11 @@ objects:
   bathtub: {ko: 욕조, physical_type: rigid, states: [cleanliness, wetness], surface: true}
   bed: {ko: 침대, physical_type: articulated, states: [], surface: true}
   person: {ko: 사람, physical_type: person, states: []}
+
+# 표면 부분: 표면 평면을 정하는 꼭짓점 3D 궤적(trajectory3d)의 part ID.
+# corner_0 원점, corner_1 가로 끝, corner_2 대각, corner_3 세로 끝 (relations.yaml tool_surface.corner_parts)
+surface_parts:
+  corner_0: {ko: 꼭짓점 0 (원점)}
+  corner_1: {ko: 꼭짓점 1 (가로 끝)}
+  corner_2: {ko: 꼭짓점 2 (대각)}
+  corner_3: {ko: 꼭짓점 3 (세로 끝)}

@@ -24,10 +24,12 @@ from dlp_schema.db.repository import (
     record_review,
     register_ontology,
     set_lifecycle,
+    set_model_status,
     update_stream_sync,
 )
 from dlp_schema.db.tables import metadata
 from dlp_schema.labels import Provenance, Source, VerificationState
+from dlp_schema.lineage import ModelStatus
 from dlp_schema.ontology import Ontology
 from dlp_schema.session import LifecycleState, SyncMethod
 from dlp_schema.testing import FIXED_TIME, action_payload, make_label, make_session
@@ -119,9 +121,73 @@ def test_labels_are_immutable_except_review(pg: sa.Engine) -> None:
         "UPDATE label_records SET t_end_ms = 5 WHERE label_id = 'a1'",
         "UPDATE label_records SET payload = '{}'::jsonb WHERE label_id = 'a1'",
         "DELETE FROM label_records WHERE label_id = 'a1'",
+        "UPDATE label_records SET measurement = 'blind' WHERE label_id = 'a1'",
+        "UPDATE label_records SET seeded_error = true WHERE label_id = 'a1'",
     ):
         with pytest.raises(DBAPIError, match="label_records"), pg.begin() as conn:
             conn.execute(sa.text(statement))
+
+
+APPEND_ONLY_TABLES = (
+    "label_records", "raw_access_log", "review_work", "privacy_audits", "retention_decisions",
+)  # fmt: skip
+
+
+@pytest.mark.services
+@pytest.mark.parametrize("table", APPEND_ONLY_TABLES)
+def test_append_only_tables_cannot_be_truncated(pg: sa.Engine, table: str) -> None:
+    """행 트리거를 거치지 않는 TRUNCATE도 막는다 (CASCADE로 딸려 비우는 경우 포함)."""
+    with pytest.raises(DBAPIError, match="TRUNCATE"), pg.begin() as conn:
+        conn.execute(sa.text(f"TRUNCATE {table}"))
+    if table == "label_records":
+        with pytest.raises(DBAPIError, match="TRUNCATE"), pg.begin() as conn:
+            conn.execute(sa.text("TRUNCATE sessions CASCADE"))
+
+
+@pytest.mark.services
+def test_long_model_version_is_stored(pg: sa.Engine) -> None:
+    """정책 해시가 붙은 모델 버전은 128자를 넘을 수 있다 (프라이버시 파이프라인)."""
+    version = "privacy-" + "+".join(f"detector{i}-1.0.0+p{'a' * 12}" for i in range(6))
+    assert len(version) > 128
+    model = Provenance(source=Source.MODEL, model_version=version)
+    with pg.begin() as conn:
+        insert_labels(conn, [make_label(action_payload(), provenance=model, confidence=0.5)])
+    with pg.connect() as conn:
+        [label] = get_labels(conn, "s001")
+    assert label.provenance.model_version == version
+
+
+@pytest.mark.services
+def test_dataset_version_golden_set_version_fits_golden_set_ids(pg: sa.Engine) -> None:
+    version = DatasetVersion(
+        version_id="ds-0002", ontology_version="1.0.0", created_at=FIXED_TIME,
+        snapshot_uri="lakefs://dlp/main@abc", golden_set_version="g" * 128, splits={},
+    )  # fmt: skip
+    with pg.begin() as conn:
+        insert_dataset_version(conn, version)
+    with pg.connect() as conn:
+        assert get_dataset_version(conn, "ds-0002") == version
+
+
+@pytest.mark.services
+def test_set_model_status_rejects_unknown_version(pg: sa.Engine) -> None:
+    with pytest.raises(KeyError, match="nope"), pg.begin() as conn:
+        set_model_status(conn, "nope", ModelStatus.DEPLOYED, FIXED_TIME)
+
+
+@pytest.mark.services
+def test_update_stream_sync_keeps_reference_clock(pg: sa.Engine) -> None:
+    session = make_session()
+    moved = session.reference_stream.model_copy(update={"offset_ms": 10.0})
+    with pytest.raises(ValueError, match="기준 스트림"), pg.begin() as conn:
+        update_stream_sync(conn, "s001", moved)
+    as_reference = session.stream("imu").model_copy(update={"sync_method": SyncMethod.REFERENCE})
+    with pytest.raises(ValueError, match="기준 스트림"), pg.begin() as conn:
+        update_stream_sync(conn, "s001", as_reference)
+    with pg.begin() as conn:  # 그대로 다시 쓰는 것은 허용
+        update_stream_sync(conn, "s001", session.reference_stream)
+    with pg.connect() as conn:
+        assert get_session(conn, "s001") == session
 
 
 @pytest.mark.services

@@ -101,6 +101,51 @@ def test_migration_renames_and_flags_removed_ids(tmp_path: Path) -> None:
     assert {lid for lid, _ in result.needs_review} == {"e", "old"}
 
 
+def test_migration_moves_only_current_labels_of_history() -> None:
+    """수정·삭제된 레코드를 다시 이관하면 지운 라벨이 되살아난다 (현재 라벨만 이관)."""
+    migration = OntologyMigration(from_version="1.0.0", to_version="1.1.0")
+    history = [
+        make_label(action_payload(), label_id="v1"),
+        make_label(action_payload(verb="lift"), label_id="v2", parent_label_id="v1"),
+        make_label(action_payload(), label_id="fp"),
+        make_label(action_payload(), label_id="fp-x", parent_label_id="fp", retracted=True),
+        make_label(action_payload(), label_id="blind", measurement="blind"),
+    ]
+    result = migrate_labels(history, migration, FIXED_TIME)
+    assert [(x.label_id, x.parent_label_id) for x in result.migrated] == [
+        ("v2:v1.1.0", "v2"),
+        ("blind:v1.1.0", "blind"),
+    ]
+    assert result.migrated[1].measurement == "blind"  # 측정 레코드는 이관 후에도 운영 라벨이 아니다
+    assert not any(x.retracted for x in result.migrated)
+    again = migrate_labels([*history, *result.migrated], migration, FIXED_TIME)
+    assert again.migrated == () and again.needs_review == ()
+
+
+def test_migration_renames_part_fields() -> None:
+    migration = OntologyMigration.model_validate(
+        {"from_version": "1.0.0", "to_version": "1.1.0",
+         "renames": {"parts": {"cloth_face": "cloth_side", "corner_0": "origin"}}}
+    )  # fmt: skip
+    mask = {"kind": "mask_track", "entity_id": "rag_01", "class_id": "rag", "part": "cloth_face",
+            "keyframes": [{"t_ms": 0, "outside": True}]}  # fmt: skip
+    traj = {"kind": "trajectory3d", "entity_id": "table_01", "part": "corner_0",
+            "frame": "camera", "source_3d": "mono_depth",
+            "samples": [{"t_ms": 0, "x": 0, "y": 0, "z": 1}]}  # fmt: skip
+    rel = {"kind": "relation", "subject_id": "rag_01", "subject_part": "cloth_face",
+           "predicate": "contact", "object_id": "table_01", "object_part": "corner_0"}  # fmt: skip
+    labels = [
+        make_label(mask, label_id="m", stream_id="bodycam"),
+        make_label(traj, label_id="t", stream_id="bodycam"),
+        make_label(rel, label_id="r"),
+    ]
+    out = {x.parent_label_id: x.payload.model_dump() for x in
+           migrate_labels(labels, migration, FIXED_TIME).migrated}  # fmt: skip
+    assert out["m"]["part"] == "cloth_side"
+    assert out["t"]["part"] == "origin"
+    assert (out["r"]["subject_part"], out["r"]["object_part"]) == ("cloth_side", "origin")
+
+
 def test_migration_rejects_unknown_category() -> None:
     with pytest.raises(ValidationError):
         OntologyMigration.model_validate(
