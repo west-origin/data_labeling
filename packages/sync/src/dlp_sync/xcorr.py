@@ -114,7 +114,7 @@ class XcorrResult:
     """
 
     anchors: list[Anchor]
-    psr: float  # 창들의 PSR 중앙값
+    psr: float  # 오디오: 창 PSR 중앙값, 운동: 전체 상관 PSR
 
 
 @dataclass(frozen=True)

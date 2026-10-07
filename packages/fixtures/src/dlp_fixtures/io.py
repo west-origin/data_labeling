@@ -25,7 +25,6 @@ from pydantic import BaseModel
 
 
 def write_wav(path: Path, samples: NDArray[np.float32], sample_rate: int) -> None:
-    # -1~1 → int16 (리틀 엔디언). 32767을 곱해 +1이 넘치지 않게 한다
     """모노 16비트 PCM WAV로 쓴다.
 
     Args:
@@ -33,6 +32,7 @@ def write_wav(path: Path, samples: NDArray[np.float32], sample_rate: int) -> Non
         samples: -1~1 범위의 float 샘플 (밖은 잘라낸다).
         sample_rate: 샘플레이트 Hz.
     """
+    # -1~1 → int16 (리틀 엔디언). 32767을 곱해 +1이 넘치지 않게 한다
     pcm = (np.clip(samples, -1.0, 1.0) * 32767).astype("<i2")
     with wave.open(str(path), "wb") as f:
         f.setnchannels(1)

@@ -317,10 +317,12 @@ def _slate(ref: _Reference, target: StreamMedia, policy: SyncPolicy) -> Attempt:
        드리프트까지, 아니면 오프셋만 맞춘다.
     3. 오차 상한(최대 앵커 잔차 + 드리프트 누적 가능량)으로 신뢰도를 깎는다.
     4. `refine_with_audio`이고 두 영상에 오디오가 있으면 오디오 상관으로 다듬는다 (`_refine_slate`).
-       실패하면(결과 없음·어긋남, 또는 `FitError`) 슬레이트 결과를 그대로 쓰고 사유에 적는다.
+       실패하면(결과 없음·어긋남, 또는 `FitError`) 슬레이트 결과를 그대로 쓰고 사유에 적는다
+       (`FitError` 처리는 ADR 0031 결정 7).
 
     Raises:
-        FitError: 드리프트 추정이 상한을 넘을 때 (`_try`가 잡는다).
+        FitError: 슬레이트 앵커의 드리프트 추정이 상한을 넘을 때 (`_try`가 잡는다). 오디오
+            정밀화의 `FitError`는 여기서 잡아 슬레이트 결과로 물러나므로 올라가지 않는다.
     """
     if target.video is None:
         return Attempt("qr_slate", 0.0, "영상이 없습니다")

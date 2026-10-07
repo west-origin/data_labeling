@@ -89,6 +89,7 @@ def select_audit_sample(
     n = max(1, math.ceil(len(candidates) * ratio))
 
     def key(c: AuditCandidate) -> str:
+        """정렬 키: (주, 세션, 스트림)의 sha256 16진수."""
         return hashlib.sha256(f"{week}|{c.session_id}|{c.stream_id}".encode()).hexdigest()
 
     return sorted(candidates, key=key)[:n]
@@ -221,12 +222,12 @@ def audit_candidates(
 ) -> list[AuditCandidate]:
     """그 주에 블러 검수 작업을 수집했고 지금 승인 상태인 세션의 영상 스트림.
 
-    원 검수자(blur_reviewer)는 그 스트림의 마지막 운영 블러 검수 작업 담당자다.
+    원 검수자(blur_reviewer)는 그 스트림에서 그 주에 수집한 마지막 운영 블러 검수 작업의 담당자다.
     duration_ms: 후보 스트림의 길이를 정하는 함수 (CLI는 `stream_duration_ms`에 원본 저장소를 묶어
     넘긴다). 후보가 된 스트림에만 부른다 (원본 읽기를 줄인다).
 
     운영 작업(표준·QA)만 본다. 담당자가 비어 있으면 "unknown". 모든 세션을 하나씩 읽으므로 세션 수에
-    비례해 느려진다 (DB 읽기만, 쓰기 없음).
+    비례해 느려진다. DB는 읽기만 한다. 원본 저장소 읽기(3인칭 PTS 인덱스)는 duration_ms가 한다.
     """
     start, end = iso_week_bounds(week)
     out: list[AuditCandidate] = []

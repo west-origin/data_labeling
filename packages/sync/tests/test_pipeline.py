@@ -107,6 +107,7 @@ def test_audio_refinement_fit_error_falls_back_to_slate_fit(
     real = xcorr_audio_anchors
 
     def fake(*args: object, **kwargs: object) -> XcorrResult | None:
+        """거친 탐색(prior 없음)은 진짜 함수로, 정밀화(prior 있음)는 드리프트 5% 앵커로."""
         if kwargs.get("prior") is None:
             return real(*args, **kwargs)  # type: ignore[arg-type]
         # 대상 시계 20초가 기준 21초에 해당: |scale - 1| = 5% → fit_clock이 거부한다

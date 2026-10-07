@@ -1,8 +1,7 @@
 """검수 화면용 프록시 영상. 원본 PTS를 그대로 유지해 마스터 타임라인과 어긋나지 않게 한다.
 
 해상도를 낮추고 일정 간격(설정)마다 키프레임을 넣어 빠른 스크러빙이 가능하게 한다.
-오디오는 넣지 않는다
-(오디오는 원본 저장소에만 둔다).
+오디오는 넣지 않는다 (오디오는 원본 파일에만 남는다).
 
 WP3, ADR 0003. 수집이 영상 스트림마다 만들어 원본 버킷
 `sessions/<세션>/derived/<스트림>.proxy.mp4`에 둔다. 프록시는 블러 전 영상을 줄인 것이므로
@@ -36,7 +35,7 @@ def proxy_size(width: int, height: int, max_height: int) -> tuple[int, int]:
 
 
 def make_proxy(src: Path, dst: Path, settings: ProxyConfig) -> None:
-    """settings: config/defaults.yaml media.proxy (높이 상한, CRF, 키프레임 간격).
+    """원본 영상으로 프록시를 만든다 (설정: config/defaults.yaml media.proxy).
 
     원본의 첫 비디오 트랙만 libx264(yuv420p)로 다시 인코딩한다. 프레임 PTS·time_base는 원본
     그대로라 VFR도 유지된다. 첫 프레임과, 직전 키프레임에서 keyframe_ms 이상 지난 첫 프레임을
@@ -45,7 +44,7 @@ def make_proxy(src: Path, dst: Path, settings: ProxyConfig) -> None:
     Args:
         src: 원본 영상.
         dst: 쓸 프록시 파일 (mp4, 덮어쓴다).
-        settings: 프록시 설정.
+        settings: 프록시 설정 (높이 상한, CRF, 키프레임 간격 ms).
     """
     max_height, crf, keyframe_ms = settings.max_height, settings.crf, settings.keyframe_ms
     with av.open(str(src)) as inp, av.open(str(dst), "w") as out:
