@@ -125,7 +125,8 @@ def model_version(detectors: dict[str, FrameDetector], policy: PrivacyPolicy) ->
 
     형식: `iou-tracker-1+<이름>:<탐지기 버전>,...+p<정책 해시 8자>` (이름순). 이 문자열이
     blur_track 라벨의 `provenance.model_version`이 되고, `runner.detect_session`은 같은 버전의
-    레코드가 이미 있으면 그 스트림을 건너뛴다 (멱등). 탐지기 가중치·정책이 바뀌면 다시 탐지한다.
+    레코드가 이미 있거나 그 버전이 결과 0개로 탐지 표시에 남아 있으면 그 스트림을 건너뛴다 (멱등).
+    탐지기 가중치·정책이 바뀌면 다시 탐지한다.
 
     Args:
         detectors: 쓸 수 있는 탐지기. 정책 대상이 쓰는 것만 버전에 들어간다.
@@ -191,7 +192,8 @@ def detect_video(
 
     Raises:
         av.error.*: 영상을 열거나 디코딩할 수 없을 때.
-        KeyError: policy.review_priority에 "track_gap"이나 "no_detector"가 없을 때.
+        KeyError: 구간이 생긴 검수 이유가 policy.review_priority에 없을 때 ("track_gap"은 트랙이
+            하나라도 있으면, "no_detector"는 탐지기 없는 대상이 있으면 늘 찾는다).
     """
     # 검수 이유 → 우선순위(작을수록 먼저) = review_priority 목록의 위치
     priority: dict[ReviewReason, int] = {r: i for i, r in enumerate(policy.review_priority)}

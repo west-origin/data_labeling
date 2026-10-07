@@ -13,6 +13,9 @@
      DB `label_records`에 쓴다.
    - 사람이 먼저 봐야 할 **검수 우선 구간**(`review.ReviewSegment`)을 원본 버킷
      `sessions/<세션>/derived/privacy_review/<스트림>.json`에 쓴다.
+   - 결과가 0개인 탐지·모델 버전은 DB에 흔적이 남지 않으므로 원본 버킷 탐지 표시
+     `sessions/<세션>/derived/privacy_detect/<스트림>.json`에 남겨 다음 실행이 건너뛰게 한다
+     (ADR 0030). 블러가 0개여도 사람 검수(2)는 필요하다.
    - 세션 `privacy_state`: PENDING → AUTO_BLURRED. 승인 뒤 블러가 바뀌면 APPROVED → AUTO_BLURRED.
 2. 사람 검수 (CVAT, `dlp review create --stage privacy` → 검수 → `dlp review collect`)
    - 블러 검수는 원본 접근 권한자(`review.yaml reviewers.privacy`)에게만 배정한다. 검수자는 원본
@@ -35,7 +38,8 @@
      (`invalidate_render`). 무효화를 거치지 않은 경로가 있어도 해시가 달라 막힌다.
 
 버킷 구분:
-- 원본 버킷(`dlp-raw`): 원본 영상, 프록시, PTS 인덱스, 검수 우선 구간. 원본 접근 권한자만 본다.
+- 원본 버킷(`dlp-raw`): 원본 영상, 프록시, PTS 인덱스, 검수 우선 구간, 탐지 표시. 원본 접근
+  권한자만 본다.
   저장소는 `dlp_cli.raw_access.raw_store`(감사 저장소)로만 만든다 (ADR 0020, `dlp_media.audit`).
 - 라벨링 버킷(`dlp-labeling`): 블러본과 렌더 기록. 일반 라벨러가 (읽기 전용 자격 증명으로) 본다.
 

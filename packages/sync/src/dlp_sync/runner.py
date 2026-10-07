@@ -3,7 +3,7 @@
 입력: DB `sessions`·`streams`의 세션, 원본 저장소의 스트림 파일.
 출력
 - DB 스트림 행의 `offset_ms`·`clock_scale`·`sync_method`·`sync_confidence` 갱신
-  (`adjust`는 `manual_adjustment_ms`)
+  (`adjust`는 `manual_adjustment_ms`. unsynced 스트림이면 manual로 바꾸며 오프셋 0·배율 1)
 - 저장소의 `sessions/<세션>/derived/sync_report.json` (덮어씀, 파생 산출물)
 
 - `run_sync`: 자동 동기화 (멱등: 같은 입력·정책이면 같은 결과이고, 바뀐 스트림만 DB에 쓴다)

@@ -253,7 +253,8 @@ def fill_durations(
 
 
 def imu_from_gpmf_payloads(payloads: list[tuple[float, float, bytes]]) -> ImuData | None:
-    """가속도 샘플이 2개 미만이면 None (샘플레이트를 정할 수 없어 IMU 스트림을 만들지 않는다).
+    """GPMF 패킷 목록 → `ImuData`. 가속도 샘플이 2개 미만이면 None (샘플레이트를 정할 수 없어
+    IMU 스트림을 만들지 않는다).
 
     자이로가 없는 기종·파일이면 자이로 열은 NaN이다 (0으로 채우면 정지로 오해된다).
     길이가 없는 패킷은 `fill_durations`로 채우고, 채울 수 없으면 경고를 남기고 None이다

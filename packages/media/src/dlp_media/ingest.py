@@ -5,6 +5,8 @@
 1. 원본 파일을 원본 버킷에 올린다 (`sessions/<세션>/raw/<스트림><확장자>`). 불변이며 멱등이다.
 2. 영상 스트림: PTS 인덱스와 프록시 영상을 만들어 `sessions/<세션>/derived/`에 둔다.
 3. 바디캠에 내장 IMU가 있고 매니페스트에 IMU 스트림이 없으면 추출해 IMU 스트림을 추가한다.
+   쓸 만한 샘플이 없거나 GPMF 패킷 길이를 정할 수 없으면 IMU 스트림만 만들지 않고 수집은 계속한다
+   (`dlp_media.imu.fill_durations`, ADR 0030).
 4. 센서 스트림(IMU, 장갑): 정규화된 Parquet을 만들고 스트림 uri가 이를 가리키게 한다.
 5. 세션 계약 객체를 만들고 (DB 연결이 있으면) 등록한다.
 
@@ -112,9 +114,8 @@ def load_manifest(path: Path) -> tuple[SessionManifest, Path]:
     return SessionManifest.model_validate(data), path.parent
 
 
-# 같은 세션 ID가 매니페스트·미디어에서 나온 필드가 다른 내용으로 이미 DB에 등록돼 있다.
 class SessionConflictError(RuntimeError):
-    pass
+    """같은 세션 ID가 매니페스트·미디어에서 나온 필드가 다른 내용으로 이미 DB에 등록돼 있다."""
 
 
 @dataclass
@@ -137,13 +138,14 @@ def ingest_session(
     *,
     proxy: ProxyConfig | None = None,
 ) -> IngestResult:
-    """proxy: 프록시 인코딩 설정. 없으면 저장소의 config/defaults.yaml media.proxy를 읽는다.
+    """매니페스트 하나를 수집한다 (모듈 docstring의 1~5단계).
 
     Args:
         manifest: 매니페스트.
         base_dir: 매니페스트의 상대 경로 기준 디렉터리.
         raw: 원본 버킷 저장소 (CLI는 감사 저장소).
         conn: DB 연결 (호출자가 연 트랜잭션). None이면 DB 등록을 건너뛴다 (db="skipped").
+        proxy: 프록시 인코딩 설정. 없으면 저장소의 config/defaults.yaml media.proxy를 읽는다.
 
     Returns:
         `IngestResult`. 세션 스트림 순서는 매니페스트 순서이고, 내장 IMU 스트림("imu")은 바디캠

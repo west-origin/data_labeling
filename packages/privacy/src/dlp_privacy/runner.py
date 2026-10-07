@@ -4,7 +4,8 @@ WP5, ADR 0005·0019·0023·0024. CLI `dlp_cli.privacy_cmds`가 DB 연결과 저�
 
 단계와 진입점:
 - `detect_session` (`dlp privacy detect`): 원본 영상 → blur_track 라벨(DB `label_records`) +
-  검수 우선 구간(원본 버킷 JSON). 세션 `privacy_state`를 AUTO_BLURRED로.
+  검수 우선 구간·탐지 표시(원본 버킷 JSON). 세션 `privacy_state`가 PENDING이거나, APPROVED인데
+  블러가 바뀌었으면 AUTO_BLURRED로.
 - (사람 검수: `dlp review create --stage privacy` → CVAT → `dlp review collect`. dlp_review 담당)
 - `approve_session` (`dlp privacy approve`): 승인 조건을 확인하고 APPROVED로.
 - `render_session` (`dlp privacy render`): 승인된 세션의 블러본과 렌더 기록을 라벨링 버킷에 쓴다.
@@ -27,7 +28,8 @@ WP5, ADR 0005·0019·0023·0024. CLI `dlp_cli.privacy_cmds`가 DB 연결과 저�
 규칙 (CLAUDE.md, ADR 0015·0019):
 - 라벨은 덮어쓰지 않는다. 버전이 바뀌면 검수 전(UNREVIEWED)인 이전 모델 블러만 `retractions`로
   지운다. 사람이 검수한 블러는 지우지 않는다.
-- 다시 돌릴지는 전체 이력(`get_labels`)에 같은 모델 버전 레코드가 있는지로 정한다.
+- 다시 돌릴지는 전체 이력(`get_labels`)에 같은 모델 버전 레코드가 있는지로 정한다. 결과가 0개라
+  이력에 흔적이 없는 버전은 원본 버킷의 탐지 표시(`detect_marker_key`, ADR 0030)로 보충한다.
 - 운영 블러(`operational_blur`)만 승인·렌더에 쓴다. 오류 삽입·측정 레코드와 그 후손은 뺀다.
 """
 
@@ -67,10 +69,11 @@ from dlp_schema.session import LifecycleState, PrivacyState, Session, StreamKind
 VIDEO_KINDS = {StreamKind.BODYCAM, StreamKind.THIRD_PERSON}
 
 
-# 게이트 조건을 만족하지 않아 단계를 진행할 수 없다 (승인 전 렌더, 미검수 블러 등).
-# 메시지에 다음에 할 명령을 적는다.
 class PrivacyGateError(RuntimeError):
-    pass
+    """게이트 조건을 만족하지 않아 단계를 진행할 수 없다 (승인 전 렌더, 미검수 블러 등).
+
+    메시지에 다음에 할 명령을 적는다.
+    """
 
 
 class RenderNotCurrentError(PrivacyGateError):
@@ -81,8 +84,9 @@ class RenderNotCurrentError(PrivacyGateError):
 class DetectSummary:
     """`detect_session` 결과 요약 (CLI 출력용)."""
 
-    detected: dict[str, int] = field(default_factory=dict[str, int])  # 스트림 → 트랙 수
-    # 같은 모델 버전 결과가 이미 있어 건너뛴 스트림
+    # 스트림 → 이번에 새로 쓴 블러 트랙 수 (삭제 레코드는 세지 않는다. 0이면 결과 0개)
+    detected: dict[str, int] = field(default_factory=dict[str, int])
+    # 모든 버전의 결과가 이미 있어(이력 또는 결과 0개 탐지 표시) 건너뛴 스트림
     skipped: list[str] = field(default_factory=list[str])
     missing: dict[str, str] = field(default_factory=dict[str, str])  # 대상 → 이유
     # 이번에 쓴 검수 우선 구간 객체 키 (원본 버킷)
@@ -257,14 +261,19 @@ def detect_session(
     labeling: 블러가 바뀐 스트림의 렌더 기록을 무효로 만들 라벨링 버킷 (ADR 0024). 없어도
     블러본을 쓰는 쪽이 assert_render_current로 막지만, 있으면 이전 블러본을 바로 무효로 둔다.
 
-    스트림마다:
-    1. 이력에 이 탐지 버전·재학습 모델 버전의 레코드가 모두 있으면 건너뛴다 (멱등). 결과가 0개였던
-       버전은 이력에 흔적이 없으므로 원본 버킷의 탐지 표시(`detect_marker_key`)로 보충한다.
-    2. 원본 영상을 받아(감사 기록) 아직 없는 버전만 돌린다 (탐지기 파이프라인, 재학습 모델).
-       결과가 0개인 버전은 탐지 표시에 더한다.
+    스트림마다 (ADR 0030):
+    1. 이력에 이 탐지 버전·재학습 모델 버전의 레코드가 모두 있으면 건너뛴다 (멱등, 탐지 표시를
+       읽지 않는다). 아니면 결과가 0개였던 버전을 원본 버킷의 탐지 표시(`detect_marker_key`)에서
+       읽어 보충한다. 표시까지 합쳐 모두 끝났고 지울 이전 버전 블러(stale)가 없으면 건너뛴다.
+    2. 이력·표시 어디에도 없는 버전(`need_run`)이 있을 때만 원본 영상을 받아(감사 기록) 그 버전만
+       돌린다 (탐지기 파이프라인, 재학습 모델). 이번에 돌아 결과가 0개인 버전은 탐지 표시에 더한다.
+       표시 덕분에 끝났지만 stale이 남은 경우에는 영상을 받지 않고 3의 삭제만 한다.
     3. 지금 쓰지 않는 버전의 검수 전 모델 블러를 삭제 레코드로 지우고 새 라벨과 함께 쓴다.
-    4. 블러가 바뀌었으면 렌더 기록을 무효로 하고, 검수 우선 구간 파일을 병합해 다시 쓴다.
+    4. 쓴 레코드가 있으면 렌더 기록을 무효로 한다. 탐지기나 재학습 모델이 다시 돌았으면 검수 우선
+       구간 파일을 병합해 다시 쓴다.
     끝으로 PENDING이거나 (승인 상태에서 블러가 바뀌었으면) privacy_state를 AUTO_BLURRED로 둔다.
+    결과가 모두 0개여도 PENDING이면 AUTO_BLURRED가 된다 (놓친 대상이 있을 수 있어 사람 검수는
+    여전히 필요하다, `missing_privacy_reviews`).
 
     Args:
         conn: 호출자가 연 트랜잭션의 DB 연결.
@@ -281,8 +290,10 @@ def detect_session(
         PrivacyGateError: 세션에 온톨로지 버전이 없을 때.
         sqlalchemy.exc.NoResultFound: 세션이 없을 때.
 
-    부작용: DB `label_records` 추가, `sessions.privacy_state` 변경, 원본 버킷 읽기·쓰기(검수 우선
-    구간), 라벨링 버킷 렌더 기록 덮어쓰기(labeling이 있을 때).
+    부작용: DB `label_records` 추가, `sessions.privacy_state` 변경, 원본 버킷 읽기·쓰기(원본 영상
+    읽기, 검수 우선 구간·탐지 표시 읽기·덮어쓰기), 라벨링 버킷 렌더 기록 덮어쓰기(labeling이
+    있을 때). 저장소 쓰기는 DB 트랜잭션이 되돌아가도 남는다. 그래서 탐지 표시에는 결과 0개
+    버전만 넣는다.
     """
     session = get_session(conn, session_id)
     if session.ontology_version is None:

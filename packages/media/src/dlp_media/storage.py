@@ -6,7 +6,8 @@ WP3·WP16, ADR 0003·0020. 모든 단계가 이 프로토콜(`ObjectStore`)로 �
 
 버킷 (이름은 config/defaults.yaml `buckets`):
 - 원본 버킷(`dlp-raw`): 블러 전 원본 영상·센서 파일(`sessions/<세션>/raw/`), 파생물(PTS 인덱스,
-  프록시, 정규화 Parquet, 검수 우선 구간: `sessions/<세션>/derived/`). 얼굴 등이 그대로 보이므로
+  프록시, 정규화 Parquet, 검수 우선 구간, 프라이버시 탐지 표시: `sessions/<세션>/derived/`).
+  얼굴 등이 그대로 보이므로
   원본 접근 권한자만 본다. 이 버킷의 저장소는 반드시 `dlp_cli.raw_access.raw_store`로 만든
   `dlp_media.audit.AuditedStore`로 감싸 쓴다 (모든 읽기·쓰기·서명 URL이 감사 기록에 남는다).
   정적 검사 테스트가 다른 경로로 원본 저장소를 만드는 것을 막는다.
@@ -36,9 +37,8 @@ if TYPE_CHECKING:
     from mypy_boto3_s3 import S3Client
 
 
-# 불변 키에 다른 내용을 올리려 했다 (원본이 바뀌었거나 다른 파일을 같은 스트림으로 지정).
 class ImmutableObjectError(RuntimeError):
-    pass
+    """불변 키에 다른 내용을 올리려 했다 (원본이 바뀌었거나 다른 파일을 같은 스트림으로 지정)."""
 
 
 @dataclass(frozen=True)

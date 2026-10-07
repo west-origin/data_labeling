@@ -38,7 +38,7 @@ targets:
 # detection_threshold: 탐지기에 넘기는 신뢰도 문턱 (0~1). 올리면 오탐이 줄지만 누락(사고)이 는다.
 detection_threshold: 0.3
 # review_score: 관측 점수(0~1)가 이 미만인 프레임은 low_confidence 검수 우선 구간이 된다.
-review_score: 0.6             # 트랙 점수가 이보다 낮은 구간은 검수 우선 구간
+review_score: 0.6             # 관측 점수가 이보다 낮은 프레임은 검수 우선 구간
 
 # 트래커 (dlp_privacy.tracker). 시간 단위는 ms (스트림 PTS 시각).
 tracker:
@@ -66,7 +66,8 @@ render:
 # low_confidence: 관측 점수 < review_score
 # reflection: 반사면 속 얼굴 블러가 있는 프레임
 # trained_model: 배포된 재학습 블러 모델이 낸 구간 (탐지기와 합집합으로 쓰므로 따로 확인한다)
-# trained_model 외 항목을 빼면 탐지가 KeyError로 실패한다 (코드가 이유별 우선순위를 찾는다).
+# trained_model 외 항목을 빼면 그 이유의 구간이 생길 때 탐지가 KeyError로 실패한다
+# (코드가 이유별 우선순위를 찾는다. trained_model이 없으면 맨 뒤 순위로 둔다).
 # 순서를 바꾸면 정책 해시가 바뀌어 다시 탐지한다.
 review_priority: [no_detector, track_gap, disagreement, low_confidence, reflection, trained_model]
 

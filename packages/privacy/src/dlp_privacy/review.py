@@ -98,7 +98,7 @@ def track_segments(
         frame_times: 영상 전체 프레임 시각 (연속 판정용).
         review_score: privacy.yaml `review_score`.
         available_detectors: 이 대상에 쓸 수 있는 탐지기 이름.
-        priority: 이유 → 우선순위 (review_priority 위치). 네 이유가 모두 있어야 한다.
+        priority: 이유 → 우선순위 (review_priority 위치). 구간이 생긴 이유가 없으면 KeyError.
 
     Returns:
         이유별로 연속 프레임을 묶은 구간 목록 (정렬하지 않음).
