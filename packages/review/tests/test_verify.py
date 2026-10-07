@@ -37,6 +37,10 @@ ROOT = Path(__file__).resolve().parents[3]
 
 @pytest.fixture
 def pg() -> Iterator[sa.Engine]:
+    """일회용 PostgreSQL DB (마이그레이션 + 온톨로지 v1 등록). 테스트 뒤 지운다.
+
+    `DLP_DATABASE_URL`(기본: 개발 compose의 DB)에 접속해 무작위 이름의 DB를 만든다.
+    """
     url = sa.make_url(
         os.environ.get(
             "DLP_DATABASE_URL", "postgresql+psycopg://dlp:dlp-dev-password@localhost:5432/dlp"
@@ -61,6 +65,14 @@ def pg() -> Iterator[sa.Engine]:
 
 
 def test_verify_refuses_until_review_is_done_then_records_transition(pg: sa.Engine) -> None:
+    """검수 완료 판정이 남은 일을 모두 이유로 보여 주고, 끝나면 전이·시각을 남기는지 본다.
+
+    시나리오: 프리라벨 전이면 거부 → prelabeled + 블러 승인 전 + 열린 작업 + 미검수 모델 라벨이면
+    세 이유가 모두 나오고 생애주기는 그대로 →
+    블러 승인·작업 수거·라벨 승인 뒤 human_verified로 전이.
+    정답 근거: 전이 시각은 넘긴 `later`, 실행자는 "lead"여야 하고, 다시 불러도 기록이 늘지
+    않는다(멱등).
+    """
     model = Provenance(source=Source.MODEL, model_version="actions-v1")
     later = FIXED_TIME + timedelta(days=3)
     with pg.begin() as conn:

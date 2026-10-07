@@ -39,15 +39,18 @@ ROOT = Path(__file__).resolve().parents[3]
 
 @pytest.fixture(scope="module")
 def policy() -> ReviewOpsPolicy:
+    """저장소의 실제 검수 운영 정책 (review.yaml + defaults.yaml review 비율)."""
     return load_policy(ROOT)
 
 
 @pytest.fixture(scope="module")
 def ontology() -> Ontology:
+    """온톨로지 v1 (오류 삽입 class_swap 후보)."""
     return load_ontology(ROOT / "config/ontology/v1")
 
 
 def model(label: LabelRecord, version: str, confidence: float) -> LabelRecord:
+    """라벨을 모델 출처(model_version=version)와 신뢰도 confidence로 바꾼 사본."""
     return label.model_copy(
         update={
             "provenance": Provenance(source=Source.MODEL, model_version=version),
@@ -59,6 +62,10 @@ def model(label: LabelRecord, version: str, confidence: float) -> LabelRecord:
 def box(
     label_id: str, cls: str, x: float, start: int = 0, end: int = 1000, **kw: Any
 ) -> LabelRecord:
+    """시험용 박스 트랙 라벨 (bodycam, 100 ms 간격 키프레임, 크기 50*50, y=10).
+
+    x로 가로 위치를, start·end(ms)로 구간을 정한다. kw는 `make_label`에 넘긴다.
+    """
     frames = tuple(BoxKeyframe(t_ms=t, x=x, y=10, w=50, h=50) for t in range(start, end + 1, 100))
     payload = BoxTrackPayload(entity_id=f"{cls}_{label_id}", class_id=cls, keyframes=frames)
     return make_label(
@@ -70,6 +77,7 @@ def box(
 
 
 def _units(n: int) -> list[PlannedUnit]:
+    """n개 공간 단위 (세션 s00000…, 우선순위 1~7 순환). 배정 비율 시험용."""
     return [
         PlannedUnit(Unit(f"s{i:05d}", "bodycam", "spatial", ("box_track",)), (), 1.0 + (i % 7))
         for i in range(n)
@@ -108,6 +116,11 @@ def test_assignment_ratios_follow_policy(policy: ReviewOpsPolicy) -> None:
 
 
 def test_qa_ratio_and_senior(policy: ReviewOpsPolicy) -> None:
+    """QA 배정이 qa_sample_ratio만큼(이항 분포 4 표준편차 안) 선임에게 가는지 본다.
+
+    시나리오: 20,000개 단위의 표준 배정을 모두 끝난 것으로 두고 `plan_qa`. 선임은 "lead" 한 명.
+    정답 근거: 정책 비율과 이항 분포 표준편차, 모든 QA 배정의 담당자가 "lead"이고 pair_id가 있다.
+    """
     p = policy.model_copy(
         update={"reviewers": policy.reviewers.model_copy(update={"senior": ("lead",)})}
     )
@@ -125,6 +138,13 @@ def test_qa_ratio_and_senior(policy: ReviewOpsPolicy) -> None:
 
 
 def test_priority_reasons(policy: ReviewOpsPolicy) -> None:
+    """우선순위 사유 네 가지가 모두 잡히고 단위 점수가 가중치 * 길이와 같은지 본다.
+
+    시나리오: 같은 자리 다른 클래스 박스(두 모델 버전) → 불일치, 신뢰도 0.3 → 낮은 신뢰도,
+    처음 보는 클래스(mop) → 새 객체, 장갑 세션의 신뢰도 0.6 접촉 → 접촉 불일치.
+    정답 근거: 박스 구간 0~1000 ms(1초), 접촉 구간 100~600 ms(0.5초)로 계산한 가중 합.
+    장갑 세션이 아니면 접촉 사유가 없고, 사유가 없으면 routine_priority.
+    """
     a = model(box("a", "cup", 10), "det-1", 0.9)
     b = model(box("b", "bucket", 12), "det-2", 0.9)  # 같은 곳, 다른 클래스 → 불일치
     low = model(box("c", "cup", 200), "det-1", 0.3)  # 낮은 신뢰도
@@ -158,6 +178,13 @@ def test_priority_reasons(policy: ReviewOpsPolicy) -> None:
 
 
 def test_sampling_accepts_or_rejects_lot(policy: ReviewOpsPolicy) -> None:
+    """표본 묶음 만들기·뽑기·합격 판정을 본다.
+
+    시나리오: 신뢰도 0.95 박스 100개(+ 묶음 밖 0.5 하나) → 묶음 1개, 표본 10개(ratio 0.1).
+    표본 검수 전 accepted=None, 표본 전부 승인 → 합격 + 나머지 90개 표본 검증,
+    표본 2/10 수정 → 결함 비율 0.2 > 0.05 → 불합격.
+    정답 근거: 정책 sampling 값과 같은 seed의 같은 표본(결정성).
+    """
     sp = policy.sampling
     labels = [model(box(f"l{i:03d}", "cup", float(i)), "det-1", 0.95) for i in range(100)]
     labels.append(model(box("low", "cup", 0), "det-1", 0.5))  # 묶음 밖 (신뢰도 낮음)
@@ -189,6 +216,10 @@ def test_sampling_accepts_or_rejects_lot(policy: ReviewOpsPolicy) -> None:
 
 
 def _truth() -> list[LabelRecord]:
+    """오류 삽입 정답 단위: 합성 행동 시나리오의 행동 라벨 + 박스 하나 + 얼굴 블러 하나.
+
+    세 오류 종류(boundary_shift, class_swap, blur_deletion)의 후보가 모두 있다.
+    """
     actions = [
         x for x in generate_action_scenario(0, session_id="gold").labels if x.kind == "action"
     ]
@@ -201,6 +232,12 @@ def _truth() -> list[LabelRecord]:
 
 
 def test_seeded_task_injects_known_errors(policy: ReviewOpsPolicy, ontology: Ontology) -> None:
+    """오류 삽입 사본이 규칙대로 만들어지고 운영 라벨에 섞이지 않는지 본다.
+
+    정답 근거: 세 종류 오류가 하나씩 들어가고, 모든 사본은 seeded_error·parent 없음·배정 접두사 ID,
+    블러 하나를 빼 사본 수 = 정답 수 - 1, 경계 이동량이 정책 범위 안, 클래스 교체 값이 원래와
+    다르다. `current_labels`는 정답만 돌려준다.
+    """
     truth = _truth()
     task = seed_labels(
         truth,
@@ -241,6 +278,12 @@ def test_seeded_task_injects_known_errors(policy: ReviewOpsPolicy, ontology: Ont
 
 
 def test_detection_of_seeded_errors(policy: ReviewOpsPolicy, ontology: Ontology) -> None:
+    """검수자가 오류를 되돌리면 발견으로, 다른 검수자 결과는 세지 않는지 본다.
+
+    시나리오: 아무것도 고치지 않으면 발견 0 → 블러를 배정 접두사 ID로 다시 그림, 클래스를 원래
+    값으로, 경계를 원래 값 ±150 ms(허용 오차 200 ms 안)까지 되돌림 → r1 기준 모두 발견, r2 기준 0.
+    고친 레코드도 오류 삽입 계보라 운영 라벨이 아니다 (`non_operational_ids`).
+    """
     truth = _truth()
     task = seed_labels(
         truth, assignment_id="g:a", ontology=ontology, policy=policy.seeding, seed=1, now=FIXED_TIME
@@ -312,6 +355,11 @@ def test_detection_of_seeded_errors(policy: ReviewOpsPolicy, ontology: Ontology)
 
 
 def test_agreement_and_prelabel_bias() -> None:
+    """일치도·프리라벨 편향 계산을 본다.
+
+    정답 근거: 같은 라벨끼리는 카파·구간 F1·경계 F1이 모두 1. 블라인드가 절반만 맞고 표준은 모델과
+    같으면 편향 = 1 - F1(블라인드, 모델) > 0.
+    """
     truth = [x for x in generate_action_scenario(0).labels if x.kind == "action"]
     items = as_items(truth)
     same = agreement(items, items, 200, 0.5)
@@ -325,11 +373,17 @@ def test_agreement_and_prelabel_bias() -> None:
 
 
 def test_lot_key_is_stable() -> None:
+    """묶음 키 형식 `<세션>:<종류>:<모델 버전>`이 바뀌지 않는지 본다 (표본 시드 안정성)."""
     lot = Lot("s", "box_track", "det-1", ("a", "b"))
     assert lot.key == "s:box_track:det-1"
 
 
 def test_blur_review_needs_privacy_reviewers_and_skips_qa(policy: ReviewOpsPolicy) -> None:
+    """블러 검수 권한 검사와 블러 배정의 QA 제외를 본다.
+
+    시나리오: 권한자 priv1은 통과, 일반 라벨러·미배정(None)은 AccessError.
+    블러 단위 2,000개를 끝난 것으로 둬도 `plan_qa`는 빈 목록 (블러 검수는 일반 QA로 넘기지 않는다).
+    """
     from dlp_review.ops.runner import AccessError, check_privacy_reviewers
 
     p = policy.model_copy(
@@ -393,6 +447,7 @@ def test_blur_deletion_credit_is_scoped_to_assignment_and_stream(
             "verification": human}  # fmt: skip
 
     def drawn(label_id: str, stream: str) -> LabelRecord:
+        """검수자가 이 과제에서 새로 그린 것처럼 만든 블러 레코드 (ID·스트림 지정)."""
         return truth[0].model_copy(update={"label_id": label_id, "stream_id": stream, **base})
 
     other_assignment = drawn(f"{seed_prefix('g:c')}new-1", "bodycam")

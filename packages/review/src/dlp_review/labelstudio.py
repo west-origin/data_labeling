@@ -16,6 +16,15 @@ hand.right:tool, state:cleanliness=clean).
 meta.text[0]에 JSON으로 싣는다. 결과 id는 원래 라벨 ID다.
 
 화면에서 새로 그린 객체 상태 구간은 어느 개체인지 알 수 없어 받지 않는다 (CVAT에서 개체를 고른다).
+
+WP6, ADR 0006(무손실 왕복). 사용처: `tasks.create_labeling_tasks`(보내기: `label_config`,
+`to_ls_results`), `collect.collect_task`(받기: `from_ls_results`), `timeseries`(`CHANNELS`),
+`ops.policy.UnitsPolicy`(`LS_KINDS` 검사).
+
+공개 이름: `LS_KINDS`, `FROM_NAME`, `TO_NAME`, `CHANNELS`, `HANDS`, `label_names`, `label_config`,
+`to_ls_results`, `NAME_KINDS`, `from_ls_results`.
+
+시간 단위: 결과의 start·end는 마스터 타임라인 ms(ADR 0019). 받을 때 반올림해 정수 ms로 만든다.
 """
 
 from __future__ import annotations
@@ -37,15 +46,24 @@ from dlp_schema.labels import (
 )
 from dlp_schema.ontology import Ontology, VerbLevel
 
+# Label Studio 화면이 보여 주는 라벨 종류 (LabelRecord.kind)
 LS_KINDS = ("action", "gap", "segment", "event", "hand_state", "object_state")
+# 라벨 설정 XML의 TimeSeriesLabels 이름(from_name)과 TimeSeries 이름(to_name)
 FROM_NAME, TO_NAME = "labels", "ts"
+# 시계열 CSV 열 = 화면 채널 (timeseries.write_timeseries_csv와 같아야 한다)
 CHANNELS = ("glove_left", "glove_right", "imu_acc")
 
 
+# 손별 라벨 이름에 쓰는 손 값 (Hand enum 값)
 HANDS = ("right", "left")
 
 
 def label_names(o: Ontology) -> list[str]:
+    """온톨로지에서 화면에 둘 모든 라벨 이름을 만든다.
+
+    행동(원시 동작, 손별), 사이 구간(손별), 손 상태(접촉 대상 종류, 손별), 상위 구간(skill·task·
+    substep), 이벤트, 객체 상태(`state:<속성>=<값>`) 순서다.
+    """
     primitives = [v for v, t in o.verbs.items() if t.level is VerbLevel.PRIMITIVE]
     names = [f"action.{h}:{v}" for h in HANDS for v in primitives]
     names += [f"gap.{h}:{g}" for h in HANDS for g in o.gap_types]
@@ -59,6 +77,12 @@ def label_names(o: Ontology) -> list[str]:
 
 
 def label_config(o: Ontology) -> str:
+    """Label Studio 프로젝트 설정 XML.
+
+    영상(`$video`)과 시계열(`$timeseries`, CSV URL)을 sync="v" 그룹으로 함께 재생하고,
+    시계열 위에 구간 라벨(TimeSeriesLabels)을 그린다. 시간 열은 `time_ms`(마스터 타임라인 ms).
+    라벨 값은 `quoteattr`로 XML 속성 이스케이프한다.
+    """
     labels = "\n".join(f"      <Label value={quoteattr(n)}/>" for n in label_names(o))
     channels = "\n".join(
         f'      <Channel column="{c}" legend="{c}" strokeColor="{color}"/>'
@@ -79,7 +103,12 @@ def label_config(o: Ontology) -> str:
 
 
 def _name_and_meta(label: LabelRecord) -> tuple[str, dict[str, Any]]:
+    """라벨 → (화면 라벨 이름, 메타 JSON용 페이로드 전체).
+
+    예외: 손이 없는 사이 구간, Label Studio가 다루지 않는 종류면 ValueError.
+    """
     p = label.payload
+    # 페이로드 전체를 메타로 싣는다 (화면에서 고치지 않는 필드를 되살리는 데 쓴다)
     meta: dict[str, Any] = p.model_dump(mode="json")
     match p:
         case ActionPayload():
@@ -102,9 +131,15 @@ def _name_and_meta(label: LabelRecord) -> tuple[str, dict[str, Any]]:
 
 
 def to_ls_results(labels: list[LabelRecord]) -> list[dict[str, Any]]:
+    """라벨 → Label Studio 결과 목록 (예측으로 올린다).
+
+    결과 id = 원래 라벨 ID, value.start·end = 구간 ms, 시작=끝이면 instant(순간 이벤트).
+    meta.text[0]에 페이로드 JSON과 `_stream_id`(원래 스트림)를 싣는다.
+    """
     out: list[dict[str, Any]] = []
     for label in labels:
         name, meta = _name_and_meta(label)
+        # 스트림 ID는 페이로드 밖 필드라 메타에 따로 실어 왕복시킨다
         meta["_stream_id"] = label.stream_id
         out.append(
             {
@@ -124,6 +159,7 @@ def to_ls_results(labels: list[LabelRecord]) -> list[dict[str, Any]]:
     return out
 
 
+# 라벨 이름 머리("<종류>" 또는 "<종류>.<손>"의 종류 부분) → LabelRecord.kind
 NAME_KINDS = {
     "action": "action",
     "gap": "gap",
@@ -142,9 +178,17 @@ def _kind_of(name: str) -> str | None:
 
 
 def _apply_name(name: str, meta: dict[str, Any], start: int, end: int) -> dict[str, Any]:
-    """라벨 이름의 값을 덮어쓰고, 화면에서 새로 그린 구간이면 나머지 필드를 기본값으로 채운다."""
+    """라벨 이름의 값을 덮어쓰고, 화면에서 새로 그린 구간이면 나머지 필드를 기본값으로 채운다.
+
+    인자: name(화면 라벨 이름), meta(원래 페이로드 JSON 또는 빈 dict), start·end(구간 ms).
+    반환: 페이로드 검증 직전 dict (제자리에서 고친 meta).
+    새로 그린 구간의 ID: 행동 `h-<손>-<시작 ms>`, 상위 구간 `h-<수준>-<시작 ms>`.
+    새로 그린 손 상태의 역할: 접촉이 있으면 active, 없으면(none) inactive.
+    예외: 새로 그린 객체 상태 구간, 알 수 없는 라벨 이름이면 ValueError.
+    """
     head, _, key = name.partition(":")
     kind, _, hand = head.partition(".")
+    # 메타에 kind가 없다 = 원래 라벨이 없는(새로 그린) 구간
     new = "kind" not in meta
     if kind == "action":
         meta |= {"kind": "action", "verb": key, "hand": hand}
@@ -175,6 +219,18 @@ def _apply_name(name: str, meta: dict[str, Any], start: int, end: int) -> dict[s
 
 
 def from_ls_results(results: list[dict[str, Any]], known_ids: set[str]) -> list[ReviewedItem]:
+    """Label Studio 결과 → 검수 항목.
+
+    인자:
+    - results: 사람이 제출한 최신 주석의 결과 (`LabelStudioClient.latest_results`).
+    - known_ids: 작업에 보낸 원래 라벨 ID. 결과 id가 여기 있어야 원래 라벨로 본다
+      (아니면 새로 그린 것).
+
+    반환: `ReviewedItem` 목록. timeserieslabels가 아닌 결과는 건너뛴다.
+    예외: 새로 그린 객체 상태 구간·알 수 없는 라벨 이름이면 ValueError, 페이로드 검증 실패면
+    pydantic ValidationError.
+    """
+    # 지연 import (변환이 필요할 때만 TypeAdapter를 만든다)
     from pydantic import TypeAdapter
 
     adapter: TypeAdapter[LabelPayload] = TypeAdapter(LabelPayload)
@@ -183,10 +239,12 @@ def from_ls_results(results: list[dict[str, Any]], known_ids: set[str]) -> list[
         if r.get("type") != "timeserieslabels":
             continue
         value = r["value"]
+        # 화면에서 옮긴 경계는 소수 ms일 수 있어 정수 ms로 반올림한다
         start, end = round(float(value["start"])), round(float(value["end"]))
         texts = (r.get("meta") or {}).get("text") or []
         meta: dict[str, Any] = json.loads(texts[0]) if texts else {}
         stream_id = meta.pop("_stream_id", None)
+        # 한 구간에 라벨 하나만 쓴다 (여러 개 고르면 첫 번째)
         name = value["timeserieslabels"][0]
         origin = r.get("id") if r.get("id") in known_ids else None
         if "kind" in meta and meta["kind"] != _kind_of(name):

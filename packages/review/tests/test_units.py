@@ -1,3 +1,12 @@
+"""검수 연동 단위 테스트 (WP6, ADR 0006·0024). 서비스(DB·도구) 없이 돈다.
+
+- 변환기: CVAT·Label Studio 무손실 왕복, 새로 그린 트랙·구간, 모양(Shape) 모드, 지원하지 않는 주석.
+- reconcile: 승인·수정·삭제·추가 판정과 ID 멱등, 좌표 반올림 기준 비교, 보낸 뒤 바뀐 라벨 제외.
+- 그 밖: 시계열 CSV의 마스터 시각, 워터마크 PTS 유지, 원본 URI 차단, 웹훅 서명·검수자 판정.
+정답은 합성 픽스처(`dlp_fixtures.video.generate_blur_scenario`, `dlp_fixtures.actions`)의
+라벨·프레임 시각과 `dlp_schema.testing`의 고정 라벨에서 온다.
+"""
+
 from __future__ import annotations
 
 import hashlib
@@ -70,6 +79,7 @@ ROOT = Path(__file__).resolve().parents[3]
 
 @pytest.fixture(scope="module")
 def ontology() -> Ontology:
+    """온톨로지 v1 (Label Studio 라벨 이름·설정 XML 시험용)."""
     return load_ontology(ROOT / "config" / "ontology" / "v1")
 
 
@@ -90,6 +100,11 @@ def fake_schema(names: list[str]) -> CvatSchema:
 
 
 def test_cvat_roundtrip_offline_including_keypoints() -> None:
+    """블러 박스·키포인트 트랙이 CVAT 형식을 거쳐도 그대로 돌아오는지 본다 (ADR 0006 무손실 왕복).
+
+    정답 근거: 합성 블러 시나리오의 블러 라벨과 행동 시나리오의 손 키포인트 트랙, 각 시나리오의
+    프레임 시각. 돌아온 항목은 원래 라벨 ID를 가리키고, 내용·구간이 `quantize(원래 라벨)`과 같다.
+    """
     blur = generate_blur_scenario(2)
     actions = generate_action_scenario(2)
     kp = next(x for x in actions.labels if x.kind == "keypoint_track")
@@ -111,6 +126,11 @@ def test_cvat_roundtrip_offline_including_keypoints() -> None:
 
 
 def test_cvat_new_track_and_bad_frame_time() -> None:
+    """새로 그린 트랙과 프레임 시각이 어긋난 키프레임을 본다.
+
+    정답 근거: 속성(dlp_label_id)을 지운 트랙은 원래 ID 없는 블러 항목이 된다. 프레임 시각을 1 ms씩
+    밀어 키프레임 시각과 맞지 않으면 보낼 때 ValueError("프레임 시각").
+    """
     blur = generate_blur_scenario(2)
     schema = fake_schema(["face", "reflection", "document", "screen", "photo", "shipping_label"])
     [track] = to_cvat_tracks(blur.labels[:1], blur.frame_times, schema)
@@ -124,6 +144,12 @@ def test_cvat_new_track_and_bad_frame_time() -> None:
 
 
 def test_label_studio_roundtrip_offline_and_new_regions(ontology: Ontology) -> None:
+    """시간 라벨의 Label Studio 왕복과 화면에서 새로 그린 구간을 본다.
+
+    정답 근거: 합성 행동 시나리오의 시간 라벨이 ID·내용·구간·스트림 그대로 돌아오고, 결과의 라벨
+    이름이 모두 `label_names(온톨로지)`에 있다. 새로 그린 `action.left:press` 100~900 ms는 원래 ID
+    없는 왼손 행동(접근 시작·종료 = 구간)이 되고, 새로 그린 객체 상태 구간은 ValueError.
+    """
     labels = [x for x in generate_action_scenario(3).labels if x.kind in LS_KINDS]
     results = to_ls_results(labels)
     back = from_ls_results(results, {x.label_id for x in labels})
@@ -148,6 +174,11 @@ def test_label_studio_roundtrip_offline_and_new_regions(ontology: Ontology) -> N
 
 
 def test_moving_an_action_keeps_contact_inside(ontology: Ontology) -> None:
+    """행동 구간을 줄이면 접촉 시각이 새 구간 안으로 들어오는지 본다.
+
+    정답 근거: 고정 행동 라벨(0~1000 ms, 접촉 400~900 ms)을 500~800 ms로 옮기면
+    접근 시작 500, 접촉 500~800, 종료 800.
+    """
     label = make_label(action_payload())  # 0~1000, 접촉 400~900
     [r] = to_ls_results([label])
     r["value"]["start"], r["value"]["end"] = 500, 800
@@ -163,6 +194,7 @@ def test_moving_an_action_keeps_contact_inside(ontology: Ontology) -> None:
 
 
 def test_label_config_is_valid_xml(ontology: Ontology) -> None:
+    """프로젝트 설정 XML이 파싱되고 시계열·영상·대표 라벨 이름을 담는지 본다."""
     root = ET.fromstring(label_config(ontology))
     assert root.find("TimeSeries") is not None and root.find("Video") is not None
     values = {e.get("value") for e in root.iter("Label")}
@@ -173,6 +205,12 @@ def test_label_config_is_valid_xml(ontology: Ontology) -> None:
 
 
 def test_reconcile_approves_corrects_retracts_and_adds() -> None:
+    """reconcile의 네 판정(승인·수정·삭제·추가)과 ID 멱등을 본다.
+
+    시나리오: a는 그대로, b는 접촉 시작을 300으로 옮김, c는 결과에 없음, 새 행동 하나 추가.
+    정답 근거: 승인 [a], 수정·삭제·추가 각 1, b의 수정은 human_corrected, c는 retracted, 새 레코드는
+    사람 출처. 같은 입력으로 다시 돌리면 새 레코드 ID가 같다.
+    """
     a = make_label(action_payload(action_id="a1"), label_id="a")
     b = make_label(action_payload(action_id="b1"), label_id="b")
     c = make_label(action_payload(action_id="c1"), label_id="c")
@@ -198,6 +236,11 @@ def test_reconcile_approves_corrects_retracts_and_adds() -> None:
 
 
 def test_reconcile_compares_against_normalized_originals() -> None:
+    """좌표 반올림 왕복 값과 비교하므로 미세한 차이는 승인으로 보는지 본다.
+
+    시나리오: 원래 블러 박스 x에 0.0001을 더한 라벨을 보냈고 `quantize` 결과가 그대로 돌아왔다.
+    정답 근거: normalize=quantize이면 새 레코드 없이 승인만 된다.
+    """
     blur = generate_blur_scenario(2)
     original = blur.labels[0]
     p = original.payload
@@ -217,6 +260,12 @@ def test_reconcile_compares_against_normalized_originals() -> None:
 
 
 def test_timeseries_csv_uses_synced_master_time(tmp_path: Path) -> None:
+    """시계열 CSV가 동기화 오프셋을 적용한 마스터 시각 격자인지 본다.
+
+    시나리오: 오른손 장갑 스트림 offset 1000 ms, 스트림 시각 500~600 ms에만 신호 1,
+    세션 4초, 100 Hz.
+    정답 근거: 행 수 400(4초 * 100 Hz), 신호가 마스터 1500~1590 ms에 나타나고 없는 왼손 열은 0.
+    """
     session = make_session()
     glove = session.streams[1].model_copy(
         update={"stream_id": "glove_right", "kind": StreamKind.GLOVE_RIGHT, "offset_ms": 1_000.0,
@@ -239,6 +288,11 @@ def test_timeseries_csv_uses_synced_master_time(tmp_path: Path) -> None:
 
 
 def test_watermark_marks_frames_and_keeps_pts(tmp_path: Path) -> None:
+    """워터마크가 화면 일부에만 들어가고 PTS를 그대로 두는지 본다.
+
+    정답 근거: 합성 블러 영상과 워터마크 영상의 PTS 목록이 같고, 첫 프레임에서 크게 바뀐 화소 비율이
+    1%~40% (글씨가 곳곳에 있지만 화면을 덮지는 않는다).
+    """
     blur = generate_blur_scenario(1)
     src, dst = tmp_path / "a.mp4", tmp_path / "b.mp4"
     blur.write(src)
@@ -254,6 +308,11 @@ def test_watermark_marks_frames_and_keeps_pts(tmp_path: Path) -> None:
 
 
 def test_stage_uri_guard() -> None:
+    """원본 버킷 URI 차단 검사를 본다 (CLAUDE.md 원본 노출 금지 규칙).
+
+    정답 근거: 프라이버시 단계는 원본 URI를 허용, 작업 라벨 단계는 라벨링 버킷 URI만 허용하고
+    원본 버킷의 s3://, path-style 서명 URL, virtual-host style URL은 모두 RawAccessError.
+    """
     check_stage_uris(ReviewStage.PRIVACY, ["s3://dlp-raw/sessions/s/derived/a.mp4"], "dlp-raw")
     check_stage_uris(ReviewStage.LABELING, ["s3://dlp-labeling/x.mp4"], "dlp-raw")
     check_stage_uris(
@@ -269,6 +328,12 @@ def test_stage_uri_guard() -> None:
 
 
 def test_webhook_parsing_and_auth() -> None:
+    """웹훅 서명·비밀 확인과 수집 요청 파싱을 본다.
+
+    정답 근거: CVAT는 본문 HMAC-SHA256 서명이 맞고 job이 completed일 때만 요청(작업 키 cvat:7, job
+    담당자 rev1), 틀린 서명은 WebhookAuthError, 진행 중 상태는 None. Label Studio는 X-DLP-Secret이
+    맞을 때 요청(검수자는 비우고 숫자 ID 12만 싣는다), 비밀이 없으면 WebhookAuthError.
+    """
     job = {"task_id": 7, "state": "completed", "assignee": {"username": "rev1"}}
     body = json.dumps({"event": "update:job", "job": job}).encode()
     sig = "sha256=" + hmac.new(b"s3cret", body, hashlib.sha256).hexdigest()
@@ -294,6 +359,7 @@ def test_webhook_parsing_and_auth() -> None:
 
 
 def _task(key: str, assignee: str | None) -> ReviewTask:
+    """시험용 Label Studio 작업 라벨 작업 (작업 키 key, 담당자 assignee)."""
     return ReviewTask(
         task_key=key, tool=ReviewTool.LABEL_STUDIO, external_id="3", session_id="s001",
         stream_id="bodycam", stage=ReviewStage.LABELING, assignee=assignee,
@@ -417,6 +483,7 @@ def test_correction_of_a_retracted_label_does_not_revive_it() -> None:
 
 
 def _shape(label_id: int, frame: int, kind: str = "rectangle", **kw: Any) -> dict[str, Any]:
+    """시험용 CVAT 모양 dict (기본: 직사각형 10~60 화소, 수동). kw로 필드를 덮어쓴다."""
     return {
         "type": kind, "frame": frame, "label_id": label_id, "points": [10, 10, 60, 60],
         "occluded": False, "outside": False, "z_order": 0, "rotation": 0.0, "attributes": [],
@@ -490,6 +557,7 @@ def test_cvat_unsupported_annotations_fail_closed() -> None:
 
 
 def _cvat_task(stage: ReviewStage, assignee: str | None) -> ReviewTask:
+    """시험용 CVAT 작업 (단계 stage에 맞는 버킷의 매체 URI, 담당자 assignee)."""
     return ReviewTask(
         task_key="cvat:7", tool=ReviewTool.CVAT, external_id="7", session_id="s001",
         stream_id="bodycam", stage=stage, assignee=assignee,
@@ -522,6 +590,7 @@ def test_second_task_correction_of_already_corrected_label_is_dropped() -> None:
     생겨 두 수정본이 모두 현재 라벨이 됐다. 먼저 고친 것만 남기고 나중 것은 뺀다."""
 
     def box(x: float) -> BoxTrackPayload:
+        """x 위치만 다른 박스 트랙 페이로드 (개체 cup_1, 키프레임 하나)."""
         return BoxTrackPayload(
             entity_id="cup_1",
             class_id="cup",

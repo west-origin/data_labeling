@@ -69,6 +69,10 @@ ROOT = Path(__file__).resolve().parents[3]
 
 @pytest.fixture
 def pg() -> Iterator[sa.Engine]:
+    """일회용 PostgreSQL DB (마이그레이션 + 온톨로지 v1 등록). 테스트 뒤 지운다.
+
+    `DLP_DATABASE_URL`(기본: 개발 compose의 DB)에 접속해 무작위 이름의 DB를 만든다.
+    """
     url = sa.make_url(
         os.environ.get(
             "DLP_DATABASE_URL", "postgresql+psycopg://dlp:dlp-dev-password@localhost:5432/dlp"
@@ -94,6 +98,9 @@ def pg() -> Iterator[sa.Engine]:
 
 @pytest.fixture
 def setup(cvat_config: CvatPolicy) -> ReviewSetup:
+    """개발 서비스(S3·Label Studio)와 시험용 CVAT 계정 연결로 만든 `ReviewSetup`.
+
+    CVAT 클라이언트는 넣지 않는다 (CVAT 테스트는 따로 붙인다)."""
     return ReviewSetup(
         raw=S3Store.from_env("dlp-raw"),
         labeling=S3Store.from_env("dlp-labeling"),
@@ -174,6 +181,7 @@ def _session(
 
 
 def _post(ls: LabelStudioClient, task_id: str, results: list[dict[str, Any]]) -> None:
+    """Label Studio 작업에 사람 주석(results)을 제출한다 (검수자 제출 흉내)."""
     resp = ls.http.post(f"/api/tasks/{task_id}/annotations", json={"result": results})
     resp.raise_for_status()
 
@@ -181,6 +189,15 @@ def _post(ls: LabelStudioClient, task_id: str, results: list[dict[str, Any]]) ->
 def test_blind_and_seeded_tasks_through_label_studio(
     pg: sa.Engine, setup: ReviewSetup, tmp_path: Path
 ) -> None:
+    """Label Studio로 표준·블라인드·오류 삽입 배정을 끝까지 돌리고 품질 리포트를 본다.
+
+    시나리오: 골든(사람 라벨) 세션과 작업(모델 프리라벨, 신뢰도 0.7) 세션. 블라인드·오류 삽입 비율
+    1.0으로 계획(재계획은 빈 목록, 멱등) → 작업 만들기(같은 배정으로 다시 만들면 같은 작업) →
+    블라인드는 정답의 절반을 그림, 오류 삽입은 넣은 오류를 모두 원래 값으로 되돌림, 표준은
+    프리라벨을 그대로 제출 → 수집.
+    정답 근거: 블라인드 작업에 예측 없음, 블라인드 결과는 모두 measurement=blind, 오류 삽입 결과는
+    모두 seeded_error, 운영 라벨에 측정 레코드 없음, 골든 운영 라벨 불변, 발견율 100%, 편향 > 0.
+    """
     gold_sid, work_sid = f"gold-{uuid.uuid4().hex[:6]}", f"work-{uuid.uuid4().hex[:6]}"
     _session(pg, setup, tmp_path / "gold", gold_sid, human=True)
     work = _session(pg, setup, tmp_path / "work", work_sid, human=False)
@@ -305,6 +322,7 @@ def test_blind_and_seeded_tasks_through_label_studio(
 
 
 def get_labels_sync(pg: sa.Engine, sid: str) -> list[LabelRecord]:
+    """새 연결로 세션의 모든 라벨 레코드를 읽는다 (트랜잭션 밖에서 확인용)."""
     with pg.connect() as conn:
         return get_labels(conn, sid)
 
