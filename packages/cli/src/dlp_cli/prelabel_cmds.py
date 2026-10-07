@@ -23,6 +23,7 @@ from dlp_schema import load_config, load_ontology, repo_root
 from dlp_schema.db.repository import list_model_versions
 from dlp_schema.lineage import ModelStatus
 from dlp_schema.predictor import ModelUnavailableError, Predictor
+from dlp_sync.policy import load_policy as load_sync_policy
 from dlp_train.deployed import deployed_predictors
 from dlp_train.policy import load_policy as load_training_policy
 from dlp_train.trainers import LoadContext
@@ -85,6 +86,10 @@ def cmd_run(args: argparse.Namespace) -> int:
             now,
             lifter=lifter,
             replaced=replaced,
+            # 접촉 단계가 쓰는 장갑 압력 채널 (접촉 모델 버전에 들어간다)
+            pressure_prefixes=load_sync_policy(
+                root / "config/policies/sync.yaml"
+            ).glove.pressure_prefixes,
         )
     engine.dispose()
     for key, n in s.produced.items():

@@ -14,7 +14,14 @@ from dlp_relations.runner import run_relations
 from dlp_schema.db.migrate import upgrade
 from dlp_schema.db.repository import get_labels, insert_labels, insert_session, register_ontology
 from dlp_schema.episode import current_labels
-from dlp_schema.labels import CoveragePayload, LabelRecord, Provenance, RelationPayload, Source
+from dlp_schema.labels import (
+    CoveragePayload,
+    LabelRecord,
+    Provenance,
+    RelationPayload,
+    Source,
+    Trajectory3DPayload,
+)
 from dlp_schema.ontology import load_ontology
 from dlp_schema.testing import FIXED_TIME, make_session
 
@@ -142,3 +149,23 @@ def test_rule_change_keeps_approved_relations(pg: sa.Engine) -> None:
         ids = {x.label_id for x in _current(conn)}
     # 승인된 관계는 규칙에서 빠져도 지우지 않는다
     assert changed.retracted == 0 and grasp.label_id in ids
+
+
+def test_duplicate_tool_trajectory_does_not_crash_the_run(pg: sa.Engine) -> None:
+    """감사 회귀 (4차): 같은 도구 작용부 궤적이 새 ID로 다시 나와도 같은 커버리지 ID를 두 번 넣지
+    않는다 (UniqueViolation 없음)."""
+    ontology = load_ontology(ROOT / "config/ontology/v1")
+    policy = load_policy(ROOT)
+    wiping = generate_wiping_scenario(0, session_id=SID)
+    tool = [
+        x
+        for x in wiping.labels
+        if isinstance(x.payload, Trajectory3DPayload) and x.payload.entity_id == "rag_01"
+    ]
+    with pg.begin() as conn:
+        insert_labels(conn, [x.model_copy(update={"label_id": f"{x.label_id}-v2"}) for x in tool])
+    with pg.begin() as conn:
+        first = run_relations(conn, SID, ontology, policy, FIXED_TIME)
+        current = _current(conn)
+    assert first.inserted == len(wiping.truth_relations) + 1
+    assert sum(isinstance(x.payload, CoveragePayload) for x in current) == 1

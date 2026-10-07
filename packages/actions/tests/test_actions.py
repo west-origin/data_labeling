@@ -14,7 +14,14 @@ from dlp_actions.boundaries import boundary_candidates, segments, wrist_series
 from dlp_actions.clients import OpenAICompatibleVlm, OracleVlm
 from dlp_actions.pipeline import HandResult, segment_hand
 from dlp_actions.policy import ActionsPolicy, load_policy
-from dlp_actions.vlm import SegmentRequest, build_prompt, classify, response_schema, validate_answer
+from dlp_actions.vlm import (
+    SegmentRequest,
+    VlmUnavailableError,
+    build_prompt,
+    classify,
+    response_schema,
+    validate_answer,
+)
 from dlp_fixtures.actions import ActionScenario, generate_action_scenario
 from dlp_fixtures.video import generate_blur_scenario
 from dlp_schema.labels import (
@@ -255,9 +262,12 @@ def test_openai_compatible_client_sends_frames_and_schema(
     ]
 
 
-def test_vlm_server_errors_are_retried_then_unknown(ontology: Ontology) -> None:
-    """감사 회귀: VLM 서버 오류·시간 초과가 세션 전체를 멈추지 않는다. 재시도 후 그 구간만 미상."""
+def test_vlm_server_errors_back_off_then_abort_not_unknown(ontology: Ontology) -> None:
+    """감사 회귀 (4차): VLM 서버 오류·시간 초과는 정책의 백오프만큼 기다리며 다시 묻고,
+    끝내 실패하면 미상으로 두지 않고 VlmUnavailableError를 올린다
+    (장애가 미상으로 영구히 남지 않게)."""
     calls: list[int] = []
+    waits: list[float] = []
 
     def failing(req: httpx.Request) -> httpx.Response:
         calls.append(1)
@@ -269,12 +279,15 @@ def test_vlm_server_errors_are_retried_then_unknown(ontology: Ontology) -> None:
         "http://vlm", "test-model", frames=1, max_side=64, timeout_s=1,
         transport=httpx.MockTransport(failing),
     )  # fmt: skip
-    result = classify(client, _request(), ontology, max_retries=2)
-    assert len(calls) == 3 and result.fallback and result.answer.gap_type == "unknown"
-    assert all("VLM 서버 오류" in e for e in result.errors)
+    with pytest.raises(VlmUnavailableError):
+        classify(
+            client, _request(), ontology, max_retries=2, backoff_s=(1.0, 5.0), sleep=waits.append
+        )
+    assert len(calls) == 3 and waits == [1.0, 5.0]  # 백오프 2번 + 마지막 시도
 
-    # 한 번 실패한 뒤 성공하면 그 답을 쓴다
+    # 한 번 실패한 뒤 성공하면 그 답을 쓴다 (응답 위반 재시도 횟수는 쓰지 않는다)
     calls.clear()
+    waits.clear()
 
     def flaky(req: httpx.Request) -> httpx.Response:
         calls.append(1)
@@ -287,5 +300,15 @@ def test_vlm_server_errors_are_retried_then_unknown(ontology: Ontology) -> None:
         "http://vlm", "test-model", frames=1, max_side=64, timeout_s=1,
         transport=httpx.MockTransport(flaky),
     )  # fmt: skip
-    ok = classify(client, _request(), ontology, max_retries=2)
-    assert not ok.fallback and ok.answer.gap_type == "idle" and ok.attempts == 2
+    ok = classify(client, _request(), ontology, max_retries=2, backoff_s=(3.0,), sleep=waits.append)
+    assert not ok.fallback and ok.answer.gap_type == "idle" and ok.attempts == 1
+    assert waits == [3.0] and len(calls) == 2
+    assert all("VLM 서버 오류" in e for e in ok.errors)
+
+
+def test_backoff_is_not_part_of_the_policy_digest(policy: ActionsPolicy) -> None:
+    """백오프는 결과를 바꾸지 않으므로 바꿔도 모델 버전(재실행)이 바뀌지 않는다."""
+    slower = policy.model_copy(
+        update={"vlm": policy.vlm.model_copy(update={"unavailable_backoff_s": (60.0,)})}
+    )
+    assert slower.digest == policy.digest and policy.vlm.unavailable_backoff_s

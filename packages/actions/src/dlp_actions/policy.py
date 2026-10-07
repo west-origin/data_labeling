@@ -39,6 +39,9 @@ class VlmPolicy(Contract):
     default_confidence: float = Field(ge=0, le=1)
     model: str
     timeout_s: float = Field(gt=0)
+    # 서버 오류·시간 초과 뒤 다시 묻기 전 대기(초). 길이가 재시도 횟수다. 결과에 영향이 없어
+    # 정책 해시(모델 버전)에 넣지 않는다
+    unavailable_backoff_s: tuple[float, ...] = ()
 
 
 class ActionsPolicy(Contract):
@@ -52,7 +55,8 @@ class ActionsPolicy(Contract):
 
     @property
     def digest(self) -> str:
-        content = json.dumps(self.model_dump(mode="json"), sort_keys=True)
+        data = self.model_dump(mode="json", exclude={"vlm": {"unavailable_backoff_s"}})
+        content = json.dumps(data, sort_keys=True)
         return hashlib.sha256(content.encode()).hexdigest()[:12]
 
 

@@ -57,7 +57,11 @@ def segment_hand(
             in_contact=any(cs < e and ce > s for cs, ce in contacts),
             entities=entities,
         )
-        classified.append(classify(client, request, ontology, policy.vlm.max_retries))
+        classified.append(
+            classify(
+                client, request, ontology, policy.vlm.max_retries, policy.vlm.unavailable_backoff_s
+            )
+        )
     reasons = {c.t_ms: c.reason for c in candidates}
     spans = merge_spans(classified, policy.vlm.default_confidence, contacts, reasons)
     labels = to_labels(

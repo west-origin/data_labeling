@@ -11,6 +11,7 @@ import sqlalchemy as sa
 from dlp_actions.clients import OpenAICompatibleVlm
 from dlp_actions.policy import load_policy
 from dlp_actions.runner import run_actions
+from dlp_actions.vlm import VlmUnavailableError
 from dlp_cli.schema_cmds import database_url
 from dlp_media.storage import store_from_spec
 from dlp_schema import load_config, load_ontology, repo_root
@@ -43,10 +44,18 @@ def cmd_run(args: argparse.Namespace) -> int:
         args.store, load_config(root / "config/defaults.yaml").buckets.labeling
     )
     engine = sa.create_engine(database_url(args.url))
-    with engine.begin() as conn:
-        now = datetime.now(UTC)
-        s = run_actions(conn, args.session_id, client, ontology, policy, now, labeling)
-    engine.dispose()
+    try:
+        with engine.begin() as conn:
+            now = datetime.now(UTC)
+            s = run_actions(conn, args.session_id, client, ontology, policy, now, labeling)
+    except VlmUnavailableError as exc:
+        # 트랜잭션이 되돌려져 아무것도 쓰지 않았다. 서버가 돌아오면 다시 실행한다
+        print(
+            f"[VLM 서버 장애] {args.session_id}: 아무것도 쓰지 않았습니다. 다시 실행하세요 ({exc})"
+        )
+        return 3
+    finally:
+        engine.dispose()
     for hand, counts in s.hands.items():
         print(f"{hand}: " + ", ".join(f"{k} {v}" for k, v in counts.items()))
     for hand in s.skipped:

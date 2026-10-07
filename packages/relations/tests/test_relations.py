@@ -175,3 +175,23 @@ def test_policy_digest_tracks_rule_changes(policy: RelationsPolicy) -> None:
                 "rules": [policy.rules[0].model_dump(mode="json")] * 2,
             }
         )
+
+
+def test_duplicate_working_part_trajectory_gives_one_coverage(
+    policy: RelationsPolicy, ontology: Ontology
+) -> None:
+    """감사 회귀 (4차): 같은 도구 작용부 궤적이 새 ID로 하나 더 있어도(3D 단계 재실행 뒤 이전 것은
+    검수돼 남음) 접촉·관계·커버리지가 두 번 나오지 않는다."""
+    w = generate_wiping_scenario(0)
+    base = derive(w.labels, ontology, policy)
+    tool = [
+        x
+        for x in w.labels
+        if isinstance(x.payload, Trajectory3DPayload) and x.payload.entity_id == "rag_01"
+    ]
+    assert tool
+    dup = [x.model_copy(update={"label_id": f"{x.label_id}-v2"}) for x in tool]
+    d = derive([*w.labels, *dup], ontology, policy)
+    assert [c.payload for c in d.coverage] == [c.payload for c in base.coverage]
+    assert len(d.contacts) == len(base.contacts)
+    assert [r.payload for r in d.relations] == [r.payload for r in base.relations]

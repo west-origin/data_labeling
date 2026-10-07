@@ -1,7 +1,10 @@
 """세션 행동 구간 실행 (`dlp actions run`). 멱등이다.
 
 바디캠의 손마다(hand21 키포인트 트랙이 있는 손) 경계 후보 → VLM 분류 → 병합·채우기를 하고
-action·gap·description 레코드를 쓴다.
+action·gap·description 레코드를 쓴다. 트랙이 사라진 손은 이 모듈이 낸 검수 전 레코드만 지운다.
+VLM 서버가 재시도(백오프) 후에도 응답하지 않은 구간이 있으면 VlmUnavailableError로 세션 전체를
+멈춘다 (호출자의 트랜잭션이 되돌려져 아무것도 쓰지 않으므로 다시 실행하면 처음부터 한다).
+서버 장애를 미상으로 채워 정상 버전으로 쓰면 재실행이 건너뛰어 미상이 영구히 남기 때문이다.
 model_version은 "actions-<정책 해시>+<VLM 버전>+i<입력 해시>"다.
 입력 해시는 이 단계가 읽는 현재 라벨(바디캠 손 키포인트, 손 상태, 객체 트랙)의 ID 집합 해시다.
 입력이 바뀌면(프리라벨 재실행, 검수자의 접촉 수정) 버전이 바뀌어 다시 만든다.
@@ -228,6 +231,37 @@ def run_actions(
     def described(x: LabelRecord) -> bool:
         return isinstance(x.payload, ActionPayload) and x.payload.action_id in reviewed_descriptions
 
+    def mine_of(hand: Hand) -> list[LabelRecord]:
+        """이 단계가 낸 그 손의 검수 전 현재 행동·공백 (설명이 검수된 행동은 뺀다)."""
+        return [
+            x
+            for x in current
+            if _ours(x)
+            and _hand_of(x) is hand
+            and x.verification.state is VerificationState.UNREVIEWED
+            and not described(x)
+        ]
+
+    def with_descriptions(mine: list[LabelRecord]) -> list[LabelRecord]:
+        """지울 행동에 딸린 검수 전 설명까지."""
+        return mine + [
+            d
+            for x in mine
+            if isinstance(x.payload, ActionPayload)
+            and (d := descriptions_by_action.get(x.payload.action_id)) is not None
+            and d.verification.state is VerificationState.UNREVIEWED
+        ]
+
+    # 손 트랙이 사라진 손 (예: 손 모델 버전이 바뀌어 그 손을 더 찾지 못함): 새로 만들 입력이
+    # 없으므로 이 단계가 냈던 검수 전 행동·공백·설명만 지운다. 검수된 것과 사람 레코드는 남긴다.
+    orphans = {h for x in current if _ours(x) and (h := _hand_of(x)) is not None} - set(tracks)
+    for hand in sorted(orphans):
+        removed = retractions(with_descriptions(mine_of(hand)), version, now)
+        if removed:
+            insert_labels(conn, removed)
+            summary.retracted += len(removed)
+            summary.hands[hand.value] = {"retracted_without_track": len(removed)}
+
     with tempfile.TemporaryDirectory() as tmp:
         video: Path | None = None
         if labeling is not None:
@@ -236,14 +270,7 @@ def run_actions(
             # 설명 초안에 개인정보가 들어가지 않게). 블러본은 프라이버시 승인 후 렌더된다.
             labeling.get_file(blurred_key(session_id, body.stream_id), video)
         for hand, track in sorted(tracks.items()):
-            mine = [
-                x
-                for x in current
-                if _ours(x)
-                and _hand_of(x) is hand
-                and x.verification.state is VerificationState.UNREVIEWED
-                and not described(x)
-            ]
+            mine = mine_of(hand)
             protected = [
                 x
                 for x in current
@@ -259,13 +286,7 @@ def run_actions(
             if any(x.provenance.model_version == version and _hand_of(x) is hand for x in labels):
                 summary.skipped.append(hand.value)
                 continue
-            stale = mine + [
-                d
-                for x in mine
-                if isinstance(x.payload, ActionPayload)
-                and (d := descriptions_by_action.get(x.payload.action_id)) is not None
-                and d.verification.state is VerificationState.UNREVIEWED
-            ]
+            stale = with_descriptions(mine)
             contacts = sorted(
                 (x.t_start_ms, x.t_end_ms)
                 for x in current

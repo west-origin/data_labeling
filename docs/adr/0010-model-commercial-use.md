@@ -37,11 +37,16 @@
 | --- | --- | --- | --- |
 | YuNet | 얼굴 블러 | review | WIDER FACE (CC BY-NC-ND 4.0) |
 | MediaPipe 손 | 손 21관절 | allowed | Google 자체 데이터 |
-| EfficientDet-Lite0 | COCO 객체 | allowed | COCO |
-| YOLOX-m COCO | 사람 박스 | allowed | COCO |
+| EfficientDet-Lite0 | COCO 객체 | review | COCO 이미지 (Flickr 개별 CC, CC BY-NC 계열 포함) |
+| YOLOX-m COCO | 사람 박스 | review | COCO 이미지 (Flickr 개별 CC, CC BY-NC 계열 포함) |
 | RTMPose-m Body7 | 전신 17점 | review | CrowdPose 등 연구용 데이터 포함 |
 | OWLv2 | 도구·블러 대상 | review | Objects365 (비상업) 미세조정 |
-| Depth Anything V2 Metric Small | 3D | allowed | Hypersim (CC BY-SA 3.0) |
+| Depth Anything V2 Metric Small | 3D | review | 인코더 의사 라벨 학습 이미지 (ImageNet-21K, SA-1B 등 연구용) |
+
+COCO 학습 모델 주: COCO 주석은 CC BY 4.0이지만 이미지는 Flickr 사진마다 다른 CC 라이선스이고
+CC BY-NC 계열이 섞여 있다. 직접 학습 데이터에 비상업 조건이 있으므로 `review`다 (감사 4차, ADR 0026).
+COCO가 든 모델의 학습 데이터 표기는 모두 "주석 CC BY 4.0, 이미지는 Flickr 개별 CC 라이선스로 CC BY-NC
+계열 포함"으로 통일한다.
 
 ## review를 허용하지 않기로 할 때의 대안 (성능 하락 있음)
 
