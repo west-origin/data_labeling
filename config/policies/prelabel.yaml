@@ -3,19 +3,15 @@
 # 저장소 전체에서 찾기: make todo-models
 version: 1
 
+# 역할 → config/models.yaml 이름
 models:
-  hand_landmarker:
-    path: data/models/hand_landmarker.task
-    url: https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task
-    sha256: fbc2a30080c3c557093b5ddfc334698132eb341044ccee322ccf8bcf3607cde1
-  pose_landmarker:
-    path: data/models/pose_landmarker_lite.task
-    url: https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task
-    sha256: 59929e1d1ee95287735ddd833b19cf4ac46d29bc7afddbbf6753c459690d574a
-  object_detector:
-    path: data/models/efficientdet_lite0.tflite
-    url: https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float16/latest/efficientdet_lite0.tflite
-    sha256: 4b59100025bea1235a84c1038879a6cccc9f6c49f5e41144e91e74d99e780993
+  hands: hand_landmarker
+  body_detector: yolox_m_humanart
+  body: rtmpose_m_body7
+  coco_objects: object_detector
+  open_vocab: owlv2_onnx
+  open_vocab_tokenizer: owlv2_tokenizer
+  depth: depth_metric_indoor_small
 
 hands:
   min_score: 0.5
@@ -23,7 +19,8 @@ hands:
   input_is_mirrored: false
 
 body:
-  min_score: 0.5
+  min_score: 0.3            # RTMPose 관절 점수 평균의 하한
+  keypoint_score: 0.3       # 이보다 낮은 관절은 visibility=1 (가려짐 추정)
   max_people: 4
   track_iou: 0.3
 
@@ -32,9 +29,6 @@ objects:
   track_iou: 0.3
   max_gap_ms: 300
   # COCO 클래스 → 온톨로지 객체. 매핑이 없는 COCO 클래스는 버린다.
-  # TODO(real-model): COCO에 없는 청소 도구(걸레, 밀대, 솔, 분무기 등)와 도구 작용부 마스크는
-  #   오픈 보캐뷸러리 탐지(Grounding DINO, OWLv2) + SAM 2 마스크 추적이 필요하다.
-  #   GPU 환경과 Hugging Face 접근이 필요해 이 환경에서는 stub만 있다.
   coco_to_ontology:
     cup: cup
     toilet: toilet
@@ -42,6 +36,32 @@ objects:
     bed: bed
     bottle: spray_bottle
     person: person
+
+# COCO에 없는 청소·돌봄 도구는 OWLv2 오픈 보캐뷸러리 탐지로 찾는다 (CPU 프레임당 약 9초).
+# frame_stride_ms마다 추론하고, 사이 프레임은 트랙 보간이 메운다 (max_gap_ms 안에서).
+open_vocab_objects:
+  frame_stride_ms: 500
+  min_score: 0.12
+  track_iou: 0.3
+  max_gap_ms: 1200
+  # 질의 문장 → 온톨로지 객체
+  queries:
+    a mop: mop
+    a cleaning rag: rag
+    a sponge: sponge
+    a scrub brush: brush
+    a toilet brush: toilet_brush
+    a broom: broom
+    a dustpan: dustpan
+    a spray bottle: spray_bottle
+    a bucket: bucket
+    a trash bag: trash_bag
+    a trash can: trash_bin
+    a towel: towel
+    a diaper: diaper
+    a rubber glove: glove
+    a bathtub: bathtub
+    a mirror: mirror
 
 contact:
   glove:
@@ -59,5 +79,15 @@ wearer_matching:
   rate_hz: 30
   min_correlation: 0.5
 
-# TODO(real-model): 카메라 6자유도 궤적(시각-관성 SLAM: Basalt, ORB-SLAM3)과 단안 메트릭 깊이
-#   (Depth Anything V2 Small)는 C++ 빌드·GPU·Hugging Face 접근이 필요해 이 환경에서는 stub만 있다.
+# 바디캠 손·객체를 단안 메트릭 깊이(Depth Anything V2 Metric Indoor Small)로 카메라 좌표 3D로 올린다.
+# 세션 캘리브레이션에 내부 파라미터가 없으면 default_hfov_deg로 근사한다 (액션캠 광각 기준).
+depth:
+  frame_stride_ms: 200
+  default_hfov_deg: 90
+  patch_radius_px: 2        # 깊이를 읽을 때 주변 (2r+1)^2 픽셀의 중앙값
+  min_depth_m: 0.1
+  max_depth_m: 10.0
+  hand_points: [0, 4, 8]    # 손목, 엄지 끝, 검지 끝 (hand21 번호)
+
+# TODO(real-model): 카메라 6자유도 궤적(시각-관성 SLAM: Basalt, ORB-SLAM3)은 C++ 빌드와 GPU가
+#   필요해 이 환경에서는 stub만 있다. 그때까지 3D 궤적은 카메라 좌표계(frame=camera)뿐이다.

@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from dlp_models.owlv2 import Owlv2
+from dlp_models.registry import resolve
 from dlp_privacy.detection import FrameDetector
 from dlp_privacy.detectors.codes import CodeDetector
+from dlp_privacy.detectors.open_vocab import OpenVocabDetector
 from dlp_privacy.detectors.reflection import ReflectionDetector
 from dlp_privacy.detectors.yunet import YuNetFaceDetector
-from dlp_privacy.policy import PrivacyPolicy
+from dlp_privacy.policy import DetectorSpec, PrivacyPolicy
 from dlp_schema.predictor import ModelUnavailableError
 
 
@@ -34,7 +37,9 @@ def build_detectors(
             if spec.kind == "opencv_codes":
                 det: FrameDetector = CodeDetector(name)
             elif spec.kind == "yunet":
-                det = YuNetFaceDetector(name, root / (spec.model_path or ""), spec.model_sha256)
+                det = YuNetFaceDetector(name, *resolve(root, spec.model or "yunet"))
+            elif spec.kind == "open_vocab":
+                det = _open_vocab(name, spec, root)
             elif spec.kind == "reflection":
                 region = make(spec.region_detector or "")
                 face = make(spec.face_detector or "")
@@ -49,9 +54,6 @@ def build_detectors(
                     )
                 det = ReflectionDetector(name, region, face, spec.threshold_scale or 0.5)
             else:
-                # TODO(real-model): 오픈 보캐뷸러리 탐지기(Grounding DINO, OWLv2) 어댑터. GPU와
-                #   Hugging Face 접근이 필요하다. 연동 전에는 해당 대상이 no_detector
-                #   전수 검수 구간이 된다.
                 raise ModelUnavailableError(f"{name}: 이 환경에서 쓸 수 없는 탐지기 ({spec.kind})")
         except ModelUnavailableError as exc:
             missing[name] = str(exc)
@@ -63,3 +65,20 @@ def build_detectors(
         for name in target.detectors:
             make(name)
     return ready, missing
+
+
+def _open_vocab(name: str, spec: DetectorSpec, root: Path) -> FrameDetector:
+    if not spec.queries or spec.model is None or spec.tokenizer is None:
+        raise ModelUnavailableError(f"{name}: 모델·토크나이저·질의가 정책에 없습니다")
+    model, version = resolve(root, spec.model)
+    tokenizer, _ = resolve(root, spec.tokenizer)
+    queries = list(spec.queries)
+    return OpenVocabDetector(
+        name,
+        Owlv2(model, tokenizer, queries),
+        [spec.queries[q] for q in queries],
+        version=version,
+        frame_stride_ms=spec.frame_stride_ms,
+        score_threshold=spec.score_threshold or 0.1,
+        score_full=spec.score_full or 1.0,
+    )

@@ -29,9 +29,7 @@ review_priority: [no_detector, track_gap, disagreement, low_confidence, reflecti
 detectors:
   yunet:
     kind: yunet
-    model_path: data/models/face_detection_yunet_2023mar.onnx
-    model_sha256: 8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4
-    model_url: https://media.githubusercontent.com/media/opencv/opencv_zoo/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx
+    model: yunet              # config/models.yaml 이름
   codes:
     kind: opencv_codes        # QR·바코드 (가중치 없음) → 송장 근거
   reflection:
@@ -39,7 +37,28 @@ detectors:
     region_detector: open_vocab
     face_detector: yunet
     threshold_scale: 0.5
-  # TODO(real-model): 오픈 보캐뷸러리 탐지(Grounding DINO, OWLv2)로 문서·화면·사진물·문패와
-  #   반사면 영역을 찾는다. GPU와 Hugging Face 접근이 필요하다. 그때까지 이 대상들은 전수 검수한다.
+  # 오픈 보캐뷸러리 탐지 (OWLv2 base, ONNX 양자화, CPU 프레임당 약 9초).
+  # 한 번 추론으로 문서·화면·사진물·문패·송장과 반사면 영역(reflection 탐지기용)을 함께 찾는다.
+  # frame_stride_ms마다 한 번 추론하고 그 사이 프레임에는 마지막 결과를 그대로 둔다 (held).
+  # 사이에 잠깐 나타났다 사라진 대상은 놓칠 수 있으므로 GPU 환경에서는 간격을 줄인다.
   open_vocab:
-    kind: unavailable
+    kind: open_vocab
+    model: owlv2_onnx
+    tokenizer: owlv2_tokenizer
+    frame_stride_ms: 500
+    score_threshold: 0.1      # OWLv2 원점수 문턱 (재현율 우선으로 낮게)
+    score_full: 0.4           # 이 원점수 이상을 신뢰도 1.0으로 본다 (원점수 / score_full)
+    # 질의 문장 → 대상 ID. reflective_surface는 reflection 탐지기만 쓴다.
+    queries:
+      a printed document: document
+      a sheet of paper with text: document
+      a computer monitor screen: screen
+      a smartphone screen: screen
+      a television screen: screen
+      a framed photograph: photo
+      a photo of a person: photo
+      a door number sign: address_sign
+      a nameplate: address_sign
+      a shipping label on a parcel: shipping_label
+      a mirror: reflective_surface
+      a glass window: reflective_surface

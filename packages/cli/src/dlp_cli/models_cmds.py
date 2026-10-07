@@ -1,58 +1,49 @@
-"""모델 가중치 내려받기.
-
-정책 파일들(privacy.yaml의 detectors, prelabel.yaml의 models)에 적힌 URL·sha256을 따른다.
-가중치는 저장소에 넣지 않는다.
-"""
+"""모델 가중치 내려받기·변환 (config/models.yaml). 가중치는 저장소에 넣지 않는다."""
 
 from __future__ import annotations
 
 import argparse
-import hashlib
-import urllib.request
-from pathlib import Path
-from typing import Any
+import subprocess
 
-import yaml
-
+from dlp_models.registry import fetch, load_registry
 from dlp_schema import repo_root
 
-
-def model_specs(root: Path) -> dict[str, tuple[str, str, str | None]]:
-    """이름 → (상대 경로, URL, sha256)."""
-    specs: dict[str, tuple[str, str, str | None]] = {}
-    privacy: Any = yaml.safe_load((root / "config/policies/privacy.yaml").read_text("utf-8"))
-    for name, spec in privacy.get("detectors", {}).items():
-        if spec.get("model_url") and spec.get("model_path"):
-            specs[name] = (spec["model_path"], spec["model_url"], spec.get("model_sha256"))
-    prelabel: Any = yaml.safe_load((root / "config/policies/prelabel.yaml").read_text("utf-8"))
-    for name, spec in prelabel.get("models", {}).items():
-        specs[name] = (spec["path"], spec["url"], spec.get("sha256"))
-    return specs
+# 변환 스크립트는 무거운 PyTorch가 필요해 프로젝트 환경과 따로 일회용 환경에서 돌린다
+EXPORT_ENV = [
+    "uv", "run", "--no-project", "--python", "3.12",
+    "--with", "torch==2.9.1", "--with", "transformers==4.57.1", "--with", "onnx",
+    "--index", "https://download.pytorch.org/whl/cpu", "--index-strategy", "unsafe-best-match",
+    "python",
+]  # fmt: skip
 
 
 def cmd_fetch(args: argparse.Namespace) -> int:
     root = repo_root()
     failed = 0
-    for name, (rel, url, sha) in model_specs(root).items():
-        path = root / rel
-        if path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest() == sha:
-            print(f"[있음] {name}: {path}")
+    for name, spec in load_registry(root).models.items():
+        if args.names and name not in args.names:
             continue
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with urllib.request.urlopen(url, timeout=120) as resp:
-            data = resp.read()
-        digest = hashlib.sha256(data).hexdigest()
-        if sha and digest != sha:
-            print(f"[실패] {name}: 해시 불일치 {digest}")
-            failed += 1
-            continue
-        path.write_bytes(data)
-        print(f"[받음] {name}: {path} ({len(data)} bytes)")
+        message = fetch(root, name, spec)
+        failed += message.startswith("[실패]")
+        print(message)
     return 1 if failed else 0
+
+
+def cmd_export(args: argparse.Namespace) -> int:
+    root = repo_root()
+    for name, spec in load_registry(root).models.items():
+        if spec.export is None or (root / spec.path).is_file():
+            continue
+        print(f"[변환] {name}: {spec.export}")
+        subprocess.run([*EXPORT_ENV, str(root / spec.export)], cwd=root, check=True)
+    return 0
 
 
 def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:  # pyright: ignore[reportPrivateUsage]
     models = sub.add_parser("models", help="모델 가중치")
     msub = models.add_subparsers(dest="models_command", required=True)
-    fetch = msub.add_parser("fetch", help="정책에 적힌 가중치를 내려받고 해시를 확인")
-    fetch.set_defaults(func=cmd_fetch)
+    fetch_p = msub.add_parser("fetch", help="config/models.yaml의 가중치를 받고 해시를 확인")
+    fetch_p.add_argument("names", nargs="*", help="받을 모델 이름 (기본: 전부)")
+    fetch_p.set_defaults(func=cmd_fetch)
+    export = msub.add_parser("export", help="공개 ONNX가 없는 모델을 공식 가중치에서 변환")
+    export.set_defaults(func=cmd_export)

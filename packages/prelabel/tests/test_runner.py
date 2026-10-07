@@ -16,6 +16,7 @@ from dlp_fixtures.video import generate_blur_scenario
 from dlp_media.ingest import ingest_session, load_manifest
 from dlp_media.storage import S3Store
 from dlp_prelabel.adapters.stubs import OraclePredictor
+from dlp_prelabel.lift3d import DepthLifter
 from dlp_prelabel.policy import load_policy
 from dlp_prelabel.runner import CONTACT_VERSION, run_prelabel
 from dlp_schema.db.migrate import upgrade
@@ -29,9 +30,10 @@ from dlp_schema.db.repository import (
 )
 from dlp_schema.labels import BoxKeyframe, BoxTrackPayload, HandStatePayload
 from dlp_schema.ontology import load_ontology
-from dlp_schema.predictor import Predictor
+from dlp_schema.predictor import ModelUnavailableError, Predictor
 from dlp_schema.session import LifecycleState, PrivacyState, SyncMethod
 from dlp_schema.testing import FIXED_TIME, make_label
+from dlp_schema.validation import check_label
 
 pytestmark = pytest.mark.services
 ROOT = Path(__file__).resolve().parents[3]
@@ -119,9 +121,20 @@ def test_prelabel_session_with_glove_contacts(pg: sa.Engine, tmp_path: Path) -> 
         OraclePredictor("objects", boxes, ("box_track",), now=FIXED_TIME),
     ]
     policy, ontology = load_policy(ROOT), load_ontology(ROOT / "config/ontology/v1")
+    try:  # 실제 깊이 모델이 있으면 3D 궤적 단계도 돈다 (make export-models)
+        lifter: DepthLifter | None = DepthLifter(ROOT, policy, now=FIXED_TIME)
+    except ModelUnavailableError:
+        lifter = None
     with pg.begin() as conn:
-        summary = run_prelabel(conn, sid, raw, predictors, policy, ontology, FIXED_TIME)
+        summary = run_prelabel(
+            conn, sid, raw, predictors, policy, ontology, FIXED_TIME, lifter=lifter
+        )
+        lifted = get_labels(conn, sid, kinds=["trajectory3d"])
     assert summary.produced == {"bodycam/hands": 1, "bodycam/objects": 3}
+    if lifter is not None:
+        # 손 관절 3개 + 객체 3개. 합성 영상의 깊이 값 자체는 의미가 없어 형식만 본다
+        assert summary.lifted == len(lifted) == 6
+        assert all(check_label(x, ontology) == [] for x in lifted)
     truth = [
         x
         for x in actions.labels
@@ -138,6 +151,7 @@ def test_prelabel_session_with_glove_contacts(pg: sa.Engine, tmp_path: Path) -> 
         ]
         assert get_session(conn, sid).lifecycle_state is LifecycleState.PRELABELED
     assert sorted(again.skipped) == ["bodycam/hands", "bodycam/objects"] and again.contacts == 0
+    assert again.lifted == 0
     for c, gt in zip(contacts, truth, strict=True):
         assert abs(c.t_start_ms - gt.t_start_ms) <= 33
         gp = gt.payload

@@ -112,20 +112,14 @@ class UnavailablePredictor:
         return []
 
 
-# TODO(real-model): 도구 작용부·파지부 마스크 (mask_track, part=작용부). SAM 2 마스크 추적과
-#   오픈 보캐뷸러리 탐지가 필요하다 (GPU, Hugging Face 접근). 커버리지 계산(WP9)이 이 결과를 쓴다.
-TOOL_PART_MASKS = UnavailablePredictor(
-    "tool_part_masks", "SAM 2 + 오픈 보캐뷸러리 탐지 필요 (GPU, Hugging Face)"
-)
+# TODO(real-model): 도구 작용부·파지부 마스크 (mask_track, part=작용부). 도구 박스는 OWLv2가
+#   내므로(adapters/owl_objects.py) 그 박스를 프롬프트로 SAM 2 마스크 추적이 필요하다. SAM 2는
+#   CPU로는 영상 길이만큼 돌리기에 너무 느려 GPU가 필요하다. 커버리지 계산(WP9)이 이 결과를 쓴다.
+TOOL_PART_MASKS = UnavailablePredictor("tool_part_masks", "SAM 2 마스크 추적 미연동 (GPU 필요)")
 
 # TODO(real-model): 바디캠 6자유도 궤적 (trajectory3d, entity_id="camera"). IMU가 있으면 시각-관성
 #   SLAM(Basalt BSD-3, ORB-SLAM3 GPL-3.0), 없으면 시각 SLAM(DROID-SLAM). C++ 빌드와 GPU가 필요하다.
 CAMERA_POSE = UnavailablePredictor("camera_pose", "시각-관성 SLAM 미연동 (C++ 빌드, GPU)")
-
-# TODO(real-model): 단안 메트릭 깊이로 손·객체·작용부를 3D로 올리기
-#   (Depth Anything V2 Small, Apache 2.0).
-#   Hugging Face 접근이 막혀 가중치를 받을 수 없다.
-MONO_DEPTH = UnavailablePredictor("mono_depth", "Depth Anything V2 가중치 접근 불가 (Hugging Face)")
 
 # TODO(real-model): 영상만으로 접촉을 판정하는 학습 분류기. 장갑 세션의 접촉 구간을 정답으로
 #   WP13에서 학습한다. 지금은 contact.video_contact_intervals 휴리스틱을 쓴다.
@@ -133,4 +127,4 @@ LEARNED_CONTACT = UnavailablePredictor(
     "learned_contact", "학습 데이터(장갑 세션) 누적 후 WP13에서 학습"
 )
 
-UNAVAILABLE = (TOOL_PART_MASKS, CAMERA_POSE, MONO_DEPTH, LEARNED_CONTACT)
+UNAVAILABLE = (TOOL_PART_MASKS, CAMERA_POSE, LEARNED_CONTACT)

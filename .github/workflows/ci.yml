@@ -22,8 +22,15 @@ jobs:
       - run: make install
       - name: System libraries for MediaPipe (EGL/GLES, CPU inference)
         run: sudo apt-get update && sudo apt-get install -y libegl1 libgles2
-      - name: Fetch model weights (YuNet, MediaPipe hand/pose/object ~21 MB)
+      - name: Cache model weights
+        uses: actions/cache@v4
+        with:
+          path: data/models
+          key: models-${{ hashFiles('config/models.yaml', 'scripts/export_depth_onnx.py') }}
+      - name: Fetch model weights (YuNet, MediaPipe, RTMPose, OWLv2 ~360 MB)
         run: make models
+      - name: Export depth model to ONNX (cached after first run)
+        run: make export-models
       - run: make check
 
   services:

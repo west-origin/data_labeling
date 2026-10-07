@@ -3,13 +3,16 @@ name = "data-labeling"
 version = "0.1.0"
 description = "1인칭 돌봄 영상 라벨링 플랫폼 (워크스페이스 루트)"
 requires-python = ">=3.12,<3.14"
-dependencies = ["dlp-cli", "dlp-datasets", "dlp-fixtures", "dlp-media", "dlp-prelabel", "dlp-privacy", "dlp-review", "dlp-schema", "dlp-sync"]
+dependencies = ["dlp-cli", "dlp-datasets", "dlp-fixtures", "dlp-media", "dlp-models", "dlp-prelabel", "dlp-privacy", "dlp-review", "dlp-schema", "dlp-sync"]
 
 [tool.uv]
 package = false
 # MediaPipe는 GUI판 opencv-contrib-python을 요구하지만, 같은 cv2 모듈을 주는 headless판과 함께 깔면
 # 충돌한다. 작업공간 전체를 opencv-contrib-python-headless로 통일하고 GUI판 요구는 지운다.
-override-dependencies = ["opencv-contrib-python ; sys_platform == 'never'"]
+override-dependencies = [
+    "opencv-contrib-python ; sys_platform == 'never'",
+    "opencv-python ; sys_platform == 'never'",
+]
 
 [tool.uv.workspace]
 members = ["packages/*"]
@@ -19,6 +22,7 @@ dlp-cli = { workspace = true }
 dlp-datasets = { workspace = true }
 dlp-fixtures = { workspace = true }
 dlp-media = { workspace = true }
+dlp-models = { workspace = true }
 dlp-prelabel = { workspace = true }
 dlp-privacy = { workspace = true }
 dlp-review = { workspace = true }
@@ -47,7 +51,7 @@ select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "PTH", "N"]
 "**/migrations/versions/*.py" = ["E501"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["dlp_cli", "dlp_datasets", "dlp_fixtures", "dlp_media", "dlp_prelabel", "dlp_privacy", "dlp_review", "dlp_schema", "dlp_sync"]
+known-first-party = ["dlp_cli", "dlp_datasets", "dlp_fixtures", "dlp_media", "dlp_models", "dlp_prelabel", "dlp_privacy", "dlp_review", "dlp_schema", "dlp_sync"]
 
 [tool.pyright]
 include = ["packages", "tests"]

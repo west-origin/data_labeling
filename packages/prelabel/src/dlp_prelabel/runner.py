@@ -2,10 +2,11 @@
 
 1. 영상 스트림마다 Predictor를 돌린다 (원본 영상: 모델 추론은 접근 통제된 서버에서 원본으로 한다).
    같은 Predictor·모델 버전 결과가 그 스트림에 이미 있으면 건너뛴다.
-2. 바디캠의 손 키포인트·객체 박스와 장갑 신호로 접촉 구간을 만들어 hand_state 라벨로 쓴다.
-3. 3인칭 영상이 있으면 바디캠 IMU와 3인칭 인물 손목 속도를 상관시켜 착용자를 찾는다.
+2. 깊이 모델이 있으면 바디캠 손 관절·객체 박스를 카메라 좌표 3D 궤적으로 올린다 (lift3d).
+3. 바디캠의 손 키포인트·객체 박스와 장갑 신호로 접촉 구간을 만들어 hand_state 라벨로 쓴다.
+4. 3인칭 영상이 있으면 바디캠 IMU와 3인칭 인물 손목 속도를 상관시켜 착용자를 찾는다.
    찾은 인물의 키포인트 트랙은 entity_id="wearer"인 새 레코드(parent=원래 트랙)로 남긴다.
-4. 프라이버시 승인 상태의 세션은 생애주기를 prelabeled로 옮긴다.
+5. 프라이버시 승인 상태의 세션은 생애주기를 prelabeled로 옮긴다.
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ from dlp_prelabel.contact import (
     glove_contact_intervals,
     video_contact_intervals,
 )
+from dlp_prelabel.lift3d import DepthLifter
 from dlp_prelabel.policy import PrelabelPolicy
 from dlp_prelabel.wearer import match_wearer, wrist_speed
 from dlp_schema.db.repository import get_labels, get_session, insert_labels, set_lifecycle
@@ -53,6 +55,7 @@ class PrelabelSummary:
     produced: dict[str, int] = field(default_factory=dict[str, int])  # "스트림/predictor" → 라벨 수
     skipped: list[str] = field(default_factory=list[str])
     contacts: int = 0
+    lifted: int = 0
     wearer: str | None = None
     wearer_scores: dict[str, float] = field(default_factory=dict[str, float])
 
@@ -73,6 +76,7 @@ def run_prelabel(
     policy: PrelabelPolicy,
     ontology: Ontology,
     now: datetime,
+    lifter: DepthLifter | None = None,
 ) -> PrelabelSummary:
     session = get_session(conn, session_id)
     if session.ontology_version is None:
@@ -97,11 +101,44 @@ def run_prelabel(
                 insert_labels(conn, labels)
                 summary.produced[key] = len(labels)
         current = current_labels(get_labels(conn, session_id))
+        if lifter is not None:
+            summary.lifted = _lift(conn, session, current, raw, work, lifter)
         summary.contacts = _contacts(conn, session, current, raw, work, policy, ontology, now)
         _wearer(conn, session, current, raw, work, policy, now, summary)
     if session.lifecycle_state is LifecycleState.PRIVACY_APPROVED:
         set_lifecycle(conn, session_id, LifecycleState.PRELABELED)
     return summary
+
+
+def _lift(
+    conn: sa.Connection,
+    session: Session,
+    current: list[LabelRecord],
+    raw: ObjectStore,
+    work: Path,
+    lifter: DepthLifter,
+) -> int:
+    body = session.reference_stream
+    if any(x.provenance.model_version == lifter.version for x in current):
+        return 0
+    tracks = [
+        x
+        for x in current
+        if x.stream_id == body.stream_id
+        and isinstance(x.payload, KeypointTrackPayload | BoxTrackPayload)
+    ]
+    if not tracks:
+        return 0
+    labels = lifter.run(
+        _fetch(raw, body.uri, work),
+        session_id=session.session_id,
+        stream_id=body.stream_id,
+        tracks=tracks,
+        calib=session.calibration.intrinsics,
+        ontology_version=session.ontology_version or "",
+    )
+    insert_labels(conn, labels)
+    return len(labels)
 
 
 def _contact_kind(class_id: str | None, ontology: Ontology) -> str:

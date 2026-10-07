@@ -11,6 +11,10 @@ schemas:
 models:
 	uv run dlp models fetch
 
+# 공개 ONNX가 없는 모델(깊이)을 공식 가중치에서 변환한다 (일회용 PyTorch CPU 환경, 수 분)
+export-models:
+	uv run dlp models export
+
 # 실제 모델을 아직 연동하지 못한 곳 (GPU·Hugging Face 등이 필요)
 todo-models:
 	@grep -rn "TODO(real-model):" --include=*.py --include=*.yaml packages config | grep -v "/.venv/"
@@ -22,7 +26,7 @@ db-upgrade:
 	uv run dlp db upgrade
 	uv run dlp ontology register 1.0.0
 
-.PHONY: install lint fmt typecheck test contracts schemas models todo-models fixtures db-upgrade check env up down ps logs health test-services \
+.PHONY: install lint fmt typecheck test contracts schemas models export-models todo-models fixtures db-upgrade check env up down ps logs health test-services \
         cvat-up cvat-down cvat-superuser clean
 
 install:

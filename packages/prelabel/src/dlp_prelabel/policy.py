@@ -11,10 +11,16 @@ from pydantic import Field
 from dlp_schema.common import Contract, OntologyId
 
 
-class ModelSpec(Contract):
-    path: str
-    url: str
-    sha256: str
+class ModelRoles(Contract):
+    """역할 → config/models.yaml 이름."""
+
+    hands: str
+    body_detector: str
+    body: str
+    coco_objects: str
+    open_vocab: str
+    open_vocab_tokenizer: str
+    depth: str
 
 
 class HandsPolicy(Contract):
@@ -24,6 +30,7 @@ class HandsPolicy(Contract):
 
 class BodyPolicy(Contract):
     min_score: float = Field(ge=0, le=1)
+    keypoint_score: float = Field(ge=0, le=1)
     max_people: int = Field(ge=1)
     track_iou: float = Field(gt=0, le=1)
 
@@ -33,6 +40,23 @@ class ObjectsPolicy(Contract):
     track_iou: float = Field(gt=0, le=1)
     max_gap_ms: float = Field(ge=0)
     coco_to_ontology: dict[str, OntologyId]
+
+
+class OpenVocabObjectsPolicy(Contract):
+    frame_stride_ms: int = Field(ge=0)
+    min_score: float = Field(ge=0, le=1)
+    track_iou: float = Field(gt=0, le=1)
+    max_gap_ms: float = Field(ge=0)
+    queries: dict[str, OntologyId] = Field(min_length=1)
+
+
+class DepthPolicy(Contract):
+    frame_stride_ms: int = Field(ge=0)
+    default_hfov_deg: float = Field(gt=0, lt=180)
+    patch_radius_px: int = Field(ge=0)
+    min_depth_m: float = Field(gt=0)
+    max_depth_m: float = Field(gt=0)
+    hand_points: tuple[int, ...] = Field(min_length=1)
 
 
 class GloveContactPolicy(Contract):
@@ -59,12 +83,14 @@ class WearerPolicy(Contract):
 
 class PrelabelPolicy(Contract):
     version: int
-    models: dict[str, ModelSpec]
+    models: ModelRoles
     hands: HandsPolicy
     body: BodyPolicy
     objects: ObjectsPolicy
+    open_vocab_objects: OpenVocabObjectsPolicy
     contact: ContactPolicy
     wearer_matching: WearerPolicy
+    depth: DepthPolicy
 
 
 def load_policy(root: Path) -> PrelabelPolicy:

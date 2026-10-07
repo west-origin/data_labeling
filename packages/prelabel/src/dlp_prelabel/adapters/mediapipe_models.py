@@ -1,6 +1,6 @@
-"""MediaPipe 실제 모델 어댑터 (CPU): 손 21관절, 전신 포즈(COCO 17점), COCO 객체 탐지.
+"""MediaPipe 실제 모델 어댑터 (CPU): 손 21관절, COCO 객체 탐지.
 
-모델 파일은 `make models`로 받는다 (config/policies/prelabel.yaml). MediaPipe는 EGL/GLES 시스템
+모델 파일은 `make models`로 받는다 (config/models.yaml). MediaPipe는 EGL/GLES 시스템
 라이브러리가 필요하다 (Ubuntu: libegl1 libgles2).
 """
 
@@ -11,11 +11,11 @@
 
 from __future__ import annotations
 
-import hashlib
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from dlp_models.registry import resolve
 from dlp_prelabel.common import iter_frames, model_label, track_boxes
 from dlp_prelabel.policy import PrelabelPolicy
 from dlp_schema.labels import (
@@ -29,19 +29,10 @@ from dlp_schema.labels import (
 )
 from dlp_schema.predictor import Clip, ModelUnavailableError
 
-# MediaPipe 포즈 33점 → COCO 17점 순서
-MP_TO_COCO17 = (0, 2, 5, 7, 8, 11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28)
 
-
-def _model(root: Path, policy: PrelabelPolicy, name: str) -> tuple[Path, str]:
-    spec = policy.models[name]
-    path = root / spec.path
-    if not path.is_file():
-        raise ModelUnavailableError(f"{name} 모델 파일이 없습니다: {path} (`make models`)")
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    if digest != spec.sha256:
-        raise ModelUnavailableError(f"{name} 모델 해시가 다릅니다: {digest}")
-    return path, f"mediapipe-{name}-{digest[:12]}"
+def _model(root: Path, name: str) -> tuple[Path, str]:
+    path, version = resolve(root, name)
+    return path, f"mediapipe-{version}"
 
 
 def _vision() -> Any:
@@ -68,7 +59,7 @@ class MediaPipeHands:
     def __init__(
         self, root: Path, policy: PrelabelPolicy, *, ontology_version: str, now: datetime
     ) -> None:
-        self.path, self.version = _model(root, policy, "hand_landmarker")
+        self.path, self.version = _model(root, policy.models.hands)
         self.policy, self.ontology_version, self.now = policy, ontology_version, now
 
     def run(self, clip: Clip) -> list[LabelRecord]:
@@ -123,82 +114,10 @@ class MediaPipeHands:
         return out
 
 
-class MediaPipePose:
-    name = "body"
-
-    def __init__(
-        self, root: Path, policy: PrelabelPolicy, *, ontology_version: str, now: datetime
-    ) -> None:
-        self.path, self.version = _model(root, policy, "pose_landmarker")
-        self.policy, self.ontology_version, self.now = policy, ontology_version, now
-
-    def run(self, clip: Clip) -> list[LabelRecord]:
-        mp, mpt, vision = _vision()
-        options = vision.PoseLandmarkerOptions(
-            base_options=mpt.BaseOptions(
-                model_asset_path=str(self.path), delegate=mpt.BaseOptions.Delegate.CPU
-            ),
-            running_mode=vision.RunningMode.VIDEO,
-            num_poses=self.policy.body.max_people,
-            min_pose_detection_confidence=self.policy.body.min_score,
-        )
-        detections: list[
-            tuple[int, list[tuple[str, tuple[float, float, float, float], float]]]
-        ] = []
-        frames: dict[tuple[int, tuple[float, float, float, float]], KeypointFrame] = {}
-        with vision.PoseLandmarker.create_from_options(options) as model:
-            for t, img in iter_frames(clip.video):
-                h, w = img.shape[:2]
-                result = model.detect_for_video(
-                    mp.Image(image_format=mp.ImageFormat.SRGB, data=img), t
-                )
-                dets: list[tuple[str, tuple[float, float, float, float], float]] = []
-                for landmarks in result.pose_landmarks:
-                    pts = [landmarks[i] for i in MP_TO_COCO17]
-                    points = tuple(
-                        Keypoint(
-                            x=p.x * w, y=p.y * h, visibility=2 if (p.visibility or 0) > 0.5 else 1
-                        )
-                        for p in pts
-                    )
-                    xs, ys = [p.x for p in points], [p.y for p in points]
-                    box = (min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys))
-                    score = sum((p.visibility or 0) for p in pts) / len(pts)
-                    dets.append(("person", box, score))
-                    frames[(t, box)] = KeypointFrame(t_ms=t, points=points)
-                detections.append((t, dets))
-        tracks = track_boxes(detections, iou_match=self.policy.body.track_iou, max_gap_ms=300)
-        out: list[LabelRecord] = []
-        for i, tr in enumerate(tracks):
-            times = sorted(tr.frames)
-            payload = KeypointTrackPayload(
-                entity_id=f"person_{i:02d}",
-                skeleton="coco17",
-                keyframes=tuple(frames[(t, tr.frames[t][0])] for t in times),
-            )
-            out.append(
-                model_label(
-                    label_id=f"{clip.session_id}-{clip.stream_id}-body-{i:03d}",
-                    session_id=clip.session_id,
-                    stream_id=clip.stream_id,
-                    t_start_ms=times[0],
-                    t_end_ms=times[-1],
-                    ontology_version=self.ontology_version,
-                    model_version=self.version,
-                    confidence=sum(s for _, s in tr.frames.values()) / len(tr.frames),
-                    payload=payload,
-                    now=self.now,
-                )
-            )
-        return out
-
-
 class MediaPipeObjects:
     """COCO 객체 탐지. 온톨로지에 대응하는 클래스만 남긴다.
 
-    TODO(real-model): COCO에 없는 청소 도구(걸레, 밀대, 솔 등)와 도구 작용부 마스크는
-    오픈 보캐뷸러리 탐지(Grounding DINO, OWLv2) + SAM 2가 필요하다 (GPU, Hugging Face 접근).
-    지금은 stub뿐이다.
+    COCO에 없는 청소 도구는 OWLv2 어댑터(adapters/owl_objects.py)가 맡는다.
     """
 
     name = "objects"
@@ -206,7 +125,7 @@ class MediaPipeObjects:
     def __init__(
         self, root: Path, policy: PrelabelPolicy, *, ontology_version: str, now: datetime
     ) -> None:
-        self.path, self.version = _model(root, policy, "object_detector")
+        self.path, self.version = _model(root, policy.models.coco_objects)
         self.policy, self.ontology_version, self.now = policy, ontology_version, now
 
     def run(self, clip: Clip) -> list[LabelRecord]:
@@ -260,6 +179,7 @@ def boxes_to_labels(
     now: datetime,
     *,
     prefix: str,
+    entity_prefix: str = "",
 ) -> list[LabelRecord]:
     out: list[LabelRecord] = []
     counters: dict[str, int] = {}
@@ -277,7 +197,7 @@ def boxes_to_labels(
             for t in times
         )
         payload = BoxTrackPayload(
-            entity_id=f"{tr.key}_{n:02d}", class_id=tr.key, keyframes=keyframes
+            entity_id=f"{entity_prefix}{tr.key}_{n:02d}", class_id=tr.key, keyframes=keyframes
         )
         out.append(
             model_label(

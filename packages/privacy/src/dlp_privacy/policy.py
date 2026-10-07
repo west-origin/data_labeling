@@ -30,13 +30,17 @@ class RenderPolicy(Contract):
 
 
 class DetectorSpec(Contract):
-    kind: Literal["yunet", "opencv_codes", "reflection", "unavailable", "oracle"]
-    model_path: str | None = None
-    model_sha256: str | None = None
-    model_url: str | None = None
+    kind: Literal["yunet", "opencv_codes", "reflection", "open_vocab", "unavailable", "oracle"]
+    model: str | None = Field(default=None, description="config/models.yaml 이름")
+    tokenizer: str | None = None
     region_detector: str | None = None
     face_detector: str | None = None
     threshold_scale: float | None = None
+    # open_vocab 전용
+    frame_stride_ms: int = Field(default=0, ge=0)
+    score_threshold: float | None = Field(default=None, ge=0, le=1)
+    score_full: float | None = Field(default=None, gt=0, le=1)
+    queries: dict[str, str] = Field(default_factory=dict[str, str])
 
 
 class PrivacyPolicy(Contract):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import av
@@ -9,9 +10,11 @@ import pytest
 from dlp_fixtures.sync import generate_sync_scenario
 from dlp_fixtures.video import BlurScenario, render_qr, target_boxes_at
 from dlp_media.pts import build_pts_index
+from dlp_models.owlv2 import OwlDetection
 from dlp_privacy.detection import FrameDetector
 from dlp_privacy.detectors import build_detectors
 from dlp_privacy.detectors.codes import CodeDetector
+from dlp_privacy.detectors.open_vocab import OpenVocabDetector
 from dlp_privacy.detectors.oracle import OracleDetector
 from dlp_privacy.pipeline import StreamResult, detect_video
 from dlp_privacy.policy import PrivacyPolicy, TargetPolicy
@@ -239,6 +242,8 @@ def test_render_strips_audio(tmp_path: Path, policy: PrivacyPolicy) -> None:
 
 
 def test_detector_factory_reports_unavailable_models(policy: PrivacyPolicy, tmp_path: Path) -> None:
+    (tmp_path / "config").mkdir()
+    shutil.copy(ROOT / "config/models.yaml", tmp_path / "config/models.yaml")
     ready, missing = build_detectors(policy, tmp_path)  # 가중치가 없는 루트
     assert "codes" in ready
     assert "yunet" in missing and "make models" in missing["yunet"]
@@ -252,6 +257,37 @@ def test_code_detector_finds_qr_as_shipping_label() -> None:
     [det] = CodeDetector("codes").detect(frame, 0, 0.3)
     assert det.target == "shipping_label"
     assert 70 <= det.box.x <= 110 and 30 <= det.box.y <= 70 and det.box.w > 60
+
+
+class FakeOwl:
+    def __init__(self) -> None:
+        self.queries = ["a printed document", "a mirror"]
+        self.calls = 0
+
+    def detect(self, image: np.ndarray, thresholds: list[float]) -> list[OwlDetection]:
+        self.calls += 1
+        return [
+            OwlDetection(0, (10.0, 10.0, 50.0, 40.0), 0.2),
+            OwlDetection(1, (100.0, 20.0, 60.0, 80.0), 0.05),
+        ]
+
+
+def test_open_vocab_detector_runs_every_stride_and_holds_results() -> None:
+    fake = FakeOwl()
+    det = OpenVocabDetector(
+        "open_vocab", fake, ["document", "reflective_surface"], version="owl-x",
+        frame_stride_ms=500, score_threshold=0.05, score_full=0.4,
+    )  # fmt: skip
+    img = np.zeros((120, 200, 3), dtype=np.uint8)
+    per_frame = [det.detect(img, t, 0.3) for t in range(0, 1_000, 33)]
+    assert fake.calls == 2  # 0 ms, 528 ms
+    assert all(len(found) == 1 for found in per_frame)  # 0.05/0.4 < 0.3은 빠진다
+    [doc] = per_frame[0]
+    assert doc.target == "document" and doc.score == pytest.approx(0.5)
+    assert det.detect(img, 990, 0.1)[1].target == "reflective_surface"  # 같은 시각: 추론 없음
+    assert fake.calls == 2
+    det.detect(img, 0, 0.3)  # 시간이 거꾸로 가면 새 영상
+    assert fake.calls == 3
 
 
 @pytest.mark.skipif(

@@ -11,7 +11,8 @@
 - `make fmt` — 자동 포맷·린트 수정
 - `make contracts` — 온톨로지 검증 + JSON Schema가 코드와 일치하는지 검사 (`make check`에 포함)
 - `make schemas` — 계약 타입을 바꾼 뒤 `schemas/*.schema.json` 재생성
-- `make models` — 정책에 적힌 모델 가중치를 `data/models/`에 받고 sha256 확인 (저장소에는 넣지 않음)
+- `make models` — `config/models.yaml`의 모델 가중치를 `data/models/`에 받고 sha256 확인 (저장소에는 넣지 않음)
+- `make export-models` — 공개 ONNX가 없는 모델(메트릭 깊이)을 공식 가중치에서 변환 (일회용 PyTorch 환경)
 - `make todo-models` — 실제 모델을 아직 연동하지 못한 곳(`TODO(real-model):` 표시) 목록
 - `make fixtures` — 합성 픽스처를 `data/fixtures/`에 생성 (저장소에는 넣지 않음)
 - `make db-upgrade` — 개발 DB에 Alembic 마이그레이션 적용 + 온톨로지 v1 등록
@@ -33,14 +34,15 @@
   장갑 Parquet·HDF5 정규화. `dlp ingest <매니페스트>`로 실행한다.
 - `packages/sync/` (`dlp_sync`) — 멀티스트림 동기화: QR 슬레이트, 두드림, 오디오·운동 상호상관, 드리프트 보정.
   `dlp sync run <세션>`, `dlp sync adjust <세션> <스트림> <ms>`. 정책은 `config/policies/sync.yaml`.
-- `packages/privacy/` (`dlp_privacy`) — 프라이버시 게이트: 탐지기(YuNet, QR·바코드, 반사면, 오라클 stub), 추적·보간·유지,
+- `packages/privacy/` (`dlp_privacy`) — 프라이버시 게이트: 탐지기(YuNet, QR·바코드, OWLv2 오픈 보캐뷸러리, 반사면, 오라클 stub), 추적·보간·유지,
   모자이크 렌더, 검수 우선 구간, 잔여 누락 감사. `dlp privacy detect|approve|render`. 정책은 `config/policies/privacy.yaml`.
 - `packages/review/` (`dlp_review`) — 검수 도구 연동: CVAT·Label Studio 변환기(무손실 왕복), 작업 생성, reconcile(검수 결과 →
   라벨 이력), 웹훅 수집, 라벨러 워터마크, 역할 경계. `dlp review create|collect|serve|register-webhooks`.
 - `packages/datasets/` (`dlp_datasets`) — 데이터셋 버전(lakeFS 커밋), 작업자·장소 단위 분할(holdout 포함), 골든셋 제안,
   사용 중지 전파, 계보 조회. `dlp dataset golden|build|withdraw`, `dlp lineage <세션>`. 정책은 `config/policies/dataset.yaml`.
-- `packages/prelabel/` (`dlp_prelabel`) — 자동 프리라벨: MediaPipe 손·전신·COCO 객체(실제), Oracle stub, 장갑·영상 접촉,
-  3인칭 착용자 매칭. `dlp prelabel run <세션>`. 정책은 `config/policies/prelabel.yaml`.
+- `packages/models/` (`dlp_models`) — 모델 레지스트리(`config/models.yaml`, 해시 확인)와 공용 ONNX 런타임(OWLv2, 메트릭 깊이).
+- `packages/prelabel/` (`dlp_prelabel`) — 자동 프리라벨: MediaPipe 손·COCO 객체, RTMPose 전신, OWLv2 도구, 깊이 기반 3D 궤적,
+  Oracle stub, 장갑·영상 접촉, 3인칭 착용자 매칭. `dlp prelabel run <세션>`. 정책은 `config/policies/prelabel.yaml`.
 - `config/` — 온톨로지·정책·기본값 YAML. 코드에 값을 하드코딩하지 않는다.
 - `schemas/` — 생성된 JSON Schema. 직접 편집하지 않는다 (`make schemas`).
 - `services/` — 개발용 docker compose (PostgreSQL, SeaweedFS S3, Label Studio, Prefect, MLflow, lakeFS), CVAT 실행 스크립트.
