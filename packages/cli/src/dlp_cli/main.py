@@ -14,6 +14,7 @@ from dlp_cli import (
     models_cmds,
     prelabel_cmds,
     privacy_cmds,
+    relations_cmds,
     review_cmds,
     schema_cmds,
     sync_cmds,
@@ -50,6 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
     review_cmds.add_commands(sub)
     dataset_cmds.add_commands(sub)
     prelabel_cmds.add_commands(sub)
+    relations_cmds.add_commands(sub)
     return parser
 
 

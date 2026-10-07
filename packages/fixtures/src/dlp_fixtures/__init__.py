@@ -10,16 +10,19 @@ from dlp_fixtures.io import write_jsonl
 from dlp_fixtures.sessions import generate_sessions
 from dlp_fixtures.sync import SyncScenario, generate_sync_scenario
 from dlp_fixtures.video import BlurScenario, generate_blur_scenario
+from dlp_fixtures.wiping import WipingScenario, generate_wiping_scenario
 
 __all__ = [
     "ActionScenario",
     "BlurScenario",
     "SyncScenario",
+    "WipingScenario",
     "generate_action_scenario",
     "generate_all",
     "generate_blur_scenario",
     "generate_sessions",
     "generate_sync_scenario",
+    "generate_wiping_scenario",
 ]
 
 RECORDED_AT = datetime(2026, 11, 2, 9, 30, tzinfo=UTC)
@@ -33,6 +36,7 @@ def generate_all(out_dir: Path, seed: int = 0, n_sessions: int = 300) -> dict[st
         "sync": out_dir / "sync",
         "blur": out_dir / "blur",
         "actions": out_dir / "actions",
+        "wiping": out_dir / "wiping",
     }
     write_jsonl(paths["sessions"], generate_sessions(n_sessions, seed))
     generate_sync_scenario(seed, recorded_at=RECORDED_AT).write(paths["sync"])
@@ -41,4 +45,8 @@ def generate_all(out_dir: Path, seed: int = 0, n_sessions: int = 300) -> dict[st
     blur.write(paths["blur"] / "bodycam.mp4")
     write_jsonl(paths["blur"] / "labels.jsonl", blur.labels)
     generate_action_scenario(seed).write(paths["actions"])
+    wiping = generate_wiping_scenario(seed)
+    paths["wiping"].mkdir(parents=True, exist_ok=True)
+    write_jsonl(paths["wiping"] / "labels.jsonl", wiping.labels)
+    write_jsonl(paths["wiping"] / "truth_relations.jsonl", wiping.truth_relations)
     return paths
