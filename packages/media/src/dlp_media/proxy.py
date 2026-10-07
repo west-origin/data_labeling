@@ -18,14 +18,22 @@ from dlp_media.probe import to_fraction
 from dlp_schema.config import ProxyConfig
 
 
+def proxy_size(width: int, height: int, max_height: int) -> tuple[int, int]:
+    """프록시 해상도. 높이는 max_height 이하로 줄이고(비율 유지), 가로·세로를 짝수로 맞춘다.
+
+    libx264 yuv420p는 홀수 크기를 인코딩하지 못한다. 원본이 홀수면 1픽셀 줄인다 (최소 2).
+    """
+    if height > max_height:
+        width, height = round(width * max_height / height), max_height
+    return max(2, width // 2 * 2), max(2, height // 2 * 2)
+
+
 def make_proxy(src: Path, dst: Path, settings: ProxyConfig) -> None:
     """settings: config/defaults.yaml media.proxy (높이 상한, CRF, 키프레임 간격)."""
     max_height, crf, keyframe_ms = settings.max_height, settings.crf, settings.keyframe_ms
     with av.open(str(src)) as inp, av.open(str(dst), "w") as out:
         vin = inp.streams.video[0]
-        width, height = vin.codec_context.width, vin.codec_context.height
-        if height > max_height:
-            width, height = round(width * max_height / height / 2) * 2, max_height
+        width, height = proxy_size(vin.codec_context.width, vin.codec_context.height, max_height)
         time_base = to_fraction(vin.time_base)
 
         vout = out.add_stream("libx264", rate=30)

@@ -215,7 +215,9 @@
           "type": "integer"
         },
         "max_height": {
-          "exclusiveMinimum": 0,
+          "description": "높이 상한 (짝수: libx264 yuv420p는 가로·세로가 짝수여야 한다)",
+          "minimum": 2,
+          "multipleOf": 2,
           "title": "Max Height",
           "type": "integer"
         }

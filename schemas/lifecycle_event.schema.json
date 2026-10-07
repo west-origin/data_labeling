@@ -1,0 +1,74 @@
+{
+  "$defs": {
+    "LifecycleState": {
+      "description": "한 방향으로만 이동한다. 어느 단계에서든 withdrawn으로 빠질 수 있다.",
+      "enum": [
+        "raw_ingested",
+        "privacy_approved",
+        "prelabeled",
+        "human_verified",
+        "split_assigned",
+        "exported",
+        "withdrawn"
+      ],
+      "title": "LifecycleState",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "세션 생애주기 전이 기록 (DB session_lifecycle_events, 추가만 한다. ADR 0028).\n\n세션 등록 때 처음 상태(from_state 없음)를 한 번, 이후 상태가 바뀔 때마다 한 번 남는다.\n같은 상태로의 멱등 호출은 남기지 않는다. 예: 사람 검수 완료 시각 = human_verified로 처음\n전이한 기록의 at.",
+  "properties": {
+    "actor": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "전이를 일으킨 사람·단계 (모르면 None)",
+      "title": "Actor"
+    },
+    "at": {
+      "format": "date-time",
+      "title": "At",
+      "type": "string"
+    },
+    "event_id": {
+      "description": "DB가 매기는 일련번호 (같은 세션 안에서 시간 순)",
+      "minimum": 1,
+      "title": "Event Id",
+      "type": "integer"
+    },
+    "from_state": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/LifecycleState"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "이전 상태. 세션 등록 기록이면 None"
+    },
+    "session_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Session Id",
+      "type": "string"
+    },
+    "to_state": {
+      "$ref": "#/$defs/LifecycleState"
+    }
+  },
+  "required": [
+    "event_id",
+    "session_id",
+    "from_state",
+    "to_state",
+    "at"
+  ],
+  "title": "LifecycleEvent",
+  "type": "object"
+}

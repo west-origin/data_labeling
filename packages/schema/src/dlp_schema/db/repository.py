@@ -23,6 +23,7 @@ from dlp_schema.db.tables import (
     review_assignments,
     review_tasks,
     review_work,
+    session_lifecycle_events,
     sessions,
     streams,
     training_runs,
@@ -47,6 +48,7 @@ from dlp_schema.review import (
     ReviewTaskStatus,
 )
 from dlp_schema.session import (
+    LifecycleEvent,
     LifecycleState,
     PrivacyState,
     Session,
@@ -65,27 +67,72 @@ class TransitionError(ValueError):
 
 
 def register_ontology(conn: sa.Connection, ontology: Ontology) -> None:
-    """온톨로지 버전을 등록한다. 같은 버전이 다른 내용으로 이미 있으면 오류."""
+    """온톨로지 버전을 등록한다.
+
+    같은 버전이 이미 있으면
+    - 내용이 같으면 아무것도 하지 않는다.
+    - 등록된 버전이 초안(draft)이고 새 내용이 덧붙이기만 한 것이면(기존 키와 값은 그대로, 새 키만
+      더함) 내용을 새 것으로 바꾼다 (ADR 0028). 예전 내용으로 기록된 라벨은 새 내용에서도 모두
+      유효하다. 상태(draft/frozen) 변경은 덧붙이기가 아니다.
+    - 그 밖(확정된 버전, 키 삭제·값 변경)은 오류다. 새 버전을 만들고 이관(migrate_labels)한다.
+    """
     content = ontology.model_dump(mode="json")
-    existing = conn.execute(
-        sa.select(ontology_versions.c.content).where(
-            ontology_versions.c.version == ontology.version
+    row = (
+        conn.execute(
+            sa.select(ontology_versions.c.status, ontology_versions.c.content)
+            .where(ontology_versions.c.version == ontology.version)
+            .with_for_update()
         )
-    ).scalar_one_or_none()
-    if existing is None:
+        .mappings()
+        .one_or_none()
+    )
+    if row is None:
         conn.execute(
             ontology_versions.insert().values(
                 version=ontology.version, status=ontology.status, content=content
             )
         )
-    elif existing != content:
-        raise ValueError(f"온톨로지 {ontology.version}이 다른 내용으로 이미 등록되어 있습니다")
+        return
+    existing: Any = row["content"]
+    if existing == content:
+        return
+    if row["status"] == "draft" and _is_additive(existing, content):
+        conn.execute(
+            ontology_versions.update()
+            .where(ontology_versions.c.version == ontology.version)
+            .values(content=content)
+        )
+        return
+    why = "확정된 버전입니다" if row["status"] != "draft" else "덧붙이기가 아닌 변경입니다"
+    raise ValueError(
+        f"온톨로지 {ontology.version}이 다른 내용으로 이미 등록되어 있습니다 ({why}). "
+        "버전을 올리고 이관하세요"
+    )
+
+
+def _is_additive(old: Any, new: Any) -> bool:
+    """new가 old에 키를 더하기만 했는가 (사전은 재귀로, 그 밖의 값은 같아야 한다)."""
+    if isinstance(old, dict) and isinstance(new, dict):
+        old_d: dict[str, Any] = old  # pyright: ignore[reportUnknownVariableType]
+        new_d: dict[str, Any] = new  # pyright: ignore[reportUnknownVariableType]
+        return all(k in new_d and _is_additive(v, new_d[k]) for k, v in old_d.items())
+    return bool(old == new)
 
 
 # ---------------------------------------------------------------- 세션
 
 
-def insert_session(conn: sa.Connection, session: Session) -> None:
+def insert_session(
+    conn: sa.Connection,
+    session: Session,
+    *,
+    at: datetime | None = None,
+    actor: str | None = None,
+) -> None:
+    """세션과 스트림을 등록하고, 처음 생애주기 상태를 session_lifecycle_events에 남긴다.
+
+    at: 기록 시각 (시간대 필수). 주지 않으면 DB 시각(now())이다.
+    """
     data = session.model_dump(mode="json")
     conn.execute(
         sessions.insert().values(
@@ -107,6 +154,7 @@ def insert_session(conn: sa.Connection, session: Session) -> None:
         for i, s in enumerate(data["streams"])
     ]
     conn.execute(streams.insert(), rows)
+    _record_lifecycle(conn, session.session_id, None, session.lifecycle_state, at, actor)
 
 
 def get_session(conn: sa.Connection, session_id: str) -> Session:
@@ -129,19 +177,67 @@ def get_session(conn: sa.Connection, session_id: str) -> Session:
     return Session.model_validate(data)
 
 
-def set_lifecycle(conn: sa.Connection, session_id: str, target: LifecycleState) -> None:
+def set_lifecycle(
+    conn: sa.Connection,
+    session_id: str,
+    target: LifecycleState,
+    *,
+    at: datetime | None = None,
+    actor: str | None = None,
+) -> None:
+    """생애주기 상태를 바꾸고 같은 트랜잭션에서 전이를 session_lifecycle_events에 남긴다.
+
+    같은 상태로의 호출(멱등)은 기록하지 않는다. at: 전이 시각 (시간대 필수). 주지 않으면
+    DB 시각(now())이다. actor: 전이를 일으킨 사람·단계 (선택).
+    """
     current = LifecycleState(
         conn.execute(
-            sa.select(sessions.c.lifecycle_state).where(sessions.c.session_id == session_id)
+            sa.select(sessions.c.lifecycle_state)
+            .where(sessions.c.session_id == session_id)
+            .with_for_update()
         ).scalar_one()
     )
     if not can_transition(current, target):
         raise TransitionError(f"{session_id}: {current} → {target} 전이는 허용되지 않습니다")
+    if current is target:
+        return
     conn.execute(
         sessions.update()
         .where(sessions.c.session_id == session_id)
         .values(lifecycle_state=target.value)
     )
+    _record_lifecycle(conn, session_id, current, target, at, actor)
+
+
+def _record_lifecycle(
+    conn: sa.Connection,
+    session_id: str,
+    from_state: LifecycleState | None,
+    to_state: LifecycleState,
+    at: datetime | None,
+    actor: str | None,
+) -> None:
+    if at is not None and at.utcoffset() is None:
+        raise ValueError("생애주기 기록 시각(at)에는 시간대가 있어야 합니다")
+    conn.execute(
+        session_lifecycle_events.insert().values(
+            session_id=session_id,
+            from_state=from_state.value if from_state is not None else None,
+            to_state=to_state.value,
+            at=at if at is not None else sa.func.now(),
+            actor=actor,
+        )
+    )
+
+
+def list_lifecycle_events(conn: sa.Connection, session_id: str) -> list[LifecycleEvent]:
+    """세션의 생애주기 전이 기록 (기록 순서)."""
+    rows = conn.execute(
+        sa.select(session_lifecycle_events)
+        .where(session_lifecycle_events.c.session_id == session_id)
+        .order_by(session_lifecycle_events.c.event_id)
+    ).mappings()
+    return [LifecycleEvent.model_validate(dict(r)) for r in rows]
 
 
 def set_privacy_state(conn: sa.Connection, session_id: str, state: PrivacyState) -> None:

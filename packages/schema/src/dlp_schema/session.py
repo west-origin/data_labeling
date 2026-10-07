@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Annotated
 
-from pydantic import AwareDatetime, Field, model_validator
+from pydantic import AwareDatetime, Field, StringConstraints, model_validator
 
 from dlp_schema.common import Confidence, Contract, Identifier, Ms, SemVer
 
@@ -118,12 +119,16 @@ class Stream(Contract):
         return self.offset_ms + self.manual_adjustment_ms + stream_ms * self.clock_scale
 
 
+# 동의서 버전. DB sessions.consent_version(VARCHAR(64))과 길이를 맞춘다 (ADR 0028)
+ConsentVersion = Annotated[str, StringConstraints(min_length=1, max_length=64)]
+
+
 class Session(Contract):
     session_id: Identifier
     domain: Domain
     worker_id: Identifier = Field(description="가명 작업자 ID")
     site_id: Identifier = Field(description="가명 장소 ID")
-    consent_version: str
+    consent_version: ConsentVersion = Field(description="동의서 버전 (1~64자)")
     recorded_at: AwareDatetime
     duration_ms: Ms
     streams: tuple[Stream, ...]
@@ -161,3 +166,19 @@ class Session(Contract):
             if s.stream_id == stream_id:
                 return s
         raise KeyError(stream_id)
+
+
+class LifecycleEvent(Contract):
+    """세션 생애주기 전이 기록 (DB session_lifecycle_events, 추가만 한다. ADR 0028).
+
+    세션 등록 때 처음 상태(from_state 없음)를 한 번, 이후 상태가 바뀔 때마다 한 번 남는다.
+    같은 상태로의 멱등 호출은 남기지 않는다. 예: 사람 검수 완료 시각 = human_verified로 처음
+    전이한 기록의 at.
+    """
+
+    event_id: int = Field(ge=1, description="DB가 매기는 일련번호 (같은 세션 안에서 시간 순)")
+    session_id: Identifier
+    from_state: LifecycleState | None = Field(description="이전 상태. 세션 등록 기록이면 None")
+    to_state: LifecycleState
+    at: AwareDatetime
+    actor: str | None = Field(default=None, description="전이를 일으킨 사람·단계 (모르면 None)")

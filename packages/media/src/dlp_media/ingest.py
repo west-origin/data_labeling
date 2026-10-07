@@ -38,7 +38,15 @@ from dlp_media.storage import ObjectStore, put_immutable
 from dlp_schema.common import Contract, Identifier, SemVer
 from dlp_schema.config import ProxyConfig, load_config, repo_root
 from dlp_schema.db.repository import get_session, insert_session
-from dlp_schema.session import Calibration, Domain, Session, Stream, StreamKind, SyncMethod
+from dlp_schema.session import (
+    Calibration,
+    ConsentVersion,
+    Domain,
+    Session,
+    Stream,
+    StreamKind,
+    SyncMethod,
+)
 
 VIDEO_KINDS = {StreamKind.BODYCAM, StreamKind.THIRD_PERSON}
 GLOVE_KINDS = {StreamKind.GLOVE_LEFT, StreamKind.GLOVE_RIGHT}
@@ -55,7 +63,7 @@ class SessionManifest(Contract):
     domain: Domain
     worker_id: Identifier
     site_id: Identifier
-    consent_version: str
+    consent_version: ConsentVersion = Field(description="동의서 버전 (1~64자)")
     recorded_at: AwareDatetime | None = Field(
         default=None, description="없으면 바디캠 컨테이너의 creation_time을 쓴다"
     )

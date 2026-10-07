@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
+from dlp_schema.common import IDENTIFIER_MAX, derived_id
 from dlp_schema.config import load_config
 from dlp_schema.dataset import DatasetVersion, Split
-from dlp_schema.episode import Entity, EntityKind, EpisodeGraph, current_labels
+from dlp_schema.episode import Entity, EntityKind, EpisodeGraph, current_labels, retractions
 from dlp_schema.jsonschema import stale_schemas
 from dlp_schema.labels import LabelRecord, Verification, VerificationState
 from dlp_schema.migration import OntologyMigration, load_migration, migrate_labels
@@ -170,3 +172,30 @@ def test_defaults_config_loads(repo: Path) -> None:
 
 def test_committed_json_schemas_are_current(repo: Path) -> None:
     assert stale_schemas(repo / "schemas") == [], "`dlp schema export`로 다시 생성하세요"
+
+
+def test_derived_ids_stay_within_identifier_length() -> None:
+    """128자에 가까운 라벨 ID도 이관·삭제 레코드 ID가 계약 길이 안이고 결정적이다."""
+    long_id = "s001-" + "x" * 109 + ":rabcdef123456"  # 128자
+    label = make_label(action_payload(), label_id=long_id)
+    migration = OntologyMigration(from_version="1.0.0", to_version="1.1.0")
+    result = migrate_labels([label], migration, FIXED_TIME)
+    assert result.needs_review == ()
+    [new] = result.migrated
+    assert len(new.label_id) <= IDENTIFIER_MAX and new.label_id.endswith(":v1.1.0")
+    assert new.parent_label_id == long_id
+    again = migrate_labels([label], migration, FIXED_TIME)
+    assert again.migrated[0].label_id == new.label_id  # 멱등
+
+    [gone] = retractions([label], "m:2", FIXED_TIME)
+    assert len(gone.label_id) <= IDENTIFIER_MAX and gone.label_id.endswith(":retracted")
+    assert gone.label_id != new.label_id and gone.parent_label_id == long_id
+    short = make_label(action_payload(), label_id="s001-a")
+    assert retractions([short], "m:2", FIXED_TIME)[0].label_id == "s001-a:retracted"
+    assert derived_id("a" * 120, "v1.0.0") != derived_id("a" * 119 + "b", "v1.0.0")
+
+
+def test_retractions_validate_the_contract() -> None:
+    label = make_label(action_payload(), label_id="s001-a")
+    with pytest.raises(ValidationError):
+        retractions([label], "m:2", datetime(2026, 1, 1))  # 시간대 없는 시각

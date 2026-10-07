@@ -58,12 +58,19 @@ def detect_double_taps(
 
 
 def match_taps(
-    reference: list[DoubleTap], target: list[DoubleTap], policy: TapPolicy
+    reference: list[DoubleTap],
+    target: list[DoubleTap],
+    policy: TapPolicy,
+    *,
+    max_drift_ppm: float = 0.0,
 ) -> list[Anchor]:
     """기준(바디캠)과 대상의 두 번 두드림을 짝짓는다.
 
     가능한 모든 짝의 오프셋 후보 중 허용 오차 안에서 가장 많은 짝을 설명하는 것을 고른다
     (어느 한쪽이 두드림을 놓치거나 잡음을 두드림으로 잡아도 견딘다).
+    후보를 낸 짝에서 |Δt|만큼 떨어진 두드림은 두 시계의 드리프트가 쌓였을 수 있으므로
+    허용 오차에 max_drift_ppm·|Δt|를 더한다
+    (sync.yaml max_drift_ppm). 20분 녹화의 80 ppm 드리프트는 끝에서 약 96 ms다.
     """
     best: list[Anchor] = []
     for r in reference:
@@ -73,10 +80,10 @@ def match_taps(
             used: set[int] = set()
             for rr in reference:
                 for j, tt in enumerate(target):
-                    if (
-                        j not in used
-                        and abs(rr.first_ms - (tt.first_ms + offset)) <= policy.match_tolerance_ms
-                    ):
+                    tolerance = policy.match_tolerance_ms + max_drift_ppm * 1e-6 * abs(
+                        rr.first_ms - r.first_ms
+                    )
+                    if j not in used and abs(rr.first_ms - (tt.first_ms + offset)) <= tolerance:
                         used.add(j)
                         anchors.append(Anchor(rr.first_ms, tt.first_ms, "tap1"))
                         anchors.append(Anchor(rr.second_ms, tt.second_ms, "tap2"))

@@ -10,7 +10,14 @@ manual_adjustment_ms는 다시 동기화해도 유지한다.
   (오프셋 0, 배율 1, 조정값 = 사람이 정한 오프셋). unsynced 스트림은 다음 단계가 쓰지 않는다.
 
 신뢰도
-- qr_slate: 슬레이트 2개 이상 0.95, 1개 0.8 (프레임 간격만큼의 양자화 오차가 있다)
+- qr_slate: 슬레이트 2개 이상 confidence_many, 1개 confidence_one에
+  exp(-max(0, 오차 상한 - 양자화) / slate.residual_scale_ms)를 곱한다.
+  오차 상한 = 최대 앵커 잔차 + 드리프트가 쌓일 수 있는 양(드리프트를 맞췄으면 앵커 밖 외삽분,
+  아니면 max_drift_ppm·앵커에서 가장 먼 거리). 양자화 = 앵커의 프레임 간격(gap_ms) 중 최대.
+  긴 녹화를 오프셋만으로 맞추면 신뢰도가 떨어져 다음 방법으로 넘어간다.
+  두 영상에 오디오가 있으면(refine_with_audio) 슬레이트 맞춤을 출발점으로 오디오 상관 창을 맞춰
+  드리프트까지 다듬고, 그 결과가 슬레이트 앵커와 양자화 안에서 맞으면 쓴다
+  (신뢰도는 슬레이트 기본값과 상관 신뢰도 중 큰 값).
 - tap_event: (짝지은 두 번 두드림 수 / 2, 최대 1) * exp(-잔차 RMS / residual_scale_ms)
 - audio_xcorr, motion_xcorr: 1 - min_psr / PSR (PSR이 min_psr 이하면 0). 앵커가 2개 이상이면
   exp(-잔차 RMS / residual_scale_ms)를 곱한다
@@ -18,6 +25,7 @@ manual_adjustment_ms는 다시 동기화해도 유지한다.
 
 from __future__ import annotations
 
+import itertools
 import math
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -28,9 +36,9 @@ from dlp_schema.session import Session, Stream, StreamKind, SyncMethod
 from dlp_sync.anchors import Anchor, ClockFit, FitError, fit_clock
 from dlp_sync.policy import MethodName, SyncPolicy
 from dlp_sync.signals import Audio, Series
-from dlp_sync.slate import SlateSighting, detect_slates
+from dlp_sync.slate import SlateScan, scan_slates
 from dlp_sync.taps import DoubleTap, detect_double_taps, match_taps
-from dlp_sync.xcorr import XcorrResult, audio_anchors, motion_anchors
+from dlp_sync.xcorr import LagPrior, XcorrResult, audio_anchors, motion_anchors
 
 METHOD_ENUM: dict[MethodName, SyncMethod] = {
     "qr_slate": SyncMethod.QR_SLATE,
@@ -86,14 +94,14 @@ class _Reference:
         self.media = media
         self.policy = policy
         self.imu = imu
-        self._slates: list[SlateSighting] | None = None
+        self._slates: SlateScan | None = None
         self._audio_taps: list[DoubleTap] | None = None
 
     @property
-    def slates(self) -> list[SlateSighting]:
+    def slates(self) -> SlateScan:
         if self._slates is None:
             v = self.media.video
-            self._slates = detect_slates(v, self.policy.slate) if v else []
+            self._slates = scan_slates(v, self.policy.slate) if v else SlateScan([], None)
         return self._slates
 
     @property
@@ -190,13 +198,23 @@ def _try(method: MethodName, ref: _Reference, target: StreamMedia, policy: SyncP
             if ref.media.audio is None or target.audio is None:
                 return Attempt(method, 0.0, "오디오가 없습니다")
             res = audio_anchors(
-                ref.media.audio, target.audio, policy.audio_xcorr, policy.max_offset_ms
+                ref.media.audio,
+                target.audio,
+                policy.audio_xcorr,
+                policy.max_offset_ms,
+                max_drift_ppm=policy.max_drift_ppm,
             )
             ax = policy.audio_xcorr
             return _from_xcorr(method, res, ax.min_psr, ax.residual_scale_ms, policy)
         if ref.imu is None or target.series is None:
             return Attempt(method, 0.0, "기준 IMU나 대상 시계열이 없습니다")
-        res = motion_anchors(ref.imu, target.series, policy.motion_xcorr, policy.max_offset_ms)
+        res = motion_anchors(
+            ref.imu,
+            target.series,
+            policy.motion_xcorr,
+            policy.max_offset_ms,
+            max_drift_ppm=policy.max_drift_ppm,
+        )
         mx = policy.motion_xcorr
         return _from_xcorr(method, res, mx.min_psr, mx.residual_scale_ms, policy)
     except FitError as exc:
@@ -206,21 +224,104 @@ def _try(method: MethodName, ref: _Reference, target: StreamMedia, policy: SyncP
 def _slate(ref: _Reference, target: StreamMedia, policy: SyncPolicy) -> Attempt:
     if target.video is None:
         return Attempt("qr_slate", 0.0, "영상이 없습니다")
-    ref_by_payload = {s.payload: s.stream_ms for s in ref.slates}
-    anchors = [
-        Anchor(ref_by_payload[s.payload], s.stream_ms, s.payload)
-        for s in detect_slates(target.video, policy.slate)
-        if s.payload in ref_by_payload
-    ]
-    if not anchors:
-        return Attempt("qr_slate", 0.0, "두 영상에서 같은 슬레이트를 찾지 못했습니다")
-    if policy.slate.estimate_drift:
-        fit = _fit(anchors, policy)
-    else:
-        fit = fit_clock(anchors, min_drift_span_ms=math.inf, max_drift_ppm=policy.max_drift_ppm)
     sp = policy.slate
-    confidence = sp.confidence_many if len(anchors) >= 2 else sp.confidence_one
-    return Attempt("qr_slate", confidence, f"슬레이트 {len(anchors)}개", fit, anchors)
+    ref_by_payload = {s.payload: s for s in ref.slates.sightings}
+    scan = scan_slates(target.video, sp)
+    matched = [
+        (ref_by_payload[s.payload], s) for s in scan.sightings if s.payload in ref_by_payload
+    ]
+    if not matched:
+        return Attempt("qr_slate", 0.0, "두 영상에서 같은 슬레이트를 찾지 못했습니다")
+    anchors = [Anchor(r.stream_ms, t.stream_ms, t.payload) for r, t in matched]
+    # 앵커 오차는 (-대상 간격, +기준 간격) 안이다
+    quant_ms = max(max(r.gap_ms, t.gap_ms) for r, t in matched)
+    stream_s = [a.stream_ms for a in anchors]
+    span = max(stream_s) - min(stream_s)
+    drift = sp.estimate_drift and len(anchors) >= 2 and span >= sp.min_drift_span_ms
+    fit = fit_clock(
+        anchors,
+        min_drift_span_ms=sp.min_drift_span_ms if drift else math.inf,
+        max_drift_ppm=policy.max_drift_ppm,
+    )
+    extent = _stream_extent(target, scan, stream_s)
+    residual = max(abs(a.master_ms - fit.to_master(a.stream_ms)) for a in anchors)
+    if fit.drift_estimated:
+        # 앵커 밖으로 외삽하는 구간: 드리프트 오차 상한 (양 끝 앵커 오차 합 / 앵커 간격)
+        outside = max(min(stream_s) - extent[0], extent[1] - max(stream_s), 0.0)
+        drift_bound = 2 * quant_ms * outside / span
+    else:
+        drift_bound = policy.max_drift_ppm * 1e-6 * _farthest(stream_s, extent)
+    bound = residual + drift_bound
+    base = sp.confidence_many if len(anchors) >= 2 else sp.confidence_one
+    confidence = base * math.exp(-max(0.0, bound - quant_ms) / sp.residual_scale_ms)
+    reason = f"슬레이트 {len(anchors)}개, 오차 상한 {bound:.1f} ms (양자화 {quant_ms:.1f} ms)"
+    attempt = Attempt("qr_slate", confidence, reason, fit, anchors)
+    if sp.refine_with_audio and ref.media.audio is not None and target.audio is not None:
+        refined = _refine_slate(attempt, ref.media.audio, target.audio, quant_ms, policy)
+        if refined is not None:
+            return refined
+        attempt.reason += ", 오디오 정밀화 실패"
+    return attempt
+
+
+def _stream_extent(
+    target: StreamMedia, scan: SlateScan, stream_s: list[float]
+) -> tuple[float, float]:
+    """대상 스트림 시각의 범위. 길이를 모르면 앵커 범위."""
+    end = scan.duration_ms
+    if end is None and target.audio is not None:
+        end = target.audio.start_ms + target.audio.duration_ms
+    return (0.0, end if end is not None else max(stream_s))
+
+
+def _farthest(points: list[float], extent: tuple[float, float]) -> float:
+    """범위 안의 점에서 가장 가까운 앵커까지 거리의 최댓값."""
+    pts = sorted(points)
+    gaps = [(b - a) / 2 for a, b in itertools.pairwise(pts)]
+    return max([pts[0] - extent[0], extent[1] - pts[-1], *gaps, 0.0])
+
+
+def _refine_slate(
+    slate: Attempt, ref_audio: Audio, target_audio: Audio, quant_ms: float, policy: SyncPolicy
+) -> Attempt | None:
+    """슬레이트 맞춤을 출발점으로 오디오 상관 창을 맞춘다.
+
+    결과가 슬레이트 앵커와 양자화(+ refine_ms) 안에서 맞을 때만 쓴다.
+    """
+    assert slate.fit is not None
+    fit = slate.fit
+    ax = policy.audio_xcorr
+    # 드리프트를 맞췄으면 그 추정 오차(앵커 오차 합 / 앵커 간격), 아니면 드리프트 상한으로
+    # 앵커에서 멀수록 넓게 찾는다
+    drift_ppm = 2 * quant_ms / fit.span_ms * 1e6 if fit.drift_estimated else policy.max_drift_ppm
+    prior = LagPrior(
+        fit.offset_ms,
+        fit.clock_scale,
+        tuple(a.master_ms for a in slate.anchors),
+        2 * quant_ms + ax.refine_ms,
+        drift_ppm,
+    )
+    res = audio_anchors(
+        ref_audio, target_audio, ax, policy.max_offset_ms,
+        max_drift_ppm=policy.max_drift_ppm, prior=prior,
+    )  # fmt: skip
+    if res is None or not res.anchors:
+        return None
+    xc = _from_xcorr("audio_xcorr", res, ax.min_psr, ax.residual_scale_ms, policy)
+    if xc.fit is None or xc.confidence < policy.min_confidence:
+        return None
+    worst = max(abs(a.master_ms - xc.fit.to_master(a.stream_ms)) for a in slate.anchors)
+    if worst > quant_ms + ax.refine_ms:
+        return None
+    sp = policy.slate
+    base = sp.confidence_many if len(slate.anchors) >= 2 else sp.confidence_one
+    return Attempt(
+        "qr_slate",
+        max(base, xc.confidence),
+        f"{slate.reason}, 오디오 정밀화 {xc.reason} 창 {len(xc.anchors)}개",
+        xc.fit,
+        [*slate.anchors, *xc.anchors],
+    )
 
 
 def _tap(ref: _Reference, target: StreamMedia, policy: SyncPolicy) -> Attempt:
@@ -232,7 +333,9 @@ def _tap(ref: _Reference, target: StreamMedia, policy: SyncPolicy) -> Attempt:
         target_taps = detect_double_taps(target.series.t_ms, target.series.values, policy.tap)
     else:
         return Attempt("tap_event", 0.0, "대상 신호가 없습니다")
-    anchors = match_taps(ref.audio_taps, target_taps, policy.tap)
+    anchors = match_taps(
+        ref.audio_taps, target_taps, policy.tap, max_drift_ppm=policy.max_drift_ppm
+    )
     if not anchors:
         return Attempt("tap_event", 0.0, "두드림을 짝짓지 못했습니다")
     fit = _fit(anchors, policy)
@@ -250,6 +353,8 @@ def _from_xcorr(
 ) -> Attempt:
     if res is None:
         return Attempt(method, 0.0, "상관 탐색 범위가 겹치지 않습니다")
+    if not res.anchors:
+        return Attempt(method, 0.0, f"PSR {res.psr:.1f} (모든 창이 min_psr 미만)")
     fit = _fit(res.anchors, policy)
     confidence = max(0.0, 1 - min_psr / res.psr) if res.psr > 0 else 0.0
     if fit.n_anchors >= 2:

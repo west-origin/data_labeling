@@ -63,11 +63,16 @@ class SyncScenario:
     glove_right: dict[str, NDArray[np.float64]] = field(repr=False)
     imu: dict[str, NDArray[np.float64]] = field(repr=False)
 
-    def write(self, out_dir: Path, *, videos: bool = True) -> None:
-        """WAV·Parquet·정답 JSON, 그리고 (videos=True면) QR 슬레이트와 오디오가 든 MP4."""
+    def write(self, out_dir: Path, *, videos: bool = True, wavs: bool = True) -> None:
+        """WAV·Parquet·정답 JSON, 그리고 (videos=True면) QR 슬레이트와 오디오가 든 MP4.
+
+        wavs=False면 WAV를 쓰지 않는다 (영상에 오디오가 들어 있으므로 긴 녹화 픽스처에서
+        시간을 아낀다).
+        """
         out_dir.mkdir(parents=True, exist_ok=True)
         for name, samples in self.audio.items():
-            write_wav(out_dir / f"{name}.wav", samples, AUDIO_RATE)
+            if wavs:
+                write_wav(out_dir / f"{name}.wav", samples, AUDIO_RATE)
             if videos:
                 self.write_video(out_dir / f"{name}.mp4", name)
         write_parquet(out_dir / "glove_right.parquet", self.glove_right, {"clock": "glove_right"})
@@ -75,9 +80,22 @@ class SyncScenario:
         write_json(out_dir / "truth.json", self.truth())
 
     def write_video(
-        self, path: Path, stream: str, *, width: int = 240, height: int = 240, fps: float = 10.0
+        self,
+        path: Path,
+        stream: str,
+        *,
+        width: int = 240,
+        height: int = 240,
+        fps: float = 10.0,
+        dense_edges_ms: float | None = None,
+        sparse_every: int = 30,
     ) -> None:
-        """스트림 시계 기준으로 프레임을 찍는다. 슬레이트가 떠 있는 동안은 QR을 보여준다."""
+        """스트림 시계 기준으로 프레임을 찍는다. 슬레이트가 떠 있는 동안은 QR을 보여준다.
+
+        dense_edges_ms를 주면 가변 프레임레이트(VFR)로 쓴다: 스트림 앞뒤 dense_edges_ms 구간은
+        fps로, 그 사이는 sparse_every 프레임마다 하나만 쓴다. 긴 녹화(20~40분) 픽스처를 빨리
+        만들기 위한 옵션이다. 슬레이트 검출 구간(sync.yaml slate.search_window_ms)을 덮도록 정한다.
+        """
         clock = self.clocks[stream]
         audio = self.audio[stream]
         stream_len_ms = audio.size / AUDIO_RATE * 1000
@@ -88,6 +106,12 @@ class SyncScenario:
         def frames() -> Iterator[tuple[int, NDArray[np.uint8]]]:
             for i in range(int(stream_len_ms / 1000 * fps)):
                 pts = round(i * 1000 / fps)
+                if (
+                    dense_edges_ms is not None
+                    and dense_edges_ms < pts < stream_len_ms - dense_edges_ms
+                    and i % sparse_every
+                ):
+                    continue
                 master = float(clock.to_master(pts))
                 shown = [s for s in self.slates if 0 <= master - s.master_ms < SLATE_DURATION_MS]
                 if shown:

@@ -8,7 +8,7 @@ from pathlib import Path
 from dlp_schema.session import Session, StreamKind
 from dlp_sync.pipeline import StreamMedia
 from dlp_sync.policy import SyncPolicy
-from dlp_sync.signals import glove_series, imu_series, load_audio
+from dlp_sync.signals import glove_pressure_prefixes, glove_series, imu_series, load_audio
 
 VIDEO = {StreamKind.BODYCAM, StreamKind.THIRD_PERSON}
 GLOVE = {StreamKind.GLOVE_LEFT, StreamKind.GLOVE_RIGHT}
@@ -25,7 +25,7 @@ def load_session_media(
             media[s.stream_id] = StreamMedia(video=path, audio=load_audio(path))
         elif s.kind in GLOVE:
             media[s.stream_id] = StreamMedia(
-                series=glove_series(fetch(s.uri), policy.glove.pressure_prefixes)
+                series=glove_series(fetch(s.uri), glove_pressure_prefixes(policy))
             )
         elif s.kind is StreamKind.IMU:
             media[s.stream_id] = StreamMedia(series=imu_series(fetch(s.uri)))

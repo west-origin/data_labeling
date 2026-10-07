@@ -10,7 +10,7 @@ from itertools import pairwise
 
 from pydantic import Field, model_validator
 
-from dlp_schema.common import Contract, Identifier, Ms, OntologyId, SemVer
+from dlp_schema.common import Contract, Identifier, Ms, OntologyId, SemVer, derived_id
 from dlp_schema.labels import (
     ActionPayload,
     BoxTrackPayload,
@@ -198,13 +198,16 @@ def retractions(
 ) -> list[LabelRecord]:
     """이전 버전의 모델 라벨을 지우는 삭제 레코드 (parent=원래, retracted).
 
-    ID는 `<원래>:retracted`이고 출처는 지운 쪽(새 버전)이다. 한 레코드는 한 번만 지울 수 있다
-    (지운 뒤에는 현재 라벨이 아니므로 다시 대상이 되지 않는다).
+    ID는 `<원래>:retracted`(128자를 넘으면 해시로 줄인 `derived_id`)이고
+    출처는 지운 쪽(새 버전)이다.
+    한 레코드는 한 번만 지울 수 있다 (지운 뒤에는 현재 라벨이 아니므로 다시 대상이 되지 않는다).
+    계약 검증을 거친다 (시간대 없는 now 등은 ValidationError).
     """
     return [
-        x.model_copy(
-            update={
-                "label_id": f"{x.label_id}:retracted",
+        LabelRecord.model_validate(
+            {
+                **x.model_dump(),
+                "label_id": derived_id(x.label_id, "retracted"),
                 "parent_label_id": x.label_id,
                 "retracted": True,
                 "verification": Verification(),

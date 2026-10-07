@@ -1,3 +1,6 @@
+# PyAV 타입 스텁이 일부 반환 타입을 비워 두어 이 모듈에서만 해당 경고를 끈다.
+# pyright: reportUnknownMemberType=false
+
 from __future__ import annotations
 
 from fractions import Fraction
@@ -74,3 +77,37 @@ def test_proxy_keeps_pts_drops_audio_and_adds_keyframes(
 
     with av.open(str(tmp_path / f"{blur[1].parent.name}-proxy.mp4")) as c:
         assert c.streams.video[0].codec_context.width == 160
+
+
+def _odd_source(path: Path, width: int, height: int) -> None:
+    """홀수 크기 원본 (무손실 FFV1, yuv444p는 홀수 크기를 받는다)."""
+    with av.open(str(path), "w") as c:
+        vs = c.add_stream("ffv1", rate=10)
+        assert isinstance(vs, av.VideoStream)
+        vs.width, vs.height, vs.pix_fmt = width, height, "yuv444p"
+        vs.time_base = Fraction(1, 1000)
+        for i in range(5):
+            img = np.full((height, width, 3), 40 * i, dtype=np.uint8)
+            frame = av.VideoFrame.from_ndarray(img, format="rgb24")
+            frame.pts, frame.time_base = i * 100, Fraction(1, 1000)
+            c.mux(vs.encode(frame))
+        c.mux(vs.encode(None))
+
+
+@pytest.mark.parametrize(("size", "expected"), [((101, 75), (100, 74)), ((333, 241), (166, 120))])
+def test_proxy_handles_odd_source_size(
+    size: tuple[int, int], expected: tuple[int, int], tmp_path: Path
+) -> None:
+    """홀수 높이·너비 원본도 짝수 크기로 인코딩한다 (libx264 yuv420p)."""
+    src, dst = tmp_path / "odd.mkv", tmp_path / "odd-proxy.mp4"
+    _odd_source(src, *size)
+    make_proxy(src, dst, ProxyConfig(max_height=120, crf=28, keyframe_ms=500))
+    with av.open(str(dst)) as c:
+        ctx = c.streams.video[0].codec_context
+        assert (ctx.width, ctx.height) == expected
+    assert build_pts_index(dst).ms.tolist() == [0, 100, 200, 300, 400]
+
+
+def test_proxy_max_height_must_be_even() -> None:
+    with pytest.raises(ValueError, match="multiple"):
+        ProxyConfig(max_height=121, crf=28, keyframe_ms=500)

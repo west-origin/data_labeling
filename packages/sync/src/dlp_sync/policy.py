@@ -19,8 +19,17 @@ class SlatePolicy(Contract):
     search_window_ms: float = Field(gt=0)
     frame_stride: int = Field(ge=1)
     estimate_drift: bool
+    min_drift_span_ms: float = Field(
+        gt=0, description="슬레이트 앵커 사이가 이보다 길 때만 드리프트를 추정한다 (프레임 양자화)"
+    )
     confidence_one: float = Field(ge=0, le=1)
     confidence_many: float = Field(ge=0, le=1)
+    residual_scale_ms: float = Field(
+        gt=0, description="신뢰도 *= exp(-max(0, 오차 상한 - 양자화) / 이 값)"
+    )
+    refine_with_audio: bool = Field(
+        description="두 영상에 오디오가 있으면 슬레이트 맞춤을 출발점으로 오디오 상관으로 다듬는다"
+    )
 
 
 class TapPolicy(Contract):
@@ -28,7 +37,10 @@ class TapPolicy(Contract):
     max_pulse_ms: float = Field(gt=0)
     merge_gap_ms: float = Field(ge=0)
     threshold_mad: float = Field(gt=0)
-    match_tolerance_ms: float = Field(gt=0)
+    match_tolerance_ms: float = Field(
+        gt=0,
+        description="기준 두드림에서 |Δt|만큼 떨어진 두드림은 max_drift_ppm·|Δt|를 더 허용한다",
+    )
     residual_scale_ms: float = Field(gt=0)
 
 
@@ -37,7 +49,12 @@ class AudioXcorrPolicy(Contract):
     coarse_segment_ms: float = Field(gt=0)
     window_ms: float = Field(gt=0)
     windows: int = Field(ge=1)
-    refine_ms: float = Field(gt=0)
+    refine_ms: float = Field(
+        gt=0,
+        description=(
+            "정밀 탐색 범위. 거친 추정 지점에서 |Δt|만큼 떨어진 창은 max_drift_ppm·|Δt|를 더 본다"
+        ),
+    )
     min_psr: float = Field(gt=0)
     residual_scale_ms: float = Field(
         gt=0, description="앵커가 2개 이상일 때 신뢰도에 곱하는 exp(-잔차 RMS / 이 값)"
@@ -46,6 +63,11 @@ class AudioXcorrPolicy(Contract):
 
 class MotionXcorrPolicy(Contract):
     rate_hz: float = Field(gt=0)
+    window_ms: float = Field(gt=0, description="창별 정밀 탐색의 창 길이")
+    refine_ms: float = Field(
+        gt=0, description="창별 정밀 탐색 범위 (전체 상관 추정 ± 이 값 + max_drift_ppm·녹화 길이)"
+    )
+    window_min_psr: float = Field(gt=0, description="창별 정밀 탐색에서 앵커로 쓸 창의 PSR 하한")
     min_psr: float = Field(gt=0)
     residual_scale_ms: float = Field(
         gt=0, description="앵커가 2개 이상일 때 신뢰도에 곱하는 exp(-잔차 RMS / 이 값)"
