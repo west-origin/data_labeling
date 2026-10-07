@@ -49,9 +49,7 @@ def deployed_predictors(
     *,
     strict: bool = False,
 ) -> Deployed:
-    """strict: 배포 모델을 쓸 수 없으면 기본 어댑터로 넘어가지 않고 실패한다.
-
-    프라이버시 단계용: 사람이 승인한 블러 모델을 조용히 빼면 블러 재현이 떨어진다.
+    """단계에 붙일 배포 모델을 레지스트리에서 읽어 로더로 만든다.
 
     Args:
         conn: DB 연결 (model_versions 읽기).
@@ -61,11 +59,13 @@ def deployed_predictors(
         ctx: 로더 문맥 (운영에서는 truth=None이라 oracle-stub은 못 쓴다).
         work: 산출물을 받을 로컬 디렉터리.
         loaders: 학습기 이름 → 로더 (테스트용 주입, 기본 `LOADERS`).
+        strict: 배포 모델을 쓸 수 없으면 기본 어댑터로 넘어가지 않고 실패한다. 프라이버시 단계용:
+            사람이 승인한 블러 모델을 조용히 빼면 블러 재현이 떨어진다.
 
     Returns:
-        `Deployed`. 과제마다 가장 최근(created_at 순 마지막) deployed 모델 하나를 쓴다. 로더가
-        없거나 `ModelUnavailableError`·`TrainingError`(해시 불일치)면 그 과제는 기본 어댑터를
-        그대로 둔다 (replaces도 더하지 않는다).
+        `Deployed`. 과제마다 가장 최근(created_at 순 마지막) deployed 모델 하나를 쓴다. strict가
+        아니고 로더가 없거나 `ModelUnavailableError`·`TrainingError`(해시 불일치)면 그 과제는
+        기본 어댑터를 그대로 둔다 (replaces도 더하지 않는다).
 
     Raises:
         TrainingError: strict이고 배포 모델을 쓸 수 없을 때.

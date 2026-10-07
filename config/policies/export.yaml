@@ -20,7 +20,8 @@ splits: [train, val]
 excluded_kinds: [blur_track]
 
 # 작업자·장소·세션·라벨 ID는 내보내기마다 다른 가명으로 바꾼다 (dlp_export.pseudonym, ADR 0027).
-# 가명 = HMAC(HMAC(비밀값, 내보내기 ID), ID): 한 내보내기 안에서는 일관되고, 내보내기 사이에서는 ID로 이어지지 않는다.
+# 가명 = "<종류>-" + HMAC(HMAC(비밀값, 내보내기 ID), "<종류>:<ID>") 16진 앞 16자: 한 내보내기 안에서는 일관되고,
+# 내보내기 사이에서는 ID로 이어지지 않는다.
 # 비밀값은 secret_env 환경 변수(내부 보관). 없으면 실행마다 임의 값이라 아무도 원래 ID로 되짚을 수 없다.
 # 개발용 비밀값(dev_secrets, .env.example 값)은 env_var 환경 변수가 dev_envs 중 하나일 때만 쓸 수 있다.
 ids:

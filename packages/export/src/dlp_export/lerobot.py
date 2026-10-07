@@ -1,10 +1,10 @@
 """LeRobot 에피소드 (형식 v3.0, 공식 쓰기·읽기 API).
 
-세션의 바디캠 블러본 하나가 에피소드 하나다. 이 모듈은 고정 프레임률 시각마다의 특징 표와 그 시각에
-보이던 블러본 프레임(PTS 인덱스로 고름)을 정하고, 격리된 일회용 환경의 scripts/lerobot_write.py가
-LeRobot 공식 API로 쓴다 (PyTorch가 작업공간 의존성과 충돌하므로, 환경은
-scripts/lerobot-env/uv.lock에 고정). 쓴 뒤 scripts/lerobot_check.py가 공식 로더로 다시 읽어
-확인한다.
+세션의 `lerobot.video_stream` 스트림(기본 바디캠) 블러본 하나가 에피소드 하나다. 이 모듈은 고정
+프레임률 시각마다의 특징 표와 그 시각에 보이던 블러본 프레임(PTS 인덱스로 고름)을 정하고, 격리된
+일회용 환경의 scripts/lerobot_write.py가 LeRobot 공식 API로 쓴다 (PyTorch가 작업공간 의존성과
+충돌하므로, 환경은 scripts/lerobot-env/uv.lock에 고정). 쓴 뒤 scripts/lerobot_check.py가 공식
+로더로 다시 읽어 확인한다.
 
 흐름 (`runner._lerobot`이 부른다):
 1. `build_episode`: 세션·스트림·라벨 → `Episode` (프레임별 특징 배열, 작업공간 numpy만 사용).

@@ -13,7 +13,7 @@
 
 진입점: `dlp dataset withdraw <세션> <이유>`(`withdraw_session`),
 `dlp lineage <세션>`(`session_lineage`).
-관련: WP7, ADR 0007. 호출자가 트랜잭션을 연다.
+관련: WP7, ADR 0007, 0031(사용 중지 생애주기 기록의 시각·실행자). 호출자가 트랜잭션을 연다.
 """
 
 from __future__ import annotations
@@ -66,7 +66,7 @@ def session_lineage(conn: sa.Connection, session_id: str) -> SessionLineage:
     내보내기는 그 버전들의 내보내기 중 `session_ids`(실제로 쓴 세션)에 이 세션이 있는 것만.
 
     Raises:
-        KeyError 등: 세션이 없을 때 (`get_session`).
+        sqlalchemy.exc.NoResultFound: 세션이 없을 때 (`get_session`).
     """
     session = get_session(conn, session_id)
     versions = dataset_versions_with_session(conn, session_id)
@@ -89,8 +89,8 @@ def withdraw_session(
     """세션을 사용 중지하고, 이미 들어간 버전·학습·내보내기 목록을 돌려준다.
 
     멱등: 이미 `withdrawals`에 있으면 기록을 더하지 않는다 (첫 사유·시각이 남는다).
-    부작용: 세션 행의 생애주기를 withdrawn으로 갱신(이 행 갱신이 내보내기의 FOR SHARE 잠금과
-    직렬화된다), `withdrawals`에 추가.
+    부작용: 세션 행의 생애주기를 withdrawn으로 갱신하고 `session_lifecycle_events`에 전이를 남긴다
+    (이 행 갱신이 내보내기의 FOR SHARE 잠금과 직렬화된다), `withdrawals`에 추가.
 
     Args:
         conn: 호출자가 연 트랜잭션 연결.
@@ -130,8 +130,7 @@ def record_export(
     """내보내기 기록.
 
     session_ids를 주면(실제로 쓴 세션) 그대로 남기되, 버전 밖이거나 사용 중지된 세션이 있으면
-    실패한다.
-    없으면 버전의 해당 분할에서 지금 사용 중지된 세션을 뺀 것이다.
+    실패한다. 없으면 버전의 해당 분할에서 지금 사용 중지된 세션을 뺀 것이다.
 
     Args:
         export_id: 내보내기 ID (`exports` 기본 키).

@@ -11,9 +11,10 @@
   MT/ML/Frag 등 나머지 CLEAR 필드는 내지 않는다.
 test_metrics_reference.py가 무작위 시퀀스에서 TrackEval과 1e-12 안에서 같은지 본다.
 
-하네스는 여러 세션·스트림을 한 시퀀스로 이어 붙여 넣는다 (ID에 세션·스트림을 붙여 서로 겹치지 않게
-하므로, TrackEval처럼 시퀀스별로 계산해 합친 것과 HOTA 정의상 다를 수 있다 — 시퀀스 평균이 아니라
-전체 검출 단위로 묶인다). 정답 키프레임 시각만 "프레임"으로 쓴다 (`harness.eval_objects`).
+하네스는 여러 세션·스트림을 한 시퀀스로 이어 붙여 넣는다. 개체 키에 세션·스트림을 붙여 ID가
+시퀀스끼리 겹치지 않고 한 "프레임"에는 한 (세션, 스트림)만 들어가므로, 결과는 TrackEval이 시퀀스별로
+계산해 합친 값(COMBINED_SEQ: 정수 필드 합, AssA·LocA는 TP 가중 평균)과 같다. 시퀀스별 HOTA의 단순
+평균은 아니다. 정답 키프레임 시각만 "프레임"으로 쓴다 (`harness.eval_objects`).
 """
 
 from __future__ import annotations

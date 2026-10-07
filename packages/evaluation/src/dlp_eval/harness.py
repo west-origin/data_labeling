@@ -1,7 +1,7 @@
 """라벨 레코드 → 과제별 지표. 골든셋 세션들의 정답(사람)과 예측(모델 버전)을 비교한다.
 
 과제와 라벨 종류:
-- objects: box_track → mAP(0.50:0.95), AP50, HOTA, IDF1, MOTA, ECE.
+- objects: box_track → mAP(0.50:0.95), AP50, AP75, HOTA, IDF1, MOTA, ECE, 클래스별 AP.
   정답 키프레임 시각(모든 정답 트랙의 합집합)에서 비교한다. 사람 정답은 키프레임이 성기다 (CVAT가
   사이를 보간한다). 그래서 정답 트랙은 자기 키프레임 사이를 간격 제한 없이 선형 보간하고 (화면 밖
   키프레임이 끼면 그 사이는 없음), 예측은 과제별 max_interp_ms 이내에서만 보간한다 (프리라벨
@@ -295,8 +295,8 @@ def eval_keypoints(
         skeleton: "hand21"(과제 hands) 또는 "coco17"(과제 body). 다른 골격 라벨은 무시한다.
 
     Returns:
-        PCK 하나("pck")를 담은 리포트. 클래스 수는 손이면 "left"/"right", 전신이면 "person" 단위의
-        정답 (시각, 개체) 수다. 정답이 없으면 None.
+        PCK 하나("pck")를 담은 리포트. 클래스 수는 손이면 "left"/"right"(손 쪽이 비어 있으면
+        "hand"), 전신이면 "person" 단위의 정답 (시각, 개체) 수다. 정답이 없으면 None.
 
     주의: 정답 트랙은 보간하지 않고 자기 키프레임 시각에서만 비교한다 (객체·블러와 다르다). 예측은
     `max_interp_ms.for_task(hands|body)` 안에서 보간한다. 시각 간 ID 일관성은 보지 않는다 (ADR

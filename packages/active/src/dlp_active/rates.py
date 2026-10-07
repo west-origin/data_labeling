@@ -1,8 +1,8 @@
 """클래스별 검수자 수정률.
 
-클래스 키는 "라벨 종류/클래스"다 (예: box_track/cup, action/fold_sheet). 개별 검수(사람 승인·수정)된
-모델 라벨과 사람이 추가한 라벨만 센다. 검수 수가 적은 클래스는 전체 수정률 쪽으로 당긴다
-(베이즈 평활).
+클래스 키는 "라벨 종류/클래스"다 (예: box_track/cup, action/fold_sheet). 개별 검수(사람
+승인·수정)된 모델 라벨, 사람이 지운 모델 라벨, 사람이 추가한 라벨만 센다 (표본 검증·센서 라벨은
+세지 않는다). 검수 수가 적은 클래스는 전체 수정률 쪽으로 당긴다 (베이즈 평활).
 
 수식 (active.yaml `correction`):
 - 검수 수 n_c = 그 클래스의 accepted + corrected + deleted (+ added, `count_added`면)

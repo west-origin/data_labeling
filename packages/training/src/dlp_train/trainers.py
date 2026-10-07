@@ -13,8 +13,8 @@ TODO(real-model): 실제 학습기·로더 (객체 YOLOX 미세조정, 손·전�
   config/models.yaml을 따른다 (ADR 0010).
 
 WP13, ADR 0016. 새 학습기를 추가하려면 `Trainer`와 `ModelLoader`를 같은 이름으로
-`TRAINERS`·`LOADERS`에
-등록하고, CPU용 stub 경로를 함께 둔다 (CLAUDE.md "새 모델은 Predictor 어댑터와 stub을 함께").
+`TRAINERS`·`LOADERS`에 등록하고, CPU용 stub 경로를 함께 둔다 (CLAUDE.md "새 모델은 Predictor
+어댑터와 stub을 함께").
 """
 
 from __future__ import annotations
@@ -59,9 +59,13 @@ class Trainer(Protocol):
 
     name: str  # 등록 이름 (정책 trainer, 레지스트리 model_versions.trainer)
 
-    def train(
-        self, data: TrainingData, params: Mapping[str, Any], out_dir: Path
-    ) -> TrainOutput: ...
+    def train(self, data: TrainingData, params: Mapping[str, Any], out_dir: Path) -> TrainOutput:
+        """학습 예제로 학습해 `out_dir` 안에 산출물 파일 하나를 쓰고 그 경로·학습 지표를 돌려준다.
+
+        params는 정책 템플릿 위에 `dlp train run --param`을 덮은 값이다. 산출물 업로드·해시는
+        호출자(`loop.run_training_job`)가 한다.
+        """
+        ...
 
 
 @dataclass(frozen=True)

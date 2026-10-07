@@ -177,8 +177,9 @@ def predict_golden(
 ) -> list[SessionData]:
     """후보·기존 모델을 골든셋 세션 영상에 돌린다 (DB에 쓰지 않는다).
 
-    공간 과제는 영상 스트림마다, 타임라인 과제(접촉·행동 등, stream_id 없는 라벨)는 세션마다 기준
-    스트림(바디캠)에 한 번 돌린다. 스트림마다 돌리면 같은 타임라인 구간이 겹쳐 오탐이 된다.
+    공간 과제는 영상 스트림(바디캠·3인칭)마다, 타임라인 과제(`TIMELINE_TASKS`, stream_id 없는
+    라벨)는 세션마다 기준 스트림(바디캠)에 한 번 돌린다. 스트림마다 돌리면 같은 타임라인 구간이
+    겹쳐 오탐이 된다.
 
     Returns:
         세션마다 `SessionData` (정답·예측 모두 `matches(task)`로 거름). 원본 영상 접근은 `clips`가
@@ -230,9 +231,7 @@ def run_training_job(
     loaders: dict[str, ModelLoader] | None = None,
     stub_truth: bool = False,
 ) -> LoopResult:
-    """stub_truth: oracle-stub처럼 정답이 필요한 로더에 골든 정답을 넘긴다 (CI·테스트 전용).
-
-    재학습 루프 한 번 (모듈 docstring의 1~5단계).
+    """재학습 루프 한 번 (모듈 docstring의 1~5단계).
 
     Args:
         conn: DB 연결. 호출자가 트랜잭션을 연다 (`engine.begin()`).
@@ -245,6 +244,7 @@ def run_training_job(
         now: 기록 시각 (시간대 있는 datetime). 모델 버전 태그에도 들어가므로 같은 작업을 같은 now로
             다시 부르면 같은 모델 버전이 되어 DB 삽입이 충돌한다 (멱등이 아니다).
         trainers, loaders: 테스트용 주입 (기본 `TRAINERS`·`LOADERS`).
+        stub_truth: oracle-stub처럼 정답이 필요한 로더에 골든 정답을 넘긴다 (CI·테스트 전용).
 
     Returns:
         `LoopResult`. skipped면 DB·MLflow에 아무것도 쓰지 않는다.
@@ -560,7 +560,7 @@ def _compared_with(artifacts: ObjectStore, mv: ModelVersion) -> str | None:
 
     Raises:
         TrainingError: 리포트 URI가 없거나 리포트에 `deployed_baseline` 키가 없을 때 (이전 형식
-        리포트).
+            리포트).
     """
     if mv.report_uri is None:
         raise TrainingError(f"{mv.model_version}: 평가 리포트가 없습니다")
