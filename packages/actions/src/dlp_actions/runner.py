@@ -1,4 +1,4 @@
-"""세션 행동 구간 실행 (`dlp actions run`). 멱등이다.
+"""세션 행동 구간 실행 (`dlp actions run`). 멱등이다 (WP10, ADR 0012·0015·0024·0026).
 
 바디캠의 손마다(hand21 키포인트 트랙이 있는 손) 경계 후보 → VLM 분류 → 병합·채우기를 하고
 action·gap·description 레코드를 쓴다. 트랙이 사라진 손은 이 모듈이 낸 검수 전 레코드만 지운다.
@@ -12,8 +12,12 @@ model_version은 "actions-<정책 해시>+<VLM 버전>+i<입력 해시>"다.
 - 버전이 바뀌면 이 모듈이 만든 이전 현재 레코드 중 **검수 전인 것만** 삭제 레코드로 표시하고
   새로 쓴다.
   검수자가 승인·표본 검증한 레코드와 사람이 고치거나 만든 레코드는 남기고(설명이 검수된 행동도
-  남긴다: 행동만 지우면 설명이 고아가 된다), 새 결과 중 그와 겹치는
-  구간은 버린 뒤 남는 빈 시간을 미상(unknown) 공백으로 채운다 (타임라인 공백 0 유지, ADR 0015).
+  남긴다: 행동만 지우면 설명이 고아가 된다), 새 결과 중 그와 겹치는 구간은 버린 뒤 남는 빈 시간을
+  미상(unknown) 공백으로 채운다 (타임라인 공백 0 유지, ADR 0015).
+
+입력은 `current_labels()`(운영 라벨)에서 고르고, 다시 돌릴지는 전체 이력(`get_labels`)으로 정한다.
+DB: `labels` 테이블 읽기·쓰기(추가만). 저장소: 라벨링 버킷의 블러본 읽기(원본 버킷은 읽지 않는다).
+트랜잭션은 호출자(CLI)가 연다.
 """
 
 from __future__ import annotations
@@ -51,12 +55,24 @@ from dlp_schema.labels import (
 )
 from dlp_schema.ontology import Ontology
 
+# 이 단계 모델 버전의 접두사 (`_ours` 판별)
 PREFIX = "actions-"
+# 이 단계가 쓰는 라벨 종류 (참고용, 코드에서 쓰지 않는다)
 KINDS = ("action", "gap", "description")
 
 
 @dataclass
 class ActionsSummary:
+    """실행 요약 (CLI가 출력한다).
+
+    Attributes:
+        version: 이번 실행의 모델 버전.
+        hands: 손 → 개수 (candidates, segments, actions, gaps, kept_reviewed, unknown_fallbacks,
+            또는 트랙이 사라진 손이면 retracted_without_track).
+        skipped: 같은 버전 결과가 있어 건너뛴 손.
+        retracted: 이번에 쓴 삭제 레코드 수.
+    """
+
     version: str
     hands: dict[str, dict[str, int]] = field(default_factory=dict[str, dict[str, int]])
     skipped: list[str] = field(default_factory=list[str])
@@ -64,6 +80,7 @@ class ActionsSummary:
 
 
 def _hand_of(x: LabelRecord) -> Hand | None:
+    """행동·사이 구간 라벨의 손 (그 밖의 라벨은 None)."""
     p = x.payload
     if isinstance(p, ActionPayload | GapPayload):
         return p.hand
@@ -71,6 +88,7 @@ def _hand_of(x: LabelRecord) -> Hand | None:
 
 
 def _ours(x: LabelRecord) -> bool:
+    """이 단계(`actions-` 접두사 모델 버전)가 낸 모델 라벨인지."""
     return x.provenance.source is Source.MODEL and (x.provenance.model_version or "").startswith(
         PREFIX
     )
@@ -85,7 +103,10 @@ def input_digest(labels: list[LabelRecord]) -> str:
 
 
 def subtract(span: tuple[int, int], cuts: list[tuple[int, int]]) -> list[tuple[int, int]]:
-    """span에서 cuts(정렬됨)를 뺀 조각들."""
+    """span에서 cuts(정렬됨)를 뺀 조각들.
+
+    예: subtract((0, 100), [(20, 30), (50, 60)]) == [(0, 20), (30, 50), (60, 100)].
+    """
     start, end = span
     out: list[tuple[int, int]] = []
     cur = start
@@ -114,12 +135,24 @@ def keep_protected(
     버려서 비는 시간은 미상 공백으로 채운다.
 
     버린 행동의 설명도 버린다. 남은 타임라인은 검수된 구간 + 새 구간 + 채운 공백으로 빈틈이 없다.
+
+    Args:
+        labels: 새로 만든 라벨 (`segment_hand` 결과).
+        protected: 남길 그 손의 행동·공백 (사람 출처, 검수됨, 설명이 검수된 행동).
+        hand: 손.
+        version: 이번 모델 버전 (채운 공백 ID의 `version_tag`).
+        now: 생성 시각.
+
+    Returns:
+        쓸 라벨. 채운 공백은 첫 번째로 버린 라벨을 본떠 만들고(신뢰도 0, 근거 INFERRED),
+        ID는 `<세션>-<손>-<tag>-<시작>-fill`이다.
     """
     if not protected:
         return labels
     keep_spans = sorted((x.t_start_ms, x.t_end_ms) for x in protected)
 
     def overlaps(s: int, e: int) -> bool:
+        """[s, e)가 보호 구간 중 하나와 겹치는지."""
         return any(ks < e and s < ke for ks, ke in keep_spans)
 
     out: list[LabelRecord] = []
@@ -172,8 +205,32 @@ def run_actions(
     now: datetime,
     labeling: ObjectStore | None = None,
 ) -> ActionsSummary:
+    """세션의 손마다 행동 구간을 만들어 DB에 쓴다 (모듈 docstring의 규칙).
+
+    Args:
+        conn: 열린 트랜잭션의 DB 연결 (호출자가 커밋·롤백한다).
+        session_id: 세션 ID.
+        client: VLM 클라이언트 (`version`이 모델 버전에 들어간다).
+        ontology: 온톨로지.
+        policy: 행동 구간 정책 (`digest`가 모델 버전에 들어간다).
+        now: 생성 시각 (시간대 필수).
+        labeling: 라벨링 버킷 저장소. 주면 블러본을 받아 VLM에 프레임을 보낸다. None이면 프레임 없이
+            묻는다 (테스트·오라클).
+
+    Returns:
+        `ActionsSummary`.
+
+    Raises:
+        VlmUnavailableError: VLM 서버가 백오프 후에도 응답하지 않을 때 (아무것도 쓰지 않도록
+            호출자가 트랜잭션을 되돌린다).
+        RenderNotCurrentError: 블러본이 지금 승인된 블러 라벨로 렌더한 것이 아닐 때 (ADR 0024).
+
+    부작용: `labels`에 삭제 레코드와 새 라벨을 추가한다. 라벨링 버킷에서 블러본을 임시 디렉터리로
+    받는다.
+    """
     session = get_session(conn, session_id)
     labels = get_labels(conn, session_id)
+    # 입력은 운영 라벨(current)에서, 재실행 판단은 전체 이력(labels)으로 한다
     current = current_labels(labels)
     body = session.reference_stream
     track_labels = [
@@ -184,6 +241,7 @@ def run_actions(
         and x.payload.skeleton == "hand21"
         and x.payload.hand is not None
     ]
+    # 손마다 트랙 하나 (같은 손이 여럿이면 마지막 것)
     tracks: dict[Hand, KeypointTrackPayload] = {}
     for x in track_labels:
         assert isinstance(x.payload, KeypointTrackPayload) and x.payload.hand is not None
@@ -192,6 +250,7 @@ def run_actions(
         x for x in current if isinstance(x.payload, BoxTrackPayload | MaskTrackPayload)
     ]
     state_labels = [x for x in current if isinstance(x.payload, HandStatePayload)]
+    # 모델 버전 = 정책 해시 + VLM 버전 + 입력 라벨 ID 집합 해시
     inputs = input_digest([*track_labels, *object_labels, *state_labels])
     version = f"{PREFIX}{policy.digest}+{client.version}+i{inputs}"
     summary = ActionsSummary(version)
@@ -232,6 +291,7 @@ def run_actions(
     }
 
     def described(x: LabelRecord) -> bool:
+        """설명이 검수된 행동인지 (그 행동은 지우지 않는다)."""
         return isinstance(x.payload, ActionPayload) and x.payload.action_id in reviewed_descriptions
 
     def mine_of(hand: Hand) -> list[LabelRecord]:
@@ -278,6 +338,7 @@ def run_actions(
             labeling.get_file(blurred_key(session_id, body.stream_id), video)
             check_fetched(video, rendered, session_id, body.stream_id)
         for hand, track in sorted(tracks.items()):
+            # 지울 후보(검수 전 우리 것)와 남길 것(사람·검수됨·설명이 검수된 행동)
             mine = mine_of(hand)
             protected = [
                 x
@@ -295,6 +356,7 @@ def run_actions(
                 summary.skipped.append(hand.value)
                 continue
             stale = with_descriptions(mine)
+            # 그 손의 접촉 구간 = 접촉 대상이 있는 손 상태 라벨 (프리라벨·검수 결과)
             contacts = sorted(
                 (x.t_start_ms, x.t_end_ms)
                 for x in current
@@ -319,6 +381,8 @@ def run_actions(
                 ontology_version=session.ontology_version or ontology.version,
                 now=now,
             )
+            # 보호 구간과 겹치는 새 결과는 버리고 빈 곳은 미상으로 채운다.
+            # 이전 버전의 검수 전 결과는 삭제 레코드로 지운다
             new = keep_protected(result.labels, protected, hand, version, now)
             removed = retractions(stale, version, now)
             insert_labels(conn, [*removed, *new])

@@ -1,3 +1,10 @@
+"""`run_actions` DB 통합 테스트 (WP10, `@pytest.mark.services`, ADR 0015·0024·0026).
+
+실행 중인 PostgreSQL(`make up`)이 필요하다. 테스트마다 일회용 DB에 합성 행동 시나리오(seed 1)의
+입력 라벨(손 키포인트·손 상태)만 넣고 돌린다. 정답 행동·사이 구간은 `OracleVlm`에만 준다.
+멱등성, 버전 교체, 검수 보호, 입력 변경 재실행, VLM 장애 중단, 트랙 소실, 블러본 확인을 본다.
+"""
+
 from __future__ import annotations
 
 import itertools
@@ -46,12 +53,18 @@ from dlp_schema.testing import FIXED_TIME, make_session
 
 pytestmark = pytest.mark.services
 ROOT = Path(__file__).resolve().parents[3]
+# 테스트 세션 ID
 SID = "act-0001"
+# 입력·정답을 주는 합성 행동 시나리오 (seed 1)
 SCENARIO = generate_action_scenario(1, session_id=SID)
 
 
 @pytest.fixture
 def pg() -> Iterator[sa.Engine]:
+    """일회용 DB 엔진: 마이그레이션·온톨로지 v1·세션과 입력 라벨(손 키포인트·손 상태)만 넣는다.
+
+    테스트가 끝나면 DB를 강제로 지운다.
+    """
     url = sa.make_url(
         os.environ.get(
             "DLP_DATABASE_URL", "postgresql+psycopg://dlp:dlp-dev-password@localhost:5432/dlp"
@@ -81,11 +94,16 @@ def pg() -> Iterator[sa.Engine]:
 
 
 def _timeline(conn: sa.Connection) -> list[LabelRecord]:
+    """현재 action·gap 라벨을 시작 시각 순으로."""
     labels = current_labels(get_labels(conn, SID, kinds=["action", "gap"]))
     return sorted(labels, key=lambda x: x.t_start_ms)
 
 
 def test_run_is_idempotent_and_new_version_replaces_old(pg: sa.Engine) -> None:
+    """같은 입력·정책이면 두 번째 실행은 건너뛰고, 결과가 0~끝을 빈틈없이 덮는지 검증한다.
+    정책(merge_ms)이 바뀌면 이전 버전의 행동·사이 구간·설명을 모두 삭제 표시하고 새 버전으로 다시
+    만든다.
+    """
     ontology = load_ontology(ROOT / "config/ontology/v1")
     policy = load_policy(ROOT)
     truth = [x for x in SCENARIO.labels if isinstance(x.payload, ActionPayload | GapPayload)]
@@ -115,7 +133,10 @@ def test_run_is_idempotent_and_new_version_replaces_old(pg: sa.Engine) -> None:
 
 
 def test_rerun_after_reviewer_deleted_everything_is_skipped(pg: sa.Engine) -> None:
-    """감사 회귀 (ADR 0015): 현재 라벨이 아니라 이력으로 멱등을 판단한다 (ID 충돌·되살림 없음)."""
+    """감사 회귀 (ADR 0015): 현재 라벨이 아니라 이력으로 멱등을 판단한다 (ID 충돌·되살림 없음).
+
+    검수자가 모두 지운 뒤 같은 버전으로 다시 돌려도 되살리지 않고 건너뛴다.
+    """
     ontology = load_ontology(ROOT / "config/ontology/v1")
     policy = load_policy(ROOT)
     truth = [x for x in SCENARIO.labels if isinstance(x.payload, ActionPayload | GapPayload)]
@@ -143,6 +164,9 @@ def test_rerun_after_reviewer_deleted_everything_is_skipped(pg: sa.Engine) -> No
 
 
 def test_new_version_keeps_reviewed_labels_and_fills_gaplessly(pg: sa.Engine) -> None:
+    """새 버전이 승인·표본 검증된 라벨을 남기고, 그와 겹치는 새 결과를 버린 뒤 빈 곳을 미상으로 채워
+    타임라인에 공백·겹침이 없는지 검증한다.
+    """
     ontology = load_ontology(ROOT / "config/ontology/v1")
     policy = load_policy(ROOT)
     truth = [x for x in SCENARIO.labels if isinstance(x.payload, ActionPayload | GapPayload)]
@@ -252,7 +276,8 @@ def test_input_change_reruns_and_reviewed_description_protects_its_action(pg: sa
 
 def test_vlm_outage_aborts_the_session_so_a_rerun_redoes_it(pg: sa.Engine) -> None:
     """감사 회귀 (4차): VLM 서버가 백오프 후에도 응답하지 않으면 미상으로 채워 쓰지 않고 실행을
-    멈춘다 (트랜잭션이 되돌려진다). 같은 서버·모델이 복구되면 다시 실행해 제대로 만든다."""
+    멈춘다 (트랜잭션이 되돌려진다). 같은 서버·모델이 복구되면 다시 실행해 제대로 만든다.
+    """
     ontology = load_ontology(ROOT / "config/ontology/v1")
     policy = load_policy(ROOT)
     fast = policy.model_copy(
@@ -278,7 +303,8 @@ def test_vlm_outage_aborts_the_session_so_a_rerun_redoes_it(pg: sa.Engine) -> No
 
 def test_hand_without_track_loses_only_unreviewed_actions(pg: sa.Engine) -> None:
     """감사 회귀 (4차): 손 트랙이 사라지면(손 모델 버전 변경 등) 그 손의 검수 전 행동·공백·설명을
-    지운다. 검수된 행동은 남긴다. 다시 돌려도 더 지우지 않는다."""
+    지운다. 검수된 행동은 남긴다. 다시 돌려도 더 지우지 않는다.
+    """
     ontology = load_ontology(ROOT / "config/ontology/v1")
     policy = load_policy(ROOT)
     truth = [x for x in SCENARIO.labels if isinstance(x.payload, ActionPayload | GapPayload)]
@@ -309,7 +335,8 @@ def test_vlm_refuses_blurred_video_not_rendered_from_current_approval(
     pg: sa.Engine, tmp_path: Path
 ) -> None:
     """회귀(감사 4-2): VLM에는 지금 승인된 블러 라벨로 렌더한 블러본만 보낸다. 승인이 풀렸거나
-    렌더 기록이 없거나 무효이면 프레임을 읽기 전에 멈춘다."""
+    렌더 기록이 없거나 무효이면 프레임을 읽기 전에 멈춘다.
+    """
     ontology = load_ontology(ROOT / "config/ontology/v1")
     policy = load_policy(ROOT)
     truth = [x for x in SCENARIO.labels if isinstance(x.payload, ActionPayload | GapPayload)]

@@ -1,11 +1,30 @@
-# 동기화 정책 (WP4). 스트림 종류별로 방법을 순서대로 시도하고, 신뢰도가 min_confidence 이상인 첫 결과를 쓴다.
+# 동기화 정책 (WP4, ADR 0004·0028). 스트림 종류별로 방법을 순서대로 시도하고, 신뢰도가 min_confidence 이상인 첫 결과를 쓴다.
+#
+# 읽는 곳: dlp_sync.policy.SyncPolicy (`dlp sync run`). 알 수 없는 키는 적재 오류다.
+# 동기화 결과는 라벨이 아니라 DB 스트림 필드에 쓰므로 이 정책 전체의 해시는 모델 버전에 들어가지 않는다.
+# 예외: glove.pressure_prefixes 값(파싱된 값)은 접촉 프리라벨 모델 버전에 들어간다 (dlp_prelabel.runner).
+# 값을 바꾸면 `dlp sync run`을 다시 돌려야 기존 세션에 반영된다 (manual 스트림은 다시 돌려도 그대로).
+#
+# 시계 모델: master_ms = offset_ms + manual_adjustment_ms + stream_ms * clock_scale.
+# 마스터 타임라인 = 바디캠 시계. drift_ppm = (clock_scale - 1) * 1e6 (양수 = 스트림 시계가 느림).
+# 모든 시간 값의 단위는 ms다.
+
+# 정책 형식 버전. 키 구조를 바꿀 때 올린다
 version: 1
+# 채택 기준 신뢰도(0~1). 방법 목록을 앞에서부터 시도해 이 값 이상인 첫 방법을 쓴다.
+# 두드림 한 쌍만 맞으면 신뢰도가 최대 0.5라 이 값(0.6)을 넘지 못한다 (ADR 0004 결정 4).
+# 올리면 더 뒤 방법이나 unsynced로 가는 세션이 늘고, 내리면 덜 정확한 맞춤을 받아들인다
 min_confidence: 0.6
-max_offset_ms: 15000          # 탐색할 최대 오프셋 (양방향)
+max_offset_ms: 15000          # 탐색할 최대 오프셋 (양방향). 상관 탐색 범위이자, 넘는 추정을 버리는 기준
 min_drift_span_ms: 10000      # 앵커 사이 간격이 이보다 짧으면 드리프트(clock_scale)를 추정하지 않는다
+                              # (두드림·상관용. 슬레이트는 slate.min_drift_span_ms를 따로 쓴다)
 max_drift_ppm: 300            # 이보다 큰 드리프트 추정은 오류로 보고 버린다. 두드림 짝짓기 허용 오차와
                               # 상호상관 정밀 탐색 범위를 넓히는 드리프트 상한으로도 쓴다
+                              # (소비자 카메라·장갑은 최대 약 80 ppm, ADR 0028)
 
+# 스트림 종류별 시도 순서 (대체 순서). 방법: qr_slate | tap_event | audio_xcorr | motion_xcorr.
+# 목록에 없는 종류는 동기화하지 않는다(unsynced로 남는다). 기준(bodycam)을 넣으면 적재 오류다.
+# motion_xcorr는 바디캠 내장 IMU(shared_clock) 신호가 있어야 한다.
 methods:                      # 키는 스트림 종류(StreamKind). 바디캠(기준)은 넣지 않는다
   third_person: [qr_slate, tap_event, audio_xcorr]
   glove_left: [tap_event, motion_xcorr]
@@ -13,17 +32,21 @@ methods:                      # 키는 스트림 종류(StreamKind). 바디캠(�
   imu: [tap_event]            # 바디캠 내장 IMU(shared_clock)는 동기화하지 않는다
   audio: [tap_event, audio_xcorr]
 
+# 장갑 동기화 신호. 접촉 프리라벨(prelabel)과 검수 동기 재생(review)도 같은 접두사를 쓴다.
+# 장갑 기종의 압력 채널 이름이 다르면 여기에 접두사를 더한다 (없으면 장갑 수집 신호 적재가 실패한다)
 glove:
   pressure_prefixes: [pressure]  # 이 접두사로 시작하는 채널의 합을 장갑 동기화 신호로 쓴다 (IMU·온도 채널 제외)
 
+# QR 슬레이트 (dlp_sync.slate, pipeline._slate)
 slate:
-  payload_prefix: "DLP-SLATE|"
-  search_window_ms: 60000     # 영상 앞뒤 이 구간에서만 찾는다
+  payload_prefix: "DLP-SLATE|"  # 슬레이트 앱이 띄우는 QR 내용의 접두사. 다른 QR은 무시한다
+  search_window_ms: 60000     # 영상 앞뒤 이 구간에서만 찾는다 (영상이 이 값의 2배보다 짧으면 전체)
   frame_stride: 3             # 이 간격으로 QR을 찾고, 찾으면 앞 프레임을 되짚어 처음 보인 프레임을 정한다
+                              # (키우면 빨라지지만, 슬레이트가 stride 프레임보다 짧게 뜨면 놓칠 수 있다)
   # 슬레이트 시각은 프레임 단위로 양자화된다(앵커마다 최대 1프레임 오차). 앵커 사이가 짧으면 드리프트 오차가
   # 커지므로(30초 간격이면 ±1000 ppm 이상) min_drift_span_ms 이상 떨어진 슬레이트가 있을 때만 드리프트를 맞춘다.
   # 그 사이 구간의 시각 오차는 앵커 오차(1프레임 미만)로 묶인다.
-  estimate_drift: true
+  estimate_drift: true        # false면 슬레이트로는 늘 오프셋만 맞춘다
   min_drift_span_ms: 600000   # 10분. 30 fps면 드리프트 오차 상한 2프레임/10분 ≈ 110 ppm
   confidence_one: 0.8         # 슬레이트 하나로 맞춘 신뢰도 (오차 상한이 양자화 안일 때)
   confidence_many: 0.95       # 슬레이트 둘 이상이 서로 맞을 때 신뢰도 (오차 상한이 양자화 안일 때)
@@ -32,30 +55,36 @@ slate:
   # 신뢰도 *= exp(-max(0, 상한 - 양자화) / residual_scale_ms)
   residual_scale_ms: 10.0
   refine_with_audio: true     # 두 영상에 오디오가 있으면 슬레이트 맞춤을 출발점으로 오디오 상관으로 다듬는다
+                              # (결과가 슬레이트 앵커와 양자화 + audio_xcorr.refine_ms 안에서 맞을 때만 쓴다)
 
+# 두 번 두드림 (dlp_sync.taps). 기준은 늘 바디캠 오디오의 두드림이다
 tap:
-  double_tap_gap_ms: [120, 300]
+  double_tap_gap_ms: [120, 300]  # 두 두드림 사이 간격의 허용 범위 [하한, 상한] (촬영 프로토콜의 두 번 두드림)
   max_pulse_ms: 80            # 이보다 긴 신호는 두드림이 아니다 (행동 중 접촉 등)
   merge_gap_ms: 20            # 이 간격 안의 문턱 초과는 한 사건으로 묶는다
-  threshold_mad: 12.0         # 잡음 중앙값 + MAD 배수
+  threshold_mad: 12.0         # 잡음 중앙값 + MAD 배수. 낮추면 잡음을 두드림으로, 높이면 약한 두드림을 놓친다
   match_tolerance_ms: 50      # 두 스트림 사건을 같은 두드림으로 볼 허용 오차. 기준 두드림에서 |Δt|만큼 떨어진
                               # 두드림은 드리프트를 감안해 max_drift_ppm·|Δt|를 더 허용한다 (20분·300 ppm이면 +360 ms)
-  residual_scale_ms: 15.0     # 신뢰도 = exp(-잔차 RMS / 이 값)
+  residual_scale_ms: 15.0     # 신뢰도 = min(1, 짝 수/2) * exp(-잔차 RMS / 이 값)
 
+# 오디오 상호상관 (dlp_sync.xcorr.audio_anchors). 오디오는 16 kHz로 읽는다
 audio_xcorr:
-  analysis_rate_hz: 4000      # 거친 탐색 샘플레이트
-  coarse_segment_ms: 30000    # 거친 탐색에 쓰는 기준 오디오 길이
+  analysis_rate_hz: 4000      # 거친 탐색 샘플레이트 (16 kHz를 정수배로 줄인다)
+  coarse_segment_ms: 30000    # 거친 탐색에 쓰는 기준 오디오 길이 (기준 오디오 가운데 구간)
   window_ms: 3000             # 정밀 탐색 창 길이
-  windows: 5                  # 정밀 탐색 창 개수 (앵커 수)
+  windows: 5                  # 정밀 탐색 창 개수 (앵커 수). 2개 이상 통과하고 앵커 범위가 min_drift_span_ms
+                              # 이상이면 드리프트까지 맞춘다
   refine_ms: 20               # 정밀 탐색 범위 (거친 추정 ±). 거친 추정 지점(또는 슬레이트 앵커)에서 |Δt|만큼
                               # 떨어진 창은 드리프트를 감안해 max_drift_ppm·|Δt|를 더 본다
-  min_psr: 8.0                # 상관 최대값의 주변 대비 비 (peak-to-sidelobe ratio)
+  min_psr: 8.0                # 상관 최대값의 주변 대비 비 (peak-to-sidelobe ratio). 미만인 창은 앵커로 쓰지 않는다.
+                              # 신뢰도 = 1 - min_psr / PSR 중앙값. 실제 현장 소음에서 적절한지 파일럿 확인 필요 (ADR 0004)
   residual_scale_ms: 5.0      # 앵커 2개 이상이면 신뢰도 *= exp(-앵커 잔차 RMS / 이 값)
 
+# 장갑 압력 ↔ 바디캠 IMU 운동 상관 (dlp_sync.xcorr.motion_anchors)
 motion_xcorr:
-  rate_hz: 200
+  rate_hz: 200                # 두 신호를 리샘플할 공통 격자 (Hz)
   window_ms: 10000            # 창별 정밀 탐색 창 길이. 사건(두드림)이 든 창마다 앵커가 하나 나온다
   refine_ms: 50               # 창별 탐색 범위 = 전체 상관 추정 ± (이 값 + max_drift_ppm·녹화 길이)
   window_min_psr: 6.0         # 창별 PSR 하한. 사건 없는 창은 3~4, 두드림이 든 창은 9 안팎 (합성 픽스처)
-  min_psr: 8.0
+  min_psr: 8.0                # 전체 상관 PSR 하한. 신뢰도 = 1 - min_psr / PSR
   residual_scale_ms: 5.0      # 앵커 2개 이상이면 신뢰도 *= exp(-앵커 잔차 RMS / 이 값)
