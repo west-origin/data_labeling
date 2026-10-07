@@ -53,6 +53,8 @@ jobs:
         run: make up
       - run: make health
       - run: make test-services
+      - name: LeRobot official write/read (isolated PyTorch CPU env)
+        run: make test-isolated
       - name: Dump logs on failure
         if: failure()
         run: docker compose --env-file .env -f services/docker-compose.yml logs --tail=200

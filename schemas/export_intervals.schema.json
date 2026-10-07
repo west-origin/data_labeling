@@ -1,0 +1,1384 @@
+{
+  "$defs": {
+    "ActionPayload": {
+      "additionalProperties": false,
+      "description": "원시 동작 하나 (손별). 양손 행동은 두 손 트랙에 같은 action_id로 기록한다.",
+      "properties": {
+        "action_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "title": "Action Id",
+          "type": "string"
+        },
+        "contact_held": {
+          "default": false,
+          "description": "연속 접촉 묶음의 중간·끝 행동 (접촉 시작이 앞 행동에 있음)",
+          "title": "Contact Held",
+          "type": "boolean"
+        },
+        "direction": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Direction"
+        },
+        "hand": {
+          "$ref": "#/$defs/Hand"
+        },
+        "kind": {
+          "const": "action",
+          "default": "action",
+          "title": "Kind",
+          "type": "string"
+        },
+        "post_state": {
+          "patternProperties": {
+            "^[a-z][a-z0-9_]{0,63}$": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
+              "type": "string"
+            }
+          },
+          "title": "Post State",
+          "type": "object"
+        },
+        "pre_state": {
+          "patternProperties": {
+            "^[a-z][a-z0-9_]{0,63}$": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
+              "type": "string"
+            }
+          },
+          "title": "Pre State",
+          "type": "object"
+        },
+        "t_approach_ms": {
+          "description": "마스터 타임라인 기준 시각(ms)",
+          "minimum": 0,
+          "title": "T Approach Ms",
+          "type": "integer"
+        },
+        "t_contact_end_ms": {
+          "anyOf": [
+            {
+              "description": "마스터 타임라인 기준 시각(ms)",
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "T Contact End Ms"
+        },
+        "t_contact_start_ms": {
+          "anyOf": [
+            {
+              "description": "마스터 타임라인 기준 시각(ms)",
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "T Contact Start Ms"
+        },
+        "t_end_ms": {
+          "description": "마스터 타임라인 기준 시각(ms)",
+          "minimum": 0,
+          "title": "T End Ms",
+          "type": "integer"
+        },
+        "target_body_part": {
+          "anyOf": [
+            {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target Body Part"
+        },
+        "target_id": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target Id"
+        },
+        "tool_id": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tool Id"
+        },
+        "verb": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
+          "title": "Verb",
+          "type": "string"
+        }
+      },
+      "required": [
+        "action_id",
+        "hand",
+        "verb",
+        "t_approach_ms",
+        "t_end_ms"
+      ],
+      "title": "ActionPayload",
+      "type": "object"
+    },
+    "BlurTrackPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "keyframes": {
+          "items": {
+            "$ref": "#/$defs/BoxKeyframe"
+          },
+          "minItems": 1,
+          "title": "Keyframes",
+          "type": "array"
+        },
+        "kind": {
+          "const": "blur_track",
+          "default": "blur_track",
+          "title": "Kind",
+          "type": "string"
+        },
+        "target": {
+          "description": "프라이버시 사전의 대상 ID",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
+          "title": "Target",
+          "type": "string"
+        }
+      },
+      "required": [
+        "target",
+        "keyframes"
+      ],
+      "title": "BlurTrackPayload",
+      "type": "object"
+    },
+    "BoxKeyframe": {
+      "additionalProperties": false,
+      "properties": {
+        "h": {
+          "minimum": 0,
+          "title": "H",
+          "type": "number"
+        },
+        "outside": {
+          "default": false,
+          "title": "Outside",
+          "type": "boolean"
+        },
+        "t_ms": {
+          "description": "마스터 타임라인 기준 시각(ms)",
+          "minimum": 0,
+          "title": "T Ms",
+          "type": "integer"
+        },
+        "w": {
+          "minimum": 0,
+          "title": "W",
+          "type": "number"
+        },
+        "x": {
+          "title": "X",
+          "type": "number"
+        },
+        "y": {
+          "title": "Y",
+          "type": "number"
+        }
+      },
+      "required": [
+        "t_ms",
+        "x",
+        "y",
+        "w",
+        "h"
+      ],
+      "title": "BoxKeyframe",
+      "type": "object"
+    },
+    "BoxTrackPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "class_id": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
+          "title": "Class Id",
+          "type": "string"
+        },
+        "entity_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "title": "Entity Id",
+          "type": "string"
+        },
+        "keyframes": {
+          "items": {
+            "$ref": "#/$defs/BoxKeyframe"
+          },
+          "minItems": 1,
+          "title": "Keyframes",
+          "type": "array"
+        },
+        "kind": {
+          "const": "box_track",
+          "default": "box_track",
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "entity_id",
+        "class_id",
+        "keyframes"
+      ],
+      "title": "BoxTrackPayload",
+      "type": "object"
+    },
+    "CoordinateFrame": {
+      "enum": [
+        "camera",
+        "body",
+        "world"
+      ],
+      "title": "CoordinateFrame",
+      "type": "string"
+    },
+    "CoveragePayload": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "coverage",
+          "default": "coverage",
+          "title": "Kind",
+          "type": "string"
+        },
+        "ratio": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Ratio",
+          "type": "number"
+        },
+        "surface_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "title": "Surface Id",
+          "type": "string"
+        },
+        "tool_id": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tool Id"
+        }
+      },
+      "required": [
+        "surface_id",
+        "ratio"
+      ],
+      "title": "CoveragePayload",
+      "type": "object"
+    },
+    "DescriptionPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "description",
+          "default": "description",
+          "title": "Kind",
+          "type": "string"
+        },
+        "language": {
+          "default": "ko",
+          "title": "Language",
+          "type": "string"
+        },
+        "segment_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "title": "Segment Id",
+          "type": "string"
+        },
+        "text": {
+          "minLength": 1,
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "segment_id",
+        "text"
+      ],
+      "title": "DescriptionPayload",
+      "type": "object"
+    },
+    "Domain": {
+      "enum": [
+        "cleaning",
+        "caregiving",
+        "nursing"
+      ],
+      "title": "Domain",
+      "type": "string"
+    },
+    "EventPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "event_type": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
+          "title": "Event Type",
+          "type": "string"
+        },
+        "kind": {
+          "const": "event",
+          "default": "event",
+          "title": "Kind",
+          "type": "string"
+        },
+        "related_action_id": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Related Action Id"
+        },
+        "related_entity_id": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Related Entity Id"
+        },
+        "severity": {
+          "anyOf": [
+            {
+              "enum": [
+                1,
+                2,
+                3
+              ],
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Severity"
+        }
+      },
+      "required": [
+        "event_type"
+      ],
+      "title": "EventPayload",
+      "type": "object"
+    },
+    "ExportedLabel": {
+      "additionalProperties": false,
+      "properties": {
+        "confidence": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Confidence"
+        },
+        "label_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "title": "Label Id",
+          "type": "string"
+        },
+        "model_version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Version"
+        },
+        "payload": {
+          "discriminator": {
+            "mapping": {
+              "action": "#/$defs/ActionPayload",
+              "blur_track": "#/$defs/BlurTrackPayload",
+              "box_track": "#/$defs/BoxTrackPayload",
+              "coverage": "#/$defs/CoveragePayload",
+              "description": "#/$defs/DescriptionPayload",
+              "event": "#/$defs/EventPayload",
+              "gap": "#/$defs/GapPayload",
+              "hand_state": "#/$defs/HandStatePayload",
+              "keypoint_track": "#/$defs/KeypointTrackPayload",
+              "mask_track": "#/$defs/MaskTrackPayload",
+              "object_state": "#/$defs/ObjectStatePayload",
+              "relation": "#/$defs/RelationPayload",
+              "segment": "#/$defs/SegmentPayload",
+              "trajectory3d": "#/$defs/Trajectory3DPayload"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/BoxTrackPayload"
+            },
+            {
+              "$ref": "#/$defs/MaskTrackPayload"
+            },
+            {
+              "$ref": "#/$defs/KeypointTrackPayload"
+            },
+            {
+              "$ref": "#/$defs/BlurTrackPayload"
+            },
+            {
+              "$ref": "#/$defs/Trajectory3DPayload"
+            },
+            {
+              "$ref": "#/$defs/HandStatePayload"
+            },
+            {
+              "$ref": "#/$defs/ActionPayload"
+            },
+            {
+              "$ref": "#/$defs/SegmentPayload"
+            },
+            {
+              "$ref": "#/$defs/GapPayload"
+            },
+            {
+              "$ref": "#/$defs/ObjectStatePayload"
+            },
+            {
+              "$ref": "#/$defs/CoveragePayload"
+            },
+            {
+              "$ref": "#/$defs/EventPayload"
+            },
+            {
+              "$ref": "#/$defs/RelationPayload"
+            },
+            {
+              "$ref": "#/$defs/DescriptionPayload"
+            }
+          ],
+          "title": "Payload"
+        },
+        "source": {
+          "$ref": "#/$defs/Source"
+        },
+        "stream_id": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Stream Id"
+        },
+        "t_end_ms": {
+          "description": "마스터 타임라인 기준 시각(ms)",
+          "minimum": 0,
+          "title": "T End Ms",
+          "type": "integer"
+        },
+        "t_start_ms": {
+          "description": "마스터 타임라인 기준 시각(ms)",
+          "minimum": 0,
+          "title": "T Start Ms",
+          "type": "integer"
+        },
+        "verification": {
+          "$ref": "#/$defs/VerificationState"
+        }
+      },
+      "required": [
+        "label_id",
+        "t_start_ms",
+        "t_end_ms",
+        "verification",
+        "source",
+        "payload"
+      ],
+      "title": "ExportedLabel",
+      "type": "object"
+    },
+    "ExportedStream": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/StreamKind"
+        },
+        "stream_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "title": "Stream Id",
+          "type": "string"
+        },
+        "video": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "내보내기 안의 블러본 상대 경로 (있으면)",
+          "title": "Video"
+        }
+      },
+      "required": [
+        "stream_id",
+        "kind"
+      ],
+      "title": "ExportedStream",
+      "type": "object"
+    },
+    "GapPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "gap_type": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
+          "title": "Gap Type",
+          "type": "string"
+        },
+        "hand": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Hand"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "kind": {
+          "const": "gap",
+          "default": "gap",
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "gap_type"
+      ],
+      "title": "GapPayload",
+      "type": "object"
+    },
+    "Hand": {
+      "enum": [
+        "left",
+        "right"
+      ],
+      "title": "Hand",
+      "type": "string"
+    },
+    "HandStatePayload": {
+      "additionalProperties": false,
+      "description": "손 상태 구간. 값이 바뀌는 시각(변화점)마다 새 구간을 만든다.",
+      "properties": {
+        "body_part": {
+          "anyOf": [
+            {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Body Part"
+        },
+        "contact_target_kind": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
+          "title": "Contact Target Kind",
+          "type": "string"
+        },
+        "grasp_type": {
+          "anyOf": [
+            {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Grasp Type"
+        },
+        "hand": {
+          "$ref": "#/$defs/Hand"
+        },
+        "kind": {
+          "const": "hand_state",
+          "default": "hand_state",
+          "title": "Kind",
+          "type": "string"
+        },
+        "role": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
+          "title": "Role",
+          "type": "string"
+        },
+        "target_id": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target Id"
+        }
+      },
+      "required": [
+        "hand",
+        "contact_target_kind",
+        "role"
+      ],
+      "title": "HandStatePayload",
+      "type": "object"
+    },
+    "Keypoint": {
+      "additionalProperties": false,
+      "properties": {
+        "confidence": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Confidence"
+        },
+        "visibility": {
+          "description": "0 라벨 없음, 1 가려짐, 2 보임",
+          "enum": [
+            0,
+            1,
+            2
+          ],
+          "title": "Visibility",
+          "type": "integer"
+        },
+        "x": {
+          "title": "X",
+          "type": "number"
+        },
+        "y": {
+          "title": "Y",
+          "type": "number"
+        }
+      },
+      "required": [
+        "x",
+        "y",
+        "visibility"
+      ],
+      "title": "Keypoint",
+      "type": "object"
+    },
+    "KeypointFrame": {
+      "additionalProperties": false,
+      "properties": {
+        "points": {
+          "items": {
+            "$ref": "#/$defs/Keypoint"
+          },
+          "title": "Points",
+          "type": "array"
+        },
+        "t_ms": {
+          "description": "마스터 타임라인 기준 시각(ms)",
+          "minimum": 0,
+          "title": "T Ms",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "t_ms",
+        "points"
+      ],
+      "title": "KeypointFrame",
+      "type": "object"
+    },
+    "KeypointTrackPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "entity_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "title": "Entity Id",
+          "type": "string"
+        },
+        "hand": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Hand"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "keyframes": {
+          "items": {
+            "$ref": "#/$defs/KeypointFrame"
+          },
+          "minItems": 1,
+          "title": "Keyframes",
+          "type": "array"
+        },
+        "kind": {
+          "const": "keypoint_track",
+          "default": "keypoint_track",
+          "title": "Kind",
+          "type": "string"
+        },
+        "skeleton": {
+          "enum": [
+            "hand21",
+            "coco17",
+            "wholebody133"
+          ],
+          "title": "Skeleton",
+          "type": "string"
+        }
+      },
+      "required": [
+        "entity_id",
+        "skeleton",
+        "keyframes"
+      ],
+      "title": "KeypointTrackPayload",
+      "type": "object"
+    },
+    "MaskKeyframe": {
+      "additionalProperties": false,
+      "properties": {
+        "outside": {
+          "default": false,
+          "title": "Outside",
+          "type": "boolean"
+        },
+        "rle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Rle"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "t_ms": {
+          "description": "마스터 타임라인 기준 시각(ms)",
+          "minimum": 0,
+          "title": "T Ms",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "t_ms"
+      ],
+      "title": "MaskKeyframe",
+      "type": "object"
+    },
+    "MaskTrackPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "class_id": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
+          "title": "Class Id",
+          "type": "string"
+        },
+        "entity_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "title": "Entity Id",
+          "type": "string"
+        },
+        "keyframes": {
+          "items": {
+            "$ref": "#/$defs/MaskKeyframe"
+          },
+          "minItems": 1,
+          "title": "Keyframes",
+          "type": "array"
+        },
+        "kind": {
+          "const": "mask_track",
+          "default": "mask_track",
+          "title": "Kind",
+          "type": "string"
+        },
+        "part": {
+          "anyOf": [
+            {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "도구 작용부·파지부 등 부분 마스크",
+          "title": "Part"
+        }
+      },
+      "required": [
+        "entity_id",
+        "class_id",
+        "keyframes"
+      ],
+      "title": "MaskTrackPayload",
+      "type": "object"
+    },
+    "ObjectStatePayload": {
+      "additionalProperties": false,
+      "description": "객체 상태가 유지되는 구간. 상태 전이는 같은 객체·속성의 연속 구간에서 도출한다.",
+      "properties": {
+        "attribute": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
+          "title": "Attribute",
+          "type": "string"
+        },
+        "class_id": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
+          "title": "Class Id",
+          "type": "string"
+        },
+        "entity_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "title": "Entity Id",
+          "type": "string"
+        },
+        "kind": {
+          "const": "object_state",
+          "default": "object_state",
+          "title": "Kind",
+          "type": "string"
+        },
+        "value": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
+          "title": "Value",
+          "type": "string"
+        }
+      },
+      "required": [
+        "entity_id",
+        "class_id",
+        "attribute",
+        "value"
+      ],
+      "title": "ObjectStatePayload",
+      "type": "object"
+    },
+    "RelationPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "derived_by": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "관계를 도출한 규칙 ID",
+          "title": "Derived By"
+        },
+        "kind": {
+          "const": "relation",
+          "default": "relation",
+          "title": "Kind",
+          "type": "string"
+        },
+        "object_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "title": "Object Id",
+          "type": "string"
+        },
+        "object_part": {
+          "anyOf": [
+            {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Object Part"
+        },
+        "predicate": {
+          "$ref": "#/$defs/RelationPredicate"
+        },
+        "subject_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "title": "Subject Id",
+          "type": "string"
+        },
+        "subject_part": {
+          "anyOf": [
+            {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Subject Part"
+        }
+      },
+      "required": [
+        "subject_id",
+        "predicate",
+        "object_id"
+      ],
+      "title": "RelationPayload",
+      "type": "object"
+    },
+    "RelationPredicate": {
+      "enum": [
+        "grasp",
+        "contact",
+        "support",
+        "contain"
+      ],
+      "title": "RelationPredicate",
+      "type": "string"
+    },
+    "Rle": {
+      "additionalProperties": false,
+      "description": "COCO 형식 RLE 마스크.",
+      "properties": {
+        "counts": {
+          "title": "Counts",
+          "type": "string"
+        },
+        "size": {
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "integer"
+            }
+          ],
+          "title": "Size",
+          "type": "array"
+        }
+      },
+      "required": [
+        "size",
+        "counts"
+      ],
+      "title": "Rle",
+      "type": "object"
+    },
+    "SegmentLevel": {
+      "enum": [
+        "skill",
+        "substep",
+        "task"
+      ],
+      "title": "SegmentLevel",
+      "type": "string"
+    },
+    "SegmentPayload": {
+      "additionalProperties": false,
+      "description": "원시 동작을 묶는 상위 구간 (기술, 하위 단계, 작업).",
+      "properties": {
+        "child_ids": {
+          "default": [],
+          "items": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+            "type": "string"
+          },
+          "title": "Child Ids",
+          "type": "array"
+        },
+        "kind": {
+          "const": "segment",
+          "default": "segment",
+          "title": "Kind",
+          "type": "string"
+        },
+        "level": {
+          "$ref": "#/$defs/SegmentLevel"
+        },
+        "ref_id": {
+          "description": "기술은 동사 ID, 하위 단계·작업은 작업 사전 ID",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
+          "title": "Ref Id",
+          "type": "string"
+        },
+        "segment_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "title": "Segment Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "segment_id",
+        "level",
+        "ref_id"
+      ],
+      "title": "SegmentPayload",
+      "type": "object"
+    },
+    "Source": {
+      "enum": [
+        "human",
+        "model",
+        "sensor"
+      ],
+      "title": "Source",
+      "type": "string"
+    },
+    "Source3D": {
+      "enum": [
+        "mono_depth",
+        "visual_slam",
+        "visual_inertial_slam",
+        "multi_view"
+      ],
+      "title": "Source3D",
+      "type": "string"
+    },
+    "Split": {
+      "enum": [
+        "golden",
+        "train",
+        "val",
+        "holdout"
+      ],
+      "title": "Split",
+      "type": "string"
+    },
+    "StreamKind": {
+      "enum": [
+        "bodycam",
+        "imu",
+        "third_person",
+        "glove_left",
+        "glove_right",
+        "audio"
+      ],
+      "title": "StreamKind",
+      "type": "string"
+    },
+    "Trajectory3DPayload": {
+      "additionalProperties": false,
+      "description": "3D 궤적. 카메라 자세는 entity_id=\"camera\"에 회전(쿼터니언)까지 기록한다.",
+      "properties": {
+        "entity_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "title": "Entity Id",
+          "type": "string"
+        },
+        "frame": {
+          "$ref": "#/$defs/CoordinateFrame"
+        },
+        "kind": {
+          "const": "trajectory3d",
+          "default": "trajectory3d",
+          "title": "Kind",
+          "type": "string"
+        },
+        "part": {
+          "anyOf": [
+            {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Part"
+        },
+        "samples": {
+          "items": {
+            "$ref": "#/$defs/Trajectory3DSample"
+          },
+          "minItems": 1,
+          "title": "Samples",
+          "type": "array"
+        },
+        "source_3d": {
+          "$ref": "#/$defs/Source3D"
+        }
+      },
+      "required": [
+        "entity_id",
+        "frame",
+        "source_3d",
+        "samples"
+      ],
+      "title": "Trajectory3DPayload",
+      "type": "object"
+    },
+    "Trajectory3DSample": {
+      "additionalProperties": false,
+      "properties": {
+        "qw": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Qw"
+        },
+        "qx": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Qx"
+        },
+        "qy": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Qy"
+        },
+        "qz": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Qz"
+        },
+        "t_ms": {
+          "description": "마스터 타임라인 기준 시각(ms)",
+          "minimum": 0,
+          "title": "T Ms",
+          "type": "integer"
+        },
+        "x": {
+          "title": "X",
+          "type": "number"
+        },
+        "y": {
+          "title": "Y",
+          "type": "number"
+        },
+        "z": {
+          "title": "Z",
+          "type": "number"
+        }
+      },
+      "required": [
+        "t_ms",
+        "x",
+        "y",
+        "z"
+      ],
+      "title": "Trajectory3DSample",
+      "type": "object"
+    },
+    "VerificationState": {
+      "enum": [
+        "unreviewed",
+        "sample_verified",
+        "human_approved",
+        "human_corrected"
+      ],
+      "title": "VerificationState",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "세션 하나의 시간 구간 라벨.\n\n행동, 상위 구간, 공백, 손 상태, 객체 상태, 이벤트, 관계, 커버리지, 설명.",
+  "properties": {
+    "dataset_version_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Dataset Version Id",
+      "type": "string"
+    },
+    "domain": {
+      "$ref": "#/$defs/Domain"
+    },
+    "duration_ms": {
+      "description": "마스터 타임라인 기준 시각(ms)",
+      "minimum": 0,
+      "title": "Duration Ms",
+      "type": "integer"
+    },
+    "export_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Export Id",
+      "type": "string"
+    },
+    "exported_at": {
+      "format": "date-time",
+      "title": "Exported At",
+      "type": "string"
+    },
+    "format": {
+      "const": "dlp-intervals",
+      "default": "dlp-intervals",
+      "title": "Format",
+      "type": "string"
+    },
+    "format_version": {
+      "default": "1.0",
+      "title": "Format Version",
+      "type": "string"
+    },
+    "labels": {
+      "items": {
+        "$ref": "#/$defs/ExportedLabel"
+      },
+      "title": "Labels",
+      "type": "array"
+    },
+    "ontology_version": {
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "title": "Ontology Version",
+      "type": "string"
+    },
+    "session_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Session Id",
+      "type": "string"
+    },
+    "site_id": {
+      "description": "가명",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Site Id",
+      "type": "string"
+    },
+    "split": {
+      "$ref": "#/$defs/Split"
+    },
+    "streams": {
+      "items": {
+        "$ref": "#/$defs/ExportedStream"
+      },
+      "title": "Streams",
+      "type": "array"
+    },
+    "worker_id": {
+      "description": "가명",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Worker Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "export_id",
+    "dataset_version_id",
+    "ontology_version",
+    "session_id",
+    "split",
+    "domain",
+    "worker_id",
+    "site_id",
+    "duration_ms",
+    "streams",
+    "labels",
+    "exported_at"
+  ],
+  "title": "IntervalFile",
+  "type": "object"
+}

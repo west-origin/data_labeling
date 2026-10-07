@@ -1,0 +1,20 @@
+[project]
+name = "dlp-export"
+version = "0.1.0"
+description = "내보내기: COCO, 구간 JSON, LeRobot 에피소드 (데이터셋 버전에서, 검증 정책 적용, 블러본만)"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "dlp-datasets",
+    "dlp-media",
+    "dlp-schema",
+    "numpy>=2.0",
+    "opencv-contrib-python-headless>=4.10",
+    "pyyaml>=6.0",
+]
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dlp_export"]

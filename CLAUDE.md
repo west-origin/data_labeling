@@ -20,6 +20,7 @@
 - `make up` / `make down` / `make clean` — 개발 서비스 기동 / 중지 / 볼륨까지 삭제
 - `make health` — `dlp services check`로 서비스 헬스체크
 - `make test-services` — 실행 중인 서비스 대상 통합 테스트 (`@pytest.mark.services`)
+- `make test-isolated` — 격리된 일회용 환경(LeRobot·PyTorch CPU판)을 받는 테스트 (`@pytest.mark.isolated_env`)
 - `make install-curation` — FiftyOne(데이터 큐레이션, 약 1 GB) 포함 설치. `make install`을 다시 하면 빠진다
 - `make cvat-up` / `make cvat-down` / `make cvat-superuser` — CVAT (공식 compose, 고정 버전)
 
@@ -60,6 +61,9 @@
 - `packages/active/` (`dlp_active`) — 액티브 러닝: 클래스별 수정률 기반 세션 점수(점수 항목 플러그인 `register_term`),
   FiftyOne 연동(블러본만). `dlp active rank|fiftyone`. 정책은 `config/policies/active.yaml`.
   FiftyOne은 선택 설치(`make install-curation`).
+- `packages/export/` (`dlp_export`) — 내보내기: COCO, 구간 JSON(`dlp_schema.export`), LeRobot v3.0 에피소드.
+  데이터셋 버전 스냅샷에서, 검증 정책 적용, 블러본만. `dlp export coco|intervals|lerobot`. 정책은 `config/policies/export.yaml`.
+  LeRobot은 격리된 일회용 환경(`scripts/lerobot_write.py`, `scripts/lerobot_check.py`)에서 공식 API로 쓰고 읽는다.
 - `config/` — 온톨로지·정책·기본값 YAML. 코드에 값을 하드코딩하지 않는다.
 - `schemas/` — 생성된 JSON Schema. 직접 편집하지 않는다 (`make schemas`).
 - `services/` — 개발용 docker compose (PostgreSQL, SeaweedFS S3, Label Studio, Prefect, MLflow, lakeFS), CVAT 실행 스크립트.
@@ -90,6 +94,8 @@
 - 각 파이프라인 단계는 멱등적인 `dlp <단계>` 하위 명령으로 만든다. 모델 출처 라벨 ID에는 `version_tag(모델 버전)`을
   넣고, 다시 돌릴지는 현재 라벨이 아니라 전체 이력(`get_labels`)으로 정한다. 버전이 바뀌면 검수 전인 이전 버전만
   `retractions()`로 지운다 (ADR 0015).
+- 내보내기는 데이터셋 버전에서만 만들고(`dlp_export`), 기본은 사람이 만들거나 승인·수정·표본 검증한 라벨만 넣는다.
+  미검수는 명시적 옵션으로만. 블러 라벨·원본 위치·검수자 ID는 어떤 형식에도 넣지 않는다.
 - 블러(원본 영상) 검수는 `review.yaml reviewers.privacy`의 원본 접근 권한자에게만 배정한다.
 - 테스트는 정답을 아는 합성 픽스처(WP2)로 작성한다. 실제 영상·개인정보를 저장소에 넣지 않는다.
 - 코드 주석과 문서는 한국어, 식별자는 영어.

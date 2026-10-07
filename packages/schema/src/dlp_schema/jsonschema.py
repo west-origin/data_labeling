@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from dlp_schema.config import PlatformConfig
 from dlp_schema.dataset import DatasetVersion
 from dlp_schema.episode import EpisodeGraph
+from dlp_schema.export import IntervalFile
 from dlp_schema.labels import LabelRecord
 from dlp_schema.lineage import ExportRecord, GoldenSet, ModelVersion, TrainingRun, Withdrawal
 from dlp_schema.migration import OntologyMigration
@@ -32,6 +33,7 @@ CONTRACTS: dict[str, type[BaseModel]] = {
     "model_version": ModelVersion,
     "export_record": ExportRecord,
     "withdrawal": Withdrawal,
+    "export_intervals": IntervalFile,
 }
 
 

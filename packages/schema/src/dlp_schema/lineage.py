@@ -7,6 +7,7 @@ from enum import StrEnum
 from pydantic import AwareDatetime, Field, model_validator
 
 from dlp_schema.common import Contract, Identifier
+from dlp_schema.labels import VerificationState
 from dlp_schema.session import Domain
 
 
@@ -69,6 +70,11 @@ class ExportRecord(Contract):
     uri: str
     session_ids: tuple[Identifier, ...] = Field(
         description="실제로 내보낸 세션 (사용 중지 제외 후)"
+    )
+    label_states: tuple[VerificationState, ...] = Field(
+        default=(),
+        description="검증 정책: 내보낸 라벨의 검증 상태 (사람이 만든 라벨은 늘 포함). "
+        "unreviewed가 있으면 미검수 포함 옵션으로 내보낸 것",
     )
     created_at: AwareDatetime
 

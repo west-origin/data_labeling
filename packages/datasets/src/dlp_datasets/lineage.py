@@ -24,6 +24,7 @@ from dlp_schema.db.repository import (
     set_lifecycle,
     withdrawn_session_ids,
 )
+from dlp_schema.labels import VerificationState
 from dlp_schema.lineage import ExportRecord, TrainingRun, Withdrawal
 from dlp_schema.session import LifecycleState
 
@@ -72,6 +73,7 @@ def record_export(
     format: str,
     uri: str,
     splits: tuple[Split, ...] = (Split.TRAIN, Split.VAL),
+    label_states: tuple[VerificationState, ...] = (),
     now: datetime,
 ) -> ExportRecord:
     """내보내기 기록. 내보낼 세션은 버전의 해당 분할에서 지금 사용 중지된 세션을 뺀 것이다."""
@@ -82,7 +84,7 @@ def record_export(
     )
     export = ExportRecord(
         export_id=export_id, dataset_version_id=dataset_version_id, target=target, format=format,
-        uri=uri, session_ids=sessions, created_at=now,
+        uri=uri, session_ids=sessions, label_states=label_states, created_at=now,
     )  # fmt: skip
     insert_export(conn, export)
     return export

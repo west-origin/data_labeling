@@ -31,13 +31,17 @@ db-upgrade:
 	uv run dlp db upgrade
 	uv run dlp ontology register 1.0.0
 
-.PHONY: install install-curation lint fmt typecheck test contracts schemas models export-models todo-models licenses fixtures db-upgrade check env up down ps logs health test-services \
+.PHONY: install install-curation test-isolated lint fmt typecheck test contracts schemas models export-models todo-models licenses fixtures db-upgrade check env up down ps logs health test-services \
         cvat-up cvat-down cvat-superuser clean
 
 install:
 	uv sync --locked
 
 # FiftyOne(데이터 큐레이션, 약 1 GB). make install을 다시 하면 빠진다
+# 격리된 일회용 환경을 받는 테스트 (LeRobot 공식 쓰기·읽기, PyTorch CPU판 약 1.5 GB, 처음 한 번 수 분)
+test-isolated:
+	uv run pytest -m isolated_env
+
 install-curation:
 	uv sync --locked --group curation
 

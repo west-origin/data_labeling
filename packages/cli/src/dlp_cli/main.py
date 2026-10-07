@@ -12,6 +12,7 @@ from dlp_cli import (
     active_cmds,
     dataset_cmds,
     eval_cmds,
+    export_cmds,
     fixtures_cmds,
     media_cmds,
     models_cmds,
@@ -60,6 +61,7 @@ def build_parser() -> argparse.ArgumentParser:
     eval_cmds.add_commands(sub)
     train_cmds.add_commands(sub)
     active_cmds.add_commands(sub)
+    export_cmds.add_commands(sub)
     return parser
 
 

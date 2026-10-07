@@ -1,4 +1,16 @@
 {
+  "$defs": {
+    "VerificationState": {
+      "enum": [
+        "unreviewed",
+        "sample_verified",
+        "human_approved",
+        "human_corrected"
+      ],
+      "title": "VerificationState",
+      "type": "string"
+    }
+  },
   "additionalProperties": false,
   "properties": {
     "created_at": {
@@ -20,6 +32,15 @@
       "description": "coco, interval_json, lerobot 등",
       "title": "Format",
       "type": "string"
+    },
+    "label_states": {
+      "default": [],
+      "description": "검증 정책: 내보낸 라벨의 검증 상태 (사람이 만든 라벨은 늘 포함). unreviewed가 있으면 미검수 포함 옵션으로 내보낸 것",
+      "items": {
+        "$ref": "#/$defs/VerificationState"
+      },
+      "title": "Label States",
+      "type": "array"
     },
     "session_ids": {
       "description": "실제로 내보낸 세션 (사용 중지 제외 후)",

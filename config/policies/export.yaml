@@ -1,0 +1,35 @@
+# 내보내기 정책 (WP15). 미검수 포함 여부의 기본값은 config/defaults.yaml export.include_unreviewed.
+version: 1
+
+# 기본 검증 정책: 사람이 만든 라벨은 늘 포함하고, 모델 라벨은 이 상태만 포함한다 (기준 문서 "내보내기 검증 정책").
+# 미검수 라벨은 --include-unreviewed(또는 defaults export.include_unreviewed: true)로만 포함한다.
+label_states: [human_approved, human_corrected, sample_verified]
+
+# 기본으로 내보내는 분할 (골든셋은 평가 기준이라 판매용 기본 내보내기에 넣지 않는다).
+splits: [train, val]
+
+# 내보내지 않는 라벨 종류. 블러 라벨은 어떤 형식으로도 내보내지 않는다.
+excluded_kinds: [blur_track]
+
+coco:
+  jpeg_quality: 90
+  frame_tolerance_ms: 1      # 키프레임 시각과 블러본 프레임 시각의 허용 차이 (ms 반올림만)
+
+intervals:
+  kinds: [action, segment, gap, event, hand_state, object_state, relation, coverage, description]
+
+lerobot:
+  fps: 30                    # 에피소드 프레임률 (가변 프레임 블러본에서 PTS로 그 시각에 보이던 프레임을 고른다)
+  video_stream: bodycam      # 에피소드 영상 스트림 종류
+  max_width: 640             # 이보다 넓으면 줄인다 (0이면 원본 크기)
+  interp_max_gap_ms: 200     # 키포인트·3D 궤적을 이 간격 안에서만 선형 보간
+  hand_points_3d: [wrist, thumb_tip, index_tip]
+  repo_id: dlp/export
+  robot_type: human_bodycam
+  vcodec: h264
+  # LeRobot 공식 쓰기·읽기 API는 PyTorch를 끌어와 작업공간 의존성(av·numpy 버전)과 충돌한다.
+  # 격리된 일회용 환경에서 돌린다 (uv run --no-project --with ...).
+  env:
+    python: "3.12"
+    packages: ["lerobot[dataset]==0.6.1", "torch==2.11.0", "torchvision==0.26.0"]
+    index: https://download.pytorch.org/whl/cpu

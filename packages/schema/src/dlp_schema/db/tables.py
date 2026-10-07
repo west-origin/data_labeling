@@ -222,6 +222,7 @@ exports = sa.Table(
     sa.Column("format", sa.String(64), nullable=False),
     sa.Column("uri", sa.Text(), nullable=False),
     sa.Column("session_ids", Json, nullable=False),
+    sa.Column("label_states", Json, nullable=False, server_default="[]"),
     sa.Column("created_at", Ts, nullable=False),
 )
 
