@@ -11,6 +11,10 @@ schemas:
 models:
 	uv run dlp models fetch
 
+# 실제 모델을 아직 연동하지 못한 곳 (GPU·Hugging Face 등이 필요)
+todo-models:
+	@grep -rn "TODO(real-model):" --include=*.py --include=*.yaml packages config | grep -v "/.venv/"
+
 fixtures:
 	uv run dlp fixtures generate --out data/fixtures
 
@@ -18,7 +22,7 @@ db-upgrade:
 	uv run dlp db upgrade
 	uv run dlp ontology register 1.0.0
 
-.PHONY: install lint fmt typecheck test contracts schemas models fixtures db-upgrade check env up down ps logs health test-services \
+.PHONY: install lint fmt typecheck test contracts schemas models todo-models fixtures db-upgrade check env up down ps logs health test-services \
         cvat-up cvat-down cvat-superuser clean
 
 install:

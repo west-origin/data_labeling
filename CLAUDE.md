@@ -12,6 +12,7 @@
 - `make contracts` — 온톨로지 검증 + JSON Schema가 코드와 일치하는지 검사 (`make check`에 포함)
 - `make schemas` — 계약 타입을 바꾼 뒤 `schemas/*.schema.json` 재생성
 - `make models` — 정책에 적힌 모델 가중치를 `data/models/`에 받고 sha256 확인 (저장소에는 넣지 않음)
+- `make todo-models` — 실제 모델을 아직 연동하지 못한 곳(`TODO(real-model):` 표시) 목록
 - `make fixtures` — 합성 픽스처를 `data/fixtures/`에 생성 (저장소에는 넣지 않음)
 - `make db-upgrade` — 개발 DB에 Alembic 마이그레이션 적용 + 온톨로지 v1 등록
 - `make up` / `make down` / `make clean` — 개발 서비스 기동 / 중지 / 볼륨까지 삭제
@@ -38,6 +39,8 @@
   라벨 이력), 웹훅 수집, 라벨러 워터마크, 역할 경계. `dlp review create|collect|serve|register-webhooks`.
 - `packages/datasets/` (`dlp_datasets`) — 데이터셋 버전(lakeFS 커밋), 작업자·장소 단위 분할(holdout 포함), 골든셋 제안,
   사용 중지 전파, 계보 조회. `dlp dataset golden|build|withdraw`, `dlp lineage <세션>`. 정책은 `config/policies/dataset.yaml`.
+- `packages/prelabel/` (`dlp_prelabel`) — 자동 프리라벨: MediaPipe 손·전신·COCO 객체(실제), Oracle stub, 장갑·영상 접촉,
+  3인칭 착용자 매칭. `dlp prelabel run <세션>`. 정책은 `config/policies/prelabel.yaml`.
 - `config/` — 온톨로지·정책·기본값 YAML. 코드에 값을 하드코딩하지 않는다.
 - `schemas/` — 생성된 JSON Schema. 직접 편집하지 않는다 (`make schemas`).
 - `services/` — 개발용 docker compose (PostgreSQL, SeaweedFS S3, Label Studio, Prefect, MLflow, lakeFS), CVAT 실행 스크립트.
@@ -57,6 +60,8 @@
 - 정책 값(비율, 허용 오차, 임계값)은 `config/`에서 읽는다.
 - 골든·학습·검증 사이에 작업자나 장소가 겹치면 안 된다. 분할은 `dlp_datasets.splitter`로만 만든다.
 - 새 모델은 공통 `Predictor` 어댑터와 CPU용 stub 구현을 함께 추가한다. CI는 stub으로 돈다.
+- 실제 모델을 연동하지 못하고 stub만 둔 곳에는 주석 `TODO(real-model): <무엇이 필요한지>`를 단다 (코드와 정책 YAML 모두).
+  연동하면 표시를 지운다.
 - 각 파이프라인 단계는 멱등적인 `dlp <단계>` 하위 명령으로 만든다.
 - 테스트는 정답을 아는 합성 픽스처(WP2)로 작성한다. 실제 영상·개인정보를 저장소에 넣지 않는다.
 - 코드 주석과 문서는 한국어, 식별자는 영어.

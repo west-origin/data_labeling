@@ -8,7 +8,7 @@ dependencies = [
     "dlp-media",
     "dlp-schema",
     "numpy>=2.0",
-    "opencv-python-headless>=4.10",
+    "opencv-contrib-python-headless>=4.10",
     "pyyaml>=6.0",
 ]
 

@@ -14,6 +14,7 @@
 - `packages/privacy` (`dlp_privacy`): 프라이버시 게이트 (`dlp privacy detect|approve|render`)
 - `packages/review` (`dlp_review`): 검수 도구 연동 (`dlp review create|collect|serve`)
 - `packages/datasets` (`dlp_datasets`): 데이터셋 버전·분할·골든셋·계보 (`dlp dataset`, `dlp lineage`)
+- `packages/prelabel` (`dlp_prelabel`): 자동 프리라벨 (`dlp prelabel run`). 미연동 모델은 `make todo-models`
 - `packages/cli` (`dlp`): 명령줄 도구
 - `config/ontology/v1`: 온톨로지 v1 초안, `config/defaults.yaml`: 미결정 사항 기본값
 - `schemas/`: 계약 타입의 JSON Schema (생성 파일)
@@ -24,7 +25,7 @@
 
 ```sh
 make install        # Python 3.12 환경과 의존성
-make models         # 모델 가중치 (YuNet 얼굴 탐지)
+make models         # 모델 가중치 (YuNet 얼굴, MediaPipe 손·전신·객체). MediaPipe는 libegl1 libgles2 필요
 make check          # 린트·타입·테스트
 make up             # PostgreSQL, SeaweedFS(S3), Label Studio, Prefect, MLflow
 make health         # 헬스체크

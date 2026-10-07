@@ -39,5 +39,7 @@ detectors:
     region_detector: open_vocab
     face_detector: yunet
     threshold_scale: 0.5
+  # TODO(real-model): 오픈 보캐뷸러리 탐지(Grounding DINO, OWLv2)로 문서·화면·사진물·문패와
+  #   반사면 영역을 찾는다. GPU와 Hugging Face 접근이 필요하다. 그때까지 이 대상들은 전수 검수한다.
   open_vocab:
-    kind: unavailable         # Grounding DINO·OWLv2는 GPU 환경에서 연동 (WP8)
+    kind: unavailable

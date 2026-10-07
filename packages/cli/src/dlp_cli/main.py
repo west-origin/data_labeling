@@ -12,6 +12,7 @@ from dlp_cli import (
     fixtures_cmds,
     media_cmds,
     models_cmds,
+    prelabel_cmds,
     privacy_cmds,
     review_cmds,
     schema_cmds,
@@ -48,6 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
     models_cmds.add_commands(sub)
     review_cmds.add_commands(sub)
     dataset_cmds.add_commands(sub)
+    prelabel_cmds.add_commands(sub)
     return parser
 
 

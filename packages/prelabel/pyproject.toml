@@ -1,14 +1,15 @@
 [project]
-name = "dlp-sync"
+name = "dlp-prelabel"
 version = "0.1.0"
-description = "멀티스트림 동기화: QR 슬레이트, 두드림, 오디오·운동 상호상관, 드리프트 보정"
+description = "자동 프리라벨 어댑터: 손·전신 포즈, 객체, 접촉, 착용자 매칭 (공통 Predictor + stub)"
 requires-python = ">=3.12,<3.14"
 dependencies = [
     "av>=14.0",
     "dlp-media",
     "dlp-schema",
+    "dlp-sync",
+    "mediapipe>=1.1",
     "numpy>=2.0",
-    "opencv-contrib-python-headless>=4.10",
     "pyyaml>=6.0",
 ]
 
@@ -17,4 +18,4 @@ requires = ["hatchling>=1.25"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/dlp_sync"]
+packages = ["src/dlp_prelabel"]

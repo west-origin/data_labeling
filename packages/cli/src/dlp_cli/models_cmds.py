@@ -1,6 +1,7 @@
 """모델 가중치 내려받기.
 
-정책 파일의 model_url·model_sha256을 따른다. 가중치는 저장소에 넣지 않는다.
+정책 파일들(privacy.yaml의 detectors, prelabel.yaml의 models)에 적힌 URL·sha256을 따른다.
+가중치는 저장소에 넣지 않는다.
 """
 
 from __future__ import annotations
@@ -8,26 +9,40 @@ from __future__ import annotations
 import argparse
 import hashlib
 import urllib.request
+from pathlib import Path
+from typing import Any
 
-from dlp_privacy.policy import load_policy
+import yaml
+
 from dlp_schema import repo_root
+
+
+def model_specs(root: Path) -> dict[str, tuple[str, str, str | None]]:
+    """이름 → (상대 경로, URL, sha256)."""
+    specs: dict[str, tuple[str, str, str | None]] = {}
+    privacy: Any = yaml.safe_load((root / "config/policies/privacy.yaml").read_text("utf-8"))
+    for name, spec in privacy.get("detectors", {}).items():
+        if spec.get("model_url") and spec.get("model_path"):
+            specs[name] = (spec["model_path"], spec["model_url"], spec.get("model_sha256"))
+    prelabel: Any = yaml.safe_load((root / "config/policies/prelabel.yaml").read_text("utf-8"))
+    for name, spec in prelabel.get("models", {}).items():
+        specs[name] = (spec["path"], spec["url"], spec.get("sha256"))
+    return specs
 
 
 def cmd_fetch(args: argparse.Namespace) -> int:
     root = repo_root()
     failed = 0
-    for name, spec in load_policy(root).detectors.items():
-        if not (spec.model_url and spec.model_path):
-            continue
-        path = root / spec.model_path
-        if path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest() == spec.model_sha256:
+    for name, (rel, url, sha) in model_specs(root).items():
+        path = root / rel
+        if path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest() == sha:
             print(f"[있음] {name}: {path}")
             continue
         path.parent.mkdir(parents=True, exist_ok=True)
-        with urllib.request.urlopen(spec.model_url, timeout=60) as resp:
+        with urllib.request.urlopen(url, timeout=120) as resp:
             data = resp.read()
         digest = hashlib.sha256(data).hexdigest()
-        if spec.model_sha256 and digest != spec.model_sha256:
+        if sha and digest != sha:
             print(f"[실패] {name}: 해시 불일치 {digest}")
             failed += 1
             continue

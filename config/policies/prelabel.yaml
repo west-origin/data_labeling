@@ -1,0 +1,63 @@
+# 자동 프리라벨 정책 (WP8).
+# 실제 모델을 아직 연동하지 못한 곳은 "TODO(real-model)"로 표시하고 필요한 것을 적는다.
+# 저장소 전체에서 찾기: make todo-models
+version: 1
+
+models:
+  hand_landmarker:
+    path: data/models/hand_landmarker.task
+    url: https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task
+    sha256: fbc2a30080c3c557093b5ddfc334698132eb341044ccee322ccf8bcf3607cde1
+  pose_landmarker:
+    path: data/models/pose_landmarker_lite.task
+    url: https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task
+    sha256: 59929e1d1ee95287735ddd833b19cf4ac46d29bc7afddbbf6753c459690d574a
+  object_detector:
+    path: data/models/efficientdet_lite0.tflite
+    url: https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float16/latest/efficientdet_lite0.tflite
+    sha256: 4b59100025bea1235a84c1038879a6cccc9f6c49f5e41144e91e74d99e780993
+
+hands:
+  min_score: 0.5
+  # MediaPipe는 입력이 거울상(셀카)이라고 보고 왼손·오른손을 정한다. 바디캠은 거울상이 아니므로 뒤집는다.
+  input_is_mirrored: false
+
+body:
+  min_score: 0.5
+  max_people: 4
+  track_iou: 0.3
+
+objects:
+  min_score: 0.4
+  track_iou: 0.3
+  max_gap_ms: 300
+  # COCO 클래스 → 온톨로지 객체. 매핑이 없는 COCO 클래스는 버린다.
+  # TODO(real-model): COCO에 없는 청소 도구(걸레, 밀대, 솔, 분무기 등)와 도구 작용부 마스크는
+  #   오픈 보캐뷸러리 탐지(Grounding DINO, OWLv2) + SAM 2 마스크 추적이 필요하다.
+  #   GPU 환경과 Hugging Face 접근이 필요해 이 환경에서는 stub만 있다.
+  coco_to_ontology:
+    cup: cup
+    toilet: toilet
+    sink: sink
+    bed: bed
+    bottle: spray_bottle
+    person: person
+
+contact:
+  glove:
+    on_threshold: 0.3         # 압력 합이 이 값을 넘으면 접촉 시작
+    off_threshold: 0.15       # 이 값 아래로 내려가면 접촉 종료 (히스테리시스)
+    min_duration_ms: 60
+  video:
+    max_distance_px: 12       # 손가락 끝과 객체 박스 사이 거리가 이 이하면 접촉 후보
+    min_duration_ms: 100
+    merge_gap_ms: 100
+  # TODO(real-model): 영상만으로 접촉을 판정하는 학습 분류기 (장갑 세션을 정답으로, WP13에서 학습).
+  #   지금은 손가락 끝-객체 거리 휴리스틱만 쓴다.
+
+wearer_matching:
+  rate_hz: 30
+  min_correlation: 0.5
+
+# TODO(real-model): 카메라 6자유도 궤적(시각-관성 SLAM: Basalt, ORB-SLAM3)과 단안 메트릭 깊이
+#   (Depth Anything V2 Small)는 C++ 빌드·GPU·Hugging Face 접근이 필요해 이 환경에서는 stub만 있다.

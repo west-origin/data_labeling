@@ -49,6 +49,9 @@ def build_detectors(
                     )
                 det = ReflectionDetector(name, region, face, spec.threshold_scale or 0.5)
             else:
+                # TODO(real-model): 오픈 보캐뷸러리 탐지기(Grounding DINO, OWLv2) 어댑터. GPU와
+                #   Hugging Face 접근이 필요하다. 연동 전에는 해당 대상이 no_detector
+                #   전수 검수 구간이 된다.
                 raise ModelUnavailableError(f"{name}: 이 환경에서 쓸 수 없는 탐지기 ({spec.kind})")
         except ModelUnavailableError as exc:
             missing[name] = str(exc)
