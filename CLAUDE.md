@@ -20,6 +20,7 @@
 - `make up` / `make down` / `make clean` — 개발 서비스 기동 / 중지 / 볼륨까지 삭제
 - `make health` — `dlp services check`로 서비스 헬스체크
 - `make test-services` — 실행 중인 서비스 대상 통합 테스트 (`@pytest.mark.services`)
+- `make install-curation` — FiftyOne(데이터 큐레이션, 약 1 GB) 포함 설치. `make install`을 다시 하면 빠진다
 - `make cvat-up` / `make cvat-down` / `make cvat-superuser` — CVAT (공식 compose, 고정 버전)
 
 ## 구조
@@ -56,6 +57,9 @@
 - `packages/training/` (`dlp_train`) — 재학습 루프: 데이터셋 버전에서 과제별 학습 예제 추출(자동 원본과 수정본 차이),
   학습 작업 템플릿, MLflow 기록, 모델 레지스트리(DB `model_versions`), 골든셋 평가·게이트 후 배포.
   `dlp train run|models|approve`. CI·CPU는 `oracle-stub` 학습기. 정책은 `config/policies/training.yaml`.
+- `packages/active/` (`dlp_active`) — 액티브 러닝: 클래스별 수정률 기반 세션 점수(점수 항목 플러그인 `register_term`),
+  FiftyOne 연동(블러본만). `dlp active rank|fiftyone`. 정책은 `config/policies/active.yaml`.
+  FiftyOne은 선택 설치(`make install-curation`).
 - `config/` — 온톨로지·정책·기본값 YAML. 코드에 값을 하드코딩하지 않는다.
 - `schemas/` — 생성된 JSON Schema. 직접 편집하지 않는다 (`make schemas`).
 - `services/` — 개발용 docker compose (PostgreSQL, SeaweedFS S3, Label Studio, Prefect, MLflow, lakeFS), CVAT 실행 스크립트.

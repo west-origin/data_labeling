@@ -1,0 +1,18 @@
+[project]
+name = "dlp-active"
+version = "0.1.0"
+description = "액티브 러닝: 클래스별 수정률 기반 세션 점수, 점수 항목 플러그인, FiftyOne 연동"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "dlp-media",
+    "dlp-schema",
+    "numpy>=2.0",
+    "pyyaml>=6.0",
+]
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dlp_active"]

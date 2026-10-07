@@ -31,11 +31,15 @@ db-upgrade:
 	uv run dlp db upgrade
 	uv run dlp ontology register 1.0.0
 
-.PHONY: install lint fmt typecheck test contracts schemas models export-models todo-models licenses fixtures db-upgrade check env up down ps logs health test-services \
+.PHONY: install install-curation lint fmt typecheck test contracts schemas models export-models todo-models licenses fixtures db-upgrade check env up down ps logs health test-services \
         cvat-up cvat-down cvat-superuser clean
 
 install:
 	uv sync --locked
+
+# FiftyOne(데이터 큐레이션, 약 1 GB). make install을 다시 하면 빠진다
+install-curation:
+	uv sync --locked --group curation
 
 lint:
 	uv run ruff check .
