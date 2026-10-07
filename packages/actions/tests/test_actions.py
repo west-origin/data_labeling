@@ -1,3 +1,10 @@
+"""행동 구간 2단 구조 단위 테스트 (WP10 완료 기준, ADR 0012·0026).
+
+정답을 아는 합성 행동 시퀀스(`dlp_fixtures.actions.generate_action_scenario`)를 쓴다. 정답 행동의
+접근·접촉·끝 시각이 경계 판정 기준이고, `OracleVlm`이 정답 라벨로 답해 VLM 없이 병합·채우기
+규칙을 시험한다. DB·서비스는 쓰지 않는다 (VLM 서버는 `httpx.MockTransport`로 흉내 낸다).
+"""
+
 from __future__ import annotations
 
 import itertools
@@ -37,22 +44,26 @@ from dlp_schema.ontology import Ontology, load_ontology
 from dlp_schema.testing import FIXED_TIME
 from dlp_schema.validation import check_label
 
+# 저장소 루트 (packages/actions/tests/test_actions.py에서 세 단계 위)
 ROOT = Path(__file__).resolve().parents[3]
 
 
 @pytest.fixture(scope="module")
 def policy() -> ActionsPolicy:
+    """저장소의 행동 구간 정책 (모듈 범위)."""
     return load_policy(ROOT)
 
 
 @pytest.fixture(scope="module")
 def ontology() -> Ontology:
+    """저장소의 온톨로지 v1 (모듈 범위)."""
     return load_ontology(ROOT / "config/ontology/v1")
 
 
 def _inputs(
     sc: ActionScenario,
 ) -> tuple[KeypointTrackPayload, list[tuple[int, int]], list[LabelRecord]]:
+    """시나리오 → (손 키포인트 트랙, 접촉 구간, 정답 행동·사이 구간 라벨)."""
     track = next(x.payload for x in sc.labels if isinstance(x.payload, KeypointTrackPayload))
     contacts = [
         (x.t_start_ms, x.t_end_ms)
@@ -64,6 +75,7 @@ def _inputs(
 
 
 def _request(**kw: Any) -> SegmentRequest:
+    """기본값(오른손, 0~1000 ms, 접촉 있음, 개체 sink_01·cup_01)에 `kw`를 덮어쓴 요청."""
     base: dict[str, Any] = {
         "session_id": "s", "stream_id": "bodycam", "video": None, "hand": Hand.RIGHT,
         "start_ms": 0, "end_ms": 1000, "in_contact": True, "entities": ("sink_01", "cup_01"),
@@ -72,6 +84,7 @@ def _request(**kw: Any) -> SegmentRequest:
 
 
 def _run(sc: ActionScenario, ontology: Ontology, policy: ActionsPolicy) -> HandResult:
+    """시나리오 하나를 `OracleVlm`으로 `segment_hand`에 돌린다."""
     track, contacts, truth = _inputs(sc)
     return segment_hand(
         session_id=sc.session_id, stream_id="bodycam", video=None, hand=sc.hand, track=track,
@@ -82,7 +95,11 @@ def _run(sc: ActionScenario, ontology: Ontology, policy: ActionsPolicy) -> HandR
 
 
 def test_boundary_candidates_recall_at_least_95_percent(policy: ActionsPolicy) -> None:
-    """완료 기준: 합성 행동 시퀀스에서 경계 후보 재현율 ≥ 95% (기준 문서 허용 오차 안)."""
+    """완료 기준: 합성 행동 시퀀스에서 경계 후보 재현율 ≥ 95% (기준 문서 허용 오차 안).
+
+    seed 0~29 시나리오의 정답 경계(접근 시작·끝·접촉 시작·종료)마다 허용 오차
+    (`tolerance_ms`) 안에 후보가 하나라도 있으면 맞힌 것으로 센다.
+    """
     tol = policy.tolerance_ms
     hits = total = 0
     for seed in range(30):
@@ -107,6 +124,9 @@ def test_boundary_candidates_recall_at_least_95_percent(policy: ActionsPolicy) -
 
 
 def test_segments_partition_the_timeline() -> None:
+    """`segments`가 [0, 1000]을 빈틈없이 나누고, 짧은 조각(100 ms 미만)을 앞 구간에 붙이는지
+    검증한다.
+    """
     from dlp_actions.boundaries import Candidate
 
     cands = [Candidate(t, "valley") for t in (100, 150, 500, 990)]
@@ -117,6 +137,9 @@ def test_segments_partition_the_timeline() -> None:
 
 
 def test_prompt_and_schema_carry_the_ontology(ontology: Ontology) -> None:
+    """프롬프트에 온톨로지 동사·사이 구간(한국어)과 개체 후보가 들어가고, 스키마의 동사 목록은 원시
+    동작만 (기술 `wipe` 제외), gap_type은 온톨로지 세 종류 + null인지 검증한다.
+    """
     request = _request()
     prompt = build_prompt(request, ontology)
     assert "rub: 문지르다" in prompt and "unknown: 미상" in prompt and "sink_01" in prompt
@@ -147,11 +170,17 @@ def test_prompt_and_schema_carry_the_ontology(ontology: Ontology) -> None:
     ],
 )
 def test_invalid_answers_are_rejected(raw: str, message: str, ontology: Ontology) -> None:
+    """JSON 아님, 목록 밖 동사, 기술 동사, 목록 밖 대상, gap에 동사, 목록 밖 gap_type, 스키마
+    위반이 각각 해당 오류 문구로 거부되는지 검증한다.
+    """
     answer, errors = validate_answer(raw, ontology, _request())
     assert answer is None and any(message in e for e in errors)
 
 
 def test_retry_then_fallback_to_unknown_not_idle(ontology: Ontology) -> None:
+    """한 번 틀리면 다시 물어 정답을 받고(시도 2), 세 번 모두 틀리면 대기(idle)가 아니라
+    미상(unknown)으로 대체하는지(fallback, 호출 3번) 검증한다.
+    """
     truth = [x for x in generate_action_scenario(0).labels if isinstance(x.payload, ActionPayload)]
     a = truth[0]
     request = _request(
@@ -171,7 +200,11 @@ def test_retry_then_fallback_to_unknown_not_idle(ontology: Ontology) -> None:
 def test_two_stage_segmentation_recovers_truth(
     seed: int, ontology: Ontology, policy: ActionsPolicy
 ) -> None:
-    """오라클 VLM이면 경계 후보 + 병합만으로 정답 행동 순서와 경계를 되찾는다. 타임라인 공백 0."""
+    """오라클 VLM이면 경계 후보 + 병합만으로 정답 행동 순서와 경계를 되찾는다. 타임라인 공백 0.
+
+    seed 0~9: (동사, 대상) 순서가 정답과 같고, 90% 이상이 접근·끝 허용 오차 안이며, 행동·사이 구간이
+    0~끝을 빈틈없이 덮고, 행동마다 설명이 있고, 모든 라벨이 온톨로지 검증을 통과한다.
+    """
     sc = generate_action_scenario(seed)
     result = _run(sc, ontology, policy)
     got = [x.payload for x in result.labels if isinstance(x.payload, ActionPayload)]
@@ -200,9 +233,14 @@ def test_two_stage_segmentation_recovers_truth(
 
 
 def test_merge_and_fill_rules(ontology: Ontology, policy: ActionsPolicy) -> None:
-    """같은 분류 인접 구간 병합, 접촉이 둘이면 사이 경계에서 나눔, 미상은 사이 구간으로 채움."""
+    """같은 분류 인접 구간 병합, 접촉이 둘이면 사이 경계에서 나눔, 미상은 사이 구간으로 채움.
+
+    접촉 (300, 900)과 (1500, 1900) 사이의 골짜기 후보 1200에서 나뉘어 행동 둘이 되고, 각 행동의
+    접촉 시작·종료가 그 접촉과 같다.
+    """
 
     def piece(s: int, e: int, answer: dict[str, Any]) -> Any:
+        """구간 (s, e)의 분류 결과 하나 (시도 1번)."""
         from dlp_actions.vlm import Classified, VlmAnswer
 
         return Classified(_request(start_ms=s, end_ms=e), VlmAnswer.model_validate(answer), 1)
@@ -237,11 +275,15 @@ def test_merge_and_fill_rules(ontology: Ontology, policy: ActionsPolicy) -> None
 def test_openai_compatible_client_sends_frames_and_schema(
     tmp_path: Path, ontology: Ontology
 ) -> None:
+    """OpenAI 호환 클라이언트가 블러 픽스처 영상에서 프레임 4장(image_url)과 JSON Schema를 보내고,
+    응답 내용을 그대로 분류에 쓰는지 검증한다 (서버는 MockTransport).
+    """
     video = tmp_path / "v.mp4"
     generate_blur_scenario(1, duration_ms=1_000).write(video)
     seen: list[dict[str, Any]] = []
 
     def handler(req: httpx.Request) -> httpx.Response:
+        """요청 본문을 기록하고 gap idle 응답을 돌려준다."""
         seen.append(json.loads(req.content))
         answer = {"label": "gap", "gap_type": "idle", "description": None}
         return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(answer)}}]})
@@ -265,11 +307,15 @@ def test_openai_compatible_client_sends_frames_and_schema(
 def test_vlm_server_errors_back_off_then_abort_not_unknown(ontology: Ontology) -> None:
     """감사 회귀 (4차): VLM 서버 오류·시간 초과는 정책의 백오프만큼 기다리며 다시 묻고,
     끝내 실패하면 미상으로 두지 않고 VlmUnavailableError를 올린다
-    (장애가 미상으로 영구히 남지 않게)."""
+    (장애가 미상으로 영구히 남지 않게).
+
+    한 번 실패한 뒤 성공하면 그 답을 쓰고, 응답 위반 시도 횟수(attempts)는 늘지 않는다.
+    """
     calls: list[int] = []
     waits: list[float] = []
 
     def failing(req: httpx.Request) -> httpx.Response:
+        """첫 호출은 시간 초과, 그 뒤는 503."""
         calls.append(1)
         if len(calls) == 1:
             raise httpx.ReadTimeout("timeout", request=req)
@@ -290,6 +336,7 @@ def test_vlm_server_errors_back_off_then_abort_not_unknown(ontology: Ontology) -
     waits.clear()
 
     def flaky(req: httpx.Request) -> httpx.Response:
+        """첫 호출은 500, 그 뒤는 정상 응답."""
         calls.append(1)
         if len(calls) == 1:
             return httpx.Response(500)

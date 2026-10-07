@@ -2,31 +2,41 @@
 # 1단: 손목 속도와 접촉 신호로 경계 후보를 만든다 (VLM은 경계를 정하지 않는다).
 # 2단: VLM이 후보 구간마다 온톨로지 목록 안에서 행동·사이 구간 종류를 고르고 한 문장 설명을 쓴다.
 # 같은 분류의 인접 구간은 병합하고, 행동이 아닌 구간은 대기·미상·범위 외로 채워 공백을 없앤다.
+#
+# 읽는 곳: dlp_actions.policy.ActionsPolicy (`dlp actions run`). 알 수 없는 키는 적재 오류다.
+# 모델 버전: 이 파일의 파싱된 값 해시(ActionsPolicy.digest, vlm.unavailable_backoff_s 제외)가
+# `actions-<해시>+<VLM 버전>+i<입력 해시>`에 들어간다. 주석·서식은 해시에 영향이 없다.
+# 값을 바꾸면 다음 `dlp actions run`이 검수 전 결과를 지우고 새로 만든다 (검수된 라벨은 남는다, ADR 0015).
+
+# 정책 형식 버전 (키 구조를 바꿀 때 올린다. 값이 해시에 들어간다)
 version: 1
 
 # 장갑만 잡아 대상을 모르는 접촉의 target_id (prelabel.yaml contact.unresolved_target_id).
 # VLM에 대상·도구 후보로 주지 않는다.
 unresolved_entity_ids: [unresolved]
 
+# 1단 경계 후보 (dlp_actions.boundaries). 시간은 ms
 boundaries:
   # 속도 단위: 손바닥 길이(손목→가운뎃손가락 뿌리, hand21 0→9)/초. 해상도·거리와 무관하게 쓴다.
-  smooth_ms: 100              # 속도 이동 평균 창
+  smooth_ms: 100              # 속도 이동 평균 창 (키프레임 간격으로 나눠 프레임 수로 바꾼다)
   still_speed: 2.0            # 이보다 느리면 정지
   min_still_ms: 120           # 정지가 이만큼 이어지면 그 시작·끝을 경계 후보로 둔다
   valley_speed: 15.0          # 접촉 밖에서 속도 골짜기가 이보다 낮으면 경계 후보 (멈추지 않고 방향 전환)
   valley_ratio: 0.4           # 골짜기는 앞뒤 valley_window_ms 안 최고 속도의 이 비율 이하여야 한다
-  valley_window_ms: 300
-  min_valley_separation_ms: 150
+  valley_window_ms: 300       # 골짜기 앞뒤로 최고 속도를 비교할 창
+  min_valley_separation_ms: 150  # 골짜기 후보 사이 최소 간격 (가까운 골짜기는 앞의 것만)
   merge_ms: 80                # 이보다 가까운 후보는 하나로 (접촉 경계를 우선)
-  min_segment_ms: 100
+  min_segment_ms: 100         # 이보다 짧은 후보 구간은 앞 구간에 붙인다 (VLM 호출 수도 줄어든다)
 
 # 평가 허용 오차 (기준 문서 경계 규칙). 테스트와 평가 하네스(WP11)가 쓴다.
+# 실행 결과에는 영향이 없지만 해시에는 들어가므로 바꾸면 모델 버전이 바뀐다.
 tolerance_ms:
-  approach: 200
-  contact_glove: 70
-  contact_video: 150
-  end: 200
+  approach: 200               # 접근 시작
+  contact_glove: 70           # 장갑 압력 기반 접촉 시작·종료
+  contact_video: 150          # 영상 기반 접촉 시작·종료
+  end: 200                    # 행동 끝
 
+# 2단 VLM 분류 (dlp_actions.vlm, dlp_actions.clients)
 vlm:
   max_retries: 2              # 스키마 위반·온톨로지 밖 응답이면 위반을 알려 다시 묻는다.
                               # 그래도 안 되면 그 구간만 미상(unknown)이다
@@ -34,7 +44,7 @@ vlm:
   # 두지 않고 그 세션 실행을 멈춘다 (트랜잭션을 되돌려 아무것도 쓰지 않는다. 장애를 미상으로 쓰면
   # 같은 버전이라 재실행이 건너뛰어 영구히 미상으로 남는다). 결과를 바꾸지 않아 모델 버전에 넣지 않는다.
   unavailable_backoff_s: [2, 10, 30]
-  frames_per_segment: 8
+  frames_per_segment: 8       # 후보 구간마다 VLM에 보낼 프레임 수 (구간 안에 고르게, 블러본에서)
   max_side_px: 448            # VLM에 보낼 프레임 긴 변
   default_confidence: 0.5     # 응답에 신뢰도가 없을 때
   # TODO(real-model): VLM 추론 서버(OpenAI 호환 API)가 필요하다. GPU면 vLLM, CPU면 llama.cpp
@@ -42,4 +52,4 @@ vlm:
   #   DLP_VLM_URL 환경 변수로 준다. 라이선스는 config/models.yaml external에서 검사한다. 모델은 상업 사용 가능한 라이선스여야 한다 (ADR 0010).
   #   Qwen2.5-VL-7B-Instruct는 Apache-2.0, 3B는 비상업 연구 라이선스라 쓰지 않는다.
   model: Qwen/Qwen2.5-VL-7B-Instruct
-  timeout_s: 120
+  timeout_s: 120              # 요청 하나의 시간 초과 (초). 넘으면 서버 오류로 보고 백오프 재시도

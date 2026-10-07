@@ -1,4 +1,12 @@
-"""VLM 클라이언트: CPU용 stub(정답 기반)과 OpenAI 호환 서버(vLLM 등) 어댑터."""
+"""VLM 클라이언트: CPU용 stub(정답 기반)과 OpenAI 호환 서버(vLLM 등) 어댑터 (WP10).
+
+- `OracleVlm`: 정답 라벨로 답하는 stub. CI·CPU 테스트용 (`VlmClient` 구현).
+- `OpenAICompatibleVlm`: `/v1/chat/completions`에 프레임(JPEG base64) + 프롬프트 + JSON Schema를
+  보낸다. 실제 서버에서 아직 검증하지 않았다 (클래스 docstring의 TODO(real-model) 표시).
+- `sample_frames`: 구간에서 PTS 기준으로 프레임을 고르게 뽑는다.
+
+VLM에는 블러본만 보낸다 (`runner`가 블러본 경로를 넘긴다, ADR 0024).
+"""
 
 from __future__ import annotations
 
@@ -23,9 +31,17 @@ class OracleVlm:
 
     faults: 앞 몇 번의 호출에 일부러 틀린 응답을 낸다 (재시도·미상 처리 시험용).
       "not_json" | "bad_verb" | "bad_target" 을 순서대로 소비한다.
+
+    정답에 설명(`DescriptionPayload`)이 있으면 그 문장을, 없으면 "<동사> <대상>"을 설명으로 낸다.
     """
 
     def __init__(self, truth: list[LabelRecord], faults: list[str] | None = None) -> None:
+        """정답 라벨과 고장 응답 목록으로 stub을 만든다.
+
+        Args:
+            truth: 정답 라벨 (행동·사이 구간·설명). 같은 손 또는 손 없는 라벨만 본다.
+            faults: 앞쪽 호출에서 낼 고장 응답 종류 목록.
+        """
         self.version = "oracle-vlm-1"
         self.truth = truth
         self.faults = list(faults or [])
@@ -37,6 +53,10 @@ class OracleVlm:
         }
 
     def complete(self, request: SegmentRequest, prompt: str, schema: dict[str, Any]) -> str:
+        """겹침이 가장 큰 정답을 JSON으로 답한다 (신뢰도 0.9). 겹치는 정답이 없으면 gap unknown.
+
+        `calls`를 센다. `faults`가 남아 있으면 먼저 그 고장 응답을 낸다.
+        """
         self.calls += 1
         if self.faults:
             fault = self.faults.pop(0)
@@ -75,7 +95,14 @@ class OracleVlm:
 
 
 def sample_frames(request: SegmentRequest, n: int, max_side: int) -> list[bytes]:
-    """구간에서 PTS 기준으로 고르게 n장을 골라 JPEG로."""
+    """구간에서 PTS 기준으로 고르게 n장을 골라 JPEG로.
+
+    목표 시각 = 구간을 n + 1등분한 안쪽 점들. 각 목표 시각 이후 첫 프레임을 쓴다. 긴 변이
+    max_side보다 크면 줄인다 (JPEG 품질 85).
+
+    Returns:
+        JPEG 바이트 목록 (영상이 없으면 빈 목록, 프레임이 드물면 n장보다 적을 수 있다).
+    """
     if request.video is None:
         return []
     wanted = list(np.linspace(request.start_ms, request.end_ms, n + 2)[1:-1])
@@ -114,11 +141,28 @@ class OpenAICompatibleVlm:
         self, base_url: str, model: str, *, frames: int, max_side: int, timeout_s: float,
         transport: httpx.BaseTransport | None = None,
     ) -> None:  # fmt: skip
+        """HTTP 클라이언트를 만든다 (연결은 첫 요청 때).
+
+        Args:
+            base_url: 서버 주소 (`--vlm-url` 또는 `DLP_VLM_URL`).
+            model: 모델 이름 (`actions.yaml vlm.model`). 버전 문자열 `vlm-<model>`에 들어간다.
+            frames: 구간마다 보낼 프레임 수.
+            max_side: 프레임 긴 변 상한 픽셀.
+            timeout_s: 요청 시간 초과 초.
+            transport: httpx 전송 계층 (테스트에서 `MockTransport`).
+        """
         self.version = f"vlm-{model}"
         self.model, self.frames, self.max_side = model, frames, max_side
         self.http = httpx.Client(base_url=base_url, timeout=timeout_s, transport=transport)
 
     def complete(self, request: SegmentRequest, prompt: str, schema: dict[str, Any]) -> str:
+        """프레임 + 프롬프트 + JSON Schema(strict)를 보내고 첫 선택지의 메시지 내용을 돌려준다.
+
+        temperature 0 (같은 입력이면 같은 답을 기대). 외부 서비스 호출이다.
+
+        Raises:
+            VlmUnavailableError: HTTP 오류·시간 초과·응답 형식 오류.
+        """
         images = [
             {
                 "type": "image_url",

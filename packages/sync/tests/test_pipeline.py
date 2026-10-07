@@ -1,3 +1,11 @@
+"""`synchronize`의 방법 선택·대체 순서·정확도 테스트 (WP4 완료 기준, ADR 0004).
+
+`conftest.build`로 만든 30초(일부 120초) 합성 시나리오를 쓴다. 판정 기준은 시나리오의 정답 시계
+(`scenario.clocks`)와의 최대 시각 오차(0, 중간, 끝 세 지점)와 드리프트 오차(ppm)다.
+완료 기준: 슬레이트·두드림 ≤ 1프레임(33 ms), 상호상관 ≤ 2프레임, 드리프트 ≤ 10 ppm.
+옵션(`with_slates`, `audible_taps`)으로 앞 방법이 실패하게 만들어 다음 방법으로 넘어가는지 본다.
+"""
+
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -28,12 +36,16 @@ def _errors(built: Built, synced: Session, stream_id: str) -> tuple[float, float
 
 
 def _chosen(report: SyncReport, stream_id: str) -> str | None:
+    """보고서에서 그 스트림이 채택한 방법 이름 (없으면 None)."""
     return next(r.chosen for r in report.streams if r.stream_id == stream_id)
 
 
 def test_slates_are_found_where_they_were_shown(
     build: Callable[..., Built], policy: SyncPolicy
 ) -> None:
+    """바디캠 영상에서 슬레이트가 정답 순서대로, 정답 시각 이후 1프레임(+1 ms) 안에서 처음 보이는지
+    검증한다.
+    """
     scenario, session, _ = build()
     sightings = detect_slates(Path(session.reference_stream.uri), policy.slate)
     assert [s.payload for s in sightings] == [e.payload for e in scenario.slates]
@@ -44,6 +56,9 @@ def test_slates_are_found_where_they_were_shown(
 def test_default_session_prefers_slate_then_tap(
     build: Callable[..., Built], policy: SyncPolicy
 ) -> None:
+    """기본 정책에서 3인칭은 qr_slate(오디오 정밀화 포함, 오차 1 ms 미만), 장갑은 tap_event(1프레임
+    안)를 채택하고, 기준·shared_clock 스트림은 바뀌지 않는지 검증한다.
+    """
     built = build()
     synced, report = synchronize(built[1], built[2], policy)
     assert _chosen(report, "third_person") == "qr_slate"
@@ -79,6 +94,9 @@ def test_short_recording_slates_alone_fit_offset_only(
 def test_without_slates_third_person_uses_taps(
     build: Callable[..., Built], policy: SyncPolicy
 ) -> None:
+    """슬레이트가 없으면 3인칭이 두드림으로 넘어가고 오차가 1 ms 미만인지 검증한다 (seed 2: 두 쌍
+    모두 들림).
+    """
     built = build(seed=2, with_slates=False)  # 3인칭이 두 번의 두 번 두드림을 모두 듣는 seed
     synced, report = synchronize(built[1], built[2], policy)
     assert _chosen(report, "third_person") == "tap_event"
@@ -106,6 +124,9 @@ def test_single_tap_pair_is_not_trusted_alone(
 def test_without_slates_or_audible_taps_falls_back_to_correlation(
     build: Callable[..., Built], policy: SyncPolicy
 ) -> None:
+    """슬레이트도 들리는 두드림도 없으면 3인칭은 audio_xcorr, 장갑은 motion_xcorr로 넘어가 2프레임
+    안에 맞추고, 시도 순서가 정책 순서(qr_slate → tap_event → audio_xcorr)와 같은지 검증한다.
+    """
     built = build(with_slates=False, audible_taps=False)
     synced, report = synchronize(built[1], built[2], policy)
     assert _chosen(report, "third_person") == "audio_xcorr"
@@ -119,6 +140,10 @@ def test_without_slates_or_audible_taps_falls_back_to_correlation(
 def test_glove_without_any_signal_is_left_unsynced(
     build: Callable[..., Built], policy: SyncPolicy
 ) -> None:
+    """장갑을 맞출 신호가 없으면 unsynced(신뢰도 None)가 되는지 검증한다.
+
+    두드림이 기준 오디오에 들리지 않고(`audible_taps=False`) 기준 IMU도 빼서 두 방법 모두 실패.
+    """
     _, session, media = build(with_slates=False, audible_taps=False)
     no_imu = {k: v for k, v in media.items() if k != "imu"}
     synced, report = synchronize(session, no_imu, policy)
@@ -130,6 +155,9 @@ def test_glove_without_any_signal_is_left_unsynced(
 def test_drift_is_recovered_within_10_ppm_on_long_recording(
     build: Callable[..., Built], policy: SyncPolicy
 ) -> None:
+    """120초 녹화(seed 9)에서 오디오 상관이 드리프트를 10 ppm 안, 시각을 1 ms 안으로 맞추는지
+    검증한다.
+    """
     built = build(seed=9, duration_ms=120_000.0, with_slates=False, audible_taps=False)
     synced, report = synchronize(built[1], built[2], policy)
     assert _chosen(report, "third_person") == "audio_xcorr"
@@ -139,6 +167,9 @@ def test_drift_is_recovered_within_10_ppm_on_long_recording(
 
 
 def test_manual_adjustment_survives_resync(build: Callable[..., Built], policy: SyncPolicy) -> None:
+    """사람 조정값(-12.5 ms)이 재동기화 뒤에도 남아 마스터 시각에 더해지고, 기준 스트림 조정은
+    거부되는지.
+    """
     _, session, media = build()
     synced, _ = synchronize(session, media, policy)
     adjusted = apply_manual_adjustment(synced, "third_person", -12.5)
@@ -151,6 +182,7 @@ def test_manual_adjustment_survives_resync(build: Callable[..., Built], policy: 
 
 
 def test_resync_is_deterministic(build: Callable[..., Built], policy: SyncPolicy) -> None:
+    """동기화 결과를 다시 동기화해도 세션과 보고서가 같은지(멱등·결정적) 검증한다."""
     _, session, media = build()
     first, r1 = synchronize(session, media, policy)
     second, r2 = synchronize(first, media, policy)
@@ -197,6 +229,9 @@ def test_adjusting_unsynced_stream_makes_it_manual(
 
 
 def test_failed_resync_keeps_previous_fit(build: Callable[..., Built], policy: SyncPolicy) -> None:
+    """신호 없이 다시 돌려 모든 방법이 실패해도 이전 자동 결과와 사람 조정값을 그대로 두는지
+    검증한다.
+    """
     built = build()
     synced, _ = synchronize(built[1], built[2], policy)
     assert synced.stream("glove_right").sync_method is SyncMethod.TAP_EVENT
