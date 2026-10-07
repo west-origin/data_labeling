@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -15,6 +16,7 @@ from datetime import datetime
 
 import sqlalchemy as sa
 
+from dlp_privacy.runner import last_detection, operational_blur
 from dlp_review import roles
 from dlp_review.ops.assign import Loads, PlannedUnit, plan
 from dlp_review.ops.measure import Agreement, DetectionRate, agreement, as_items, prelabel_bias
@@ -132,13 +134,19 @@ def plan_session(
     if privacy:
         check_privacy_reviewers(reviewers, policy)
     session = get_session(conn, session_id)
-    current = current_labels(get_labels(conn, session_id))
+    history = get_labels(conn, session_id)
+    current = current_labels(history)
     known = known_classes(conn, session_id)
     glove = any(s.kind in (StreamKind.GLOVE_LEFT, StreamKind.GLOVE_RIGHT) for s in session.streams)
     planned: list[PlannedUnit] = []
     for unit in units_for(session, policy, privacy=privacy):
         labels = unit.select(current)
-        if not labels:
+        generation = ""
+        if privacy:
+            # 블러 단위는 탐지가 0개여도 사람이 영상 전체를 봐야 승인할 수 있다 (ADR 0023 3번).
+            # 배정 ID에 세대를 붙여 재탐지·승인 취소 뒤 다시 계획하면 새 배정이 생긴다
+            generation = privacy_generation(history, unit.stream_id or "")
+        elif not labels:
             continue
         flagged = flag_unit(labels, policy, known_classes=known, glove_session=glove)
         sample: tuple[str, ...] = ()
@@ -157,7 +165,9 @@ def plan_session(
                     for i in picked
                 ]  # fmt: skip
         planned.append(
-            PlannedUnit(unit, tuple(flagged), unit_priority(flagged, policy), sample, withheld)
+            PlannedUnit(
+                unit, tuple(flagged), unit_priority(flagged, policy), sample, withheld, generation
+            )
         )
     # 블러 단위(원본 영상)는 블러 계획에서만, 작업 라벨 단위는 작업 라벨 계획에서만
     # 오류 삽입 원천이 된다
@@ -183,6 +193,14 @@ def plan_session(
         insert_assignment(conn, a)
         created.append(a)
     return created
+
+
+def privacy_generation(history: Sequence[LabelRecord], stream_id: str) -> str:
+    """블러 단위 입력 세대: 마지막 자동 탐지 시각 + 현재 운영 블러 라벨 집합의 짧은 해시."""
+    since = last_detection(history, stream_id)
+    ids = sorted(x.label_id for x in operational_blur(history, stream_id))
+    key = "|".join([since.isoformat() if since else "-", *ids])
+    return "g" + hashlib.sha256(key.encode()).hexdigest()[:8]
 
 
 def _prepare_seeded(

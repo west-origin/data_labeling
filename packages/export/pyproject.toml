@@ -6,6 +6,7 @@ requires-python = ">=3.12,<3.14"
 dependencies = [
     "dlp-datasets",
     "dlp-media",
+    "dlp-privacy",
     "dlp-schema",
     "numpy>=2.0",
     "opencv-contrib-python-headless>=4.10",

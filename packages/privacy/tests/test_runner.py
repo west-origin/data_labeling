@@ -19,11 +19,19 @@ from dlp_media.ingest import ingest_session, load_manifest
 from dlp_media.storage import S3Store
 from dlp_privacy.detectors.oracle import OracleDetector
 from dlp_privacy.policy import PrivacyPolicy, TargetPolicy
-from dlp_privacy.runner import PrivacyGateError, approve_session, detect_session, render_session
+from dlp_privacy.runner import (
+    PrivacyGateError,
+    RenderNotCurrentError,
+    approve_session,
+    assert_render_current,
+    detect_session,
+    render_session,
+)
 from dlp_schema.db.migrate import upgrade
 from dlp_schema.db.repository import (
     get_labels,
     get_session,
+    insert_labels,
     insert_review_task,
     record_review,
     register_ontology,
@@ -134,6 +142,9 @@ def test_detect_review_approve_render(
     with pg.begin() as conn:
         uris = render_session(conn, sid, raw, labeling, oracle_policy)
         assert render_session(conn, sid, raw, labeling, oracle_policy) == uris  # 멱등
+        rendered = assert_render_current(conn, labeling, sid, "bodycam", oracle_policy)
+        head = labeling.head(f"sessions/{sid}/blurred/bodycam.mp4")
+        assert head is not None and rendered == head.sha256
         with pytest.raises(PrivacyGateError, match="라벨링 버킷"):
             render_session(conn, sid, raw, raw, oracle_policy)
     assert uris["bodycam"] == f"s3://dlp-labeling/sessions/{sid}/blurred/bodycam.mp4"
@@ -150,9 +161,14 @@ def test_detect_review_approve_render(
     face_only = OracleDetector("oracle", [x for x in scenario.labels if x.kind == "blur_track"][:2])
     face_only.version = "oracle-2"  # 탐지기 버전이 바뀌었다
     with pg.begin() as conn:
-        changed = detect_session(conn, sid, raw, {"oracle": face_only}, {}, oracle_policy, later)
+        changed = detect_session(
+            conn, sid, raw, {"oracle": face_only}, {}, oracle_policy, later, labeling=labeling
+        )
         assert changed.changed
         assert get_session(conn, sid).privacy_state is PrivacyState.AUTO_BLURRED
+        # 회귀(감사 4-2): 승인이 풀리면 이전 블러본을 어떤 단계도 쓰지 못한다
+        with pytest.raises(RenderNotCurrentError, match="승인 상태"):
+            assert_render_current(conn, labeling, sid, "bodycam", oracle_policy)
         with pytest.raises(PrivacyGateError, match="승인 전"):
             render_session(conn, sid, raw, labeling, oracle_policy)
         with pytest.raises(PrivacyGateError, match="블러 검수 작업"):
@@ -163,7 +179,22 @@ def test_detect_review_approve_render(
             record_review(conn, label.label_id, VerificationState.HUMAN_APPROVED, "rev01", later)
         again_approved = approve_session(conn, sid)
         assert again_approved.lifecycle_state is LifecycleState.PRIVACY_APPROVED
+        # 다시 승인했어도 다시 렌더하기 전에는 이전 블러본이 현재 것이 아니다 (기록 무효·해시 다름)
+        for stream in ("bodycam", "third_person"):
+            with pytest.raises(RenderNotCurrentError, match="무효"):
+                assert_render_current(conn, labeling, sid, stream, oracle_policy)
         render_session(conn, sid, raw, labeling, oracle_policy)
+        assert_render_current(conn, labeling, sid, "bodycam", oracle_policy)
+        # 렌더 기록을 무효로 두지 못한 경로가 있어도 블러 라벨 집합이 다르면 해시로 막힌다
+        extra = current_labels(get_labels(conn, sid, kinds=["blur_track"]))[0].model_copy(
+            update={
+                "label_id": f"{sid}-human-extra", "stream_id": "third_person",
+                "provenance": Provenance(source=Source.HUMAN), "confidence": None,
+            }
+        )  # fmt: skip
+        insert_labels(conn, [extra])
+        with pytest.raises(RenderNotCurrentError, match="승인된 블러 라벨"):
+            assert_render_current(conn, labeling, sid, "third_person", oracle_policy)
     after = labeling.head(f"sessions/{sid}/blurred/bodycam.mp4")
     assert before is not None and after is not None and before.sha256 != after.sha256
 
@@ -296,5 +327,12 @@ def test_deployed_blur_model_is_unioned_and_versioned(
         )
         after = current_versions(conn)
     assert swapped.detected["bodycam"] == len(blurs)
+    # 회귀(감사 4-8): 재학습 모델만 다시 돌아도 탐지기 검수 우선 구간은 남고 이전 모델 구간은 빠진다
+    with tempfile.TemporaryDirectory() as tmp:
+        dest = Path(tmp) / "r.json"
+        raw.get_file(f"sessions/{sid}/derived/privacy_review/bodycam.json", dest)
+        merged = json.loads(dest.read_text(encoding="utf-8"))
+    assert {s["reason"] for s in merged} >= reasons
+    assert {s["detail"] for s in merged if s["reason"] == "trained_model"} == {"trained-v2"}
     assert "trained-v1" not in after and after["trained-v2"] == len(blurs)
     assert sum(n for v, n in after.items() if not v.startswith("trained")) == 6

@@ -27,6 +27,9 @@ from dlp_active.select import SessionScore
 from dlp_media.probe import probe
 from dlp_media.pts import PtsIndex, build_pts_index
 from dlp_media.storage import ObjectStore, blurred_key, sha256_file
+from dlp_privacy.policy import load_policy as load_privacy_policy
+from dlp_privacy.runner import RenderNotCurrentError, assert_render_current, check_fetched
+from dlp_schema import repo_root
 from dlp_schema.db.repository import get_labels, get_session
 from dlp_schema.episode import current_labels
 from dlp_schema.history import label_class
@@ -211,6 +214,7 @@ def build_samples(
     """고른 세션의 블러본을 받아 샘플을 만든다. 블러본이 없는 스트림은 건너뛰고 이유를 돌려준다."""
     samples: list[FoSample] = []
     notes: list[str] = []
+    privacy = load_privacy_policy(repo_root())
     for rank, s in enumerate(ranked, start=1):
         session = get_session(conn, s.session_id)
         history = get_labels(conn, s.session_id)
@@ -220,10 +224,23 @@ def build_samples(
             if head is None:
                 notes.append(f"{s.session_id}/{stream.stream_id}: 블러본이 없어 건너뜀")
                 continue
+            try:
+                # 지금 승인된 블러 라벨로 렌더한 블러본만 쓴다 (승인 취소·재승인 뒤 이전 것 금지)
+                rendered = assert_render_current(
+                    conn, labeling, s.session_id, stream.stream_id, privacy
+                )
+            except RenderNotCurrentError as exc:
+                notes.append(f"{s.session_id}/{stream.stream_id}: 건너뜀 ({exc})")
+                continue
             video = cache / s.session_id / f"{stream.stream_id}.mp4"
             if not video.exists() or sha256_file(video) != head.sha256:
                 video.parent.mkdir(parents=True, exist_ok=True)
                 labeling.get_file(key, video)
+            try:
+                check_fetched(video, rendered, s.session_id, stream.stream_id)
+            except RenderNotCurrentError as exc:
+                notes.append(f"{s.session_id}/{stream.stream_id}: 건너뜀 ({exc})")
+                continue
             info = probe(video).video
             if info is None:
                 notes.append(f"{s.session_id}/{stream.stream_id}: 영상 트랙이 없음")

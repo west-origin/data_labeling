@@ -104,7 +104,42 @@ class CvatClient:
         _check(self.http.put(f"/api/tasks/{task_id}/annotations", json=body))
 
     def get_tracks(self, task_id: int) -> list[dict[str, Any]]:
-        return list(_check(self.http.get(f"/api/tasks/{task_id}/annotations"))["tracks"])
+        """트랙만. 수집은 get_annotations를 쓴다 (모양·태그도 봐야 한다)."""
+        return list(self.get_annotations(task_id)["tracks"])
+
+    def get_annotations(self, task_id: int) -> dict[str, Any]:
+        """작업의 모든 주석: tracks(트랙 모드), shapes(모양 모드, CVAT 기본), tags(프레임 태그)."""
+        return dict(_check(self.http.get(f"/api/tasks/{task_id}/annotations")))
+
+    def find_user_id(self, username: str) -> int | None:
+        """CVAT 사용자 이름 → 사용자 ID (정확히 같은 이름만)."""
+        res = _check(self.http.get("/api/users", params={"search": username, "page_size": 100}))
+        return next((int(u["id"]) for u in res["results"] if u["username"] == username), None)
+
+    def jobs(self, task_id: int) -> list[dict[str, Any]]:
+        res = _check(self.http.get("/api/jobs", params={"task_id": task_id, "page_size": 500}))
+        return sorted(res["results"], key=lambda j: int(j["id"]))
+
+    def job_ids(self, task_id: int) -> list[int]:
+        return [int(j["id"]) for j in self.jobs(task_id)]
+
+    def job_assignees(self, task_id: int) -> dict[int, str | None]:
+        """작업(job) → 담당자 사용자 이름."""
+        return {
+            int(j["id"]): (j.get("assignee") or {}).get("username") or None
+            for j in self.jobs(task_id)
+        }
+
+    def assign(self, task_id: int, user_id: int) -> None:
+        """작업(task)과 그 모든 job의 담당자를 정한다. 일반 사용자는 담당한 job만 볼 수 있다."""
+        _check(self.http.patch(f"/api/tasks/{task_id}", json={"assignee_id": user_id}))
+        for job in self.job_ids(task_id):
+            _check(self.http.patch(f"/api/jobs/{job}", json={"assignee": user_id}))
+
+    def add_issue(self, job_id: int, frame: int, position: list[float], message: str) -> int:
+        """검수자에게 보이는 이슈 (먼저 볼 구간 안내)."""
+        body = {"job": job_id, "frame": frame, "position": position, "message": message}
+        return int(_check(self.http.post("/api/issues", json=body))["id"])
 
     def add_webhook(self, project_id: int, url: str, secret: str) -> int:
         body = {

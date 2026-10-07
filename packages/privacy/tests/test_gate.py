@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+from datetime import timedelta
 from pathlib import Path
 
 import av
@@ -8,7 +9,7 @@ import numpy as np
 import pytest
 
 from dlp_fixtures.sync import generate_sync_scenario
-from dlp_fixtures.video import BlurScenario, render_qr, target_boxes_at
+from dlp_fixtures.video import BlurScenario, render_qr, target_boxes_at, vfr_times, write_video
 from dlp_media.pts import build_pts_index
 from dlp_models.owlv2 import OwlDetection
 from dlp_privacy.detection import FrameDetector
@@ -17,10 +18,12 @@ from dlp_privacy.detectors.codes import CodeDetector
 from dlp_privacy.detectors.open_vocab import OpenVocabDetector
 from dlp_privacy.detectors.oracle import OracleDetector
 from dlp_privacy.geometry import Box
-from dlp_privacy.pipeline import StreamResult, detect_video
-from dlp_privacy.policy import PrivacyPolicy, TargetPolicy
+from dlp_privacy.pipeline import StreamResult, detect_video, model_version
+from dlp_privacy.policy import PrivacyPolicy, ReviewReason, TargetPolicy
 from dlp_privacy.render import blur_tracks, render_blurred
-from dlp_schema.labels import BlurTrackPayload, BoxKeyframe, LabelRecord
+from dlp_privacy.review import ReviewSegment
+from dlp_privacy.runner import last_detection, merge_segments
+from dlp_schema.labels import BlurTrackPayload, BoxKeyframe, LabelRecord, Provenance, Source
 from dlp_schema.ontology import Ontology, load_ontology
 from dlp_schema.testing import FIXED_TIME, make_label
 from dlp_schema.validation import check_label
@@ -203,7 +206,7 @@ def test_render_interpolates_between_sparse_keyframes() -> None:
     label = make_label(
         BlurTrackPayload(target="face", keyframes=kfs), t_end_ms=300, stream_id="bodycam"
     )
-    [track] = blur_tracks([label])
+    [track] = blur_tracks([label], list(range(0, 401, 50)))  # 고른 간격: 시각 비율 = 프레임 비율
     assert track.box_at(50) == Box(50, 25, 20, 10)  # 선형 보간
     assert track.box_at(150) == Box(100, 50, 30, 10)  # 다음이 화면 밖이면 직전 박스 유지
     assert track.box_at(250) is None  # 화면 밖
@@ -381,3 +384,153 @@ def test_yunet_loads_and_runs(policy: PrivacyPolicy, blur: tuple[BlurScenario, P
     # 합성 얼굴은 실제 얼굴이 아니므로 결과 개수는 보지 않고, 박스 형식만 확인한다
     for d in yunet.detect(blur[0].frames[0], 0, 0.3):
         assert d.target == "face" and d.box.w > 0
+
+
+def test_render_interpolates_by_frame_index_on_vfr_like_cvat(tmp_path: Path) -> None:
+    """회귀(감사 4-7): CVAT는 프레임 번호로 보간한다. VFR 영상에서 시각 비율로 보간하면 검수
+    화면과 블러본의 박스가 다르다. 블러본도 PTS 프레임 순서로 보간해야 한다."""
+    times = [0, 10, 20, 30, 300]  # 고르지 않은 간격 (VFR)
+    w, h = 200, 40
+    src = tmp_path / "vfr.mp4"
+    write_video(src, ((t, np.zeros((h, w, 3), dtype=np.uint8)) for t in times), width=w, height=h)
+    assert [round(t) for t in build_pts_index(src).ms] == times
+    kfs = (
+        BoxKeyframe(t_ms=0, x=0, y=10, w=20, h=20),
+        BoxKeyframe(t_ms=300, x=160, y=10, w=20, h=20),
+    )
+    label = make_label(
+        BlurTrackPayload(target="face", keyframes=kfs), t_end_ms=300, stream_id="bodycam"
+    )
+    [track] = blur_tracks([label], times)
+    # t=20 ms는 다섯 프레임 중 세 번째 (번호 2/4) → x = 160 * 0.5 (시각 비율이면 160 * 20/300)
+    assert track.box_at(20) == Box(80, 10, 20, 20)
+    dst = tmp_path / "blurred.mp4"
+    render_blurred(
+        src, dst, [label], mode="solid", min_block_px=6, blocks_per_box=5, encoder_rate=30, crf=0
+    )
+    with av.open(str(dst)) as c:
+        frames = {
+            round(float(f.time or 0) * 1000): f.to_ndarray(format="rgb24")
+            for f in c.decode(video=0)
+        }
+    third = frames[20]
+    assert third[20, 85:95].mean() > 100  # 프레임 번호 보간 위치에 블러
+    assert third[20, 12:20].mean() < 30  # 시각 비율 위치(x≈10.7)에는 없다
+
+
+def test_vfr_fixture_positions_match_frame_order() -> None:
+    """VFR 픽스처의 모든 프레임에서 보간 위치 = 프레임 번호 비율."""
+    times = vfr_times(np.random.default_rng(3), 2_000)
+    kfs = (
+        BoxKeyframe(t_ms=times[0], x=0, y=0, w=10, h=10),
+        BoxKeyframe(t_ms=times[-1], x=1000, y=0, w=10, h=10),
+    )
+    label = make_label(
+        BlurTrackPayload(target="face", keyframes=kfs), t_end_ms=times[-1], stream_id="bodycam"
+    )
+    [track] = blur_tracks([label], times)
+    n = len(times) - 1
+    for i, t in enumerate(times):
+        box = track.box_at(t)
+        assert box is not None and abs(box.x - 1000 * i / n) < 1e-6
+
+
+def test_model_version_changes_with_detection_policy(policy: PrivacyPolicy) -> None:
+    """회귀(감사 4-3): 문턱·여유·트래커·유지 시간·탐지기 설정이 바뀌면 다시 탐지해야 한다."""
+    oracle: dict[str, FrameDetector] = {"oracle": OracleDetector("oracle", [])}
+    base = oracle_policy(policy, {t: ["oracle"] for t in TARGETS})
+    v0 = model_version(oracle, base)
+    assert v0 == model_version(oracle, base)  # 같은 정책이면 같은 버전 (멱등)
+    face = base.targets["face"]
+    changed = [
+        base.model_copy(update={"detection_threshold": 0.05}),
+        base.model_copy(
+            update={"targets": {**base.targets, "face": face.model_copy(update={"margin": 0.8})}}
+        ),
+        base.model_copy(update={"tracker": base.tracker.model_copy(update={"max_gap_ms": 1})}),
+        base.model_copy(update={"platform": base.platform.model_copy(update={"blur_hold_ms": 2})}),
+    ]
+    yunet = policy.detectors["yunet"]
+    changed.append(
+        policy.model_copy(
+            update={
+                "detectors": {**policy.detectors, "yunet": yunet.model_copy(update={"top_k": 7})}
+            }
+        )
+    )
+    ov = policy.detectors["open_vocab"]
+    changed.append(
+        policy.model_copy(
+            update={
+                "detectors": {
+                    **policy.detectors,
+                    "open_vocab": ov.model_copy(
+                        update={"queries": {"a mirror": "reflective_surface"}}
+                    ),
+                }
+            }
+        )
+    )
+    versions = {model_version(oracle, p) for p in changed[:4]}
+    assert v0 not in versions and len(versions) == 4
+    real = model_version({}, policy)
+    assert all(model_version({}, p) != real for p in changed[4:])
+    # 렌더 설정은 탐지 버전에 넣지 않는다 (블러본 해시가 맡는다)
+    assert (
+        model_version(
+            oracle, base.model_copy(update={"render": base.render.model_copy(update={"crf": 30})})
+        )
+        == v0
+    )
+
+
+def test_last_detection_ignores_seeded_and_measurement_records() -> None:
+    """회귀(감사 4-6): 오류 삽입 계획이 만든 모델 출처 블러 사본(지금 시각)이 마지막 탐지 시각을
+    옮겨 승인을 막았다. 운영 블러가 아닌 레코드와 그 후손은 세지 않는다."""
+    kfs = (BoxKeyframe(t_ms=0, x=0, y=0, w=10, h=10),)
+    model = Provenance(source=Source.MODEL, model_version="det-1")
+    payload = BlurTrackPayload(target="face", keyframes=kfs)
+    base = make_label(payload, "b1", 0, 0, stream_id="bodycam", provenance=model, confidence=0.9)
+    later = FIXED_TIME + timedelta(days=1)
+    seeded = base.model_copy(
+        update={"label_id": "seed-1", "seeded_error": True, "created_at": later}
+    )
+    seeded_fix = base.model_copy(
+        update={"label_id": "seed-1-fix", "parent_label_id": "seed-1", "created_at": later}
+    )
+    measured = base.model_copy(
+        update={"label_id": "m-1", "measurement": "blind", "created_at": later}
+    )
+    assert last_detection([base, seeded, seeded_fix, measured], "bodycam") == FIXED_TIME
+    assert (
+        last_detection(
+            [base, seeded, base.model_copy(update={"label_id": "b2", "created_at": later})],
+            "bodycam",
+        )
+        == later
+    )
+
+
+def _seg(reason: ReviewReason, detail: str = "", t: int = 0) -> ReviewSegment:
+    return ReviewSegment(
+        stream_id="bodycam", target="face", reason=reason, t_start_ms=t, t_end_ms=t + 10,
+        priority=0, detail=detail,
+    )  # fmt: skip
+
+
+def test_merge_segments_keeps_detector_segments_when_only_model_reruns() -> None:
+    """회귀(감사 4-8): 재학습 모델만 다시 돌면 검수 우선 구간 파일을 덮어써 탐지기 구간이
+    사라졌다."""
+    old = [_seg("track_gap"), _seg("trained_model", "m1"), _seg("trained_model", "m0", 5)]
+    new = [_seg("trained_model", "m1", 20)]
+    merged = merge_segments(old, new, detector_rerun=False, rerun_models={"m1"}, live_models={"m1"})
+    assert {(s.reason, s.detail, s.t_start_ms) for s in merged} == {
+        ("track_gap", "", 0), ("trained_model", "m1", 20),
+    }  # fmt: skip
+    rerun = merge_segments(
+        old, [_seg("low_confidence")], detector_rerun=True, rerun_models=set(), live_models={"m1"}
+    )
+    assert {(s.reason, s.detail) for s in rerun} == {
+        ("low_confidence", ""),
+        ("trained_model", "m1"),
+    }

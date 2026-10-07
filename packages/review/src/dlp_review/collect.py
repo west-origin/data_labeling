@@ -4,8 +4,12 @@
 (작업 행을 SELECT … FOR UPDATE로 잠그고 상태를 본다. 동시에 수집해도 두 번째는 None).
 
 - 수집하는 검수자는 작업 담당자여야 한다 (웹훅의 도구 사용자 ID가 아니라 작업의 담당자로 기록).
-- 작업을 보낸 뒤 다른 단계가 지운(retracted) 라벨은 검수 결과로 되살리지 않는다.
-- 운영 블러 라벨이 바뀌면 프라이버시 승인을 풀어 다시 승인·렌더하게 한다.
+- 작업을 보낸 뒤 다른 단계가 지웠거나(retracted) 다른 작업이 먼저 고친(자식 레코드가 생긴) 라벨은
+  검수 결과로 되살리거나 두 갈래 이력을 만들지 않는다.
+- CVAT는 트랙과 모양(Shape 모드, CVAT 기본) 주석을 모두 받는다. 옮길 수 없는 주석(태그, 다각형 등)이
+  있으면 수집하지 않는다 (TaskError).
+- 운영 블러 라벨이 바뀌면 프라이버시 승인을 풀어 다시 승인·렌더하게 하고, 그 스트림의 이전 블러본
+  렌더 기록을 무효로 둔다 (ADR 0024).
 """
 
 from __future__ import annotations
@@ -19,7 +23,15 @@ from typing import TYPE_CHECKING
 
 import sqlalchemy as sa
 
-from dlp_review.cvat import UNIT_SCALE, CvatSchema, from_cvat_tracks, quantize
+from dlp_privacy.runner import invalidate_render
+from dlp_review.cvat import (
+    UNIT_SCALE,
+    CvatFormatError,
+    CvatSchema,
+    annotation_tracks,
+    from_cvat_tracks,
+    quantize,
+)
 from dlp_review.labelstudio import from_ls_results
 from dlp_review.reconcile import ReviewOutcome, reconcile
 from dlp_review.tasks import (
@@ -72,12 +84,14 @@ def _seeded_new_id(assignment_id: str, label_id: str) -> str:
 
 
 def drop_retracted(outcome: ReviewOutcome, labels: list[LabelRecord]) -> list[str]:
-    """보낸 뒤 다른 단계가 지운 라벨에 대한 검수 결과(승인·수정·삭제)를 뺀다.
+    """보낸 뒤 바뀐 라벨에 대한 검수 결과(승인·수정·삭제)를 뺀다.
 
-    지운 라벨을 parent로 하는 수정 레코드를 쓰면 그 레코드가 현재 라벨이 되어 지운 라벨이
-    되살아난다. 뺀 원래 라벨 ID를 돌려준다.
+    - 다른 단계가 지운 라벨: 그것을 parent로 하는 수정 레코드를 쓰면 지운 라벨이 되살아난다.
+    - 다른 작업(같은 라벨을 보낸 다른 검수)이 먼저 고친 라벨: 또 고치면 한 라벨에 자식이 둘인
+      갈래 이력이 생겨 두 레코드가 모두 현재 라벨이 된다.
+    어느 쪽이든 이 라벨은 이미 자식 레코드가 있다. 뺀 원래 라벨 ID를 돌려준다.
     """
-    retracted = {x.parent_label_id for x in labels if x.retracted and x.parent_label_id}
+    retracted = {x.parent_label_id for x in labels if x.parent_label_id}
     dropped = sorted(
         {i for i in outcome.approved if i in retracted}
         | {
@@ -152,14 +166,21 @@ def collect_task(
                 scale = label_scale(setup.raw, stream, video, work)
         project = setup.cvat.http.get(f"/api/tasks/{task.external_id}").json()["project_id"]
         schema = CvatSchema.from_labels(setup.cvat.project_labels(int(project)))
-        reviewed = from_cvat_tracks(
-            setup.cvat.get_tracks(int(task.external_id)),
-            times,
-            schema,
-            task.stream_id,
-            new_box_kind="blur_track" if privacy else "box_track",
-            scale=scale,
-        )
+        try:
+            # 모양(Shape) 모드 직사각형도 트랙으로 받는다 (버리면 놓친 얼굴이 블러 없이 남는다)
+            tracks = annotation_tracks(
+                setup.cvat.get_annotations(int(task.external_id)), len(times), schema
+            )
+            reviewed = from_cvat_tracks(
+                tracks,
+                times,
+                schema,
+                task.stream_id,
+                new_box_kind="blur_track" if privacy else "box_track",
+                scale=scale,
+            )
+        except CvatFormatError as exc:
+            raise TaskError(f"{task_key}: {exc}") from exc
         normalize = partial(quantize, scale=scale)
     else:
         if setup.label_studio is None:
@@ -224,14 +245,15 @@ def collect_task(
     for label_id in outcome.approved:
         record_review(conn, label_id, VerificationState.HUMAN_APPROVED, reviewer_id, now)
     mark_review_task_collected(conn, task_key, now)
-    if (
-        task.stage is ReviewStage.PRIVACY
-        and task.mode in OPERATIONAL_MODES
-        and outcome.new_records
-        and session.privacy_state is PrivacyState.APPROVED
-    ):
-        # 승인 뒤 블러가 바뀌었다: 다시 승인해야 블러본을 새로 렌더한다
-        set_privacy_state(conn, task.session_id, PrivacyState.AUTO_BLURRED)
+    if task.stage is ReviewStage.PRIVACY and task.mode in OPERATIONAL_MODES and outcome.new_records:
+        if session.privacy_state is PrivacyState.APPROVED:
+            # 승인 뒤 블러가 바뀌었다: 다시 승인해야 블러본을 새로 렌더한다
+            set_privacy_state(conn, task.session_id, PrivacyState.AUTO_BLURRED)
+        # 이전 블러본을 어떤 단계도 현재 것으로 보지 않게 렌더 기록을 무효로 둔다
+        with tempfile.TemporaryDirectory() as tmp:
+            invalidate_render(
+                setup.labeling, task.session_id, task.stream_id, f"collected:{task_key}", Path(tmp)
+            )
     if assignment is not None:
         from dlp_review.ops.runner import finish_assignment
 

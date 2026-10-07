@@ -40,6 +40,9 @@ class PlannedUnit:
     priority: float
     sample_label_ids: tuple[str, ...] = ()
     withheld_label_ids: tuple[str, ...] = ()
+    # 단위 입력 세대 (블러 단위: 탐지·블러 라벨 집합 해시). 배정 ID에 붙여 재탐지·승인 취소 뒤
+    # 다시 계획하면 새 배정이 생기게 한다. 비어 있으면 붙이지 않는다.
+    generation: str = ""
 
 
 class Loads:
@@ -74,10 +77,13 @@ def plan(
     loads = loads or Loads(reviewers)
     out: list[ReviewAssignment] = []
 
-    def make(unit: Unit, mode: ReviewMode, assignee: str | None, **kw: object) -> ReviewAssignment:
+    def make(
+        unit: Unit, mode: ReviewMode, assignee: str | None, generation: str = "", **kw: object
+    ) -> ReviewAssignment:
         return ReviewAssignment.model_validate(
             {
-                "assignment_id": kw.pop("assignment_id", None) or assignment_id(unit, mode),
+                "assignment_id": kw.pop("assignment_id", None)
+                or assignment_id(unit, mode, generation),
                 "session_id": unit.session_id,
                 "stream_id": unit.stream_id,
                 "label_kinds": unit.kinds,
@@ -91,8 +97,9 @@ def plan(
     for p in sorted(planned, key=lambda p: (-p.priority, p.unit.unit_id)):
         unit = p.unit
         standard_to = loads.pick()
+        gen = p.generation
         standard = make(
-            unit, ReviewMode.STANDARD, standard_to, priority=p.priority, flagged=p.flagged,
+            unit, ReviewMode.STANDARD, standard_to, gen, priority=p.priority, flagged=p.flagged,
             sample_label_ids=p.sample_label_ids, withheld_label_ids=p.withheld_label_ids,
         )  # fmt: skip
         out.append(standard)
@@ -106,6 +113,7 @@ def plan(
                         unit,
                         ReviewMode.BLIND,
                         to,
+                        gen,
                         priority=p.priority,
                         pair_id=standard.assignment_id,
                     )
@@ -118,6 +126,7 @@ def plan(
                         unit,
                         ReviewMode.DOUBLE,
                         to,
+                        gen,
                         priority=p.priority,
                         pair_id=standard.assignment_id,
                     )
@@ -129,7 +138,9 @@ def plan(
                 make(
                     source, ReviewMode.SEEDED_ERROR, loads.pick(), priority=p.priority,
                     assignment_id=assignment_id(
-                        source, ReviewMode.SEEDED_ERROR, tag=unit.unit_id.replace(":", ".")
+                        source,
+                        ReviewMode.SEEDED_ERROR,
+                        tag=unit.unit_id.replace(":", ".") + (f".{gen}" if gen else ""),
                     ),
                 )
             )  # fmt: skip

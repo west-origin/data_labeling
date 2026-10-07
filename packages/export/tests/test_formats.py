@@ -26,6 +26,8 @@ from dlp_export.source import (
     select_labels,
 )
 from dlp_media.pts import build_pts_index
+from dlp_privacy.policy import load_policy as load_privacy_policy
+from dlp_privacy.runner import RenderMeta, operational_blur, render_hash, write_render_meta
 from dlp_schema.dataset import DatasetVersion, Split
 from dlp_schema.export import IntervalFile
 from dlp_schema.labels import VerificationState
@@ -43,7 +45,14 @@ def source(sc: Scenario, policy: ExportPolicy, include_unreviewed: bool = False)
     )  # fmt: skip
     return ExportSource(
         version,
-        [ExportSession(sc.session, Split.TRAIN, select_labels(sc.labels, policy, states))],
+        [
+            ExportSession(
+                sc.session,
+                Split.TRAIN,
+                select_labels(sc.labels, policy, states),
+                sc.render_hashes,
+            )
+        ],
         states,
     )
 
@@ -157,7 +166,10 @@ def test_coco_person_boxes_work_with_keypoint_eval(
         label_id="s1-body", session_id="s1", stream_id="bodycam", t_start_ms=t[2],
         t_end_ms=t[2],
     )  # fmt: skip
-    sc = Scenario(scenario.session, [person_box, body], scenario.times, scenario.labeling)
+    sc = Scenario(
+        scenario.session, [person_box, body], scenario.times, scenario.labeling,
+        scenario.render_hashes,
+    )  # fmt: skip
     out = tmp_path / "out"
     write_coco(
         source(sc, policy), policy, ontology, sc.labeling, out, tmp_path / "w",
@@ -300,7 +312,10 @@ def test_offset_third_person_keyframes_use_stream_time(
     scenario.labeling.get_file("sessions/s1/blurred/bodycam.mp4", video)
     from dlp_media.storage import sha256_file
 
-    scenario.labeling.put_file("sessions/s1/blurred/third.mp4", video, sha256_file(video))
+    sha = sha256_file(video)
+    scenario.labeling.put_file("sessions/s1/blurred/third.mp4", video, sha)
+    digest = render_hash(operational_blur(labels, "third"), load_privacy_policy(ROOT))
+    write_render_meta(scenario.labeling, "s1", "third", RenderMeta(digest, sha), tmp_path)
     states = label_states(policy, False)
     version = DatasetVersion(
         version_id="dv1", ontology_version="1.0.0", created_at=FIXED_TIME,
@@ -308,7 +323,11 @@ def test_offset_third_person_keyframes_use_stream_time(
     )  # fmt: skip
     src = ExportSource(
         version,
-        [ExportSession(session, Split.TRAIN, select_labels(labels, policy, states))],
+        [
+            ExportSession(
+                session, Split.TRAIN, select_labels(labels, policy, states), {"third": digest}
+            )
+        ],
         states,
     )
     out = tmp_path / "out"

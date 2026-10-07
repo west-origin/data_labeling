@@ -11,6 +11,8 @@ frame_stride_ms 간격으로만 추론하고 그 사이 프레임에 마지막 �
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -50,9 +52,47 @@ def used_detectors(
     }
 
 
+def detection_policy_digest(policy: PrivacyPolicy) -> str:
+    """탐지 결과(블러 라벨·검수 우선 구간)를 정하는 정책 값의 짧은 해시.
+
+    문턱·대상(여유·탐지기)·트래커·블러 유지 시간·검수 점수·쓰는 탐지기 설정(질의, NMS 등)이
+    바뀌면 모델 버전이 달라져 다시 탐지한다 (ADR 0019 프리라벨과 같은 규칙, ADR 0024).
+    렌더 설정은 블러본 해시(render_hash)가 따로 맡는다.
+    """
+    names: set[str] = set()
+    todo = [n for tp in policy.targets.values() for n in tp.detectors]
+    while todo:  # 반사면 탐지기가 쓰는 영역·얼굴 탐지기까지
+        name = todo.pop()
+        if name in names:
+            continue
+        names.add(name)
+        spec = policy.detectors.get(name)
+        if spec is not None:
+            todo += [n for n in (spec.region_detector, spec.face_detector) if n]
+    data = {
+        "detection_threshold": policy.detection_threshold,
+        "review_score": policy.review_score,
+        "review_priority": list(policy.review_priority),
+        "targets": {k: v.model_dump(mode="json") for k, v in sorted(policy.targets.items())},
+        "tracker": policy.tracker.model_dump(mode="json"),
+        "blur_hold_ms": policy.platform.blur_hold_ms,
+        "detectors": {
+            n: policy.detectors[n].model_dump(mode="json")
+            for n in sorted(names)
+            if n in policy.detectors
+        },
+    }
+    return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()[:8]
+
+
 def model_version(detectors: dict[str, FrameDetector], policy: PrivacyPolicy) -> str:
     used = used_detectors(detectors, policy)
-    return TRACKER_VERSION + "+" + ",".join(f"{n}:{d.version}" for n, d in sorted(used.items()))
+    return (
+        TRACKER_VERSION
+        + "+"
+        + ",".join(f"{n}:{d.version}" for n, d in sorted(used.items()))
+        + f"+p{detection_policy_digest(policy)}"
+    )
 
 
 @dataclass
