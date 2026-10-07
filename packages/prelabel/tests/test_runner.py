@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import itertools
 import os
 import uuid
 from collections.abc import Iterator
@@ -44,7 +45,7 @@ from dlp_schema.labels import (
     VerificationState,
 )
 from dlp_schema.ontology import load_ontology
-from dlp_schema.predictor import ModelUnavailableError, Predictor
+from dlp_schema.predictor import Clip, ModelUnavailableError, Predictor
 from dlp_schema.session import LifecycleState, PrivacyState, SyncMethod
 from dlp_schema.testing import FIXED_TIME, make_label
 from dlp_schema.validation import check_label
@@ -340,3 +341,150 @@ def test_wearer_copy_is_unreviewed_and_rematched_after_body_model_change(
     assert a.wearer is not None and b.wearer is not None and a.wearer != b.wearer
     assert len(live) == 1 and live[0].parent_label_id == b.wearer
     assert live[0].verification.state is VerificationState.UNREVIEWED
+
+
+def test_reviewed_contacts_are_not_duplicated_when_inputs_change(
+    pg: sa.Engine, tmp_path: Path
+) -> None:
+    """감사 회귀 (4차): 접촉을 승인한 뒤 입력(객체 박스)이 바뀌어 접촉 단계가 다시 돌아도, 승인된
+    접촉과 같은 손에서 겹치는 새 접촉을 넣지 않는다. 장갑 압력 채널 접두사가 바뀌어도 다시 돈다."""
+    actions = generate_action_scenario(1, n_units=10)
+    generate_blur_scenario(1).write(tmp_path / "bodycam.mp4")
+    write_parquet(
+        tmp_path / "glove_right.parquet",
+        {"t_ms": actions.glove_t_ms, "pressure_0": actions.glove_pressure},
+    )
+    sid = f"dup-{uuid.uuid4().hex[:8]}"
+    manifest = {
+        "session_id": sid, "domain": "cleaning", "worker_id": "w01", "site_id": "site01",
+        "consent_version": "c1", "recorded_at": FIXED_TIME.isoformat(), "ontology_version": "1.0.0",
+        "streams": [
+            {"stream_id": "bodycam", "kind": "bodycam", "path": "bodycam.mp4"},
+            {"stream_id": "glove_right", "kind": "glove_right", "path": "glove_right.parquet"},
+        ],
+    }  # fmt: skip
+    (tmp_path / "m.yaml").write_text(yaml.safe_dump(manifest), encoding="utf-8")
+    raw = S3Store.from_env("dlp-raw")
+    with pg.begin() as conn:
+        session = ingest_session(*load_manifest(tmp_path / "m.yaml"), raw, conn).session
+        glove = session.stream("glove_right")
+        update_stream_sync(
+            conn, sid, glove.model_copy(update={"sync_method": SyncMethod.TAP_EVENT})
+        )
+    boxes = [
+        make_label(
+            BoxTrackPayload(
+                entity_id=eid,
+                class_id=cls,
+                keyframes=tuple(
+                    BoxKeyframe(t_ms=t, x=p[0] - 15, y=p[1] - 15, w=30, h=30)
+                    for t in actions.frame_times
+                ),
+            ),
+            label_id=f"gt-{eid}",
+            session_id=sid,
+            stream_id="bodycam",
+            t_start_ms=actions.frame_times[0],
+            t_end_ms=actions.frame_times[-1],
+        )
+        for eid, cls, _, p, _ in ENTITIES
+        if eid in {"drawer_01", "bucket_01", "sink_01"}
+    ]
+    predictors: list[Predictor] = [
+        OraclePredictor("hands", actions.labels, ("keypoint_track",), now=FIXED_TIME),
+        OraclePredictor("objects", boxes, ("box_track",), now=FIXED_TIME),
+    ]
+    policy, ontology = load_policy(ROOT), load_ontology(ROOT / "config/ontology/v1")
+    with pg.begin() as conn:
+        first = run_prelabel(conn, sid, raw, predictors, policy, ontology, FIXED_TIME)
+        contacts = _builtin_contacts(current_labels(get_labels(conn, sid, kinds=["hand_state"])))
+        approved = contacts[::2]  # 검수자가 접촉 절반을 승인했다
+        for x in approved:
+            record_review(conn, x.label_id, VerificationState.HUMAN_APPROVED, "rev01", FIXED_TIME)
+    assert first.contacts == len(contacts) > 1
+    # 검수자가 박스를 고친 것과 같은 입력 변화 (객체 예측기 버전 변경)
+    jittered = OraclePredictor("objects", boxes, ("box_track",), jitter_px=2.0, now=FIXED_TIME)
+    with pg.begin() as conn:
+        second = run_prelabel(conn, sid, raw, [jittered], policy, ontology, FIXED_TIME)
+        live = _builtin_contacts(current_labels(get_labels(conn, sid, kinds=["hand_state"])))
+    assert second.contacts == len(contacts) - len(approved)  # 승인 구간과 겹치는 새 접촉은 버린다
+    assert {x.label_id for x in approved} <= {x.label_id for x in live}
+    assert len(live) == len(contacts)
+    for a, b in itertools.combinations(live, 2):
+        assert isinstance(a.payload, HandStatePayload) and isinstance(b.payload, HandStatePayload)
+        same_hand = a.payload.hand is b.payload.hand
+        assert not (same_hand and a.t_start_ms < b.t_end_ms and b.t_start_ms < a.t_end_ms)
+
+    # 장갑 압력 채널 접두사(sync.yaml)는 접촉 모델 버전에 들어간다: 바뀌면 다시 돈다
+    with pg.begin() as conn:
+        same = run_prelabel(
+            conn, sid, raw, [jittered], policy, ontology, FIXED_TIME, pressure_prefixes=["pressure"]
+        )
+        other = run_prelabel(
+            conn, sid, raw, [jittered], policy, ontology, FIXED_TIME,
+            pressure_prefixes=["pressure_"],
+        )  # fmt: skip
+    assert same.contacts == 0 and other.contacts == second.contacts
+
+
+class _TimelineContacts:
+    """배포된 재학습 접촉 모델 흉내: 마스터 타임라인 접촉 구간(stream_id 없음)을 낸다."""
+
+    name = "trained-contact"
+    version = "trained-contact-v1"
+
+    def __init__(self, truth: list[LabelRecord]) -> None:
+        self.truth = [x for x in truth if isinstance(x.payload, HandStatePayload)]
+        self.calls: list[str] = []
+
+    def run(self, clip: Clip) -> list[LabelRecord]:
+        self.calls.append(clip.stream_id)
+        return [
+            x.model_copy(
+                update={
+                    "label_id": f"{clip.session_id}-{clip.stream_id}-{self.name}-{i:04d}",
+                    "session_id": clip.session_id,
+                    "stream_id": None,
+                    "provenance": Provenance(source=Source.MODEL, model_version=self.version),
+                    "confidence": 0.9,
+                }
+            )
+            for i, x in enumerate(self.truth)
+        ]
+
+
+def test_timeline_model_runs_once_on_the_reference_stream(pg: sa.Engine, tmp_path: Path) -> None:
+    """감사 회귀 (4차): 마스터 타임라인 구간을 내는 배포 모델(접촉)은 3인칭 스트림이 있어도 기준
+    스트림에서 세션당 한 번만 돈다 (같은 접촉이 두 번 남지 않는다). 다시 돌려도 건너뛴다."""
+    actions = generate_action_scenario(1, n_units=4)
+    video = generate_blur_scenario(1)
+    video.write(tmp_path / "bodycam.mp4")
+    video.write(tmp_path / "third.mp4")
+    sid = f"tl-{uuid.uuid4().hex[:8]}"
+    manifest = {
+        "session_id": sid, "domain": "cleaning", "worker_id": "w01", "site_id": "site01",
+        "consent_version": "c1", "recorded_at": FIXED_TIME.isoformat(), "ontology_version": "1.0.0",
+        "streams": [
+            {"stream_id": "bodycam", "kind": "bodycam", "path": "bodycam.mp4"},
+            {"stream_id": "third", "kind": "third_person", "path": "third.mp4"},
+        ],
+    }  # fmt: skip
+    (tmp_path / "m.yaml").write_text(yaml.safe_dump(manifest), encoding="utf-8")
+    raw = S3Store.from_env("dlp-raw")
+    with pg.begin() as conn:
+        ingest_session(*load_manifest(tmp_path / "m.yaml"), raw, conn)
+    policy, ontology = load_policy(ROOT), load_ontology(ROOT / "config/ontology/v1")
+    assert "trained-contact" in policy.timeline_predictors
+    model = _TimelineContacts([x.model_copy(update={"session_id": sid}) for x in actions.labels])
+    with pg.begin() as conn:
+        first = run_prelabel(
+            conn, sid, raw, [model], policy, ontology, FIXED_TIME, replaced=[CONTACT_STEP]
+        )
+        again = run_prelabel(
+            conn, sid, raw, [model], policy, ontology, FIXED_TIME, replaced=[CONTACT_STEP]
+        )
+        states = current_labels(get_labels(conn, sid, kinds=["hand_state"]))
+    assert model.calls == ["bodycam"]
+    assert first.produced == {"bodycam/trained-contact": len(model.truth)}
+    assert again.skipped == ["bodycam/trained-contact"]
+    assert len(states) == len(model.truth) > 0

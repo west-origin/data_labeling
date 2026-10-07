@@ -126,6 +126,8 @@ class PrelabelPolicy(Contract):
     contact: ContactPolicy
     wearer_matching: WearerPolicy
     depth: DepthPolicy
+    # 마스터 타임라인 구간(stream_id 없음)을 내는 예측기 이름. 기준 스트림에서 세션당 한 번만 돌린다
+    timeline_predictors: tuple[str, ...] = ()
 
     def digest(self, *sections: str) -> str:
         """정책 절들의 짧은 해시. 모델 버전에 붙여 정책 값이 바뀌면 다시 돌게 한다."""

@@ -29,6 +29,22 @@ def test_registry_entries_have_source_and_license() -> None:
             assert (ROOT / spec.export).is_file(), name
 
 
+def test_coco_trained_models_are_review() -> None:
+    """감사 회귀 (4차): COCO 이미지는 Flickr 개별 CC 라이선스(CC BY-NC 계열 포함)라 직접 학습
+    데이터에 비상업 조건이 있다 → review. COCO 표기도 한 가지로 통일한다."""
+    registry = load_registry(ROOT)
+    coco = {
+        name: spec
+        for name, spec in registry.models.items()
+        if any("COCO" in d for d in spec.training_data)
+    }
+    assert {"object_detector", "yolox_m_coco", "rtmpose_m_body7"} <= set(coco)
+    for name, spec in coco.items():
+        assert spec.commercial != "allowed", name
+        [entry] = [d for d in spec.training_data if "COCO" in d]
+        assert "CC BY-NC" in entry and "Flickr" in entry, name
+
+
 def test_resolve_reports_missing_and_tampered_weights(tmp_path: Path) -> None:
     root = _root_with_registry(tmp_path)
     with pytest.raises(ModelUnavailableError, match="make models"):

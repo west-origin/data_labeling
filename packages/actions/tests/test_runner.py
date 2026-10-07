@@ -7,17 +7,24 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 import sqlalchemy as sa
 
-from dlp_actions.clients import OracleVlm
+from dlp_actions.clients import OpenAICompatibleVlm, OracleVlm
 from dlp_actions.policy import load_policy
 from dlp_actions.runner import run_actions
-from dlp_actions.vlm import SegmentRequest
+from dlp_actions.vlm import SegmentRequest, VlmUnavailableError
 from dlp_fixtures.actions import generate_action_scenario
 from dlp_schema.db.migrate import upgrade
-from dlp_schema.db.repository import get_labels, insert_labels, insert_session, register_ontology
-from dlp_schema.episode import current_labels
+from dlp_schema.db.repository import (
+    get_labels,
+    insert_labels,
+    insert_session,
+    record_review,
+    register_ontology,
+)
+from dlp_schema.episode import current_labels, retractions
 from dlp_schema.labels import (
     ActionPayload,
     DescriptionPayload,
@@ -26,6 +33,7 @@ from dlp_schema.labels import (
     LabelRecord,
     Provenance,
     Source,
+    VerificationState,
 )
 from dlp_schema.ontology import load_ontology
 from dlp_schema.testing import FIXED_TIME, make_session
@@ -129,9 +137,6 @@ def test_rerun_after_reviewer_deleted_everything_is_skipped(pg: sa.Engine) -> No
 
 
 def test_new_version_keeps_reviewed_labels_and_fills_gaplessly(pg: sa.Engine) -> None:
-    from dlp_schema.db.repository import record_review
-    from dlp_schema.labels import VerificationState
-
     ontology = load_ontology(ROOT / "config/ontology/v1")
     policy = load_policy(ROOT)
     truth = [x for x in SCENARIO.labels if isinstance(x.payload, ActionPayload | GapPayload)]
@@ -237,3 +242,58 @@ def test_input_change_reruns_and_reviewed_description_protects_its_action(pg: sa
         for x in descriptions
     )
     assert all(a.t_end_ms == b.t_start_ms for a, b in itertools.pairwise(timeline2))
+
+
+def test_vlm_outage_aborts_the_session_so_a_rerun_redoes_it(pg: sa.Engine) -> None:
+    """감사 회귀 (4차): VLM 서버가 백오프 후에도 응답하지 않으면 미상으로 채워 쓰지 않고 실행을
+    멈춘다 (트랜잭션이 되돌려진다). 같은 서버·모델이 복구되면 다시 실행해 제대로 만든다."""
+    ontology = load_ontology(ROOT / "config/ontology/v1")
+    policy = load_policy(ROOT)
+    fast = policy.model_copy(
+        update={"vlm": policy.vlm.model_copy(update={"unavailable_backoff_s": (0.0, 0.0)})}
+    )
+    down = OpenAICompatibleVlm(
+        "http://vlm", policy.vlm.model, frames=1, max_side=64, timeout_s=1,
+        transport=httpx.MockTransport(lambda req: httpx.Response(503)),
+    )  # fmt: skip
+    with pytest.raises(VlmUnavailableError), pg.begin() as conn:
+        run_actions(conn, SID, down, ontology, fast, FIXED_TIME)
+    with pg.begin() as conn:
+        assert _timeline(conn) == []  # 아무것도 쓰지 않았다
+    truth = [x for x in SCENARIO.labels if isinstance(x.payload, ActionPayload | GapPayload)]
+    up = OracleVlm(truth)
+    up.version = down.version  # 같은 서버·모델이 복구됐다 (모델 버전이 같다)
+    with pg.begin() as conn:
+        again = run_actions(conn, SID, up, ontology, fast, FIXED_TIME)
+        timeline = _timeline(conn)
+    assert not again.skipped and again.hands["right"]["unknown_fallbacks"] == 0
+    assert sum(isinstance(x.payload, ActionPayload) for x in timeline) == len(SCENARIO.actions)
+
+
+def test_hand_without_track_loses_only_unreviewed_actions(pg: sa.Engine) -> None:
+    """감사 회귀 (4차): 손 트랙이 사라지면(손 모델 버전 변경 등) 그 손의 검수 전 행동·공백·설명을
+    지운다. 검수된 행동은 남긴다. 다시 돌려도 더 지우지 않는다."""
+    ontology = load_ontology(ROOT / "config/ontology/v1")
+    policy = load_policy(ROOT)
+    truth = [x for x in SCENARIO.labels if isinstance(x.payload, ActionPayload | GapPayload)]
+    with pg.begin() as conn:
+        run_actions(conn, SID, OracleVlm(truth), ontology, policy, FIXED_TIME)
+        timeline = _timeline(conn)
+        approved = next(x for x in timeline if isinstance(x.payload, ActionPayload))
+        record_review(conn, approved.label_id, VerificationState.HUMAN_APPROVED, "r1", FIXED_TIME)
+        tracks = current_labels(get_labels(conn, SID, kinds=["keypoint_track"]))
+        # 손 모델 버전이 바뀌어 이전 트랙이 지워지고 새 버전은 이 손을 찾지 못했다
+        insert_labels(conn, retractions(tracks, "hands-v2", FIXED_TIME))
+        gone = run_actions(conn, SID, OracleVlm(truth), ontology, policy, FIXED_TIME)
+        left = current_labels(get_labels(conn, SID, kinds=["action", "gap", "description"]))
+        again = run_actions(conn, SID, OracleVlm(truth), ontology, policy, FIXED_TIME)
+    assert gone.retracted == gone.hands["right"]["retracted_without_track"] > 0
+    assert [x.label_id for x in left if x.kind != "description"] == [approved.label_id]
+    assert isinstance(approved.payload, ActionPayload)
+    assert all(
+        isinstance(x.payload, DescriptionPayload)
+        and x.payload.segment_id == approved.payload.action_id
+        for x in left
+        if x.kind == "description"
+    )
+    assert again.retracted == 0 and not again.hands

@@ -4,14 +4,18 @@
 - 출력은 JSON Schema로 강제한다 (OpenAI 호환 서버의 response_format=json_schema). 서버가 강제하지
   못해도 여기서 다시 검사한다: JSON 파싱, 스키마, 온톨로지 밖 값, 개체 목록 밖 대상.
 - 위반하면 위반 내용을 붙여 max_retries번까지 다시 묻고, 그래도 안 되면 미상(gap unknown)이다.
-  서버 오류·시간 초과(VlmUnavailableError)도 같은 횟수만큼 다시 묻고, 끝내 실패하면 그 구간만
-  미상이다.
+- 서버 오류·시간 초과(VlmUnavailableError)는 응답 내용 문제가 아니다. 정책의 백오프
+  (vlm.unavailable_backoff_s)만큼 기다리며 다시 묻고, 끝내 실패하면 미상으로 두지 않고
+  VlmUnavailableError를 올린다 (세션 실행을 멈춘다: 장애를 미상으로 쓰면 같은 버전이라 재실행이
+  건너뛰어 영구히 미상으로 남는다).
   모르는 구간을 대기(idle)로 처리하지 않는다.
 """
 
 from __future__ import annotations
 
 import json
+import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol
@@ -57,7 +61,7 @@ class Classified:
 
 
 class VlmUnavailableError(RuntimeError):
-    """VLM 서버 오류·시간 초과. classify가 재시도하고, 끝내 실패하면 그 구간을 미상으로 둔다."""
+    """VLM 서버 오류·시간 초과. classify가 백오프하며 재시도하고, 끝내 실패하면 다시 올린다."""
 
 
 class VlmClient(Protocol):
@@ -146,18 +150,42 @@ def validate_answer(
 UNKNOWN = VlmAnswer(label="gap", gap_type="unknown", description=None)
 
 
+def _complete(
+    client: VlmClient,
+    request: SegmentRequest,
+    prompt: str,
+    schema: dict[str, Any],
+    backoff_s: Sequence[float],
+    sleep: Callable[[float], None],
+    errors: list[str],
+) -> str:
+    """서버 오류·시간 초과면 backoff_s의 대기마다 다시 묻는다. 끝내 실패하면 그 오류를 올린다."""
+    for wait in backoff_s:
+        try:
+            return client.complete(request, prompt, schema)
+        except VlmUnavailableError as exc:
+            errors.append(f"VLM 서버 오류: {exc}")
+            sleep(wait)
+    return client.complete(request, prompt, schema)
+
+
 def classify(
-    client: VlmClient, request: SegmentRequest, ontology: Ontology, max_retries: int
+    client: VlmClient,
+    request: SegmentRequest,
+    ontology: Ontology,
+    max_retries: int,
+    backoff_s: Sequence[float] = (),
+    sleep: Callable[[float], None] = time.sleep,
 ) -> Classified:
+    """max_retries: 응답 위반 시 다시 묻는 횟수. 서버 오류는 backoff_s로 따로 다시 묻는다.
+
+    서버가 끝내 응답하지 않으면 VlmUnavailableError를 올린다 (미상으로 두지 않는다).
+    """
     schema = response_schema(ontology, request.entities)
     prompt = build_prompt(request, ontology)
     errors: list[str] = []
     for attempt in range(1, max_retries + 2):
-        try:
-            raw = client.complete(request, prompt, schema)
-        except VlmUnavailableError as exc:
-            errors.append(f"VLM 서버 오류: {exc}")
-            continue
+        raw = _complete(client, request, prompt, schema, backoff_s, sleep, errors)
         answer, problems = validate_answer(raw, ontology, request)
         if answer is not None:
             return Classified(request, answer, attempt, errors)

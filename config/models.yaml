@@ -34,15 +34,17 @@ models:
     url: https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float16/latest/efficientdet_lite0.tflite
     sha256: 4b59100025bea1235a84c1038879a6cccc9f6c49f5e41144e91e74d99e780993
     license: Apache-2.0
-    training_data: ["COCO 2017 (주석 CC BY 4.0, 이미지는 Flickr 개별 라이선스)"]
-    commercial: allowed
+    # COCO 이미지는 Flickr 사진마다 다른 CC 라이선스이고 CC BY-NC 계열이 섞여 있다 (비상업 조건) → review
+    training_data: ["COCO 2017 (주석 CC BY 4.0, 이미지는 Flickr 개별 CC 라이선스로 CC BY-NC 계열 포함)"]
+    commercial: review
   yolox_m_coco:
     path: data/models/yolox/yolox_m_coco.onnx
     url: https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_m.onnx
     sha256: 21ff6cfdeb53b013bac2249599e55f00bff3cfdfdab37ed7a4620818c1d15b3f
     license: Apache-2.0
-    training_data: ["COCO 2017 (주석 CC BY 4.0, 이미지는 Flickr 개별 라이선스)"]
-    commercial: allowed
+    # COCO 이미지는 Flickr 사진마다 다른 CC 라이선스이고 CC BY-NC 계열이 섞여 있다 (비상업 조건) → review
+    training_data: ["COCO 2017 (주석 CC BY 4.0, 이미지는 Flickr 개별 CC 라이선스로 CC BY-NC 계열 포함)"]
+    commercial: review
   rtmpose_m_body7:
     path: data/models/rtmpose/rtmpose_m_body7_256x192.onnx
     url: https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/rtmpose-m_simcc-body7_pt-body7_420e-256x192-e48f03d0_20230504.zip
@@ -50,7 +52,7 @@ models:
     sha256: f7fbb6c5c11a1bb70f3d445e4ddec5d144ea89ad5649c081ef976f9b24a0b741
     license: Apache-2.0
     training_data:
-      - COCO 2017 (CC BY 4.0)
+      - COCO 2017 (주석 CC BY 4.0, 이미지는 Flickr 개별 CC 라이선스로 CC BY-NC 계열 포함)
       - CrowdPose (CC BY 4.0, 학술·비상업 연구용으로 배포)
       - AI Challenger, MPII, sub-JHMDB, Halpe, PoseTrack18 (연구용 배포, 조건 확인 필요)
     commercial: review

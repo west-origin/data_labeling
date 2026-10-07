@@ -3,6 +3,11 @@
 # 저장소 전체에서 찾기: make todo-models
 version: 1
 
+# 마스터 타임라인 구간(stream_id 없음)을 내는 예측기 이름. 기준 스트림(바디캠)에서 세션당 한 번만 돌린다
+# (3인칭 스트림에서도 돌리면 같은 접촉 구간이 두 번 남는다). 배포된 재학습 모델의 이름은
+# "trained-<과제>"다 (dlp_train, training.yaml tasks의 타임라인 과제).
+timeline_predictors: [trained-contact, trained-actions, trained-relations, trained-states, trained-coverage]
+
 # 역할 → config/models.yaml 이름
 models:
   hands: hand_landmarker

@@ -6,18 +6,23 @@
 3. 바디캠의 손 키포인트·객체 박스와 장갑 신호로 접촉 구간을 만들어 hand_state 라벨로 쓴다.
    배포된 재학습 접촉 모델이 있으면(replaced에 CONTACT_STEP) 이 단계는 돌지 않고, 이 단계가 냈던
    검수 전 접촉을 지운다.
-   2·3의 모델 버전에는 정책 해시와 입력(현재 입력 라벨 ID, 장갑 동기화) 해시를 넣는다. 입력이 바뀌면
+   2·3의 모델 버전에는 정책 해시와 입력(현재 입력 라벨 ID, 장갑 동기화, 장갑 압력 채널 접두사
+   sync.yaml glove.pressure_prefixes) 해시를 넣는다. 입력이 바뀌면
    (예측기 버전 변경, 검수자 수정) 다시 돌고, 검수 전인 이전 결과만 지운다.
+   검수된(승인·표본 검증) 결과와 사람이 고치거나 만든 결과는 남으므로, 새 결과 중 그와 겹치는 것은
+   버린다: 접촉은 같은 손에서 시간이 겹치는 구간, 3D 궤적은 같은 (개체, 부위, 좌표계)
+   (ADR 0015, 검수 결과 옆에 같은 대상의 모델 출력이 중복으로 남지 않게).
 4. 3인칭 영상이 있으면 바디캠 IMU와 3인칭 인물 손목 속도를 상관시켜 착용자를 찾는다.
    찾은 인물의 키포인트 트랙은 entity_id="wearer"인 새 레코드(parent=원래 트랙)로 남긴다.
-   이 레코드는 모델 출력(검수 전)이다. 전신 모델 버전이 바뀌어 지워지면 새 트랙으로 다시 찾는다.
+   이 레코드는 모델 출력(검수 전, 출처 MODEL)이다. 원래 트랙이 사람 출처여도
+   출처를 물려받지 않는다. 전신 모델 버전이 바뀌어 지워지면 새 트랙으로 다시 찾는다.
 5. 프라이버시 승인 상태의 세션은 생애주기를 prelabeled로 옮긴다.
 """
 
 from __future__ import annotations
 
 import tempfile
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -36,6 +41,7 @@ from dlp_prelabel.contact import (
 from dlp_prelabel.lift3d import DepthLifter
 from dlp_prelabel.policy import PrelabelPolicy
 from dlp_prelabel.wearer import match_wearer, wrist_speed
+from dlp_schema.config import repo_root
 from dlp_schema.db.repository import get_labels, get_session, insert_labels, set_lifecycle
 from dlp_schema.episode import current_labels, retractions, version_tag
 from dlp_schema.labels import (
@@ -45,13 +51,16 @@ from dlp_schema.labels import (
     HandStatePayload,
     KeypointTrackPayload,
     LabelRecord,
+    Provenance,
     Source,
+    Trajectory3DPayload,
     Verification,
     VerificationState,
 )
 from dlp_schema.ontology import Ontology
 from dlp_schema.predictor import Clip, Predictor
 from dlp_schema.session import LifecycleState, Session, StreamKind, SyncMethod
+from dlp_sync.policy import load_policy as load_sync_policy
 from dlp_sync.signals import glove_series, imu_series
 
 VIDEO = {StreamKind.BODYCAM, StreamKind.THIRD_PERSON}
@@ -66,6 +75,12 @@ CONTACT_STEP = "contact"
 def contact_version(policy: PrelabelPolicy, inputs: str) -> str:
     """inputs: 접촉 단계 입력 해시 (손 키포인트·객체 박스 라벨 ID, 장갑 스트림 동기화)."""
     return f"{CONTACT_PREFIX}+p{policy.digest('contact')}+i{inputs}"
+
+
+def default_pressure_prefixes() -> tuple[str, ...]:
+    """저장소 sync.yaml glove.pressure_prefixes (장갑 압력 채널 접두사)."""
+    root = repo_root(Path(__file__).parent)
+    return load_sync_policy(root / "config" / "policies" / "sync.yaml").glove.pressure_prefixes
 
 
 def wearer_version(policy: PrelabelPolicy) -> str:
@@ -101,12 +116,18 @@ def run_prelabel(
     now: datetime,
     lifter: DepthLifter | None = None,
     replaced: Iterable[str] = (),
+    pressure_prefixes: Sequence[str] | None = None,
 ) -> PrelabelSummary:
     """replaced: 배포된 재학습 모델이 대신하는 기본 어댑터 이름 (CONTACT_STEP이면 접촉 단계).
 
     그 어댑터가 냈던 검수 전 라벨을 지운다 (같은 대상이 기본 어댑터와 재학습 모델 양쪽으로 겹쳐 남지
     않게).
+    pressure_prefixes: 장갑 압력 채널 접두사 (sync.yaml glove.pressure_prefixes). 없으면 저장소
+    sync.yaml에서 읽는다. 접촉 단계 모델 버전에 들어가 바뀌면 접촉을 다시 만든다.
     """
+    prefixes = (
+        tuple(pressure_prefixes) if pressure_prefixes is not None else default_pressure_prefixes()
+    )
     replaced = set(replaced)
     session = get_session(conn, session_id)
     if session.ontology_version is None:
@@ -115,11 +136,18 @@ def run_prelabel(
     existing = get_labels(conn, session_id)
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp)
+        reference = session.reference_stream.stream_id
+        timeline = set(policy.timeline_predictors)
         for stream in (s for s in session.streams if s.kind in VIDEO):
             for predictor in predictors:
                 key = f"{stream.stream_id}/{predictor.name}"
+                on_timeline = predictor.name in timeline
+                # 마스터 타임라인 구간을 내는 모델(재학습 접촉 모델 등)은 세션에 한 번, 기준 스트림
+                # (바디캠)에서만 돌린다. 스트림마다 돌리면 같은 구간이 스트림 수만큼 겹쳐 남는다
+                if on_timeline and stream.stream_id != reference:
+                    continue
                 if any(
-                    x.stream_id == stream.stream_id
+                    (x.stream_id == stream.stream_id or (on_timeline and x.stream_id is None))
                     and x.provenance.model_version == predictor.version
                     for x in existing
                 ):
@@ -128,6 +156,9 @@ def run_prelabel(
                 labels = predictor.run(
                     Clip(session_id, stream.stream_id, _fetch(raw, stream.uri, work))
                 )
+                if stream.stream_id != reference:
+                    # 목록에 없는 모델이 타임라인 구간(stream_id 없음)을 내도 기준 스트림 것만 쓴다
+                    labels = [x for x in labels if x.stream_id is not None]
                 # 같은 예측기의 이전 버전 라벨 중 아직 아무도 검수하지 않은 것은 지운다
                 prefix = f"{session_id}-{stream.stream_id}-{predictor.name}-"
                 stale = _stale(existing, prefix, predictor.version)
@@ -153,7 +184,7 @@ def run_prelabel(
             summary.lifted = _lift(conn, session, history, current, raw, work, lifter, now)
         if CONTACT_STEP not in replaced:
             summary.contacts = _contacts(
-                conn, session, history, current, raw, work, policy, ontology, now
+                conn, session, history, current, raw, work, policy, ontology, now, prefixes
             )
         _wearer(conn, session, history, current, raw, work, policy, now, summary)
     if session.lifecycle_state is LifecycleState.PRIVACY_APPROVED:
@@ -183,6 +214,53 @@ def _stale(labels: list[LabelRecord], prefix: str, version: str) -> list[LabelRe
 
 def _is_wearer(x: LabelRecord) -> bool:
     return (x.provenance.model_version or "").startswith(WEARER_PREFIX)
+
+
+def _protected(x: LabelRecord) -> bool:
+    """검수자가 승인·표본 검증했거나 사람이 고치거나 만든 라벨. 어떤 단계도 지우지 않는다."""
+    return (
+        x.provenance.source is Source.HUMAN
+        or x.verification.state is not VerificationState.UNREVIEWED
+    )
+
+
+def _trajectory_key(p: Trajectory3DPayload) -> tuple[str, str | None, str]:
+    return (p.entity_id, p.part, p.frame.value)
+
+
+def drop_protected_trajectories(
+    labels: list[LabelRecord], current: list[LabelRecord]
+) -> list[LabelRecord]:
+    """새 3D 궤적 중 같은 (개체, 부위, 좌표계)의 검수된·사람 궤적이 이미 있는 것을 버린다."""
+    kept = {
+        _trajectory_key(x.payload)
+        for x in current
+        if isinstance(x.payload, Trajectory3DPayload) and _protected(x)
+    }
+    return [
+        x
+        for x in labels
+        if not (isinstance(x.payload, Trajectory3DPayload) and _trajectory_key(x.payload) in kept)
+    ]
+
+
+def drop_protected_contacts(
+    intervals: list[ContactInterval], hand: Hand, current: list[LabelRecord]
+) -> list[tuple[int, ContactInterval]]:
+    """새 접촉 구간 중 같은 손의 검수된·사람 손 상태 구간과 시간이 겹치는 것을 버린다.
+
+    (원래 순번, 구간)을 돌려준다. 순번은 라벨 ID에 쓰므로 버려도 남은 구간의 ID가 바뀌지 않는다.
+    """
+    spans = [
+        (x.t_start_ms, x.t_end_ms)
+        for x in current
+        if isinstance(x.payload, HandStatePayload) and x.payload.hand is hand and _protected(x)
+    ]
+    return [
+        (i, c)
+        for i, c in enumerate(intervals)
+        if not any(s < c.end_ms and c.start_ms < e for s, e in spans)
+    ]
 
 
 def _lift(
@@ -224,6 +302,7 @@ def _lift(
         ontology_version=session.ontology_version or "",
         version=version,
     )
+    labels = drop_protected_trajectories(labels, current)
     insert_labels(conn, [*retractions(stale, version, now), *labels])
     return len(labels)
 
@@ -258,6 +337,7 @@ def _contacts(
     policy: PrelabelPolicy,
     ontology: Ontology,
     now: datetime,
+    pressure_prefixes: tuple[str, ...],
 ) -> int:
     # 멱등: 이력에 이 버전이 있으면 (검수자가 모두 고쳤거나 지웠어도) 다시 만들지 않는다.
     # 정책(contact 절)이나 입력(손·객체 트랙, 장갑 동기화)이 바뀌면 버전이 바뀌어 다시 만들고,
@@ -285,6 +365,8 @@ def _contacts(
         input_digest(
             [*hand_labels, *box_labels],
             *(g.model_dump_json() for _, g in sorted(gloves.items())),
+            # 장갑 압력 채널 선택(sync.yaml glove.pressure_prefixes)도 접촉 결과를 바꾼다
+            "pressure_prefixes=" + ",".join(pressure_prefixes),
         ),
     )
     if any(x.provenance.model_version == version for x in history):
@@ -306,12 +388,12 @@ def _contacts(
         intervals: list[ContactInterval] = video
         if hand in gloves:
             g = gloves[hand]
-            series = glove_series(_fetch(raw, g.uri, work))
+            series = glove_series(_fetch(raw, g.uri, work), pressure_prefixes)
             master = np.array([g.to_master_ms(float(t)) for t in series.t_ms])
             intervals = fuse_contacts(
                 glove_contact_intervals(master, series.values, policy.contact.glove), video
             )
-        for i, c in enumerate(intervals):
+        for i, c in drop_protected_contacts(intervals, hand, current):
             kind = _contact_kind(classes.get(c.target_id or ""), ontology)
             payload = HandStatePayload(
                 hand=hand,
@@ -394,21 +476,28 @@ def _wearer(
     if match.entity_id is None:
         return
     original = people[match.entity_id]
+    insert_labels(conn, [wearer_copy(original, match.correlation, wearer_version(policy), now)])
+    summary.wearer = match.entity_id
+
+
+def wearer_copy(
+    original: LabelRecord, correlation: float, version: str, now: datetime
+) -> LabelRecord:
+    """착용자로 찾은 인물 트랙의 사본 (entity_id="wearer", parent=원래 트랙).
+
+    모델 출력이다: 원래 트랙의 출처(사람이 고친 트랙이면 HUMAN)와 검수 상태를 물려받지 않는다.
+    물려받으면 검수 전 모델 판단이 사람 라벨로 내보내지고, 모델 단계가 지울 수도 없다.
+    """
     assert isinstance(original.payload, KeypointTrackPayload)
-    relabeled = original.model_copy(
+    return original.model_copy(
         update={
             "label_id": f"{original.label_id}:wearer",
             "parent_label_id": original.label_id,
             "payload": original.payload.model_copy(update={"entity_id": "wearer"}),
-            "provenance": original.provenance.model_copy(
-                update={"model_version": wearer_version(policy)}
-            ),
-            "confidence": round(max(match.correlation, 0.0), 4),
+            "provenance": Provenance(source=Source.MODEL, model_version=version),
+            "confidence": round(max(correlation, 0.0), 4),
             "evidence": Evidence.INFERRED,
-            # 모델 출력이다: 원래 트랙의 검수 상태를 물려받지 않는다
             "verification": Verification(),
             "created_at": now,
         }
     )
-    insert_labels(conn, [relabeled])
-    summary.wearer = match.entity_id

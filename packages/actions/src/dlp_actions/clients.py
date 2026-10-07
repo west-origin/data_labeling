@@ -141,5 +141,6 @@ class OpenAICompatibleVlm:
             data: Any = resp.json()
             return str(data["choices"][0]["message"]["content"])
         except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError) as exc:
-            # 서버 오류·시간 초과·응답 형식 오류: classify가 재시도 후 미상으로 둔다
+            # 서버 오류·시간 초과·응답 형식 오류: classify가 백오프하며 재시도하고, 끝내 실패하면
+            # 다시 올려 세션 실행을 멈춘다 (미상으로 두지 않는다)
             raise VlmUnavailableError(f"{type(exc).__name__}: {exc}") from exc

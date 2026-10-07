@@ -80,8 +80,13 @@ def run_relations(
     drafts = [(d.payload, d.start_ms, d.end_ms, d.confidence) for d in derived.relations] + [
         (c.payload, c.start_ms, c.end_ms, c.confidence) for c in derived.coverage
     ]
+    seen: set[str] = set()
     for payload, start, end, confidence in drafts:
         base = _base_id(session_id, payload, start, end)
+        # 내용이 같은 초안은 하나만 (같은 ID로 두 번 넣지 않는다)
+        if base in seen:
+            continue
+        seen.add(base)
         history = sorted(i for i in by_id if i == base or i.startswith(base + "-"))
         live = [i for i in history if i in current_ids]
         if live:
