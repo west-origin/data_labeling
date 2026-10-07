@@ -112,7 +112,7 @@ def audit_report(
     - 사람(서비스 계정이 아닌 actor)의 `read`·`presign`은 권한자가 아니면 표시.
     - 서비스 계정은 용도(`purpose`, 예: `privacy.detect`)가 `service_purposes`에 없으면 표시.
     - 사람의 접근이 정책 시간대에서 업무 시간 밖이면 표시. `off_hours = (시작, 끝)` 시(hour)이며,
-      시작 > 끝이면 자정을 넘는 구간(예: 22~7시)이다.
+      시작 > 끝이면 자정을 넘는 구간(예: 22~6시)이다.
 
     반환: 집계(사람·용도·동작별 건수, 세션 수)와 `flags`(사람이 확인할 문장 목록)를 담은
     `AuditReport`.

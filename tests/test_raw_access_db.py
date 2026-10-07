@@ -55,6 +55,7 @@ class Counting:
     """
 
     def __init__(self, inner: S3Store) -> None:
+        """inner: 실제로 호출을 넘길 원본 저장소. 버킷 이름도 그대로 따른다."""
         self.inner, self.bucket = inner, inner.bucket
         self.calls: Counter[tuple[str, str]] = Counter()
 

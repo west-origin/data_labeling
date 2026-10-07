@@ -80,12 +80,15 @@ def build_parser() -> argparse.ArgumentParser:
     check.set_defaults(func=_cmd_services_check)
 
     # 단계별 하위 명령. 대략 파이프라인 순서로 나열한다 (도움말 출력 순서에만 영향).
-    schema_cmds.add_commands(sub)  # dlp schema export, ontology validate|register, db upgrade (WP1)
+    # 계약·온톨로지·DB: dlp schema export, dlp ontology validate|register, dlp db upgrade (WP1)
+    schema_cmds.add_commands(sub)
     fixtures_cmds.add_commands(sub)  # dlp fixtures generate — 합성 픽스처 (WP2)
     media_cmds.add_commands(sub)  # dlp ingest — 세션 수집 (WP3)
     sync_cmds.add_commands(sub)  # dlp sync run|adjust — 멀티스트림 동기화 (WP4)
-    privacy_cmds.add_commands(sub)  # dlp privacy detect|approve|render — 프라이버시 게이트 (WP5)
-    models_cmds.add_commands(sub)  # dlp models fetch|export|licenses (ADR 0009·0010)
+    # 프라이버시 게이트: dlp privacy detect|approve|render|audit-sample (WP5)
+    privacy_cmds.add_commands(sub)
+    # 모델 가중치 받기·변환과 라이선스 검사: dlp models fetch|export|licenses (ADR 0009·0010)
+    models_cmds.add_commands(sub)
     review_cmds.add_commands(sub)  # dlp review … — 검수 도구 연동·운영 (WP6, WP12)
     dataset_cmds.add_commands(sub)  # dlp dataset … / dlp lineage — 데이터셋·계보 (WP7)
     prelabel_cmds.add_commands(sub)  # dlp prelabel run — 자동 프리라벨 (WP8)

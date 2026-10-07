@@ -14,7 +14,8 @@
 - `--baseline`을 잘못 적으면 예측이 비어 기존 지표가 0이 되고 어떤 후보든 통과하므로,
   기존 모델은 `require_predictions=True`로 읽어 예측이 없으면 실패시킨다.
 
-정책 출처: `config/policies/evaluation.yaml` (과제별 지표·임계값·게이트).
+정책 출처: `config/policies/evaluation.yaml` (과제별 지표·임계값·게이트). 게이트에 모르는 지표
+이름을 적으면 정책을 읽을 때 실패한다 (`dlp_eval.policy.TASK_METRICS`, ADR 0031).
 """
 
 from __future__ import annotations
