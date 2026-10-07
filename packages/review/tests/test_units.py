@@ -38,6 +38,8 @@ from dlp_review.webhook import (
     parse_event,
     resolve_reviewer,
 )
+from dlp_schema import repo_root
+from dlp_schema.config import load_config
 from dlp_schema.episode import current_labels
 from dlp_schema.labels import (
     ActionPayload,
@@ -312,7 +314,7 @@ def test_privacy_boxes_land_on_the_downscaled_proxy(tmp_path: Path) -> None:
     blur.write(src)
     store.put_file("sessions/s/raw/bodycam.mp4", src, sha256_file(src))
     proxy = tmp_path / "proxy.mp4"
-    make_proxy(src, proxy)
+    make_proxy(src, proxy, load_config(repo_root() / "config" / "defaults.yaml").media.proxy)
     stream = Stream(
         stream_id="bodycam", kind=StreamKind.BODYCAM, uri=store.uri("sessions/s/raw/bodycam.mp4")
     )

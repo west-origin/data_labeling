@@ -51,8 +51,10 @@ from dlp_relations.runner import run_relations
 from dlp_schema.db.migrate import upgrade
 from dlp_schema.db.repository import (
     get_labels,
+    get_session,
     insert_golden_set,
     insert_labels,
+    insert_review_task,
     insert_session,
     record_review,
     register_ontology,
@@ -71,7 +73,8 @@ from dlp_schema.labels import (
 from dlp_schema.lineage import GoldenSet, ModelStatus
 from dlp_schema.ontology import load_ontology
 from dlp_schema.predictor import Clip
-from dlp_schema.session import Domain, LifecycleState, PrivacyState
+from dlp_schema.review import ReviewStage, ReviewTask, ReviewTaskStatus, ReviewTool
+from dlp_schema.session import Domain, LifecycleState, PrivacyState, StreamKind
 from dlp_schema.testing import FIXED_TIME, make_label, make_session
 from dlp_sync.policy import load_policy as load_sync_policy
 from dlp_sync.runner import run_sync
@@ -189,6 +192,21 @@ def test_synthetic_session_end_to_end(pg: sa.Engine, tmp_path: Path) -> None:
             conn, sid, raw, {"oracle": OracleDetector("oracle", [face])}, {}, oracle_policy, now
         )
         approve_all(conn, sid, ["blur_track"], "privacy-reviewer")
+        # 영상 스트림마다 수거된 블러 검수 작업이 있어야 승인된다 (CVAT 없이 수거된 것으로 둔다)
+        for st in get_session(conn, sid).streams:
+            if st.kind not in (StreamKind.BODYCAM, StreamKind.THIRD_PERSON):
+                continue
+            insert_review_task(
+                conn,
+                ReviewTask(
+                    task_key=f"cvat:{sid}-{st.stream_id}-e2e", tool=ReviewTool.CVAT,
+                    external_id="0", session_id=sid, stream_id=st.stream_id,
+                    stage=ReviewStage.PRIVACY, assignee="privacy-reviewer",
+                    media_uri=f"s3://dlp-raw/sessions/{sid}/derived/{st.stream_id}.proxy.mp4",
+                    label_kinds=("blur_track",), created_at=now,
+                    status=ReviewTaskStatus.COLLECTED, collected_at=now,
+                ),
+            )  # fmt: skip
         approve_session(conn, sid)
         blurred = render_session(conn, sid, raw, labeling, oracle_policy)
     assert all("dlp-raw" not in u for u in blurred.values())

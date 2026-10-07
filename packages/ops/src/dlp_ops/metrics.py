@@ -196,6 +196,7 @@ def weekly_metrics(
 
     # 잔여 블러 누락
     audits = list_privacy_audits(conn, start, end)
+    m.counts["privacy_audits"] = len(audits)
     if audits:
         m.residual_blur_miss_per_hour = residual_miss_rate(
             [
@@ -214,6 +215,14 @@ def weekly_metrics(
 def alerts(history: list[WeeklyMetrics], policy: OpsPolicy) -> list[str]:
     """주간 지표 추이에서 경고 (오래된 주부터 정렬된 목록)."""
     out: list[str] = []
+    if history:
+        cur = history[-1]
+        privacy_work = not math.isnan(cur.privacy_review_minutes_per_video_hour)
+        if cur.counts.get("privacy_audits", 0) == 0 and (privacy_work or cur.verified_episodes):
+            out.append(
+                f"{cur.week}: 블러 잔여 누락 감사가 없다 — 감사 없는 주는 통과로 보지 않는다 "
+                "(dlp privacy audit-sample로 표본을 뽑아 감사한다)"
+            )
     ap = policy.alerts
     if len(history) >= 2:
         prev, cur = history[-2], history[-1]

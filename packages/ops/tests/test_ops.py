@@ -87,6 +87,12 @@ def test_quality_alerts(policy: OpsPolicy) -> None:
     assert any("가이드라인" in x for x in alerts(flat, policy))
     improving = [w(f"W{i}", 60 - 5 * i, 0.3 - 0.02 * i, 0.6, 0.9) for i in range(4)]
     assert alerts(improving, policy) == []
+    # 블러 검수가 있었는데 그 주 감사가 없으면 경고, 감사가 있으면 없다
+    no_audit = WeeklyMetrics("W9", privacy_review_minutes_per_video_hour=30.0)
+    assert any("감사가 없다" in x for x in alerts([no_audit], policy))
+    audited = WeeklyMetrics("W9", privacy_review_minutes_per_video_hour=30.0,
+                            counts={"privacy_audits": 1})  # fmt: skip
+    assert alerts([audited], policy) == []
 
 
 def event(actor: str, action: str, hour: int, purpose: str = "privacy.detect") -> RawAccessEvent:
