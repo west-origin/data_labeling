@@ -1,3 +1,11 @@
+"""내보내기 형식 단위 테스트 (DB 없이).
+
+검증 정책, 구간 JSON, 가명, COCO, LeRobot 특징, 원본 위치 검사를 본다.
+
+정답은 conftest의 합성 시나리오(프레임 시각을 아는 VFR 블러본과 라벨)에서 온다. DB를 쓰지 않도록
+`source()`가 `load_source` 대신 `ExportSource`를 직접 만든다.
+"""
+
 from __future__ import annotations
 
 import contextlib
@@ -40,6 +48,7 @@ NOIDS = Pseudonymizer(None)  # 가명 처리 없이 (내부 ID를 그대로 확�
 
 
 def source(sc: Scenario, policy: ExportPolicy, include_unreviewed: bool = False) -> ExportSource:
+    """시나리오 → `ExportSource` (세션 s1 하나, 학습 분할, 정책으로 고른 라벨). DB 없이 만든다."""
     states = label_states(policy, include_unreviewed)
     version = DatasetVersion(
         version_id="dv1", ontology_version="1.0.0", created_at=FIXED_TIME,
@@ -60,6 +69,11 @@ def source(sc: Scenario, policy: ExportPolicy, include_unreviewed: bool = False)
 
 
 def test_verification_policy(scenario: Scenario, policy: ExportPolicy) -> None:
+    """기본 검증 정책과 --include-unreviewed가 고르는 라벨.
+
+    정답: 기본은 사람 라벨(kp·tip·tsc·task)과 승인·표본 검증 모델 라벨(box·act·hs).
+    옵션을 켜면 미검수(unrev)만 더해지고 블러·오류 삽입·측정은 여전히 빠진다.
+    """
     default = {x.label_id for x in source(scenario, policy).sessions[0].labels}
     # 미검수·블러·오류 삽입은 기본으로 빠지고, 표본 검증과 사람 라벨은 들어간다
     assert default == {f"s1-{k}" for k in ("box", "kp", "hs", "tip", "tsc", "act", "task")}
@@ -73,6 +87,11 @@ def test_verification_policy(scenario: Scenario, policy: ExportPolicy) -> None:
 def test_interval_json_validates_against_published_schema(
     scenario: Scenario, policy: ExportPolicy, tmp_path: Path
 ) -> None:
+    """구간 JSON이 공개 JSON Schema를 통과하고, 내부 ID·검수자 ID가 결과에 없다.
+
+    정답: 구간 종류 라벨 4개(hs·tsc·act·task)가 시작 시각 순(task 0, hs 100, act 200, tsc 300)으로
+    나오고 검증 상태도 그 순서. 작업자·장소·세션·라벨 ID는 이 내보내기의 가명.
+    """
     ids = Pseudonymizer.for_export("e1", b"secret", enabled=True)
     counts = write_intervals(
         source(scenario, policy), policy, tmp_path, export_id="e1", now=FIXED_TIME, ids=ids,
@@ -99,6 +118,11 @@ def test_interval_json_validates_against_published_schema(
 
 
 def test_pseudonyms_are_per_export() -> None:
+    """가명 성질 (ADR 0021·0027).
+
+    내보내기 안 일관, 내보내기 사이 단절, 종류별 분리, 비밀값 재현성, 비밀값 없으면 임의,
+    꺼지면 원래 값, 세션 ID가 든 다른 ID는 세션 부분만 바뀜(`ref`·`payload_ids`).
+    """
     a = Pseudonymizer.for_export("export-a", b"secret", enabled=True)
     b = Pseudonymizer.for_export("export-b", b"secret", enabled=True)
     assert a.worker("w1") == a.worker("w1") != a.worker("w2")  # 한 내보내기 안에서 일관
@@ -140,6 +164,11 @@ def test_dev_secret_only_in_dev(policy: ExportPolicy) -> None:
 def test_coco_loads_with_pycocotools(
     scenario: Scenario, policy: ExportPolicy, ontology: Ontology, tmp_path: Path
 ) -> None:
+    """COCO 결과를 pycocotools로 읽고 평가할 수 있다.
+
+    정답: 이미지는 박스·관절 키프레임 프레임 t[2]·t[4]·t[6] 셋. 박스 키프레임 t[3]+5는 프레임
+    사이라 1건 버림. 미검수 sponge 박스는 없음. 정답을 그대로 예측으로 넣으면 bbox AP = 1.
+    """
     out = tmp_path / "out"
     ids = Pseudonymizer.for_export("e1", b"secret", enabled=True)
     r = write_coco(
@@ -229,6 +258,12 @@ def test_coco_person_boxes_work_with_keypoint_eval(
 def test_lerobot_frame_features(
     scenario: Scenario, policy: ExportPolicy, ontology: Ontology, tmp_path: Path
 ) -> None:
+    """LeRobot 프레임 특징이 시나리오 정답과 같다 (격리 환경 없이 `build_episode`만).
+
+    정답 근거: 프레임은 그 시각에 보이던 블러본 프레임(PTS), 손 2D는 t[2]·t[6] 키프레임의 선형 보간,
+    400 ms에는 손 상태(대걸레 쥠)·작용부 3D(x = t/1000)·도구-표면 접촉·동사 carry·작업
+    floor_sweep_mop이 모두 걸리고, 검증 등급은 각 라벨의 상태에서 나온다.
+    """
     lp = policy.lerobot
     vocab = Vocab.from_ontology(ontology)
     video = tmp_path / "v.mp4"
@@ -253,6 +288,7 @@ def test_lerobot_frame_features(
     col = {n: i for i, n in enumerate(names)}
 
     def at(ms: float) -> int:
+        """마스터 시각 ms에 가장 가까운 에피소드 프레임 번호."""
         return int(np.argmin(np.abs(ep.times_ms - ms)))
 
     # 손 2D: 두 키프레임 사이 보간 (간격이 interp_max_gap_ms 안이면)
@@ -316,6 +352,7 @@ def test_lerobot_counts_only_written_labels(
 
 
 def test_raw_uri_guard(tmp_path: Path) -> None:
+    """결과 파일에 원본 버킷 URI가 있으면 `assert_no_raw`가 실패한다."""
     (tmp_path / "manifest.json").write_text('{"uri": "s3://dlp-raw/sessions/x/bodycam.mp4"}')
     with pytest.raises(ExportError, match="원본"):
         assert_no_raw(tmp_path, "dlp-raw")

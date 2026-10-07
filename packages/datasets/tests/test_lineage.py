@@ -1,3 +1,10 @@
+"""데이터셋 빌드·사용 중지·계보 통합 테스트 (PostgreSQL·lakeFS, `make up`, WP7).
+
+합성 세션 300개(`generate_sessions(300, seed=5)`)를 프라이버시 승인·사람 검증 완료로 넣고 세션마다
+행동 라벨 하나(`<세션>-a`)를 둔다. 정답 근거: 라벨 수(300), 분할 격리, 사용 중지 전후의
+버전·내보내기 차이.
+"""
+
 from __future__ import annotations
 
 import json
@@ -45,6 +52,7 @@ ROOT = Path(__file__).resolve().parents[3]
 
 @pytest.fixture
 def pg() -> Iterator[sa.Engine]:
+    """테스트마다 새 PostgreSQL 데이터베이스를 만들고 마이그레이션한다. 끝나면 지운다."""
     url = sa.make_url(
         os.environ.get(
             "DLP_DATABASE_URL", "postgresql+psycopg://dlp:dlp-dev-password@localhost:5432/dlp"
@@ -68,11 +76,13 @@ def pg() -> Iterator[sa.Engine]:
 
 @pytest.fixture(scope="module")
 def policy() -> DatasetPolicy:
+    """저장소의 config/policies/dataset.yaml."""
     return load_policy(ROOT)
 
 
 @pytest.fixture
 def snapshots(policy: DatasetPolicy) -> LakeFSSnapshotStore:
+    """개발 compose의 lakeFS (환경 변수 또는 기본값)."""
     lp = policy.lakefs
     return LakeFSSnapshotStore.from_env(
         repository=lp.repository, branch=lp.branch, storage_namespace=lp.storage_namespace
@@ -118,6 +128,12 @@ def _populate(pg: sa.Engine) -> list[str]:
 def test_build_withdraw_rebuild_export_and_trace(
     pg: sa.Engine, policy: DatasetPolicy, snapshots: LakeFSSnapshotStore, tmp_path: Path
 ) -> None:
+    """빌드 → 학습·내보내기 기록 → 사용 중지 → 재빌드·재내보내기 → 계보 (WP7 완료 기준).
+
+    정답: v1은 격리 위반 0·골든 그대로·lakeFS URI·라벨 300개. 사용 중지한 train 세션의 계보는
+    v1·run-1·exp-1. 골든·holdout 세션 계보에는 학습 실행이 없다. v2와 이후 내보내기에는 그 세션이
+    없고(v2 excluded_sessions에 기록), 옛 v1은 그대로 남는다.
+    """
     golden = _populate(pg)
     v1_id = f"ds-{uuid.uuid4().hex[:6]}-v1"
     with pg.begin() as conn:
@@ -215,6 +231,7 @@ def test_build_withdraw_rebuild_export_and_trace(
 def test_build_refuses_empty_or_wrong_domain(
     pg: sa.Engine, policy: DatasetPolicy, snapshots: LakeFSSnapshotStore
 ) -> None:
+    """빌드 실패 두 경우: 골든셋(cleaning)과 다른 도메인(nursing) 요청, 후보가 없는 온톨로지."""
     _populate(pg)
     with pg.begin() as conn, pytest.raises(DatasetBuildError, match="도메인"):
         build_dataset_version(
@@ -302,6 +319,10 @@ def test_golden_session_outside_candidates_still_blocks_its_worker_and_site(
 def test_golden_proposal_skips_unapproved_and_withdrawn_sessions(
     pg: sa.Engine, policy: DatasetPolicy
 ) -> None:
+    """골든 제안은 프라이버시 미승인·사용 중지 세션을 고르지 않는다.
+
+    처음 제안의 첫 세션을 미승인으로, 둘째 세션을 사용 중지로 바꾼 뒤 다시 제안해 확인한다.
+    """
     sessions = generate_sessions(300, seed=5)
     with pg.begin() as conn:
         register_ontology(conn, load_ontology(ROOT / "config" / "ontology" / "v1"))

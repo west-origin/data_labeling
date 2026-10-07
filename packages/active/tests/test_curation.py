@@ -1,3 +1,10 @@
+"""FiftyOne 샘플 변환 단위 테스트 (DB 없이, WP14).
+
+정답 근거: VFR 합성 블러본(프레임 시각 `times`를 안다)에 공간 라벨은 프레임 시각(스트림 PTS)으로,
+시간 구간 라벨은 마스터 시각(= 스트림 시각 + 오프셋)으로 두어, 어느 FiftyOne 프레임(1부터)에
+들어가야 하는지 정해진다.
+"""
+
 from __future__ import annotations
 
 import math
@@ -24,11 +31,13 @@ W, H = 64, 48
 
 @pytest.fixture(scope="module")
 def policy() -> ActivePolicy:
+    """저장소의 config/policies/active.yaml."""
     return load_policy(ROOT)
 
 
 @pytest.fixture(scope="module")
 def video(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, list[int]]:
+    """VFR 검은 영상(약 1초, 64x48)과 그 프레임 시각."""
     times = vfr_times(np.random.default_rng(3), 1000)
     path = tmp_path_factory.mktemp("v") / "blurred.mp4"
     write_video(path, ((t, np.zeros((H, W, 3), np.uint8)) for t in times), width=W, height=H)
@@ -36,6 +45,8 @@ def video(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, list[int]]:
 
 
 def labels(times: list[int], offset: int) -> list[LabelRecord]:
+    """정답 라벨: 박스(times[3]에 하나, 프레임 사이 하나, outside 하나), 관절(times[5]), 행동(마스터
+    times[3]~times[5]), 블러(빠져야 함)."""
     m = Provenance(source=Source.MODEL, model_version="m1")
     # 공간 라벨 키프레임은 스트림 PTS 시각, 시간 구간 라벨은 마스터 시각 (= 스트림 시각 + 오프셋)
     t3, t5 = times[3], times[5]
@@ -69,6 +80,7 @@ def labels(times: list[int], offset: int) -> list[LabelRecord]:
 
 
 def stream(offset: int) -> Stream:
+    """마스터 시각과 offset ms 어긋난 바디캠 스트림."""
     return Stream(
         stream_id="bodycam",
         kind=StreamKind.BODYCAM,
@@ -79,6 +91,7 @@ def stream(offset: int) -> Stream:
 
 
 def sample(video: tuple[Path, list[int]], policy: ActivePolicy, offset: int = 250) -> Any:
+    """정답 라벨로 만든 `FoSample` (순위 1, 점수 1.5)."""
     path, times = video
     score = SessionScore("s1", 1.5, {"correction_rate": 1.5}, 2, [("box_track/cup", 1.5)])
     return stream_sample(
@@ -96,6 +109,11 @@ def sample(video: tuple[Path, list[int]], policy: ActivePolicy, offset: int = 25
 def test_labels_map_to_blurred_video_frames(
     video: tuple[Path, list[int]], policy: ActivePolicy
 ) -> None:
+    """라벨이 PTS로 맞춘 블러본 프레임에 들어간다.
+
+    정답: 박스는 4번째 프레임(times[3])만 (프레임 사이·outside 버림), 관절은 6번째 프레임, 행동은
+    오프셋을 빼 [4, 6] 구간, 블러는 없음. 좌표는 영상 크기로 정규화.
+    """
     s = sample(video, policy)
     # VFR 영상에서도 PTS로 맞춘다: 4번째·6번째 프레임 (FiftyOne 번호는 1부터)
     assert sorted(s.frames) == [4, 6]
@@ -112,6 +130,10 @@ def test_labels_map_to_blurred_video_frames(
 
 
 def test_push_to_fiftyone_round_trip(video: tuple[Path, list[int]], policy: ActivePolicy) -> None:
+    """FiftyOne에 넣고 다시 읽어 필드·프레임 라벨·구간·검증 상태 필터가 그대로인지.
+
+    fiftyone이 없으면 건너뛴다 (`make install-curation`).
+    """
     fo: Any = pytest.importorskip("fiftyone")
     rates = correction_rates([], policy)
     name = f"dlp-test-{uuid.uuid4().hex[:8]}"

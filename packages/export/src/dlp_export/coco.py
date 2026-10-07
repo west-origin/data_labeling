@@ -1,5 +1,8 @@
 """COCO (객체 박스·키포인트): 정답 키프레임 시각의 블러본 프레임을 이미지로 낸다.
 
+`dlp export coco <버전>`이 쓴다. 출력: `out/coco/annotations.json`과 `out/coco/images/*.jpg`.
+pycocotools로 읽고 평가할 수 있어야 한다 (테스트가 확인).
+
 - 이미지: 세션·스트림·시각(t_ms)마다 하나. 파일은 블러본에서 그 시각에 정확히 있는 프레임
   (JPEG). 키프레임이 블러본 프레임 시각에 없으면(허용 오차 밖) 그 주석은 버리고 센다.
   남은 주석이 하나도 없는 프레임은 이미지도 내지 않는다 (내보낸 세션 = 주석이 들어간 세션).
@@ -9,6 +12,11 @@
   num_keypoints 0과 0으로 채운 keypoints(3*K)를 가진다 (COCO 키포인트 평가가 모든 주석에서 읽는다).
 - 주석마다 track_id(개체), label_id, 검증 상태, 출처, 모델 버전, 신뢰도를 붙인다
   (보간한 값은 넣지 않는다).
+
+시각 규약 (ADR 0019): 박스·키포인트 키프레임 시각은 그 스트림 영상의 PTS 시각이므로 마스터 시각으로
+바꾸지 않고 그대로 블러본 PTS 인덱스에서 찾는다 (3인칭 스트림도 같다). 이미지 `t_ms`도 스트림 시각.
+버린 주석 사유(`CocoResult.dropped`): keyframe_between_frames, unknown_class,
+no_visible_keypoints, unsupported_skeleton.
 """
 
 from __future__ import annotations
@@ -32,6 +40,7 @@ from dlp_schema.labels import BoxTrackPayload, KeypointTrackPayload, LabelRecord
 from dlp_schema.ontology import Ontology
 from dlp_schema.session import StreamKind
 
+# hand21 관절 이름 (MediaPipe 손 21점 순서). LeRobot state 열 이름에도 쓴다
 HAND21 = (
     "wrist", "thumb_cmc", "thumb_mcp", "thumb_ip", "thumb_tip",
     "index_mcp", "index_pip", "index_dip", "index_tip",
@@ -39,22 +48,30 @@ HAND21 = (
     "ring_mcp", "ring_pip", "ring_dip", "ring_tip",
     "pinky_mcp", "pinky_pip", "pinky_dip", "pinky_tip",
 )  # fmt: skip
+# hand21 뼈대 (0부터 번호). COCO는 1부터라 categories에서 +1 한다
 HAND21_SKELETON = [[0, 1], [1, 2], [2, 3], [3, 4], [0, 5], [5, 6], [6, 7], [7, 8], [0, 9], [9, 10],
                    [10, 11], [11, 12], [0, 13], [13, 14], [14, 15], [15, 16], [0, 17], [17, 18],
                    [18, 19], [19, 20], [5, 9], [9, 13], [13, 17]]  # fmt: skip
+# COCO person 17관절 이름 (공식 순서)
 COCO17 = (
     "nose", "left_eye", "right_eye", "left_ear", "right_ear", "left_shoulder", "right_shoulder",
     "left_elbow", "right_elbow", "left_wrist", "right_wrist", "left_hip", "right_hip",
     "left_knee", "right_knee", "left_ankle", "right_ankle",
 )  # fmt: skip
+# COCO 공식 person 뼈대 (이미 1부터 번호)
 COCO17_SKELETON = [[16, 14], [14, 12], [17, 15], [15, 13], [12, 13], [6, 12], [7, 13], [6, 7],
                    [6, 8], [7, 9], [8, 10], [9, 11], [2, 3], [1, 2], [1, 3], [2, 4], [3, 5],
                    [4, 6], [5, 7]]  # fmt: skip
+# 이미지를 내는 영상 스트림 종류
 VIDEO = (StreamKind.BODYCAM, StreamKind.THIRD_PERSON)
 
 
 def categories(ontology: Ontology) -> tuple[list[dict[str, Any]], dict[str, int], dict[str, int]]:
-    """(범주 목록, 객체 클래스 → ID, 골격 → ID). ID는 1부터, 같은 온톨로지면 같다."""
+    """(범주 목록, 객체 클래스 → ID, 골격 → ID). ID는 1부터, 같은 온톨로지면 같다.
+
+    순서: 온톨로지 객체(이름순) → (객체 person이 없으면) person 범주 → hand 범주.
+    person 범주(객체든 새로 만든 것이든)에 coco17 keypoints·skeleton을 붙인다.
+    """
     cats: list[dict[str, Any]] = []
     obj: dict[str, int] = {}
     for i, name in enumerate(sorted(ontology.objects), start=1):
@@ -62,6 +79,7 @@ def categories(ontology: Ontology) -> tuple[list[dict[str, Any]], dict[str, int]
         obj[name] = i
     skel: dict[str, int] = {}
     if "person" in obj:
+        # 객체 person 범주를 그대로 키포인트 범주로 쓴다 (박스와 관절이 같은 범주)
         cat = cats[obj["person"] - 1]
         skel["coco17"] = obj["person"]
     else:
@@ -82,6 +100,7 @@ def categories(ontology: Ontology) -> tuple[list[dict[str, Any]], dict[str, int]
 
 
 def _meta(x: LabelRecord, ids: Pseudonymizer) -> dict[str, Any]:
+    """주석에 붙이는 출처 정보 (라벨 ID는 가명, 검수자 ID는 넣지 않는다)."""
     return {
         "label_id": ids.label(x.label_id),
         "verification": x.verification.state.value,
@@ -93,13 +112,16 @@ def _meta(x: LabelRecord, ids: Pseudonymizer) -> dict[str, Any]:
 
 @dataclass
 class CocoResult:
-    images: int = 0
-    annotations: int = 0
+    """`write_coco` 결과. sessions·labels는 내부 ID (이력·계보용)."""
+
+    images: int = 0  # 낸 이미지 수
+    annotations: int = 0  # 낸 주석 수
     dropped: dict[str, int] = field(default_factory=dict[str, int])  # 사유 → 버린 주석 수
     sessions: set[str] = field(default_factory=set[str])  # 주석이 하나라도 들어간 세션
     labels: dict[str, LabelRecord] = field(default_factory=dict[str, LabelRecord])  # 쓴 라벨
 
     def written(self, x: LabelRecord, session_id: str) -> None:
+        """라벨 x의 주석을 하나 이상 결과에 넣었다고 기록한다."""
         self.sessions.add(session_id)
         self.labels[x.label_id] = x
 
@@ -119,6 +141,20 @@ def write_coco(
     """out/coco/annotations.json과 images/. 세션·라벨 ID와 트랙 ID 속 세션 ID는 ids로 가명 처리한다.
 
     결과의 sessions·labels는 내부 ID다 (내보내기 이력·사용 중지 계보용).
+
+    Args:
+        src: `load_source` 결과.
+        policy: 내보내기 정책 (`coco.jpeg_quality`, `coco.frame_tolerance_ms`).
+        ontology: 범주를 만들 온톨로지.
+        labeling: 라벨링 버킷 (블러본을 받는다, `fetch_blurred`).
+        out: 결과 루트. work: 블러본 캐시 디렉터리.
+        export_id, now: info에 기록.
+        ids: 가명 함수.
+
+    Raises:
+        ExportError: 블러본을 받을 수 없을 때 (`fetch_blurred`).
+
+    이미지 파일 이름: "<세션 가명>__<스트림>__<t_ms 9자리>.jpg". 이미지·주석 ID는 1부터 차례로.
     """
     cats, obj_ids, skel_ids = categories(ontology)
     # 키포인트 범주 ID → 관절 수 (박스만의 주석도 그 범주면 키포인트 필드를 0으로 채운다)
@@ -130,6 +166,7 @@ def write_coco(
     img_dir.mkdir(parents=True, exist_ok=True)
 
     def drop(reason: str) -> None:
+        """버린 주석을 사유별로 센다."""
         result.dropped[reason] = result.dropped.get(reason, 0) + 1
 
     for es in src.sessions:
@@ -141,6 +178,7 @@ def write_coco(
                 if x.stream_id == stream.stream_id
                 and isinstance(x.payload, BoxTrackPayload | KeypointTrackPayload)
             ]
+            # 공간 라벨이 없는 스트림은 블러본을 받지도 않는다
             if not spatial:
                 continue
             video = fetch_blurred(labeling, es, stream, work)
@@ -153,6 +191,7 @@ def write_coco(
                 p = x.payload
                 assert isinstance(p, BoxTrackPayload | KeypointTrackPayload)
                 for k in p.keyframes:
+                    # 화면 밖 표시(outside) 키프레임은 주석이 아니다 (박스만 가진 필드)
                     if getattr(k, "outside", False):
                         continue
                     f = exact_frame(index, k.t_ms, policy.coco.frame_tolerance_ms)
@@ -179,6 +218,7 @@ def write_coco(
                         ann |= {"keypoints": [0] * (3 * n_points[cid]), "num_keypoints": 0}
                     kept.append((f, x, ann))
                 elif isinstance(p, KeypointTrackPayload) and p.skeleton in skel_ids:
+                    # COCO keypoints: [x1, y1, v1, x2, …]. 보이지 않는(v=0) 관절은 (0, 0, 0)
                     flat: list[float] = []
                     xs: list[float] = []
                     ys: list[float] = []
@@ -190,6 +230,7 @@ def write_coco(
                     if not xs:
                         drop("no_visible_keypoints")
                         continue
+                    # 박스 = 보이는 관절을 감싸는 최소 사각형 (COCO 키포인트 평가의 면적 기준)
                     bw, bh = max(xs) - min(xs), max(ys) - min(ys)
                     kept.append((f, x, base | {
                         "category_id": skel_ids[p.skeleton],
@@ -206,6 +247,7 @@ def write_coco(
             image_id: dict[int, int] = {}
             names: dict[int, str] = {}
             for f in sorted({f for f, _, _ in kept}):
+                # 이미지 시각 = 그 프레임의 PTS 시각 (반올림한 정수 ms)
                 t = round(float(index.ms[f]))
                 iid = len(images) + 1
                 image_id[f] = iid
@@ -217,6 +259,7 @@ def write_coco(
                     "session_id": pseudo, "stream_id": stream.stream_id,
                     "t_ms": t, "split": es.split.value,
                 })  # fmt: skip
+            # 필요한 프레임만 한 번 순서대로 디코딩해 JPEG로 쓴다
             for f, rgb in decode_frames(video, set(image_id)):
                 ok, buf = cv2.imencode(
                     ".jpg",

@@ -1,19 +1,21 @@
 # 액티브 러닝 정책 (WP14). 다음에 검수·라벨링할 세션을 고른다.
 # 세션 안의 검수 순서는 config/policies/review.yaml priority(우선순위 큐)이고, 이 점수와 별개다.
+# 읽는 곳: dlp_active.policy.load_policy (`dlp active rank|fiftyone`). 관련: ADR 0017.
+# 이 파일은 파싱한 값으로만 쓴다 (주석을 바꿔도 결과가 같다).
 version: 1
 
 # 클래스별 검수자 수정률 = (고침 + 지움 [+ 놓쳐서 추가]) / (개별 검수한 모델 라벨 + 추가).
 # 표본 검증 상태는 개별 검수가 아니므로 세지 않는다. 검수 수가 적은 클래스는 전체 수정률 쪽으로 당긴다:
 #   (고친 수 + prior_weight × 전체 수정률) / (검수 수 + prior_weight)
 correction:
-  count_added: true
-  prior_weight: 20
+  count_added: true           # 사람이 놓친 것을 추가한 라벨도 수정으로 센다
+  prior_weight: 20            # 평활 강도 (가상 검수 수). 키우면 검수 수 적은 클래스가 전체 수정률에 가까워진다
 
 # 후보 세션: 프리라벨이 끝나고 아직 사람 검수를 마치지 않은 세션. 골든셋 세션은 사람이 처음부터
 # 라벨링하므로 후보에서 뺀다.
 candidates:
-  lifecycle: [prelabeled]
-  exclude_golden: true
+  lifecycle: [prelabeled]     # 후보가 되는 생애주기 상태 (LifecycleState 값)
+  exclude_golden: true        # 골든셋 세션을 후보에서 뺀다 (수정률 계산에서는 늘 뺀다)
 
 # 블러는 종료 조건 전까지 전수 검수라 점수에 넣지 않는다.
 excluded_kinds: [blur_track]
@@ -23,10 +25,10 @@ excluded_kinds: [blur_track]
 score:
   normalize: total          # total(세션 전체) | per_minute(영상 1분당)
   terms:
-    correction_rate: 1.0
+    correction_rate: 1.0    # 예상 수정 수 (Σ 검수 대기 라벨 클래스의 수정률)
 
 select: 10                  # 한 번에 고르는 세션 수 (dlp active rank --limit)
 
 fiftyone:
-  dataset_prefix: dlp-active-
+  dataset_prefix: dlp-active-   # FiftyOne 데이터셋 이름 접두어 (기본 이름 <접두어>top<N>)
   frame_tolerance_ms: 1     # 라벨 키프레임 시각과 블러본 프레임 시각의 허용 차이 (ms 반올림만)

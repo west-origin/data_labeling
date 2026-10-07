@@ -1,10 +1,19 @@
 # 데이터셋 버전 정책 (WP7). 분할 단위는 config/defaults.yaml golden_set.split_unit(작업자·장소)을 따른다.
-version: 1
-val_ratio: 0.1                # 학습·검증 후보 세션 중 검증 비율 목표
-golden_sessions_per_domain: 20  # 골든셋 제안 시 도메인별 목표 세션 수 (사람이 최종 확정)
-eligible_privacy_state: approved  # 프라이버시 승인된 세션만 데이터셋에 넣는다
-include_label_history: true   # 스냅샷에 수정 이력(자동 원본과 수정본)을 함께 넣는다
+# 읽는 곳: dlp_datasets.policy.load_policy (`dlp dataset golden|build`). 관련: ADR 0007.
+# 이 파일은 파싱한 값으로만 쓴다 (주석을 바꿔도 결과가 같다).
+version: 1                    # 정책 파일 형식 버전
+# 학습·검증 후보 세션 중 검증 비율 목표 (0~1). 작업자 단위로 고르므로 실제 비율은 조금 다르다.
+# 올리면 검증 쪽 작업자·장소가 늘어 holdout(어디에도 못 쓰는 세션)도 늘어난다
+val_ratio: 0.1
+# 골든셋 제안 시 도메인별 목표 세션 수 (사람이 최종 확정). 작업자 단위로 담아 조금 넘을 수 있다
+golden_sessions_per_domain: 20
+# 프라이버시 승인된 세션만 데이터셋에 넣는다 (PrivacyState 값). 바꾸면 블러 검수 전 세션이 들어간다
+eligible_privacy_state: approved
+# 스냅샷에 수정 이력(자동 원본과 수정본)을 함께 넣는다. 재학습(dlp_train.extract)이 원본과 수정본
+# 차이를 쓰므로 끄면 그 학습 예제를 만들 수 없다
+include_label_history: true
+# 스냅샷 저장소 (lakeFS). 커밋 ID가 URI에 들어가 버전은 불변이다
 lakefs:
-  repository: dlp-datasets
-  branch: main
-  storage_namespace: s3://dlp-datasets/lakefs
+  repository: dlp-datasets    # lakeFS 저장소 이름 (없으면 만든다)
+  branch: main                # 커밋할 브랜치
+  storage_namespace: s3://dlp-datasets/lakefs  # 저장소를 처음 만들 때 쓰는 실제 객체 위치

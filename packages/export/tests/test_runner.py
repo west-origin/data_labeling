@@ -45,6 +45,12 @@ pytestmark = pytest.mark.services
 
 @pytest.fixture
 def engine() -> Iterator[sa.Engine]:
+    """테스트마다 새 PostgreSQL 데이터베이스(dlp_test_<임의>)를 만들고 마이그레이션한다.
+
+    끝나면 지운다.
+
+    DLP_DATABASE_URL(없으면 개발 compose 기본값)의 서버를 쓴다 (`make up` 필요).
+    """
     url = sa.make_url(
         os.environ.get(
             "DLP_DATABASE_URL", "postgresql+psycopg://dlp:dlp-dev-password@localhost:5432/dlp"
@@ -69,6 +75,13 @@ def engine() -> Iterator[sa.Engine]:
 def test_export_applies_policy_and_records_history(
     engine: sa.Engine, policy: ExportPolicy, ontology: Ontology, tmp_path: Path
 ) -> None:
+    """데이터셋 버전 → 구간 JSON·COCO 내보내기가 검증 정책·사용 중지·가명을 지키고 이력을 남긴다.
+
+    시나리오: 작업자·장소가 모두 다른 세션 4개로 버전 dv1을 만든 뒤 s2를 사용 중지한다.
+    정답: 결과·이력에 s2가 없고(s0·s1·s3만), 미검수·블러·오류 삽입·측정 라벨 0건, 원본 위치·검수자
+    ID·내부 ID 없음, manifest 파일 목록 = 올린 파일과 sha256, 가명 대응표는 내부 경로에만.
+    미검수 포함 옵션은 이력의 검증 정책에 남는다. 계보: s0은 내보내기 3건, s2는 0건.
+    """
     snapshots = LocalSnapshotStore(tmp_path / "snap")
     labeling = LocalStore(tmp_path / "store", "dlp-labeling")
     datasets = LocalStore(tmp_path / "store", "dlp-datasets")
@@ -102,6 +115,10 @@ def test_export_applies_policy_and_records_history(
         withdraw_session(conn, "s2", "동의 철회", FIXED_TIME + timedelta(days=1))
 
     def export(fmt: str, include_unreviewed: bool = False):
+        """dv1을 buyer-a에게 내보낸다.
+
+        고정 시각·고정 비밀값이라 가명을 테스트에서 다시 계산할 수 있다.
+        """
         return run_export(
             engine, root=ROOT, version_id="dv1", fmt=fmt, target="buyer-a",  # type: ignore[arg-type]
             snapshots=snapshots, labeling=labeling, datasets=datasets, raw_bucket="dlp-raw",
@@ -187,6 +204,11 @@ def test_export_applies_policy_and_records_history(
 def test_lerobot_export_end_to_end(
     engine: sa.Engine, policy: ExportPolicy, ontology: Ontology, tmp_path: Path
 ) -> None:
+    """LeRobot 내보내기 종단 (격리 환경 사용, `make test-isolated`).
+
+    정답: 세션 a·b가 에피소드 2개로 쓰이고 공식 로더도 2개를 읽는다. meta/dlp_episodes.json의
+    세션 ID는 에피소드 순서대로 a·b의 가명이고, 영상(mp4)과 데이터(parquet)가 있다.
+    """
     snapshots = LocalSnapshotStore(tmp_path / "snap")
     labeling = LocalStore(tmp_path / "store", "dlp-labeling")
     datasets = LocalStore(tmp_path / "store", "dlp-datasets")
@@ -226,6 +248,11 @@ def test_lerobot_export_end_to_end(
 def test_lerobot_refuses_mixed_aspect_ratios(
     engine: sa.Engine, policy: ExportPolicy, ontology: Ontology, tmp_path: Path
 ) -> None:
+    """화면비가 다른 블러본(64x48과 64x36)은 한 LeRobot 데이터셋에 넣지 않는다.
+
+    격리 환경을 부르기 전에 실패하므로 기본 서비스 테스트로 돈다. 정답: ExportError("화면비")이고
+    데이터셋 버킷에 아무것도 올라가지 않았다.
+    """
     from dlp_fixtures.video import write_video
     from dlp_media.storage import sha256_file
 
@@ -270,10 +297,15 @@ class _FailingStore(LocalStore):
 
     def __init__(self, root: Path, bucket: str, *, fail_at: int | None = None,
                  withdraw: tuple[sa.Engine, str] | None = None) -> None:  # fmt: skip
+        """fail_at: 이 번째(1부터) put_file에서 OSError.
+
+        withdraw: (엔진, 세션) — 첫 올리기 직후 그 세션을 사용 중지한다.
+        """
         super().__init__(root, bucket)
         self.puts, self.fail_at, self.withdraw = 0, fail_at, withdraw
 
     def put_file(self, key: str, path: Path, sha256: str) -> None:
+        """올리기 횟수를 세고, 설정에 따라 실패하거나 다른 트랜잭션에서 세션을 사용 중지한다."""
         self.puts += 1
         if self.fail_at is not None and self.puts == self.fail_at:
             raise OSError("올리기 실패 (시험)")
@@ -309,6 +341,7 @@ def test_export_history_is_committed_before_upload(
         )  # fmt: skip
 
     def export(datasets: LocalStore, minutes: int) -> None:
+        """dv1 구간 JSON 내보내기 (분마다 다른 시각 → 다른 내보내기 ID)."""
         run_export(
             engine, root=ROOT, version_id="dv1", fmt="intervals", target="buyer-a",
             snapshots=snapshots, labeling=labeling, datasets=datasets, raw_bucket="dlp-raw",
@@ -380,6 +413,7 @@ def test_export_refuses_blurred_video_after_privacy_reopened(
     calls = iter(range(100))
 
     def export(fmt: str = "coco"):
+        """dv1 내보내기 (호출마다 1분씩 늦은 시각 → 다른 내보내기 ID)."""
         return run_export(
             engine, root=ROOT, version_id="dv1", fmt=fmt, target="buyer",  # type: ignore[arg-type]
             snapshots=snapshots, labeling=labeling, datasets=datasets, raw_bucket="dlp-raw",

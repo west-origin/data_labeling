@@ -1,3 +1,10 @@
+"""수정률·세션 점수·선택 단위 테스트 (DB 없이, WP14).
+
+정답 근거: 검수 결과를 아는 합성 이력(`reviewed_history`: n개 중 corrected개를 사람이 고침)으로
+클래스별 수정률을 정하고, 검수 대기 라벨 구성(`pending`)으로 예상 수정 수 = Σ 수정률을 손으로
+계산해 순서를 맞춘다.
+"""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -20,20 +27,24 @@ ROOT = Path(__file__).resolve().parents[3]
 
 @pytest.fixture(scope="module")
 def policy() -> ActivePolicy:
+    """저장소의 config/policies/active.yaml."""
     return load_policy(ROOT)
 
 
 def action(verb: str) -> dict[str, Any]:
+    """오른손 행동 페이로드 (0~1000 ms)."""
     return {"kind": "action", "action_id": "a", "hand": "right", "verb": verb,
             "t_approach_ms": 0, "t_end_ms": 1000}  # fmt: skip
 
 
 def box(cls: str) -> dict[str, Any]:
+    """클래스 cls의 박스 트랙 페이로드 (키프레임 하나)."""
     return {"kind": "box_track", "entity_id": f"{cls}_1", "class_id": cls,
             "keyframes": [{"t_ms": 0, "x": 1, "y": 1, "w": 5, "h": 5}]}  # fmt: skip
 
 
 def blur() -> dict[str, Any]:
+    """얼굴 블러 트랙 페이로드 (점수·수정률에서 빠져야 한다)."""
     return {"kind": "blur_track", "target": "face",
             "keyframes": [{"t_ms": 0, "x": 1, "y": 1, "w": 5, "h": 5}]}  # fmt: skip
 
@@ -46,6 +57,7 @@ def make_label(payload: dict[str, Any], **kw: Any) -> LabelRecord:
 
 
 def model(sid: str, lid: str, payload: dict[str, Any], **kw: Any) -> LabelRecord:
+    """모델 라벨 "<sid>-<lid>" (출처 m1, 신뢰도 기본 0.9, 기본 미검수)."""
     return make_label(
         payload,
         label_id=f"{sid}-{lid}",
@@ -57,6 +69,7 @@ def model(sid: str, lid: str, payload: dict[str, Any], **kw: Any) -> LabelRecord
 
 
 def reviewed(state: VerificationState) -> Verification:
+    """검수자 r1이 고정 시각에 준 검증 상태."""
     return Verification(state=state, reviewer_id="r1", reviewed_at=FIXED_TIME)
 
 
@@ -89,6 +102,7 @@ def reviewed_history(
 def pending(
     sid: str, counts: dict[str, int], payloads: dict[str, dict[str, Any]]
 ) -> list[LabelRecord]:
+    """검수 대기 모델 라벨: 이름별 개수만큼 (`payloads[이름]`)."""
     return [
         model(sid, f"p-{name}-{i}", payloads[name]) for name, n in counts.items() for i in range(n)
     ]
@@ -98,6 +112,11 @@ PAYLOADS = {"fold": action("fold_sheet"), "cup": box("cup"), "mop": box("mop"), 
 
 
 def test_sessions_with_high_correction_classes_come_first(policy: ActivePolicy) -> None:
+    """수정률 높은 클래스를 많이 담은 세션이 앞선다 (기준 문서의 예: 시트 접기 30%, 컵 0.5%).
+
+    정답: 순서 s-fold > s-mixed > s-mops > s-cups > s-blur, 점수 = Σ 개수 * 수정률,
+    블러만 담은 세션은 검수 대기 0·점수 0.
+    """
     # 합성 수정률 분포: 시트 접기 30%, 컵 0.5% (기준 문서의 예), 대걸레 10%
     histories = [
         reviewed_history("r1", PAYLOADS["fold"], 400, 120),
@@ -165,6 +184,8 @@ def test_random_distribution_matches_expected_order(policy: ActivePolicy) -> Non
 def test_rates_count_only_individual_reviews_and_smooth_small_classes(
     policy: ActivePolicy,
 ) -> None:
+    """수정률은 개별 검수만 세고(표본 검증 제외), 지운 오탐은 수정으로, 블러·오류 삽입은 빼며,
+    표본이 적은 클래스(4/4)는 전체 수정률(5/101) 쪽으로 평활한다."""
     sid = "r1"
     history = [
         *reviewed_history(sid, PAYLOADS["mop"], 4, 4),  # 4개 중 4개 수정 (표본 적음)
@@ -195,6 +216,8 @@ def test_rates_count_only_individual_reviews_and_smooth_small_classes(
 
 
 def test_score_term_plugins(policy: ActivePolicy) -> None:
+    """점수 항목 플러그인: 정책으로 항목을 바꾸면 순서가 바뀌고, 새 항목은 등록만 하면 켤 수 있으며,
+    등록되지 않은 이름·겹치는 이름은 거부한다."""
     rates = correction_rates([reviewed_history("r", PAYLOADS["cup"], 10, 1)], policy)
     sessions = [
         (make_session("a"), [model("a", "1", PAYLOADS["cup"], confidence=0.2)]),
@@ -209,12 +232,16 @@ def test_score_term_plugins(policy: ActivePolicy) -> None:
 
     # 새 항목은 등록만 하면 정책에서 켤 수 있다
     class LongSession:
+        """시험용 항목: 긴 세션일수록 높은 점수."""
+
         name = "long_session"
 
         def score(self, ctx: SessionContext) -> float:
+            """세션 길이(초)."""
             return ctx.session.duration_ms / 1000
 
         def explain(self, ctx: SessionContext) -> dict[str, float]:
+            """기여 클래스 없음."""
             return {}
 
     if "long_session" not in TERMS:
@@ -238,6 +265,10 @@ def test_score_term_plugins(policy: ActivePolicy) -> None:
 
 
 def test_per_minute_normalization(policy: ActivePolicy) -> None:
+    """per_minute 정규화.
+
+    합계로는 긴 세션(10분, 대기 10개)이 앞서지만 1분당으로는 짧은 세션(1분, 3개)이 앞선다.
+    """
     rates = correction_rates([reviewed_history("r", PAYLOADS["mop"], 100, 10)], policy)
     per_min = policy.model_copy(
         update={"score": policy.score.model_copy(update={"normalize": "per_minute"})}

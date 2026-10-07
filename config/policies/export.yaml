@@ -1,14 +1,22 @@
 # 내보내기 정책 (WP15). 미검수 포함 여부의 기본값은 config/defaults.yaml export.include_unreviewed.
+# 읽는 곳: dlp_export.policy.load_policy (`dlp export coco|intervals|lerobot`).
+# 관련: ADR 0018(내보내기), 0021(이력 선커밋·가명·LeRobot 격리 환경), 0027(세션·라벨 ID 가명).
+# 이 파일은 파싱한 값으로만 쓴다 (텍스트 해시를 쓰지 않으므로 주석을 바꿔도 결과가 같다).
+
+# 정책 파일 형식 버전. 키 구조를 바꿀 때만 올린다.
 version: 1
 
 # 기본 검증 정책: 사람이 만든 라벨은 늘 포함하고, 모델 라벨은 이 상태만 포함한다 (기준 문서 "내보내기 검증 정책").
 # 미검수 라벨은 --include-unreviewed(또는 defaults export.include_unreviewed: true)로만 포함한다.
+# unreviewed를 여기 넣으면 로더가 거부한다 (ExportPolicy._reviewed). 판매 품질을 좌우하므로 줄이는 것만 신중히.
 label_states: [human_approved, human_corrected, sample_verified]
 
 # 기본으로 내보내는 분할 (골든셋은 평가 기준이라 판매용 기본 내보내기에 넣지 않는다).
+# holdout은 정보 누수 방지용으로 남겨 둔 세션이라 넣지 않는다. CLI --split으로 바꿀 수 있다.
 splits: [train, val]
 
 # 내보내지 않는 라벨 종류. 블러 라벨은 어떤 형식으로도 내보내지 않는다.
+# blur_track을 빼면 로더가 거부한다 (ExportPolicy._no_blur). 다른 종류를 더 넣는 것은 자유.
 excluded_kinds: [blur_track]
 
 # 작업자·장소·세션·라벨 ID는 내보내기마다 다른 가명으로 바꾼다 (dlp_export.pseudonym, ADR 0027).
@@ -16,32 +24,43 @@ excluded_kinds: [blur_track]
 # 비밀값은 secret_env 환경 변수(내부 보관). 없으면 실행마다 임의 값이라 아무도 원래 ID로 되짚을 수 없다.
 # 개발용 비밀값(dev_secrets, .env.example 값)은 env_var 환경 변수가 dev_envs 중 하나일 때만 쓸 수 있다.
 ids:
+  # false면 내부 ID를 그대로 내보낸다 (내부용 내보내기에만. 판매용은 반드시 true)
   pseudonymize: true
+  # 가명 비밀값을 담은 환경 변수 이름. 비밀값을 바꾸면 이전 내보내기의 가명을 다시 계산할 수 없다
   secret_env: DLP_EXPORT_ID_SECRET
+  # 공개된 개발용 비밀값 목록 (.env.example과 맞춘다). 운영에서 이 값이면 내보내기를 거부한다
   dev_secrets: [dlp-dev-export-id-secret]
+  # 실행 환경을 알려 주는 환경 변수 이름
   env_var: DLP_ENV
+  # 개발용 비밀값을 허용하는 env_var 값
   dev_envs: [dev]
 
+# COCO 형식 (dlp_export.coco).
 coco:
-  jpeg_quality: 90
+  jpeg_quality: 90           # 이미지(블러본 프레임) JPEG 품질 1~100. 높을수록 파일이 크다
   frame_tolerance_ms: 1      # 키프레임 시각과 블러본 프레임 시각의 허용 차이 (ms 반올림만)
 
+# 구간 JSON 형식 (dlp_export.intervals).
 intervals:
+  # 구간 JSON에 넣는 라벨 종류. 공간 라벨(box_track·keypoint_track 등)은 COCO·LeRobot으로 나간다.
+  # 새 시간 구간 라벨 종류를 온톨로지에 더하면 여기에도 더해야 나간다
   kinds: [action, segment, gap, event, hand_state, object_state, relation, coverage, description]
 
+# LeRobot v3.0 형식 (dlp_export.lerobot). 세션의 video_stream 블러본 하나가 에피소드 하나다.
 lerobot:
   fps: 30                    # 에피소드 프레임률 (가변 프레임 블러본에서 PTS로 그 시각에 보이던 프레임을 고른다)
   video_stream: bodycam      # 에피소드 영상 스트림 종류
   max_width: 640             # 이보다 넓으면 줄인다 (0이면 원본 크기)
   interp_max_gap_ms: 200     # 키포인트·3D 궤적을 이 간격 안에서만 선형 보간
+  # observation.state에 넣는 손 3D 점 (Trajectory3D part 이름). 바꾸면 state 열 수가 바뀐다
   hand_points_3d: [wrist, thumb_tip, index_tip]
-  repo_id: dlp/export
-  robot_type: human_bodycam
-  vcodec: h264
+  repo_id: dlp/export        # LeRobot 데이터셋 repo_id (허브에 올리지 않는다, 메타데이터용)
+  robot_type: human_bodycam  # LeRobot 메타데이터 robot_type
+  vcodec: h264               # 에피소드 영상 코덱
   aspect_tolerance: 0.01     # 한 데이터셋에 넣는 에피소드의 화면비(가로/세로) 허용 차이. 넘으면 나눠 내보낸다
   # LeRobot 공식 쓰기·읽기 API는 PyTorch를 끌어와 작업공간 의존성(av·numpy 버전)과 충돌한다.
   # 격리된 일회용 환경에서 돌린다 (uv run --project <project> --locked --isolated).
   # 버전(lerobot[dataset]==0.6.1, torch==2.11.0 CPU판 등)과 전이 의존성·해시는 <project>/uv.lock에 고정한다.
   env:
-    python: "3.12"
-    project: scripts/lerobot-env
+    python: "3.12"           # 격리 환경 Python 버전 (uv.lock과 맞아야 한다)
+    project: scripts/lerobot-env  # 저장소 루트 기준. 의존성을 바꾸면 그 디렉터리에서 uv lock

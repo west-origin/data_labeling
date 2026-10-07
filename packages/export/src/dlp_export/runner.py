@@ -15,6 +15,17 @@
    실패하면 이력과 manifest 없는 폴더가 남는다 (manifest 없는 폴더 = 미완성 내보내기, 다시
    내보낸다). 올린 뒤(manifest 전에) 사용 중지를 다시 확인해, 그 사이 사용 중지된 세션이 있으면
    manifest를 올리지 않고 실패한다.
+6. manifest까지 올린 뒤 실제로 쓴 세션 중 생애주기 split_assigned인 것을 exported로 옮긴다
+   (실행자 `export:<내보내기 ID>`, ADR 0029).
+
+왜 이력을 먼저 커밋하나 (ADR 0021): 파일을 먼저 올리고 이력을 나중에 쓰면, 그 사이 실패하거나 사용
+중지가 끼어들 때 "구매자에게 나갔을 수 있는데 계보에 없는" 내보내기가 생긴다. 사용 중지 전파
+(`dlp_datasets.lineage`)는 계보 목록으로 구매자에게 삭제를 요청하므로, 이력이 실제보다 많은
+쪽(미완성 내보내기도 기록)이 안전하다.
+
+DB 쓰기: `exports`(record_export), `session_lifecycle_events`·`sessions`(set_lifecycle).
+저장소 쓰기: 데이터셋 버킷 `exports/<ID>/…`, `internal/export-id-maps/<ID>.json`. 원본 버킷은 읽지도
+쓰지도 않는다 (라벨링·데이터셋 버킷이 원본 버킷이면 바로 실패).
 """
 
 from __future__ import annotations
@@ -56,6 +67,7 @@ from dlp_schema.lineage import ExportRecord
 from dlp_schema.ontology import Ontology
 from dlp_schema.session import LifecycleState, Session
 
+# 지원 형식 (CLI 하위 명령 이름과 같다)
 Format = Literal["coco", "intervals", "lerobot"]
 # 결과 파일에서 내보내기마다 다른 가명으로 바꾸는 ID (ADR 0027)
 PSEUDONYMIZED = ("worker_id", "site_id", "session_id", "label_id")
@@ -68,10 +80,12 @@ def id_map_key(export_id: str) -> str:
 
 @dataclass
 class ExportResult:
-    record: ExportRecord
-    files: int
+    """`run_export` 결과 (CLI가 요약을 출력한다)."""
+
+    record: ExportRecord  # DB `exports`에 쓴 이력 (session_ids는 내부 ID)
+    files: int  # 올린 파일 수 (manifest 포함, 대응표 제외)
     label_counts: dict[str, int]  # "종류/검증 상태" → 수
-    details: dict[str, Any] = field(default_factory=dict[str, Any])
+    details: dict[str, Any] = field(default_factory=dict[str, Any])  # 형식별 세부 (이미지 수 등)
     session_pseudonyms: dict[str, str] = field(default_factory=dict[str, str])  # 내부 ID → 가명
 
 
@@ -83,13 +97,18 @@ def export_id_for(
     splits: tuple[Split, ...],
     now: datetime,
 ) -> str:
-    """같은 시각이라도 형식·대상·검증 정책·분할이 다르면 다른 ID (결과 폴더가 겹치지 않게)."""
+    """같은 시각이라도 형식·대상·검증 정책·분할이 다르면 다른 ID (결과 폴더가 겹치지 않게).
+
+    Returns:
+        "export-<형식>-<sha256 앞 10자>". 입력이 모두 같으면(같은 시각 포함) 같은 ID다.
+    """
     key = "|".join([version_id, fmt, target, ",".join(states), ",".join(splits), now.isoformat()])
     tag = hashlib.sha256(key.encode()).hexdigest()[:10]
     return f"export-{fmt}-{tag}"
 
 
 def _label_counts(labels: list[LabelRecord]) -> dict[str, int]:
+    """라벨 목록 → {"종류/검증 상태": 수} (키 순)."""
     c = Counter(f"{x.kind}/{x.verification.state.value}" for x in labels)
     return dict(sorted(c.items()))
 
@@ -104,10 +123,20 @@ def _lerobot(
     work: Path,
     ids: Pseudonymizer,
 ) -> tuple[list[LabelRecord], set[str], dict[str, Any]]:
-    """(내보낸 라벨, 내보낸 세션(내부 ID), 세부 정보). 결과 파일의 세션 ID는 가명이다."""
+    """(내보낸 라벨, 내보낸 세션(내부 ID), 세부 정보). 결과 파일의 세션 ID는 가명이다.
+
+    세션마다 `video_stream` 스트림 블러본 하나가 에피소드 하나다. 그 스트림이 없는 세션은 건너뛴다.
+    격리 환경에서 `out/lerobot`에 쓰고 공식 로더로 다시 읽어 에피소드 수를 확인한 뒤,
+    meta/dlp_vocab.json(어휘)과 meta/dlp_episodes.json(에피소드 → 세션 가명·분할)을 덧붙인다.
+
+    Raises:
+        ExportError: 화면비가 `aspect_tolerance` 넘게 다른 에피소드가 섞였을 때, 쓸 세션이 없을 때,
+            로더가 읽은 에피소드 수가 다를 때.
+        subprocess.CalledProcessError: 격리 환경 스크립트가 실패했을 때.
+    """
     vocab = Vocab.from_ontology(ontology)
     episodes: list[tuple[Session, Path, Episode]] = []
-    size: tuple[int, int] | None = None
+    size: tuple[int, int] | None = None  # 첫 에피소드 크기 (모든 에피소드를 이 크기로 쓴다)
     sessions: list[dict[str, Any]] = []
     for es in src.sessions:
         stream = next(
@@ -148,6 +177,7 @@ def _lerobot(
     written = {s.session_id for s, _, _ in episodes}
     pkg = write_package(episodes, policy, size, work / "lerobot_pkg", ids)
     dest = out / "lerobot"
+    # 격리 환경: 공식 API로 쓰고, 공식 로더로 다시 읽어 확인 (JSON을 표준 출력으로 돌려준다)
     run_script(root, policy.lerobot, "lerobot_write.py", str(pkg), str(dest))
     check = json.loads(
         run_script(root, policy.lerobot, "lerobot_check.py", str(dest), policy.lerobot.repo_id)
@@ -177,7 +207,12 @@ def _lerobot(
 
 
 def lock_sessions(conn: sa.Connection, session_ids: set[str]) -> None:
-    """내보낼 세션 행을 이 트랜잭션 끝까지 공유 잠금한다 (사용 중지의 세션 행 갱신과 직렬화)."""
+    """내보낼 세션 행을 이 트랜잭션 끝까지 공유 잠금한다 (사용 중지의 세션 행 갱신과 직렬화).
+
+    `SELECT … FOR SHARE`. 사용 중지(`withdraw_session`)는 세션 행의 생애주기를 갱신하므로, 이 잠금을
+    쥔 동안 기다리거나(내보내기가 먼저) 이 잠금이 기다린다(사용 중지가 먼저).
+    잠금 순서는 세션 ID 순.
+    """
     conn.execute(
         sa.select(sessions_table.c.session_id)
         .where(sessions_table.c.session_id.in_(sorted(session_ids)))
@@ -206,9 +241,40 @@ def run_export(
     """내보내기 하나. DB 트랜잭션은 이 함수가 연다 (이력은 올리기 전에 따로 커밋한다).
 
     id_secret: 작업자·장소 가명 비밀값 (없으면 실행마다 임의 값, export.yaml ids).
+
+    Args:
+        engine: DB 엔진. 트랜잭션 세 개를 차례로 연다 (읽기 → 이력 커밋 → 생애주기 전이).
+        root: 저장소 루트 (격리 환경 스크립트 위치).
+        version_id: 데이터셋 버전 ID.
+        fmt: "coco" | "intervals" | "lerobot".
+        target: 받는 쪽 이름 (예: 구매자). 이력과 내보내기 ID에 들어간다.
+        snapshots: 데이터셋 스냅샷 저장소.
+        labeling: 라벨링 버킷 (블러본 읽기 전용).
+        datasets: 데이터셋 버킷 (결과·대응표 쓰기).
+        raw_bucket: 원본 버킷 이름 (결과에 이 위치가 있으면 실패).
+        policy: 내보내기 정책.
+        ontology: 데이터셋 버전의 온톨로지 (COCO 범주·LeRobot 어휘).
+        include_unreviewed: 미검수 모델 라벨 포함 (명시적 옵션).
+        splits: 내보낼 분할 (None이면 정책 기본).
+        now: 내보내기 시각 (시간대 포함). 내보내기 ID에도 들어간다.
+        id_secret: 가명 비밀값 바이트 (CLI가 `check_secret`으로 확인한 뒤 넘긴다).
+
+    Returns:
+        `ExportResult`.
+
+    Raises:
+        ExportError: 원본 버킷을 쓰려 할 때, 내보낼 세션이 없을 때, 원본 위치가 결과에 있을 때,
+            내보내는 동안·올리는 동안 사용 중지된 세션이 있을 때, 블러본 문제 등.
+        ValueError: `record_export`가 버전 밖·사용 중지 세션을 거부할 때.
+        OSError 등: 올리기 실패 (이력은 이미 커밋되어 남는다).
+
+    멱등성: 같은 입력·같은 `now`로 다시 부르면 같은 내보내기 ID라 이력 삽입이 `exports` 기본 키에서
+    충돌한다 (sqlalchemy IntegrityError). 다시 내보낼 때는 새 시각을 쓴다 (미완성 폴더는 그대로 두고
+    새 ID로).
     """
     if labeling.bucket == raw_bucket or datasets.bucket == raw_bucket:
         raise ExportError("내보내기는 원본 버킷을 읽거나 쓰지 않습니다")
+    # 1) 고르기 (읽기 전용 연결)
     with engine.connect() as conn:
         src = load_source(
             conn, snapshots, version_id, policy, include_unreviewed=include_unreviewed,
@@ -223,6 +289,7 @@ def run_export(
     with tempfile.TemporaryDirectory() as tmp:
         out, work = Path(tmp) / "out", Path(tmp) / "work"
         out.mkdir()
+        # 2) 형식별 쓰기. written = 실제로 결과에 들어간 세션(내부 ID), used = 결과에 들어간 라벨
         details: dict[str, Any]
         if fmt == "intervals":
             details = {
@@ -244,6 +311,7 @@ def run_export(
             raise ExportError(f"{version_id}: 이 형식으로 쓴 세션이 없습니다")
         counts = _label_counts(used)
         pseudonyms = {sid: ids.session(sid) for sid in sorted(written)}
+        # 3) manifest
         # 파일 목록 (manifest 자신 제외): 경로 → sha256. 받는 쪽이 빠지거나 바뀐 파일을 확인한다
         inventory = {p.relative_to(out).as_posix(): sha256_file(p) for p in sorted(walk_files(out))}
         manifest = {
@@ -272,8 +340,9 @@ def run_export(
         (out / "manifest.json").write_text(
             json.dumps(manifest, ensure_ascii=False, indent=2), "utf-8"
         )
+        # 원본 위치 검사는 올리기·이력 전에 (실패하면 아무 흔적도 남기지 않는다)
         assert_no_raw(out, raw_bucket)
-        # 이력을 먼저 따로 커밋한다 (세션 행 잠금 뒤 사용 중지 재확인, record_export도 확인한다)
+        # 4) 이력을 먼저 따로 커밋한다 (세션 행 잠금 뒤 사용 중지 재확인, record_export도 확인한다)
         with engine.begin() as conn:
             lock_sessions(conn, written)
             late = written & withdrawn_session_ids(conn)
@@ -293,6 +362,7 @@ def run_export(
                 session_ids=tuple(sorted(written)),
                 now=now,
             )
+        # 5) 올리기 (manifest는 맨 마지막: manifest가 있는 폴더 = 완성된 내보내기)
         files = 0
         manifest_path = out / "manifest.json"
         for rel, digest in inventory.items():
@@ -317,7 +387,7 @@ def run_export(
             f"exports/{export_id}/manifest.json", manifest_path, sha256_file(manifest_path)
         )
         files += 1
-    # 다 올린 뒤 실제로 내보낸 세션을 생애주기 exported로 옮긴다 (split_assigned에서만, 멱등).
+    # 6) 다 올린 뒤 실제로 내보낸 세션을 생애주기 exported로 옮긴다 (split_assigned에서만, 멱등).
     # holdout처럼 split_assigned가 아닌 세션은 그대로 둔다
     with engine.begin() as conn:
         for sid in sorted(written):

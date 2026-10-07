@@ -37,6 +37,13 @@ pytestmark = pytest.mark.isolated_env
 def test_official_lerobot_loader_reads_export(
     scenario: Scenario, policy: ExportPolicy, ontology: Ontology, tmp_path: Path
 ) -> None:
+    """격리 환경의 공식 쓰기 API로 에피소드 2개를 쓰고 공식 로더로 읽은 값이 우리 특징과 같은지.
+
+    시나리오: 시나리오 프레임 시각으로 회색 단색 영상을 만들고, 같은 에피소드를 두 번 넣는다.
+    정답 근거: `build_episode`가 만든 특징(state·hand_state·verb·verification·task)이 그대로 읽혀야
+    하고, 각 프레임 밝기가 `gray(frame_index[k])`여야 한다 (PTS로 고른 프레임이 들어갔다는 뜻).
+    작업 목록은 시나리오의 작업 구간(floor_sweep_mop)과 구간 밖 도메인(cleaning).
+    """
     lp = policy.lerobot
     video = tmp_path / "v.mp4"
     write_video(

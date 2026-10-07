@@ -41,6 +41,7 @@ ROOT = Path(__file__).resolve().parents[3]
 
 @pytest.fixture
 def engine() -> Iterator[sa.Engine]:
+    """테스트마다 새 PostgreSQL 데이터베이스를 만들고 마이그레이션한다. 끝나면 지운다."""
     url = sa.make_url(
         os.environ.get(
             "DLP_DATABASE_URL", "postgresql+psycopg://dlp:dlp-dev-password@localhost:5432/dlp"
@@ -63,11 +64,13 @@ def engine() -> Iterator[sa.Engine]:
 
 
 def box(cls: str) -> dict[str, Any]:
+    """클래스 cls의 박스 트랙 페이로드 (t=0 키프레임 하나)."""
     return {"kind": "box_track", "entity_id": f"{cls}_1", "class_id": cls,
             "keyframes": [{"t_ms": 0, "x": 8, "y": 8, "w": 16, "h": 16}]}  # fmt: skip
 
 
 def lab(sid: str, lid: str, cls: str, *, model: bool = True, **kw: Any) -> LabelRecord:
+    """세션 sid의 박스 라벨 "<sid>-<lid>" (model이면 모델 출처·신뢰도 0.8, 아니면 사람)."""
     return make_label(
         box(cls),
         label_id=f"{sid}-{lid}",
@@ -82,6 +85,12 @@ def lab(sid: str, lid: str, cls: str, *, model: bool = True, **kw: Any) -> Label
 
 
 def test_rank_candidates_and_build_fiftyone_samples(engine: sa.Engine, tmp_path: Path) -> None:
+    """DB 세션 순위와 FiftyOne 샘플 만들기 (골든·사용 중지·검수 전 단계 제외, 렌더 확인).
+
+    정답: 후보는 prelabeled 중 골든(gold)·사용 중지(gone)를 뺀 mops·cups. 수정률은 rev 세션에서
+    mop 2/2, cup 0/2 (골든의 사람 cup 정답은 세지 않는다) → mops가 먼저. 블러본은 렌더 기록이
+    있고 지금 승인 상태일 때만 쓴다 (cups는 블러본 없음, 승인을 풀면 건너뜀).
+    """
     policy = load_policy(ROOT)
     done = Verification(
         state=VerificationState.HUMAN_CORRECTED, reviewer_id="r", reviewed_at=FIXED_TIME
@@ -93,6 +102,7 @@ def test_rank_candidates_and_build_fiftyone_samples(engine: sa.Engine, tmp_path:
         register_ontology(conn, load_ontology(ROOT / "config/ontology/v1"))
 
         def add(sid: str, state: LifecycleState, labels: list[LabelRecord], **kw: Any) -> None:
+            """작업자·장소가 세션마다 다른 승인 세션을 생애주기 state로 넣고 라벨을 넣는다."""
             insert_session(
                 conn,
                 make_session(sid, worker_id=f"w-{sid}", site_id=f"s-{sid}", **kw).model_copy(
