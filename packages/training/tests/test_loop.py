@@ -221,6 +221,10 @@ def test_training_loop_gate_blocks_or_deploys(engine: sa.Engine, tmp_path: Path)
     # 기본 어댑터(objects·tools)를 대신하는 과제라 비교할 기본 예측 버전 없이는 평가하지 않는다
     with pytest.raises(TrainingError, match="baseline-version"):
         run(TrainingJob("objects", "dv1", params={"jitter_px": 0.0}), 1)
+    # 잘못 적은 기존 버전: 골든셋에 예측이 없으면 기존 지표가 0이 되어 아무 후보나 통과하므로 멈춘다
+    with pytest.raises(TrainingError, match="base-v9"):
+        run(TrainingJob("objects", "dv1", baseline_versions=(*BASE, "base-v9"), force=True), 1)
+    assert not tracker.runs
     r1 = run(TrainingJob("objects", "dv1", params={"jitter_px": 200.0}, baseline_versions=BASE), 1)
     assert r1.status == "rejected", r1.reason
     # 학습 세션 8개마다 (승인 cup, 수정 bucket, 추가 mop). 골든 세션은 들어가지 않는다

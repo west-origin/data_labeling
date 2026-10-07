@@ -47,6 +47,19 @@ def test_segment_f1_and_boundaries() -> None:
     assert (b.tp, b.fp, b.fn) == (4, 1, 0)
 
 
+def test_boundary_agreement_excludes_timeline_extremes() -> None:
+    # 공백 없이 채운 타임라인은 양 끝(0, 300)이 항상 같아 공짜로 맞는다 → 빼고 센다
+    truth = [(0, 100, "rub"), (100, 300, "push")]
+    pred = [(0, 200, "rub"), (200, 300, "push")]
+    b = boundary_agreement(truth, pred, tolerance_ms=10)
+    assert (b.tp, b.fp, b.fn) == (2, 1, 1)  # 0, 300 공짜
+    b = boundary_agreement(truth, pred, tolerance_ms=10, exclude_extremes=True)
+    assert (b.tp, b.fp, b.fn) == (0, 1, 1) and b.f1 == 0.0
+    # 예측이 늦게 시작하면 그 시작은 경계로 남아 오탐이다 (양 끝은 정답·예측을 합친 타임라인 기준)
+    b = boundary_agreement(truth, [(50, 100, "rub"), (100, 300, "push")], 10, exclude_extremes=True)
+    assert (b.tp, b.fp, b.fn) == (1, 1, 0)
+
+
 def test_temporal_map_hand_example() -> None:
     truth = [("v1", 0, 100, "rub"), ("v1", 200, 300, "rub")]
     pred = [("v1", 0, 100, "rub", 0.9), ("v1", 500, 600, "rub", 0.8), ("v1", 200, 290, "rub", 0.7)]

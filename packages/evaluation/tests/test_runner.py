@@ -20,11 +20,13 @@ from dlp_schema.db.repository import (
     insert_golden_set,
     insert_labels,
     insert_session,
+    insert_withdrawal,
     record_review,
     register_ontology,
 )
+from dlp_schema.episode import retractions
 from dlp_schema.labels import ActionPayload, LabelRecord, Provenance, Source, VerificationState
-from dlp_schema.lineage import GoldenSet
+from dlp_schema.lineage import GoldenSet, Withdrawal
 from dlp_schema.ontology import load_ontology
 from dlp_schema.session import Domain, StreamKind, SyncMethod
 from dlp_schema.testing import FIXED_TIME, make_session
@@ -138,3 +140,60 @@ def test_golden_evaluation_from_database(pg: sa.Engine, tmp_path: Path) -> None:
     md = (tmp_path / "eval.md").read_text("utf-8")
     assert "배포 게이트: 실패" in md and "segment_f1_0.5" in md
     assert all(isinstance(x.payload, ActionPayload) for s in good["actions"] for x in s.truth)
+
+
+def test_prefix_predictions_keep_reviewer_deleted_records_and_skip_withdrawn(
+    pg: sa.Engine,
+) -> None:
+    """버전 앞부분(`actions-*`)으로 고른 예측도 전체 이력에서 뽑는다.
+
+    검수자가 지운 오탐은 예측에 남고(사라지면 오탐이 안 세진다), 새 모델 버전이 지운 옛 레코드는
+    빠진다. 사용 중지된 세션은 골든셋에 있어도 평가하지 않는다.
+    """
+    with pg.begin() as conn:
+        register_ontology(conn, load_ontology(ROOT / "config/ontology/v1"))
+        for sid in ("p-0001", "p-0002"):
+            insert_session(conn, make_session(sid))
+        truth = [
+            x for x in generate_action_scenario(0, session_id="p-0001").labels if x.kind == "action"
+        ]
+        v1 = _model(truth, "actions-v1", "v1")
+        fp = v1[0].model_copy(update={"label_id": "fp-v1"})  # 같은 구간 중복 예측 = 오탐
+        # 검수자가 오탐을 지움 (사람 삭제 레코드)
+        deleted = fp.model_copy(
+            update={
+                "label_id": "fp-v1-del",
+                "parent_label_id": "fp-v1",
+                "retracted": True,
+                "provenance": Provenance(source=Source.HUMAN),
+                "confidence": None,
+            }
+        )
+        # 새 버전(actions-v2)이 옛 레코드 하나를 지우고 다시 냄 (모델 삭제 레코드)
+        stale = _model(truth[:1], "actions-v0", "v0")
+        insert_labels(
+            conn,
+            [*truth, *v1, fp, deleted, *stale, *retractions(stale, "actions-v2", FIXED_TIME)],
+        )
+        other = [
+            x for x in generate_action_scenario(1, session_id="p-0002").labels if x.kind == "action"
+        ]
+        insert_labels(conn, [*other, *_model(other, "actions-v1", "v1")])
+        insert_withdrawal(conn, Withdrawal(session_id="p-0002", reason="동의 철회",
+                                           withdrawn_at=FIXED_TIME))  # fmt: skip
+        insert_golden_set(
+            conn,
+            GoldenSet(
+                version="cleaning-g2",
+                domain=Domain.CLEANING,
+                session_ids=("p-0001", "p-0002"),
+                created_at=FIXED_TIME,
+            ),
+        )
+    with pg.connect() as conn:
+        data = load_golden(conn, "cleaning-g2", {"actions": "actions-*"})["actions"]
+    assert [s.session_id for s in data] == ["p-0001"]
+    pred_ids = {x.label_id for x in data[0].pred}
+    assert "fp-v1" in pred_ids  # 검수자가 지운 오탐도 예측이다
+    assert not any(i.endswith("-v0") for i in pred_ids)  # 새 버전이 지운 옛 레코드는 빠진다
+    assert pred_ids == {x.label_id for x in v1} | {"fp-v1"}

@@ -2,17 +2,21 @@
 
 과제와 라벨 종류:
 - objects: box_track → mAP(0.50:0.95), AP50, HOTA, IDF1, MOTA, ECE.
-  정답 키프레임 시각에서 비교하고 예측은 키프레임 사이를 보간한다 (max_interp_ms 이내).
-- hands / body: keypoint_track(hand21 / coco17) → PCK. 손은 왼손·오른손끼리, 전신은 시각마다
-  키포인트 박스 IoU로 사람을 맞춘다.
+  정답 키프레임 시각(모든 정답 트랙의 합집합)에서 비교한다. 사람 정답은 키프레임이 성기다 (CVAT가
+  사이를 보간한다). 그래서 정답 트랙은 자기 키프레임 사이를 간격 제한 없이 선형 보간하고 (화면 밖
+  키프레임이 끼면 그 사이는 없음), 예측은 max_interp_ms 이내에서만 보간한다.
+- hands / body: keypoint_track(hand21 / coco17) → PCK. 손은 같은 스트림의 같은 손끼리,
+  전신은 스트림·시각마다 키포인트 박스 IoU로 사람을 맞춘다.
 - contact: hand_state(접촉 대상 있음) → 접촉 시작·종료 F1과 오차(ms), 파지 유형 macro F1.
   장갑 세션은 contact_glove 허용 오차를 쓴다.
-- actions: action → 구간 F1@IoU, temporal mAP, 경계 일치 F1, 동사 macro F1.
+- actions: action → 구간 F1@IoU, temporal mAP, 경계 일치 F1(타임라인 양 끝 제외), 동사 macro F1.
 - relations: relation → 같은 (주어, 술어, 목적어, 부분) 구간 F1@relation_iou.
 - states: object_state → 상태 전이 정확도.
 - coverage: coverage → 같은 (표면, 도구) 쌍의 비율 절대 오차 평균.
 - privacy: blur_track → 블러 재현(정답 박스가 예측 블러로 충분히 덮인 비율)과 정밀.
-세션 사이의 개체 ID는 세션 ID를 붙여 구분한다 (추적 지표는 여러 시퀀스를 이어 붙인 것과 같다).
+공간 라벨의 키프레임 시각은 그 스트림의 PTS 시각이다 (ADR 0019). 그래서 공간 과제(objects·hands·
+body·privacy)는 정답과 같은 스트림의 예측만 비교하고, 영상·개체 ID에 세션과 스트림 ID를 붙여
+구분한다 (추적 지표는 여러 시퀀스를 이어 붙인 것과 같다).
 """
 
 from __future__ import annotations
@@ -81,10 +85,17 @@ def _payloads[T](labels: list[LabelRecord], cls: type[T]) -> list[tuple[LabelRec
     return [(x, x.payload) for x in labels if isinstance(x.payload, cls) and not x.retracted]
 
 
+TRUTH_GAP = math.inf  # 정답 트랙은 키프레임 간격과 상관없이 보간한다 (CVAT 보간과 같다)
+
+
 def _interp(
-    keyframes: Sequence[tuple[int, NDArray[np.float64] | None]], t: int, max_gap: int
+    keyframes: Sequence[tuple[int, NDArray[np.float64] | None]], t: int, max_gap: float
 ) -> NDArray[np.float64] | None:
-    """키프레임 (시각, 값 또는 화면 밖 None)에서 시각 t의 값."""
+    """키프레임 (시각, 값 또는 화면 밖 None)에서 시각 t의 값.
+
+    두 키프레임 사이는 선형 보간한다. 어느 한쪽이 화면 밖이거나 간격이 max_gap보다 크면 None이고,
+    첫 키프레임 앞·마지막 키프레임 뒤는 None이다.
+    """
     times = [k[0] for k in keyframes]
     i = int(np.searchsorted(times, t))
     if i < len(times) and times[i] == t:
@@ -134,11 +145,12 @@ def eval_objects(data: list[SessionData], policy: EvaluationPolicy) -> TaskRepor
     counts: Counter[str] = Counter()
     for s in data:
         truth = [
-            (p.entity_id, p.class_id, _box_frames(p))
-            for _, p in _payloads(s.truth, BoxTrackPayload)
+            (x.stream_id, p.entity_id, p.class_id, _box_frames(p))
+            for x, p in _payloads(s.truth, BoxTrackPayload)
         ]
         pred = [
             (
+                x.stream_id,
                 p.entity_id,
                 p.class_id,
                 _box_frames(p),
@@ -146,28 +158,37 @@ def eval_objects(data: list[SessionData], policy: EvaluationPolicy) -> TaskRepor
             )
             for x, p in _payloads(s.pred, BoxTrackPayload)
         ]
-        times = sorted({t for _, _, kf in truth for t, v in kf if v is not None})
-        for t in times:
-            g = [(e, c, v) for e, c, kf in truth if (v := _interp(kf, t, 0)) is not None]
+        times = sorted({(st, t) for st, _, _, kf in truth for t, v in kf if v is not None})
+        for stream, t in times:
+            g = [
+                (e, c, v)
+                for st, e, c, kf in truth
+                if st == stream and (v := _interp(kf, t, TRUTH_GAP)) is not None
+            ]
             d = [
                 (e, c, v, sc)
-                for e, c, kf, sc in pred
-                if (v := _interp(kf, t, policy.max_interp_ms)) is not None
+                for st, e, c, kf, sc in pred
+                if st == stream and (v := _interp(kf, t, policy.max_interp_ms)) is not None
             ]
+            image = (s.session_id, stream, t)
             gb = [_as_box(v) for _, _, v in g]
             db = [_as_box(v) for _, _, v, _ in d]
             for (_, c, _), box in zip(g, gb, strict=True):
-                gts.append(GtBox((s.session_id, t), c, box))
+                gts.append(GtBox(image, c, box))
                 counts[c] += 1
             for (_, c, _, sc), box in zip(d, db, strict=True):
-                dets.append(DetBox((s.session_id, t), c, box, sc))
+                dets.append(DetBox(image, c, box, sc))
             iou = box_iou(gb, db)
             same = np.array(
                 [[gc == dc for _, dc, _, _ in d] for _, gc, _ in g], dtype=bool
             ).reshape(iou.shape)
             sim = iou * same
             frames.append(
-                ([(s.session_id, e) for e, _, _ in g], [(s.session_id, e) for e, _, _, _ in d], sim)
+                (
+                    [(s.session_id, f"{stream}/{e}") for e, _, _ in g],
+                    [(s.session_id, f"{stream}/{e}") for e, _, _, _ in d],
+                    sim,
+                )
             )
             used: set[int] = set()
             scores = np.array([x[3] for x in d], dtype=np.float64)
@@ -205,24 +226,49 @@ def eval_keypoints(
     pairs: list[tuple[NDArray[np.float64], NDArray[np.float64] | None]] = []
     counts: Counter[str] = Counter()
     for s in data:
-        truth = [p for _, p in _payloads(s.truth, KeypointTrackPayload) if p.skeleton == skeleton]
-        pred = [p for _, p in _payloads(s.pred, KeypointTrackPayload) if p.skeleton == skeleton]
+        truth = [
+            (x.stream_id, p)
+            for x, p in _payloads(s.truth, KeypointTrackPayload)
+            if p.skeleton == skeleton
+        ]
+        pred = [
+            (x.stream_id, p)
+            for x, p in _payloads(s.pred, KeypointTrackPayload)
+            if p.skeleton == skeleton
+        ]
         if skeleton == "hand21":
-            for t_track in truth:
-                match = next((p for p in pred if p.hand is t_track.hand), None)
-                kf = _kp_frames(match) if match else []
+            for stream, t_track in truth:
+                # 같은 스트림의 같은 손 예측 트랙들 (트랙이 끊겨 여러 개일 수 있다)
+                candidates = [
+                    _kp_frames(p) for st, p in pred if st == stream and p.hand is t_track.hand
+                ]
                 for t, gt in _kp_frames(t_track):
                     assert gt is not None
-                    v = _interp(kf, t, policy.max_interp_ms) if kf else None
+                    v = next(
+                        (
+                            v
+                            for kf in candidates
+                            if (v := _interp(kf, t, policy.max_interp_ms)) is not None
+                        ),
+                        None,
+                    )
                     pairs.append((gt, v[:, :2] if v is not None else None))
                     counts[t_track.hand.value if t_track.hand else "hand"] += 1
             continue
-        pred_frames = [_kp_frames(p) for p in pred]
-        times = sorted({f.t_ms for p in truth for f in p.keyframes})
-        for t in times:
-            gt_now = [g for p in truth for tt, g in _kp_frames(p) if tt == t and g is not None]
+        pred_frames = [(st, _kp_frames(p)) for st, p in pred]
+        times = sorted({(st, f.t_ms) for st, p in truth for f in p.keyframes})
+        for stream, t in times:
+            gt_now = [
+                g
+                for st, p in truth
+                if st == stream
+                for tt, g in _kp_frames(p)
+                if tt == t and g is not None
+            ]
             pr_now = [
-                v for kf in pred_frames if (v := _interp(kf, t, policy.max_interp_ms)) is not None
+                v
+                for st, kf in pred_frames
+                if st == stream and (v := _interp(kf, t, policy.max_interp_ms)) is not None
             ]
             iou = box_iou([_kp_box(g) for g in gt_now], [_kp_box(v) for v in pr_now])
             used: set[int] = set()
@@ -347,7 +393,9 @@ def eval_actions(data: list[SessionData], policy: EvaluationPolicy) -> TaskRepor
                 seg[thr][0] += r.tp
                 seg[thr][1] += r.fp
                 seg[thr][2] += r.fn
-            b = boundary_agreement(truth, plain, policy.tolerance_ms.boundary)
+            b = boundary_agreement(
+                truth, plain, policy.tolerance_ms.boundary, exclude_extremes=True
+            )
             bnd[0] += b.tp
             bnd[1] += b.fp
             bnd[2] += b.fn
@@ -370,7 +418,8 @@ def eval_actions(data: list[SessionData], policy: EvaluationPolicy) -> TaskRepor
 
     metrics = {f"segment_f1_{thr}": f1(*seg[thr]) for thr in policy.segment_iou}
     metrics["temporal_map"] = temporal_map(t_grouped, p_grouped)[0]
-    metrics["boundary_f1"] = f1(*bnd)
+    # 양 끝을 빼고 나면 경계가 하나도 없을 수 있다 (구간이 하나뿐) → 정의되지 않음
+    metrics["boundary_f1"] = f1(*bnd) if sum(bnd) else math.nan
     metrics["verb_macro_f1"] = macro_f1(verbs_truth, verbs_pred)
     return _report(metrics, counts, len(data), policy.min_samples_per_class)
 
@@ -473,7 +522,8 @@ def _covered(target: Box, covers: Sequence[Box]) -> float:
 
 
 def eval_privacy(data: list[SessionData], policy: EvaluationPolicy) -> TaskReport | None:
-    """정답 키프레임 시각마다 비교한다. 정답은 보간하지 않고, 예측은 max_interp_ms 안에서 보간한다.
+    """스트림별 정답 키프레임 시각마다 비교한다. 정답 트랙은 자기 키프레임 사이를 보간하고 (사람
+    키프레임은 성기다), 예측은 같은 스트림만 max_interp_ms 안에서 보간한다.
 
     재현: 정답 박스 면적의 coverage 이상이 예측 블러들로 덮였는가 (대상 종류별로도 낸다).
     정밀: 예측 박스 면적의 precision_overlap 이상이 정답 박스들 위에 있는가.
@@ -494,7 +544,7 @@ def eval_privacy(data: list[SessionData], policy: EvaluationPolicy) -> TaskRepor
             g = [
                 (target, _as_box(v))
                 for st, target, kf in truth
-                if st == stream and (v := _interp(kf, t, 0)) is not None
+                if st == stream and (v := _interp(kf, t, TRUTH_GAP)) is not None
             ]
             d = [
                 _as_box(v)

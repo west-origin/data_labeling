@@ -2,8 +2,10 @@
 
 - 영상은 라벨링 버킷의 블러본만 쓴다 (원본 버킷은 읽지 않는다). FiftyOne은 로컬 파일 경로가 필요해
   캐시 디렉터리에 받는다.
-- 라벨 시각(마스터 ms) → 스트림 시각 → 블러본 PTS 인덱스의 가장 가까운 프레임 (허용 오차 안에서만).
-  FiftyOne 프레임 번호는 1부터다. 프레임 번호는 FiftyOne 안에서만 쓰고 저장소에는 남기지 않는다.
+- 공간 라벨(박스·관절)의 키프레임 시각은 이미 그 스트림의 PTS 시각이다 (ADR 0019). 그대로 블러본 PTS
+  인덱스의 가장 가까운 프레임에 맞춘다 (허용 오차 안에서만). 시간 구간 라벨은 마스터 시각이라
+  스트림 시각으로 바꾼 뒤 맞춘다. FiftyOne 프레임 번호는 1부터다. 프레임 번호는 FiftyOne
+  안에서만 쓰고 저장소에는 남기지 않는다.
 - 박스는 Detections, 관절은 Keypoints, 시간 구간(행동·손 상태 등)은 TemporalDetections로 넣는다.
   각 라벨에 검증 상태·출처·모델 버전·label_id를 붙여, 수정률 높은 클래스를 FiftyOne에서 바로 거른다.
 - 샘플 필드: 세션 점수·순위·항목 점수·기여 상위 클래스. 데이터셋 info에 클래스별 수정률.
@@ -59,11 +61,15 @@ class FoSample:
     temporal: list[FoLabel] = field(default_factory=list[FoLabel])
 
 
-def _frame(index: PtsIndex, stream: Stream, master_ms: float, tolerance_ms: int) -> int | None:
-    """마스터 시각 → 블러본 프레임 번호(1부터). 가까운 프레임이 허용 오차 밖이면 None."""
-    t = (master_ms - stream.offset_ms - stream.manual_adjustment_ms) / stream.clock_scale
-    i = index.nearest(t)
-    return i + 1 if abs(float(index.ms[i]) - t) <= tolerance_ms else None
+def _frame(index: PtsIndex, stream_ms: float, tolerance_ms: int) -> int | None:
+    """스트림 시각 → 블러본 프레임 번호(1부터). 가까운 프레임이 허용 오차 밖이면 None."""
+    i = index.nearest(stream_ms)
+    return i + 1 if abs(float(index.ms[i]) - stream_ms) <= tolerance_ms else None
+
+
+def _stream_ms(stream: Stream, master_ms: float) -> float:
+    """마스터 시각 → 스트림 시각 (시간 구간 라벨용)."""
+    return (master_ms - stream.offset_ms - stream.manual_adjustment_ms) / stream.clock_scale
 
 
 def _meta(x: LabelRecord) -> dict[str, Any]:
@@ -97,13 +103,13 @@ def stream_sample(
         p = x.payload
         if x.stream_id == stream.stream_id and isinstance(p, BoxTrackPayload):
             for k in p.keyframes:
-                f = None if k.outside else _frame(index, stream, k.t_ms, tol)
+                f = None if k.outside else _frame(index, k.t_ms, tol)
                 if f is not None:
                     box = (k.x / w, k.y / h, k.w / w, k.h / h)
                     sample.frames.setdefault(f, []).append(FoLabel(x.kind, box=box, **_meta(x)))
         elif x.stream_id == stream.stream_id and isinstance(p, KeypointTrackPayload):
             for kf in p.keyframes:
-                f = _frame(index, stream, kf.t_ms, tol)
+                f = _frame(index, kf.t_ms, tol)
                 if f is not None:
                     pts = tuple(
                         (q.x / w, q.y / h) if q.visibility > 0 else (float("nan"), float("nan"))
@@ -111,8 +117,8 @@ def stream_sample(
                     )
                     sample.frames.setdefault(f, []).append(FoLabel(x.kind, points=pts, **_meta(x)))
         elif x.kind not in SPATIAL and x.stream_id in (None, stream.stream_id):
-            a = _frame(index, stream, x.t_start_ms, 10**9)
-            b = _frame(index, stream, x.t_end_ms, 10**9)
+            a = _frame(index, _stream_ms(stream, x.t_start_ms), 10**9)
+            b = _frame(index, _stream_ms(stream, x.t_end_ms), 10**9)
             if a is not None and b is not None:
                 sample.temporal.append(FoLabel(x.kind, support=(a, max(a, b)), **_meta(x)))
     return sample

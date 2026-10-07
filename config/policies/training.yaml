@@ -31,9 +31,16 @@ tasks:
              trainer: oracle-stub, params: {jitter_px: 0.0}}
   body:     {stage: prelabel, replaces: [body], min_examples: 200, min_new_examples: 50, deploy: auto,
              trainer: oracle-stub, params: {jitter_px: 0.0}}
-  contact:  {stage: prelabel, replaces: [], min_examples: 200, min_new_examples: 50, deploy: auto,
+  # contact: 배포되면 프리라벨의 휴리스틱 접촉(라벨 ID `<세션>-contact-`, 버전 contact-heuristic-1+p…)을
+  #   대신한다. replaces의 "contact"는 그 휴리스틱을 뜻한다.
+  # TODO(real-model): dlp_prelabel.runner가 replaced에 "contact"가 있으면 휴리스틱 접촉(_contacts)을 건너뛰고
+  #   검수 전 `<세션>-contact-` 라벨을 지워야 한다. 지금은 스트림 접두(`<세션>-<스트림>-contact-`)만 지워
+  #   배포 모델 접촉과 휴리스틱 접촉이 겹쳐 남는다. 연동 전까지 사람 승인 후에만 배포한다.
+  contact:  {stage: prelabel, replaces: [contact], min_examples: 200, min_new_examples: 50, deploy: approve,
              trainer: oracle-stub, params: {jitter_px: 0.0}}
-  actions:  {stage: actions, replaces: [], min_examples: 200, min_new_examples: 50, deploy: auto,
+  # TODO(real-model): 행동 단계(dlp actions run)는 아직 배포된 행동 모델(deployed_predictors stage actions)을
+  #   읽지 않는다. 배포해도 쓰이지 않으므로 연동 전까지 사람 승인으로 둔다 (승인해도 효과가 없다).
+  actions:  {stage: actions, replaces: [], min_examples: 200, min_new_examples: 50, deploy: approve,
              trainer: oracle-stub, params: {jitter_px: 0.0}}
   privacy:  {stage: privacy, replaces: [], min_examples: 200, min_new_examples: 50, deploy: approve,
              trainer: oracle-stub, params: {jitter_px: 0.0}}

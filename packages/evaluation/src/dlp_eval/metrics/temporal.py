@@ -149,7 +149,21 @@ def boundaries(intervals: Sequence[Interval]) -> list[int]:
 
 
 def boundary_agreement(
-    truth: Sequence[Interval], pred: Sequence[Interval], tolerance_ms: int
+    truth: Sequence[Interval],
+    pred: Sequence[Interval],
+    tolerance_ms: int,
+    *,
+    exclude_extremes: bool = False,
 ) -> EventResult:
-    """경계 일치율: 경계 시각을 허용 오차 안에서 일대일로 맞춘 F1."""
-    return match_events(boundaries(truth), boundaries(pred), tolerance_ms)
+    """경계 일치율: 경계 시각을 허용 오차 안에서 일대일로 맞춘 F1.
+
+    exclude_extremes: 정답·예측을 합친 타임라인의 맨 앞 시작과 맨 뒤 끝 시각을 경계에서 뺀다.
+    공백 없이 채운 타임라인(행동 구간)은 양 끝이 항상 세션 처음·끝이라 공짜로 맞기 때문이다.
+    """
+    t, p = boundaries(truth), boundaries(pred)
+    if exclude_extremes and (truth or pred):
+        lo = min(s for s, _, _ in (*truth, *pred))
+        hi = max(e for _, e, _ in (*truth, *pred))
+        t = [x for x in t if x not in (lo, hi)]
+        p = [x for x in p if x not in (lo, hi)]
+    return match_events(t, p, tolerance_ms)

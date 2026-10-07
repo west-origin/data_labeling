@@ -4,26 +4,27 @@ version: 1
 tolerance_ms:
   contact: 150              # 영상 기준 접촉 시작·종료 허용 오차 (장갑 세션은 contact_glove)
   contact_glove: 70
-  boundary: 200             # 행동 경계 일치 허용 오차
+  boundary: 200             # 행동 경계 일치 허용 오차 (타임라인 맨 앞·맨 뒤 경계는 세지 않는다)
   state: 500                # 상태 전이 시각 허용 오차
 max_interp_ms: 200          # 예측 박스·관절을 정답 시각에 맞출 때 보간할 최대 키프레임 간격
+                            # (정답 트랙은 간격 제한 없이 자기 키프레임 사이를 보간한다)
 track_iou: 0.5              # 추적 IDF1·MOTA와 보정(ECE) 판정의 IoU 문턱
 segment_iou: [0.1, 0.25, 0.5]
 relation_iou: 0.5
 match_iou: 0.5             # 접촉 파지 유형·행동 동사를 비교할 때 정답·예측 구간을 맞추는 IoU
 pck_alpha: 0.1              # 정답 키포인트 박스 긴 변의 10%
 ece_bins: 15
-min_samples_per_class: 20
+min_samples_per_class: 20   # 이보다 정답 표본이 적은 클래스는 리포트에 "표본 부족"으로 표시
 # 블러(프라이버시): 정답 시각마다 정답 박스가 예측 블러로 coverage 이상 덮이면 재현, 예측 박스 면적의
 # precision_overlap 이상이 정답 대상 위면 정밀. 놓친 대상은 노출이므로 재현을 주 지표로 본다.
 privacy:
   coverage: 0.9
-  precision_overlap: 0.5   # 이보다 정답 표본이 적은 클래스는 리포트에 "표본 부족"으로 표시
+  precision_overlap: 0.5
 
 # 하위 집단: 세션 속성별로 따로 리포트한다.
 #   glove: 장갑 스트림이 있는 세션(glove) / 없는 세션(bare)
 #   site: 장소별
-subgroups: [glove]
+subgroups: [glove, site]
 
 # 배포 게이트: 후보 모델이 기존 모델보다
 #   - 주 지표(primary)가 min_gain 이상 좋고,

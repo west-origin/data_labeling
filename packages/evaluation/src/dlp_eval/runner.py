@@ -5,9 +5,12 @@ DB에서 정답·예측을 모아 지표·하위 집단·게이트 리포트를 
 - 정답: 골든셋 세션의 현재 라벨 중 사람이 만든 것과 사람이 승인·수정한 것.
   (표본 검증만 된 모델 라벨은 정답으로 보지 않는다.)
 - 예측: 과제별로 지정한 model_version의 레코드 (삭제 레코드 제외). 나중에 검수자가 고쳤어도 모델이
-  낸 원래 레코드로 평가한다. 버전이 `*`로 끝나면 그 앞부분으로 시작하는 현재 레코드를 평가한다.
+  낸 원래 레코드로 평가한다. 버전이 `*`로 끝나면 그 앞부분으로 시작하는 버전의 레코드 중 새
+  모델 버전이 지우지(retractions) 않은 것을 평가한다. 검수자가 지우거나 고친 모델 레코드도
+  그대로 예측이다 (검수자가 지운 오탐이 사라지면 안 된다).
 - 오류 삽입 사본·측정 레코드와 그 후손은 예측에서 뺀다.
-- 하위 집단: glove(장갑 스트림 유무), site(장소).
+- 하위 집단: glove(장갑 스트림 유무), site(장소). evaluation.yaml subgroups에 적은 것만 리포트한다.
+- 사용 중지(동의 철회 등)된 세션은 골든셋에 있어도 평가하지 않는다.
 """
 
 from __future__ import annotations
@@ -23,10 +26,15 @@ import sqlalchemy as sa
 from dlp_eval.gate import GateDecision
 from dlp_eval.harness import LOWER_IS_BETTER, EvalReport, SessionData
 from dlp_eval.policy import Task
-from dlp_schema.db.repository import get_golden_set, get_labels, get_session
+from dlp_schema.db.repository import (
+    get_golden_set,
+    get_labels,
+    get_session,
+    withdrawn_session_ids,
+)
 from dlp_schema.episode import current_labels, non_operational_ids
 from dlp_schema.labels import LabelRecord, Source, VerificationState
-from dlp_schema.session import Session, StreamKind
+from dlp_schema.session import LifecycleState, Session, StreamKind
 
 TASK_KINDS: dict[Task, tuple[str, ...]] = {
     "objects": ("box_track",),
@@ -56,9 +64,14 @@ class GoldenSession:
 
 def golden_sessions(conn: sa.Connection, golden_version: str) -> list[GoldenSession]:
     golden = get_golden_set(conn, golden_version)
+    withdrawn = withdrawn_session_ids(conn)
     out: list[GoldenSession] = []
     for sid in golden.session_ids:
+        if sid in withdrawn:
+            continue
         session = get_session(conn, sid)
+        if session.lifecycle_state is LifecycleState.WITHDRAWN:
+            continue
         labels = get_labels(conn, sid)
         truth = [x for x in current_labels(labels) if is_truth(x)]
         glove = any(
@@ -66,6 +79,38 @@ def golden_sessions(conn: sa.Connection, golden_version: str) -> list[GoldenSess
         )
         groups = {"glove": "glove" if glove else "bare", "site": session.site_id}
         out.append(GoldenSession(session, labels, truth, groups))
+    return out
+
+
+def _predictions(
+    labels: list[LabelRecord],
+    kinds: tuple[str, ...],
+    version: str,
+    excluded: set[str],
+    model_retracted: set[str],
+) -> list[LabelRecord]:
+    """전체 이력에서 그 모델 버전이 낸 레코드 (삭제 레코드·비운영 레코드 제외).
+
+    버전이 `*`로 끝나면 그 앞부분으로 시작하는 버전의 레코드 중 새 모델 버전이 지우지 않은 것
+    전부다. 관계·커버리지처럼 정책이 바뀌어도 내용이 같은 레코드는 옛 버전을 그대로 두는 모듈용
+    (예: relations-*). 검수자가 지우거나 고친 레코드는 그대로 예측이다.
+    """
+    prefix = version[:-1] if version.endswith("*") else None
+    out: list[LabelRecord] = []
+    for x in labels:
+        if (
+            x.kind not in kinds
+            or x.provenance.source is Source.HUMAN
+            or x.retracted
+            or x.label_id in excluded
+        ):
+            continue
+        mv = x.provenance.model_version or ""
+        if prefix is None:
+            if mv == version:
+                out.append(x)
+        elif mv.startswith(prefix) and x.label_id not in model_retracted:
+            out.append(x)
     return out
 
 
@@ -77,37 +122,16 @@ def load_golden(
         sid, labels, truth, groups = g.session.session_id, g.labels, g.truth, g.groups
         # 오류 삽입 사본·측정 레코드와 그 후손은 모델 버전을 달고 있어도 예측이 아니다
         excluded = non_operational_ids(labels)
-        current = current_labels(labels)
+        # 모델 버전이 바뀌어 지운 레코드 (retractions, 출처 model). 사람이 지운 것은 들지 않는다
+        model_retracted = {
+            x.parent_label_id
+            for x in labels
+            if x.retracted and x.provenance.source is not Source.HUMAN and x.parent_label_id
+        }
         for task, version in models.items():
             kinds = TASK_KINDS[task]
-            if version.endswith("*"):
-                # 버전 앞부분으로 고르면 그 모듈의 현재 레코드를 평가한다. 관계·커버리지처럼 정책이
-                # 바뀌어도 내용이 같은 레코드는 옛 버전을 그대로 두는 모듈용 (예: relations-*)
-                prefix = version[:-1]
-                pred = [
-                    x
-                    for x in current
-                    if x.kind in kinds and (x.provenance.model_version or "").startswith(prefix)
-                ]
-                out[task].append(
-                    SessionData(sid, [x for x in truth if x.kind in kinds], pred, groups)
-                )
-                continue
-            out[task].append(
-                SessionData(
-                    sid,
-                    [x for x in truth if x.kind in kinds],
-                    [
-                        x
-                        for x in labels
-                        if x.kind in kinds
-                        and x.provenance.model_version == version
-                        and not x.retracted
-                        and x.label_id not in excluded
-                    ],
-                    groups,
-                )
-            )
+            pred = _predictions(labels, kinds, version, excluded, model_retracted)
+            out[task].append(SessionData(sid, [x for x in truth if x.kind in kinds], pred, groups))
     return out
 
 

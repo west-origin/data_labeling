@@ -37,7 +37,9 @@ def video(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, list[int]]:
 
 def labels(times: list[int], offset: int) -> list[LabelRecord]:
     m = Provenance(source=Source.MODEL, model_version="m1")
-    t3, t5 = times[3] + offset, times[5] + offset  # 마스터 시각 = 스트림 시각 + 오프셋
+    # 공간 라벨 키프레임은 스트림 PTS 시각, 시간 구간 라벨은 마스터 시각 (= 스트림 시각 + 오프셋)
+    t3, t5 = times[3], times[5]
+    m3, m5 = t3 + offset, t5 + offset
     return [
         make_label(
             {"kind": "box_track", "entity_id": "cup_1", "class_id": "cup",
@@ -55,8 +57,8 @@ def labels(times: list[int], offset: int) -> list[LabelRecord]:
         ),
         make_label(
             {"kind": "action", "action_id": "a1", "hand": "right", "verb": "wipe",
-             "t_approach_ms": t3, "t_end_ms": t5},
-            label_id="act", t_start_ms=t3, t_end_ms=t5,
+             "t_approach_ms": m3, "t_end_ms": m5},
+            label_id="act", t_start_ms=m3, t_end_ms=m5,
         ),
         make_label(
             {"kind": "blur_track", "target": "face",

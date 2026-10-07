@@ -2,8 +2,9 @@
 
 재학습 예제(dlp_train)와 액티브 러닝 수정률(dlp_active)이 같이 쓴다.
 
-- accepted: 모델 라벨이 그대로 인정됨 (states에 든 검증 상태)
-- corrected: 사람이 고침 (origin = 처음 모델 레코드)
+- accepted: 모델 라벨이 그대로 인정됨 (states에 든 검증 상태, origin = 그 모델 레코드). 모델이 낸
+  자식 레코드(부모가 있는 모델 레코드)도 자기 검증 상태로 판단한다 (수정이 아니다).
+- corrected: 사람이 고침 (현재 레코드 출처가 사람, origin = 처음 모델 레코드)
 - added: 모델이 놓친 것을 사람이 추가함 (origin 없음)
 - deleted: 사람이 모델 라벨을 지움 (오탐, label = 지운 레코드)
 운영 라벨만 본다 (오류 삽입·측정 레코드와 그 후손 제외). 모델 버전이 바뀌어 지운 삭제 레코드
@@ -88,8 +89,12 @@ def review_changes(
         root = _root(x, by_id)
         at = x.verification.reviewed_at or x.created_at
         who = x.verification.reviewer_id
-        if root.provenance.source is Source.MODEL:
-            out.append(ReviewChange("accepted" if root is x else "corrected", x, root, at, who))
+        if x.provenance.source is Source.MODEL:
+            # 모델이 낸 현재 레코드는 부모가 있어도 (예: 3인칭 착용자 사본, parent=원래 트랙) 사람의
+            # 수정이 아니다. 자기 검증 상태로 판단한다: states 안이면 그대로 인정된 것이다.
+            out.append(ReviewChange("accepted", x, x, at, who))
+        elif root.provenance.source is Source.MODEL:
+            out.append(ReviewChange("corrected", x, root, at, who))
         else:
             out.append(ReviewChange("added", x, None, at, who))
     for r in history:

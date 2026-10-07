@@ -206,15 +206,19 @@ def run_training_job(
             f"골든셋 {version.golden_set_version}에 {job.task} 정답이 없어 평가할 수 없습니다"
         )
         return result
-    if (
-        spec.replaces
-        and not job.baseline_versions
-        and not list_model_versions(conn, job.task, ModelStatus.DEPLOYED)
-    ):
+    has_deployed = bool(list_model_versions(conn, job.task, ModelStatus.DEPLOYED))
+    if spec.replaces and not job.baseline_versions and not has_deployed:
         raise TrainingError(
             f"{job.task}: 배포되면 기본 어댑터 {list(spec.replaces)}를 대신하므로 비교할 "
             "기본 어댑터 예측 버전이 필요합니다 (--baseline-version, 골든셋에 그 예측이 있어야 함)"
         )
+    # 배포 모델이 없으면 기본 어댑터의 DB 예측과 비교한다. 잘못 적은 버전은 예측이 비어 기존 지표가
+    # 0에 가까워지고 어떤 후보든 통과하므로, 골든셋에 예측이 없는 버전이 하나라도 있으면 멈춘다.
+    baseline_golden = (
+        _merged_golden(conn, version.golden_set_version, job)
+        if job.baseline_versions and not has_deployed
+        else None
+    )
 
     tag = _short(
         job.task,
@@ -309,9 +313,9 @@ def run_training_job(
                     golden_version=version.golden_set_version,
                     model_versions={job.task: cur.model_version},
                 )
-            elif job.baseline_versions:
+            elif baseline_golden is not None:
                 baseline = evaluate(
-                    {job.task: _merged_golden(conn, version.golden_set_version, job)},
+                    {job.task: baseline_golden},
                     eval_policy,
                     golden_version=version.golden_set_version,
                     model_versions={job.task: "+".join(job.baseline_versions)},
@@ -360,10 +364,20 @@ def run_training_job(
 
 
 def _merged_golden(conn: sa.Connection, golden_version: str, job: TrainingJob) -> list[SessionData]:
-    """여러 기본 어댑터 버전의 예측을 세션별로 합친다 (대신할 어댑터 모두와 비교)."""
+    """여러 기본 어댑터 버전의 예측을 세션별로 합친다 (대신할 어댑터 모두와 비교).
+
+    골든셋에 예측이 하나도 없는 버전이 있으면 TrainingError (버전을 잘못 적었거나 골든셋에
+    프리라벨을 돌리지 않았다).
+    """
     merged: dict[str, SessionData] = {}
     for v in job.baseline_versions:
-        for s in load_golden(conn, golden_version, {job.task: v})[job.task]:
+        sessions = load_golden(conn, golden_version, {job.task: v})[job.task]
+        if not any(s.pred for s in sessions):
+            raise TrainingError(
+                f"{job.task}: 기존 모델 버전 {v}의 예측이 골든셋 {golden_version}에 없습니다 "
+                "(--baseline-version을 확인하세요. 버전 앞부분으로 고르려면 끝에 *)"
+            )
+        for s in sessions:
             if s.session_id in merged:
                 merged[s.session_id].pred.extend(s.pred)
             else:

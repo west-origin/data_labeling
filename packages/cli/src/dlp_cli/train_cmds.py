@@ -110,7 +110,10 @@ def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
         "--baseline-version",
         action="append",
         default=[],
-        help="배포 모델이 없을 때 비교할 DB 예측의 모델 버전 (대신할 기본 어댑터마다, 여러 번)",
+        help=(
+            "배포 모델이 없을 때 비교할 DB 예측의 모델 버전 (대신할 기본 어댑터마다, 여러 번). "
+            "골든셋에 예측이 없는 버전이면 실패한다"
+        ),
     )
     run.add_argument("--force", action="store_true", help="누적 조건을 무시")
     run.add_argument("--store", default="s3", help="'s3' 또는 'local:<디렉터리>'")

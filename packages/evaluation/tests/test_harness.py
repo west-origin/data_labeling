@@ -85,7 +85,8 @@ def scenario_data(seed: int, glove: bool) -> SessionData:
         *actions.labels, *wiping.truth_relations, coverage, *boxes(f"s{seed}"),
         *states(f"s{seed}", 2000),
     ]  # fmt: skip
-    return SessionData(f"s{seed}", truth, as_model(truth), {"glove": "glove" if glove else "bare"})
+    groups = {"glove": "glove" if glove else "bare", "site": f"site{seed % 2}"}
+    return SessionData(f"s{seed}", truth, as_model(truth), groups)
 
 
 def run(data: list[SessionData], policy: EvaluationPolicy, version: str = "m1") -> EvalReport:
@@ -119,8 +120,9 @@ def test_perfect_predictions_score_perfectly(policy: EvaluationPolicy) -> None:
     assert m["relations"]["relation_f1"] == 1.0
     assert m["states"]["transition_accuracy"] == 1.0
     assert m["coverage"]["coverage_abs_error"] == 0.0
-    # 하위 집단 리포트: 장갑 세션과 맨손 세션
-    assert set(report.subgroups) == {"glove=glove", "glove=bare"}
+    # 하위 집단 리포트: 장갑 세션과 맨손 세션, 장소별
+    assert set(report.subgroups) == {"glove=glove", "glove=bare", "site=site0", "site=site1"}
+    assert report.subgroups["site=site1"]["objects"].sessions == 1
     assert report.subgroups["glove=bare"]["actions"].sessions == 1
 
 
@@ -273,3 +275,160 @@ def test_privacy_recall_and_precision(policy: EvaluationPolicy) -> None:
     # 얼굴 예측(60x60)은 정답(40x40)이 면적의 0.44만 덮어 정밀 기준 0.5 미만 → 맞음은 문서 1개
     # (블러를 넉넉히 키우는 것은 재현에는 좋지만 정밀에서 깎인다)
     assert m["blur_precision"] == pytest.approx(1 / 5)
+
+
+# ---------------------------------------------------------------- 감사 회귀
+
+
+def _track(
+    label_id: str,
+    entity: str,
+    cls: str,
+    frames: list[tuple[int, float]],
+    stream: str = "bodycam",
+    outside: frozenset[int] = frozenset(),
+) -> LabelRecord:
+    """x가 시각에 따라 움직이는 40x40 박스 트랙."""
+    keyframes = tuple(
+        BoxKeyframe(t_ms=t, x=x, y=50, w=40, h=40, outside=t in outside) for t, x in frames
+    )
+    return make_label(
+        BoxTrackPayload(entity_id=entity, class_id=cls, keyframes=keyframes),
+        label_id=label_id, stream_id=stream, t_start_ms=frames[0][0], t_end_ms=frames[-1][0],
+    )  # fmt: skip
+
+
+def _objects(truth: list[LabelRecord], pred: list[LabelRecord], policy: EvaluationPolicy):
+    report = evaluate(
+        {"objects": [SessionData("s1", truth, pred)]}, policy, golden_version="g",
+        model_versions={"objects": "m1"},
+    )  # fmt: skip
+    return report.overall["objects"].metrics
+
+
+def test_sparse_truth_keyframes_are_interpolated(policy: EvaluationPolicy) -> None:
+    # 사람 정답은 키프레임이 성기고 트랙마다 시각이 다르다 (CVAT가 사이를 보간한다).
+    # 컵은 0·400·800 ms, 걸레는 200·600·1000 ms에만 키프레임이 있다. 둘 다 등속 이동.
+    def cup(t: int) -> float:
+        return 10 + t / 10
+
+    def rag(t: int) -> float:
+        return 300 + t / 20
+
+    truth = [
+        _track("t-cup", "cup_01", "cup", [(t, cup(t)) for t in (0, 400, 800)]),
+        _track("t-rag", "rag_01", "rag", [(t, rag(t)) for t in (200, 600, 1000)]),
+    ]
+    # 예측은 100 ms마다 정확한 위치 (같은 직선) → 완벽해야 한다
+    pred = as_model(
+        [
+            _track("p-cup", "c", "cup", [(t, cup(t)) for t in range(0, 801, 100)]),
+            _track("p-rag", "r", "rag", [(t, rag(t)) for t in range(200, 1001, 100)]),
+        ]
+    )
+    m = _objects(truth, pred, policy)
+    assert m["hota"] == pytest.approx(1.0) and m["map"] == pytest.approx(1.0)
+    assert m["idf1"] == 1.0 and m["mota"] == 1.0
+    # 화면 밖 키프레임이 끼면 그 사이는 정답이 없다: 컵이 400 ms에 화면 밖이면 200·600 ms에는 컵이
+    # 없으므로, 그 시각의 컵 예측은 오탐이다
+    hidden = [_track("t-cup", "cup_01", "cup", [(t, cup(t)) for t in (0, 400, 800)],
+                     outside=frozenset({400})), truth[1]]  # fmt: skip
+    m2 = _objects(hidden, pred, policy)
+    assert m2["mota"] < 1.0
+
+
+def test_objects_and_hands_compare_within_the_same_stream(policy: EvaluationPolicy) -> None:
+    # 같은 개체 ID가 두 스트림(바디캠·3인칭)에 다른 위치로 있다
+    truth = [
+        _track("t-a", "cup_01", "cup", [(0, 10.0), (100, 20.0)], stream="bodycam"),
+        _track("t-b", "cup_01", "cup", [(0, 300.0), (100, 310.0)], stream="third"),
+    ]
+    pred = as_model(
+        [
+            _track("p-a", "cup_01", "cup", [(0, 10.0), (100, 20.0)], stream="bodycam"),
+            _track("p-b", "cup_01", "cup", [(0, 300.0), (100, 310.0)], stream="third"),
+        ]
+    )
+    m = _objects(truth, pred, policy)
+    assert m["hota"] == pytest.approx(1.0) and m["idf1"] == 1.0 and m["map"] == pytest.approx(1.0)
+    # 다른 스트림의 예측으로는 맞출 수 없다 (같은 좌표라도)
+    swapped = as_model(
+        [
+            _track("p-a", "cup_01", "cup", [(0, 10.0), (100, 20.0)], stream="third"),
+            _track("p-b", "cup_01", "cup", [(0, 300.0), (100, 310.0)], stream="bodycam"),
+        ]
+    )
+    assert _objects(truth, swapped, policy)["ap50"] == 0.0
+
+    def hand(label_id: str, stream: str, x: float) -> LabelRecord:
+        points = [{"x": x + j, "y": 50 + j, "visibility": 2} for j in range(21)]
+        return make_label(
+            {"kind": "keypoint_track", "entity_id": "hand_r", "skeleton": "hand21",
+             "hand": "right", "keyframes": [{"t_ms": 0, "points": points}]},
+            label_id=label_id, stream_id=stream, t_start_ms=0, t_end_ms=0,
+        )  # fmt: skip
+
+    h_truth = [hand("h-a", "bodycam", 10), hand("h-b", "third", 400)]
+    # 3인칭 예측이 먼저 나와도 스트림이 같은 것끼리 맞춘다
+    h_pred = as_model([hand("q-b", "third", 400), hand("q-a", "bodycam", 10)])
+    report = evaluate(
+        {"hands": [SessionData("s1", h_truth, h_pred)]}, policy, golden_version="g",
+        model_versions={"hands": "m1"},
+    )  # fmt: skip
+    assert report.overall["hands"].metrics["pck"] == 1.0
+
+
+def test_privacy_sparse_truth_is_interpolated(policy: EvaluationPolicy) -> None:
+    # 정답 얼굴은 0·400 ms에만 키프레임, 문서는 200 ms에 키프레임. 예측은 100 ms마다 정확하다
+    truth = [
+        _blur("face", "face", [(0, 10, 10), (400, 50, 10)]),
+        _blur("doc", "document", [(0, 200, 200), (200, 200, 200), (400, 200, 200)]),
+    ]
+    pred = as_model(
+        [
+            _blur("p-face", "face", [(t, 10 + t / 10, 10) for t in range(0, 401, 100)]),
+            _blur("p-doc", "document", [(t, 200, 200) for t in range(0, 401, 100)]),
+        ]
+    )
+    report = evaluate(
+        {"privacy": [SessionData("s001", truth, pred)]}, policy, golden_version="g",
+        model_versions={"privacy": "m1"},
+    )  # fmt: skip
+    m = report.overall["privacy"].metrics
+    # 200 ms의 얼굴 정답(보간)도 있고 예측과 같은 자리라 재현·정밀 모두 1
+    assert report.overall["privacy"].class_counts == {"face": 3, "document": 3}
+    assert m["blur_recall"] == 1.0 and m["blur_precision"] == 1.0
+
+
+def test_coverage_error_hand_computed(policy: EvaluationPolicy) -> None:
+    def cov(label_id: str, surface: str, ratio: float) -> LabelRecord:
+        return make_label(
+            CoveragePayload(surface_id=surface, tool_id="rag_01", ratio=ratio), label_id=label_id
+        )
+
+    truth = [cov("t1", "table_01", 0.5), cov("t2", "sink_01", 0.8)]
+    pred = as_model([cov("p1", "table_01", 0.4)])  # 싱크 예측 없음 → 0으로 본다
+    report = evaluate(
+        {"coverage": [SessionData("s001", truth, pred)]}, policy, golden_version="g",
+        model_versions={"coverage": "m1"},
+    )  # fmt: skip
+    # |0.4 - 0.5| = 0.1, |0 - 0.8| = 0.8 → 평균 0.45
+    assert report.overall["coverage"].metrics["coverage_abs_error"] == pytest.approx(0.45)
+
+
+def test_gate_with_nan_baseline_metric(policy: EvaluationPolicy) -> None:
+    from dlp_eval.harness import TaskReport
+
+    def report(error_ms: float) -> EvalReport:
+        metrics = {"contact_start_f1": 0.9, "contact_end_f1": 0.9, "grasp_macro_f1": 0.8,
+                   "contact_start_error_ms": error_ms}  # fmt: skip
+        return EvalReport("g", {"contact": "m"}, {"contact": TaskReport(metrics, {}, [], 1)}, {})
+
+    nan = float("nan")
+    # 기존 모델이 맞춘 접촉이 없어 오차가 NaN: 기존을 가장 나쁜 값으로 보고 통과 (경고)
+    d = decide(report(30.0), report(nan), policy)
+    assert d.passed and any("기존 값이 없어" in w for w in d.tasks["contact"].warnings)
+    # 후보가 NaN이면 실패
+    assert not decide(report(nan), report(30.0), policy).passed
+    # 둘 다 NaN이면 그 지표는 건너뛴다
+    assert decide(report(nan), report(nan), policy).passed

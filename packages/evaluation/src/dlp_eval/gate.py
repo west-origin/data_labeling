@@ -6,6 +6,8 @@
 - 기존 모델이 없으면 주 지표가 first_deploy 기준을 넘어야 한다.
 - 정답 표본이 부족한 클래스는 막지 않고 경고로만 남긴다.
 지표 방향: 오차·ECE는 낮을수록 좋다 (harness.LOWER_IS_BETTER).
+값이 NaN(정의되지 않음)이면: 후보만 NaN이면 실패, 기존만 NaN이면 기존을 가장 나쁜 값으로 보아
+그 비교는 통과(경고), 둘 다 NaN이면 건너뛴다.
 """
 
 from __future__ import annotations
@@ -49,8 +51,13 @@ def _compare(
         c, b = cand.metrics.get(m, math.nan), base.metrics.get(m, math.nan)
         if math.isnan(c) and math.isnan(b):
             continue
-        if math.isnan(c) or math.isnan(b):
+        if math.isnan(c):
             decision.reasons.append(f"{where} {m}: 비교할 수 없음 (후보 {c}, 기존 {b})")
+            continue
+        if math.isnan(b):
+            # 기존 모델은 값이 정의되지 않음 (예: 맞춘 접촉이 없어 오차가 없음) → 가장 나쁜 값으로
+            # 보고 후보가 이 비교를 통과한다. 후보만 NaN이면 위에서 실패한다.
+            decision.warnings.append(f"{where} {m}: 기존 값이 없어 후보({c:.4f})를 통과로 봄")
             continue
         g = _gain(m, c, b)
         if primary and m == rule.primary and g < rule.min_gain:
