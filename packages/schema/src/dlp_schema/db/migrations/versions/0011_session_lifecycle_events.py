@@ -15,10 +15,16 @@ down_revision: str | None = "0010"
 branch_labels: str | None = None
 depends_on: str | None = None
 
+# 0011 4차 검수 (ADR 0028): session_lifecycle_events (세션 생애주기 전이 기록, 추가 전용).
+# event_id는 자동 증가 (PostgreSQL BIGINT, SQLite INTEGER: SQLite는 INTEGER PRIMARY KEY만 자동 증가한다).
+# 기존 세션은 지금 상태를 한 번 기록한다 (from_state NULL, 시각 = sessions.created_at, actor 'migration:0011').
+
+# 대상 테이블 이름
 TABLE = "session_lifecycle_events"
 
 
 def upgrade() -> None:
+    """전이 기록 테이블을 만들고 기존 세션을 백필한 뒤 추가 전용·TRUNCATE 금지 트리거를 건다."""
     op.create_table(
         TABLE,
         sa.Column(
@@ -61,6 +67,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    """트리거를 지우고 전이 기록 테이블을 지운다 (함수는 0009·0010 소유라 남긴다)."""
     if op.get_bind().dialect.name == "postgresql":
         op.execute(f"DROP TRIGGER IF EXISTS {TABLE}_no_truncate ON {TABLE}")
         op.execute(f"DROP TRIGGER IF EXISTS {TABLE}_append_only ON {TABLE}")

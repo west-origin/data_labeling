@@ -16,6 +16,15 @@ down_revision: str | None = None
 branch_labels: str | None = None
 depends_on: str | None = None
 
+# 0001 초기 스키마 (WP1, ADR 0002).
+# 만드는 테이블: ontology_versions, dataset_versions, sessions, dataset_split_assignments,
+# label_records, streams. 그리고 PostgreSQL에서만 라벨 불변 트리거(label_records_immutable).
+# 테이블 생성 순서는 FK 참조 순서를 따른다 (참조되는 쪽이 먼저). downgrade는 그 역순이다.
+
+# 라벨 불변 트리거 함수 (PL/pgSQL). DELETE는 무조건 거부하고, UPDATE는 검수 상태 열
+# (verification_state, reviewer_id, reviewed_at) 밖의 열이 바뀌면 거부한다.
+# `IS DISTINCT FROM`은 NULL끼리도 같다고 보는 비교라 NULL 열도 안전하게 비교된다.
+# 0005가 measurement 열을 더해 이 함수를 다시 정의한다 (CREATE OR REPLACE).
 IMMUTABLE_LABEL_FUNCTION = """
 CREATE OR REPLACE FUNCTION dlp_label_records_immutable() RETURNS trigger AS $$
 BEGIN
@@ -40,6 +49,7 @@ $$ LANGUAGE plpgsql;
 
 
 def upgrade() -> None:
+    """초기 테이블·색인·제약과 (PostgreSQL이면) 라벨 불변 트리거를 만든다."""
     op.create_table(
         "ontology_versions",
         sa.Column("version", sa.String(length=32), nullable=False),
@@ -217,6 +227,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    """트리거·함수를 먼저 지우고 테이블을 FK 역순으로 지운다 (모든 데이터 삭제)."""
     if op.get_bind().dialect.name == "postgresql":
         op.execute("DROP TRIGGER IF EXISTS label_records_immutable ON label_records")
         op.execute("DROP FUNCTION IF EXISTS dlp_label_records_immutable()")

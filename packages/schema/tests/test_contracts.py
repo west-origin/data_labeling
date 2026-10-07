@@ -1,3 +1,11 @@
+"""계약 타입(Pydantic) 규칙 테스트.
+
+직렬화 왕복, 알 수 없는 필드 거부, 시각 순서, 공간 라벨 stream_id, 출처·검증 규칙,
+세션의 기준 스트림, 시계 변환, 생애주기 전이를 본다.
+
+정답 근거: 계약 정의 자체 (각 검증기가 거부해야 하는 최소 반례).
+"""
+
 from __future__ import annotations
 
 from datetime import datetime
@@ -18,6 +26,7 @@ from dlp_schema.labels import (
 from dlp_schema.session import LifecycleState, Session, StreamKind, can_transition
 from dlp_schema.testing import FIXED_TIME, action_payload, make_label, make_session
 
+# 공용 페이로드 예시 (모든 kind 하나씩). PAYLOADS의 순서를 인덱스로 참조하는 테스트가 있다.
 BOX = {"kind": "box_track", "entity_id": "rag_01", "class_id": "rag",
        "keyframes": [{"t_ms": 0, "x": 1, "y": 2, "w": 3, "h": 4}]}  # fmt: skip
 HAND21 = [{"x": 0.0, "y": 0.0, "visibility": 2}] * 21
@@ -52,11 +61,13 @@ PAYLOADS: list[dict[str, Any]] = [
 
 
 def _stream(kind: str) -> str | None:
+    """공간 라벨이면 bodycam, 아니면 None (공간 라벨은 stream_id가 필수)."""
     return "bodycam" if kind in SPATIAL_KINDS else None
 
 
 @pytest.mark.parametrize("payload", PAYLOADS, ids=lambda p: p["kind"])
 def test_every_payload_kind_roundtrips_through_json(payload: dict[str, Any]) -> None:
+    """모든 페이로드 종류가 JSON으로 직렬화했다 다시 읽어도 같은 객체다 (kind 판별 포함)."""
     label = make_label(payload, stream_id=_stream(payload["kind"]))
     again = LabelRecord.model_validate_json(label.model_dump_json())
     assert again == label
@@ -64,6 +75,10 @@ def test_every_payload_kind_roundtrips_through_json(payload: dict[str, Any]) -> 
 
 
 def test_unknown_fields_and_payload_kinds_are_rejected() -> None:
+    """페이로드의 모르는 필드(color)와 모르는 kind(sticker)는 검증 오류다.
+
+    각각 extra=forbid와 판별 공용체(kind)가 막는다.
+    """
     with pytest.raises(ValidationError):
         make_label({**BOX, "color": "red"}, stream_id="bodycam")
     with pytest.raises(ValidationError):
@@ -71,6 +86,7 @@ def test_unknown_fields_and_payload_kinds_are_rejected() -> None:
 
 
 def test_times_must_be_ordered_and_timezone_aware() -> None:
+    """t_start > t_end, 시간대 없는 created_at은 거부한다."""
     with pytest.raises(ValidationError, match="t_start_ms"):
         make_label({"kind": "gap", "gap_type": "idle"}, t_start_ms=10, t_end_ms=5)
     with pytest.raises(ValidationError):
@@ -78,6 +94,9 @@ def test_times_must_be_ordered_and_timezone_aware() -> None:
 
 
 def test_action_time_rules() -> None:
+    """행동 시각: 접근 <= 접촉 시작 <= 접촉 종료 <= 종료, 라벨 구간 = (접근, 종료).
+    연속 접촉(contact_held)이면 접촉 시각 없이도 유효하다.
+    """
     with pytest.raises(ValidationError, match="순서"):
         make_label(action_payload(t_contact_start_ms=1_200, t_contact_end_ms=1_300))
     with pytest.raises(ValidationError, match="접촉 시작이 접촉 종료보다"):
@@ -89,6 +108,7 @@ def test_action_time_rules() -> None:
 
 
 def test_keyframes_must_lie_inside_label_interval() -> None:
+    """키프레임 시각이 라벨 구간 밖이거나 중복이면 거부한다."""
     late = {**BOX, "keyframes": [{"t_ms": 5_000, "x": 0, "y": 0, "w": 1, "h": 1}]}
     with pytest.raises(ValidationError, match="벗어났"):
         make_label(late, stream_id="bodycam")
@@ -98,6 +118,7 @@ def test_keyframes_must_lie_inside_label_interval() -> None:
 
 
 def test_spatial_labels_need_stream() -> None:
+    """박스와 3D 궤적(공간 라벨)은 stream_id 없이 만들 수 없다 (ADR 0019, 0022)."""
     with pytest.raises(ValidationError, match="stream_id"):
         make_label(BOX)
     # 3D 궤적도 영상 PTS 시각의 공간 라벨이다 (ADR 0019, 0022)
@@ -107,6 +128,7 @@ def test_spatial_labels_need_stream() -> None:
 
 
 def test_exported_label_rejects_blur_payload() -> None:
+    """내보내기 라벨은 박스는 받고 블러 트랙은 거부한다."""
     common: dict[str, Any] = {
         "label_id": "x1", "stream_id": "bodycam", "t_start_ms": 0, "t_end_ms": 0,
         "verification": "human_approved", "source": "human",
@@ -117,6 +139,7 @@ def test_exported_label_rejects_blur_payload() -> None:
 
 
 def test_keypoint_count_must_match_skeleton() -> None:
+    """hand21 골격에 키포인트 20개면 거부한다."""
     bad = {**PAYLOADS[2], "keyframes": [{"t_ms": 0, "points": HAND21[:20]}]}
     with pytest.raises(ValidationError, match="21"):
         make_label(bad, stream_id="bodycam")
@@ -131,11 +154,16 @@ def test_keypoint_count_must_match_skeleton() -> None:
     ],
 )
 def test_hand_state_rules(overrides: dict[str, Any], message: str) -> None:
+    """손 상태의 접촉 대상 종류별 필수·금지 필드.
+
+    none이면 비워야 하고, tool이면 target_id, person이면 body_part가 필요하다.
+    """
     with pytest.raises(ValidationError, match=message):
         make_label({**PAYLOADS[5], **overrides})
 
 
 def test_provenance_and_verification_rules() -> None:
+    """모델 출처는 model_version·confidence, 검수됨은 reviewer_id, 삭제는 parent, 자기 참조 금지."""
     with pytest.raises(ValidationError, match="model_version"):
         Provenance(source=Source.MODEL)
     with pytest.raises(ValidationError, match="confidence"):
@@ -151,12 +179,18 @@ def test_provenance_and_verification_rules() -> None:
 
 
 def test_contracts_are_immutable() -> None:
+    """계약 객체는 frozen이라 속성 대입이 검증 오류다."""
     label = make_label(BOX, stream_id="bodycam")
     with pytest.raises(ValidationError):
         label.t_end_ms = 5  # type: ignore[misc]
 
 
 def test_session_requires_exactly_one_reference_bodycam() -> None:
+    """세션은 reference 바디캠이 정확히 하나여야 한다.
+
+    바디캠 없음, stream_id 중복, 바디캠의 방법이 reference가 아님, 다른 스트림이 reference를 씀을
+    모두 거부한다. 정상 세션은 JSON 왕복이 같다.
+    """
     session = make_session()
     assert session.reference_stream.stream_id == "bodycam"
     assert Session.model_validate_json(session.model_dump_json()) == session
@@ -175,12 +209,14 @@ def test_session_requires_exactly_one_reference_bodycam() -> None:
     "change", [{"offset_ms": 5.0}, {"clock_scale": 1.0001}, {"manual_adjustment_ms": -3.0}]
 )
 def test_reference_stream_has_identity_clock(change: dict[str, float]) -> None:
+    """기준 스트림의 오프셋·배율·사람 조정 중 하나라도 항등이 아니면 거부한다."""
     streams = [s.model_dump() for s in make_session().streams]
     with pytest.raises(ValidationError, match="기준 스트림"):
         make_session(streams=[{**streams[0], **change}, streams[1]])
 
 
 def test_stream_maps_to_master_timeline() -> None:
+    """to_master_ms = offset + 조정 + stream_ms * scale. 정답: 100 + (-5) + 1000 * 1.001 = 1096."""
     stream = (
         make_session()
         .stream("imu")
@@ -191,6 +227,10 @@ def test_stream_maps_to_master_timeline() -> None:
 
 
 def test_lifecycle_moves_forward_one_step_or_withdraws() -> None:
+    """생애주기: 한 칸 전진·제자리 허용, 건너뛰기·후퇴 금지.
+
+    어디서든 withdrawn으로 갈 수 있고, withdrawn 이후에는 이동할 수 없다.
+    """
     s = LifecycleState
     assert can_transition(s.RAW_INGESTED, s.PRIVACY_APPROVED)
     assert can_transition(s.PRELABELED, s.PRELABELED)

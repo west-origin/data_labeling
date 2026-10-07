@@ -15,8 +15,12 @@ down_revision: str | None = "0006"
 branch_labels: str | None = None
 depends_on: str | None = None
 
+# 0007 model_versions: 재학습 모델 레지스트리 (WP13, ADR 0016). training_runs에 FK.
+# task·run_id·status 색인: 과제별 배포 모델 조회와 상태별 목록에 쓴다.
+
 
 def upgrade() -> None:
+    """model_versions 테이블과 색인 세 개를 만든다."""
     op.create_table(
         "model_versions",
         sa.Column("model_version", sa.String(length=128), nullable=False),
@@ -43,6 +47,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    """model_versions 테이블을 지운다."""
     op.drop_index(op.f("ix_model_versions_status"), table_name="model_versions")
     op.drop_index(op.f("ix_model_versions_run_id"), table_name="model_versions")
     op.drop_index(op.f("ix_model_versions_task"), table_name="model_versions")
