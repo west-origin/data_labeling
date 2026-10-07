@@ -74,6 +74,25 @@ class MediaPolicy(Contract):
     timeseries_rate_hz: float = Field(gt=0)
 
 
+class CvatPolicy(Contract):
+    """CVAT 계정 연결과 블러 검수 화면 안내."""
+
+    users: dict[str, str] = Field(
+        default_factory=dict[str, str],
+        description="dlp 검수자 ID → CVAT 사용자 이름. 블러 검수 담당자는 반드시 있어야 한다",
+    )
+    privacy_issue_limit: int = Field(
+        ge=0, description="블러 검수 작업에 CVAT 이슈로 남기는 검수 우선 구간 최대 수"
+    )
+
+    @model_validator(mode="after")
+    def _one_to_one(self) -> CvatPolicy:
+        names = list(self.users.values())
+        if len(names) != len(set(names)):
+            raise ValueError("cvat.users: 한 CVAT 사용자를 두 검수자에게 줄 수 없습니다")
+        return self
+
+
 class ReviewOpsPolicy(Contract):
     version: int
     media: MediaPolicy
@@ -83,6 +102,7 @@ class ReviewOpsPolicy(Contract):
     measurement: MeasurementPolicy
     seeding: SeedingPolicy
     reviewers: ReviewersPolicy
+    cvat: CvatPolicy
     ratios: ReviewConfig  # config/defaults.yaml review
 
 

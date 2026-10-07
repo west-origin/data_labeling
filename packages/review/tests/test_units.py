@@ -17,8 +17,17 @@ from dlp_fixtures.video import TARGET_COLORS, generate_blur_scenario
 from dlp_media.proxy import make_proxy
 from dlp_media.pts import build_pts_index
 from dlp_media.storage import LocalStore, sha256_file
+from dlp_privacy.render import blur_tracks
 from dlp_review.collect import drop_retracted
-from dlp_review.cvat import CvatSchema, from_cvat_tracks, label_spec, quantize, to_cvat_tracks
+from dlp_review.cvat import (
+    CvatFormatError,
+    CvatSchema,
+    annotation_tracks,
+    from_cvat_tracks,
+    label_spec,
+    quantize,
+    to_cvat_tracks,
+)
 from dlp_review.labelstudio import (
     LS_KINDS,
     from_ls_results,
@@ -28,7 +37,7 @@ from dlp_review.labelstudio import (
 )
 from dlp_review.reconcile import ReviewedItem, reconcile
 from dlp_review.roles import RawAccessError, check_stage_uris
-from dlp_review.tasks import frame_times, label_scale, video_size
+from dlp_review.tasks import ReviewSetup, frame_times, label_scale, video_size
 from dlp_review.timeseries import write_timeseries_csv
 from dlp_review.watermark import burn_watermark
 from dlp_review.webhook import (
@@ -44,6 +53,7 @@ from dlp_schema.episode import current_labels
 from dlp_schema.labels import (
     ActionPayload,
     BlurTrackPayload,
+    BoxKeyframe,
     BoxTrackPayload,
     GapPayload,
     VerificationState,
@@ -52,6 +62,7 @@ from dlp_schema.ontology import Ontology, load_ontology
 from dlp_schema.review import ReviewStage, ReviewTask, ReviewTool
 from dlp_schema.session import Stream, StreamKind, SyncMethod
 from dlp_schema.testing import FIXED_TIME, action_payload, make_label, make_session
+from dlp_sync.policy import load_policy as load_sync_policy
 from dlp_sync.signals import Series
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -400,3 +411,148 @@ def test_correction_of_a_retracted_label_does_not_revive_it() -> None:
     assert drop_retracted(out, [a, b, gone]) == ["a"]
     assert out.approved == ["b"] and not out.new_records
     assert {x.label_id for x in current_labels([a, b, gone, *out.new_records])} == {"b"}
+
+
+# ---------------------------------------------------------------- 감사 4차 회귀
+
+
+def _shape(label_id: int, frame: int, kind: str = "rectangle", **kw: Any) -> dict[str, Any]:
+    return {
+        "type": kind, "frame": frame, "label_id": label_id, "points": [10, 10, 60, 60],
+        "occluded": False, "outside": False, "z_order": 0, "rotation": 0.0, "attributes": [],
+        "group": 0, "source": "manual", **kw,
+    }  # fmt: skip
+
+
+def test_cvat_shape_mode_rectangle_becomes_single_frame_track() -> None:
+    """회귀(감사 4-1): CVAT 기본 모양(Shape) 모드로 그린 직사각형을 버려 놓친 얼굴이 블러 없이
+    승인·렌더됐다. 그 프레임 키프레임 + 다음 프레임 outside 트랙으로 받는다."""
+    blur = generate_blur_scenario(2)
+    times = blur.frame_times
+    names = ["face", "reflection", "document", "screen", "photo", "shipping_label"]
+    schema = fake_schema(names)
+    existing = to_cvat_tracks(blur.labels[:1], times, schema)
+    ann = {"tracks": existing, "tags": [], "shapes": [_shape(schema.label_ids["face"], 3)]}
+    tracks = annotation_tracks(ann, len(times), schema)
+    items = from_cvat_tracks(tracks, times, schema, "bodycam", new_box_kind="blur_track")
+    assert len(items) == 2
+    new = items[1]
+    assert new.origin_label_id is None and isinstance(new.payload, BlurTrackPayload)
+    k0, k1 = new.payload.keyframes
+    assert (k0.t_ms, k0.outside, k0.x, k0.w) == (times[3], False, 10, 50)
+    assert (k1.t_ms, k1.outside) == (times[4], True)
+    # 렌더도 그 프레임에만 블러를 둔다
+    [track] = blur_tracks(
+        [make_label(new.payload, t_start_ms=times[3], t_end_ms=times[4], stream_id="bodycam")],
+        times,
+    )
+    assert track.box_at(times[3]) is not None and track.box_at(times[4]) is None
+    # 마지막 프레임 모양은 키프레임 하나 (뒤에 프레임이 없다)
+    [last] = annotation_tracks(
+        {"tracks": [], "shapes": [_shape(1, len(times) - 1)]}, len(times), schema
+    )
+    assert len(last["shapes"]) == 1
+    # 작업 라벨 작업에서는 객체 박스 트랙
+    obj = fake_schema(["cup", "kp_hand21"])
+    [box] = from_cvat_tracks(
+        annotation_tracks({"shapes": [_shape(obj.label_ids["cup"], 2)]}, len(times), obj),
+        times, obj, "bodycam", new_box_kind="box_track",
+    )  # fmt: skip
+    assert isinstance(box.payload, BoxTrackPayload) and box.payload.class_id == "cup"
+
+
+def test_cvat_unsupported_annotations_fail_closed() -> None:
+    """옮길 수 없는 주석(태그·다각형·회전 박스·점 모양 박스)은 조용히 버리지 않고 수집을 멈춘다."""
+    schema = fake_schema(["face", "kp_hand21"])
+    face = schema.label_ids["face"]
+    bad: list[dict[str, Any]] = [
+        {"tags": [{"frame": 1, "label_id": face, "attributes": []}]},
+        {"shapes": [_shape(face, 1, "polygon", points=[0, 0, 5, 0, 5, 5])]},
+        {"shapes": [_shape(face, 1, rotation=30.0)]},
+        {"shapes": [_shape(face, 1, "points", points=[1, 1])]},
+        {"shapes": [_shape(schema.label_ids["kp_hand21"], 1)]},
+        {"shapes": [_shape(face, 99)]},
+        {
+            "tracks": [
+                {
+                    "frame": 0,
+                    "label_id": face,
+                    "attributes": [],
+                    "shapes": [_shape(face, 0, "ellipse")],
+                }
+            ]
+        },
+        {"shapes": [_shape(999, 1)]},
+    ]
+    for ann in bad:
+        with pytest.raises(CvatFormatError):
+            annotation_tracks(ann, 10, schema)
+
+
+def _cvat_task(stage: ReviewStage, assignee: str | None) -> ReviewTask:
+    return ReviewTask(
+        task_key="cvat:7", tool=ReviewTool.CVAT, external_id="7", session_id="s001",
+        stream_id="bodycam", stage=stage, assignee=assignee,
+        media_uri="s3://dlp-raw/x.mp4" if stage is ReviewStage.PRIVACY else "s3://dlp-labeling/x",
+        label_kinds=("blur_track",), created_at=FIXED_TIME,
+    )  # fmt: skip
+
+
+def test_cvat_webhook_checks_job_assignee_against_account_mapping() -> None:
+    """회귀(감사 4-4): job 담당자가 늘 비어 있어 담당자 검사가 의미가 없었다. 블러 검수는 담당자의
+    CVAT 계정과 job 담당자가 같아야만 받는다."""
+    users = {"rev01": "cvat-rev01", "labeler01": "cvat-lab01"}
+    priv = _cvat_task(ReviewStage.PRIVACY, "rev01")
+    assert resolve_reviewer(CollectRequest("cvat:7", "cvat-rev01"), priv, None, users) == "rev01"
+    for who in (None, "cvat-lab01", "rev01"):
+        with pytest.raises(ReviewerMismatchError):
+            resolve_reviewer(CollectRequest("cvat:7", who), priv, None, users)
+    with pytest.raises(ReviewerMismatchError, match="계정 연결"):
+        resolve_reviewer(CollectRequest("cvat:7", "rev01"), priv, None, {})
+    lab = _cvat_task(ReviewStage.LABELING, "labeler01")
+    assert resolve_reviewer(CollectRequest("cvat:7", "cvat-lab01"), lab, None, users) == "labeler01"
+    with pytest.raises(ReviewerMismatchError):
+        resolve_reviewer(CollectRequest("cvat:7", None), lab, None, users)
+    # 연결이 없는 작업 라벨 작업은 이전처럼 담당자 이름으로 본다
+    assert resolve_reviewer(CollectRequest("cvat:7", None), lab, None, {}) == "labeler01"
+
+
+def test_second_task_correction_of_already_corrected_label_is_dropped() -> None:
+    """회귀(감사 4-9): 같은 라벨을 보낸 두 작업이 차례로 고치면 한 라벨에 자식이 둘인 갈래 이력이
+    생겨 두 수정본이 모두 현재 라벨이 됐다. 먼저 고친 것만 남기고 나중 것은 뺀다."""
+
+    def box(x: float) -> BoxTrackPayload:
+        return BoxTrackPayload(
+            entity_id="cup_1",
+            class_id="cup",
+            keyframes=(BoxKeyframe(t_ms=0, x=x, y=0, w=10, h=10),),
+        )
+
+    original = make_label(box(0), "L", 0, 0, stream_id="bodycam")
+    first = reconcile([original], [ReviewedItem("L", "bodycam", 0, 0, box(5))], session_id="s001",
+                      ontology_version="1.0.0", reviewer_id="r1", now=FIXED_TIME)  # fmt: skip
+    history = [original, *first.new_records]
+    second = reconcile([original], [ReviewedItem("L", "bodycam", 0, 0, box(9))],
+                       session_id="s001", ontology_version="1.0.0", reviewer_id="r2",
+                       now=FIXED_TIME)  # fmt: skip
+    assert drop_retracted(second, history) == ["L"] and not second.new_records
+    current = current_labels([*history, *second.new_records])
+    assert len(current) == 1 and isinstance(current[0].payload, BoxTrackPayload)
+    assert current[0].payload.keyframes[0].x == 5
+    # 승인만 한 경우도 이미 고친 라벨은 승인하지 않는다
+    approve = reconcile([original], [ReviewedItem("L", "bodycam", 0, 0, box(0))],
+                        session_id="s001", ontology_version="1.0.0", reviewer_id="r2",
+                        now=FIXED_TIME)  # fmt: skip
+    assert approve.approved == ["L"]
+    assert drop_retracted(approve, history) == ["L"] and approve.approved == []
+
+
+def test_glove_series_uses_policy_prefixes(tmp_path: Path) -> None:
+    """검수 시계열 CSV는 sync 정책의 압력 채널 접두사를 명시해 넘긴다 (암묵적으로 읽지 않는다)."""
+    setup = ReviewSetup(
+        raw=LocalStore(tmp_path, "dlp-raw"), labeling=LocalStore(tmp_path, "dlp-labeling"),
+        labeling_reader=None,  # type: ignore[arg-type]
+        ontology=None,  # type: ignore[arg-type]
+    )  # fmt: skip
+    expected = load_sync_policy(ROOT / "config" / "policies" / "sync.yaml").glove.pressure_prefixes
+    assert setup.pressure_prefixes() == expected

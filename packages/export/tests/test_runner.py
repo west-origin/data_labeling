@@ -27,13 +27,18 @@ from dlp_export.source import ExportError
 from dlp_fixtures.video import vfr_times
 from dlp_media.storage import LocalStore, sha256_file
 from dlp_schema.db.migrate import upgrade
-from dlp_schema.db.repository import insert_labels, insert_session, register_ontology
+from dlp_schema.db.repository import (
+    insert_labels,
+    insert_session,
+    register_ontology,
+    set_privacy_state,
+)
 from dlp_schema.labels import VerificationState
 from dlp_schema.ontology import Ontology
 from dlp_schema.session import PrivacyState
 from dlp_schema.testing import FIXED_TIME, make_session
 
-from .conftest import ROOT, scenario_labels, write_blurred
+from .conftest import ROOT, record_render, scenario_labels, write_blurred
 
 pytestmark = pytest.mark.services
 
@@ -242,7 +247,9 @@ def test_lerobot_refuses_mixed_aspect_ratios(
             write_video(
                 video, ((t, np.zeros((h, w, 3), np.uint8)) for t in times), width=w, height=h
             )
-            labeling.put_file(f"sessions/{sid}/blurred/bodycam.mp4", video, sha256_file(video))
+            sha = sha256_file(video)
+            labeling.put_file(f"sessions/{sid}/blurred/bodycam.mp4", video, sha)
+            record_render(labeling, sid, "bodycam", scenario_labels(sid, times), sha, tmp_path)
         build_dataset_version(
             conn, snapshots, load_dataset_policy(ROOT), version_id="dv1",
             ontology_version="1.0.0", golden_set_version=None, now=FIXED_TIME,
@@ -339,3 +346,68 @@ def test_export_history_is_committed_before_upload(
     assert (
         tmp_path / "store" / "dlp-datasets" / "exports" / done.export_id / "manifest.json"
     ).exists()
+
+
+def test_export_refuses_blurred_video_after_privacy_reopened(
+    engine: sa.Engine, policy: ExportPolicy, ontology: Ontology, tmp_path: Path
+) -> None:
+    """회귀(감사 4-2): 스냅샷에는 승인 상태였어도 그 뒤 블러 QA로 프라이버시가 다시 열린 세션의
+    이전 블러본을 내보냈다. 지금 DB 상태로 승인을 확인하고, 다시 승인해도 다시 렌더하기 전에는
+    렌더 기록 해시가 지금 블러 라벨과 달라 내보내지 않는다."""
+    snapshots = LocalSnapshotStore(tmp_path / "snap")
+    labeling = LocalStore(tmp_path / "store", "dlp-labeling")
+    datasets = LocalStore(tmp_path / "store", "dlp-datasets")
+    times = vfr_times(np.random.default_rng(4), 1000)
+    with engine.begin() as conn:
+        register_ontology(conn, ontology)
+        for i, sid in enumerate(["s0", "s1"]):
+            insert_session(
+                conn,
+                make_session(
+                    sid, worker_id=f"w{i}", site_id=f"site{i}",
+                    streams=[{"stream_id": "bodycam", "kind": "bodycam",
+                              "sync_method": "reference",
+                              "uri": f"s3://dlp-raw/sessions/{sid}/bodycam.mp4"}],
+                ).model_copy(update={"privacy_state": PrivacyState.APPROVED}),
+            )  # fmt: skip
+            insert_labels(conn, scenario_labels(sid, times))
+            write_blurred(labeling, sid, times, tmp_path)
+        build_dataset_version(
+            conn, snapshots, load_dataset_policy(ROOT), version_id="dv1",
+            ontology_version="1.0.0", golden_set_version=None, now=FIXED_TIME,
+        )  # fmt: skip
+
+    calls = iter(range(100))
+
+    def export(fmt: str = "coco"):
+        return run_export(
+            engine, root=ROOT, version_id="dv1", fmt=fmt, target="buyer",  # type: ignore[arg-type]
+            snapshots=snapshots, labeling=labeling, datasets=datasets, raw_bucket="dlp-raw",
+            policy=policy, ontology=ontology, include_unreviewed=False, splits=None,
+            now=FIXED_TIME + timedelta(days=2, minutes=next(calls)),
+        )  # fmt: skip
+
+    assert set(export().record.session_ids) == {"s0", "s1"}
+    with engine.begin() as conn:
+        # 블러 QA에서 누락이 발견되어 프라이버시가 다시 열림 (dlp review collect와 같은 전이)
+        set_privacy_state(conn, "s0", PrivacyState.AUTO_BLURRED)
+    for fmt in ("coco", "intervals"):
+        with pytest.raises(ExportError, match="s0: 지금 프라이버시 승인 상태가 아닙니다"):
+            export(fmt)
+    # 검수자가 블러를 더 그려 다시 승인했지만 다시 렌더하지 않았다
+    blur = next(x for x in scenario_labels("s0", times) if x.kind == "blur_track")
+    extra = blur.model_copy(update={"label_id": "s0-blur-added"})
+    with engine.begin() as conn:
+        insert_labels(conn, [extra])
+        set_privacy_state(conn, "s0", PrivacyState.APPROVED)
+    with pytest.raises(ExportError, match="s0/bodycam: 블러본이 지금 승인된 블러 라벨"):
+        export()
+    # 다시 렌더하면 내보낸다
+    write_blurred(labeling, "s0", times, tmp_path, [*scenario_labels("s0", times), extra])
+    assert set(export().record.session_ids) == {"s0", "s1"}
+    # 블러본 파일만 바뀌고 렌더 기록이 그대로면 (렌더 밖에서 덮어씀) 받지 않는다
+    other = tmp_path / "other.mp4"
+    labeling.get_file("sessions/s1/blurred/bodycam.mp4", other)
+    labeling.put_file("sessions/s0/blurred/bodycam.mp4", other, "0" * 64)
+    with pytest.raises(ExportError, match="렌더 기록과 다릅니다"):
+        export()

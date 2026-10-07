@@ -4,7 +4,10 @@
 약한 가우시안 블러는 쓰지 않는다. 박스는 라벨 키프레임 시각(정수 ms)과 프레임 시각을 반올림해
 맞춘다. 키프레임이 없는 프레임은 검수 화면(CVAT)이 보여 준 것과 같게 정한다.
 - 직전 키프레임이 화면 밖(outside)이면 블러 없음.
-- 직전·다음 키프레임이 모두 보이면 두 박스를 시각 비율로 선형 보간한다.
+- 직전·다음 키프레임이 모두 보이면 두 박스를 **프레임 번호** 비율로 선형 보간한다. CVAT는
+  프레임 번호로 보간하므로 가변 프레임레이트(VFR) 영상에서 시각 비율로 보간하면 검수 화면과
+  블러본의 박스가 달라진다. 프레임 번호는 렌더할 때 그 영상의 PTS 프레임 시각 순서로만 쓰고
+  저장하지 않는다 (ADR 0024).
 - 다음 키프레임이 화면 밖이거나 없으면 직전 박스를 그대로 유지한다.
 검수자는 CVAT에서 키프레임 몇 개만 고치므로 (CVAT는 키프레임만 돌려준다) 보간하지 않으면
 검수 화면과 블러본의 박스가 달라진다.
@@ -24,15 +27,42 @@ import av
 import numpy as np
 
 from dlp_media.probe import to_fraction
+from dlp_media.pts import build_pts_index
 from dlp_privacy.detection import Image
 from dlp_privacy.geometry import Box
 from dlp_schema.labels import BlurTrackPayload, BoxKeyframe, LabelRecord
+
+
+class FramePositions:
+    """영상 프레임 시각(PTS, 정수 ms) → 프레임 순서 위치.
+
+    프레임 사이 시각은 이웃 프레임 사이 비율로 둔다.
+    """
+
+    def __init__(self, frame_times: list[int]) -> None:
+        self.times = sorted(frame_times)
+        self.index = {t: i for i, t in enumerate(self.times)}
+
+    def at(self, t_ms: int) -> float:
+        i = self.index.get(t_ms)
+        if i is not None:
+            return float(i)
+        ts = self.times
+        j = bisect.bisect_left(ts, t_ms)
+        if not ts:
+            return float(t_ms)
+        if j == 0:
+            return (t_ms - ts[0]) / 1000.0  # 첫 프레임 앞 (보간에는 쓰이지 않는다)
+        if j >= len(ts):
+            return len(ts) - 1 + (t_ms - ts[-1]) / 1000.0
+        return j - 1 + (t_ms - ts[j - 1]) / (ts[j] - ts[j - 1])
 
 
 @dataclass(frozen=True)
 class _Track:
     times: list[int]
     frames: list[BoxKeyframe]
+    positions: FramePositions
 
     def box_at(self, t_ms: int) -> Box | None:
         i = bisect.bisect_right(self.times, t_ms) - 1
@@ -47,16 +77,22 @@ class _Track:
         nxt = self.frames[i + 1]
         if nxt.outside:
             return box
-        s = (t_ms - k.t_ms) / (nxt.t_ms - k.t_ms)
-        return box.lerp(Box(nxt.x, nxt.y, nxt.w, nxt.h), s)
+        # CVAT와 같이 프레임 번호로 보간한다 (VFR에서 시각 비율과 다르다)
+        p0, p1 = self.positions.at(k.t_ms), self.positions.at(nxt.t_ms)
+        if p1 <= p0:
+            return box
+        s = (self.positions.at(t_ms) - p0) / (p1 - p0)
+        return box.lerp(Box(nxt.x, nxt.y, nxt.w, nxt.h), min(max(s, 0.0), 1.0))
 
 
-def blur_tracks(labels: list[LabelRecord]) -> list[_Track]:
+def blur_tracks(labels: list[LabelRecord], frame_times: list[int]) -> list[_Track]:
+    """frame_times: 블러를 입힐 영상의 프레임 시각 (PTS 인덱스)."""
+    positions = FramePositions(frame_times)
     out: list[_Track] = []
     for label in labels:
         p = label.payload
         if isinstance(p, BlurTrackPayload):
-            out.append(_Track([k.t_ms for k in p.keyframes], list(p.keyframes)))
+            out.append(_Track([k.t_ms for k in p.keyframes], list(p.keyframes), positions))
     return out
 
 
@@ -95,7 +131,7 @@ def render_blurred(
 
     encoder_rate·crf는 privacy.yaml render에서 온다.
     """
-    tracks = blur_tracks(labels)
+    tracks = blur_tracks(labels, [round(t) for t in build_pts_index(src).ms])
     applied = 0
     with av.open(str(src)) as inp, av.open(str(dst), "w") as out:
         vin = inp.streams.video[0]

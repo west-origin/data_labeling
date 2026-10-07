@@ -5,6 +5,7 @@ description = "액티브 러닝: 클래스별 수정률 기반 세션 점수, �
 requires-python = ">=3.12,<3.14"
 dependencies = [
     "dlp-media",
+    "dlp-privacy",
     "dlp-schema",
     "numpy>=2.0",
     "pyyaml>=6.0",

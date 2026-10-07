@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import uuid
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,7 @@ from dlp_review.clients import CvatClient, LabelStudioClient
 from dlp_review.collect import collect_task
 from dlp_review.cvat import CvatSchema, to_cvat_tracks
 from dlp_review.labelstudio import LS_KINDS, to_ls_results
+from dlp_review.ops.policy import CvatPolicy
 from dlp_review.ops.policy import load_policy as load_ops_policy
 from dlp_review.ops.runner import (
     AccessError,
@@ -91,13 +93,14 @@ def pg() -> Iterator[sa.Engine]:
 
 
 @pytest.fixture
-def setup() -> ReviewSetup:
+def setup(cvat_config: CvatPolicy) -> ReviewSetup:
     return ReviewSetup(
         raw=S3Store.from_env("dlp-raw"),
         labeling=S3Store.from_env("dlp-labeling"),
         labeling_reader=S3Store.labeler_from_env("dlp-labeling"),
         ontology=load_ontology(ROOT / "config" / "ontology" / "v1"),
         label_studio=LabelStudioClient.from_env(),
+        cvat_config=cvat_config,
     )
 
 
@@ -314,7 +317,7 @@ def test_seeded_blur_deletion_through_cvat(
         cvat = CvatClient.from_env()
     except httpx.HTTPError as exc:
         pytest.skip(f"CVAT에 연결할 수 없습니다 (make cvat-up): {exc}")
-    setup = ReviewSetup(setup.raw, setup.labeling, setup.labeling_reader, setup.ontology, cvat=cvat)
+    setup = replace(setup, cvat=cvat, label_studio=None)
     gold_sid, work_sid = f"gold-{uuid.uuid4().hex[:6]}", f"work-{uuid.uuid4().hex[:6]}"
     _session(pg, setup, tmp_path / "gold", gold_sid, human=True)
     _session(pg, setup, tmp_path / "work", work_sid, human=False)

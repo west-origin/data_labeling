@@ -12,6 +12,8 @@ import pytest
 from dlp_export.policy import ExportPolicy, load_policy
 from dlp_fixtures.video import vfr_times, write_video
 from dlp_media.storage import LocalStore, sha256_file
+from dlp_privacy.policy import load_policy as load_privacy_policy
+from dlp_privacy.runner import RenderMeta, operational_blur, render_hash, write_render_meta
 from dlp_schema.labels import LabelRecord, Provenance, Source, Verification, VerificationState
 from dlp_schema.ontology import Ontology, load_ontology
 from dlp_schema.session import Session
@@ -64,6 +66,7 @@ class Scenario:
     labels: list[LabelRecord]
     times: list[int]  # 블러본 프레임 시각
     labeling: LocalStore
+    render_hashes: dict[str, str]  # 스트림 → 블러본 렌더 해시 (load_source가 DB로 계산하는 값)
 
 
 def scenario_labels(sid: str, times: list[int]) -> list[LabelRecord]:
@@ -123,17 +126,41 @@ def scenario_labels(sid: str, times: list[int]) -> list[LabelRecord]:
     ]  # fmt: skip
 
 
-def write_blurred(labeling: LocalStore, sid: str, times: list[int], tmp: Path) -> None:
+def write_blurred(
+    labeling: LocalStore,
+    sid: str,
+    times: list[int],
+    tmp: Path,
+    labels: list[LabelRecord] | None = None,
+) -> str:
+    """블러본과 렌더 기록(dlp privacy render가 남기는 것)을 쓴다. 기록한 렌더 해시를 돌려준다.
+
+    labels: 렌더에 쓴 블러 라벨 이력 (없으면 scenario_labels(sid, times)).
+    """
     video = tmp / f"{sid}.mp4"
     rng = np.random.default_rng(1)
     frames = ((t, rng.integers(0, 255, (H, W, 3), dtype=np.uint8)) for t in times)
     write_video(video, frames, width=W, height=H)
-    labeling.put_file(f"sessions/{sid}/blurred/bodycam.mp4", video, sha256_file(video))
+    sha = sha256_file(video)
+    labeling.put_file(f"sessions/{sid}/blurred/bodycam.mp4", video, sha)
+    history = scenario_labels(sid, times) if labels is None else labels
+    return record_render(labeling, sid, "bodycam", history, sha, tmp)
+
+
+def record_render(
+    labeling: LocalStore, sid: str, stream: str, history: list[LabelRecord], sha: str, tmp: Path
+) -> str:
+    """렌더 기록 (블러 라벨 이력·프라이버시 정책 해시 + 블러본 파일 해시). 해시를 돌려준다."""
+    digest = render_hash(operational_blur(history, stream), load_privacy_policy(ROOT))
+    write_render_meta(labeling, sid, stream, RenderMeta(digest, sha), tmp)
+    return digest
 
 
 @pytest.fixture
 def scenario(tmp_path: Path) -> Scenario:
     times = vfr_times(np.random.default_rng(4), 1000)
     labeling = LocalStore(tmp_path / "store", "dlp-labeling")
-    write_blurred(labeling, "s1", times, tmp_path)
-    return Scenario(make_session("s1"), scenario_labels("s1", times), times, labeling)
+    digest = write_blurred(labeling, "s1", times, tmp_path)
+    return Scenario(
+        make_session("s1"), scenario_labels("s1", times), times, labeling, {"bodycam": digest}
+    )

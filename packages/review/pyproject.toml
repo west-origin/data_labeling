@@ -7,6 +7,7 @@ dependencies = [
     "av>=14.0",
     "dlp-eval",
     "dlp-media",
+    "dlp-privacy",
     "dlp-schema",
     "dlp-sync",
     "httpx>=0.27",

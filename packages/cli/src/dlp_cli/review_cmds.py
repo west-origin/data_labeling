@@ -112,7 +112,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
             task = get_review_task(conn, req.task_key)
             try:
                 # 검수자는 웹훅의 도구 사용자 ID가 아니라 작업 담당자다
-                reviewer = resolve_reviewer(req, task, service_user)
+                reviewer = resolve_reviewer(req, task, service_user, ops_policy.cvat.users)
             except ReviewerMismatchError as exc:
                 print(f"{req.task_key}: 수집하지 않음 ({exc})")
                 return

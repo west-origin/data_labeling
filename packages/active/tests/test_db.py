@@ -19,12 +19,15 @@ from dlp_active.select import rank_sessions
 from dlp_datasets.lineage import withdraw_session
 from dlp_fixtures.video import write_video
 from dlp_media.storage import LocalStore, sha256_file
+from dlp_privacy.policy import load_policy as load_privacy_policy
+from dlp_privacy.runner import RenderMeta, expected_render_hash, write_render_meta
 from dlp_schema.db.migrate import upgrade
 from dlp_schema.db.repository import (
     insert_golden_set,
     insert_labels,
     insert_session,
     register_ontology,
+    set_privacy_state,
 )
 from dlp_schema.labels import LabelRecord, Provenance, Source, Verification, VerificationState
 from dlp_schema.lineage import GoldenSet
@@ -145,11 +148,25 @@ def test_rank_candidates_and_build_fiftyone_samples(engine: sa.Engine, tmp_path:
         width=48,
         height=32,
     )
-    labeling.put_file("sessions/mops/blurred/bodycam.mp4", video, sha256_file(video))
+    sha = sha256_file(video)
+    labeling.put_file("sessions/mops/blurred/bodycam.mp4", video, sha)
+    privacy = load_privacy_policy(ROOT)
+    with engine.connect() as conn:
+        # 렌더 기록이 없는 블러본은 쓰지 않는다 (지금 승인된 블러 라벨로 렌더했는지 모른다)
+        samples, notes = build_samples(conn, labeling, tmp_path / "cache", ranked, policy)
+        assert samples == [] and "렌더 기록" in notes[0]
+        digest = expected_render_hash(conn, "mops", "bodycam", privacy)
+    write_render_meta(labeling, "mops", "bodycam", RenderMeta(digest, sha), tmp_path)
     with engine.connect() as conn:
         samples, notes = build_samples(conn, labeling, tmp_path / "cache", ranked, policy)
     assert [s.session_id for s in samples] == ["mops"]
     assert notes == ["cups/bodycam: 블러본이 없어 건너뜀"]
+    # 회귀(감사 4-2): 승인이 풀린 세션의 이전 블러본은 큐레이션에 넣지 않는다
+    with engine.begin() as conn:
+        set_privacy_state(conn, "mops", PrivacyState.AUTO_BLURRED)
+        stale, why = build_samples(conn, labeling, tmp_path / "cache2", ranked, policy)
+        set_privacy_state(conn, "mops", PrivacyState.APPROVED)
+    assert stale == [] and "승인 상태가 아닙니다" in why[0]
     s = samples[0]
     assert s.filepath == tmp_path / "cache" / "mops" / "bodycam.mp4" and s.filepath.exists()
     assert s.fields["active_rank"] == 1

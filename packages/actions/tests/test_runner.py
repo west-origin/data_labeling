@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import numpy as np
 import pytest
 import sqlalchemy as sa
 
@@ -16,6 +17,9 @@ from dlp_actions.policy import load_policy
 from dlp_actions.runner import run_actions
 from dlp_actions.vlm import SegmentRequest, VlmUnavailableError
 from dlp_fixtures.actions import generate_action_scenario
+from dlp_fixtures.video import write_video
+from dlp_media.storage import LocalStore, sha256_file
+from dlp_privacy.runner import RenderNotCurrentError
 from dlp_schema.db.migrate import upgrade
 from dlp_schema.db.repository import (
     get_labels,
@@ -23,6 +27,7 @@ from dlp_schema.db.repository import (
     insert_session,
     record_review,
     register_ontology,
+    set_privacy_state,
 )
 from dlp_schema.episode import current_labels, retractions
 from dlp_schema.labels import (
@@ -36,6 +41,7 @@ from dlp_schema.labels import (
     VerificationState,
 )
 from dlp_schema.ontology import load_ontology
+from dlp_schema.session import PrivacyState
 from dlp_schema.testing import FIXED_TIME, make_session
 
 pytestmark = pytest.mark.services
@@ -297,3 +303,26 @@ def test_hand_without_track_loses_only_unreviewed_actions(pg: sa.Engine) -> None
         if x.kind == "description"
     )
     assert again.retracted == 0 and not again.hands
+
+
+def test_vlm_refuses_blurred_video_not_rendered_from_current_approval(
+    pg: sa.Engine, tmp_path: Path
+) -> None:
+    """회귀(감사 4-2): VLM에는 지금 승인된 블러 라벨로 렌더한 블러본만 보낸다. 승인이 풀렸거나
+    렌더 기록이 없거나 무효이면 프레임을 읽기 전에 멈춘다."""
+    ontology = load_ontology(ROOT / "config/ontology/v1")
+    policy = load_policy(ROOT)
+    truth = [x for x in SCENARIO.labels if isinstance(x.payload, ActionPayload | GapPayload)]
+    labeling = LocalStore(tmp_path / "store", "dlp-labeling")
+    video = tmp_path / "b.mp4"
+    write_video(
+        video, ((t, np.zeros((32, 48, 3), np.uint8)) for t in (0, 33, 66)), width=48, height=32
+    )
+    labeling.put_file(f"sessions/{SID}/blurred/bodycam.mp4", video, sha256_file(video))
+    with pg.begin() as conn:
+        with pytest.raises(RenderNotCurrentError, match="승인 상태"):
+            run_actions(conn, SID, OracleVlm(truth), ontology, policy, FIXED_TIME, labeling)
+        set_privacy_state(conn, SID, PrivacyState.APPROVED)
+        with pytest.raises(RenderNotCurrentError, match="렌더 기록"):
+            run_actions(conn, SID, OracleVlm(truth), ontology, policy, FIXED_TIME, labeling)
+        assert not current_labels(get_labels(conn, SID, kinds=["action"]))

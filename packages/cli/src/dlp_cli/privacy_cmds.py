@@ -61,8 +61,11 @@ def cmd_detect(args: argparse.Namespace) -> int:
         for note in deployed.notes:
             print(f"[재학습 모델] {note}")
         s = detect_session(
-            conn, args.session_id, raw, detectors, missing, policy, now, extra=deployed.predictors
-        )
+            conn, args.session_id, raw, detectors, missing, policy, now,
+            extra=deployed.predictors,
+            # 블러가 바뀐 스트림의 이전 블러본 렌더 기록을 무효로 둔다 (ADR 0024)
+            labeling=store_from_spec(args.store, buckets.labeling),
+        )  # fmt: skip
     engine.dispose()
     for stream, n in s.detected.items():
         print(f"{stream}: 블러 트랙 {n}개")

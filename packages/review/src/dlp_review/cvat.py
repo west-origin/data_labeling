@@ -10,6 +10,12 @@ CVAT는 프레임 번호로 주석을 저장하므로 PTS 인덱스의 프레임
 - dlp_meta: 화면에서 고치지 않는 필드 (종류, 개체 ID, 손 등)
 키포인트의 점별 가시성은 모양 속성 dlp_visibility("2,2,1,…")로 싣는다.
 
+검수자가 CVAT 기본인 모양(Shape) 모드로 그린 직사각형은 한 프레임에만 있는 주석이다. 이것도
+놓친 블러·박스이므로 버리지 않고 트랙으로 바꾼다: 그 프레임 키프레임 + 다음 프레임 화면 밖(outside)
+키프레임 (CVAT 화면과 같게 그 프레임에만 보인다). 키포인트(points) 모양은 키프레임 하나짜리
+키포인트 트랙이다. 직사각형·점이 아닌 모양(다각형·마스크·스켈레톤 등), 회전한 직사각형, 프레임
+태그는 우리 라벨로 옮길 수 없으므로 수집을 멈춘다 (CvatFormatError, 조용히 버리지 않는다).
+
 좌표: 라벨은 원본(라벨이 가리키는 영상) 화소 좌표다. 검수 화면 영상이 다른 해상도(예: 프라이버시
 검수의 480p 프록시)이면 scale = (화면 영상 너비 / 원본 너비, 화면 영상 높이 / 원본 높이)로 보내고
 돌아올 때 나눈다. 둘 다 PRECISION 자리로 반올림하므로, 고치지 않은 라벨의 비교 기준은
@@ -72,10 +78,82 @@ class CvatSchema:
         )
 
     def label_name(self, label_id: int) -> str:
-        return next(n for n, i in self.label_ids.items() if i == label_id)
+        name = next((n for n, i in self.label_ids.items() if i == label_id), None)
+        if name is None:
+            raise CvatFormatError(f"프로젝트에 없는 CVAT 라벨 ID: {label_id}")
+        return name
 
     def attr_name(self, spec_id: int) -> str:
-        return next(n for (_, n), i in self.attr_ids.items() if i == spec_id)
+        name = next((n for (_, n), i in self.attr_ids.items() if i == spec_id), None)
+        if name is None:
+            raise CvatFormatError(f"프로젝트에 없는 CVAT 속성 ID: {spec_id}")
+        return name
+
+
+class CvatFormatError(ValueError):
+    """CVAT 주석을 우리 라벨로 옮길 수 없다 (지원하지 않는 모양·태그). 수집하지 않는다."""
+
+
+def _expected_shape(name: str) -> str:
+    return "points" if name.startswith("kp_") else "rectangle"
+
+
+def _check_shape(shape: dict[str, Any], name: str) -> None:
+    want = _expected_shape(name)
+    if shape.get("type") != want:
+        raise CvatFormatError(
+            f"라벨 {name}에 지원하지 않는 CVAT 모양 {shape.get('type')!r} "
+            f"(프레임 {shape.get('frame')}). {want}로 그려야 합니다"
+        )
+    if want == "rectangle" and float(shape.get("rotation") or 0.0) != 0.0:
+        raise CvatFormatError(
+            f"라벨 {name}의 회전한 직사각형 (프레임 {shape.get('frame')})은 지원하지 않습니다"
+        )
+
+
+def annotation_tracks(
+    annotations: dict[str, Any], frame_count: int, schema: CvatSchema
+) -> list[dict[str, Any]]:
+    """CVAT 작업 주석 전체(tracks·shapes·tags) → 트랙 목록.
+
+    모양 모드 직사각형은 (그 프레임, 다음 프레임 outside) 트랙으로, 점 모양은 키프레임 하나짜리
+    트랙으로 바꾼다. 태그나 지원하지 않는 모양이 있으면 CvatFormatError.
+    """
+    tags = annotations.get("tags") or []
+    if tags:
+        frames = sorted({int(t.get("frame", -1)) for t in tags})
+        raise CvatFormatError(f"CVAT 프레임 태그는 지원하지 않습니다 (프레임 {frames[:5]})")
+    tracks = [dict(t) for t in annotations.get("tracks") or []]
+    for track in tracks:
+        name = schema.label_name(track["label_id"])
+        for shape in track.get("shapes") or []:
+            _check_shape(shape, name)
+    for shape in sorted(annotations.get("shapes") or [], key=lambda x: (x["frame"], x["label_id"])):
+        name = schema.label_name(shape["label_id"])
+        _check_shape(shape, name)
+        frame = int(shape["frame"])
+        if not 0 <= frame < frame_count:
+            raise CvatFormatError(f"영상 밖 프레임의 CVAT 모양: {frame}")
+        attrs = list(shape.get("attributes") or [])
+        first = {
+            "type": shape["type"], "frame": frame, "points": list(shape["points"]),
+            "outside": False, "occluded": bool(shape.get("occluded", False)),
+            "z_order": 0, "rotation": 0.0, "attributes": attrs,
+        }  # fmt: skip
+        shapes = [first]
+        if shape["type"] == "rectangle" and frame + 1 < frame_count:
+            shapes.append({**first, "frame": frame + 1, "outside": True, "attributes": []})
+        tracks.append(
+            {
+                "frame": frame,
+                "label_id": shape["label_id"],
+                "group": 0,
+                "source": shape.get("source", "manual"),
+                "attributes": attrs,
+                "shapes": shapes,
+            }
+        )
+    return tracks
 
 
 def _r(v: float) -> float:
@@ -228,6 +306,12 @@ def from_cvat_tracks(
         meta: dict[str, Any] = json.loads(attrs["dlp_meta"]) if attrs.get("dlp_meta") else {}
         kind = meta.get("kind") or ("keypoint_track" if name.startswith("kp_") else new_box_kind)
         shapes = sorted(track["shapes"], key=lambda s: s["frame"])
+        if not shapes:
+            raise CvatFormatError(f"모양이 없는 CVAT 트랙 (라벨 {name})")
+        for s in shapes:
+            _check_shape(s, name)
+            if not 0 <= int(s["frame"]) < len(frame_times):
+                raise CvatFormatError(f"영상 밖 프레임의 CVAT 모양: {s['frame']}")
         times = [frame_times[s["frame"]] for s in shapes]
         payload: Any
         if kind in ("box_track", "blur_track"):

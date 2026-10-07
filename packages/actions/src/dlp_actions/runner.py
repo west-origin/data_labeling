@@ -30,6 +30,9 @@ from dlp_actions.pipeline import segment_hand
 from dlp_actions.policy import ActionsPolicy
 from dlp_actions.vlm import VlmClient
 from dlp_media.storage import ObjectStore, blurred_key
+from dlp_privacy.policy import load_policy as load_privacy_policy
+from dlp_privacy.runner import assert_render_current, check_fetched
+from dlp_schema import repo_root
 from dlp_schema.db.repository import get_labels, get_session, insert_labels
 from dlp_schema.episode import current_labels, retractions, version_tag
 from dlp_schema.labels import (
@@ -268,7 +271,12 @@ def run_actions(
             video = Path(tmp) / "bodycam.mp4"
             # VLM에는 블러본만 보낸다 (원본 프레임이 VLM 서버로 나가지 않게,
             # 설명 초안에 개인정보가 들어가지 않게). 블러본은 프라이버시 승인 후 렌더된다.
+            # 지금 승인된 블러 라벨로 렌더한 블러본이 아니면 멈춘다 (ADR 0024)
+            rendered = assert_render_current(
+                conn, labeling, session_id, body.stream_id, load_privacy_policy(repo_root())
+            )
             labeling.get_file(blurred_key(session_id, body.stream_id), video)
+            check_fetched(video, rendered, session_id, body.stream_id)
         for hand, track in sorted(tracks.items()):
             mine = mine_of(hand)
             protected = [

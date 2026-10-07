@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
-from dlp_schema.review import ReviewTask
+from dlp_schema.review import ReviewStage, ReviewTask, ReviewTool
 
 
 @dataclass(frozen=True)
@@ -36,15 +36,33 @@ class ReviewerMismatchError(PermissionError):
 
 
 def resolve_reviewer(
-    request: CollectRequest, task: ReviewTask, service_user_id: int | None = None
+    request: CollectRequest,
+    task: ReviewTask,
+    service_user_id: int | None = None,
+    cvat_users: Mapping[str, str] | None = None,
 ) -> str | None:
     """웹훅 요청의 검수자. None이면 수집하지 않는다 (서비스 계정이 만든 주석).
 
     - 작업에 담당자가 있으면 그 담당자다. 도구가 사용자 이름을 알려 주면(CVAT) 담당자와 같아야 한다.
+    - CVAT 작업은 담당자의 CVAT 계정(review.yaml cvat.users)과 job 담당자를 맞춘다. 연결이 있으면
+      job 담당자가 없거나 다르면 받지 않는다. 블러 검수는 연결이 없어도 받지 않는다 (ADR 0024).
     - Label Studio의 completed_by는 도구 내부 숫자 ID라 검수자 ID로 쓰지 않는다.
     """
     if service_user_id is not None and request.user_id == service_user_id:
         return None
+    if task.tool is ReviewTool.CVAT and task.assignee is not None:
+        expected = (cvat_users or {}).get(task.assignee)
+        if expected is None and task.stage is ReviewStage.PRIVACY:
+            raise ReviewerMismatchError(
+                f"{task.task_key}: 블러 검수 담당자 {task.assignee}의 CVAT 계정 연결이 없습니다"
+            )
+        if expected is not None and request.reviewer != expected:
+            raise ReviewerMismatchError(
+                f"{task.task_key}: CVAT job 담당자({request.reviewer or '없음'})가 "
+                f"담당자 {task.assignee}의 계정 {expected}이 아닙니다"
+            )
+        if expected is not None:
+            return task.assignee
     if task.assignee is not None:
         if request.reviewer is not None and request.reviewer != task.assignee:
             raise ReviewerMismatchError(

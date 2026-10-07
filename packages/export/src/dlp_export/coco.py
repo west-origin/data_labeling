@@ -143,7 +143,7 @@ def write_coco(
             ]
             if not spatial:
                 continue
-            video = fetch_blurred(labeling, s, stream, work)
+            video = fetch_blurred(labeling, es, stream, work)
             index = build_pts_index(video)
             info = probe(video).video
             assert info is not None

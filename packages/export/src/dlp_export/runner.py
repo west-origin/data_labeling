@@ -115,7 +115,7 @@ def _lerobot(
         )
         if stream is None:
             continue
-        video = fetch_blurred(labeling, es.session, stream, work)
+        video = fetch_blurred(labeling, es, stream, work)
         info = probe(video).video
         assert info is not None
         if size is None:
