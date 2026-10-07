@@ -1,3 +1,8 @@
+"""원본 버킷 접근 감사 저장소 단위 테스트 (dlp_media.audit, WP16, ADR 0020).
+
+메모리 기록(MemorySink)과 로컬 저장소로, 어떤 접근이 어떤 순서·필드로 기록되는지 본다.
+"""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -12,6 +17,12 @@ T0 = datetime(2026, 10, 7, 9, 0, tzinfo=UTC)
 
 
 def test_every_raw_access_is_logged_before_it_happens(tmp_path: Path) -> None:
+    """모든 원본 접근이 접근 전에 기록된다.
+
+    시나리오: 올리기 → head → 내려받기 → 없는 키 내려받기(실패) → 서명 URL(로컬은 불가) → grant 둘.
+    정답: write, read, read(실패한 시도도 남는다), grant(검수자), grant(unassigned) 순서로 남고,
+    head와 만들지 못한 서명 URL은 남지 않는다. 목적·버킷·시각이 모두 같고 이벤트 ID는 고유하다.
+    """
     sink = MemorySink()
     store = AuditedStore(
         LocalStore(tmp_path / "s", "dlp-raw"), sink, actor="worker-1", purpose="privacy.detect",
@@ -42,5 +53,6 @@ def test_every_raw_access_is_logged_before_it_happens(tmp_path: Path) -> None:
 
 
 def test_session_of() -> None:
+    """원본 키 sessions/<세션>/… 에서 세션 ID를 뽑고, 다른 형식이면 None."""
     assert session_of("sessions/abc/derived/x.json") == "abc"
     assert session_of("other/abc") is None

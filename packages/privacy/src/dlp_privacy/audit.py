@@ -6,6 +6,17 @@
 - 표본: 그 주(ISO 주)에 블러 검수를 수집하고 승인된 세션의 영상 스트림 (`dlp privacy audit-sample`).
 - 감사 결과는 privacy_audits에 남는다 (`dlp ops privacy-audit`).
 - 감사가 없는 주는 목표를 지킨 것으로 보지 않는다 (전수 검수 종료 판정에서 실패로 센다).
+
+WP5·WP16, ADR 0020·0023. 정책 값: defaults.yaml `privacy.full_review_exit`
+(weeks_below_target: 연속 몇 주, audit_sample_ratio: 표본 비율),
+`success_criteria.residual_blur_miss_per_hour_max`(목표, 없으면 전수 검수 유지).
+
+공개 함수:
+- `select_audit_sample`: 결정적 표본 추출.
+- `residual_miss_rate` / `weekly_miss_rates`: 1시간당 잔여 누락 수 (주별).
+- `review_mode`: 전수(full) / 표본(sampled) 검수 판정.
+- `iso_week` / `iso_week_bounds` / `previous_weeks`: ISO 주 계산 (UTC).
+- `audit_candidates`: DB에서 그 주의 감사 후보를 고른다 (읽기만).
 """
 
 from __future__ import annotations
@@ -24,22 +35,31 @@ from dlp_schema.review import ReviewMode as TaskMode
 from dlp_schema.review import ReviewStage, ReviewTaskStatus
 from dlp_schema.session import PrivacyState, StreamKind
 
+# 감사 대상 영상 스트림 종류 (runner.VIDEO_KINDS와 같다)
 VIDEO_KINDS = {StreamKind.BODYCAM, StreamKind.THIRD_PERSON}
 
 
 @dataclass(frozen=True)
 class AuditCandidate:
+    """감사 후보 (승인된 블러본 하나)."""
+
     session_id: str
     stream_id: str
+    # 영상 길이 (ms). 지금은 세션 길이(바디캠 기준)를 쓴다.
     duration_ms: int
+    # 원 블러 검수자 (감사자는 이 사람이 아니어야 한다)
     blur_reviewer: str
 
 
 @dataclass(frozen=True)
 class AuditResult:
+    """감사 결과 하나 (DB privacy_audits 행과 대응)."""
+
     session_id: str
     stream_id: str
+    # 감사한 영상 길이 (ms)
     duration_ms: int
+    # 감사자가 찾은 블러 누락 수 (`dlp ops privacy-audit`로 입력)
     misses: int
     auditor: str
     blur_reviewer: str
@@ -51,6 +71,14 @@ def select_audit_sample(
     """그 주 승인된 블러본 중 ratio만큼(최소 1개)을 뽑는다.
 
     같은 주·같은 후보면 같은 결과가 나오도록 (주, 세션, 스트림)의 해시 순서로 고른다.
+
+    Args:
+        candidates: `audit_candidates` 결과 (순서 무관).
+        ratio: 표본 비율 (defaults.yaml privacy.full_review_exit.audit_sample_ratio).
+        week: ISO 주 문자열 ("2026-W41"). 주가 바뀌면 다른 표본이 나온다.
+
+    Returns:
+        ceil(후보 수 x ratio)개 (후보가 있으면 최소 1개). 후보가 없으면 빈 목록.
     """
     if not candidates:
         return []
@@ -63,17 +91,25 @@ def select_audit_sample(
 
 
 def residual_miss_rate(results: list[AuditResult]) -> float:
-    """영상 1시간당 잔여 누락 수. 감사자가 원 검수자와 같으면 오류."""
+    """영상 1시간당 잔여 누락 수. 감사자가 원 검수자와 같으면 오류.
+
+    Returns:
+        (누락 수 합) / (영상 길이 합, 시간).
+
+    Raises:
+        ValueError: 감사자 = 원 검수자인 결과가 있거나, 감사한 영상 길이 합이 0일 때.
+    """
     for r in results:
         if r.auditor == r.blur_reviewer:
             raise ValueError(f"{r.session_id}/{r.stream_id}: 감사자가 원 검수자와 같습니다")
-    hours = sum(r.duration_ms for r in results) / 3_600_000
+    hours = sum(r.duration_ms for r in results) / 3_600_000  # ms → 시간
     if hours == 0:
         raise ValueError("감사한 영상이 없습니다")
     return sum(r.misses for r in results) / hours
 
 
 # 블러 검수 방식 (검수 작업 방식 dlp_schema.review.ReviewMode와 다르다)
+# full: 모든 블러본을 사람이 전수 검수, sampled: 표본만 검수.
 ReviewMode = Literal["full", "sampled"]
 
 
@@ -85,6 +121,11 @@ def review_mode(
     weekly_rates의 None은 감사가 없던 주다. 감사가 없으면 목표를 지켰는지 모르므로 통과로 보지
     않는다 (전수 검수 유지). 가장 최근 주가 목표를 넘으면 즉시 전수 검수로 돌아간다.
     목표가 아직 없으면 전수 검수다.
+
+    Args:
+        weekly_rates: 주별 잔여 누락률 (오래된 주부터, `weekly_miss_rates`).
+        target: 1시간당 허용 잔여 누락 수 (success_criteria). None이면 미정.
+        weeks_below_target: 연속으로 목표 이하여야 하는 주 수.
     """
     if target is None or len(weekly_rates) < weeks_below_target:
         return "full"
@@ -93,13 +134,17 @@ def review_mode(
 
 
 def iso_week_bounds(week: str) -> tuple[datetime, datetime]:
-    """'2026-W41' → 그 주 월요일 0시(UTC)와 다음 주 월요일 0시."""
+    """'2026-W41' → 그 주 월요일 0시(UTC)와 다음 주 월요일 0시.
+
+    반환 구간은 [시작, 끝) 반열림이다.
+    """
     year, _, num = week.partition("-W")
     start = datetime.fromisocalendar(int(year), int(num), 1).replace(tzinfo=UTC)
     return start, start + timedelta(days=7)
 
 
 def iso_week(at: datetime) -> str:
+    """시각(시간대 필수) → UTC 기준 ISO 주 문자열 ("2026-W41")."""
     year, week, _ = at.astimezone(UTC).isocalendar()
     return f"{year}-W{week:02d}"
 
@@ -113,7 +158,15 @@ def previous_weeks(week: str, n: int) -> list[str]:
 def weekly_miss_rates(
     audits: Iterable[tuple[datetime, AuditResult]], weeks: Sequence[str]
 ) -> list[float | None]:
-    """주마다 잔여 누락률. 감사가 없던 주는 None (통과로 보지 않는다)."""
+    """주마다 잔여 누락률. 감사가 없던 주는 None (통과로 보지 않는다).
+
+    Args:
+        audits: (감사 시각, 결과) 목록. 감사 시각의 ISO 주로 묶는다.
+        weeks: 결과를 낼 주 목록 (`previous_weeks`).
+
+    Raises:
+        ValueError: `residual_miss_rate`와 같다.
+    """
     by_week: dict[str, list[AuditResult]] = {}
     for at, result in audits:
         by_week.setdefault(iso_week(at), []).append(result)
@@ -124,6 +177,9 @@ def audit_candidates(conn: sa.Connection, week: str) -> list[AuditCandidate]:
     """그 주에 블러 검수 작업을 수집했고 지금 승인 상태인 세션의 영상 스트림.
 
     원 검수자(blur_reviewer)는 그 스트림의 마지막 운영 블러 검수 작업 담당자다.
+
+    운영 작업(표준·QA)만 본다. 담당자가 비어 있으면 "unknown". 모든 세션을 하나씩 읽으므로 세션 수에
+    비례해 느려진다 (DB 읽기만, 쓰기 없음).
     """
     start, end = iso_week_bounds(week)
     out: list[AuditCandidate] = []
@@ -146,6 +202,7 @@ def audit_candidates(conn: sa.Connection, week: str) -> list[AuditCandidate]:
             if not mine:
                 continue
             last = max(mine, key=lambda t: t.collected_at or t.created_at)
+            # 영상 길이는 스트림이 아니라 세션 길이(바디캠)를 쓴다 (3인칭 길이가 다를 수 있다)
             out.append(
                 AuditCandidate(sid, s.stream_id, session.duration_ms, last.assignee or "unknown")
             )

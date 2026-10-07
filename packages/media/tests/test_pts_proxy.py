@@ -1,6 +1,12 @@
 # PyAV 타입 스텁이 일부 반환 타입을 비워 두어 이 모듈에서만 해당 경고를 끈다.
 # pyright: reportUnknownMemberType=false
 
+"""PTS 인덱스·컨테이너 조회·프록시 테스트 (dlp_media.pts·probe·proxy, WP3).
+
+정답 근거: 블러 픽스처는 프레임마다 정해 둔 정수 ms PTS(VFR)로 영상을 쓴다. 동기화 픽스처의
+바디캠은 h264 영상 + 16 kHz 오디오이며 creation_time 태그가 없다.
+"""
+
 from __future__ import annotations
 
 from fractions import Fraction
@@ -19,6 +25,7 @@ from dlp_schema.config import ProxyConfig
 
 
 def test_pts_index_matches_vfr_frame_times_exactly(blur: tuple[BlurScenario, Path]) -> None:
+    """VFR 영상의 PTS 인덱스가 픽스처 프레임 시각과 정확히(분수·실수 모두) 같다."""
     scenario, path = blur
     index = build_pts_index(path)
     assert index.is_vfr
@@ -28,6 +35,11 @@ def test_pts_index_matches_vfr_frame_times_exactly(blur: tuple[BlurScenario, Pat
 
 
 def test_frame_lookup_at_exact_boundaries(blur: tuple[BlurScenario, Path]) -> None:
+    """frame_at·nearest의 경계 동작.
+
+    프레임 시각 정각이면 그 프레임, 1 µs 앞이면 앞 프레임, 첫 프레임 앞은 0, 끝 뒤는 마지막.
+    두 프레임 중간 ±0.1 ms는 가까운 쪽.
+    """
     scenario, path = blur
     index = build_pts_index(path)
     times = scenario.frame_times
@@ -43,6 +55,7 @@ def test_frame_lookup_at_exact_boundaries(blur: tuple[BlurScenario, Path]) -> No
 def test_pts_index_roundtrip_and_validation(
     blur: tuple[BlurScenario, Path], tmp_path: Path
 ) -> None:
+    """Parquet 쓰기·읽기 왕복이 같고, 중복 PTS는 ValueError."""
     index = build_pts_index(blur[1])
     index.write(tmp_path / "pts.parquet")
     again = PtsIndex.read(tmp_path / "pts.parquet")
@@ -53,6 +66,7 @@ def test_pts_index_roundtrip_and_validation(
 
 
 def test_probe_reports_streams(sync: tuple[SyncScenario, Path]) -> None:
+    """probe가 h264 비디오, 16 kHz 오디오, 데이터 트랙 없음, creation_time 없음을 알려 준다."""
     info = probe(sync[1] / "bodycam.mp4")
     assert info.video is not None and info.video.codec == "h264"
     assert info.audio is not None and info.audio.sample_rate == 16_000
@@ -63,6 +77,11 @@ def test_probe_reports_streams(sync: tuple[SyncScenario, Path]) -> None:
 def test_proxy_keeps_pts_drops_audio_and_adds_keyframes(
     sync: tuple[SyncScenario, Path], blur: tuple[BlurScenario, Path], tmp_path: Path
 ) -> None:
+    """프록시는 원본 PTS를 그대로 두고, 오디오를 빼고, 키프레임을 일정 간격으로 넣는다.
+
+    높이 120으로 줄고(320x240 → 160x120), 첫 프레임이 키프레임이며 키프레임 간격은
+    500 ms + 한 프레임 여유(100 ms) 이하다.
+    """
     for src in (blur[1], sync[1] / "bodycam.mp4"):
         dst = tmp_path / f"{src.parent.name}-proxy.mp4"
         make_proxy(src, dst, ProxyConfig(max_height=120, crf=28, keyframe_ms=500))
@@ -109,5 +128,6 @@ def test_proxy_handles_odd_source_size(
 
 
 def test_proxy_max_height_must_be_even() -> None:
+    """프록시 높이 상한은 짝수여야 한다 (설정 검증, ProxyConfig)."""
     with pytest.raises(ValueError, match="multiple"):
         ProxyConfig(max_height=121, crf=28, keyframe_ms=500)

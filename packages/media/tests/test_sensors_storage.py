@@ -1,3 +1,8 @@
+"""센서(IMU 사이드카·장갑) 정규화와 로컬 저장소 불변성 테스트 (dlp_media.imu·glove·storage, WP3).
+
+정답 근거: 동기화 픽스처의 IMU(200 Hz)·장갑(100 Hz, pressure_0~4) 배열을 그대로 비교한다.
+"""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -14,6 +19,11 @@ from dlp_media.tables import read_parquet
 
 
 def test_imu_sidecar_parquet_and_csv(sync: tuple[SyncScenario, Path], tmp_path: Path) -> None:
+    """IMU 사이드카 Parquet·CSV를 읽고 정규화 Parquet으로 쓴다.
+
+    값이 픽스처와 같고 200 Hz이며, 정규화 파일의 열·출처 메타데이터가 맞다. 열이 빠지거나
+    샘플이 하나뿐이면 ValueError.
+    """
     scenario, out = sync
     imu = read_imu_table(out / "imu.parquet")
     assert np.allclose(imu.acc[:, 2], scenario.imu["az"])
@@ -41,6 +51,12 @@ def test_imu_sidecar_parquet_and_csv(sync: tuple[SyncScenario, Path], tmp_path: 
 
 
 def test_glove_parquet_and_hdf5(sync: tuple[SyncScenario, Path], tmp_path: Path) -> None:
+    """장갑 Parquet·HDF5를 같은 형태로 정규화한다.
+
+    HDF5의 2차원 pressure(N, 5)는 pressure_0~4 채널로 펼치고, 1차원 temperature는 채널, 시각 열
+    (timestamp_ms)은 채널이 아니다. 시각 열이 둘이면 남은 시각 열도 채널에서 뺀다. 시각이
+    증가하지 않거나 시각 열이 없으면 ValueError.
+    """
     scenario, out = sync
     glove = read_glove(out / "glove_right.parquet")
     assert set(glove.channels) == {f"pressure_{i}" for i in range(5)}
@@ -79,6 +95,10 @@ def test_glove_parquet_and_hdf5(sync: tuple[SyncScenario, Path], tmp_path: Path)
 
 
 def test_local_store_is_immutable_and_idempotent(tmp_path: Path) -> None:
+    """로컬 저장소 불변 업로드: 같은 내용은 건너뛰고(False), 다른 내용은 ImmutableObjectError.
+
+    버킷 밖을 가리키는 키("../")는 ValueError.
+    """
     store = LocalStore(tmp_path / "store", "dlp-raw")
     src = tmp_path / "a.bin"
     src.write_bytes(b"first")
