@@ -1,3 +1,11 @@
+"""검수 흐름 통합 테스트 (`@pytest.mark.services`, WP6, ADR 0020·0023·0024).
+
+실행 중인 PostgreSQL·SeaweedFS(S3)·Label Studio(필수)와 CVAT(선택, 없으면 해당 테스트만 건너뜀)를
+쓴다. 합성 블러 영상 + 장갑 데이터로 세션을 수집하고, 오라클 탐지기로 블러 프리라벨을 만든 뒤
+작업 만들기 → 도구에서 고치기 → 수집 → 라벨 이력·승인 상태를 확인한다. 테스트마다 일회용 DB를
+만들고 지운다.
+"""
+
 from __future__ import annotations
 
 import copy
@@ -72,6 +80,10 @@ _LS = {ReviewTool.LABEL_STUDIO}  # 작업 라벨 작업을 Label Studio만 만�
 
 @pytest.fixture
 def pg() -> Iterator[sa.Engine]:
+    """일회용 PostgreSQL DB (마이그레이션 + 온톨로지 v1 등록). 테스트 뒤 지운다.
+
+    `DLP_DATABASE_URL`(기본: 개발 compose의 DB)에 접속해 무작위 이름의 DB를 만든다.
+    """
     url = sa.make_url(
         os.environ.get(
             "DLP_DATABASE_URL", "postgresql+psycopg://dlp:dlp-dev-password@localhost:5432/dlp"
@@ -115,6 +127,7 @@ def setup(cvat_config: CvatPolicy) -> ReviewSetup:
 
 
 def _need_cvat(setup: ReviewSetup) -> CvatClient:
+    """CVAT 클라이언트를 돌려준다. 없으면 테스트를 건너뛴다."""
     if setup.cvat is None:
         pytest.skip("CVAT에 연결할 수 없습니다 (make cvat-up)")
     return setup.cvat
@@ -143,6 +156,7 @@ def _submit_prelabels(ls: LabelStudioClient, task_id: str) -> None:
 
 
 def _oracle_policy() -> PrivacyPolicy:
+    """모든 블러 대상의 탐지기를 오라클 하나로 바꾼 프라이버시 정책 (정답 박스 그대로 탐지)."""
     policy = load_policy(ROOT)
     return policy.model_copy(
         update={
@@ -234,6 +248,13 @@ def test_unchanged_labeling_review_round_trips_losslessly_through_label_studio(
 def test_privacy_review_edits_become_label_history(
     pg: sa.Engine, setup: ReviewSetup, tmp_path: Path
 ) -> None:
+    """CVAT 블러 검수의 수정·삭제·추가가 라벨 이력이 되고, 승인 뒤 다시 고치면 승인이 풀리는지 본다.
+
+    시나리오: 첫 트랙을 5 px 옮기고, 마지막 트랙을 지우고, 둘째 트랙을 복제해 새로 그린 것으로 둔다.
+    정답 근거: 수정·삭제·추가 각 1, 나머지는 승인, 현재 블러 수 = 원래 수, 두 번째 수집은 None(한
+    번만), 옮긴 트랙의 수정 레코드는 원래 라벨을 parent로 가리킨다. 승인 뒤 다시 트랙 하나를 지우고
+    수집하면 privacy_state가 auto_blurred로 돌아간다.
+    """
     _need_cvat(setup)
     sid, blur = _session(pg, setup, tmp_path)
     assert setup.cvat is not None
@@ -327,12 +348,15 @@ class _FailingCvat:
     """원본을 올리다 실패하는 CVAT (감사 기록이 올리기 전에 남는지 본다)."""
 
     def __init__(self, real: CvatClient) -> None:
+        """real: 나머지 호출을 넘길 실제 CVAT 클라이언트."""
         self.real = real
 
     def __getattr__(self, name: str) -> Any:
+        """create_task 말고는 실제 클라이언트로 넘긴다."""
         return getattr(self.real, name)
 
     def create_task(self, name: str, project_id: int, video: Path) -> int:
+        """업로드 대신 RuntimeError를 던진다."""
         raise RuntimeError("업로드 실패")
 
 
@@ -362,6 +386,12 @@ def test_privacy_task_checks_reviewer_and_records_grant_before_upload(
 def test_labelers_only_get_watermarked_blurred_media(
     pg: sa.Engine, setup: ReviewSetup, tmp_path: Path
 ) -> None:
+    """일반 라벨러 작업이 라벨링 버킷의 워터마크 블러본만 쓰고 원본은 열 수 없는지 본다.
+
+    시나리오: 블러 승인 전에는 작업 라벨 작업을 만들지 못함 → 승인·렌더 뒤 작업 생성.
+    정답 근거: 매체 URI가 `s3://dlp-labeling/sessions/<세션>/review/labeler01/`로 시작, Label Studio
+    작업 데이터에 dlp-raw가 없음, 라벨러 서명 URL로 영상·시계열은 열리고 원본은 403.
+    """
     sid, _ = _session(pg, setup, tmp_path)
     with pg.begin() as conn:
         if setup.cvat is not None:

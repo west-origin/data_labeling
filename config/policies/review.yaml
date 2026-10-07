@@ -1,57 +1,91 @@
 # 검수 운영 정책 (WP12). 배정 비율(QA·이중·블라인드·오류 삽입)은 config/defaults.yaml review를 따른다.
+#
+# 읽는 곳: dlp_review.ops.policy.load_policy (Pydantic ReviewOpsPolicy로 검증, 알 수 없는 키는 오류).
+# 쓰는 명령: dlp review create|collect|serve|plan|assign|queue|qa|quality, dlp ops weekly(운영 지표).
+# 이 파일은 파싱한 값으로만 쓰고 텍스트 해시를 만들지 않으므로 주석을 고쳐도 동작이 바뀌지 않는다.
+# 키를 더하거나 이름을 바꾸면 dlp_review/ops/policy.py 모델도 함께 바꿔야 한다.
+
+# 정책 파일 형식 버전 (정수). 형식이 바뀔 때만 올린다.
 version: 1
 
-# 검수 화면용 매체
+# 검수 화면용 매체 (dlp_review.watermark, dlp_review.timeseries)
 media:
+  # 범위 (0, 1]. 높이면 유출 추적은 쉬워지지만 검수자가 화면을 보기 어려워진다.
   watermark_opacity: 0.18             # 라벨러 ID 워터마크 불투명도 (화면 캡처 유출 추적)
+  # libx264 CRF, 범위 0~51 (낮을수록 고화질·큰 파일). 검수에 쓰는 화질이라 너무 높이지 않는다.
   watermark_crf: 20                   # 워터마크 영상 화질
+  # 정수 > 0. 출력 프레임 PTS는 원본을 그대로 쓰므로 재생 시각·키프레임 매칭에는 영향이 없다.
   encoder_rate: 30                    # libx264 명목 프레임레이트 (프레임 PTS는 원본 그대로)
+  # Hz > 0. 격자 간격 = 1000 / 값 (ms). 1000의 약수가 아니면 time_ms 열에 소수가 생긴다.
+  # 높이면 CSV가 커지고 Label Studio 화면이 느려진다.
   timeseries_rate_hz: 50              # 장갑·IMU 시계열 CSV 격자 (마스터 타임라인)
 
 # 검수 단위: 세션 × 스트림 × 라벨 종류 묶음. 묶음마다 검수 도구가 다르다.
 # 도구가 보여 주는 종류만 쓴다 (보여 주지 않는 종류를 표본으로 뽑으면 판정이 끝나지 않는다).
 # 관계·설명은 아직 검수 도구 화면이 없어 단위에 넣지 않는다.
+# 허용 값: spatial ⊆ (box_track, keypoint_track), temporal ⊆ dlp_review.labelstudio.LS_KINDS.
+# 벗어나면 정책 로드가 실패한다 (UnitsPolicy 검증).
 units:
   spatial: [box_track, keypoint_track]                            # CVAT, 스트림별
   temporal: [action, gap, segment, event, hand_state, object_state]  # Label Studio, 세션 단위
 
 # 우선순위 큐: 단위 안에서 사유가 붙은 구간을 찾고, 단위 우선순위 = Σ 사유 가중치 × 구간 길이(초).
+# 모델 출처 라벨만 본다 (dlp_review.ops.priority.flag_unit). 임계값은 모두 0~1.
 priority:
   low_confidence: 0.5                 # 이보다 신뢰도가 낮은 모델 라벨
+  # 같은 키프레임 시각의 박스 IoU (보간하지 않는다). 낮추면 불일치 사유가 늘어난다.
   disagreement_iou: 0.5               # 다른 모델(버전)의 박스가 이만큼 겹치는데 클래스가 다르면 불일치
+  # 겹침 비율의 분모는 두 구간 중 짧은 쪽 길이다.
   disagreement_overlap: 0.5           # 다른 모델의 시간 구간이 이 비율 이상 겹치는데 분류가 다르면 불일치
   contact_mismatch_max_confidence: 0.7  # 장갑 세션에서 이 이하 신뢰도의 접촉 라벨 = 장갑·영상 한쪽만 접촉
+  # 사유 이름(dlp_schema.review.ReviewReason 값) → 가중치. 없는 사유(sample, routine)는 0으로 본다.
+  # 상대 크기만 의미가 있다: 큰 사유가 붙은 단위가 큐 앞으로 온다.
   weights:
     contact_mismatch: 4.0
     model_disagreement: 3.0
     new_object: 2.0
     low_confidence: 1.0
+  # 0 이상. 사유가 있는 단위보다 뒤로 가도록 작은 값을 둔다.
   routine_priority: 0.1               # 사유가 없는 단위의 기본 우선순위
 
 # 높은 신뢰도 라벨은 묶음(세션·종류·모델 버전)마다 표본만 검수한다. 표본에서 고친 비율이
 # max_defect_ratio 이하이면 묶음의 나머지 미검수 라벨을 "표본 검증"으로, 넘으면 묶음 전체를 검수 큐에 넣는다.
+# 표본 수 = min(N, max(min_sample, ⌈ratio·N⌉)). 블러(privacy) 단위에는 적용하지 않는다 (전수 검수).
 sampling:
+  # 0~1. 이 신뢰도 이상인 미검수 모델 라벨만 표본 묶음에 든다. 낮추면 사람이 보지 않는 라벨이 늘어난다.
   high_confidence: 0.85
+  # (0, 1]. 묶음 대비 표본 비율.
   ratio: 0.1
+  # 1 이상. 묶음당 최소 표본 수 (작은 묶음은 사실상 전수).
   min_sample: 5
+  # 0~1. 표본 결함(사람이 고치거나 지운) 비율 허용치. 높이면 오류가 많은 묶음도 합격한다.
   max_defect_ratio: 0.05
 
 # 검수 품질 측정 (이중 라벨 일치도, 프리라벨 편향)
 measurement:
+  # 0 이상 (ms).
   tolerance_ms: 200                   # 경계 일치 허용 오차
+  # (0, 1].
   match_iou: 0.5                      # 두 라벨 묶음의 구간을 맞추는 시간 IoU
 
 # 오류 삽입 과제: 정답을 아는 단위(모든 라벨이 사람이 만들거나 승인·수정한 것)의 사본에 오류를 넣는다.
 seeding:
+  # 1 이상. 후보가 모자라면 덜 넣는다.
   errors_per_task: 3
+  # 하나 이상. 순서대로 돌아가며 넣는다 (단위에 후보가 없는 종류는 건너뛴다).
   types: [boundary_shift, class_swap, blur_deletion]
+  # [최소, 최대] ms, 양끝 포함. 최소값은 detect_tolerance_ms보다 커야 "되돌림"을 구별할 수 있다.
   boundary_shift_ms: [300, 800]       # 경계 허용 오차(200 ms) 밖으로 옮긴다
+  # 0 이상 (ms).
   detect_tolerance_ms: 200            # 검수자가 이 안으로 되돌리면 발견한 것으로 본다
+  # (0, 1]. 분모는 뺀 블러 구간 길이.
   blur_overlap: 0.5                   # 다시 그린 블러가 뺀 블러와 시간이 이만큼 겹치면 발견
 
 # 검수자 역할. QA는 선임만, 블라인드·이중 배정은 표준 배정과 다른 사람에게 준다.
 # 블러 검수(원본 영상)는 privacy 목록에 있는 원본 접근 권한자에게만 배정한다. 블러 단위는 QA·일반
 # 오류 삽입 과제에 쓰지 않는다 (블러 오류 삽입은 --privacy 계획에서 권한자에게만).
+# privacy 목록은 원본 접근 감사(dlp ops audit-report)의 권한자 명단에도 쓰인다. 사람을 더할 때는
+# 원본 접근 권한 승인 절차를 먼저 밟는다.
 reviewers:
   senior: []                          # 비어 있으면 QA 배정의 담당자를 비워 둔다
   privacy: []                         # 원본 접근 권한자
@@ -60,5 +94,7 @@ reviewers:
 # 이 연결과 맞을 때만 수집한다. 블러 검수 담당자는 여기 없으면 작업을 만들지 않는다 (원본을 올리기 전에 멈춘다).
 # 검수자 CVAT 계정은 관리자가 아닌 일반 사용자(user/worker 그룹)로 만든다: 일반 사용자는 배정받은 job만 본다.
 cvat:
+  # dlp 검수자 ID → CVAT 사용자 이름. 한 CVAT 계정을 두 검수자에게 줄 수 없다 (로드 시 검증).
   users: {}                           # 예: {rev01: cvat-rev01}
+  # 0 이상. 0이면 이슈를 남기지 않는다.
   privacy_issue_limit: 50             # 블러 검수 작업에 이슈로 남기는 검수 우선 구간 최대 수 (우선순위 순)

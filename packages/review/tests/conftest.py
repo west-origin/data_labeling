@@ -1,3 +1,10 @@
+"""검수 패키지 테스트 공용 픽스처·도우미.
+
+CVAT 계정 연결(`review.yaml cvat.users` 자리)을 시험용으로 만든다. CVAT가 닿으면 시험 검수자마다
+일반 사용자 계정을 만들어 두고, 닿지 않으면 연결 정보만 돌려준다 (CVAT가 필요한 테스트는 따로
+건너뛴다). 실제 사용자·개인정보는 쓰지 않는다.
+"""
+
 from __future__ import annotations
 
 import httpx
@@ -12,6 +19,7 @@ CVAT_TEST_PASSWORD = "Kq7zr-Wv2mN8-xT4"  # 개발용 CVAT의 시험 계정 (일�
 
 
 def cvat_username(reviewer: str) -> str:
+    """시험 검수자 ID → 시험용 CVAT 사용자 이름 (`dlp-test-<검수자>`)."""
     return f"dlp-test-{reviewer}"
 
 
