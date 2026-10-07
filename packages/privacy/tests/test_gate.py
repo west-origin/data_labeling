@@ -1,3 +1,15 @@
+"""프라이버시 탐지·트래커·검수 구간·렌더 단위 테스트 (DB·저장소 없이, WP5).
+
+정답 근거: 합성 블러 시나리오(`dlp_fixtures.video.generate_blur_scenario`)는 3초 VFR(프레임 간격
+25~50 ms) 320x240 영상에 얼굴·반사(거울 속)·문서·화면·사진·송장 6개 대상을 움직이며 그리고, 대상마다
+모든 프레임의 정답 박스(blur_track 라벨)를 함께 준다. 탐지기는 그 정답을 내는 `OracleDetector`(누락·
+흔들림·점수 범위를 조절)나 가짜 OWLv2(`FakeOwl`)를 쓴다. 실제 가중치가 필요한 테스트(YuNet)는
+가중치가 없으면 건너뛴다.
+
+관련 회귀: ADR 0024 감사 4-3(정책 해시), 4-6(오류 삽입 레코드와 마지막 탐지 시각),
+4-7(VFR 프레임 번호 보간), 4-8(검수 우선 구간 병합).
+"""
+
 from __future__ import annotations
 
 import shutil
@@ -48,6 +60,11 @@ def run(
     assignment: dict[str, list[str]] | None = None,
     missing: dict[str, str] | None = None,
 ) -> StreamResult:
+    """합성 영상에 `detect_video`를 돌린다.
+
+    assignment: 대상 → 탐지기 이름 (기본: 6개 대상 모두 "oracle"). 정책 대상도 이 키로 바뀐다.
+    missing: 쓸 수 없는 탐지기 → 이유 (no_detector 구간 확인용).
+    """
     assignment = assignment or {t: ["oracle"] for t in TARGETS}
     return detect_video(
         blur[1],
@@ -62,6 +79,7 @@ def run(
 
 
 def label_box(labels: list[LabelRecord], target: str, t_ms: int) -> list[BoxKeyframe]:
+    """라벨 중 그 대상의 시각 t_ms 키프레임 박스 (outside 제외)."""
     out: list[BoxKeyframe] = []
     for x in labels:
         p = x.payload
@@ -89,12 +107,18 @@ def covered(labels: list[LabelRecord], scenario: BlurScenario) -> tuple[int, int
 
 @pytest.fixture(scope="module")
 def ontology() -> Ontology:
+    """저장소 온톨로지 v1 (라벨 검증용)."""
     return load_ontology(ROOT / "config" / "ontology" / "v1")
 
 
 def test_perfect_stub_gives_full_recall(
     blur: tuple[BlurScenario, Path], policy: PrivacyPolicy, ontology: Ontology
 ) -> None:
+    """완벽한 탐지기면 모든 프레임·대상의 정답 박스가 블러 안에 든다 (재현율 100%).
+
+    WP5 완료 기준. 6개 대상 모두 라벨이 생기고, 라벨이 온톨로지 검증을 통과하며 모델 버전과
+    신뢰도를 가진다.
+    """
     result = run(blur, policy, {"oracle": OracleDetector("oracle", blur[0].labels)})
     hit, total = covered(result.labels, blur[0])
     assert total > 300 and hit == total  # 완료 기준: 재현율 100%
@@ -109,6 +133,10 @@ def test_perfect_stub_gives_full_recall(
 def test_misses_are_filled_by_interpolation_and_flagged(
     blur: tuple[BlurScenario, Path], policy: PrivacyPolicy
 ) -> None:
+    """25% 누락에도 보간·유지로 재현율 100%이고 track_gap 구간이 생긴다.
+
+    track_gap 구간의 우선순위는 정책 review_priority의 위치다.
+    """
     oracle = OracleDetector("oracle", blur[0].labels, miss_rate=0.25, seed=3)
     result = run(blur, policy, {"oracle": oracle})
     hit, total = covered(result.labels, blur[0])
@@ -139,6 +167,12 @@ def test_jittered_boxes_still_cover_nearly_all_area(
 def test_blur_is_held_after_track_loss(
     blur: tuple[BlurScenario, Path], policy: PrivacyPolicy
 ) -> None:
+    """트랙을 잃은 뒤 blur_hold_ms 동안 블러를 유지하고, 다시 찾기 전 hold만큼 미리 가린다.
+
+    시나리오: 얼굴을 1~2초 동안 놓친다 (max_gap_ms 600보다 길어 트랙이 나뉜다).
+    정답: 잃은 뒤 hold 이내와 다시 찾기 hold 이전 프레임에만 블러가 있고, 그 사이는 비어 있다.
+    화면 밖으로 나가는 송장도 나간 뒤 hold 이내까지만 블러가 남는다.
+    """
     scenario = blur[0]
     hold = policy.platform.blur_hold_ms
     # 얼굴을 1초 동안 놓친다 (max_gap_ms보다 길어 트랙이 끊긴다)
@@ -171,7 +205,10 @@ def test_blur_is_held_after_track_loss(
 def test_unblurred_gap_between_split_tracks_is_flagged(
     blur: tuple[BlurScenario, Path], policy: PrivacyPolicy
 ) -> None:
-    """회귀: 오래 끊겨 트랙이 나뉘면 그 사이 블러 없는 프레임을 검수 구간으로 낸다."""
+    """회귀: 오래 끊겨 트랙이 나뉘면 그 사이 블러 없는 프레임을 검수 구간으로 낸다.
+
+    split_review_ms를 100으로 줄이면 (틈이 그보다 길어) split 구간을 내지 않는다.
+    """
     scenario = blur[0]
     oracle = OracleDetector("oracle", scenario.labels, miss_spans_ms=[("face", 1_000, 2_000)])
     result = run(blur, policy, {"oracle": oracle})
@@ -196,7 +233,11 @@ def test_unblurred_gap_between_split_tracks_is_flagged(
 
 
 def test_render_interpolates_between_sparse_keyframes() -> None:
-    """회귀: 검수자가 CVAT에서 고친 트랙은 키프레임만 남는다. 블러본은 CVAT처럼 보간해야 한다."""
+    """회귀: 검수자가 CVAT에서 고친 트랙은 키프레임만 남는다. 블러본은 CVAT처럼 보간해야 한다.
+
+    고른 간격(50 ms) 프레임이라 프레임 번호 비율 = 시각 비율이다. 키프레임 사이 보간, 다음이
+    outside면 직전 박스 유지, outside 뒤는 없음, 마지막 뒤는 유지, 첫 키프레임 앞은 없음.
+    """
     kfs = (
         BoxKeyframe(t_ms=0, x=0, y=0, w=10, h=10),
         BoxKeyframe(t_ms=100, x=100, y=50, w=30, h=10),
@@ -217,6 +258,12 @@ def test_render_interpolates_between_sparse_keyframes() -> None:
 def test_review_segments_cover_low_confidence_disagreement_reflection_and_missing(
     blur: tuple[BlurScenario, Path], policy: PrivacyPolicy
 ) -> None:
+    """검수 우선 구간 종류별 생성.
+
+    얼굴에 강·약 탐지기 둘(약한 쪽은 50% 누락) → disagreement. 반사 대상 → reflection.
+    문서에 쓸 수 없는 탐지기만 → 영상 전체 no_detector(이유 포함)이며 가장 앞에 온다.
+    점수 0.31~0.5 탐지기 → low_confidence(review_score 0.6 미만).
+    """
     labels = blur[0].labels
     detectors: dict[str, FrameDetector] = {
         "strong": OracleDetector("strong", labels),
@@ -244,6 +291,11 @@ def test_review_segments_cover_low_confidence_disagreement_reflection_and_missin
 def test_render_mosaics_targets_keeps_pts_and_leaves_rest(
     blur: tuple[BlurScenario, Path], policy: PrivacyPolicy, tmp_path: Path
 ) -> None:
+    """모자이크 렌더: 대상은 가려지고 PTS는 그대로이며 나머지 영역은 거의 그대로다.
+
+    정답 근거: 픽스처는 얼굴·반사의 눈과 문서 글줄을 어둡게(≤40) 그린다. 블록 평균 뒤에는 그 어두운
+    픽셀이 사라져 최솟값이 45를 넘는다. 대상이 없는 왼쪽 아래 영역은 코덱 손실 범위(<4) 안에서 같다.
+    """
     scenario, src = blur
     result = run(blur, policy, {"oracle": OracleDetector("oracle", scenario.labels)})
     dst = tmp_path / "blurred.mp4"
@@ -261,6 +313,7 @@ def test_render_mosaics_targets_keeps_pts_and_leaves_rest(
     assert build_pts_index(dst).ms.tolist() == build_pts_index(src).ms.tolist()
 
     def frames(path: Path) -> dict[int, np.ndarray]:
+        """영상의 프레임 시각(ms) → RGB 이미지."""
         with av.open(str(path)) as c:
             return {
                 round(float(f.time or 0) * 1000): f.to_ndarray(format="rgb24")
@@ -287,6 +340,7 @@ def test_render_mosaics_targets_keeps_pts_and_leaves_rest(
 
 
 def test_render_strips_audio(tmp_path: Path, policy: PrivacyPolicy) -> None:
+    """오디오가 있는 원본을 렌더해도 블러본에는 오디오 트랙이 없다."""
     sync = generate_sync_scenario(1, recorded_at=FIXED_TIME, duration_ms=3_000)
     src = tmp_path / "with_audio.mp4"
     sync.write_video(src, "bodycam")
@@ -302,6 +356,11 @@ def test_render_strips_audio(tmp_path: Path, policy: PrivacyPolicy) -> None:
 
 
 def test_detector_factory_reports_unavailable_models(policy: PrivacyPolicy, tmp_path: Path) -> None:
+    """가중치가 없는 루트에서 탐지기 공장이 쓸 수 없는 탐지기와 이유를 보고한다.
+
+    QR·바코드(가중치 없음)는 쓸 수 있고, YuNet은 `make models` 안내와 함께 빠지며, OWLv2가 없으니
+    reflection도 (open_vocab, yunet이 없다는 이유로) 빠진다.
+    """
     (tmp_path / "config").mkdir()
     shutil.copy(ROOT / "config/models.yaml", tmp_path / "config/models.yaml")
     ready, missing = build_detectors(policy, tmp_path)  # 가중치가 없는 루트
@@ -312,6 +371,7 @@ def test_detector_factory_reports_unavailable_models(policy: PrivacyPolicy, tmp_
 
 
 def test_code_detector_finds_qr_as_shipping_label() -> None:
+    """QR이 그려진 프레임에서 shipping_label 탐지 하나를 QR 위치에 낸다."""
     frame = np.full((240, 320, 3), 200, dtype=np.uint8)
     frame[40:200, 80:240] = render_qr("SHIP|1234-5678", 160)
     [det] = CodeDetector("codes", 0.9).detect(frame, 0, 0.3)
@@ -320,11 +380,15 @@ def test_code_detector_finds_qr_as_shipping_label() -> None:
 
 
 class FakeOwl:
+    """OWLv2 대신 쓰는 가짜 질의 탐지기 (호출 수를 센다, 항상 같은 두 탐지)."""
+
     def __init__(self) -> None:
+        """질의 두 개(문서, 거울)와 호출 수 0."""
         self.queries = ["a printed document", "a mirror"]
         self.calls = 0
 
     def detect(self, image: np.ndarray, thresholds: list[float]) -> list[OwlDetection]:
+        """문서(원점수 0.2)와 거울(원점수 0.05) 탐지를 돌려준다."""
         self.calls += 1
         return [
             OwlDetection(0, (10.0, 10.0, 50.0, 40.0), 0.2),
@@ -333,6 +397,12 @@ class FakeOwl:
 
 
 def test_open_vocab_detector_runs_every_stride_and_holds_results() -> None:
+    """OWLv2 탐지기는 frame_stride_ms마다 한 번만 추론하고 사이에는 결과를 유지한다.
+
+    33 ms 간격 0~990 ms 프레임, 간격 500 → 추론 2번(0, 528 ms). 정규화 신뢰도 0.2/0.4=0.5는
+    문턱 0.3을 넘고 0.05/0.4는 못 넘는다. 같은 시각 재호출은 추론하지 않고, 시간이 거꾸로 가거나
+    reset하면 다시 추론한다.
+    """
     fake = FakeOwl()
     det = OpenVocabDetector(
         "open_vocab", fake, ["document", "reflective_surface"], version="owl-x",
@@ -358,6 +428,7 @@ def test_open_vocab_detector_runs_every_stride_and_holds_results() -> None:
 def test_pipeline_resets_open_vocab_cache_per_video(
     policy: PrivacyPolicy, blur: tuple[BlurScenario, Path]
 ) -> None:
+    """같은 탐지기로 영상 두 개를 돌리면 영상마다 캐시를 비워 한 번씩 추론한다."""
     fake = FakeOwl()
     det = OpenVocabDetector(
         "open_vocab", fake, ["document", "reflective_surface"], version="owl-x",
@@ -377,6 +448,10 @@ def test_pipeline_resets_open_vocab_cache_per_video(
     reason="YuNet 가중치 없음 (make models)",
 )
 def test_yunet_loads_and_runs(policy: PrivacyPolicy, blur: tuple[BlurScenario, Path]) -> None:
+    """실제 YuNet 가중치가 있으면 불러와 돌린다 (없으면 건너뜀).
+
+    합성 얼굴은 실제 얼굴이 아니므로 결과 개수는 보지 않고 형식만 확인한다.
+    """
     ready, _ = build_detectors(policy, ROOT)
     yunet = ready["yunet"]
     assert yunet.version.startswith("yunet-")
@@ -388,7 +463,8 @@ def test_yunet_loads_and_runs(policy: PrivacyPolicy, blur: tuple[BlurScenario, P
 
 def test_render_interpolates_by_frame_index_on_vfr_like_cvat(tmp_path: Path) -> None:
     """회귀(감사 4-7): CVAT는 프레임 번호로 보간한다. VFR 영상에서 시각 비율로 보간하면 검수
-    화면과 블러본의 박스가 다르다. 블러본도 PTS 프레임 순서로 보간해야 한다."""
+    화면과 블러본의 박스가 다르다. 블러본도 PTS 프레임 순서로 보간해야 한다.
+    """
     times = [0, 10, 20, 30, 300]  # 고르지 않은 간격 (VFR)
     w, h = 200, 40
     src = tmp_path / "vfr.mp4"
@@ -486,7 +562,8 @@ def test_model_version_changes_with_detection_policy(policy: PrivacyPolicy) -> N
 
 def test_last_detection_ignores_seeded_and_measurement_records() -> None:
     """회귀(감사 4-6): 오류 삽입 계획이 만든 모델 출처 블러 사본(지금 시각)이 마지막 탐지 시각을
-    옮겨 승인을 막았다. 운영 블러가 아닌 레코드와 그 후손은 세지 않는다."""
+    옮겨 승인을 막았다. 운영 블러가 아닌 레코드와 그 후손은 세지 않는다.
+    """
     kfs = (BoxKeyframe(t_ms=0, x=0, y=0, w=10, h=10),)
     model = Provenance(source=Source.MODEL, model_version="det-1")
     payload = BlurTrackPayload(target="face", keyframes=kfs)
@@ -512,6 +589,7 @@ def test_last_detection_ignores_seeded_and_measurement_records() -> None:
 
 
 def _seg(reason: ReviewReason, detail: str = "", t: int = 0) -> ReviewSegment:
+    """검수 우선 구간 하나 (얼굴, 10 ms 길이, 우선순위 0)."""
     return ReviewSegment(
         stream_id="bodycam", target="face", reason=reason, t_start_ms=t, t_end_ms=t + 10,
         priority=0, detail=detail,
@@ -520,7 +598,11 @@ def _seg(reason: ReviewReason, detail: str = "", t: int = 0) -> ReviewSegment:
 
 def test_merge_segments_keeps_detector_segments_when_only_model_reruns() -> None:
     """회귀(감사 4-8): 재학습 모델만 다시 돌면 검수 우선 구간 파일을 덮어써 탐지기 구간이
-    사라졌다."""
+    사라졌다.
+
+    정답: 모델만 다시 돌면 탐지기 구간(track_gap)은 남고, 다시 돈 모델(m1)은 새 구간으로, 배포되지
+    않은 모델(m0)은 빠진다. 탐지기가 다시 돌면 탐지기 구간만 새것으로 바뀌고 m1 구간은 남는다.
+    """
     old = [_seg("track_gap"), _seg("trained_model", "m1"), _seg("trained_model", "m0", 5)]
     new = [_seg("trained_model", "m1", 20)]
     merged = merge_segments(old, new, detector_rerun=False, rerun_models={"m1"}, live_models={"m1"})

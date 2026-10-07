@@ -1,3 +1,10 @@
+"""세션 수집 테스트 (dlp_media.ingest, WP3, ADR 0003).
+
+로컬 저장소 테스트는 CI에서 돈다. 마지막 테스트는 SeaweedFS·PostgreSQL이 필요하다
+(`@pytest.mark.services`). 정답 근거: 동기화 픽스처는 12초, 10 fps 바디캠(프레임 120개),
+100 Hz 장갑, 200 Hz IMU를 만든다.
+"""
+
 from __future__ import annotations
 
 import os
@@ -30,6 +37,7 @@ ManifestWriter = Callable[..., Path]
 
 
 def _local(uri: str, store: LocalStore) -> Path:
+    """로컬 저장소 URI(local://버킷/키) → 실제 파일 경로."""
     return store.root / uri.removeprefix(f"local://{store.bucket}/")
 
 
@@ -38,6 +46,12 @@ def test_ingest_builds_session_and_is_idempotent(
     tmp_path: Path,
     write_manifest: ManifestWriter,
 ) -> None:
+    """수집이 세션을 만들고, 같은 매니페스트로 다시 돌리면 아무것도 바꾸지 않는다.
+
+    정답: 기록 시각·기준 스트림(REFERENCE)·장갑 100 Hz·길이 약 12초, 업로드 8개(원본 3 + PTS 2 +
+    프록시 2 + 장갑 정규화 1), PTS 인덱스 프레임 120개, 프록시 파일이 있다. 두 번째 실행은 모두
+    건너뛰고 같은 세션을 낸다.
+    """
     store = LocalStore(tmp_path / "store", "dlp-raw")
     manifest, base = load_manifest(write_manifest(tmp_path, sync[1]))
 
@@ -66,6 +80,7 @@ def test_ingest_builds_session_and_is_idempotent(
 def test_changed_raw_file_is_rejected(
     sync: tuple[SyncScenario, Path], tmp_path: Path, write_manifest: ManifestWriter
 ) -> None:
+    """같은 스트림 원본 파일 내용이 바뀌면 다시 수집할 때 ImmutableObjectError."""
     store = LocalStore(tmp_path / "store", "dlp-raw")
     glove = tmp_path / "glove.parquet"
     glove.write_bytes((sync[1] / "glove_right.parquet").read_bytes())
@@ -85,6 +100,10 @@ def test_recorded_at_required_when_container_has_none(
     tmp_path: Path,
     write_manifest: ManifestWriter,
 ) -> None:
+    """매니페스트에도 컨테이너에도 촬영 시각이 없으면 ValueError.
+
+    픽스처 영상에는 creation_time 태그가 없다.
+    """
     manifest, base = load_manifest(write_manifest(tmp_path, sync[1], recorded_at=None))
     with pytest.raises(ValueError, match="recorded_at"):
         ingest_session(manifest, base, LocalStore(tmp_path / "store", "dlp-raw"))
@@ -96,13 +115,22 @@ def test_embedded_imu_becomes_shared_clock_stream(
     monkeypatch: pytest.MonkeyPatch,
     write_manifest: ManifestWriter,
 ) -> None:
+    """바디캠 내장 IMU가 있으면 "imu" 스트림(SHARED_CLOCK)을 추가한다.
+
+    가짜 추출기가 5 ms 간격 샘플을 내므로 샘플레이트 200 Hz가 정답이다.
+    """
+
     class FakeExtractor:
+        """비디오가 있으면 항상 처리하는 가짜 IMU 추출기 (0~1초, 5 ms 간격, 값 0)."""
+
         name = "fake"
 
         def can_handle(self, info: MediaInfo) -> bool:
+            """비디오 트랙이 있으면 참."""
             return info.video is not None
 
         def extract(self, path: Path) -> ImuData:
+            """200 Hz, 1초 길이의 0 값 IMU."""
             t = np.arange(0, 1_000, 5.0)
             return ImuData(t, np.zeros((t.size, 3)), np.zeros((t.size, 3)), source="fake")
 
@@ -125,12 +153,16 @@ def test_embedded_extractor_without_samples_adds_no_imu_stream(
     """GPMF에 ACCL이 없으면 샘플레이트 0인 IMU 스트림 대신 IMU 없이 수집한다."""
 
     class EmptyExtractor:
+        """처리는 하지만 샘플이 없어 None을 내는 가짜 추출기."""
+
         name = "empty"
 
         def can_handle(self, info: MediaInfo) -> bool:
+            """비디오 트랙이 있으면 참."""
             return info.video is not None
 
         def extract(self, path: Path) -> ImuData | None:
+            """샘플 없음 (None)."""
             return None
 
     monkeypatch.setattr(imu_module, "EXTRACTORS", [EmptyExtractor()])
@@ -145,6 +177,10 @@ def test_embedded_extractor_without_samples_adds_no_imu_stream(
 
 @pytest.fixture
 def pg() -> Iterator[sa.Engine]:
+    """빈 임시 PostgreSQL DB (마이그레이션 적용). 끝나면 DB를 지운다.
+
+    DLP_DATABASE_URL(없으면 개발 기본값)의 서버에 `dlp_test_<임의>` DB를 만든다.
+    """
     url = sa.make_url(
         os.environ.get(
             "DLP_DATABASE_URL", "postgresql+psycopg://dlp:dlp-dev-password@localhost:5432/dlp"
@@ -173,6 +209,12 @@ def test_ingest_into_seaweedfs_and_postgres(
     pg: sa.Engine,
     write_manifest: ManifestWriter,
 ) -> None:
+    """실제 S3·DB로 수집·재수집·충돌을 확인한다 (서비스 필요).
+
+    첫 실행은 inserted·업로드 8개·s3://dlp-raw URI, 두 번째는 unchanged. 동기화·프라이버시·
+    생애주기가 바꾼 필드는 재수집 충돌이 아니며 바뀐 값이 유지된다. 작업자 ID가 바뀐 매니페스트는
+    SessionConflictError.
+    """
     store = S3Store.from_env("dlp-raw")
     sid = f"ing-{uuid.uuid4().hex[:8]}"
     manifest, base = load_manifest(write_manifest(tmp_path, sync[1], session_id=sid))

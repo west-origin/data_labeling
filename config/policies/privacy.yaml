@@ -1,7 +1,26 @@
 # 프라이버시 게이트 정책 (WP5). 유지 시간·렌더 방식·오디오 제거는 config/defaults.yaml privacy를 따른다.
+#
+# 읽는 곳: dlp_privacy.policy.load_policy (dlp privacy detect|approve|render, 블러본을 확인하는
+#   검수 작업·내보내기·행동 VLM·큐레이션).
+# 버전에 미치는 영향 (바꾸기 전에 꼭 확인):
+#   - render 외 값(문턱·대상·트래커·검수 점수·검수 우선순위·쓰는 탐지기 설정)은 탐지 모델 버전의
+#     정책 해시(dlp_privacy.pipeline.detection_policy_digest)에 들어간다. 바꾸면 그 뒤
+#     `dlp privacy detect`를 돌리는 세션마다 다시 탐지하고 검수 전 블러를 새 버전으로 바꾼다.
+#     승인된 세션도 블러가 바뀌면 승인이 풀려 다시 검수·승인·렌더해야 한다.
+#   - render 값은 블러본 해시(dlp_privacy.runner.render_hash)에 들어간다. 바꾸면 기존 블러본이
+#     "현재 것이 아님"이 되어 `dlp privacy render`로 다시 만들어야 소비자가 쓸 수 있다.
+#   - 해시는 파싱된 값으로 계산하므로 이 파일의 주석·공백·키 순서는 버전을 바꾸지 않는다.
+# 모르는 키는 거부된다 (Pydantic extra=forbid). 탐지기 값이 비어 있으면 코드 기본값 없이 오류다.
+
+# 파일 형식 버전 (해시에 들어가지 않는다). 키 구조를 바꾸면 올린다.
 version: 1
 
 # 대상별 박스 여유(박스 크기 대비 비율)와 쓰는 탐지기. 탐지기는 아래 detectors에 정의한다.
+# - 키: 온톨로지 프라이버시 사전의 대상 ID (config/ontology). 여기 없는 대상은 탐지하지 않는다.
+# - margin: 박스 가로·세로를 각각 이 비율만큼 키운다 (중심 유지). 0.2 = 20% 크게. 얼굴은 머리카락·
+#   귀까지 가리도록 크게, 글자 대상은 주변을 덜 가리도록 작게 둔다.
+# - detectors: 이 대상을 찾는 탐지기 이름 (여러 개면 결과를 합친다). 쓸 수 있는 탐지기가 하나도
+#   없으면 영상 전체가 no_detector 검수 구간이 되어 사람이 전부 본다.
 targets:
   face: {margin: 0.2, detectors: [yunet]}
   reflection: {margin: 0.2, detectors: [reflection]}
@@ -16,16 +35,24 @@ targets:
 #   못 찾는 글자는 블러 전수 검수(사람)에만 기대한다.
 
 # 재현율 우선: 낮은 문턱으로 잡고 사람이 오탐을 지운다
+# detection_threshold: 탐지기에 넘기는 신뢰도 문턱 (0~1). 올리면 오탐이 줄지만 누락(사고)이 는다.
 detection_threshold: 0.3
+# review_score: 관측 점수(0~1)가 이 미만인 프레임은 low_confidence 검수 우선 구간이 된다.
 review_score: 0.6             # 트랙 점수가 이보다 낮은 구간은 검수 우선 구간
 
+# 트래커 (dlp_privacy.tracker). 시간 단위는 ms (스트림 PTS 시각).
 tracker:
+  # 이전 관측 박스와 IoU(0~1]가 이 이상이면 같은 트랙. 낮을수록 빠르게 움직이는 대상도 잇지만
+  # 가까운 다른 대상과 섞일 수 있다. 같은 프레임의 여러 탐지기 결과를 합칠 때도 이 값을 쓴다.
   iou_match: 0.2              # 같은 트랙으로 이을 최소 IoU
+  # 관측이 이 시간 이하로 끊기면 같은 트랙으로 보고 사이를 선형 보간한다 (보간 프레임은 track_gap).
   max_gap_ms: 600             # 이보다 짧은 끊김은 선형 보간으로 메운다
   # max_gap_ms보다 길게 끊겨 트랙이 나뉘면 그 사이는 블러가 없다. 같은 대상의 블러 없는 틈이
   # 이 이하이면 track_gap 검수 우선 구간으로 내보낸다 (놓친 프레임일 가능성이 높다).
   split_review_ms: 5000
 
+# 블러본 렌더 (dlp_privacy.render). 바꾸면 블러본을 다시 렌더해야 한다 (render_hash).
+# 렌더 방식(mosaic|solid)은 defaults.yaml privacy.render_mode에 있다.
 render:
   min_block_px: 6             # 모자이크 블록 최소 크기
   blocks_per_box: 5           # 박스 짧은 변을 이 개수 이하의 블록으로 나눈다
@@ -33,9 +60,21 @@ render:
   crf: 18                     # 블러본 화질 (낮을수록 좋다)
 
 # 검수 우선 구간 종류와 우선순위 (앞이 먼저)
+# no_detector: 쓸 수 있는 탐지기가 없는 대상 (영상 전체)
+# track_gap: 보간·유지한 프레임, 나뉜 트랙 사이 블러 없는 틈 (detail=split)
+# disagreement: 탐지기가 둘 이상인 대상에서 일부 탐지기만 찾은 프레임
+# low_confidence: 관측 점수 < review_score
+# reflection: 반사면 속 얼굴 블러가 있는 프레임
 # trained_model: 배포된 재학습 블러 모델이 낸 구간 (탐지기와 합집합으로 쓰므로 따로 확인한다)
+# trained_model 외 항목을 빼면 탐지가 KeyError로 실패한다 (코드가 이유별 우선순위를 찾는다).
+# 순서를 바꾸면 정책 해시가 바뀌어 다시 탐지한다.
 review_priority: [no_detector, track_gap, disagreement, low_confidence, reflection, trained_model]
 
+# 탐지기 정의 (이름 → 설정). targets.*.detectors와 reflection의 region/face_detector가
+# 이 이름을 쓴다.
+# kind별 구현은 dlp_privacy.detectors. 가중치(model, tokenizer)는 config/models.yaml 키이며
+# `make models`로 받는다. 가중치가 없으면 그 탐지기는 "쓸 수 없음"으로 보고되고 대상은 전수
+# 검수된다.
 detectors:
   yunet:
     kind: yunet
@@ -47,21 +86,22 @@ detectors:
     score: 0.9                # 코드는 찾거나 못 찾으므로 고정 신뢰도
   reflection:
     kind: reflection          # 반사면 영역 안에서 얼굴 탐지 문턱을 낮춘다
-    region_detector: open_vocab
-    face_detector: yunet
-    threshold_scale: 0.5
+    region_detector: open_vocab   # 반사면 영역(reflective_surface)을 찾는 탐지기
+    face_detector: yunet          # 영역 안에서 얼굴을 찾는 탐지기
+    threshold_scale: 0.5          # 영역 안 얼굴 문턱 = detection_threshold x 이 값
   # 오픈 보캐뷸러리 탐지 (OWLv2 base, ONNX 양자화, CPU 프레임당 약 9초).
   # 한 번 추론으로 문서·화면·사진물·문패·송장과 반사면 영역(reflection 탐지기용)을 함께 찾는다.
   # frame_stride_ms마다 한 번 추론하고 그 사이 프레임에는 마지막 결과를 그대로 둔다 (held).
   # 사이에 잠깐 나타났다 사라진 대상은 놓칠 수 있으므로 GPU 환경에서는 간격을 줄인다.
   open_vocab:
     kind: open_vocab
-    model: owlv2_onnx
-    tokenizer: owlv2_tokenizer
-    frame_stride_ms: 500
+    model: owlv2_onnx         # config/models.yaml 이름 (ONNX 가중치)
+    tokenizer: owlv2_tokenizer  # config/models.yaml 이름 (질의 문장 토크나이저)
+    frame_stride_ms: 500      # 추론 간격 ms (0이면 매 프레임). 탐지기 버전에도 들어간다.
     score_threshold: 0.1      # OWLv2 원점수 문턱 (재현율 우선으로 낮게)
     score_full: 0.4           # 이 원점수 이상을 신뢰도 1.0으로 본다 (원점수 / score_full)
     # 질의 문장 → 대상 ID. reflective_surface는 reflection 탐지기만 쓴다.
+    # 같은 대상에 문장을 여러 개 둘 수 있다. 문장을 바꾸면 탐지 결과·버전이 바뀐다.
     queries:
       a printed document: document
       a sheet of paper with text: document

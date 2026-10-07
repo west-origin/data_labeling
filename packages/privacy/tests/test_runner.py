@@ -1,3 +1,14 @@
+"""프라이버시 게이트 통합 테스트: 수집 → 탐지 → 검수 → 승인 → 렌더 → 렌더 확인 (WP5).
+
+실행 중인 서비스(PostgreSQL, SeaweedFS S3)가 필요하다 (`@pytest.mark.services`, `make up` 뒤
+`make test-services`). 테스트마다 임시 DB를 만들고 지운다.
+
+정답 근거: 합성 블러 시나리오의 대상 6개(얼굴·반사·문서·화면·사진·송장)를 그대로 내는
+`OracleDetector`를 쓰므로 바디캠 스트림의 트랙 수는 6이다. 검수 도구(CVAT) 대신
+`reviewed_task`로 수집된 검수 작업 기록만 만들고, `record_review`로 라벨 검증 상태를 바꾼다.
+관련 회귀: ADR 0024 감사 4-2(승인 취소 뒤 이전 블러본 사용), 4-8(재학습 모델 구간 병합).
+"""
+
 from __future__ import annotations
 
 import json
@@ -50,6 +61,10 @@ ROOT = Path(__file__).resolve().parents[3]
 
 @pytest.fixture
 def pg() -> Iterator[sa.Engine]:
+    """빈 임시 PostgreSQL DB (마이그레이션 + 온톨로지 v1 등록). 끝나면 DB를 지운다.
+
+    DLP_DATABASE_URL(없으면 개발 기본값)의 서버에 `dlp_test_<임의>` DB를 만든다.
+    """
     url = sa.make_url(
         os.environ.get(
             "DLP_DATABASE_URL", "postgresql+psycopg://dlp:dlp-dev-password@localhost:5432/dlp"
@@ -76,6 +91,17 @@ def pg() -> Iterator[sa.Engine]:
 def test_detect_review_approve_render(
     pg: sa.Engine, policy: PrivacyPolicy, blur: tuple[BlurScenario, Path], tmp_path: Path
 ) -> None:
+    """게이트 전체 흐름과 승인 취소·재승인.
+
+    시나리오:
+    1. 바디캠(블러 픽스처)과 3인칭(오디오가 있는 동기화 픽스처 영상)으로 세션을 수집한다.
+    2. 탐지 전 승인은 실패, 탐지 뒤 AUTO_BLURRED, 같은 버전 재탐지는 건너뜀.
+    3. 승인 전 렌더 실패 → 검수 작업 없으면 승인 실패 → 미검수 라벨 있으면 실패 → 모두 검수 후 승인.
+    4. 렌더는 멱등이고, 블러본은 라벨링 버킷에만 있으며 오디오가 없다. 같은 버킷 렌더는 거부.
+    5. 탐지기 버전이 바뀌어 블러가 바뀌면 승인이 풀리고 이전 블러본은 어떤 단계도 쓰지 못한다.
+    6. 다시 검수·승인해도 다시 렌더하기 전에는 무효, 렌더 뒤에는 현재 것. 렌더 기록을 거치지 않고
+       블러 라벨이 늘면 해시가 달라 막힌다. 새 블러본 파일 해시는 이전과 다르다.
+    """
     scenario, video = blur
     # 3인칭 영상 자리에는 오디오가 있는 다른 영상을 둔다 (블러본에서 오디오가 빠지는지 본다)
     sync = generate_sync_scenario(2, recorded_at=FIXED_TIME, duration_ms=3_000)
@@ -216,7 +242,10 @@ def reviewed_task(conn: sa.Connection, sid: str, stream: str, at: datetime, tag:
 def test_approval_needs_a_review_task_even_without_detections(
     pg: sa.Engine, policy: PrivacyPolicy, blur: tuple[BlurScenario, Path], tmp_path: Path
 ) -> None:
-    """회귀: 탐지가 하나도 없으면 미검수 라벨이 없어 사람 검수 없이 승인됐다."""
+    """회귀: 탐지가 하나도 없으면 미검수 라벨이 없어 사람 검수 없이 승인됐다.
+
+    정답: 탐지 0개여도 수집한 블러 검수 작업이 생기기 전에는 승인이 실패한다.
+    """
     _, video = blur
     sid = f"priv-{uuid.uuid4().hex[:8]}"
     manifest = {
@@ -252,9 +281,11 @@ class TrainedBlur:
     name = "trained-privacy"
 
     def __init__(self, labels: list[LabelRecord], version: str) -> None:
+        """labels: 낼 블러 라벨(정답), version: 모델 버전 (provenance.model_version)."""
         self.labels, self.version = labels, version
 
     def run(self, clip: Clip) -> list[LabelRecord]:
+        """클립의 세션·스트림으로 ID·출처를 바꾼 정답 블러 라벨 (모델 출처, 신뢰도 0.9)."""
         tag = self.version.replace(".", "_")
         return [
             x.model_copy(
@@ -273,6 +304,12 @@ class TrainedBlur:
 def test_deployed_blur_model_is_unioned_and_versioned(
     pg: sa.Engine, policy: PrivacyPolicy, blur: tuple[BlurScenario, Path], tmp_path: Path
 ) -> None:
+    """배포된 재학습 블러 모델은 탐지기 결과와 합집합으로 들어가고 버전별로 바뀐다.
+
+    정답: 첫 실행 트랙 수 = 탐지기 6 + 모델 블러 수, trained_model 검수 구간이 생긴다. 같은 모델이면
+    건너뛰고, 모델이 v1→v2로 바뀌면 v1 블러만 지워지고(검수 전) v2가 들어오며 탐지기 블러 6개는
+    그대로다. 검수 우선 구간에는 탐지기 구간이 남고 trained_model 구간은 v2만 남는다 (감사 4-8).
+    """
     scenario, video = blur
     sid = f"priv-{uuid.uuid4().hex[:8]}"
     manifest = {
@@ -297,6 +334,7 @@ def test_deployed_blur_model_is_unioned_and_versioned(
     v1, v2 = TrainedBlur(blurs, "trained-v1"), TrainedBlur(blurs, "trained-v2")
 
     def current_versions(conn: sa.Connection) -> dict[str, int]:
+        """현재 블러 라벨의 모델 버전별 개수."""
         out: dict[str, int] = {}
         for x in current_labels(get_labels(conn, sid, kinds=["blur_track"])):
             v = x.provenance.model_version or ""
