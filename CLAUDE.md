@@ -39,6 +39,8 @@
   모자이크 렌더, 검수 우선 구간, 잔여 누락 감사. `dlp privacy detect|approve|render`. 정책은 `config/policies/privacy.yaml`.
 - `packages/review/` (`dlp_review`) — 검수 도구 연동: CVAT·Label Studio 변환기(무손실 왕복), 작업 생성, reconcile(검수 결과 →
   라벨 이력), 웹훅 수집, 라벨러 워터마크, 역할 경계. `dlp review create|collect|serve|register-webhooks`.
+  운영 로직(`dlp_review.ops`): 우선순위 큐, 표본 검증, 블라인드·오류 삽입·이중·QA 배정, 품질 측정.
+  `dlp review plan|assign|queue|qa|quality`. 정책은 `config/policies/review.yaml`.
 - `packages/datasets/` (`dlp_datasets`) — 데이터셋 버전(lakeFS 커밋), 작업자·장소 단위 분할(holdout 포함), 골든셋 제안,
   사용 중지 전파, 계보 조회. `dlp dataset golden|build|withdraw`, `dlp lineage <세션>`. 정책은 `config/policies/dataset.yaml`.
 - `packages/models/` (`dlp_models`) — 모델 레지스트리(`config/models.yaml`, 해시 확인)와 공용 ONNX 런타임(OWLv2, 메트릭 깊이).
@@ -61,6 +63,8 @@
 
 - 모든 시간 값은 마스터 타임라인 기준 정수 ms. 프레임 번호를 저장하지 않는다.
 - 라벨은 덮어쓰지 않는다. 수정은 새 레코드 + `parent_label_id`.
+- 다른 단계의 입력은 `current_labels()`(운영 라벨)로 고른다. 오류 삽입 레코드와 그 후손, 블라인드·이중 측정
+  레코드(`measurement`)는 운영 라벨이 아니며 학습·내보내기에 들어가면 안 된다.
 - 모듈 사이 데이터는 `dlp_schema` 타입으로만 주고받는다. 계약 변경은 ADR + Alembic 마이그레이션 + 계약 테스트 + `make schemas`를 함께 한다.
 - DB 스키마는 `dlp_schema/db/tables.py`와 새 Alembic 리비전을 함께 바꾼다. 테스트가 둘의 일치를 검사한다.
 - 모든 datetime은 시간대 정보가 있어야 한다 (UTC 권장).

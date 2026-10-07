@@ -12,6 +12,9 @@ from dlp_cli.schema_cmds import database_url
 from dlp_media.storage import S3Store
 from dlp_review.clients import CvatClient, LabelStudioClient
 from dlp_review.collect import collect_task
+from dlp_review.ops.assign import plan_qa
+from dlp_review.ops.policy import load_policy as load_ops_policy
+from dlp_review.ops.runner import create_assignment_tasks, plan_session, quality_report
 from dlp_review.tasks import (
     PRIVACY_PROJECT,
     SPATIAL_PROJECT,
@@ -22,6 +25,13 @@ from dlp_review.tasks import (
 )
 from dlp_review.webhook import CollectRequest, serve
 from dlp_schema import load_config, load_ontology, repo_root
+from dlp_schema.db.repository import (
+    get_assignment,
+    get_golden_set,
+    insert_assignment,
+    list_assignments,
+)
+from dlp_schema.review import AssignmentStatus
 
 
 def _setup(args: argparse.Namespace) -> ReviewSetup:
@@ -110,6 +120,86 @@ def cmd_register(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_plan(args: argparse.Namespace) -> int:
+    root = repo_root()
+    policy = load_ops_policy(root)
+    ontology = load_ontology(root / "config" / "ontology" / "v1")
+    engine = sa.create_engine(database_url(args.url))
+    with engine.begin() as conn:
+        pool: list[str] = []
+        for version in args.seed_golden:
+            pool += list(get_golden_set(conn, version).session_ids)
+        created = plan_session(
+            conn, args.session_id, args.reviewer, policy, ontology, seed=args.seed,
+            now=datetime.now(UTC), seed_sessions=pool, privacy=args.privacy,
+        )  # fmt: skip
+    engine.dispose()
+    for a in created:
+        reasons = sorted({f.reason.value for f in a.flagged})
+        who = a.assignee or "-"
+        print(f"{a.assignment_id} {a.mode.value} → {who} (우선순위 {a.priority:.2f} {reasons})")
+    if not created:
+        print("새 배정이 없습니다 (이미 계획됨)")
+    return 0
+
+
+def cmd_assign(args: argparse.Namespace) -> int:
+    engine = sa.create_engine(database_url(args.url))
+    setup = _setup(args)
+    with engine.begin() as conn:
+        a = get_assignment(conn, args.assignment_id)
+        tasks = create_assignment_tasks(conn, a, setup, datetime.now(UTC))
+    engine.dispose()
+    for t in tasks:
+        print(f"{t.task_key} ({t.mode.value}, {t.assignee}) {t.media_uri}")
+    return 0
+
+
+def cmd_qa(args: argparse.Namespace) -> int:
+    policy = load_ops_policy(repo_root())
+    engine = sa.create_engine(database_url(args.url))
+    with engine.begin() as conn:
+        done = list_assignments(conn, status=AssignmentStatus.DONE)
+        existing = {a.assignment_id for a in list_assignments(conn)}
+        created = [
+            a for a in plan_qa(done, policy, seed=args.seed, now=datetime.now(UTC))
+            if a.assignment_id not in existing
+        ]  # fmt: skip
+        for a in created:
+            insert_assignment(conn, a)
+    engine.dispose()
+    print(f"QA 배정 {len(created)}개")
+    return 0
+
+
+def cmd_queue(args: argparse.Namespace) -> int:
+    engine = sa.create_engine(database_url(args.url))
+    with engine.connect() as conn:
+        queue = list_assignments(conn, status=AssignmentStatus.OPEN)
+    engine.dispose()
+    for a in queue[: args.limit]:
+        print(f"{a.priority:8.2f}  {a.assignment_id}  {a.mode.value}  {a.assignee or '-'}")
+    return 0
+
+
+def cmd_quality(args: argparse.Namespace) -> int:
+    policy = load_ops_policy(repo_root())
+    engine = sa.create_engine(database_url(args.url))
+    with engine.connect() as conn:
+        report = quality_report(conn, policy)
+    engine.dispose()
+    for d in report.detection:
+        print(f"오류 삽입 발견율 {d.reviewer}: {d.detected}/{d.injected} ({d.rate:.0%})")
+    for key, agr in report.double.items():
+        print(
+            f"이중 라벨 일치 {key}: 카파 {agr.kappa:.3f}, "
+            f"구간 F1 {agr.segment_f1:.3f}, 경계 F1 {agr.boundary_f1:.3f}"
+        )
+    for key, bias in report.blind_bias.items():
+        print(f"프리라벨 편향 {key}: {bias:+.3f} (양수면 검수자가 프리라벨에 끌려감)")
+    return 0
+
+
 def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:  # pyright: ignore[reportPrivateUsage]
     review = sub.add_parser("review", help="검수 도구 연동")
     rsub = review.add_subparsers(dest="review_command", required=True)
@@ -137,3 +227,31 @@ def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
     reg = rsub.add_parser("register-webhooks", help="검수 프로젝트에 웹훅 등록")
     reg.add_argument("url_base", help="도구에서 닿는 웹훅 서버 주소 (예: http://host:8765)")
     reg.set_defaults(func=cmd_register)
+
+    pl = rsub.add_parser("plan", help="세션 검수 배정 계획 (우선순위·표본·블라인드·이중·오류 삽입)")
+    pl.add_argument("session_id")
+    pl.add_argument("--reviewer", action="append", required=True, help="검수자 (여러 번)")
+    pl.add_argument("--seed-golden", action="append", default=[], help="오류 삽입 과제 원천 골든셋")
+    pl.add_argument("--privacy", action="store_true", help="블러 검수 단위로 계획 (전수 검수)")
+    pl.add_argument("--seed", type=int, default=0)
+    pl.add_argument("--url", help="DB URL (기본: DLP_DATABASE_URL)")
+    pl.set_defaults(func=cmd_plan)
+
+    asg = rsub.add_parser("assign", help="배정의 검수 도구 작업 생성")
+    asg.add_argument("assignment_id")
+    asg.add_argument("--url", help="DB URL (기본: DLP_DATABASE_URL)")
+    asg.set_defaults(func=cmd_assign)
+
+    qa = rsub.add_parser("qa", help="끝난 표준 배정에서 QA 재검수 배정을 뽑는다")
+    qa.add_argument("--seed", type=int, default=0)
+    qa.add_argument("--url", help="DB URL (기본: DLP_DATABASE_URL)")
+    qa.set_defaults(func=cmd_qa)
+
+    q = rsub.add_parser("queue", help="열린 배정을 우선순위 순으로")
+    q.add_argument("--limit", type=int, default=50)
+    q.add_argument("--url", help="DB URL (기본: DLP_DATABASE_URL)")
+    q.set_defaults(func=cmd_queue)
+
+    ql = rsub.add_parser("quality", help="오류 삽입 발견율, 이중 라벨 일치도, 프리라벨 편향")
+    ql.add_argument("--url", help="DB URL (기본: DLP_DATABASE_URL)")
+    ql.set_defaults(func=cmd_quality)

@@ -1194,6 +1194,23 @@
       "title": "Label Id",
       "type": "string"
     },
+    "measurement": {
+      "anyOf": [
+        {
+          "enum": [
+            "blind",
+            "double"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "측정용 레코드 (블라인드 과제, 이중 라벨링의 두 번째 라벨). 운영 라벨이 아니다",
+      "title": "Measurement"
+    },
     "ontology_version": {
       "pattern": "^\\d+\\.\\d+\\.\\d+$",
       "title": "Ontology Version",

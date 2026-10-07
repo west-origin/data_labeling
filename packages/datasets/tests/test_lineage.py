@@ -30,6 +30,7 @@ from dlp_schema.db.repository import (
     insert_session,
     register_ontology,
 )
+from dlp_schema.labels import LabelRecord
 from dlp_schema.lineage import GoldenSet, TrainingRun
 from dlp_schema.ontology import load_ontology
 from dlp_schema.session import Domain, LifecycleState, PrivacyState
@@ -222,3 +223,36 @@ def test_build_refuses_empty_or_wrong_domain(
             golden_set_version=None,
             now=FIXED_TIME,
         )
+
+
+def test_seeded_errors_and_measurements_never_reach_training(
+    pg: sa.Engine, policy: DatasetPolicy, snapshots: LakeFSSnapshotStore, tmp_path: Path
+) -> None:
+    """완료 기준: 오류 삽입 레코드와 그 후손, 측정용 레코드가 학습 분할에 0건."""
+    _populate(pg)
+    with pg.begin() as conn:
+        sids = [s.session_id for s in generate_sessions(300, seed=5)]
+        extra: list[LabelRecord] = []
+        for sid in sids:
+            seeded = make_label(
+                action_payload(), label_id=f"seed-x-{sid}", session_id=sid, seeded_error=True
+            )
+            fix = make_label(
+                action_payload(), label_id=f"fix-{sid}", session_id=sid,
+                parent_label_id=seeded.label_id,
+            )  # fmt: skip
+            blind = make_label(
+                action_payload(), label_id=f"blind-{sid}", session_id=sid, measurement="blind"
+            )
+            extra += [seeded, fix, blind]
+        insert_labels(conn, extra)
+        result = build_dataset_version(
+            conn, snapshots, policy, version_id=f"ds-{uuid.uuid4().hex[:6]}-seed",
+            ontology_version="1.0.0", golden_set_version="golden-cleaning-v1", now=FIXED_TIME,
+        )  # fmt: skip
+    path = tmp_path / "labels.jsonl"
+    snapshots.read(result.version.snapshot_uri, "labels.jsonl", path)
+    ids = [json.loads(line)["label_id"] for line in path.read_text("utf-8").splitlines()]
+    assert len(ids) == 300 and all(i.endswith("-a") for i in ids)
+    train = {sid for sid, sp in result.version.splits.items() if sp is Split.TRAIN}
+    assert train and not any(i.startswith(("seed-", "fix-", "blind-")) for i in ids)

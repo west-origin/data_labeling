@@ -33,6 +33,7 @@ from dlp_schema.db.repository import (
     set_lifecycle,
     withdrawn_session_ids,
 )
+from dlp_schema.episode import non_operational_ids
 from dlp_schema.session import LifecycleState, Session
 
 
@@ -92,8 +93,11 @@ def build_dataset_version(
         labels_path = Path(tmp) / "labels.jsonl"
         with labels_path.open("w", encoding="utf-8") as f:
             for s in sorted(candidates, key=lambda x: x.session_id):
-                for label in get_labels(conn, s.session_id):
-                    if label.seeded_error:
+                labels = get_labels(conn, s.session_id)
+                # 오류 삽입 레코드와 그 후손, 블라인드·이중 라벨링 측정 레코드는 넣지 않는다
+                excluded_ids = non_operational_ids(labels)
+                for label in labels:
+                    if label.label_id in excluded_ids:
                         continue
                     f.write(label.model_dump_json() + "\n")
                     label_counts[f"{label.kind}/{label.verification.state.value}"] += 1

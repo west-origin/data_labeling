@@ -14,7 +14,7 @@ from dlp_schema.labels import LabelRecord
 from dlp_schema.lineage import ExportRecord, GoldenSet, TrainingRun, Withdrawal
 from dlp_schema.migration import OntologyMigration
 from dlp_schema.ontology import Ontology
-from dlp_schema.review import ReviewTask
+from dlp_schema.review import ReviewAssignment, ReviewTask
 from dlp_schema.session import Session
 
 CONTRACTS: dict[str, type[BaseModel]] = {
@@ -26,6 +26,7 @@ CONTRACTS: dict[str, type[BaseModel]] = {
     "ontology_migration": OntologyMigration,
     "platform_config": PlatformConfig,
     "review_task": ReviewTask,
+    "review_assignment": ReviewAssignment,
     "golden_set": GoldenSet,
     "training_run": TrainingRun,
     "export_record": ExportRecord,

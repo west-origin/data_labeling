@@ -16,6 +16,7 @@ from dlp_schema.db.tables import (
     golden_sets,
     label_records,
     ontology_versions,
+    review_assignments,
     review_tasks,
     sessions,
     streams,
@@ -25,7 +26,13 @@ from dlp_schema.db.tables import (
 from dlp_schema.labels import LabelRecord, VerificationState
 from dlp_schema.lineage import ExportRecord, GoldenSet, TrainingRun, Withdrawal
 from dlp_schema.ontology import Ontology
-from dlp_schema.review import ReviewStage, ReviewTask, ReviewTaskStatus
+from dlp_schema.review import (
+    AssignmentStatus,
+    ReviewAssignment,
+    ReviewStage,
+    ReviewTask,
+    ReviewTaskStatus,
+)
 from dlp_schema.session import LifecycleState, PrivacyState, Session, Stream, can_transition
 
 
@@ -167,6 +174,7 @@ def label_to_row(label: LabelRecord) -> dict[str, Any]:
         "parent_label_id": label.parent_label_id,
         "retracted": label.retracted,
         "seeded_error": label.seeded_error,
+        "measurement": label.measurement,
         "created_at": label.created_at,
         "payload": data["payload"],
     }
@@ -196,6 +204,7 @@ def row_to_label(row: Mapping[Any, Any]) -> LabelRecord:
             "parent_label_id": row["parent_label_id"],
             "retracted": row["retracted"],
             "seeded_error": row["seeded_error"],
+            "measurement": row["measurement"],
             "created_at": row["created_at"],
             "payload": row["payload"],
         }
@@ -274,6 +283,55 @@ def mark_review_task_collected(conn: sa.Connection, task_key: str, at: datetime)
     )
     if result.rowcount != 1:
         raise KeyError(task_key)
+
+
+def insert_assignment(conn: sa.Connection, a: ReviewAssignment) -> None:
+    data = a.model_dump(mode="json")
+    data["created_at"], data["completed_at"] = a.created_at, a.completed_at
+    conn.execute(review_assignments.insert().values(**data))
+
+
+def get_assignment(conn: sa.Connection, assignment_id: str) -> ReviewAssignment:
+    row = (
+        conn.execute(
+            sa.select(review_assignments).where(review_assignments.c.assignment_id == assignment_id)
+        )
+        .mappings()
+        .one()
+    )
+    return ReviewAssignment.model_validate(dict(row))
+
+
+def list_assignments(
+    conn: sa.Connection, session_id: str | None = None, status: AssignmentStatus | None = None
+) -> list[ReviewAssignment]:
+    """우선순위 높은 순 (같으면 만든 순)."""
+    query = sa.select(review_assignments)
+    if session_id is not None:
+        query = query.where(review_assignments.c.session_id == session_id)
+    if status is not None:
+        query = query.where(review_assignments.c.status == status.value)
+    query = query.order_by(
+        review_assignments.c.priority.desc(),
+        review_assignments.c.created_at,
+        review_assignments.c.assignment_id,
+    )
+    return [ReviewAssignment.model_validate(dict(r)) for r in conn.execute(query).mappings()]
+
+
+def update_assignment(conn: sa.Connection, assignment_id: str, **values: object) -> None:
+    """배정 상태·담당자·작업 키만 바꾼다."""
+    allowed = {"assignee", "task_key", "status", "completed_at"}
+    if not set(values) <= allowed:
+        raise ValueError(f"바꿀 수 없는 필드: {set(values) - allowed}")
+    data = {k: (v.value if isinstance(v, AssignmentStatus) else v) for k, v in values.items()}
+    result = conn.execute(
+        review_assignments.update()
+        .where(review_assignments.c.assignment_id == assignment_id)
+        .values(**data)
+    )
+    if result.rowcount != 1:
+        raise KeyError(assignment_id)
 
 
 # ---------------------------------------------------------------- 데이터셋 버전

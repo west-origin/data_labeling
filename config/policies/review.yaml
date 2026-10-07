@@ -1,0 +1,39 @@
+# 검수 운영 정책 (WP12). 배정 비율(QA·이중·블라인드·오류 삽입)은 config/defaults.yaml review를 따른다.
+version: 1
+
+# 검수 단위: 세션 × 스트림 × 라벨 종류 묶음. 묶음마다 검수 도구가 다르다.
+units:
+  spatial: [box_track, keypoint_track]                   # CVAT, 스트림별
+  temporal: [action, gap, hand_state, segment, object_state, event, relation, description]  # Label Studio, 세션 단위
+
+# 우선순위 큐: 단위 안에서 사유가 붙은 구간을 찾고, 단위 우선순위 = Σ 사유 가중치 × 구간 길이(초).
+priority:
+  low_confidence: 0.5                 # 이보다 신뢰도가 낮은 모델 라벨
+  disagreement_iou: 0.5               # 다른 모델(버전)의 박스가 이만큼 겹치는데 클래스가 다르면 불일치
+  disagreement_overlap: 0.5           # 다른 모델의 시간 구간이 이 비율 이상 겹치는데 분류가 다르면 불일치
+  contact_mismatch_max_confidence: 0.7  # 장갑 세션에서 이 이하 신뢰도의 접촉 라벨 = 장갑·영상 한쪽만 접촉
+  weights:
+    contact_mismatch: 4.0
+    model_disagreement: 3.0
+    new_object: 2.0
+    low_confidence: 1.0
+  routine_priority: 0.1               # 사유가 없는 단위의 기본 우선순위
+
+# 높은 신뢰도 라벨은 묶음(세션·종류·모델 버전)마다 표본만 검수한다. 표본에서 고친 비율이
+# max_defect_ratio 이하이면 묶음의 나머지 미검수 라벨을 "표본 검증"으로, 넘으면 묶음 전체를 검수 큐에 넣는다.
+sampling:
+  high_confidence: 0.85
+  ratio: 0.1
+  min_sample: 5
+  max_defect_ratio: 0.05
+
+# 오류 삽입 과제: 정답을 아는 단위(모든 라벨이 사람이 만들거나 승인·수정한 것)의 사본에 오류를 넣는다.
+seeding:
+  errors_per_task: 3
+  types: [boundary_shift, class_swap, blur_deletion]
+  boundary_shift_ms: [300, 800]       # 경계 허용 오차(200 ms) 밖으로 옮긴다
+  detect_tolerance_ms: 200            # 검수자가 이 안으로 되돌리면 발견한 것으로 본다
+
+# 검수자 역할. QA는 선임만, 블라인드·이중 배정은 표준 배정과 다른 사람에게 준다.
+reviewers:
+  senior: []                          # 비어 있으면 QA 배정의 담당자를 비워 둔다

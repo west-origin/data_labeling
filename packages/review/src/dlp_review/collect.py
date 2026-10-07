@@ -22,6 +22,7 @@ from dlp_review.tasks import (
     object_key,
 )
 from dlp_schema.db.repository import (
+    get_assignment,
     get_review_task,
     get_session,
     insert_labels,
@@ -29,7 +30,7 @@ from dlp_schema.db.repository import (
     record_review,
 )
 from dlp_schema.labels import VerificationState
-from dlp_schema.review import ReviewTaskStatus, ReviewTool
+from dlp_schema.review import ReviewMode, ReviewTaskStatus, ReviewTool
 
 
 def collect_task(
@@ -43,7 +44,16 @@ def collect_task(
     if session.ontology_version is None:
         raise TaskError(f"{task.session_id}: 세션에 온톨로지 버전이 없습니다")
     stream_filter = task.stream_id if task.tool is ReviewTool.CVAT else None
-    originals = current_for_review(conn, task.session_id, stream_filter, task.label_kinds)
+    assignment = get_assignment(conn, task.assignment_id) if task.assignment_id else None
+    if assignment is not None:
+        from dlp_review.ops.selection import assignment_selector  # 순환 import를 피한다
+
+        originals = assignment_selector(conn, assignment)(stream_filter, task.label_kinds)
+    else:
+        originals = current_for_review(conn, task.session_id, stream_filter, task.label_kinds)
+    if task.mode in (ReviewMode.BLIND, ReviewMode.DOUBLE):
+        # 측정용: 검수자가 낸 모든 라벨을 새 측정 레코드로 남기고 운영 라벨은 건드리지 않는다
+        originals = []
 
     if task.tool is ReviewTool.CVAT:
         if setup.cvat is None:
@@ -75,8 +85,22 @@ def collect_task(
         now=now,
         normalize=normalize,
     )
+    if task.mode is ReviewMode.BLIND or task.mode is ReviewMode.DOUBLE:
+        measurement = "blind" if task.mode is ReviewMode.BLIND else "double"
+        outcome.new_records = [
+            x.model_copy(update={"measurement": measurement}) for x in outcome.new_records
+        ]
+    elif task.mode is ReviewMode.SEEDED_ERROR:
+        # 오류 삽입 과제에서 나온 모든 레코드는 학습에서 빠진다 (새로 그린 것 포함)
+        outcome.new_records = [
+            x.model_copy(update={"seeded_error": True}) for x in outcome.new_records
+        ]
     insert_labels(conn, outcome.new_records)
     for label_id in outcome.approved:
         record_review(conn, label_id, VerificationState.HUMAN_APPROVED, reviewer_id, now)
     mark_review_task_collected(conn, task_key, now)
+    if assignment is not None:
+        from dlp_review.ops.runner import finish_assignment
+
+        finish_assignment(conn, assignment, now)
     return outcome

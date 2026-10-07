@@ -573,23 +573,27 @@ version = "0.1.0"
 source = { editable = "packages/review" }
 dependencies = [
     { name = "av" },
+    { name = "dlp-eval" },
     { name = "dlp-media" },
     { name = "dlp-schema" },
     { name = "dlp-sync" },
     { name = "httpx" },
     { name = "numpy" },
     { name = "opencv-contrib-python-headless" },
+    { name = "pyyaml" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "av", specifier = ">=14.0" },
+    { name = "dlp-eval", editable = "packages/evaluation" },
     { name = "dlp-media", editable = "packages/media" },
     { name = "dlp-schema", editable = "packages/schema" },
     { name = "dlp-sync", editable = "packages/sync" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "numpy", specifier = ">=2.0" },
     { name = "opencv-contrib-python-headless", specifier = ">=4.10" },
+    { name = "pyyaml", specifier = ">=6.0" },
 ]
 
 [[package]]

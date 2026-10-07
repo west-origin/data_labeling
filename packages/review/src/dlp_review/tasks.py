@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -28,7 +29,7 @@ from dlp_schema.db.repository import get_labels, get_session, insert_review_task
 from dlp_schema.episode import current_labels
 from dlp_schema.labels import LabelRecord
 from dlp_schema.ontology import Ontology
-from dlp_schema.review import ReviewStage, ReviewTask, ReviewTool
+from dlp_schema.review import ReviewMode, ReviewStage, ReviewTask, ReviewTool
 from dlp_schema.session import PrivacyState, Session, StreamKind
 from dlp_sync.signals import Series, glove_series, imu_series
 
@@ -74,6 +75,19 @@ def current_for_review(
     ]
 
 
+# 작업에 넣을 라벨을 고르는 함수: (스트림 또는 None, 라벨 종류) → 라벨
+Selector = Callable[[str | None, tuple[str, ...]], list[LabelRecord]]
+
+
+def default_selector(conn: sa.Connection, session_id: str) -> Selector:
+    """현재 운영 라벨 (오류 삽입·측정 레코드 제외)."""
+
+    def pick(stream_id: str | None, kinds: tuple[str, ...]) -> list[LabelRecord]:
+        return current_for_review(conn, session_id, stream_id, kinds)
+
+    return pick
+
+
 def _cvat_project(cvat: CvatClient, name: str, labels: list[str]) -> tuple[int, CvatSchema]:
     project = cvat.find_project(name)
     pid = int(project["id"]) if project else cvat.create_project(name, label_spec(labels))
@@ -81,8 +95,19 @@ def _cvat_project(cvat: CvatClient, name: str, labels: list[str]) -> tuple[int, 
 
 
 def create_privacy_tasks(
-    conn: sa.Connection, session_id: str, setup: ReviewSetup, now: datetime
+    conn: sa.Connection,
+    session_id: str,
+    setup: ReviewSetup,
+    now: datetime,
+    *,
+    select: Selector | None = None,
+    mode: ReviewMode = ReviewMode.STANDARD,
+    assignment_id: str | None = None,
+    assignee: str | None = None,
+    streams: set[str] | None = None,
 ) -> list[ReviewTask]:
+    """select가 없으면 현재 블러 트랙을 넣는다 (배정 방식에 따라 다른 라벨을 넣을 때 쓴다)."""
+    pick = select or default_selector(conn, session_id)
     if setup.cvat is None:
         raise TaskError("CVAT 클라이언트가 없습니다")
     session = get_session(conn, session_id)
@@ -92,16 +117,19 @@ def create_privacy_tasks(
     out: list[ReviewTask] = []
     with tempfile.TemporaryDirectory() as tmp:
         for stream in (s for s in session.streams if s.kind in VIDEO_KINDS):
+            if streams is not None and stream.stream_id not in streams:
+                continue
             key = f"sessions/{session_id}/derived/{stream.stream_id}.proxy.mp4"
             video = Path(tmp) / f"{stream.stream_id}.mp4"
             setup.raw.get_file(key, video)
-            labels = current_for_review(conn, session_id, stream.stream_id, ("blur_track",))
+            labels = pick(stream.stream_id, ("blur_track",))
             tid = setup.cvat.create_task(f"{session_id}/{stream.stream_id}/privacy", pid, video)
             setup.cvat.put_tracks(tid, to_cvat_tracks(labels, frame_times(video), schema))
             task = ReviewTask(
                 task_key=f"cvat:{tid}", tool=ReviewTool.CVAT, external_id=str(tid),
                 session_id=session_id, stream_id=stream.stream_id, stage=ReviewStage.PRIVACY,
                 media_uri=setup.raw.uri(key), label_kinds=("blur_track",), created_at=now,
+                mode=mode, assignment_id=assignment_id, assignee=assignee,
             )  # fmt: skip
             insert_review_task(conn, task)
             out.append(task)
@@ -119,8 +147,22 @@ def _series(session: Session, raw: ObjectStore, work: Path) -> dict[str, Series]
 
 
 def create_labeling_tasks(
-    conn: sa.Connection, session_id: str, setup: ReviewSetup, assignee: str, now: datetime
+    conn: sa.Connection,
+    session_id: str,
+    setup: ReviewSetup,
+    assignee: str,
+    now: datetime,
+    *,
+    select: Selector | None = None,
+    mode: ReviewMode = ReviewMode.STANDARD,
+    assignment_id: str | None = None,
+    streams: set[str] | None = None,
+    tools: set[ReviewTool] | None = None,
 ) -> list[ReviewTask]:
+    """select가 없으면 현재 운영 라벨을 넣는다. tools·streams로 만들 작업을 좁힌다."""
+    pick = select or default_selector(conn, session_id)
+    use_cvat = setup.cvat is not None and (tools is None or ReviewTool.CVAT in tools)
+    use_ls = setup.label_studio is not None and (tools is None or ReviewTool.LABEL_STUDIO in tools)
     session = get_session(conn, session_id)
     if session.privacy_state is not PrivacyState.APPROVED:
         raise TaskError(f"{session_id}: 프라이버시 승인 전에는 작업 라벨 검수를 만들 수 없습니다")
@@ -129,6 +171,10 @@ def create_labeling_tasks(
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp)
         for stream in (s for s in session.streams if s.kind in VIDEO_KINDS):
+            if streams is not None and stream.stream_id not in streams:
+                continue
+            if not use_cvat and not (use_ls and stream.kind is StreamKind.BODYCAM):
+                continue
             blurred = work / f"{stream.stream_id}-blurred.mp4"
             setup.labeling.get_file(
                 f"sessions/{session_id}/blurred/{stream.stream_id}.mp4", blurred
@@ -139,10 +185,9 @@ def create_labeling_tasks(
             setup.labeling.put_file(vkey, marked, sha256_file(marked))
             media_uri = setup.labeling.uri(vkey)
 
-            if setup.cvat is not None:
-                labels = current_for_review(
-                    conn, session_id, stream.stream_id, ("box_track", "keypoint_track")
-                )
+            if use_cvat:
+                assert setup.cvat is not None
+                labels = pick(stream.stream_id, ("box_track", "keypoint_track"))
                 names = [*setup.ontology.objects, "kp_hand21", "kp_coco17", "kp_wholebody133"]
                 pid, schema = _cvat_project(setup.cvat, SPATIAL_PROJECT, names)
                 tid = setup.cvat.create_task(
@@ -152,15 +197,16 @@ def create_labeling_tasks(
                 spatial = ("box_track", "keypoint_track")
                 out.append(
                     _task(f"cvat:{tid}", ReviewTool.CVAT, tid, session_id, stream.stream_id,
-                          assignee, media_uri, spatial, now)
+                          assignee, media_uri, spatial, now, mode, assignment_id)
                 )  # fmt: skip
 
-            if setup.label_studio is not None and stream.kind is StreamKind.BODYCAM:
+            if use_ls and stream.kind is StreamKind.BODYCAM:
+                assert setup.label_studio is not None
                 csv = work / "timeseries.csv"
                 write_timeseries_csv(session, _series(session, setup.raw, work), csv)
                 ckey = f"sessions/{session_id}/review/timeseries.csv"
                 setup.labeling.put_file(ckey, csv, sha256_file(csv))
-                labels = current_for_review(conn, session_id, None, LS_KINDS)
+                labels = pick(None, LS_KINDS)
                 ls = setup.label_studio
                 project = ls.find_project(TEMPORAL_PROJECT)
                 lpid = (
@@ -177,7 +223,8 @@ def create_labeling_tasks(
                 check_stage_uris(ReviewStage.LABELING, [str(v) for v in data.values()], raw_bucket)
                 tid = ls.create_task(lpid, data, to_ls_results(labels))
                 out.append(_task(f"label_studio:{tid}", ReviewTool.LABEL_STUDIO, tid, session_id,
-                                 stream.stream_id, assignee, media_uri, LS_KINDS, now))  # fmt: skip
+                                 stream.stream_id, assignee, media_uri, LS_KINDS, now, mode,
+                                 assignment_id))  # fmt: skip
     check_stage_uris(ReviewStage.LABELING, [t.media_uri for t in out], raw_bucket)
     for task in out:
         insert_review_task(conn, task)
@@ -187,9 +234,10 @@ def create_labeling_tasks(
 def _task(
     key: str, tool: ReviewTool, tid: int, session_id: str, stream_id: str, assignee: str,
     media_uri: str, kinds: tuple[str, ...], now: datetime,
+    mode: ReviewMode = ReviewMode.STANDARD, assignment_id: str | None = None,
 ) -> ReviewTask:  # fmt: skip
     return ReviewTask(
         task_key=key, tool=tool, external_id=str(tid), session_id=session_id, stream_id=stream_id,
         stage=ReviewStage.LABELING, assignee=assignee, media_uri=media_uri, label_kinds=kinds,
-        created_at=now,
+        created_at=now, mode=mode, assignment_id=assignment_id,
     )  # fmt: skip

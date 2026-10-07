@@ -146,8 +146,34 @@ def entity_refs(label: LabelRecord) -> list[str]:
             return []
 
 
-def current_labels(labels: list[LabelRecord]) -> list[LabelRecord]:
-    """수정 이력에서 최신 레코드만 남긴다. 다른 레코드의 parent인 레코드와 삭제 레코드를 뺀다."""
+def non_operational_ids(labels: list[LabelRecord]) -> set[str]:
+    """운영 라벨이 아닌 레코드: 오류 삽입 레코드와 그 후손(검수자가 고친 것 포함), 측정용 레코드."""
+    out = {x.label_id for x in labels if x.seeded_error or x.measurement is not None}
+    children: dict[str, list[str]] = {}
+    for x in labels:
+        if x.parent_label_id:
+            children.setdefault(x.parent_label_id, []).append(x.label_id)
+    stack = list(out)
+    while stack:
+        for child in children.get(stack.pop(), []):
+            if child not in out:
+                out.add(child)
+                stack.append(child)
+    return out
+
+
+def current_labels(labels: list[LabelRecord], *, operational: bool = True) -> list[LabelRecord]:
+    """수정 이력에서 최신 레코드만 남긴다. 다른 레코드의 parent인 레코드와 삭제 레코드를 뺀다.
+
+    operational이면 오류 삽입·측정용 레코드와 그 후손도 뺀다 (학습·내보내기·다른 단계의 입력).
+    """
+    excluded = non_operational_ids(labels) if operational else set[str]()
     superseded = {x.parent_label_id for x in labels if x.parent_label_id}
     retracted = {x.label_id for x in labels if x.retracted}
-    return [x for x in labels if x.label_id not in superseded and x.label_id not in retracted]
+    return [
+        x
+        for x in labels
+        if x.label_id not in superseded
+        and x.label_id not in retracted
+        and x.label_id not in excluded
+    ]

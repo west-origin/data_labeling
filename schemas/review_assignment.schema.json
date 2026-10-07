@@ -1,0 +1,290 @@
+{
+  "$defs": {
+    "AssignmentStatus": {
+      "enum": [
+        "open",
+        "done"
+      ],
+      "title": "AssignmentStatus",
+      "type": "string"
+    },
+    "FlaggedSpan": {
+      "additionalProperties": false,
+      "description": "검수 단위 안에서 먼저 볼 구간.",
+      "properties": {
+        "label_ids": {
+          "default": [],
+          "items": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+            "type": "string"
+          },
+          "title": "Label Ids",
+          "type": "array"
+        },
+        "reason": {
+          "$ref": "#/$defs/ReviewReason"
+        },
+        "t_end_ms": {
+          "description": "마스터 타임라인 기준 시각(ms)",
+          "minimum": 0,
+          "title": "T End Ms",
+          "type": "integer"
+        },
+        "t_start_ms": {
+          "description": "마스터 타임라인 기준 시각(ms)",
+          "minimum": 0,
+          "title": "T Start Ms",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "reason",
+        "t_start_ms",
+        "t_end_ms"
+      ],
+      "title": "FlaggedSpan",
+      "type": "object"
+    },
+    "InjectedError": {
+      "additionalProperties": false,
+      "properties": {
+        "detail": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              }
+            ]
+          },
+          "title": "Detail",
+          "type": "object"
+        },
+        "error_type": {
+          "enum": [
+            "boundary_shift",
+            "class_swap",
+            "blur_deletion"
+          ],
+          "title": "Error Type",
+          "type": "string"
+        },
+        "original_label_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "title": "Original Label Id",
+          "type": "string"
+        },
+        "seeded_label_id": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "오류를 넣은 사본. 블러 삭제는 사본이 없다",
+          "title": "Seeded Label Id"
+        }
+      },
+      "required": [
+        "error_type",
+        "original_label_id"
+      ],
+      "title": "InjectedError",
+      "type": "object"
+    },
+    "ReviewMode": {
+      "description": "검수 방식. 블라인드·이중의 결과는 측정용 레코드, 오류 삽입 과제의 결과는 학습에서 빠진다.",
+      "enum": [
+        "standard",
+        "blind",
+        "seeded_error",
+        "double",
+        "qa"
+      ],
+      "title": "ReviewMode",
+      "type": "string"
+    },
+    "ReviewReason": {
+      "enum": [
+        "low_confidence",
+        "model_disagreement",
+        "new_object",
+        "contact_mismatch",
+        "sample",
+        "routine"
+      ],
+      "title": "ReviewReason",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "검수 단위(세션, 스트림, 라벨 종류 묶음)의 배정.\n\n우선순위·방식·담당자와 오류 삽입 기록을 남긴다.",
+  "properties": {
+    "assignee": {
+      "anyOf": [
+        {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Assignee"
+    },
+    "assignment_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Assignment Id",
+      "type": "string"
+    },
+    "completed_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Completed At"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "flagged": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/FlaggedSpan"
+      },
+      "title": "Flagged",
+      "type": "array"
+    },
+    "injected": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/InjectedError"
+      },
+      "title": "Injected",
+      "type": "array"
+    },
+    "label_kinds": {
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "title": "Label Kinds",
+      "type": "array"
+    },
+    "mode": {
+      "$ref": "#/$defs/ReviewMode"
+    },
+    "only_label_ids": {
+      "default": [],
+      "description": "비어 있지 않으면 작업에 이 라벨만 넣는다 (불합격 묶음 재검수)",
+      "items": {
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+        "type": "string"
+      },
+      "title": "Only Label Ids",
+      "type": "array"
+    },
+    "pair_id": {
+      "anyOf": [
+        {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "블라인드·이중·QA 배정이 짝을 이루는 표준 배정",
+      "title": "Pair Id"
+    },
+    "priority": {
+      "description": "클수록 먼저",
+      "title": "Priority",
+      "type": "number"
+    },
+    "sample_label_ids": {
+      "default": [],
+      "description": "높은 신뢰도 묶음의 표본. 이 배정의 결과로 묶음 합격 여부를 정한다",
+      "items": {
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+        "type": "string"
+      },
+      "title": "Sample Label Ids",
+      "type": "array"
+    },
+    "session_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Session Id",
+      "type": "string"
+    },
+    "status": {
+      "$ref": "#/$defs/AssignmentStatus",
+      "default": "open"
+    },
+    "stream_id": {
+      "anyOf": [
+        {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Stream Id"
+    },
+    "task_key": {
+      "anyOf": [
+        {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Task Key"
+    },
+    "withheld_label_ids": {
+      "default": [],
+      "description": "작업에 넣지 않은 묶음의 나머지. 표본이 합격하면 표본 검증이 된다",
+      "items": {
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+        "type": "string"
+      },
+      "title": "Withheld Label Ids",
+      "type": "array"
+    }
+  },
+  "required": [
+    "assignment_id",
+    "session_id",
+    "label_kinds",
+    "mode",
+    "priority",
+    "created_at"
+  ],
+  "title": "ReviewAssignment",
+  "type": "object"
+}

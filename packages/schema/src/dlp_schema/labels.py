@@ -356,6 +356,10 @@ class LabelRecord(Contract):
     parent_label_id: Identifier | None = None
     retracted: bool = Field(default=False, description="parent 라벨을 삭제(오탐 제거)하는 레코드")
     seeded_error: bool = Field(default=False, description="오류 삽입 과제용. 학습에서 제외")
+    measurement: Literal["blind", "double"] | None = Field(
+        default=None,
+        description="측정용 레코드 (블라인드 과제, 이중 라벨링의 두 번째 라벨). 운영 라벨이 아니다",
+    )
     created_at: AwareDatetime
     payload: LabelPayload
 

@@ -1,5 +1,17 @@
 {
   "$defs": {
+    "ReviewMode": {
+      "description": "검수 방식. 블라인드·이중의 결과는 측정용 레코드, 오류 삽입 과제의 결과는 학습에서 빠진다.",
+      "enum": [
+        "standard",
+        "blind",
+        "seeded_error",
+        "double",
+        "qa"
+      ],
+      "title": "ReviewMode",
+      "type": "string"
+    },
     "ReviewStage": {
       "description": "프라이버시 검수는 원본 접근 권한자만, 작업 라벨 검수는 블러본만 본다.",
       "enum": [
@@ -42,6 +54,19 @@
       "default": null,
       "title": "Assignee"
     },
+    "assignment_id": {
+      "anyOf": [
+        {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Assignment Id"
+    },
     "collected_at": {
       "anyOf": [
         {
@@ -74,6 +99,10 @@
     "media_uri": {
       "title": "Media Uri",
       "type": "string"
+    },
+    "mode": {
+      "$ref": "#/$defs/ReviewMode",
+      "default": "standard"
     },
     "session_id": {
       "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
