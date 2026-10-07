@@ -1,4 +1,27 @@
-"""운영 대시보드와 보안 하위 명령 (WP16)."""
+"""운영 대시보드와 보안 하위 명령 (WP16, ADR 0020·0021).
+
+등록하는 명령 (`dlp ops …`):
+- `weekly [--week] [--weeks] [--out]` — 주간 운영 지표(검수 시간, 수정률, 자동 승인율, 프리라벨
+  편향, 오류 삽입 발견율, 잔여 블러 누락률, 에피소드당 원가)와 경고. 최근 N주를 한 표로 낸다.
+- `audit-report <YYYY-MM> [--fail-on-flags]` — 원본 접근(`raw_access_log`) 월간 감사 리포트.
+  권한 없는 접근·업무 시간 밖 접근 같은 확인할 것(flags)을 표시한다.
+- `retention [--today] [--all]` — 원본 보관 기간 만료 알림 (기간은 `defaults.yaml`
+  `retention.raw_retention_days`, 아직 미정이면 알림만 없음).
+- `retention-decide <세션> extend|delete [--until] --reason` — 보관 연장·삭제 결정을 기록한다.
+  실제 삭제는 이 명령이 하지 않는다 (`RETENTION_NOTE` 참고).
+- `log-work <세션> --reviewer --stage --minutes` — 도구가 재지 않는 검수 작업 시간을 손으로
+  기록한다.
+- `privacy-audit <세션> <스트림> --misses` — 잔여 블러 누락 감사 결과를 기록한다.
+  감사자는 그 스트림의 블러 검수자와 달라야 한다. 감사 표본은 `dlp privacy audit-sample`로 뽑는다.
+
+주기: `weekly`는 매주, `audit-report`는 매월, `retention`은 매주 정도 (저장소에 예약 실행 설정은
+없다 — 운영자가 cron 등으로 건다).
+운영·감사 기록 테이블(`review_work`, `privacy_audits`, `retention_decisions`)은 추가만 한다
+(ADR 0020, 0021). 지표 계산 로직은 `dlp_ops` 패키지에 있다.
+
+정책 출처: `config/policies/ops.yaml` (경고 임계값, 원가, 감사 규칙, 보관 알림 일수),
+`config/policies/review.yaml`(`reviewers.privacy`: 원본 접근 권한자).
+"""
 
 from __future__ import annotations
 
@@ -31,10 +54,21 @@ from dlp_schema.ops import PrivacyAuditRecord, RetentionDecision, ReviewWork
 
 
 def _engine(args: argparse.Namespace) -> sa.Engine:
+    """`--url`(없으면 `DLP_DATABASE_URL`/기본값)로 엔진을 만든다. 호출자가 `dispose`한다."""
     return sa.create_engine(database_url(args.url))
 
 
 def _write(out: str | None, text: str, data: object) -> None:
+    """리포트를 파일로 쓰거나 표준 출력에 낸다.
+
+    인자:
+        out: 리포트 경로(보통 `.md`). None/빈 문자열이면 `text`만 표준 출력에 찍는다.
+        text: 사람용 Markdown 본문.
+        data: 기계용 데이터. `out`이 있으면 확장자를 `.json`으로 바꾼 옆 파일에 쓴다
+            (`datetime` 등은 `default=str`로 문자열화).
+
+    부작용: 상위 디렉터리를 만들고 두 파일을 덮어쓴다.
+    """
     if out:
         path = Path(out)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -48,6 +82,16 @@ def _write(out: str | None, text: str, data: object) -> None:
 
 
 def cmd_weekly(args: argparse.Namespace) -> int:
+    """`dlp ops weekly`: 최근 `--weeks`주(기본 8)의 운영 지표와 경고를 낸다. 읽기 전용.
+
+    인자:
+        args.week: 마지막 주 (ISO 주 `YYYY-Www`). None이면 지금(UTC)이 속한 주.
+        args.weeks: 몇 주를 거슬러 볼지.
+        args.out: 리포트 파일 경로 (없으면 표준 출력).
+
+    경고(`alerts`)는 여러 주 추세를 보고 `ops.yaml`의 임계값으로 정한다.
+    반환: 항상 0 (경고가 있어도 실패로 보지 않는다).
+    """
     root = repo_root()
     policy, review = load_policy(root), load_review_policy(root)
     last = args.week or metrics_mod.week_of(datetime.now(UTC))
@@ -67,6 +111,10 @@ def cmd_weekly(args: argparse.Namespace) -> int:
 
 
 def cmd_audit_report(args: argparse.Namespace) -> int:
+    """`dlp ops audit-report <YYYY-MM>`: 원본 접근 감사 월간 리포트. 읽기 전용.
+
+    반환: `--fail-on-flags`이고 확인할 것이 있으면 1, 그 밖에는 0 (CI·cron에서 알림용).
+    """
     root = repo_root()
     policy, review = load_policy(root), load_review_policy(root)
     engine = _engine(args)
@@ -78,6 +126,16 @@ def cmd_audit_report(args: argparse.Namespace) -> int:
 
 
 def cmd_retention(args: argparse.Namespace) -> int:
+    """`dlp ops retention`: 원본 보관 만료 상태를 세션별로 계산해 알린다. 읽기 전용.
+
+    인자:
+        args.today: 기준일 `YYYY-MM-DD`. 없으면 오늘(UTC 날짜).
+        args.all: 참이면 알림이 없는 세션도 출력한다.
+
+    보관 기간(`raw_retention_days`)이 None이면 안내를 출력하고, 만료 계산은 `retention_status`에
+    맡긴다. 상태 집계와, 알림 대상 세션(`[상태] 세션 만료일 메모`)을 출력한다. 만료·사용 중지·삭제
+    결정이 있으면 실제 삭제 절차 안내(`RETENTION_NOTE`)를 덧붙인다.
+    """
     root = repo_root()
     days = load_config(root / "config/defaults.yaml").retention.raw_retention_days
     if days is None:
@@ -97,6 +155,17 @@ def cmd_retention(args: argparse.Namespace) -> int:
 
 
 def cmd_retention_decide(args: argparse.Namespace) -> int:
+    """`dlp ops retention-decide <세션> extend|delete`: 원본 보관 결정을 기록한다 (추가만).
+
+    인자:
+        args.decision: `extend`(연장, `--until` 필수) 또는 `delete`(삭제 결정, `--until` 없어야 함).
+            조합이 틀리면 `RetentionDecision` 검증에서 `ValidationError`.
+        args.until: 연장 기한 `YYYY-MM-DD`.
+        args.reason: 결정 이유 (필수).
+
+    결정자는 `current_actor()`(`DLP_ACTOR` 또는 OS 사용자)다.
+    부작용: 세션이 있는지 확인한 뒤 `retention_decisions` INSERT. 원본은 지우지 않는다.
+    """
     d = RetentionDecision(
         decision_id=uuid.uuid4().hex,
         session_id=args.session_id,
@@ -116,13 +185,29 @@ def cmd_retention_decide(args: argparse.Namespace) -> int:
 
 
 def _aware(text: str) -> datetime:
-    """ISO 시각. 시간대가 없으면 UTC로 본다."""
+    """ISO 시각. 시간대가 없으면 UTC로 본다.
+
+    예: `2026-10-05T09:00` → `2026-10-05T09:00+00:00`. 형식이 틀리면 `ValueError`.
+    """
     t = datetime.fromisoformat(text)
     return t if t.tzinfo is not None else t.replace(tzinfo=UTC)
 
 
 def cmd_log_work(args: argparse.Namespace) -> int:
     # 검수한 시각(--at)의 주에 센다. 나중에 몰아서 기록해도 그 주의 지표에 들어간다
+    """`dlp ops log-work <세션>`: 검수 작업 시간을 `review_work`에 기록한다 (추가만).
+
+    인자:
+        args.reviewer: 검수자 ID.
+        args.stage: `privacy` / `labeling` / `qa`.
+        args.minutes: 작업 시간(분, 실수). 초로 바꿔 `seconds`에 저장한다.
+        args.video_ms: 검수한 영상 길이(ms). 없거나 0이면 세션 전체 길이.
+        args.task_key: 검수 작업 키. 있으면 출처를 `cvat`로, 없으면 `manual`로 기록한다
+            (Label Studio 작업 키를 줘도 `cvat`으로 기록된다 — 보고서의 버그 의심 참고).
+        args.at: 검수한 시각 (ISO 8601). 그 시각이 속한 주의 지표에 들어간다. 미래면 `SystemExit`.
+
+    부작용: 한 트랜잭션에서 `review_work` INSERT. 세션이 없으면 DB 조회 오류.
+    """
     at = _aware(args.at) if args.at else datetime.now(UTC)
     if at > datetime.now(UTC):
         raise SystemExit(f"--at이 미래입니다: {at.isoformat()}")
@@ -148,6 +233,17 @@ def cmd_log_work(args: argparse.Namespace) -> int:
 
 
 def cmd_privacy_audit(args: argparse.Namespace) -> int:
+    """`dlp ops privacy-audit <세션> <스트림> --misses <N>`: 잔여 블러 누락 감사 결과를 기록한다.
+
+    검사:
+    - 그 스트림의 운영 현재 블러 트랙에 사람 검수자가 없으면 `SystemExit` (감사할 블러본이 없다).
+    - 감사자(`--auditor`, 없으면 `current_actor()`)가 그 블러 검수자 중 하나면 `SystemExit`
+      (독립 감사, `PrivacyAuditRecord`도 같은 규칙을 검증한다).
+
+    기록: `blur_reviewer`에는 검수자 목록의 첫 사람만, `duration_ms`에는 스트림이 아니라 세션 길이를
+    넣는다. 누락률은 시간당(누락 수 / 길이) 계산에 쓴다.
+    부작용: 한 트랜잭션에서 `privacy_audits` INSERT (추가만).
+    """
     engine = _engine(args)
     with engine.begin() as conn:
         session = get_session(conn, args.session_id)
@@ -180,6 +276,7 @@ def cmd_privacy_audit(args: argparse.Namespace) -> int:
 
 
 def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:  # pyright: ignore[reportPrivateUsage]
+    """`ops weekly|audit-report|retention|retention-decide|log-work|privacy-audit`을 등록한다."""
     ops = sub.add_parser("ops", help="운영 지표·원본 접근 감사·보관 기간")
     osub = ops.add_subparsers(dest="ops_command", required=True)
     w = osub.add_parser("weekly", help="주간 운영 지표 (최근 여러 주와 경고)")

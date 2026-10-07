@@ -1,3 +1,8 @@
+# GitHub Actions CI. 작업 세 개:
+#   check          — 푸시·PR마다: 의존성(+FiftyOne) 설치, 모델 가중치 받기·변환(캐시), `make check`.
+#   services       — 푸시·PR마다: docker compose 개발 서비스를 띄워 통합 테스트와 LeRobot 격리 테스트.
+#   services-cvat  — 매일·수동 실행 때만: CVAT까지 띄워 서비스 테스트.
+# 비밀값은 쓰지 않는다 (모두 .env.example의 개발값).
 name: CI
 
 on:
@@ -9,11 +14,13 @@ on:
   schedule:
     - cron: "17 18 * * *"   # 매일 (CVAT 포함 서비스 테스트)
 
+# 같은 브랜치(ref)에 새 푸시가 오면 이전 실행을 취소한다
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  # 단위 테스트·린트·타입·계약 (서비스 불필요). MediaPipe 등 실제 모델 CPU 추론 테스트도 여기서 돈다.
   check:
     name: lint · typecheck · test
     runs-on: ubuntu-latest
@@ -26,6 +33,7 @@ jobs:
       - run: make install-curation   # FiftyOne 연동 테스트까지 돌린다
       - name: System libraries for MediaPipe (EGL/GLES, CPU inference)
         run: sudo apt-get update && sudo apt-get install -y libegl1 libgles2
+      # 가중치 캐시 키 = models.yaml + 변환 스크립트 해시. 둘 중 하나가 바뀌면 다시 받는다
       - name: Cache model weights
         uses: actions/cache@v4
         with:
@@ -37,6 +45,8 @@ jobs:
         run: make export-models
       - run: make check
 
+  # 개발 서비스 통합 테스트. compose 파일 검증 → 기동(make up) → 헬스체크 → services 테스트 → 격리 테스트.
+  # 끝나면(성공·실패 모두) 볼륨까지 지운다.
   services:
     name: compose smoke test
     runs-on: ubuntu-latest
@@ -48,12 +58,14 @@ jobs:
       - run: uv python install
       - run: make install
       - name: Validate compose file
+        # 변수 치환까지 포함해 compose 파일이 해석되는지만 본다 (-q: 출력 없음)
         run: cp .env.example .env && docker compose --env-file .env -f services/docker-compose.yml config -q
       - name: Start services
         run: make up
       - run: make health
       - run: make test-services
       - name: LeRobot official write/read (isolated PyTorch CPU env)
+        # LeRobot·PyTorch CPU 일회용 환경을 받는다 (scripts/lerobot-env/uv.lock). 내보내기 종단 테스트는 DB도 쓴다
         run: make test-isolated
       - name: Dump logs on failure
         if: failure()
@@ -68,6 +80,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
+      # cvat.sh superuser가 이 값이 없으면 실패한다 (.env에도 있지만 명시)
       DLP_CVAT_ADMIN_PASSWORD: dlp-dev-password   # 개발용 (tests의 기본값과 같다)
     steps:
       - uses: actions/checkout@v4
@@ -80,6 +93,7 @@ jobs:
       - name: Start services
         run: make up
       - name: Start CVAT
+        # CVAT 공식 compose를 고정 버전으로 받아 띄우고 관리자 계정을 만든다 (수 분)
         run: make cvat-up && make cvat-superuser
       - run: make health
       - run: make test-services

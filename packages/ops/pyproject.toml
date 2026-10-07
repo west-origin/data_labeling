@@ -1,3 +1,4 @@
+# WP16 운영 패키지 (`dlp ops …`가 쓴다). dlp-privacy(잔여 누락률), dlp-review(검수 운영 정책·품질 측정)에 의존한다.
 [project]
 name = "dlp-ops"
 version = "0.1.0"

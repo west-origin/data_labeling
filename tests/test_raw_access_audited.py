@@ -1,8 +1,12 @@
-"""원본 버킷 저장소는 감사 저장소로만 만든다 (WP16).
+"""원본 버킷 저장소는 감사 저장소로만 만든다 (WP16, ADR 0020·0021).
 
 CLI·라이브러리 코드를 훑어 감사를 거치지 않는 원본 저장소 생성을 찾는다.
 원본 버킷 이름을 얻는 길(config buckets.raw, 리터럴 "dlp-raw",
 dlp_cli.raw_access.raw_bucket())을 raw_access.py 밖에서 쓰면 실패한다.
+
+검사 범위는 `packages/*/src/**/*.py` 줄 단위 텍스트다 (주석·docstring 포함!). 따라서 그 경로의
+주석에도 위 표현을 쓰면 안 된다. 저장소를 만들지 않고 이름을 비교·전달만 하는 줄은 `NAME_ONLY`로
+허용한다. 테스트 코드(`tests/`, `packages/*/tests/`)는 검사하지 않는다.
 """
 
 from __future__ import annotations
@@ -21,6 +25,10 @@ NAME_ONLY = re.compile(r"raw_bucket=|buckets\.labeling == buckets\.raw|원본 �
 
 
 def test_cli_builds_raw_stores_only_through_audit() -> None:
+    """패키지 소스 전체에서 원본 버킷 이름을 얻는 줄을 찾아, 허용 파일·허용 패턴이 아니면 실패한다.
+
+    실패 메시지에 `파일:줄: 내용`을 모두 나열한다.
+    """
     offenders: list[str] = []
     for path in sorted((ROOT / "packages").glob("*/src/**/*.py")):
         rel = path.relative_to(ROOT)
@@ -36,7 +44,11 @@ def test_cli_builds_raw_stores_only_through_audit() -> None:
 
 
 def test_scan_catches_raw_bucket_helper() -> None:
-    """raw_bucket()으로 이름을 얻어 저장소를 만드는 줄도 잡는다 (예전 media_cmds --no-db 경로)."""
+    """raw_bucket()으로 이름을 얻어 저장소를 만드는 줄도 잡는다 (예전 media_cmds --no-db 경로).
+
+    정규식 자체의 회귀 테스트: 호출·가져오기는 잡고, 같은 이름의 키워드 인자·매개변수·변수는 잡지
+    않는다.
+    """
     assert RAW_BUCKET_CALL.search("store_from_spec(args.store, raw_bucket())")
     assert RAW_BUCKET_CALL.search("from dlp_cli.raw_access import raw_bucket, raw_store")
     assert not RAW_BUCKET_CALL.search("raw_bucket=config.buckets.raw,")

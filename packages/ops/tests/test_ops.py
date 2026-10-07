@@ -1,6 +1,16 @@
 """완료 기준 (WP16): 합성 운영 이벤트로 지표 값이 기대와 일치한다.
 
 DB 테스트는 PostgreSQL(make up)이 필요하다. 경고 규칙과 감사 리포트 판정은 순수 함수로 확인한다.
+
+구성:
+- 순수 함수 (DB 없음, `make check`에서 돈다): 주·달 경계, 경고 규칙, 원본 접근 감사 판정,
+  블러 검수자 선택, 검증 완료 시각(`verified_at`) 추정.
+- DB (`@pytest.mark.services`, `make test-services`): 테스트마다 임시 DB를 만들어
+  마이그레이션·온톨로지 등록 뒤 합성 레코드를 넣고 `weekly_metrics`·CLI(`dlp ops
+  log-work|privacy-audit`)·`retention_status`를 확인한다. 끝나면 DB를 지운다.
+
+시간 기준: `WEEK` = 2026-W41(10-05 월 ~ 10-11 일), `IN` = 그 주 수요일 9시 UTC, `BEFORE` = 그 1주
+전. 정답은 테스트가 직접 넣은 레코드 수에서 손으로 계산한 값이다 (각 단언 옆 주석).
 """
 
 from __future__ import annotations
@@ -53,16 +63,20 @@ from dlp_schema.testing import make_label, make_session
 
 ROOT = Path(__file__).resolve().parents[3]
 WEEK = "2026-W41"  # 2026-10-05(월) ~ 10-11
-IN = datetime(2026, 10, 7, 9, 0, tzinfo=UTC)
-BEFORE = IN - timedelta(days=7)
+IN = datetime(2026, 10, 7, 9, 0, tzinfo=UTC)  # WEEK 안의 시각 (수요일 9시 UTC)
+BEFORE = IN - timedelta(days=7)  # 지난주(W40) 같은 시각 — "그 주가 아님"을 만들 때
 
 
 @pytest.fixture(scope="module")
 def policy() -> OpsPolicy:
+    """저장소의 실제 `config/policies/ops.yaml` (모듈 범위에서 한 번 읽는다)."""
     return load_policy(ROOT)
 
 
 def test_week_and_month_ranges() -> None:
+    """ISO 주 → UTC [월요일, 다음 월요일), 시각 → 주 문자열, 달 경계(12월 → 다음 해 1월)를
+    확인한다. 정책 시간대(Asia/Seoul)의 달 경계는 UTC로 바꾸면 전날 15시다.
+    """
     start, end = week_range(WEEK)
     assert (start, end) == (datetime(2026, 10, 5, tzinfo=UTC), datetime(2026, 10, 12, tzinfo=UTC))
     assert week_of(IN) == WEEK and week_of(BEFORE) == "2026-W40"
@@ -76,7 +90,16 @@ def test_week_and_month_ranges() -> None:
 
 
 def test_quality_alerts(policy: OpsPolicy) -> None:
+    """경고 규칙 세 가지를 합성 `WeeklyMetrics`로 확인한다.
+
+    - 자동 승인율 +10%p, 발견율 -20%p → "검수 품질 저하" 하나만 (임계값 0.02/0.05 초과).
+    - 검수 시간이 4주(`stagnation_weeks`) 동안 늘고 수정률이 그대로 → "가이드라인" 경고.
+      둘 다 줄면 경고 없음.
+    - 블러 검수 시간이 있는데 감사 0건 → "감사가 없다" 경고. 감사 1건이면 없음.
+    """
+
     def w(week: str, minutes: float, corr: float, auto: float, det: float) -> WeeklyMetrics:
+        """경고 판정에 필요한 네 지표만 채운 `WeeklyMetrics`를 만든다."""
         return WeeklyMetrics(week, review_minutes_per_video_hour=minutes, correction_rate=corr,
                              auto_approval_rate=auto, seeded_detection_rate=det)  # fmt: skip
 
@@ -97,6 +120,7 @@ def test_quality_alerts(policy: OpsPolicy) -> None:
 
 
 def event(actor: str, action: str, hour: int, purpose: str = "privacy.detect") -> RawAccessEvent:
+    """2026-10-07 `hour`시(UTC)의 원본 접근 이벤트 하나 (세션 `s1`, 바디캠 원본 키)."""
     return RawAccessEvent(
         event_id=uuid.uuid4().hex, at=datetime(2026, 10, 7, hour, tzinfo=UTC), actor=actor,
         purpose=purpose, action=action, bucket="dlp-raw",  # type: ignore[arg-type]
@@ -106,6 +130,11 @@ def event(actor: str, action: str, hour: int, purpose: str = "privacy.detect") -
 
 def test_audit_report_flags(policy: OpsPolicy) -> None:
     # 시각은 UTC. 서울(UTC+9) 기준 업무 시간 밖 = 22시~6시 = UTC 13시~21시
+    """원본 접근 감사 판정 규칙을 이벤트 8건으로 확인한다 (각 이벤트 옆 주석이 기대 판정).
+
+    권한자는 `rev-a` 하나, 서비스 계정은 정책의 `svc-pipeline`. 서울 기준 업무 시간 밖(22~6시)은
+    UTC 13~21시다. 기대: 표시 5종이 각각 정확히 한 번 (정렬해 비교), 동작별 건수와 세션 수 1.
+    """
     events = [
         event("svc-pipeline", "read", 15),  # 서비스 계정: 시간과 무관하게 정상
         event("rev-a", "grant", 2, "review.create"),  # 권한자에게 보여 줌: 정상
@@ -130,9 +159,14 @@ def test_audit_report_flags(policy: OpsPolicy) -> None:
 
 
 def test_blur_reviewers_use_current_tracks_only() -> None:
-    """감사자 검사는 지금 렌더에 쓰인(운영 현재) 블러 트랙의 검수자 모두와 비교한다."""
+    """감사자 검사는 지금 렌더에 쓰인(운영 현재) 블러 트랙의 검수자 모두와 비교한다.
+
+    정답: 고쳐진 `b1`의 `old-rev`, 오류 삽입 사본의 `rev-c`, 다른 스트림의 `rev-d`는 빠지고,
+    트랙 2개의 `rev-a`가 트랙 1개의 `rev-b`보다 앞선다.
+    """
 
     def blur(lid: str, who: str, **kw: Any) -> LabelRecord:
+        """바디캠 스트림의 얼굴 블러 트랙 하나 (`who`가 `IN`에 승인)."""
         return make_label(
             {"kind": "blur_track", "target": "face",
              "keyframes": [{"t_ms": 0, "x": 1, "y": 1, "w": 5, "h": 5}]},
@@ -152,7 +186,11 @@ def test_blur_reviewers_use_current_tracks_only() -> None:
 
 
 def test_verified_at_is_stable() -> None:
-    """검증 완료 시각은 그 뒤의 QA 수정·새 모델 버전·재검수로 바뀌지 않는다."""
+    """검증 완료 시각은 그 뒤의 QA 수정·새 모델 버전·재검수로 바뀌지 않는다.
+
+    시나리오: 모델 라벨 a(t2에 승인), b(미검수) → 미완료(None). b를 사람이 t2에 고침 → t2.
+    그 뒤 a의 QA 수정과 새 모델 라벨이 생겨도 t2 그대로.
+    """
     sid = "v"
     t1, t2, later = BEFORE, IN, IN + timedelta(days=14)
     base = [
@@ -172,7 +210,12 @@ def test_verified_at_is_stable() -> None:
 
 def test_verified_at_waits_for_staged_labels() -> None:
     """단계별 파이프라인: 객체 박스를 먼저 검수하고 2주 뒤 행동 구간이 생겨 검수되면, 완료 시각은
-    행동 구간의 검수 시각이다 (먼저 검수한 단계만 보고 일찍 세지 않는다)."""
+    행동 구간의 검수 시각이다 (먼저 검수한 단계만 보고 일찍 세지 않는다).
+
+    추가로 확인: 이미 검수한 박스의 QA 수정은 시각을 바꾸지 않는다. 완료 시각 전에 생긴 미검수 모델
+    라벨이 있으면 None. 사람이 모델 라벨을 지운 것도 검수라 그 시각까지 늦춘다. 오류 삽입 레코드는
+    무시한다.
+    """
     sid = "st"
     box = {"kind": "box_track", "entity_id": "e1", "class_id": "towel",
            "keyframes": [{"t_ms": 0, "x": 1, "y": 1, "w": 2, "h": 2}]}  # fmt: skip
@@ -211,6 +254,11 @@ def test_verified_at_waits_for_staged_labels() -> None:
 
 @pytest.fixture
 def pg() -> Iterator[sa.Engine]:
+    """임시 PostgreSQL 데이터베이스 (`make up` 필요).
+
+    `DLP_DATABASE_URL`(없으면 개발 기본값) 서버에 `dlp_test_<임의>` DB를 만들고, Alembic 최신까지
+    올린 뒤 온톨로지 v1을 등록한 엔진을 준다. 테스트가 끝나면 연결을 끊고 DB를 강제로 지운다.
+    """
     url = sa.make_url(
         os.environ.get(
             "DLP_DATABASE_URL", "postgresql+psycopg://dlp:dlp-dev-password@localhost:5432/dlp"
@@ -235,15 +283,19 @@ def pg() -> Iterator[sa.Engine]:
 
 
 def action(verb: str = "carry") -> dict[str, Any]:
+    """오른손 `carry` 행동 구간 페이로드 (0~900 ms, 마스터 타임라인). `verb`로 동사를 바꾼다."""
     return {"kind": "action", "action_id": "a", "hand": "right", "verb": verb,
             "t_approach_ms": 0, "t_end_ms": 900}  # fmt: skip
 
 
 def checked(state: VerificationState, at: datetime, who: str = "rev-1") -> Verification:
+    """`who`가 `at`에 `state`로 검수한 `Verification`."""
     return Verification(state=state, reviewer_id=who, reviewed_at=at)
 
 
 def model(sid: str, lid: str, at: datetime, **kw: Any) -> LabelRecord:
+    """세션 `sid`의 모델 출처 행동 라벨 (`model_version=m1`, 신뢰도 0.8). 라벨 ID는
+    `<sid>-<lid>`."""
     return make_label(
         action(), label_id=f"{sid}-{lid}", session_id=sid, t_end_ms=900, created_at=at,
         provenance=Provenance(source=Source.MODEL, model_version="m1"), confidence=0.8, **kw,
@@ -251,6 +303,8 @@ def model(sid: str, lid: str, at: datetime, **kw: Any) -> LabelRecord:
 
 
 def human(sid: str, lid: str, at: datetime, **kw: Any) -> LabelRecord:
+    """세션 `sid`의 사람 출처 라벨. 기본 검수 상태는 `at`의 `human_corrected`, 페이로드는
+    `action()`."""
     payload = kw.pop("payload", action())
     kw.setdefault("verification", checked(VerificationState.HUMAN_CORRECTED, at))
     return make_label(
@@ -260,6 +314,18 @@ def human(sid: str, lid: str, at: datetime, **kw: Any) -> LabelRecord:
 
 @pytest.mark.services
 def test_weekly_metrics_from_synthetic_events(pg: sa.Engine, policy: OpsPolicy) -> None:
+    """합성 운영 이벤트로 `weekly_metrics`의 모든 지표를 손계산 값과 맞춘다.
+
+    정답 근거 (각 블록 옆 주석):
+    - 그 주 검수: 승인 6, 수정 2, 삭제 1, 추가 1 → 수정률 4/10, 자동 승인율 6/9.
+      지난주 승인·블러·오류 삽입·골든셋·사용 중지 세션의 검수는 세지 않는다.
+    - 오류 삽입 2개 중 1개를 되돌림 → 발견율 0.5.
+    - 검수 시간: 작업 라벨 50분 / 1.5시간 영상, 블러 10분 / 10분 영상 = 60분/시간. 지난주 기록 제외.
+    - 잔여 블러 누락: 1시간짜리 감사 2건에서 누락 1 → 0.5/시간.
+    - 검증 에피소드: ops-a(라벨 이력 추정), 골든 세션, ops-v(생애주기 기록, ADR 0028) = 3.
+    - 원가: 검수 1시간 * 30000원 / 3 에피소드 = 10000원.
+    마지막으로 `review_work`는 DB 트리거로 UPDATE가 막혀 있다(추가만, ADR 0020).
+    """
     review_policy = load_review_policy(ROOT)
     sid, old = "ops-a", "ops-b"
     approved = VerificationState.HUMAN_APPROVED
@@ -377,6 +443,9 @@ def test_cli_log_work_and_privacy_audit(pg: sa.Engine, monkeypatch: pytest.Monke
     """log-work --at은 검수한 주에 센다.
 
     privacy-audit 감사자는 현재 블러 트랙의 모든 검수자와 다르다.
+
+    정답: 서울 시각 10시는 UTC 1시라 W41에 기록된다. 소수 검수자 `rev-b`도 감사자가 될 수 없고,
+    `DLP_ACTOR=aud-1`로 감사하면 기록의 `blur_reviewer`는 트랙이 많은 `rev-a`다.
     """
     from dlp_cli.main import main
     from dlp_schema.db.repository import list_privacy_audits
@@ -410,6 +479,16 @@ def test_cli_log_work_and_privacy_audit(pg: sa.Engine, monkeypatch: pytest.Monke
 
 @pytest.mark.services
 def test_retention_alerts(pg: sa.Engine) -> None:
+    """원본 보관 만료 상태를 세션별로 확인한다 (기준일 2027-10-01, 보관 365일, 30일 전부터 알림).
+
+    정답 근거:
+    - r-old: 2026-09-01 확정 → 2027-09-01 만료 → `expired`. 그 뒤의 모델·철회·오류 삽입 레코드는
+      기산점을 늦추지 않는다.
+    - r-soon: 2026-10-20 + 365일 = 2027-10-20 → 30일 안 → `due_soon`.
+    - r-new: 2027-06-01 확정 → `ok`. r-ext: 2027-12-31까지 연장 → `extended`.
+    - r-del·r-gone-del: 삭제 결정 → `delete_decided`. r-gone: 사용 중지, 결정 없음 → `withdrawn`.
+    - r-wip: 검수 완료 전이라 목록에 없다. 보관 기간 미정이면 사용 중지 세션만 보인다.
+    """
     today = date(2027, 10, 1)
     finished = {
         "r-old": datetime(2026, 9, 1, tzinfo=UTC),
