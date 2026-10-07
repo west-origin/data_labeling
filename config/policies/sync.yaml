@@ -1,0 +1,41 @@
+# 동기화 정책 (WP4). 스트림 종류별로 방법을 순서대로 시도하고, 신뢰도가 min_confidence 이상인 첫 결과를 쓴다.
+version: 1
+min_confidence: 0.6
+max_offset_ms: 15000          # 탐색할 최대 오프셋 (양방향)
+min_drift_span_ms: 10000      # 앵커 사이 간격이 이보다 짧으면 드리프트(clock_scale)를 추정하지 않는다
+max_drift_ppm: 300            # 이보다 큰 드리프트 추정은 오류로 보고 버린다
+
+methods:
+  third_person: [qr_slate, tap_event, audio_xcorr]
+  glove_left: [tap_event, motion_xcorr]
+  glove_right: [tap_event, motion_xcorr]
+  imu: [tap_event]            # 바디캠 내장 IMU(shared_clock)는 동기화하지 않는다
+  audio: [tap_event, audio_xcorr]
+
+slate:
+  payload_prefix: "DLP-SLATE|"
+  search_window_ms: 60000     # 영상 앞뒤 이 구간에서만 찾는다
+  frame_stride: 3             # 이 간격으로 QR을 찾고, 찾으면 앞 프레임을 되짚어 처음 보인 프레임을 정한다
+  # 슬레이트 시각은 프레임 단위로 양자화된다(앵커마다 최대 1프레임 오차). 두 슬레이트 사이가 30초여도
+  # 드리프트 오차가 ±1000 ppm을 넘을 수 있으므로 오프셋만 추정한다.
+  estimate_drift: false
+
+tap:
+  double_tap_gap_ms: [120, 300]
+  max_pulse_ms: 80            # 이보다 긴 신호는 두드림이 아니다 (행동 중 접촉 등)
+  merge_gap_ms: 20            # 이 간격 안의 문턱 초과는 한 사건으로 묶는다
+  threshold_mad: 12.0         # 잡음 중앙값 + MAD 배수
+  match_tolerance_ms: 50      # 두 스트림 사건을 같은 두드림으로 볼 허용 오차
+  residual_scale_ms: 15.0     # 신뢰도 = exp(-잔차 RMS / 이 값)
+
+audio_xcorr:
+  analysis_rate_hz: 4000      # 거친 탐색 샘플레이트
+  coarse_segment_ms: 30000    # 거친 탐색에 쓰는 기준 오디오 길이
+  window_ms: 3000             # 정밀 탐색 창 길이
+  windows: 5                  # 정밀 탐색 창 개수 (앵커 수)
+  refine_ms: 20               # 정밀 탐색 범위 (거친 추정 ±)
+  min_psr: 8.0                # 상관 최대값의 주변 대비 비 (peak-to-sidelobe ratio)
+
+motion_xcorr:
+  rate_hz: 200
+  min_psr: 8.0

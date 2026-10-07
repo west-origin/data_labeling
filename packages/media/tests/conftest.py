@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -26,7 +27,7 @@ def sync(tmp_path_factory: pytest.TempPathFactory) -> tuple[SyncScenario, Path]:
     return scenario, out
 
 
-def write_manifest(directory: Path, sync_dir: Path, **overrides: object) -> Path:
+def _write_manifest(directory: Path, sync_dir: Path, **overrides: object) -> Path:
     manifest: dict[str, object] = {
         "session_id": "ing-s001",
         "domain": "cleaning",
@@ -46,3 +47,12 @@ def write_manifest(directory: Path, sync_dir: Path, **overrides: object) -> Path
     path = directory / "manifest.yaml"
     path.write_text(yaml.safe_dump(manifest, allow_unicode=True), encoding="utf-8")
     return path
+
+
+ManifestWriter = Callable[..., Path]
+
+
+@pytest.fixture
+def write_manifest() -> ManifestWriter:
+    """(디렉터리, 동기화 픽스처 디렉터리, **덮어쓸 값) → 매니페스트 경로."""
+    return _write_manifest

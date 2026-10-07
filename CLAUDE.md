@@ -29,6 +29,8 @@
   알고리즘 모듈의 테스트는 이 생성기로 작성하고, 생성기 출력의 정답을 기준으로 판정한다.
 - `packages/media/` (`dlp_media`) — 세션 수집: 원본 저장소(불변, 멱등), PTS 인덱스, 프록시, IMU 추출기(GPMF·사이드카),
   장갑 Parquet·HDF5 정규화. `dlp ingest <매니페스트>`로 실행한다.
+- `packages/sync/` (`dlp_sync`) — 멀티스트림 동기화: QR 슬레이트, 두드림, 오디오·운동 상호상관, 드리프트 보정.
+  `dlp sync run <세션>`, `dlp sync adjust <세션> <스트림> <ms>`. 정책은 `config/policies/sync.yaml`.
 - `config/` — 온톨로지·정책·기본값 YAML. 코드에 값을 하드코딩하지 않는다.
 - `schemas/` — 생성된 JSON Schema. 직접 편집하지 않는다 (`make schemas`).
 - `services/` — 개발용 docker compose (PostgreSQL, SeaweedFS S3, Label Studio, Prefect, MLflow), CVAT 실행 스크립트.

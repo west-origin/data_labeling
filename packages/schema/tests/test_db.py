@@ -24,11 +24,12 @@ from dlp_schema.db.repository import (
     record_review,
     register_ontology,
     set_lifecycle,
+    update_stream_sync,
 )
 from dlp_schema.db.tables import metadata
 from dlp_schema.labels import Provenance, Source, VerificationState
 from dlp_schema.ontology import Ontology
-from dlp_schema.session import LifecycleState
+from dlp_schema.session import LifecycleState, SyncMethod
 from dlp_schema.testing import FIXED_TIME, action_payload, make_label, make_session
 
 DEFAULT_URL = "postgresql+psycopg://dlp:dlp-dev-password@localhost:5432/dlp"
@@ -152,3 +153,18 @@ def test_registering_changed_ontology_under_same_version_fails(
     changed = ontology.model_copy(update={"status": "frozen"})
     with pytest.raises(ValueError, match="다른 내용"), pg.begin() as conn:
         register_ontology(conn, changed)
+
+
+@pytest.mark.services
+def test_update_stream_sync_changes_only_sync_fields(pg: sa.Engine) -> None:
+    imu = make_session().stream("imu")
+    synced = imu.model_copy(
+        update={"offset_ms": 12.5, "clock_scale": 1.00005, "sync_method": SyncMethod.TAP_EVENT,
+                "sync_confidence": 0.9, "manual_adjustment_ms": -2.0}
+    )  # fmt: skip
+    with pg.begin() as conn:
+        update_stream_sync(conn, "s001", synced)
+    with pg.connect() as conn:
+        assert get_session(conn, "s001").stream("imu") == synced
+    with pytest.raises(KeyError), pg.begin() as conn:
+        update_stream_sync(conn, "s001", synced.model_copy(update={"stream_id": "nope"}))

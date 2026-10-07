@@ -128,7 +128,15 @@ def generate_sync_scenario(
     duration_ms: float = 30_000.0,
     max_offset_ms: float = 4_000.0,
     max_drift_ppm: float = 80.0,
+    with_slates: bool = True,
+    audible_taps: bool = True,
 ) -> SyncScenario:
+    """동기화 시나리오를 만든다.
+
+    with_slates=False면 슬레이트를 띄우지 않는다. audible_taps=False면 두드림이 마이크에 들리지
+    않는다 (장갑·IMU에는 남는다). 둘 다 동기화 방법의 대체 경로를 시험하기 위한 옵션이다.
+    난수 사용 순서는 바꾸지 않으므로 같은 seed의 나머지 값은 그대로다.
+    """
     rng = np.random.default_rng(seed)
 
     def random_clock(max_offset: float) -> ClockTruth:
@@ -150,6 +158,8 @@ def generate_sync_scenario(
         SlateEvent(t, slate_payload(session_id, recorded_at, t))
         for t in (float(rng.uniform(500, 1_000)), duration_ms - 1_800.0)
     ]
+    if not with_slates:
+        slates = []
 
     # 주변 소음: 마스터 시간축 위의 대역 제한 잡음. 모든 스트림 구간을 덮도록 여유를 둔다.
     margin = max_offset_ms * 2 + 1_000
@@ -163,7 +173,8 @@ def generate_sync_scenario(
         m = clock.to_master(t)
         sig = np.interp(m, amb_t, ambient) * gain
         sig += rng.standard_normal(t.size) * 0.01
-        sig += _taps(m, taps)
+        if audible_taps:
+            sig += _taps(m, taps)
         return sig.astype(np.float32)
 
     # 각 스트림은 자기 시각 0에서 녹화를 시작해 마스터 구간 끝까지 녹화한다.

@@ -9,6 +9,7 @@ members = [
     "dlp-fixtures",
     "dlp-media",
     "dlp-schema",
+    "dlp-sync",
 ]
 
 [[package]]
@@ -124,6 +125,7 @@ dependencies = [
     { name = "dlp-fixtures" },
     { name = "dlp-media" },
     { name = "dlp-schema" },
+    { name = "dlp-sync" },
 ]
 
 [package.dev-dependencies]
@@ -142,6 +144,7 @@ requires-dist = [
     { name = "dlp-fixtures", editable = "packages/fixtures" },
     { name = "dlp-media", editable = "packages/media" },
     { name = "dlp-schema", editable = "packages/schema" },
+    { name = "dlp-sync", editable = "packages/sync" },
 ]
 
 [package.metadata.requires-dev]
@@ -162,6 +165,7 @@ dependencies = [
     { name = "dlp-fixtures" },
     { name = "dlp-media" },
     { name = "dlp-schema" },
+    { name = "dlp-sync" },
 ]
 
 [package.metadata]
@@ -169,6 +173,7 @@ requires-dist = [
     { name = "dlp-fixtures", editable = "packages/fixtures" },
     { name = "dlp-media", editable = "packages/media" },
     { name = "dlp-schema", editable = "packages/schema" },
+    { name = "dlp-sync", editable = "packages/sync" },
 ]
 
 [[package]]
@@ -234,6 +239,29 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.11" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "sqlalchemy", specifier = ">=2.0.40" },
+]
+
+[[package]]
+name = "dlp-sync"
+version = "0.1.0"
+source = { editable = "packages/sync" }
+dependencies = [
+    { name = "av" },
+    { name = "dlp-media" },
+    { name = "dlp-schema" },
+    { name = "numpy" },
+    { name = "opencv-python-headless" },
+    { name = "pyyaml" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "av", specifier = ">=14.0" },
+    { name = "dlp-media", editable = "packages/media" },
+    { name = "dlp-schema", editable = "packages/schema" },
+    { name = "numpy", specifier = ">=2.0" },
+    { name = "opencv-python-headless", specifier = ">=4.10" },
+    { name = "pyyaml", specifier = ">=6.0" },
 ]
 
 [[package]]

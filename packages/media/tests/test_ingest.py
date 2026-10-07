@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import numpy as np
@@ -20,7 +20,7 @@ from dlp_schema.db.migrate import upgrade
 from dlp_schema.session import StreamKind, SyncMethod
 from dlp_schema.testing import FIXED_TIME
 
-from .conftest import write_manifest
+ManifestWriter = Callable[..., Path]
 
 
 def _local(uri: str, store: LocalStore) -> Path:
@@ -28,7 +28,9 @@ def _local(uri: str, store: LocalStore) -> Path:
 
 
 def test_ingest_builds_session_and_is_idempotent(
-    sync: tuple[SyncScenario, Path], tmp_path: Path
+    sync: tuple[SyncScenario, Path],
+    tmp_path: Path,
+    write_manifest: ManifestWriter,
 ) -> None:
     store = LocalStore(tmp_path / "store", "dlp-raw")
     manifest, base = load_manifest(write_manifest(tmp_path, sync[1]))
@@ -55,7 +57,9 @@ def test_ingest_builds_session_and_is_idempotent(
     assert second.session == s
 
 
-def test_changed_raw_file_is_rejected(sync: tuple[SyncScenario, Path], tmp_path: Path) -> None:
+def test_changed_raw_file_is_rejected(
+    sync: tuple[SyncScenario, Path], tmp_path: Path, write_manifest: ManifestWriter
+) -> None:
     store = LocalStore(tmp_path / "store", "dlp-raw")
     glove = tmp_path / "glove.parquet"
     glove.write_bytes((sync[1] / "glove_right.parquet").read_bytes())
@@ -71,7 +75,9 @@ def test_changed_raw_file_is_rejected(sync: tuple[SyncScenario, Path], tmp_path:
 
 
 def test_recorded_at_required_when_container_has_none(
-    sync: tuple[SyncScenario, Path], tmp_path: Path
+    sync: tuple[SyncScenario, Path],
+    tmp_path: Path,
+    write_manifest: ManifestWriter,
 ) -> None:
     manifest, base = load_manifest(write_manifest(tmp_path, sync[1], recorded_at=None))
     with pytest.raises(ValueError, match="recorded_at"):
@@ -79,7 +85,10 @@ def test_recorded_at_required_when_container_has_none(
 
 
 def test_embedded_imu_becomes_shared_clock_stream(
-    sync: tuple[SyncScenario, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    sync: tuple[SyncScenario, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    write_manifest: ManifestWriter,
 ) -> None:
     class FakeExtractor:
         name = "fake"
@@ -129,7 +138,10 @@ def pg() -> Iterator[sa.Engine]:
 
 @pytest.mark.services
 def test_ingest_into_seaweedfs_and_postgres(
-    sync: tuple[SyncScenario, Path], tmp_path: Path, pg: sa.Engine
+    sync: tuple[SyncScenario, Path],
+    tmp_path: Path,
+    pg: sa.Engine,
+    write_manifest: ManifestWriter,
 ) -> None:
     store = S3Store.from_env("dlp-raw")
     sid = f"ing-{uuid.uuid4().hex[:8]}"

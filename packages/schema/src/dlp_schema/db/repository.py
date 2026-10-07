@@ -19,7 +19,7 @@ from dlp_schema.db.tables import (
 )
 from dlp_schema.labels import LabelRecord, VerificationState
 from dlp_schema.ontology import Ontology
-from dlp_schema.session import LifecycleState, Session, can_transition
+from dlp_schema.session import LifecycleState, Session, Stream, can_transition
 
 
 class TransitionError(ValueError):
@@ -107,6 +107,23 @@ def set_lifecycle(conn: sa.Connection, session_id: str, target: LifecycleState) 
         .where(sessions.c.session_id == session_id)
         .values(lifecycle_state=target.value)
     )
+
+
+def update_stream_sync(conn: sa.Connection, session_id: str, stream: Stream) -> None:
+    """스트림의 동기화 결과(오프셋, 드리프트, 방법, 신뢰도, 사람 조정값)만 갱신한다."""
+    result = conn.execute(
+        streams.update()
+        .where(streams.c.session_id == session_id, streams.c.stream_id == stream.stream_id)
+        .values(
+            offset_ms=stream.offset_ms,
+            clock_scale=stream.clock_scale,
+            sync_method=stream.sync_method.value,
+            sync_confidence=stream.sync_confidence,
+            manual_adjustment_ms=stream.manual_adjustment_ms,
+        )
+    )
+    if result.rowcount != 1:
+        raise KeyError(f"{session_id}/{stream.stream_id}")
 
 
 # ---------------------------------------------------------------- 라벨
