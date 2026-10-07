@@ -1,30 +1,42 @@
 # 지표와 평가 하네스 정책 (WP11). 골든셋으로 모델을 평가하고 배포 여부를 판정한다.
+# 로더: dlp_eval.policy.load_policy → EvaluationPolicy (모르는 키는 거부한다).
+# 사용처: dlp eval golden(dlp_cli.eval_cmds), 재학습 루프(dlp_train.loop). 관련 ADR 0013·0025.
+# 이 파일은 모델 버전 해시에 들어가지 않는다 (값을 바꿔도 프리라벨 등이 다시 돌지 않는다).
+# 값을 바꾸면 같은 모델이라도 지표·게이트 판정이 달라지므로, 비교하는 두 리포트는 같은 정책으로 만든다.
+
+# 정책 형식 버전 (정수). 형식이 바뀔 때만 올린다.
 version: 1
 
+# 시점 허용 오차 (정수 ms, 마스터 타임라인 시각). 넓히면 F1이 오르고 오차 지표 의미가 약해진다.
 tolerance_ms:
   contact: 150              # 영상 기준 접촉 시작·종료 허용 오차 (장갑 세션은 contact_glove)
-  contact_glove: 70
+  contact_glove: 70         # 장갑 스트림이 있는 세션 (장갑 압력으로 접촉 시점이 더 정확하다)
   boundary: 200             # 행동 경계 일치 허용 오차 (타임라인 맨 앞·맨 뒤 경계는 세지 않는다)
   state: 500                # 상태 전이 시각 허용 오차
 # 예측 박스·관절을 정답 시각에 맞출 때 보간할 최대 키프레임 간격 (정답 트랙은 간격 제한 없이 자기
 # 키프레임 사이를 보간한다). 프리라벨 트래커는 max_gap_ms보다 짧은 끊김을 한 트랙으로 잇되 그 사이에
 # 키프레임을 만들지 않으므로, 과제 값은 그 예측을 내는 어댑터의 트랙 간격 이상이어야 한다 (짧으면 같은
 # 박스도 놓친 것으로 세어 기존 지표가 0에 가까워지고 약한 후보가 게이트를 통과한다). 테스트가 검사한다.
+# 단위 ms (스트림 PTS 시각 차). 너무 길면 실제로 끊긴 트랙도 이어 붙여 오탐·놓침을 덜 센다.
 max_interp_ms:
-  default: 200
+  default: 200              # tasks에 없는 과제 (hands, privacy 등)
   tasks:
     objects: 1200           # >= prelabel.yaml open_vocab_objects.max_gap_ms (OWLv2 도구, 500 ms 간격 추론)
                             #    와 objects.max_gap_ms
     body: 300               # >= prelabel.yaml body.max_gap_ms
-track_iou: 0.5              # 추적 IDF1·MOTA와 보정(ECE) 판정의 IoU 문턱
+track_iou: 0.5              # 추적 IDF1·MOTA와 보정(ECE) 판정의 IoU 문턱 (0~1)
+# 행동 구간 F1을 낼 IoU 문턱 목록. 지표 이름은 segment_f1_<값> (게이트 primary가 이 이름을 쓴다:
+# 값을 바꾸면 gate.actions.primary도 같이 바꿔야 한다)
 segment_iou: [0.1, 0.25, 0.5]
-relation_iou: 0.5
+relation_iou: 0.5           # 관계 구간 F1의 IoU 문턱 (같은 주어·술어·목적어·부분끼리)
 match_iou: 0.5             # 접촉 파지 유형·행동 동사를 비교할 때 정답·예측 구간을 맞추는 IoU
-pck_alpha: 0.1              # 정답 키포인트 박스 긴 변의 10%
-ece_bins: 15
+pck_alpha: 0.1              # 정답 키포인트 박스 긴 변의 10% (PCK 허용 거리 = alpha x 긴 변)
+ece_bins: 15                # ECE 신뢰도 균등 구간 수 (Guo et al. 2017 기본 15)
 min_samples_per_class: 20   # 이보다 정답 표본이 적은 클래스는 리포트에 "표본 부족"으로 표시
+                            # (게이트를 막지 않고 경고만 남긴다)
 # 블러(프라이버시): 정답 시각마다 정답 박스가 예측 블러로 coverage 이상 덮이면 재현, 예측 박스 면적의
 # precision_overlap 이상이 정답 대상 위면 정밀. 놓친 대상은 노출이므로 재현을 주 지표로 본다.
+# 둘 다 면적 비율 (0 초과 1 이하). coverage를 낮추면 일부만 가린 블러도 재현으로 센다 (노출 위험).
 privacy:
   coverage: 0.9
   precision_overlap: 0.5
@@ -32,6 +44,7 @@ privacy:
 # 하위 집단: 세션 속성별로 따로 리포트한다.
 #   glove: 장갑 스트림이 있는 세션(glove) / 없는 세션(bare)
 #   site: 장소별
+# 게이트는 기존 모델 대비 각 하위 집단에서도 하락을 본다. 허용 값은 glove, site뿐이다.
 subgroups: [glove, site]
 
 # 배포 게이트: 후보 모델이 기존 모델보다
@@ -40,6 +53,12 @@ subgroups: [glove, site]
 # 기존 모델이 없으면(첫 배포) 주 지표가 first_deploy 기준을 넘으면 통과한다 (오차 지표는 이하).
 # 지표 방향(높을수록 좋은지)은 코드가 안다 (오차·ECE는 낮을수록 좋다).
 # max_drop은 0~1 지표 기준이다. 단위가 다른 지표(ms 오차 등)는 max_drop_by로 따로 준다.
+# 지표 이름은 dlp_eval.harness가 내는 키다 (objects: map·ap50·hota·idf1·mota·ece, hands/body: pck,
+# contact: contact_{start,end}_{f1,error_ms}·grasp_macro_f1, actions: segment_f1_<iou>·temporal_map·
+# boundary_f1·verb_macro_f1, relations: relation_f1, states: transition_accuracy·transition_precision,
+# coverage: coverage_abs_error, privacy: blur_recall·blur_precision). 없는 이름을 적으면 NaN으로
+# 취급되어 후보·기존 모두 NaN이면 조용히 건너뛴다 — 오타에 주의한다.
+# 규칙이 없는 과제는 판정하지 않고 경고만 남긴다 (통과로 본다).
 gate:
   objects: {primary: hota, min_gain: 0.0, max_drop: 0.01, guards: [map, idf1, ece], first_deploy: 0.3}
   hands: {primary: pck, min_gain: 0.0, max_drop: 0.01, guards: [], first_deploy: 0.5}
@@ -61,4 +80,5 @@ gate:
     max_drop_by: {blur_precision: 0.05}
     guards: [blur_precision]
     first_deploy: 0.95
+  # 커버리지는 오차 지표라 first_deploy는 상한이다 (평균 절대 오차 0.1 이하여야 첫 배포)
   coverage: {primary: coverage_abs_error, min_gain: 0.0, max_drop: 0.01, guards: [], first_deploy: 0.1}

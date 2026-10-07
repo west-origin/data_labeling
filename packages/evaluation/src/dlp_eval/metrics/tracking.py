@@ -2,6 +2,18 @@
 
 입력은 시각마다 (정답 ID 배열, 예측 ID 배열, 유사도 행렬)이다. ID는 0부터 이어진 정수로 바꿔 넣는다.
 유사도는 박스 IoU 등 0~1 값이다.
+
+참조:
+- HOTA: Luiten et al. IJCV 2021, TrackEval `trackeval/metrics/hota.py` `eval_sequence`.
+  alpha 0.05:0.05:0.95(19개) 평균. DetA·AssA·DetRe·DetPr·LocA도 낸다.
+- IDF1: Ristani et al. ECCV 2016, TrackEval `identity.py` (전역 ID 일대일 할당, 유사도 문턱).
+- CLEAR MOT: Bernardin & Stiefelhagen 2008, TrackEval `clear.py` (MOTA·MOTP·ID 전환).
+  MT/ML/Frag 등 나머지 CLEAR 필드는 내지 않는다.
+test_metrics_reference.py가 무작위 시퀀스에서 TrackEval과 1e-12 안에서 같은지 본다.
+
+하네스는 여러 세션·스트림을 한 시퀀스로 이어 붙여 넣는다 (ID에 세션·스트림을 붙여 서로 겹치지 않게
+하므로, TrackEval처럼 시퀀스별로 계산해 합친 것과 HOTA 정의상 다를 수 있다 — 시퀀스 평균이 아니라
+전체 검출 단위로 묶인다). 정답 키프레임 시각만 "프레임"으로 쓴다 (`harness.eval_objects`).
 """
 
 from __future__ import annotations
@@ -14,7 +26,9 @@ from numpy.typing import NDArray
 
 from dlp_eval.metrics.assign import assign
 
+# TrackEval과 같은 부동소수 허용치 (문턱 비교에서 반올림 오차를 흡수)
 EPS = float(np.finfo("float").eps)
+# HOTA 위치 정확도 문턱 alpha = 0.05, 0.10, …, 0.95 (19개, TrackEval과 같다)
 ALPHAS = np.arange(0.05, 0.99, 0.05)
 
 Ids = NDArray[np.int64]
@@ -23,18 +37,22 @@ Sim = NDArray[np.float64]
 
 @dataclass(frozen=True)
 class TrackingData:
-    num_gt_ids: int
-    num_tracker_ids: int
-    gt_ids: list[Ids]
-    tracker_ids: list[Ids]
+    """TrackEval `eval_sequence` 입력과 같은 구조 (한 시퀀스)."""
+
+    num_gt_ids: int  # 정답 개체 수 (ID는 0..num_gt_ids-1)
+    num_tracker_ids: int  # 예측 트랙 수 (ID는 0..num_tracker_ids-1)
+    gt_ids: list[Ids]  # 시각마다 그 시각에 있는 정답 ID
+    tracker_ids: list[Ids]  # 시각마다 그 시각에 있는 예측 ID
     similarity: list[Sim]  # (len(gt_ids[t]), len(tracker_ids[t]))
 
     @property
     def num_gt_dets(self) -> int:
+        """모든 시각의 정답 검출 수."""
         return sum(len(x) for x in self.gt_ids)
 
     @property
     def num_tracker_dets(self) -> int:
+        """모든 시각의 예측 검출 수."""
         return sum(len(x) for x in self.tracker_ids)
 
     @classmethod
@@ -42,7 +60,12 @@ class TrackingData:
         cls,
         frames: Sequence[tuple[Sequence[Hashable], Sequence[Hashable], Sim]],
     ) -> TrackingData:
-        """시각별 (정답 개체 키, 예측 개체 키, 유사도)에서 만든다. 키는 무엇이든 된다."""
+        """시각별 (정답 개체 키, 예측 개체 키, 유사도)에서 만든다. 키는 무엇이든 된다.
+
+        키는 처음 나온 순서대로 0부터 정수 ID로 바꾼다. 유사도는 (정답 수, 예측 수) 모양으로 바꾼다
+        (빈 시각도 (0, n)·(n, 0) 모양이 되게). 한 시각에 같은 키가 두 번 나오면 같은 ID가 되므로
+        호출자가 키를 유일하게 만들어야 한다.
+        """
         gt_map: dict[Hashable, int] = {}
         tr_map: dict[Hashable, int] = {}
         gt_ids: list[Ids] = []
@@ -57,25 +80,40 @@ class TrackingData:
 
 @dataclass(frozen=True)
 class HotaResult:
-    hota: float
-    det_a: float
-    ass_a: float
-    det_re: float
-    det_pr: float
-    loc_a: float
+    """HOTA와 하위 지표 (모두 alpha 19개의 평균)."""
+
+    hota: float  # sqrt(DetA * AssA)
+    det_a: float  # 검출 정확도 TP / (TP + FN + FP)
+    ass_a: float  # 연결 정확도
+    det_re: float  # 검출 재현율
+    det_pr: float  # 검출 정밀도
+    loc_a: float  # 위치 정확도 (맞춘 쌍 평균 유사도)
 
 
 def hota(data: TrackingData) -> HotaResult:
+    """HOTA (TrackEval `HOTA.eval_sequence`와 같은 계산).
+
+    단계:
+    1. 전역 정렬 점수: 정답 i·예측 j가 함께 나온 시각에서 유사도를 정규화해 누적한 잠재 매칭 수를
+       |i| + |j| - 잠재 매칭 수로 나눈다 (트랙 수준 Jaccard).
+    2. 시각마다 "전역 점수 x 유사도"를 최대로 하는 헝가리안 매칭을 하고, alpha마다 유사도 >= alpha인
+       짝만 TP로 센다.
+    3. alpha마다 AssA = TP 가중 평균 연결 IoU, DetA = TP/(TP+FN+FP), HOTA = sqrt(DetA·AssA).
+
+    정답이나 예측 검출이 하나도 없으면 모두 0, LocA 1.0 (TrackEval과 같다).
+    """
     n_a = len(ALPHAS)
     tp, fn, fp = np.zeros(n_a), np.zeros(n_a), np.zeros(n_a)
     loc = np.zeros(n_a)
     if data.num_tracker_dets == 0 or data.num_gt_dets == 0:
         return HotaResult(0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
 
+    # 1) 전역 정렬 점수 (트랙 쌍마다)
     potential = np.zeros((data.num_gt_ids, data.num_tracker_ids))
     gt_count = np.zeros((data.num_gt_ids, 1))
     tr_count = np.zeros((1, data.num_tracker_ids))
     for g, p, s in zip(data.gt_ids, data.tracker_ids, data.similarity, strict=True):
+        # 유사도를 행·열 합으로 정규화 (한 검출이 여러 짝과 겹칠 때 몫을 나눈다)
         denom = s.sum(0)[np.newaxis, :] + s.sum(1)[:, np.newaxis] - s
         sim_iou = np.zeros_like(s)
         mask = denom > 0 + EPS
@@ -85,6 +123,7 @@ def hota(data: TrackingData) -> HotaResult:
         tr_count[0, p] += 1
     global_score = potential / (gt_count + tr_count - potential)
 
+    # 2) 시각별 매칭과 alpha별 TP·FN·FP
     matches = [np.zeros_like(potential) for _ in ALPHAS]
     for g, p, s in zip(data.gt_ids, data.tracker_ids, data.similarity, strict=True):
         if len(g) == 0:
@@ -106,6 +145,7 @@ def hota(data: TrackingData) -> HotaResult:
                 loc[a] += float(s[r, c].sum())
                 matches[a][g[r], p[c]] += 1
 
+    # 3) alpha별 최종 지표
     ass_a = np.zeros(n_a)
     for a in range(n_a):
         m = matches[a]
@@ -124,18 +164,34 @@ def hota(data: TrackingData) -> HotaResult:
 
 @dataclass(frozen=True)
 class IdentityResult:
-    idf1: float
+    """IDF1 결과."""
+
+    idf1: float  # IDTP / (IDTP + 0.5·IDFP + 0.5·IDFN)
     idtp: int
     idfp: int
     idfn: int
 
 
 def identity(data: TrackingData, threshold: float = 0.5) -> IdentityResult:
+    """IDF1 (TrackEval `Identity.eval_sequence`와 같은 계산).
+
+    정답 트랙과 예측 트랙을 시퀀스 전체에서 일대일로 묶는다 (한 정답 트랙은 한 예측 트랙에만).
+    묶인 쌍이 같은 시각에 유사도 >= threshold이면 IDTP다. 묶이지 않는 경우를 표현하려고 가상 정답·
+    가상 예측을 붙인 (ng+nt) 정방 행렬에서 IDFN + IDFP 합을 최소로 하는 헝가리안 할당을 한다.
+
+    Args:
+        threshold: 유사도 문턱 (하네스는 `evaluation.yaml track_iou`).
+
+    Returns:
+        `IdentityResult`. 예측이 없으면 IDF1 0 (IDFN = 정답 수), 정답이 없으면 IDF1 0 (IDFP = 예측
+        수).
+    """
     if data.num_tracker_dets == 0:
         return IdentityResult(0.0, 0, 0, data.num_gt_dets)
     if data.num_gt_dets == 0:
         return IdentityResult(0.0, 0, data.num_tracker_dets, 0)
     ng, nt = data.num_gt_ids, data.num_tracker_ids
+    # potential[i, j]: 정답 i·예측 j가 문턱 이상으로 겹친 시각 수
     potential = np.zeros((ng, nt))
     gt_count, tr_count = np.zeros(ng), np.zeros(nt)
     for g, p, s in zip(data.gt_ids, data.tracker_ids, data.similarity, strict=True):
@@ -143,6 +199,9 @@ def identity(data: TrackingData, threshold: float = 0.5) -> IdentityResult:
         potential[g[mg], p[mp]] += 1
         gt_count[g] += 1
         tr_count[p] += 1
+    # 비용 행렬 구성 (TrackEval과 같다): 왼쪽 위 = 실제 쌍, 오른쪽 위 = 정답 i를 짝 없이 둠(대각만
+    # 허용), 왼쪽 아래 = 예측 j를 짝 없이 둠(대각만 허용), 오른쪽 아래 = 가상끼리 (비용 0). 1e10은
+    # 금지 칸
     fp_mat = np.zeros((ng + nt, ng + nt))
     fn_mat = np.zeros((ng + nt, ng + nt))
     fp_mat[ng:, :nt] = 1e10
@@ -164,15 +223,29 @@ def identity(data: TrackingData, threshold: float = 0.5) -> IdentityResult:
 
 @dataclass(frozen=True)
 class ClearResult:
-    mota: float
-    motp: float
+    """CLEAR MOT 결과 (일부 필드)."""
+
+    mota: float  # (TP - FP - IDSW) / 정답 수. 음수가 될 수 있다
+    motp: float  # 맞춘 쌍 평균 유사도
     tp: int
     fp: int
     fn: int
-    idsw: int
+    idsw: int  # ID 전환 수
 
 
 def clear(data: TrackingData, threshold: float = 0.5) -> ClearResult:
+    """CLEAR MOT (TrackEval `CLEAR.eval_sequence`와 같은 계산).
+
+    시각마다 유사도 >= threshold인 짝 중에서 헝가리안 매칭을 하되, 바로 앞 시각에 맞았던 (정답,
+    예측) 짝을 1000점 가산으로 우선한다 (트랙 유지). 정답이 마지막으로 맞았던 예측 ID와 다른 예측에
+    맞으면 ID 전환이다.
+
+    Args:
+        threshold: 유사도 문턱 (하네스는 `evaluation.yaml track_iou`).
+
+    Returns:
+        `ClearResult`. 예측이 없으면 MOTA 0, 정답이 없으면 MOTA = -예측 수 (TrackEval과 같다).
+    """
     if data.num_tracker_dets == 0:
         return ClearResult(0.0, 0.0, 0, 0, data.num_gt_dets, 0)
     if data.num_gt_dets == 0:
@@ -189,6 +262,7 @@ def clear(data: TrackingData, threshold: float = 0.5) -> ClearResult:
             fn += len(g)
             continue
         score = 1000 * (p[np.newaxis, :] == prev_step[g[:, np.newaxis]]) + s
+        # 문턱 미만 짝은 점수 0 → 아래에서 맞춘 것으로 세지 않는다
         score[s < threshold - EPS] = 0
         rows, cols = assign(-score)
         ok = score[rows, cols] > 0 + EPS
@@ -198,6 +272,7 @@ def clear(data: TrackingData, threshold: float = 0.5) -> ClearResult:
         switched = ~np.isnan(before) & (mp.astype(np.float64) != before)
         idsw += int(np.count_nonzero(switched))
         prev_tr[mg] = mp
+        # 앞 시각 우선 정보는 이번 시각에 맞은 짝만 남긴다 (끊기면 우선이 사라진다)
         prev_step[:] = np.nan
         prev_step[mg] = mp
         n = len(mg)
