@@ -241,7 +241,8 @@ def run_actions(
         and x.payload.skeleton == "hand21"
         and x.payload.hand is not None
     ]
-    # 손마다 트랙 하나 (같은 손이 여럿이면 마지막 것)
+    # 손마다 트랙 하나 (같은 손이 여럿이면 조회 순서상 마지막 것. 프리라벨 접촉 단계의
+    # `pick_hand_tracks`와 달리 정해진 선택 기준이 없다)
     tracks: dict[Hand, KeypointTrackPayload] = {}
     for x in track_labels:
         assert isinstance(x.payload, KeypointTrackPayload) and x.payload.hand is not None

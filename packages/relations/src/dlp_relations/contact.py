@@ -2,7 +2,7 @@
 
 작용부 샘플마다 같은 시각의 표면 좌표로 바꿔 평면까지 거리와 표면 안 여부를 본다. 거리가
 on_distance_m 이하로 내려오면 접촉을 시작하고 off_distance_m을 넘거나 표면 밖으로 나가면 끝낸다.
-구간 경계는 on 문턱 아래 첫·마지막 샘플이다 (off 문턱은 잡음에 의한 끊김만 막는다).
+구간 경계는 on 문턱 이하인 첫·마지막 샘플이다 (off 문턱은 잡음에 의한 끊김만 막는다).
 
 정책: `relations.yaml tool_surface`. `derive`가 (도구 작용부, 표면)마다 부르고, 결과는 관계 규칙
 (source=tool_surface)과 커버리지 입력이 된다.
@@ -45,9 +45,10 @@ class Track3D:
 class SurfaceContact:
     """작용부-표면 접촉 구간 하나.
 
-    tool_id, tool_part: 도구 개체와 작용부. surface_id: 표면 개체. start_ms, end_ms: on 문턱 아래
-    첫·마지막 샘플 시각. points: 구간 안 샘플의 표면 좌표 (시각, 가로 비율, 세로 비율). sizes: 그
-    시각 표면 크기(m).
+    tool_id, tool_part: 도구 개체와 작용부. surface_id: 표면 개체. start_ms, end_ms: on 문턱 이하
+    첫·마지막 샘플 시각. points: 구간 안 샘플의 표면 좌표 (시각, 가로 비율, 세로 비율). sizes: 접촉
+    중 모은 샘플마다의 표면 크기(m). points와 달리 끝 경계 뒤 꼬리 샘플을 걸러 내지 않아 길이가 다를
+    수 있다 (커버리지는 중앙값만 쓴다).
     """
 
     tool_id: str
@@ -55,7 +56,7 @@ class SurfaceContact:
     surface_id: str
     start_ms: int
     end_ms: int
-    # 구간 안 샘플의 표면 좌표 (시각, 가로 비율, 세로 비율)와 그 시각 표면 크기 (m)
+    # 구간 안 샘플의 표면 좌표 (시각, 가로 비율, 세로 비율)와 접촉 중 샘플의 표면 크기 (m)
     points: list[tuple[int, float, float]] = field(default_factory=list[tuple[int, float, float]])
     sizes: list[tuple[float, float]] = field(default_factory=list[tuple[float, float]])
 
@@ -134,7 +135,7 @@ def tool_surface_contacts(
     if current is not None and last_on is not None:
         current.end_ms = last_on
         runs.append(current)
-    for r in runs:  # 경계 밖(on 문턱 위) 샘플은 커버리지에서 뺀다
+    for r in runs:  # 경계 밖(on 문턱 위) 샘플 좌표는 커버리지에서 뺀다 (sizes는 그대로)
         r.points = [x for x in r.points if r.start_ms <= x[0] <= r.end_ms]
 
     # merge_gap_ms 이하로 끊긴 구간을 잇는다 (커버리지 점·크기도 합친다)

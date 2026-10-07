@@ -182,15 +182,19 @@ class _FakeHandLandmarker:
     """
 
     def __init__(self) -> None:
+        """받은 시각(ms)을 `stamps`에 차례로 기록한다."""
         self.stamps: list[int] = []
 
     def __enter__(self) -> _FakeHandLandmarker:
+        """`with` 문 대역 (실제 HandLandmarker도 컨텍스트 관리자다)."""
         return self
 
     def __exit__(self, *exc: object) -> None:
+        """닫을 자원이 없다."""
         return None
 
     def detect_for_video(self, image: Any, t: int) -> Any:
+        """시각이 앞 호출보다 크지 않으면 MediaPipe처럼 ValueError, 아니면 손 하나를 낸다."""
         if self.stamps and t <= self.stamps[-1]:
             raise ValueError("Input timestamp must be monotonically increasing.")
         self.stamps.append(t)
@@ -222,6 +226,7 @@ def test_mediapipe_hands_skips_frames_with_repeated_ms(monkeypatch: pytest.Monke
         Delegate = SimpleNamespace(CPU=0)
 
         def __init__(self, **_kw: object) -> None:
+            """받은 옵션은 쓰지 않는다."""
             pass
 
     vision = SimpleNamespace(
@@ -235,6 +240,7 @@ def test_mediapipe_hands_skips_frames_with_repeated_ms(monkeypatch: pytest.Monke
     img = np.zeros((10, 20, 3), dtype=np.uint8)
 
     def frames(_video: Path) -> Iterator[tuple[int, np.ndarray[Any, Any]]]:
+        """`iter_frames` 대역: 같은 ms가 반복되는 (PTS ms, 프레임)을 낸다."""
         # 1000 fps를 넘는 구간: 0.0, 0.6, 1.2, 1.8 ms PTS → 반올림 0, 1, 1, 2
         yield from ((t, img) for t in (0, 1, 1, 2, 33))
 

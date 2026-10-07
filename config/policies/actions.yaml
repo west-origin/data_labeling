@@ -25,7 +25,7 @@ boundaries:
   valley_ratio: 0.4           # 골짜기는 앞뒤 valley_window_ms 안 최고 속도의 이 비율 이하여야 한다
   valley_window_ms: 300       # 골짜기 앞뒤로 최고 속도를 비교할 창
   min_valley_separation_ms: 150  # 골짜기 후보 사이 최소 간격 (가까운 골짜기는 앞의 것만)
-  merge_ms: 80                # 이보다 가까운 후보는 하나로 (접촉 경계를 우선)
+  merge_ms: 80                # 이 이하로 가까운 후보는 하나로 (접촉 > 정지 > 골짜기 순 우선)
   min_segment_ms: 100         # 이보다 짧은 후보 구간은 앞 구간에 붙인다 (VLM 호출 수도 줄어든다)
 
 # 평가 허용 오차 (기준 문서 경계 규칙). 테스트와 평가 하네스(WP11)가 쓴다.
@@ -49,7 +49,8 @@ vlm:
   default_confidence: 0.5     # 응답에 신뢰도가 없을 때
   # TODO(real-model): VLM 추론 서버(OpenAI 호환 API)가 필요하다. GPU면 vLLM, CPU면 llama.cpp
   #   llama-server(GGUF)로 띄울 수 있다 (CPU는 느려 timeout_s를 늘린다). 서버 주소는
-  #   DLP_VLM_URL 환경 변수로 준다. 라이선스는 config/models.yaml external에서 검사한다. 모델은 상업 사용 가능한 라이선스여야 한다 (ADR 0010).
+  #   DLP_VLM_URL 환경 변수(또는 --vlm-url)로 준다. 라이선스는 config/models.yaml external에서
+  #   검사한다. 모델 가중치는 상업 사용 가능한 라이선스여야 한다 (ADR 0010).
   #   Qwen2.5-VL-7B-Instruct는 Apache-2.0, 3B는 비상업 연구 라이선스라 쓰지 않는다.
   model: Qwen/Qwen2.5-VL-7B-Instruct
   timeout_s: 120              # 요청 하나의 시간 초과 (초). 넘으면 서버 오류로 보고 백오프 재시도

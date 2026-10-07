@@ -79,7 +79,7 @@ def match_wearer(
     """
     scores: dict[str, float] = {}
     for entity, (t, v) in people.items():
-        # 두 신호가 겹치는 시간 [lo, hi]. 그 길이가 min_overlap_samples 격자 칸보다 짧으면 건너뛴다
+        # 두 신호가 겹치는 시간 [lo, hi). 그 길이가 min_overlap_samples 격자 칸보다 짧으면 건너뛴다
         lo, hi = max(reference_t[0], t[0]), min(reference_t[-1], t[-1])
         if hi - lo < min_overlap_samples * 1000 / rate_hz:
             continue

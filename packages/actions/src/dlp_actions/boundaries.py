@@ -40,7 +40,7 @@ class Candidate:
     """
 
     t_ms: int
-    reason: str  # contact_start | contact_end | still_start | still_end | valley | edge
+    reason: str  # contact_start, contact_end, still_start, still_end, valley 중 하나
 
 
 def wrist_series(

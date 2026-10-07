@@ -45,7 +45,9 @@ HAND21_NAMES = HAND21_JOINTS
 class DepthModel(Protocol):
     """깊이 추론기 인터페이스 (`dlp_models.depth.MetricDepth`, 테스트의 가짜 모델)."""
 
-    def predict(self, image: Image) -> NDArray[np.float32]: ...
+    def predict(self, image: Image) -> NDArray[np.float32]:
+        """(H, W, 3) RGB 프레임 → 같은 크기 (H, W) 깊이 맵 (미터)."""
+        ...
 
 
 def intrinsics_for(
@@ -164,7 +166,7 @@ class DepthLifter:
         ontology_version: str,
         version: str | None = None,
     ) -> list[LabelRecord]:
-        """version: 라벨에 쓸 모델 버전 (기본: self.version). 러너가 입력 해시를 붙여 넘긴다.
+        """바디캠 영상에서 트랙을 3D로 올려 trajectory3d 라벨을 만든다.
 
         Args:
             video: 바디캠 영상 로컬 경로.
@@ -172,11 +174,12 @@ class DepthLifter:
             tracks: 올릴 손·박스 트랙 (`lift_tracks` 참고).
             calib: 세션 카메라 내부 파라미터.
             ontology_version: 라벨에 넣을 온톨로지 버전.
+            version: 라벨에 쓸 모델 버전 (기본: `self.version`). 러너는 입력 해시를 붙여 넘긴다.
 
         Returns:
             (개체, 부위)마다 trajectory3d 라벨 하나. ID는
-                `<세션>-<스트림>-3d-<version_tag>-<개체>-<부위|center>`.
-            신뢰도는 `depth.confidence` 고정. DB에는 쓰지 않는다 (러너가 쓴다).
+            `<세션>-<스트림>-3d-<version_tag>-<개체>-<부위|center>`. 신뢰도는 `depth.confidence`
+            고정. DB에는 쓰지 않는다 (러너가 쓴다).
         """
         # 러너는 입력 해시를 붙인 버전을 넘긴다 (라벨 ID의 version_tag도 이 버전으로 만든다)
         model_version = version or self.version

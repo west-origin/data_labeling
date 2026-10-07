@@ -1,6 +1,6 @@
 """규칙 엔진: 입력 구간(손 상태, 도구-표면 접촉)에 YAML 규칙을 적용해 관계 구간을 만든다.
 
-규칙 ID는 관계의 derived_by에 남는다. 같은 관계(주어·술어·목적어·부분·규칙)가 merge_gap_ms보다 짧게
+규칙 ID는 관계의 derived_by에 남는다. 같은 관계(주어·술어·목적어·부위·규칙)가 merge_gap_ms 이하로
 끊기면 하나로 잇는다.
 
 규칙 형식은 `relations.yaml rules` 주석 참고. 한 입력에 맞는 규칙이 여럿이면 모두 관계를 낸다.
@@ -30,10 +30,11 @@ class RelationDraft:
 
 
 def hand_state_fields(p: HandStatePayload, unresolved: tuple[str, ...] = ()) -> Fields:
-    """unresolved: 대상을 모른다는 표시 ID. target_id가 이 값이면 없음(None)으로 본다.
-
-    손 상태 페이로드 → 규칙 필드 (hand, contact_target_kind, target_id, body_part, grasp_type,
+    """손 상태 페이로드 → 규칙 필드 (hand, contact_target_kind, target_id, body_part, grasp_type,
     role).
+
+    unresolved: 대상을 모른다는 표시 ID (`relations.yaml unresolved_target_ids`). target_id가 이
+    값이면 없음(None)으로 본다.
     """
     return {
         "hand": p.hand.value,

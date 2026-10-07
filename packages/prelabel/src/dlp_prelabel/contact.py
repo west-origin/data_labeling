@@ -1,7 +1,8 @@
 """접촉 구간 추정 (모델이 아니라 알고리즘).
 
-- 장갑: 압력 합을 히스테리시스 문턱으로 나눈다. 시작은 on 문턱을 넘은 뒤 off 아래였던 마지막 샘플
-  다음으로 되짚고, 끝은 off 아래로 내려간 첫 샘플이다 (장갑 접촉 시각이 접촉 모델의 정답 신호다).
+- 장갑: 압력 합을 히스테리시스 문턱으로 나눈다. 시작은 on 문턱을 넘은 샘플에서 off 이하였던
+  마지막 샘플 다음까지 되짚고, 끝은 off 아래로 내려간 첫 샘플이다 (장갑 접촉 시각이 접촉 모델의
+  정답 신호다).
 - 영상: 손가락 끝 다섯 점과 객체 박스 사이 최소 거리가 문턱 이하인 프레임을 접촉 후보로 본다. 손
   키프레임 시각에 박스 키프레임이 없으면 앞뒤 박스 키프레임을 선형 보간한다 (간격이 box_max_gap_ms
   이하일 때만). 도구 박스는 프레임마다가 아니라 frame_stride_ms마다 나온다.
@@ -140,12 +141,12 @@ def box_at(
 def video_contact_intervals(
     hand: KeypointTrackPayload, objects: list[BoxTrackPayload], policy: VideoContactPolicy
 ) -> list[ContactInterval]:
-    # 키프레임 시각 목록을 한 번만 만들어 box_at의 이분 탐색에 넘긴다
     """손 키포인트 트랙과 객체 박스 트랙 → 영상 접촉 구간 (source="video").
 
     프레임(손 키프레임)마다 손가락 끝 다섯 점(hand21의 4, 8, 12, 16, 20)과 각 박스 사이 최소 거리를
-    재고, 문턱 이하인 박스 중 가장 가까운 것을 그 프레임의 대상으로 둔다. 같은 대상이 merge_gap_ms
-    안에 다시 나오면 구간을 잇고, min_duration_ms보다 짧은 구간은 버린다.
+    재고, 문턱 이하인 박스 중 가장 가까운 것을 그 프레임의 대상으로 둔다. 직전 구간과 같은 대상이
+    merge_gap_ms 안에 다시 나오면 구간을 잇고(사이에 다른 대상이 끼면 새 구간), min_duration_ms보다
+    짧은 구간은 버린다.
 
     Args:
         hand: hand21 키포인트 트랙 (바디캠, 스트림 PTS ms).
@@ -155,6 +156,7 @@ def video_contact_intervals(
     Returns:
         시각 순 구간 목록. 대상이 바뀌면 새 구간이 된다.
     """
+    # 키프레임 시각 목록을 한 번만 만들어 box_at의 이분 탐색에 넘긴다
     tracks = [(obj, [k.t_ms for k in obj.keyframes]) for obj in objects if obj.keyframes]
     per_frame: list[tuple[int, str | None]] = []
     for f in hand.keyframes:

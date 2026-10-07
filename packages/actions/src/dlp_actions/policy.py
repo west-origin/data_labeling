@@ -25,12 +25,12 @@ from dlp_schema.common import Contract
 
 
 class BoundaryPolicy(Contract):
-    # 속도 이동 평균 창 ms
     """`actions.yaml boundaries`: 손목 속도·접촉 기반 경계 후보.
 
     속도 단위는 손바닥 길이(손목 → 가운뎃손가락 뿌리, hand21 0 → 9)/초, 시간은 ms.
     """
 
+    # 속도 이동 평균 창 ms
     smooth_ms: int = Field(ge=0)
     # 이보다 느리면 정지
     still_speed: float = Field(gt=0)
@@ -44,7 +44,7 @@ class BoundaryPolicy(Contract):
     valley_window_ms: int = Field(ge=0)
     # 골짜기 후보 사이 최소 간격 ms
     min_valley_separation_ms: int = Field(ge=0)
-    # 이보다 가까운 후보는 하나로 (접촉 > 정지 > 골짜기 순 우선)
+    # 이 이하로 가까운 후보는 하나로 (접촉 > 정지 > 골짜기 순 우선)
     merge_ms: int = Field(ge=0)
     # 이보다 짧은 조각은 앞 구간에 붙인다
     min_segment_ms: int = Field(ge=0)
@@ -63,9 +63,9 @@ class ToleranceMs(Contract):
 
 
 class VlmPolicy(Contract):
-    # 응답 위반(스키마·온톨로지 밖) 시 다시 묻는 횟수
     """`actions.yaml vlm`: 2단 VLM 분류 설정."""
 
+    # 응답 위반(스키마·온톨로지 밖) 시 다시 묻는 횟수
     max_retries: int = Field(ge=0)
     # 구간마다 VLM에 보낼 프레임 수
     frames_per_segment: int = Field(ge=1)
@@ -83,9 +83,9 @@ class VlmPolicy(Contract):
 
 
 class ActionsPolicy(Contract):
-    # 정책 형식 버전
     """`config/policies/actions.yaml` 전체."""
 
+    # 정책 형식 버전
     version: int
     # 대상을 모르는 접촉의 target_id (prelabel.yaml contact.unresolved_target_id).
     # 대상 후보에서 뺀다

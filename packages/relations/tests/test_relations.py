@@ -136,6 +136,7 @@ def test_tool_contact_needs_grasp_and_same_coordinate_frame(
     assert derive(no_grasp, ontology, policy).contacts == []
 
     def to_world(x: LabelRecord) -> LabelRecord:
+        """걸레 궤적만 world 좌표계로 바꾼 사본 (표면 꼭짓점은 camera 그대로)."""
         p = x.payload
         if isinstance(p, Trajectory3DPayload) and p.entity_id == "rag_01":
             return x.model_copy(

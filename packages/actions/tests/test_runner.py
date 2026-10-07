@@ -255,7 +255,10 @@ def test_input_change_reruns_and_reviewed_description_protects_its_action(pg: sa
         seen: list[tuple[str, ...]] = []
 
         class Spy(OracleVlm):
+            """요청마다 받은 대상 후보(`entities`)를 기록하는 오라클 VLM."""
+
             def complete(self, request: SegmentRequest, prompt: str, schema: dict[str, Any]) -> str:
+                """대상 후보를 `seen`에 남기고 오라클 답을 그대로 돌려준다."""
                 seen.append(request.entities)
                 return super().complete(request, prompt, schema)
 

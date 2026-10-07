@@ -136,10 +136,11 @@ class UnavailablePredictor:
 
 
 # TODO(real-model): 도구 작용부·파지부 마스크 (mask_track, part=작용부). 도구 박스는 OWLv2가
-#   내므로(adapters/owl_objects.py) 그 박스를 프롬프트로 SAM 2.1(tiny, Apache-2.0) 마스크가
-#   필요하다.
-#   아직 연동하지 않았다. CPU로도 느리지만 돈다 (OWLv2처럼 프레임 간격 추론, ONNX 공개본 있음).
-#   커버리지 계산(WP9)이 이 결과를 쓴다.
+#   내므로(adapters/owl_objects.py) 그 박스를 프롬프트로 쓰는 SAM 2.1(tiny, Apache-2.0) 마스크가
+#   필요하다. 아직 연동하지 않았다. CPU로도 느리지만 돈다 (OWLv2처럼 프레임 간격 추론, ONNX
+#   공개본 있음).
+#   이 마스크와 메트릭 깊이로 작용부 3D 궤적을 만들어야 도구-표면 접촉·커버리지(WP9)가 실제 영상에서
+#   나온다 (relations.yaml tool_surface의 TODO).
 TOOL_PART_MASKS = UnavailablePredictor("tool_part_masks", "SAM 2.1 마스크 미연동")
 
 # TODO(real-model): 바디캠 6자유도 궤적 (trajectory3d, entity_id="camera"). IMU가 있으면 시각-관성

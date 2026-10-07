@@ -16,8 +16,7 @@
 - 출력 `predicted_depth`: (1, H', W') float32, 미터. `MetricDepth.predict`가 원래 해상도로 되돌린다.
 
 가중치·라이선스: `config/models.yaml`의 `depth_metric_indoor_small` (가중치 Apache-2.0, 학습
-데이터에
-비상업 조건이 있어 `commercial: review`, ADR 0010).
+데이터에 비상업 조건이 있어 `commercial: review`, ADR 0010).
 
 공개 항목:
 - `Intrinsics`: 핀홀 카메라 내부 파라미터(픽셀)와 역투영.

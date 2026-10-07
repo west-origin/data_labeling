@@ -43,7 +43,7 @@ body:
   keypoint_score: 0.3       # 이보다 낮은 관절은 visibility=1 (가려짐 추정)
   max_people: 4             # 프레임당 사람 수 상한
   track_iou: 0.3            # 이전 프레임 박스와 IoU가 이 이상이면 같은 사람 트랙으로 잇는다
-  max_gap_ms: 300           # 이보다 짧게 끊긴 사람 트랙은 하나로 잇는다
+  max_gap_ms: 300           # 이 이하로 끊긴 사람 트랙은 하나로 잇는다
 
 # COCO 객체 탐지 (MediaPipe EfficientDet-Lite0)
 objects:
@@ -61,8 +61,8 @@ objects:
     person: person
 
 # COCO에 없는 청소·돌봄 도구는 OWLv2 오픈 보캐뷸러리 탐지로 찾는다 (CPU 프레임당 약 9초).
-# frame_stride_ms마다 추론하고, 사이 프레임은 트랙 보간이 메운다 (max_gap_ms 안에서).
-# (프리라벨은 추론한 시각에만 키프레임을 남기고, 사이는 검수 도구와 접촉 단계 contact.video가 보간한다)
+# frame_stride_ms마다 추론하고, max_gap_ms 안에서 이어지는 탐지를 한 트랙으로 잇는다. 프리라벨은 추론한
+# 시각에만 키프레임을 남기고, 사이는 검수 도구와 접촉 단계(contact.video.box_max_gap_ms)가 보간한다.
 open_vocab_objects:
   frame_stride_ms: 500      # 추론 간격 (ms). GPU 환경에서는 줄인다. 줄이면 처리 시간이 비례해 는다
   min_score: 0.12           # 모든 질의 공통 점수 문턱 (OWLv2 점수는 낮게 나오는 편이라 작다)
