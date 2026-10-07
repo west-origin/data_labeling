@@ -34,3 +34,7 @@
 - `dlp active rank [--limit] [--json]`, `dlp active fiftyone [--limit] [--name] [--cache]`.
 - 완료 기준 테스트: 합성 수정률 분포(시트 접기 30%, 대걸레 10%, 컵 0.5%)와 임의 분포에서 세션이 예상 수정 수
   순서대로 선택된다 (`packages/active/tests/test_select.py`).
+
+## 갱신 (ADR 0019)
+
+2차 전체 검수 정정이 이 결정을 보강한다. 바뀐 내용은 ADR 0019를 따른다.

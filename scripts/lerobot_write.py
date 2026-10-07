@@ -55,7 +55,7 @@ def main() -> None:
         data = np.load(ep["npz"])
         for k, img in enumerate(frames(ep["video"], data["frame_index"], size)):
             ds.add_frame({
-                "observation.images.bodycam": img,
+                spec["video_key"]: img,
                 "observation.state": data["state"][k],
                 "action": data["action"][k],
                 "annotation.hand_state": data["hand_state"][k],

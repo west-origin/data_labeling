@@ -15,9 +15,9 @@ from pathlib import Path
 
 import sqlalchemy as sa
 
-from dlp_datasets.snapshot import SnapshotStore
+from dlp_datasets.snapshot import SnapshotError, SnapshotStore
 from dlp_export.policy import ExportPolicy
-from dlp_media.storage import ObjectStore, sha256_file
+from dlp_media.storage import ObjectStore, blurred_key, sha256_file
 from dlp_schema.dataset import DatasetVersion, Split
 from dlp_schema.db.repository import get_dataset_version, get_session, withdrawn_session_ids
 from dlp_schema.episode import current_labels
@@ -84,18 +84,28 @@ def load_source(
                     x = LabelRecord.model_validate_json(line)
                     if x.session_id in by_session:
                         by_session[x.session_id].append(x)
+    pinned: dict[str, Session] = {}
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "sessions.jsonl"
+        try:
+            snapshots.read(version.snapshot_uri, "sessions.jsonl", path)
+        except (FileNotFoundError, SnapshotError):
+            pass  # 세션을 고정하기 전에 만든 버전: DB의 현재 세션을 쓴다
+        else:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if line.strip():
+                    s = Session.model_validate_json(line)
+                    pinned[s.session_id] = s
     states = label_states(policy, include_unreviewed)
     sessions = [
         ExportSession(
-            get_session(conn, sid), chosen[sid], select_labels(by_session[sid], policy, states)
+            pinned.get(sid) or get_session(conn, sid),
+            chosen[sid],
+            select_labels(by_session[sid], policy, states),
         )
         for sid in sorted(chosen)
     ]
     return ExportSource(version, sessions, states)
-
-
-def blurred_key(session_id: str, stream_id: str) -> str:
-    return f"sessions/{session_id}/blurred/{stream_id}.mp4"
 
 
 def fetch_blurred(labeling: ObjectStore, session: Session, stream: Stream, work: Path) -> Path:
@@ -114,12 +124,15 @@ def fetch_blurred(labeling: ObjectStore, session: Session, stream: Stream, work:
 
 
 def assert_no_raw(out: Path, raw_bucket: str) -> None:
-    """내보내기 결과의 텍스트 파일에 원본 버킷 위치가 없는지 확인한다."""
-    needles = [f"s3://{raw_bucket}", f"local://{raw_bucket}", f"{raw_bucket}/sessions/"]
+    """내보내기 결과의 모든 파일에 원본 위치가 없는지 본다 (parquet·영상 포함, 바이트로)."""
+    needles = [
+        n.encode()
+        for n in (f"s3://{raw_bucket}", f"local://{raw_bucket}", f"{raw_bucket}/sessions/")
+    ]
     for p in out.rglob("*"):
-        if p.suffix in (".json", ".jsonl", ".md", ".txt") and p.is_file():
-            text = p.read_text("utf-8", errors="ignore")
-            hit = next((n for n in needles if n in text), None)
+        if p.is_file():
+            data = p.read_bytes()
+            hit = next((n.decode() for n in needles if n in data), None)
             if hit:
                 raise ExportError(f"내보내기에 원본 위치가 있습니다: {p.relative_to(out)} ({hit})")
 

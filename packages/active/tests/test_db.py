@@ -109,7 +109,13 @@ def test_rank_candidates_and_build_fiftyone_samples(engine: sa.Engine, tmp_path:
         add("mops", LifecycleState.PRELABELED, [lab("mops", f"{i}", "mop") for i in range(2)])
         # 검수 수가 적어 평활이 크다: mop 0.545, cup 0.455 → 예상 수정 mops 1.09 > cups 0.91
         add("cups", LifecycleState.PRELABELED, [lab("cups", f"{i}", "cup") for i in range(2)])
-        add("gold", LifecycleState.PRELABELED, [lab("gold", f"{i}", "mop") for i in range(9)])
+        # 골든 세션: 사람이 처음부터 만든 cup 정답 (수정률에 "추가"로 세면 안 된다)
+        add(
+            "gold",
+            LifecycleState.PRELABELED,
+            [lab("gold", f"{i}", "mop") for i in range(9)]
+            + [lab("gold", f"t{i}", "cup", model=False, verification=done) for i in range(20)],
+        )
         add("gone", LifecycleState.PRELABELED, [lab("gone", f"{i}", "mop") for i in range(9)])
         add("raw", LifecycleState.PRIVACY_APPROVED, [])
         insert_golden_set(
@@ -124,6 +130,10 @@ def test_rank_candidates_and_build_fiftyone_samples(engine: sa.Engine, tmp_path:
         ranked, rates = rank_sessions(conn, policy)
     assert [s.session_id for s in ranked] == ["mops", "cups"]  # 골든·사용 중지·검수 전 단계 제외
     assert rates.classes["box_track/mop"].changed == 2
+    assert (rates.classes["box_track/cup"].reviewed, rates.classes["box_track/cup"].changed) == (
+        2,
+        0,
+    )
     assert ranked[0].top_classes[0][0] == "box_track/mop"
 
     # 블러본은 라벨링 버킷에만 있다 (cups는 아직 렌더 전)

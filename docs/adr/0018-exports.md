@@ -41,3 +41,7 @@
 - `dlp export coco|intervals|lerobot <데이터셋 버전> --target <대상> [--include-unreviewed] [--split]`.
 - 완료 기준 테스트: pycocotools로 읽고 정답을 예측으로 넣은 COCOeval AP 1, LeRobot 공식 로더로 읽은 프레임이
   만든 특징과 일치, 기본 정책에서 미검수 0건·사용 중지 세션 0건, 결과에 원본 위치·검수자 ID 없음.
+
+## 갱신 (ADR 0019)
+
+2차 전체 검수 정정이 이 결정을 보강한다. 바뀐 내용은 ADR 0019를 따른다.

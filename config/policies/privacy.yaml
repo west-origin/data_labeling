@@ -10,6 +10,10 @@ targets:
   screen: {margin: 0.05, detectors: [open_vocab]}
   photo: {margin: 0.05, detectors: [open_vocab]}
   address_sign: {margin: 0.05, detectors: [open_vocab]}
+# TODO(real-model): 글자 탐지(OCR)가 아직 없다. 기준 계획(WP5)은 송장·문서·주소 표지를 오픈 보캐뷸러리 +
+#   OCR + 바코드로 찾는다. 지금은 오픈 보캐뷸러리(OWLv2)와 QR·바코드만 쓴다. 후보: RapidOCR(PaddleOCR
+#   검출 모델 ONNX, Apache-2.0, CPU)로 글자 영역을 찾아 문서·송장·표지 대상에 합친다. 그때까지 OWLv2가
+#   못 찾는 글자는 블러 전수 검수(사람)에만 기대한다.
 
 # 재현율 우선: 낮은 문턱으로 잡고 사람이 오탐을 지운다
 detection_threshold: 0.3
@@ -24,7 +28,8 @@ render:
   blocks_per_box: 5           # 박스 짧은 변을 이 개수 이하의 블록으로 나눈다
 
 # 검수 우선 구간 종류와 우선순위 (앞이 먼저)
-review_priority: [no_detector, track_gap, disagreement, low_confidence, reflection]
+# trained_model: 배포된 재학습 블러 모델이 낸 구간 (탐지기와 합집합으로 쓰므로 따로 확인한다)
+review_priority: [no_detector, track_gap, disagreement, low_confidence, reflection, trained_model]
 
 detectors:
   yunet:

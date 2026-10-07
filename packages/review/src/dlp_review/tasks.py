@@ -18,7 +18,7 @@ from pathlib import Path
 import sqlalchemy as sa
 
 from dlp_media.pts import build_pts_index
-from dlp_media.storage import ObjectStore, S3Store, sha256_file
+from dlp_media.storage import ObjectStore, S3Store, blurred_key, sha256_file
 from dlp_review.clients import CvatClient, LabelStudioClient
 from dlp_review.cvat import CvatSchema, label_spec, to_cvat_tracks
 from dlp_review.labelstudio import LS_KINDS, label_config, to_ls_results
@@ -177,9 +177,7 @@ def create_labeling_tasks(
             if not use_cvat and not (use_ls and stream.kind is StreamKind.BODYCAM):
                 continue
             blurred = work / f"{stream.stream_id}-blurred.mp4"
-            setup.labeling.get_file(
-                f"sessions/{session_id}/blurred/{stream.stream_id}.mp4", blurred
-            )
+            setup.labeling.get_file(blurred_key(session_id, stream.stream_id), blurred)
             marked = work / f"{stream.stream_id}-{assignee}.mp4"
             burn_watermark(blurred, marked, f"{assignee} {session_id}")
             vkey = f"sessions/{session_id}/review/{assignee}/{stream.stream_id}.mp4"

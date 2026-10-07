@@ -61,11 +61,16 @@ GRADE = {
     VerificationState.HUMAN_APPROVED: 2,
     VerificationState.HUMAN_CORRECTED: 3,
 }
-GROUPS = ("hands_2d", "hands_3d", "hand_state", "actions")
+GROUPS = ("hands_2d", "hands_3d", "hand_state", "actions", "tool_contact", "task")
 
 
 def grade(x: LabelRecord) -> int:
     return 3 if x.provenance.source is Source.HUMAN else GRADE[x.verification.state]
+
+
+def preferred(labels: list[LabelRecord]) -> list[LabelRecord]:
+    """겹치는 라벨 중 먼저 쓸 순서: 검증 등급이 높은 것, 같으면 새 것."""
+    return sorted(labels, key=lambda x: (-grade(x), -x.created_at.timestamp(), x.label_id))
 
 
 @dataclass(frozen=True)
@@ -121,11 +126,15 @@ def state_names(policy: LeRobotPolicy) -> list[str]:
     return names
 
 
+def video_key(policy: LeRobotPolicy) -> str:
+    return f"observation.images.{policy.video_stream}"
+
+
 def features(policy: LeRobotPolicy, height: int, width: int) -> dict[str, Any]:
     n = len(state_names(policy))
     hands = [h.value for h in HANDS]
     return {
-        "observation.images.bodycam": {
+        video_key(policy): {
             "dtype": "video", "shape": [height, width, 3], "names": ["height", "width", "channels"],
         },
         "observation.state": {"dtype": "float32", "shape": [n], "names": state_names(policy)},
@@ -138,7 +147,9 @@ def features(policy: LeRobotPolicy, height: int, width: int) -> dict[str, Any]:
         },
         "annotation.tool_surface_contact": {"dtype": "int64", "shape": [2], "names": hands},
         "annotation.verb": {"dtype": "int64", "shape": [2], "names": hands},
-        "annotation.verification": {"dtype": "int64", "shape": [4], "names": list(GROUPS)},
+        "annotation.verification": {
+            "dtype": "int64", "shape": [len(GROUPS)], "names": list(GROUPS),
+        },
     }  # fmt: skip
 
 
@@ -199,11 +210,12 @@ def build_episode(
     times = start + np.arange(n) * 1000.0 / policy.fps
     frame_index = np.array([index.frame_at(stream_ms(stream, t)) for t in times], dtype=np.int64)
 
-    # 손 2D: 스트림의 hand21 트랙 (같은 손에 트랙이 여럿이면 시각마다 먼저 값이 있는 것)
+    # 공간 라벨(키포인트·3D 궤적)은 스트림 시각, 손 상태·행동·관계·작업은 마스터 시각 (ADR 0019)
+    # 손 2D: 스트림의 hand21 트랙 (같은 손에 트랙이 여럿이면 시각마다 등급 높은·새 것부터)
     kp2d: dict[Hand, list[tuple[list[tuple[int, NDArray[np.float64]]], LabelRecord]]] = {
         h_: [] for h_ in HANDS
     }
-    for x in labels:
+    for x in preferred(labels):
         p = x.payload
         if (
             isinstance(p, KeypointTrackPayload)
@@ -224,30 +236,43 @@ def build_episode(
                 for f in sorted(p.keyframes, key=lambda f: f.t_ms)
             ]
             kp2d[p.hand].append((series, x))
-    # 3D 궤적: (개체, 부분) → 표본
+    # 3D 궤적: (개체, 부분) → 이 스트림의 궤적들 (등급 높은·새 것부터, 시각마다 값이 있는 첫 것)
     traj: dict[
-        tuple[str, str | None], tuple[list[tuple[int, NDArray[np.float64]]], LabelRecord]
+        tuple[str, str | None], list[tuple[list[tuple[int, NDArray[np.float64]]], LabelRecord]]
     ] = {}
-    for x in labels:
+    for x in preferred(labels):
         p = x.payload
-        if isinstance(p, Trajectory3DPayload):
-            traj[(p.entity_id, p.part)] = (
-                [
-                    (s.t_ms, np.array([s.x, s.y, s.z]))
-                    for s in sorted(p.samples, key=lambda s: s.t_ms)
-                ],
-                x,
+        if isinstance(p, Trajectory3DPayload) and x.stream_id in (None, stream.stream_id):
+            traj.setdefault((p.entity_id, p.part), []).append(
+                (
+                    [
+                        (s.t_ms, np.array([s.x, s.y, s.z]))
+                        for s in sorted(p.samples, key=lambda s: s.t_ms)
+                    ],
+                    x,
+                )
             )
-    hand_states = [x for x in labels if isinstance(x.payload, HandStatePayload)]
-    actions = [x for x in labels if isinstance(x.payload, ActionPayload)]
+
+    def traj_at(
+        entity: str, part: str | None, ts: float
+    ) -> tuple[NDArray[np.float64], LabelRecord] | None:
+        for series, x in traj.get((entity, part), []):
+            v = _interp(series, ts, gap)
+            if v is not None:
+                return v, x
+        return None
+
+    ordered = preferred(labels)
+    hand_states = [x for x in ordered if isinstance(x.payload, HandStatePayload)]
+    actions = [x for x in ordered if isinstance(x.payload, ActionPayload)]
     tool_contacts = [
-        x for x in labels
+        x for x in ordered
         if isinstance(x.payload, RelationPayload)
         and x.payload.predicate is RelationPredicate.CONTACT
         and x.payload.subject_part in vocab.working_parts
     ]  # fmt: skip
     tasks_lbl = [
-        x for x in labels
+        x for x in ordered
         if isinstance(x.payload, SegmentPayload) and x.payload.level is SegmentLevel.TASK
     ]  # fmt: skip
 
@@ -256,7 +281,7 @@ def build_episode(
     hs = np.full((n, 8), -1, np.int64)
     tsc = np.full((n, 2), -1, np.int64)
     verb = np.full((n, 2), -1, np.int64)
-    ver = np.full((n, 4), -1, np.int64)
+    ver = np.full((n, len(GROUPS)), -1, np.int64)
     task_names: list[str] = []
     n2d, n3d = 21 * 3, len(policy.hand_points_3d) * 4
 
@@ -265,10 +290,11 @@ def build_episode(
         ver[k, g] = grade(x) if cur < 0 else min(cur, grade(x))
 
     for k, t in enumerate(times):
+        ts = stream_ms(stream, t)  # 공간 라벨을 읽을 스트림 시각
         for hi, hand in enumerate(HANDS):
             # 2D
             for series, x in kp2d[hand]:
-                v = _interp(series, t, gap)
+                v = _interp(series, ts, gap)
                 if v is not None:
                     # 양쪽 키프레임에 다 라벨이 있는 관절만 값이 있다. 보임 정도는 둘 중 낮은 쪽
                     # (보간한 v의 내림: 끝점에서는 그 값, 사이에서는 작은 값)
@@ -281,10 +307,9 @@ def build_episode(
             # 3D 손 점
             base = 2 * n2d + hi * n3d
             for pi, part in enumerate(policy.hand_points_3d):
-                got = traj.get((f"{hand.value}_hand", part))
-                v = _interp(got[0], t, gap) if got else None
-                if v is not None and got is not None:
-                    state[k, base + pi * 4 : base + pi * 4 + 4] = [*v, 1.0]
+                got = traj_at(f"{hand.value}_hand", part, ts)
+                if got is not None:
+                    state[k, base + pi * 4 : base + pi * 4 + 4] = [*got[0], 1.0]
                     worse(k, 1, got[1])
             # 손 상태와 쥔 도구
             cur = [x for x in _covering(hand_states, t) if x.payload.hand is hand]  # type: ignore[union-attr]
@@ -309,17 +334,19 @@ def build_episode(
                     tool_id = p.target_id
             tip_base = 2 * n2d + 2 * n3d + hi * 4
             if tool_id is not None:
-                tsc[k, hi] = int(any(
-                    x.payload.subject_id == tool_id  # type: ignore[union-attr]
-                    for x in _covering(tool_contacts, t)
-                ))  # fmt: skip
-                for (ent, part), (series, x) in traj.items():
-                    if ent == tool_id and part in vocab.working_parts:
-                        v = _interp(series, t, gap)
-                        if v is not None:
-                            state[k, tip_base : tip_base + 4] = [*v, 1.0]
-                            worse(k, 1, x)
-                            break
+                touching = [
+                    x for x in _covering(tool_contacts, t)
+                    if x.payload.subject_id == tool_id  # type: ignore[union-attr]
+                ]  # fmt: skip
+                tsc[k, hi] = int(bool(touching))
+                if touching:
+                    worse(k, 4, touching[0])
+                for part in sorted(p for e, p in traj if e == tool_id and p in vocab.working_parts):
+                    got = traj_at(tool_id, part, ts)
+                    if got is not None:
+                        state[k, tip_base : tip_base + 4] = [*got[0], 1.0]
+                        worse(k, 1, got[1])
+                        break
             # 행동
             acts = [x for x in _covering(actions, t) if x.payload.hand is hand]  # type: ignore[union-attr]
             if acts:
@@ -328,6 +355,8 @@ def build_episode(
                 verb[k, hi] = vocab.verbs.index(p.verb) if p.verb in vocab.verbs else -1
                 worse(k, 3, acts[0])
         cover = _covering(tasks_lbl, t)
+        if cover:
+            worse(k, 5, cover[0])
         seg = cover[0].payload if cover else None
         task_names.append(seg.ref_id if isinstance(seg, SegmentPayload) else session.domain.value)
 
@@ -365,6 +394,7 @@ def write_package(
     spec = {
         "repo_id": lp.repo_id, "fps": lp.fps, "robot_type": lp.robot_type, "vcodec": lp.vcodec,
         "width": w, "height": h, "features": features(lp, h, w), "episodes": items,
+        "video_key": video_key(lp),
     }  # fmt: skip
     path = pkg / "package.json"
     path.write_text(json.dumps(spec, ensure_ascii=False), "utf-8")

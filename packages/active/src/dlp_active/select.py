@@ -1,6 +1,7 @@
 """세션 점수와 선택 (`dlp active rank`).
 
-1. 수정률: 모든 세션의 라벨 이력에서 클래스별 수정률을 센다 (개별 검수된 것만).
+1. 수정률: 골든셋·사용 중지 세션을 뺀 세션의 라벨 이력에서 클래스별 수정률을 센다
+   (개별 검수된 것만).
 2. 후보: 정책의 생애주기(기본 prelabeled) 세션. 골든셋 세션과 사용 중지 세션은 뺀다.
 3. 점수: 켜진 항목의 가중합. 정책 normalize가 per_minute면 영상 1분당으로 나눈다.
 4. 높은 점수부터 고른다 (같으면 세션 ID 순 — 같은 입력이면 같은 결과).
@@ -73,21 +74,20 @@ def rank_sessions(
     conn: sa.Connection, policy: ActivePolicy, limit: int | None = None
 ) -> tuple[list[SessionScore], RateTable]:
     withdrawn = withdrawn_session_ids(conn)
-    golden = (
-        {sid for g in list_golden_sets(conn) for sid in g.session_ids}
-        if policy.candidates.exclude_golden
-        else set[str]()
-    )
+    golden = {sid for g in list_golden_sets(conn) for sid in g.session_ids}
     histories: list[list[LabelRecord]] = []
     candidates: list[tuple[Session, list[LabelRecord]]] = []
     for sid in list_session_ids(conn):
+        if sid in withdrawn:
+            continue
         history = get_labels(conn, sid)
-        histories.append(history)
+        # 골든셋 정답은 사람이 처음부터 만든 라벨이라 "추가"로 세면 수정률이 부풀려진다.
+        # 수정률은 프리라벨을 검수한 세션에서만 센다.
+        if sid not in golden:
+            histories.append(history)
         session = get_session(conn, sid)
-        if (
-            session.lifecycle_state in policy.candidates.lifecycle
-            and sid not in withdrawn
-            and sid not in golden
+        if session.lifecycle_state in policy.candidates.lifecycle and not (
+            policy.candidates.exclude_golden and sid in golden
         ):
             candidates.append((session, history))
     rates = correction_rates(histories, policy)

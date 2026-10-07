@@ -17,7 +17,7 @@ from dlp_media.storage import store_from_spec
 from dlp_schema import load_config, repo_root
 from dlp_schema.db.repository import list_model_versions
 from dlp_schema.lineage import ModelStatus
-from dlp_train.loop import TrainingJob, deploy, raw_clips, run_training_job
+from dlp_train.loop import TrainingJob, deploy, raw_clips, registration, run_training_job
 from dlp_train.policy import load_policy
 from dlp_train.tracking import MlflowTracker
 
@@ -43,9 +43,10 @@ def cmd_run(args: argparse.Namespace) -> int:
         dataset_version_id=args.dataset_version,
         trainer=args.trainer,
         params=dict(_param(p) for p in args.param),
-        baseline_version=args.baseline_version,
+        baseline_versions=tuple(args.baseline_version),
         force=args.force,
     )
+    tracker = MlflowTracker.from_env()
     engine = sa.create_engine(database_url(args.url))
     with engine.begin() as conn:
         r = run_training_job(
@@ -53,13 +54,15 @@ def cmd_run(args: argparse.Namespace) -> int:
             job,
             snapshots=snapshots,
             artifacts=store_from_spec(args.store, buckets.mlflow),
-            tracker=MlflowTracker.from_env(),
+            tracker=tracker,
             clips=raw_clips(store_from_spec(args.store, buckets.raw)),
             policy=policy,
             eval_policy=load_eval_policy(root),
             now=datetime.now(UTC),
         )
     engine.dispose()
+    if r.registration is not None:  # DB 커밋 뒤에 MLflow 레지스트리 별칭을 옮긴다
+        tracker.register(*r.registration)
     print(f"학습 예제: {r.examples}")
     print(f"{args.task}: {r.status} — {r.reason}")
     if r.model_version:
@@ -85,14 +88,11 @@ def cmd_approve(args: argparse.Namespace) -> int:
     root = repo_root()
     engine = sa.create_engine(database_url(args.url))
     with engine.begin() as conn:
-        mv = deploy(
-            conn,
-            args.model_version,
-            tracker=MlflowTracker.from_env(),
-            policy=load_policy(root),
-            now=datetime.now(UTC),
-        )
+        mv = deploy(conn, args.model_version, now=datetime.now(UTC))
+        reg = registration(conn, mv, load_policy(root))
     engine.dispose()
+    if reg is not None:  # DB 커밋 뒤에
+        MlflowTracker.from_env().register(*reg)
     print(f"{mv.task}: {mv.model_version} 배포")
     return 0
 
@@ -105,7 +105,12 @@ def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
     run.add_argument("dataset_version")
     run.add_argument("--trainer", help="학습기 (기본: config/policies/training.yaml 템플릿)")
     run.add_argument("--param", action="append", default=[], help="key=value (JSON 값), 여러 번")
-    run.add_argument("--baseline-version", help="배포 모델이 없을 때 비교할 DB 예측의 모델 버전")
+    run.add_argument(
+        "--baseline-version",
+        action="append",
+        default=[],
+        help="배포 모델이 없을 때 비교할 DB 예측의 모델 버전 (대신할 기본 어댑터마다, 여러 번)",
+    )
     run.add_argument("--force", action="store_true", help="누적 조건을 무시")
     run.add_argument("--store", default="s3", help="'s3' 또는 'local:<디렉터리>'")
     run.add_argument("--url", help="DB URL (기본: DLP_DATABASE_URL)")

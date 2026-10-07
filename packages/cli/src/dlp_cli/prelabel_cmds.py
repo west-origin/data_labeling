@@ -70,6 +70,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             ontology,
             now,
             lifter=lifter,
+            replaced=deployed.replaces,
         )
     engine.dispose()
     for key, n in s.produced.items():

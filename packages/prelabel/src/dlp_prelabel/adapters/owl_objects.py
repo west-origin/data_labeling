@@ -27,8 +27,7 @@ class OwlObjects:
     ) -> None:
         self.model_path, version = resolve(root, policy.models.open_vocab)
         self.tokenizer_path, _ = resolve(root, policy.models.open_vocab_tokenizer)
-        op = policy.open_vocab_objects
-        self.version = f"owlv2-{version}-s{op.frame_stride_ms}"
+        self.version = f"owlv2-{version}+p{policy.digest('open_vocab_objects')}"
         self.policy, self.ontology_version, self.now = policy, ontology_version, now
 
     def run(self, clip: Clip) -> list[LabelRecord]:

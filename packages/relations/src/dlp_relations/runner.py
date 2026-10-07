@@ -27,6 +27,7 @@ from dlp_schema.labels import (
     RelationPayload,
     Source,
     Verification,
+    VerificationState,
 )
 from dlp_schema.ontology import Ontology
 
@@ -112,7 +113,11 @@ def run_relations(
     stale = [
         by_id[i]
         for i in sorted(current_ids)
-        if i not in desired and is_derived(by_id[i]) and by_id[i].kind in ("relation", "coverage")
+        if i not in desired
+        and is_derived(by_id[i])
+        and by_id[i].kind in ("relation", "coverage")
+        # 검수자가 승인·표본 검증한 레코드는 규칙이 바뀌어도 지우지 않는다 (ADR 0015)
+        and by_id[i].verification.state is VerificationState.UNREVIEWED
     ]
     retractions = [
         x.model_copy(

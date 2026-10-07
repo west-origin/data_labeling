@@ -39,7 +39,13 @@ def deployed_predictors(
     ctx: LoadContext,
     work: Path,
     loaders: dict[str, ModelLoader] | None = None,
+    *,
+    strict: bool = False,
 ) -> Deployed:
+    """strict: 배포 모델을 쓸 수 없으면 기본 어댑터로 넘어가지 않고 실패한다.
+
+    프라이버시 단계용: 사람이 승인한 블러 모델을 조용히 빼면 블러 재현이 떨어진다.
+    """
     loaders = LOADERS if loaders is None else loaders
     out = Deployed()
     for task, spec in policy.tasks.items():
@@ -51,6 +57,8 @@ def deployed_predictors(
         mv = deployed[-1]
         loader = loaders.get(mv.trainer)
         if loader is None:
+            if strict:
+                raise TrainingError(f"{task}: 배포 모델 {mv.model_version}의 로더가 없습니다")
             out.notes.append(
                 f"{task}: 배포 모델 {mv.model_version}의 로더가 없어 기본 어댑터를 씁니다"
             )
@@ -60,6 +68,10 @@ def deployed_predictors(
                 _download(artifacts, mv, work), version=mv.model_version, ctx=ctx
             )
         except (ModelUnavailableError, TrainingError) as exc:
+            if strict:
+                raise TrainingError(
+                    f"{task}: 배포 모델 {mv.model_version}을 쓸 수 없습니다 ({exc})"
+                ) from exc
             out.notes.append(
                 f"{task}: 배포 모델 {mv.model_version}을 쓸 수 없어 기본 어댑터를 씁니다 ({exc})"
             )

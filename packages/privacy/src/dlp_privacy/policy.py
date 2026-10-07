@@ -11,7 +11,9 @@ from pydantic import Field
 from dlp_schema.common import Contract, OntologyId
 from dlp_schema.config import PrivacyConfig, load_config
 
-ReviewReason = Literal["no_detector", "track_gap", "disagreement", "low_confidence", "reflection"]
+ReviewReason = Literal[
+    "no_detector", "track_gap", "disagreement", "low_confidence", "reflection", "trained_model"
+]
 
 
 class TargetPolicy(Contract):

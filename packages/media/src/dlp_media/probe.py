@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from fractions import Fraction
 from pathlib import Path
 
@@ -73,11 +73,16 @@ def probe(path: Path) -> MediaInfo:
             path=path,
             format_name=c.format.name,
             duration_ms=c.duration / 1000 if c.duration is not None else None,
-            creation_time=datetime.fromisoformat(created) if created else None,
+            creation_time=_aware(datetime.fromisoformat(created)) if created else None,
             video=video,
             audio=audio,
             data_streams=tuple(data),
         )
+
+
+def _aware(t: datetime) -> datetime:
+    """컨테이너 태그에 시간대가 없으면 UTC로 본다 (촬영 시각은 시간대가 있어야 한다)."""
+    return t if t.tzinfo is not None else t.replace(tzinfo=UTC)
 
 
 def to_fraction(value: object) -> Fraction:

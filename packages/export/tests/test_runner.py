@@ -22,6 +22,7 @@ from dlp_datasets.policy import load_policy as load_dataset_policy
 from dlp_datasets.snapshot import LocalSnapshotStore
 from dlp_export.policy import ExportPolicy
 from dlp_export.runner import run_export
+from dlp_export.source import ExportError
 from dlp_fixtures.video import vfr_times
 from dlp_media.storage import LocalStore
 from dlp_schema.db.migrate import upgrade
@@ -103,14 +104,14 @@ def test_export_applies_policy_and_records_history(
                 splits=None, now=FIXED_TIME + timedelta(days=2),
             )  # fmt: skip
 
-    kept = {"s0", "s1", "s3"} & {sid for sid in sids}
+    kept = {"s0", "s1", "s3"}  # s2는 사용 중지
     for fmt in ("intervals", "coco"):
         r = export(fmt)
         out = tmp_path / "store" / "dlp-datasets" / "exports" / r.record.export_id
         manifest = json.loads((out / "manifest.json").read_text())
         exported = {s["session_id"] for s in manifest["sessions"]}
         # 사용 중지 세션 0건 (데이터셋 버전에는 있었다)
-        assert "s2" not in exported and exported <= kept and set(r.record.session_ids) == exported
+        assert exported == kept and set(r.record.session_ids) == kept
         # 미검수 라벨 0건
         assert not [k for k in r.label_counts if k.endswith("/unreviewed")]
         assert manifest["verification_policy"]["include_unreviewed"] is False
@@ -130,7 +131,12 @@ def test_export_applies_policy_and_records_history(
         else:
             for sid in exported:
                 f = json.loads((out / "intervals" / f"{sid}.json").read_text())
-                assert {x["verification"] for x in f["labels"]} != {"unreviewed"}
+                assert "unreviewed" not in {x["verification"] for x in f["labels"]}
+                assert not {x["label_id"] for x in f["labels"]} & {
+                    f"{sid}-blind",
+                    f"{sid}-seed",
+                    f"{sid}-seedfix",
+                }
                 assert all(x["payload"]["kind"] != "blur_track" for x in f["labels"])
 
     # 미검수 포함은 명시적 옵션으로만, 이력에 정책이 남는다
@@ -178,3 +184,43 @@ def test_lerobot_export_end_to_end(
     episodes = json.loads((out / "meta" / "dlp_episodes.json").read_text())
     assert [e["session_id"] for e in episodes] == ["a", "b"]
     assert list(out.rglob("*.mp4")) and list(out.rglob("data/**/*.parquet"))
+
+
+def test_lerobot_refuses_mixed_aspect_ratios(
+    engine: sa.Engine, policy: ExportPolicy, ontology: Ontology, tmp_path: Path
+) -> None:
+    from dlp_fixtures.video import write_video
+    from dlp_media.storage import sha256_file
+
+    snapshots = LocalSnapshotStore(tmp_path / "snap")
+    labeling = LocalStore(tmp_path / "store", "dlp-labeling")
+    datasets = LocalStore(tmp_path / "store", "dlp-datasets")
+    times = vfr_times(np.random.default_rng(6), 500)
+    with engine.begin() as conn:
+        register_ontology(conn, ontology)
+        for i, (sid, (w, h)) in enumerate([("a", (64, 48)), ("b", (64, 36))]):
+            insert_session(
+                conn,
+                make_session(sid, worker_id=f"w{i}", site_id=f"x{i}").model_copy(
+                    update={"privacy_state": PrivacyState.APPROVED}
+                ),
+            )
+            insert_labels(conn, scenario_labels(sid, times))
+            video = tmp_path / f"{sid}.mp4"
+            write_video(
+                video, ((t, np.zeros((h, w, 3), np.uint8)) for t in times), width=w, height=h
+            )
+            labeling.put_file(f"sessions/{sid}/blurred/bodycam.mp4", video, sha256_file(video))
+        build_dataset_version(
+            conn, snapshots, load_dataset_policy(ROOT), version_id="dv1",
+            ontology_version="1.0.0", golden_set_version=None, now=FIXED_TIME,
+        )  # fmt: skip
+        with pytest.raises(ExportError, match="화면비"):
+            run_export(
+                conn, root=ROOT, version_id="dv1", fmt="lerobot", target="internal",
+                snapshots=snapshots, labeling=labeling, datasets=datasets, raw_bucket="dlp-raw",
+                policy=policy, ontology=ontology, include_unreviewed=False, splits=None,
+                now=FIXED_TIME,
+            )  # fmt: skip
+    # 아무것도 올리지 않았다
+    assert not (tmp_path / "store" / "dlp-datasets").exists()

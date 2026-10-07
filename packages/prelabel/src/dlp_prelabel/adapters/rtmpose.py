@@ -36,7 +36,7 @@ class RtmPose:
     ) -> None:
         self.detector_path, det_version = resolve(root, policy.models.body_detector)
         self.pose_path, pose_version = resolve(root, policy.models.body)
-        self.version = f"rtmpose-{pose_version}+{det_version}"
+        self.version = f"rtmpose-{pose_version}+{det_version}+p{policy.digest('body')}"
         self.policy, self.ontology_version, self.now = policy, ontology_version, now
 
     def run(self, clip: Clip) -> list[LabelRecord]:

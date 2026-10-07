@@ -21,12 +21,13 @@ def main() -> None:
         "tasks": sorted(ds.meta.tasks.index.tolist()),
         "samples": [],
     }
+    video_key = next(k for k in ds.features if k.startswith("observation.images."))
     for i in sorted({0, len(ds) // 2, len(ds) - 1}):
         x = ds[i]
         out["samples"].append({
             "index": int(x["index"]), "episode_index": int(x["episode_index"]),
             "timestamp": float(x["timestamp"]), "task": x["task"],
-            "image_shape": list(x["observation.images.bodycam"].shape),
+            "image_shape": list(x[video_key].shape),
             "state": [float(v) for v in x["observation.state"]],
             "hand_state": [int(v) for v in x["annotation.hand_state"]],
             "tool_surface_contact": [int(v) for v in x["annotation.tool_surface_contact"]],

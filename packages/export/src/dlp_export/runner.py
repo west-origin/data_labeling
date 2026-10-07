@@ -39,7 +39,8 @@ from dlp_media.probe import probe
 from dlp_media.pts import build_pts_index
 from dlp_media.storage import ObjectStore, sha256_file
 from dlp_schema.dataset import Split
-from dlp_schema.labels import VerificationState
+from dlp_schema.db.repository import withdrawn_session_ids
+from dlp_schema.labels import LabelRecord, VerificationState
 from dlp_schema.lineage import ExportRecord
 from dlp_schema.ontology import Ontology
 from dlp_schema.session import Session
@@ -69,9 +70,13 @@ def export_id_for(
     return f"export-{fmt}-{tag}"
 
 
-def _label_counts(src: ExportSource) -> dict[str, int]:
-    c = Counter(f"{x.kind}/{x.verification.state.value}" for es in src.sessions for x in es.labels)
+def _label_counts(labels: list[LabelRecord]) -> dict[str, int]:
+    c = Counter(f"{x.kind}/{x.verification.state.value}" for x in labels)
     return dict(sorted(c.items()))
+
+
+# LeRobot 특징을 만드는 라벨 종류 (내보낸 라벨 수를 셀 때 쓴다)
+LEROBOT_KINDS = ("keypoint_track", "trajectory3d", "hand_state", "action", "relation", "segment")
 
 
 def _lerobot(
@@ -82,7 +87,8 @@ def _lerobot(
     labeling: ObjectStore,
     out: Path,
     work: Path,
-) -> dict[str, Any]:
+) -> tuple[list[LabelRecord], set[str], dict[str, Any]]:
+    """(내보낸 라벨, 내보낸 세션, 세부 정보)."""
     vocab = Vocab.from_ontology(ontology)
     episodes: list[tuple[Session, Path, Episode]] = []
     size: tuple[int, int] | None = None
@@ -96,7 +102,16 @@ def _lerobot(
         video = fetch_blurred(labeling, es.session, stream, work)
         info = probe(video).video
         assert info is not None
-        size = size or (info.width, info.height)
+        if size is None:
+            size = (info.width, info.height)
+        elif abs(info.width / info.height - size[0] / size[1]) > 0.01:
+            # 다른 화면비를 한 크기로 맞추면 영상이 찌그러진다
+            # (2D 관절은 정규화라 맞지만 화면은 틀린다)
+            raise ExportError(
+                f"{es.session.session_id}: 화면비가 다른 에피소드는 한 LeRobot 데이터셋에 "
+                f"넣지 않습니다 ({info.width}x{info.height} vs {size[0]}x{size[1]}). "
+                "화면비별로 나눠 내보내세요"
+            )
         ep = build_episode(
             es.session, stream, build_pts_index(video), (info.width, info.height), es.labels, vocab,
             policy.lerobot,
@@ -114,6 +129,7 @@ def _lerobot(
         )
     if not episodes or size is None:
         raise ExportError(f"{policy.lerobot.video_stream} 스트림이 있는 세션이 없습니다")
+    written = {s["session_id"] for s in sessions}
     pkg = write_package(episodes, policy, size, work / "lerobot_pkg")
     dest = out / "lerobot"
     run_script(root, policy.lerobot, "lerobot_write.py", str(pkg), str(dest))
@@ -128,7 +144,18 @@ def _lerobot(
     (dest / "meta" / "dlp_episodes.json").write_text(
         json.dumps(sessions, ensure_ascii=False, indent=2), "utf-8"
     )
-    return {"episodes": len(episodes), "frames": check["frames"], "loader_check": check}
+    used = [
+        x
+        for es in src.sessions
+        if es.session.session_id in written
+        for x in es.labels
+        if x.kind in LEROBOT_KINDS
+    ]
+    return (
+        used,
+        written,
+        {"episodes": len(episodes), "frames": check["frames"], "loader_check": check},
+    )
 
 
 def run_export(
@@ -161,17 +188,24 @@ def run_export(
     with tempfile.TemporaryDirectory() as tmp:
         out, work = Path(tmp) / "out", Path(tmp) / "work"
         out.mkdir()
+        details: dict[str, Any]
         if fmt == "intervals":
-            details: dict[str, Any] = {
+            details = {
                 "labels_per_session": write_intervals(
                     src, policy, out, export_id=export_id, now=now
                 )
             }
+            written = {es.session.session_id for es in src.sessions}
+            used = [x for es in src.sessions for x in es.labels if x.kind in policy.intervals.kinds]
         elif fmt == "coco":
             r = write_coco(src, policy, ontology, labeling, out, work, export_id=export_id, now=now)
             details = {"images": r.images, "annotations": r.annotations, "dropped": r.dropped}
+            written, used = r.sessions, list(r.labels.values())
         else:
-            details = _lerobot(root, src, policy, ontology, labeling, out, work)
+            used, written, details = _lerobot(root, src, policy, ontology, labeling, out, work)
+        if not written:
+            raise ExportError(f"{version_id}: 이 형식으로 쓴 세션이 없습니다")
+        counts = _label_counts(used)
         manifest = {
             "export_id": export_id,
             "dataset_version_id": version_id,
@@ -188,31 +222,38 @@ def run_export(
             "sessions": [
                 {"session_id": es.session.session_id, "split": es.split.value}
                 for es in src.sessions
+                if es.session.session_id in written
             ],
-            "label_counts": _label_counts(src),
+            "label_counts": counts,
             "details": details,
         }
         (out / "manifest.json").write_text(
             json.dumps(manifest, ensure_ascii=False, indent=2), "utf-8"
         )
         assert_no_raw(out, raw_bucket)
+        # 내보내는 동안 사용 중지된 세션이 생겼으면 아무것도 올리지 않는다
+        late = written & withdrawn_session_ids(conn)
+        if late:
+            raise ExportError(f"내보내는 동안 사용 중지된 세션: {sorted(late)}. 다시 내보내세요")
+        # 이력을 먼저 남기고(같은 트랜잭션), manifest.json은 마지막에 올린다. 중간에 실패하면
+        # 트랜잭션이 되돌아가고 manifest 없는 폴더만 남는다 (manifest 없는 폴더 = 미완성 내보내기).
+        record = record_export(
+            conn,
+            export_id=export_id,
+            dataset_version_id=version_id,
+            target=target,
+            format=fmt,
+            uri=datasets.uri(f"exports/{export_id}"),
+            splits=splits or policy.splits,
+            label_states=src.label_states,
+            session_ids=tuple(sorted(written)),
+            now=now,
+        )
         files = 0
-        for p in walk_files(out):
+        manifest_path = out / "manifest.json"
+        for p in [*(q for q in walk_files(out) if q != manifest_path), manifest_path]:
             datasets.put_file(
                 f"exports/{export_id}/{p.relative_to(out).as_posix()}", p, sha256_file(p)
             )
             files += 1
-    record = record_export(
-        conn,
-        export_id=export_id,
-        dataset_version_id=version_id,
-        target=target,
-        format=fmt,
-        uri=datasets.uri(f"exports/{export_id}"),
-        splits=splits or policy.splits,
-        label_states=src.label_states,
-        now=now,
-    )
-    if set(record.session_ids) != {es.session.session_id for es in src.sessions}:
-        raise ExportError("내보낸 세션과 이력의 세션이 다릅니다")
-    return ExportResult(record, files, _label_counts(src), details)
+    return ExportResult(record, files, counts, details)

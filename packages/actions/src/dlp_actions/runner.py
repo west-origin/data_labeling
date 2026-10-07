@@ -3,8 +3,10 @@
 바디캠의 손마다(hand21 키포인트 트랙이 있는 손) 경계 후보 → VLM 분류 → 병합·채우기를 하고
 action·gap·description 레코드를 쓴다. model_version은 "actions-<정책 해시>+<VLM 버전>"이다.
 - 같은 버전 결과가 그 손에 이미 있으면 건너뛴다.
-- 버전이 바뀌면 이 모듈이 만든 이전 현재 레코드를 삭제 레코드로 표시하고 새로 쓴다.
-  검수자가 고친 레코드(사람 출처 자식이 있는 것)는 이미 현재 레코드가 아니므로 건드리지 않는다.
+- 버전이 바뀌면 이 모듈이 만든 이전 현재 레코드 중 **검수 전인 것만** 삭제 레코드로 표시하고
+  새로 쓴다.
+  검수자가 승인·표본 검증한 레코드와 사람이 고치거나 만든 레코드는 남기고, 새 결과 중 그와 겹치는
+  구간은 버린 뒤 남는 빈 시간을 미상(unknown) 공백으로 채운다 (타임라인 공백 0 유지, ADR 0015).
 """
 
 from __future__ import annotations
@@ -19,13 +21,14 @@ import sqlalchemy as sa
 from dlp_actions.pipeline import segment_hand
 from dlp_actions.policy import ActionsPolicy
 from dlp_actions.vlm import VlmClient
-from dlp_media.storage import ObjectStore
+from dlp_media.storage import ObjectStore, blurred_key
 from dlp_schema.db.repository import get_labels, get_session, insert_labels
-from dlp_schema.episode import current_labels, retractions
+from dlp_schema.episode import current_labels, retractions, version_tag
 from dlp_schema.labels import (
     ActionPayload,
     BoxTrackPayload,
     DescriptionPayload,
+    Evidence,
     GapPayload,
     Hand,
     HandStatePayload,
@@ -33,6 +36,7 @@ from dlp_schema.labels import (
     LabelRecord,
     MaskTrackPayload,
     Source,
+    VerificationState,
 )
 from dlp_schema.ontology import Ontology
 
@@ -61,6 +65,85 @@ def _ours(x: LabelRecord) -> bool:
     )
 
 
+def subtract(span: tuple[int, int], cuts: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """span에서 cuts(정렬됨)를 뺀 조각들."""
+    start, end = span
+    out: list[tuple[int, int]] = []
+    cur = start
+    for cs, ce in cuts:
+        if ce <= cur or cs >= end:
+            continue
+        if cs > cur:
+            out.append((cur, cs))
+        cur = max(cur, ce)
+        if cur >= end:
+            break
+    if cur < end:
+        out.append((cur, end))
+    return out
+
+
+def keep_protected(
+    labels: list[LabelRecord],
+    protected: list[LabelRecord],
+    hand: Hand,
+    version: str,
+    now: datetime,
+) -> list[LabelRecord]:
+    """새 행동·공백 중 검수된(또는 사람) 구간과 겹치는 것을 버린다.
+
+    버려서 비는 시간은 미상 공백으로 채운다.
+
+    버린 행동의 설명도 버린다. 남은 타임라인은 검수된 구간 + 새 구간 + 채운 공백으로 빈틈이 없다.
+    """
+    if not protected:
+        return labels
+    keep_spans = sorted((x.t_start_ms, x.t_end_ms) for x in protected)
+
+    def overlaps(s: int, e: int) -> bool:
+        return any(ks < e and s < ke for ks, ke in keep_spans)
+
+    out: list[LabelRecord] = []
+    dropped_actions: set[str] = set()
+    holes: list[tuple[int, int]] = []
+    template: LabelRecord | None = None
+    for x in labels:
+        timed = isinstance(x.payload, ActionPayload | GapPayload)
+        if timed and overlaps(x.t_start_ms, x.t_end_ms):
+            holes.append((x.t_start_ms, x.t_end_ms))
+            template = template or x
+            if isinstance(x.payload, ActionPayload):
+                dropped_actions.add(x.payload.action_id)
+            continue
+        out.append(x)
+    out = [
+        x
+        for x in out
+        if not (
+            isinstance(x.payload, DescriptionPayload) and x.payload.segment_id in dropped_actions
+        )
+    ]
+    if template is None:
+        return out
+    tag = version_tag(version)
+    for hole in holes:
+        for start, end in subtract(hole, keep_spans):
+            out.append(
+                template.model_copy(
+                    update={
+                        "label_id": f"{template.session_id}-{hand.value}-{tag}-{start}-fill",
+                        "t_start_ms": start,
+                        "t_end_ms": end,
+                        "confidence": 0.0,
+                        "evidence": Evidence.INFERRED,
+                        "created_at": now,
+                        "payload": GapPayload(hand=hand, gap_type="unknown"),
+                    }
+                )
+            )
+    return out
+
+
 def run_actions(
     conn: sa.Connection,
     session_id: str,
@@ -68,7 +151,7 @@ def run_actions(
     ontology: Ontology,
     policy: ActionsPolicy,
     now: datetime,
-    raw: ObjectStore | None = None,
+    labeling: ObjectStore | None = None,
 ) -> ActionsSummary:
     session = get_session(conn, session_id)
     version = f"{PREFIX}{policy.digest}+{client.version}"
@@ -106,21 +189,39 @@ def run_actions(
     }
     with tempfile.TemporaryDirectory() as tmp:
         video: Path | None = None
-        if raw is not None:
+        if labeling is not None:
             video = Path(tmp) / "bodycam.mp4"
-            raw.get_file(body.uri.removeprefix(raw.uri("")), video)
+            # VLM에는 블러본만 보낸다 (원본 프레임이 VLM 서버로 나가지 않게,
+            # 설명 초안에 개인정보가 들어가지 않게). 블러본은 프라이버시 승인 후 렌더된다.
+            labeling.get_file(blurred_key(session_id, body.stream_id), video)
         for hand, track in sorted(tracks.items()):
-            mine = [x for x in current if _ours(x) and _hand_of(x) is hand]
+            mine = [
+                x
+                for x in current
+                if _ours(x)
+                and _hand_of(x) is hand
+                and x.verification.state is VerificationState.UNREVIEWED
+            ]
+            protected = [
+                x
+                for x in current
+                if _hand_of(x) is hand
+                and (
+                    x.provenance.source is Source.HUMAN
+                    or x.verification.state is not VerificationState.UNREVIEWED
+                )
+            ]
             # 멱등: 이 버전을 낸 적이 있으면 건너뛴다 (검수자가 모두 고쳤거나 다른 버전으로
             # 바뀌었어도). 예전 버전으로 되돌려도 다시 만들지 않는다. 다시 만들려면 버전을 바꾼다.
             if any(x.provenance.model_version == version and _hand_of(x) is hand for x in labels):
                 summary.skipped.append(hand.value)
                 continue
             stale = mine + [
-                descriptions_by_action[x.payload.action_id]
+                d
                 for x in mine
                 if isinstance(x.payload, ActionPayload)
-                and x.payload.action_id in descriptions_by_action
+                and (d := descriptions_by_action.get(x.payload.action_id)) is not None
+                and d.verification.state is VerificationState.UNREVIEWED
             ]
             contacts = sorted(
                 (x.t_start_ms, x.t_end_ms)
@@ -146,14 +247,16 @@ def run_actions(
                 ontology_version=session.ontology_version or ontology.version,
                 now=now,
             )
+            new = keep_protected(result.labels, protected, hand, version, now)
             removed = retractions(stale, version, now)
-            insert_labels(conn, [*removed, *result.labels])
+            insert_labels(conn, [*removed, *new])
             summary.retracted += len(removed)
             summary.hands[hand.value] = {
                 "candidates": len(result.candidates),
                 "segments": len(result.classified),
-                "actions": sum(isinstance(x.payload, ActionPayload) for x in result.labels),
-                "gaps": sum(isinstance(x.payload, GapPayload) for x in result.labels),
+                "actions": sum(isinstance(x.payload, ActionPayload) for x in new),
+                "gaps": sum(isinstance(x.payload, GapPayload) for x in new),
+                "kept_reviewed": len(protected),
                 "unknown_fallbacks": result.fallbacks,
             }
     return summary

@@ -39,9 +39,10 @@ def cmd_fiftyone(args: argparse.Namespace) -> int:
     root = repo_root()
     policy = load_policy(root)
     # 블러본만 쓴다: 라벨링 버킷 (원본 버킷은 읽지 않는다)
-    labeling = store_from_spec(
-        args.store, load_config(root / "config/defaults.yaml").buckets.labeling
-    )
+    buckets = load_config(root / "config/defaults.yaml").buckets
+    if buckets.labeling == buckets.raw:
+        raise SystemExit("큐레이션은 원본 버킷을 읽지 않습니다 (buckets.labeling == buckets.raw)")
+    labeling = store_from_spec(args.store, buckets.labeling)
     engine = sa.create_engine(database_url(args.url))
     with engine.connect() as conn:
         ranked, rates = rank_sessions(conn, policy, args.limit)

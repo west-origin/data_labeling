@@ -24,7 +24,7 @@ from dlp_active.rates import RateTable
 from dlp_active.select import SessionScore
 from dlp_media.probe import probe
 from dlp_media.pts import PtsIndex, build_pts_index
-from dlp_media.storage import ObjectStore, sha256_file
+from dlp_media.storage import ObjectStore, blurred_key, sha256_file
 from dlp_schema.db.repository import get_labels, get_session
 from dlp_schema.episode import current_labels
 from dlp_schema.history import label_class
@@ -209,7 +209,7 @@ def build_samples(
         session = get_session(conn, s.session_id)
         history = get_labels(conn, s.session_id)
         for stream in (x for x in session.streams if x.kind in VIDEO):
-            key = f"sessions/{s.session_id}/blurred/{stream.stream_id}.mp4"
+            key = blurred_key(s.session_id, stream.stream_id)
             head = labeling.head(key)
             if head is None:
                 notes.append(f"{s.session_id}/{stream.stream_id}: 블러본이 없어 건너뜀")

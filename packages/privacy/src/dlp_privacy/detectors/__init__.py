@@ -1,4 +1,8 @@
-"""탐지기 구현과 정책에서 탐지기를 만드는 공장."""
+"""탐지기 구현과 정책에서 탐지기를 만드는 공장.
+
+TODO(real-model): 글자 탐지(OCR) 탐지기가 없다 (송장·문서·주소 표지는 OWLv2와 QR·바코드만).
+  후보는 RapidOCR(PaddleOCR 검출 ONNX, Apache-2.0, CPU). config/policies/privacy.yaml 참조.
+"""
 
 from __future__ import annotations
 

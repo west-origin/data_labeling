@@ -36,13 +36,14 @@ from dlp_schema.ontology import load_ontology
 from dlp_schema.session import Domain, PrivacyState, Session
 from dlp_schema.testing import FIXED_TIME, make_label, make_session
 from dlp_train.deployed import deployed_predictors
-from dlp_train.loop import LoopResult, TrainingJob, deploy, run_training_job
+from dlp_train.loop import LoopResult, TrainingError, TrainingJob, deploy, run_training_job
 from dlp_train.policy import TrainingPolicy, load_policy
 from dlp_train.tracking import MemoryTracker
 from dlp_train.trainers import LoadContext
 
 ROOT = Path(__file__).resolve().parents[3]
 pytestmark = pytest.mark.services
+BASE = ("base-v1",)
 CLASSES = ("cup", "bucket", "mop")
 
 
@@ -217,7 +218,10 @@ def test_training_loop_gate_blocks_or_deploys(engine: sa.Engine, tmp_path: Path)
     assert not tracker.runs
 
     # 1) 흔들림이 큰 후보: 첫 배포 기준(HOTA) 미달 → 미배포
-    r1 = run(TrainingJob("objects", "dv1", params={"jitter_px": 60.0}), 1)
+    # 기본 어댑터(objects·tools)를 대신하는 과제라 비교할 기본 예측 버전 없이는 평가하지 않는다
+    with pytest.raises(TrainingError, match="baseline-version"):
+        run(TrainingJob("objects", "dv1", params={"jitter_px": 0.0}), 1)
+    r1 = run(TrainingJob("objects", "dv1", params={"jitter_px": 200.0}, baseline_versions=BASE), 1)
     assert r1.status == "rejected", r1.reason
     # 학습 세션 8개마다 (승인 cup, 수정 bucket, 추가 mop). 골든 세션은 들어가지 않는다
     assert sum(r1.examples.values()) == 24
@@ -226,13 +230,13 @@ def test_training_loop_gate_blocks_or_deploys(engine: sa.Engine, tmp_path: Path)
         assert not list_model_versions(conn, "objects", ModelStatus.DEPLOYED)
 
     # 2) 새 예제가 없으면 재학습하지 않는다 (force로만)
-    r_skip = run(TrainingJob("objects", "dv1"), 2)
+    r_skip = run(TrainingJob("objects", "dv1", baseline_versions=BASE), 2)
     assert r_skip.status == "skipped" and "min_new_examples" in r_skip.reason
 
     # 3) 정확한 후보: 배포 모델이 없으니 DB에 있는 기존(base) 모델 예측과 비교 → 통과 → 배포
     r2 = run(
         TrainingJob(
-            "objects", "dv1", params={"jitter_px": 0.0}, baseline_version="base-v1", force=True
+            "objects", "dv1", params={"jitter_px": 0.0}, baseline_versions=BASE, force=True
         ),
         3,
     )
@@ -268,6 +272,9 @@ def test_training_loop_gate_blocks_or_deploys(engine: sa.Engine, tmp_path: Path)
     assert {"model/oracle-stub.json", "golden/golden.json", "golden/golden.md"} <= set(
         rec.artifacts
     )
+    # 레지스트리 등록은 DB 커밋 뒤에 CLI가 한다 (배포 결과가 알려 준다)
+    assert r2.registration is not None and r1.registration is None and r3.registration is None
+    tracker.register(*r2.registration)
     assert tracker.registry == {"dlp-objects": [r2.mlflow_run_id]}
     assert tracker.aliases[("dlp-objects", "deployed")] == "1"
 
@@ -276,10 +283,18 @@ def test_training_loop_gate_blocks_or_deploys(engine: sa.Engine, tmp_path: Path)
     assert r4.status == "passed", r4.reason
     with engine.begin() as conn:
         assert not list_model_versions(conn, "privacy", ModelStatus.DEPLOYED)
-        deploy(conn, r4.model_version or "", tracker=tracker, policy=policy, now=FIXED_TIME)
+        deploy(conn, r4.model_version or "", now=FIXED_TIME)
         assert [
             m.model_version for m in list_model_versions(conn, "privacy", ModelStatus.DEPLOYED)
         ] == [r4.model_version]
+    # 승인 대기 모델은, 그 게이트 판정 뒤에 다른 모델이 배포됐으면 승인할 수 없다
+    r6 = run(TrainingJob("privacy", "dv1", force=True), 7)
+    r7 = run(TrainingJob("privacy", "dv1", force=True), 8)
+    assert (r6.status, r7.status) == ("passed", "passed")
+    with engine.begin() as conn:
+        deploy(conn, r6.model_version or "", now=FIXED_TIME.replace(second=9))
+    with engine.begin() as conn, pytest.raises(TrainingError, match="다시 학습"):
+        deploy(conn, r7.model_version or "", now=FIXED_TIME.replace(second=10))
     r5 = run(TrainingJob("hands", "dv1", force=True), 6)
     assert r5.status == "skipped" and "정답이 없어" in r5.reason
 

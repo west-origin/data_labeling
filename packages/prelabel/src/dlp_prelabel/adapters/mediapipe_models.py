@@ -60,7 +60,8 @@ class MediaPipeHands:
     def __init__(
         self, root: Path, policy: PrelabelPolicy, *, ontology_version: str, now: datetime
     ) -> None:
-        self.path, self.version = _model(root, policy.models.hands)
+        self.path, version = _model(root, policy.models.hands)
+        self.version = f"{version}+p{policy.digest('hands')}"
         self.policy, self.ontology_version, self.now = policy, ontology_version, now
 
     def run(self, clip: Clip) -> list[LabelRecord]:
@@ -126,7 +127,8 @@ class MediaPipeObjects:
     def __init__(
         self, root: Path, policy: PrelabelPolicy, *, ontology_version: str, now: datetime
     ) -> None:
-        self.path, self.version = _model(root, policy.models.coco_objects)
+        self.path, version = _model(root, policy.models.coco_objects)
+        self.version = f"{version}+p{policy.digest('objects')}"
         self.policy, self.ontology_version, self.now = policy, ontology_version, now
 
     def run(self, clip: Clip) -> list[LabelRecord]:

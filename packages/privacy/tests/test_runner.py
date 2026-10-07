@@ -21,8 +21,10 @@ from dlp_privacy.policy import PrivacyPolicy, TargetPolicy
 from dlp_privacy.runner import PrivacyGateError, approve_session, detect_session, render_session
 from dlp_schema.db.migrate import upgrade
 from dlp_schema.db.repository import get_labels, get_session, record_review, register_ontology
-from dlp_schema.labels import VerificationState
+from dlp_schema.episode import current_labels
+from dlp_schema.labels import LabelRecord, Provenance, Source, VerificationState
 from dlp_schema.ontology import load_ontology
+from dlp_schema.predictor import Clip
 from dlp_schema.session import LifecycleState, PrivacyState
 from dlp_schema.testing import FIXED_TIME
 
@@ -129,3 +131,88 @@ def test_detect_review_approve_render(
         labeling.get_file(f"sessions/{sid}/blurred/third_person.mp4", dest)
         with av.open(str(dest)) as c:
             assert c.streams.video and not c.streams.audio
+
+
+class TrainedBlur:
+    """배포된 재학습 블러 모델 자리 (정답 블러를 그대로 낸다)."""
+
+    name = "trained-privacy"
+
+    def __init__(self, labels: list[LabelRecord], version: str) -> None:
+        self.labels, self.version = labels, version
+
+    def run(self, clip: Clip) -> list[LabelRecord]:
+        tag = self.version.replace(".", "_")
+        return [
+            x.model_copy(
+                update={
+                    "label_id": f"{clip.session_id}-{clip.stream_id}-{self.name}-{tag}-{i}",
+                    "session_id": clip.session_id,
+                    "stream_id": clip.stream_id,
+                    "provenance": Provenance(source=Source.MODEL, model_version=self.version),
+                    "confidence": 0.9,
+                }
+            )
+            for i, x in enumerate(self.labels)
+        ]
+
+
+def test_deployed_blur_model_is_unioned_and_versioned(
+    pg: sa.Engine, policy: PrivacyPolicy, blur: tuple[BlurScenario, Path], tmp_path: Path
+) -> None:
+    scenario, video = blur
+    sid = f"priv-{uuid.uuid4().hex[:8]}"
+    manifest = {
+        "session_id": sid, "domain": "cleaning", "worker_id": "w01", "site_id": "site01",
+        "consent_version": "c1", "recorded_at": FIXED_TIME.isoformat(), "ontology_version": "1.0.0",
+        "streams": [{"stream_id": "bodycam", "kind": "bodycam", "path": str(video)}],
+    }  # fmt: skip
+    (tmp_path / "m.yaml").write_text(yaml.safe_dump(manifest), encoding="utf-8")
+    raw = S3Store.from_env("dlp-raw")
+    with pg.begin() as conn:
+        ingest_session(*load_manifest(tmp_path / "m.yaml"), raw, conn)
+    oracle = OracleDetector("oracle", scenario.labels)
+    oracle_policy = policy.model_copy(
+        update={
+            "targets": {
+                t: TargetPolicy(margin=tp.margin, detectors=("oracle",))
+                for t, tp in policy.targets.items()
+            }
+        }
+    )
+    blurs = [x for x in scenario.labels if x.kind == "blur_track"]
+    v1, v2 = TrainedBlur(blurs, "trained-v1"), TrainedBlur(blurs, "trained-v2")
+
+    def current_versions(conn: sa.Connection) -> dict[str, int]:
+        out: dict[str, int] = {}
+        for x in current_labels(get_labels(conn, sid, kinds=["blur_track"])):
+            v = x.provenance.model_version or ""
+            out[v] = out.get(v, 0) + 1
+        return out
+
+    with pg.begin() as conn:
+        first = detect_session(
+            conn, sid, raw, {"oracle": oracle}, {}, oracle_policy, FIXED_TIME, extra=[v1]
+        )
+        before = current_versions(conn)
+    assert first.detected["bodycam"] == 6 + len(blurs)  # 탐지기 + 재학습 모델 (합집합)
+    assert before["trained-v1"] == len(blurs)
+    with tempfile.TemporaryDirectory() as tmp:
+        dest = Path(tmp) / "r.json"
+        raw.get_file(f"sessions/{sid}/derived/privacy_review/bodycam.json", dest)
+        reasons = {s["reason"] for s in json.loads(dest.read_text(encoding="utf-8"))}
+    assert "trained_model" in reasons
+
+    with pg.begin() as conn:
+        again = detect_session(
+            conn, sid, raw, {"oracle": oracle}, {}, oracle_policy, FIXED_TIME, extra=[v1]
+        )
+        assert again.skipped == ["bodycam"]
+        # 모델이 바뀌면 이전 모델의 검수 전 블러만 바뀌고 탐지기 결과는 그대로다
+        swapped = detect_session(
+            conn, sid, raw, {"oracle": oracle}, {}, oracle_policy, FIXED_TIME, extra=[v2]
+        )
+        after = current_versions(conn)
+    assert swapped.detected["bodycam"] == len(blurs)
+    assert "trained-v1" not in after and after["trained-v2"] == len(blurs)
+    assert sum(n for v, n in after.items() if not v.startswith("trained")) == 6

@@ -46,6 +46,13 @@ class TrainingPolicy(Contract):
             raise ValueError(f"골든·holdout 분할은 학습에 쓸 수 없습니다: {sorted(bad)}")
         return v
 
+    @field_validator("tasks")
+    @classmethod
+    def _privacy_needs_approval(cls, v: dict[Task, TaskTraining]) -> dict[Task, TaskTraining]:
+        if "privacy" in v and v["privacy"].deploy != "approve":
+            raise ValueError("블러(privacy) 모델은 사람 승인 후에만 배포한다 (deploy: approve)")
+        return v
+
     @field_validator("trainable_states")
     @classmethod
     def _reviewed(cls, v: tuple[VerificationState, ...]) -> tuple[VerificationState, ...]:

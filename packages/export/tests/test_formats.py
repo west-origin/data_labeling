@@ -165,8 +165,9 @@ def test_lerobot_frame_features(
     assert ep.state[k, col["right.tool_tip.x3d"]] == pytest.approx(ep.times_ms[k] / 1000, abs=1e-4)
     assert list(ep.tool_surface_contact[k]) == [-1, 1]
     assert list(ep.verb[k]) == [-1, vocab.verbs.index("carry")]
-    # 검증 등급: 손 상태는 표본 검증(1), 행동은 사람 승인(2), 3D는 사람(3)
-    assert list(ep.verification[k][1:]) == [3, 1, 2]
+    # 검증 등급 [2D, 3D, 손 상태, 행동, 도구-표면 접촉, 작업]:
+    # 3D 사람(3), 손 상태 표본 검증(1), 행동 사람 승인(2), 접촉 관계·작업 구간 사람(3)
+    assert list(ep.verification[k][1:]) == [3, 1, 2, 3, 3]
     assert ep.tasks[k] == "floor_sweep_mop"
     assert ep.tasks[at(800)] == "cleaning"  # 작업 구간 밖은 도메인
     assert list(ep.tool_surface_contact[at(800)]) == [-1, -1]  # 쥔 도구 없음
@@ -177,3 +178,51 @@ def test_raw_uri_guard(tmp_path: Path) -> None:
     (tmp_path / "manifest.json").write_text('{"uri": "s3://dlp-raw/sessions/x/bodycam.mp4"}')
     with pytest.raises(ExportError, match="원본"):
         assert_no_raw(tmp_path, "dlp-raw")
+
+
+def test_offset_third_person_keyframes_use_stream_time(
+    scenario: Scenario, policy: ExportPolicy, ontology: Ontology, tmp_path: Path
+) -> None:
+    """공간 라벨 키프레임은 그 스트림 영상의 PTS 시각이다 (ADR 0019). 3인칭 스트림이 마스터와
+    어긋나 있어도(오프셋·클럭 배율) 키프레임은 그 영상 프레임에 그대로 맞는다."""
+    from dlp_schema.session import Stream, StreamKind, SyncMethod
+
+    from .conftest import scenario_labels
+
+    third = Stream(
+        stream_id="third", kind=StreamKind.THIRD_PERSON, uri="s3://dlp-raw/x/third.mp4",
+        sync_method=SyncMethod.QR_SLATE, offset_ms=1234.567, clock_scale=1.0001,
+    )  # fmt: skip
+    session = scenario.session.model_copy(update={"streams": (*scenario.session.streams, third)})
+    t = scenario.times
+    labels = [
+        x.model_copy(update={"stream_id": "third", "label_id": f"{x.label_id}-3"})
+        for x in scenario_labels("s1", t)
+        if x.label_id in ("s1-box", "s1-kp")
+    ]
+    # 3인칭 블러본 자리에 같은 VFR 영상을 둔다 (키프레임은 이 영상의 PTS 시각)
+    video = tmp_path / "third_src.mp4"
+    scenario.labeling.get_file("sessions/s1/blurred/bodycam.mp4", video)
+    from dlp_media.storage import sha256_file
+
+    scenario.labeling.put_file("sessions/s1/blurred/third.mp4", video, sha256_file(video))
+    states = label_states(policy, False)
+    version = DatasetVersion(
+        version_id="dv1", ontology_version="1.0.0", created_at=FIXED_TIME,
+        snapshot_uri="local-snapshot://x/dv1", splits={"s1": Split.TRAIN},
+    )  # fmt: skip
+    src = ExportSource(
+        version,
+        [ExportSession(session, Split.TRAIN, select_labels(labels, policy, states))],
+        states,
+    )
+    out = tmp_path / "out"
+    r = write_coco(src, policy, ontology, scenario.labeling, out, tmp_path / "w",
+                   export_id="e1", now=FIXED_TIME)  # fmt: skip
+    data = json.loads((out / "coco" / "annotations.json").read_text())
+    third_imgs = [i for i in data["images"] if i["stream_id"] == "third"]
+    assert sorted(i["t_ms"] for i in third_imgs) == [t[2], t[4], t[6]]
+    assert r.dropped == {"keyframe_between_frames": 1}  # 원래 프레임 사이에 둔 키프레임 하나만
+    for img in data["images"]:
+        assert (out / "coco" / img["file_name"]).exists()
+    assert len({i["file_name"] for i in data["images"]}) == len(data["images"])

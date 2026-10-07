@@ -18,6 +18,8 @@ class SlatePolicy(Contract):
     search_window_ms: float = Field(gt=0)
     frame_stride: int = Field(ge=1)
     estimate_drift: bool
+    confidence_one: float = Field(ge=0, le=1)
+    confidence_many: float = Field(ge=0, le=1)
 
 
 class TapPolicy(Contract):

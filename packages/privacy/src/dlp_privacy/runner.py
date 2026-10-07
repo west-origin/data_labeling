@@ -11,7 +11,7 @@ from pathlib import Path
 
 import sqlalchemy as sa
 
-from dlp_media.storage import ObjectStore, sha256_file
+from dlp_media.storage import ObjectStore, blurred_key, sha256_file
 from dlp_privacy.detection import FrameDetector
 from dlp_privacy.pipeline import detect_video, model_version
 from dlp_privacy.policy import PrivacyPolicy
@@ -25,7 +25,7 @@ from dlp_schema.db.repository import (
     set_privacy_state,
 )
 from dlp_schema.episode import current_labels, retractions
-from dlp_schema.labels import LabelRecord, Source, VerificationState
+from dlp_schema.labels import BlurTrackPayload, LabelRecord, Source, VerificationState
 from dlp_schema.predictor import Clip, Predictor
 from dlp_schema.session import LifecycleState, PrivacyState, Session, StreamKind
 
@@ -112,8 +112,26 @@ def detect_session(
                 segments = result.segments
             for p in extra:
                 if p.version not in done:
-                    out = p.run(Clip(session_id, stream.stream_id, video))
-                    labels += [x for x in out if x.kind == "blur_track"]
+                    out = [
+                        x
+                        for x in p.run(Clip(session_id, stream.stream_id, video))
+                        if isinstance(x.payload, BlurTrackPayload)
+                    ]
+                    labels += out
+                    order = {r: i for i, r in enumerate(policy.review_priority)}
+                    for x in out:
+                        assert isinstance(x.payload, BlurTrackPayload)
+                        segments.append(
+                            ReviewSegment(
+                                stream_id=stream.stream_id,
+                                target=x.payload.target,
+                                reason="trained_model",
+                                t_start_ms=x.t_start_ms,
+                                t_end_ms=x.t_end_ms,
+                                priority=order.get("trained_model", len(order)),
+                                detail=p.version,
+                            )
+                        )
             # 탐지기·모델 버전이 바뀌면 검수 전인 이전 버전 블러만 지운다 (검수한 블러는 남긴다)
             stale = [
                 x
@@ -125,7 +143,7 @@ def detect_session(
             ]
             insert_labels(conn, [*retractions(stale, version, now), *labels])
             summary.detected[stream.stream_id] = len(labels)
-            if version not in done:
+            if segments or version not in done:
                 key = f"sessions/{session_id}/derived/privacy_review/{stream.stream_id}.json"
                 out_path = work / f"{stream.stream_id}-review.json"
                 out_path.write_text(
@@ -184,7 +202,7 @@ def render_session(
         for stream in session.streams:
             if stream.kind not in VIDEO_KINDS:
                 continue
-            key = f"sessions/{session_id}/blurred/{stream.stream_id}.mp4"
+            key = blurred_key(session_id, stream.stream_id)
             if labeling.head(key) is None:
                 dst = work / f"{stream.stream_id}-blurred.mp4"
                 render_blurred(

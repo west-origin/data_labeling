@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import tempfile
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -48,8 +49,17 @@ from dlp_schema.session import LifecycleState, Session, StreamKind, SyncMethod
 from dlp_sync.signals import glove_series, imu_series
 
 VIDEO = {StreamKind.BODYCAM, StreamKind.THIRD_PERSON}
-CONTACT_VERSION = "contact-heuristic-1"
-WEARER_VERSION = "wearer-xcorr-1"
+REPLACED_VERSION = "replaced-by-deployed-model"
+CONTACT_PREFIX = "contact-heuristic-1"
+WEARER_PREFIX = "wearer-xcorr-1"
+
+
+def contact_version(policy: PrelabelPolicy) -> str:
+    return f"{CONTACT_PREFIX}+p{policy.digest('contact')}"
+
+
+def wearer_version(policy: PrelabelPolicy) -> str:
+    return f"{WEARER_PREFIX}+p{policy.digest('wearer_matching')}"
 
 
 @dataclass
@@ -80,7 +90,13 @@ def run_prelabel(
     ontology: Ontology,
     now: datetime,
     lifter: DepthLifter | None = None,
+    replaced: Iterable[str] = (),
 ) -> PrelabelSummary:
+    """replaced: 배포된 재학습 모델이 대신하는 기본 어댑터 이름.
+
+    그 어댑터가 냈던 검수 전 라벨을 지운다 (같은 대상이 기본 어댑터와 재학습 모델 양쪽으로 겹쳐 남지
+    않게).
+    """
     session = get_session(conn, session_id)
     if session.ontology_version is None:
         raise ValueError(f"{session_id}: 세션에 온톨로지 버전이 없습니다")
@@ -107,6 +123,16 @@ def run_prelabel(
                 insert_labels(conn, [*retractions(stale, predictor.version, now), *labels])
                 summary.produced[key] = len(labels)
                 summary.retracted += len(stale)
+        replaced_stale = [
+            x
+            for stream in session.streams
+            if stream.kind in VIDEO
+            for name in sorted(set(replaced))
+            for x in _stale(existing, f"{session_id}-{stream.stream_id}-{name}-", "")
+        ]
+        if replaced_stale:
+            insert_labels(conn, retractions(replaced_stale, REPLACED_VERSION, now))
+            summary.retracted += len(replaced_stale)
         history = get_labels(conn, session_id)
         current = current_labels(history)
         if lifter is not None:
@@ -187,9 +213,12 @@ def _contacts(
     ontology: Ontology,
     now: datetime,
 ) -> int:
-    # 멱등: 이력에 이 버전이 있으면 (검수자가 모두 고쳤거나 지웠어도) 다시 만들지 않는다
-    if any(x.provenance.model_version == CONTACT_VERSION for x in history):
+    # 멱등: 이력에 이 버전이 있으면 (검수자가 모두 고쳤거나 지웠어도) 다시 만들지 않는다.
+    # 정책(contact 절)이 바뀌면 버전이 바뀌어 다시 만들고, 검수 전인 이전 버전 접촉만 지운다.
+    version = contact_version(policy)
+    if any(x.provenance.model_version == version for x in history):
         return 0
+    stale = _stale(history, f"{session.session_id}-contact-", version)
     body = session.reference_stream.stream_id
     hands = {
         x.payload.hand: x.payload
@@ -234,20 +263,20 @@ def _contacts(
             )
             labels.append(
                 model_label(
-                    label_id=f"{session.session_id}-contact-{version_tag(CONTACT_VERSION)}-{hand.value}-{i:04d}",
+                    label_id=f"{session.session_id}-contact-{version_tag(version)}-{hand.value}-{i:04d}",
                     session_id=session.session_id,
                     stream_id=None,
                     t_start_ms=c.start_ms,
                     t_end_ms=c.end_ms,
                     ontology_version=session.ontology_version or "",
-                    model_version=CONTACT_VERSION,
+                    model_version=version,
                     confidence=getattr(policy.contact.confidence, c.source),
                     payload=payload,
                     now=now,
                     evidence=Evidence.OBSERVED if c.source != "video" else Evidence.INFERRED,
                 )
             )
-    insert_labels(conn, labels)
+    insert_labels(conn, [*retractions(stale, version, now), *labels])
     return len(labels)
 
 
@@ -273,7 +302,9 @@ def _wearer(
     )
     if third is None or imu is None or third.sync_method is SyncMethod.UNSYNCED:
         return
-    if any(x.provenance.model_version == WEARER_VERSION for x in history):
+    # 착용자 레코드는 원래 트랙을 대체(parent)하므로 지우면 원래 트랙까지 사라진다.
+    # 그래서 정책이 바뀌어도 이미 매칭한 세션은 다시 하지 않는다 (바꾸려면 검수자가 고친다).
+    if any((x.provenance.model_version or "").startswith(WEARER_PREFIX) for x in history):
         return
     people = {
         x.label_id: x
@@ -307,7 +338,9 @@ def _wearer(
             "label_id": f"{original.label_id}:wearer",
             "parent_label_id": original.label_id,
             "payload": original.payload.model_copy(update={"entity_id": "wearer"}),
-            "provenance": original.provenance.model_copy(update={"model_version": WEARER_VERSION}),
+            "provenance": original.provenance.model_copy(
+                update={"model_version": wearer_version(policy)}
+            ),
             "confidence": round(max(match.correlation, 0.0), 4),
             "evidence": Evidence.INFERRED,
             "created_at": now,

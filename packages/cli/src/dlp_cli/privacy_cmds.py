@@ -45,6 +45,7 @@ def cmd_detect(args: argparse.Namespace) -> int:
             "privacy",
             LoadContext(now=now, ontology_version=ontology_version),
             Path(tmp),
+            strict=True,
         )
         for note in deployed.notes:
             print(f"[재학습 모델] {note}")

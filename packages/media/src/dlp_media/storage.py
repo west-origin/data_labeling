@@ -39,6 +39,11 @@ class ObjectStore(Protocol):
     def get_file(self, key: str, dest: Path) -> None: ...
 
 
+def blurred_key(session_id: str, stream_id: str) -> str:
+    """라벨링 버킷의 블러본 위치 (프라이버시 렌더가 쓰고, 검수·행동·큐레이션·내보내기가 읽는다)."""
+    return f"sessions/{session_id}/blurred/{stream_id}.mp4"
+
+
 def sha256_file(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as f:

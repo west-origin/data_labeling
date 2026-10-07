@@ -18,7 +18,7 @@ from dlp_media.storage import S3Store
 from dlp_prelabel.adapters.stubs import OraclePredictor
 from dlp_prelabel.lift3d import DepthLifter
 from dlp_prelabel.policy import load_policy
-from dlp_prelabel.runner import CONTACT_VERSION, run_prelabel
+from dlp_prelabel.runner import contact_version, run_prelabel
 from dlp_schema.db.migrate import upgrade
 from dlp_schema.db.repository import (
     get_labels,
@@ -149,7 +149,7 @@ def test_prelabel_session_with_glove_contacts(pg: sa.Engine, tmp_path: Path) -> 
         contacts = [
             x
             for x in get_labels(conn, sid, kinds=["hand_state"])
-            if x.provenance.model_version == CONTACT_VERSION
+            if x.provenance.model_version == contact_version(policy)
         ]
         assert get_session(conn, sid).lifecycle_state is LifecycleState.PRELABELED
     assert sorted(again.skipped) == ["bodycam/hands", "bodycam/objects"] and again.contacts == 0
@@ -192,6 +192,16 @@ def test_prelabel_session_with_glove_contacts(pg: sa.Engine, tmp_path: Path) -> 
         live = [
             x
             for x in current_labels(get_labels(conn, sid, kinds=["hand_state"]))
-            if x.provenance.model_version == CONTACT_VERSION
+            if x.provenance.model_version == contact_version(policy)
         ]
     assert third.contacts == 0 and live == []
+
+    # 3: 배포된 재학습 모델이 objects 어댑터를 대신하면, objects가 낸 검수 전 라벨은 지운다
+    trained = OraclePredictor("trained-objects", boxes, ("box_track",), now=FIXED_TIME)
+    with pg.begin() as conn:
+        swapped = run_prelabel(
+            conn, sid, raw, [trained], policy, ontology, FIXED_TIME, replaced=["objects"]
+        )
+        objects = current_labels(get_labels(conn, sid, kinds=["box_track"]))
+    assert swapped.retracted == 3
+    assert {x.provenance.model_version for x in objects} == {trained.version}

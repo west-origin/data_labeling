@@ -6,7 +6,7 @@
    건너뛴다.
 3. 학습 → 산출물을 학습 산출물 버킷에 올리고(sha256) MLflow 실행에 파라미터·지표·산출물을 남긴다.
    학습 실행(training_runs)과 모델 버전(model_versions, candidate)을 DB에 쓴다.
-4. 골든셋 평가: 후보와 기존 모델(배포 중인 재학습 모델, 없으면 baseline_version의 DB 예측)을
+4. 골든셋 평가: 후보와 기존 모델(배포 중인 재학습 모델, 없으면 baseline_versions의 DB 예측)을
    골든셋 세션에 메모리에서 돌려 같은 코드로 평가한다. 골든셋 세션에는 아무것도 쓰지 않는다.
 5. 게이트(config/policies/evaluation.yaml) 통과 → 배포(정책 deploy: auto) 또는 승인 대기(approve).
    실패 → rejected. 배포하면 이전 배포 모델은 retired가 된다.
@@ -27,7 +27,7 @@ import sqlalchemy as sa
 
 from dlp_datasets.lineage import register_training_run
 from dlp_datasets.snapshot import SnapshotStore
-from dlp_eval.gate import GateDecision, decide
+from dlp_eval.gate import GateDecision, TaskDecision, decide
 from dlp_eval.harness import EvalReport, SessionData, evaluate
 from dlp_eval.policy import EvaluationPolicy, Task
 from dlp_eval.runner import GoldenSession, golden_sessions, load_golden, write_report
@@ -65,7 +65,10 @@ class TrainingJob:
     dataset_version_id: str
     trainer: str | None = None  # 없으면 정책의 과제 템플릿
     params: dict[str, Any] = field(default_factory=dict[str, Any])  # 템플릿 파라미터 위에 덮어쓴다
-    baseline_version: str | None = None  # 배포된 재학습 모델이 없을 때 비교할 DB 예측의 모델 버전
+    # 배포된 재학습 모델이 없을 때 비교할 DB 예측의 모델 버전들 (대신할 기본 어댑터들의 버전).
+    # 정책 replaces가 있는 과제는 필수다 (기본 어댑터보다 나쁜 모델이 첫 배포 기준만 넘고
+    # 대신하지 않게).
+    baseline_versions: tuple[str, ...] = ()
     force: bool = False  # 누적 조건을 무시한다
 
 
@@ -78,6 +81,8 @@ class LoopResult:
     candidate: EvalReport | None = None
     baseline: EvalReport | None = None
     decision: GateDecision | None = None
+    # 배포했으면 MLflow 레지스트리에 올릴 것 (이름, 실행, 출처, 별칭). DB 커밋 뒤에 올린다
+    registration: tuple[str, str, str, str] | None = None
     mlflow_run_id: str | None = None
 
 
@@ -201,6 +206,15 @@ def run_training_job(
             f"골든셋 {version.golden_set_version}에 {job.task} 정답이 없어 평가할 수 없습니다"
         )
         return result
+    if (
+        spec.replaces
+        and not job.baseline_versions
+        and not list_model_versions(conn, job.task, ModelStatus.DEPLOYED)
+    ):
+        raise TrainingError(
+            f"{job.task}: 배포되면 기본 어댑터 {list(spec.replaces)}를 대신하므로 비교할 "
+            "기본 어댑터 예측 버전이 필요합니다 (--baseline-version, 골든셋에 그 예측이 있어야 함)"
+        )
 
     tag = _short(
         job.task,
@@ -295,14 +309,20 @@ def run_training_job(
                     golden_version=version.golden_set_version,
                     model_versions={job.task: cur.model_version},
                 )
-            elif job.baseline_version is not None:
+            elif job.baseline_versions:
                 baseline = evaluate(
-                    load_golden(conn, version.golden_set_version, {job.task: job.baseline_version}),
+                    {job.task: _merged_golden(conn, version.golden_set_version, job)},
                     eval_policy,
                     golden_version=version.golden_set_version,
-                    model_versions={job.task: job.baseline_version},
+                    model_versions={job.task: "+".join(job.baseline_versions)},
                 )
             decision = decide(candidate, baseline, eval_policy)
+            if job.task not in candidate.overall:
+                # 정답이 있어도 평가기가 지표를 못 내면(예: 키프레임이 모두 화면 밖) 배포하지 않는다
+                decision = GateDecision(
+                    False,
+                    {job.task: TaskDecision(job.task, False, ["후보 지표를 계산하지 못했습니다"])},
+                )
             result.candidate, result.baseline, result.decision = candidate, baseline, decision
 
             report = work / "report" / "golden.json"
@@ -329,9 +349,8 @@ def run_training_job(
             set_model_status(conn, model_version, ModelStatus.PASSED, now, report_uri)
             result.status, result.reason = "passed", "게이트 통과, 사람 배포 승인 대기"
         else:
-            deploy(
-                conn, model_version, tracker=tracker, policy=policy, now=now, report_uri=report_uri
-            )
+            mv = deploy(conn, model_version, now=now, report_uri=report_uri)
+            result.registration = registration(conn, mv, policy)
             result.status, result.reason = "deployed", "게이트 통과, 배포"
         tracker.finish(mlflow_run, "FINISHED")
     except Exception:
@@ -340,16 +359,30 @@ def run_training_job(
     return result
 
 
+def _merged_golden(conn: sa.Connection, golden_version: str, job: TrainingJob) -> list[SessionData]:
+    """여러 기본 어댑터 버전의 예측을 세션별로 합친다 (대신할 어댑터 모두와 비교)."""
+    merged: dict[str, SessionData] = {}
+    for v in job.baseline_versions:
+        for s in load_golden(conn, golden_version, {job.task: v})[job.task]:
+            if s.session_id in merged:
+                merged[s.session_id].pred.extend(s.pred)
+            else:
+                merged[s.session_id] = SessionData(s.session_id, s.truth, list(s.pred), s.groups)
+    return list(merged.values())
+
+
 def deploy(
     conn: sa.Connection,
     model_version: str,
     *,
-    tracker: Tracker | None,
-    policy: TrainingPolicy,
     now: datetime,
     report_uri: str | None = None,
 ) -> ModelVersion:
-    """게이트를 통과한 모델(candidate 판정 직후 또는 passed)을 배포한다. 과제마다 배포는 하나다."""
+    """게이트를 통과한 모델(candidate 판정 직후 또는 passed)을 배포한다. 과제마다 배포는 하나다.
+
+    passed 모델은 게이트 판정 뒤에 같은 과제의 다른 모델이 배포됐으면 배포하지 않는다 (그 모델과
+    비교하지 않았으므로 다시 평가해야 한다). MLflow 등록은 DB 커밋 뒤에 register()로 한다.
+    """
     mv = next((m for m in list_model_versions(conn) if m.model_version == model_version), None)
     if mv is None:
         raise TrainingError(f"모델 버전이 없습니다: {model_version}")
@@ -357,16 +390,26 @@ def deploy(
         raise TrainingError(f"{model_version}은 배포할 수 없는 상태입니다: {mv.status.value}")
     if mv.status is ModelStatus.CANDIDATE and report_uri is None:
         raise TrainingError(f"{model_version}은 게이트 판정 전입니다")
-    for cur in list_model_versions(conn, mv.task, ModelStatus.DEPLOYED):
+    current = list_model_versions(conn, mv.task, ModelStatus.DEPLOYED)
+    if mv.status is ModelStatus.PASSED and mv.decided_at is not None:
+        newer = [c for c in current if c.decided_at is not None and c.decided_at > mv.decided_at]
+        if newer:
+            raise TrainingError(
+                f"{model_version}의 게이트 판정 뒤에 {newer[0].model_version}이 배포됐습니다. "
+                "그 모델과 비교하도록 다시 학습·평가하세요"
+            )
+    for cur in current:
         set_model_status(conn, cur.model_version, ModelStatus.RETIRED, now)
     set_model_status(conn, model_version, ModelStatus.DEPLOYED, now, report_uri)
-    if tracker is not None:
-        run = get_training_run(conn, mv.run_id).mlflow_run_id
-        if run is not None:
-            tracker.register(
-                f"{policy.mlflow.registered_model_prefix}{mv.task}",
-                run,
-                f"runs:/{run}/model",
-                policy.mlflow.deployed_alias,
-            )
     return mv
+
+
+def registration(
+    conn: sa.Connection, mv: ModelVersion, policy: TrainingPolicy
+) -> tuple[str, str, str, str] | None:
+    """MLflow 모델 레지스트리에 올릴 것 (이름, 실행, 출처, 별칭). MLflow 실행이 없으면 None."""
+    run = get_training_run(conn, mv.run_id).mlflow_run_id
+    if run is None:
+        return None
+    name = f"{policy.mlflow.registered_model_prefix}{mv.task}"
+    return name, run, f"runs:/{run}/model", policy.mlflow.deployed_alias

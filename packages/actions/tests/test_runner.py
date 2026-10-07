@@ -116,3 +116,34 @@ def test_rerun_after_reviewer_deleted_everything_is_skipped(pg: sa.Engine) -> No
         again = run_actions(conn, SID, OracleVlm(truth), ontology, policy, FIXED_TIME)
         assert current_labels(get_labels(conn, SID, kinds=["action", "gap"])) == []
     assert again.skipped == ["right"]
+
+
+def test_new_version_keeps_reviewed_labels_and_fills_gaplessly(pg: sa.Engine) -> None:
+    from dlp_schema.db.repository import record_review
+    from dlp_schema.labels import VerificationState
+
+    ontology = load_ontology(ROOT / "config/ontology/v1")
+    policy = load_policy(ROOT)
+    truth = [x for x in SCENARIO.labels if isinstance(x.payload, ActionPayload | GapPayload)]
+    with pg.begin() as conn:
+        run_actions(conn, SID, OracleVlm(truth), ontology, policy, FIXED_TIME)
+        timeline = _timeline(conn)
+        approved = [x for x in timeline if isinstance(x.payload, ActionPayload)][1]
+        sampled = timeline[0]
+        record_review(conn, approved.label_id, VerificationState.HUMAN_APPROVED, "r1", FIXED_TIME)
+        record_review(conn, sampled.label_id, VerificationState.SAMPLE_VERIFIED, "r1", FIXED_TIME)
+    # 경계가 달라지는 새 버전 (병합 간격을 크게 바꾼다)
+    changed = policy.model_copy(
+        update={"boundaries": policy.boundaries.model_copy(update={"merge_ms": 600})}
+    )
+    with pg.begin() as conn:
+        second = run_actions(conn, SID, OracleVlm(truth), ontology, changed, FIXED_TIME)
+        timeline2 = _timeline(conn)
+    ids = {x.label_id for x in timeline2}
+    assert {approved.label_id, sampled.label_id} <= ids  # 검수한 라벨은 남는다
+    assert second.hands["right"]["kept_reviewed"] == 2
+    # 공백도 겹침도 없다
+    assert timeline2[0].t_start_ms == 0 and timeline2[-1].t_end_ms == SCENARIO.duration_ms
+    assert all(a.t_end_ms == b.t_start_ms for a, b in itertools.pairwise(timeline2))
+    others = {x.provenance.model_version for x in timeline2} - {approved.provenance.model_version}
+    assert others <= {second.version}

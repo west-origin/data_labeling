@@ -74,14 +74,25 @@ def record_export(
     uri: str,
     splits: tuple[Split, ...] = (Split.TRAIN, Split.VAL),
     label_states: tuple[VerificationState, ...] = (),
+    session_ids: tuple[str, ...] | None = None,
     now: datetime,
 ) -> ExportRecord:
-    """내보내기 기록. 내보낼 세션은 버전의 해당 분할에서 지금 사용 중지된 세션을 뺀 것이다."""
+    """내보내기 기록.
+
+    session_ids를 주면(실제로 쓴 세션) 그대로 남기되, 버전 밖이거나 사용 중지된 세션이 있으면
+    실패한다.
+    없으면 버전의 해당 분할에서 지금 사용 중지된 세션을 뺀 것이다.
+    """
     version = get_dataset_version(conn, dataset_version_id)
     withdrawn = withdrawn_session_ids(conn)
-    sessions = tuple(
-        sorted(sid for sid, sp in version.splits.items() if sp in splits and sid not in withdrawn)
-    )
+    allowed = {sid for sid, sp in version.splits.items() if sp in splits and sid not in withdrawn}
+    if session_ids is None:
+        sessions = tuple(sorted(allowed))
+    else:
+        bad = sorted(set(session_ids) - allowed)
+        if bad:
+            raise ValueError(f"내보낼 수 없는 세션 (버전 밖·사용 중지): {bad}")
+        sessions = tuple(sorted(session_ids))
     export = ExportRecord(
         export_id=export_id, dataset_version_id=dataset_version_id, target=target, format=format,
         uri=uri, session_ids=sessions, label_states=label_states, created_at=now,

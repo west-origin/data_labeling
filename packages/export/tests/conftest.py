@@ -111,6 +111,15 @@ def scenario_labels(sid: str, times: list[int]) -> list[LabelRecord]:
                    **base, **human()),
         make_label({**box, "entity_id": "cup_9"}, label_id=f"{sid}-seed", stream_id="bodycam",
                    t_start_ms=t[2], t_end_ms=t[4], seeded_error=True, **base, **human()),
+        # 오류 삽입 사본을 검수자가 고친 후손 (seeded_error 표시는 없지만 운영 라벨이 아니다)
+        make_label({**box, "entity_id": "cup_9", "class_id": "bucket"}, label_id=f"{sid}-seedfix",
+                   stream_id="bodycam", t_start_ms=t[2], t_end_ms=t[4],
+                   parent_label_id=f"{sid}-seed", **base, **human()),
+        # 블라인드 측정 레코드
+        make_label({"kind": "action", "action_id": "m1", "hand": "left", "verb": "carry",
+                    "t_approach_ms": 0, "t_end_ms": 900},
+                   label_id=f"{sid}-blind", t_start_ms=0, t_end_ms=900, measurement="blind",
+                   **base, **human()),
     ]  # fmt: skip
 
 

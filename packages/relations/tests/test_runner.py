@@ -119,3 +119,26 @@ def test_reviewer_deleted_relation_is_not_reinserted(pg: sa.Engine) -> None:
         ids = {x.label_id for x in _current(conn)}
     assert (summary.inserted, summary.skipped_by_review) == (0, 1)
     assert contact.label_id not in ids
+
+
+def test_rule_change_keeps_approved_relations(pg: sa.Engine) -> None:
+    from dlp_schema.db.repository import record_review
+    from dlp_schema.labels import VerificationState
+
+    ontology = load_ontology(ROOT / "config/ontology/v1")
+    policy = load_policy(ROOT)
+    with pg.begin() as conn:
+        run_relations(conn, SID, ontology, policy, FIXED_TIME)
+        [grasp] = [
+            x for x in _current(conn)
+            if isinstance(x.payload, RelationPayload) and x.payload.derived_by == "hand_grasp"
+        ]  # fmt: skip
+        record_review(conn, grasp.label_id, VerificationState.HUMAN_APPROVED, "r1", FIXED_TIME)
+    no_grasp = policy.model_copy(
+        update={"rules": tuple(r for r in policy.rules if r.id != "hand_grasp")}
+    )
+    with pg.begin() as conn:
+        changed = run_relations(conn, SID, ontology, no_grasp, FIXED_TIME)
+        ids = {x.label_id for x in _current(conn)}
+    # 승인된 관계는 규칙에서 빠져도 지우지 않는다
+    assert changed.retracted == 0 and grasp.label_id in ids

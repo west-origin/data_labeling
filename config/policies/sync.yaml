@@ -19,6 +19,8 @@ slate:
   # 슬레이트 시각은 프레임 단위로 양자화된다(앵커마다 최대 1프레임 오차). 두 슬레이트 사이가 30초여도
   # 드리프트 오차가 ±1000 ppm을 넘을 수 있으므로 오프셋만 추정한다.
   estimate_drift: false
+  confidence_one: 0.8         # 슬레이트 하나로 맞춘 신뢰도
+  confidence_many: 0.95       # 슬레이트 둘 이상이 서로 맞을 때 신뢰도
 
 tap:
   double_tap_gap_ms: [120, 300]

@@ -101,7 +101,7 @@ class DepthLifter:
 
     def __init__(self, root: Path, policy: PrelabelPolicy, *, now: datetime) -> None:
         self.path, version = resolve(root, policy.models.depth)
-        self.version = f"depth3d-{version}-s{policy.depth.frame_stride_ms}"
+        self.version = f"depth3d-{version}+p{policy.digest('depth')}"
         self.policy, self.now = policy, now
         self.model: DepthModel | None = None
 

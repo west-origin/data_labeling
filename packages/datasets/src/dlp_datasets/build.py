@@ -3,8 +3,8 @@
 1. 후보: 온톨로지 버전이 같고 프라이버시 승인된 세션 (도메인을 주면 그 도메인만).
 2. 사용 중지된 세션은 빼고 excluded_sessions에 적는다.
 3. 골든셋 세션은 golden, 나머지는 작업자·장소 단위로 train / val / holdout.
-4. 스냅샷: 포함 세션의 라벨 레코드 전체(수정 이력 포함, 오류 삽입 과제 제외)와
-   매니페스트를 커밋한다.
+4. 스냅샷: 포함 세션의 라벨 레코드 전체(수정 이력 포함, 오류 삽입 과제 제외), 세션 메타데이터
+   (스트림·동기화)와 매니페스트를 커밋한다.
 5. 데이터셋 버전과 분할을 DB에 쓰고, 사람 검증을 마친 세션은 생애주기를
    분할 배정으로 옮긴다.
 """
@@ -113,13 +113,26 @@ def build_dataset_version(
             "excluded_sessions": sorted(excluded),
             "label_counts": dict(sorted(label_counts.items())),
         }
+        # 세션 메타데이터(스트림·동기화)도 고정한다:
+        # 같은 버전으로 내보내면 그 뒤에 다시 동기화했어도 같은 결과가 나온다
+        sessions_path = Path(tmp) / "sessions.jsonl"
+        sessions_path.write_text(
+            "".join(
+                s.model_dump_json() + "\n" for s in sorted(candidates, key=lambda x: x.session_id)
+            ),
+            encoding="utf-8",
+        )
         manifest_path = Path(tmp) / "manifest.json"
         manifest_path.write_text(
             json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
         )
         uri = snapshots.commit(
             f"datasets/{version_id}",
-            {"labels.jsonl": labels_path, "manifest.json": manifest_path},
+            {
+                "labels.jsonl": labels_path,
+                "sessions.jsonl": sessions_path,
+                "manifest.json": manifest_path,
+            },
             f"dataset {version_id}",
             {"version_id": version_id, "ontology_version": ontology_version},
         )

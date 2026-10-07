@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 from typing import Any
 
@@ -103,6 +105,11 @@ class PrelabelPolicy(Contract):
     contact: ContactPolicy
     wearer_matching: WearerPolicy
     depth: DepthPolicy
+
+    def digest(self, *sections: str) -> str:
+        """정책 절들의 짧은 해시. 모델 버전에 붙여 정책 값이 바뀌면 다시 돌게 한다."""
+        data = {name: getattr(self, name).model_dump(mode="json") for name in sections}
+        return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()[:8]
 
 
 def load_policy(root: Path) -> PrelabelPolicy:

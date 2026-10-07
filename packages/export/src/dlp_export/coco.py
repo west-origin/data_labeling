@@ -92,6 +92,12 @@ class CocoResult:
     images: int = 0
     annotations: int = 0
     dropped: dict[str, int] = field(default_factory=dict[str, int])  # 사유 → 버린 주석 수
+    sessions: set[str] = field(default_factory=set[str])  # 주석이 하나라도 들어간 세션
+    labels: dict[str, LabelRecord] = field(default_factory=dict[str, LabelRecord])  # 쓴 라벨
+
+    def written(self, x: LabelRecord, session_id: str) -> None:
+        self.sessions.add(session_id)
+        self.labels[x.label_id] = x
 
 
 def write_coco(
@@ -130,34 +136,33 @@ def write_coco(
             index = build_pts_index(video)
             info = probe(video).video
             assert info is not None
-            frame_of: dict[int, int] = {}  # 키프레임 시각 → 프레임
-            items: list[tuple[int, LabelRecord, Any]] = []
+            # 키프레임(스트림 시각) → 블러본 프레임. 이미지는 프레임마다 하나다
+            items: list[tuple[int, LabelRecord, Any]] = []  # (프레임, 라벨, 키프레임)
             for x in spatial:
                 p = x.payload
                 assert isinstance(p, BoxTrackPayload | KeypointTrackPayload)
                 for k in p.keyframes:
                     if getattr(k, "outside", False):
                         continue
-                    f = exact_frame(index, stream, k.t_ms, policy.coco.frame_tolerance_ms)
+                    f = exact_frame(index, k.t_ms, policy.coco.frame_tolerance_ms)
                     if f is None:
                         drop("keyframe_between_frames")
                         continue
-                    frame_of[k.t_ms] = f
-                    items.append((k.t_ms, x, k))
+                    items.append((f, x, k))
             image_id: dict[int, int] = {}
-            for t in sorted(frame_of):
+            for f in sorted({f for f, _, _ in items}):
+                t = round(float(index.ms[f]))
                 iid = len(images) + 1
-                image_id[t] = iid
+                image_id[f] = iid
                 images.append({
                     "id": iid,
                     "file_name": f"images/{s.session_id}__{stream.stream_id}__{t:09d}.jpg",
                     "width": info.width, "height": info.height,
-                    "session_id": s.session_id, "stream_id": stream.stream_id, "t_ms": t,
-                    "split": es.split.value,
+                    "session_id": s.session_id, "stream_id": stream.stream_id,
+                    "t_ms": t, "split": es.split.value,
                 })  # fmt: skip
-            by_frame = {frame_of[t]: t for t in frame_of}
-            for f, rgb in decode_frames(video, set(by_frame)):
-                t = by_frame[f]
+            for f, rgb in decode_frames(video, set(image_id)):
+                t = round(float(index.ms[f]))
                 ok, buf = cv2.imencode(
                     ".jpg",
                     cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR),
@@ -167,9 +172,9 @@ def write_coco(
                 (img_dir / f"{s.session_id}__{stream.stream_id}__{t:09d}.jpg").write_bytes(
                     buf.tobytes()
                 )
-            for t, x, k in items:
+            for f, x, k in items:
                 p = x.payload
-                base = {"id": len(anns) + 1, "image_id": image_id[t], "iscrowd": 0} | _meta(x)
+                base = {"id": len(anns) + 1, "image_id": image_id[f], "iscrowd": 0} | _meta(x)
                 if isinstance(p, BoxTrackPayload):
                     if p.class_id not in obj_ids:
                         drop("unknown_class")
@@ -178,6 +183,7 @@ def write_coco(
                         "category_id": obj_ids[p.class_id], "track_id": p.entity_id,
                         "bbox": [k.x, k.y, k.w, k.h], "area": k.w * k.h,
                     })  # fmt: skip
+                    result.written(x, s.session_id)
                 elif isinstance(p, KeypointTrackPayload) and p.skeleton in skel_ids:
                     flat: list[float] = []
                     xs: list[float] = []
@@ -197,6 +203,7 @@ def write_coco(
                         "keypoints": flat, "num_keypoints": len(xs),
                         "bbox": [min(xs), min(ys), bw, bh], "area": bw * bh,
                     })  # fmt: skip
+                    result.written(x, s.session_id)
                 else:
                     drop("unsupported_skeleton")
     coco = {

@@ -202,7 +202,8 @@ def _slate(ref: _Reference, target: StreamMedia, policy: SyncPolicy) -> Attempt:
         fit = _fit(anchors, policy)
     else:
         fit = fit_clock(anchors, min_drift_span_ms=math.inf, max_drift_ppm=policy.max_drift_ppm)
-    confidence = 0.95 if len(anchors) >= 2 else 0.8
+    sp = policy.slate
+    confidence = sp.confidence_many if len(anchors) >= 2 else sp.confidence_one
     return Attempt("qr_slate", confidence, f"슬레이트 {len(anchors)}개", fit, anchors)
 
 

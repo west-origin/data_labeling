@@ -38,10 +38,14 @@ def cmd_run(args: argparse.Namespace) -> int:
         timeout_s=vlm.timeout_s,
     )
     ontology = load_ontology(root / "config/ontology/v1")
-    raw = store_from_spec(args.store, load_config(root / "config/defaults.yaml").buckets.raw)
+    # 블러본만 읽는다 (라벨링 버킷)
+    labeling = store_from_spec(
+        args.store, load_config(root / "config/defaults.yaml").buckets.labeling
+    )
     engine = sa.create_engine(database_url(args.url))
     with engine.begin() as conn:
-        s = run_actions(conn, args.session_id, client, ontology, policy, datetime.now(UTC), raw)
+        now = datetime.now(UTC)
+        s = run_actions(conn, args.session_id, client, ontology, policy, now, labeling)
     engine.dispose()
     for hand, counts in s.hands.items():
         print(f"{hand}: " + ", ".join(f"{k} {v}" for k, v in counts.items()))
