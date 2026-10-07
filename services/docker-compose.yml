@@ -1,6 +1,14 @@
-# 개발용 서비스 묶음. CVAT는 서비스 구성이 커서 공식 compose로 따로 띄운다 (services/cvat/README.md).
+# 개발용 서비스 묶음. CVAT는 서비스 구성이 커서 공식 compose로 따로 띄운다 (services/cvat/cvat.sh).
+# 실행: `make up`(= docker compose --env-file .env -f services/docker-compose.yml up -d --wait 후
+# Label Studio 토큰 설정), `make down`, `make clean`(볼륨까지 삭제). 값은 .env(.env.example 복사본)에서 온다.
+# 서비스 관계:
+#   postgres  ← label-studio, prefect, mlflow, dlp CLI(dlp DB) 모두의 DB 서버 (DB는 init 스크립트가 만든다)
+#   seaweedfs ← bucket-init(버킷 생성), mlflow(산출물), lakefs(데이터셋 객체), dlp CLI(원본·블러본·내보내기)
+# 헬스체크가 통과해야 `up --wait`가 끝나고, `make health`(dlp services check)가 같은 주소를 다시 점검한다.
+# 프로젝트 이름 = 컨테이너·볼륨 이름 접두 (.env COMPOSE_PROJECT_NAME)
 name: ${COMPOSE_PROJECT_NAME:-dlp}
 
+# 모든 서비스 헬스체크의 공통 주기 (YAML 앵커). 최대 대기 ≈ start_period + interval*retries ≈ 210초
 x-healthcheck: &healthcheck
   interval: 5s
   timeout: 5s
@@ -8,6 +16,7 @@ x-healthcheck: &healthcheck
   start_period: 10s
 
 services:
+  # PostgreSQL 16: 메타데이터 DB 서버. POSTGRES_DB(dlp)와 init 스크립트가 dlp·labelstudio·prefect·mlflow DB를 만든다
   postgres:
     image: postgres:16-alpine
     environment:
@@ -15,14 +24,19 @@ services:
       POSTGRES_PASSWORD: ${DLP_POSTGRES_PASSWORD}
       POSTGRES_DB: dlp
     volumes:
+      # 데이터 볼륨 + 최초 기동 때 한 번 도는 DB 생성 스크립트 (볼륨이 있으면 다시 돌지 않는다)
       - postgres-data:/var/lib/postgresql/data
       - ./postgres/init-databases.sh:/docker-entrypoint-initdb.d/10-init-databases.sh:ro
     ports:
+      # 호스트 포트 (dlp CLI·테스트가 localhost:<포트>로 접속)
       - "${DLP_POSTGRES_PORT:-5432}:5432"
     healthcheck:
       <<: *healthcheck
+      # 마지막에 만드는 mlflow DB로 확인한다 (init 스크립트가 끝나야 의존 서비스가 뜬다)
       test: ["CMD-SHELL", "pg_isready -U ${DLP_POSTGRES_USER} -d mlflow"]
 
+  # SeaweedFS 단일 노드 S3 (마스터+볼륨+파일러+S3). 자격 증명 파일은 entrypoint가 환경 변수로 만든다
+  # (관리자 = 서비스 계정, labeler = 라벨링 버킷 읽기 전용)
   seaweedfs:
     image: chrislusf/seaweedfs:4.48
     entrypoint: ["/bin/sh", "/entrypoint-dlp.sh"]
@@ -31,11 +45,13 @@ services:
       S3_SECRET_KEY: ${DLP_S3_SECRET_KEY}
       S3_LABELER_ACCESS_KEY: ${DLP_S3_LABELER_ACCESS_KEY}
       S3_LABELER_SECRET_KEY: ${DLP_S3_LABELER_SECRET_KEY}
+      # 라벨러 키가 읽을 수 있는 유일한 버킷 (config/defaults.yaml buckets.labeling과 같아야 한다)
       LABELING_BUCKET: dlp-labeling
     volumes:
       - seaweedfs-data:/data
       - ./seaweedfs/entrypoint.sh:/entrypoint-dlp.sh:ro
     ports:
+      # 호스트 S3 포트 (DLP_S3_ENDPOINT 기본값 http://localhost:8333과 맞춘다)
       - "${DLP_S3_PORT:-8333}:8333"
     healthcheck:
       <<: *healthcheck
@@ -53,6 +69,8 @@ services:
       AWS_DEFAULT_REGION: us-east-1
     entrypoint: ["/bin/sh", "-c"]
     command:
+      # 버킷 이름은 config/defaults.yaml buckets(raw, labeling, datasets, mlflow)와 같아야 한다.
+      # 이미 있으면 건너뛴다(멱등). `$$`는 compose 변수 치환을 피한 셸 `$`다
       - |
         set -e
         for b in dlp-raw dlp-labeling dlp-datasets dlp-mlflow; do
@@ -60,6 +78,7 @@ services:
             || aws --endpoint-url http://seaweedfs:8333 s3 mb "s3://$$b"
         done
 
+  # Label Studio: 시간 구간(행동) 검수 도구. DB는 postgres의 labelstudio
   label-studio:
     image: heartexlabs/label-studio:1.23.2
     depends_on:
@@ -74,11 +93,13 @@ services:
       POSTGRE_PORT: "5432"
       LABEL_STUDIO_USERNAME: ${DLP_LABEL_STUDIO_USER}
       LABEL_STUDIO_PASSWORD: ${DLP_LABEL_STUDIO_PASSWORD}
+      # 관리자 API 토큰 (레거시 토큰 인증은 make up 끝에 services/label-studio/bootstrap.py가 켠다)
       LABEL_STUDIO_USER_TOKEN: ${DLP_LABEL_STUDIO_TOKEN}
       LABEL_STUDIO_DISABLE_SIGNUP_WITHOUT_LINK: "true"
     volumes:
       - label-studio-data:/label-studio/data
     ports:
+      # 호스트 8081 → 컨테이너 8080 (CVAT가 호스트 8080을 쓰므로 비킨다)
       - "${DLP_LABEL_STUDIO_PORT:-8081}:8080"
     healthcheck:
       <<: *healthcheck
@@ -88,6 +109,7 @@ services:
         - -c
         - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=4)"
 
+  # Prefect 3 서버: 파이프라인 작업 흐름 실행·기록. DB는 postgres의 prefect (asyncpg 드라이버)
   prefect:
     image: prefecthq/prefect:3.8.8-python3.12
     depends_on:
@@ -107,6 +129,7 @@ services:
         - -c
         - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4200/api/health', timeout=4)"
 
+  # MLflow 추적 서버 (재학습 실행·지표·모델 레지스트리, WP13). 공식 이미지에 드라이버가 없어 직접 빌드한다
   mlflow:
     build: ./mlflow
     image: dlp-mlflow:3.16.1
@@ -126,6 +149,7 @@ services:
       - --host=0.0.0.0
       - --port=5000
       - --backend-store-uri=postgresql+psycopg2://${DLP_POSTGRES_USER}:${DLP_POSTGRES_PASSWORD}@postgres:5432/mlflow
+      # 산출물은 MLflow가 프록시해 S3 dlp-mlflow 버킷에 쓴다 (클라이언트는 S3 자격 증명이 필요 없다)
       - --artifacts-destination=s3://dlp-mlflow
       - --serve-artifacts
     ports:
@@ -139,6 +163,7 @@ services:
         - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health', timeout=4)"
 
   # 데이터셋 버전 관리. 객체는 SeaweedFS의 dlp-datasets 버킷에, 메타데이터는 내장 KV(볼륨)에 둔다.
+  # 데이터셋 버전 저장소 (WP7). `dlp dataset build`가 datasets/<버전>을 커밋한다
   lakefs:
     image: treeverse/lakefs:1.88.0
     user: "0:0"  # 개발용: 이름 있는 볼륨이 root 소유라 이미지 기본 사용자로는 쓸 수 없다
@@ -168,6 +193,7 @@ services:
       <<: *healthcheck
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8000/_health"]
 
+# 이름 있는 볼륨. `make clean`(down -v)으로 지우면 모든 개발 데이터가 사라진다
 volumes:
   postgres-data:
   seaweedfs-data:

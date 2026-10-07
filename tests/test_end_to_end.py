@@ -4,12 +4,15 @@
 
 수집 → 동기화 → 블러 탐지·검수·승인·렌더 → 프리라벨(stub) → 관계 → 행동(VLM stub, 블러본) →
 검수 시뮬레이터(승인, 흔들린 박스와 행동은 정답으로 수정) → 데이터셋 버전(lakeFS) →
-재학습(stub)·골든 평가·게이트 →
-내보내기(구간 JSON, COCO).
+재학습(stub)·골든 평가·게이트 → 내보내기(구간 JSON, COCO).
 
 서비스(make up)가 필요하다. 실제 모델 대신 정답을 아는 stub을 쓰므로, 이 테스트가 보는 것은
-단계 사이의
-계약·멱등·검증 정책·시각 처리다.
+단계 사이의 계약·멱등·검증 정책·시각 처리다.
+
+CLI(`dlp …`)를 거치지 않고 각 패키지의 실행 함수를 직접 부른다. 저장소는 감사 없는 `S3Store`를
+직접 쓴다 (원본 접근 감사는 `test_raw_access_db.py`가 따로 검증한다).
+정답 출처: `dlp_fixtures.actions.generate_action_scenario`(손 키포인트·행동 구간·객체 위치)와
+`truth_boxes`(그 객체 위치로 만든 정답 박스).
 """
 
 from __future__ import annotations
@@ -89,6 +92,12 @@ OBJECTS = {e[0] for e in ENTITIES}
 
 @pytest.fixture
 def pg() -> Iterator[sa.Engine]:
+    """임시 PostgreSQL 데이터베이스 (`make up` 필요).
+
+    `DLP_DATABASE_URL`(없으면 개발 기본값) 서버에 `dlp_test_<임의>` DB를 만들고 Alembic 최신까지
+    올린 엔진을 준다. 끝나면 DB를 강제로 지운다. (같은 픽스처가 `test_raw_access_db.py`,
+    `packages/ops/tests/test_ops.py`에도 있다 — 공용 conftest로 모을 리팩토링 후보.)
+    """
     url = sa.make_url(
         os.environ.get(
             "DLP_DATABASE_URL", "postgresql+psycopg://dlp:dlp-dev-password@localhost:5432/dlp"
@@ -111,7 +120,15 @@ def pg() -> Iterator[sa.Engine]:
 
 
 def truth_boxes(sid: str, frame_times: list[int], prefix: str) -> list[LabelRecord]:
-    """정답 객체 박스: 영상 프레임 시각마다 키프레임 (공간 라벨 = 스트림 PTS 시각, ADR 0019)."""
+    """정답 객체 박스: 영상 프레임 시각마다 키프레임 (공간 라벨 = 스트림 PTS 시각, ADR 0019).
+
+    인자:
+        sid: 세션 ID.
+        frame_times: 바디캠 영상의 프레임 PTS 시각(ms) 목록. 키프레임마다 하나씩 쓴다.
+        prefix: 라벨 ID 접두 (`<prefix>-<entity_id>`).
+    반환: 픽스처 `ENTITIES` 중 객체마다 사람 출처 `box_track` 라벨 하나 (중심 ±15px, 30x30 고정
+    박스).
+    """
     return [
         make_label(
             BoxTrackPayload(
@@ -133,6 +150,10 @@ def truth_boxes(sid: str, frame_times: list[int], prefix: str) -> list[LabelReco
 
 
 def approve_all(conn: sa.Connection, sid: str, kinds: list[str], reviewer: str) -> int:
+    """검수 시뮬레이터: `kinds`의 운영 현재 모델 라벨 중 미검수인 것을 `reviewer`가 모두 승인한다.
+
+    반환: 승인한 라벨 수. 부작용: `record_review`로 검수 상태 갱신 (호출자 트랜잭션 안).
+    """
     n = 0
     for x in current_labels(get_labels(conn, sid, kinds=kinds)):
         if (
@@ -145,6 +166,22 @@ def approve_all(conn: sa.Connection, sid: str, kinds: list[str], reviewer: str) 
 
 
 def test_synthetic_session_end_to_end(pg: sa.Engine, tmp_path: Path) -> None:
+    """합성 세션 하나를 수집부터 내보내기까지 돌리고 결과를 픽스처 정답과 맞춘다.
+
+    단계별 확인 (본문 번호 주석과 같다):
+    1. 수집·동기화: 바디캠만이라 기준 스트림 오프셋 0.
+    2. 블러: 정답 탐지기 → 원본 권한 검수자 승인 → 수거된 블러 검수 작업(가짜) → 승인 → 렌더.
+       블러본 URI에 원본 버킷 이름이 없다.
+    3. 프리라벨: 손(정답), 객체(정답을 4px 흔든 것). 두 번 돌리면 둘 다 건너뛴다(멱등).
+    4. 관계·행동: VLM stub이 블러본을 받아 정답 구간 분류. 오른손 행동 수 ≥ 정답 - 1.
+    5. 검수 시뮬레이터: 박스는 정답으로 수정, 행동 타임라인은 지우고 정답으로 다시 그림, 나머지
+       승인. `verify_session`으로 human_verified.
+    6. 다른 작업자·장소의 골든 세션(사람 정답 + 기본 어댑터 예측)과 데이터셋 버전.
+    7. 재학습(oracle stub): 기본 어댑터보다 나아 게이트 통과 → 배포. 학습 예제는 고친 박스뿐.
+    8. 내보내기(구간 JSON, COCO): 골든 세션 없음, 미검수 없음, 세션 ID는 가명. 행동
+       동사·대상·시각과 박스가 픽스처 정답과 정확히 같다.
+    마지막으로 계보(세션 → 데이터셋 버전 → 학습 실행 → 내보내기)를 확인한다.
+    """
     sid = f"e2e-{uuid.uuid4().hex[:8]}"
     actions = generate_action_scenario(2, session_id=sid, n_units=4)
     # 바디캠: 행동 픽스처의 프레임 시각으로 쓴 영상
@@ -258,8 +295,7 @@ def test_synthetic_session_end_to_end(pg: sa.Engine, tmp_path: Path) -> None:
             ],
         )
         # 행동 타임라인: 영상 접촉 휴리스틱의 경계는 정답과 다를 수 있다.
-        # 검수자가 모델 행동·공백·설명을
-        # 지우고 정답 타임라인으로 다시 그린다 (사람 출처 레코드)
+        # 검수자가 모델 행동·공백·설명을 지우고 정답 타임라인으로 다시 그린다 (사람 출처 레코드)
         reviewed = Verification(
             state=VerificationState.HUMAN_CORRECTED, reviewer_id="labeler-1", reviewed_at=now
         )

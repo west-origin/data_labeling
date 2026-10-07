@@ -7,14 +7,18 @@
 [project]
 name = "dlp-lerobot-env"
 version = "0"
+# LeRobot·PyTorch 휠이 맞는 파이썬 (작업공간과 같은 3.12)
 requires-python = "==3.12.*"
 dependencies = [
+    # 데이터셋 쓰기·읽기 API만 (scripts/lerobot_write.py, scripts/lerobot_check.py). 버전을 바꾸면 v3.0 형식
+    # 호환과 annotation.* 특징 이름을 다시 확인한다 (make test-isolated)
     "lerobot[dataset]==0.6.1",
     "torch==2.11.0",
     "torchvision==0.26.0",
 ]
 
 [tool.uv]
+# 이 디렉터리는 설치할 패키지가 아니라 의존성 묶음일 뿐이다
 package = false
 
 [tool.uv.sources]

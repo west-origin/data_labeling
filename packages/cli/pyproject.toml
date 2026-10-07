@@ -1,3 +1,5 @@
+# `dlp` 명령줄 도구. 모든 단계 패키지에 의존하는 최상위 접착층이다 (로직은 각 패키지에 둔다).
+# 새 단계 패키지를 만들면 여기 dependencies와 루트 pyproject.toml [tool.uv.sources]에 함께 등록한다.
 [project]
 name = "dlp-cli"
 version = "0.1.0"
@@ -5,6 +7,7 @@ description = "dlp 명령줄 진입점"
 requires-python = ">=3.12,<3.14"
 dependencies = ["dlp-actions", "dlp-active", "dlp-datasets", "dlp-eval", "dlp-export", "dlp-fixtures", "dlp-media", "dlp-models", "dlp-ops", "dlp-prelabel", "dlp-privacy", "dlp-relations", "dlp-review", "dlp-schema", "dlp-sync", "dlp-train"]
 
+# `uv run dlp …`가 부르는 진입점
 [project.scripts]
 dlp = "dlp_cli.main:main"
 

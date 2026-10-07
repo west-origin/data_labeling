@@ -1,4 +1,4 @@
-"""주간 운영 지표 (`dlp ops weekly`).
+"""주간 운영 지표 (`dlp ops weekly`, WP16, ADR 0014·0020·0027·0028·0029).
 
 주는 ISO 주(월요일 0시 UTC부터 7일)다. 지표마다 그 주에 일어난 일만 센다.
 
@@ -17,6 +17,17 @@
   (verified_at: 운영 라벨 항목마다 처음 검수한 시각 중 가장 늦은 것, ADR 0027).
   블러(프라이버시 검수)는 따로 센다.
   생산원가 = 검수 시간 * 인건비 / 그 수.
+
+값이 없는 지표(분모 0)는 `math.nan`이고, JSON(`as_dict`)에서는 null, Markdown에서는 `-`다.
+
+공개 함수:
+- `week_range(week)` / `week_of(t)` — ISO 주 문자열 ↔ UTC 구간.
+- `verified_time(conn, …)` / `verified_at(history)` — 세션의 검증 완료 시각.
+- `weekly_metrics(conn, week, review_policy, policy)` — 한 주의 `WeeklyMetrics` (읽기 전용).
+- `alerts(history, policy)` — 여러 주 추이에서 경고 문장.
+- `markdown(history, warnings, currency)` — 주별 열의 Markdown 표.
+
+성능 주의: `weekly_metrics`는 주마다 모든 세션의 라벨 이력을 다시 읽는다 (주 수 * 세션 수).
 """
 
 from __future__ import annotations
@@ -50,20 +61,27 @@ from dlp_schema.labels import LabelRecord, Source, VerificationState
 from dlp_schema.review import AssignmentStatus, ReviewMode
 from dlp_schema.session import LifecycleState
 
+# 개별 검수로 보는 상태 (수정률·자동 승인율 계산). 표본 검증은 개별로 본 것이 아니라 뺀다
 REVIEWED = (VerificationState.HUMAN_APPROVED, VerificationState.HUMAN_CORRECTED)
 # 검증 완료로 보는 모델 라벨 상태 (표본 검증 묶음의 나머지도 검증된 것으로 본다)
 VERIFIED_LABEL = (*REVIEWED, VerificationState.SAMPLE_VERIFIED)
+# 검증 완료 이후의 생애주기 상태 (옛 세션의 검증 시각을 라벨 이력에서 추정할지 정할 때)
 VERIFIED = (LifecycleState.HUMAN_VERIFIED, LifecycleState.SPLIT_ASSIGNED, LifecycleState.EXPORTED)
 
 
 def week_range(week: str) -> tuple[datetime, datetime]:
-    """'2026-W41' → (월요일 0시 UTC, 다음 월요일 0시 UTC)."""
+    """'2026-W41' → (월요일 0시 UTC, 다음 월요일 0시 UTC).
+
+    반열림 구간 [시작, 끝)이다. 형식이 틀리면 `ValueError`.
+    """
     year, w = week.split("-W")
     start = datetime.combine(date.fromisocalendar(int(year), int(w), 1), datetime.min.time(), UTC)
     return start, start + timedelta(days=7)
 
 
 def week_of(t: datetime) -> str:
+    """시각이 속한 ISO 주 문자열(`YYYY-Www`, UTC 기준). 연말·연초는 ISO 연도를 따른다 (예:
+    2026-12-31 → 2026-W53)."""
     y, w, _ = t.astimezone(UTC).isocalendar()
     return f"{y}-W{w:02d}"
 
@@ -76,6 +94,13 @@ def verified_time(
     생애주기 기록에 human_verified로 옮긴 전이(이전 상태가 있는 것)가 있으면 그 첫 시각이다.
     0011 이관의 보충 기록(이전 상태 없음)뿐인 옛 세션은 지금 상태가 검증 이후일 때만 라벨 이력에서
     추정한다 (verified_at).
+
+    인자:
+        conn: DB 연결 (`session_lifecycle_events`를 읽는다).
+        session_id: 세션 ID.
+        state: 세션의 지금 생애주기 상태.
+        history: 세션의 전체 라벨 이력 (추정에만 쓴다).
+    반환: 시간대 있는 datetime, 아직 검증 전이면 None.
     """
     for event in list_lifecycle_events(conn, session_id):
         if event.to_state is LifecycleState.HUMAN_VERIFIED and event.from_state is not None:
@@ -94,8 +119,9 @@ def verified_at(history: list[LabelRecord]) -> datetime | None:
       그대로다.
     - T 이전(같은 시각 포함)에 있던 현재 모델 라벨 중 미검수가 있으면 완료가 아니다 (None).
       T 뒤에 생긴 미검수 모델 라벨(검증 뒤의 새 모델 버전)은 보지 않는다.
-    한계: 수명 주기 전이 시각이 기록되지 않아(ADR 0027) 검증 뒤에 생긴 라벨을 나중에 검수하면 그
-    검수 시각으로 T가 늦춰지고, 수명 주기를 검수보다 늦게 바꾸면 지난 주의 수가 늘 수 있다.
+    한계: 이 추정은 생애주기 기록(ADR 0028)이 없는 옛 세션에만 쓴다. 전이 시각이 없으므로(ADR 0027)
+    검증 뒤에 생긴 라벨을 나중에 검수하면 그 검수 시각으로 T가 늦춰지고, 수명 주기를 검수보다 늦게
+    바꾸면 지난 주의 수가 늘 수 있다.
     """
     labels = [x for x in history if x.kind != "blur_track"]
     excluded = non_operational_ids(labels)
@@ -103,12 +129,16 @@ def verified_at(history: list[LabelRecord]) -> datetime | None:
     by_id = {x.label_id: x for x in ops}
 
     def own_review(x: LabelRecord) -> datetime | None:
+        """레코드 자체의 검수 시각: 사람 레코드는 작성 시각, 모델 레코드는 검수된 상태일 때
+        `reviewed_at`, 아니면 None."""
         if x.provenance.source is Source.HUMAN:
             return x.created_at
         v = x.verification
         return v.reviewed_at if v.state in VERIFIED_LABEL else None
 
     def first_review(x: LabelRecord) -> datetime | None:
+        """사슬(자기 → 부모 → …)에서 가장 이른 검수 시각. 순환 참조는 `seen`으로 끊는다. 없으면
+        None."""
         times: list[datetime] = []
         seen: set[str] = set()
         cur: LabelRecord | None = x
@@ -136,11 +166,32 @@ def verified_at(history: list[LabelRecord]) -> datetime | None:
 
 
 def _ratio(a: float, b: float) -> float:
+    """`a / b`. 분모가 0이면 `math.nan`(지표 없음)을 돌려준다 (0으로 보지 않는다)."""
     return a / b if b else math.nan
 
 
 @dataclass
 class WeeklyMetrics:
+    """한 주의 운영 지표. `math.nan`은 "그 주에 계산할 자료가 없음"이다.
+
+    필드:
+        week: ISO 주 `YYYY-Www`.
+        review_minutes_per_video_hour: 작업 라벨·QA 검수 분 / 검수한 영상 시간(시간).
+        privacy_review_minutes_per_video_hour: 블러 검수 분 / 영상 시간.
+        correction_rate: (고침+지움+추가) / (승인+고침+지움+추가). 블러·골든셋·사용 중지 세션
+            제외.
+        auto_approval_rate: 승인 / (승인+고침+지움). 사람이 추가한 것은 분모에 넣지 않는다.
+        prelabel_bias: 그 주에 끝난 블라인드 배정 편향의 평균 (양수 = 프리라벨에 끌려감).
+        seeded_detection_rate: 발견한 삽입 오류 / 삽입한 오류 (그 주에 끝난 오류 삽입 배정).
+        residual_blur_miss_per_hour: 그 주 감사의 누락 수 / 감사한 영상 시간.
+        verified_episodes: 검증 완료 시각이 그 주인 세션 수 (골든셋 포함, 사용 중지 제외).
+        review_hours: 그 주 모든 단계(블러 포함)의 검수 시간 합(시간).
+        cost_per_episode: `review_hours` * `hourly_cost` / `verified_episodes` (인건비 미정이면
+            nan).
+        counts: 원자료 건수 (`accepted`, `corrected`, `deleted`, `added`, `seeded_errors`,
+            `seeded_found`, `privacy_audits`).
+    """
+
     week: str
     review_minutes_per_video_hour: float = math.nan
     privacy_review_minutes_per_video_hour: float = math.nan
@@ -155,6 +206,7 @@ class WeeklyMetrics:
     counts: dict[str, int] = field(default_factory=dict[str, int])
 
     def as_dict(self) -> dict[str, Any]:
+        """JSON용 사전. `nan`은 `None`(null)으로 바꾼다 (JSON 표준에 NaN이 없다)."""
         return {
             k: (None if isinstance(v, float) and math.isnan(v) else v)
             for k, v in asdict(self).items()
@@ -164,10 +216,24 @@ class WeeklyMetrics:
 def weekly_metrics(
     conn: sa.Connection, week: str, review_policy: ReviewOpsPolicy, policy: OpsPolicy
 ) -> WeeklyMetrics:
+    """한 주의 운영 지표를 DB에서 계산한다. 읽기 전용.
+
+    인자:
+        conn: DB 연결.
+        week: ISO 주 `YYYY-Www`.
+        review_policy: `review.yaml` 운영 정책 (오류 삽입 발견 허용 오차
+            `seeding.detect_tolerance_ms`,
+            `seeding.blur_overlap`, 블라인드 편향 계산).
+        policy: `ops.yaml` (인건비).
+
+    읽는 테이블: `review_work`, `sessions`, `label_records`, `golden_sets`, `withdrawals`,
+    `review_assignments`, `privacy_audits`, `session_lifecycle_events`.
+    """
     start, end = week_range(week)
     m = WeeklyMetrics(week)
 
     def inside(t: datetime | None) -> bool:
+        """시각이 이 주 [start, end) 안인지. None이면 거짓."""
         return t is not None and start <= t < end
 
     # 검수 시간
@@ -255,7 +321,17 @@ def weekly_metrics(
 
 
 def alerts(history: list[WeeklyMetrics], policy: OpsPolicy) -> list[str]:
-    """주간 지표 추이에서 경고 (오래된 주부터 정렬된 목록)."""
+    """주간 지표 추이에서 경고 (오래된 주부터 정렬된 목록).
+
+    규칙:
+    1. 마지막 주에 블러 검수나 검증 에피소드가 있었는데 잔여 누락 감사가 0건이면 경고.
+    2. 직전 주 대비 자동 승인율이 `auto_approval_rise` 이상 오르고 오류 삽입 발견율이
+       `detection_drop` 이상 떨어지면 "검수 품질 저하" 경고.
+    3. 최근 `stagnation_weeks`주의 처음과 끝을 비교해 검수 시간과 수정률이 둘 다 줄지 않았으면
+       "가이드라인·온톨로지 점검" 경고.
+    `nan`과의 비교는 항상 거짓이라 자료가 없는 주는 2·3번 경고를 내지 않는다.
+    반환: 경고 문장 목록 (없으면 빈 목록).
+    """
     out: list[str] = []
     if history:
         cur = history[-1]
@@ -290,6 +366,7 @@ def alerts(history: list[WeeklyMetrics], policy: OpsPolicy) -> list[str]:
 
 
 def markdown(history: list[WeeklyMetrics], warnings: list[str], currency: str) -> str:
+    """주간 지표 목록 → 주를 열로 둔 Markdown 표 (+ 경고 절). `nan`은 `-`로 표시한다."""
     rows = [
         ("검수 분 / 영상 1시간 (작업 라벨)", "review_minutes_per_video_hour", "{:.1f}"),
         ("검수 분 / 영상 1시간 (블러)", "privacy_review_minutes_per_video_hour", "{:.1f}"),
