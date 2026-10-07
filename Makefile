@@ -8,11 +8,14 @@ contracts:
 schemas:
 	uv run dlp schema export
 
+fixtures:
+	uv run dlp fixtures generate --out data/fixtures
+
 db-upgrade:
 	uv run dlp db upgrade
 	uv run dlp ontology register 1.0.0
 
-.PHONY: install lint fmt typecheck test contracts schemas db-upgrade check env up down ps logs health test-services \
+.PHONY: install lint fmt typecheck test contracts schemas fixtures db-upgrade check env up down ps logs health test-services \
         cvat-up cvat-down cvat-superuser clean
 
 install:

@@ -1,0 +1,225 @@
+"""오프셋·드리프트를 아는 다중 스트림 동기화 시나리오.
+
+기준 시각(마스터) m과 스트림 시각 t의 관계는 계약과 같다: m = offset_ms + t * clock_scale.
+바디캠과 IMU는 같은 시계(offset 0, scale 1)다.
+3인칭 영상과 장갑은 각자의 오프셋과 드리프트를 가진다.
+
+신호 구성
+- 오디오: 두 마이크가 공유하는 대역 제한 주변 소음 + 각자의 잡음
+  + 두드림(감쇠 사인 버스트).
+  주변 소음 덕분에 두드림이 없어도 상호상관으로 오프셋을 찾을 수 있다.
+- 장갑 압력: 두드림 순간 압력 스파이크.
+- IMU: 두드림 순간 가속도 스파이크.
+- QR 슬레이트: 정해진 기준 시각에 시각 정보를 담은 QR을 화면에 띄운다 (영상은 video.py가 그린다).
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+
+import numpy as np
+from numpy.typing import NDArray
+
+from dlp_fixtures.io import write_json, write_parquet, write_wav
+from dlp_fixtures.video import slate_frame, write_video
+
+AUDIO_RATE = 16_000
+GLOVE_RATE = 100.0
+IMU_RATE = 200.0
+TAP_GAP_MS = 200.0  # 두 번 두드림 사이 간격
+SLATE_DURATION_MS = 1_000.0
+
+
+@dataclass(frozen=True)
+class ClockTruth:
+    offset_ms: float
+    clock_scale: float
+
+    def to_master(self, stream_ms: NDArray[np.float64] | float) -> NDArray[np.float64]:
+        return np.asarray(self.offset_ms + np.asarray(stream_ms) * self.clock_scale)
+
+    def to_stream(self, master_ms: NDArray[np.float64] | float) -> NDArray[np.float64]:
+        return np.asarray((np.asarray(master_ms) - self.offset_ms) / self.clock_scale)
+
+
+@dataclass(frozen=True)
+class SlateEvent:
+    master_ms: float
+    payload: str
+
+
+@dataclass
+class SyncScenario:
+    session_id: str
+    recorded_at: datetime
+    duration_ms: float
+    clocks: dict[str, ClockTruth]
+    tap_master_ms: list[float]
+    slates: list[SlateEvent]
+    audio: dict[str, NDArray[np.float32]] = field(repr=False)
+    glove_right: dict[str, NDArray[np.float64]] = field(repr=False)
+    imu: dict[str, NDArray[np.float64]] = field(repr=False)
+
+    def write(self, out_dir: Path, *, videos: bool = True) -> None:
+        """WAV·Parquet·정답 JSON, 그리고 (videos=True면) QR 슬레이트와 오디오가 든 MP4."""
+        out_dir.mkdir(parents=True, exist_ok=True)
+        for name, samples in self.audio.items():
+            write_wav(out_dir / f"{name}.wav", samples, AUDIO_RATE)
+            if videos:
+                self.write_video(out_dir / f"{name}.mp4", name)
+        write_parquet(out_dir / "glove_right.parquet", self.glove_right, {"clock": "glove_right"})
+        write_parquet(out_dir / "imu.parquet", self.imu, {"clock": "bodycam"})
+        write_json(out_dir / "truth.json", self.truth())
+
+    def write_video(
+        self, path: Path, stream: str, *, width: int = 240, height: int = 240, fps: float = 10.0
+    ) -> None:
+        """스트림 시계 기준으로 프레임을 찍는다. 슬레이트가 떠 있는 동안은 QR을 보여준다."""
+        clock = self.clocks[stream]
+        audio = self.audio[stream]
+        stream_len_ms = audio.size / AUDIO_RATE * 1000
+        rng = np.random.default_rng(len(stream))
+        blank = rng.integers(90, 110, size=(height, width, 3), dtype=np.uint8)
+        cache: dict[str, NDArray[np.uint8]] = {}
+
+        def frames() -> Iterator[tuple[int, NDArray[np.uint8]]]:
+            for i in range(int(stream_len_ms / 1000 * fps)):
+                pts = round(i * 1000 / fps)
+                master = float(clock.to_master(pts))
+                shown = [s for s in self.slates if 0 <= master - s.master_ms < SLATE_DURATION_MS]
+                if shown:
+                    payload = shown[0].payload
+                    if payload not in cache:
+                        cache[payload] = slate_frame(payload, width, height)
+                    yield pts, cache[payload]
+                else:
+                    yield pts, blank
+
+        write_video(path, frames(), width=width, height=height, audio=audio, audio_rate=AUDIO_RATE)
+
+    def truth(self) -> dict[str, object]:
+        return {
+            "session_id": self.session_id,
+            "recorded_at": self.recorded_at.isoformat(),
+            "duration_ms": self.duration_ms,
+            "clocks": {
+                k: {"offset_ms": c.offset_ms, "clock_scale": c.clock_scale}
+                for k, c in self.clocks.items()
+            },
+            "tap_master_ms": self.tap_master_ms,
+            "slates": [{"master_ms": s.master_ms, "payload": s.payload} for s in self.slates],
+        }
+
+
+def slate_payload(session_id: str, recorded_at: datetime, master_ms: float) -> str:
+    """슬레이트 QR 내용: 세션 ID와 그 순간의 절대 시각(Unix ms)."""
+    epoch_ms = round(recorded_at.timestamp() * 1000 + master_ms)
+    return f"DLP-SLATE|{session_id}|{epoch_ms}"
+
+
+def generate_sync_scenario(
+    seed: int = 0,
+    *,
+    session_id: str = "syn-sync",
+    recorded_at: datetime,
+    duration_ms: float = 30_000.0,
+    max_offset_ms: float = 4_000.0,
+    max_drift_ppm: float = 80.0,
+) -> SyncScenario:
+    rng = np.random.default_rng(seed)
+
+    def random_clock(max_offset: float) -> ClockTruth:
+        return ClockTruth(
+            offset_ms=float(rng.uniform(-max_offset, max_offset)),
+            clock_scale=1.0 + float(rng.uniform(-max_drift_ppm, max_drift_ppm)) * 1e-6,
+        )
+
+    clocks = {
+        "bodycam": ClockTruth(0.0, 1.0),
+        "imu": ClockTruth(0.0, 1.0),
+        "third_person": random_clock(max_offset_ms),
+        "glove_right": random_clock(max_offset_ms / 2),
+    }
+    start_tap = float(rng.uniform(2_500, 3_500))
+    end_tap = duration_ms - float(rng.uniform(3_000, 4_000))
+    taps = [start_tap, start_tap + TAP_GAP_MS, end_tap, end_tap + TAP_GAP_MS]
+    slates = [
+        SlateEvent(t, slate_payload(session_id, recorded_at, t))
+        for t in (float(rng.uniform(500, 1_000)), duration_ms - 1_800.0)
+    ]
+
+    # 주변 소음: 마스터 시간축 위의 대역 제한 잡음. 모든 스트림 구간을 덮도록 여유를 둔다.
+    margin = max_offset_ms * 2 + 1_000
+    amb_t = np.arange(-margin, duration_ms + margin, 1000 / AUDIO_RATE)
+    white = rng.standard_normal(amb_t.size)
+    kernel = np.ones(8) / 8
+    ambient = np.convolve(white, kernel, mode="same") * 0.15
+
+    def mic(clock: ClockTruth, stream_len_ms: float, gain: float) -> NDArray[np.float32]:
+        t = np.arange(0, stream_len_ms, 1000 / AUDIO_RATE)
+        m = clock.to_master(t)
+        sig = np.interp(m, amb_t, ambient) * gain
+        sig += rng.standard_normal(t.size) * 0.01
+        sig += _taps(m, taps)
+        return sig.astype(np.float32)
+
+    # 각 스트림은 자기 시각 0에서 녹화를 시작해 마스터 구간 끝까지 녹화한다.
+    def stream_len(clock: ClockTruth) -> float:
+        return float(clock.to_stream(duration_ms + 500))
+
+    audio = {
+        "bodycam": mic(clocks["bodycam"], duration_ms, 1.0),
+        "third_person": mic(clocks["third_person"], stream_len(clocks["third_person"]), 0.7),
+    }
+
+    glove_clock = clocks["glove_right"]
+    gt = np.arange(0, stream_len(glove_clock), 1000 / GLOVE_RATE)
+    gm = glove_clock.to_master(gt)
+    spikes = _pulses(gm, taps, width_ms=40.0)
+    glove = {"t_ms": gt}
+    for ch in range(5):
+        glove[f"pressure_{ch}"] = np.clip(
+            spikes * rng.uniform(0.7, 1.0) + rng.standard_normal(gt.size) * 0.01, 0, None
+        )
+
+    it = np.arange(0, duration_ms, 1000 / IMU_RATE)
+    imu = {"t_ms": it}
+    for axis in ("ax", "ay", "az", "gx", "gy", "gz"):
+        imu[axis] = rng.standard_normal(it.size) * 0.05
+    imu["az"] = imu["az"] + 9.81 + _pulses(it, taps, width_ms=20.0) * 3.0
+
+    return SyncScenario(
+        session_id=session_id,
+        recorded_at=recorded_at,
+        duration_ms=duration_ms,
+        clocks=clocks,
+        tap_master_ms=taps,
+        slates=slates,
+        audio=audio,
+        glove_right=glove,
+        imu=imu,
+    )
+
+
+def _taps(master_ms: NDArray[np.float64], taps: list[float]) -> NDArray[np.float64]:
+    """감쇠 사인 버스트 (2 kHz, 시정수 8 ms, 30 ms 길이)."""
+    out = np.zeros(master_ms.size)
+    for tap in taps:
+        dt = master_ms - tap
+        on = (dt >= 0) & (dt < 30)
+        out[on] += 0.8 * np.exp(-dt[on] / 8.0) * np.sin(2 * np.pi * 2.0 * dt[on])
+    return out
+
+
+def _pulses(
+    master_ms: NDArray[np.float64], taps: list[float], width_ms: float
+) -> NDArray[np.float64]:
+    out = np.zeros(master_ms.size)
+    for tap in taps:
+        dt = master_ms - tap
+        on = (dt >= 0) & (dt < width_ms)
+        out[on] = np.maximum(out[on], 1.0 - dt[on] / width_ms)
+    return out

@@ -8,6 +8,7 @@
 ## 구성
 
 - `packages/schema` (`dlp_schema`): 세션·스트림·라벨·에피소드 그래프 계약 타입, 온톨로지 로더·검증, 온톨로지 이관, DB 스키마
+- `packages/fixtures` (`dlp_fixtures`): 정답을 아는 합성 데이터 생성기 (`dlp fixtures generate`)
 - `packages/cli` (`dlp`): 명령줄 도구
 - `config/ontology/v1`: 온톨로지 v1 초안, `config/defaults.yaml`: 미결정 사항 기본값
 - `schemas/`: 계약 타입의 JSON Schema (생성 파일)
