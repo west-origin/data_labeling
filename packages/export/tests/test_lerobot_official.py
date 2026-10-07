@@ -2,6 +2,9 @@
 
 격리된 일회용 환경(PyTorch CPU판, 약 1.5 GB)을 받으므로 기본 테스트에서 빼고
 `make test-isolated`로 돈다.
+
+프레임 내용: 블러본의 i번째 프레임을 i로 정해지는 회색 단색으로 만들어, 로더가 돌려준 영상
+프레임이 PTS로 고른 그 프레임(frame_index)인지 밝기로 확인한다.
 """
 
 from __future__ import annotations
@@ -15,10 +18,17 @@ import pytest
 from dlp_export.lerobot import Vocab, build_episode, run_script, write_package
 from dlp_export.policy import ExportPolicy
 from dlp_export.source import label_states, select_labels
+from dlp_fixtures.video import write_video
 from dlp_media.pts import build_pts_index
 from dlp_schema.ontology import Ontology
 
 from .conftest import ROOT, Scenario
+
+
+def gray(i: int) -> int:
+    """i번째 프레임의 밝기. 이웃 프레임끼리 37씩 달라 한 프레임만 어긋나도 드러난다."""
+    return 28 + (i * 37) % 200
+
 
 pytestmark = pytest.mark.isolated_env
 
@@ -28,7 +38,12 @@ def test_official_lerobot_loader_reads_export(
 ) -> None:
     lp = policy.lerobot
     video = tmp_path / "v.mp4"
-    scenario.labeling.get_file("sessions/s1/blurred/bodycam.mp4", video)
+    write_video(
+        video,
+        ((t, np.full((48, 64, 3), gray(i), np.uint8)) for i, t in enumerate(scenario.times)),
+        width=64,
+        height=48,
+    )
     labels = select_labels(scenario.labels, policy, label_states(policy, False))
     ep = build_episode(
         scenario.session, scenario.session.streams[0], build_pts_index(video), (64, 48), labels,
@@ -60,3 +75,5 @@ def test_official_lerobot_loader_reads_export(
         assert s["verb"] == ep.verb[k].tolist()
         assert s["verification"] == ep.verification[k].tolist()
         assert s["task"] == ep.tasks[k]
+        # PTS로 고른 블러본 프레임이 그대로 들어갔다 (손실 압축 허용 오차 안)
+        assert s["image_mean"] * 255 == pytest.approx(gray(int(ep.frame_index[k])), abs=6)

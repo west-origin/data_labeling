@@ -24,8 +24,7 @@ class IntervalsPolicy(Contract):
 
 class LeRobotEnv(Contract):
     python: str
-    packages: tuple[str, ...] = Field(min_length=1)
-    index: str
+    project: str  # 저장소 루트 기준, pyproject.toml과 uv.lock이 있는 디렉터리
 
 
 class LeRobotPolicy(Contract):
@@ -40,6 +39,11 @@ class LeRobotPolicy(Contract):
     env: LeRobotEnv
 
 
+class IdsPolicy(Contract):
+    pseudonymize: bool
+    secret_env: str  # 가명 비밀값을 담은 환경 변수 (없으면 실행마다 임의 값)
+
+
 class ExportPolicy(Contract):
     version: int
     label_states: tuple[VerificationState, ...] = Field(min_length=1)
@@ -48,6 +52,7 @@ class ExportPolicy(Contract):
     coco: CocoPolicy
     intervals: IntervalsPolicy
     lerobot: LeRobotPolicy
+    ids: IdsPolicy
 
     @field_validator("label_states")
     @classmethod

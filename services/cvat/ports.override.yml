@@ -1,0 +1,6 @@
+# CVAT 공식 compose 덮어쓰기 (services/cvat/cvat.sh가 함께 쓴다).
+# traefik의 호스트 포트를 DLP_CVAT_PORT(기본 8080)로 바꾼다. !override는 목록을 합치지 않고 바꾼다.
+services:
+  traefik:
+    ports: !override
+      - "${DLP_CVAT_PORT:-8080}:8080"

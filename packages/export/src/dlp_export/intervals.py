@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 from dlp_export.policy import ExportPolicy
+from dlp_export.pseudonym import Pseudonymizer
 from dlp_export.source import ExportSource
 from dlp_schema.export import ExportedLabel, ExportedStream, IntervalFile
 from dlp_schema.labels import LabelRecord
@@ -27,9 +28,18 @@ def exported(x: LabelRecord) -> ExportedLabel:
 
 
 def write_intervals(
-    src: ExportSource, policy: ExportPolicy, out: Path, *, export_id: str, now: datetime
+    src: ExportSource,
+    policy: ExportPolicy,
+    out: Path,
+    *,
+    export_id: str,
+    now: datetime,
+    ids: Pseudonymizer,
 ) -> dict[str, int]:
-    """out/intervals/<세션>.json. 세션별 라벨 수를 돌려준다."""
+    """out/intervals/<세션>.json. 세션별 라벨 수를 돌려준다.
+
+    작업자·장소 ID는 ids로 가명 처리한다.
+    """
     (out / "intervals").mkdir(parents=True, exist_ok=True)
     counts: dict[str, int] = {}
     for es in src.sessions:
@@ -45,8 +55,8 @@ def write_intervals(
             session_id=s.session_id,
             split=es.split,
             domain=s.domain,
-            worker_id=s.worker_id,
-            site_id=s.site_id,
+            worker_id=ids.worker(s.worker_id),
+            site_id=ids.site(s.site_id),
             duration_ms=s.duration_ms,
             streams=tuple(ExportedStream(stream_id=st.stream_id, kind=st.kind) for st in s.streams),
             labels=tuple(exported(x) for x in labels),

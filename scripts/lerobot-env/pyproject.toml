@@ -1,0 +1,27 @@
+# LeRobot 공식 쓰기·읽기 API용 격리 환경 (dlp export lerobot, make test-isolated).
+# 작업공간 멤버가 아니다: PyTorch가 작업공간 의존성(av·numpy 버전)과 충돌한다.
+# 모든 패키지(전이 의존성 포함)의 버전과 해시는 이 디렉터리의 uv.lock에 고정한다.
+# 바꾼 뒤에는 이 디렉터리에서 `uv lock`을 다시 한다 (실행은 --locked라 잠금 파일과 어긋나면 실패한다).
+# PyTorch(torch·torchvision)만 CPU판 인덱스에서 받고 나머지는 모두 PyPI에서 받는다
+# (explicit 인덱스: 다른 패키지가 그 인덱스에서 오지 않는다).
+[project]
+name = "dlp-lerobot-env"
+version = "0"
+requires-python = "==3.12.*"
+dependencies = [
+    "lerobot[dataset]==0.6.1",
+    "torch==2.11.0",
+    "torchvision==0.26.0",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+torchvision = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true

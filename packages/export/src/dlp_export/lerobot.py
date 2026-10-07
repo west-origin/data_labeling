@@ -2,8 +2,9 @@
 
 세션의 바디캠 블러본 하나가 에피소드 하나다. 이 모듈은 고정 프레임률 시각마다의 특징 표와 그 시각에
 보이던 블러본 프레임(PTS 인덱스로 고름)을 정하고, 격리된 일회용 환경의 scripts/lerobot_write.py가
-LeRobot 공식 API로 쓴다 (PyTorch가 작업공간 의존성과 충돌하므로). 쓴 뒤 scripts/lerobot_check.py가
-공식 로더로 다시 읽어 확인한다.
+LeRobot 공식 API로 쓴다 (PyTorch가 작업공간 의존성과 충돌하므로, 환경은
+scripts/lerobot-env/uv.lock에 고정). 쓴 뒤 scripts/lerobot_check.py가 공식 로더로 다시 읽어
+확인한다.
 
 프레임 특징 (손은 왼손·오른손 순):
 - observation.state (float32): 손 21관절 2D(정규화 x, y, COCO 보임 v: 0 없음·1 가려짐·2 보임)
@@ -190,6 +191,7 @@ class Episode:
     verb: NDArray[np.int64]
     verification: NDArray[np.int64]
     tasks: list[str]
+    used: frozenset[str] = frozenset()  # 실제로 어느 프레임 특징에 들어간 라벨 ID
 
 
 def build_episode(
@@ -283,9 +285,12 @@ def build_episode(
     verb = np.full((n, 2), -1, np.int64)
     ver = np.full((n, len(GROUPS)), -1, np.int64)
     task_names: list[str] = []
+    used: set[str] = set()
     n2d, n3d = 21 * 3, len(policy.hand_points_3d) * 4
 
     def worse(k: int, g: int, x: LabelRecord) -> None:
+        """프레임 k의 묶음 g에 라벨 x를 썼다 (검증 등급을 낮추고, 쓴 라벨로 센다)."""
+        used.add(x.label_id)
         cur = ver[k, g]
         ver[k, g] = grade(x) if cur < 0 else min(cur, grade(x))
 
@@ -361,7 +366,9 @@ def build_episode(
         task_names.append(seg.ref_id if isinstance(seg, SegmentPayload) else session.domain.value)
 
     action = np.concatenate([state[1:], state[-1:]], axis=0)
-    return Episode(frame_index, times, state, action, hs, tsc, verb, ver, task_names)
+    return Episode(
+        frame_index, times, state, action, hs, tsc, verb, ver, task_names, frozenset(used)
+    )
 
 
 def write_package(
@@ -401,18 +408,24 @@ def write_package(
     return path
 
 
-def env_command(policy: LeRobotPolicy) -> list[str]:
-    cmd = ["uv", "run", "--no-project", "--python", policy.env.python]
-    for p in policy.env.packages:
-        cmd += ["--with", p]
-    return [*cmd, "--index", policy.env.index, "--index-strategy", "unsafe-best-match", "python"]
+def env_command(root: Path, policy: LeRobotPolicy) -> list[str]:
+    """격리 환경 실행 명령.
+
+    잠금 파일(전이 의존성까지 버전·해시 고정)을 그대로 따르고(--locked: pyproject와 어긋나면
+    실패), 실행마다 일회용 가상 환경을 쓴다(--isolated). PyTorch만 CPU판 인덱스에서 받는다
+    (explicit 인덱스).
+    """
+    return [
+        "uv", "run", "--project", str(root / policy.env.project), "--locked", "--isolated",
+        "--python", policy.env.python, "python",
+    ]  # fmt: skip
 
 
 def run_script(root: Path, policy: LeRobotPolicy, script: str, *args: str) -> str:
     """격리 환경에서 scripts/<script>를 돌리고 표준 출력을 돌려준다 (허브에 접속하지 않는다)."""
     env = {**os.environ, "HF_HUB_OFFLINE": "1", "HF_DATASETS_OFFLINE": "1"}
     proc = subprocess.run(
-        [*env_command(policy), str(root / "scripts" / script), *args],
+        [*env_command(root, policy), str(root / "scripts" / script), *args],
         cwd=root, env=env, check=True, capture_output=True, text=True,
     )  # fmt: skip
     return proc.stdout

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from datetime import UTC, datetime
 
 import sqlalchemy as sa
@@ -24,28 +25,34 @@ def cmd_export(args: argparse.Namespace) -> int:
     snapshots = LakeFSSnapshotStore.from_env(
         repository=lp.repository, branch=lp.branch, storage_namespace=lp.storage_namespace
     )
+    policy = load_policy(root)
+    secret = os.environ.get(policy.ids.secret_env)
     engine = sa.create_engine(database_url(args.url))
-    with engine.begin() as conn:
-        r = run_export(
-            conn,
-            root=root,
-            version_id=args.dataset_version,
-            fmt=args.format,
-            target=args.target,
-            snapshots=snapshots,
-            labeling=store_from_spec(args.store, config.buckets.labeling),
-            datasets=store_from_spec(args.store, config.buckets.datasets),
-            raw_bucket=config.buckets.raw,
-            policy=load_policy(root),
-            ontology=load_ontology(root / "config/ontology/v1"),
-            include_unreviewed=args.include_unreviewed or config.export.include_unreviewed,
-            splits=tuple(Split(s) for s in args.split) or None,
-            now=datetime.now(UTC),
-        )
+    # 트랜잭션은 run_export가 연다: 이력을 올리기 전에 따로 커밋한다
+    r = run_export(
+        engine,
+        root=root,
+        version_id=args.dataset_version,
+        fmt=args.format,
+        target=args.target,
+        snapshots=snapshots,
+        labeling=store_from_spec(args.store, config.buckets.labeling),
+        datasets=store_from_spec(args.store, config.buckets.datasets),
+        raw_bucket=config.buckets.raw,
+        policy=policy,
+        ontology=load_ontology(root / "config/ontology/v1"),
+        include_unreviewed=args.include_unreviewed or config.export.include_unreviewed,
+        splits=tuple(Split(s) for s in args.split) or None,
+        now=datetime.now(UTC),
+        id_secret=secret.encode() if secret else None,
+    )
     engine.dispose()
     n = len(r.record.session_ids)
     print(f"{r.record.export_id}: {r.record.uri} (파일 {r.files}개, 세션 {n}개)")
     print(f"검증 정책: {', '.join(s.value for s in r.record.label_states)}")
+    if policy.ids.pseudonymize and not secret:
+        env = policy.ids.secret_env
+        print(f"작업자·장소 가명: {env}가 없어 임의 비밀값을 썼습니다 (되짚을 수 없음)")
     for k, n in r.label_counts.items():
         print(f"  {k}: {n}")
     return 0

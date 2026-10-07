@@ -96,13 +96,12 @@ def test_export_applies_policy_and_records_history(
         withdraw_session(conn, "s2", "동의 철회", FIXED_TIME + timedelta(days=1))
 
     def export(fmt: str, include_unreviewed: bool = False):
-        with engine.begin() as conn:
-            return run_export(
-                conn, root=ROOT, version_id="dv1", fmt=fmt, target="buyer-a",  # type: ignore[arg-type]
-                snapshots=snapshots, labeling=labeling, datasets=datasets, raw_bucket="dlp-raw",
-                policy=policy, ontology=ontology, include_unreviewed=include_unreviewed,
-                splits=None, now=FIXED_TIME + timedelta(days=2),
-            )  # fmt: skip
+        return run_export(
+            engine, root=ROOT, version_id="dv1", fmt=fmt, target="buyer-a",  # type: ignore[arg-type]
+            snapshots=snapshots, labeling=labeling, datasets=datasets, raw_bucket="dlp-raw",
+            policy=policy, ontology=ontology, include_unreviewed=include_unreviewed,
+            splits=None, now=FIXED_TIME + timedelta(days=2), id_secret=b"test-secret",
+        )  # fmt: skip
 
     kept = {"s0", "s1", "s3"}  # s2는 사용 중지
     for fmt in ("intervals", "coco"):
@@ -129,6 +128,15 @@ def test_export_applies_policy_and_records_history(
             }  # fmt: skip
             assert {i["session_id"] for i in coco["images"]} == exported
         else:
+            # 작업자·장소 ID는 이 내보내기의 가명 (원래 ID는 결과에 없다)
+            assert manifest["pseudonymized_ids"] == ["worker_id", "site_id"]
+            workers = set[str]()
+            for sid in exported:
+                f = json.loads((out / "intervals" / f"{sid}.json").read_text())
+                assert f["worker_id"].startswith("worker-") and f["site_id"].startswith("site-")
+                workers.add(f["worker_id"])
+            assert len(workers) == len(exported)
+            assert not any(f'"w{i}"' in text or f'"site{i}"' in text for i in range(4))
             for sid in exported:
                 f = json.loads((out / "intervals" / f"{sid}.json").read_text())
                 assert "unreviewed" not in {x["verification"] for x in f["labels"]}
@@ -172,12 +180,12 @@ def test_lerobot_export_end_to_end(
             conn, snapshots, load_dataset_policy(ROOT), version_id="dv1",
             ontology_version="1.0.0", golden_set_version=None, now=FIXED_TIME,
         )  # fmt: skip
-        r = run_export(
-            conn, root=ROOT, version_id="dv1", fmt="lerobot", target="internal",
-            snapshots=snapshots, labeling=labeling, datasets=datasets, raw_bucket="dlp-raw",
-            policy=policy, ontology=ontology, include_unreviewed=False, splits=None,
-            now=FIXED_TIME,
-        )  # fmt: skip
+    r = run_export(
+        engine, root=ROOT, version_id="dv1", fmt="lerobot", target="internal",
+        snapshots=snapshots, labeling=labeling, datasets=datasets, raw_bucket="dlp-raw",
+        policy=policy, ontology=ontology, include_unreviewed=False, splits=None,
+        now=FIXED_TIME,
+    )  # fmt: skip
     out = tmp_path / "store" / "dlp-datasets" / "exports" / r.record.export_id / "lerobot"
     assert r.details["episodes"] == 2 and r.details["loader_check"]["episodes"] == 2
     assert (out / "meta" / "info.json").exists() and (out / "meta" / "dlp_vocab.json").exists()
@@ -215,12 +223,95 @@ def test_lerobot_refuses_mixed_aspect_ratios(
             conn, snapshots, load_dataset_policy(ROOT), version_id="dv1",
             ontology_version="1.0.0", golden_set_version=None, now=FIXED_TIME,
         )  # fmt: skip
-        with pytest.raises(ExportError, match="화면비"):
-            run_export(
-                conn, root=ROOT, version_id="dv1", fmt="lerobot", target="internal",
-                snapshots=snapshots, labeling=labeling, datasets=datasets, raw_bucket="dlp-raw",
-                policy=policy, ontology=ontology, include_unreviewed=False, splits=None,
-                now=FIXED_TIME,
-            )  # fmt: skip
+    with pytest.raises(ExportError, match="화면비"):
+        run_export(
+            engine, root=ROOT, version_id="dv1", fmt="lerobot", target="internal",
+            snapshots=snapshots, labeling=labeling, datasets=datasets, raw_bucket="dlp-raw",
+            policy=policy, ontology=ontology, include_unreviewed=False, splits=None,
+            now=FIXED_TIME,
+        )  # fmt: skip
     # 아무것도 올리지 않았다
     assert not (tmp_path / "store" / "dlp-datasets").exists()
+
+
+class _FailingStore(LocalStore):
+    """n번째 올리기에서 실패하거나(fail_at), 첫 올리기 직후 세션을 사용 중지한다(withdraw)."""
+
+    def __init__(self, root: Path, bucket: str, *, fail_at: int | None = None,
+                 withdraw: tuple[sa.Engine, str] | None = None) -> None:  # fmt: skip
+        super().__init__(root, bucket)
+        self.puts, self.fail_at, self.withdraw = 0, fail_at, withdraw
+
+    def put_file(self, key: str, path: Path, sha256: str) -> None:
+        self.puts += 1
+        if self.fail_at is not None and self.puts == self.fail_at:
+            raise OSError("올리기 실패 (시험)")
+        super().put_file(key, path, sha256)
+        if self.withdraw is not None and self.puts == 1:
+            engine, sid = self.withdraw
+            with engine.begin() as conn:
+                withdraw_session(conn, sid, "동의 철회", FIXED_TIME + timedelta(days=1))
+
+
+def test_export_history_is_committed_before_upload(
+    engine: sa.Engine, policy: ExportPolicy, ontology: Ontology, tmp_path: Path
+) -> None:
+    """올리다 실패해도 이력은 남는다. 올리는 사이 사용 중지되면 manifest를 올리지 않고 실패하며,
+    사용 중지의 계보 목록에 그 내보내기가 보인다."""
+    snapshots = LocalSnapshotStore(tmp_path / "snap")
+    labeling = LocalStore(tmp_path / "store", "dlp-labeling")
+    times = vfr_times(np.random.default_rng(7), 300)
+    with engine.begin() as conn:
+        register_ontology(conn, ontology)
+        for i, sid in enumerate(("s0", "s1")):
+            insert_session(
+                conn,
+                make_session(sid, worker_id=f"w{i}", site_id=f"site{i}").model_copy(
+                    update={"privacy_state": PrivacyState.APPROVED}
+                ),
+            )
+            insert_labels(conn, scenario_labels(sid, times))
+            write_blurred(labeling, sid, times, tmp_path)
+        build_dataset_version(
+            conn, snapshots, load_dataset_policy(ROOT), version_id="dv1",
+            ontology_version="1.0.0", golden_set_version=None, now=FIXED_TIME,
+        )  # fmt: skip
+
+    def export(datasets: LocalStore, minutes: int) -> None:
+        run_export(
+            engine, root=ROOT, version_id="dv1", fmt="intervals", target="buyer-a",
+            snapshots=snapshots, labeling=labeling, datasets=datasets, raw_bucket="dlp-raw",
+            policy=policy, ontology=ontology, include_unreviewed=False, splits=None,
+            now=FIXED_TIME + timedelta(minutes=minutes),
+        )  # fmt: skip
+
+    # 1) 두 번째 파일을 올리다 실패: 이력은 남고 manifest는 없다
+    crashing = _FailingStore(tmp_path / "store", "dlp-datasets", fail_at=2)
+    with pytest.raises(OSError, match="올리기 실패"):
+        export(crashing, 1)
+    with engine.connect() as conn:
+        (first,) = session_lineage(conn, "s0").exports
+    folder = tmp_path / "store" / "dlp-datasets" / "exports" / first.export_id
+    assert folder.exists() and not (folder / "manifest.json").exists()
+
+    # 2) 올리는 사이 s1 사용 중지: 실패, manifest 없음, 계보에 이 내보내기가 보인다
+    racing = _FailingStore(tmp_path / "store", "dlp-datasets", withdraw=(engine, "s1"))
+    with pytest.raises(ExportError, match="올리는 동안 사용 중지"):
+        export(racing, 2)
+    with engine.connect() as conn:
+        exports = session_lineage(conn, "s1").exports
+    assert len(exports) == 2
+    late = next(e for e in exports if e.export_id != first.export_id)
+    assert not (
+        tmp_path / "store" / "dlp-datasets" / "exports" / late.export_id / "manifest.json"
+    ).exists()
+
+    # 3) 다시 내보내면 s1은 빠지고 manifest까지 올라간다
+    export(LocalStore(tmp_path / "store", "dlp-datasets"), 3)
+    with engine.connect() as conn:
+        s0 = session_lineage(conn, "s0").exports
+        assert len(s0) == 3 and len(session_lineage(conn, "s1").exports) == 2
+    done = next(e for e in s0 if e.session_ids == ("s0",))
+    assert (
+        tmp_path / "store" / "dlp-datasets" / "exports" / done.export_id / "manifest.json"
+    ).exists()
