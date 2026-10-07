@@ -1,0 +1,19 @@
+[project]
+name = "dlp-eval"
+version = "0.1.0"
+description = "지표 라이브러리, 골든셋 평가 실행기, 하위 집단 리포트, 배포 게이트"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "dlp-schema",
+    "numpy>=2.0",
+    "pyyaml>=6.0",
+    "scipy>=1.13",
+    "sqlalchemy>=2.0",
+]
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dlp_eval"]

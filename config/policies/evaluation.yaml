@@ -1,0 +1,35 @@
+# 지표와 평가 하네스 정책 (WP11). 골든셋으로 모델을 평가하고 배포 여부를 판정한다.
+version: 1
+
+tolerance_ms:
+  contact: 150              # 영상 기준 접촉 시작·종료 허용 오차 (장갑 세션은 contact_glove)
+  contact_glove: 70
+  boundary: 200             # 행동 경계 일치 허용 오차
+  state: 500                # 상태 전이 시각 허용 오차
+max_interp_ms: 200          # 예측 박스·관절을 정답 시각에 맞출 때 보간할 최대 키프레임 간격
+track_iou: 0.5              # 추적 IDF1·MOTA와 보정(ECE) 판정의 IoU 문턱
+segment_iou: [0.1, 0.25, 0.5]
+relation_iou: 0.5
+pck_alpha: 0.1              # 정답 키포인트 박스 긴 변의 10%
+ece_bins: 15
+min_samples_per_class: 20   # 이보다 정답 표본이 적은 클래스는 리포트에 "표본 부족"으로 표시
+
+# 하위 집단: 세션 속성별로 따로 리포트한다.
+#   glove: 장갑 스트림이 있는 세션(glove) / 없는 세션(bare)
+#   site: 장소별
+subgroups: [glove]
+
+# 배포 게이트: 후보 모델이 기존 모델보다
+#   - 주 지표(primary)가 min_gain 이상 좋고,
+#   - 지키는 지표(guards)가 전체와 각 하위 집단에서 max_drop보다 많이 나빠지지 않아야 통과한다.
+# 기존 모델이 없으면(첫 배포) 주 지표가 first_deploy 기준을 넘으면 통과한다 (오차 지표는 이하).
+# 지표 방향(높을수록 좋은지)은 코드가 안다 (오차·ECE는 낮을수록 좋다).
+gate:
+  objects: {primary: hota, min_gain: 0.0, max_drop: 0.01, guards: [map, idf1, ece], first_deploy: 0.3}
+  hands: {primary: pck, min_gain: 0.0, max_drop: 0.01, guards: [], first_deploy: 0.5}
+  body: {primary: pck, min_gain: 0.0, max_drop: 0.01, guards: [], first_deploy: 0.5}
+  contact: {primary: contact_start_f1, min_gain: 0.0, max_drop: 0.01, guards: [contact_end_f1, contact_start_error_ms, grasp_macro_f1], first_deploy: 0.5}
+  actions: {primary: segment_f1_0.5, min_gain: 0.0, max_drop: 0.01, guards: [temporal_map, boundary_f1, verb_macro_f1], first_deploy: 0.3}
+  relations: {primary: relation_f1, min_gain: 0.0, max_drop: 0.01, guards: [], first_deploy: 0.5}
+  states: {primary: transition_accuracy, min_gain: 0.0, max_drop: 0.01, guards: [], first_deploy: 0.5}
+  coverage: {primary: coverage_abs_error, min_gain: 0.0, max_drop: 0.01, guards: [], first_deploy: 0.1}

@@ -24,3 +24,4 @@ data/
 *.mp4
 *.parquet
 *.h5
+reports/

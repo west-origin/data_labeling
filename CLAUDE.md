@@ -49,6 +49,8 @@
 - `packages/actions/` (`dlp_actions`) — 행동 구간 2단 구조: 손목 속도·접촉으로 경계 후보 → VLM이 온톨로지 안에서 분류·설명
   (JSON Schema 강제, 재시도 후 미상) → 병합·채우기(공백 0). `dlp actions run <세션> --vlm-url`. CPU·CI는 `OracleVlm` stub.
   정책은 `config/policies/actions.yaml`.
+- `packages/evaluation/` (`dlp_eval`) — 지표 라이브러리(mAP·HOTA·IDF1·PCK·접촉·구간 F1·temporal mAP·ECE 등, 참조 구현과 일치 테스트),
+  골든셋 평가 하네스, 하위 집단 리포트, 배포 게이트. `dlp eval golden <골든셋> --model <과제>=<버전>`. 정책은 `config/policies/evaluation.yaml`.
 - `config/` — 온톨로지·정책·기본값 YAML. 코드에 값을 하드코딩하지 않는다.
 - `schemas/` — 생성된 JSON Schema. 직접 편집하지 않는다 (`make schemas`).
 - `services/` — 개발용 docker compose (PostgreSQL, SeaweedFS S3, Label Studio, Prefect, MLflow, lakeFS), CVAT 실행 스크립트.
