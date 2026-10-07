@@ -28,10 +28,12 @@ from dlp_schema.db.repository import (
     get_review_task,
     get_session,
     insert_labels,
+    insert_review_work,
     mark_review_task_collected,
     record_review,
 )
 from dlp_schema.labels import VerificationState
+from dlp_schema.ops import ReviewWork
 from dlp_schema.review import ReviewMode, ReviewTaskStatus, ReviewTool
 
 if TYPE_CHECKING:
@@ -93,6 +95,23 @@ def collect_task(
         results = setup.label_studio.latest_results(int(task.external_id))
         reviewed = from_ls_results(results, {x.label_id for x in originals})
         normalize = None
+        # 검수 시간 (운영 지표, WP16). CVAT는 작업 시간을 재지 않아 dlp ops log-work로 기록한다
+        seconds = setup.label_studio.lead_seconds(int(task.external_id))
+        if seconds > 0:
+            insert_review_work(
+                conn,
+                ReviewWork(
+                    work_id=f"{task_key}:work",
+                    task_key=task_key,
+                    session_id=task.session_id,
+                    reviewer=reviewer_id,
+                    stage=task.stage.value,
+                    seconds=seconds,
+                    video_ms=session.duration_ms,
+                    source="label_studio",
+                    recorded_at=now,
+                ),
+            )
 
     outcome = reconcile(
         originals,

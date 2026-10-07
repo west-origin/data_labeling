@@ -1,0 +1,59 @@
+{
+  "additionalProperties": false,
+  "description": "승인된 블러본의 잔여 누락 감사 결과 (원 검수자가 아닌 감사자).",
+  "properties": {
+    "audit_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Audit Id",
+      "type": "string"
+    },
+    "audited_at": {
+      "format": "date-time",
+      "title": "Audited At",
+      "type": "string"
+    },
+    "auditor": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Auditor",
+      "type": "string"
+    },
+    "blur_reviewer": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Blur Reviewer",
+      "type": "string"
+    },
+    "duration_ms": {
+      "description": "마스터 타임라인 기준 시각(ms)",
+      "minimum": 0,
+      "title": "Duration Ms",
+      "type": "integer"
+    },
+    "misses": {
+      "minimum": 0,
+      "title": "Misses",
+      "type": "integer"
+    },
+    "session_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Session Id",
+      "type": "string"
+    },
+    "stream_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Stream Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "audit_id",
+    "session_id",
+    "stream_id",
+    "duration_ms",
+    "misses",
+    "auditor",
+    "blur_reviewer",
+    "audited_at"
+  ],
+  "title": "PrivacyAuditRecord",
+  "type": "object"
+}

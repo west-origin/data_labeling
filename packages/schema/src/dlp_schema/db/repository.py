@@ -17,8 +17,12 @@ from dlp_schema.db.tables import (
     label_records,
     model_versions,
     ontology_versions,
+    privacy_audits,
+    raw_access_log,
+    retention_decisions,
     review_assignments,
     review_tasks,
+    review_work,
     sessions,
     streams,
     training_runs,
@@ -34,6 +38,7 @@ from dlp_schema.lineage import (
     Withdrawal,
 )
 from dlp_schema.ontology import Ontology
+from dlp_schema.ops import PrivacyAuditRecord, RawAccessEvent, RetentionDecision, ReviewWork
 from dlp_schema.review import (
     AssignmentStatus,
     ReviewAssignment,
@@ -505,3 +510,75 @@ def dataset_versions_with_session(conn: sa.Connection, session_id: str) -> list[
         .order_by(dataset_split_assignments.c.version_id)
     )
     return [str(r) for r in conn.execute(query).scalars()]
+
+
+# ---------------------------------------------------------------- 운영 기록 (추가만 한다)
+
+
+def _between(column: Any, start: datetime | None, end: datetime | None) -> list[Any]:
+    out: list[Any] = []
+    if start is not None:
+        out.append(column >= start)
+    if end is not None:
+        out.append(column < end)
+    return out
+
+
+def insert_raw_access(conn: sa.Connection, event: RawAccessEvent) -> None:
+    conn.execute(raw_access_log.insert().values(**event.model_dump()))
+
+
+def list_raw_access(
+    conn: sa.Connection, start: datetime | None = None, end: datetime | None = None
+) -> list[RawAccessEvent]:
+    query = (
+        sa.select(raw_access_log)
+        .where(*_between(raw_access_log.c.at, start, end))
+        .order_by(raw_access_log.c.at, raw_access_log.c.event_id)
+    )
+    return [RawAccessEvent.model_validate(dict(r)) for r in conn.execute(query).mappings()]
+
+
+def insert_review_work(conn: sa.Connection, work: ReviewWork) -> None:
+    conn.execute(review_work.insert().values(**work.model_dump()))
+
+
+def list_review_work(
+    conn: sa.Connection, start: datetime | None = None, end: datetime | None = None
+) -> list[ReviewWork]:
+    query = (
+        sa.select(review_work)
+        .where(*_between(review_work.c.recorded_at, start, end))
+        .order_by(review_work.c.recorded_at, review_work.c.work_id)
+    )
+    return [ReviewWork.model_validate(dict(r)) for r in conn.execute(query).mappings()]
+
+
+def insert_privacy_audit(conn: sa.Connection, audit: PrivacyAuditRecord) -> None:
+    conn.execute(privacy_audits.insert().values(**audit.model_dump()))
+
+
+def list_privacy_audits(
+    conn: sa.Connection, start: datetime | None = None, end: datetime | None = None
+) -> list[PrivacyAuditRecord]:
+    query = (
+        sa.select(privacy_audits)
+        .where(*_between(privacy_audits.c.audited_at, start, end))
+        .order_by(privacy_audits.c.audited_at, privacy_audits.c.audit_id)
+    )
+    return [PrivacyAuditRecord.model_validate(dict(r)) for r in conn.execute(query).mappings()]
+
+
+def insert_retention_decision(conn: sa.Connection, decision: RetentionDecision) -> None:
+    conn.execute(retention_decisions.insert().values(**decision.model_dump()))
+
+
+def list_retention_decisions(
+    conn: sa.Connection, session_id: str | None = None
+) -> list[RetentionDecision]:
+    query = sa.select(retention_decisions).order_by(
+        retention_decisions.c.decided_at, retention_decisions.c.decision_id
+    )
+    if session_id is not None:
+        query = query.where(retention_decisions.c.session_id == session_id)
+    return [RetentionDecision.model_validate(dict(r)) for r in conn.execute(query).mappings()]

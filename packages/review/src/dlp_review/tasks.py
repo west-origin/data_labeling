@@ -17,6 +17,7 @@ from pathlib import Path
 
 import sqlalchemy as sa
 
+from dlp_media.audit import grant
 from dlp_media.pts import build_pts_index
 from dlp_media.storage import ObjectStore, S3Store, blurred_key, sha256_file
 from dlp_review.clients import CvatClient, LabelStudioClient
@@ -124,6 +125,7 @@ def create_privacy_tasks(
             setup.raw.get_file(key, video)
             labels = pick(stream.stream_id, ("blur_track",))
             tid = setup.cvat.create_task(f"{session_id}/{stream.stream_id}/privacy", pid, video)
+            grant(setup.raw, key, assignee)  # 원본을 검수자에게 보여 준다 (감사 기록)
             setup.cvat.put_tracks(tid, to_cvat_tracks(labels, frame_times(video), schema))
             task = ReviewTask(
                 task_key=f"cvat:{tid}", tool=ReviewTool.CVAT, external_id=str(tid),

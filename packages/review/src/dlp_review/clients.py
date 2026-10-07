@@ -91,6 +91,11 @@ class CvatClient:
     def get_tracks(self, task_id: int) -> list[dict[str, Any]]:
         return list(_check(self.http.get(f"/api/tasks/{task_id}/annotations"))["tracks"])
 
+    def lead_seconds(self, task_id: int) -> float:
+        """작업에 쓴 시간(초): 주석들의 lead_time 합 (Label Studio가 편집 화면에서 잰다)."""
+        anns = _check(self.http.get(f"/api/tasks/{task_id}/annotations"))
+        return float(sum(float(a.get("lead_time") or 0.0) for a in anns))
+
     def add_webhook(self, project_id: int, url: str, secret: str) -> int:
         body = {
             "target_url": url, "type": "project", "project_id": project_id,
@@ -137,6 +142,11 @@ class LabelStudioClient:
             return []
         latest = max(anns, key=lambda a: a.get("updated_at") or a.get("created_at") or "")
         return list(latest["result"])
+
+    def lead_seconds(self, task_id: int) -> float:
+        """작업에 쓴 시간(초): 주석들의 lead_time 합 (Label Studio가 편집 화면에서 잰다)."""
+        anns = _check(self.http.get(f"/api/tasks/{task_id}/annotations"))
+        return float(sum(float(a.get("lead_time") or 0.0) for a in anns))
 
     def add_webhook(self, project_id: int, url: str, secret: str) -> int:
         body = {

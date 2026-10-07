@@ -7,12 +7,12 @@ from pathlib import Path
 
 import sqlalchemy as sa
 
+from dlp_cli.raw_access import raw_bucket, raw_store
 from dlp_cli.schema_cmds import database_url
 from dlp_media.ingest import ingest_session, load_manifest
 from dlp_media.probe import probe
 from dlp_media.pts import build_pts_index
 from dlp_media.storage import store_from_spec
-from dlp_schema import load_config, repo_root
 
 
 def cmd_probe(args: argparse.Namespace) -> int:
@@ -41,8 +41,15 @@ def cmd_pts_index(args: argparse.Namespace) -> int:
 
 def cmd_ingest(args: argparse.Namespace) -> int:
     manifest, base = load_manifest(Path(args.manifest))
-    bucket = load_config(repo_root() / "config" / "defaults.yaml").buckets.raw
-    raw = store_from_spec(args.store, bucket)
+    if args.no_db and args.store == "s3":
+        raise SystemExit(
+            "원본 버킷에 올릴 때는 DB가 필요합니다 (접근 감사 기록). --no-db는 local: 저장소에만"
+        )
+    raw = (
+        store_from_spec(args.store, raw_bucket())
+        if args.no_db
+        else raw_store(args.store, args.url, "media.ingest")
+    )
     if args.no_db:
         result = ingest_session(manifest, base, raw)
     else:

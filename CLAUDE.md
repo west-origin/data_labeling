@@ -66,6 +66,9 @@
 - `packages/export/` (`dlp_export`) — 내보내기: COCO, 구간 JSON(`dlp_schema.export`), LeRobot v3.0 에피소드.
   데이터셋 버전 스냅샷에서, 검증 정책 적용, 블러본만. `dlp export coco|intervals|lerobot`. 정책은 `config/policies/export.yaml`.
   LeRobot은 격리된 일회용 환경(`scripts/lerobot_write.py`, `scripts/lerobot_check.py`)에서 공식 API로 쓰고 읽는다.
+- `packages/ops/` (`dlp_ops`) — 운영 대시보드와 보안: 주간 운영 지표(검수 시간·수정률·자동 승인율·편향·발견율·
+  잔여 블러 누락·원가)와 경고, 원본 접근 월간 감사 리포트, 원본 보관 만료 알림·결정.
+  `dlp ops weekly|audit-report|retention|retention-decide|log-work|privacy-audit`. 정책은 `config/policies/ops.yaml`.
 - `config/` — 온톨로지·정책·기본값 YAML. 코드에 값을 하드코딩하지 않는다.
 - `schemas/` — 생성된 JSON Schema. 직접 편집하지 않는다 (`make schemas`).
 - `services/` — 개발용 docker compose (PostgreSQL, SeaweedFS S3, Label Studio, Prefect, MLflow, lakeFS), CVAT 실행 스크립트.
@@ -99,6 +102,8 @@
   `retractions()`로 지운다. 검수자가 승인·표본 검증한 라벨은 어떤 단계도 지우지 않는다 (ADR 0015, 0019).
 - 내보내기는 데이터셋 버전에서만 만들고(`dlp_export`), 기본은 사람이 만들거나 승인·수정·표본 검증한 라벨만 넣는다.
   미검수는 명시적 옵션으로만. 블러 라벨·원본 위치·검수자 ID는 어떤 형식에도 넣지 않는다.
+- 원본 버킷 저장소는 `dlp_cli.raw_access.raw_store`(감사 저장소)로만 만든다. 모든 원본 접근은 `raw_access_log`에
+  남고, 운영·감사 기록은 추가만 한다 (ADR 0020). 정적 검사 테스트가 우회를 막는다.
 - 블러(원본 영상) 검수는 `review.yaml reviewers.privacy`의 원본 접근 권한자에게만 배정한다.
 - 테스트는 정답을 아는 합성 픽스처(WP2)로 작성한다. 실제 영상·개인정보를 저장소에 넣지 않는다.
 - 코드 주석과 문서는 한국어, 식별자는 영어.

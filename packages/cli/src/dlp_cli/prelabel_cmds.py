@@ -9,6 +9,7 @@ from pathlib import Path
 
 import sqlalchemy as sa
 
+from dlp_cli.raw_access import raw_store
 from dlp_cli.schema_cmds import database_url
 from dlp_media.storage import store_from_spec
 from dlp_prelabel.adapters.mediapipe_models import MediaPipeHands, MediaPipeObjects
@@ -47,7 +48,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     for p in UNAVAILABLE:
         print(f"[미연동] {p.name}: {p.reason}")  # TODO(real-model) 표시가 붙은 기능
     buckets = load_config(root / "config/defaults.yaml").buckets
-    raw = store_from_spec(args.store, buckets.raw)
+    raw = raw_store(args.store, args.url, "prelabel.run")
     engine = sa.create_engine(database_url(args.url))
     with engine.begin() as conn, tempfile.TemporaryDirectory() as tmp:
         # 게이트를 통과해 배포된 재학습 모델이 있으면 정책의 replaces 기본 어댑터 대신 쓴다

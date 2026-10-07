@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 
 import sqlalchemy as sa
 
+from dlp_cli.raw_access import raw_store
 from dlp_cli.schema_cmds import database_url
 from dlp_media.storage import S3Store
 from dlp_review.clients import CvatClient, LabelStudioClient
@@ -38,7 +39,7 @@ def _setup(args: argparse.Namespace) -> ReviewSetup:
     root = repo_root()
     buckets = load_config(root / "config" / "defaults.yaml").buckets
     return ReviewSetup(
-        raw=S3Store.from_env(buckets.raw),
+        raw=raw_store("s3", getattr(args, "url", None), f"review.{args.review_command}"),
         labeling=S3Store.from_env(buckets.labeling),
         labeling_reader=S3Store.labeler_from_env(buckets.labeling),
         ontology=load_ontology(root / "config" / "ontology" / "v1"),

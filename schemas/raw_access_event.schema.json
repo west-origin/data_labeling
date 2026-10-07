@@ -1,0 +1,70 @@
+{
+  "additionalProperties": false,
+  "description": "원본(블러 전) 버킷 접근 하나. read=내려받기, presign=서명 URL 발급, write=올리기,\ngrant=검수 도구에 원본을 올려 사람(actor)에게 보여 줌.",
+  "properties": {
+    "action": {
+      "enum": [
+        "read",
+        "presign",
+        "write",
+        "grant"
+      ],
+      "title": "Action",
+      "type": "string"
+    },
+    "actor": {
+      "description": "사람 또는 서비스 계정",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Actor",
+      "type": "string"
+    },
+    "at": {
+      "format": "date-time",
+      "title": "At",
+      "type": "string"
+    },
+    "bucket": {
+      "title": "Bucket",
+      "type": "string"
+    },
+    "event_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Event Id",
+      "type": "string"
+    },
+    "key": {
+      "title": "Key",
+      "type": "string"
+    },
+    "purpose": {
+      "description": "단계·명령 (예: privacy.detect, review.create)",
+      "minLength": 1,
+      "title": "Purpose",
+      "type": "string"
+    },
+    "session_id": {
+      "anyOf": [
+        {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Session Id"
+    }
+  },
+  "required": [
+    "event_id",
+    "at",
+    "actor",
+    "purpose",
+    "action",
+    "bucket",
+    "key"
+  ],
+  "title": "RawAccessEvent",
+  "type": "object"
+}

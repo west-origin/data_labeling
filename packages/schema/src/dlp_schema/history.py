@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Collection
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Literal
 
 from dlp_schema.episode import current_labels, non_operational_ids
@@ -38,6 +39,8 @@ class ReviewChange:
     change: Change
     label: LabelRecord  # 최종 레코드 (deleted면 지운 레코드)
     origin: LabelRecord | None  # 처음 모델이 낸 레코드
+    at: datetime  # 검수한 시각 (승인·수정 시각, 지웠으면 삭제 레코드 시각)
+    reviewer: str | None = None
 
 
 def label_class(label: LabelRecord) -> str:
@@ -83,10 +86,12 @@ def review_changes(
         if x.provenance.source is not Source.HUMAN and x.verification.state not in states:
             continue
         root = _root(x, by_id)
+        at = x.verification.reviewed_at or x.created_at
+        who = x.verification.reviewer_id
         if root.provenance.source is Source.MODEL:
-            out.append(ReviewChange("accepted" if root is x else "corrected", x, root))
+            out.append(ReviewChange("accepted" if root is x else "corrected", x, root, at, who))
         else:
-            out.append(ReviewChange("added", x, None))
+            out.append(ReviewChange("added", x, None, at, who))
     for r in history:
         if (
             not r.retracted
@@ -98,5 +103,6 @@ def review_changes(
         gone = by_id[r.parent_label_id]
         root = _root(gone, by_id)
         if root.provenance.source is Source.MODEL:
-            out.append(ReviewChange("deleted", gone, root))
+            at = r.verification.reviewed_at or r.created_at
+            out.append(ReviewChange("deleted", gone, root, at, r.verification.reviewer_id))
     return out

@@ -1,0 +1,18 @@
+[project]
+name = "dlp-ops"
+version = "0.1.0"
+description = "운영 대시보드와 보안: 주간 운영 지표, 원본 접근 감사 리포트, 원본 보관 만료 알림"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "dlp-privacy",
+    "dlp-review",
+    "dlp-schema",
+    "pyyaml>=6.0",
+]
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dlp_ops"]

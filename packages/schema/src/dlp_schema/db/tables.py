@@ -268,3 +268,58 @@ dataset_split_assignments = sa.Table(
     sa.Column("session_id", sa.String(128), sa.ForeignKey("sessions.session_id"), primary_key=True),
     sa.Column("split", sa.String(16), nullable=False),
 )
+
+
+# ---------------------------------------------------------------- 운영 기록 (WP16, 추가만 한다)
+
+raw_access_log = sa.Table(
+    "raw_access_log",
+    metadata,
+    sa.Column("event_id", sa.String(128), primary_key=True),
+    sa.Column("at", Ts, nullable=False, index=True),
+    sa.Column("actor", sa.String(128), nullable=False, index=True),
+    sa.Column("purpose", sa.String(128), nullable=False),
+    sa.Column("action", sa.String(16), nullable=False),
+    sa.Column("bucket", sa.String(128), nullable=False),
+    sa.Column("key", sa.Text(), nullable=False),
+    sa.Column("session_id", sa.String(128), nullable=True, index=True),
+)
+
+review_work = sa.Table(
+    "review_work",
+    metadata,
+    sa.Column("work_id", sa.String(128), primary_key=True),
+    sa.Column("task_key", sa.String(128), nullable=True),
+    sa.Column("session_id", sa.String(128), nullable=False, index=True),
+    sa.Column("reviewer", sa.String(128), nullable=False),
+    sa.Column("stage", sa.String(16), nullable=False),
+    sa.Column("seconds", sa.Float(), nullable=False),
+    sa.Column("video_ms", sa.BigInteger(), nullable=False),
+    sa.Column("source", sa.String(16), nullable=False),
+    sa.Column("recorded_at", Ts, nullable=False, index=True),
+)
+
+privacy_audits = sa.Table(
+    "privacy_audits",
+    metadata,
+    sa.Column("audit_id", sa.String(128), primary_key=True),
+    sa.Column("session_id", sa.String(128), nullable=False, index=True),
+    sa.Column("stream_id", sa.String(128), nullable=False),
+    sa.Column("duration_ms", sa.BigInteger(), nullable=False),
+    sa.Column("misses", sa.Integer(), nullable=False),
+    sa.Column("auditor", sa.String(128), nullable=False),
+    sa.Column("blur_reviewer", sa.String(128), nullable=False),
+    sa.Column("audited_at", Ts, nullable=False, index=True),
+)
+
+retention_decisions = sa.Table(
+    "retention_decisions",
+    metadata,
+    sa.Column("decision_id", sa.String(128), primary_key=True),
+    sa.Column("session_id", sa.String(128), nullable=False, index=True),
+    sa.Column("decision", sa.String(16), nullable=False),
+    sa.Column("until", sa.Date(), nullable=True),
+    sa.Column("reason", sa.Text(), nullable=False),
+    sa.Column("decided_by", sa.String(128), nullable=False),
+    sa.Column("decided_at", Ts, nullable=False),
+)

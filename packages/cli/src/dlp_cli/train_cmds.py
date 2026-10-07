@@ -9,6 +9,7 @@ from typing import Any
 
 import sqlalchemy as sa
 
+from dlp_cli.raw_access import raw_store
 from dlp_cli.schema_cmds import database_url
 from dlp_datasets.policy import load_policy as load_dataset_policy
 from dlp_datasets.snapshot import LakeFSSnapshotStore
@@ -55,7 +56,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             snapshots=snapshots,
             artifacts=store_from_spec(args.store, buckets.mlflow),
             tracker=tracker,
-            clips=raw_clips(store_from_spec(args.store, buckets.raw)),
+            clips=raw_clips(raw_store(args.store, args.url, "train.run")),
             policy=policy,
             eval_policy=load_eval_policy(root),
             now=datetime.now(UTC),

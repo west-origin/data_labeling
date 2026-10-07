@@ -6,9 +6,9 @@ import argparse
 
 import sqlalchemy as sa
 
+from dlp_cli.raw_access import raw_store
 from dlp_cli.schema_cmds import database_url
-from dlp_media.storage import store_from_spec
-from dlp_schema import load_config, repo_root
+from dlp_schema import repo_root
 from dlp_sync.policy import load_policy
 from dlp_sync.runner import adjust, run_sync
 
@@ -16,7 +16,7 @@ from dlp_sync.runner import adjust, run_sync
 def cmd_sync_run(args: argparse.Namespace) -> int:
     root = repo_root()
     policy = load_policy(root / "config" / "policies" / "sync.yaml")
-    raw = store_from_spec(args.store, load_config(root / "config" / "defaults.yaml").buckets.raw)
+    raw = raw_store(args.store, args.url, "sync.run")
     engine = sa.create_engine(database_url(args.url))
     with engine.begin() as conn:
         synced, report = run_sync(conn, args.session_id, raw, policy)

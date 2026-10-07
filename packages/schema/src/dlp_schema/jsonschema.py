@@ -15,6 +15,7 @@ from dlp_schema.labels import LabelRecord
 from dlp_schema.lineage import ExportRecord, GoldenSet, ModelVersion, TrainingRun, Withdrawal
 from dlp_schema.migration import OntologyMigration
 from dlp_schema.ontology import Ontology
+from dlp_schema.ops import PrivacyAuditRecord, RawAccessEvent, RetentionDecision, ReviewWork
 from dlp_schema.review import ReviewAssignment, ReviewTask
 from dlp_schema.session import Session
 
@@ -34,6 +35,10 @@ CONTRACTS: dict[str, type[BaseModel]] = {
     "export_record": ExportRecord,
     "withdrawal": Withdrawal,
     "export_intervals": IntervalFile,
+    "raw_access_event": RawAccessEvent,
+    "review_work": ReviewWork,
+    "privacy_audit": PrivacyAuditRecord,
+    "retention_decision": RetentionDecision,
 }
 
 

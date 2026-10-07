@@ -22,6 +22,7 @@ members = [
     "dlp-fixtures",
     "dlp-media",
     "dlp-models",
+    "dlp-ops",
     "dlp-prelabel",
     "dlp-privacy",
     "dlp-relations",
@@ -618,6 +619,7 @@ dependencies = [
     { name = "dlp-fixtures" },
     { name = "dlp-media" },
     { name = "dlp-models" },
+    { name = "dlp-ops" },
     { name = "dlp-prelabel" },
     { name = "dlp-privacy" },
     { name = "dlp-relations" },
@@ -656,6 +658,7 @@ requires-dist = [
     { name = "dlp-fixtures", editable = "packages/fixtures" },
     { name = "dlp-media", editable = "packages/media" },
     { name = "dlp-models", editable = "packages/models" },
+    { name = "dlp-ops", editable = "packages/ops" },
     { name = "dlp-prelabel", editable = "packages/prelabel" },
     { name = "dlp-privacy", editable = "packages/privacy" },
     { name = "dlp-relations", editable = "packages/relations" },
@@ -761,6 +764,7 @@ dependencies = [
     { name = "dlp-fixtures" },
     { name = "dlp-media" },
     { name = "dlp-models" },
+    { name = "dlp-ops" },
     { name = "dlp-prelabel" },
     { name = "dlp-privacy" },
     { name = "dlp-relations" },
@@ -780,6 +784,7 @@ requires-dist = [
     { name = "dlp-fixtures", editable = "packages/fixtures" },
     { name = "dlp-media", editable = "packages/media" },
     { name = "dlp-models", editable = "packages/models" },
+    { name = "dlp-ops", editable = "packages/ops" },
     { name = "dlp-prelabel", editable = "packages/prelabel" },
     { name = "dlp-privacy", editable = "packages/privacy" },
     { name = "dlp-relations", editable = "packages/relations" },
@@ -915,6 +920,25 @@ requires-dist = [
     { name = "opencv-contrib-python-headless", specifier = ">=4.10" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "tokenizers", specifier = ">=0.20" },
+]
+
+[[package]]
+name = "dlp-ops"
+version = "0.1.0"
+source = { editable = "packages/ops" }
+dependencies = [
+    { name = "dlp-privacy" },
+    { name = "dlp-review" },
+    { name = "dlp-schema" },
+    { name = "pyyaml" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "dlp-privacy", editable = "packages/privacy" },
+    { name = "dlp-review", editable = "packages/review" },
+    { name = "dlp-schema", editable = "packages/schema" },
+    { name = "pyyaml", specifier = ">=6.0" },
 ]
 
 [[package]]

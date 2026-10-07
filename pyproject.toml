@@ -3,7 +3,7 @@ name = "data-labeling"
 version = "0.1.0"
 description = "1인칭 돌봄 영상 라벨링 플랫폼 (워크스페이스 루트)"
 requires-python = ">=3.12,<3.14"
-dependencies = ["dlp-actions", "dlp-active", "dlp-cli", "dlp-datasets", "dlp-eval", "dlp-export", "dlp-fixtures", "dlp-media", "dlp-models", "dlp-prelabel", "dlp-privacy", "dlp-relations", "dlp-review", "dlp-schema", "dlp-sync", "dlp-train"]
+dependencies = ["dlp-actions", "dlp-active", "dlp-cli", "dlp-datasets", "dlp-eval", "dlp-export", "dlp-fixtures", "dlp-media", "dlp-models", "dlp-ops", "dlp-prelabel", "dlp-privacy", "dlp-relations", "dlp-review", "dlp-schema", "dlp-sync", "dlp-train"]
 
 [tool.uv]
 package = false
@@ -29,6 +29,7 @@ dlp-export = { workspace = true }
 dlp-fixtures = { workspace = true }
 dlp-media = { workspace = true }
 dlp-models = { workspace = true }
+dlp-ops = { workspace = true }
 dlp-prelabel = { workspace = true }
 dlp-relations = { workspace = true }
 dlp-privacy = { workspace = true }
@@ -71,7 +72,7 @@ select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "PTH", "N"]
 "**/migrations/versions/*.py" = ["E501"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["dlp_actions", "dlp_active", "dlp_cli", "dlp_datasets", "dlp_eval", "dlp_export", "dlp_fixtures", "dlp_media", "dlp_models", "dlp_prelabel", "dlp_privacy", "dlp_relations", "dlp_review", "dlp_schema", "dlp_sync", "dlp_train"]
+known-first-party = ["dlp_actions", "dlp_active", "dlp_cli", "dlp_datasets", "dlp_eval", "dlp_export", "dlp_fixtures", "dlp_media", "dlp_models", "dlp_ops", "dlp_prelabel", "dlp_privacy", "dlp_relations", "dlp_review", "dlp_schema", "dlp_sync", "dlp_train"]
 
 [tool.pyright]
 include = ["packages", "tests"]

@@ -1,0 +1,27 @@
+# 운영 대시보드와 보안 정책 (WP16). 원본 보관 기간은 config/defaults.yaml retention.raw_retention_days.
+version: 1
+
+# 생산원가 = 검수 시간(모든 단계) × 시간당 인건비 ÷ 그 주 검증 완료 에피소드 수.
+# 인건비는 Gate 0에서 정한다. 비어 있으면 원가 지표를 내지 않는다.
+cost:
+  hourly_cost: null
+  currency: KRW
+
+# 경고 규칙 (기준 문서 "운영 지표")
+alerts:
+  # 자동 승인율이 오르는데 오류 삽입 발견율이 떨어지면 모델 개선이 아니라 검수 품질 저하로 본다
+  auto_approval_rise: 0.02        # 직전 주 대비 이만큼 오르고
+  detection_drop: 0.05            # 발견율이 이만큼 떨어지면 경고
+  # 검수 시간과 수정률이 이 주 수 동안 줄지 않으면 가이드라인·온톨로지 점검 경고
+  stagnation_weeks: 4
+
+# 원본 접근 감사 (월 1회 검토)
+audit:
+  service_accounts: [svc-pipeline]   # 파이프라인 계정 (사람이 아님)
+  # 원본을 볼 수 있는 사람 = config/policies/review.yaml reviewers.privacy + 아래
+  raw_viewers: []
+  timezone: Asia/Seoul
+  off_hours: [22, 6]                 # 사람의 원본 접근이 이 시간대(시작 시 이상, 끝 시 미만)면 표시
+
+retention:
+  alert_days_before: 30              # 만료 이 일수 전부터 알린다

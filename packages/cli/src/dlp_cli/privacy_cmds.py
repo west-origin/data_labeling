@@ -9,6 +9,7 @@ from pathlib import Path
 
 import sqlalchemy as sa
 
+from dlp_cli.raw_access import raw_store
 from dlp_cli.schema_cmds import database_url
 from dlp_media.storage import store_from_spec
 from dlp_privacy.detectors import build_detectors
@@ -28,7 +29,7 @@ def _engine(args: argparse.Namespace) -> sa.Engine:
 def cmd_detect(args: argparse.Namespace) -> int:
     root = repo_root()
     policy = load_policy(root)
-    raw = store_from_spec(args.store, load_config(root / "config" / "defaults.yaml").buckets.raw)
+    raw = raw_store(args.store, args.url, "privacy.detect")
     detectors, missing = build_detectors(policy, root)
     for name, reason in missing.items():
         print(f"[탐지기 없음] {name}: {reason}")
@@ -74,7 +75,7 @@ def cmd_approve(args: argparse.Namespace) -> int:
 def cmd_render(args: argparse.Namespace) -> int:
     root = repo_root()
     buckets = load_config(root / "config" / "defaults.yaml").buckets
-    raw = store_from_spec(args.store, buckets.raw)
+    raw = raw_store(args.store, args.url, "privacy.render")
     labeling = store_from_spec(args.store, buckets.labeling)
     engine = _engine(args)
     with engine.begin() as conn:

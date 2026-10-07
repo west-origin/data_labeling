@@ -1,0 +1,80 @@
+{
+  "additionalProperties": false,
+  "description": "검수 작업 시간. 검수 도구가 재거나(Label Studio lead_time) 사람이 기록한다.",
+  "properties": {
+    "recorded_at": {
+      "format": "date-time",
+      "title": "Recorded At",
+      "type": "string"
+    },
+    "reviewer": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Reviewer",
+      "type": "string"
+    },
+    "seconds": {
+      "minimum": 0,
+      "title": "Seconds",
+      "type": "number"
+    },
+    "session_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Session Id",
+      "type": "string"
+    },
+    "source": {
+      "enum": [
+        "label_studio",
+        "cvat",
+        "manual"
+      ],
+      "title": "Source",
+      "type": "string"
+    },
+    "stage": {
+      "enum": [
+        "privacy",
+        "labeling",
+        "qa"
+      ],
+      "title": "Stage",
+      "type": "string"
+    },
+    "task_key": {
+      "anyOf": [
+        {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Task Key"
+    },
+    "video_ms": {
+      "description": "검수한 영상 길이",
+      "minimum": 0,
+      "title": "Video Ms",
+      "type": "integer"
+    },
+    "work_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Work Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "work_id",
+    "session_id",
+    "reviewer",
+    "stage",
+    "seconds",
+    "video_ms",
+    "source",
+    "recorded_at"
+  ],
+  "title": "ReviewWork",
+  "type": "object"
+}
