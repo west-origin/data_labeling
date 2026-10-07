@@ -1,0 +1,20 @@
+[project]
+name = "dlp-media"
+version = "0.1.0"
+description = "세션 수집: 원본 저장, PTS 인덱스, 프록시 영상, IMU·장갑 데이터 정규화"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "av>=14.0",
+    "boto3>=1.35",
+    "dlp-schema",
+    "h5py>=3.11",
+    "numpy>=2.0",
+    "pyarrow>=18.0",
+]
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dlp_media"]

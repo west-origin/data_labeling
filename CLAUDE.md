@@ -27,6 +27,8 @@
 - `packages/fixtures/` (`dlp_fixtures`) — 정답을 아는 합성 데이터: 가짜 세션, 오프셋·드리프트를 아는 동기화 신호와
   QR 슬레이트 MP4, 위치를 아는 블러 대상 VFR 영상, 경계를 아는 행동 시퀀스(손 키포인트·장갑 압력·정답 라벨).
   알고리즘 모듈의 테스트는 이 생성기로 작성하고, 생성기 출력의 정답을 기준으로 판정한다.
+- `packages/media/` (`dlp_media`) — 세션 수집: 원본 저장소(불변, 멱등), PTS 인덱스, 프록시, IMU 추출기(GPMF·사이드카),
+  장갑 Parquet·HDF5 정규화. `dlp ingest <매니페스트>`로 실행한다.
 - `config/` — 온톨로지·정책·기본값 YAML. 코드에 값을 하드코딩하지 않는다.
 - `schemas/` — 생성된 JSON Schema. 직접 편집하지 않는다 (`make schemas`).
 - `services/` — 개발용 docker compose (PostgreSQL, SeaweedFS S3, Label Studio, Prefect, MLflow), CVAT 실행 스크립트.
@@ -40,6 +42,7 @@
 - 모듈 사이 데이터는 `dlp_schema` 타입으로만 주고받는다. 계약 변경은 ADR + Alembic 마이그레이션 + 계약 테스트 + `make schemas`를 함께 한다.
 - DB 스키마는 `dlp_schema/db/tables.py`와 새 Alembic 리비전을 함께 바꾼다. 테스트가 둘의 일치를 검사한다.
 - 모든 datetime은 시간대 정보가 있어야 한다 (UTC 권장).
+- 영상 시각은 PTS 인덱스로만 계산한다. 프레임 번호에 프레임 간격을 곱해 계산하지 않는다.
 - 원본 버킷(`dlp-raw`) URI를 일반 라벨러 경로(블러본, 검수 작업, 내보내기)에 노출하지 않는다.
 - 정책 값(비율, 허용 오차, 임계값)은 `config/`에서 읽는다.
 - 새 모델은 공통 `Predictor` 어댑터와 CPU용 stub 구현을 함께 추가한다. CI는 stub으로 돈다.

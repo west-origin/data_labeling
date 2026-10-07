@@ -93,6 +93,17 @@ def test_session_and_label_roundtrip(pg: sa.Engine) -> None:
 
 
 @pytest.mark.services
+def test_stream_order_is_preserved(pg: sa.Engine) -> None:
+    base = make_session("s002")
+    reordered = base.model_copy(update={"streams": tuple(reversed(base.streams))})
+    assert [s.stream_id for s in reordered.streams] == ["imu", "bodycam"]
+    with pg.begin() as conn:
+        insert_session(conn, reordered)
+    with pg.connect() as conn:
+        assert get_session(conn, "s002") == reordered
+
+
+@pytest.mark.services
 def test_labels_are_immutable_except_review(pg: sa.Engine) -> None:
     with pg.begin() as conn:
         insert_labels(conn, [make_label(action_payload(), label_id="a1")])

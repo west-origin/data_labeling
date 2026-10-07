@@ -61,6 +61,7 @@ streams = sa.Table(
         primary_key=True,
     ),
     sa.Column("stream_id", sa.String(128), primary_key=True),
+    sa.Column("position", sa.Integer(), nullable=False, comment="세션 안 스트림 순서"),
     sa.Column("kind", sa.String(32), nullable=False),
     sa.Column("uri", sa.Text(), nullable=False),
     sa.Column("sample_rate_hz", sa.Float(), nullable=True),

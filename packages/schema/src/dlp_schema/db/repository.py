@@ -67,7 +67,10 @@ def insert_session(conn: sa.Connection, session: Session) -> None:
             ontology_version=session.ontology_version,
         )
     )
-    rows = [{"session_id": session.session_id, **s} for s in data["streams"]]
+    rows = [
+        {"session_id": session.session_id, "position": i, **s}
+        for i, s in enumerate(data["streams"])
+    ]
     conn.execute(streams.insert(), rows)
 
 
@@ -81,13 +84,13 @@ def get_session(conn: sa.Connection, session_id: str) -> Session:
         conn.execute(
             sa.select(streams)
             .where(streams.c.session_id == session_id)
-            .order_by(streams.c.stream_id)
+            .order_by(streams.c.position)
         )
         .mappings()
         .all()
     )
     data = _without(row, "created_at")
-    data["streams"] = [_without(s, "session_id") for s in stream_rows]
+    data["streams"] = [_without(s, "session_id", "position") for s in stream_rows]
     return Session.model_validate(data)
 
 

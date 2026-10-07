@@ -6,11 +6,13 @@ import json
 import os
 import urllib.request
 import uuid
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from dlp_cli.health import default_checks, run_checks
+from dlp_media.storage import S3Store, put_immutable
 
 pytestmark = pytest.mark.services
 
@@ -49,3 +51,15 @@ def test_mlflow_artifact_roundtrip_through_s3() -> None:
 def test_prefect_database_reachable() -> None:
     flows = json.loads(_request("POST", f"{PREFECT}/api/flows/filter", json_body={"limit": 1}))
     assert isinstance(flows, list)
+
+
+@pytest.mark.parametrize("bucket", ["dlp-raw", "dlp-labeling", "dlp-datasets", "dlp-mlflow"])
+def test_every_bucket_accepts_writes(bucket: str, tmp_path: Path) -> None:
+    """버킷마다 볼륨이 따로 잡히므로 모든 버킷에 실제로 써 본다 (볼륨 부족 회귀 방지)."""
+    store = S3Store.from_env(bucket)
+    src = tmp_path / "probe.txt"
+    src.write_text(uuid.uuid4().hex)
+    key = f"_smoke/{src.read_text()}.txt"
+    assert put_immutable(store, key, src)
+    assert store.head(key) is not None
+    store.client.delete_object(Bucket=bucket, Key=key)

@@ -6,7 +6,7 @@ import argparse
 import sys
 from collections.abc import Sequence
 
-from dlp_cli import __version__, fixtures_cmds, schema_cmds
+from dlp_cli import __version__, fixtures_cmds, media_cmds, schema_cmds
 from dlp_cli.health import default_checks, run_checks
 
 
@@ -32,6 +32,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     schema_cmds.add_commands(sub)
     fixtures_cmds.add_commands(sub)
+    media_cmds.add_commands(sub)
     return parser
 
 
