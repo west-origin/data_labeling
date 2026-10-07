@@ -1,16 +1,21 @@
 """세션 행동 구간 실행 (`dlp actions run`). 멱등이다.
 
 바디캠의 손마다(hand21 키포인트 트랙이 있는 손) 경계 후보 → VLM 분류 → 병합·채우기를 하고
-action·gap·description 레코드를 쓴다. model_version은 "actions-<정책 해시>+<VLM 버전>"이다.
+action·gap·description 레코드를 쓴다.
+model_version은 "actions-<정책 해시>+<VLM 버전>+i<입력 해시>"다.
+입력 해시는 이 단계가 읽는 현재 라벨(바디캠 손 키포인트, 손 상태, 객체 트랙)의 ID 집합 해시다.
+입력이 바뀌면(프리라벨 재실행, 검수자의 접촉 수정) 버전이 바뀌어 다시 만든다.
 - 같은 버전 결과가 그 손에 이미 있으면 건너뛴다.
 - 버전이 바뀌면 이 모듈이 만든 이전 현재 레코드 중 **검수 전인 것만** 삭제 레코드로 표시하고
   새로 쓴다.
-  검수자가 승인·표본 검증한 레코드와 사람이 고치거나 만든 레코드는 남기고, 새 결과 중 그와 겹치는
+  검수자가 승인·표본 검증한 레코드와 사람이 고치거나 만든 레코드는 남기고(설명이 검수된 행동도
+  남긴다: 행동만 지우면 설명이 고아가 된다), 새 결과 중 그와 겹치는
   구간은 버린 뒤 남는 빈 시간을 미상(unknown) 공백으로 채운다 (타임라인 공백 0 유지, ADR 0015).
 """
 
 from __future__ import annotations
 
+import hashlib
 import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -63,6 +68,14 @@ def _ours(x: LabelRecord) -> bool:
     return x.provenance.source is Source.MODEL and (x.provenance.model_version or "").startswith(
         PREFIX
     )
+
+
+def input_digest(labels: list[LabelRecord]) -> str:
+    """입력 라벨 ID 집합의 짧은 해시 (라벨은 덮어쓰지 않으므로 수정되면 ID가 바뀐다)."""
+    h = hashlib.sha256()
+    for label_id in sorted({x.label_id for x in labels}):
+        h.update(label_id.encode() + b"\n")
+    return h.hexdigest()[:8]
 
 
 def subtract(span: tuple[int, int], cuts: list[tuple[int, int]]) -> list[tuple[int, int]]:
@@ -154,32 +167,45 @@ def run_actions(
     labeling: ObjectStore | None = None,
 ) -> ActionsSummary:
     session = get_session(conn, session_id)
-    version = f"{PREFIX}{policy.digest}+{client.version}"
-    summary = ActionsSummary(version)
     labels = get_labels(conn, session_id)
     current = current_labels(labels)
     body = session.reference_stream
-    tracks = {
-        x.payload.hand: x.payload
+    track_labels = [
+        x
         for x in current
         if x.stream_id == body.stream_id
         and isinstance(x.payload, KeypointTrackPayload)
         and x.payload.skeleton == "hand21"
         and x.payload.hand is not None
-    }
-    # 대상 후보: 객체 트랙 개체와 손 상태의 접촉 대상
+    ]
+    tracks: dict[Hand, KeypointTrackPayload] = {}
+    for x in track_labels:
+        assert isinstance(x.payload, KeypointTrackPayload) and x.payload.hand is not None
+        tracks[x.payload.hand] = x.payload
+    object_labels = [
+        x for x in current if isinstance(x.payload, BoxTrackPayload | MaskTrackPayload)
+    ]
+    state_labels = [x for x in current if isinstance(x.payload, HandStatePayload)]
+    inputs = input_digest([*track_labels, *object_labels, *state_labels])
+    version = f"{PREFIX}{policy.digest}+{client.version}+i{inputs}"
+    summary = ActionsSummary(version)
+    unresolved = set(policy.unresolved_entity_ids)
+    # 대상 후보: 객체 트랙 개체와 손 상태의 접촉 대상 (대상을 모르는 접촉 표시 ID는 뺀다)
     entities = tuple(
         sorted(
-            {
-                x.payload.entity_id
-                for x in current
-                if isinstance(x.payload, BoxTrackPayload | MaskTrackPayload)
-            }
-            | {
-                x.payload.target_id
-                for x in current
-                if isinstance(x.payload, HandStatePayload) and x.payload.target_id
-            }
+            (
+                {
+                    x.payload.entity_id
+                    for x in object_labels
+                    if isinstance(x.payload, BoxTrackPayload | MaskTrackPayload)
+                }
+                | {
+                    x.payload.target_id
+                    for x in state_labels
+                    if isinstance(x.payload, HandStatePayload) and x.payload.target_id
+                }
+            )
+            - unresolved
         )
     )
     descriptions_by_action = {
@@ -187,6 +213,21 @@ def run_actions(
         for x in current
         if isinstance(x.payload, DescriptionPayload) and _ours(x)
     }
+    # 설명이 검수된(사람이 고쳤거나 승인·표본 검증한) 행동.
+    # 행동을 지우면 설명이 고아가 되므로 남긴다
+    reviewed_descriptions = {
+        x.payload.segment_id
+        for x in current
+        if isinstance(x.payload, DescriptionPayload)
+        and (
+            x.provenance.source is Source.HUMAN
+            or x.verification.state is not VerificationState.UNREVIEWED
+        )
+    }
+
+    def described(x: LabelRecord) -> bool:
+        return isinstance(x.payload, ActionPayload) and x.payload.action_id in reviewed_descriptions
+
     with tempfile.TemporaryDirectory() as tmp:
         video: Path | None = None
         if labeling is not None:
@@ -201,6 +242,7 @@ def run_actions(
                 if _ours(x)
                 and _hand_of(x) is hand
                 and x.verification.state is VerificationState.UNREVIEWED
+                and not described(x)
             ]
             protected = [
                 x
@@ -209,6 +251,7 @@ def run_actions(
                 and (
                     x.provenance.source is Source.HUMAN
                     or x.verification.state is not VerificationState.UNREVIEWED
+                    or described(x)
                 )
             ]
             # 멱등: 이 버전을 낸 적이 있으면 건너뛴다 (검수자가 모두 고쳤거나 다른 버전으로

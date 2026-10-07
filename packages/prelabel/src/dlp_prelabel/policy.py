@@ -51,6 +51,7 @@ class OpenVocabObjectsPolicy(Contract):
     min_score: float = Field(ge=0, le=1)
     track_iou: float = Field(gt=0, le=1)
     max_gap_ms: float = Field(ge=0)
+    nms_iou: float = Field(gt=0, le=1)
     queries: dict[str, OntologyId] = Field(min_length=1)
 
 
@@ -74,6 +75,7 @@ class VideoContactPolicy(Contract):
     max_distance_px: float
     min_duration_ms: float
     merge_gap_ms: float
+    box_max_gap_ms: float = Field(ge=0)
 
 
 class ContactConfidence(Contract):
@@ -88,11 +90,13 @@ class ContactPolicy(Contract):
     glove: GloveContactPolicy
     video: VideoContactPolicy
     confidence: ContactConfidence
+    unresolved_target_id: str = Field(min_length=1)
 
 
 class WearerPolicy(Contract):
     rate_hz: float = Field(gt=0)
     min_correlation: float = Field(ge=-1, le=1)
+    min_overlap_samples: int = Field(ge=2)
 
 
 class PrelabelPolicy(Contract):

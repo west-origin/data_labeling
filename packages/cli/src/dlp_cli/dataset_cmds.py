@@ -8,13 +8,12 @@ from datetime import UTC, datetime
 import sqlalchemy as sa
 
 from dlp_cli.schema_cmds import database_url
-from dlp_datasets.build import build_dataset_version
+from dlp_datasets.build import build_dataset_version, propose_golden_set
 from dlp_datasets.lineage import session_lineage, withdraw_session
 from dlp_datasets.policy import load_policy
 from dlp_datasets.snapshot import LakeFSSnapshotStore
-from dlp_datasets.splitter import propose_golden
 from dlp_schema import repo_root
-from dlp_schema.db.repository import get_session, insert_golden_set, list_session_ids
+from dlp_schema.db.repository import insert_golden_set
 from dlp_schema.lineage import GoldenSet
 from dlp_schema.session import Domain
 
@@ -27,9 +26,14 @@ def cmd_golden(args: argparse.Namespace) -> int:
     policy = load_policy(repo_root())
     engine = _engine(args)
     with engine.begin() as conn:
-        sessions = [get_session(conn, sid) for sid in list_session_ids(conn, args.ontology_version)]
-        proposed = propose_golden(
-            sessions, args.domain, args.count or policy.golden_sessions_per_domain, seed=args.seed
+        # 프라이버시 승인되지 않았거나 사용 중지된 세션은 제안하지 않는다
+        proposed = propose_golden_set(
+            conn,
+            policy,
+            ontology_version=args.ontology_version,
+            domain=args.domain,
+            target=args.count or policy.golden_sessions_per_domain,
+            seed=args.seed,
         )
         if args.create:
             insert_golden_set(
@@ -95,6 +99,7 @@ def cmd_withdraw(args: argparse.Namespace) -> int:
         [r.run_id for r in lineage.training_runs],
         [e.export_id for e in lineage.exports],
         "이미 들어간 곳",
+        lineage.golden_sets,
     )
     return 0
 
@@ -110,14 +115,17 @@ def cmd_lineage(args: argparse.Namespace) -> int:
         [r.run_id for r in lineage.training_runs],
         [e.export_id for e in lineage.exports],
         "계보",
+        lineage.golden_sets,
     )
     return 0
 
 
-def _print_lineage(versions: list[str], runs: list[str], exports: list[str], title: str) -> None:
+def _print_lineage(
+    versions: list[str], runs: list[str], exports: list[str], title: str, golden: list[str]
+) -> None:
     print(
-        f"  {title}: 데이터셋 버전 {versions or '-'}, 학습 실행 {runs or '-'}, "
-        f"내보내기 {exports or '-'}"
+        f"  {title}: 골든셋 {golden or '-'}, 데이터셋 버전 {versions or '-'}, "
+        f"학습 실행 {runs or '-'}, 내보내기 {exports or '-'}"
     )
 
 

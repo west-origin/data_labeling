@@ -66,6 +66,9 @@ class RelationsPolicy(Contract):
     version: int
     rules: tuple[Rule, ...] = Field(min_length=1)
     merge_gap_ms: int = Field(ge=0)
+    # 대상을 모르는 접촉의 target_id (prelabel.yaml contact.unresolved_target_id).
+    # 규칙 입력에서는 값이 없는 것으로 본다
+    unresolved_target_ids: tuple[str, ...] = ()
     tool_surface: ToolSurfacePolicy
     coverage: CoveragePolicy
 

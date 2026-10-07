@@ -36,6 +36,10 @@ rules:
 
 merge_gap_ms: 100             # 같은 관계가 이보다 짧게 끊기면 하나로 잇는다
 
+# 장갑만 잡아 대상을 모르는 접촉의 target_id (prelabel.yaml contact.unresolved_target_id).
+# 규칙 입력에서는 값이 없는 것(null)으로 본다: {target_id} 자리가 비어 관계를 만들지 않는다.
+unresolved_target_ids: [unresolved]
+
 # 도구 작용부(trajectory3d, part=작용부)와 표면 평면(trajectory3d, part=corner_0~3) 사이 거리로
 # 도구-표면 접촉 구간을 찾는다. 두 궤적은 같은 좌표계여야 하고, 시각마다 표면 좌표로 바꾸므로
 # 카메라가 움직여도 된다.

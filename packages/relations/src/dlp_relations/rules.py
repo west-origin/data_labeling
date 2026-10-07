@@ -24,11 +24,12 @@ class RelationDraft:
     confidence: float
 
 
-def hand_state_fields(p: HandStatePayload) -> Fields:
+def hand_state_fields(p: HandStatePayload, unresolved: tuple[str, ...] = ()) -> Fields:
+    """unresolved: 대상을 모른다는 표시 ID. target_id가 이 값이면 없음(None)으로 본다."""
     return {
         "hand": p.hand.value,
         "contact_target_kind": p.contact_target_kind,
-        "target_id": p.target_id,
+        "target_id": None if p.target_id in unresolved else p.target_id,
         "body_part": p.body_part,
         "grasp_type": p.grasp_type,
         "role": p.role,
@@ -83,7 +84,7 @@ def apply_rules(
     for x in hand_states:
         if isinstance(x.payload, HandStatePayload):
             conf = x.confidence if x.confidence is not None else 1.0
-            fields = hand_state_fields(x.payload)
+            fields = hand_state_fields(x.payload, policy.unresolved_target_ids)
             inputs.append(("hand_state", fields, x.t_start_ms, x.t_end_ms, conf))
     for c in contacts:
         conf = policy.tool_surface.confidence

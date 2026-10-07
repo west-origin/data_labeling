@@ -24,6 +24,32 @@ def test_golden_train_val_share_no_worker_or_site(seed: int) -> None:
     assert report.holdout_ratio < 0.4
 
 
+def test_golden_sessions_outside_candidates_block_their_workers_and_sites() -> None:
+    sessions = generate_sessions(300, seed=3)
+    golden = propose_golden(sessions, "cleaning", 20, seed=3)
+    by_id = {s.session_id: s for s in sessions}
+    # 한 골든 작업자의 골든 세션이 모두 후보에서 빠져도(프라이버시 미승인 등) 그 작업자·장소는
+    # 골든 쪽이다 (그 작업자의 다른 도메인 세션은 학습·검증에 들어가면 안 된다)
+    worker = by_id[golden[0]].worker_id
+    outside = [by_id[g] for g in golden if by_id[g].worker_id == worker]
+    out_ids = {s.session_id for s in outside}
+    sites = {s.site_id for s in outside}
+    candidates = [s for s in sessions if s.session_id not in out_ids]
+    splits, _ = assign_splits(candidates, golden, val_ratio=0.1, seed=3, golden_sessions=outside)
+
+    def leaked(sp: dict[str, Split]) -> list[str]:
+        return [
+            s.session_id
+            for s in candidates
+            if sp[s.session_id] in (Split.TRAIN, Split.VAL)
+            and (s.worker_id == worker or s.site_id in sites)
+        ]
+
+    assert leaked(splits) == []
+    # golden_sessions 없이 나누면 겹친다 (이 시험이 실제 누수 경로를 본다)
+    assert leaked(assign_splits(candidates, golden, val_ratio=0.1, seed=3)[0])
+
+
 def test_golden_proposal_stays_in_domain_and_takes_whole_workers() -> None:
     sessions = generate_sessions(300, seed=2)
     golden = set(propose_golden(sessions, "caregiving", 15, seed=2))

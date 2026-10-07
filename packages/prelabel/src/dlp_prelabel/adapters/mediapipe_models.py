@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -54,6 +55,21 @@ def flip_hand(label: str, input_is_mirrored: bool) -> Hand:
     return Hand.RIGHT if hand is Hand.LEFT else Hand.LEFT
 
 
+def best_per_hand[T](
+    detections: Iterable[tuple[Hand, float, T]],
+) -> dict[Hand, tuple[float, T]]:
+    """한 프레임의 손 탐지에서 손(왼·오른)마다 점수가 가장 높은 것 하나만 남긴다.
+
+    num_hands=2면 두 탐지가 같은 손으로 판정될 수 있다. 둘 다 넣으면 한 트랙에 같은 시각
+    키프레임이 두 번 들어간다.
+    """
+    best: dict[Hand, tuple[float, T]] = {}
+    for hand, score, item in detections:
+        if hand not in best or score > best[hand][0]:
+            best[hand] = (score, item)
+    return best
+
+
 class MediaPipeHands:
     name = "hands"
 
@@ -81,14 +97,21 @@ class MediaPipeHands:
                 result = model.detect_for_video(
                     mp.Image(image_format=mp.ImageFormat.SRGB, data=img), t
                 )
-                for landmarks, handed in zip(result.hand_landmarks, result.handedness, strict=True):
-                    hand = flip_hand(handed[0].category_name, self.policy.hands.input_is_mirrored)
+                found = best_per_hand(
+                    (
+                        flip_hand(handed[0].category_name, self.policy.hands.input_is_mirrored),
+                        float(handed[0].score),
+                        landmarks,
+                    )
+                    for landmarks, handed in zip(
+                        result.hand_landmarks, result.handedness, strict=True
+                    )
+                )
+                for hand, (score, landmarks) in found.items():
                     points = tuple(
                         Keypoint(x=lm.x * w, y=lm.y * h, visibility=2) for lm in landmarks
                     )
-                    frames[hand].append(
-                        (KeypointFrame(t_ms=t, points=points), float(handed[0].score))
-                    )
+                    frames[hand].append((KeypointFrame(t_ms=t, points=points), score))
         out: list[LabelRecord] = []
         for hand, items in frames.items():
             if not items:

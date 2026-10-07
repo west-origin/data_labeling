@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 import sqlalchemy as sa
@@ -20,6 +20,7 @@ from dlp_schema.db.repository import (
     insert_training_run,
     insert_withdrawal,
     list_exports,
+    list_golden_sets,
     list_training_runs,
     set_lifecycle,
     withdrawn_session_ids,
@@ -36,17 +37,32 @@ class SessionLineage:
     dataset_versions: list[str]
     training_runs: list[TrainingRun]
     exports: list[ExportRecord]
+    golden_sets: list[str] = field(default_factory=list[str])
+
+
+# 학습 예제는 학습·검증 분할에서만 뽑는다 (dlp_train.extract).
+# 골든·holdout 세션은 학습에 들어가지 않는다.
+TRAINING_SPLITS = frozenset({Split.TRAIN, Split.VAL})
 
 
 def session_lineage(conn: sa.Connection, session_id: str) -> SessionLineage:
-    """세션 → 데이터셋 버전 → 학습 실행 → 내보내기."""
+    """세션 → 골든셋·데이터셋 버전 → 학습 실행 → 내보내기.
+
+    학습 실행은 그 버전에서 세션이 학습·검증 분할에 있었던 것만 돌려준다.
+    """
     session = get_session(conn, session_id)
     versions = dataset_versions_with_session(conn, session_id)
     exports = (
         [e for e in list_exports(conn, versions) if session_id in e.session_ids] if versions else []
     )
-    runs = list_training_runs(conn, versions) if versions else []
-    return SessionLineage(session_id, session.lifecycle_state, versions, runs, exports)
+    trained = [
+        v
+        for v in versions
+        if get_dataset_version(conn, v).splits.get(session_id) in TRAINING_SPLITS
+    ]
+    runs = list_training_runs(conn, trained) if trained else []
+    golden = [g.version for g in list_golden_sets(conn) if session_id in g.session_ids]
+    return SessionLineage(session_id, session.lifecycle_state, versions, runs, exports, golden)
 
 
 def withdraw_session(

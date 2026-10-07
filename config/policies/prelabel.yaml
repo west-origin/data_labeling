@@ -46,6 +46,7 @@ open_vocab_objects:
   min_score: 0.12
   track_iou: 0.3
   max_gap_ms: 1200
+  nms_iou: 0.5              # 같은 질의의 박스끼리 IoU가 이 이상이면 점수 낮은 쪽을 버린다
   # 질의 문장 → 온톨로지 객체
   queries:
     a mop: mop
@@ -74,6 +75,12 @@ contact:
     max_distance_px: 12       # 손가락 끝과 객체 박스 사이 거리가 이 이하면 접촉 후보
     min_duration_ms: 100
     merge_gap_ms: 100
+    # 객체 박스 키프레임이 손 키프레임 시각에 없으면 앞뒤 키프레임을 선형 보간한다 (도구 박스는
+    # open_vocab_objects.frame_stride_ms 간격). 앞뒤 키프레임 간격이 이보다 길면 보간하지 않는다.
+    box_max_gap_ms: 1200
+  # 장갑만 접촉을 잡고 영상에서 대상을 찾지 못한 구간의 target_id (HandStatePayload는 object 접촉에
+  # 대상 ID가 필요하다). 관계 규칙(relations.yaml)과 행동 대상 후보(actions.yaml)는 이 ID를 버린다.
+  unresolved_target_id: unresolved
   # 출처별 신뢰도. 검수 우선순위는 장갑 세션에서 fused보다 낮은 접촉(장갑·영상 한쪽만)을 먼저 본다
   # (config/policies/review.yaml contact_mismatch_max_confidence는 glove·video보다 크고 fused보다 작게).
   confidence: {fused: 0.9, glove: 0.6, video: 0.5}
@@ -83,6 +90,7 @@ contact:
 wearer_matching:
   rate_hz: 30
   min_correlation: 0.5
+  min_overlap_samples: 20   # 두 신호가 겹치는 길이가 rate_hz 격자로 이 샘플 수보다 짧으면 비교하지 않는다
 
 # 바디캠 손·객체를 단안 메트릭 깊이(Depth Anything V2 Metric Indoor Small)로 카메라 좌표 3D로 올린다.
 # 세션 캘리브레이션에 내부 파라미터가 없으면 default_hfov_deg로 근사한다 (액션캠 광각 기준).

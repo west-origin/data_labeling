@@ -4,6 +4,8 @@
 - 출력은 JSON Schema로 강제한다 (OpenAI 호환 서버의 response_format=json_schema). 서버가 강제하지
   못해도 여기서 다시 검사한다: JSON 파싱, 스키마, 온톨로지 밖 값, 개체 목록 밖 대상.
 - 위반하면 위반 내용을 붙여 max_retries번까지 다시 묻고, 그래도 안 되면 미상(gap unknown)이다.
+  서버 오류·시간 초과(VlmUnavailableError)도 같은 횟수만큼 다시 묻고, 끝내 실패하면 그 구간만
+  미상이다.
   모르는 구간을 대기(idle)로 처리하지 않는다.
 """
 
@@ -52,6 +54,10 @@ class Classified:
     attempts: int
     errors: list[str] = field(default_factory=list[str])
     fallback: bool = False  # 재시도 후에도 실패해 미상으로 둠
+
+
+class VlmUnavailableError(RuntimeError):
+    """VLM 서버 오류·시간 초과. classify가 재시도하고, 끝내 실패하면 그 구간을 미상으로 둔다."""
 
 
 class VlmClient(Protocol):
@@ -147,7 +153,11 @@ def classify(
     prompt = build_prompt(request, ontology)
     errors: list[str] = []
     for attempt in range(1, max_retries + 2):
-        raw = client.complete(request, prompt, schema)
+        try:
+            raw = client.complete(request, prompt, schema)
+        except VlmUnavailableError as exc:
+            errors.append(f"VLM 서버 오류: {exc}")
+            continue
         answer, problems = validate_answer(raw, ontology, request)
         if answer is not None:
             return Classified(request, answer, attempt, errors)
