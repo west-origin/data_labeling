@@ -162,7 +162,9 @@ def generate_action_scenario(
             c0 = t
             contact("still", int(rng.integers(200, 400)))  # 잡다
             g_end = t
-            dest = (float(rng.uniform(-60, 60)), float(rng.uniform(-40, 20)))
+            # 옮기기는 눈에 띄게 움직인다 (30~70 px). 너무 짧으면 정지와 구분할 수 없다.
+            angle, radius = rng.uniform(-np.pi, 0), rng.uniform(30, 70)
+            dest = (float(radius * np.cos(angle)), float(radius * np.sin(angle) * 0.6))
             contact("minjerk", int(rng.integers(600, 1_100)), dest)  # 옮기다
             c_end = t
             contact("still", int(rng.integers(150, 300)))  # 놓다

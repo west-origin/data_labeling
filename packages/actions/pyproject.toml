@@ -1,0 +1,22 @@
+[project]
+name = "dlp-actions"
+version = "0.1.0"
+description = "행동 구간 2단 구조: 경계 후보 생성, VLM 분류 어댑터, 병합·채우기"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "av>=14.0",
+    "dlp-media",
+    "dlp-schema",
+    "httpx>=0.27",
+    "numpy>=2.0",
+    "opencv-contrib-python-headless>=4.10",
+    "pyyaml>=6.0",
+    "sqlalchemy>=2.0",
+]
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dlp_actions"]

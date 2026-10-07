@@ -8,6 +8,7 @@ from collections.abc import Sequence
 
 from dlp_cli import (
     __version__,
+    actions_cmds,
     dataset_cmds,
     fixtures_cmds,
     media_cmds,
@@ -52,6 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
     dataset_cmds.add_commands(sub)
     prelabel_cmds.add_commands(sub)
     relations_cmds.add_commands(sub)
+    actions_cmds.add_commands(sub)
     return parser
 
 
