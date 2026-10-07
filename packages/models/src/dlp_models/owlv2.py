@@ -23,6 +23,9 @@ SIZE = 960
 MEAN = np.array([0.48145466, 0.4578275, 0.40821073], dtype=np.float32)
 STD = np.array([0.26862954, 0.26130258, 0.27577711], dtype=np.float32)
 MAX_TOKENS = 16
+NMS_IOU = (
+    0.5  # 기본값. 호출하는 단계는 정책 값(예: prelabel.yaml open_vocab_objects.nms_iou)을 넘긴다
+)
 
 
 @dataclass(frozen=True)
@@ -50,6 +53,7 @@ def decode(
     thresholds: list[float],
     width: int,
     height: int,
+    nms_iou: float = NMS_IOU,
 ) -> list[OwlDetection]:
     """logits (N, Q), boxes (N, 4) cxcywh 정규화 → 질의별 문턱을 넘는 탐지.
 
@@ -63,7 +67,7 @@ def decode(
             x2, y2 = min(float(width), cx + bw / 2), min(float(height), cy + bh / 2)
             if x2 > x1 and y2 > y1:
                 out.append(OwlDetection(q, (x1, y1, x2 - x1, y2 - y1), float(scores[i, q])))
-    return nms(out, 0.5)
+    return nms(out, nms_iou)
 
 
 def nms(dets: list[OwlDetection], iou_thr: float) -> list[OwlDetection]:
@@ -83,8 +87,17 @@ def _iou(a: tuple[float, float, float, float], b: tuple[float, float, float, flo
 
 
 class Owlv2:
-    def __init__(self, model: Path, tokenizer: Path, queries: list[str], threads: int = 0) -> None:
+    def __init__(
+        self,
+        model: Path,
+        tokenizer: Path,
+        queries: list[str],
+        threads: int = 0,
+        *,
+        nms_iou: float = NMS_IOU,
+    ) -> None:
         self.session = OnnxModel(model, threads)
+        self.nms_iou = nms_iou
         tok = Tokenizer.from_file(str(tokenizer))
         self.queries = queries
         self.input_ids = np.zeros((len(queries), MAX_TOKENS), dtype=np.int64)
@@ -101,4 +114,6 @@ class Owlv2:
             {"input_ids": self.input_ids, "pixel_values": pixels, "attention_mask": self.attention},
         )
         h, w = image.shape[:2]
-        return decode(np.asarray(logits)[0], np.asarray(boxes)[0], side, thresholds, w, h)
+        return decode(
+            np.asarray(logits)[0], np.asarray(boxes)[0], side, thresholds, w, h, self.nms_iou
+        )

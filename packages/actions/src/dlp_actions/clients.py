@@ -13,7 +13,7 @@ import cv2
 import httpx
 import numpy as np
 
-from dlp_actions.vlm import SegmentRequest
+from dlp_actions.vlm import SegmentRequest, VlmUnavailableError
 from dlp_media.probe import to_fraction
 from dlp_schema.labels import ActionPayload, DescriptionPayload, GapPayload, LabelRecord
 
@@ -135,7 +135,11 @@ class OpenAICompatibleVlm:
                 "json_schema": {"name": "segment_label", "schema": schema, "strict": True},
             },
         }
-        resp = self.http.post("/v1/chat/completions", json=body)
-        resp.raise_for_status()
-        data: Any = resp.json()
-        return str(data["choices"][0]["message"]["content"])
+        try:
+            resp = self.http.post("/v1/chat/completions", json=body)
+            resp.raise_for_status()
+            data: Any = resp.json()
+            return str(data["choices"][0]["message"]["content"])
+        except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError) as exc:
+            # 서버 오류·시간 초과·응답 형식 오류: classify가 재시도 후 미상으로 둔다
+            raise VlmUnavailableError(f"{type(exc).__name__}: {exc}") from exc

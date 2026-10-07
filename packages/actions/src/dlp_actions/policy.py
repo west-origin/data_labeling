@@ -43,6 +43,9 @@ class VlmPolicy(Contract):
 
 class ActionsPolicy(Contract):
     version: int
+    # 대상을 모르는 접촉의 target_id (prelabel.yaml contact.unresolved_target_id).
+    # 대상 후보에서 뺀다
+    unresolved_entity_ids: tuple[str, ...] = ()
     boundaries: BoundaryPolicy
     tolerance_ms: ToleranceMs
     vlm: VlmPolicy

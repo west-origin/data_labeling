@@ -5,7 +5,9 @@
 그대로 두면 거의 모든 세션이 한 덩어리가 된다. 그래서 다음 규칙으로 나눈다.
 
 1. 골든셋 세션의 작업자·장소를 "골든 쪽"으로 묶는다. 그 작업자나 장소가 나오는 다른 세션은
-   어느 쪽에도 넣지 않는다 (holdout).
+   어느 쪽에도 넣지 않는다 (holdout). 후보에 들지 않은 골든셋 세션(프라이버시 미승인, 다른 온톨로지
+   등)도 골든 쪽 작업자·장소를 정한다 (golden_sessions): 그 세션이 나중에 평가에 쓰여도
+   학습과 겹치지 않게.
 2. 나머지에서 검증용 작업자를 하나씩 고른다. 작업자를 고르면 그의 장소도 검증 쪽이 된다.
    작업자와 장소가 모두 검증 쪽인 세션은 val, 모두 학습 쪽인 세션은 train, 걸친 세션은 holdout이다.
    매 단계에서 holdout이 가장 적게 늘어나는 작업자를 고르고(같으면 seed 해시 순), 검증 세션이
@@ -36,12 +38,22 @@ def _h(seed: int, s: str) -> str:
 
 
 def assign_splits(
-    sessions: list[Session], golden_ids: Iterable[str], *, val_ratio: float, seed: int = 0
+    sessions: list[Session],
+    golden_ids: Iterable[str],
+    *,
+    val_ratio: float,
+    seed: int = 0,
+    golden_sessions: Iterable[Session] = (),
 ) -> tuple[dict[str, Split], SplitReport]:
+    """golden_sessions: 골든셋의 모든 세션 (후보 밖 세션 포함).
+
+    그 작업자·장소는 학습·검증에 못 들어간다.
+    """
     golden = set(golden_ids)
     splits: dict[str, Split] = {}
-    gold_workers = {s.worker_id for s in sessions if s.session_id in golden}
-    gold_sites = {s.site_id for s in sessions if s.session_id in golden}
+    gold = [s for s in sessions if s.session_id in golden] + list(golden_sessions)
+    gold_workers = {s.worker_id for s in gold}
+    gold_sites = {s.site_id for s in gold}
     pool: list[Session] = []
     for s in sessions:
         if s.session_id in golden:

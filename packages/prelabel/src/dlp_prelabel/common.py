@@ -5,7 +5,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+import hashlib
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -21,7 +22,10 @@ Image = NDArray[np.uint8]
 
 
 def iter_frames(video: Path) -> Iterator[tuple[int, Image]]:
-    """(마스터 타임라인 ms, RGB 프레임). 시각은 PTS를 반올림한 정수 ms다."""
+    """(그 스트림 영상의 PTS ms, RGB 프레임). 시각은 PTS를 반올림한 정수 ms다.
+
+    마스터 타임라인 시각이 아니다. 공간 라벨 키프레임은 이 스트림 PTS 시각으로 쓴다 (ADR 0019).
+    """
     with av.open(str(video)) as c:
         stream = c.streams.video[0]
         tb = to_fraction(stream.time_base)
@@ -32,6 +36,20 @@ def iter_frames(video: Path) -> Iterator[tuple[int, Image]]:
                 round(float(frame.pts * tb * 1000)),
                 np.asarray(frame.to_ndarray(format="rgb24"), dtype=np.uint8),
             )
+
+
+def input_digest(labels: Iterable[LabelRecord], *extra: str) -> str:
+    """단계 입력(현재 라벨 ID 집합과 추가 문자열)의 짧은 해시.
+
+    라벨은 덮어쓰지 않고 수정하면 새 ID가 생기므로, ID 집합이 같으면 입력이 같다. 모델 버전에 붙여
+    입력이 바뀌면 다시 돌고 검수 전인 이전 결과를 지운다.
+    """
+    h = hashlib.sha256()
+    for item in sorted({x.label_id for x in labels}):
+        h.update(item.encode() + b"\n")
+    for item in extra:
+        h.update(b"|" + item.encode())
+    return h.hexdigest()[:8]
 
 
 def iou(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> float:

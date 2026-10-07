@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
 
-from dlp_models.depth import Intrinsics, MetricDepth, sample_depth
-from dlp_models.owlv2 import Owlv2, decode, preprocess
+from dlp_models.depth import Intrinsics, MetricDepth, input_size, sample_depth
+from dlp_models.owlv2 import OwlDetection, Owlv2, decode, nms, preprocess
 from dlp_models.registry import load_registry, resolve
 from dlp_schema.predictor import ModelUnavailableError
 
@@ -54,6 +55,40 @@ def test_owl_preprocess_pads_to_square_and_decode_maps_back_to_pixels() -> None:
     [det] = decode(logits, boxes, side, [0.5, 0.5], 640, 480)
     assert det.query_index == 0 and det.score == pytest.approx(0.9526, abs=1e-3)
     assert det.box == pytest.approx((240.0, 240.0, 160.0, 160.0))
+
+
+def test_owl_nms_threshold_is_a_parameter() -> None:
+    a = OwlDetection(0, (0.0, 0.0, 10.0, 10.0), 0.9)
+    b = OwlDetection(0, (3.0, 0.0, 10.0, 10.0), 0.8)  # IoU 7/13 ≈ 0.54
+    assert nms([a, b], 0.5) == [a]
+    assert nms([a, b], 0.6) == [a, b]
+
+
+def test_depth_input_keeps_aspect_ratio_like_the_reference() -> None:
+    # 공식 Resize(518, keep_aspect_ratio, ensure_multiple_of=14, lower_bound)
+    assert input_size(240, 320) == (518, 686)
+    assert input_size(1080, 1920) == (518, 924)
+    assert input_size(518, 518) == (518, 518)
+    assert input_size(1920, 1080) == (924, 518)
+    for h, w in ((240, 320), (720, 1280), (1080, 1440), (333, 777)):
+        ih, iw = input_size(h, w)
+        assert ih % 14 == 0 and iw % 14 == 0 and min(ih, iw) >= 518
+        assert abs(iw / ih - w / h) < 0.03  # 비율 유지 (14 배수 맞춤 오차만)
+
+
+def test_depth_predict_feeds_aspect_preserving_input_and_restores_size() -> None:
+    seen: list[tuple[int, ...]] = []
+
+    class FakeSession:
+        def run(self, names: list[str], feeds: dict[str, Any]) -> list[Any]:
+            x = feeds["pixel_values"]
+            seen.append(x.shape)
+            return [np.ones((1, x.shape[2], x.shape[3]), dtype=np.float32)]
+
+    model = MetricDepth.__new__(MetricDepth)
+    model.session = FakeSession()  # pyright: ignore[reportAttributeAccessIssue]
+    depth = model.predict(np.zeros((240, 320, 3), dtype=np.uint8))
+    assert seen == [(1, 3, 518, 686)] and depth.shape == (240, 320)
 
 
 def test_unproject_and_depth_patch_median() -> None:

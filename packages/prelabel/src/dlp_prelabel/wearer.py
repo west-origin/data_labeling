@@ -43,11 +43,12 @@ def match_wearer(
     *,
     rate_hz: float,
     min_correlation: float,
+    min_overlap_samples: int,
 ) -> WearerMatch:
     scores: dict[str, float] = {}
     for entity, (t, v) in people.items():
         lo, hi = max(reference_t[0], t[0]), min(reference_t[-1], t[-1])
-        if hi - lo < 2000 / rate_hz * 10:
+        if hi - lo < min_overlap_samples * 1000 / rate_hz:
             continue
         grid = np.arange(lo, hi, 1000 / rate_hz)
         a = np.interp(grid, reference_t, reference_v)

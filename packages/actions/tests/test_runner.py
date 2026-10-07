@@ -5,6 +5,7 @@ import os
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 import sqlalchemy as sa
@@ -12,11 +13,20 @@ import sqlalchemy as sa
 from dlp_actions.clients import OracleVlm
 from dlp_actions.policy import load_policy
 from dlp_actions.runner import run_actions
+from dlp_actions.vlm import SegmentRequest
 from dlp_fixtures.actions import generate_action_scenario
 from dlp_schema.db.migrate import upgrade
 from dlp_schema.db.repository import get_labels, insert_labels, insert_session, register_ontology
 from dlp_schema.episode import current_labels
-from dlp_schema.labels import ActionPayload, GapPayload, LabelRecord, Provenance, Source
+from dlp_schema.labels import (
+    ActionPayload,
+    DescriptionPayload,
+    GapPayload,
+    HandStatePayload,
+    LabelRecord,
+    Provenance,
+    Source,
+)
 from dlp_schema.ontology import load_ontology
 from dlp_schema.testing import FIXED_TIME, make_session
 
@@ -147,3 +157,83 @@ def test_new_version_keeps_reviewed_labels_and_fills_gaplessly(pg: sa.Engine) ->
     assert all(a.t_end_ms == b.t_start_ms for a, b in itertools.pairwise(timeline2))
     others = {x.provenance.model_version for x in timeline2} - {approved.provenance.model_version}
     assert others <= {second.version}
+
+
+def test_input_change_reruns_and_reviewed_description_protects_its_action(pg: sa.Engine) -> None:
+    """감사 회귀: 입력(손 상태)이 바뀌면 다시 만들고, 설명이 검수된 행동은 지우지 않는다.
+
+    대상을 모르는 접촉 표시 ID(unresolved)는 VLM 대상 후보에 넣지 않는다.
+    """
+    ontology = load_ontology(ROOT / "config/ontology/v1")
+    policy = load_policy(ROOT)
+    truth = [x for x in SCENARIO.labels if isinstance(x.payload, ActionPayload | GapPayload)]
+    with pg.begin() as conn:
+        first = run_actions(conn, SID, OracleVlm(truth), ontology, policy, FIXED_TIME)
+        timeline = _timeline(conn)
+        action = [x for x in timeline if isinstance(x.payload, ActionPayload)][1]
+        assert isinstance(action.payload, ActionPayload)
+        [desc] = [
+            x
+            for x in current_labels(get_labels(conn, SID, kinds=["description"]))
+            if isinstance(x.payload, DescriptionPayload)
+            and x.payload.segment_id == action.payload.action_id
+        ]
+        # 검수자가 설명만 고쳤다 (행동 레코드는 미검수 그대로)
+        assert isinstance(desc.payload, DescriptionPayload)
+        insert_labels(
+            conn,
+            [
+                desc.model_copy(
+                    update={
+                        "label_id": f"{desc.label_id}:edit",
+                        "parent_label_id": desc.label_id,
+                        "provenance": Provenance(source=Source.HUMAN),
+                        "confidence": None,
+                        "payload": desc.payload.model_copy(update={"text": "걸레로 닦는다"}),
+                    }
+                )
+            ],
+        )
+        # 입력 변경: 대상을 모르는 접촉 하나를 더한다 (정책·VLM은 같다)
+        state = next(
+            x for x in SCENARIO.labels
+            if isinstance(x.payload, HandStatePayload) and x.payload.contact_target_kind != "none"
+        )  # fmt: skip
+        assert isinstance(state.payload, HandStatePayload)
+        insert_labels(
+            conn,
+            [
+                state.model_copy(
+                    update={
+                        "label_id": f"{state.label_id}-unresolved",
+                        "payload": state.payload.model_copy(
+                            update={
+                                "contact_target_kind": "object",
+                                "target_id": "unresolved",
+                                "grasp_type": None,
+                            }
+                        ),
+                    }
+                )
+            ],
+        )
+        seen: list[tuple[str, ...]] = []
+
+        class Spy(OracleVlm):
+            def complete(self, request: SegmentRequest, prompt: str, schema: dict[str, Any]) -> str:
+                seen.append(request.entities)
+                return super().complete(request, prompt, schema)
+
+        second = run_actions(conn, SID, Spy(truth), ontology, policy, FIXED_TIME)
+        timeline2 = _timeline(conn)
+        descriptions = current_labels(get_labels(conn, SID, kinds=["description"]))
+    assert second.version != first.version and second.hands  # 입력이 바뀌어 다시 돌았다
+    assert seen and all("unresolved" not in e for e in seen)
+    assert action.label_id in {x.label_id for x in timeline2}  # 설명이 검수된 행동은 남는다
+    assert any(
+        isinstance(x.payload, DescriptionPayload)
+        and x.payload.segment_id == action.payload.action_id
+        and x.label_id == f"{desc.label_id}:edit"
+        for x in descriptions
+    )
+    assert all(a.t_end_ms == b.t_start_ms for a, b in itertools.pairwise(timeline2))

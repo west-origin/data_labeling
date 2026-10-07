@@ -114,7 +114,10 @@ class DepthLifter:
         tracks: list[LabelRecord],
         calib: CameraIntrinsics | None,
         ontology_version: str,
+        version: str | None = None,
     ) -> list[LabelRecord]:
+        """version: 라벨에 쓸 모델 버전 (기본: self.version). 러너가 입력 해시를 붙여 넘긴다."""
+        model_version = version or self.version
         if self.model is None:
             self.model = MetricDepth(self.path)
         samples = lift_tracks(iter_frames(video), self.model, tracks, calib, self.policy.depth)
@@ -129,7 +132,7 @@ class DepthLifter:
                 source_3d=Source3D.MONO_DEPTH,
                 samples=tuple(ss),
             )
-            tag = version_tag(self.version)
+            tag = version_tag(model_version)
             out.append(
                 model_label(
                     label_id=f"{session_id}-{stream_id}-3d-{tag}-{entity}-{part or 'center'}",
@@ -138,7 +141,7 @@ class DepthLifter:
                     t_start_ms=ss[0].t_ms,
                     t_end_ms=ss[-1].t_ms,
                     ontology_version=ontology_version,
-                    model_version=self.version,
+                    model_version=model_version,
                     confidence=self.policy.depth.confidence,
                     payload=payload,
                     now=self.now,

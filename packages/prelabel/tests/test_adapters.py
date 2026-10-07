@@ -10,7 +10,12 @@ import pytest
 from dlp_fixtures.actions import generate_action_scenario
 from dlp_fixtures.video import generate_blur_scenario
 from dlp_models.registry import load_registry
-from dlp_prelabel.adapters.mediapipe_models import MediaPipeHands, MediaPipeObjects, flip_hand
+from dlp_prelabel.adapters.mediapipe_models import (
+    MediaPipeHands,
+    MediaPipeObjects,
+    best_per_hand,
+    flip_hand,
+)
 from dlp_prelabel.adapters.owl_objects import OwlObjects
 from dlp_prelabel.adapters.rtmpose import RtmPose
 from dlp_prelabel.adapters.stubs import UNAVAILABLE, OraclePredictor
@@ -35,6 +40,15 @@ def test_handedness_is_flipped_for_non_mirrored_bodycam() -> None:
     assert flip_hand("Left", input_is_mirrored=False) is Hand.RIGHT
     assert flip_hand("Right", input_is_mirrored=False) is Hand.LEFT
     assert flip_hand("Left", input_is_mirrored=True) is Hand.LEFT
+
+
+def test_two_detections_of_the_same_hand_keep_the_highest_score() -> None:
+    # 감사 회귀: num_hands=2에서 두 탐지가 모두 같은 손이면 같은 시각 키프레임이 둘 생겼다
+    found = best_per_hand([(Hand.LEFT, 0.6, "a"), (Hand.LEFT, 0.9, "b"), (Hand.RIGHT, 0.7, "c")])
+    assert found == {Hand.LEFT: (0.9, "b"), Hand.RIGHT: (0.7, "c")}
+    assert best_per_hand([(Hand.RIGHT, 0.8, "x"), (Hand.RIGHT, 0.5, "y")]) == {
+        Hand.RIGHT: (0.8, "x")
+    }
 
 
 def test_coco_mapping_targets_exist_in_ontology() -> None:

@@ -153,6 +153,18 @@ def test_rules_skip_missing_fields_and_merge_short_gaps(policy: RelationsPolicy)
     assert [(d.start_ms, d.end_ms) for d in drafts] == [(0, 2000), (2500, 3000)]
 
 
+def test_unresolved_contact_target_emits_no_relation(policy: RelationsPolicy) -> None:
+    """감사 회귀: 장갑만 잡은 접촉(target_id=unresolved)이 관계를 만들지 않는다."""
+    payload = HandStatePayload(
+        hand=Hand.RIGHT, role="active", contact_target_kind="object", target_id="unresolved"
+    )
+    assert "unresolved" in policy.unresolved_target_ids
+    assert apply_rules(policy, [make_label(payload=payload)], []) == []
+    known = payload.model_copy(update={"target_id": "cup_01"})
+    [d] = apply_rules(policy, [make_label(payload=known)], [])
+    assert d.payload.object_id == "cup_01"
+
+
 def test_policy_digest_tracks_rule_changes(policy: RelationsPolicy) -> None:
     changed = policy.model_copy(update={"rules": policy.rules[1:]})
     assert changed.digest != policy.digest and policy.digest == load_policy(ROOT).digest

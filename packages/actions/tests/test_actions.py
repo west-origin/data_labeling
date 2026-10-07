@@ -253,3 +253,39 @@ def test_openai_compatible_client_sends_frames_and_schema(
         "action",
         "gap",
     ]
+
+
+def test_vlm_server_errors_are_retried_then_unknown(ontology: Ontology) -> None:
+    """감사 회귀: VLM 서버 오류·시간 초과가 세션 전체를 멈추지 않는다. 재시도 후 그 구간만 미상."""
+    calls: list[int] = []
+
+    def failing(req: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        if len(calls) == 1:
+            raise httpx.ReadTimeout("timeout", request=req)
+        return httpx.Response(503, text="busy")
+
+    client = OpenAICompatibleVlm(
+        "http://vlm", "test-model", frames=1, max_side=64, timeout_s=1,
+        transport=httpx.MockTransport(failing),
+    )  # fmt: skip
+    result = classify(client, _request(), ontology, max_retries=2)
+    assert len(calls) == 3 and result.fallback and result.answer.gap_type == "unknown"
+    assert all("VLM 서버 오류" in e for e in result.errors)
+
+    # 한 번 실패한 뒤 성공하면 그 답을 쓴다
+    calls.clear()
+
+    def flaky(req: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx.Response(500)
+        answer = {"label": "gap", "gap_type": "idle", "description": None}
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(answer)}}]})
+
+    client = OpenAICompatibleVlm(
+        "http://vlm", "test-model", frames=1, max_side=64, timeout_s=1,
+        transport=httpx.MockTransport(flaky),
+    )  # fmt: skip
+    ok = classify(client, _request(), ontology, max_retries=2)
+    assert not ok.fallback and ok.answer.gap_type == "idle" and ok.attempts == 2

@@ -33,7 +33,7 @@ class OwlObjects:
     def run(self, clip: Clip) -> list[LabelRecord]:
         op = self.policy.open_vocab_objects
         queries = list(op.queries)
-        model = Owlv2(self.model_path, self.tokenizer_path, queries)
+        model = Owlv2(self.model_path, self.tokenizer_path, queries, nms_iou=op.nms_iou)
         thresholds = [op.min_score] * len(queries)
         detections: list[
             tuple[int, list[tuple[str, tuple[float, float, float, float], float]]]

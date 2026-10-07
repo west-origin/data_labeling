@@ -18,12 +18,16 @@ from dlp_prelabel.adapters.rtmpose import RtmPose
 from dlp_prelabel.adapters.stubs import UNAVAILABLE
 from dlp_prelabel.lift3d import DepthLifter
 from dlp_prelabel.policy import load_policy
-from dlp_prelabel.runner import run_prelabel
+from dlp_prelabel.runner import CONTACT_STEP, run_prelabel
 from dlp_schema import load_config, load_ontology, repo_root
+from dlp_schema.db.repository import list_model_versions
+from dlp_schema.lineage import ModelStatus
 from dlp_schema.predictor import ModelUnavailableError, Predictor
 from dlp_train.deployed import deployed_predictors
 from dlp_train.policy import load_policy as load_training_policy
 from dlp_train.trainers import LoadContext
+
+CONTACT_TASK = "contact"  # config/policies/training.yaml tasks의 접촉 과제 이름
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -62,6 +66,15 @@ def cmd_run(args: argparse.Namespace) -> int:
         )
         for note in deployed.notes:
             print(f"[재학습 모델] {note}")
+        replaced = set(deployed.replaces)
+        # 배포된 재학습 접촉 모델(hand_state를 낸다)을 실제로 불러왔으면 기본 접촉 단계를 대신한다.
+        # 둘 다 돌면 같은 접촉이 두 번 남는다 (training.yaml contact.replaces에 contact가 있으면
+        # deployed.replaces로도 들어온다)
+        contact_models = list_model_versions(conn, CONTACT_TASK, ModelStatus.DEPLOYED)
+        loaded = {p.version for p in deployed.predictors}
+        if contact_models and contact_models[-1].model_version in loaded:
+            replaced.add(CONTACT_STEP)
+            print(f"[재학습 모델] {CONTACT_TASK}: 기본 접촉 단계(장갑·영상 휴리스틱)를 대신합니다")
         s = run_prelabel(
             conn,
             args.session_id,
@@ -71,7 +84,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             ontology,
             now,
             lifter=lifter,
-            replaced=deployed.replaces,
+            replaced=replaced,
         )
     engine.dispose()
     for key, n in s.produced.items():
