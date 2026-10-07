@@ -59,7 +59,8 @@ class Trainer(Protocol):
 class LoadContext:
     now: datetime
     ontology_version: str
-    # (세션, 스트림) → 정답 라벨. oracle-stub만 쓴다 (평가·테스트). 운영에서는 None
+    # (세션, 스트림) → 그 스트림의 정답과 세션의 타임라인 정답(stream_id 없음, 접촉·행동).
+    # oracle-stub만 쓴다 (평가·테스트). 운영에서는 None
     truth: Callable[[str, str], list[LabelRecord]] | None = None
 
 

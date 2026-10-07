@@ -1,6 +1,7 @@
 """데이터셋 버전에서 과제별 학습 예제를 뽑는다.
 
 - 분할: 정책의 splits(학습·검증)에 든 세션만. 골든·holdout 세션은 절대 넣지 않는다.
+  사용 중지(동의 철회)된 세션은 버전에 있어도 뺀다.
 - 라벨: 운영 라벨(`current_labels`)만. 오류 삽입 레코드와 그 후손, 측정용 레코드는 빠진다.
 - 예제가 되는 라벨: 사람이 만든 라벨, 또는 정책의 trainable_states(승인·수정·표본 검증) 상태의 라벨.
 - 자동 원본과 수정본의 차이: 각 예제에 처음 모델이 낸 레코드(origin)와 변화 종류를 붙인다.
@@ -14,6 +15,7 @@ from __future__ import annotations
 
 import tempfile
 from collections import Counter
+from collections.abc import Set
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -72,15 +74,19 @@ def extract_examples(
     splits: dict[str, Split],
     task: Task,
     policy: TrainingPolicy,
+    excluded: Set[str] = frozenset(),
 ) -> list[Example]:
-    """세션 여러 개의 라벨 이력에서 학습 예제를 뽑는다 (분할에 없는 세션은 버린다)."""
+    """세션 여러 개의 라벨 이력에서 학습 예제를 뽑는다.
+
+    분할에 없는 세션과 excluded(사용 중지된 세션)는 버린다.
+    """
     by_session: dict[str, list[LabelRecord]] = {}
     for x in labels:
         by_session.setdefault(x.session_id, []).append(x)
     out: list[Example] = []
     for sid in sorted(by_session):
         split = splits.get(sid)
-        if split is None or split not in policy.splits:
+        if split is None or split not in policy.splits or sid in excluded:
             continue
         for c in review_changes(by_session[sid], policy.trainable_states):
             if matches(task, c.label):
@@ -89,13 +95,21 @@ def extract_examples(
 
 
 def load_training_data(
-    snapshots: SnapshotStore, version: DatasetVersion, task: Task, policy: TrainingPolicy
+    snapshots: SnapshotStore,
+    version: DatasetVersion,
+    task: Task,
+    policy: TrainingPolicy,
+    *,
+    excluded: Set[str] = frozenset(),
 ) -> TrainingData:
-    """데이터셋 버전 스냅샷(labels.jsonl)과 버전의 분할로 학습 예제를 만든다."""
+    """데이터셋 버전 스냅샷(labels.jsonl)과 버전의 분할로 학습 예제를 만든다.
+
+    excluded: 버전을 만든 뒤 사용 중지(동의 철회 등)된 세션 (`loop.withdrawn_sessions`). 뺀다.
+    """
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "labels.jsonl"
         snapshots.read(version.snapshot_uri, "labels.jsonl", path)
         with path.open(encoding="utf-8") as f:
             labels = [LabelRecord.model_validate_json(line) for line in f if line.strip()]
-    examples = extract_examples(labels, dict(version.splits), task, policy)
+    examples = extract_examples(labels, dict(version.splits), task, policy, excluded)
     return TrainingData(version.version_id, task, examples)

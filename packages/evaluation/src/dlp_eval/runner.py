@@ -11,12 +11,17 @@ DB에서 정답·예측을 모아 지표·하위 집단·게이트 리포트를 
 - 오류 삽입 사본·측정 레코드와 그 후손은 예측에서 뺀다.
 - 하위 집단: glove(장갑 스트림 유무), site(장소). evaluation.yaml subgroups에 적은 것만 리포트한다.
 - 사용 중지(동의 철회 등)된 세션은 골든셋에 있어도 평가하지 않는다.
+- 한 과제에 모델 버전을 여럿 주면 (예: objects를 대신할 기본 어댑터 objects·tools) 예측을 세션별로
+  합친다 (`load_golden_merged`).
+- 세션마다 버전이 다른 단계(접촉·행동·3D 궤적은 버전에 세션 데이터 해시가 들어간다)는 버전
+  앞부분+`*`로 고른다 (예: contact=contact-heuristic-1*, ADR 0013).
 """
 
 from __future__ import annotations
 
 import json
 import math
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -47,6 +52,11 @@ TASK_KINDS: dict[Task, tuple[str, ...]] = {
     "coverage": ("coverage",),
     "privacy": ("blur_track",),
 }
+# 마스터 타임라인 구간 라벨(stream_id 없음)로 평가하는 과제. 세션마다 한 번만 예측한다
+# (영상 스트림마다 돌리면 같은 타임라인 구간이 스트림 수만큼 겹친다, ADR 0019)
+TIMELINE_TASKS: frozenset[Task] = frozenset(
+    {"contact", "actions", "relations", "states", "coverage"}
+)
 TRUSTED = {VerificationState.HUMAN_APPROVED, VerificationState.HUMAN_CORRECTED}
 
 
@@ -135,6 +145,47 @@ def load_golden(
     return out
 
 
+class MissingPredictionsError(ValueError):
+    """골든셋에 예측이 하나도 없는 모델 버전.
+
+    버전을 잘못 적었거나 골든셋에 그 단계를 돌리지 않았다.
+    """
+
+
+def load_golden_merged(
+    conn: sa.Connection,
+    golden_version: str,
+    models: dict[Task, list[str]],
+    *,
+    require_predictions: bool = False,
+) -> dict[Task, list[SessionData]]:
+    """과제마다 여러 모델 버전의 예측을 세션별로 합친다 (대신할 기본 어댑터 여럿과 비교할 때).
+
+    require_predictions: 골든셋에 예측이 하나도 없는 버전이 있으면 MissingPredictionsError.
+    기존(비교) 모델에 쓴다. 잘못 적은 버전은 예측이 비어 기존 지표가 0에 가까워지고 어떤 후보든
+    통과하기 때문이다.
+    """
+    out: dict[Task, list[SessionData]] = {}
+    for task, versions in models.items():
+        merged: dict[str, SessionData] = {}
+        for v in versions:
+            sessions = load_golden(conn, golden_version, {task: v})[task]
+            if require_predictions and not any(s.pred for s in sessions):
+                raise MissingPredictionsError(
+                    f"{task}: 모델 버전 {v}의 예측이 골든셋 {golden_version}에 없습니다 "
+                    "(버전을 확인하세요. 버전 앞부분으로 고르려면 끝에 *)"
+                )
+            for s in sessions:
+                if s.session_id in merged:
+                    merged[s.session_id].pred.extend(s.pred)
+                else:
+                    merged[s.session_id] = SessionData(
+                        s.session_id, s.truth, list(s.pred), s.groups
+                    )
+        out[task] = list(merged.values())
+    return out
+
+
 def _clean(value: Any) -> Any:
     if isinstance(value, float) and math.isnan(value):
         return None
@@ -145,7 +196,12 @@ def _clean(value: Any) -> Any:
     return value
 
 
-def report_dict(report: EvalReport, decision: GateDecision | None) -> dict[str, Any]:
+def report_dict(
+    report: EvalReport,
+    decision: GateDecision | None,
+    extra: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """extra: 리포트에 함께 남길 값 (예: 재학습 루프가 비교한 배포 모델 버전)."""
     data: dict[str, Any] = {
         "golden_version": report.golden_version,
         "model_versions": report.model_versions,
@@ -160,6 +216,7 @@ def report_dict(report: EvalReport, decision: GateDecision | None) -> dict[str, 
             "passed": decision.passed,
             "tasks": {t: asdict(d) for t, d in decision.tasks.items()},
         }
+    data |= dict(extra or {})
     return _clean(data)
 
 
@@ -185,9 +242,14 @@ def markdown(report: EvalReport, decision: GateDecision | None) -> str:
     return "\n".join(lines) + "\n"
 
 
-def write_report(path: Path, report: EvalReport, decision: GateDecision | None) -> None:
+def write_report(
+    path: Path,
+    report: EvalReport,
+    decision: GateDecision | None,
+    extra: Mapping[str, Any] | None = None,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        json.dumps(report_dict(report, decision), ensure_ascii=False, indent=2), "utf-8"
+        json.dumps(report_dict(report, decision, extra), ensure_ascii=False, indent=2), "utf-8"
     )
     path.with_suffix(".md").write_text(markdown(report, decision), "utf-8")

@@ -87,9 +87,12 @@ def cmd_models(args: argparse.Namespace) -> int:
 
 def cmd_approve(args: argparse.Namespace) -> int:
     root = repo_root()
+    buckets = load_config(root / "config/defaults.yaml").buckets
+    # 평가 리포트에 적힌 비교 대상 배포 모델이 지금 배포 모델과 같아야 배포한다
+    artifacts = store_from_spec(args.store, buckets.mlflow)
     engine = sa.create_engine(database_url(args.url))
     with engine.begin() as conn:
-        mv = deploy(conn, args.model_version, now=datetime.now(UTC))
+        mv = deploy(conn, args.model_version, now=datetime.now(UTC), artifacts=artifacts)
         reg = registration(conn, mv, load_policy(root))
     engine.dispose()
     if reg is not None:  # DB 커밋 뒤에
@@ -126,5 +129,8 @@ def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
     models.set_defaults(func=cmd_models)
     approve = tsub.add_parser("approve", help="게이트를 통과한(passed) 모델을 사람이 배포 승인")
     approve.add_argument("model_version")
+    approve.add_argument(
+        "--store", default="s3", help="평가 리포트 저장소 's3' 또는 'local:<디렉터리>'"
+    )
     approve.add_argument("--url")
     approve.set_defaults(func=cmd_approve)

@@ -16,7 +16,7 @@ import pytest
 import sqlalchemy as sa
 
 from dlp_datasets.build import build_dataset_version
-from dlp_datasets.lineage import session_lineage
+from dlp_datasets.lineage import session_lineage, withdraw_session
 from dlp_datasets.policy import load_policy as load_dataset_policy
 from dlp_datasets.snapshot import LocalSnapshotStore
 from dlp_eval.policy import load_policy as load_eval_policy
@@ -33,7 +33,7 @@ from dlp_schema.db.repository import (
 from dlp_schema.labels import LabelRecord, Provenance, Source, Verification, VerificationState
 from dlp_schema.lineage import GoldenSet, ModelStatus
 from dlp_schema.ontology import load_ontology
-from dlp_schema.session import Domain, PrivacyState, Session
+from dlp_schema.session import Domain, PrivacyState, Session, Stream, StreamKind, SyncMethod
 from dlp_schema.testing import FIXED_TIME, make_label, make_session
 from dlp_train.deployed import deployed_predictors
 from dlp_train.loop import LoopResult, TrainingError, TrainingJob, deploy, run_training_job
@@ -287,7 +287,7 @@ def test_training_loop_gate_blocks_or_deploys(engine: sa.Engine, tmp_path: Path)
     assert r4.status == "passed", r4.reason
     with engine.begin() as conn:
         assert not list_model_versions(conn, "privacy", ModelStatus.DEPLOYED)
-        deploy(conn, r4.model_version or "", now=FIXED_TIME)
+        deploy(conn, r4.model_version or "", now=FIXED_TIME, artifacts=artifacts)
         assert [
             m.model_version for m in list_model_versions(conn, "privacy", ModelStatus.DEPLOYED)
         ] == [r4.model_version]
@@ -296,9 +296,9 @@ def test_training_loop_gate_blocks_or_deploys(engine: sa.Engine, tmp_path: Path)
     r7 = run(TrainingJob("privacy", "dv1", force=True), 8)
     assert (r6.status, r7.status) == ("passed", "passed")
     with engine.begin() as conn:
-        deploy(conn, r6.model_version or "", now=FIXED_TIME.replace(second=9))
+        deploy(conn, r6.model_version or "", now=FIXED_TIME.replace(second=9), artifacts=artifacts)
     with engine.begin() as conn, pytest.raises(TrainingError, match="다시 학습"):
-        deploy(conn, r7.model_version or "", now=FIXED_TIME.replace(second=10))
+        deploy(conn, r7.model_version or "", now=FIXED_TIME.replace(second=10), artifacts=artifacts)
     r5 = run(TrainingJob("hands", "dv1", force=True), 6)
     assert r5.status == "skipped" and "정답이 없어" in r5.reason
 
@@ -337,3 +337,121 @@ def test_training_loop_gate_blocks_or_deploys(engine: sa.Engine, tmp_path: Path)
         artifacts._path(mv.artifact_uri.removeprefix(artifacts.uri(""))).write_text("{}")  # pyright: ignore[reportPrivateUsage]
         tampered = deployed_predictors(conn, artifacts, policy, "prelabel", ctx, tmp_path / "w3")
         assert not tampered.predictors and "해시" in tampered.notes[0]
+
+
+# ---------------------------------------------------------------- 타임라인 과제·동의 철회·승인 배포
+
+THIRD: dict[str, Any] = {
+    "stream_id": "third", "kind": StreamKind.THIRD_PERSON,
+    "uri": "s3://dlp-raw/x/third.mp4", "sync_method": SyncMethod.QR_SLATE,
+}  # fmt: skip
+
+
+def timeline_labels(sid: str, *, shift: int = 0, model: str | None = None) -> list[LabelRecord]:
+    """접촉 5개와 행동 5개 (마스터 타임라인, stream_id 없음). model이면 그 버전의 모델 예측."""
+    kw: dict[str, Any] = (
+        {"provenance": Provenance(source=Source.MODEL, model_version=model), "confidence": 0.6}
+        if model
+        else {}
+    )
+    tag = "m" if model else "h"
+    out: list[LabelRecord] = []
+    for i in range(5):
+        s, e = 1000 * i + shift, 1000 * i + 500 + shift
+        contact = {"kind": "hand_state", "hand": "right", "contact_target_kind": "object",
+                   "target_id": "cup_01", "grasp_type": "power", "role": "active"}  # fmt: skip
+        action = {"kind": "action", "action_id": f"a{i}", "hand": "right", "verb": "grasp",
+                  "t_approach_ms": s, "t_end_ms": e}  # fmt: skip
+        out.append(make_label(contact, label_id=f"{sid}-{tag}-c{i}", session_id=sid,
+                              t_start_ms=s, t_end_ms=e, **kw))  # fmt: skip
+        out.append(make_label(action, label_id=f"{sid}-{tag}-a{i}", session_id=sid,
+                              t_start_ms=s, t_end_ms=e, **kw))  # fmt: skip
+    return out
+
+
+def test_timeline_tasks_withdrawal_and_approval_baseline(engine: sa.Engine, tmp_path: Path) -> None:
+    policy = small(load_policy(ROOT))
+    snapshots = LocalSnapshotStore(tmp_path / "snapshots")
+    artifacts = LocalStore(tmp_path / "store", "dlp-mlflow")
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"stub")
+
+    with engine.begin() as conn:
+        register_ontology(conn, load_ontology(ROOT / "config/ontology/v1"))
+        for i in range(8):
+            s = make_session(f"tr{i}", worker_id=f"w{i}", site_id=f"site{i}")
+            insert_session(conn, s.model_copy(update={"privacy_state": PrivacyState.APPROVED}))
+            insert_labels(conn, timeline_labels(f"tr{i}"))
+        for i in range(2):
+            # 골든 세션에는 3인칭 영상도 있다 (영상 스트림 두 개)
+            s = make_session(f"gd{i}", worker_id=f"gw{i}", site_id=f"gsite{i}")
+            s = s.model_copy(
+                update={"streams": (*s.streams, Stream.model_validate(THIRD)),
+                        "privacy_state": PrivacyState.APPROVED}
+            )  # fmt: skip
+            insert_session(conn, s)
+            insert_labels(conn, timeline_labels(f"gd{i}"))
+            # 휴리스틱 접촉 예측: 버전이 세션마다 다르고 300 ms 늦다 (허용 150 ms 밖)
+            heuristic = timeline_labels(f"gd{i}", shift=300, model=f"contact-heuristic-1+pX+igd{i}")
+            insert_labels(conn, [x for x in heuristic if x.kind == "hand_state"])
+        insert_golden_set(
+            conn,
+            GoldenSet(version="golden-v1", domain=Domain.CLEANING, session_ids=("gd0", "gd1"),
+                      created_at=FIXED_TIME),
+        )  # fmt: skip
+        version = build_dataset_version(
+            conn, snapshots, load_dataset_policy(ROOT), version_id="dv1",
+            ontology_version="1.0.0", golden_set_version="golden-v1", now=FIXED_TIME,
+        ).version  # fmt: skip
+        trained = sorted(sid for sid, sp in version.splits.items() if sp in policy.splits)
+        # 버전을 만든 뒤 동의 철회: 버전 분할에는 남아 있지만 학습 예제에서 빠져야 한다
+        withdrawn = trained[0]
+        withdraw_session(conn, withdrawn, "consent", FIXED_TIME)
+
+    def run(job: TrainingJob, now_s: int) -> LoopResult:
+        with engine.begin() as conn:
+            return run_training_job(
+                conn, job, snapshots=snapshots, artifacts=artifacts, tracker=MemoryTracker(),
+                clips=lambda session, stream, work: video, policy=policy,
+                eval_policy=load_eval_policy(ROOT), now=FIXED_TIME.replace(second=now_s),
+                stub_truth=True,
+            )  # fmt: skip
+
+    heuristic_base = ("contact-heuristic-1*",)
+    c1 = run(TrainingJob("contact", "dv1", baseline_versions=heuristic_base, force=True), 1)
+    # 철회한 세션의 접촉 5개는 빠졌다
+    assert sum(c1.examples.values()) == 5 * (len(trained) - 1)
+    # 접촉은 타임라인 라벨이라 세션마다 한 번만 예측한다 (3인칭 스트림에서 겹치면 오탐이 된다)
+    assert c1.status == "passed", c1.reason
+    assert c1.candidate is not None
+    m = c1.candidate.overall["contact"].metrics
+    assert m["contact_start_f1"] == 1.0 and m["contact_end_f1"] == 1.0
+    assert c1.baseline is not None
+    assert c1.baseline.overall["contact"].metrics["contact_start_f1"] == 0.0
+
+    a1 = run(TrainingJob("actions", "dv1", force=True), 2)
+    assert a1.status == "passed", a1.reason
+    assert a1.candidate is not None
+    assert a1.candidate.overall["actions"].metrics["segment_f1_0.5"] == 1.0
+    assert sum(a1.examples.values()) == 5 * (len(trained) - 1)
+
+    # 승인 배포: 리포트에 적힌 비교 배포 모델(없음)이 지금과 같으니 배포한다.
+    # 리포트 저장소 없이는 확인할 수 없다
+    with engine.begin() as conn, pytest.raises(TrainingError, match="저장소"):
+        deploy(conn, c1.model_version or "", now=FIXED_TIME.replace(second=50))
+    with engine.begin() as conn:
+        deploy(conn, c1.model_version or "", now=FIXED_TIME.replace(second=50), artifacts=artifacts)
+    # 배포(50초)보다 이른 시각에 시작한 학습도 c1과 비교했으면 승인할 수 있다
+    # (판정 시각은 학습 시작 시각이라 비교에 쓰지 않는다)
+    c2 = run(TrainingJob("contact", "dv1", force=True), 20)
+    c3 = run(TrainingJob("contact", "dv1", force=True), 21)
+    assert (c2.status, c3.status) == ("passed", "passed")
+    assert c2.baseline is not None and c2.baseline.model_versions["contact"] == c1.model_version
+    with engine.begin() as conn:
+        deploy(conn, c2.model_version or "", now=FIXED_TIME.replace(second=55), artifacts=artifacts)
+    # c3는 c1과 비교했는데 지금 배포 모델은 c2다 → 다시 평가해야 한다
+    with engine.begin() as conn, pytest.raises(TrainingError, match="다시 학습"):
+        deploy(conn, c3.model_version or "", now=FIXED_TIME.replace(second=56), artifacts=artifacts)
+    with engine.connect() as conn:
+        deployed = list_model_versions(conn, "contact", ModelStatus.DEPLOYED)
+        assert [d.model_version for d in deployed] == [c2.model_version]

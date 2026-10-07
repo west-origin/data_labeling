@@ -6,8 +6,16 @@ tolerance_ms:
   contact_glove: 70
   boundary: 200             # 행동 경계 일치 허용 오차 (타임라인 맨 앞·맨 뒤 경계는 세지 않는다)
   state: 500                # 상태 전이 시각 허용 오차
-max_interp_ms: 200          # 예측 박스·관절을 정답 시각에 맞출 때 보간할 최대 키프레임 간격
-                            # (정답 트랙은 간격 제한 없이 자기 키프레임 사이를 보간한다)
+# 예측 박스·관절을 정답 시각에 맞출 때 보간할 최대 키프레임 간격 (정답 트랙은 간격 제한 없이 자기
+# 키프레임 사이를 보간한다). 프리라벨 트래커는 max_gap_ms보다 짧은 끊김을 한 트랙으로 잇되 그 사이에
+# 키프레임을 만들지 않으므로, 과제 값은 그 예측을 내는 어댑터의 트랙 간격 이상이어야 한다 (짧으면 같은
+# 박스도 놓친 것으로 세어 기존 지표가 0에 가까워지고 약한 후보가 게이트를 통과한다). 테스트가 검사한다.
+max_interp_ms:
+  default: 200
+  tasks:
+    objects: 1200           # >= prelabel.yaml open_vocab_objects.max_gap_ms (OWLv2 도구, 500 ms 간격 추론)
+                            #    와 objects.max_gap_ms
+    body: 300               # >= prelabel.yaml body.max_gap_ms
 track_iou: 0.5              # 추적 IDF1·MOTA와 보정(ECE) 판정의 IoU 문턱
 segment_iou: [0.1, 0.25, 0.5]
 relation_iou: 0.5

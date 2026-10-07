@@ -1,7 +1,8 @@
 """재학습 루프 한 번 (`dlp train run`).
 
 1. 데이터셋 버전에서 과제 학습 예제를 뽑는다
-   (학습·검증 분할만, 운영 라벨만, 자동 원본과의 차이 포함).
+   (학습·검증 분할만, 운영 라벨만, 자동 원본과의 차이 포함). 버전을 만든 뒤 사용 중지(동의 철회)된
+   세션은 뺀다 (골든셋 평가도 golden_sessions가 뺀다).
 2. 누적 확인: 예제 수가 min_examples 미만이거나 직전 학습보다 min_new_examples만큼 늘지 않았으면
    건너뛴다.
 3. 학습 → 산출물을 학습 산출물 버킷에 올리고(sha256) MLflow 실행에 파라미터·지표·산출물을 남긴다.
@@ -30,26 +31,39 @@ from dlp_datasets.snapshot import SnapshotStore
 from dlp_eval.gate import GateDecision, TaskDecision, decide
 from dlp_eval.harness import EvalReport, SessionData, evaluate
 from dlp_eval.policy import EvaluationPolicy, Task
-from dlp_eval.runner import GoldenSession, golden_sessions, load_golden, write_report
+from dlp_eval.runner import (
+    TIMELINE_TASKS,
+    GoldenSession,
+    MissingPredictionsError,
+    golden_sessions,
+    load_golden_merged,
+    write_report,
+)
 from dlp_media.storage import ObjectStore, sha256_file
+from dlp_schema.dataset import DatasetVersion
 from dlp_schema.db.repository import (
     get_dataset_version,
     get_golden_set,
+    get_session,
     get_training_run,
     insert_model_version,
     list_model_versions,
     set_model_status,
+    withdrawn_session_ids,
 )
 from dlp_schema.labels import LabelRecord
 from dlp_schema.lineage import ModelStatus, ModelVersion, TrainingRun
 from dlp_schema.predictor import Clip, Predictor
-from dlp_schema.session import Session, Stream, StreamKind
+from dlp_schema.session import LifecycleState, Session, Stream, StreamKind
 from dlp_train.extract import load_training_data, matches
 from dlp_train.policy import TrainingPolicy
 from dlp_train.tracking import Tracker
 from dlp_train.trainers import LOADERS, TRAINERS, LoadContext, ModelLoader, Trainer
 
 VIDEO = {StreamKind.BODYCAM, StreamKind.THIRD_PERSON}
+# 게이트에서 비교한 배포 모델 버전 (없으면 null).
+# 평가 리포트(golden.json)와 MLflow 파라미터에 남긴다
+DEPLOYED_BASELINE = "deployed_baseline"
 
 # (세션, 스트림, 작업 디렉터리) → 모델에 넣을 영상 파일
 ClipSource = Callable[[Session, Stream, Path], Path]
@@ -125,11 +139,20 @@ def predict_golden(
     clips: ClipSource,
     work: Path,
 ) -> list[SessionData]:
-    """후보·기존 모델을 골든셋 세션 영상에 돌린다 (DB에 쓰지 않는다)."""
+    """후보·기존 모델을 골든셋 세션 영상에 돌린다 (DB에 쓰지 않는다).
+
+    공간 과제는 영상 스트림마다, 타임라인 과제(접촉·행동 등, stream_id 없는 라벨)는 세션마다 기준
+    스트림(바디캠)에 한 번 돌린다. 스트림마다 돌리면 같은 타임라인 구간이 겹쳐 오탐이 된다.
+    """
     out: list[SessionData] = []
     for g in golden:
         pred: list[LabelRecord] = []
-        for stream in (s for s in g.session.streams if s.kind in VIDEO):
+        streams = (
+            [g.session.reference_stream]
+            if task in TIMELINE_TASKS
+            else [s for s in g.session.streams if s.kind in VIDEO]
+        )
+        for stream in streams:
             labels = predictor.run(
                 Clip(g.session.session_id, stream.stream_id, clips(g.session, stream, work))
             )
@@ -140,11 +163,15 @@ def predict_golden(
 
 
 def _truth_lookup(golden: list[GoldenSession]) -> Callable[[str, str], list[LabelRecord]]:
-    by_key: dict[tuple[str, str], list[LabelRecord]] = {}
+    """(세션, 스트림) → 그 스트림의 정답과 세션의 타임라인 정답(stream_id 없음).
+
+    타임라인 과제는 predict_golden이 세션마다 한 번만 부르므로 겹치지 않는다.
+    """
+    by_key: dict[tuple[str, str | None], list[LabelRecord]] = {}
     for g in golden:
         for x in g.truth:
-            by_key.setdefault((x.session_id, x.stream_id or ""), []).append(x)
-    return lambda sid, stream: by_key.get((sid, stream), [])
+            by_key.setdefault((x.session_id, x.stream_id), []).append(x)
+    return lambda sid, stream: by_key.get((sid, stream), []) + by_key.get((sid, None), [])
 
 
 def run_training_job(
@@ -180,7 +207,9 @@ def run_training_job(
             f"{version.version_id}: 골든셋이 없는 데이터셋 버전은 평가할 수 없습니다"
         )
     golden_ids = set(get_golden_set(conn, version.golden_set_version).session_ids)
-    data = load_training_data(snapshots, version, job.task, policy)
+    data = load_training_data(
+        snapshots, version, job.task, policy, excluded=withdrawn_sessions(conn, version, policy)
+    )
     leaks = data.session_ids & golden_ids
     if leaks:
         raise TrainingError(f"골든셋 세션이 학습 데이터에 있습니다: {sorted(leaks)[:5]}")
@@ -295,6 +324,8 @@ def run_training_job(
                 model_versions={job.task: model_version},
             )
             deployed = list_model_versions(conn, job.task, ModelStatus.DEPLOYED)
+            # 비교한 배포 모델 (없으면 None). 승인 배포 때 지금 배포 모델과 같은지 본다
+            compared_with = deployed[-1].model_version if deployed else None
             baseline: EvalReport | None = None
             if deployed:
                 cur = deployed[-1]
@@ -330,11 +361,12 @@ def run_training_job(
             result.candidate, result.baseline, result.decision = candidate, baseline, decision
 
             report = work / "report" / "golden.json"
-            write_report(report, candidate, decision)
+            write_report(report, candidate, decision, {DEPLOYED_BASELINE: compared_with})
             report_key = f"{policy.artifact_prefix}/{job.task}/{model_version}/golden.json"
             artifacts.put_file(report_key, report, sha256_file(report))
             md = report.with_suffix(".md")
             artifacts.put_file(report_key.removesuffix(".json") + ".md", md, sha256_file(md))
+            tracker.log_params(mlflow_run, {DEPLOYED_BASELINE: compared_with or "none"})
             tracker.log_artifact(mlflow_run, report, "golden")
             tracker.log_artifact(mlflow_run, md, "golden")
             metrics = candidate.overall[job.task].metrics if job.task in candidate.overall else {}
@@ -369,20 +401,27 @@ def _merged_golden(conn: sa.Connection, golden_version: str, job: TrainingJob) -
     골든셋에 예측이 하나도 없는 버전이 있으면 TrainingError (버전을 잘못 적었거나 골든셋에
     프리라벨을 돌리지 않았다).
     """
-    merged: dict[str, SessionData] = {}
-    for v in job.baseline_versions:
-        sessions = load_golden(conn, golden_version, {job.task: v})[job.task]
-        if not any(s.pred for s in sessions):
-            raise TrainingError(
-                f"{job.task}: 기존 모델 버전 {v}의 예측이 골든셋 {golden_version}에 없습니다 "
-                "(--baseline-version을 확인하세요. 버전 앞부분으로 고르려면 끝에 *)"
-            )
-        for s in sessions:
-            if s.session_id in merged:
-                merged[s.session_id].pred.extend(s.pred)
-            else:
-                merged[s.session_id] = SessionData(s.session_id, s.truth, list(s.pred), s.groups)
-    return list(merged.values())
+    try:
+        merged = load_golden_merged(
+            conn, golden_version, {job.task: list(job.baseline_versions)}, require_predictions=True
+        )
+    except MissingPredictionsError as exc:
+        raise TrainingError(f"{exc} (--baseline-version)") from exc
+    return merged[job.task]
+
+
+def withdrawn_sessions(
+    conn: sa.Connection, version: DatasetVersion, policy: TrainingPolicy
+) -> set[str]:
+    """학습 분할 세션 중 사용 중지(동의 철회 등)된 세션. 데이터셋 버전을 만든 뒤 철회됐어도 뺀다."""
+    withdrawn = withdrawn_session_ids(conn)
+    out: set[str] = set()
+    for sid, split in version.splits.items():
+        if split not in policy.splits:
+            continue
+        if sid in withdrawn or get_session(conn, sid).lifecycle_state is LifecycleState.WITHDRAWN:
+            out.add(sid)
+    return out
 
 
 def deploy(
@@ -391,11 +430,13 @@ def deploy(
     *,
     now: datetime,
     report_uri: str | None = None,
+    artifacts: ObjectStore | None = None,
 ) -> ModelVersion:
     """게이트를 통과한 모델(candidate 판정 직후 또는 passed)을 배포한다. 과제마다 배포는 하나다.
 
-    passed 모델은 게이트 판정 뒤에 같은 과제의 다른 모델이 배포됐으면 배포하지 않는다 (그 모델과
-    비교하지 않았으므로 다시 평가해야 한다). MLflow 등록은 DB 커밋 뒤에 register()로 한다.
+    passed 모델은 평가 리포트(report_uri, artifacts 저장소)에 적힌 비교 대상 배포 모델이 지금 배포
+    모델과 다르면 배포하지 않는다 (지금 모델과 비교하지 않았으므로 다시 평가해야 한다). 판정 시각은
+    학습 실행 시작 시각이라 비교에 쓰지 않는다. MLflow 등록은 DB 커밋 뒤에 register()로 한다.
     """
     mv = next((m for m in list_model_versions(conn) if m.model_version == model_version), None)
     if mv is None:
@@ -405,17 +446,37 @@ def deploy(
     if mv.status is ModelStatus.CANDIDATE and report_uri is None:
         raise TrainingError(f"{model_version}은 게이트 판정 전입니다")
     current = list_model_versions(conn, mv.task, ModelStatus.DEPLOYED)
-    if mv.status is ModelStatus.PASSED and mv.decided_at is not None:
-        newer = [c for c in current if c.decided_at is not None and c.decided_at > mv.decided_at]
-        if newer:
+    if mv.status is ModelStatus.PASSED:
+        if artifacts is None:
+            raise TrainingError(f"{model_version}: 승인 배포에는 평가 리포트 저장소가 필요합니다")
+        compared = _compared_with(artifacts, mv)
+        now_deployed = current[-1].model_version if current else None
+        if compared != now_deployed:
             raise TrainingError(
-                f"{model_version}의 게이트 판정 뒤에 {newer[0].model_version}이 배포됐습니다. "
+                f"{model_version}은 게이트에서 {compared or '배포 모델 없음'}과 비교했지만 "
+                f"지금 배포 모델은 {now_deployed or '없음'}입니다. "
                 "그 모델과 비교하도록 다시 학습·평가하세요"
             )
     for cur in current:
         set_model_status(conn, cur.model_version, ModelStatus.RETIRED, now)
     set_model_status(conn, model_version, ModelStatus.DEPLOYED, now, report_uri)
     return mv
+
+
+def _compared_with(artifacts: ObjectStore, mv: ModelVersion) -> str | None:
+    """passed 모델의 평가 리포트에 적힌, 게이트에서 비교한 배포 모델 버전 (없었으면 None)."""
+    if mv.report_uri is None:
+        raise TrainingError(f"{mv.model_version}: 평가 리포트가 없습니다")
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "golden.json"
+        artifacts.get_file(_key(artifacts, mv.report_uri), path)
+        data: dict[str, Any] = json.loads(path.read_text("utf-8"))
+    if DEPLOYED_BASELINE not in data:
+        raise TrainingError(
+            f"{mv.model_version}: 평가 리포트에 비교한 배포 모델이 없습니다. 다시 학습·평가하세요"
+        )
+    value = data[DEPLOYED_BASELINE]
+    return str(value) if value is not None else None
 
 
 def registration(

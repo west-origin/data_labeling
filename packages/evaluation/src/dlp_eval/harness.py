@@ -4,9 +4,10 @@
 - objects: box_track → mAP(0.50:0.95), AP50, HOTA, IDF1, MOTA, ECE.
   정답 키프레임 시각(모든 정답 트랙의 합집합)에서 비교한다. 사람 정답은 키프레임이 성기다 (CVAT가
   사이를 보간한다). 그래서 정답 트랙은 자기 키프레임 사이를 간격 제한 없이 선형 보간하고 (화면 밖
-  키프레임이 끼면 그 사이는 없음), 예측은 max_interp_ms 이내에서만 보간한다.
-- hands / body: keypoint_track(hand21 / coco17) → PCK. 손은 같은 스트림의 같은 손끼리,
-  전신은 스트림·시각마다 키포인트 박스 IoU로 사람을 맞춘다.
+  키프레임이 끼면 그 사이는 없음), 예측은 과제별 max_interp_ms 이내에서만 보간한다 (프리라벨
+  트래커가 한 트랙으로 잇는 끊김 이상, evaluation.yaml).
+- hands / body: keypoint_track(hand21 / coco17) → PCK. 정답 시각마다 손은 같은 스트림의 같은 쪽
+  손끼리 관절 거리로, 전신은 같은 스트림에서 보이는 관절 박스 IoU로 일대일 맞춘다 (헝가리안).
 - contact: hand_state(접촉 대상 있음) → 접촉 시작·종료 F1과 오차(ms), 파지 유형 macro F1.
   장갑 세션은 contact_glove 허용 오차를 쓴다.
 - actions: action → 구간 F1@IoU, temporal mAP, 경계 일치 F1(타임라인 양 끝 제외), 동사 macro F1.
@@ -29,6 +30,7 @@ from dataclasses import dataclass, field
 import numpy as np
 from numpy.typing import NDArray
 
+from dlp_eval.metrics.assign import assign
 from dlp_eval.metrics.classification import ece, macro_f1, under_sampled
 from dlp_eval.metrics.detection import Box, DetBox, GtBox, average_precision, box_iou
 from dlp_eval.metrics.keypoints import pck
@@ -49,6 +51,7 @@ from dlp_schema.labels import (
     BlurTrackPayload,
     BoxTrackPayload,
     CoveragePayload,
+    Hand,
     HandStatePayload,
     KeypointTrackPayload,
     LabelRecord,
@@ -143,6 +146,7 @@ def eval_objects(data: list[SessionData], policy: EvaluationPolicy) -> TaskRepor
     conf: list[float] = []
     correct: list[bool] = []
     counts: Counter[str] = Counter()
+    gap = policy.max_interp_ms.for_task("objects")
     for s in data:
         truth = [
             (x.stream_id, p.entity_id, p.class_id, _box_frames(p))
@@ -168,7 +172,7 @@ def eval_objects(data: list[SessionData], policy: EvaluationPolicy) -> TaskRepor
             d = [
                 (e, c, v, sc)
                 for st, e, c, kf, sc in pred
-                if st == stream and (v := _interp(kf, t, policy.max_interp_ms)) is not None
+                if st == stream and (v := _interp(kf, t, gap)) is not None
             ]
             image = (s.session_id, stream, t)
             gb = [_as_box(v) for _, _, v in g]
@@ -223,6 +227,15 @@ def eval_objects(data: list[SessionData], policy: EvaluationPolicy) -> TaskRepor
 def eval_keypoints(
     data: list[SessionData], policy: EvaluationPolicy, skeleton: str
 ) -> TaskReport | None:
+    """정답 키프레임 시각마다 같은 스트림(손은 같은 쪽 손)의 정답·예측을 일대일로 맞춘다.
+
+    한 시각에 정답이 여럿일 수 있다 (바디캠에 착용자와 돌봄 대상의 왼손, 3인칭에 여러 사람).
+    예측 트랙은 시각마다 한 번만 쓴다. 손은 관절 평균 거리 합이 가장 작게, 전신은 보이는 관절
+    박스 IoU 합이 가장 크게 (IoU 0인 짝은 맞추지 않는다) 헝가리안 할당으로 맞춘다.
+    맞출 예측이 없는 정답은 예측 없음(모든 관절 틀림)으로 센다.
+    """
+    task: Task = "hands" if skeleton == "hand21" else "body"
+    gap = policy.max_interp_ms.for_task(task)
     pairs: list[tuple[NDArray[np.float64], NDArray[np.float64] | None]] = []
     counts: Counter[str] = Counter()
     for s in data:
@@ -232,71 +245,81 @@ def eval_keypoints(
             if p.skeleton == skeleton
         ]
         pred = [
-            (x.stream_id, p)
+            (x.stream_id, p.hand, _kp_frames(p))
             for x, p in _payloads(s.pred, KeypointTrackPayload)
             if p.skeleton == skeleton
         ]
-        if skeleton == "hand21":
-            for stream, t_track in truth:
-                # 같은 스트림의 같은 손 예측 트랙들 (트랙이 끊겨 여러 개일 수 있다)
-                candidates = [
-                    _kp_frames(p) for st, p in pred if st == stream and p.hand is t_track.hand
-                ]
-                for t, gt in _kp_frames(t_track):
-                    assert gt is not None
-                    v = next(
-                        (
-                            v
-                            for kf in candidates
-                            if (v := _interp(kf, t, policy.max_interp_ms)) is not None
-                        ),
-                        None,
-                    )
-                    pairs.append((gt, v[:, :2] if v is not None else None))
-                    counts[t_track.hand.value if t_track.hand else "hand"] += 1
-            continue
-        pred_frames = [(st, _kp_frames(p)) for st, p in pred]
-        times = sorted({(st, f.t_ms) for st, p in truth for f in p.keyframes})
-        for stream, t in times:
-            gt_now = [
-                g
-                for st, p in truth
-                if st == stream
-                for tt, g in _kp_frames(p)
-                if tt == t and g is not None
-            ]
-            pr_now = [
+        # (스트림, 손, 시각) → 그 시각의 정답들. 전신은 손 구분 없이 (hand=None)
+        groups: dict[tuple[str | None, Hand | None, int], list[NDArray[np.float64]]] = {}
+        for stream, p in truth:
+            side = p.hand if skeleton == "hand21" else None
+            for t, g in _kp_frames(p):
+                assert g is not None
+                groups.setdefault((stream, side, t), []).append(g)
+        for (stream, side, t), gts in sorted(
+            groups.items(), key=lambda kv: (kv[0][0] or "", str(kv[0][1]), kv[0][2])
+        ):
+            cands = [
                 v
-                for st, kf in pred_frames
-                if st == stream and (v := _interp(kf, t, policy.max_interp_ms)) is not None
+                for st, hand, kf in pred
+                if st == stream
+                and (skeleton != "hand21" or hand is side)
+                and (v := _interp(kf, t, gap)) is not None
             ]
-            iou = box_iou([_kp_box(g) for g in gt_now], [_kp_box(v) for v in pr_now])
-            used: set[int] = set()
-            for i, g in enumerate(gt_now):
-                j = (
-                    next(
-                        (
-                            int(j)
-                            for j in np.argsort(-iou[i])
-                            if int(j) not in used and iou[i, j] > 0
-                        ),
-                        None,
-                    )
-                    if len(pr_now)
-                    else None
-                )
-                if j is not None:
-                    used.add(j)
-                pairs.append((g, pr_now[j][:, :2] if j is not None else None))
-                counts["person"] += 1
+            match = _match_hands(gts, cands) if skeleton == "hand21" else _match_people(gts, cands)
+            for g, j in zip(gts, match, strict=True):
+                pairs.append((g, cands[j][:, :2] if j is not None else None))
+                counts[(side.value if side else "hand") if skeleton == "hand21" else "person"] += 1
     if not pairs:
         return None
     r = pck(pairs, policy.pck_alpha)
     return _report({"pck": r.pck}, counts, len(data), policy.min_samples_per_class)
 
 
+def _assign_pairs(cost: NDArray[np.float64], allowed: NDArray[np.bool_]) -> list[int | None]:
+    """행(정답)마다 맞춘 열(예측) 번호. 허용되지 않은 짝은 맞추지 않는다."""
+    out: list[int | None] = [None] * cost.shape[0]
+    if not cost.size or not allowed.any():
+        return out
+    big = float(np.abs(cost[allowed]).max()) * 2 + 1.0
+    rows, cols = assign(np.where(allowed, cost, big))
+    for i, j in zip(rows.tolist(), cols.tolist(), strict=True):
+        if allowed[i, j]:
+            out[i] = j
+    return out
+
+
+def _match_hands(
+    gts: list[NDArray[np.float64]], cands: list[NDArray[np.float64]]
+) -> list[int | None]:
+    """같은 쪽 손이 여럿이면 관절 평균 거리(정답에서 보이는 관절)가 가까운 예측끼리 맞춘다."""
+    cost = np.zeros((len(gts), len(cands)))
+    allowed = np.zeros((len(gts), len(cands)), dtype=bool)
+    for i, g in enumerate(gts):
+        visible = g[:, 2] > 0
+        if not visible.any():
+            continue
+        for j, v in enumerate(cands):
+            d = np.hypot(v[visible, 0] - g[visible, 0], v[visible, 1] - g[visible, 1])
+            cost[i, j] = float(d.mean())
+            allowed[i, j] = True
+    return _assign_pairs(cost, allowed)
+
+
+def _match_people(
+    gts: list[NDArray[np.float64]], cands: list[NDArray[np.float64]]
+) -> list[int | None]:
+    """보이는 관절 박스의 IoU 합이 가장 큰 일대일 할당 (IoU 0인 짝은 맞추지 않는다)."""
+    iou = box_iou([_kp_box(g) for g in gts], [_kp_box(v) for v in cands])
+    return _assign_pairs(-iou, iou > 0)
+
+
 def _kp_box(points: NDArray[np.float64]) -> Box:
-    xs, ys = points[:, 0], points[:, 1]
+    """보이는(visibility>0) 관절의 박스. 표시하지 않은 관절(보통 (0, 0))은 넣지 않는다."""
+    visible = points[points[:, 2] > 0]
+    if not len(visible):
+        return (0.0, 0.0, 0.0, 0.0)
+    xs, ys = visible[:, 0], visible[:, 1]
     return (
         float(xs.min()),
         float(ys.min()),
@@ -523,7 +546,7 @@ def _covered(target: Box, covers: Sequence[Box]) -> float:
 
 def eval_privacy(data: list[SessionData], policy: EvaluationPolicy) -> TaskReport | None:
     """스트림별 정답 키프레임 시각마다 비교한다. 정답 트랙은 자기 키프레임 사이를 보간하고 (사람
-    키프레임은 성기다), 예측은 같은 스트림만 max_interp_ms 안에서 보간한다.
+    키프레임은 성기다), 예측은 같은 스트림만 max_interp_ms(privacy) 안에서 보간한다.
 
     재현: 정답 박스 면적의 coverage 이상이 예측 블러들로 덮였는가 (대상 종류별로도 낸다).
     정밀: 예측 박스 면적의 precision_overlap 이상이 정답 박스들 위에 있는가.
@@ -531,6 +554,7 @@ def eval_privacy(data: list[SessionData], policy: EvaluationPolicy) -> TaskRepor
     hits: Counter[str] = Counter()
     counts: Counter[str] = Counter()
     pred_total = pred_ok = 0
+    gap = policy.max_interp_ms.for_task("privacy")
     for s in data:
         truth = [
             (x.stream_id, p.target, _box_frames(_as_track(p)))
@@ -549,7 +573,7 @@ def eval_privacy(data: list[SessionData], policy: EvaluationPolicy) -> TaskRepor
             d = [
                 _as_box(v)
                 for st, kf in pred
-                if st == stream and (v := _interp(kf, t, policy.max_interp_ms)) is not None
+                if st == stream and (v := _interp(kf, t, gap)) is not None
             ]
             for target, box in g:
                 counts[target] += 1

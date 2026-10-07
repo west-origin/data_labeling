@@ -432,3 +432,90 @@ def test_gate_with_nan_baseline_metric(policy: EvaluationPolicy) -> None:
     assert not decide(report(nan), report(30.0), policy).passed
     # 둘 다 NaN이면 그 지표는 건너뛴다
     assert decide(report(nan), report(nan), policy).passed
+
+
+# ---------------------------------------------------------------- 감사 회귀 (4차)
+
+
+def test_sparse_stride_predictions_are_interpolated_per_task(policy: EvaluationPolicy) -> None:
+    # OWLv2 도구 예측은 500 ms마다만 추론하고 트래커가 max_gap_ms(1200) 안의 끊김을 한 트랙으로
+    # 잇는다. 정답은 30 fps로 촘촘하다. 같은 박스면 완벽해야 한다 (기본 200 ms 보간이면 0에 가깝다)
+    truth = [_track("t-mop", "mop_01", "mop", [(t, 100.0) for t in range(0, 2001, 33)])]
+    pred = as_model([_track("p-mop", "m", "mop", [(t, 100.0) for t in range(0, 2001, 500)])])
+    m = _objects(truth, pred, policy)
+    assert m["hota"] == pytest.approx(1.0) and m["map"] == pytest.approx(1.0)
+    # 과제별 보간 간격보다 길게 끊긴 예측은 그 사이를 예측 없음으로 센다
+    gaps = policy.max_interp_ms.model_copy(update={"tasks": {"objects": 200}})
+    short = policy.model_copy(update={"max_interp_ms": gaps})
+    assert _objects(truth, pred, short)["ap50"] < 0.1
+
+
+def test_interp_gaps_cover_prelabel_tracker_gaps(policy: EvaluationPolicy) -> None:
+    import yaml
+
+    prelabel = yaml.safe_load((ROOT / "config/policies/prelabel.yaml").read_text("utf-8"))
+    gaps = policy.max_interp_ms
+    assert gaps.for_task("objects") >= prelabel["open_vocab_objects"]["max_gap_ms"]
+    assert gaps.for_task("objects") >= prelabel["objects"]["max_gap_ms"]
+    assert gaps.for_task("body") >= prelabel["body"]["max_gap_ms"]
+
+
+def _person(label_id: str, x0: float, *, hidden: int = 0, stream: str = "third") -> LabelRecord:
+    """17관절 사람. 앞쪽 hidden개 관절은 표시하지 않음(visibility 0, 좌표 (0, 0))."""
+    points = [
+        {"x": 0, "y": 0, "visibility": 0}
+        if k < hidden
+        else {"x": x0 + (k % 4) * 10, "y": 100 + (k // 4) * 20, "visibility": 2}
+        for k in range(17)
+    ]
+    return make_label(
+        {"kind": "keypoint_track", "entity_id": label_id, "skeleton": "coco17",
+         "keyframes": [{"t_ms": 0, "points": points}]},
+        label_id=label_id, stream_id=stream, t_start_ms=0, t_end_ms=0,
+    )  # fmt: skip
+
+
+def _pck(
+    task: Task, truth: list[LabelRecord], pred: list[LabelRecord], policy: EvaluationPolicy
+) -> float:
+    report = evaluate(
+        {task: [SessionData("s1", truth, pred)]}, policy, golden_version="g",
+        model_versions={task: "m1"},
+    )  # fmt: skip
+    return report.overall[task].metrics["pck"]
+
+
+def test_body_pck_matches_people_by_visible_joints(policy: EvaluationPolicy) -> None:
+    # 정답 B는 관절 두 개를 표시하지 않았다 ((0, 0)). 그 점을 박스에 넣으면 B 박스가 A를 덮어 정답
+    # 순서대로 탐욕 매칭할 때 B가 A 예측을 가져간다. 보이는 관절만으로 맞추면 완벽하다
+    truth = [_person("tB", 300, hidden=2), _person("tA", 100)]
+    pred = as_model([_person("pA", 100), _person("pB", 300)])
+    assert _pck("body", truth, pred, policy) == 1.0
+    # 예측이 하나뿐이면 겹치는 정답(A)과만 맞춘다 (정답 순서와 상관없이).
+    # B의 보이는 관절 15개는 틀림
+    assert _pck("body", truth, as_model([_person("pA", 100)]), policy) == pytest.approx(
+        17 / (17 + 15)
+    )
+    # 다른 스트림 예측과는 맞추지 않는다
+    other = as_model([_person("pA", 100, stream="bodycam"), _person("pB", 300, stream="bodycam")])
+    assert _pck("body", truth, other, policy) == 0.0
+
+
+def _hand(label_id: str, x0: float, side: str = "left") -> LabelRecord:
+    points = [{"x": x0 + k, "y": 50 + k, "visibility": 2} for k in range(21)]
+    return make_label(
+        {"kind": "keypoint_track", "entity_id": label_id, "skeleton": "hand21", "hand": side,
+         "keyframes": [{"t_ms": 0, "points": points}]},
+        label_id=label_id, stream_id="bodycam", t_start_ms=0, t_end_ms=0,
+    )  # fmt: skip
+
+
+def test_hands_pck_matches_same_side_hands_by_distance(policy: EvaluationPolicy) -> None:
+    # 바디캠에 왼손이 둘 (착용자, 돌봄 대상). 예측 순서가 정답과 달라도 가까운 손끼리 맞춘다
+    truth = [_hand("wearer_l", 100), _hand("recipient_l", 400)]
+    pred = as_model([_hand("h0", 400), _hand("h1", 100)])
+    assert _pck("hands", truth, pred, policy) == 1.0
+    # 예측 트랙 하나는 한 시각에 정답 하나에만 쓴다 (두 정답에 같은 예측을 쓰지 않는다)
+    assert _pck("hands", truth, as_model([_hand("h1", 100)]), policy) == 0.5
+    # 반대쪽 손 예측과는 맞추지 않는다
+    assert _pck("hands", truth, as_model([_hand("h1", 100, "right")]), policy) == 0.0
