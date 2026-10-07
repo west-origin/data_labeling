@@ -21,6 +21,7 @@ WP3, ADR 0003. 수집(`ingest`)이 쓴다: 바디캠에 내장 IMU가 있고 매
 
 from __future__ import annotations
 
+import logging
 import struct
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,6 +33,8 @@ from numpy.typing import NDArray
 
 from dlp_media.probe import MediaInfo, to_fraction
 from dlp_media.tables import read_parquet, write_parquet
+
+log = logging.getLogger(__name__)
 
 # 정규화 Parquet·사이드카의 센서 열 이름 (가속도 3축, 자이로 3축 순서)
 IMU_COLUMNS = ("ax", "ay", "az", "gx", "gy", "gz")
@@ -214,10 +217,47 @@ def timestamps(packets: list[tuple[float, float, int]]) -> NDArray[np.float64]:
     return np.asarray(np.concatenate(parts) if parts else np.zeros(0), dtype=np.float64)
 
 
+def fill_durations(
+    payloads: list[tuple[float, float, bytes]],
+) -> list[tuple[float, float, bytes]] | None:
+    """길이(duration)가 없는(0 이하) 패킷의 길이를 채운다.
+
+    회귀: 컨테이너에 packet.duration이 없으면 길이 0으로 들어와 패킷 안 샘플이 모두 시작 시각에
+    몰렸고, `ImuData`의 시각 순증가 검증이 실패해 수집 전체가 실패했다.
+
+    채우는 규칙:
+    - 마지막이 아닌 패킷: 다음 패킷 시작 - 이 패킷 시작 (GPMF 패킷은 빈틈없이 이어진다).
+    - 마지막 패킷: 길이를 아는(원래 있거나 위에서 채운) 패킷 길이의 중앙값.
+
+    Args:
+        payloads: (패킷 시작 ms, 패킷 길이 ms, GPMF 바이트) 목록, 시각 순.
+
+    Returns:
+        길이를 채운 목록. 길이를 정할 수 없으면(패킷 하나뿐인데 길이가 없거나, 다음 패킷 시작이
+        같거나 앞서 있음) None.
+    """
+    out: list[tuple[float, float, bytes]] = []
+    for i, (start, dur, data) in enumerate(payloads):
+        if dur <= 0 and i + 1 < len(payloads):
+            dur = payloads[i + 1][0] - start
+            if dur <= 0:
+                return None  # 시작 시각이 같거나 거꾸로다: 패킷 안 샘플 시각을 정할 수 없다
+        out.append((start, dur, data))
+    if out and out[-1][1] <= 0:
+        known = [d for _, d, _ in out[:-1] if d > 0]
+        if not known:
+            return None  # 패킷 하나뿐이고 길이가 없다
+        start, _, data = out[-1]
+        out[-1] = (start, float(np.median(known)), data)
+    return out
+
+
 def imu_from_gpmf_payloads(payloads: list[tuple[float, float, bytes]]) -> ImuData | None:
     """가속도 샘플이 2개 미만이면 None (샘플레이트를 정할 수 없어 IMU 스트림을 만들지 않는다).
 
     자이로가 없는 기종·파일이면 자이로 열은 NaN이다 (0으로 채우면 정지로 오해된다).
+    길이가 없는 패킷은 `fill_durations`로 채우고, 채울 수 없으면 경고를 남기고 None이다
+    (IMU 하나 때문에 세션 수집 전체를 실패시키지 않는다).
 
     Args:
         payloads: (패킷 시작 ms, 패킷 길이 ms, GPMF 바이트) 목록, 시각 순.
@@ -225,6 +265,11 @@ def imu_from_gpmf_payloads(payloads: list[tuple[float, float, bytes]]) -> ImuDat
     Returns:
         가속도 시각 기준 `ImuData` (source "gpmf"). 자이로는 가속도 시각으로 선형 보간한다.
     """
+    filled = fill_durations(payloads)
+    if filled is None:
+        log.warning("GPMF 패킷 길이를 정할 수 없어 내장 IMU 스트림을 만들지 않습니다")
+        return None
+    payloads = filled
     acc_parts = [sensor_samples(p, "ACCL") for _, _, p in payloads]
     gyro_parts = [sensor_samples(p, "GYRO") for _, _, p in payloads]
     t_acc = timestamps(
@@ -258,8 +303,8 @@ class GpmfExtractor:
     def extract(self, path: Path) -> ImuData | None:
         """`gpmd` 트랙 패킷을 모아 `imu_from_gpmf_payloads`로 넘긴다.
 
-        패킷 시각은 PTS x time_base x 1000 (ms), 길이는 packet.duration (없으면 0 → 샘플이
-        모두 시작 시각에 몰려 시각 순증가 검증에서 실패할 수 있다).
+        패킷 시각은 PTS x time_base x 1000 (ms), 길이는 packet.duration. 길이가 없으면 0으로 넘기고
+        `imu_from_gpmf_payloads`가 다음 패킷 시작(마지막은 중앙값)으로 채운다.
         """
         payloads: list[tuple[float, float, bytes]] = []
         with av.open(str(path)) as c:

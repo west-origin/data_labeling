@@ -36,7 +36,7 @@ import sqlalchemy as sa
 
 from dlp_cli.raw_access import raw_store
 from dlp_cli.schema_cmds import database_url
-from dlp_media.storage import store_from_spec
+from dlp_media.storage import ObjectStore, store_from_spec
 from dlp_privacy.audit import (
     AuditResult,
     audit_candidates,
@@ -45,6 +45,7 @@ from dlp_privacy.audit import (
     previous_weeks,
     review_mode,
     select_audit_sample,
+    stream_duration_ms,
     weekly_miss_rates,
 )
 from dlp_privacy.detectors import build_detectors
@@ -52,6 +53,7 @@ from dlp_privacy.policy import load_policy
 from dlp_privacy.runner import approve_session, detect_session, render_session
 from dlp_schema import load_config, repo_root
 from dlp_schema.db.repository import get_session, list_privacy_audits
+from dlp_schema.session import Session, Stream, StreamKind
 from dlp_train.deployed import deployed_predictors
 from dlp_train.policy import load_policy as load_training_policy
 from dlp_train.trainers import LoadContext
@@ -168,6 +170,8 @@ def cmd_audit_sample(args: argparse.Namespace) -> int:
     인자:
         args.week: ISO 주 문자열(예: `2026-W41`). None이면 지금(UTC) 기준 이번 주.
         args.url: DB URL.
+        args.store: 원본 저장소 ('s3' 또는 'local:<디렉터리>'). 바디캠이 아닌 후보 스트림의 길이를
+            PTS 인덱스로 읽을 때만 쓴다 (감사 저장소, 읽기 기록이 남는다).
 
     흐름:
     1. 판정 창 = 이번 주를 포함해 거슬러 `full_review_exit.weeks_below_target`주.
@@ -186,8 +190,18 @@ def cmd_audit_sample(args: argparse.Namespace) -> int:
     week = args.week or iso_week(datetime.now(UTC))
     weeks = previous_weeks(week, exit_policy.weeks_below_target)
     engine = _engine(args)
-    with engine.connect() as conn:
-        candidates = audit_candidates(conn, week)
+    # 원본 저장소는 바디캠이 아닌 후보가 있을 때 처음 한 번만 만든다 (바디캠은 세션 길이를 쓴다)
+    raw: list[ObjectStore] = []
+    with engine.connect() as conn, tempfile.TemporaryDirectory() as tmp:
+        work = Path(tmp)
+
+        def duration(session: Session, stream: Stream) -> int:
+            """후보 스트림 자신의 길이 (`stream_duration_ms`)."""
+            if stream.kind is not StreamKind.BODYCAM and not raw:
+                raw.append(raw_store(args.store, args.url, "privacy.audit-sample"))
+            return stream_duration_ms(session, stream, raw[0] if raw else None, work)
+
+        candidates = audit_candidates(conn, week, duration)
         # 판정 창 전체(가장 오래된 주 시작 ~ 이번 주 끝)의 감사 기록을 한 번에 읽는다
         start, _ = iso_week_bounds(weeks[0])
         _, end = iso_week_bounds(week)
@@ -234,4 +248,6 @@ def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
     )
     audit.add_argument("--week", help="ISO 주 (예: 2026-W41, 기본: 이번 주)")
     audit.add_argument("--url", help="DB URL (기본: DLP_DATABASE_URL)")
+    # 3인칭 등 바디캠이 아닌 스트림의 길이를 PTS 인덱스(원본 버킷)에서 읽는다
+    audit.add_argument("--store", default="s3", help="'s3' 또는 'local:<디렉터리>'")
     audit.set_defaults(func=cmd_audit_sample)

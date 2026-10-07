@@ -105,6 +105,21 @@ def test_payload_samples_are_spread_over_packet_duration() -> None:
     assert np.allclose(imu.gyro[:, 0], [1, 1, 1, 2, 3, 3, 3, 3])
 
 
+def test_packets_without_duration_use_next_packet_start() -> None:
+    """회귀: packet.duration이 없으면(0) 샘플이 패킷 시작에 몰려 ImuData 검증이 실패했다.
+
+    정답: 1초 간격 패킷 세 개(가속도 4개씩), 길이 모두 0 → 앞 두 패킷은 다음 시작까지 1000 ms,
+    마지막은 중앙값 1000 ms → 250 ms 간격 12개. 패킷 하나뿐이고 길이가 없으면 None (수집은 계속).
+    """
+    acc = np.tile([[981, 0, 0]], (4, 1))
+    gyro = np.tile([[0, 1000, 0]], (2, 1))
+    imu = imu_from_gpmf_payloads([(t, 0.0, payload(acc, gyro)) for t in (0.0, 1_000.0, 2_000.0)])
+    assert imu is not None
+    assert imu.t_ms.tolist() == [250.0 * i for i in range(12)]
+    assert imu.sample_rate_hz == pytest.approx(4.0)
+    assert imu_from_gpmf_payloads([(0.0, 0.0, payload(acc, gyro))]) is None
+
+
 def accel_only(acc: np.ndarray) -> bytes:
     """가속도 스트림만 있는 GPMF 페이로드."""
     return nested(

@@ -65,6 +65,7 @@ from dlp_schema.labels import (
     BoxKeyframe,
     BoxTrackPayload,
     GapPayload,
+    KeypointTrackPayload,
     VerificationState,
 )
 from dlp_schema.ontology import Ontology, load_ontology
@@ -123,6 +124,37 @@ def test_cvat_roundtrip_offline_including_keypoints() -> None:
                 q.t_start_ms,
                 q.t_end_ms,
             )
+
+
+def test_cvat_keypoint_visibility_must_match_points() -> None:
+    """회귀: dlp_visibility 값이 점 수보다 짧으면 IndexError가 나 수집이 내부 오류로 멈췄다.
+
+    정답 근거: 행동 시나리오의 손 키포인트 트랙(21점)을 CVAT 형식으로 보낸 뒤 첫 모양의 가시성
+    값을 하나 빼거나(20개), 하나 더하거나(22개), 정수가 아니게 바꾸면 모두 `CvatFormatError`다.
+    값이 비어 있으면 모든 점을 보임(2)으로 본다.
+    """
+    actions = generate_action_scenario(2)
+    kp = next(x for x in actions.labels if x.kind == "keypoint_track")
+    schema = fake_schema(["kp_hand21"])
+    vis_id = schema.attr_ids[("kp_hand21", "dlp_visibility")]
+
+    def with_visibility(value: str) -> list[dict[str, Any]]:
+        """첫 모양의 가시성 속성만 value로 바꾼 트랙 목록."""
+        [track] = to_cvat_tracks([kp], actions.frame_times, schema)
+        track["shapes"][0]["attributes"] = [{"spec_id": vis_id, "value": value}]
+        return [track]
+
+    for bad in (",".join(["2"] * 20), ",".join(["2"] * 22), "2,x"):
+        with pytest.raises(CvatFormatError, match="dlp_visibility"):
+            from_cvat_tracks(
+                with_visibility(bad), actions.frame_times, schema, "bodycam",
+                new_box_kind="box_track",
+            )  # fmt: skip
+    [item] = from_cvat_tracks(
+        with_visibility(""), actions.frame_times, schema, "bodycam", new_box_kind="box_track"
+    )
+    assert isinstance(item.payload, KeypointTrackPayload)
+    assert {p.visibility for p in item.payload.keyframes[0].points} == {2}
 
 
 def test_cvat_new_track_and_bad_frame_time() -> None:

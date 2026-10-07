@@ -6,9 +6,14 @@ DB 없이 순수 함수만 시험한다. 정답은 손으로 계산한 값이다
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from fractions import Fraction
+from pathlib import Path
 
+import numpy as np
 import pytest
 
+from dlp_media.pts import PtsIndex
+from dlp_media.storage import LocalStore, sha256_file
 from dlp_privacy.audit import (
     AuditCandidate,
     AuditResult,
@@ -18,8 +23,11 @@ from dlp_privacy.audit import (
     residual_miss_rate,
     review_mode,
     select_audit_sample,
+    stream_duration_ms,
     weekly_miss_rates,
 )
+from dlp_schema.session import Stream, StreamKind
+from dlp_schema.testing import make_session
 
 
 def test_weeks_without_audit_do_not_count_as_passing() -> None:
@@ -86,3 +94,30 @@ def test_full_review_exit_and_revert() -> None:
     assert review_mode([0.1] * 7, 0.2, 8) == "full"  # 기간 부족
     assert review_mode([0.5] + [0.1] * 8, 0.2, 8) == "sampled"
     assert review_mode([0.1] * 8 + [0.3], 0.2, 8) == "full"  # 최근 주가 넘으면 즉시 복귀
+
+
+def test_stream_duration_uses_that_streams_pts_index(tmp_path: Path) -> None:
+    """회귀: 3인칭 스트림 감사에도 세션(바디캠) 길이를 써서 시간당 누락률이 틀렸다.
+
+    시나리오: 세션 길이 60초(바디캠), 3인칭 PTS 인덱스는 0~29,900 ms(100 ms 간격 300프레임).
+    정답: 바디캠은 저장소 없이 60,000, 3인칭은 마지막 프레임 + 중앙 간격 = 30,000.
+    PTS 인덱스가 없는 3인칭은 세션 길이로 대신하지 않고 ValueError.
+    """
+    store = LocalStore(tmp_path / "store", "raw")
+    index = PtsIndex(
+        Fraction(1, 1000), np.arange(0, 30_000, 100, dtype=np.int64), np.ones(300, dtype=bool)
+    )
+    index.write(tmp_path / "tp.pts.parquet")
+    key = "sessions/s001/derived/tp1.pts.parquet"
+    store.put_file(key, tmp_path / "tp.pts.parquet", sha256_file(tmp_path / "tp.pts.parquet"))
+    session = make_session()
+    third = Stream(
+        stream_id="tp1", kind=StreamKind.THIRD_PERSON, uri=store.uri("raw/tp1.mp4"),
+        pts_index_uri=store.uri(key),
+    )  # fmt: skip
+    work = tmp_path / "work"
+    work.mkdir()
+    assert stream_duration_ms(session, session.streams[0], None, work) == 60_000
+    assert stream_duration_ms(session, third, store, work) == 30_000
+    with pytest.raises(ValueError, match="PTS 인덱스"):
+        stream_duration_ms(session, third.model_copy(update={"pts_index_uri": None}), store, work)

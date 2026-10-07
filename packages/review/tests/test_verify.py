@@ -119,3 +119,29 @@ def test_verify_refuses_until_review_is_done_then_records_transition(pg: sa.Engi
         again = verify_session(conn, "s001", later + timedelta(days=1), "lead")
         assert again.verified and again.already
         assert len(list_lifecycle_events(conn, "s001")) == count
+
+
+def test_cli_verify_actor_defaults_to_current_actor(
+    pg: sa.Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """회귀: `dlp review verify`가 --actor·DLP_ACTOR가 없으면 판정자를 "unknown"으로 남겼다.
+
+    정답: 다른 명령처럼 `current_actor()`(DLP_ACTOR, 없으면 OS 사용자)를 쓴다. OS 사용자를
+    "os-user"로 바꿔 두면 생애주기 기록의 실행자가 "os-user"다.
+    """
+    from dlp_cli.main import main
+
+    with pg.begin() as conn:
+        insert_session(conn, make_session("s002"))
+        set_privacy_state(conn, "s002", PrivacyState.APPROVED)
+        set_lifecycle(conn, "s002", LifecycleState.PRIVACY_APPROVED)
+        set_lifecycle(conn, "s002", LifecycleState.PRELABELED)
+        # 사람이 만든 행동 라벨 하나 (검수 완료 조건: 블러가 아닌 운영 라벨이 있다)
+        insert_labels(conn, [make_label(action_payload(), label_id="b1", session_id="s002")])
+    monkeypatch.delenv("DLP_ACTOR", raising=False)
+    monkeypatch.setattr("getpass.getuser", lambda: "os-user")
+    url = pg.url.render_as_string(hide_password=False)
+    assert main(["review", "verify", "s002", "--url", url]) == 0
+    with pg.connect() as conn:
+        last = list_lifecycle_events(conn, "s002")[-1]
+    assert last.to_state is LifecycleState.HUMAN_VERIFIED and last.actor == "os-user"

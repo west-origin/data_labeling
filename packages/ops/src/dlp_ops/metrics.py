@@ -22,6 +22,7 @@
 
 공개 함수:
 - `week_range(week)` / `week_of(t)` — ISO 주 문자열 ↔ UTC 구간.
+- `work_source(task_key)` — 손으로 기록한 검수 시간의 출처 (작업 키 접두사의 도구, 없으면 manual).
 - `verified_time(conn, …)` / `verified_at(history)` — 세션의 검증 완료 시각.
 - `weekly_metrics(conn, week, review_policy, policy)` — 한 주의 `WeeklyMetrics` (읽기 전용).
 - `alerts(history, policy)` — 여러 주 추이에서 경고 문장.
@@ -35,7 +36,7 @@ from __future__ import annotations
 import math
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 
 import sqlalchemy as sa
 
@@ -58,7 +59,7 @@ from dlp_schema.db.repository import (
 from dlp_schema.episode import current_labels, non_operational_ids
 from dlp_schema.history import review_changes
 from dlp_schema.labels import LabelRecord, Source, VerificationState
-from dlp_schema.review import AssignmentStatus, ReviewMode
+from dlp_schema.review import AssignmentStatus, ReviewMode, ReviewTool
 from dlp_schema.session import LifecycleState
 
 # 개별 검수로 보는 상태 (수정률·자동 승인율 계산). 표본 검증은 개별로 본 것이 아니라 뺀다
@@ -67,6 +68,33 @@ REVIEWED = (VerificationState.HUMAN_APPROVED, VerificationState.HUMAN_CORRECTED)
 VERIFIED_LABEL = (*REVIEWED, VerificationState.SAMPLE_VERIFIED)
 # 검증 완료 이후의 생애주기 상태 (옛 세션의 검증 시각을 라벨 이력에서 추정할지 정할 때)
 VERIFIED = (LifecycleState.HUMAN_VERIFIED, LifecycleState.SPLIT_ASSIGNED, LifecycleState.EXPORTED)
+
+
+def work_source(task_key: str | None) -> Literal["label_studio", "cvat", "manual"]:
+    """`dlp ops log-work`가 남길 `ReviewWork.source` (검수 작업이 있던 도구).
+
+    회귀: 작업 키가 있으면 무조건 `cvat`으로 기록해, Label Studio 작업(`label_studio:<id>`)의
+    검수 시간이 CVAT 시간으로 잘못 집계됐다.
+
+    Args:
+        task_key: 검수 작업 키 (`<도구>:<도구 작업 ID>`, 예: `cvat:7`, `label_studio:3`).
+            없으면 None.
+
+    Returns:
+        작업 키 접두사의 도구(`ReviewTool` 값). 작업 키가 없으면 `manual`.
+
+    Raises:
+        ValueError: 접두사가 알려진 도구가 아닐 때 (잘못된 키를 조용히 한 도구로 세지 않는다).
+    """
+    if task_key is None:
+        return "manual"
+    tool, sep, _ = task_key.partition(":")
+    if sep and tool == ReviewTool.CVAT:
+        return "cvat"
+    if sep and tool == ReviewTool.LABEL_STUDIO:
+        return "label_studio"
+    tools = ", ".join(f"{t.value}:<id>" for t in ReviewTool)
+    raise ValueError(f"작업 키 {task_key!r}의 도구를 알 수 없습니다 (형식: {tools})")
 
 
 def week_range(week: str) -> tuple[datetime, datetime]:

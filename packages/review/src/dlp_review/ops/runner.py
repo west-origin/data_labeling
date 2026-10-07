@@ -18,6 +18,7 @@ WP12, ADR 0014·0015·0023(블러 배정·세대). 이 모듈은 순수 로직(`
 - `create_assignment_tasks`: 배정의 도구 작업을 만든다 (멱등).
 - `FinishResult`, `finish_assignment`: 배정 마무리와 표본 판정.
 - `QualityReport`, `quality_report`: 발견율·이중 일치도·프리라벨 편향.
+- `shown_prelabels`: 표준 검수자에게 실제로 보낸 모델 프리라벨 (블라인드 편향의 기준).
 """
 
 from __future__ import annotations
@@ -349,9 +350,13 @@ def finish_assignment(
 
     부작용: 배정 상태 done 갱신, 합격이면 나머지 라벨에 `sample_verified` 기록(검수자 ID
     `sampling:<배정>`), 불합격이면 재검수 배정(`<배정>:resample`, 보류 라벨만, 우선순위 +1) 삽입.
-    주의: 배정의 작업이 하나도 없으면(`tasks`가 빔) 바로 done이 된다.
+    배정의 작업이 하나도 없으면 아무것도 하지 않는다 (done이 아니다).
     """
     tasks = [t for t in list_review_tasks(conn, a.session_id) if t.assignment_id == a.assignment_id]
+    if not tasks:
+        # 회귀: any([])가 거짓이라 작업이 없는(아직 `dlp review assign` 전인) 배정이 사람 검수 없이
+        # done이 되고, 표본 배정이면 판정까지 돌았다. 작업을 만들고 수집해야만 마무리한다.
+        return FinishResult()
     if any(t.status is not ReviewTaskStatus.COLLECTED for t in tasks):
         return FinishResult()  # 아직 남은 작업이 있다
     # 인자 a는 오래된 사본일 수 있어 DB에서 상태를 다시 읽는다
@@ -408,6 +413,41 @@ class QualityReport:
     blind_bias: dict[str, float] = field(default_factory=dict[str, float])  # 배정 → 프리라벨 편향
 
 
+def shown_prelabels(
+    unit: Sequence[LabelRecord], pair_tasks: Sequence[ReviewTask]
+) -> list[LabelRecord]:
+    """표준(짝) 배정의 검수자에게 실제로 보낸 모델 프리라벨.
+
+    회귀: 프리라벨 편향을 이력 전체의 모델 레코드(지워진 레코드·이전 모델 버전 포함)로 재서,
+    검수자가 본 적 없는 프리라벨까지 기준에 들어가 편향이 틀렸다.
+
+    작업마다:
+    - `sent_label_ids`가 있으면 그 ID의 레코드 (작업에 실제로 보낸 라벨).
+    - 없으면(예전 작업) 작업 created_at 시점의 운영 현재 라벨 (그 시각까지 만든 레코드로
+      `current_labels`: 그 뒤의 삭제·수정 레코드는 아직 없던 것으로 본다).
+    둘 다 모델 출처이고 측정·오류 삽입 레코드가 아닌 것만 남긴다.
+
+    Args:
+        unit: 측정 단위(종류·스트림)의 전체 이력.
+        pair_tasks: 짝 표준 배정의 검수 작업 (없으면 보낸 프리라벨도 없다).
+
+    Returns:
+        모델 프리라벨 (중복 없이, label_id 순).
+    """
+    by_id = {x.label_id: x for x in unit}
+    shown: dict[str, LabelRecord] = {}
+    for t in pair_tasks:
+        if t.sent_label_ids is not None:
+            # 단위 밖(다른 종류·스트림) ID는 by_id에 없어 빠진다
+            picked = [by_id[i] for i in t.sent_label_ids if i in by_id]
+        else:
+            picked = current_labels([x for x in unit if x.created_at <= t.created_at])
+        for x in picked:
+            if x.provenance.source is Source.MODEL and x.measurement is None and not x.seeded_error:
+                shown[x.label_id] = x
+    return [shown[i] for i in sorted(shown)]
+
+
 def quality_report(conn: sa.Connection, policy: ReviewOpsPolicy) -> QualityReport:
     """끝난(done) 배정 전체로 검수 품질을 잰다. 읽기만 한다.
 
@@ -415,7 +455,8 @@ def quality_report(conn: sa.Connection, policy: ReviewOpsPolicy) -> QualityRepor
     - 이중 배정: 짝 표준 배정이 끝났으면, 단위의 현재 운영 라벨과 이 배정의 `double` 측정 레코드의
       일치도(`measure.agreement`).
     - 블라인드 배정: 짝 표준 배정이 끝났으면 프리라벨 편향(`measure.prelabel_bias`).
-      표준 결과 = 현재 운영 라벨, 블라인드 결과 = `blind` 측정 레코드.
+      표준 결과 = 현재 운영 라벨, 블라인드 결과 = `blind` 측정 레코드, 모델 프리라벨 = 짝 표준
+      배정 작업에 실제로 보낸 모델 라벨(`shown_prelabels`).
     정책 값: `measurement.tolerance_ms`·`match_iou`, `seeding.detect_tolerance_ms`·`blur_overlap`.
     """
     mp = policy.measurement
@@ -455,15 +496,11 @@ def quality_report(conn: sa.Connection, policy: ReviewOpsPolicy) -> QualityRepor
                 as_items(operational), as_items(measured), mp.tolerance_ms, mp.match_iou
             )
         else:
-            # 모델 프리라벨: 이력 전체의 모델 출처 레코드 (측정·오류 삽입 제외).
-            # 현재 운영 라벨만이 아니라 이전 모델 버전·지워진 레코드도 들어간다.
-            model = [
-                x
-                for x in unit
-                if x.provenance.source is Source.MODEL
-                and x.measurement is None
-                and not x.seeded_error
+            # 모델 프리라벨: 짝 표준 배정의 검수자가 실제로 본 것 (이전 버전·지워진 레코드 제외)
+            pair_tasks = [
+                t for t in list_review_tasks(conn, a.session_id) if t.assignment_id == a.pair_id
             ]
+            model = shown_prelabels(unit, pair_tasks)
             report.blind_bias[a.assignment_id] = prelabel_bias(
                 as_items(model),
                 as_items(operational),

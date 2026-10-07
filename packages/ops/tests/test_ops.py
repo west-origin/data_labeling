@@ -20,13 +20,17 @@ import os
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, date, datetime, timedelta
+from fractions import Fraction
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import pytest
 import sqlalchemy as sa
 
+from dlp_media.pts import PtsIndex
+from dlp_media.storage import LocalStore, sha256_file
 from dlp_ops.audit import audit_report, blur_reviewers, month_range
 from dlp_ops.metrics import (
     WeeklyMetrics,
@@ -58,7 +62,7 @@ from dlp_schema.lineage import GoldenSet, Withdrawal
 from dlp_schema.ontology import load_ontology
 from dlp_schema.ops import PrivacyAuditRecord, RawAccessEvent, RetentionDecision, ReviewWork
 from dlp_schema.review import AssignmentStatus, InjectedError, ReviewAssignment, ReviewMode
-from dlp_schema.session import Domain, LifecycleState
+from dlp_schema.session import Domain, LifecycleState, Stream, StreamKind
 from dlp_schema.testing import make_label, make_session
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -439,26 +443,45 @@ def test_weekly_metrics_from_synthetic_events(pg: sa.Engine, policy: OpsPolicy) 
 
 
 @pytest.mark.services
-def test_cli_log_work_and_privacy_audit(pg: sa.Engine, monkeypatch: pytest.MonkeyPatch) -> None:
-    """log-work --at은 검수한 주에 센다.
+def test_cli_log_work_and_privacy_audit(
+    pg: sa.Engine, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """log-work --at은 검수한 주에 센다. 출처는 작업 키 접두사의 도구다.
 
-    privacy-audit 감사자는 현재 블러 트랙의 모든 검수자와 다르다.
+    privacy-audit 감사자는 현재 블러 트랙의 모든 검수자와 다르다. 길이는 감사한 스트림의 길이다.
 
     정답: 서울 시각 10시는 UTC 1시라 W41에 기록된다. 소수 검수자 `rev-b`도 감사자가 될 수 없고,
     `DLP_ACTOR=aud-1`로 감사하면 기록의 `blur_reviewer`는 트랙이 많은 `rev-a`다.
+    회귀: `label_studio:3` 작업 키의 출처가 `cvat`으로 기록됐다 → `label_studio`.
+    모르는 접두사는 거부.
+    회귀: 3인칭 감사의 길이가 세션 길이(60초)였다 → 3인칭 PTS 인덱스 길이(30초).
     """
     from dlp_cli.main import main
     from dlp_schema.db.repository import list_privacy_audits
 
     url = pg.url.render_as_string(hide_password=False)
+    # 3인칭 PTS 인덱스(100 ms 간격 300프레임 → 30초)를 로컬 원본 저장소에 둔다
+    raw = LocalStore(tmp_path, "dlp-raw")
+    index = PtsIndex(
+        Fraction(1, 1000), np.arange(0, 30_000, 100, dtype=np.int64), np.ones(300, dtype=bool)
+    )
+    index.write(tmp_path / "tp.pts.parquet")
+    pts_key = "sessions/cli-1/derived/tp1.pts.parquet"
+    raw.put_file(pts_key, tmp_path / "tp.pts.parquet", sha256_file(tmp_path / "tp.pts.parquet"))
+    base = make_session("cli-1")
+    third = Stream(stream_id="tp1", kind=StreamKind.THIRD_PERSON, uri=raw.uri("raw/tp1.mp4"),
+                   pts_index_uri=raw.uri(pts_key))  # fmt: skip
     with pg.begin() as conn:
-        insert_session(conn, make_session("cli-1"))
+        insert_session(conn, base.model_copy(update={"streams": (*base.streams, third)}))
         insert_labels(conn, [
             make_label({"kind": "blur_track", "target": "face",
                         "keyframes": [{"t_ms": 0, "x": 1, "y": 1, "w": 5, "h": 5}]},
-                       label_id=f"cli-1-b{i}", session_id="cli-1", stream_id="bodycam",
+                       label_id=f"cli-1-b{i}", session_id="cli-1", stream_id=stream,
                        verification=checked(VerificationState.HUMAN_APPROVED, IN, who))
-            for i, who in enumerate(["rev-a", "rev-a", "rev-b"])
+            for i, (who, stream) in enumerate(
+                [("rev-a", "bodycam"), ("rev-a", "bodycam"), ("rev-b", "bodycam"),
+                 ("rev-a", "tp1")]
+            )
         ])  # fmt: skip
     seoul = "2026-10-07T10:00:00+09:00"
     assert main(["ops", "log-work", "cli-1", "--reviewer", "rev-a", "--stage", "privacy",
@@ -466,6 +489,15 @@ def test_cli_log_work_and_privacy_audit(pg: sa.Engine, monkeypatch: pytest.Monke
     with pg.connect() as conn:
         (w,) = list_review_work(conn)
     assert w.recorded_at == datetime(2026, 10, 7, 1, tzinfo=UTC) and week_of(w.recorded_at) == WEEK
+    assert w.source == "manual"  # 작업 키 없음
+    for key, source in (("label_studio:3", "label_studio"), ("cvat:7", "cvat")):
+        assert main(["ops", "log-work", "cli-1", "--reviewer", "rev-a", "--stage", "labeling",
+                     "--minutes", "5", "--task-key", key, "--url", url]) == 0  # fmt: skip
+        with pg.connect() as conn:
+            assert {x.source for x in list_review_work(conn) if x.task_key == key} == {source}
+    with pytest.raises(SystemExit, match="도구를 알 수 없습니다"):
+        main(["ops", "log-work", "cli-1", "--reviewer", "rev-a", "--stage", "labeling",
+              "--minutes", "5", "--task-key", "jira:1", "--url", url])  # fmt: skip
     # 검수자 중 소수(rev-b)도 감사자가 될 수 없다
     with pytest.raises(SystemExit, match="블러 검수자"):
         main(["ops", "privacy-audit", "cli-1", "bodycam", "--misses", "0", "--auditor", "rev-b",
@@ -475,6 +507,14 @@ def test_cli_log_work_and_privacy_audit(pg: sa.Engine, monkeypatch: pytest.Monke
     with pg.connect() as conn:
         (a,) = list_privacy_audits(conn)
     assert (a.auditor, a.blur_reviewer, a.misses) == ("aud-1", "rev-a", 1)
+    assert a.duration_ms == 60_000  # 바디캠 = 세션 길이
+    assert main(["ops", "privacy-audit", "cli-1", "tp1", "--misses", "0", "--url", url,
+                 "--store", f"local:{tmp_path}"]) == 0  # fmt: skip
+    with pg.connect() as conn:
+        (tp,) = [x for x in list_privacy_audits(conn) if x.stream_id == "tp1"]
+    assert tp.duration_ms == 30_000  # 그 스트림(3인칭)의 PTS 인덱스 길이
+    with pytest.raises(SystemExit, match="영상 스트림이 아닙니다"):
+        main(["ops", "privacy-audit", "cli-1", "imu", "--misses", "0", "--url", url])
 
 
 @pytest.mark.services

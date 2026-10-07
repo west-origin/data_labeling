@@ -31,7 +31,9 @@ from dlp_review.ops.policy import CvatPolicy
 from dlp_review.ops.policy import load_policy as load_ops_policy
 from dlp_review.ops.runner import (
     AccessError,
+    FinishResult,
     create_assignment_tasks,
+    finish_assignment,
     plan_session,
     quality_report,
 )
@@ -41,9 +43,11 @@ from dlp_schema.db.migrate import upgrade
 from dlp_schema.db.repository import (
     get_assignment,
     get_labels,
+    insert_assignment,
     insert_golden_set,
     insert_labels,
     insert_review_task,
+    insert_session,
     list_review_tasks,
     record_review,
     register_ontology,
@@ -54,6 +58,7 @@ from dlp_schema.lineage import GoldenSet
 from dlp_schema.ontology import load_ontology
 from dlp_schema.review import (
     AssignmentStatus,
+    ReviewAssignment,
     ReviewMode,
     ReviewStage,
     ReviewTask,
@@ -61,7 +66,7 @@ from dlp_schema.review import (
     ReviewTool,
 )
 from dlp_schema.session import Domain
-from dlp_schema.testing import FIXED_TIME
+from dlp_schema.testing import FIXED_TIME, make_session
 
 pytestmark = pytest.mark.services
 ROOT = Path(__file__).resolve().parents[3]
@@ -319,6 +324,27 @@ def test_blind_and_seeded_tasks_through_label_studio(
     [rate] = report.detection
     assert (rate.injected, rate.detected) == (len(seeded.injected), len(seeded.injected))
     assert report.blind_bias[blind.assignment_id] > 0  # 표준 검수는 프리라벨을 그대로 승인했다
+
+
+def test_finish_assignment_without_tasks_stays_open(pg: sa.Engine) -> None:
+    """회귀: 작업이 하나도 없는 배정은 any([])가 거짓이라 사람 검수 없이 done이 됐다.
+
+    시나리오: 표본(sample_label_ids)이 있는 표준 배정을 넣고 작업을 만들지 않은 채 마무리한다.
+    정답: 결과는 빈 `FinishResult`(판정 없음)이고 배정은 open 그대로, completed_at도 없다.
+    """
+    sid = f"fin-{uuid.uuid4().hex[:6]}"
+    a = ReviewAssignment(
+        assignment_id=f"{sid}-std", session_id=sid, label_kinds=("action",),
+        mode=ReviewMode.STANDARD, priority=1.0, assignee="r1", sample_label_ids=("x1",),
+        withheld_label_ids=("x2",), created_at=FIXED_TIME,
+    )  # fmt: skip
+    with pg.begin() as conn:
+        insert_session(conn, make_session(sid))
+        insert_assignment(conn, a)
+        result = finish_assignment(conn, a, FIXED_TIME, load_ops_policy(ROOT))
+        after = get_assignment(conn, a.assignment_id)
+    assert result == FinishResult()
+    assert after.status is AssignmentStatus.OPEN and after.completed_at is None
 
 
 def get_labels_sync(pg: sa.Engine, sid: str) -> list[LabelRecord]:
