@@ -138,7 +138,38 @@ services:
         - -c
         - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health', timeout=4)"
 
+  # 데이터셋 버전 관리. 객체는 SeaweedFS의 dlp-datasets 버킷에, 메타데이터는 내장 KV(볼륨)에 둔다.
+  lakefs:
+    image: treeverse/lakefs:1.88.0
+    user: "0:0"  # 개발용: 이름 있는 볼륨이 root 소유라 이미지 기본 사용자로는 쓸 수 없다
+    depends_on:
+      bucket-init:
+        condition: service_completed_successfully
+    command: ["run"]
+    environment:
+      LAKEFS_DATABASE_TYPE: local
+      LAKEFS_DATABASE_LOCAL_PATH: /home/lakefs/data/metadata
+      LAKEFS_AUTH_ENCRYPT_SECRET_KEY: ${DLP_LAKEFS_ENCRYPT_SECRET}
+      LAKEFS_BLOCKSTORE_TYPE: s3
+      LAKEFS_BLOCKSTORE_S3_ENDPOINT: http://seaweedfs:8333
+      LAKEFS_BLOCKSTORE_S3_FORCE_PATH_STYLE: "true"
+      LAKEFS_BLOCKSTORE_S3_REGION: us-east-1
+      LAKEFS_BLOCKSTORE_S3_CREDENTIALS_ACCESS_KEY_ID: ${DLP_S3_ACCESS_KEY}
+      LAKEFS_BLOCKSTORE_S3_CREDENTIALS_SECRET_ACCESS_KEY: ${DLP_S3_SECRET_KEY}
+      LAKEFS_INSTALLATION_USER_NAME: admin
+      LAKEFS_INSTALLATION_ACCESS_KEY_ID: ${DLP_LAKEFS_ACCESS_KEY}
+      LAKEFS_INSTALLATION_SECRET_ACCESS_KEY: ${DLP_LAKEFS_SECRET_KEY}
+      LAKEFS_STATS_ENABLED: "false"
+    volumes:
+      - lakefs-data:/home/lakefs/data
+    ports:
+      - "${DLP_LAKEFS_PORT:-8000}:8000"
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8000/_health"]
+
 volumes:
   postgres-data:
   seaweedfs-data:
   label-studio-data:
+  lakefs-data:

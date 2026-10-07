@@ -13,6 +13,9 @@ class Split(StrEnum):
     GOLDEN = "golden"
     TRAIN = "train"
     VAL = "val"
+    # 골든셋과 작업자·장소를 공유하거나, 학습·검증 경계에 걸쳐 어느 쪽에도 넣을 수 없는 세션.
+    # 정보 누수를 막기 위해 학습·검증·평가 어디에도 쓰지 않는다.
+    HOLDOUT = "holdout"
 
 
 class DatasetVersion(Contract):

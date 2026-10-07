@@ -130,6 +130,59 @@ review_tasks = sa.Table(
     sa.Index("ix_review_tasks_session", "session_id", "stage"),
 )
 
+golden_sets = sa.Table(
+    "golden_sets",
+    metadata,
+    sa.Column("version", sa.String(128), primary_key=True),
+    sa.Column("domain", sa.String(32), nullable=False),
+    sa.Column("session_ids", Json, nullable=False),
+    sa.Column("created_at", Ts, nullable=False),
+    sa.Column("note", sa.Text(), nullable=False),
+)
+
+training_runs = sa.Table(
+    "training_runs",
+    metadata,
+    sa.Column("run_id", sa.String(128), primary_key=True),
+    sa.Column(
+        "dataset_version_id",
+        sa.String(128),
+        sa.ForeignKey("dataset_versions.version_id"),
+        nullable=False,
+        index=True,
+    ),
+    sa.Column("model_name", sa.String(128), nullable=False),
+    sa.Column("model_version", sa.String(128), nullable=False),
+    sa.Column("mlflow_run_id", sa.String(64), nullable=True),
+    sa.Column("created_at", Ts, nullable=False),
+)
+
+exports = sa.Table(
+    "exports",
+    metadata,
+    sa.Column("export_id", sa.String(128), primary_key=True),
+    sa.Column(
+        "dataset_version_id",
+        sa.String(128),
+        sa.ForeignKey("dataset_versions.version_id"),
+        nullable=False,
+        index=True,
+    ),
+    sa.Column("target", sa.String(128), nullable=False),
+    sa.Column("format", sa.String(64), nullable=False),
+    sa.Column("uri", sa.Text(), nullable=False),
+    sa.Column("session_ids", Json, nullable=False),
+    sa.Column("created_at", Ts, nullable=False),
+)
+
+withdrawals = sa.Table(
+    "withdrawals",
+    metadata,
+    sa.Column("session_id", sa.String(128), sa.ForeignKey("sessions.session_id"), primary_key=True),
+    sa.Column("reason", sa.Text(), nullable=False),
+    sa.Column("withdrawn_at", Ts, nullable=False),
+)
+
 dataset_versions = sa.Table(
     "dataset_versions",
     metadata,

@@ -1,0 +1,27 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "reason": {
+      "minLength": 1,
+      "title": "Reason",
+      "type": "string"
+    },
+    "session_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Session Id",
+      "type": "string"
+    },
+    "withdrawn_at": {
+      "format": "date-time",
+      "title": "Withdrawn At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "session_id",
+    "reason",
+    "withdrawn_at"
+  ],
+  "title": "Withdrawal",
+  "type": "object"
+}

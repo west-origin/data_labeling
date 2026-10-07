@@ -1,0 +1,224 @@
+from __future__ import annotations
+
+import json
+import os
+import uuid
+from collections.abc import Iterator
+from datetime import timedelta
+from pathlib import Path
+
+import pytest
+import sqlalchemy as sa
+
+from dlp_datasets.build import DatasetBuildError, build_dataset_version
+from dlp_datasets.lineage import (
+    record_export,
+    register_training_run,
+    withdraw_session,
+)
+from dlp_datasets.policy import DatasetPolicy, load_policy
+from dlp_datasets.snapshot import LakeFSSnapshotStore
+from dlp_datasets.splitter import check_isolation, propose_golden
+from dlp_fixtures.sessions import generate_sessions
+from dlp_schema.dataset import Split
+from dlp_schema.db.migrate import upgrade
+from dlp_schema.db.repository import (
+    get_dataset_version,
+    get_session,
+    insert_golden_set,
+    insert_labels,
+    insert_session,
+    register_ontology,
+)
+from dlp_schema.lineage import GoldenSet, TrainingRun
+from dlp_schema.ontology import load_ontology
+from dlp_schema.session import Domain, LifecycleState, PrivacyState
+from dlp_schema.testing import FIXED_TIME, action_payload, make_label
+
+pytestmark = pytest.mark.services
+ROOT = Path(__file__).resolve().parents[3]
+
+
+@pytest.fixture
+def pg() -> Iterator[sa.Engine]:
+    url = sa.make_url(
+        os.environ.get(
+            "DLP_DATABASE_URL", "postgresql+psycopg://dlp:dlp-dev-password@localhost:5432/dlp"
+        )
+    )
+    name = f"dlp_test_{uuid.uuid4().hex[:8]}"
+    admin = sa.create_engine(url.set(database="postgres"), isolation_level="AUTOCOMMIT")
+    with admin.connect() as conn:
+        conn.execute(sa.text(f'CREATE DATABASE "{name}"'))
+    test_url = url.set(database=name).render_as_string(hide_password=False)
+    upgrade(test_url)
+    engine = sa.create_engine(test_url)
+    try:
+        yield engine
+    finally:
+        engine.dispose()
+        with admin.connect() as conn:
+            conn.execute(sa.text(f'DROP DATABASE "{name}" WITH (FORCE)'))
+        admin.dispose()
+
+
+@pytest.fixture(scope="module")
+def policy() -> DatasetPolicy:
+    return load_policy(ROOT)
+
+
+@pytest.fixture
+def snapshots(policy: DatasetPolicy) -> LakeFSSnapshotStore:
+    lp = policy.lakefs
+    return LakeFSSnapshotStore.from_env(
+        repository=lp.repository, branch=lp.branch, storage_namespace=lp.storage_namespace
+    )
+
+
+def _populate(pg: sa.Engine) -> list[str]:
+    """합성 세션 300개 (프라이버시 승인, 사람 검증 완료)와 세션마다 라벨 하나."""
+    sessions = generate_sessions(300, seed=5)
+    with pg.begin() as conn:
+        register_ontology(conn, load_ontology(ROOT / "config" / "ontology" / "v1"))
+        for s in sessions:
+            insert_session(
+                conn,
+                s.model_copy(
+                    update={
+                        "privacy_state": PrivacyState.APPROVED,
+                        "lifecycle_state": LifecycleState.HUMAN_VERIFIED,
+                    }
+                ),
+            )
+            insert_labels(
+                conn,
+                [
+                    make_label(
+                        action_payload(), label_id=f"{s.session_id}-a", session_id=s.session_id
+                    )
+                ],
+            )
+        golden = propose_golden(sessions, "cleaning", 20, seed=5)
+        insert_golden_set(
+            conn,
+            GoldenSet(
+                version="golden-cleaning-v1",
+                domain=Domain.CLEANING,
+                session_ids=tuple(golden),
+                created_at=FIXED_TIME,
+            ),
+        )
+    return golden
+
+
+def test_build_withdraw_rebuild_export_and_trace(
+    pg: sa.Engine, policy: DatasetPolicy, snapshots: LakeFSSnapshotStore, tmp_path: Path
+) -> None:
+    golden = _populate(pg)
+    v1_id = f"ds-{uuid.uuid4().hex[:6]}-v1"
+    with pg.begin() as conn:
+        result = build_dataset_version(
+            conn,
+            snapshots,
+            policy,
+            version_id=v1_id,
+            ontology_version="1.0.0",
+            golden_set_version="golden-cleaning-v1",
+            now=FIXED_TIME,
+        )
+        sessions = [get_session(conn, sid) for sid in result.version.splits]
+    v1 = result.version
+    assert check_isolation(sessions, dict(v1.splits)) == []  # 완료 기준: 교집합 0
+    assert all(v1.splits[g] is Split.GOLDEN for g in golden)
+    assert v1.snapshot_uri.startswith("lakefs://dlp-datasets/")
+    snap = tmp_path / "manifest.json"
+    snapshots.read(v1.snapshot_uri, "manifest.json", snap)
+    manifest = json.loads(snap.read_text(encoding="utf-8"))
+    assert manifest["split_counts"] == result.report.counts
+    assert sum(result.label_counts.values()) == 300
+
+    victim = next(sid for sid, sp in v1.splits.items() if sp is Split.TRAIN)
+    with pg.begin() as conn:
+        assert get_session(conn, victim).lifecycle_state is LifecycleState.SPLIT_ASSIGNED
+        register_training_run(
+            conn,
+            TrainingRun(
+                run_id="run-1",
+                dataset_version_id=v1_id,
+                model_name="blur",
+                model_version="b1",
+                created_at=FIXED_TIME,
+            ),
+        )
+        e1 = record_export(
+            conn,
+            export_id="exp-1",
+            dataset_version_id=v1_id,
+            target="buyer-a",
+            format="lerobot",
+            uri="s3://dlp-datasets/exports/1",
+            now=FIXED_TIME,
+        )
+        assert victim in e1.session_ids
+
+        lineage = withdraw_session(conn, victim, "동의 철회", FIXED_TIME + timedelta(days=1))
+    # 완료 기준: 계보 조회가 세션 → 버전 → 학습 실행 → 내보내기를 모두 돌려준다
+    assert lineage.lifecycle is LifecycleState.WITHDRAWN
+    assert lineage.dataset_versions == [v1_id]
+    assert [r.run_id for r in lineage.training_runs] == ["run-1"]
+    assert [e.export_id for e in lineage.exports] == ["exp-1"]
+
+    v2_id = v1_id.replace("-v1", "-v2")
+    with pg.begin() as conn:
+        v2 = build_dataset_version(
+            conn,
+            snapshots,
+            policy,
+            version_id=v2_id,
+            ontology_version="1.0.0",
+            golden_set_version="golden-cleaning-v1",
+            parent_version_id=v1_id,
+            now=FIXED_TIME + timedelta(days=2),
+        ).version
+        e2 = record_export(
+            conn,
+            export_id="exp-2",
+            dataset_version_id=v1_id,
+            target="buyer-b",
+            format="coco",
+            uri="s3://dlp-datasets/exports/2",
+            now=FIXED_TIME,
+        )
+        stored_v1 = get_dataset_version(conn, v1_id)
+    # 완료 기준: 사용 중지 후 새 버전과 내보내기에 그 세션이 없다 (옛 버전은 재현성을 위해 그대로)
+    assert victim not in v2.splits and victim in v2.excluded_sessions
+    assert victim not in e2.session_ids
+    assert victim in stored_v1.splits
+    assert v2.snapshot_uri != v1.snapshot_uri
+
+
+def test_build_refuses_empty_or_wrong_domain(
+    pg: sa.Engine, policy: DatasetPolicy, snapshots: LakeFSSnapshotStore
+) -> None:
+    _populate(pg)
+    with pg.begin() as conn, pytest.raises(DatasetBuildError, match="도메인"):
+        build_dataset_version(
+            conn,
+            snapshots,
+            policy,
+            version_id="x1",
+            ontology_version="1.0.0",
+            golden_set_version="golden-cleaning-v1",
+            domain="nursing",
+            now=FIXED_TIME,
+        )
+    with pg.begin() as conn, pytest.raises(DatasetBuildError, match="세션이 없습니다"):
+        build_dataset_version(
+            conn,
+            snapshots,
+            policy,
+            version_id="x2",
+            ontology_version="9.9.9",
+            golden_set_version=None,
+            now=FIXED_TIME,
+        )

@@ -1,0 +1,52 @@
+{
+  "$defs": {
+    "Domain": {
+      "enum": [
+        "cleaning",
+        "caregiving",
+        "nursing"
+      ],
+      "title": "Domain",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "도메인별 골든셋 버전. 학습에 절대 쓰지 않는 평가 기준 세션 묶음.",
+  "properties": {
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "domain": {
+      "$ref": "#/$defs/Domain"
+    },
+    "note": {
+      "default": "",
+      "title": "Note",
+      "type": "string"
+    },
+    "session_ids": {
+      "items": {
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+        "type": "string"
+      },
+      "minItems": 1,
+      "title": "Session Ids",
+      "type": "array"
+    },
+    "version": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "version",
+    "domain",
+    "session_ids",
+    "created_at"
+  ],
+  "title": "GoldenSet",
+  "type": "object"
+}

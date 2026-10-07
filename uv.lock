@@ -6,6 +6,7 @@ requires-python = ">=3.12, <3.14"
 members = [
     "data-labeling",
     "dlp-cli",
+    "dlp-datasets",
     "dlp-fixtures",
     "dlp-media",
     "dlp-privacy",
@@ -146,6 +147,7 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "dlp-cli" },
+    { name = "dlp-datasets" },
     { name = "dlp-fixtures" },
     { name = "dlp-media" },
     { name = "dlp-privacy" },
@@ -167,6 +169,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "dlp-cli", editable = "packages/cli" },
+    { name = "dlp-datasets", editable = "packages/datasets" },
     { name = "dlp-fixtures", editable = "packages/fixtures" },
     { name = "dlp-media", editable = "packages/media" },
     { name = "dlp-privacy", editable = "packages/privacy" },
@@ -190,6 +193,7 @@ name = "dlp-cli"
 version = "0.1.0"
 source = { editable = "packages/cli" }
 dependencies = [
+    { name = "dlp-datasets" },
     { name = "dlp-fixtures" },
     { name = "dlp-media" },
     { name = "dlp-privacy" },
@@ -200,12 +204,30 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "dlp-datasets", editable = "packages/datasets" },
     { name = "dlp-fixtures", editable = "packages/fixtures" },
     { name = "dlp-media", editable = "packages/media" },
     { name = "dlp-privacy", editable = "packages/privacy" },
     { name = "dlp-review", editable = "packages/review" },
     { name = "dlp-schema", editable = "packages/schema" },
     { name = "dlp-sync", editable = "packages/sync" },
+]
+
+[[package]]
+name = "dlp-datasets"
+version = "0.1.0"
+source = { editable = "packages/datasets" }
+dependencies = [
+    { name = "dlp-schema" },
+    { name = "httpx" },
+    { name = "pyyaml" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "dlp-schema", editable = "packages/schema" },
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "pyyaml", specifier = ">=6.0" },
 ]
 
 [[package]]

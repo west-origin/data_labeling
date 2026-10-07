@@ -1,0 +1,10 @@
+# 데이터셋 버전 정책 (WP7). 분할 단위는 config/defaults.yaml golden_set.split_unit(작업자·장소)을 따른다.
+version: 1
+val_ratio: 0.1                # 학습·검증 후보 세션 중 검증 비율 목표
+golden_sessions_per_domain: 20  # 골든셋 제안 시 도메인별 목표 세션 수 (사람이 최종 확정)
+eligible_privacy_state: approved  # 프라이버시 승인된 세션만 데이터셋에 넣는다
+include_label_history: true   # 스냅샷에 수정 이력(자동 원본과 수정본)을 함께 넣는다
+lakefs:
+  repository: dlp-datasets
+  branch: main
+  storage_namespace: s3://dlp-datasets/lakefs

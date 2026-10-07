@@ -66,6 +66,7 @@ def test_services_check_exit_code(monkeypatch: pytest.MonkeyPatch) -> None:
         "DLP_LABEL_STUDIO_PORT",
         "DLP_PREFECT_PORT",
         "DLP_MLFLOW_PORT",
+        "DLP_LAKEFS_PORT",
     ):
         monkeypatch.setenv(key, port)
     monkeypatch.setenv("DLP_HOST", "127.0.0.1")

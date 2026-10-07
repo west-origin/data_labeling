@@ -177,7 +177,10 @@ def test_privacy_review_edits_become_label_history(
     assert stored.status is ReviewTaskStatus.COLLECTED
     assert len(current) == len(blur)  # 수정 1(대체), 삭제 1, 추가 1
     assert all(x.verification.state is not VerificationState.UNREVIEWED for x in current)
-    moved = next(x for x in current if x.parent_label_id == tracks[0]["attributes"][0]["value"])
+    # CVAT는 속성 순서를 보장하지 않으므로 값으로 원래 라벨 ID를 찾는다
+    original_ids = {x.label_id for x in blur}
+    moved_from = next(a["value"] for a in tracks[0]["attributes"] if a["value"] in original_ids)
+    moved = next(x for x in current if x.parent_label_id == moved_from)
     assert isinstance(moved.payload, BlurTrackPayload)
     with pg.begin() as conn:
         assert approve_session(conn, sid).privacy_state.value == "approved"

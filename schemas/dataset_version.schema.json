@@ -4,7 +4,8 @@
       "enum": [
         "golden",
         "train",
-        "val"
+        "val",
+        "holdout"
       ],
       "title": "Split",
       "type": "string"

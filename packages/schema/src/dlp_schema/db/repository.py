@@ -12,13 +12,18 @@ from dlp_schema.dataset import DatasetVersion
 from dlp_schema.db.tables import (
     dataset_split_assignments,
     dataset_versions,
+    exports,
+    golden_sets,
     label_records,
     ontology_versions,
     review_tasks,
     sessions,
     streams,
+    training_runs,
+    withdrawals,
 )
 from dlp_schema.labels import LabelRecord, VerificationState
+from dlp_schema.lineage import ExportRecord, GoldenSet, TrainingRun, Withdrawal
 from dlp_schema.ontology import Ontology
 from dlp_schema.review import ReviewStage, ReviewTask, ReviewTaskStatus
 from dlp_schema.session import LifecycleState, PrivacyState, Session, Stream, can_transition
@@ -313,3 +318,80 @@ def get_dataset_version(conn: sa.Connection, version_id: str) -> DatasetVersion:
 
 def _without(mapping: Mapping[Any, Any], *keys: str) -> dict[str, Any]:
     return {str(k): v for k, v in mapping.items() if k not in keys}
+
+
+# ---------------------------------------------------------------- 세션 목록·계보
+
+
+def list_session_ids(conn: sa.Connection, ontology_version: str | None = None) -> list[str]:
+    query = sa.select(sessions.c.session_id).order_by(sessions.c.session_id)
+    if ontology_version is not None:
+        query = query.where(sessions.c.ontology_version == ontology_version)
+    return [str(r) for r in conn.execute(query).scalars()]
+
+
+def insert_golden_set(conn: sa.Connection, golden: GoldenSet) -> None:
+    data = golden.model_dump(mode="json")
+    data["created_at"] = golden.created_at
+    conn.execute(golden_sets.insert().values(**data))
+
+
+def get_golden_set(conn: sa.Connection, version: str) -> GoldenSet:
+    row = (
+        conn.execute(sa.select(golden_sets).where(golden_sets.c.version == version))
+        .mappings()
+        .one()
+    )
+    return GoldenSet.model_validate(dict(row))
+
+
+def list_golden_sets(conn: sa.Connection, domain: str | None = None) -> list[GoldenSet]:
+    query = sa.select(golden_sets).order_by(golden_sets.c.created_at)
+    if domain is not None:
+        query = query.where(golden_sets.c.domain == domain)
+    return [GoldenSet.model_validate(dict(r)) for r in conn.execute(query).mappings()]
+
+
+def insert_training_run(conn: sa.Connection, run: TrainingRun) -> None:
+    conn.execute(training_runs.insert().values(**run.model_dump()))
+
+
+def list_training_runs(conn: sa.Connection, dataset_version_ids: list[str]) -> list[TrainingRun]:
+    query = (
+        sa.select(training_runs)
+        .where(training_runs.c.dataset_version_id.in_(dataset_version_ids))
+        .order_by(training_runs.c.created_at)
+    )
+    return [TrainingRun.model_validate(dict(r)) for r in conn.execute(query).mappings()]
+
+
+def insert_export(conn: sa.Connection, export: ExportRecord) -> None:
+    data = export.model_dump(mode="json")
+    data["created_at"] = export.created_at
+    conn.execute(exports.insert().values(**data))
+
+
+def list_exports(conn: sa.Connection, dataset_version_ids: list[str]) -> list[ExportRecord]:
+    query = (
+        sa.select(exports)
+        .where(exports.c.dataset_version_id.in_(dataset_version_ids))
+        .order_by(exports.c.created_at)
+    )
+    return [ExportRecord.model_validate(dict(r)) for r in conn.execute(query).mappings()]
+
+
+def insert_withdrawal(conn: sa.Connection, withdrawal: Withdrawal) -> None:
+    conn.execute(withdrawals.insert().values(**withdrawal.model_dump()))
+
+
+def withdrawn_session_ids(conn: sa.Connection) -> set[str]:
+    return {str(r) for r in conn.execute(sa.select(withdrawals.c.session_id)).scalars()}
+
+
+def dataset_versions_with_session(conn: sa.Connection, session_id: str) -> list[str]:
+    query = (
+        sa.select(dataset_split_assignments.c.version_id)
+        .where(dataset_split_assignments.c.session_id == session_id)
+        .order_by(dataset_split_assignments.c.version_id)
+    )
+    return [str(r) for r in conn.execute(query).scalars()]

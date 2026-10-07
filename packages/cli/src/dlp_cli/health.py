@@ -49,6 +49,7 @@ def default_checks(
             "prefect", "http", f"http://{host}:{port('DLP_PREFECT_PORT', 4200)}/api/health"
         ),
         ServiceCheck("mlflow", "http", f"http://{host}:{port('DLP_MLFLOW_PORT', 5000)}/health"),
+        ServiceCheck("lakefs", "http", f"http://{host}:{port('DLP_LAKEFS_PORT', 8000)}/_health"),
     ]
     if include_cvat:
         checks.append(

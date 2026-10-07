@@ -1,0 +1,54 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "dataset_version_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Dataset Version Id",
+      "type": "string"
+    },
+    "export_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Export Id",
+      "type": "string"
+    },
+    "format": {
+      "description": "coco, interval_json, lerobot 등",
+      "title": "Format",
+      "type": "string"
+    },
+    "session_ids": {
+      "description": "실제로 내보낸 세션 (사용 중지 제외 후)",
+      "items": {
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+        "type": "string"
+      },
+      "title": "Session Ids",
+      "type": "array"
+    },
+    "target": {
+      "description": "내보낸 곳 (구매자, 내부 학습 등)",
+      "title": "Target",
+      "type": "string"
+    },
+    "uri": {
+      "title": "Uri",
+      "type": "string"
+    }
+  },
+  "required": [
+    "export_id",
+    "dataset_version_id",
+    "target",
+    "format",
+    "uri",
+    "session_ids",
+    "created_at"
+  ],
+  "title": "ExportRecord",
+  "type": "object"
+}

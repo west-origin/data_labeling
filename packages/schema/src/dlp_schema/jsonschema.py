@@ -11,6 +11,7 @@ from dlp_schema.config import PlatformConfig
 from dlp_schema.dataset import DatasetVersion
 from dlp_schema.episode import EpisodeGraph
 from dlp_schema.labels import LabelRecord
+from dlp_schema.lineage import ExportRecord, GoldenSet, TrainingRun, Withdrawal
 from dlp_schema.migration import OntologyMigration
 from dlp_schema.ontology import Ontology
 from dlp_schema.review import ReviewTask
@@ -25,6 +26,10 @@ CONTRACTS: dict[str, type[BaseModel]] = {
     "ontology_migration": OntologyMigration,
     "platform_config": PlatformConfig,
     "review_task": ReviewTask,
+    "golden_set": GoldenSet,
+    "training_run": TrainingRun,
+    "export_record": ExportRecord,
+    "withdrawal": Withdrawal,
 }
 
 
