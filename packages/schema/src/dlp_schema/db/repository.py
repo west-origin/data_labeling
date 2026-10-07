@@ -46,7 +46,15 @@ from dlp_schema.review import (
     ReviewTask,
     ReviewTaskStatus,
 )
-from dlp_schema.session import LifecycleState, PrivacyState, Session, Stream, can_transition
+from dlp_schema.session import (
+    LifecycleState,
+    PrivacyState,
+    Session,
+    Stream,
+    StreamKind,
+    SyncMethod,
+    can_transition,
+)
 
 
 class TransitionError(ValueError):
@@ -147,7 +155,25 @@ def set_privacy_state(conn: sa.Connection, session_id: str, state: PrivacyState)
 
 
 def update_stream_sync(conn: sa.Connection, session_id: str, stream: Stream) -> None:
-    """스트림의 동기화 결과(오프셋, 드리프트, 방법, 신뢰도, 사람 조정값)만 갱신한다."""
+    """스트림의 동기화 결과(오프셋, 드리프트, 방법, 신뢰도, 사람 조정값)만 갱신한다.
+
+    기준 스트림(바디캠)은 마스터 시계 그 자체라 reference·오프셋 0·배율 1·조정 0만 허용한다.
+    다른 스트림을 reference로 바꿀 수도 없다.
+    """
+    stored = conn.execute(
+        sa.select(streams.c.kind).where(
+            streams.c.session_id == session_id, streams.c.stream_id == stream.stream_id
+        )
+    ).scalar_one_or_none()
+    if stored is None:
+        raise KeyError(f"{session_id}/{stream.stream_id}")
+    is_reference = StreamKind(stored) is StreamKind.BODYCAM
+    if is_reference and not (
+        stream.sync_method is SyncMethod.REFERENCE and stream.is_identity_clock
+    ):
+        raise ValueError(f"{session_id}/{stream.stream_id}: 기준 스트림의 시계는 바꿀 수 없습니다")
+    if not is_reference and stream.sync_method is SyncMethod.REFERENCE:
+        raise ValueError(f"{session_id}/{stream.stream_id}: 기준 스트림이 아닙니다")
     result = conn.execute(
         streams.update()
         .where(streams.c.session_id == session_id, streams.c.stream_id == stream.stream_id)
@@ -473,11 +499,13 @@ def set_model_status(
     values: dict[str, Any] = {"status": status.value, "decided_at": at}
     if report_uri is not None:
         values["report_uri"] = report_uri
-    conn.execute(
+    result = conn.execute(
         model_versions.update()
         .where(model_versions.c.model_version == model_version)
         .values(**values)
     )
+    if result.rowcount != 1:
+        raise KeyError(model_version)
 
 
 def insert_export(conn: sa.Connection, export: ExportRecord) -> None:

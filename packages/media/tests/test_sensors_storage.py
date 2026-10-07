@@ -34,6 +34,10 @@ def test_imu_sidecar_parquet_and_csv(sync: tuple[SyncScenario, Path], tmp_path: 
     bad.write_text("t_ms,ax\n0,1\n1,2\n")
     with pytest.raises(ValueError, match="IMU 열"):
         read_imu_table(bad)
+    single = tmp_path / "single.csv"
+    single.write_text("t_ms,ax,ay,az,gx,gy,gz\n0,0,0,9.8,0,0,0\n")
+    with pytest.raises(ValueError, match="2개 미만"):
+        read_imu_table(single)
 
 
 def test_glove_parquet_and_hdf5(sync: tuple[SyncScenario, Path], tmp_path: Path) -> None:
@@ -53,6 +57,15 @@ def test_glove_parquet_and_hdf5(sync: tuple[SyncScenario, Path], tmp_path: Path)
     assert np.array_equal(from_h5.t_ms, t)
     assert np.array_equal(from_h5.channels["pressure_3"], pressure[:, 3])
     assert "temperature" in from_h5.channels
+    assert "timestamp_ms" not in from_h5.channels
+
+    # 시각 열이 둘이면 남은 시각 열도 채널이 아니다 (압력 합에 섞이지 않게)
+    both = tmp_path / "both.h5"
+    with h5py.File(both, "w") as f:
+        f["t_ms"] = t
+        f["timestamp_ms"] = t + 5.0
+        f["pressure"] = pressure
+    assert set(read_glove(both).channels) == {f"pressure_{i}" for i in range(5)}
 
     with h5py.File(tmp_path / "bad.h5", "w") as f:
         f["t_ms"] = np.array([0.0, 10.0, 5.0])

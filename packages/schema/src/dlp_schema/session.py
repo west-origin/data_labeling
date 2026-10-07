@@ -109,6 +109,11 @@ class Stream(Contract):
     sync_confidence: Confidence | None = None
     manual_adjustment_ms: float = 0.0
 
+    @property
+    def is_identity_clock(self) -> bool:
+        """마스터 시계와 같은 시계인가 (오프셋 0, 배율 1, 사람 조정 0)."""
+        return self.offset_ms == 0 and self.clock_scale == 1 and self.manual_adjustment_ms == 0
+
     def to_master_ms(self, stream_ms: float) -> float:
         return self.offset_ms + self.manual_adjustment_ms + stream_ms * self.clock_scale
 
@@ -135,8 +140,16 @@ class Session(Contract):
         bodycams = [s for s in self.streams if s.kind is StreamKind.BODYCAM]
         if len(bodycams) != 1:
             raise ValueError("세션에는 기준 스트림인 바디캠이 정확히 하나 있어야 합니다")
-        if bodycams[0].sync_method is not SyncMethod.REFERENCE:
+        ref = bodycams[0]
+        if ref.sync_method is not SyncMethod.REFERENCE:
             raise ValueError("바디캠 스트림의 sync_method는 reference여야 합니다")
+        if not ref.is_identity_clock:
+            raise ValueError(
+                "기준 스트림(바디캠)은 offset_ms 0, clock_scale 1, "
+                "manual_adjustment_ms 0이어야 합니다"
+            )
+        if any(s.sync_method is SyncMethod.REFERENCE for s in self.streams if s is not ref):
+            raise ValueError("reference 동기화 방법은 바디캠 스트림만 쓸 수 있습니다")
         return self
 
     @property

@@ -451,6 +451,7 @@
           "title": "Model Version"
         },
         "payload": {
+          "description": "블러 라벨(blur_track)은 어떤 내보내기에도 넣지 않는다",
           "discriminator": {
             "mapping": {
               "action": "#/$defs/ActionPayload",

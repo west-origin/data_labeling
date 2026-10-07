@@ -15,6 +15,12 @@ buckets:
   datasets: dlp-datasets           # 데이터셋 버전·내보내기
   mlflow: dlp-mlflow               # 학습 산출물
 
+media:
+  proxy:                           # 검수 화면용 프록시 영상 (dlp ingest)
+    max_height: 480                # 이보다 높으면 이 높이로 줄인다 (px)
+    crf: 28                        # libx264 화질 (낮을수록 고화질)
+    keyframe_ms: 1000              # 키프레임 간격 (빠른 스크러빙용)
+
 privacy:
   blur_hold_ms: 200
   render_mode: mosaic              # mosaic | solid

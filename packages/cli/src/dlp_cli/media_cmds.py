@@ -13,6 +13,8 @@ from dlp_media.ingest import ingest_session, load_manifest
 from dlp_media.probe import probe
 from dlp_media.pts import build_pts_index
 from dlp_media.storage import store_from_spec
+from dlp_schema import repo_root
+from dlp_schema.config import load_config
 
 
 def cmd_probe(args: argparse.Namespace) -> int:
@@ -50,12 +52,13 @@ def cmd_ingest(args: argparse.Namespace) -> int:
         if args.no_db
         else raw_store(args.store, args.url, "media.ingest")
     )
+    proxy = load_config(repo_root() / "config" / "defaults.yaml").media.proxy
     if args.no_db:
-        result = ingest_session(manifest, base, raw)
+        result = ingest_session(manifest, base, raw, proxy=proxy)
     else:
         engine = sa.create_engine(database_url(args.url))
         with engine.begin() as conn:
-            result = ingest_session(manifest, base, raw, conn)
+            result = ingest_session(manifest, base, raw, conn, proxy=proxy)
         engine.dispose()
     print(f"세션 {result.session.session_id}: 스트림 {len(result.session.streams)}개")
     print(f"업로드 {len(result.uploaded)}, 건너뜀 {len(result.skipped)}, DB {result.db}")

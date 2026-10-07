@@ -89,7 +89,7 @@ label_records = sa.Table(
         nullable=False,
     ),
     sa.Column("source", sa.String(16), nullable=False),
-    sa.Column("model_version", sa.String(128), nullable=True),
+    sa.Column("model_version", sa.Text(), nullable=True),
     sa.Column("sensor_id", sa.String(128), nullable=True),
     sa.Column("evidence", sa.String(16), nullable=False),
     sa.Column("confidence", sa.Float(), nullable=True),
@@ -252,7 +252,7 @@ dataset_versions = sa.Table(
     ),
     sa.Column("created_at", Ts, nullable=False),
     sa.Column("snapshot_uri", sa.Text(), nullable=False),
-    sa.Column("golden_set_version", sa.String(64), nullable=True),
+    sa.Column("golden_set_version", sa.String(128), nullable=True),
     sa.Column("excluded_sessions", Json, nullable=False),
 )
 

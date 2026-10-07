@@ -4,6 +4,14 @@
 새 버전의 새 레코드를 만들며(parent_label_id로 연결), 검증 상태는 미검수로 되돌린다.
 골든셋은 이관 후 재검수를 거쳐야 평가에 쓸 수 있기 때문이다.
 
+입력은 세션의 전체 수정 이력이어도 된다. 이관 대상은 이력의 현재 라벨뿐이다
+(`current_labels(operational=False)`): 이미 수정된 레코드, 삭제된 레코드, 삭제 레코드 자체를
+다시 이관하면 지운 라벨이 되살아나기 때문이다. 오류 삽입·측정 레코드는 표시를 그대로 지닌 채
+이관되므로 이관 후에도 운영 라벨이 아니다.
+
+부분 ID(parts: 도구 작용부·파지부, 표면 부분, 손 관절)는 mask_track·trajectory3d의 part와
+relation의 subject_part·object_part에서 바꾼다.
+
 상태 속성과 값(pre_state, post_state, object_state.attribute/value)의
 이름 변경은 아직 지원하지 않는다.
 """
@@ -18,6 +26,7 @@ import yaml
 from pydantic import Field, ValidationError
 
 from dlp_schema.common import Contract, OntologyId, SemVer
+from dlp_schema.episode import current_labels
 from dlp_schema.labels import LabelRecord, Verification
 
 Category = Literal[
@@ -32,13 +41,16 @@ Category = Literal[
     "body_parts",
     "contact_target_kinds",
     "hand_roles",
+    "parts",
 ]
 
 # 페이로드 종류별로 어떤 필드가 어떤 사전을 참조하는지
 _FIELDS: dict[str, dict[str, Category]] = {
     "action": {"verb": "verbs", "target_body_part": "body_parts"},
     "box_track": {"class_id": "objects"},
-    "mask_track": {"class_id": "objects"},
+    "mask_track": {"class_id": "objects", "part": "parts"},
+    "trajectory3d": {"part": "parts"},
+    "relation": {"subject_part": "parts", "object_part": "parts"},
     "object_state": {"class_id": "objects"},
     "blur_track": {"target": "privacy_targets"},
     "hand_state": {
@@ -79,9 +91,12 @@ def load_migration(path: Path) -> OntologyMigration:
 def migrate_labels(
     labels: list[LabelRecord], migration: OntologyMigration, now: datetime
 ) -> MigrationResult:
+    """labels: 세션의 라벨 이력 (현재 라벨만 이관한다)."""
     migrated: list[LabelRecord] = []
     review: list[tuple[str, str]] = []
-    for label in labels:
+    for label in current_labels(labels, operational=False):
+        if label.ontology_version == migration.to_version:
+            continue  # 이미 새 버전인 라벨 (이관을 다시 돌린 경우)
         if label.ontology_version != migration.from_version:
             review.append((label.label_id, f"버전 {label.ontology_version}은 이관 대상이 아닙니다"))
             continue

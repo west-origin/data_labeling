@@ -84,6 +84,12 @@ class Ontology(Contract):
     objects: dict[OntologyId, ObjectClass]
     events: dict[OntologyId, EventTerm]
     privacy_targets: dict[OntologyId, PrivacyTarget]
+    surface_parts: dict[OntologyId, Term] = Field(
+        default_factory=dict, description="표면 평면 꼭짓점 등 표면 3D 궤적의 부분 ID"
+    )
+    hand_joints: dict[OntologyId, Term] = Field(
+        default_factory=dict, description="손 3D 궤적의 부분 ID (hand21 골격의 이름 붙은 점)"
+    )
 
     @model_validator(mode="after")
     def _check_references(self) -> Ontology:
@@ -119,6 +125,14 @@ class Ontology(Contract):
         if obj is None or obj.tool is None:
             return frozenset()
         return frozenset(obj.tool.working_parts) | frozenset(obj.tool.grip_parts)
+
+    def known_parts(self) -> frozenset[str]:
+        """부분 ID 전체: 모든 도구의 작용부·파지부, 표면 부분, 손 관절.
+
+        3D 궤적과 관계의 part는 객체 클래스를 함께 싣지 않으므로 이 합집합으로 검사한다.
+        """
+        tool = {p for oid in self.objects for p in self.tool_parts(oid)}
+        return frozenset(tool) | frozenset(self.surface_parts) | frozenset(self.hand_joints)
 
 
 def load_ontology(directory: Path) -> Ontology:

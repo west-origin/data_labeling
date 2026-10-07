@@ -10,6 +10,10 @@
 
 같은 매니페스트로 다시 실행하면 아무것도 바꾸지 않는다. 파생 파일은 이미 있으면 다시 만들지
 않는다 (인코딩 결과가 실행마다 바이트 단위로 같다는 보장이 없기 때문이다).
+이미 등록된 세션과는 매니페스트·미디어에서 나온 필드만 비교한다. 동기화 결과, 프라이버시·생애주기
+상태, 온톨로지 이관처럼 수집 뒤 단계가 바꾸는 필드는 다시 수집해도 충돌로 보지 않는다.
+
+프록시 인코딩 설정은 config/defaults.yaml media.proxy에서 읽는다.
 """
 
 from __future__ import annotations
@@ -32,6 +36,7 @@ from dlp_media.proxy import make_proxy
 from dlp_media.pts import build_pts_index
 from dlp_media.storage import ObjectStore, put_immutable
 from dlp_schema.common import Contract, Identifier, SemVer
+from dlp_schema.config import ProxyConfig, load_config, repo_root
 from dlp_schema.db.repository import get_session, insert_session
 from dlp_schema.session import Calibration, Domain, Session, Stream, StreamKind, SyncMethod
 
@@ -81,7 +86,11 @@ def ingest_session(
     base_dir: Path,
     raw: ObjectStore,
     conn: sa.Connection | None = None,
+    *,
+    proxy: ProxyConfig | None = None,
 ) -> IngestResult:
+    """proxy: 프록시 인코딩 설정. 없으면 저장소의 config/defaults.yaml media.proxy를 읽는다."""
+    proxy_cfg = proxy if proxy is not None else default_proxy_config()
     sid = manifest.session_id
     prefix = f"sessions/{sid}"
     kinds = [s.kind for s in manifest.streams]
@@ -122,7 +131,8 @@ def ingest_session(
             index = build_pts_index(src)
             pts_uri = derived(f"{prefix}/derived/{ms.stream_id}.pts.parquet", index.write)
             derived(
-                f"{prefix}/derived/{ms.stream_id}.proxy.mp4", lambda out, s=src: make_proxy(s, out)
+                f"{prefix}/derived/{ms.stream_id}.proxy.mp4",
+                lambda out, s=src: make_proxy(s, out, proxy_cfg),
             )
             is_body = ms.kind is StreamKind.BODYCAM
             streams.append(
@@ -179,6 +189,11 @@ def ingest_session(
     return result
 
 
+def default_proxy_config() -> ProxyConfig:
+    root = repo_root(Path(__file__).parent)
+    return load_config(root / "config" / "defaults.yaml").media.proxy
+
+
 def _imu_stream(
     stream_id: str,
     imu: ImuData,
@@ -202,8 +217,28 @@ def _register(conn: sa.Connection, session: Session) -> str:
     except NoResultFound:
         insert_session(conn, session)
         return "inserted"
-    if existing != session:
+    if _ingest_fields(existing) != _ingest_fields(session):
         raise SessionConflictError(
             f"세션 {session.session_id}가 다른 내용으로 이미 등록되어 있습니다"
         )
     return "unchanged"
+
+
+# 수집 뒤 단계가 바꾸는 필드 (동기화, 프라이버시·생애주기, 온톨로지 이관)
+_LATER_SESSION_FIELDS = {"privacy_state", "lifecycle_state", "ontology_version"}
+_SYNC_FIELDS = {
+    "offset_ms",
+    "clock_scale",
+    "sync_method",
+    "sync_confidence",
+    "manual_adjustment_ms",
+}
+
+
+def _ingest_fields(session: Session) -> dict[str, Any]:
+    """매니페스트와 미디어에서 나온 필드만 (재수집 충돌 판단용)."""
+    data = session.model_dump(mode="json", exclude=_LATER_SESSION_FIELDS)
+    data["streams"] = [
+        {k: v for k, v in s.items() if k not in _SYNC_FIELDS} for s in data["streams"]
+    ]
+    return data

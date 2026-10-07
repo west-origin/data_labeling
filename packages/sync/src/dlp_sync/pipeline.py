@@ -4,10 +4,16 @@
 기준 스트림(바디캠)과 같은 시계인 스트림(shared_clock)은 건드리지 않는다. 사람이 넣은
 manual_adjustment_ms는 다시 동기화해도 유지한다.
 
+- 사람이 직접 맞춘 스트림(manual)은 다시 동기화해도 건드리지 않는다.
+- 다시 돌렸는데 이번에는 맞추지 못하면 이전의 자동 결과를 그대로 둔다 (unsynced로 내리지 않는다).
+- 자동으로 맞추지 못한(unsynced) 스트림에 사람이 조정값을 넣으면 manual이 된다
+  (오프셋 0, 배율 1, 조정값 = 사람이 정한 오프셋). unsynced 스트림은 다음 단계가 쓰지 않는다.
+
 신뢰도
 - qr_slate: 슬레이트 2개 이상 0.95, 1개 0.8 (프레임 간격만큼의 양자화 오차가 있다)
 - tap_event: (짝지은 두 번 두드림 수 / 2, 최대 1) * exp(-잔차 RMS / residual_scale_ms)
-- audio_xcorr, motion_xcorr: 1 - min_psr / PSR (PSR이 min_psr 이하면 0), 앵커 잔차가 크면 낮춘다
+- audio_xcorr, motion_xcorr: 1 - min_psr / PSR (PSR이 min_psr 이하면 0). 앵커가 2개 이상이면
+  exp(-잔차 RMS / residual_scale_ms)를 곱한다
 """
 
 from __future__ import annotations
@@ -32,6 +38,11 @@ METHOD_ENUM: dict[MethodName, SyncMethod] = {
     "audio_xcorr": SyncMethod.AUDIO_XCORR,
     "motion_xcorr": SyncMethod.MOTION_XCORR,
 }
+
+
+# 다시 동기화해도 건드리지 않는 스트림: 기준, 같은 시계, 사람이 맞춘 스트림
+KEEP_METHODS = frozenset({SyncMethod.REFERENCE, SyncMethod.SHARED_CLOCK, SyncMethod.MANUAL})
+AUTO_METHODS = frozenset(METHOD_ENUM.values())
 
 
 @dataclass
@@ -118,10 +129,10 @@ def synchronize(
     updated: list[Stream] = []
     reports: list[StreamReport] = []
     for stream in session.streams:
-        if stream.sync_method in (SyncMethod.REFERENCE, SyncMethod.SHARED_CLOCK):
+        if stream.sync_method in KEEP_METHODS:
             updated.append(stream)
             continue
-        methods = policy.methods.get(stream.kind.value, ())
+        methods = policy.methods.get(stream.kind, ())
         target = media.get(stream.stream_id, StreamMedia())
         attempts: list[Attempt] = []
         chosen: Attempt | None = None
@@ -133,6 +144,9 @@ def synchronize(
                 break
         reports.append(StreamReport(stream.stream_id, chosen.method if chosen else None, attempts))
         if chosen is None or chosen.fit is None:
+            if stream.sync_method in AUTO_METHODS:
+                updated.append(stream)  # 이전의 자동 결과를 유지한다
+                continue
             updated.append(
                 stream.model_copy(
                     update={
@@ -178,11 +192,13 @@ def _try(method: MethodName, ref: _Reference, target: StreamMedia, policy: SyncP
             res = audio_anchors(
                 ref.media.audio, target.audio, policy.audio_xcorr, policy.max_offset_ms
             )
-            return _from_xcorr(method, res, policy.audio_xcorr.min_psr, policy)
+            ax = policy.audio_xcorr
+            return _from_xcorr(method, res, ax.min_psr, ax.residual_scale_ms, policy)
         if ref.imu is None or target.series is None:
             return Attempt(method, 0.0, "기준 IMU나 대상 시계열이 없습니다")
         res = motion_anchors(ref.imu, target.series, policy.motion_xcorr, policy.max_offset_ms)
-        return _from_xcorr(method, res, policy.motion_xcorr.min_psr, policy)
+        mx = policy.motion_xcorr
+        return _from_xcorr(method, res, mx.min_psr, mx.residual_scale_ms, policy)
     except FitError as exc:
         return Attempt(method, 0.0, str(exc))
 
@@ -226,27 +242,37 @@ def _tap(ref: _Reference, target: StreamMedia, policy: SyncPolicy) -> Attempt:
 
 
 def _from_xcorr(
-    method: MethodName, res: XcorrResult | None, min_psr: float, policy: SyncPolicy
+    method: MethodName,
+    res: XcorrResult | None,
+    min_psr: float,
+    residual_scale_ms: float,
+    policy: SyncPolicy,
 ) -> Attempt:
     if res is None:
         return Attempt(method, 0.0, "상관 탐색 범위가 겹치지 않습니다")
     fit = _fit(res.anchors, policy)
     confidence = max(0.0, 1 - min_psr / res.psr) if res.psr > 0 else 0.0
     if fit.n_anchors >= 2:
-        confidence *= math.exp(-fit.residual_rms_ms / 5.0)
+        confidence *= math.exp(-fit.residual_rms_ms / residual_scale_ms)
     return Attempt(method, confidence, f"PSR {res.psr:.1f}", fit, res.anchors)
 
 
 def apply_manual_adjustment(session: Session, stream_id: str, adjustment_ms: float) -> Session:
-    """사람이 검수 화면에서 정한 미세 조정값(ms)을 기록한다. 자동 결과는 그대로 둔다."""
+    """사람이 검수 화면에서 정한 미세 조정값(ms)을 기록한다. 자동 결과는 그대로 둔다.
+
+    자동으로 맞추지 못한(unsynced) 스트림이면 사람이 오프셋 전체를 정한 것이므로 manual로 바꾼다
+    (오프셋 0, 배율 1, 조정값 = 사람이 정한 오프셋). 이후 다시 동기화해도 덮어쓰지 않는다.
+    """
     stream = session.stream(stream_id)
     if stream.sync_method is SyncMethod.REFERENCE:
         raise ValueError("기준 스트림은 조정할 수 없습니다")
+    update: dict[str, object] = {"manual_adjustment_ms": adjustment_ms}
+    if stream.sync_method is SyncMethod.UNSYNCED:
+        update.update(
+            offset_ms=0.0, clock_scale=1.0, sync_method=SyncMethod.MANUAL, sync_confidence=None
+        )
     streams = [
-        s.model_copy(update={"manual_adjustment_ms": adjustment_ms})
-        if s.stream_id == stream_id
-        else s
-        for s in session.streams
+        s.model_copy(update=update) if s.stream_id == stream_id else s for s in session.streams
     ]
     return Session.model_validate(
         {**session.model_dump(), "streams": [s.model_dump() for s in streams]}

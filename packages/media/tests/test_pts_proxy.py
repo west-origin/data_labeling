@@ -12,6 +12,7 @@ from dlp_fixtures.video import BlurScenario
 from dlp_media.probe import probe
 from dlp_media.proxy import make_proxy
 from dlp_media.pts import PtsIndex, build_pts_index
+from dlp_schema.config import ProxyConfig
 
 
 def test_pts_index_matches_vfr_frame_times_exactly(blur: tuple[BlurScenario, Path]) -> None:
@@ -61,7 +62,7 @@ def test_proxy_keeps_pts_drops_audio_and_adds_keyframes(
 ) -> None:
     for src in (blur[1], sync[1] / "bodycam.mp4"):
         dst = tmp_path / f"{src.parent.name}-proxy.mp4"
-        make_proxy(src, dst, max_height=120, keyframe_ms=500)
+        make_proxy(src, dst, ProxyConfig(max_height=120, crf=28, keyframe_ms=500))
         source, proxy = build_pts_index(src), build_pts_index(dst)
         assert proxy.ms.tolist() == source.ms.tolist()
         info = probe(dst)

@@ -28,7 +28,8 @@
           "grasp_types",
           "body_parts",
           "contact_target_kinds",
-          "hand_roles"
+          "hand_roles",
+          "parts"
         ]
       },
       "title": "Removed",
@@ -57,7 +58,8 @@
           "grasp_types",
           "body_parts",
           "contact_target_kinds",
-          "hand_roles"
+          "hand_roles",
+          "parts"
         ]
       },
       "title": "Renames",

@@ -91,3 +91,8 @@ def test_ingest_then_sync_updates_db_and_writes_report(
     with pg.begin() as conn:
         again, _ = run_sync(conn, sid, store, policy)
     assert again.stream("third_person").manual_adjustment_ms == -4.5
+
+    # 동기화 결과가 바뀐 세션을 같은 매니페스트로 다시 수집해도 충돌이 아니다
+    with pg.begin() as conn:
+        reingest = ingest_session(*load_manifest(tmp_path / "m.yaml"), store, conn)
+    assert reingest.db == "unchanged"

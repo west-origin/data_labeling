@@ -139,3 +139,53 @@ def test_resync_is_deterministic(build: Callable[..., Built], policy: SyncPolicy
     second, r2 = synchronize(first, media, policy)
     assert first == second
     assert r1.to_dict() == r2.to_dict()
+
+
+def test_tap_drift_is_recovered_within_10_ppm(
+    build: Callable[..., Built], policy: SyncPolicy
+) -> None:
+    """긴 녹화의 시작·끝 두 번 두드림(오디오)으로 드리프트를 10 ppm 안으로 추정한다 (완료 기준).
+
+    seed 2는 3인칭이 두 번 두드림 두 쌍을 모두 듣는다. 장갑(100 Hz)은 샘플 간격 10 ms가
+    앵커 오차라 드리프트 정밀도가 이보다 낮다 (프레임 오차 기준만 본다).
+    """
+    built = build(seed=2, duration_ms=120_000.0, with_slates=False)
+    synced, report = synchronize(built[1], built[2], policy)
+    assert _chosen(report, "third_person") == "tap_event"
+    worst, drift_err = _errors(built, synced, "third_person")
+    assert synced.stream("third_person").clock_scale != 1.0  # 드리프트를 실제로 추정했다
+    assert drift_err <= 10
+    assert worst < 1.0
+    assert _chosen(report, "glove_right") == "tap_event"
+    assert _errors(built, synced, "glove_right")[0] <= FRAME_MS
+
+
+def test_adjusting_unsynced_stream_makes_it_manual(
+    build: Callable[..., Built], policy: SyncPolicy
+) -> None:
+    """자동으로 맞추지 못한 스트림에 사람이 넣은 오프셋은 manual이 되고, 다시 동기화해도 남는다."""
+    _, session, media = build(with_slates=False, audible_taps=False)
+    no_imu = {k: v for k, v in media.items() if k != "imu"}
+    synced, _ = synchronize(session, no_imu, policy)
+    assert synced.stream("glove_right").sync_method is SyncMethod.UNSYNCED
+    manual = apply_manual_adjustment(synced, "glove_right", 250.0)
+    glove = manual.stream("glove_right")
+    assert glove.sync_method is SyncMethod.MANUAL
+    assert (glove.offset_ms, glove.clock_scale, glove.manual_adjustment_ms) == (0.0, 1.0, 250.0)
+    assert glove.to_master_ms(1_000) == pytest.approx(1_250.0)
+    # 이제 신호가 있어도 사람이 맞춘 결과를 덮어쓰지 않는다
+    again, report = synchronize(manual, media, policy)
+    assert again.stream("glove_right") == glove
+    assert "glove_right" not in {r.stream_id for r in report.streams}
+
+
+def test_failed_resync_keeps_previous_fit(build: Callable[..., Built], policy: SyncPolicy) -> None:
+    built = build()
+    synced, _ = synchronize(built[1], built[2], policy)
+    assert synced.stream("glove_right").sync_method is SyncMethod.TAP_EVENT
+    adjusted = apply_manual_adjustment(synced, "glove_right", 3.0)
+    # 신호를 잃은 재실행: unsynced로 내리지 않고 이전 결과와 사람 조정값을 둔다
+    again, report = synchronize(adjusted, {}, policy)
+    assert _chosen(report, "glove_right") is None
+    assert again.stream("glove_right") == adjusted.stream("glove_right")
+    assert again.stream("third_person") == synced.stream("third_person")

@@ -144,6 +144,19 @@
       "title": "InfrastructureConfig",
       "type": "object"
     },
+    "MediaConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "proxy": {
+          "$ref": "#/$defs/ProxyConfig"
+        }
+      },
+      "required": [
+        "proxy"
+      ],
+      "title": "MediaConfig",
+      "type": "object"
+    },
     "PrivacyConfig": {
       "additionalProperties": false,
       "properties": {
@@ -184,6 +197,35 @@
         "full_review_exit"
       ],
       "title": "PrivacyConfig",
+      "type": "object"
+    },
+    "ProxyConfig": {
+      "additionalProperties": false,
+      "description": "검수 화면용 프록시 영상 인코딩 설정.",
+      "properties": {
+        "crf": {
+          "maximum": 51,
+          "minimum": 0,
+          "title": "Crf",
+          "type": "integer"
+        },
+        "keyframe_ms": {
+          "exclusiveMinimum": 0,
+          "title": "Keyframe Ms",
+          "type": "integer"
+        },
+        "max_height": {
+          "exclusiveMinimum": 0,
+          "title": "Max Height",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "max_height",
+        "crf",
+        "keyframe_ms"
+      ],
+      "title": "ProxyConfig",
       "type": "object"
     },
     "RetentionConfig": {
@@ -301,6 +343,9 @@
     "infrastructure": {
       "$ref": "#/$defs/InfrastructureConfig"
     },
+    "media": {
+      "$ref": "#/$defs/MediaConfig"
+    },
     "privacy": {
       "$ref": "#/$defs/PrivacyConfig"
     },
@@ -322,6 +367,7 @@
     "version",
     "infrastructure",
     "buckets",
+    "media",
     "privacy",
     "review",
     "golden_set",

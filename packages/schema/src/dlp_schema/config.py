@@ -26,6 +26,18 @@ class BucketsConfig(Contract):
     mlflow: str
 
 
+class ProxyConfig(Contract):
+    """검수 화면용 프록시 영상 인코딩 설정."""
+
+    max_height: int = Field(gt=0)
+    crf: int = Field(ge=0, le=51)
+    keyframe_ms: int = Field(gt=0)
+
+
+class MediaConfig(Contract):
+    proxy: ProxyConfig
+
+
 class FullReviewExit(Contract):
     weeks_below_target: int = Field(gt=0)
     audit_sample_ratio: float = Field(gt=0, le=1)
@@ -69,6 +81,7 @@ class PlatformConfig(Contract):
     version: int
     infrastructure: InfrastructureConfig
     buckets: BucketsConfig
+    media: MediaConfig
     privacy: PrivacyConfig
     review: ReviewConfig
     golden_set: GoldenSetConfig

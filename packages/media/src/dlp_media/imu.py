@@ -60,7 +60,7 @@ class ImuExtractor(Protocol):
     name: str
 
     def can_handle(self, info: MediaInfo) -> bool: ...
-    def extract(self, path: Path) -> ImuData: ...
+    def extract(self, path: Path) -> ImuData | None: ...
 
 
 # ---------------------------------------------------------------- GPMF
@@ -150,7 +150,11 @@ def timestamps(packets: list[tuple[float, float, int]]) -> NDArray[np.float64]:
     return np.asarray(np.concatenate(parts) if parts else np.zeros(0), dtype=np.float64)
 
 
-def imu_from_gpmf_payloads(payloads: list[tuple[float, float, bytes]]) -> ImuData:
+def imu_from_gpmf_payloads(payloads: list[tuple[float, float, bytes]]) -> ImuData | None:
+    """가속도 샘플이 2개 미만이면 None (샘플레이트를 정할 수 없어 IMU 스트림을 만들지 않는다).
+
+    자이로가 없는 기종·파일이면 자이로 열은 NaN이다 (0으로 채우면 정지로 오해된다).
+    """
     acc_parts = [sensor_samples(p, "ACCL") for _, _, p in payloads]
     gyro_parts = [sensor_samples(p, "GYRO") for _, _, p in payloads]
     t_acc = timestamps(
@@ -161,8 +165,13 @@ def imu_from_gpmf_payloads(payloads: list[tuple[float, float, bytes]]) -> ImuDat
     )
     acc = np.concatenate(acc_parts) if acc_parts else np.zeros((0, 3))
     gyro_raw = np.concatenate(gyro_parts) if gyro_parts else np.zeros((0, 3))
-    # 자이로를 가속도 시각으로 선형 보간한다 (기종에 따라 샘플레이트가 다르다)
-    gyro = np.stack([np.interp(t_acc, t_gyro, gyro_raw[:, i]) for i in range(3)], axis=1)
+    if t_acc.size < 2:
+        return None
+    if t_gyro.size == 0:
+        gyro = np.full((t_acc.size, 3), np.nan)
+    else:
+        # 자이로를 가속도 시각으로 선형 보간한다 (기종에 따라 샘플레이트가 다르다)
+        gyro = np.stack([np.interp(t_acc, t_gyro, gyro_raw[:, i]) for i in range(3)], axis=1)
     return ImuData(t_acc, acc, gyro, source="gpmf")
 
 
@@ -172,7 +181,7 @@ class GpmfExtractor:
     def can_handle(self, info: MediaInfo) -> bool:
         return any(d.codec_tag == "gpmd" for d in info.data_streams)
 
-    def extract(self, path: Path) -> ImuData:
+    def extract(self, path: Path) -> ImuData | None:
         payloads: list[tuple[float, float, bytes]] = []
         with av.open(str(path)) as c:
             stream = next(s for s in c.streams if s.type == "data" and s.codec_tag == "gpmd")
@@ -194,6 +203,7 @@ EXTRACTORS: list[ImuExtractor] = [GpmfExtractor()]
 
 
 def extract_embedded_imu(path: Path, info: MediaInfo) -> ImuData | None:
+    """내장 IMU를 추출한다. 처리할 추출기가 없거나 쓸 만한 샘플이 없으면 None."""
     for extractor in EXTRACTORS:
         if extractor.can_handle(info):
             return extractor.extract(path)
@@ -216,6 +226,8 @@ def read_imu_table(path: Path) -> ImuData:
     missing = [c for c in ("t_ms", *IMU_COLUMNS) if c not in cols]
     if missing:
         raise ValueError(f"{path.name}: IMU 열이 없습니다: {missing}")
+    if np.asarray(cols["t_ms"]).size < 2:
+        raise ValueError(f"{path.name}: IMU 샘플이 2개 미만이라 샘플레이트를 정할 수 없습니다")
     return ImuData(
         np.asarray(cols["t_ms"], dtype=float),
         np.stack([np.asarray(cols[c], dtype=float) for c in IMU_COLUMNS[:3]], axis=1),
