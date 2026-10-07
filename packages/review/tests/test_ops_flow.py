@@ -8,6 +8,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 import sqlalchemy as sa
 import yaml
@@ -21,12 +22,13 @@ from dlp_privacy.detection import FrameDetector
 from dlp_privacy.detectors.oracle import OracleDetector
 from dlp_privacy.policy import TargetPolicy, load_policy
 from dlp_privacy.runner import approve_session, detect_session, render_session
-from dlp_review.clients import LabelStudioClient
+from dlp_review.clients import CvatClient, LabelStudioClient
 from dlp_review.collect import collect_task
+from dlp_review.cvat import CvatSchema, to_cvat_tracks
 from dlp_review.labelstudio import LS_KINDS, to_ls_results
 from dlp_review.ops.policy import load_policy as load_ops_policy
 from dlp_review.ops.runner import create_assignment_tasks, plan_session, quality_report
-from dlp_review.tasks import ReviewSetup
+from dlp_review.tasks import ReviewSetup, frame_times, object_key
 from dlp_schema.db.migrate import upgrade
 from dlp_schema.db.repository import (
     get_assignment,
@@ -268,3 +270,71 @@ def test_blind_and_seeded_tasks_through_label_studio(
 def get_labels_sync(pg: sa.Engine, sid: str) -> list[LabelRecord]:
     with pg.connect() as conn:
         return get_labels(conn, sid)
+
+
+def test_seeded_blur_deletion_through_cvat(
+    pg: sa.Engine, setup: ReviewSetup, tmp_path: Path
+) -> None:
+    """블러 삭제 오류 삽입 과제 (CVAT). CI 서비스 작업에는 CVAT가 없어 닿지 않으면 건너뛴다."""
+    try:
+        cvat = CvatClient.from_env()
+    except httpx.HTTPError as exc:
+        pytest.skip(f"CVAT에 연결할 수 없습니다 (make cvat-up): {exc}")
+    setup = ReviewSetup(setup.raw, setup.labeling, setup.labeling_reader, setup.ontology, cvat=cvat)
+    gold_sid, work_sid = f"gold-{uuid.uuid4().hex[:6]}", f"work-{uuid.uuid4().hex[:6]}"
+    _session(pg, setup, tmp_path / "gold", gold_sid, human=True)
+    _session(pg, setup, tmp_path / "work", work_sid, human=False)
+    ops = load_ops_policy(ROOT)
+    ratios = {
+        "blind_task_ratio": 0.0,
+        "seeded_error_task_ratio": 1.0,
+        "double_annotation_ratio": 0.0,
+    }
+    ops = ops.model_copy(update={"ratios": ops.ratios.model_copy(update=ratios)})
+    ontology = load_ontology(ROOT / "config" / "ontology" / "v1")
+    with pg.begin() as conn:
+        planned = plan_session(
+            conn, work_sid, ["r1", "r2"], ops, ontology, seed=5, now=FIXED_TIME,
+            seed_sessions=[gold_sid], seed_groups={"privacy"}, privacy=True,
+        )  # fmt: skip
+    [seeded] = [a for a in planned if a.mode is ReviewMode.SEEDED_ERROR]
+    assert seeded.label_kinds == ("blur_track",) and seeded.session_id == gold_sid
+    assert seeded.injected and {e.error_type for e in seeded.injected} == {"blur_deletion"}
+    # 계획 단계에서 오류를 넣은 사본이 이미 들어가 있으므로 원래 라벨만 고른다
+    gold = {x.label_id: x for x in get_labels_sync(pg, gold_sid) if not x.seeded_error}
+
+    with pg.begin() as conn:
+        [task] = create_assignment_tasks(conn, seeded, setup, FIXED_TIME)
+    tid = int(task.external_id)
+    sent = cvat.get_tracks(tid)
+    assert len(sent) == len([x for x in gold.values() if x.kind == "blur_track"]) - len(
+        seeded.injected
+    )
+
+    # 검수자: 빠진 블러를 다시 그린다
+    project = cvat.http.get(f"/api/tasks/{tid}").json()["project_id"]
+    schema = CvatSchema.from_labels(cvat.project_labels(int(project)))
+    video = tmp_path / "proxy.mp4"
+    setup.raw.get_file(object_key(setup.raw, task.media_uri), video)
+    redrawn = to_cvat_tracks(
+        [gold[e.original_label_id] for e in seeded.injected], frame_times(video), schema
+    )
+    for t in redrawn:
+        t["attributes"] = []  # 새로 그린 트랙에는 원래 라벨 ID가 없다
+    for t in [*sent, *redrawn]:
+        t.pop("id", None)
+        for s in t["shapes"]:
+            s.pop("id", None)
+    cvat.put_tracks(tid, [*sent, *redrawn])
+
+    with pg.begin() as conn:
+        outcome = collect_task(conn, task.task_key, setup, seeded.assignee or "r1", FIXED_TIME)
+        report = quality_report(conn, ops)
+        gold_after = get_labels(conn, gold_sid)
+    assert outcome is not None and outcome.added == len(seeded.injected)
+    assert all(x.seeded_error for x in outcome.new_records)
+    [rate] = report.detection
+    assert (rate.injected, rate.detected) == (len(seeded.injected), len(seeded.injected))
+    # 원래 골든 블러 라벨(운영 라벨)은 그대로다
+    before = {i for i, x in gold.items() if x.kind == "blur_track" and not x.seeded_error}
+    assert {x.label_id for x in current_labels(gold_after) if x.kind == "blur_track"} == before
