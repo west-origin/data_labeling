@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+from collections.abc import Iterable
+from datetime import datetime
 from enum import StrEnum
 from itertools import pairwise
 
@@ -19,9 +22,12 @@ from dlp_schema.labels import (
     LabelRecord,
     MaskTrackPayload,
     ObjectStatePayload,
+    Provenance,
     RelationPayload,
     SegmentPayload,
+    Source,
     Trajectory3DPayload,
+    Verification,
 )
 
 
@@ -176,4 +182,36 @@ def current_labels(labels: list[LabelRecord], *, operational: bool = True) -> li
         if x.label_id not in superseded
         and x.label_id not in retracted
         and x.label_id not in excluded
+    ]
+
+
+def version_tag(model_version: str) -> str:
+    """모델 버전마다 다른 짧은 ID 조각.
+
+    모델 출처 라벨 ID에 넣어 버전이 바뀌어도 ID가 겹치지 않게 한다.
+    """
+    return hashlib.sha256(model_version.encode()).hexdigest()[:8]
+
+
+def retractions(
+    stale: Iterable[LabelRecord], model_version: str, now: datetime
+) -> list[LabelRecord]:
+    """이전 버전의 모델 라벨을 지우는 삭제 레코드 (parent=원래, retracted).
+
+    ID는 `<원래>:retracted`이고 출처는 지운 쪽(새 버전)이다. 한 레코드는 한 번만 지울 수 있다
+    (지운 뒤에는 현재 라벨이 아니므로 다시 대상이 되지 않는다).
+    """
+    return [
+        x.model_copy(
+            update={
+                "label_id": f"{x.label_id}:retracted",
+                "parent_label_id": x.label_id,
+                "retracted": True,
+                "verification": Verification(),
+                "provenance": Provenance(source=Source.MODEL, model_version=model_version),
+                "confidence": x.confidence if x.confidence is not None else 1.0,
+                "created_at": now,
+            }
+        )
+        for x in stale
     ]

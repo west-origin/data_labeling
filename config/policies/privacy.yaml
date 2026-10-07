@@ -32,6 +32,7 @@ detectors:
     model: yunet              # config/models.yaml 이름
   codes:
     kind: opencv_codes        # QR·바코드 (가중치 없음) → 송장 근거
+    score: 0.9                # 코드는 찾거나 못 찾으므로 고정 신뢰도
   reflection:
     kind: reflection          # 반사면 영역 안에서 얼굴 탐지 문턱을 낮춘다
     region_detector: open_vocab

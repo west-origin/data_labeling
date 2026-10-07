@@ -35,16 +35,26 @@ class ModelFile(Contract):
     commercial: Commercial
 
 
+class ExternalModel(Contract):
+    """외부 추론 서버(VLM 등)가 가중치를 들고 있는 모델. 이 저장소는 라이선스 검사만 한다."""
+
+    served_by: str = Field(description="어떤 서버로 쓰는지 (예: OpenAI 호환 VLM 서버)")
+    license: str
+    training_data: tuple[str, ...]
+    commercial: Commercial
+
+
 class ModelRegistry(Contract):
     version: int
     accept: tuple[Commercial, ...] = Field(description="정책이 쓸 수 있는 상업 사용 분류")
     models: dict[str, ModelFile]
+    external: dict[str, ExternalModel] = Field(default_factory=dict[str, ExternalModel])
 
     def violations(self, used: dict[str, str]) -> list[str]:
         """정책이 쓰는 모델(쓰는 곳 → 모델 이름) 중 목록에 없거나 허용 분류가 아닌 것."""
         out: list[str] = []
         for where, name in sorted(used.items()):
-            spec = self.models.get(name)
+            spec = self.models.get(name) or self.external.get(name)
             if spec is None:
                 out.append(f"{where}: 모델 목록에 없는 {name}")
             elif spec.commercial not in self.accept:
@@ -81,7 +91,10 @@ def resolve(root: Path, name: str, *, check_hash: bool = True) -> tuple[Path, st
         digest = _digest(path, path.stat().st_mtime)
         if digest != spec.sha256:
             raise ModelUnavailableError(f"{name} 가중치 해시가 다릅니다: {digest}")
-    return path, f"{name}-{spec.sha256[:12]}"
+        return path, f"{name}-{digest[:12]}"
+    # 압축에서 꺼냈거나 직접 변환한 파일은 등록 해시(zip·변환 환경)와 다를 수 있다. 라벨의 모델
+    # 버전에는 실제로 쓴 파일의 해시를 남긴다 (같은 등록 항목이라도 다른 파일이면 다른 버전이 된다).
+    return path, f"{name}-{_digest(path, path.stat().st_mtime)[:12]}"
 
 
 def fetch(root: Path, name: str, spec: ModelFile) -> str:

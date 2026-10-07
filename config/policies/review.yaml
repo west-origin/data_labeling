@@ -2,9 +2,11 @@
 version: 1
 
 # 검수 단위: 세션 × 스트림 × 라벨 종류 묶음. 묶음마다 검수 도구가 다르다.
+# 도구가 보여 주는 종류만 쓴다 (보여 주지 않는 종류를 표본으로 뽑으면 판정이 끝나지 않는다).
+# 관계·설명은 아직 검수 도구 화면이 없어 단위에 넣지 않는다.
 units:
-  spatial: [box_track, keypoint_track]                   # CVAT, 스트림별
-  temporal: [action, gap, hand_state, segment, object_state, event, relation, description]  # Label Studio, 세션 단위
+  spatial: [box_track, keypoint_track]                            # CVAT, 스트림별
+  temporal: [action, gap, segment, event, hand_state, object_state]  # Label Studio, 세션 단위
 
 # 우선순위 큐: 단위 안에서 사유가 붙은 구간을 찾고, 단위 우선순위 = Σ 사유 가중치 × 구간 길이(초).
 priority:
@@ -27,13 +29,22 @@ sampling:
   min_sample: 5
   max_defect_ratio: 0.05
 
+# 검수 품질 측정 (이중 라벨 일치도, 프리라벨 편향)
+measurement:
+  tolerance_ms: 200                   # 경계 일치 허용 오차
+  match_iou: 0.5                      # 두 라벨 묶음의 구간을 맞추는 시간 IoU
+
 # 오류 삽입 과제: 정답을 아는 단위(모든 라벨이 사람이 만들거나 승인·수정한 것)의 사본에 오류를 넣는다.
 seeding:
   errors_per_task: 3
   types: [boundary_shift, class_swap, blur_deletion]
   boundary_shift_ms: [300, 800]       # 경계 허용 오차(200 ms) 밖으로 옮긴다
   detect_tolerance_ms: 200            # 검수자가 이 안으로 되돌리면 발견한 것으로 본다
+  blur_overlap: 0.5                   # 다시 그린 블러가 뺀 블러와 시간이 이만큼 겹치면 발견
 
 # 검수자 역할. QA는 선임만, 블라인드·이중 배정은 표준 배정과 다른 사람에게 준다.
+# 블러 검수(원본 영상)는 privacy 목록에 있는 원본 접근 권한자에게만 배정한다. 블러 단위는 QA·일반
+# 오류 삽입 과제에 쓰지 않는다 (블러 오류 삽입은 --privacy 계획에서 권한자에게만).
 reviewers:
   senior: []                          # 비어 있으면 QA 배정의 담당자를 비워 둔다
+  privacy: []                         # 원본 접근 권한자

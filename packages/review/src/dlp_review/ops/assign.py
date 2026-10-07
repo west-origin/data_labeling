@@ -143,10 +143,9 @@ def plan_qa(
     seniors = Loads(policy.reviewers.senior)
     out: list[ReviewAssignment] = []
     for a in sorted(done, key=lambda a: a.assignment_id):
-        if (
-            a.mode is not ReviewMode.STANDARD
-            or draw(seed, a.assignment_id, "qa") >= policy.ratios.qa_sample_ratio
-        ):
+        if a.mode is not ReviewMode.STANDARD or a.label_kinds == ("blur_track",):
+            continue  # 블러 검수는 원본 영상을 열어 일반 QA 대상이 아니다 (잔여 누락 감사가 맡는다)
+        if draw(seed, a.assignment_id, "qa") >= policy.ratios.qa_sample_ratio:
             continue
         out.append(
             a.model_copy(

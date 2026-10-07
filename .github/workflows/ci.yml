@@ -1,9 +1,13 @@
 name: CI
 
 on:
+  # 작업 브랜치(claude/** 등)에서도 돈다. main이 없거나 PR 전이어도 검증되게 한다.
   push:
-    branches: [main]
+    branches: ["**"]
   pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 18 * * *"   # 매일 (CVAT 포함 서비스 테스트)
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -54,3 +58,31 @@ jobs:
         run: docker compose --env-file .env -f services/docker-compose.yml logs --tail=200
       - if: always()
         run: make clean
+
+  # CVAT는 이미지가 커서 매 푸시마다 띄우지 않는다. 매일·수동 실행 때만 CVAT까지 띄워 서비스 테스트를 돌린다.
+  services-cvat:
+    name: compose + CVAT smoke test
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      DLP_CVAT_ADMIN_PASSWORD: dlp-dev-password   # 개발용 (tests의 기본값과 같다)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv python install
+      - run: make install
+      - run: cp .env.example .env
+      - name: Start services
+        run: make up
+      - name: Start CVAT
+        run: make cvat-up && make cvat-superuser
+      - run: make health
+      - run: make test-services
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose --env-file .env -f services/docker-compose.yml logs --tail=200
+      - if: always()
+        run: make cvat-down && make clean

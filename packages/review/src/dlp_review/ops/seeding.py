@@ -34,6 +34,8 @@ from dlp_schema.labels import (
     RelationPayload,
     SegmentPayload,
     Source,
+    Verification,
+    VerificationState,
 )
 from dlp_schema.ontology import Ontology
 from dlp_schema.review import InjectedError
@@ -122,7 +124,7 @@ def seed_labels(
         x.label_id: x.model_copy(
             update={
                 "label_id": f"{prefix}{i:04d}", "parent_label_id": None, "retracted": False,
-                "seeded_error": True, "created_at": now,
+                "seeded_error": True, "created_at": now, "verification": Verification(),
             }
         )
         for i, x in enumerate(ordered)
@@ -169,6 +171,7 @@ def detected(
     labels: list[LabelRecord],
     reviewer_id: str | None,
     tolerance_ms: int,
+    blur_overlap: float,
 ) -> bool:
     """검수 결과(사람 출처, 오류 삽입 계보)를 보고 발견했는지 판정한다.
 
@@ -178,9 +181,17 @@ def detected(
     original = by_id.get(error.original_label_id)
     if original is None:
         return False
-    human = [x for x in labels if x.provenance.source is Source.HUMAN and x.seeded_error]
+    # 검수자가 이 과제에서 남긴 레코드만 본다. 오류 삽입 사본은 검수 상태가 비어 있으므로 빠진다
+    # (사본은 만들 때 검수 상태를 지운다. 검수자가 그 사본을 승인만 하면 고친 것이 아니다).
+    human = [
+        x
+        for x in labels
+        if x.provenance.source is Source.HUMAN
+        and x.seeded_error
+        and x.verification.state is VerificationState.HUMAN_CORRECTED
+    ]
     if reviewer_id is not None:
-        human = [x for x in human if x.verification.reviewer_id in (None, reviewer_id)]
+        human = [x for x in human if x.verification.reviewer_id == reviewer_id]
     if error.error_type == "blur_deletion":
         p = original.payload
         assert isinstance(p, BlurTrackPayload)
@@ -188,7 +199,7 @@ def detected(
             x.parent_label_id is None
             and isinstance(x.payload, BlurTrackPayload)
             and x.payload.target == p.target
-            and _overlap_ratio(original, x) >= 0.5
+            and _overlap_ratio(original, x) >= blur_overlap
             for x in human
         )
     fixes = [x for x in human if x.parent_label_id == error.seeded_label_id and not x.retracted]

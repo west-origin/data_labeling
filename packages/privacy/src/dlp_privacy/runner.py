@@ -22,8 +22,8 @@ from dlp_schema.db.repository import (
     set_lifecycle,
     set_privacy_state,
 )
-from dlp_schema.episode import current_labels
-from dlp_schema.labels import LabelRecord, VerificationState
+from dlp_schema.episode import current_labels, retractions
+from dlp_schema.labels import LabelRecord, Source, VerificationState
 from dlp_schema.session import LifecycleState, PrivacyState, Session, StreamKind
 
 VIDEO_KINDS = {StreamKind.BODYCAM, StreamKind.THIRD_PERSON}
@@ -98,7 +98,16 @@ def detect_session(
                 now=now,
             )
             summary.missing.update(result.missing)
-            insert_labels(conn, result.labels)
+            # 탐지기 버전이 바뀌면 검수 전인 이전 버전 블러만 지운다 (검수한 블러는 남긴다)
+            stale = [
+                x
+                for x in current_labels(existing)
+                if x.stream_id == stream.stream_id
+                and x.provenance.source is Source.MODEL
+                and x.provenance.model_version != version
+                and x.verification.state is VerificationState.UNREVIEWED
+            ]
+            insert_labels(conn, [*retractions(stale, version, now), *result.labels])
             summary.detected[stream.stream_id] = len(result.labels)
             key = f"sessions/{session_id}/derived/privacy_review/{stream.stream_id}.json"
             out = work / f"{stream.stream_id}-review.json"

@@ -94,7 +94,15 @@ def test_golden_evaluation_from_database(pg: sa.Engine, tmp_path: Path) -> None:
             good = _model(truth, "actions-good", "good")
             bad = _model(truth[1:], "actions-bad", "bad")  # 첫 행동을 놓침
             # 첫 행동의 정답은 검수자가 승인한 모델 라벨이다 (사람 라벨과 같이 정답으로 본다)
-            insert_labels(conn, [*truth[1:], *good, *bad])
+            # 오류 삽입 사본은 모델 버전을 그대로 달고 있어도 예측이 아니다 (감사 회귀, ADR 0015)
+            seeded = good[1].model_copy(
+                update={
+                    "label_id": f"seed-x-{sid}",
+                    "seeded_error": True,
+                    "t_end_ms": good[1].t_end_ms,
+                }
+            )
+            insert_labels(conn, [*truth[1:], *good, *bad, seeded])
             record_review(
                 conn, good[0].label_id, VerificationState.HUMAN_APPROVED, "rev01", FIXED_TIME
             )

@@ -8,6 +8,7 @@ from __future__ import annotations
 import tempfile
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import sqlalchemy as sa
 
@@ -23,6 +24,7 @@ from dlp_review.tasks import (
 )
 from dlp_schema.db.repository import (
     get_assignment,
+    get_labels,
     get_review_task,
     get_session,
     insert_labels,
@@ -32,11 +34,24 @@ from dlp_schema.db.repository import (
 from dlp_schema.labels import VerificationState
 from dlp_schema.review import ReviewMode, ReviewTaskStatus, ReviewTool
 
+if TYPE_CHECKING:
+    from dlp_review.ops.policy import ReviewOpsPolicy
+
 
 def collect_task(
-    conn: sa.Connection, task_key: str, setup: ReviewSetup, reviewer_id: str, now: datetime
+    conn: sa.Connection,
+    task_key: str,
+    setup: ReviewSetup,
+    reviewer_id: str,
+    now: datetime,
+    ops_policy: ReviewOpsPolicy | None = None,
 ) -> ReviewOutcome | None:
-    """수집했으면 결과를, 이미 수집한 작업이면 None을 돌려준다."""
+    """수집했으면 결과를, 이미 수집한 작업이면 None을 돌려준다.
+
+    검수 결과는 작업에 실제로 보낸 라벨(sent_label_ids)과 비교한다. 그 사이 다른 단계가 라벨을
+    바꿨어도 보내지 않은 라벨을 검수자가 지운 것으로 보지 않는다.
+    ops_policy는 배정 마무리(표본 판정)에 쓴다.
+    """
     task = get_review_task(conn, task_key)
     if task.status is ReviewTaskStatus.COLLECTED:
         return None
@@ -45,7 +60,10 @@ def collect_task(
         raise TaskError(f"{task.session_id}: 세션에 온톨로지 버전이 없습니다")
     stream_filter = task.stream_id if task.tool is ReviewTool.CVAT else None
     assignment = get_assignment(conn, task.assignment_id) if task.assignment_id else None
-    if assignment is not None:
+    if task.sent_label_ids is not None:
+        history = {x.label_id: x for x in get_labels(conn, task.session_id)}
+        originals = [history[i] for i in task.sent_label_ids if i in history]
+    elif assignment is not None:  # sent_label_ids 이전에 만든 작업
         from dlp_review.ops.selection import assignment_selector  # 순환 import를 피한다
 
         originals = assignment_selector(conn, assignment)(stream_filter, task.label_kinds)
@@ -102,5 +120,5 @@ def collect_task(
     if assignment is not None:
         from dlp_review.ops.runner import finish_assignment
 
-        finish_assignment(conn, assignment, now)
+        finish_assignment(conn, assignment, now, ops_policy)
     return outcome

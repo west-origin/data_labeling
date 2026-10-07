@@ -15,6 +15,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from dlp_review.ops.policy import SamplingPolicy
+from dlp_schema.episode import current_labels
 from dlp_schema.labels import LabelRecord, Source, VerificationState
 
 
@@ -79,22 +80,26 @@ def judge(
         for x in labels
         if x.parent_label_id and x.provenance.source is Source.HUMAN and x.measurement is None
     }
-    defects = sum(i in corrected for i in sample_ids)
+    current = {x.label_id for x in current_labels(labels)}
+    # 검수 전에 다른 단계(모델 재실행)가 지운 표본은 판정에서 뺀다
+    kept = [i for i in sample_ids if i in corrected or i in current]
+    defects = sum(i in corrected for i in kept)
     approved = sum(
         by_id[i].verification.state is VerificationState.HUMAN_APPROVED
-        for i in sample_ids
-        if i in by_id and i not in corrected
+        for i in kept
+        if i not in corrected
     )
-    pending = len(sample_ids) - defects - approved
+    pending = len(kept) - defects - approved
     if pending:
-        return SamplingVerdict(len(sample_ids), defects, pending, None, ())
-    accepted = defects / max(1, len(sample_ids)) <= policy.max_defect_ratio
+        return SamplingVerdict(len(kept), defects, pending, None, ())
+    accepted = defects / max(1, len(kept)) <= policy.max_defect_ratio
     rest = tuple(
         i
         for i in lot_ids
         if i not in sample_ids
         and i in by_id
         and i not in corrected
+        and i in current
         and by_id[i].verification.state is VerificationState.UNREVIEWED
     )
-    return SamplingVerdict(len(sample_ids), defects, 0, accepted, rest if accepted else ())
+    return SamplingVerdict(len(kept), defects, 0, accepted, rest if accepted else ())

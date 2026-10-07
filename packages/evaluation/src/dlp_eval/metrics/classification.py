@@ -36,7 +36,7 @@ def ece(confidence: Sequence[float], correct: Sequence[bool], bins: int = 15) ->
     conf = np.asarray(confidence, dtype=np.float64)
     ok = np.asarray(correct, dtype=np.float64)
     if conf.size == 0:
-        return 0.0
+        return float("nan")  # 예측이 없으면 보정을 잴 수 없다 (0이면 만점처럼 보인다)
     edges = np.linspace(0, 1, bins + 1)
     total = 0.0
     for i in range(bins):

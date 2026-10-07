@@ -4,6 +4,9 @@
 - 날짜: 2026-10-07
 - 관련: WP8
 
+> **갱신:** 이 문서의 "Hugging Face 접근 불가"와 미연동 목록은 작성 당시 기준이다. 지금 상태는 ADR 0009(실제 모델 연동),
+> ADR 0010(상업 사용 분류), ADR 0015(감사 뒤 정정)를 따른다.
+
 ## 결정
 
 1. **모든 프리라벨 모델은 공통 `Predictor`(`run(clip) -> list[LabelRecord]`)를 구현하고 CPU용 stub을 함께 둔다.** stub은 정답 라벨을 모델 출처로 돌려주는 `OraclePredictor`다. CI와 다른 모듈 개발은 stub으로 진행한다.

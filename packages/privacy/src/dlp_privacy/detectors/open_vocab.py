@@ -46,6 +46,11 @@ class OpenVocabDetector:
         self._last_run: int | None = None
         self._cache: list[tuple[str, Box, float]] = []
 
+    def reset(self) -> None:
+        """새 영상을 시작할 때 부른다. 앞 영상의 추론 결과를 다음 영상에 쓰지 않게 한다."""
+        self._last_run = None
+        self._cache = []
+
     def _infer(self, image: Image) -> list[tuple[str, Box, float]]:
         thresholds = [self.score_threshold] * len(self.targets)
         return [

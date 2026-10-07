@@ -293,7 +293,10 @@ def eval_contact(data: list[SessionData], policy: EvaluationPolicy) -> TaskRepor
             for ts, te, grasp in t:
                 counts[grasp] += 1
                 best = max(p, key=lambda q: interval_iou((ts, te), (q[0], q[1])), default=None)
-                ok = best is not None and interval_iou((ts, te), (best[0], best[1])) >= 0.5
+                ok = (
+                    best is not None
+                    and interval_iou((ts, te), (best[0], best[1])) >= policy.match_iou
+                )
                 grasp_truth.append(grasp)
                 grasp_pred.append(best[2] if ok and best else "missing")
     if not grasp_truth and not any(sum(v) for v in totals.values()):
@@ -350,7 +353,10 @@ def eval_actions(data: list[SessionData], policy: EvaluationPolicy) -> TaskRepor
             for a, e, verb in truth:
                 counts[verb] += 1
                 best = max(plain, key=lambda q: interval_iou((a, e), (q[0], q[1])), default=None)
-                ok = best is not None and interval_iou((a, e), (best[0], best[1])) >= 0.5
+                ok = (
+                    best is not None
+                    and interval_iou((a, e), (best[0], best[1])) >= policy.match_iou
+                )
                 verbs_truth.append(verb)
                 verbs_pred.append(best[2] if ok and best else "missing")
     if not t_grouped:

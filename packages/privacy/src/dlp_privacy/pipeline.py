@@ -19,10 +19,11 @@ import av
 import numpy as np
 
 from dlp_media.probe import to_fraction
-from dlp_privacy.detection import Detection, FrameDetector
+from dlp_privacy.detection import Detection, FrameDetector, Resettable
 from dlp_privacy.policy import PrivacyPolicy, ReviewReason
 from dlp_privacy.review import ReviewSegment, sort_segments, spans, track_segments
 from dlp_privacy.tracker import build_tracks, track_frames
+from dlp_schema.episode import version_tag
 from dlp_schema.labels import (
     BlurTrackPayload,
     BoxKeyframe,
@@ -73,6 +74,9 @@ def detect_video(
         for target, tp in policy.targets.items()
     }
     unique = used_detectors(detectors, policy)
+    for det in {id(d): d for d in detectors.values()}.values():
+        if isinstance(det, Resettable):
+            det.reset()  # 영상마다 새로 시작 (반사면 탐지기가 쓰는 영역 탐지기 포함)
 
     frames: list[tuple[int, list[Detection]]] = []
     with av.open(str(video)) as c:
@@ -114,7 +118,7 @@ def detect_video(
         scores = [o.score for o in track.obs.values()]
         labels.append(
             LabelRecord(
-                label_id=f"{session_id}-{stream_id}-blur-{i:05d}",
+                label_id=f"{session_id}-{stream_id}-blur-{version_tag(version)}-{i:05d}",
                 session_id=session_id,
                 stream_id=stream_id,
                 t_start_ms=keyframes[0].t_ms,

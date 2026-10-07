@@ -104,6 +104,23 @@
       "$ref": "#/$defs/ReviewMode",
       "default": "standard"
     },
+    "sent_label_ids": {
+      "anyOf": [
+        {
+          "items": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "작업에 보낸 라벨. 수집은 이 라벨과 비교한다 (그 사이 라벨이 바뀌어도)",
+      "title": "Sent Label Ids"
+    },
     "session_id": {
       "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
       "title": "Session Id",

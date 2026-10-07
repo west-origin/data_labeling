@@ -208,3 +208,25 @@ def test_gate_direction_for_error_metrics(policy: EvaluationPolicy) -> None:
     ]
     decision = decide(run([s], policy, "new"), base, policy)
     assert not decision.tasks["coverage"].passed  # 오차가 0 → 0.05로 커졌다
+
+
+def test_gate_uses_per_metric_drop_for_ms_errors(policy: EvaluationPolicy) -> None:
+    from dlp_eval.harness import TaskReport
+
+    def report(error_ms: float) -> EvalReport:
+        metrics = {"contact_start_f1": 0.9, "contact_end_f1": 0.9, "grasp_macro_f1": 0.8,
+                   "contact_start_error_ms": error_ms}  # fmt: skip
+        return EvalReport("g", {"contact": "m"}, {"contact": TaskReport(metrics, {}, [], 1)}, {})
+
+    base = report(40.0)
+    assert decide(report(55.0), base, policy).passed  # 15 ms 늘어남 (허용 20 ms)
+    worse = decide(report(65.0), base, policy)
+    assert not worse.passed and "contact_start_error_ms" in worse.tasks["contact"].reasons[0]
+
+
+def test_ece_without_predictions_is_not_perfect() -> None:
+    import math
+
+    from dlp_eval.metrics.classification import ece
+
+    assert math.isnan(ece([], []))

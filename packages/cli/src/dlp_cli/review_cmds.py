@@ -148,7 +148,8 @@ def cmd_assign(args: argparse.Namespace) -> int:
     setup = _setup(args)
     with engine.begin() as conn:
         a = get_assignment(conn, args.assignment_id)
-        tasks = create_assignment_tasks(conn, a, setup, datetime.now(UTC))
+        policy = load_ops_policy(repo_root())
+        tasks = create_assignment_tasks(conn, a, setup, policy, datetime.now(UTC))
     engine.dispose()
     for t in tasks:
         print(f"{t.task_key} ({t.mode.value}, {t.assignee}) {t.media_uri}")

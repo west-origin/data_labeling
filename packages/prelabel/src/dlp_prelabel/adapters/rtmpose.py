@@ -21,6 +21,7 @@ import numpy as np
 from dlp_models.registry import resolve
 from dlp_prelabel.common import iter_frames, model_label, track_boxes
 from dlp_prelabel.policy import PrelabelPolicy
+from dlp_schema.episode import version_tag
 from dlp_schema.labels import Keypoint, KeypointFrame, KeypointTrackPayload, LabelRecord
 from dlp_schema.predictor import Clip
 
@@ -80,7 +81,7 @@ class RtmPose:
                     dets.append(("person", box, score))
                     frames[(t, box)] = KeypointFrame(t_ms=t, points=points)
             detections.append((t, dets))
-        tracks = track_boxes(detections, iou_match=bp.track_iou, max_gap_ms=300)
+        tracks = track_boxes(detections, iou_match=bp.track_iou, max_gap_ms=bp.max_gap_ms)
         out: list[LabelRecord] = []
         for i, tr in enumerate(tracks):
             times = sorted(tr.frames)
@@ -91,7 +92,7 @@ class RtmPose:
             )
             out.append(
                 model_label(
-                    label_id=f"{clip.session_id}-{clip.stream_id}-body-{i:03d}",
+                    label_id=f"{clip.session_id}-{clip.stream_id}-body-{version_tag(self.version)}-{i:03d}",
                     session_id=clip.session_id,
                     stream_id=clip.stream_id,
                     t_start_ms=times[0],

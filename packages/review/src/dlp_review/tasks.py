@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -130,6 +130,7 @@ def create_privacy_tasks(
                 session_id=session_id, stream_id=stream.stream_id, stage=ReviewStage.PRIVACY,
                 media_uri=setup.raw.uri(key), label_kinds=("blur_track",), created_at=now,
                 mode=mode, assignment_id=assignment_id, assignee=assignee,
+                sent_label_ids=tuple(x.label_id for x in labels),
             )  # fmt: skip
             insert_review_task(conn, task)
             out.append(task)
@@ -197,7 +198,7 @@ def create_labeling_tasks(
                 spatial = ("box_track", "keypoint_track")
                 out.append(
                     _task(f"cvat:{tid}", ReviewTool.CVAT, tid, session_id, stream.stream_id,
-                          assignee, media_uri, spatial, now, mode, assignment_id)
+                          assignee, media_uri, spatial, now, mode, assignment_id, labels)
                 )  # fmt: skip
 
             if use_ls and stream.kind is StreamKind.BODYCAM:
@@ -224,7 +225,7 @@ def create_labeling_tasks(
                 tid = ls.create_task(lpid, data, to_ls_results(labels))
                 out.append(_task(f"label_studio:{tid}", ReviewTool.LABEL_STUDIO, tid, session_id,
                                  stream.stream_id, assignee, media_uri, LS_KINDS, now, mode,
-                                 assignment_id))  # fmt: skip
+                                 assignment_id, labels))  # fmt: skip
     check_stage_uris(ReviewStage.LABELING, [t.media_uri for t in out], raw_bucket)
     for task in out:
         insert_review_task(conn, task)
@@ -235,9 +236,11 @@ def _task(
     key: str, tool: ReviewTool, tid: int, session_id: str, stream_id: str, assignee: str,
     media_uri: str, kinds: tuple[str, ...], now: datetime,
     mode: ReviewMode = ReviewMode.STANDARD, assignment_id: str | None = None,
+    sent: Sequence[LabelRecord] = (),
 ) -> ReviewTask:  # fmt: skip
     return ReviewTask(
         task_key=key, tool=tool, external_id=str(tid), session_id=session_id, stream_id=stream_id,
         stage=ReviewStage.LABELING, assignee=assignee, media_uri=media_uri, label_kinds=kinds,
         created_at=now, mode=mode, assignment_id=assignment_id,
+        sent_label_ids=tuple(x.label_id for x in sent),
     )  # fmt: skip

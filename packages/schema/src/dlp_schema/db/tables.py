@@ -127,6 +127,7 @@ review_tasks = sa.Table(
     sa.Column("label_kinds", Json, nullable=False),
     sa.Column("mode", sa.String(16), nullable=False),
     sa.Column("assignment_id", sa.String(128), nullable=True),
+    sa.Column("sent_label_ids", Json, nullable=True),
     sa.Column("status", sa.String(16), nullable=False),
     sa.Column("created_at", Ts, nullable=False),
     sa.Column("collected_at", Ts, nullable=True),

@@ -23,12 +23,14 @@ from dlp_schema.db.migrate import upgrade
 from dlp_schema.db.repository import (
     get_labels,
     get_session,
+    insert_labels,
     register_ontology,
     set_lifecycle,
     set_privacy_state,
     update_stream_sync,
 )
-from dlp_schema.labels import BoxKeyframe, BoxTrackPayload, HandStatePayload
+from dlp_schema.episode import current_labels
+from dlp_schema.labels import BoxKeyframe, BoxTrackPayload, HandStatePayload, Provenance, Source
 from dlp_schema.ontology import load_ontology
 from dlp_schema.predictor import ModelUnavailableError, Predictor
 from dlp_schema.session import LifecycleState, PrivacyState, SyncMethod
@@ -162,3 +164,34 @@ def test_prelabel_session_with_glove_contacts(pg: sa.Engine, tmp_path: Path) -> 
                 "fixed_surface" if gp.target_id == "sink_01" else "object"
             )
     assert np.isfinite([c.confidence or 0 for c in contacts]).all()
+
+    # 감사 회귀 (ADR 0015) 1: 예측기 버전이 바뀌면 새 ID로 넣고, 검수 전인 이전 버전만 지운다
+    jittered = OraclePredictor("objects", boxes, ("box_track",), jitter_px=2.0, now=FIXED_TIME)
+    with pg.begin() as conn:
+        changed = run_prelabel(conn, sid, raw, [jittered], policy, ontology, FIXED_TIME)
+        objects = current_labels(get_labels(conn, sid, kinds=["box_track"]))
+    assert changed.produced == {"bodycam/objects": 3} and changed.retracted == 3
+    assert {x.provenance.model_version for x in objects} == {jittered.version}
+
+    # 2: 검수자가 접촉 라벨을 모두 지운 뒤 다시 돌려도 되살리지 않는다 (이력으로 멱등 판단)
+    with pg.begin() as conn:
+        deletions = [
+            x.model_copy(
+                update={
+                    "label_id": f"{x.label_id}:rev",
+                    "parent_label_id": x.label_id,
+                    "retracted": True,
+                    "provenance": Provenance(source=Source.HUMAN),
+                    "confidence": None,
+                }
+            )
+            for x in contacts
+        ]
+        insert_labels(conn, deletions)
+        third = run_prelabel(conn, sid, raw, predictors, policy, ontology, FIXED_TIME)
+        live = [
+            x
+            for x in current_labels(get_labels(conn, sid, kinds=["hand_state"]))
+            if x.provenance.model_version == CONTACT_VERSION
+        ]
+    assert third.contacts == 0 and live == []

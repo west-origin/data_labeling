@@ -34,6 +34,7 @@ class BodyPolicy(Contract):
     keypoint_score: float = Field(ge=0, le=1)
     max_people: int = Field(ge=1)
     track_iou: float = Field(gt=0, le=1)
+    max_gap_ms: float = Field(ge=0)
 
 
 class ObjectsPolicy(Contract):
@@ -58,6 +59,7 @@ class DepthPolicy(Contract):
     min_depth_m: float = Field(gt=0)
     max_depth_m: float = Field(gt=0)
     hand_points: tuple[int, ...] = Field(min_length=1)
+    confidence: float = Field(ge=0, le=1)
 
 
 class GloveContactPolicy(Contract):
@@ -72,9 +74,18 @@ class VideoContactPolicy(Contract):
     merge_gap_ms: float
 
 
+class ContactConfidence(Contract):
+    """접촉 구간 출처별 신뢰도. 장갑과 영상이 모두 접촉이면 fused."""
+
+    fused: float = Field(ge=0, le=1)
+    glove: float = Field(ge=0, le=1)
+    video: float = Field(ge=0, le=1)
+
+
 class ContactPolicy(Contract):
     glove: GloveContactPolicy
     video: VideoContactPolicy
+    confidence: ContactConfidence
 
 
 class WearerPolicy(Contract):

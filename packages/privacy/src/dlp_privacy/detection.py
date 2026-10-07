@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 import numpy as np
 from numpy.typing import NDArray
@@ -19,6 +19,13 @@ class Detection:
     box: Box
     score: float
     detector: str
+
+
+@runtime_checkable
+class Resettable(Protocol):
+    """영상 사이에 지워야 할 상태(프레임 간격 캐시 등)를 가진 탐지기."""
+
+    def reset(self) -> None: ...
 
 
 class FrameDetector(Protocol):

@@ -24,11 +24,13 @@ from dlp_review.ops.seeding import detected, seed_labels
 from dlp_review.ops.selection import assignment_selector
 from dlp_review.tasks import ReviewSetup, create_labeling_tasks, create_privacy_tasks
 from dlp_schema.db.repository import (
+    get_assignment,
     get_labels,
     get_session,
     insert_assignment,
     insert_labels,
     list_assignments,
+    list_review_tasks,
     list_session_ids,
     record_review,
     update_assignment,
@@ -49,6 +51,7 @@ from dlp_schema.review import (
     ReviewMode,
     ReviewReason,
     ReviewTask,
+    ReviewTaskStatus,
     ReviewTool,
 )
 from dlp_schema.session import StreamKind
@@ -95,6 +98,20 @@ def seed_pool(
     return pool
 
 
+class AccessError(RuntimeError):
+    """원본 접근 권한이 없는 사람에게 블러(원본 영상) 검수를 배정하려 했다."""
+
+
+def check_privacy_reviewers(reviewers: Sequence[str | None], policy: ReviewOpsPolicy) -> None:
+    allowed = set(policy.reviewers.privacy)
+    denied = sorted({r or "(미배정)" for r in reviewers} - allowed)
+    if denied:
+        raise AccessError(
+            f"원본 접근 권한자가 아닌 검수자에게 블러 검수를 배정할 수 없습니다: {denied} "
+            "(config/policies/review.yaml reviewers.privacy)"
+        )
+
+
 def _open_loads(conn: sa.Connection, reviewers: Sequence[str]) -> Loads:
     counts = Counter(
         a.assignee for a in list_assignments(conn, status=AssignmentStatus.OPEN) if a.assignee
@@ -115,6 +132,8 @@ def plan_session(
     seed_groups: set[str] | None = None,
     privacy: bool = False,
 ) -> list[ReviewAssignment]:
+    if privacy:
+        check_privacy_reviewers(reviewers, policy)
     session = get_session(conn, session_id)
     current = current_labels(get_labels(conn, session_id))
     known = known_classes(conn, session_id)
@@ -143,7 +162,12 @@ def plan_session(
         planned.append(
             PlannedUnit(unit, tuple(flagged), unit_priority(flagged, policy), sample, withheld)
         )
-    pool = seed_pool(conn, seed_sessions, policy, seed_groups) if seed_sessions else []
+    # 블러 단위(원본 영상)는 블러 계획에서만, 작업 라벨 단위는 작업 라벨 계획에서만
+    # 오류 삽입 원천이 된다
+    groups = {"privacy"} if privacy else {"spatial", "temporal"}
+    if seed_groups is not None:
+        groups &= seed_groups
+    pool = seed_pool(conn, seed_sessions, policy, groups) if seed_sessions else []
     existing = {a.assignment_id for a in list_assignments(conn)}
     created: list[ReviewAssignment] = []
     for a in plan(
@@ -186,11 +210,16 @@ def _prepare_seeded(
 
 
 def create_assignment_tasks(
-    conn: sa.Connection, a: ReviewAssignment, setup: ReviewSetup, now: datetime
+    conn: sa.Connection,
+    a: ReviewAssignment,
+    setup: ReviewSetup,
+    policy: ReviewOpsPolicy,
+    now: datetime,
 ) -> list[ReviewTask]:
     select = assignment_selector(conn, a)
     assignee = a.assignee or "unassigned"
     if a.label_kinds == ("blur_track",):
+        check_privacy_reviewers([a.assignee], policy)  # 블러 검수는 원본 영상을 연다
         tasks = create_privacy_tasks(
             conn, a.session_id, setup, now, select=select, mode=a.mode,
             assignment_id=a.assignment_id, assignee=a.assignee,
@@ -198,10 +227,11 @@ def create_assignment_tasks(
         )  # fmt: skip
     else:
         tool = ReviewTool.LABEL_STUDIO if a.stream_id is None else ReviewTool.CVAT
+        # 시간 라벨 단위는 세션 하나에 작업 하나 (기준 바디캠 영상으로 연다)
+        stream = a.stream_id or get_session(conn, a.session_id).reference_stream.stream_id
         tasks = create_labeling_tasks(
             conn, a.session_id, setup, assignee, now, select=select, mode=a.mode,
-            assignment_id=a.assignment_id, tools={tool},
-            streams={a.stream_id} if a.stream_id else None,
+            assignment_id=a.assignment_id, tools={tool}, streams={stream},
         )  # fmt: skip
     if tasks:
         update_assignment(conn, a.assignment_id, task_key=tasks[0].task_key)
@@ -215,16 +245,32 @@ class FinishResult:
     resample_assignment: str | None = None
 
 
-def finish_assignment(conn: sa.Connection, a: ReviewAssignment, now: datetime) -> FinishResult:
-    """수집이 끝난 배정을 마무리한다. 표본이 있으면 묶음 합격 판정을 적용한다."""
-    from dlp_review.ops.policy import load_policy
-    from dlp_schema import repo_root
+def finish_assignment(
+    conn: sa.Connection,
+    a: ReviewAssignment,
+    now: datetime,
+    policy: ReviewOpsPolicy | None = None,
+) -> FinishResult:
+    """배정의 검수 작업이 모두 수집되면 마무리한다 (한 번만).
 
+    표본이 있으면 묶음 합격 판정을 적용한다.
+
+    policy가 없으면 저장소의 정책을 읽는다 (CLI·웹훅 서버는 넘겨 준다).
+    """
+    tasks = [t for t in list_review_tasks(conn, a.session_id) if t.assignment_id == a.assignment_id]
+    if any(t.status is not ReviewTaskStatus.COLLECTED for t in tasks):
+        return FinishResult()  # 아직 남은 작업이 있다
+    if get_assignment(conn, a.assignment_id).status is AssignmentStatus.DONE:
+        return FinishResult()  # 이미 마무리했다
     update_assignment(conn, a.assignment_id, status=AssignmentStatus.DONE, completed_at=now)
     result = FinishResult()
     if not a.sample_label_ids:
         return result
-    policy = load_policy(repo_root())
+    if policy is None:
+        from dlp_review.ops.policy import load_policy
+        from dlp_schema import repo_root
+
+        policy = load_policy(repo_root())
     labels = get_labels(conn, a.session_id)
     verdict = judge(
         (*a.sample_label_ids, *a.withheld_label_ids), a.sample_label_ids, labels, policy.sampling
@@ -263,9 +309,8 @@ class QualityReport:
     blind_bias: dict[str, float] = field(default_factory=dict[str, float])  # 배정 → 프리라벨 편향
 
 
-def quality_report(
-    conn: sa.Connection, policy: ReviewOpsPolicy, tolerance_ms: int = 200
-) -> QualityReport:
+def quality_report(conn: sa.Connection, policy: ReviewOpsPolicy) -> QualityReport:
+    mp = policy.measurement
     report = QualityReport()
     done = list_assignments(conn, status=AssignmentStatus.DONE)
     by_id = {a.assignment_id: a for a in done}
@@ -277,7 +322,10 @@ def quality_report(
             who = a.assignee or "unassigned"
             for err in a.injected:
                 total[who] += 1
-                found[who] += detected(err, labels, a.assignee, policy.seeding.detect_tolerance_ms)
+                found[who] += detected(
+                    err, labels, a.assignee, policy.seeding.detect_tolerance_ms,
+                    policy.seeding.blur_overlap,
+                )  # fmt: skip
             continue
         if a.mode not in (ReviewMode.BLIND, ReviewMode.DOUBLE) or a.pair_id not in by_id:
             continue
@@ -294,7 +342,7 @@ def quality_report(
         ]  # fmt: skip
         if a.mode is ReviewMode.DOUBLE:
             report.double[a.assignment_id] = agreement(
-                as_items(operational), as_items(measured), tolerance_ms
+                as_items(operational), as_items(measured), mp.tolerance_ms, mp.match_iou
             )
         else:
             model = [
@@ -305,7 +353,11 @@ def quality_report(
                 and not x.seeded_error
             ]
             report.blind_bias[a.assignment_id] = prelabel_bias(
-                as_items(model), as_items(operational), as_items(measured), tolerance_ms
+                as_items(model),
+                as_items(operational),
+                as_items(measured),
+                mp.tolerance_ms,
+                mp.match_iou,
             )
     report.detection = [DetectionRate(r, total[r], found[r]) for r in sorted(total)]
     return report

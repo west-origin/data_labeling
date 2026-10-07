@@ -248,7 +248,7 @@ def test_detection_of_seeded_errors(policy: ReviewOpsPolicy, ontology: Ontology)
     labels = [*truth, *task.labels]
     by_id = {x.label_id: x for x in labels}
     tol = policy.seeding.detect_tolerance_ms
-    assert not any(detected(e, labels, "r1", tol) for e in task.injected)  # 아무것도 안 고침
+    assert not any(detected(e, labels, "r1", tol, 0.5) for e in task.injected)  # 아무것도 안 고침
 
     human = Verification(
         state=VerificationState.HUMAN_CORRECTED, reviewer_id="r1", reviewed_at=FIXED_TIME
@@ -297,9 +297,9 @@ def test_detection_of_seeded_errors(policy: ReviewOpsPolicy, ontology: Ontology)
                 )
             )
     labels += fixes
-    assert all(detected(e, labels, "r1", tol) for e in task.injected)
+    assert all(detected(e, labels, "r1", tol, 0.5) for e in task.injected)
     assert not any(
-        detected(e, labels, "r2", tol) for e in task.injected
+        detected(e, labels, "r2", tol, 0.5) for e in task.injected
     )  # 다른 검수자 결과는 세지 않음
     # 검수자가 고친 레코드도 오류 삽입 계보라 운영 라벨이 아니다
     assert {x.label_id for x in fixes} <= non_operational_ids(labels)
@@ -311,16 +311,59 @@ def test_detection_of_seeded_errors(policy: ReviewOpsPolicy, ontology: Ontology)
 def test_agreement_and_prelabel_bias() -> None:
     truth = [x for x in generate_action_scenario(0).labels if x.kind == "action"]
     items = as_items(truth)
-    same = agreement(items, items, 200)
+    same = agreement(items, items, 200, 0.5)
     assert (same.kappa, same.segment_f1, same.boundary_f1) == (1.0, 1.0, 1.0) and same.pairs == len(
         items
     )
     # 블라인드 결과가 절반만 맞고 표준 결과는 모델과 같으면 편향은 양수
     half = [(k, c if i % 2 else "other", s, e) for i, (k, c, s, e) in enumerate(items)]
-    bias = prelabel_bias(items, items, half, 200)
-    assert bias == pytest.approx(1.0 - agreement(half, items, 200).segment_f1) and bias > 0
+    bias = prelabel_bias(items, items, half, 200, 0.5)
+    assert bias == pytest.approx(1.0 - agreement(half, items, 200, 0.5).segment_f1) and bias > 0
 
 
 def test_lot_key_is_stable() -> None:
     lot = Lot("s", "box_track", "det-1", ("a", "b"))
     assert lot.key == "s:box_track:det-1"
+
+
+def test_blur_review_needs_privacy_reviewers_and_skips_qa(policy: ReviewOpsPolicy) -> None:
+    from dlp_review.ops.runner import AccessError, check_privacy_reviewers
+
+    p = policy.model_copy(
+        update={
+            "reviewers": policy.reviewers.model_copy(
+                update={"privacy": ("priv1",), "senior": ("lead",)}
+            )
+        }
+    )
+    check_privacy_reviewers(["priv1"], p)
+    with pytest.raises(AccessError):
+        check_privacy_reviewers(["labeler1"], p)
+    with pytest.raises(AccessError):
+        check_privacy_reviewers([None], p)  # 미배정도 막는다
+    blur_units = [
+        PlannedUnit(Unit(f"s{i}", "bodycam", "privacy", ("blur_track",)), (), 1.0)
+        for i in range(2000)
+    ]
+    done = [
+        a.model_copy(update={"status": AssignmentStatus.DONE})
+        for a in plan(blur_units, ["priv1"], p, seed=1, now=FIXED_TIME)
+    ]
+    assert plan_qa(done, p, seed=1, now=FIXED_TIME) == []  # 블러 검수는 일반 QA로 넘기지 않는다
+
+
+def test_untouched_seed_copies_do_not_count_as_detection(
+    policy: ReviewOpsPolicy, ontology: Ontology
+) -> None:
+    """같은 대상(얼굴) 블러가 겹쳐 있을 때, 남은 사본만으로 빠진 블러를 찾은 것으로 세지 않는다."""
+    frames = tuple(BoxKeyframe(t_ms=t, x=1, y=1, w=5, h=5) for t in (0, 500))
+    blur = BlurTrackPayload(target="face", keyframes=frames)
+    span: dict[str, Any] = {"session_id": "gold", "t_end_ms": 500, "stream_id": "bodycam"}
+    truth = [make_label(blur, label_id=f"gold-blur{i}", **span) for i in range(2)]
+    seeding = policy.seeding.model_copy(update={"errors_per_task": 1, "types": ("blur_deletion",)})
+    task = seed_labels(
+        truth, assignment_id="g:b", ontology=ontology, policy=seeding, seed=0, now=FIXED_TIME
+    )
+    [err] = task.injected
+    labels = [*truth, *task.labels]
+    assert not detected(err, labels, None, 200, 0.5) and not detected(err, labels, "r1", 200, 0.5)

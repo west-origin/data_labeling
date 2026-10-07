@@ -11,6 +11,7 @@ from datetime import datetime
 import numpy as np
 
 from dlp_prelabel.common import model_label
+from dlp_schema.episode import version_tag
 from dlp_schema.labels import (
     BoxTrackPayload,
     KeypointTrackPayload,
@@ -84,7 +85,7 @@ class OraclePredictor:
                 )
             out.append(
                 model_label(
-                    label_id=f"{clip.session_id}-{clip.stream_id}-{self.name}-{i:03d}",
+                    label_id=f"{clip.session_id}-{clip.stream_id}-{self.name}-{version_tag(self.version)}-{i:03d}",
                     session_id=clip.session_id,
                     stream_id=clip.stream_id,
                     t_start_ms=label.t_start_ms,
@@ -113,13 +114,16 @@ class UnavailablePredictor:
 
 
 # TODO(real-model): 도구 작용부·파지부 마스크 (mask_track, part=작용부). 도구 박스는 OWLv2가
-#   내므로(adapters/owl_objects.py) 그 박스를 프롬프트로 SAM 2 마스크 추적이 필요하다. SAM 2는
-#   CPU로는 영상 길이만큼 돌리기에 너무 느려 GPU가 필요하다. 커버리지 계산(WP9)이 이 결과를 쓴다.
-TOOL_PART_MASKS = UnavailablePredictor("tool_part_masks", "SAM 2 마스크 추적 미연동 (GPU 필요)")
+#   내므로(adapters/owl_objects.py) 그 박스를 프롬프트로 SAM 2.1(tiny, Apache-2.0) 마스크가
+#   필요하다.
+#   아직 연동하지 않았다. CPU로도 느리지만 돈다 (OWLv2처럼 프레임 간격 추론, ONNX 공개본 있음).
+#   커버리지 계산(WP9)이 이 결과를 쓴다.
+TOOL_PART_MASKS = UnavailablePredictor("tool_part_masks", "SAM 2.1 마스크 미연동")
 
 # TODO(real-model): 바디캠 6자유도 궤적 (trajectory3d, entity_id="camera"). IMU가 있으면 시각-관성
-#   SLAM(Basalt BSD-3, ORB-SLAM3 GPL-3.0), 없으면 시각 SLAM(DROID-SLAM). C++ 빌드와 GPU가 필요하다.
-CAMERA_POSE = UnavailablePredictor("camera_pose", "시각-관성 SLAM 미연동 (C++ 빌드, GPU)")
+#   SLAM(Basalt BSD-3, CPU), 없으면 메트릭 깊이 + RGB-D 오도메트리(Open3D MIT, CPU)가 후보다.
+#   아직 연동하지 않았다. Basalt는 C++ 빌드와 카메라-IMU 캘리브레이션이 필요하다 (GPU는 필요 없다).
+CAMERA_POSE = UnavailablePredictor("camera_pose", "카메라 자세(SLAM·RGB-D 오도메트리) 미연동")
 
 # TODO(real-model): 영상만으로 접촉을 판정하는 학습 분류기. 장갑 세션의 접촉 구간을 정답으로
 #   WP13에서 학습한다. 지금은 contact.video_contact_intervals 휴리스틱을 쓴다.

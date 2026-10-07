@@ -25,7 +25,13 @@ from dlp_review.collect import collect_task
 from dlp_review.labelstudio import LS_KINDS
 from dlp_review.tasks import ReviewSetup, create_labeling_tasks, create_privacy_tasks
 from dlp_schema.db.migrate import upgrade
-from dlp_schema.db.repository import get_labels, insert_labels, list_review_tasks, register_ontology
+from dlp_schema.db.repository import (
+    get_labels,
+    insert_labels,
+    list_review_tasks,
+    record_review,
+    register_ontology,
+)
 from dlp_schema.episode import current_labels
 from dlp_schema.labels import BlurTrackPayload, LabelRecord, VerificationState
 from dlp_schema.ontology import load_ontology
@@ -63,11 +69,12 @@ def pg() -> Iterator[sa.Engine]:
 
 @pytest.fixture
 def setup() -> ReviewSetup:
-    """CVAT는 이미지가 커서 CI 서비스 작업에서 띄우지 않는다. 닿지 않으면 건너뛴다."""
+    """CVAT는 이미지가 커서 CI 기본 서비스 작업에서 띄우지 않는다. 닿지 않으면 CVAT 없이 만든다
+    (CVAT가 필요한 테스트만 건너뛰고 Label Studio 테스트는 돈다)."""
     try:
-        cvat = CvatClient.from_env()
-    except httpx.HTTPError as exc:
-        pytest.skip(f"CVAT에 연결할 수 없습니다 (make cvat-up): {exc}")
+        cvat: CvatClient | None = CvatClient.from_env()
+    except httpx.HTTPError:
+        cvat = None
     return ReviewSetup(
         raw=S3Store.from_env("dlp-raw"),
         labeling=S3Store.from_env("dlp-labeling"),
@@ -76,6 +83,18 @@ def setup() -> ReviewSetup:
         cvat=cvat,
         label_studio=LabelStudioClient.from_env(),
     )
+
+
+def _need_cvat(setup: ReviewSetup) -> CvatClient:
+    if setup.cvat is None:
+        pytest.skip("CVAT에 연결할 수 없습니다 (make cvat-up)")
+    return setup.cvat
+
+
+def _approve_blur(conn: sa.Connection, sid: str) -> None:
+    """CVAT 없이 블러 검수가 끝난 것으로 둔다 (Label Studio 쪽만 시험할 때)."""
+    for x in get_labels(conn, sid, kinds=["blur_track"]):
+        record_review(conn, x.label_id, VerificationState.HUMAN_APPROVED, "privacy01", FIXED_TIME)
 
 
 def _session(pg: sa.Engine, setup: ReviewSetup, tmp_path: Path) -> tuple[str, list[LabelRecord]]:
@@ -111,10 +130,11 @@ def _session(pg: sa.Engine, setup: ReviewSetup, tmp_path: Path) -> tuple[str, li
         return sid, current_labels(get_labels(conn, sid, kinds=["blur_track"]))
 
 
-def test_unchanged_review_round_trips_losslessly_through_both_tools(
+def test_unchanged_privacy_review_round_trips_losslessly_through_cvat(
     pg: sa.Engine, setup: ReviewSetup, tmp_path: Path
 ) -> None:
-    """완료 기준: 도구를 거쳐도 ID·시각·속성이 그대로라 고치지 않으면 모두 승인만 된다."""
+    """완료 기준: 도구를 거쳐도 ID·시각·속성이 그대로라 고치지 않으면 모두 승인만 된다 (CVAT)."""
+    _need_cvat(setup)
     sid, blur = _session(pg, setup, tmp_path)
     with pg.begin() as conn:
         [privacy] = create_privacy_tasks(conn, sid, setup, FIXED_TIME)
@@ -122,7 +142,14 @@ def test_unchanged_review_round_trips_losslessly_through_both_tools(
     assert outcome is not None and not outcome.new_records
     assert sorted(outcome.approved) == sorted(x.label_id for x in blur)
 
+
+def test_unchanged_labeling_review_round_trips_losslessly_through_label_studio(
+    pg: sa.Engine, setup: ReviewSetup, tmp_path: Path
+) -> None:
+    """완료 기준 (Label Studio): 시간 라벨이 도구를 거쳐도 그대로라 고치지 않으면 승인만 된다."""
+    sid, _ = _session(pg, setup, tmp_path)
     with pg.begin() as conn:
+        _approve_blur(conn, sid)
         approve_session(conn, sid)
         render_session(conn, sid, setup.raw, setup.labeling, load_policy(ROOT))
         temporal = [
@@ -141,6 +168,7 @@ def test_unchanged_review_round_trips_losslessly_through_both_tools(
 def test_privacy_review_edits_become_label_history(
     pg: sa.Engine, setup: ReviewSetup, tmp_path: Path
 ) -> None:
+    _need_cvat(setup)
     sid, blur = _session(pg, setup, tmp_path)
     assert setup.cvat is not None
     with pg.begin() as conn:
@@ -191,14 +219,18 @@ def test_labelers_only_get_watermarked_blurred_media(
 ) -> None:
     sid, _ = _session(pg, setup, tmp_path)
     with pg.begin() as conn:
-        [privacy] = create_privacy_tasks(conn, sid, setup, FIXED_TIME)
-        collect_task(conn, privacy.task_key, setup, "rev01", FIXED_TIME)
+        if setup.cvat is not None:
+            [privacy] = create_privacy_tasks(conn, sid, setup, FIXED_TIME)
+            collect_task(conn, privacy.task_key, setup, "rev01", FIXED_TIME)
+        else:
+            _approve_blur(conn, sid)
         with pytest.raises(Exception, match="프라이버시 승인"):
             create_labeling_tasks(conn, sid, setup, "labeler01", FIXED_TIME)
         approve_session(conn, sid)
         render_session(conn, sid, setup.raw, setup.labeling, load_policy(ROOT))
         tasks = create_labeling_tasks(conn, sid, setup, "labeler01", FIXED_TIME)
-    assert {t.tool.value for t in tasks} == {"cvat", "label_studio"}
+    expected = {"cvat", "label_studio"} if setup.cvat is not None else {"label_studio"}
+    assert {t.tool.value for t in tasks} == expected
     assert all(
         t.media_uri.startswith(f"s3://dlp-labeling/sessions/{sid}/review/labeler01/") for t in tasks
     )

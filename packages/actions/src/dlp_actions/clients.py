@@ -105,7 +105,9 @@ def sample_frames(request: SegmentRequest, n: int, max_side: int) -> list[bytes]
 class OpenAICompatibleVlm:
     """OpenAI 호환 채팅 API (vLLM 등)로 프레임 여러 장 + 프롬프트를 보내고 JSON 응답을 받는다.
 
-    TODO(real-model): 실제 VLM 서버에서 아직 검증하지 않았다 (GPU 필요). 요청 형식만 테스트한다.
+    TODO(real-model): 실제 VLM 서버에서 아직 검증하지 않았다. 요청 형식만 테스트한다.
+      CPU로도 띄울 수 있다 (llama.cpp llama-server + Qwen2.5-VL-7B GGUF 등).
+      느리면 timeout_s를 늘린다.
     """
 
     def __init__(

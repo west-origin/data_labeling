@@ -21,7 +21,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     policy = load_policy(root)
     url = args.vlm_url or os.environ.get("DLP_VLM_URL")
     if not url:
-        # TODO(real-model): VLM 서버(OpenAI 호환, GPU)가 없으면 행동 구간을 만들지 않는다.
+        # TODO(real-model): VLM 서버(OpenAI 호환, GPU 또는 CPU용 llama.cpp)가 없으면 행동 구간을
+        #   만들지 않는다.
         #   모든 구간을 미상으로 채우면 검수 부담만 늘기 때문이다.
         print(
             "[미연동] VLM 서버 주소가 없습니다 (--vlm-url 또는 DLP_VLM_URL). "

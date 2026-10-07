@@ -20,6 +20,7 @@ from dlp_models.depth import Intrinsics, MetricDepth, sample_depth
 from dlp_models.registry import resolve
 from dlp_prelabel.common import Image, iter_frames, model_label
 from dlp_prelabel.policy import DepthPolicy, PrelabelPolicy
+from dlp_schema.episode import version_tag
 from dlp_schema.labels import (
     BoxTrackPayload,
     CoordinateFrame,
@@ -128,16 +129,17 @@ class DepthLifter:
                 source_3d=Source3D.MONO_DEPTH,
                 samples=tuple(ss),
             )
+            tag = version_tag(self.version)
             out.append(
                 model_label(
-                    label_id=f"{session_id}-{stream_id}-3d-{entity}-{part or 'center'}",
+                    label_id=f"{session_id}-{stream_id}-3d-{tag}-{entity}-{part or 'center'}",
                     session_id=session_id,
                     stream_id=stream_id,
                     t_start_ms=ss[0].t_ms,
                     t_end_ms=ss[-1].t_ms,
                     ontology_version=ontology_version,
                     model_version=self.version,
-                    confidence=0.5,  # 단안 깊이의 절대 거리는 장면에 따라 크게 틀릴 수 있다
+                    confidence=self.policy.depth.confidence,
                     payload=payload,
                     now=self.now,
                 )

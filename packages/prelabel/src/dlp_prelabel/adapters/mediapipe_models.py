@@ -18,6 +18,7 @@ from typing import Any
 from dlp_models.registry import resolve
 from dlp_prelabel.common import iter_frames, model_label, track_boxes
 from dlp_prelabel.policy import PrelabelPolicy
+from dlp_schema.episode import version_tag
 from dlp_schema.labels import (
     BoxKeyframe,
     BoxTrackPayload,
@@ -99,7 +100,7 @@ class MediaPipeHands:
             )
             out.append(
                 model_label(
-                    label_id=f"{clip.session_id}-{clip.stream_id}-hands-{hand.value}",
+                    label_id=f"{clip.session_id}-{clip.stream_id}-hands-{version_tag(self.version)}-{hand.value}",
                     session_id=clip.session_id,
                     stream_id=clip.stream_id,
                     t_start_ms=items[0][0].t_ms,
@@ -201,7 +202,7 @@ def boxes_to_labels(
         )
         out.append(
             model_label(
-                label_id=f"{clip.session_id}-{clip.stream_id}-{prefix}-{tr.key}-{n:02d}",
+                label_id=f"{clip.session_id}-{clip.stream_id}-{prefix}-{version_tag(version)}-{tr.key}-{n:02d}",
                 session_id=clip.session_id,
                 stream_id=clip.stream_id,
                 t_start_ms=times[0],

@@ -34,7 +34,15 @@ class GateRule(Contract):
     primary: str
     min_gain: float
     max_drop: float = Field(ge=0)
+    max_drop_by: dict[str, float] = Field(
+        default_factory=dict[str, float],
+        description="지표별 허용 하락 (단위가 다른 지표용, 예: 오차 ms). 없으면 max_drop",
+    )
     guards: tuple[str, ...]
+
+    def allowed_drop(self, metric: str) -> float:
+        return self.max_drop_by.get(metric, self.max_drop)
+
     first_deploy: float
 
 
@@ -45,6 +53,7 @@ class EvaluationPolicy(Contract):
     track_iou: float = Field(gt=0, le=1)
     segment_iou: tuple[float, ...]
     relation_iou: float = Field(gt=0, le=1)
+    match_iou: float = Field(gt=0, le=1)
     pck_alpha: float = Field(gt=0)
     ece_bins: int = Field(ge=1)
     min_samples_per_class: int = Field(ge=1)

@@ -6,6 +6,7 @@ import argparse
 import subprocess
 from pathlib import Path
 
+from dlp_actions.policy import load_policy as load_actions_policy
 from dlp_models.registry import fetch, load_registry
 from dlp_prelabel.policy import load_policy as load_prelabel_policy
 from dlp_privacy.policy import load_policy as load_privacy_policy
@@ -36,6 +37,7 @@ def used_models(root: Path) -> dict[str, str]:
         names |= {n for n in (spec.region_detector, spec.face_detector) if n is not None}
     for role, model in load_prelabel_policy(root).models.model_dump().items():
         used[f"prelabel.models.{role}"] = model
+    used["actions.vlm.model"] = load_actions_policy(root).vlm.model
     return used
 
 
@@ -46,7 +48,7 @@ def cmd_licenses(args: argparse.Namespace) -> int:
     used = used_models(root)
     print("| 모델 | 쓰는 곳 | 가중치 라이선스 | 학습 데이터 | 상업 사용 |")
     print("| --- | --- | --- | --- | --- |")
-    for name, spec in registry.models.items():
+    for name, spec in [*registry.models.items(), *registry.external.items()]:
         where = ", ".join(sorted(w for w, n in used.items() if n == name)) or "-"
         data = "; ".join(spec.training_data) or "-"
         print(f"| {name} | {where} | {spec.license} | {data} | {spec.commercial} |")

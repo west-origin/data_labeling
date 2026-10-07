@@ -35,7 +35,7 @@ def build_detectors(
             if spec is None:
                 raise ModelUnavailableError(f"정책에 탐지기 {name}이 없습니다")
             if spec.kind == "opencv_codes":
-                det: FrameDetector = CodeDetector(name)
+                det: FrameDetector = CodeDetector(name, _required(spec.score, name, "score"))
             elif spec.kind == "yunet":
                 det = YuNetFaceDetector(name, *resolve(root, spec.model or "yunet"))
             elif spec.kind == "open_vocab":
@@ -52,7 +52,8 @@ def build_detectors(
                     raise ModelUnavailableError(
                         f"반사면 탐지에 필요한 탐지기가 없습니다: {', '.join(map(str, absent))}"
                     )
-                det = ReflectionDetector(name, region, face, spec.threshold_scale or 0.5)
+                scale = _required(spec.threshold_scale, name, "threshold_scale")
+                det = ReflectionDetector(name, region, face, scale)
             else:
                 raise ModelUnavailableError(f"{name}: 이 환경에서 쓸 수 없는 탐지기 ({spec.kind})")
         except ModelUnavailableError as exc:
@@ -67,6 +68,13 @@ def build_detectors(
     return ready, missing
 
 
+def _required(value: float | None, name: str, field: str) -> float:
+    """정책 값은 코드 기본값으로 채우지 않는다 (config/policies/privacy.yaml)."""
+    if value is None:
+        raise ValueError(f"privacy.yaml detectors.{name}.{field}가 없습니다")
+    return value
+
+
 def _open_vocab(name: str, spec: DetectorSpec, root: Path) -> FrameDetector:
     if not spec.queries or spec.model is None or spec.tokenizer is None:
         raise ModelUnavailableError(f"{name}: 모델·토크나이저·질의가 정책에 없습니다")
@@ -79,6 +87,6 @@ def _open_vocab(name: str, spec: DetectorSpec, root: Path) -> FrameDetector:
         [spec.queries[q] for q in queries],
         version=version,
         frame_stride_ms=spec.frame_stride_ms,
-        score_threshold=spec.score_threshold or 0.1,
-        score_full=spec.score_full or 1.0,
+        score_threshold=_required(spec.score_threshold, name, "score_threshold"),
+        score_full=_required(spec.score_full, name, "score_full"),
     )

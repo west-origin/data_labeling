@@ -21,7 +21,7 @@ from dlp_actions.policy import ActionsPolicy
 from dlp_actions.vlm import VlmClient
 from dlp_media.storage import ObjectStore
 from dlp_schema.db.repository import get_labels, get_session, insert_labels
-from dlp_schema.episode import current_labels
+from dlp_schema.episode import current_labels, retractions
 from dlp_schema.labels import (
     ActionPayload,
     BoxTrackPayload,
@@ -32,9 +32,7 @@ from dlp_schema.labels import (
     KeypointTrackPayload,
     LabelRecord,
     MaskTrackPayload,
-    Provenance,
     Source,
-    Verification,
 )
 from dlp_schema.ontology import Ontology
 
@@ -113,7 +111,9 @@ def run_actions(
             raw.get_file(body.uri.removeprefix(raw.uri("")), video)
         for hand, track in sorted(tracks.items()):
             mine = [x for x in current if _ours(x) and _hand_of(x) is hand]
-            if any(x.provenance.model_version == version for x in mine):
+            # 멱등: 이 버전을 낸 적이 있으면 건너뛴다 (검수자가 모두 고쳤거나 다른 버전으로
+            # 바뀌었어도). 예전 버전으로 되돌려도 다시 만들지 않는다. 다시 만들려면 버전을 바꾼다.
+            if any(x.provenance.model_version == version and _hand_of(x) is hand for x in labels):
                 summary.skipped.append(hand.value)
                 continue
             stale = mine + [
@@ -146,21 +146,9 @@ def run_actions(
                 ontology_version=session.ontology_version or ontology.version,
                 now=now,
             )
-            retractions = [
-                x.model_copy(
-                    update={
-                        "label_id": f"{x.label_id}:retracted",
-                        "parent_label_id": x.label_id,
-                        "retracted": True,
-                        "verification": Verification(),
-                        "provenance": Provenance(source=Source.MODEL, model_version=version),
-                        "created_at": now,
-                    }
-                )
-                for x in stale
-            ]
-            insert_labels(conn, [*retractions, *result.labels])
-            summary.retracted += len(retractions)
+            removed = retractions(stale, version, now)
+            insert_labels(conn, [*removed, *result.labels])
+            summary.retracted += len(removed)
             summary.hands[hand.value] = {
                 "candidates": len(result.candidates),
                 "segments": len(result.classified),

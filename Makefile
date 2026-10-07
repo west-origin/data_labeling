@@ -20,7 +20,7 @@ models:
 export-models:
 	uv run dlp models export
 
-# 실제 모델을 아직 연동하지 못한 곳 (GPU·Hugging Face 등이 필요)
+# 실제 모델을 아직 연동하지 못한 곳 (TODO(real-model) 표시)
 todo-models:
 	@grep -rn "TODO(real-model):" --include=*.py --include=*.yaml packages config | grep -v "/.venv/"
 

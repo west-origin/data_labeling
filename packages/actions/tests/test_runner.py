@@ -16,7 +16,7 @@ from dlp_fixtures.actions import generate_action_scenario
 from dlp_schema.db.migrate import upgrade
 from dlp_schema.db.repository import get_labels, insert_labels, insert_session, register_ontology
 from dlp_schema.episode import current_labels
-from dlp_schema.labels import ActionPayload, GapPayload, LabelRecord, Source
+from dlp_schema.labels import ActionPayload, GapPayload, LabelRecord, Provenance, Source
 from dlp_schema.ontology import load_ontology
 from dlp_schema.testing import FIXED_TIME, make_session
 
@@ -88,3 +88,31 @@ def test_run_is_idempotent_and_new_version_replaces_old(pg: sa.Engine) -> None:
     assert second.retracted == len(timeline) + counts["actions"]  # 행동·사이 구간 + 설명
     assert {x.provenance.model_version for x in timeline2} == {second.version}
     assert {x.provenance.model_version for x in descriptions} == {second.version}
+
+
+def test_rerun_after_reviewer_deleted_everything_is_skipped(pg: sa.Engine) -> None:
+    """감사 회귀 (ADR 0015): 현재 라벨이 아니라 이력으로 멱등을 판단한다 (ID 충돌·되살림 없음)."""
+    ontology = load_ontology(ROOT / "config/ontology/v1")
+    policy = load_policy(ROOT)
+    truth = [x for x in SCENARIO.labels if isinstance(x.payload, ActionPayload | GapPayload)]
+    with pg.begin() as conn:
+        run_actions(conn, SID, OracleVlm(truth), ontology, policy, FIXED_TIME)
+        ours = current_labels(get_labels(conn, SID, kinds=["action", "gap", "description"]))
+        insert_labels(
+            conn,
+            [
+                x.model_copy(
+                    update={
+                        "label_id": f"{x.label_id}:rev",
+                        "parent_label_id": x.label_id,
+                        "retracted": True,
+                        "provenance": Provenance(source=Source.HUMAN),
+                        "confidence": None,
+                    }
+                )
+                for x in ours
+            ],
+        )
+        again = run_actions(conn, SID, OracleVlm(truth), ontology, policy, FIXED_TIME)
+        assert current_labels(get_labels(conn, SID, kinds=["action", "gap"])) == []
+    assert again.skipped == ["right"]

@@ -64,9 +64,7 @@ class Agreement:
     boundary_f1: float
 
 
-def agreement(
-    a: Sequence[Item], b: Sequence[Item], tolerance_ms: int, iou: float = 0.5
-) -> Agreement:
+def agreement(a: Sequence[Item], b: Sequence[Item], tolerance_ms: int, iou: float) -> Agreement:
     """두 라벨 묶음의 일치도. 대상 키별로 시간 IoU가 가장 큰 쌍을 맞춘다."""
     left: list[str] = []
     right: list[str] = []
@@ -93,12 +91,16 @@ def agreement(
 
 
 def prelabel_bias(
-    model: Sequence[Item], standard: Sequence[Item], blind: Sequence[Item], tolerance_ms: int
+    model: Sequence[Item],
+    standard: Sequence[Item],
+    blind: Sequence[Item],
+    tolerance_ms: int,
+    iou: float,
 ) -> float:
     """표준 검수 결과가 블라인드 결과보다 모델 프리라벨에 얼마나 더 가까운가 (구간 F1 차)."""
     return (
-        agreement(standard, model, tolerance_ms).segment_f1
-        - agreement(blind, model, tolerance_ms).segment_f1
+        agreement(standard, model, tolerance_ms, iou).segment_f1
+        - agreement(blind, model, tolerance_ms, iou).segment_f1
     )
 
 

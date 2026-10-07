@@ -27,7 +27,12 @@ from dlp_review.collect import collect_task
 from dlp_review.cvat import CvatSchema, to_cvat_tracks
 from dlp_review.labelstudio import LS_KINDS, to_ls_results
 from dlp_review.ops.policy import load_policy as load_ops_policy
-from dlp_review.ops.runner import create_assignment_tasks, plan_session, quality_report
+from dlp_review.ops.runner import (
+    AccessError,
+    create_assignment_tasks,
+    plan_session,
+    quality_report,
+)
 from dlp_review.tasks import ReviewSetup, frame_times, object_key
 from dlp_schema.db.migrate import upgrade
 from dlp_schema.db.repository import (
@@ -219,9 +224,9 @@ def test_blind_and_seeded_tasks_through_label_studio(
     assert ls is not None
 
     with pg.begin() as conn:
-        [t_std] = create_assignment_tasks(conn, standard, setup, FIXED_TIME)
-        [t_blind] = create_assignment_tasks(conn, blind, setup, FIXED_TIME)
-        [t_seed] = create_assignment_tasks(conn, seeded, setup, FIXED_TIME)
+        [t_std] = create_assignment_tasks(conn, standard, setup, ops, FIXED_TIME)
+        [t_blind] = create_assignment_tasks(conn, blind, setup, ops, FIXED_TIME)
+        [t_seed] = create_assignment_tasks(conn, seeded, setup, ops, FIXED_TIME)
     assert ls.latest_results(int(t_blind.external_id)) == []  # 블라인드: 프리라벨 없음
     sent = ls.latest_results(int(t_seed.external_id))
     assert all(r["id"].startswith("seed-") for r in sent)
@@ -290,11 +295,17 @@ def test_seeded_blur_deletion_through_cvat(
         "seeded_error_task_ratio": 1.0,
         "double_annotation_ratio": 0.0,
     }
-    ops = ops.model_copy(update={"ratios": ops.ratios.model_copy(update=ratios)})
+    reviewers = ops.reviewers.model_copy(update={"privacy": ("p1", "p2")})  # 원본 접근 권한자
+    ops = ops.model_copy(
+        update={"ratios": ops.ratios.model_copy(update=ratios), "reviewers": reviewers}
+    )
     ontology = load_ontology(ROOT / "config" / "ontology" / "v1")
+    # 권한 없는 검수자에게는 블러 검수를 배정하지 않는다
+    with pg.begin() as conn, pytest.raises(AccessError):
+        plan_session(conn, work_sid, ["r1"], ops, ontology, seed=5, now=FIXED_TIME, privacy=True)
     with pg.begin() as conn:
         planned = plan_session(
-            conn, work_sid, ["r1", "r2"], ops, ontology, seed=5, now=FIXED_TIME,
+            conn, work_sid, ["p1", "p2"], ops, ontology, seed=5, now=FIXED_TIME,
             seed_sessions=[gold_sid], seed_groups={"privacy"}, privacy=True,
         )  # fmt: skip
     [seeded] = [a for a in planned if a.mode is ReviewMode.SEEDED_ERROR]
@@ -304,7 +315,7 @@ def test_seeded_blur_deletion_through_cvat(
     gold = {x.label_id: x for x in get_labels_sync(pg, gold_sid) if not x.seeded_error}
 
     with pg.begin() as conn:
-        [task] = create_assignment_tasks(conn, seeded, setup, FIXED_TIME)
+        [task] = create_assignment_tasks(conn, seeded, setup, ops, FIXED_TIME)
     tid = int(task.external_id)
     sent = cvat.get_tracks(tid)
     assert len(sent) == len([x for x in gold.values() if x.kind == "blur_track"]) - len(
@@ -328,7 +339,7 @@ def test_seeded_blur_deletion_through_cvat(
     cvat.put_tracks(tid, [*sent, *redrawn])
 
     with pg.begin() as conn:
-        outcome = collect_task(conn, task.task_key, setup, seeded.assignee or "r1", FIXED_TIME)
+        outcome = collect_task(conn, task.task_key, setup, seeded.assignee or "p1", FIXED_TIME)
         report = quality_report(conn, ops)
         gold_after = get_labels(conn, gold_sid)
     assert outcome is not None and outcome.added == len(seeded.injected)

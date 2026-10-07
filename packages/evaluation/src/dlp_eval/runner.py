@@ -5,7 +5,8 @@ DB에서 정답·예측을 모아 지표·하위 집단·게이트 리포트를 
 - 정답: 골든셋 세션의 현재 라벨 중 사람이 만든 것과 사람이 승인·수정한 것.
   (표본 검증만 된 모델 라벨은 정답으로 보지 않는다.)
 - 예측: 과제별로 지정한 model_version의 레코드 (삭제 레코드 제외). 나중에 검수자가 고쳤어도 모델이
-  낸 원래 레코드로 평가한다.
+  낸 원래 레코드로 평가한다. 버전이 `*`로 끝나면 그 앞부분으로 시작하는 현재 레코드를 평가한다.
+- 오류 삽입 사본·측정 레코드와 그 후손은 예측에서 뺀다.
 - 하위 집단: glove(장갑 스트림 유무), site(장소).
 """
 
@@ -23,7 +24,7 @@ from dlp_eval.gate import GateDecision
 from dlp_eval.harness import LOWER_IS_BETTER, EvalReport, SessionData
 from dlp_eval.policy import Task
 from dlp_schema.db.repository import get_golden_set, get_labels, get_session
-from dlp_schema.episode import current_labels
+from dlp_schema.episode import current_labels, non_operational_ids
 from dlp_schema.labels import LabelRecord, Source, VerificationState
 from dlp_schema.session import StreamKind
 
@@ -53,12 +54,28 @@ def load_golden(
         session = get_session(conn, sid)
         labels = get_labels(conn, sid)
         truth = [x for x in current_labels(labels) if is_truth(x)]
+        # 오류 삽입 사본·측정 레코드와 그 후손은 모델 버전을 달고 있어도 예측이 아니다
+        excluded = non_operational_ids(labels)
         glove = any(
             s.kind in (StreamKind.GLOVE_LEFT, StreamKind.GLOVE_RIGHT) for s in session.streams
         )
         groups = {"glove": "glove" if glove else "bare", "site": session.site_id}
+        current = current_labels(labels)
         for task, version in models.items():
             kinds = TASK_KINDS[task]
+            if version.endswith("*"):
+                # 버전 앞부분으로 고르면 그 모듈의 현재 레코드를 평가한다. 관계·커버리지처럼 정책이
+                # 바뀌어도 내용이 같은 레코드는 옛 버전을 그대로 두는 모듈용 (예: relations-*)
+                prefix = version[:-1]
+                pred = [
+                    x
+                    for x in current
+                    if x.kind in kinds and (x.provenance.model_version or "").startswith(prefix)
+                ]
+                out[task].append(
+                    SessionData(sid, [x for x in truth if x.kind in kinds], pred, groups)
+                )
+                continue
             out[task].append(
                 SessionData(
                     sid,
@@ -69,6 +86,7 @@ def load_golden(
                         if x.kind in kinds
                         and x.provenance.model_version == version
                         and not x.retracted
+                        and x.label_id not in excluded
                     ],
                     groups,
                 )

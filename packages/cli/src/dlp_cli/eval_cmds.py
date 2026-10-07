@@ -62,7 +62,12 @@ def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
         "golden", help="골든셋으로 모델 버전을 평가 (게이트 실패 시 종료 코드 1)"
     )
     golden.add_argument("golden", help="골든셋 버전")
-    golden.add_argument("--model", action="append", default=[], help="<과제>=<모델 버전> (여러 번)")
+    golden.add_argument(
+        "--model",
+        action="append",
+        default=[],
+        help="<과제>=<모델 버전> (여러 번). 관계·커버리지는 relations-* 처럼 앞부분+*",
+    )
     golden.add_argument(
         "--baseline", action="append", default=[], help="비교할 기존 모델 <과제>=<버전>"
     )

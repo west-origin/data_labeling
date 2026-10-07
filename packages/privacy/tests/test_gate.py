@@ -254,7 +254,7 @@ def test_detector_factory_reports_unavailable_models(policy: PrivacyPolicy, tmp_
 def test_code_detector_finds_qr_as_shipping_label() -> None:
     frame = np.full((240, 320, 3), 200, dtype=np.uint8)
     frame[40:200, 80:240] = render_qr("SHIP|1234-5678", 160)
-    [det] = CodeDetector("codes").detect(frame, 0, 0.3)
+    [det] = CodeDetector("codes", 0.9).detect(frame, 0, 0.3)
     assert det.target == "shipping_label"
     assert 70 <= det.box.x <= 110 and 30 <= det.box.y <= 70 and det.box.w > 60
 
@@ -288,6 +288,28 @@ def test_open_vocab_detector_runs_every_stride_and_holds_results() -> None:
     assert fake.calls == 2
     det.detect(img, 0, 0.3)  # 시간이 거꾸로 가면 새 영상
     assert fake.calls == 3
+    # 짧은 영상(한 번만 추론, 마지막 추론 시각 0) 다음 영상도 0 ms부터 시작한다.
+    # 초기화해야 새로 추론한다
+    det.reset()
+    det.detect(img, 0, 0.3)
+    assert fake.calls == 4
+
+
+def test_pipeline_resets_open_vocab_cache_per_video(
+    policy: PrivacyPolicy, blur: tuple[BlurScenario, Path]
+) -> None:
+    fake = FakeOwl()
+    det = OpenVocabDetector(
+        "open_vocab", fake, ["document", "reflective_surface"], version="owl-x",
+        frame_stride_ms=10_000, score_threshold=0.05, score_full=0.4,
+    )  # fmt: skip
+    p = oracle_policy(policy, {"document": ["open_vocab"]})
+    for _ in range(2):  # 같은 탐지기로 영상 두 개 (세션의 두 스트림과 같다)
+        detect_video(
+            blur[1], session_id="s", stream_id="v", detectors={"open_vocab": det},
+            missing_detectors={}, policy=p, ontology_version="1.0.0", now=FIXED_TIME,
+        )  # fmt: skip
+    assert fake.calls == 2  # 영상마다 한 번씩
 
 
 @pytest.mark.skipif(

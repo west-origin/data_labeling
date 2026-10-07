@@ -115,6 +115,10 @@ class ReviewTask(Contract):
     label_kinds: tuple[str, ...]
     mode: ReviewMode = ReviewMode.STANDARD
     assignment_id: Identifier | None = None
+    sent_label_ids: tuple[Identifier, ...] | None = Field(
+        default=None,
+        description="작업에 보낸 라벨. 수집은 이 라벨과 비교한다 (그 사이 라벨이 바뀌어도)",
+    )
     status: ReviewTaskStatus = ReviewTaskStatus.OPEN
     created_at: AwareDatetime
     collected_at: AwareDatetime | None = None

@@ -31,7 +31,7 @@ from dlp_prelabel.lift3d import DepthLifter
 from dlp_prelabel.policy import PrelabelPolicy
 from dlp_prelabel.wearer import match_wearer, wrist_speed
 from dlp_schema.db.repository import get_labels, get_session, insert_labels, set_lifecycle
-from dlp_schema.episode import current_labels
+from dlp_schema.episode import current_labels, retractions, version_tag
 from dlp_schema.labels import (
     BoxTrackPayload,
     Evidence,
@@ -39,6 +39,8 @@ from dlp_schema.labels import (
     HandStatePayload,
     KeypointTrackPayload,
     LabelRecord,
+    Source,
+    VerificationState,
 )
 from dlp_schema.ontology import Ontology
 from dlp_schema.predictor import Clip, Predictor
@@ -55,6 +57,7 @@ class PrelabelSummary:
     produced: dict[str, int] = field(default_factory=dict[str, int])  # "스트림/predictor" → 라벨 수
     skipped: list[str] = field(default_factory=list[str])
     contacts: int = 0
+    retracted: int = 0  # 새 버전으로 바뀌며 지운 이전 버전 라벨
     lifted: int = 0
     wearer: str | None = None
     wearer_scores: dict[str, float] = field(default_factory=dict[str, float])
@@ -98,28 +101,50 @@ def run_prelabel(
                 labels = predictor.run(
                     Clip(session_id, stream.stream_id, _fetch(raw, stream.uri, work))
                 )
-                insert_labels(conn, labels)
+                # 같은 예측기의 이전 버전 라벨 중 아직 아무도 검수하지 않은 것은 지운다
+                prefix = f"{session_id}-{stream.stream_id}-{predictor.name}-"
+                stale = _stale(existing, prefix, predictor.version)
+                insert_labels(conn, [*retractions(stale, predictor.version, now), *labels])
                 summary.produced[key] = len(labels)
-        current = current_labels(get_labels(conn, session_id))
+                summary.retracted += len(stale)
+        history = get_labels(conn, session_id)
+        current = current_labels(history)
         if lifter is not None:
-            summary.lifted = _lift(conn, session, current, raw, work, lifter)
-        summary.contacts = _contacts(conn, session, current, raw, work, policy, ontology, now)
-        _wearer(conn, session, current, raw, work, policy, now, summary)
+            summary.lifted = _lift(conn, session, history, current, raw, work, lifter, now)
+        summary.contacts = _contacts(
+            conn, session, history, current, raw, work, policy, ontology, now
+        )
+        _wearer(conn, session, history, current, raw, work, policy, now, summary)
     if session.lifecycle_state is LifecycleState.PRIVACY_APPROVED:
         set_lifecycle(conn, session_id, LifecycleState.PRELABELED)
     return summary
 
 
+def _stale(labels: list[LabelRecord], prefix: str, version: str) -> list[LabelRecord]:
+    """같은 단계의 이전 버전 모델 라벨 중 현재 운영 라벨이고 아직 검수하지 않은 것."""
+    return [
+        x
+        for x in current_labels(labels)
+        if x.label_id.startswith(prefix)
+        and x.provenance.source is Source.MODEL
+        and x.provenance.model_version != version
+        and x.verification.state is VerificationState.UNREVIEWED
+    ]
+
+
 def _lift(
     conn: sa.Connection,
     session: Session,
+    history: list[LabelRecord],
     current: list[LabelRecord],
     raw: ObjectStore,
     work: Path,
     lifter: DepthLifter,
+    now: datetime,
 ) -> int:
+    """멱등: 같은 버전을 낸 적이 있으면(검수자가 모두 고쳤어도) 다시 만들지 않는다."""
     body = session.reference_stream
-    if any(x.provenance.model_version == lifter.version for x in current):
+    if any(x.provenance.model_version == lifter.version for x in history):
         return 0
     tracks = [
         x
@@ -137,7 +162,8 @@ def _lift(
         calib=session.calibration.intrinsics,
         ontology_version=session.ontology_version or "",
     )
-    insert_labels(conn, labels)
+    stale = _stale(history, f"{session.session_id}-{body.stream_id}-3d-", lifter.version)
+    insert_labels(conn, [*retractions(stale, lifter.version, now), *labels])
     return len(labels)
 
 
@@ -153,6 +179,7 @@ def _contact_kind(class_id: str | None, ontology: Ontology) -> str:
 def _contacts(
     conn: sa.Connection,
     session: Session,
+    history: list[LabelRecord],
     current: list[LabelRecord],
     raw: ObjectStore,
     work: Path,
@@ -160,7 +187,8 @@ def _contacts(
     ontology: Ontology,
     now: datetime,
 ) -> int:
-    if any(x.provenance.model_version == CONTACT_VERSION for x in current):
+    # 멱등: 이력에 이 버전이 있으면 (검수자가 모두 고쳤거나 지웠어도) 다시 만들지 않는다
+    if any(x.provenance.model_version == CONTACT_VERSION for x in history):
         return 0
     body = session.reference_stream.stream_id
     hands = {
@@ -206,14 +234,14 @@ def _contacts(
             )
             labels.append(
                 model_label(
-                    label_id=f"{session.session_id}-contact-{hand.value}-{i:04d}",
+                    label_id=f"{session.session_id}-contact-{version_tag(CONTACT_VERSION)}-{hand.value}-{i:04d}",
                     session_id=session.session_id,
                     stream_id=None,
                     t_start_ms=c.start_ms,
                     t_end_ms=c.end_ms,
                     ontology_version=session.ontology_version or "",
                     model_version=CONTACT_VERSION,
-                    confidence={"fused": 0.9, "glove": 0.6, "video": 0.5}[c.source],
+                    confidence=getattr(policy.contact.confidence, c.source),
                     payload=payload,
                     now=now,
                     evidence=Evidence.OBSERVED if c.source != "video" else Evidence.INFERRED,
@@ -226,6 +254,7 @@ def _contacts(
 def _wearer(
     conn: sa.Connection,
     session: Session,
+    history: list[LabelRecord],
     current: list[LabelRecord],
     raw: ObjectStore,
     work: Path,
@@ -244,7 +273,7 @@ def _wearer(
     )
     if third is None or imu is None or third.sync_method is SyncMethod.UNSYNCED:
         return
-    if any(x.provenance.model_version == WEARER_VERSION for x in current):
+    if any(x.provenance.model_version == WEARER_VERSION for x in history):
         return
     people = {
         x.label_id: x

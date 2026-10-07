@@ -57,9 +57,9 @@ def _compare(
             decision.reasons.append(
                 f"{where} {m}: {b:.4f} → {c:.4f} (향상 {g:+.4f} < {rule.min_gain})"
             )
-        elif g < -rule.max_drop:
+        elif g < -rule.allowed_drop(m):
             decision.reasons.append(
-                f"{where} {m}: {b:.4f} → {c:.4f} (하락 {g:+.4f}, 허용 {rule.max_drop})"
+                f"{where} {m}: {b:.4f} → {c:.4f} (하락 {g:+.4f}, 허용 {rule.allowed_drop(m)})"
             )
 
 

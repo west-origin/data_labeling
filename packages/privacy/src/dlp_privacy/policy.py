@@ -36,6 +36,7 @@ class DetectorSpec(Contract):
     region_detector: str | None = None
     face_detector: str | None = None
     threshold_scale: float | None = None
+    score: float | None = Field(default=None, ge=0, le=1, description="고정 신뢰도 (opencv_codes)")
     # open_vocab 전용
     frame_stride_ms: int = Field(default=0, ge=0)
     score_threshold: float | None = Field(default=None, ge=0, le=1)

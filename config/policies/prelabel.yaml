@@ -24,6 +24,7 @@ body:
   keypoint_score: 0.3       # 이보다 낮은 관절은 visibility=1 (가려짐 추정)
   max_people: 4
   track_iou: 0.3
+  max_gap_ms: 300           # 이보다 짧게 끊긴 사람 트랙은 하나로 잇는다
 
 objects:
   min_score: 0.4
@@ -73,6 +74,9 @@ contact:
     max_distance_px: 12       # 손가락 끝과 객체 박스 사이 거리가 이 이하면 접촉 후보
     min_duration_ms: 100
     merge_gap_ms: 100
+  # 출처별 신뢰도. 검수 우선순위는 장갑 세션에서 fused보다 낮은 접촉(장갑·영상 한쪽만)을 먼저 본다
+  # (config/policies/review.yaml contact_mismatch_max_confidence는 glove·video보다 크고 fused보다 작게).
+  confidence: {fused: 0.9, glove: 0.6, video: 0.5}
   # TODO(real-model): 영상만으로 접촉을 판정하는 학습 분류기 (장갑 세션을 정답으로, WP13에서 학습).
   #   지금은 손가락 끝-객체 거리 휴리스틱만 쓴다.
 
@@ -89,6 +93,8 @@ depth:
   min_depth_m: 0.1
   max_depth_m: 10.0
   hand_points: [0, 4, 8]    # 손목, 엄지 끝, 검지 끝 (hand21 번호)
+  confidence: 0.5           # 단안 깊이의 절대 거리는 장면에 따라 크게 틀릴 수 있어 낮게 둔다
 
-# TODO(real-model): 카메라 6자유도 궤적(시각-관성 SLAM: Basalt, ORB-SLAM3)은 C++ 빌드와 GPU가
-#   필요해 이 환경에서는 stub만 있다. 그때까지 3D 궤적은 카메라 좌표계(frame=camera)뿐이다.
+# TODO(real-model): 카메라 6자유도 궤적은 아직 연동하지 않았다 (stub). 후보는 Basalt 시각-관성
+#   SLAM(BSD-3, CPU, C++ 빌드·캘리브레이션 필요)이나 메트릭 깊이 + RGB-D 오도메트리(Open3D, CPU).
+#   그때까지 3D 궤적은 카메라 좌표계(frame=camera)뿐이다.

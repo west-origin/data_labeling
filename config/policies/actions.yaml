@@ -28,8 +28,9 @@ vlm:
   frames_per_segment: 8
   max_side_px: 448            # VLM에 보낼 프레임 긴 변
   default_confidence: 0.5     # 응답에 신뢰도가 없을 때
-  # TODO(real-model): VLM 추론 서버(OpenAI 호환 API, 예: vLLM)가 필요하다 (GPU). 서버 주소는
-  #   DLP_VLM_URL 환경 변수로 준다. 모델은 상업 사용 가능한 라이선스여야 한다 (ADR 0010).
+  # TODO(real-model): VLM 추론 서버(OpenAI 호환 API)가 필요하다. GPU면 vLLM, CPU면 llama.cpp
+  #   llama-server(GGUF)로 띄울 수 있다 (CPU는 느려 timeout_s를 늘린다). 서버 주소는
+  #   DLP_VLM_URL 환경 변수로 준다. 라이선스는 config/models.yaml external에서 검사한다. 모델은 상업 사용 가능한 라이선스여야 한다 (ADR 0010).
   #   Qwen2.5-VL-7B-Instruct는 Apache-2.0, 3B는 비상업 연구 라이선스라 쓰지 않는다.
   model: Qwen/Qwen2.5-VL-7B-Instruct
   timeout_s: 120

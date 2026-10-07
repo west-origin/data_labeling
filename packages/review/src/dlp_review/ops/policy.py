@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from dlp_schema.common import Contract
 from dlp_schema.config import ReviewConfig, load_config
@@ -14,9 +14,21 @@ from dlp_schema.config import ReviewConfig, load_config
 ErrorType = Literal["boundary_shift", "class_swap", "blur_deletion"]
 
 
+CVAT_KINDS = ("box_track", "keypoint_track")
+
+
 class UnitsPolicy(Contract):
     spatial: tuple[str, ...]
     temporal: tuple[str, ...]
+
+    @model_validator(mode="after")
+    def _shown_by_tools(self) -> UnitsPolicy:
+        from dlp_review.labelstudio import LS_KINDS
+
+        extra = (set(self.spatial) - set(CVAT_KINDS)) | (set(self.temporal) - set(LS_KINDS))
+        if extra:
+            raise ValueError(f"검수 도구가 보여 주지 않는 라벨 종류: {sorted(extra)}")
+        return self
 
 
 class PriorityPolicy(Contract):
@@ -40,10 +52,17 @@ class SeedingPolicy(Contract):
     types: tuple[ErrorType, ...] = Field(min_length=1)
     boundary_shift_ms: tuple[int, int]
     detect_tolerance_ms: int = Field(ge=0)
+    blur_overlap: float = Field(gt=0, le=1)
+
+
+class MeasurementPolicy(Contract):
+    tolerance_ms: int = Field(ge=0)
+    match_iou: float = Field(gt=0, le=1)
 
 
 class ReviewersPolicy(Contract):
     senior: tuple[str, ...] = ()
+    privacy: tuple[str, ...] = Field(default=(), description="원본 접근 권한자 (블러 검수)")
 
 
 class ReviewOpsPolicy(Contract):
@@ -51,6 +70,7 @@ class ReviewOpsPolicy(Contract):
     units: UnitsPolicy
     priority: PriorityPolicy
     sampling: SamplingPolicy
+    measurement: MeasurementPolicy
     seeding: SeedingPolicy
     reviewers: ReviewersPolicy
     ratios: ReviewConfig  # config/defaults.yaml review
