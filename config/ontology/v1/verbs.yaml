@@ -1,0 +1,44 @@
+# level: primitive(원시 동작, 라벨 단위) | skill(기술) | human_skill(사람 대상 기술, Phase B부터)
+verbs:
+  grasp: {level: primitive, ko: 잡다}
+  release: {level: primitive, ko: 놓다}
+  lift: {level: primitive, ko: 들어 올리다}
+  lower: {level: primitive, ko: 내리다}
+  carry: {level: primitive, ko: 옮기다}
+  push: {level: primitive, ko: 밀다}
+  pull: {level: primitive, ko: 당기다}
+  rotate: {level: primitive, ko: 돌리다}
+  press: {level: primitive, ko: 누르다}
+  rub: {level: primitive, ko: 문지르다}
+  support: {level: primitive, ko: 지지하다}
+
+  open: {level: skill, ko: 열다}
+  close: {level: skill, ko: 닫다}
+  wipe: {level: skill, ko: 닦다}
+  sweep: {level: skill, ko: 쓸다}
+  rinse: {level: skill, ko: 헹구다}
+  wring: {level: skill, ko: 짜다}
+  spray: {level: skill, ko: 뿌리다}
+  pour: {level: skill, ko: 붓다}
+  spread: {level: skill, ko: 펴다}
+  fold: {level: skill, ko: 접다}
+  wrap: {level: skill, ko: 감싸다}
+  attach: {level: skill, ko: 붙이다}
+  detach: {level: skill, ko: 떼다}
+  insert: {level: skill, ko: 끼우다}
+  remove: {level: skill, ko: 빼다}
+  measure: {level: skill, ko: 측정하다}
+  inspect: {level: skill, ko: 확인하다, contactless: true}
+
+  roll_person: {level: human_skill, ko: 굴리다}
+  raise_person: {level: human_skill, ko: 일으키다}
+  lay_down_person: {level: human_skill, ko: 눕히다}
+  lift_transfer_person: {level: human_skill, ko: 들어 옮기다}
+  dress_person: {level: human_skill, ko: 입히다}
+  undress_person: {level: human_skill, ko: 벗기다}
+
+# 행동 사이 구간을 채우는 값. 타임라인에 공백을 두지 않는다.
+gap_types:
+  idle: {ko: 대기, description: 의도적 정지}
+  unknown: {ko: 미상, description: 무엇인지 판단할 수 없음. 온톨로지 확장 후보로 검토}
+  out_of_scope: {ko: 범위 외, description: "대화, 기록 작성 등 조작이 아닌 활동"}

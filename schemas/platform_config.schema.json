@@ -1,0 +1,334 @@
+{
+  "$defs": {
+    "BucketsConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "datasets": {
+          "title": "Datasets",
+          "type": "string"
+        },
+        "labeling": {
+          "title": "Labeling",
+          "type": "string"
+        },
+        "mlflow": {
+          "title": "Mlflow",
+          "type": "string"
+        },
+        "raw": {
+          "title": "Raw",
+          "type": "string"
+        }
+      },
+      "required": [
+        "raw",
+        "labeling",
+        "datasets",
+        "mlflow"
+      ],
+      "title": "BucketsConfig",
+      "type": "object"
+    },
+    "ExportConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "include_unreviewed": {
+          "title": "Include Unreviewed",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "include_unreviewed"
+      ],
+      "title": "ExportConfig",
+      "type": "object"
+    },
+    "FullReviewExit": {
+      "additionalProperties": false,
+      "properties": {
+        "audit_sample_ratio": {
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "title": "Audit Sample Ratio",
+          "type": "number"
+        },
+        "weeks_below_target": {
+          "exclusiveMinimum": 0,
+          "title": "Weeks Below Target",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "weeks_below_target",
+        "audit_sample_ratio"
+      ],
+      "title": "FullReviewExit",
+      "type": "object"
+    },
+    "GoldenSetConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "min_instances_per_class": {
+          "exclusiveMinimum": 0,
+          "title": "Min Instances Per Class",
+          "type": "integer"
+        },
+        "split_unit": {
+          "items": {
+            "enum": [
+              "worker_id",
+              "site_id"
+            ],
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Split Unit",
+          "type": "array"
+        }
+      },
+      "required": [
+        "min_instances_per_class",
+        "split_unit"
+      ],
+      "title": "GoldenSetConfig",
+      "type": "object"
+    },
+    "InfrastructureConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "annotation_tools": {
+          "enum": [
+            "hybrid",
+            "cvat_only"
+          ],
+          "title": "Annotation Tools",
+          "type": "string"
+        },
+        "data_versioning": {
+          "enum": [
+            "lakefs",
+            "dvc"
+          ],
+          "title": "Data Versioning",
+          "type": "string"
+        },
+        "experiment_tracking": {
+          "const": "mlflow",
+          "title": "Experiment Tracking",
+          "type": "string"
+        },
+        "object_store": {
+          "enum": [
+            "seaweedfs",
+            "minio"
+          ],
+          "title": "Object Store",
+          "type": "string"
+        },
+        "orchestrator": {
+          "enum": [
+            "prefect",
+            "airflow"
+          ],
+          "title": "Orchestrator",
+          "type": "string"
+        }
+      },
+      "required": [
+        "object_store",
+        "data_versioning",
+        "annotation_tools",
+        "orchestrator",
+        "experiment_tracking"
+      ],
+      "title": "InfrastructureConfig",
+      "type": "object"
+    },
+    "PrivacyConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "blur_hold_ms": {
+          "minimum": 0,
+          "title": "Blur Hold Ms",
+          "type": "integer"
+        },
+        "extra_targets_v1": {
+          "items": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}$",
+            "type": "string"
+          },
+          "title": "Extra Targets V1",
+          "type": "array"
+        },
+        "full_review_exit": {
+          "$ref": "#/$defs/FullReviewExit"
+        },
+        "render_mode": {
+          "enum": [
+            "mosaic",
+            "solid"
+          ],
+          "title": "Render Mode",
+          "type": "string"
+        },
+        "strip_audio_in_release": {
+          "title": "Strip Audio In Release",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "blur_hold_ms",
+        "render_mode",
+        "strip_audio_in_release",
+        "extra_targets_v1",
+        "full_review_exit"
+      ],
+      "title": "PrivacyConfig",
+      "type": "object"
+    },
+    "RetentionConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "raw_retention_days": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Raw Retention Days"
+        }
+      },
+      "title": "RetentionConfig",
+      "type": "object"
+    },
+    "ReviewConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "blind_task_ratio": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Blind Task Ratio",
+          "type": "number"
+        },
+        "double_annotation_ratio": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Double Annotation Ratio",
+          "type": "number"
+        },
+        "qa_sample_ratio": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Qa Sample Ratio",
+          "type": "number"
+        },
+        "seeded_error_task_ratio": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Seeded Error Task Ratio",
+          "type": "number"
+        }
+      },
+      "required": [
+        "qa_sample_ratio",
+        "double_annotation_ratio",
+        "blind_task_ratio",
+        "seeded_error_task_ratio"
+      ],
+      "title": "ReviewConfig",
+      "type": "object"
+    },
+    "SuccessCriteria": {
+      "additionalProperties": false,
+      "properties": {
+        "boundary_agreement_min": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Boundary Agreement Min"
+        },
+        "residual_blur_miss_per_hour_max": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Residual Blur Miss Per Hour Max"
+        },
+        "review_minutes_per_video_hour": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Review Minutes Per Video Hour"
+        }
+      },
+      "title": "SuccessCriteria",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "buckets": {
+      "$ref": "#/$defs/BucketsConfig"
+    },
+    "export": {
+      "$ref": "#/$defs/ExportConfig"
+    },
+    "golden_set": {
+      "$ref": "#/$defs/GoldenSetConfig"
+    },
+    "infrastructure": {
+      "$ref": "#/$defs/InfrastructureConfig"
+    },
+    "privacy": {
+      "$ref": "#/$defs/PrivacyConfig"
+    },
+    "retention": {
+      "$ref": "#/$defs/RetentionConfig"
+    },
+    "review": {
+      "$ref": "#/$defs/ReviewConfig"
+    },
+    "success_criteria": {
+      "$ref": "#/$defs/SuccessCriteria"
+    },
+    "version": {
+      "title": "Version",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "version",
+    "infrastructure",
+    "buckets",
+    "privacy",
+    "review",
+    "golden_set",
+    "export",
+    "retention",
+    "success_criteria"
+  ],
+  "title": "PlatformConfig",
+  "type": "object"
+}

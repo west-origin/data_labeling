@@ -1,0 +1,150 @@
+"""세션과 스트림."""
+
+from __future__ import annotations
+
+from enum import StrEnum
+
+from pydantic import AwareDatetime, Field, model_validator
+
+from dlp_schema.common import Confidence, Contract, Identifier, Ms, SemVer
+
+
+class Domain(StrEnum):
+    CLEANING = "cleaning"
+    CAREGIVING = "caregiving"
+    NURSING = "nursing"
+
+
+class StreamKind(StrEnum):
+    BODYCAM = "bodycam"
+    IMU = "imu"
+    THIRD_PERSON = "third_person"
+    GLOVE_LEFT = "glove_left"
+    GLOVE_RIGHT = "glove_right"
+    AUDIO = "audio"
+
+
+class SyncMethod(StrEnum):
+    REFERENCE = "reference"  # 기준 스트림(바디캠) 자신
+    SHARED_CLOCK = "shared_clock"  # 바디캠과 같은 시계 (IMU, 내장 오디오)
+    QR_SLATE = "qr_slate"
+    TAP_EVENT = "tap_event"
+    AUDIO_XCORR = "audio_xcorr"
+    MOTION_XCORR = "motion_xcorr"
+    MANUAL = "manual"
+    UNSYNCED = "unsynced"
+
+
+class PrivacyState(StrEnum):
+    PENDING = "pending"
+    AUTO_BLURRED = "auto_blurred"
+    APPROVED = "approved"
+
+
+class LifecycleState(StrEnum):
+    """한 방향으로만 이동한다. 어느 단계에서든 withdrawn으로 빠질 수 있다."""
+
+    RAW_INGESTED = "raw_ingested"
+    PRIVACY_APPROVED = "privacy_approved"
+    PRELABELED = "prelabeled"
+    HUMAN_VERIFIED = "human_verified"
+    SPLIT_ASSIGNED = "split_assigned"
+    EXPORTED = "exported"
+    WITHDRAWN = "withdrawn"
+
+
+LIFECYCLE_ORDER: tuple[LifecycleState, ...] = (
+    LifecycleState.RAW_INGESTED,
+    LifecycleState.PRIVACY_APPROVED,
+    LifecycleState.PRELABELED,
+    LifecycleState.HUMAN_VERIFIED,
+    LifecycleState.SPLIT_ASSIGNED,
+    LifecycleState.EXPORTED,
+)
+
+
+def can_transition(current: LifecycleState, target: LifecycleState) -> bool:
+    """생애주기 전이 허용 여부. 같은 상태 유지는 허용(멱등), 되돌아가기는 금지."""
+    if current is LifecycleState.WITHDRAWN:
+        return target is LifecycleState.WITHDRAWN
+    if target is LifecycleState.WITHDRAWN:
+        return True
+    return LIFECYCLE_ORDER.index(target) - LIFECYCLE_ORDER.index(current) in (0, 1)
+
+
+class CameraIntrinsics(Contract):
+    width: int = Field(gt=0)
+    height: int = Field(gt=0)
+    fx: float
+    fy: float
+    cx: float
+    cy: float
+    distortion_model: str = "opencv"
+    distortion: tuple[float, ...] = ()
+
+
+class Calibration(Contract):
+    """세션 단위 캘리브레이션. 장착 위치가 바뀔 수 있어 세션마다 기록한다."""
+
+    mount_position: str | None = None
+    intrinsics: CameraIntrinsics | None = None
+    camera_imu_extrinsics: tuple[tuple[float, ...], ...] | None = Field(
+        default=None, description="IMU→카메라 4x4 변환 행렬"
+    )
+    glove_model: str | None = None
+    glove_calibration: dict[str, float] = Field(default_factory=dict)
+
+
+class Stream(Contract):
+    """세션 안의 스트림 하나. 기준 시각 = offset_ms + 스트림 시각 * clock_scale."""
+
+    stream_id: Identifier
+    kind: StreamKind
+    uri: str
+    sample_rate_hz: float | None = Field(default=None, gt=0)
+    pts_index_uri: str | None = None
+    offset_ms: float = 0.0
+    clock_scale: float = Field(default=1.0, gt=0)
+    sync_method: SyncMethod = SyncMethod.UNSYNCED
+    sync_confidence: Confidence | None = None
+    manual_adjustment_ms: float = 0.0
+
+    def to_master_ms(self, stream_ms: float) -> float:
+        return self.offset_ms + self.manual_adjustment_ms + stream_ms * self.clock_scale
+
+
+class Session(Contract):
+    session_id: Identifier
+    domain: Domain
+    worker_id: Identifier = Field(description="가명 작업자 ID")
+    site_id: Identifier = Field(description="가명 장소 ID")
+    consent_version: str
+    recorded_at: AwareDatetime
+    duration_ms: Ms
+    streams: tuple[Stream, ...]
+    calibration: Calibration = Calibration()
+    privacy_state: PrivacyState = PrivacyState.PENDING
+    lifecycle_state: LifecycleState = LifecycleState.RAW_INGESTED
+    ontology_version: SemVer | None = None
+
+    @model_validator(mode="after")
+    def _check_streams(self) -> Session:
+        ids = [s.stream_id for s in self.streams]
+        if len(ids) != len(set(ids)):
+            raise ValueError("stream_id가 중복되었습니다")
+        bodycams = [s for s in self.streams if s.kind is StreamKind.BODYCAM]
+        if len(bodycams) != 1:
+            raise ValueError("세션에는 기준 스트림인 바디캠이 정확히 하나 있어야 합니다")
+        if bodycams[0].sync_method is not SyncMethod.REFERENCE:
+            raise ValueError("바디캠 스트림의 sync_method는 reference여야 합니다")
+        return self
+
+    @property
+    def reference_stream(self) -> Stream:
+        return next(s for s in self.streams if s.kind is StreamKind.BODYCAM)
+
+    def stream(self, stream_id: str) -> Stream:
+        for s in self.streams:
+            if s.stream_id == stream_id:
+                return s
+        raise KeyError(stream_id)

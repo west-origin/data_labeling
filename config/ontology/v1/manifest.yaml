@@ -1,0 +1,6 @@
+# 온톨로지 v1 (초안). 기준 문서 "온톨로지 v1" 절을 옮긴 것이다.
+# 식별자는 영어 snake_case, 사람용 이름은 ko 필드에 둔다.
+# 객체 클래스와 하위 단계는 파일럿 후 확정한다 (provisional).
+version: "1.0.0"
+status: draft
+provisional: [objects, tasks.substeps]

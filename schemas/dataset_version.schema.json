@@ -1,0 +1,90 @@
+{
+  "$defs": {
+    "Split": {
+      "enum": [
+        "golden",
+        "train",
+        "val"
+      ],
+      "title": "Split",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "excluded_sessions": {
+      "default": [],
+      "description": "사용 중지 등으로 제외된 세션",
+      "items": {
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+        "type": "string"
+      },
+      "title": "Excluded Sessions",
+      "type": "array"
+    },
+    "golden_set_version": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Golden Set Version"
+    },
+    "ontology_version": {
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "title": "Ontology Version",
+      "type": "string"
+    },
+    "parent_version_id": {
+      "anyOf": [
+        {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Parent Version Id"
+    },
+    "snapshot_uri": {
+      "description": "라벨 스냅샷 위치 (lakeFS 커밋 또는 DVC 해시)",
+      "title": "Snapshot Uri",
+      "type": "string"
+    },
+    "splits": {
+      "description": "세션 ID → 분할",
+      "patternProperties": {
+        "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$": {
+          "$ref": "#/$defs/Split"
+        }
+      },
+      "title": "Splits",
+      "type": "object"
+    },
+    "version_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Version Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "version_id",
+    "ontology_version",
+    "created_at",
+    "snapshot_uri",
+    "splits"
+  ],
+  "title": "DatasetVersion",
+  "type": "object"
+}

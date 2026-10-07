@@ -1,0 +1,536 @@
+{
+  "$defs": {
+    "DomainTerm": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "ko": {
+          "title": "Ko",
+          "type": "string"
+        },
+        "phase": {
+          "title": "Phase",
+          "type": "string"
+        }
+      },
+      "required": [
+        "ko",
+        "phase"
+      ],
+      "title": "DomainTerm",
+      "type": "object"
+    },
+    "EventTerm": {
+      "additionalProperties": false,
+      "properties": {
+        "category": {
+          "enum": [
+            "failure_retry",
+            "worker_safety",
+            "subject_safety",
+            "infection_control"
+          ],
+          "title": "Category",
+          "type": "string"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "form": {
+          "enum": [
+            "point",
+            "interval"
+          ],
+          "title": "Form",
+          "type": "string"
+        },
+        "ko": {
+          "title": "Ko",
+          "type": "string"
+        },
+        "raw_access": {
+          "default": false,
+          "description": "원본 접근 권한자만 기록 (표정 등)",
+          "title": "Raw Access",
+          "type": "boolean"
+        },
+        "requires_action": {
+          "default": false,
+          "title": "Requires Action",
+          "type": "boolean"
+        },
+        "requires_object": {
+          "default": false,
+          "title": "Requires Object",
+          "type": "boolean"
+        },
+        "severity": {
+          "default": false,
+          "title": "Severity",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "ko",
+        "category",
+        "form"
+      ],
+      "title": "EventTerm",
+      "type": "object"
+    },
+    "ObjectClass": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "ko": {
+          "title": "Ko",
+          "type": "string"
+        },
+        "physical_type": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
+          "title": "Physical Type",
+          "type": "string"
+        },
+        "states": {
+          "default": [],
+          "items": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}$",
+            "type": "string"
+          },
+          "title": "States",
+          "type": "array"
+        },
+        "surface": {
+          "default": false,
+          "title": "Surface",
+          "type": "boolean"
+        },
+        "tool": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "ko",
+        "physical_type"
+      ],
+      "title": "ObjectClass",
+      "type": "object"
+    },
+    "PrivacyTarget": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "ko": {
+          "title": "Ko",
+          "type": "string"
+        },
+        "required": {
+          "title": "Required",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "ko",
+        "required"
+      ],
+      "title": "PrivacyTarget",
+      "type": "object"
+    },
+    "StateAttribute": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "ko": {
+          "title": "Ko",
+          "type": "string"
+        },
+        "values": {
+          "items": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}$",
+            "type": "string"
+          },
+          "minItems": 2,
+          "title": "Values",
+          "type": "array"
+        }
+      },
+      "required": [
+        "ko",
+        "values"
+      ],
+      "title": "StateAttribute",
+      "type": "object"
+    },
+    "TaskTerm": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "domain": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
+          "title": "Domain",
+          "type": "string"
+        },
+        "ko": {
+          "title": "Ko",
+          "type": "string"
+        },
+        "substeps": {
+          "patternProperties": {
+            "^[a-z][a-z0-9_]{0,63}$": {
+              "$ref": "#/$defs/Term"
+            }
+          },
+          "title": "Substeps",
+          "type": "object"
+        }
+      },
+      "required": [
+        "ko",
+        "domain"
+      ],
+      "title": "TaskTerm",
+      "type": "object"
+    },
+    "Term": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "ko": {
+          "title": "Ko",
+          "type": "string"
+        }
+      },
+      "required": [
+        "ko"
+      ],
+      "title": "Term",
+      "type": "object"
+    },
+    "ToolSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "grip_parts": {
+          "items": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}$",
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Grip Parts",
+          "type": "array"
+        },
+        "working_parts": {
+          "items": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}$",
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Working Parts",
+          "type": "array"
+        }
+      },
+      "required": [
+        "working_parts",
+        "grip_parts"
+      ],
+      "title": "ToolSpec",
+      "type": "object"
+    },
+    "VerbLevel": {
+      "enum": [
+        "primitive",
+        "skill",
+        "human_skill"
+      ],
+      "title": "VerbLevel",
+      "type": "string"
+    },
+    "VerbTerm": {
+      "additionalProperties": false,
+      "properties": {
+        "contactless": {
+          "default": false,
+          "title": "Contactless",
+          "type": "boolean"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "ko": {
+          "title": "Ko",
+          "type": "string"
+        },
+        "level": {
+          "$ref": "#/$defs/VerbLevel"
+        }
+      },
+      "required": [
+        "ko",
+        "level"
+      ],
+      "title": "VerbTerm",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "body_parts": {
+      "patternProperties": {
+        "^[a-z][a-z0-9_]{0,63}$": {
+          "$ref": "#/$defs/Term"
+        }
+      },
+      "title": "Body Parts",
+      "type": "object"
+    },
+    "contact_target_kinds": {
+      "patternProperties": {
+        "^[a-z][a-z0-9_]{0,63}$": {
+          "$ref": "#/$defs/Term"
+        }
+      },
+      "title": "Contact Target Kinds",
+      "type": "object"
+    },
+    "domains": {
+      "patternProperties": {
+        "^[a-z][a-z0-9_]{0,63}$": {
+          "$ref": "#/$defs/DomainTerm"
+        }
+      },
+      "title": "Domains",
+      "type": "object"
+    },
+    "events": {
+      "patternProperties": {
+        "^[a-z][a-z0-9_]{0,63}$": {
+          "$ref": "#/$defs/EventTerm"
+        }
+      },
+      "title": "Events",
+      "type": "object"
+    },
+    "gap_types": {
+      "patternProperties": {
+        "^[a-z][a-z0-9_]{0,63}$": {
+          "$ref": "#/$defs/Term"
+        }
+      },
+      "title": "Gap Types",
+      "type": "object"
+    },
+    "grasp_types": {
+      "patternProperties": {
+        "^[a-z][a-z0-9_]{0,63}$": {
+          "$ref": "#/$defs/Term"
+        }
+      },
+      "title": "Grasp Types",
+      "type": "object"
+    },
+    "hand_roles": {
+      "patternProperties": {
+        "^[a-z][a-z0-9_]{0,63}$": {
+          "$ref": "#/$defs/Term"
+        }
+      },
+      "title": "Hand Roles",
+      "type": "object"
+    },
+    "objects": {
+      "patternProperties": {
+        "^[a-z][a-z0-9_]{0,63}$": {
+          "$ref": "#/$defs/ObjectClass"
+        }
+      },
+      "title": "Objects",
+      "type": "object"
+    },
+    "physical_types": {
+      "patternProperties": {
+        "^[a-z][a-z0-9_]{0,63}$": {
+          "$ref": "#/$defs/Term"
+        }
+      },
+      "title": "Physical Types",
+      "type": "object"
+    },
+    "postures": {
+      "patternProperties": {
+        "^[a-z][a-z0-9_]{0,63}$": {
+          "$ref": "#/$defs/Term"
+        }
+      },
+      "title": "Postures",
+      "type": "object"
+    },
+    "privacy_targets": {
+      "patternProperties": {
+        "^[a-z][a-z0-9_]{0,63}$": {
+          "$ref": "#/$defs/PrivacyTarget"
+        }
+      },
+      "title": "Privacy Targets",
+      "type": "object"
+    },
+    "provisional": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Provisional",
+      "type": "array"
+    },
+    "state_attributes": {
+      "patternProperties": {
+        "^[a-z][a-z0-9_]{0,63}$": {
+          "$ref": "#/$defs/StateAttribute"
+        }
+      },
+      "title": "State Attributes",
+      "type": "object"
+    },
+    "status": {
+      "enum": [
+        "draft",
+        "frozen"
+      ],
+      "title": "Status",
+      "type": "string"
+    },
+    "tasks": {
+      "patternProperties": {
+        "^[a-z][a-z0-9_]{0,63}$": {
+          "$ref": "#/$defs/TaskTerm"
+        }
+      },
+      "title": "Tasks",
+      "type": "object"
+    },
+    "verbs": {
+      "patternProperties": {
+        "^[a-z][a-z0-9_]{0,63}$": {
+          "$ref": "#/$defs/VerbTerm"
+        }
+      },
+      "title": "Verbs",
+      "type": "object"
+    },
+    "version": {
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "title": "Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "version",
+    "status",
+    "domains",
+    "tasks",
+    "verbs",
+    "gap_types",
+    "contact_target_kinds",
+    "grasp_types",
+    "hand_roles",
+    "body_parts",
+    "postures",
+    "physical_types",
+    "state_attributes",
+    "objects",
+    "events",
+    "privacy_targets"
+  ],
+  "title": "Ontology",
+  "type": "object"
+}

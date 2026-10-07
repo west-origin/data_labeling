@@ -1,0 +1,39 @@
+# 대상자 신체 부위 26개. 민감 부위는 둔부 범주로 기록하고 더 세분하지 않는다.
+body_parts:
+  head: {ko: 머리}
+  neck: {ko: 목}
+  chest: {ko: 가슴}
+  abdomen: {ko: 복부}
+  upper_back: {ko: 등 상부}
+  lower_back: {ko: 허리}
+  left_shoulder: {ko: 좌 어깨}
+  right_shoulder: {ko: 우 어깨}
+  left_upper_arm: {ko: 좌 상완}
+  right_upper_arm: {ko: 우 상완}
+  left_elbow: {ko: 좌 팔꿈치}
+  right_elbow: {ko: 우 팔꿈치}
+  left_forearm: {ko: 좌 전완}
+  right_forearm: {ko: 우 전완}
+  left_hand: {ko: 좌 손}
+  right_hand: {ko: 우 손}
+  left_buttock: {ko: 좌 둔부}
+  right_buttock: {ko: 우 둔부}
+  left_thigh: {ko: 좌 대퇴}
+  right_thigh: {ko: 우 대퇴}
+  left_knee: {ko: 좌 무릎}
+  right_knee: {ko: 우 무릎}
+  left_lower_leg: {ko: 좌 하퇴}
+  right_lower_leg: {ko: 우 하퇴}
+  left_foot: {ko: 좌 발}
+  right_foot: {ko: 우 발}
+
+postures:
+  supine: {ko: 앙와위}
+  left_lateral: {ko: 좌측와위}
+  right_lateral: {ko: 우측와위}
+  prone: {ko: 복와위}
+  semi_fowler: {ko: 반좌위}
+  sitting_bed: {ko: 좌위(침대)}
+  sitting_chair: {ko: 좌위(휠체어·의자)}
+  standing: {ko: 입위}
+  walking: {ko: 보행 중}

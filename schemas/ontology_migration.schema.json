@@ -1,0 +1,78 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "from_version": {
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "title": "From Version",
+      "type": "string"
+    },
+    "removed": {
+      "additionalProperties": {
+        "items": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "default": {},
+      "description": "새 버전에 대응 ID가 없어 사람이 다시 라벨링할 ID",
+      "propertyNames": {
+        "enum": [
+          "verbs",
+          "tasks",
+          "substeps",
+          "objects",
+          "privacy_targets",
+          "events",
+          "gap_types",
+          "grasp_types",
+          "body_parts",
+          "contact_target_kinds",
+          "hand_roles"
+        ]
+      },
+      "title": "Removed",
+      "type": "object"
+    },
+    "renames": {
+      "additionalProperties": {
+        "patternProperties": {
+          "^[a-z][a-z0-9_]{0,63}$": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}$",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "default": {},
+      "propertyNames": {
+        "enum": [
+          "verbs",
+          "tasks",
+          "substeps",
+          "objects",
+          "privacy_targets",
+          "events",
+          "gap_types",
+          "grasp_types",
+          "body_parts",
+          "contact_target_kinds",
+          "hand_roles"
+        ]
+      },
+      "title": "Renames",
+      "type": "object"
+    },
+    "to_version": {
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "title": "To Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "from_version",
+    "to_version"
+  ],
+  "title": "OntologyMigration",
+  "type": "object"
+}

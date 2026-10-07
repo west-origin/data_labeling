@@ -1,7 +1,18 @@
 # 모든 패키지에 같은 명령으로 검증한다. 에이전트와 CI는 `make check`를 기준으로 삼는다.
 COMPOSE := docker compose --env-file .env -f services/docker-compose.yml
 
-.PHONY: install lint fmt typecheck test check env up down ps logs health test-services \
+contracts:
+	uv run dlp ontology validate
+	uv run dlp schema export --check
+
+schemas:
+	uv run dlp schema export
+
+db-upgrade:
+	uv run dlp db upgrade
+	uv run dlp ontology register 1.0.0
+
+.PHONY: install lint fmt typecheck test contracts schemas db-upgrade check env up down ps logs health test-services \
         cvat-up cvat-down cvat-superuser clean
 
 install:
@@ -21,7 +32,7 @@ typecheck:
 test:
 	uv run pytest
 
-check: lint typecheck test
+check: lint typecheck contracts test
 
 env:
 	@test -f .env || cp .env.example .env

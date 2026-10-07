@@ -1,0 +1,17 @@
+# form: point(시점) | interval(구간). severity: 심각도(1~3) 필수 여부.
+events:
+  grasp_failure: {category: failure_retry, ko: 파지 실패, form: point, requires_action: true}
+  drop: {category: failure_retry, ko: 물체 놓침·낙하, form: point, requires_action: true}
+  regrasp: {category: failure_retry, ko: 재파지, form: point, requires_action: true}
+  action_retry: {category: failure_retry, ko: 행동 재시도, form: interval, requires_action: true}
+  step_abort: {category: failure_retry, ko: 단계 중단, form: point, requires_action: true}
+  rework_missed_area: {category: failure_retry, ko: 미처리 영역 재작업, form: interval, requires_action: true}
+  slip: {category: worker_safety, ko: 미끄러짐, form: interval, severity: true}
+  collision: {category: worker_safety, ko: 충돌, form: interval, severity: true}
+  sharp_contact: {category: worker_safety, ko: 날카로운 물체 접촉, form: interval, severity: true}
+  loss_of_balance: {category: subject_safety, ko: 균형 상실, form: interval, severity: true}
+  fall_risk: {category: subject_safety, ko: 낙상 위험, form: interval, severity: true}
+  discomfort: {category: subject_safety, ko: 불편 반응, form: interval, severity: true, raw_access: true}
+  bare_hand_contamination: {category: infection_control, ko: 장갑 미착용 체액·오염물 접촉, form: point, requires_object: true}
+  cross_contamination_hand: {category: infection_control, ko: 오염 후 청결 표면 접촉, form: point, requires_object: true}
+  cross_contamination_tool: {category: infection_control, ko: 오염 도구로 청결 표면 접촉, form: point, requires_object: true}

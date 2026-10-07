@@ -8,6 +8,7 @@ from collections.abc import Sequence
 
 from dlp_cli import __version__
 from dlp_cli.health import default_checks, run_checks
+from dlp_cli.schema_cmds import add_commands
 
 
 def _cmd_services_check(args: argparse.Namespace) -> int:
@@ -29,6 +30,8 @@ def build_parser() -> argparse.ArgumentParser:
     check.add_argument("--include-cvat", action="store_true", help="CVAT도 점검")
     check.add_argument("--timeout", type=float, default=3.0, help="서비스별 제한 시간(초)")
     check.set_defaults(func=_cmd_services_check)
+
+    add_commands(sub)
     return parser
 
 

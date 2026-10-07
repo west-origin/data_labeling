@@ -1,0 +1,15 @@
+# required: v1 필수 블러 대상. false는 확장 후보 (config/defaults.yaml privacy.extra_targets_v1로 활성화).
+privacy_targets:
+  face: {ko: 얼굴, required: true}
+  reflection: {ko: 반사면 속 얼굴·사람, required: true}
+  shipping_label: {ko: 택배 송장, required: true}
+  document: {ko: 문서·우편물, required: true}
+  screen: {ko: 켜진 화면, required: true}
+  photo: {ko: 사진물, required: true}
+  address_sign: {ko: "주소 식별 정보(문패, 호실 번호)", required: true}
+  medicine_bag: {ko: 약봉투, required: false}
+  patient_wristband: {ko: 환자 팔찌, required: false}
+  bed_nameplate: {ko: 침상 명패, required: false}
+  medical_chart: {ko: 의료 차트·모니터, required: false}
+  name_tag: {ko: 명찰, required: false}
+  memo: {ko: 메모, required: false}

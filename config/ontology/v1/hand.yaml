@@ -1,0 +1,22 @@
+contact_target_kinds:
+  none: {ko: 없음}
+  object: {ko: 객체}
+  tool: {ko: 도구}
+  person: {ko: 대상자}
+  fixed_surface: {ko: 고정 표면}
+  self: {ko: 자기 몸}
+
+grasp_types:
+  power: {ko: 전체 손 쥐기}
+  precision_pinch: {ko: 손가락 끝 집기}
+  lateral_pinch: {ko: 옆면 집기}
+  hook: {ko: 갈고리 걸기}
+  palm_support: {ko: 손바닥 지지}
+  palm_push_wipe: {ko: 손바닥 밀기·닦기}
+  tool_grip: {ko: 도구 쥐기}
+  non_prehensile: {ko: 비파지 접촉}
+
+hand_roles:
+  active: {ko: 주동}
+  assist: {ko: 보조·고정}
+  inactive: {ko: 비활동}

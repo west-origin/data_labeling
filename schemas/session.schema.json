@@ -1,0 +1,357 @@
+{
+  "$defs": {
+    "Calibration": {
+      "additionalProperties": false,
+      "description": "세션 단위 캘리브레이션. 장착 위치가 바뀔 수 있어 세션마다 기록한다.",
+      "properties": {
+        "camera_imu_extrinsics": {
+          "anyOf": [
+            {
+              "items": {
+                "items": {
+                  "type": "number"
+                },
+                "type": "array"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "IMU→카메라 4x4 변환 행렬",
+          "title": "Camera Imu Extrinsics"
+        },
+        "glove_calibration": {
+          "additionalProperties": {
+            "type": "number"
+          },
+          "title": "Glove Calibration",
+          "type": "object"
+        },
+        "glove_model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Glove Model"
+        },
+        "intrinsics": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CameraIntrinsics"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "mount_position": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mount Position"
+        }
+      },
+      "title": "Calibration",
+      "type": "object"
+    },
+    "CameraIntrinsics": {
+      "additionalProperties": false,
+      "properties": {
+        "cx": {
+          "title": "Cx",
+          "type": "number"
+        },
+        "cy": {
+          "title": "Cy",
+          "type": "number"
+        },
+        "distortion": {
+          "default": [],
+          "items": {
+            "type": "number"
+          },
+          "title": "Distortion",
+          "type": "array"
+        },
+        "distortion_model": {
+          "default": "opencv",
+          "title": "Distortion Model",
+          "type": "string"
+        },
+        "fx": {
+          "title": "Fx",
+          "type": "number"
+        },
+        "fy": {
+          "title": "Fy",
+          "type": "number"
+        },
+        "height": {
+          "exclusiveMinimum": 0,
+          "title": "Height",
+          "type": "integer"
+        },
+        "width": {
+          "exclusiveMinimum": 0,
+          "title": "Width",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "width",
+        "height",
+        "fx",
+        "fy",
+        "cx",
+        "cy"
+      ],
+      "title": "CameraIntrinsics",
+      "type": "object"
+    },
+    "Domain": {
+      "enum": [
+        "cleaning",
+        "caregiving",
+        "nursing"
+      ],
+      "title": "Domain",
+      "type": "string"
+    },
+    "LifecycleState": {
+      "description": "한 방향으로만 이동한다. 어느 단계에서든 withdrawn으로 빠질 수 있다.",
+      "enum": [
+        "raw_ingested",
+        "privacy_approved",
+        "prelabeled",
+        "human_verified",
+        "split_assigned",
+        "exported",
+        "withdrawn"
+      ],
+      "title": "LifecycleState",
+      "type": "string"
+    },
+    "PrivacyState": {
+      "enum": [
+        "pending",
+        "auto_blurred",
+        "approved"
+      ],
+      "title": "PrivacyState",
+      "type": "string"
+    },
+    "Stream": {
+      "additionalProperties": false,
+      "description": "세션 안의 스트림 하나. 기준 시각 = offset_ms + 스트림 시각 * clock_scale.",
+      "properties": {
+        "clock_scale": {
+          "default": 1.0,
+          "exclusiveMinimum": 0,
+          "title": "Clock Scale",
+          "type": "number"
+        },
+        "kind": {
+          "$ref": "#/$defs/StreamKind"
+        },
+        "manual_adjustment_ms": {
+          "default": 0.0,
+          "title": "Manual Adjustment Ms",
+          "type": "number"
+        },
+        "offset_ms": {
+          "default": 0.0,
+          "title": "Offset Ms",
+          "type": "number"
+        },
+        "pts_index_uri": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pts Index Uri"
+        },
+        "sample_rate_hz": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sample Rate Hz"
+        },
+        "stream_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "title": "Stream Id",
+          "type": "string"
+        },
+        "sync_confidence": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sync Confidence"
+        },
+        "sync_method": {
+          "$ref": "#/$defs/SyncMethod",
+          "default": "unsynced"
+        },
+        "uri": {
+          "title": "Uri",
+          "type": "string"
+        }
+      },
+      "required": [
+        "stream_id",
+        "kind",
+        "uri"
+      ],
+      "title": "Stream",
+      "type": "object"
+    },
+    "StreamKind": {
+      "enum": [
+        "bodycam",
+        "imu",
+        "third_person",
+        "glove_left",
+        "glove_right",
+        "audio"
+      ],
+      "title": "StreamKind",
+      "type": "string"
+    },
+    "SyncMethod": {
+      "enum": [
+        "reference",
+        "shared_clock",
+        "qr_slate",
+        "tap_event",
+        "audio_xcorr",
+        "motion_xcorr",
+        "manual",
+        "unsynced"
+      ],
+      "title": "SyncMethod",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "calibration": {
+      "$ref": "#/$defs/Calibration",
+      "default": {
+        "camera_imu_extrinsics": null,
+        "glove_calibration": {},
+        "glove_model": null,
+        "intrinsics": null,
+        "mount_position": null
+      }
+    },
+    "consent_version": {
+      "title": "Consent Version",
+      "type": "string"
+    },
+    "domain": {
+      "$ref": "#/$defs/Domain"
+    },
+    "duration_ms": {
+      "description": "마스터 타임라인 기준 시각(ms)",
+      "minimum": 0,
+      "title": "Duration Ms",
+      "type": "integer"
+    },
+    "lifecycle_state": {
+      "$ref": "#/$defs/LifecycleState",
+      "default": "raw_ingested"
+    },
+    "ontology_version": {
+      "anyOf": [
+        {
+          "pattern": "^\\d+\\.\\d+\\.\\d+$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Ontology Version"
+    },
+    "privacy_state": {
+      "$ref": "#/$defs/PrivacyState",
+      "default": "pending"
+    },
+    "recorded_at": {
+      "format": "date-time",
+      "title": "Recorded At",
+      "type": "string"
+    },
+    "session_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Session Id",
+      "type": "string"
+    },
+    "site_id": {
+      "description": "가명 장소 ID",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Site Id",
+      "type": "string"
+    },
+    "streams": {
+      "items": {
+        "$ref": "#/$defs/Stream"
+      },
+      "title": "Streams",
+      "type": "array"
+    },
+    "worker_id": {
+      "description": "가명 작업자 ID",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Worker Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "session_id",
+    "domain",
+    "worker_id",
+    "site_id",
+    "consent_version",
+    "recorded_at",
+    "duration_ms",
+    "streams"
+  ],
+  "title": "Session",
+  "type": "object"
+}

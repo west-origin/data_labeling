@@ -1,0 +1,24 @@
+domains:
+  cleaning: {ko: 청소, phase: A}
+  caregiving: {ko: 요양돌봄, phase: B}
+  nursing: {ko: 간호, phase: C}
+
+# 하위 단계(substeps)는 현장 전문가 구술 후 채운다.
+tasks:
+  floor_sweep_mop: {domain: cleaning, ko: 바닥 쓸기·닦기}
+  surface_wipe_disinfect: {domain: cleaning, ko: 표면 닦기·소독}
+  toilet_cleaning: {domain: cleaning, ko: 화장실 청소}
+  bed_making: {domain: cleaning, ko: 침상 정리·시트 교체}
+  waste_collection: {domain: cleaning, ko: 쓰레기 수거·분리}
+  repositioning: {domain: caregiving, ko: 체위 변경}
+  transfer_assist: {domain: caregiving, ko: 이승 보조(침대↔휠체어)}
+  feeding_assist: {domain: caregiving, ko: 식사 보조}
+  oral_hygiene: {domain: caregiving, ko: 구강 위생}
+  diaper_change: {domain: caregiving, ko: 기저귀 교체}
+  bathing_assist: {domain: caregiving, ko: 세면·목욕 보조}
+  dressing_assist: {domain: caregiving, ko: 옷 입히고 벗기기}
+  vital_signs: {domain: nursing, ko: 활력징후 측정}
+  medication: {domain: nursing, ko: 투약 준비·투약}
+  blood_glucose: {domain: nursing, ko: 혈당 측정}
+  dressing_change: {domain: nursing, ko: 드레싱 교체}
+  hand_hygiene_ppe: {domain: nursing, ko: 손 위생·보호구 착용}

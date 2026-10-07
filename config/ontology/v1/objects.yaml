@@ -1,0 +1,49 @@
+physical_types:
+  rigid: {ko: 강체}
+  articulated: {ko: 관절체}
+  deformable: {ko: 변형체}
+  fluid_powder: {ko: 액체·분말}
+  person: {ko: 사람}
+
+state_attributes:
+  open_state: {ko: 열림 상태, values: [open, closed]}
+  fold_state: {ko: 접힘 상태, values: [unfolded, folded]}
+  cleanliness: {ko: 청결 상태, values: [dirty, clean]}
+  fill_state: {ko: 채움 상태, values: [full, partial, empty]}
+  worn_state: {ko: 착용 상태, values: [worn, not_worn]}
+  wetness: {ko: 젖음 상태, values: [wet, dry]}
+
+# 초기 목록 (provisional). 파일럿 영상의 출현 빈도로 v1을 확정한다.
+# tool: 작용부(working_parts)와 파지부(grip_parts)를 가진 도구
+# surface: 처리 대상 표면 (청결 상태와 커버리지 기록 대상)
+objects:
+  mop: {ko: 밀대, physical_type: rigid, states: [wetness, cleanliness], tool: {working_parts: [mop_head], grip_parts: [handle]}}
+  rag: {ko: 걸레, physical_type: deformable, states: [wetness, cleanliness, fold_state], tool: {working_parts: [cloth_face], grip_parts: [cloth_body]}}
+  sponge: {ko: 스펀지, physical_type: deformable, states: [wetness], tool: {working_parts: [sponge_face], grip_parts: [sponge_body]}}
+  brush: {ko: 솔, physical_type: rigid, states: [wetness], tool: {working_parts: [bristles], grip_parts: [handle]}}
+  toilet_brush: {ko: 변기솔, physical_type: rigid, states: [wetness], tool: {working_parts: [bristles], grip_parts: [handle]}}
+  broom: {ko: 빗자루, physical_type: rigid, states: [], tool: {working_parts: [bristles], grip_parts: [handle]}}
+  dustpan: {ko: 쓰레받기, physical_type: rigid, states: [fill_state], tool: {working_parts: [pan_edge], grip_parts: [handle]}}
+  spray_bottle: {ko: 분무기, physical_type: rigid, states: [fill_state], tool: {working_parts: [nozzle], grip_parts: [trigger_grip]}}
+  bucket: {ko: 양동이, physical_type: rigid, states: [fill_state]}
+  trash_bag: {ko: 쓰레기봉투, physical_type: deformable, states: [fill_state, open_state]}
+  trash_bin: {ko: 쓰레기통, physical_type: articulated, states: [fill_state, open_state]}
+  bedsheet: {ko: 시트, physical_type: deformable, states: [fold_state, cleanliness]}
+  pillow: {ko: 베개, physical_type: deformable, states: []}
+  towel: {ko: 수건, physical_type: deformable, states: [fold_state, wetness]}
+  cup: {ko: 컵, physical_type: rigid, states: [fill_state]}
+  door: {ko: 문, physical_type: articulated, states: [open_state]}
+  drawer: {ko: 서랍, physical_type: articulated, states: [open_state]}
+  bed_rail: {ko: 침대 난간, physical_type: articulated, states: [open_state]}
+  diaper: {ko: 기저귀, physical_type: deformable, states: [worn_state, cleanliness]}
+  clothing: {ko: 의류, physical_type: deformable, states: [worn_state, fold_state]}
+  glove: {ko: 장갑, physical_type: deformable, states: [worn_state]}
+  floor: {ko: 바닥, physical_type: rigid, states: [cleanliness, wetness], surface: true}
+  sink: {ko: 세면대, physical_type: rigid, states: [cleanliness, wetness], surface: true}
+  toilet: {ko: 변기, physical_type: articulated, states: [cleanliness, open_state], surface: true}
+  mirror: {ko: 거울, physical_type: rigid, states: [cleanliness], surface: true}
+  table: {ko: 탁자, physical_type: rigid, states: [cleanliness], surface: true}
+  wall: {ko: 벽, physical_type: rigid, states: [cleanliness], surface: true}
+  bathtub: {ko: 욕조, physical_type: rigid, states: [cleanliness, wetness], surface: true}
+  bed: {ko: 침대, physical_type: articulated, states: [], surface: true}
+  person: {ko: 사람, physical_type: person, states: []}
