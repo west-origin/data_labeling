@@ -37,6 +37,7 @@ from numpy.typing import NDArray
 
 from dlp_export.frames import stream_ms
 from dlp_export.policy import ExportPolicy, LeRobotPolicy
+from dlp_export.pseudonym import Pseudonymizer
 from dlp_media.pts import PtsIndex
 from dlp_schema.labels import (
     ActionPayload,
@@ -376,6 +377,7 @@ def write_package(
     policy: ExportPolicy,
     size: tuple[int, int],
     pkg: Path,
+    ids: Pseudonymizer,
 ) -> Path:
     """격리 환경의 쓰기 스크립트가 읽을 묶음 (package.json + 에피소드마다 npz)."""
     lp = policy.lerobot
@@ -396,8 +398,8 @@ def write_package(
             verb=ep.verb,
             verification=ep.verification,
         )
-        items.append({"session_id": session.session_id, "video": str(video), "npz": str(npz),
-                      "tasks": ep.tasks})  # fmt: skip
+        items.append({"session_id": ids.session(session.session_id), "video": str(video),
+                      "npz": str(npz), "tasks": ep.tasks})  # fmt: skip
     spec = {
         "repo_id": lp.repo_id, "fps": lp.fps, "robot_type": lp.robot_type, "vcodec": lp.vcodec,
         "width": w, "height": h, "features": features(lp, h, w), "episodes": items,

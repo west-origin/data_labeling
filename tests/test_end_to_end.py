@@ -353,6 +353,7 @@ def test_synthetic_session_end_to_end(pg: sa.Engine, tmp_path: Path) -> None:
     # 8. 내보내기 → 픽스처 정답과 비교
     export_policy = load_export_policy(ROOT)
     out: dict[str, Path] = {}
+    out_ids: dict[str, str] = {}
     # 트랜잭션은 run_export가 연다 (이력을 올리기 전에 따로 커밋)
     for fmt in ("intervals", "coco"):
         r = run_export(
@@ -364,14 +365,19 @@ def test_synthetic_session_end_to_end(pg: sa.Engine, tmp_path: Path) -> None:
         assert r.record.session_ids == (sid,)  # 골든 세션은 기본 내보내기에 없다
         assert not [k for k in r.label_counts if k.endswith("/unreviewed")]
         dest = tmp_path / "export" / fmt
-        for key in ("manifest.json", "intervals/" + sid + ".json", "coco/annotations.json"):
+        # 결과 파일의 세션 ID는 내보내기마다 다른 가명이다
+        pseudo = r.session_pseudonyms[sid]
+        for key in ("manifest.json", f"intervals/{pseudo}.json", "coco/annotations.json"):
             if (fmt == "coco") == key.startswith("coco") or key == "manifest.json":
                 path = dest / key
                 path.parent.mkdir(parents=True, exist_ok=True)
                 datasets.get_file(f"exports/{r.record.export_id}/{key}", path)
         out[fmt] = dest
+        out_ids[fmt] = pseudo
 
-    intervals = json.loads((out["intervals"] / "intervals" / f"{sid}.json").read_text())
+    intervals = json.loads(
+        (out["intervals"] / "intervals" / f"{out_ids['intervals']}.json").read_text()
+    )
     exported_actions = [
         x["payload"] for x in intervals["labels"] if x["payload"]["kind"] == "action"
     ]

@@ -36,12 +36,17 @@ class LeRobotPolicy(Contract):
     repo_id: str
     robot_type: str
     vcodec: str
+    aspect_tolerance: float = Field(ge=0)  # 한 데이터셋에 넣을 수 있는 화면비 차이
     env: LeRobotEnv
 
 
 class IdsPolicy(Contract):
     pseudonymize: bool
     secret_env: str  # 가명 비밀값을 담은 환경 변수 (없으면 실행마다 임의 값)
+    # 개발용 비밀값 (.env.example). env_var가 dev_envs 밖이면 이 값으로 내보내지 않는다
+    dev_secrets: tuple[str, ...]
+    env_var: str
+    dev_envs: tuple[str, ...] = Field(min_length=1)
 
 
 class ExportPolicy(Contract):

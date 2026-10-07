@@ -2,6 +2,8 @@
 
 - 이미지: 세션·스트림·시각(t_ms)마다 하나. 파일은 블러본에서 그 시각에 정확히 있는 프레임
   (JPEG). 키프레임이 블러본 프레임 시각에 없으면(허용 오차 밖) 그 주석은 버리고 센다.
+  남은 주석이 하나도 없는 프레임은 이미지도 내지 않는다 (내보낸 세션 = 주석이 들어간 세션).
+- 세션·라벨 ID는 내보내기마다 다른 가명이다 (dlp_export.pseudonym).
 - 범주: 온톨로지 객체(이름순) + 키포인트 범주 hand(hand21), person(coco17; 객체 person이 있으면
   그 범주에 키포인트를 붙인다). 키포인트 범주에 든 박스만의 주석(예: person box_track)은
   num_keypoints 0과 0으로 채운 keypoints(3*K)를 가진다 (COCO 키포인트 평가가 모든 주석에서 읽는다).
@@ -21,6 +23,7 @@ import cv2
 
 from dlp_export.frames import decode_frames, exact_frame
 from dlp_export.policy import ExportPolicy
+from dlp_export.pseudonym import Pseudonymizer
 from dlp_export.source import ExportSource, fetch_blurred
 from dlp_media.probe import probe
 from dlp_media.pts import build_pts_index
@@ -78,9 +81,9 @@ def categories(ontology: Ontology) -> tuple[list[dict[str, Any]], dict[str, int]
     return cats, obj, skel
 
 
-def _meta(x: LabelRecord) -> dict[str, Any]:
+def _meta(x: LabelRecord, ids: Pseudonymizer) -> dict[str, Any]:
     return {
-        "label_id": x.label_id,
+        "label_id": ids.label(x.label_id),
         "verification": x.verification.state.value,
         "source": x.provenance.source.value,
         "model_version": x.provenance.model_version,
@@ -111,7 +114,12 @@ def write_coco(
     *,
     export_id: str,
     now: datetime,
+    ids: Pseudonymizer,
 ) -> CocoResult:
+    """out/coco/annotations.json과 images/. 세션·라벨 ID와 트랙 ID 속 세션 ID는 ids로 가명 처리한다.
+
+    결과의 sessions·labels는 내부 ID다 (내보내기 이력·사용 중지 계보용).
+    """
     cats, obj_ids, skel_ids = categories(ontology)
     # 키포인트 범주 ID → 관절 수 (박스만의 주석도 그 범주면 키포인트 필드를 0으로 채운다)
     n_points = {c["id"]: len(c["keypoints"]) for c in cats if "keypoints" in c}
@@ -152,45 +160,24 @@ def write_coco(
                         drop("keyframe_between_frames")
                         continue
                     items.append((f, x, k))
-            image_id: dict[int, int] = {}
-            for f in sorted({f for f, _, _ in items}):
-                t = round(float(index.ms[f]))
-                iid = len(images) + 1
-                image_id[f] = iid
-                images.append({
-                    "id": iid,
-                    "file_name": f"images/{s.session_id}__{stream.stream_id}__{t:09d}.jpg",
-                    "width": info.width, "height": info.height,
-                    "session_id": s.session_id, "stream_id": stream.stream_id,
-                    "t_ms": t, "split": es.split.value,
-                })  # fmt: skip
-            for f, rgb in decode_frames(video, set(image_id)):
-                t = round(float(index.ms[f]))
-                ok, buf = cv2.imencode(
-                    ".jpg",
-                    cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR),
-                    [cv2.IMWRITE_JPEG_QUALITY, policy.coco.jpeg_quality],
-                )
-                assert ok
-                (img_dir / f"{s.session_id}__{stream.stream_id}__{t:09d}.jpg").write_bytes(
-                    buf.tobytes()
-                )
+            # 주석을 먼저 만들고 걸러낸 뒤, 남은 주석이 하나라도 있는 프레임만 이미지로 낸다
+            # (주석이 모두 버려진 프레임·세션의 이미지는 내보내지 않는다)
+            kept: list[tuple[int, LabelRecord, dict[str, Any]]] = []  # (프레임, 라벨, 주석)
             for f, x, k in items:
                 p = x.payload
-                base = {"id": len(anns) + 1, "image_id": image_id[f], "iscrowd": 0} | _meta(x)
+                base = {"iscrowd": 0} | _meta(x, ids)
                 if isinstance(p, BoxTrackPayload):
                     if p.class_id not in obj_ids:
                         drop("unknown_class")
                         continue
                     cid = obj_ids[p.class_id]
                     ann = base | {
-                        "category_id": cid, "track_id": p.entity_id,
+                        "category_id": cid, "track_id": ids.ref(s.session_id, p.entity_id),
                         "bbox": [k.x, k.y, k.w, k.h], "area": k.w * k.h,
                     }  # fmt: skip
                     if cid in n_points:
                         ann |= {"keypoints": [0] * (3 * n_points[cid]), "num_keypoints": 0}
-                    anns.append(ann)
-                    result.written(x, s.session_id)
+                    kept.append((f, x, ann))
                 elif isinstance(p, KeypointTrackPayload) and p.skeleton in skel_ids:
                     flat: list[float] = []
                     xs: list[float] = []
@@ -204,15 +191,43 @@ def write_coco(
                         drop("no_visible_keypoints")
                         continue
                     bw, bh = max(xs) - min(xs), max(ys) - min(ys)
-                    anns.append(base | {
-                        "category_id": skel_ids[p.skeleton], "track_id": p.entity_id,
+                    kept.append((f, x, base | {
+                        "category_id": skel_ids[p.skeleton],
+                        "track_id": ids.ref(s.session_id, p.entity_id),
                         "hand": p.hand.value if p.hand else None,
                         "keypoints": flat, "num_keypoints": len(xs),
                         "bbox": [min(xs), min(ys), bw, bh], "area": bw * bh,
-                    })  # fmt: skip
-                    result.written(x, s.session_id)
+                    }))  # fmt: skip
                 else:
                     drop("unsupported_skeleton")
+            if not kept:
+                continue
+            pseudo = ids.session(s.session_id)
+            image_id: dict[int, int] = {}
+            names: dict[int, str] = {}
+            for f in sorted({f for f, _, _ in kept}):
+                t = round(float(index.ms[f]))
+                iid = len(images) + 1
+                image_id[f] = iid
+                names[f] = f"{pseudo}__{stream.stream_id}__{t:09d}.jpg"
+                images.append({
+                    "id": iid,
+                    "file_name": f"images/{names[f]}",
+                    "width": info.width, "height": info.height,
+                    "session_id": pseudo, "stream_id": stream.stream_id,
+                    "t_ms": t, "split": es.split.value,
+                })  # fmt: skip
+            for f, rgb in decode_frames(video, set(image_id)):
+                ok, buf = cv2.imencode(
+                    ".jpg",
+                    cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR),
+                    [cv2.IMWRITE_JPEG_QUALITY, policy.coco.jpeg_quality],
+                )
+                assert ok
+                (img_dir / names[f]).write_bytes(buf.tobytes())
+            for f, x, ann in kept:
+                anns.append({"id": len(anns) + 1, "image_id": image_id[f]} | ann)
+                result.written(x, s.session_id)
     coco = {
         "info": {
             "description": "dlp export", "version": src.version.version_id,

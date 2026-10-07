@@ -169,6 +169,42 @@ def test_verified_at_is_stable() -> None:
     assert verified_at(after) == t2
 
 
+def test_verified_at_waits_for_staged_labels() -> None:
+    """단계별 파이프라인: 객체 박스를 먼저 검수하고 2주 뒤 행동 구간이 생겨 검수되면, 완료 시각은
+    행동 구간의 검수 시각이다 (먼저 검수한 단계만 보고 일찍 세지 않는다)."""
+    sid = "st"
+    box = {"kind": "box_track", "entity_id": "e1", "class_id": "towel",
+           "keyframes": [{"t_ms": 0, "x": 1, "y": 1, "w": 2, "h": 2}]}  # fmt: skip
+    m = Provenance(source=Source.MODEL, model_version="m1")
+    t0 = BEFORE - timedelta(days=14)
+    a = make_label(
+        box, label_id=f"{sid}-A", session_id=sid, stream_id="bodycam", provenance=m,
+        confidence=0.9, created_at=t0,
+        verification=checked(VerificationState.HUMAN_APPROVED, t0 + timedelta(hours=1)),
+    )  # fmt: skip
+    b = model(sid, "B", BEFORE)  # 2주 뒤 행동 단계
+    b_ok = b.model_copy(update={"verification": checked(VerificationState.HUMAN_APPROVED, IN)})
+    assert verified_at([a, b_ok]) == IN and week_of(IN) == WEEK
+    # 이미 검수한 박스를 나중에 고친 QA는 완료 시각을 바꾸지 않는다
+    qa = make_label(
+        box, label_id=f"{sid}-A-qa", session_id=sid, stream_id="bodycam",
+        parent_label_id=f"{sid}-A", created_at=IN + timedelta(days=10),
+        verification=checked(VerificationState.HUMAN_CORRECTED, IN + timedelta(days=10)),
+    )  # fmt: skip
+    assert verified_at([a, b_ok, qa]) == IN
+    # 마지막 검수 시각 전에 있던 미검수 모델 라벨이 남아 있으면 완료가 아니다
+    late = model(sid, "late", IN - timedelta(hours=1))
+    assert verified_at([a, b_ok, late]) is None
+    # 검수 전 모델 라벨을 사람이 지운 것은 검수다 (그 시각까지 늦춘다)
+    fp = model(sid, "fp", BEFORE)
+    gone = human(sid, "fp-del", IN + timedelta(hours=2), parent_label_id=f"{sid}-fp",
+                 retracted=True)  # fmt: skip
+    assert verified_at([a, b_ok, fp, gone]) == IN + timedelta(hours=2)
+    # 블러·오류 삽입 레코드는 보지 않는다
+    seed = model(sid, "seed", BEFORE, seeded_error=True)
+    assert verified_at([a, b_ok, seed]) == IN
+
+
 # ---------------------------------------------------------------- DB (make up)
 
 

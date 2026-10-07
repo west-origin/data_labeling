@@ -11,10 +11,18 @@
 - `packages/fixtures` (`dlp_fixtures`): 정답을 아는 합성 데이터 생성기 (`dlp fixtures generate`)
 - `packages/media` (`dlp_media`): 세션 수집, PTS 인덱스, 프록시 영상, IMU·장갑 정규화 (`dlp ingest`, `dlp media`)
 - `packages/sync` (`dlp_sync`): 멀티스트림 동기화 (`dlp sync run`, `dlp sync adjust`)
-- `packages/privacy` (`dlp_privacy`): 프라이버시 게이트 (`dlp privacy detect|approve|render`)
-- `packages/review` (`dlp_review`): 검수 도구 연동 (`dlp review create|collect|serve`)
+- `packages/privacy` (`dlp_privacy`): 프라이버시 게이트 (`dlp privacy detect|approve|render|audit-sample`)
+- `packages/review` (`dlp_review`): 검수 도구 연동·검수 운영 (`dlp review create|collect|serve|plan|assign|queue|qa|quality`)
 - `packages/datasets` (`dlp_datasets`): 데이터셋 버전·분할·골든셋·계보 (`dlp dataset`, `dlp lineage`)
+- `packages/models` (`dlp_models`): 모델 레지스트리(`config/models.yaml`, 해시·라이선스)와 공용 ONNX 런타임
 - `packages/prelabel` (`dlp_prelabel`): 자동 프리라벨 (`dlp prelabel run`). 미연동 모델은 `make todo-models`
+- `packages/relations` (`dlp_relations`): 관계 도출·도구-표면 접촉·표면 커버리지 (`dlp relations run`)
+- `packages/actions` (`dlp_actions`): 행동 구간 경계 후보 + VLM 분류·설명 (`dlp actions run`)
+- `packages/evaluation` (`dlp_eval`): 지표 라이브러리, 골든셋 평가, 배포 게이트 (`dlp eval golden`)
+- `packages/training` (`dlp_train`): 재학습 루프와 모델 버전 배포 (`dlp train run|models|approve`)
+- `packages/active` (`dlp_active`): 액티브 러닝 세션 순위, FiftyOne 연동 (`dlp active rank|fiftyone`)
+- `packages/export` (`dlp_export`): COCO·구간 JSON·LeRobot v3.0 내보내기 (`dlp export coco|intervals|lerobot`)
+- `packages/ops` (`dlp_ops`): 주간 운영 지표, 원본 접근 감사, 보관 만료 (`dlp ops weekly|audit-report|retention|...`)
 - `packages/cli` (`dlp`): 명령줄 도구
 - `config/ontology/v1`: 온톨로지 v1 초안, `config/defaults.yaml`: 미결정 사항 기본값
 - `schemas/`: 계약 타입의 JSON Schema (생성 파일)
@@ -26,8 +34,9 @@
 ```sh
 make install        # Python 3.12 환경과 의존성
 make models         # 모델 가중치 (YuNet 얼굴, MediaPipe 손·전신·객체). MediaPipe는 libegl1 libgles2 필요
+make export-models  # 공개 ONNX가 없는 모델(메트릭 깊이)을 공식 가중치에서 변환 (일회용 PyTorch 환경)
 make check          # 린트·타입·테스트
-make up             # PostgreSQL, SeaweedFS(S3), Label Studio, Prefect, MLflow
+make up             # PostgreSQL, SeaweedFS(S3), Label Studio, Prefect, MLflow, lakeFS
 make health         # 헬스체크
 make db-upgrade     # 메타데이터 DB 마이그레이션 + 온톨로지 v1 등록
 make cvat-up        # CVAT (선택, 이미지가 커서 별도)
