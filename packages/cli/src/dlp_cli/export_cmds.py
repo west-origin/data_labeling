@@ -12,6 +12,7 @@ from dlp_cli.schema_cmds import database_url
 from dlp_datasets.policy import load_policy as load_dataset_policy
 from dlp_datasets.snapshot import LakeFSSnapshotStore
 from dlp_export.policy import load_policy
+from dlp_export.pseudonym import check_secret
 from dlp_export.runner import run_export
 from dlp_media.storage import store_from_spec
 from dlp_schema import load_config, load_ontology, repo_root
@@ -27,6 +28,11 @@ def cmd_export(args: argparse.Namespace) -> int:
     )
     policy = load_policy(root)
     secret = os.environ.get(policy.ids.secret_env)
+    try:
+        check_secret(secret, policy.ids, os.environ)
+    except ValueError as e:
+        print(f"오류: {e}")
+        return 2
     engine = sa.create_engine(database_url(args.url))
     # 트랜잭션은 run_export가 연다: 이력을 올리기 전에 따로 커밋한다
     r = run_export(
@@ -52,7 +58,7 @@ def cmd_export(args: argparse.Namespace) -> int:
     print(f"검증 정책: {', '.join(s.value for s in r.record.label_states)}")
     if policy.ids.pseudonymize and not secret:
         env = policy.ids.secret_env
-        print(f"작업자·장소 가명: {env}가 없어 임의 비밀값을 썼습니다 (되짚을 수 없음)")
+        print(f"작업자·장소·세션·라벨 가명: {env}가 없어 임의 비밀값을 썼습니다 (되짚을 수 없음)")
     for k, n in r.label_counts.items():
         print(f"  {k}: {n}")
     return 0

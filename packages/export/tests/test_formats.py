@@ -16,7 +16,7 @@ from dlp_export.coco import write_coco
 from dlp_export.intervals import write_intervals
 from dlp_export.lerobot import Vocab, build_episode, state_names
 from dlp_export.policy import ExportPolicy
-from dlp_export.pseudonym import Pseudonymizer
+from dlp_export.pseudonym import Pseudonymizer, check_secret
 from dlp_export.source import (
     ExportError,
     ExportSession,
@@ -33,6 +33,8 @@ from dlp_schema.ontology import Ontology
 from dlp_schema.testing import FIXED_TIME
 
 from .conftest import ROOT, Scenario
+
+NOIDS = Pseudonymizer(None)  # 가명 처리 없이 (내부 ID를 그대로 확인하는 테스트)
 
 
 def source(sc: Scenario, policy: ExportPolicy, include_unreviewed: bool = False) -> ExportSource:
@@ -62,12 +64,13 @@ def test_verification_policy(scenario: Scenario, policy: ExportPolicy) -> None:
 def test_interval_json_validates_against_published_schema(
     scenario: Scenario, policy: ExportPolicy, tmp_path: Path
 ) -> None:
+    ids = Pseudonymizer.for_export("e1", b"secret", enabled=True)
     counts = write_intervals(
-        source(scenario, policy), policy, tmp_path, export_id="e1", now=FIXED_TIME,
-        ids=Pseudonymizer.for_export("e1", b"secret", enabled=True),
+        source(scenario, policy), policy, tmp_path, export_id="e1", now=FIXED_TIME, ids=ids,
     )  # fmt: skip
-    assert counts == {"s1": 4}  # 손 상태, 관계, 행동, 작업 구간 (공간 라벨은 COCO·LeRobot으로)
-    data = json.loads((tmp_path / "intervals" / "s1.json").read_text())
+    sid = ids.session("s1")
+    assert counts == {sid: 4}  # 손 상태, 관계, 행동, 작업 구간 (공간 라벨은 COCO·LeRobot으로)
+    data = json.loads((tmp_path / "intervals" / f"{sid}.json").read_text())
     schema = json.loads((ROOT / "schemas" / "export_intervals.schema.json").read_text())
     jsonschema.validate(data, schema)
     f = IntervalFile.model_validate(data)
@@ -75,12 +78,15 @@ def test_interval_json_validates_against_published_schema(
         VerificationState.HUMAN_CORRECTED, VerificationState.SAMPLE_VERIFIED,
         VerificationState.HUMAN_APPROVED, VerificationState.HUMAN_CORRECTED,
     ]  # fmt: skip
-    text = (tmp_path / "intervals" / "s1.json").read_text()
+    text = (tmp_path / "intervals" / f"{sid}.json").read_text()
     assert "reviewer-7" not in text  # 검수자 ID는 내보내지 않는다
-    # 작업자·장소는 이 내보내기의 가명
-    ids = Pseudonymizer.for_export("e1", b"secret", enabled=True)
+    # 작업자·장소·세션·라벨은 이 내보내기의 가명
     assert (f.worker_id, f.site_id) == (ids.worker("w01"), ids.site("site01"))
     assert "w01" not in text and "site01" not in text
+    assert f.session_id == sid and "s1-" not in text and '"s1"' not in text
+    assert {x.label_id for x in f.labels} == {
+        ids.label(f"s1-{k}") for k in ("hs", "tsc", "act", "task")
+    }
 
 
 def test_pseudonyms_are_per_export() -> None:
@@ -99,28 +105,56 @@ def test_pseudonyms_are_per_export() -> None:
     # 비밀값이 없으면 실행마다 임의 값
     assert Pseudonymizer.for_export("export-a", None, enabled=True).worker("w1") != a.worker("w1")
     assert Pseudonymizer.for_export("export-a", None, enabled=False).worker("w1") == "w1"
+    # 세션·라벨 ID도 내보내기마다 다르고, 세션 ID가 들어간 다른 ID는 그 부분만 바뀐다
+    assert a.session("s1") != b.session("s1") and a.label("s1-a") != b.label("s1-a")
+    assert a.ref("s1", "s1-right-a100") == f"{a.session('s1')}-right-a100"
+    assert a.ref("s1", "cup_1") == "cup_1"
+    got = a.payload_ids("s1", {"action_id": "s1-x", "verb": "s1", "n": [{"segment_id": "s1"}]})
+    assert got == {
+        "action_id": f"{a.session('s1')}-x", "verb": "s1", "n": [{"segment_id": a.session("s1")}]
+    }  # fmt: skip
+    off = Pseudonymizer.for_export("export-a", None, enabled=False)
+    assert (off.session("s1"), off.label("l"), off.ref("s1", "s1-x")) == ("s1", "l", "s1-x")
+
+
+def test_dev_secret_only_in_dev(policy: ExportPolicy) -> None:
+    """.env.example의 개발용 비밀값은 DLP_ENV=dev에서만 받는다 (공개 값이라 가명을 되짚는다)."""
+    dev = policy.ids.dev_secrets[0]
+    check_secret(dev, policy.ids, {"DLP_ENV": "dev"})
+    check_secret("real-secret", policy.ids, {})
+    check_secret(None, policy.ids, {})
+    for env in ({}, {"DLP_ENV": "prod"}):
+        with pytest.raises(ValueError, match="개발용"):
+            check_secret(dev, policy.ids, env)
 
 
 def test_coco_loads_with_pycocotools(
     scenario: Scenario, policy: ExportPolicy, ontology: Ontology, tmp_path: Path
 ) -> None:
     out = tmp_path / "out"
+    ids = Pseudonymizer.for_export("e1", b"secret", enabled=True)
     r = write_coco(
         source(scenario, policy), policy, ontology, scenario.labeling, out, tmp_path / "w",
-        export_id="e1", now=FIXED_TIME,
+        export_id="e1", now=FIXED_TIME, ids=ids,
     )  # fmt: skip
     assert r.dropped == {"keyframe_between_frames": 1}
+    assert r.sessions == {"s1"}  # 이력용 결과는 내부 ID
+    text = (out / "coco" / "annotations.json").read_text()
+    assert "s1-" not in text and '"s1"' not in text
     with contextlib.redirect_stdout(io.StringIO()):
         coco: Any = COCO(str(out / "coco" / "annotations.json"))
     t = scenario.times
     assert sorted(img["t_ms"] for img in coco.dataset["images"]) == [t[2], t[4], t[6]]
     for img in coco.dataset["images"]:
         assert (out / "coco" / img["file_name"]).stat().st_size > 0
+        assert img["session_id"] == ids.session("s1")
+        assert img["file_name"].startswith(f"images/{ids.session('s1')}__")
     cup = coco.getCatIds(catNms=["cup"])[0]
     hand = coco.getCatIds(catNms=["hand"])[0]
     boxes = coco.loadAnns(coco.getAnnIds(catIds=[cup]))
     assert [a["bbox"] for a in boxes] == [[8, 8, 16, 12], [10, 8, 16, 12]]
     assert {a["verification"] for a in boxes} == {"human_approved"}
+    assert {a["label_id"] for a in boxes} == {ids.label("s1-box")}
     kps = coco.loadAnns(coco.getAnnIds(catIds=[hand]))
     assert [a["num_keypoints"] for a in kps] == [21, 21]
     assert kps[0]["keypoints"][-1] == 1  # 가려진 관절은 v=1
@@ -161,7 +195,7 @@ def test_coco_person_boxes_work_with_keypoint_eval(
     out = tmp_path / "out"
     write_coco(
         source(sc, policy), policy, ontology, sc.labeling, out, tmp_path / "w",
-        export_id="e1", now=FIXED_TIME,
+        export_id="e1", now=FIXED_TIME, ids=NOIDS,
     )  # fmt: skip
     with contextlib.redirect_stdout(io.StringIO()):
         coco: Any = COCO(str(out / "coco" / "annotations.json"))
@@ -313,7 +347,7 @@ def test_offset_third_person_keyframes_use_stream_time(
     )
     out = tmp_path / "out"
     r = write_coco(src, policy, ontology, scenario.labeling, out, tmp_path / "w",
-                   export_id="e1", now=FIXED_TIME)  # fmt: skip
+                   export_id="e1", now=FIXED_TIME, ids=NOIDS)  # fmt: skip
     data = json.loads((out / "coco" / "annotations.json").read_text())
     third_imgs = [i for i in data["images"] if i["stream_id"] == "third"]
     assert sorted(i["t_ms"] for i in third_imgs) == [t[2], t[4], t[6]]
@@ -321,3 +355,47 @@ def test_offset_third_person_keyframes_use_stream_time(
     for img in data["images"]:
         assert (out / "coco" / img["file_name"]).exists()
     assert len({i["file_name"] for i in data["images"]}) == len(data["images"])
+
+
+def test_coco_skips_images_without_annotations(
+    scenario: Scenario, policy: ExportPolicy, ontology: Ontology, tmp_path: Path
+) -> None:
+    """주석이 모두 버려진 프레임·세션은 이미지도 내지 않는다 (내보낸 세션 목록과 어긋나지 않게)."""
+    from dlp_schema.testing import make_label
+
+    t = scenario.times
+    hidden = make_label(
+        {"kind": "keypoint_track", "entity_id": "right_hand", "skeleton": "hand21",
+         "hand": "right",
+         "keyframes": [{"t_ms": t[2], "points": [{"x": 0, "y": 0, "visibility": 0}] * 21}]},
+        label_id="s1-hidden", session_id="s1", stream_id="bodycam", t_start_ms=t[2],
+        t_end_ms=t[2],
+    )  # fmt: skip
+    unknown = make_label(
+        {"kind": "box_track", "entity_id": "x_1", "class_id": "not_in_ontology",
+         "keyframes": [{"t_ms": t[4], "x": 1, "y": 1, "w": 4, "h": 4}]},
+        label_id="s1-unknown", session_id="s1", stream_id="bodycam", t_start_ms=t[4],
+        t_end_ms=t[4],
+    )  # fmt: skip
+    out = tmp_path / "out"
+    sc = Scenario(scenario.session, [hidden, unknown], scenario.times, scenario.labeling)
+    r = write_coco(
+        source(sc, policy), policy, ontology, sc.labeling, out, tmp_path / "w",
+        export_id="e1", now=FIXED_TIME, ids=NOIDS,
+    )  # fmt: skip
+    data = json.loads((out / "coco" / "annotations.json").read_text())
+    assert r.dropped == {"no_visible_keypoints": 1, "unknown_class": 1}
+    assert data["images"] == [] and r.images == 0 and r.sessions == set()
+    assert not list((out / "coco" / "images").iterdir())
+    # 같은 세션에 남는 주석이 있으면 그 프레임의 이미지만 낸다
+    box = next(x for x in scenario.labels if x.label_id == "s1-box")
+    sc = Scenario(scenario.session, [hidden, unknown, box], scenario.times, scenario.labeling)
+    out2 = tmp_path / "out2"
+    r = write_coco(
+        source(sc, policy), policy, ontology, sc.labeling, out2, tmp_path / "w2",
+        export_id="e1", now=FIXED_TIME, ids=NOIDS,
+    )  # fmt: skip
+    data = json.loads((out2 / "coco" / "annotations.json").read_text())
+    assert sorted(i["t_ms"] for i in data["images"]) == [t[2], t[4]]  # 박스 키프레임 둘
+    assert len(list((out2 / "coco" / "images").iterdir())) == 2 and r.sessions == {"s1"}
+    assert {a["image_id"] for a in data["annotations"]} == {i["id"] for i in data["images"]}

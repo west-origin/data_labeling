@@ -17,6 +17,7 @@ import pytest
 
 from dlp_export.lerobot import Vocab, build_episode, run_script, write_package
 from dlp_export.policy import ExportPolicy
+from dlp_export.pseudonym import Pseudonymizer
 from dlp_export.source import label_states, select_labels
 from dlp_fixtures.video import write_video
 from dlp_media.pts import build_pts_index
@@ -54,6 +55,7 @@ def test_official_lerobot_loader_reads_export(
         policy,
         (64, 48),
         tmp_path / "pkg",
+        Pseudonymizer(None),
     )
     dest = tmp_path / "lerobot"
     run_script(ROOT, lp, "lerobot_write.py", str(pkg), str(dest))

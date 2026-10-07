@@ -3,8 +3,10 @@
 1. 데이터셋 버전에서 세션·라벨을 고른다 (검증 정책, 사용 중지 제외, 블러 라벨 제외).
 2. 형식별로 쓴다: coco / intervals / lerobot
    (lerobot은 격리 환경에서 공식 API로 쓰고 공식 로더로 다시 읽는다).
-3. manifest.json (대상, 일시, 형식, 검증 정책, 세션, 라벨 수)을 넣고, 원본 버킷 위치가 없는지
-   확인한다. 작업자·장소 ID는 내보내기마다 다른 가명으로 바꾼다 (export.yaml ids).
+3. manifest.json (대상, 일시, 형식, 검증 정책, 세션, 라벨 수, 파일 목록과 sha256)을 넣고, 원본 버킷
+   위치가 없는지 확인한다. 작업자·장소·세션·라벨 ID는 내보내기마다 다른 가명으로 바꾼다
+   (export.yaml ids, ADR 0027). 내보내기 이력(exports.session_ids)에는 내부 세션 ID를 남기고,
+   세션 가명 대응표는 데이터셋 버킷 internal/export-id-maps/<내보내기 ID>.json(내부)에 둔다.
 4. 내보내기 이력(exports)을 **먼저 따로 커밋**한다. 그 트랜잭션에서 내보낼 세션 행을
    잠그고(FOR SHARE) 사용 중지를 다시 확인하므로, 동시에 사용 중지(세션 행 갱신)가 일어나도
    둘 중 하나가 기다린다: 사용 중지가 먼저면 내보내기가 실패하고, 내보내기가 먼저면 사용 중지의
@@ -55,6 +57,13 @@ from dlp_schema.ontology import Ontology
 from dlp_schema.session import Session
 
 Format = Literal["coco", "intervals", "lerobot"]
+# 결과 파일에서 내보내기마다 다른 가명으로 바꾸는 ID (ADR 0027)
+PSEUDONYMIZED = ("worker_id", "site_id", "session_id", "label_id")
+
+
+def id_map_key(export_id: str) -> str:
+    """세션 가명 대응표의 내부 위치 (데이터셋 버킷, exports/ 밖)."""
+    return f"internal/export-id-maps/{export_id}.json"
 
 
 @dataclass
@@ -63,6 +72,7 @@ class ExportResult:
     files: int
     label_counts: dict[str, int]  # "종류/검증 상태" → 수
     details: dict[str, Any] = field(default_factory=dict[str, Any])
+    session_pseudonyms: dict[str, str] = field(default_factory=dict[str, str])  # 내부 ID → 가명
 
 
 def export_id_for(
@@ -92,8 +102,9 @@ def _lerobot(
     labeling: ObjectStore,
     out: Path,
     work: Path,
+    ids: Pseudonymizer,
 ) -> tuple[list[LabelRecord], set[str], dict[str, Any]]:
-    """(내보낸 라벨, 내보낸 세션, 세부 정보)."""
+    """(내보낸 라벨, 내보낸 세션(내부 ID), 세부 정보). 결과 파일의 세션 ID는 가명이다."""
     vocab = Vocab.from_ontology(ontology)
     episodes: list[tuple[Session, Path, Episode]] = []
     size: tuple[int, int] | None = None
@@ -109,7 +120,7 @@ def _lerobot(
         assert info is not None
         if size is None:
             size = (info.width, info.height)
-        elif abs(info.width / info.height - size[0] / size[1]) > 0.01:
+        elif abs(info.width / info.height - size[0] / size[1]) > policy.lerobot.aspect_tolerance:
             # 다른 화면비를 한 크기로 맞추면 영상이 찌그러진다
             # (2D 관절은 정규화라 맞지만 화면은 틀린다)
             raise ExportError(
@@ -125,7 +136,7 @@ def _lerobot(
         sessions.append(
             {
                 "episode_index": len(sessions),
-                "session_id": es.session.session_id,
+                "session_id": ids.session(es.session.session_id),
                 "split": es.split.value,
                 "stream_id": stream.stream_id,
                 "start_ms": float(ep.times_ms[0]),
@@ -134,8 +145,8 @@ def _lerobot(
         )
     if not episodes or size is None:
         raise ExportError(f"{policy.lerobot.video_stream} 스트림이 있는 세션이 없습니다")
-    written = {s["session_id"] for s in sessions}
-    pkg = write_package(episodes, policy, size, work / "lerobot_pkg")
+    written = {s.session_id for s, _, _ in episodes}
+    pkg = write_package(episodes, policy, size, work / "lerobot_pkg", ids)
     dest = out / "lerobot"
     run_script(root, policy.lerobot, "lerobot_write.py", str(pkg), str(dest))
     check = json.loads(
@@ -222,14 +233,19 @@ def run_export(
             written = {es.session.session_id for es in src.sessions}
             used = [x for es in src.sessions for x in es.labels if x.kind in policy.intervals.kinds]
         elif fmt == "coco":
-            r = write_coco(src, policy, ontology, labeling, out, work, export_id=export_id, now=now)
+            r = write_coco(
+                src, policy, ontology, labeling, out, work, export_id=export_id, now=now, ids=ids
+            )
             details = {"images": r.images, "annotations": r.annotations, "dropped": r.dropped}
             written, used = r.sessions, list(r.labels.values())
         else:
-            used, written, details = _lerobot(root, src, policy, ontology, labeling, out, work)
+            used, written, details = _lerobot(root, src, policy, ontology, labeling, out, work, ids)
         if not written:
             raise ExportError(f"{version_id}: 이 형식으로 쓴 세션이 없습니다")
         counts = _label_counts(used)
+        pseudonyms = {sid: ids.session(sid) for sid in sorted(written)}
+        # 파일 목록 (manifest 자신 제외): 경로 → sha256. 받는 쪽이 빠지거나 바뀐 파일을 확인한다
+        inventory = {p.relative_to(out).as_posix(): sha256_file(p) for p in sorted(walk_files(out))}
         manifest = {
             "export_id": export_id,
             "dataset_version_id": version_id,
@@ -243,14 +259,15 @@ def run_export(
                 "include_unreviewed": include_unreviewed,
             },
             "splits": [s.value for s in (splits or policy.splits)],
-            "pseudonymized_ids": ["worker_id", "site_id"] if ids.enabled else [],
+            "pseudonymized_ids": list(PSEUDONYMIZED) if ids.enabled else [],
             "sessions": [
-                {"session_id": es.session.session_id, "split": es.split.value}
+                {"session_id": ids.session(es.session.session_id), "split": es.split.value}
                 for es in src.sessions
                 if es.session.session_id in written
             ],
             "label_counts": counts,
             "details": details,
+            "files": inventory,
         }
         (out / "manifest.json").write_text(
             json.dumps(manifest, ensure_ascii=False, indent=2), "utf-8"
@@ -278,11 +295,15 @@ def run_export(
             )
         files = 0
         manifest_path = out / "manifest.json"
-        for p in (q for q in walk_files(out) if q != manifest_path):
-            datasets.put_file(
-                f"exports/{export_id}/{p.relative_to(out).as_posix()}", p, sha256_file(p)
-            )
+        for rel, digest in inventory.items():
+            datasets.put_file(f"exports/{export_id}/{rel}", out / rel, digest)
             files += 1
+        if ids.enabled:
+            # 세션 가명 대응표는 내부 경로에만 둔다 (내보내기 폴더 밖, 구매자에게 주지 않는다).
+            # 사용 중지 때 구매자에게 지울 세션을 가명으로 알려 준다 (비밀값 없이도 되짚게)
+            id_map = Path(tmp) / "session_map.json"
+            id_map.write_text(json.dumps(pseudonyms, ensure_ascii=False, indent=2), "utf-8")
+            datasets.put_file(id_map_key(export_id), id_map, sha256_file(id_map))
         # 올리는 사이 사용 중지된 세션이 있으면 manifest를 올리지 않는다 (미완성으로 남는다).
         # 이력은 이미 커밋되어 사용 중지의 계보 목록에 이 내보내기가 보인다.
         with engine.connect() as conn:
@@ -296,4 +317,4 @@ def run_export(
             f"exports/{export_id}/manifest.json", manifest_path, sha256_file(manifest_path)
         )
         files += 1
-    return ExportResult(record, files, counts, details)
+    return ExportResult(record, files, counts, details, pseudonyms)

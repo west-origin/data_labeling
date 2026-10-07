@@ -21,10 +21,11 @@ from dlp_datasets.lineage import session_lineage, withdraw_session
 from dlp_datasets.policy import load_policy as load_dataset_policy
 from dlp_datasets.snapshot import LocalSnapshotStore
 from dlp_export.policy import ExportPolicy
-from dlp_export.runner import run_export
+from dlp_export.pseudonym import Pseudonymizer
+from dlp_export.runner import id_map_key, run_export
 from dlp_export.source import ExportError
 from dlp_fixtures.video import vfr_times
-from dlp_media.storage import LocalStore
+from dlp_media.storage import LocalStore, sha256_file
 from dlp_schema.db.migrate import upgrade
 from dlp_schema.db.repository import insert_labels, insert_session, register_ontology
 from dlp_schema.labels import VerificationState
@@ -109,8 +110,23 @@ def test_export_applies_policy_and_records_history(
         out = tmp_path / "store" / "dlp-datasets" / "exports" / r.record.export_id
         manifest = json.loads((out / "manifest.json").read_text())
         exported = {s["session_id"] for s in manifest["sessions"]}
+        # 결과 파일의 세션·라벨 ID는 이 내보내기의 가명, 이력에는 내부 세션 ID
+        ids = Pseudonymizer.for_export(r.record.export_id, b"test-secret", enabled=True)
+        pseudo = {sid: ids.session(sid) for sid in kept}
+        assert r.session_pseudonyms == pseudo
         # 사용 중지 세션 0건 (데이터셋 버전에는 있었다)
-        assert exported == kept and set(r.record.session_ids) == kept
+        assert exported == set(pseudo.values()) and set(r.record.session_ids) == kept
+        # 세션 가명 대응표는 내보내기 폴더 밖 내부 경로에만 있다
+        id_map = tmp_path / "store" / "dlp-datasets" / id_map_key(r.record.export_id)
+        assert json.loads(id_map.read_text()) == pseudo
+        # manifest의 파일 목록 = 올린 파일 전부(manifest 제외)와 그 sha256
+        # (LocalStore가 옆에 두는 .sha256 파일은 저장소 내부 기록이라 뺀다)
+        files = {
+            p.relative_to(out).as_posix(): sha256_file(p)
+            for p in out.rglob("*")
+            if p.is_file() and p.name != "manifest.json" and p.suffix != ".sha256"
+        }
+        assert manifest["files"] == files and files and r.files == len(files) + 1
         # 미검수 라벨 0건
         assert not [k for k in r.label_counts if k.endswith("/unreviewed")]
         assert manifest["verification_policy"]["include_unreviewed"] is False
@@ -121,6 +137,9 @@ def test_export_applies_policy_and_records_history(
         )
         text = "".join(p.read_text(errors="ignore") for p in out.rglob("*.json"))
         assert "dlp-raw" not in text and "reviewer-7" not in text
+        # 내부 세션·라벨 ID는 결과 어디에도 없다 (파일 이름 포함)
+        assert not any(f'"s{i}' in text or f"s{i}-" in text for i in range(4))
+        assert not [p for p in out.rglob("*") if any(f"s{i}" in p.name for i in range(4))]
         if fmt == "coco":
             coco = json.loads((out / "coco" / "annotations.json").read_text())
             assert {a["verification"] for a in coco["annotations"]} <= {
@@ -129,7 +148,9 @@ def test_export_applies_policy_and_records_history(
             assert {i["session_id"] for i in coco["images"]} == exported
         else:
             # 작업자·장소 ID는 이 내보내기의 가명 (원래 ID는 결과에 없다)
-            assert manifest["pseudonymized_ids"] == ["worker_id", "site_id"]
+            assert manifest["pseudonymized_ids"] == [
+                "worker_id", "site_id", "session_id", "label_id"
+            ]  # fmt: skip
             workers = set[str]()
             for sid in exported:
                 f = json.loads((out / "intervals" / f"{sid}.json").read_text())
@@ -137,13 +158,13 @@ def test_export_applies_policy_and_records_history(
                 workers.add(f["worker_id"])
             assert len(workers) == len(exported)
             assert not any(f'"w{i}"' in text or f'"site{i}"' in text for i in range(4))
-            for sid in exported:
-                f = json.loads((out / "intervals" / f"{sid}.json").read_text())
+            for sid in kept:
+                f = json.loads((out / "intervals" / f"{pseudo[sid]}.json").read_text())
                 assert "unreviewed" not in {x["verification"] for x in f["labels"]}
                 assert not {x["label_id"] for x in f["labels"]} & {
-                    f"{sid}-blind",
-                    f"{sid}-seed",
-                    f"{sid}-seedfix",
+                    ids.label(f"{sid}-blind"),
+                    ids.label(f"{sid}-seed"),
+                    ids.label(f"{sid}-seedfix"),
                 }
                 assert all(x["payload"]["kind"] != "blur_track" for x in f["labels"])
 
@@ -190,7 +211,10 @@ def test_lerobot_export_end_to_end(
     assert r.details["episodes"] == 2 and r.details["loader_check"]["episodes"] == 2
     assert (out / "meta" / "info.json").exists() and (out / "meta" / "dlp_vocab.json").exists()
     episodes = json.loads((out / "meta" / "dlp_episodes.json").read_text())
-    assert [e["session_id"] for e in episodes] == ["a", "b"]
+    assert [e["session_id"] for e in episodes] == [
+        r.session_pseudonyms["a"], r.session_pseudonyms["b"]
+    ]  # fmt: skip
+    assert all(e["session_id"].startswith("session-") for e in episodes)
     assert list(out.rglob("*.mp4")) and list(out.rglob("data/**/*.parquet"))
 
 

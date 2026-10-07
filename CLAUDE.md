@@ -42,7 +42,7 @@
 - `packages/sync/` (`dlp_sync`) — 멀티스트림 동기화: QR 슬레이트, 두드림, 오디오·운동 상호상관, 드리프트 보정.
   `dlp sync run <세션>`, `dlp sync adjust <세션> <스트림> <ms>`. 정책은 `config/policies/sync.yaml`.
 - `packages/privacy/` (`dlp_privacy`) — 프라이버시 게이트: 탐지기(YuNet, QR·바코드, OWLv2 오픈 보캐뷸러리, 반사면, 오라클 stub), 추적·보간·유지,
-  모자이크 렌더, 검수 우선 구간, 잔여 누락 감사. `dlp privacy detect|approve|render`. 정책은 `config/policies/privacy.yaml`.
+  모자이크 렌더, 검수 우선 구간, 잔여 누락 감사. `dlp privacy detect|approve|render|audit-sample`. 정책은 `config/policies/privacy.yaml`.
 - `packages/review/` (`dlp_review`) — 검수 도구 연동: CVAT·Label Studio 변환기(무손실 왕복), 작업 생성, reconcile(검수 결과 →
   라벨 이력), 웹훅 수집, 라벨러 워터마크, 역할 경계. `dlp review create|collect|serve|register-webhooks`.
   운영 로직(`dlp_review.ops`): 우선순위 큐, 표본 검증, 블라인드·오류 삽입·이중·QA 배정, 품질 측정.
@@ -67,7 +67,8 @@
   FiftyOne은 선택 설치(`make install-curation`).
 - `packages/export/` (`dlp_export`) — 내보내기: COCO, 구간 JSON(`dlp_schema.export`), LeRobot v3.0 에피소드.
   데이터셋 버전 스냅샷에서, 검증 정책 적용, 블러본만. 작업자·장소 ID는 내보내기마다 다른 가명(HMAC). 내보내기 이력은
-  올리기 전에 따로 커밋한다. `dlp export coco|intervals|lerobot`. 정책은 `config/policies/export.yaml`.
+  올리기 전에 따로 커밋한다. 세션·라벨 ID도 내보내기마다 다른 가명이고(이력에는 내부 ID, 세션 대응표는 내부 경로),
+  manifest에 파일 목록과 sha256을 넣는다 (ADR 0027). `dlp export coco|intervals|lerobot`. 정책은 `config/policies/export.yaml`.
   LeRobot은 격리된 일회용 환경(`scripts/lerobot_write.py`, `scripts/lerobot_check.py`)에서 공식 API로 쓰고 읽는다.
 - `packages/ops/` (`dlp_ops`) — 운영 대시보드와 보안: 주간 운영 지표(검수 시간·수정률·자동 승인율·편향·발견율·
   잔여 블러 누락·원가)와 경고, 원본 접근 월간 감사 리포트, 원본 보관 만료 알림·결정.

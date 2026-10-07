@@ -11,12 +11,16 @@ splits: [train, val]
 # 내보내지 않는 라벨 종류. 블러 라벨은 어떤 형식으로도 내보내지 않는다.
 excluded_kinds: [blur_track]
 
-# 작업자·장소 ID는 내보내기마다 다른 가명으로 바꾼다 (dlp_export.pseudonym).
-# 가명 = HMAC(HMAC(비밀값, 내보내기 ID), ID): 한 내보내기 안에서는 일관되고, 내보내기 사이에서는 이어지지 않는다.
+# 작업자·장소·세션·라벨 ID는 내보내기마다 다른 가명으로 바꾼다 (dlp_export.pseudonym, ADR 0027).
+# 가명 = HMAC(HMAC(비밀값, 내보내기 ID), ID): 한 내보내기 안에서는 일관되고, 내보내기 사이에서는 ID로 이어지지 않는다.
 # 비밀값은 secret_env 환경 변수(내부 보관). 없으면 실행마다 임의 값이라 아무도 원래 ID로 되짚을 수 없다.
+# 개발용 비밀값(dev_secrets, .env.example 값)은 env_var 환경 변수가 dev_envs 중 하나일 때만 쓸 수 있다.
 ids:
   pseudonymize: true
   secret_env: DLP_EXPORT_ID_SECRET
+  dev_secrets: [dlp-dev-export-id-secret]
+  env_var: DLP_ENV
+  dev_envs: [dev]
 
 coco:
   jpeg_quality: 90
@@ -34,6 +38,7 @@ lerobot:
   repo_id: dlp/export
   robot_type: human_bodycam
   vcodec: h264
+  aspect_tolerance: 0.01     # 한 데이터셋에 넣는 에피소드의 화면비(가로/세로) 허용 차이. 넘으면 나눠 내보낸다
   # LeRobot 공식 쓰기·읽기 API는 PyTorch를 끌어와 작업공간 의존성(av·numpy 버전)과 충돌한다.
   # 격리된 일회용 환경에서 돌린다 (uv run --project <project> --locked --isolated).
   # 버전(lerobot[dataset]==0.6.1, torch==2.11.0 CPU판 등)과 전이 의존성·해시는 <project>/uv.lock에 고정한다.

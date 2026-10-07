@@ -33,6 +33,8 @@
    (PyTorch CPU판)로 `scripts/lerobot_write.py`를 돌리고, 쓴 뒤 `scripts/lerobot_check.py`가 공식 로더로 다시
    읽어 에피소드 수를 확인한다 (버전은 정책 `lerobot.env`에 고정). 이 테스트는 `isolated_env` 표시로 기본
    검사에서 빼고 `make test-isolated`와 CI 서비스 작업에서 돈다.
+   (0021에서 고정 환경으로 바뀜: `uv run --no-project --with ...` 대신 `scripts/lerobot-env/uv.lock`에 전이
+   의존성까지 고정하고 `uv run --project scripts/lerobot-env --locked --isolated`로 돈다. ADR 0021 5항.)
 8. **내보내기 ID**는 데이터셋 버전·형식·대상·검증 정책·분할·시각의 해시다. 같은 시각이라도 정책이 다르면
    다른 폴더(`exports/<ID>/`)에 쓴다.
 

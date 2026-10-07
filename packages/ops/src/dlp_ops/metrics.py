@@ -11,10 +11,9 @@
 - 오류 삽입 발견율: 그 주에 끝난 오류 삽입 배정에서 발견한 오류 비율.
 - 잔여 블러 누락: 그 주 감사의 영상 1시간당 잔여 누락 수.
 - 검증 에피소드: 사람 검증을 마친 세션(수명 주기) 중 검증 완료 시각이 그 주인 것.
-  검증 완료 시각(verified_at) = 그 시각까지 있던 운영 현재 라벨 중 모델 라벨이 모두
-  검수된(승인·수정·표본 검증) 가장 이른 검수 시각. 그 뒤의 재검수·QA 수정·새 모델 버전은
-  이 시각을 바꾸지 않으므로 지난 주의 수가 나중에 바뀌지 않는다. 블러(프라이버시 검수)는
-  따로 센다.
+  검증 완료 시각(verified_at) = 운영 라벨 항목(수정 이력 사슬)마다 처음 검수한 시각 중 가장
+  늦은 것. 단계별로 늦게 생긴 라벨은 자기 검수 시각까지 늦추고, 이미 검수한 항목의 QA 수정은
+  바꾸지 않는다 (ADR 0027). 블러(프라이버시 검수)는 따로 센다.
   생산원가 = 검수 시간 * 인건비 / 그 수.
 """
 
@@ -42,7 +41,7 @@ from dlp_schema.db.repository import (
     list_session_ids,
     withdrawn_session_ids,
 )
-from dlp_schema.episode import current_labels
+from dlp_schema.episode import current_labels, non_operational_ids
 from dlp_schema.history import review_changes
 from dlp_schema.labels import LabelRecord, Source, VerificationState
 from dlp_schema.review import AssignmentStatus, ReviewMode
@@ -67,30 +66,55 @@ def week_of(t: datetime) -> str:
 
 
 def verified_at(history: list[LabelRecord]) -> datetime | None:
-    """세션의 검증 완료 시각 (블러 제외).
+    """세션의 검증 완료 시각 (블러 제외, 운영 라벨만).
 
-    후보 시각 T(검수 시각과 사람 레코드 작성 시각)마다 T까지 만든 레코드만으로 운영 현재
-    라벨을 구해, 모델 라벨이 모두 T 이전에 검수(VERIFIED_LABEL)됐으면 완료다.
-    그런 T 중 가장 이른 것.
-    T 뒤에 생긴 레코드(재검수·QA 수정·새 모델 버전)는 T의 판정에 끼지 않아 값이 안정적이다.
+    단위는 "항목"(수정 이력 사슬)이다. 항목이 처음 사람 손을 거친 시각 = 사슬(자기와 조상)에서
+    가장 이른 검수 시각 (모델 레코드는 VERIFIED_LABEL 상태의 reviewed_at, 사람 레코드는 작성 시각).
+    - 완료 시각 T = 현재 운영 라벨과 사람이 지운 항목마다의 "처음 검수 시각" 중 가장 늦은 것.
+      단계별로 늦게 생긴 라벨(예: 2주 뒤의 행동 구간)은 자기 검수 시각까지 T를 늦춘다.
+    - 이미 검수한 항목을 나중에 고치거나 지우는 QA는 사슬의 처음 검수 시각을 바꾸지 않아 T도
+      그대로다.
+    - T 이전(같은 시각 포함)에 있던 현재 모델 라벨 중 미검수가 있으면 완료가 아니다 (None).
+      T 뒤에 생긴 미검수 모델 라벨(검증 뒤의 새 모델 버전)은 보지 않는다.
+    한계: 수명 주기 전이 시각이 기록되지 않아(ADR 0027) 검증 뒤에 생긴 라벨을 나중에 검수하면 그
+    검수 시각으로 T가 늦춰지고, 수명 주기를 검수보다 늦게 바꾸면 지난 주의 수가 늘 수 있다.
     """
     labels = [x for x in history if x.kind != "blur_track"]
+    excluded = non_operational_ids(labels)
+    ops = [x for x in labels if x.label_id not in excluded]
+    by_id = {x.label_id: x for x in ops}
 
-    def reviewed_by(x: LabelRecord, t: datetime) -> bool:
+    def own_review(x: LabelRecord) -> datetime | None:
+        if x.provenance.source is Source.HUMAN:
+            return x.created_at
         v = x.verification
-        return v.state in VERIFIED_LABEL and v.reviewed_at is not None and v.reviewed_at <= t
+        return v.reviewed_at if v.state in VERIFIED_LABEL else None
 
-    candidates = sorted(
-        {x.verification.reviewed_at for x in labels if x.verification.reviewed_at is not None}
-        | {x.created_at for x in labels if x.provenance.source is Source.HUMAN}
-    )
-    for t in candidates:
-        current = current_labels([x for x in labels if x.created_at <= t])
-        if current and all(
-            x.provenance.source is not Source.MODEL or reviewed_by(x, t) for x in current
-        ):
-            return t
-    return None
+    def first_review(x: LabelRecord) -> datetime | None:
+        times: list[datetime] = []
+        seen: set[str] = set()
+        cur: LabelRecord | None = x
+        while cur is not None and cur.label_id not in seen:
+            seen.add(cur.label_id)
+            t = own_review(cur)
+            if t is not None:
+                times.append(t)
+            cur = by_id.get(cur.parent_label_id) if cur.parent_label_id else None
+        return min(times) if times else None
+
+    current = current_labels(ops, operational=False)
+    pending = [x for x in current if x.provenance.source is Source.MODEL and own_review(x) is None]
+    waiting = {x.label_id for x in pending}
+    items = [x for x in current if x.label_id not in waiting]
+    # 사람이 지운 항목 (모델 버전 교체로 지운 삭제 레코드는 검수가 아니다)
+    items += [x for x in ops if x.retracted and x.provenance.source is Source.HUMAN]
+    reviewed = [t for t in (first_review(x) for x in items) if t is not None]
+    if not reviewed:
+        return None
+    done = max(reviewed)
+    if any(x.created_at <= done for x in pending):
+        return None
+    return done
 
 
 def _ratio(a: float, b: float) -> float:
