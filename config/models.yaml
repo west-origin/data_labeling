@@ -1,5 +1,5 @@
 # 모델 가중치 목록. `make models`가 받아 sha256을 확인한다 (data/models/, 저장소에는 넣지 않는다).
-# 정책 파일(privacy.yaml, prelabel.yaml)은 여기 이름으로 모델을 가리킨다.
+# 정책 파일(privacy.yaml, prelabel.yaml, actions.yaml vlm.model)은 여기 이름으로 모델을 가리킨다.
 #   url: 직접 받는 파일. archive_member가 있으면 zip을 받아 그 이름으로 끝나는 파일을 꺼낸다
 #        (sha256은 zip의 해시).
 #   export: 공개 ONNX가 없어 공식 가중치를 직접 변환한다 (스크립트 실행, make export-models).
@@ -71,8 +71,7 @@ models:
       - AI Challenger, MPII, sub-JHMDB, Halpe, PoseTrack18 (연구용 배포, 조건 확인 필요)
     commercial: review
   # OWLv2 오픈 보캐뷸러리 탐지 (prelabel.yaml models.open_vocab, privacy.yaml 오픈 보캐뷸러리
-  # 탐지기).
-  # 고정 리비전 URL이라 파일이 바뀌지 않는다
+  # 탐지기). 고정 리비전 URL이라 파일이 바뀌지 않는다
   owlv2_onnx:
     path: data/models/owlv2/model_quantized.onnx
     url: https://huggingface.co/Xenova/owlv2-base-patch16-ensemble/resolve/3e255bc9bf304b3358a8c1945c0a9514eefe7f10/onnx/model_quantized.onnx
@@ -91,8 +90,7 @@ models:
     training_data: []
     commercial: allowed
   # 메트릭 깊이 (prelabel.yaml models.depth → lift3d.DepthLifter). 공개 ONNX가 없어 export
-  # 스크립트로
-  # 변환한다 (make export-models)
+  # 스크립트로 변환한다 (make export-models)
   depth_metric_indoor_small:
     path: data/models/depth_anything_v2_metric_indoor_small.onnx
     export: scripts/export_depth_onnx.py
@@ -101,7 +99,8 @@ models:
     # 달아 배포한다 (변환에 쓴 -hf 저장소에는 라이선스 표시가 없다).
     license: Apache-2.0
     # 인코더(Depth Anything V2 Small)는 대규모 비라벨 실사 이미지에 Giant 교사 모델(CC BY-NC 4.0)이
-    # 만든 의사 깊이로 학습했다. 그 이미지 데이터셋에는 비상업·연구용 조건이 있어 review다 (법무 확인 대상).
+    # 만든 의사 깊이로 학습했다. 그 이미지 데이터셋에는 비상업·연구용 조건이 있어 review다 (법무 확인
+    # 대상). 교사 모델은 간접 계보라 적기만 하고 분류 근거로 쓰지 않는다 (ADR 0010 결정 1).
     training_data:
       - Hypersim 미세조정 (CC BY-SA 3.0)
       - 인코더 Depth Anything V2 Small (Apache-2.0)의 의사 라벨 학습 이미지
@@ -117,5 +116,6 @@ external:
   Qwen/Qwen2.5-VL-7B-Instruct:
     served_by: OpenAI 호환 VLM 서버 (vLLM, llama.cpp 등), config/policies/actions.yaml vlm.model
     license: Apache-2.0
+    # 학습 데이터의 라이선스 조건을 확인할 수 없어 allowed로 두지 않는다 (판매 전 법무 확인 대상)
     training_data: ["공개되지 않음 (모델 카드에 학습 데이터 출처 명시 없음)"]
     commercial: review

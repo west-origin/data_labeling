@@ -133,8 +133,8 @@ class DepthPolicy(Contract):
     @field_validator("hand_points")
     @classmethod
     def _named_points(cls, v: tuple[int, ...]) -> tuple[int, ...]:
-        # 3D 궤적의 part는 온톨로지 hand_joints 이름이어야 하므로 이름이 있는 번호만 받는다
         """hand_points가 모두 `HAND21_JOINTS`에 있는지 검사한다. 없으면 ValueError."""
+        # 3D 궤적의 part는 온톨로지 hand_joints 이름이어야 하므로 이름이 있는 번호만 받는다
         bad = sorted(set(v) - set(HAND21_JOINTS))
         if bad:
             raise ValueError(
@@ -235,9 +235,8 @@ class PrelabelPolicy(Contract):
                 AttributeError).
 
         Returns:
-            {절: model_dump(json)}를 키 정렬 JSON으로 만든 sha256의 앞 8자. 파싱된 값만 보므로 YAML
-                주석·
-            키 순서·따옴표 차이는 해시를 바꾸지 않는다.
+            {절: model_dump(json)}를 키 정렬 JSON으로 만든 sha256의 앞 8자. 파싱된 값만 보므로
+            YAML 주석·키 순서·따옴표 차이는 해시를 바꾸지 않는다.
         """
         # 파싱·검증된 값만 해시한다 (YAML 원문이 아니다). sort_keys로 키 순서와 무관하게 만든다
         data = {name: getattr(self, name).model_dump(mode="json") for name in sections}

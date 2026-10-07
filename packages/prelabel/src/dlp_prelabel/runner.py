@@ -5,10 +5,11 @@
 2. 깊이 모델이 있으면 바디캠 손 관절·객체 박스를 카메라 좌표 3D 궤적으로 올린다 (lift3d).
 3. 바디캠의 손 키포인트·객체 박스와 장갑 신호로 접촉 구간을 만들어 hand_state 라벨로 쓴다. 배포된
    재학습 접촉 모델이 있으면(replaced에 CONTACT_STEP) 이 단계는 돌지 않고, 이 단계가 냈던 검수 전
-   접촉을 지운다. 2·3의 모델 버전에는 정책 해시와 입력(현재 입력 라벨 ID, 장갑 동기화, 장갑 압력
-   채널 접두사 sync.yaml glove.pressure_prefixes) 해시를 넣는다. 입력이 바뀌면 (예측기 버전 변경,
-   검수자 수정) 다시 돌고, 검수 전인 이전 결과만 지운다. 검수된(승인·표본 검증) 결과와 사람이
-   고치거나 만든 결과는 남으므로, 새 결과 중 그와 겹치는 것은 버린다: 접촉은 같은 손에서 시간이
+   접촉을 지운다. 2·3의 모델 버전에는 정책 절 해시(depth·contact)와 입력 해시를 넣는다. 입력은
+   2가 바디캠 손·박스 트랙의 현재 라벨 ID, 3이 그 라벨 ID와 장갑 동기화, 장갑 압력 채널
+   접두사(sync.yaml glove.pressure_prefixes)다. 입력이 바뀌면 (예측기 버전 변경, 검수자 수정) 다시
+   돌고, 검수 전인 이전 결과만 지운다. 검수된(승인·표본 검증) 결과와 사람이 고치거나 만든 결과는
+   남으므로, 새 결과 중 그와 겹치는 것은 버린다: 접촉은 같은 손에서 시간이
    겹치는 구간, 3D 궤적은 같은 (개체, 부위, 좌표계) (ADR 0015, 검수 결과 옆에 같은 대상의 모델
    출력이 중복으로 남지 않게).
 4. 3인칭 영상이 있으면 바디캠 IMU와 3인칭 인물 손목 속도를 상관시켜 착용자를 찾는다. 찾은 인물의
@@ -86,7 +87,8 @@ CONTACT_STEP = "contact"
 def contact_version(policy: PrelabelPolicy, inputs: str) -> str:
     """접촉 단계 모델 버전: `contact-heuristic-1+p<contact 절 해시>+i<입력 해시>`.
 
-    inputs: 접촉 단계 입력 해시 (손 키포인트·객체 박스 라벨 ID, 장갑 스트림 동기화).
+    inputs: 접촉 단계 입력 해시 (손 키포인트·객체 박스 라벨 ID, 장갑 스트림 동기화, 압력 채널
+    접두사).
     """
     return f"{CONTACT_PREFIX}+p{policy.digest('contact')}+i{inputs}"
 
@@ -112,14 +114,16 @@ class PrelabelSummary:
 
     produced: "스트림/예측기" → 이번에 넣은 라벨 수. skipped: 같은 버전이 이미 있어 건너뛴
     "스트림/예측기".
-    contacts: 새 접촉 라벨 수. retracted: 지운 이전 버전 라벨 수. lifted: 새 3D 궤적 수.
+    contacts: 새 접촉 라벨 수. retracted: 예측기 단계(1)의 이전 버전과 배포 모델이 대신한 기본
+    어댑터·접촉 단계에서 지운 라벨 수 (3D·접촉 단계가 새 버전으로 지운 수는 세지 않는다). lifted: 새
+    3D 궤적 수.
     wearer: 착용자로 찾은 원래 트랙 라벨 ID. wearer_scores: 인물(라벨 ID)별 상관.
     """
 
     produced: dict[str, int] = field(default_factory=dict[str, int])  # "스트림/predictor" → 라벨 수
     skipped: list[str] = field(default_factory=list[str])
     contacts: int = 0
-    retracted: int = 0  # 새 버전으로 바뀌며 지운 이전 버전 라벨
+    retracted: int = 0  # 예측기 단계·배포 모델 대체로 지운 라벨 (3D·접촉 단계 것은 빠진다)
     lifted: int = 0
     wearer: str | None = None
     wearer_scores: dict[str, float] = field(default_factory=dict[str, float])
@@ -128,7 +132,7 @@ class PrelabelSummary:
 def _fetch(store: ObjectStore, uri: str, work: Path) -> Path:
     """원본 저장소의 URI를 임시 작업 디렉터리로 받는다 (이미 받았으면 다시 받지 않는다).
 
-    키의 `/`를 `__`로 바꾼 파일 이름을 쓴다. 저장소 접근 기록은 `raw`(감사 저장소)가 남긴다.
+    키의 `/`를 `__`로 바꾼 파일 이름을 쓴다. 접근 기록은 넘겨받은 `store`(감사 저장소)가 남긴다.
     """
     key = uri.removeprefix(store.uri(""))
     dest = work / key.replace("/", "__")
@@ -149,12 +153,7 @@ def run_prelabel(
     replaced: Iterable[str] = (),
     pressure_prefixes: Sequence[str] | None = None,
 ) -> PrelabelSummary:
-    """replaced: 배포된 재학습 모델이 대신하는 기본 어댑터 이름 (CONTACT_STEP이면 접촉 단계).
-
-    그 어댑터가 냈던 검수 전 라벨을 지운다 (같은 대상이 기본 어댑터와 재학습 모델 양쪽으로 겹쳐 남지
-    않게).
-    pressure_prefixes: 장갑 압력 채널 접두사 (sync.yaml glove.pressure_prefixes). 없으면 저장소
-    sync.yaml에서 읽는다. 접촉 단계 모델 버전에 들어가 바뀌면 접촉을 다시 만든다.
+    """세션 하나의 프리라벨 단계(모듈 docstring의 1~5)를 돌린다.
 
     Args:
         conn: DB 연결. 호출자가 트랜잭션을 연다 (`engine.begin()`); 중간에 실패하면 모두 되돌린다.
@@ -164,6 +163,11 @@ def run_prelabel(
         policy: 프리라벨 정책. ontology: 접촉 대상 종류(tool/fixed_surface/object) 판단에 쓴다.
         now: 새 레코드의 created_at (시간대 필수).
         lifter: 깊이 3D 단계 (가중치가 없으면 None → 건너뛴다).
+        replaced: 배포된 재학습 모델이 대신하는 기본 어댑터 이름 (`CONTACT_STEP`이면 접촉 단계).
+            그 어댑터·단계가 냈던 검수 전 라벨을 버전과 상관없이 지운다 (같은 대상이 기본 어댑터와
+            재학습 모델 양쪽으로 겹쳐 남지 않게).
+        pressure_prefixes: 장갑 압력 채널 접두사 (sync.yaml glove.pressure_prefixes). None이면
+            저장소 sync.yaml에서 읽는다. 접촉 단계 모델 버전에 들어가 바뀌면 접촉을 다시 만든다.
 
     Returns:
         `PrelabelSummary`.
@@ -299,6 +303,7 @@ def pick_hand_tracks(hand_labels: list[LabelRecord]) -> dict[Hand, KeypointTrack
     best: dict[Hand, LabelRecord] = {}
 
     def rank(x: LabelRecord) -> tuple[bool, datetime, int, str]:
+        """위 1~4 기준을 차례로 담은 정렬 키 (튜플이 클수록 앞선다)."""
         return (_protected(x), x.created_at, x.t_end_ms - x.t_start_ms, x.label_id)
 
     for x in hand_labels:
@@ -381,9 +386,11 @@ def _lift(
     lifter: DepthLifter,
     now: datetime,
 ) -> int:
-    """멱등: 같은 버전을 낸 적이 있으면(검수자가 모두 고쳤어도) 다시 만들지 않는다.
+    """3D 궤적 단계: 바디캠 손·박스 트랙을 메트릭 깊이로 카메라 좌표 3D 궤적으로 올린다.
 
-    버전에는 입력 트랙(현재 라벨 ID) 해시가 들어가 입력이 바뀌면 다시 만든다.
+    멱등: 같은 버전을 낸 적이 있으면(검수자가 모두 고쳤어도) 다시 만들지 않는다. 버전
+    (`<lifter.version>+i<입력 해시>`)에는 입력 트랙(현재 라벨 ID) 해시가 들어가 입력이 바뀌면 다시
+    만든다. 같은 (개체, 부위, 좌표계)의 검수된·사람 궤적이 있으면 새 궤적은 버린다.
 
     입력: 기준 스트림(바디캠)의 현재 키포인트·박스 트랙 (모델·사람 출처 모두). 출력 라벨 ID 접두사는
     `<세션>-<바디캠>-3d-`. Returns: 새로 넣은 3D 궤적 수.
@@ -459,11 +466,12 @@ def _contacts(
     now: datetime,
     pressure_prefixes: tuple[str, ...],
 ) -> int:
-    # 멱등: 이력에 이 버전이 있으면 (검수자가 모두 고쳤거나 지웠어도) 다시 만들지 않는다.
-    # 정책(contact 절)이나 입력(손·객체 트랙, 장갑 동기화)이 바뀌면 버전이 바뀌어 다시 만들고,
-    # 검수 전인 이전 버전 접촉만 지운다.
     """접촉 단계: 바디캠 손·박스 트랙과 동기화된 장갑으로 손마다 접촉 구간을 만들어 hand_state로
     쓴다.
+
+    멱등: 이력에 이 버전이 있으면 (검수자가 모두 고쳤거나 지웠어도) 다시 만들지 않는다. 정책(contact
+    절)이나 입력(손·객체 트랙, 장갑 동기화, 압력 채널 접두사)이 바뀌면 버전이 바뀌어 다시 만들고,
+    검수 전인 이전 버전 접촉만 지운다. 같은 손의 검수된·사람 손 상태와 겹치는 새 구간은 버린다.
 
     장갑이 있는 손은 `fuse_contacts`(장갑 시각 + 영상 대상), 없는 손은 영상 구간만 쓴다. 라벨은
     마스터 타임라인 구간(stream_id=None)이고 ID는 `<세션>-contact-<version_tag>-<손>-<순번
@@ -598,7 +606,8 @@ def _wearer(
     }
     if not people:
         return
-    # IMU는 공유 시계(SHARED_CLOCK)라 시각을 그대로 기준 신호로 쓴다 (가속도 크기 - 중력 중앙값)
+    # IMU는 공유 시계(SHARED_CLOCK)라 시각을 그대로 기준 신호로 쓴다 (|가속도 크기 - 그 중앙값|,
+    # `dlp_sync.signals.imu_series`)
     ref = imu_series(_fetch(raw, imu.uri, work))
     speeds: dict[str, tuple[np.ndarray, np.ndarray]] = {}
     for label_id, label in people.items():

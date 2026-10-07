@@ -31,7 +31,11 @@ from dlp_schema.labels import (
 
 
 def version_tag(model_version: str) -> str:
-    """버전마다 다른 짧은 ID 조각 (정책·VLM이 바뀌면 새 레코드 ID)."""
+    """버전마다 다른 짧은 ID 조각 (정책·VLM이 바뀌면 새 레코드 ID).
+
+    `dlp_schema.episode.version_tag`와 같은 계산(sha256 16진 앞 8자)이다. `runner`의 채운 공백 ID는
+    그쪽 함수를 쓰므로 두 함수가 달라지면 ID 형식이 어긋난다.
+    """
     return hashlib.sha256(model_version.encode()).hexdigest()[:8]
 
 
@@ -49,7 +53,8 @@ class Span:
 
     start_ms: int
     end_ms: int
-    key: tuple[str, str | None, str | None, str | None]  # (label, verb|gap_type, target, tool)
+    # (종류, 동사 또는 사이 구간 종류, 대상, 도구)
+    key: tuple[str, str | None, str | None, str | None]
     confidence: float
     description: str | None
     fallback: bool

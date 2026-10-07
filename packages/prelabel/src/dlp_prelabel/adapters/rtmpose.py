@@ -59,13 +59,13 @@ class RtmPose:
         self.policy, self.ontology_version, self.now = policy, ontology_version, now
 
     def run(self, clip: Clip) -> list[LabelRecord]:
-        # rtmlib은 무겁고 onnxruntime 세션을 바로 만들므로 실제로 돌릴 때만 불러온다
         """영상 전체 프레임에서 사람 자세를 찾아 사람마다 coco17 키포인트 트랙을 돌려준다.
 
         프레임마다: 사람 박스(최대 max_people) → 자세. 관절 점수 평균이 min_score 미만인 사람은
         버린다. 추적에는 탐지 박스가 아니라 관절 좌표를 감싸는 박스를 쓴다. 트랙 신뢰도는 프레임
         점수 평균.
         """
+        # rtmlib은 무겁고 onnxruntime 세션을 바로 만들므로 실제로 돌릴 때만 불러온다
         from rtmlib import YOLOX, RTMPose
 
         bp = self.policy.body

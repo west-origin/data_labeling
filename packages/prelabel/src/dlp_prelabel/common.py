@@ -44,8 +44,8 @@ def iter_frames(video: Path) -> Iterator[tuple[int, Image]]:
 
     Yields:
         (PTS ms, (H, W, 3) RGB uint8). 첫 번째 영상 스트림만 디코드하고, PTS가 없는 프레임은
-            건너뛴다.
-        가변 프레임레이트(VFR)여도 PTS를 그대로 쓰므로 프레임 간격을 가정하지 않는다.
+        건너뛴다. 가변 프레임레이트(VFR)여도 PTS를 그대로 쓰므로 프레임 간격을 가정하지 않는다.
+        반올림 때문에 이웃 프레임의 ms가 같을 수 있다 (필요하면 `strictly_increasing`으로 거른다).
     """
     with av.open(str(video)) as c:
         stream = c.streams.video[0]

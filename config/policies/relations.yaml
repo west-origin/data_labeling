@@ -42,7 +42,7 @@ rules:
       predicate: contact
       object: "{surface_id}"
 
-merge_gap_ms: 100             # 같은 관계가 이보다 짧게 끊기면 하나로 잇는다
+merge_gap_ms: 100             # 같은 관계가 이 이하로 끊기면 하나로 잇는다
 
 # 장갑만 잡아 대상을 모르는 접촉의 target_id (prelabel.yaml contact.unresolved_target_id).
 # 규칙 입력에서는 값이 없는 것(null)으로 본다: {target_id} 자리가 비어 관계를 만들지 않는다.

@@ -25,7 +25,8 @@ def coverage_ratio(contacts: list[SurfaceContact], footprint_m: float, grid_m: f
 
     Returns:
         표면 크기를 알 수 없으면(샘플 없음) 0. 칸 중심이 어느 선분(캡슐)에서 footprint_m 안이면 덮은
-        것으로 본다. 표면 밖(비율 0~1 밖) 점은 격자 밖이라 칠하지 않는다.
+        것으로 본다. 격자는 표면(비율 0~1) 안에만 있으므로, 표면 밖 점(inside_margin 안)은 원이
+        표면에 걸치는 칸만 칠한다.
     """
     sizes = [s for c in contacts for s in c.sizes]
     if not sizes:

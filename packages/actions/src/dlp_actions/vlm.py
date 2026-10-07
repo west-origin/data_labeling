@@ -243,9 +243,10 @@ def classify(
     backoff_s: Sequence[float] = (),
     sleep: Callable[[float], None] = time.sleep,
 ) -> Classified:
-    """max_retries: 응답 위반 시 다시 묻는 횟수. 서버 오류는 backoff_s로 따로 다시 묻는다.
+    """후보 구간 하나를 VLM에 물어 검증된 분류를 얻는다.
 
-    서버가 끝내 응답하지 않으면 VlmUnavailableError를 올린다 (미상으로 두지 않는다).
+    응답 위반은 max_retries번까지 다시 묻고, 서버 오류는 backoff_s로 따로 다시 묻는다. 서버가 끝내
+    응답하지 않으면 VlmUnavailableError를 올린다 (미상으로 두지 않는다).
 
     Args:
         client: VLM 클라이언트.
