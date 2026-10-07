@@ -1,4 +1,8 @@
-"""프리라벨 실행기의 DB 없는 단위 테스트 (감사 4차 회귀)."""
+"""프리라벨 실행기의 DB 없는 단위 테스트 (감사 4차 회귀).
+
+검수된 결과 보호(접촉·3D 궤적), 착용자 사본의 출처·검수 상태, 착용자 다시 찾기 조건을 본다. ADR
+0026. 입력은 `dlp_schema.testing.make_label`로 만든 작은 레코드다.
+"""
 
 from __future__ import annotations
 
@@ -41,6 +45,7 @@ APPROVED = Verification(
 
 
 def _contact(label_id: str, start: int, end: int, hand: Hand, **kw: Any) -> LabelRecord:
+    """모델 출처 손 상태(대상 bucket_01) 레코드. kw로 출처·검수 상태를 바꾼다."""
     payload = HandStatePayload(
         hand=hand, contact_target_kind="object", target_id="bucket_01", role="active"
     )
@@ -48,6 +53,12 @@ def _contact(label_id: str, start: int, end: int, hand: Hand, **kw: Any) -> Labe
 
 
 def test_new_contacts_overlapping_reviewed_ones_on_the_same_hand_are_dropped() -> None:
+    """새 접촉 중 같은 손의 승인·사람 구간과 겹치는 것만 버리고 원래 순번을 유지하는지 본다.
+
+    시나리오: 오른손 승인(1000~2000), 오른손 검수 전(3000~4000, 보호 대상 아님), 왼손
+    사람(5000~6000). 오른손 기준 0번(승인과 겹침)만 빠지고, 3번(2000~2900)은 맞닿기만 해서
+    남는다. 왼손 기준 2번(사람 구간과 겹침)만 빠진다.
+    """
     current = [
         _contact("approved", 1_000, 2_000, Hand.RIGHT, verification=APPROVED),
         _contact(
@@ -68,6 +79,7 @@ def test_new_contacts_overlapping_reviewed_ones_on_the_same_hand_are_dropped() -
 
 
 def _traj(label_id: str, entity: str, part: str | None, **kw: Any) -> LabelRecord:
+    """카메라 좌표 3D 궤적 모델 레코드 (샘플 하나). kw로 검수 상태를 바꾼다."""
     payload = Trajectory3DPayload(
         entity_id=entity,
         part=part,
@@ -79,6 +91,9 @@ def _traj(label_id: str, entity: str, part: str | None, **kw: Any) -> LabelRecor
 
 
 def test_new_trajectories_for_reviewed_entity_parts_are_dropped() -> None:
+    """같은 (개체, 부위, 좌표계)의 승인된 궤적이 있는 새 궤적만 버리는지 본다 (손목만 빠지고 검지
+    끝, 검수 전 대상인 걸레 궤적은 남는다).
+    """
     current = [
         _traj("old-wrist", "hand_right", "wrist", verification=APPROVED),
         _traj("old-rag", "rag_01", None),  # 검수 전
@@ -93,6 +108,7 @@ def test_new_trajectories_for_reviewed_entity_parts_are_dropped() -> None:
 
 
 def _person(label_id: str, **kw: Any) -> LabelRecord:
+    """3인칭 coco17 인물 트랙 레코드 (키프레임 하나)."""
     frame = KeypointFrame(
         t_ms=0, points=tuple(Keypoint(x=1.0, y=1.0, visibility=2) for _ in range(17))
     )
@@ -101,7 +117,10 @@ def _person(label_id: str, **kw: Any) -> LabelRecord:
 
 
 def test_wearer_copy_is_a_model_record_even_from_a_human_track() -> None:
-    """감사 회귀: 사람이 고친(HUMAN) 트랙을 착용자로 찾아도 사본은 모델 출처·검수 전이다."""
+    """감사 회귀: 사람이 고친(HUMAN) 트랙을 착용자로 찾아도 사본은 모델 출처·검수 전이다.
+
+    ID `<원래>:wearer`, parent=원래, entity_id="wearer", 신뢰도=상관도 본다.
+    """
     human = _person("p1:fix", provenance=Provenance(source=Source.HUMAN), verification=APPROVED)
     copy = wearer_copy(human, 0.83, f"{WEARER_PREFIX}+pabc", FIXED_TIME)
     assert copy.provenance == Provenance(source=Source.MODEL, model_version=f"{WEARER_PREFIX}+pabc")
@@ -112,6 +131,9 @@ def test_wearer_copy_is_a_model_record_even_from_a_human_track() -> None:
 
 
 def test_has_live_wearer_after_human_or_model_retraction() -> None:
+    """착용자 레코드가 살아 있는지 판단: 검수자가 지운 것은 살아 있는 것으로 보고(되살리지 않음),
+    모델 단계가 지운 것(전신 모델 버전 변경)은 죽은 것으로 본다(다시 찾음).
+    """
     wearer = wearer_copy(_person("p1"), 0.9, f"{WEARER_PREFIX}+pabc", FIXED_TIME)
     assert _has_live_wearer([wearer])
     # 검수자가 착용자 레코드를 지웠다: 다시 찾아 되살리지 않는다 (살아 있는 것으로 본다)

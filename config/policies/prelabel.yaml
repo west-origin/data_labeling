@@ -1,6 +1,16 @@
-# 자동 프리라벨 정책 (WP8).
+# 자동 프리라벨 정책 (WP8). 읽는 곳: dlp_prelabel.policy (`dlp prelabel run <세션>`).
 # 실제 모델을 아직 연동하지 못한 곳은 "TODO(real-model)"로 표시하고 필요한 것을 적는다.
 # 저장소 전체에서 찾기: make todo-models
+#
+# 정책 해시: 각 어댑터·단계는 자기 절(hands, body, objects, open_vocab_objects, depth, contact,
+# wearer_matching)의 "파싱된 값" 해시를 모델 버전에 넣는다 (PrelabelPolicy.digest). 그 절의 값을
+# 바꾸면 다음 실행에서 그 단계가 다시 돌고, 검수 전인 이전 결과만 지운다 (검수·사람 결과는 남는다).
+# 주석·키 순서·따옴표는 해시에 영향이 없다. models 절과 timeline_predictors는 해시에 들어가지 않는다.
+#
+# 시간 단위: *_ms 값은 정수 ms. 공간 라벨(손·박스·3D) 쪽 값은 그 스트림 영상 PTS 기준, 접촉 구간은
+# 마스터 타임라인 기준이다 (ADR 0019).
+
+# 정책 파일 형식 버전 (코드가 검사하지 않는다. 형식을 바꿀 때 올린다)
 version: 1
 
 # 마스터 타임라인 구간(stream_id 없음)을 내는 예측기 이름. 기준 스트림(바디캠)에서 세션당 한 번만 돌린다
@@ -9,33 +19,39 @@ version: 1
 timeline_predictors: [trained-contact, trained-actions, trained-relations, trained-states, trained-coverage]
 
 # 역할 → config/models.yaml 이름
+# 이름을 바꾸면 그 모델 파일의 해시가 버전에 들어가 해당 어댑터가 다시 돈다. models.yaml의 상업 사용
+# 분류(accept)를 통과해야 한다 (make licenses).
 models:
-  hands: hand_landmarker
-  body_detector: yolox_m_coco
-  body: rtmpose_m_body7
-  coco_objects: object_detector
-  open_vocab: owlv2_onnx
+  hands: hand_landmarker               # MediaPipe 손 21관절 (adapters/mediapipe_models.MediaPipeHands)
+  body_detector: yolox_m_coco          # 사람 박스 (RTMPose 앞단)
+  body: rtmpose_m_body7                # 전신 COCO 17점 (adapters/rtmpose.RtmPose)
+  coco_objects: object_detector        # COCO 객체 박스 (MediaPipeObjects)
+  open_vocab: owlv2_onnx               # OWLv2 도구 탐지 (adapters/owl_objects.OwlObjects)
   open_vocab_tokenizer: owlv2_tokenizer
-  depth: depth_metric_indoor_small
+  depth: depth_metric_indoor_small     # 메트릭 깊이 (lift3d.DepthLifter)
 
+# 손 21관절 (MediaPipe HandLandmarker)
 hands:
-  min_score: 0.5
+  min_score: 0.5            # 손 탐지 최소 신뢰도 (0~1). 올리면 누락↑, 내리면 오탐↑
   # MediaPipe는 입력이 거울상(셀카)이라고 보고 왼손·오른손을 정한다. 바디캠은 거울상이 아니므로 뒤집는다.
   input_is_mirrored: false
 
+# 전신 포즈 (YOLOX 사람 탐지 → RTMPose). 3인칭 착용자 매칭과 바디캠에 보이는 다른 사람 자세에 쓴다
 body:
   detector_score: 0.3       # YOLOX 사람 박스 점수 하한
   min_score: 0.3            # RTMPose 관절 점수 평균의 하한
   keypoint_score: 0.3       # 이보다 낮은 관절은 visibility=1 (가려짐 추정)
-  max_people: 4
-  track_iou: 0.3
+  max_people: 4             # 프레임당 사람 수 상한
+  track_iou: 0.3            # 이전 프레임 박스와 IoU가 이 이상이면 같은 사람 트랙으로 잇는다
   max_gap_ms: 300           # 이보다 짧게 끊긴 사람 트랙은 하나로 잇는다
 
+# COCO 객체 탐지 (MediaPipe EfficientDet-Lite0)
 objects:
-  min_score: 0.4
-  track_iou: 0.3
-  max_gap_ms: 300
+  min_score: 0.4            # 탐지 점수 하한 (0~1)
+  track_iou: 0.3            # 트랙 잇기 IoU 문턱
+  max_gap_ms: 300           # 이보다 오래 끊기면 새 트랙 (새 entity_id)
   # COCO 클래스 → 온톨로지 객체. 매핑이 없는 COCO 클래스는 버린다.
+  # 대상은 온톨로지(config/ontology/v1)에 있어야 한다 (test_coco_mapping_targets_exist_in_ontology).
   coco_to_ontology:
     cup: cup
     toilet: toilet
@@ -46,13 +62,15 @@ objects:
 
 # COCO에 없는 청소·돌봄 도구는 OWLv2 오픈 보캐뷸러리 탐지로 찾는다 (CPU 프레임당 약 9초).
 # frame_stride_ms마다 추론하고, 사이 프레임은 트랙 보간이 메운다 (max_gap_ms 안에서).
+# (프리라벨은 추론한 시각에만 키프레임을 남기고, 사이는 검수 도구와 접촉 단계 contact.video가 보간한다)
 open_vocab_objects:
-  frame_stride_ms: 500
-  min_score: 0.12
-  track_iou: 0.3
-  max_gap_ms: 1200
+  frame_stride_ms: 500      # 추론 간격 (ms). GPU 환경에서는 줄인다. 줄이면 처리 시간이 비례해 는다
+  min_score: 0.12           # 모든 질의 공통 점수 문턱 (OWLv2 점수는 낮게 나오는 편이라 작다)
+  track_iou: 0.3            # 트랙 잇기 IoU 문턱
+  max_gap_ms: 1200          # frame_stride_ms보다 커야 트랙이 이어진다 (지금 2.4배)
   nms_iou: 0.5              # 같은 질의의 박스끼리 IoU가 이 이상이면 점수 낮은 쪽을 버린다
   # 질의 문장 → 온톨로지 객체
+  # 질의는 짧은 영어 명사구로 쓴다 (16토큰을 넘으면 잘린다). 대상은 온톨로지에 있어야 한다.
   queries:
     a mop: mop
     a cleaning rag: rag
@@ -71,15 +89,18 @@ open_vocab_objects:
     a bathtub: bathtub
     a mirror: mirror
 
+# 접촉 구간 (모델이 아닌 알고리즘, dlp_prelabel.contact). 결과는 마스터 타임라인 hand_state 라벨이다.
 contact:
+  # 장갑 압력 합 히스테리시스 (장갑 Parquet의 압력 채널 합, 채널 선택은 sync.yaml glove.pressure_prefixes)
   glove:
     on_threshold: 0.3         # 압력 합이 이 값을 넘으면 접촉 시작
     off_threshold: 0.15       # 이 값 아래로 내려가면 접촉 종료 (히스테리시스)
-    min_duration_ms: 60
+    min_duration_ms: 60       # 이보다 짧은 접촉은 버린다
+  # 영상 휴리스틱: 손가락 끝 다섯 점과 객체·도구 박스 사이 거리
   video:
     max_distance_px: 12       # 손가락 끝과 객체 박스 사이 거리가 이 이하면 접촉 후보
-    min_duration_ms: 100
-    merge_gap_ms: 100
+    min_duration_ms: 100      # 이보다 짧은 영상 접촉은 버린다
+    merge_gap_ms: 100         # 같은 대상 접촉이 이 이하로 끊기면 잇는다
     # 객체 박스 키프레임이 손 키프레임 시각에 없으면 앞뒤 키프레임을 선형 보간한다 (도구 박스는
     # open_vocab_objects.frame_stride_ms 간격). 앞뒤 키프레임 간격이 이보다 길면 보간하지 않는다.
     box_max_gap_ms: 1200
@@ -92,18 +113,19 @@ contact:
   # TODO(real-model): 영상만으로 접촉을 판정하는 학습 분류기 (장갑 세션을 정답으로, `dlp train run contact`).
   #   재학습 루프는 있지만 실제 학습기가 없어 지금은 손가락 끝-객체 거리 휴리스틱만 쓴다.
 
+# 3인칭 영상 속 착용자 찾기 (바디캠 IMU 가속도와 3인칭 인물 손목 속도의 상관, dlp_prelabel.wearer)
 wearer_matching:
-  rate_hz: 30
-  min_correlation: 0.5
+  rate_hz: 30               # 두 신호를 다시 표본할 격자 (Hz)
+  min_correlation: 0.5      # 최고 상관이 이 미만이면 착용자 없음 (-1~1)
   min_overlap_samples: 20   # 두 신호가 겹치는 길이가 rate_hz 격자로 이 샘플 수보다 짧으면 비교하지 않는다
 
 # 바디캠 손·객체를 단안 메트릭 깊이(Depth Anything V2 Metric Indoor Small)로 카메라 좌표 3D로 올린다.
 # 세션 캘리브레이션에 내부 파라미터가 없으면 default_hfov_deg로 근사한다 (액션캠 광각 기준).
 depth:
-  frame_stride_ms: 200
-  default_hfov_deg: 90
+  frame_stride_ms: 200      # 깊이 추론 간격 (ms, CPU 비용). 3D 궤적 샘플 간격이 된다
+  default_hfov_deg: 90      # 캘리브레이션이 없을 때 가로 화각 (도, 0~180)
   patch_radius_px: 2        # 깊이를 읽을 때 주변 (2r+1)^2 픽셀의 중앙값
-  min_depth_m: 0.1
+  min_depth_m: 0.1          # 이 범위 밖 깊이는 버린다 (m)
   max_depth_m: 10.0
   hand_points: [0, 4, 8]    # 손목, 엄지 끝, 검지 끝 (hand21 번호)
   confidence: 0.5           # 단안 깊이의 절대 거리는 장면에 따라 크게 틀릴 수 있어 낮게 둔다

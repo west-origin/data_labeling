@@ -12,9 +12,18 @@
 #   forbidden: 가중치 자체가 비상업 라이선스다.
 # 정책이 쓰는 모델은 accept에 든 분류여야 한다 (make check가 검사한다).
 # 법무 확인 뒤 review를 빼면 review 모델을 쓰는 정책이 검사에서 걸린다.
+# 읽는 곳: dlp_models.registry (load_registry, resolve, fetch). 파싱된 값으로만 읽으므로 주석은 어떤
+# 해시에도 들어가지 않는다. 라벨의 모델 버전에는 등록 sha256이 아니라 실제 파일 해시가 들어간다.
+# 항목 필드:
+#   path: 저장소 루트 기준 경로 (data/models/ 아래). sha256: 등록 해시.
+#   license: 가중치 라이선스. training_data: 직접 학습·미세조정 데이터와 그 라이선스.
+#   commercial: 위 분류. 새 모델은 이 셋을 반드시 적는다 (CLAUDE.md, ADR 0010).
+# 형식 버전 (코드가 검사하지 않는다)
 version: 1
+# 정책이 쓸 수 있는 분류 목록 (make licenses가 검사)
 accept: [allowed, review]
 models:
+  # 얼굴 탐지 (프라이버시 게이트 dlp_privacy.detectors.yunet, privacy.yaml)
   yunet:
     path: data/models/face_detection_yunet_2023mar.onnx
     url: https://media.githubusercontent.com/media/opencv/opencv_zoo/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx
@@ -22,6 +31,7 @@ models:
     license: MIT
     training_data: ["WIDER FACE (CC BY-NC-ND 4.0)"]
     commercial: review
+  # 손 21관절 (prelabel.yaml models.hands → MediaPipeHands)
   hand_landmarker:
     path: data/models/hand_landmarker.task
     url: https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task
@@ -29,6 +39,7 @@ models:
     license: Apache-2.0
     training_data: ["Google 자체 수집 실사·합성 손 이미지 (모델 카드)"]
     commercial: allowed
+  # COCO 객체 박스 (prelabel.yaml models.coco_objects → MediaPipeObjects)
   object_detector:
     path: data/models/efficientdet_lite0.tflite
     url: https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float16/latest/efficientdet_lite0.tflite
@@ -37,6 +48,8 @@ models:
     # COCO 이미지는 Flickr 사진마다 다른 CC 라이선스이고 CC BY-NC 계열이 섞여 있다 (비상업 조건) → review
     training_data: ["COCO 2017 (주석 CC BY 4.0, 이미지는 Flickr 개별 CC 라이선스로 CC BY-NC 계열 포함)"]
     commercial: review
+  # 사람 박스 탐지, RTMPose 앞단 (prelabel.yaml models.body_detector). rtmlib 기본 Human-Art판은
+  # 비상업 데이터라 쓰지 않는다 (ADR 0010)
   yolox_m_coco:
     path: data/models/yolox/yolox_m_coco.onnx
     url: https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_m.onnx
@@ -45,6 +58,7 @@ models:
     # COCO 이미지는 Flickr 사진마다 다른 CC 라이선스이고 CC BY-NC 계열이 섞여 있다 (비상업 조건) → review
     training_data: ["COCO 2017 (주석 CC BY 4.0, 이미지는 Flickr 개별 CC 라이선스로 CC BY-NC 계열 포함)"]
     commercial: review
+  # 전신 COCO 17점 (prelabel.yaml models.body → RtmPose). zip에서 end2end.onnx를 꺼낸다
   rtmpose_m_body7:
     path: data/models/rtmpose/rtmpose_m_body7_256x192.onnx
     url: https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/rtmpose-m_simcc-body7_pt-body7_420e-256x192-e48f03d0_20230504.zip
@@ -56,6 +70,9 @@ models:
       - CrowdPose (CC BY 4.0, 학술·비상업 연구용으로 배포)
       - AI Challenger, MPII, sub-JHMDB, Halpe, PoseTrack18 (연구용 배포, 조건 확인 필요)
     commercial: review
+  # OWLv2 오픈 보캐뷸러리 탐지 (prelabel.yaml models.open_vocab, privacy.yaml 오픈 보캐뷸러리
+  # 탐지기).
+  # 고정 리비전 URL이라 파일이 바뀌지 않는다
   owlv2_onnx:
     path: data/models/owlv2/model_quantized.onnx
     url: https://huggingface.co/Xenova/owlv2-base-patch16-ensemble/resolve/3e255bc9bf304b3358a8c1945c0a9514eefe7f10/onnx/model_quantized.onnx
@@ -65,6 +82,7 @@ models:
       - WebLI 의사 라벨 (Google 내부)
       - Objects365 (비상업), Visual Genome (CC BY 4.0) 미세조정 (논문 기준)
     commercial: review
+  # OWLv2 질의 토크나이저 (CLIP BPE, 학습 데이터 없음)
   owlv2_tokenizer:
     path: data/models/owlv2/tokenizer.json
     url: https://huggingface.co/Xenova/owlv2-base-patch16-ensemble/resolve/3e255bc9bf304b3358a8c1945c0a9514eefe7f10/tokenizer.json
@@ -72,6 +90,9 @@ models:
     license: Apache-2.0
     training_data: []
     commercial: allowed
+  # 메트릭 깊이 (prelabel.yaml models.depth → lift3d.DepthLifter). 공개 ONNX가 없어 export
+  # 스크립트로
+  # 변환한다 (make export-models)
   depth_metric_indoor_small:
     path: data/models/depth_anything_v2_metric_indoor_small.onnx
     export: scripts/export_depth_onnx.py

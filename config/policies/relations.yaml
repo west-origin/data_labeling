@@ -1,12 +1,20 @@
 # 관계 도출과 표면 커버리지 정책 (WP9). 관계는 사람이 그리지 않고 이 규칙으로 만든다.
 # 규칙을 바꾸면 `dlp relations run`이 관계를 다시 만든다: 같은 내용은 그대로 두고, 더 이상 나오지 않는
 # 관계는 삭제 레코드로 표시하고, 새 관계만 넣는다. 검수자가 고치거나 지운 관계는 다시 넣지 않는다.
+# 읽는 곳: dlp_relations.policy. 정책 해시(RelationsPolicy.digest, 관계·커버리지 레코드의
+# model_version "relations-<해시>")는 파싱된 값으로 계산하므로 주석은 해시에 영향이 없다.
+# 검수자가 승인·표본 검증한 관계는 규칙에서 빠져도 지우지 않는다 (ADR 0015).
+
+# 정책 파일 형식 버전 (코드가 검사하지 않는다)
 version: 1
 
 # 규칙은 위에서부터 차례로 본다. 한 입력 구간에 여러 규칙이 맞으면 모두 관계를 낸다.
 #   source: hand_state(손 상태 구간) | tool_surface(작용부-표면 접촉 구간, 아래 tool_surface로 계산)
 #   when: 입력 필드 → 허용 값 목록 (null은 값 없음). 모든 조건이 맞아야 한다.
 #   emit: 관계 필드. {필드} 자리에 입력 값을 넣는다. 값이 없는 자리가 있으면 관계를 만들지 않는다.
+# 입력 필드: hand_state는 hand, contact_target_kind, target_id, body_part, grasp_type, role.
+#   tool_surface는 tool_id, tool_part, surface_id. id는 관계의 derived_by가 되며 겹치면 안 된다.
+#   predicate는 계약(dlp_schema RelationPredicate)의 값이어야 한다.
 rules:
   - id: hand_grasp
     source: hand_state
@@ -51,16 +59,18 @@ tool_surface:
   on_distance_m: 0.01         # 평면까지 거리가 이 이하면 접촉 시작 (경계 시각은 이 문턱 기준)
   off_distance_m: 0.02        # 이 거리를 넘으면 접촉 종료 (히스테리시스, 잡음에 의한 끊김 방지)
   inside_margin: 0.05         # 표면 사각형 밖으로 변 길이의 이 비율까지는 안으로 본다
-  min_duration_ms: 100
-  merge_gap_ms: 100
+  min_duration_ms: 100        # 이보다 짧은 접촉 구간은 버린다
+  merge_gap_ms: 100           # 이 이하로 끊긴 접촉 구간은 잇는다
   max_time_gap_ms: 100        # 작용부 샘플과 가장 가까운 표면 샘플의 시각 차 허용
   require_grasp: true         # 손이 도구를 쥔 구간 안에서만 접촉으로 본다
-  confidence: 0.7
+  confidence: 0.7             # 도구-표면 접촉 관계와 커버리지 레코드의 신뢰도
   corner_parts: [corner_0, corner_1, corner_2, corner_3]   # corner_0 원점, 1 가로, 3 세로
 
+# 표면 커버리지: 접촉 중 작용부 경로를 반지름 footprint 원으로 쓸어 덮은 면적 비율 (도구, 표면마다 하나)
 coverage:
   grid_m: 0.01                # 커버리지 격자 크기
   default_footprint_m: 0.05   # 작용부가 표면에 닿는 원의 반지름
+  # 도구 클래스(온톨로지 객체 ID) → 작용부 원 반지름 (m). 없으면 default_footprint_m
   footprint_m:
     rag: 0.06
     sponge: 0.04

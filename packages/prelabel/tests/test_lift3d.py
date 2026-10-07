@@ -1,3 +1,9 @@
+"""`dlp_prelabel.lift3d` 단위 테스트: 깊이 역투영, 추론 간격, 내부 파라미터 비례 조정.
+
+실제 깊이 모델 대신 왼쪽 절반 1 m·오른쪽 절반 2 m인 가짜 깊이(`PlaneDepth`)를 써서 3D 좌표 정답을
+손으로 계산할 수 있게 한다. DB·서비스 불필요.
+"""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -31,9 +37,11 @@ class PlaneDepth:
     """왼쪽 절반 1 m, 오른쪽 절반 2 m인 깊이 맵을 내는 가짜 모델."""
 
     def __init__(self) -> None:
+        """호출 횟수(`calls`)를 0으로 둔다."""
         self.calls = 0
 
     def predict(self, image: Image) -> NDArray[np.float32]:
+        """호출 횟수를 세고 (H, W) 깊이 맵(왼쪽 1 m, 오른쪽 2 m)을 돌려준다."""
         self.calls += 1
         d = np.full(image.shape[:2], 1.0, dtype=np.float32)
         d[:, W // 2 :] = 2.0
@@ -41,6 +49,9 @@ class PlaneDepth:
 
 
 def _tracks() -> list[LabelRecord]:
+    """손 트랙(모든 관절이 (80, 120), 100 ms 간격 10프레임)과 버킷 박스(0 ms에 보임, 500 ms에
+    화면 밖)를 모델 라벨로 만든다.
+    """
     points = tuple(Keypoint(x=80.0, y=120.0, visibility=2) for _ in range(21))
     hand = KeypointTrackPayload(
         entity_id="right_hand",
@@ -74,6 +85,13 @@ def _tracks() -> list[LabelRecord]:
 
 
 def test_lifting_unprojects_with_depth_and_respects_stride() -> None:
+    """frame_stride_ms=200이면 100 ms 간격 프레임 중 0, 200, ..., 800에서만 깊이를 만들고 역투영
+    좌표가 정답과 같은지 본다.
+
+    정답 근거: fx=160, cx=160. 손목 (80, 120)은 왼쪽 절반이라 z=1 → x=(80-160)*1/160=-0.5, y=0.
+    버킷 중심 (220, 120)은 오른쪽 절반이라 z=2 → x=(220-160)*2/160=0.75. 화면 밖 키프레임(500
+    ms)은 빠진다. 정책 hand_points [0, 4, 8] → 부위 wrist, thumb_tip, index_tip.
+    """
     policy = load_policy(ROOT).depth.model_copy(update={"frame_stride_ms": 200})
     frames = [(t, np.zeros((H, W, 3), dtype=np.uint8)) for t in range(0, 1_000, 100)]
     depth = PlaneDepth()
@@ -90,6 +108,9 @@ def test_lifting_unprojects_with_depth_and_respects_stride() -> None:
 
 
 def test_intrinsics_scale_with_resolution_or_fall_back_to_hfov() -> None:
+    """캘리브레이션 해상도(1920x1080)의 절반 프레임이면 fx·fy·cx·cy가 절반이 되고, 캘리브레이션이
+    없으면 화각 90도 근사(fx = 640/2/tan 45도 = 320, 주점은 중앙)가 되는지 본다.
+    """
     calib = CameraIntrinsics(width=1920, height=1080, fx=1000, fy=1000, cx=960, cy=540)
     assert intrinsics_for(calib, 960, 540, 90) == Intrinsics(500, 500, 480, 270)
     approx = intrinsics_for(None, 640, 480, 90)

@@ -5,6 +5,9 @@
 - 도구 작용부 궤적: 도구 클래스이고 part가 온톨로지의 작용부인 trajectory3d.
 - 표면: surface 클래스이고 네 꼭짓점 궤적이 모두 있는 개체. 작용부와 좌표계가 같아야 한다.
 - 같은 (개체, 부위, 좌표계) 궤적이 여럿이면 하나만 쓰고, 커버리지는 (도구, 표면)마다 하나다.
+
+공개: `derive`(전체 계산), `is_derived`(이 모듈 출력인가), `entity_classes`, `class_of`,
+`VERSION_PREFIX`.
 """
 
 from __future__ import annotations
@@ -29,11 +32,14 @@ from dlp_schema.labels import (
 )
 from dlp_schema.ontology import Ontology
 
+# 이 모듈 출력의 model_version 접두사 (뒤에 정책 해시가 붙는다)
 VERSION_PREFIX = "relations-"
 
 
 @dataclass(frozen=True)
 class CoverageDraft:
+    """커버리지 초안: 페이로드, 구간(접촉들의 처음~끝, ms), 신뢰도."""
+
     payload: CoveragePayload
     start_ms: int
     end_ms: int
@@ -42,12 +48,15 @@ class CoverageDraft:
 
 @dataclass
 class Derived:
+    """`derive` 결과: 관계 초안, 커버리지 초안, 계산에 쓴 도구-표면 접촉 구간."""
+
     relations: list[RelationDraft]
     coverage: list[CoverageDraft]
     contacts: list[SurfaceContact]
 
 
 def is_derived(x: LabelRecord) -> bool:
+    """이 모듈(관계 단계)이 만든 모델 레코드인가 (model_version이 `relations-`로 시작)."""
     return x.provenance.source is Source.MODEL and (x.provenance.model_version or "").startswith(
         VERSION_PREFIX
     )
@@ -63,6 +72,7 @@ def _preference(x: LabelRecord) -> tuple[bool, float, str]:
 
 
 def entity_classes(labels: list[LabelRecord]) -> dict[str, str]:
+    """박스·마스크 트랙의 entity_id → class_id (같은 개체가 여럿이면 마지막 것)."""
     out: dict[str, str] = {}
     for x in labels:
         if isinstance(x.payload, BoxTrackPayload | MaskTrackPayload):
@@ -71,12 +81,25 @@ def entity_classes(labels: list[LabelRecord]) -> dict[str, str]:
 
 
 def class_of(entity_id: str, classes: dict[str, str]) -> str:
+    """개체 클래스. 트랙 클래스가 없으면 ID에서 추정한다: `ov_` 접두사와 `_숫자` 접미사를 뗀다."""
     if entity_id in classes:
         return classes[entity_id]
     return re.sub(r"_\d+$", "", entity_id.removeprefix("ov_"))
 
 
 def derive(labels: list[LabelRecord], ontology: Ontology, policy: RelationsPolicy) -> Derived:
+    """현재 라벨 → 관계·커버리지 초안 (DB 없음, 결정적).
+
+    Args:
+        labels: 세션 전체 이력 (여기서 `current_labels`로 현재만 고른다).
+        ontology: 도구 작용부(tool.working_parts)·표면(surface) 정의.
+        policy: 관계 정책.
+
+    Returns:
+        `Derived`. 관계는 손 상태 규칙 + 도구-표면 규칙, 커버리지는 접촉이 있는 (도구, 표면)마다
+            하나.
+    """
+    # 운영 라벨만 (오류 삽입·측정 레코드 제외). 이전 관계·커버리지 출력은 입력에서 뺀다
     current = [x for x in current_labels(labels) if not is_derived(x)]
     classes = entity_classes(current)
     hand_states = [x for x in current if isinstance(x.payload, HandStatePayload)]
@@ -96,10 +119,12 @@ def derive(labels: list[LabelRecord], ontology: Ontology, policy: RelationsPolic
             continue
         key = (p.entity_id, p.part, p.frame.value)
         if obj.tool is not None and p.part in obj.tool.working_parts:
+            # _preference 순으로 처음 본 것(검수된·사람 먼저, 그다음 최신)만 남긴다
             chosen.setdefault(key, x)
         elif (
             obj.surface
             and p.part in policy.tool_surface.corner_parts
+            # 꼭짓점도 (표면, 부위, 좌표계)마다 처음 본 궤적 하나만 쓴다
             and corner_src.setdefault(key, x) is x
         ):
             corners.setdefault((p.entity_id, p.frame.value), {})[p.part] = Track3D.from_payload(p)
@@ -113,6 +138,7 @@ def derive(labels: list[LabelRecord], ontology: Ontology, policy: RelationsPolic
     coverage: list[CoverageDraft] = []
     ts = policy.tool_surface
     for (tool_id, frame), parts_tracks in sorted(tools.items()):
+        # require_grasp: 이 도구를 대상으로 한 손 상태(tool) 구간
         grasped = [
             (x.t_start_ms, x.t_end_ms)
             for x in hand_states
@@ -121,6 +147,7 @@ def derive(labels: list[LabelRecord], ontology: Ontology, policy: RelationsPolic
             and x.payload.target_id == tool_id
         ]
         for (surface_id, surface_frame), parts in sorted(corners.items()):
+            # 좌표계가 다르거나 꼭짓점 네 개가 다 없으면 이 표면은 건너뛴다
             if surface_frame != frame or set(parts) != set(ts.corner_parts):
                 continue
             found = sorted(
