@@ -12,6 +12,7 @@ from dlp_cli import (
     media_cmds,
     models_cmds,
     privacy_cmds,
+    review_cmds,
     schema_cmds,
     sync_cmds,
 )
@@ -44,6 +45,7 @@ def build_parser() -> argparse.ArgumentParser:
     sync_cmds.add_commands(sub)
     privacy_cmds.add_commands(sub)
     models_cmds.add_commands(sub)
+    review_cmds.add_commands(sub)
     return parser
 
 

@@ -1,0 +1,117 @@
+{
+  "$defs": {
+    "ReviewStage": {
+      "description": "프라이버시 검수는 원본 접근 권한자만, 작업 라벨 검수는 블러본만 본다.",
+      "enum": [
+        "privacy",
+        "labeling",
+        "qa"
+      ],
+      "title": "ReviewStage",
+      "type": "string"
+    },
+    "ReviewTaskStatus": {
+      "enum": [
+        "open",
+        "collected"
+      ],
+      "title": "ReviewTaskStatus",
+      "type": "string"
+    },
+    "ReviewTool": {
+      "enum": [
+        "cvat",
+        "label_studio"
+      ],
+      "title": "ReviewTool",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "assignee": {
+      "anyOf": [
+        {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Assignee"
+    },
+    "collected_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Collected At"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "external_id": {
+      "title": "External Id",
+      "type": "string"
+    },
+    "label_kinds": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Label Kinds",
+      "type": "array"
+    },
+    "media_uri": {
+      "title": "Media Uri",
+      "type": "string"
+    },
+    "session_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Session Id",
+      "type": "string"
+    },
+    "stage": {
+      "$ref": "#/$defs/ReviewStage"
+    },
+    "status": {
+      "$ref": "#/$defs/ReviewTaskStatus",
+      "default": "open"
+    },
+    "stream_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Stream Id",
+      "type": "string"
+    },
+    "task_key": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Task Key",
+      "type": "string"
+    },
+    "tool": {
+      "$ref": "#/$defs/ReviewTool"
+    }
+  },
+  "required": [
+    "task_key",
+    "tool",
+    "external_id",
+    "session_id",
+    "stream_id",
+    "stage",
+    "media_uri",
+    "label_kinds",
+    "created_at"
+  ],
+  "title": "ReviewTask",
+  "type": "object"
+}

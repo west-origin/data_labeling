@@ -112,6 +112,24 @@ label_records = sa.Table(
     sa.Index("ix_label_records_session_start", "session_id", "t_start_ms"),
 )
 
+review_tasks = sa.Table(
+    "review_tasks",
+    metadata,
+    sa.Column("task_key", sa.String(128), primary_key=True),
+    sa.Column("tool", sa.String(32), nullable=False),
+    sa.Column("external_id", sa.String(64), nullable=False),
+    sa.Column("session_id", sa.String(128), sa.ForeignKey("sessions.session_id"), nullable=False),
+    sa.Column("stream_id", sa.String(128), nullable=False),
+    sa.Column("stage", sa.String(16), nullable=False),
+    sa.Column("assignee", sa.String(128), nullable=True),
+    sa.Column("media_uri", sa.Text(), nullable=False),
+    sa.Column("label_kinds", Json, nullable=False),
+    sa.Column("status", sa.String(16), nullable=False),
+    sa.Column("created_at", Ts, nullable=False),
+    sa.Column("collected_at", Ts, nullable=True),
+    sa.Index("ix_review_tasks_session", "session_id", "stage"),
+)
+
 dataset_versions = sa.Table(
     "dataset_versions",
     metadata,

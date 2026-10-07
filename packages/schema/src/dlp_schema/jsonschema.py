@@ -13,6 +13,7 @@ from dlp_schema.episode import EpisodeGraph
 from dlp_schema.labels import LabelRecord
 from dlp_schema.migration import OntologyMigration
 from dlp_schema.ontology import Ontology
+from dlp_schema.review import ReviewTask
 from dlp_schema.session import Session
 
 CONTRACTS: dict[str, type[BaseModel]] = {
@@ -23,6 +24,7 @@ CONTRACTS: dict[str, type[BaseModel]] = {
     "ontology": Ontology,
     "ontology_migration": OntologyMigration,
     "platform_config": PlatformConfig,
+    "review_task": ReviewTask,
 }
 
 

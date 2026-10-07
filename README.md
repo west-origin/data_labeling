@@ -12,6 +12,7 @@
 - `packages/media` (`dlp_media`): 세션 수집, PTS 인덱스, 프록시 영상, IMU·장갑 정규화 (`dlp ingest`, `dlp media`)
 - `packages/sync` (`dlp_sync`): 멀티스트림 동기화 (`dlp sync run`, `dlp sync adjust`)
 - `packages/privacy` (`dlp_privacy`): 프라이버시 게이트 (`dlp privacy detect|approve|render`)
+- `packages/review` (`dlp_review`): 검수 도구 연동 (`dlp review create|collect|serve`)
 - `packages/cli` (`dlp`): 명령줄 도구
 - `config/ontology/v1`: 온톨로지 v1 초안, `config/defaults.yaml`: 미결정 사항 기본값
 - `schemas/`: 계약 타입의 JSON Schema (생성 파일)
@@ -34,7 +35,7 @@ make cvat-up        # CVAT (선택, 이미지가 커서 별도)
 | --- | --- | --- |
 | PostgreSQL | localhost:5432 | DB: dlp, labelstudio, prefect, mlflow |
 | SeaweedFS S3 | http://localhost:8333 | 버킷: dlp-raw, dlp-labeling, dlp-datasets, dlp-mlflow |
-| Label Studio | http://localhost:8081 | 계정은 `.env`의 `DLP_LABEL_STUDIO_*` |
+| Label Studio | http://localhost:8081 | 계정은 `.env`의 `DLP_LABEL_STUDIO_*`. `make up`이 API 토큰을 켠다 |
 | Prefect | http://localhost:4200 | |
 | MLflow | http://localhost:5000 | 산출물은 S3 `dlp-mlflow` |
 | CVAT | http://localhost:8080 | `make cvat-up`, 관리자는 `make cvat-superuser` |

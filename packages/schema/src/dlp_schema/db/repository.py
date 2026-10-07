@@ -14,11 +14,13 @@ from dlp_schema.db.tables import (
     dataset_versions,
     label_records,
     ontology_versions,
+    review_tasks,
     sessions,
     streams,
 )
 from dlp_schema.labels import LabelRecord, VerificationState
 from dlp_schema.ontology import Ontology
+from dlp_schema.review import ReviewStage, ReviewTask, ReviewTaskStatus
 from dlp_schema.session import LifecycleState, PrivacyState, Session, Stream, can_transition
 
 
@@ -229,6 +231,44 @@ def record_review(
     )
     if result.rowcount != 1:
         raise KeyError(label_id)
+
+
+# ---------------------------------------------------------------- 검수 작업
+
+
+def insert_review_task(conn: sa.Connection, task: ReviewTask) -> None:
+    data = task.model_dump(mode="json")
+    data["created_at"], data["collected_at"] = task.created_at, task.collected_at
+    conn.execute(review_tasks.insert().values(**data))
+
+
+def get_review_task(conn: sa.Connection, task_key: str) -> ReviewTask:
+    row = (
+        conn.execute(sa.select(review_tasks).where(review_tasks.c.task_key == task_key))
+        .mappings()
+        .one()
+    )
+    return ReviewTask.model_validate(dict(row))
+
+
+def list_review_tasks(
+    conn: sa.Connection, session_id: str, stage: ReviewStage | None = None
+) -> list[ReviewTask]:
+    query = sa.select(review_tasks).where(review_tasks.c.session_id == session_id)
+    if stage is not None:
+        query = query.where(review_tasks.c.stage == stage.value)
+    rows = conn.execute(query.order_by(review_tasks.c.created_at)).mappings().all()
+    return [ReviewTask.model_validate(dict(r)) for r in rows]
+
+
+def mark_review_task_collected(conn: sa.Connection, task_key: str, at: datetime) -> None:
+    result = conn.execute(
+        review_tasks.update()
+        .where(review_tasks.c.task_key == task_key)
+        .values(status=ReviewTaskStatus.COLLECTED.value, collected_at=at)
+    )
+    if result.rowcount != 1:
+        raise KeyError(task_key)
 
 
 # ---------------------------------------------------------------- 데이터셋 버전

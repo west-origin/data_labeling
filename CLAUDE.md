@@ -34,6 +34,8 @@
   `dlp sync run <세션>`, `dlp sync adjust <세션> <스트림> <ms>`. 정책은 `config/policies/sync.yaml`.
 - `packages/privacy/` (`dlp_privacy`) — 프라이버시 게이트: 탐지기(YuNet, QR·바코드, 반사면, 오라클 stub), 추적·보간·유지,
   모자이크 렌더, 검수 우선 구간, 잔여 누락 감사. `dlp privacy detect|approve|render`. 정책은 `config/policies/privacy.yaml`.
+- `packages/review/` (`dlp_review`) — 검수 도구 연동: CVAT·Label Studio 변환기(무손실 왕복), 작업 생성, reconcile(검수 결과 →
+  라벨 이력), 웹훅 수집, 라벨러 워터마크, 역할 경계. `dlp review create|collect|serve|register-webhooks`.
 - `config/` — 온톨로지·정책·기본값 YAML. 코드에 값을 하드코딩하지 않는다.
 - `schemas/` — 생성된 JSON Schema. 직접 편집하지 않는다 (`make schemas`).
 - `services/` — 개발용 docker compose (PostgreSQL, SeaweedFS S3, Label Studio, Prefect, MLflow), CVAT 실행 스크립트.
@@ -49,6 +51,7 @@
 - 모든 datetime은 시간대 정보가 있어야 한다 (UTC 권장).
 - 영상 시각은 PTS 인덱스로만 계산한다. 프레임 번호에 프레임 간격을 곱해 계산하지 않는다.
 - 원본 버킷(`dlp-raw`) URI를 일반 라벨러 경로(블러본, 검수 작업, 내보내기)에 노출하지 않는다.
+  `dlp_review.roles.check_stage_uris`로 검사하고, 라벨러용 URL은 라벨러 자격 증명(라벨링 버킷 읽기 전용)으로 서명한다.
 - 정책 값(비율, 허용 오차, 임계값)은 `config/`에서 읽는다.
 - 새 모델은 공통 `Predictor` 어댑터와 CPU용 stub 구현을 함께 추가한다. CI는 stub으로 돈다.
 - 각 파이프라인 단계는 멱등적인 `dlp <단계>` 하위 명령으로 만든다.

@@ -3,7 +3,7 @@ name = "data-labeling"
 version = "0.1.0"
 description = "1인칭 돌봄 영상 라벨링 플랫폼 (워크스페이스 루트)"
 requires-python = ">=3.12,<3.14"
-dependencies = ["dlp-cli", "dlp-fixtures", "dlp-media", "dlp-privacy", "dlp-schema", "dlp-sync"]
+dependencies = ["dlp-cli", "dlp-fixtures", "dlp-media", "dlp-privacy", "dlp-review", "dlp-schema", "dlp-sync"]
 
 [tool.uv]
 package = false
@@ -16,6 +16,7 @@ dlp-cli = { workspace = true }
 dlp-fixtures = { workspace = true }
 dlp-media = { workspace = true }
 dlp-privacy = { workspace = true }
+dlp-review = { workspace = true }
 dlp-schema = { workspace = true }
 dlp-sync = { workspace = true }
 
@@ -41,7 +42,7 @@ select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "PTH", "N"]
 "**/migrations/versions/*.py" = ["E501"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["dlp_cli", "dlp_fixtures", "dlp_media", "dlp_privacy", "dlp_schema", "dlp_sync"]
+known-first-party = ["dlp_cli", "dlp_fixtures", "dlp_media", "dlp_privacy", "dlp_review", "dlp_schema", "dlp_sync"]
 
 [tool.pyright]
 include = ["packages", "tests"]

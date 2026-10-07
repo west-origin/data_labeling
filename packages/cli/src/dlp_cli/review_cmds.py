@@ -1,0 +1,139 @@
+"""검수 도구 연동 하위 명령."""
+
+from __future__ import annotations
+
+import argparse
+import os
+from datetime import UTC, datetime
+
+import sqlalchemy as sa
+
+from dlp_cli.schema_cmds import database_url
+from dlp_media.storage import S3Store
+from dlp_review.clients import CvatClient, LabelStudioClient
+from dlp_review.collect import collect_task
+from dlp_review.tasks import (
+    PRIVACY_PROJECT,
+    SPATIAL_PROJECT,
+    TEMPORAL_PROJECT,
+    ReviewSetup,
+    create_labeling_tasks,
+    create_privacy_tasks,
+)
+from dlp_review.webhook import CollectRequest, serve
+from dlp_schema import load_config, load_ontology, repo_root
+
+
+def _setup(args: argparse.Namespace) -> ReviewSetup:
+    root = repo_root()
+    buckets = load_config(root / "config" / "defaults.yaml").buckets
+    return ReviewSetup(
+        raw=S3Store.from_env(buckets.raw),
+        labeling=S3Store.from_env(buckets.labeling),
+        labeling_reader=S3Store.labeler_from_env(buckets.labeling),
+        ontology=load_ontology(root / "config" / "ontology" / "v1"),
+        cvat=None if getattr(args, "no_cvat", False) else CvatClient.from_env(),
+        label_studio=None if getattr(args, "no_ls", False) else LabelStudioClient.from_env(),
+    )
+
+
+def _secret() -> str:
+    secret = os.environ.get("DLP_WEBHOOK_SECRET")
+    if not secret:
+        raise SystemExit("DLP_WEBHOOK_SECRET를 설정하세요")
+    return secret
+
+
+def cmd_create(args: argparse.Namespace) -> int:
+    setup = _setup(args)
+    engine = sa.create_engine(database_url(args.url))
+    now = datetime.now(UTC)
+    with engine.begin() as conn:
+        if args.stage == "privacy":
+            tasks = create_privacy_tasks(conn, args.session_id, setup, now)
+        else:
+            if not args.assignee:
+                raise SystemExit("작업 라벨 검수에는 --assignee가 필요합니다")
+            tasks = create_labeling_tasks(conn, args.session_id, setup, args.assignee, now)
+    engine.dispose()
+    for t in tasks:
+        print(f"{t.task_key:<20} {t.stage.value:<9} {t.stream_id:<14} {t.media_uri}")
+    return 0
+
+
+def cmd_collect(args: argparse.Namespace) -> int:
+    engine = sa.create_engine(database_url(args.url))
+    with engine.begin() as conn:
+        outcome = collect_task(conn, args.task_key, _setup(args), args.reviewer, datetime.now(UTC))
+    engine.dispose()
+    if outcome is None:
+        print(f"{args.task_key}: 이미 수집함")
+    else:
+        print(
+            f"{args.task_key}: 승인 {len(outcome.approved)}, 수정 {outcome.corrected}, "
+            f"삭제 {outcome.retracted}, 추가 {outcome.added}"
+        )
+    return 0
+
+
+def cmd_serve(args: argparse.Namespace) -> int:
+    setup = _setup(args)
+    engine = sa.create_engine(database_url(args.url))
+
+    def on_collect(req: CollectRequest) -> None:
+        with engine.begin() as conn:
+            outcome = collect_task(conn, req.task_key, setup, req.reviewer, datetime.now(UTC))
+        print(f"{req.task_key} ← {req.reviewer}: {'이미 수집함' if outcome is None else '수집함'}")
+
+    server = serve(args.port, _secret(), on_collect)
+    print(f"웹훅 대기: http://0.0.0.0:{args.port}/webhooks/{{cvat,label_studio}}")
+    server.serve_forever()
+    return 0
+
+
+def cmd_register(args: argparse.Namespace) -> int:
+    setup = _setup(args)
+    secret = _secret()
+    if setup.cvat is not None:
+        for name in (PRIVACY_PROJECT, SPATIAL_PROJECT):
+            project = setup.cvat.find_project(name)
+            if project:
+                setup.cvat.add_webhook(int(project["id"]), f"{args.url_base}/webhooks/cvat", secret)
+                print(f"CVAT {name}: 웹훅 등록")
+    if setup.label_studio is not None:
+        project = setup.label_studio.find_project(TEMPORAL_PROJECT)
+        if project:
+            setup.label_studio.add_webhook(
+                int(project["id"]), f"{args.url_base}/webhooks/label_studio", secret
+            )
+            print(f"Label Studio {TEMPORAL_PROJECT}: 웹훅 등록")
+    return 0
+
+
+def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:  # pyright: ignore[reportPrivateUsage]
+    review = sub.add_parser("review", help="검수 도구 연동")
+    rsub = review.add_subparsers(dest="review_command", required=True)
+
+    create = rsub.add_parser("create", help="세션의 검수 작업 생성")
+    create.add_argument("session_id")
+    create.add_argument("--stage", choices=["privacy", "labeling"], required=True)
+    create.add_argument("--assignee", help="작업 라벨 검수 담당자 (워터마크에 들어간다)")
+    create.add_argument("--no-cvat", action="store_true")
+    create.add_argument("--no-ls", action="store_true")
+    create.add_argument("--url", help="DB URL (기본: DLP_DATABASE_URL)")
+    create.set_defaults(func=cmd_create)
+
+    collect = rsub.add_parser("collect", help="검수 결과 수집 (예: cvat:42)")
+    collect.add_argument("task_key")
+    collect.add_argument("--reviewer", required=True)
+    collect.add_argument("--url", help="DB URL (기본: DLP_DATABASE_URL)")
+    collect.set_defaults(func=cmd_collect)
+
+    srv = rsub.add_parser("serve", help="웹훅을 받아 끝난 작업을 수집 (DLP_WEBHOOK_SECRET 필요)")
+    srv.add_argument("--port", type=int, default=8765)
+    srv.add_argument("--url", help="DB URL (기본: DLP_DATABASE_URL)")
+    srv.set_defaults(func=cmd_serve)
+
+    reg = rsub.add_parser("register-webhooks", help="검수 프로젝트에 웹훅 등록")
+    reg.add_argument("url_base", help="도구에서 닿는 웹훅 서버 주소 (예: http://host:8765)")
+    reg.set_defaults(func=cmd_register)

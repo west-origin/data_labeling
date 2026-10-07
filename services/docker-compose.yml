@@ -29,6 +29,9 @@ services:
     environment:
       S3_ACCESS_KEY: ${DLP_S3_ACCESS_KEY}
       S3_SECRET_KEY: ${DLP_S3_SECRET_KEY}
+      S3_LABELER_ACCESS_KEY: ${DLP_S3_LABELER_ACCESS_KEY}
+      S3_LABELER_SECRET_KEY: ${DLP_S3_LABELER_SECRET_KEY}
+      LABELING_BUCKET: dlp-labeling
     volumes:
       - seaweedfs-data:/data
       - ./seaweedfs/entrypoint.sh:/entrypoint-dlp.sh:ro
@@ -71,6 +74,7 @@ services:
       POSTGRE_PORT: "5432"
       LABEL_STUDIO_USERNAME: ${DLP_LABEL_STUDIO_USER}
       LABEL_STUDIO_PASSWORD: ${DLP_LABEL_STUDIO_PASSWORD}
+      LABEL_STUDIO_USER_TOKEN: ${DLP_LABEL_STUDIO_TOKEN}
       LABEL_STUDIO_DISABLE_SIGNUP_WITHOUT_LINK: "true"
     volumes:
       - label-studio-data:/label-studio/data

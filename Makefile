@@ -45,6 +45,7 @@ env:
 
 up: env
 	$(COMPOSE) up -d --wait
+	set -a; . ./.env; set +a; python3 services/label-studio/bootstrap.py
 
 down:
 	$(COMPOSE) down

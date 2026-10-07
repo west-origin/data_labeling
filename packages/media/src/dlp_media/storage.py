@@ -115,8 +115,25 @@ class S3Store:
             secret_key=os.environ.get("DLP_S3_SECRET_KEY", "dlp-dev-secret"),
         )
 
+    @classmethod
+    def labeler_from_env(cls, bucket: str) -> S3Store:
+        """일반 라벨러 자격 증명 (라벨링 버킷 읽기 전용). 검수 화면용 서명 URL을 만들 때 쓴다."""
+        return cls(
+            bucket,
+            endpoint_url=os.environ.get("DLP_S3_PUBLIC_ENDPOINT")
+            or os.environ.get("DLP_S3_ENDPOINT", "http://localhost:8333"),
+            access_key=os.environ.get("DLP_S3_LABELER_ACCESS_KEY", "dlp-dev-labeler"),
+            secret_key=os.environ.get("DLP_S3_LABELER_SECRET_KEY", "dlp-dev-labeler-secret"),
+        )
+
     def uri(self, key: str) -> str:
         return f"s3://{self.bucket}/{key}"
+
+    def presign(self, key: str, expires_s: int = 7 * 24 * 3600) -> str:
+        """이 저장소의 자격 증명으로 서명한 읽기 URL."""
+        return self.client.generate_presigned_url(
+            "get_object", Params={"Bucket": self.bucket, "Key": key}, ExpiresIn=expires_s
+        )
 
     def head(self, key: str) -> StoredObject | None:
         try:

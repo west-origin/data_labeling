@@ -1,5 +1,5 @@
 #!/bin/sh
-# 환경 변수로 S3 자격 증명 파일을 만든 뒤 단일 노드 SeaweedFS(마스터+볼륨+파일러+S3)를 띄운다.
+# 환경 변수로 S3 자격 증명 파일을 만든 뒤 (관리자, 라벨러: 라벨링 버킷 읽기 전용) 단일 노드 SeaweedFS(마스터+볼륨+파일러+S3)를 띄운다.
 set -eu
 cat > /tmp/s3.json <<JSON
 {
@@ -8,6 +8,11 @@ cat > /tmp/s3.json <<JSON
       "name": "dlp",
       "credentials": [{"accessKey": "${S3_ACCESS_KEY}", "secretKey": "${S3_SECRET_KEY}"}],
       "actions": ["Admin", "Read", "List", "Tagging", "Write"]
+    },
+    {
+      "name": "labeler",
+      "credentials": [{"accessKey": "${S3_LABELER_ACCESS_KEY}", "secretKey": "${S3_LABELER_SECRET_KEY}"}],
+      "actions": ["Read:${LABELING_BUCKET}", "List:${LABELING_BUCKET}"]
     }
   ]
 }
