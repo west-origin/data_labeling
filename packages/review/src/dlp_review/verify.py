@@ -1,8 +1,9 @@
 """세션 검수 완료 판정 (`dlp review verify`).
 
-생애주기의 prelabeled → human_verified 전이를 맡는다. 이 전이가 있어야 데이터셋 버전에 들어가고
-(dlp_datasets.build는 human_verified 세션만 분할에 넣는다), 운영 지표의 "검증 에피소드"와
-보관 기간 기산점이 정해진다. 전이 시각은 session_lifecycle_events에 남는다 (ADR 0028).
+생애주기의 prelabeled → human_verified 전이를 맡는다. 데이터셋 빌드 후보는 프라이버시 승인 세션
+전체이지만(ADR 0031), 빌드가 split_assigned로 옮기는 것은 이 전이를 거친 세션뿐이다
+(dlp_datasets.build). 운영 지표의 "검증 에피소드"와 원본 보관 만료 알림도 이 상태 이후의 세션만
+본다. 전이 시각은 session_lifecycle_events에 남는다 (ADR 0028).
 
 완료 조건 (모두 만족해야 한다):
 - 블러 검수가 끝나 privacy_state가 approved다 (승인이 풀린 세션은 완료로 보지 않는다).
@@ -105,7 +106,8 @@ def verify_session(conn: sa.Connection, session_id: str, now: datetime, actor: s
 
     now: 전이 시각 (시간대 필수, 운영 지표의 검증 주가 된다). actor: 판정을 실행한 사람·서비스.
 
-    반환: `VerifyResult`. prelabeled 전 단계면 verified=False와 그 이유를 돌려준다 (예외 아님).
+    반환: `VerifyResult`. prelabeled가 아니면(그 전 단계 또는 withdrawn) verified=False와 그 이유를
+    돌려준다 (예외 아님. withdrawn이어도 이유 문장은 "프리라벨 전 단계다"로 나온다).
     부작용: 조건을 모두 만족하면 `set_lifecycle`로 `sessions.lifecycle_state`를 바꾸고
     `session_lifecycle_events`에 전이 기록을 남긴다. 트랜잭션은 호출자가 연다.
     """

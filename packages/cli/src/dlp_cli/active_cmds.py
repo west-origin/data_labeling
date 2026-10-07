@@ -3,7 +3,7 @@
 등록하는 명령:
 - `dlp active rank [--limit] [--json]` — 검수 결과에서 클래스별 수정률(검수자가 고친 비율)을
   계산하고, 그 클래스가 많이 나오는 검수 대기 세션에 높은 점수를 준다. 다음에 검수할 세션
-  순위를 출력한다. 점수 항목은 `dlp_active.select.register_term`으로 플러그인처럼 붙인다.
+  순위를 출력한다. 점수 항목은 `dlp_active.terms.register_term`으로 플러그인처럼 붙인다.
 - `dlp active fiftyone [--limit] [--name] [--cache]` — 고른 세션을 FiftyOne 데이터셋으로 올려
   눈으로 큐레이션한다. 블러본만 쓴다 (라벨링 버킷). FiftyOne은 선택 설치(`make install-curation`).
 

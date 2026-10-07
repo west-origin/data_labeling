@@ -20,7 +20,8 @@ WP6·WP12, ADR 0006·0014·0015·0024. 진입점: `dlp review collect <작업 �
 - `collect_task`: 작업 하나를 수집한다.
 
 부작용 요약 (`collect_task`): `label_records` 삽입, 검수 상태 갱신(`record_review`),
-`review_tasks` 수집 표시, `review_work` 기록(Label Studio), 세션 `privacy_state` 되돌림,
+`review_tasks` 수집 표시, `review_work` 기록(Label Studio, 잰 시간이 0보다 클 때만), 세션
+`privacy_state` 되돌림(승인 상태였을 때만),
 라벨링 버킷의 렌더 기록 무효화, 배정 마무리(`review_assignments`). 블러 검수 작업이면 원본 버킷의
 프록시를 내려받으므로 원본 접근 기록이 남는다 (setup.raw가 감사 저장소일 때, ADR 0020).
 트랜잭션은 호출자가 연다 (잠금이 트랜잭션 끝까지 유지된다).

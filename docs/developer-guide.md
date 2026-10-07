@@ -60,16 +60,16 @@ docs/adr/                     아키텍처 결정 기록 (0001~)
 | 기반 | `dlp_fixtures` | 정답을 아는 합성 데이터 생성기 (테스트용) | `dlp fixtures generate` |
 | 기반 | `dlp_media` | 수집: 원본 저장(불변·멱등), PTS 인덱스, 프록시, IMU·장갑 정규화, 원본 접근 감사 저장소 | `dlp ingest`, `dlp media` |
 | 기반 | `dlp_models` | 모델 레지스트리(해시 확인)와 공용 ONNX 런타임(OWLv2, 메트릭 깊이) | `dlp models` |
-| 단계 | `dlp_sync` | 스트림 시계를 바디캠(마스터 타임라인)에 맞춤 | `dlp sync run|adjust` |
-| 단계 | `dlp_privacy` | 블러 탐지·추적, 승인, 블러본 렌더, 잔여 누락 감사 | `dlp privacy detect|approve|render|audit-sample` |
+| 단계 | `dlp_sync` | 스트림 시계를 바디캠(마스터 타임라인)에 맞춤 | `dlp sync run\|adjust` |
+| 단계 | `dlp_privacy` | 블러 탐지·추적, 승인, 블러본 렌더, 잔여 누락 감사 | `dlp privacy detect\|approve\|render\|audit-sample` |
 | 단계 | `dlp_prelabel` | 자동 프리라벨(손·전신·객체·도구), 3D 궤적, 접촉, 3인칭 착용자 매칭 | `dlp prelabel run` |
 | 단계 | `dlp_relations` | YAML 규칙 엔진 관계 도출, 도구-표면 접촉, 표면 커버리지 | `dlp relations run` |
 | 단계 | `dlp_actions` | 행동 구간: 경계 후보 → VLM 분류(JSON Schema 강제) → 병합 | `dlp actions run` |
 | 단계 | `dlp_review` | CVAT·Label Studio 변환(무손실 왕복), 작업 생성·수거, 웹훅, 검수 운영(배정·표본·QA·품질), 검수 완료 판정 | `dlp review …` |
 | 단계 | `dlp_datasets` | 데이터셋 버전(lakeFS), 작업자·장소 단위 분할, 골든셋, 사용 중지, 계보 | `dlp dataset …`, `dlp lineage` |
 | 단계 | `dlp_eval` | 지표 라이브러리(참조 구현 일치), 골든셋 평가 하네스, 배포 게이트 | `dlp eval golden` |
-| 단계 | `dlp_train` | 재학습 루프, MLflow 기록, 모델 레지스트리, 게이트 후 배포 | `dlp train run|models|approve` |
-| 단계 | `dlp_active` | 수정률 기반 세션 순위, FiftyOne 큐레이션(선택 설치) | `dlp active rank|fiftyone` |
+| 단계 | `dlp_train` | 재학습 루프, MLflow 기록, 모델 레지스트리, 게이트 후 배포 | `dlp train run\|models\|approve` |
+| 단계 | `dlp_active` | 수정률 기반 세션 순위, FiftyOne 큐레이션(선택 설치) | `dlp active rank\|fiftyone` |
 | 단계 | `dlp_export` | COCO·구간 JSON·LeRobot 내보내기 (데이터셋 버전에서만) | `dlp export …` |
 | 단계 | `dlp_ops` | 주간 운영 지표, 원본 접근 월간 감사, 원본 보관 만료 | `dlp ops …` |
 | 진입점 | `dlp_cli` | `dlp` 명령. `<단계>_cmds.py`가 정책·저장소·DB를 엮어 각 패키지 함수를 부른다 (로직 없음) | `dlp …` |
@@ -90,13 +90,19 @@ docs/adr/                     아키텍처 결정 기록 (0001~)
 2. 세션마다
    1. `dlp ingest <매니페스트>` — 원본 불변 저장, 파생 파일, 세션 등록
    2. `dlp sync run <세션>` (필요하면 `dlp sync adjust`)
-   3. `dlp privacy detect <세션>` → `dlp review create --stage privacy --assignee <권한자>` (또는
-      `dlp review plan --privacy`) → CVAT에서 블러 검수 → `dlp review collect`(또는 웹훅 `serve`) →
+   3. `dlp privacy detect <세션>` → `dlp review create <세션> --stage privacy --assignee <권한자>`
+      (또는 `dlp review plan <세션> --privacy --reviewer <권한자>` → `dlp review assign <배정>`) →
+      CVAT에서 블러 검수 → `dlp review collect <작업 키> --reviewer <권한자>`(또는 웹훅 `serve`) →
       `dlp privacy approve` → `dlp privacy render`
    4. `dlp prelabel run` → `dlp relations run` → `dlp actions run --vlm-url …`
-   5. `dlp review plan` → `dlp review assign` → 검수 → 수거 → `dlp review qa` → `dlp review verify`
-3. 데이터셋 이후: `dlp dataset golden --create`(처음 한 번) → `dlp dataset build` →
-   `dlp train run`(→ `dlp train approve`) / `dlp eval golden` → `dlp export coco|intervals|lerobot`
+   5. `dlp review plan <세션> --reviewer …` → 배정마다 `dlp review assign` → 검수 → 수거 →
+      `dlp review qa`(뽑힌 QA 배정도 assign·수거) → `dlp review verify` (열린 배정·작업이 남으면
+      완료가 아니다)
+3. 데이터셋 이후: `dlp dataset golden --domain <도메인> --create <버전>`(도메인마다 처음 한 번,
+   프라이버시 승인 세션에서 제안한 뒤 사람이 처음부터 라벨링) → `dlp dataset build <버전> --golden
+   <골든셋>` → `dlp train run`(→ `deploy: approve` 과제는 `dlp train approve`) / `dlp eval golden` →
+   `dlp export coco|intervals|lerobot`. 빌드 후보는 프라이버시 승인 세션 전체이고, 검수 완료
+   (`human_verified`) 세션만 `split_assigned`로 옮겨진다 (ADR 0031)
 4. 주기적으로: `dlp ops weekly`, `dlp privacy audit-sample` → `dlp ops privacy-audit`,
    `dlp ops audit-report`(매월), `dlp ops retention`, `dlp active rank`
 
@@ -104,8 +110,8 @@ docs/adr/                     아키텍처 결정 기록 (0001~)
 
 | 버킷 | 내용 | 누가 |
 |---|---|---|
-| 원본 (`dlp-raw`) | 원본 영상·센서, 프록시, PTS 인덱스, 검수 우선 구간 | 원본 접근 권한자만. 모든 접근이 감사 기록에 남는다 |
-| 라벨링 (`dlp-labeling`) | 블러본과 렌더 기록(`.render.json`) | 라벨러는 이 버킷 읽기 전용 자격 증명으로 서명된 URL만 |
+| 원본 (`dlp-raw`) | 원본 영상·센서, 프록시, PTS 인덱스, 장갑·IMU 정규화본, 동기화 보고서, 검수 우선 구간, 탐지 표시 | 원본 접근 권한자만. 모든 접근이 감사 기록에 남는다 |
+| 라벨링 (`dlp-labeling`) | 블러본과 렌더 기록(`.render.json`), 검수용 워터마크 영상, 시계열 CSV | 라벨러는 이 버킷 읽기 전용 자격 증명으로 서명된 URL만 |
 | 데이터셋 (`dlp-datasets`) | 데이터셋 스냅샷(lakeFS), 내보내기 결과, 내부 가명 대응표 | 운영자 |
 | MLflow (`dlp-mlflow`) | 학습 산출물 | 재학습 루프 |
 
@@ -115,7 +121,8 @@ docs/adr/                     아키텍처 결정 기록 (0001~)
    마스터 타임라인(바디캠 시계), 공간 라벨(박스·마스크·키포인트·블러·3D 궤적) 키프레임은 그 스트림
    영상의 PTS 시각이다 (ADR 0019). 영상 시각은 PTS 인덱스로만 계산한다.
 2. **라벨 불변** — 덮어쓰지 않는다. 수정은 새 레코드 + `parent_label_id`, 삭제는 `retracted` 레코드.
-   DB 트리거가 UPDATE·DELETE·TRUNCATE를 막는다.
+   DB 트리거가 DELETE·TRUNCATE와, 검수 상태(verification) 밖 열의 UPDATE를 막는다 (검수 상태만
+   `record_review`로 갱신된다).
 3. **운영 라벨** — 다른 단계의 입력은 `dlp_schema.episode.current_labels()`로 고른다. 오류 삽입
    (`seeded_error`)·측정(`measurement`) 레코드와 그 후손은 학습·내보내기에 들어가면 안 된다.
 4. **멱등과 모델 버전** — 각 단계는 다시 돌려도 같은 결과다. 모델 버전에는 가중치 해시, 정책 절 해시,
@@ -125,8 +132,9 @@ docs/adr/                     아키텍처 결정 기록 (0001~)
 5. **원본 접근** — 원본 버킷 저장소는 `dlp_cli.raw_access.raw_store`(DB 없으면 `raw_store_offline`)로만
    만든다. 정적 검사 테스트(`tests/test_raw_access_audited.py`)가 소스 텍스트(주석 포함)를 훑어 우회를
    막으므로, 소스 주석에 원본 버킷 이름을 따옴표로 쓰지 않는다.
-6. **블러본만** — 라벨러·VLM·FiftyOne·내보내기는 `dlp_privacy.runner.assert_render_current`로 지금 승인
-   기준으로 렌더된 블러본인지 확인한 뒤에만 쓴다.
+6. **블러본만** — 라벨러·VLM·FiftyOne·내보내기는 지금 승인 기준으로 렌더된 블러본인지 확인한 뒤에만
+   쓴다 (`dlp_privacy.runner.assert_render_current`, 내보내기는 `expected_render_hash` +
+   `check_fetched`).
 7. **정책 값은 config에서** — 비율·허용 오차·임계값은 `config/policies/*.yaml`, `config/defaults.yaml`.
    정책 해시는 파싱된 값으로 계산하므로 YAML 주석은 해시에 영향이 없다.
 8. **분할 격리** — 골든·학습·검증 사이에 작업자나 장소가 겹치면 안 된다. 분할은 `dlp_datasets.splitter`
@@ -145,8 +153,8 @@ docs/adr/                     아키텍처 결정 기록 (0001~)
 - 마커: 기본(`make check`), `services`(실행 중 서비스), `isolated_env`(LeRobot·PyTorch 일회용 환경).
 - 종단 테스트 `tests/test_end_to_end.py`: 합성 세션 하나를 수집부터 내보내기까지 패키지 함수로 통과시킨다.
 - 지표는 참조 구현과 일치 테스트가 있다 (pycocotools, TrackEval, MS-TCN, ActivityNet, scikit-learn).
-- CI(`.github/workflows/ci.yml`): check 잡(`make check`), services 잡(`make up` → 서비스·격리 테스트),
-  야간 CVAT 잡.
+- CI(`.github/workflows/ci.yml`): check 잡(FiftyOne·모델 가중치까지 받고 `make check`), services 잡
+  (`make up` → 서비스·격리 테스트), CVAT까지 띄우는 services-cvat 잡(매일 예약·수동 실행 때만).
 
 ## 7. 아직 실제 모델이 아닌 곳과 사람이 정할 값
 
@@ -154,8 +162,8 @@ docs/adr/                     아키텍처 결정 기록 (0001~)
 
 - 재학습기: `oracle-stub`만 있다 (객체 YOLOX·RTMPose 미세조정, 접촉 영상 분류기 등이 후보).
 - VLM 서버(OpenAI 호환, GPU면 vLLM, CPU면 llama.cpp): 요청 형식만 테스트했다.
-- 글자 탐지(OCR) 블러 탐지기, 도구 작용부 마스크, 바디캠 6자유도 궤적(Basalt 등), 실제 영상의 작용부·
-  표면 꼭짓점 3D 궤적.
+- 글자 탐지(OCR) 블러 탐지기, 도구 작용부 마스크, 바디캠 6자유도 궤적(Basalt 등), 영상만으로 접촉을
+  판정하는 분류기, 실제 영상의 작용부·표면 꼭짓점 3D 궤적.
 - 배포된 행동 모델을 `dlp actions run`이 아직 불러오지 않는다.
 
 사람이 정할 값: 시간당 인건비(`ops.yaml cost.hourly_cost`), 원본 보관 기간
@@ -164,7 +172,8 @@ docs/adr/                     아키텍처 결정 기록 (0001~)
 
 ## 8. 검수 이력
 
-전체 검수를 네 번 했고 결과는 ADR에 남아 있다: 0015(1차), 0019(2차), 0021~0023(3차), 0024~0029(4차).
+전체 검수를 네 번 했고 결과는 ADR에 남아 있다: 0015(1차), 0019(2차), 0021~0023(3차), 0024~0028(4차).
+0029는 4차 뒤의 검수 완료 판정 결정이다.
 주석 작업 중 발견한 의심 22건은 5차 정정으로 ADR 0030·0031에 남겼다. 아래 9절은 아직 고치지 않은 것이다.
 
 ## 9. 알려진 한계와 고치지 않은 의심
@@ -235,7 +244,8 @@ docs/adr/                     아키텍처 결정 기록 (0001~)
 ### 정리 (위험도 하)
 
 - 중복 코드: 마스터→스트림 시각 변환(`dlp_export.frames.stream_ms`, `dlp_active.curation._stream_ms` →
-  `Stream` 메서드로), `VIDEO_KINDS` 3곳, `_iou` 2곳(`dlp_models.owlv2`, `dlp_prelabel.common`),
+  `Stream` 메서드로), 영상 종류 상수(`VIDEO_KINDS`/`VIDEO`) 10곳, 박스 IoU 4곳(`dlp_models.owlv2._iou`,
+  `dlp_prelabel.common.iou`, `dlp_review.ops.priority._iou`, `dlp_privacy.geometry.Box.iou`),
   `version_tag` 2곳(`dlp_actions.assemble`, `dlp_schema.episode`), P/R/F1 계산 3곳(`dlp_eval.harness`),
   오디오 상관 호출(`dlp_sync.pipeline`), 임시 PostgreSQL `pg` 픽스처 여러 벌(공용 conftest로).
 - 하드코딩: `dataset_cmds` 도메인·온톨로지 기본값, `train_cmds` 과제 선택지, `dlp_media.proxy` 인코더
@@ -246,7 +256,7 @@ docs/adr/                     아키텍처 결정 기록 (0001~)
 - 성능(작은 데이터에선 무해): `dlp_datasets.splitter.assign_splits` O(작업자²×세션),
   `dlp_eval.metrics.detection` O(C·I·N), `dlp_sync.taps.match_taps` O(R²·T²), `dlp_media.pts.nearest`,
   `dlp_privacy.tracker` 보간, `dlp_fixtures` `_wrist_track`.
-- 기타: `dlp_train.tracking`의 `httpx.Client` 미종료, `dlp_review.cmd_register` 웹훅 중복 등록,
+- 기타: `dlp_train.tracking`의 `httpx.Client` 미종료, `dlp_cli.review_cmds.cmd_register` 웹훅 중복 등록,
   `dlp_schema.db.repository` 예외 종류 불일치(`NoResultFound`/`KeyError`), `insert_*`의 datetime 되돌리기
   반복, `dlp_actions.runner.KINDS` 미사용, 이름 혼동(`dlp_review.collect`의 `retracted`,
   `VERIFIED_STATES`/`VERIFIED`, `dlp_media.ingest`의 변수 `ms`).

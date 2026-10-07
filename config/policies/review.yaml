@@ -1,7 +1,7 @@
 # 검수 운영 정책 (WP12). 배정 비율(QA·이중·블라인드·오류 삽입)은 config/defaults.yaml review를 따른다.
 #
 # 읽는 곳: dlp_review.ops.policy.load_policy (Pydantic ReviewOpsPolicy로 검증, 알 수 없는 키는 오류).
-# 쓰는 명령: dlp review create|collect|serve|plan|assign|queue|qa|quality, dlp ops weekly(운영 지표).
+# 쓰는 명령: dlp review create|collect|serve|plan|assign|qa|quality, dlp ops weekly(운영 지표)·audit-report.
 # 이 파일은 파싱한 값으로만 쓰고 텍스트 해시를 만들지 않으므로 주석을 고쳐도 동작이 바뀌지 않는다.
 # 키를 더하거나 이름을 바꾸면 dlp_review/ops/policy.py 모델도 함께 바꿔야 한다.
 

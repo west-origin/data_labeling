@@ -3,7 +3,7 @@
 PyTorch CPU판과 transformers가 필요하다. 저장소 의존성에는 넣지 않고 일회성으로 실행한다:
 
     uv run --no-project --python 3.12 \\
-      --with "torch==2.9.1" --with "transformers==4.57.1" \\
+      --with "torch==2.9.1" --with "transformers==4.57.1" --with onnx \\
       --index https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match \\
       python scripts/export_depth_onnx.py
 
@@ -36,6 +36,7 @@ class Wrapper(torch.nn.Module):
     """ONNX 내보내기용 얇은 래퍼: 출력 객체에서 `predicted_depth` 텐서만 돌려준다."""
 
     def __init__(self, model: torch.nn.Module) -> None:
+        """model: Hugging Face 깊이 추정 모델 (`AutoModelForDepthEstimation`)."""
         super().__init__()
         self.model = model
 

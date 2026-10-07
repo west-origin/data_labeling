@@ -1,9 +1,10 @@
 """높은 신뢰도 라벨의 표본 검수 (합격 판정 샘플링).
 
 묶음(lot) = 같은 세션·라벨 종류·모델 버전의, 신뢰도가 high_confidence 이상인 미검수 모델 라벨.
-묶음마다 max(min_sample, ⌈ratio·N⌉)개를 뽑아 검수한다 (같은 seed면 같은 표본). 표본에서 사람이
-고치거나 지운 비율이 max_defect_ratio 이하이면 묶음의 나머지 미검수 라벨을 "표본 검증"으로 둔다.
-넘으면(또는 검수 전에 표본이 모두 지워져 판정할 표본이 없으면) 묶음 전체를 다시 검수한다.
+묶음마다 min(N, max(min_sample, ⌈ratio·N⌉))개를 뽑아 검수한다 (같은 seed면 같은 표본).
+표본에서 사람이 고치거나 지운 비율이 max_defect_ratio 이하이면 묶음의 나머지 미검수 라벨을
+"표본 검증"으로 둔다. 넘으면(또는 검수 전에 표본이 모두 지워져 판정할 표본이 없으면) 묶음
+전체를 다시 검수한다.
 
 WP12, ADR 0014. 정책은 `config/policies/review.yaml` `sampling` 절.
 
@@ -76,7 +77,7 @@ def draw_sample(lot: Lot, policy: SamplingPolicy, seed: int) -> tuple[str, ...]:
     """묶음에서 표본 라벨 ID를 비복원으로 뽑는다 (정렬해 돌려준다).
 
     시드는 sha256(`"<seed>:<lot.key>"`)의 앞 8바이트라서 같은 seed·같은 묶음이면 늘 같은 표본이다
-    (재계획 멱등). 묶음마다 시드가 달라 묶음끼리 표본 위치가 겹치지 않는다.
+    (재계획 멱등). 묶음 키가 시드에 들어가므로 묶음마다 서로 다른 난수열을 쓴다.
     """
     digest = hashlib.sha256(f"{seed}:{lot.key}".encode()).digest()
     rng = np.random.default_rng(int.from_bytes(digest[:8], "big"))

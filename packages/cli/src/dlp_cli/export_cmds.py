@@ -7,7 +7,8 @@
   읽어 검증한다 (`scripts/lerobot_write.py`, `scripts/lerobot_check.py`).
 
 순서: `dlp dataset build` 뒤 (보통 `dlp review verify`로 검수 완료된 세션).
-내보낸 세션은 생애주기가 `exported`로 전이된다 (ADR 0029).
+내보낸 세션 중 `split_assigned`인 것만 생애주기가 `exported`로 전이된다 (검수 완료 전 세션은
+그대로, ADR 0029).
 
 규칙 (CLAUDE.md, ADR 0018·0021):
 - 기본은 사람이 만들거나 승인·수정·표본 검증한 라벨만 넣는다. 미검수는 `--include-unreviewed` 또는

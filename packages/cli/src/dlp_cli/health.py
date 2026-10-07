@@ -38,7 +38,7 @@ class ServiceCheck:
 
     name: str
     kind: CheckKind
-    target: str  # http: URL, tcp: "host:port"
+    target: str  # http면 URL, tcp면 "host:port"
 
 
 @dataclass(frozen=True)

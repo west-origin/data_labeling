@@ -5,8 +5,8 @@
 
 공개 함수:
 - `raw_store(spec, url, purpose)` — DB 감사 기록(`raw_access_log`)을 남기는 원본 저장소.
-  파이프라인의 기본 경로 (`ingest`, `sync run`, `privacy detect|render`, `prelabel run`, `train
-  run`, `review …`).
+  파이프라인의 기본 경로 (`ingest`, `sync run`, `privacy detect|render|audit-sample`, `prelabel
+  run`, `train run`, `review …`, `ops privacy-audit`).
 - `raw_store_offline(spec, purpose)` — DB 없이 로컬 개발할 때만 (`dlp ingest --no-db`). 기록은 로컬
   JSON Lines 파일(`OFFLINE_LOG`)에 남는다.
 - `raw_bucket()` — 설정(`config/defaults.yaml`)의 원본 버킷 이름.

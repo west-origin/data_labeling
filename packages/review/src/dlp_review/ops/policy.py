@@ -1,7 +1,7 @@
 """검수 운영 정책 (config/policies/review.yaml + config/defaults.yaml review 비율).
 
-WP12, ADR 0014. `dlp review plan|assign|queue|qa|quality|create|collect`와 운영 지표
-(`dlp_ops.metrics`)가 이 로더를 쓴다.
+WP12, ADR 0014. `dlp review plan|assign|qa|quality|create|collect|serve`와 운영 지표
+(`dlp ops weekly`, `dlp ops audit-report`의 `reviewers.privacy`)가 이 로더를 쓴다.
 
 공개 이름:
 - `ErrorType`: 오류 삽입 종류 (boundary_shift, class_swap, blur_deletion).
@@ -170,7 +170,7 @@ class ReviewOpsPolicy(Contract):
     seeding: SeedingPolicy
     reviewers: ReviewersPolicy
     cvat: CvatPolicy
-    ratios: ReviewConfig  # config/defaults.yaml review
+    ratios: ReviewConfig  # 배정 비율 (config/defaults.yaml `review` 절)
 
 
 def load_policy(root: Path) -> ReviewOpsPolicy:

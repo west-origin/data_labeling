@@ -1,7 +1,8 @@
 """미디어·수집 하위 명령 (WP3, ADR 0003).
 
 등록하는 명령:
-- `dlp media probe <파일>` — ffprobe로 컨테이너·스트림 정보를 출력하는 진단 도구.
+- `dlp media probe <파일>` — PyAV(ffprobe와 같은 libav)로 컨테이너·스트림 정보를 출력하는 진단
+  도구.
 - `dlp media pts-index <파일> --out <parquet>` — 영상의 PTS 인덱스를 만든다 (진단·디버그용).
 - `dlp ingest <매니페스트> [--store] [--url] [--no-db]` — 세션 수집: 원본을 원본 버킷에
   불변·멱등으로 올리고, PTS 인덱스·프록시·IMU·장갑 정규화본 같은 파생 파일을 만들고, `sessions`
@@ -39,7 +40,8 @@ def cmd_probe(args: argparse.Namespace) -> int:
     출력한다.
 
     데이터 트랙(`tag=gpmd` 등)은 GoPro GPMF 같은 내장 IMU가 있는지 볼 때 쓴다. 파일은 로컬 경로이며
-    저장소를 거치지 않으므로 감사 기록이 남지 않는다. 반환: 항상 0 (ffprobe 실패는 예외로 끝난다).
+    저장소를 거치지 않으므로 감사 기록이 남지 않는다. 반환: 항상 0 (파일을 열지 못하면 PyAV 예외로
+    끝난다).
     """
     info = probe(Path(args.file))
     print(f"형식 {info.format_name}, 길이 {info.duration_ms} ms, 생성 시각 {info.creation_time}")

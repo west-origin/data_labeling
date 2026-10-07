@@ -95,8 +95,8 @@ def pg() -> Iterator[sa.Engine]:
     """임시 PostgreSQL 데이터베이스 (`make up` 필요).
 
     `DLP_DATABASE_URL`(없으면 개발 기본값) 서버에 `dlp_test_<임의>` DB를 만들고 Alembic 최신까지
-    올린 엔진을 준다. 끝나면 DB를 강제로 지운다. (같은 픽스처가 `test_raw_access_db.py`,
-    `packages/ops/tests/test_ops.py`에도 있다 — 공용 conftest로 모을 리팩토링 후보.)
+    올린 엔진을 준다. 끝나면 DB를 강제로 지운다. (같은 픽스처가 `test_raw_access_db.py`와
+    `packages/*/tests`의 여러 모듈에도 있다 — 공용 conftest로 모을 리팩토링 후보.)
     """
     url = sa.make_url(
         os.environ.get(

@@ -253,7 +253,7 @@ def cmd_privacy_audit(args: argparse.Namespace) -> int:
     기록: `blur_reviewer`에는 검수자 목록의 첫 사람만, `duration_ms`에는 감사한 그 스트림의 길이
     (`dlp_privacy.audit.stream_duration_ms`: 바디캠은 세션 길이, 3인칭 등은 그 스트림의 PTS
     인덱스)를 넣는다. 누락률은 시간당(누락 수 / 길이) 계산에 쓴다. 세션에 그 영상 스트림이 없으면
-    `SystemExit`.
+    `SystemExit`. 바디캠이 아닌데 스트림에 PTS 인덱스가 없으면 `stream_duration_ms`의 `ValueError`.
     부작용: 한 트랜잭션에서 `privacy_audits` INSERT (추가만). 바디캠이 아니면 원본 버킷에서 PTS
     인덱스를 읽는다 (`args.store`, 감사 저장소 → 읽기 기록).
     """

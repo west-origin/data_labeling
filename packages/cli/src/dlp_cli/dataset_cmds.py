@@ -10,8 +10,10 @@
   이후 버전·내보내기에서 자동 제외되고, 이미 들어간 곳을 출력한다.
 - `dlp lineage <세션>` — 세션 계보: 골든셋 → 데이터셋 버전 → 학습 실행 → 내보내기 (읽기 전용).
 
-순서: 검수 완료(`dlp review verify`) 뒤 `dataset golden`(처음 한 번) → `dataset build`
-→ `dlp train run` / `dlp eval golden` / `dlp export …`.
+순서: `dataset golden`(도메인마다 처음 한 번, 프라이버시 승인 세션에서 제안한 뒤 사람이 처음부터
+라벨링) → 검수 완료(`dlp review verify`) → `dataset build` → `dlp train run` / `dlp eval golden` /
+`dlp export …`. 빌드 후보는 프라이버시 승인 세션 전체이고, `split_assigned`로 옮기는 것은 검수
+완료 세션뿐이다 (ADR 0031).
 
 정책 출처: `config/policies/dataset.yaml` (`golden_sessions_per_domain`, `eligible_privacy_state`,
 `include_label_history`, `val_ratio`, `lakefs` 절).

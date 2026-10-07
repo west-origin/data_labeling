@@ -17,8 +17,8 @@
 주의점:
 - CSV의 `time_ms` 열은 마스터 타임라인 ms(ADR 0019)라서 Label Studio 시간 구간 라벨의 시각과
   같은 축이다. 격자 간격은 `config/policies/review.yaml` `media.timeseries_rate_hz`에서 온다.
-- `time_ms`는 소수 한 자리 문자열로 쓴다. 격자 간격(1000/rate_hz)이 정수가 아니면 소수가 생긴다
-  (현재 기본 50 Hz → 20 ms 간격이라 정수).
+- `time_ms`는 늘 소수 한 자리 문자열(예: `20.0`)로 쓴다. 격자 간격(1000/rate_hz)이 정수가 아니면
+  값 자체에 소수가 생긴다 (현재 기본 50 Hz → 20 ms 간격이라 값은 정수, 표기는 `.0`).
 """
 
 from __future__ import annotations

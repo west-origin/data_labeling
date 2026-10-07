@@ -13,7 +13,7 @@
 - `packages/media` (`dlp_media`): 세션 수집, PTS 인덱스, 프록시 영상, IMU·장갑 정규화 (`dlp ingest`, `dlp media`)
 - `packages/sync` (`dlp_sync`): 멀티스트림 동기화 (`dlp sync run`, `dlp sync adjust`)
 - `packages/privacy` (`dlp_privacy`): 프라이버시 게이트 (`dlp privacy detect|approve|render|audit-sample`)
-- `packages/review` (`dlp_review`): 검수 도구 연동·검수 운영 (`dlp review create|collect|verify|serve|plan|assign|queue|qa|quality`)
+- `packages/review` (`dlp_review`): 검수 도구 연동·검수 운영 (`dlp review create|collect|verify|serve|register-webhooks|plan|assign|queue|qa|quality`)
 - `packages/datasets` (`dlp_datasets`): 데이터셋 버전·분할·골든셋·계보 (`dlp dataset`, `dlp lineage`)
 - `packages/models` (`dlp_models`): 모델 레지스트리(`config/models.yaml`, 해시·라이선스)와 공용 ONNX 런타임
 - `packages/prelabel` (`dlp_prelabel`): 자동 프리라벨 (`dlp prelabel run`). 미연동 모델은 `make todo-models`
@@ -34,7 +34,7 @@
 
 ```sh
 make install        # Python 3.12 환경과 의존성
-make models         # 모델 가중치 (YuNet 얼굴, MediaPipe 손·전신·객체). MediaPipe는 libegl1 libgles2 필요
+make models         # 모델 가중치 (YuNet 얼굴, MediaPipe 손·객체, RTMPose 전신, OWLv2 도구). MediaPipe는 libegl1 libgles2 필요
 make export-models  # 공개 ONNX가 없는 모델(메트릭 깊이)을 공식 가중치에서 변환 (일회용 PyTorch 환경)
 make check          # 린트·타입·테스트
 make up             # PostgreSQL, SeaweedFS(S3), Label Studio, Prefect, MLflow, lakeFS

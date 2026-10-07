@@ -1,6 +1,7 @@
 """검수 운영 로직 (WP12): 우선순위 큐, 표본 검수, 블라인드·오류 삽입·이중·QA 배정, 측정.
 
-`dlp review plan|assign|queue|qa|quality` (`dlp_cli.review_cmds`)가 쓴다. 정책은
+`dlp review plan|assign|qa|quality`와 수집(`collect`·`serve`의 배정 마무리)이 쓴다 (`queue`는
+DB 조회만 한다). 정책은
 `config/policies/review.yaml`과 `config/defaults.yaml`의 `review` 절(배정 비율)이다.
 
 모듈 구성:
