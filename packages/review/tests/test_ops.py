@@ -263,7 +263,10 @@ def test_detection_of_seeded_errors(policy: ReviewOpsPolicy, ontology: Ontology)
             "verification": human,
         }
         if e.error_type == "blur_deletion":
-            fixes.append(original.model_copy(update={"label_id": "fix-blur", **base}))
+            # 수집은 오류 삽입 과제에서 새로 그린 레코드 ID에 배정의 사본 접두사를 붙인다
+            fixes.append(
+                original.model_copy(update={"label_id": f"{seed_prefix('g:a')}new-blur", **base})
+            )
         elif e.error_type == "class_swap":
             # 검수자가 원래 값으로 되돌린다
             fixes.append(
@@ -367,3 +370,33 @@ def test_untouched_seed_copies_do_not_count_as_detection(
     [err] = task.injected
     labels = [*truth, *task.labels]
     assert not detected(err, labels, None, 200, 0.5) and not detected(err, labels, "r1", 200, 0.5)
+
+
+def test_blur_deletion_credit_is_scoped_to_assignment_and_stream(
+    policy: ReviewOpsPolicy, ontology: Ontology
+) -> None:
+    """회귀: 같은 세션의 다른 배정·다른 스트림에서 그린 블러로 블러 삭제 발견을 인정하지 않는다."""
+    frames = tuple(BoxKeyframe(t_ms=t, x=1, y=1, w=5, h=5) for t in (0, 500))
+    blur = BlurTrackPayload(target="face", keyframes=frames)
+    span: dict[str, Any] = {"session_id": "gold", "t_end_ms": 500, "stream_id": "bodycam"}
+    truth = [make_label(blur, label_id="gold-blur0", **span)]
+    seeding = policy.seeding.model_copy(update={"errors_per_task": 1, "types": ("blur_deletion",)})
+    task = seed_labels(
+        truth, assignment_id="g:b", ontology=ontology, policy=seeding, seed=0, now=FIXED_TIME
+    )
+    [err] = task.injected
+    assert err.detail["assignment_id"] == "g:b"
+    human = Verification(
+        state=VerificationState.HUMAN_CORRECTED, reviewer_id="r1", reviewed_at=FIXED_TIME
+    )
+    base = {"provenance": Provenance(source=Source.HUMAN), "seeded_error": True,
+            "verification": human}  # fmt: skip
+
+    def drawn(label_id: str, stream: str) -> LabelRecord:
+        return truth[0].model_copy(update={"label_id": label_id, "stream_id": stream, **base})
+
+    other_assignment = drawn(f"{seed_prefix('g:c')}new-1", "bodycam")
+    other_stream = drawn(f"{seed_prefix('g:b')}new-2", "third_person")
+    labels = [*truth, *task.labels, other_assignment, other_stream]
+    assert not detected(err, labels, "r1", 200, 0.5)
+    assert detected(err, [*labels, drawn(f"{seed_prefix('g:b')}new-3", "bodycam")], "r1", 200, 0.5)

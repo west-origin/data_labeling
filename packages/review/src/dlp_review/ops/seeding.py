@@ -10,7 +10,8 @@
 - 발견 판정
   - boundary_shift: 사본을 고친 레코드의 해당 경계가 원래 값에서 detect_tolerance_ms 안
   - class_swap: 사본을 고친 레코드의 클래스·동사가 원래 값
-  - blur_deletion: 검수자가 새로 그린 블러 트랙이 원래 트랙과 시간이 절반 이상 겹치고 대상이 같음
+  - blur_deletion: 그 배정에서 검수자가 새로 그린 블러 트랙(수집 때 ID에 사본 접두사가 붙는다)이
+    원래 트랙과 같은 스트림·대상이고 시간이 blur_overlap 이상 겹침
 """
 
 from __future__ import annotations
@@ -144,7 +145,13 @@ def seed_labels(
         copy = copies[original.label_id]
         if error == "blur_deletion":
             del copies[original.label_id]
-            injected.append(InjectedError(error_type=error, original_label_id=original.label_id))
+            # 발견 판정을 이 배정에서 새로 그린 블러로 한정하려고 배정 ID를 남긴다
+            injected.append(
+                InjectedError(
+                    error_type=error, original_label_id=original.label_id,
+                    detail={"assignment_id": assignment_id},
+                )
+            )  # fmt: skip
             continue
         if error == "boundary_shift":
             lo, hi = policy.boundary_shift_ms
@@ -195,8 +202,14 @@ def detected(
     if error.error_type == "blur_deletion":
         p = original.payload
         assert isinstance(p, BlurTrackPayload)
+        # 같은 스트림, 그리고 이 배정의 수집 결과(사본 접두사 ID)로 새로 그린 블러만 센다
+        # (같은 세션의 다른 배정·스트림에서 그린 블러로 발견을 인정하지 않는다)
+        aid = error.detail.get("assignment_id")
+        prefix = seed_prefix(str(aid)) if aid else None
         return any(
             x.parent_label_id is None
+            and x.stream_id == original.stream_id
+            and (prefix is None or x.label_id.startswith(prefix))
             and isinstance(x.payload, BlurTrackPayload)
             and x.payload.target == p.target
             and _overlap_ratio(original, x) >= blur_overlap

@@ -2,7 +2,12 @@
 
 블러는 강한 모자이크(박스 짧은 변을 blocks_per_box개 이하 블록으로 평균) 또는 단색 채움이다.
 약한 가우시안 블러는 쓰지 않는다. 박스는 라벨 키프레임 시각(정수 ms)과 프레임 시각을 반올림해
-맞춘다. 키프레임이 없는 프레임은 직전 키프레임이 보이는 상태면 그 박스를 쓴다 (재현율 우선).
+맞춘다. 키프레임이 없는 프레임은 검수 화면(CVAT)이 보여 준 것과 같게 정한다.
+- 직전 키프레임이 화면 밖(outside)이면 블러 없음.
+- 직전·다음 키프레임이 모두 보이면 두 박스를 시각 비율로 선형 보간한다.
+- 다음 키프레임이 화면 밖이거나 없으면 직전 박스를 그대로 유지한다.
+검수자는 CVAT에서 키프레임 몇 개만 고치므로 (CVAT는 키프레임만 돌려준다) 보간하지 않으면
+검수 화면과 블러본의 박스가 달라진다.
 """
 
 # PyAV 타입 스텁이 일부 반환 타입을 비워 두어 이 모듈에서만 해당 경고를 끈다.
@@ -36,7 +41,14 @@ class _Track:
         k = self.frames[i]
         if k.outside:
             return None
-        return Box(k.x, k.y, k.w, k.h)
+        box = Box(k.x, k.y, k.w, k.h)
+        if k.t_ms == t_ms or i + 1 >= len(self.frames):
+            return box
+        nxt = self.frames[i + 1]
+        if nxt.outside:
+            return box
+        s = (t_ms - k.t_ms) / (nxt.t_ms - k.t_ms)
+        return box.lerp(Box(nxt.x, nxt.y, nxt.w, nxt.h), s)
 
 
 def blur_tracks(labels: list[LabelRecord]) -> list[_Track]:
@@ -76,20 +88,25 @@ def render_blurred(
     mode: Literal["mosaic", "solid"],
     min_block_px: int,
     blocks_per_box: int,
+    encoder_rate: int,
+    crf: int,
 ) -> int:
-    """블러본을 쓰고 블러를 적용한 (프레임, 박스) 수를 돌려준다."""
+    """블러본을 쓰고 블러를 적용한 (프레임, 박스) 수를 돌려준다.
+
+    encoder_rate·crf는 privacy.yaml render에서 온다.
+    """
     tracks = blur_tracks(labels)
     applied = 0
     with av.open(str(src)) as inp, av.open(str(dst), "w") as out:
         vin = inp.streams.video[0]
         tb = to_fraction(vin.time_base)
-        vout = out.add_stream("libx264", rate=30)
+        vout = out.add_stream("libx264", rate=encoder_rate)
         assert isinstance(vout, av.VideoStream)
         vout.width, vout.height = vin.codec_context.width, vin.codec_context.height
         vout.pix_fmt = "yuv420p"
         vout.time_base = tb
         vout.codec_context.time_base = tb
-        vout.options = {"crf": "18", "preset": "veryfast", "threads": "1"}
+        vout.options = {"crf": str(crf), "preset": "veryfast", "threads": "1"}
         for frame in inp.decode(vin):
             if frame.pts is None:
                 continue

@@ -15,6 +15,7 @@ from datetime import datetime
 
 import sqlalchemy as sa
 
+from dlp_review import roles
 from dlp_review.ops.assign import Loads, PlannedUnit, plan
 from dlp_review.ops.measure import Agreement, DetectionRate, agreement, as_items, prelabel_bias
 from dlp_review.ops.policy import ReviewOpsPolicy
@@ -22,7 +23,13 @@ from dlp_review.ops.priority import Unit, flag_unit, unit_priority, units_for
 from dlp_review.ops.sampling import draw_sample, judge, lots
 from dlp_review.ops.seeding import detected, seed_labels
 from dlp_review.ops.selection import assignment_selector
-from dlp_review.tasks import ReviewSetup, create_labeling_tasks, create_privacy_tasks
+from dlp_review.roles import AccessError as AccessError  # 이전 위치에서 쓰던 이름 (재수출)
+from dlp_review.tasks import (
+    ReviewSetup,
+    create_labeling_tasks,
+    create_privacy_tasks,
+    lock_assignment,
+)
 from dlp_schema.db.repository import (
     get_assignment,
     get_labels,
@@ -98,18 +105,8 @@ def seed_pool(
     return pool
 
 
-class AccessError(RuntimeError):
-    """원본 접근 권한이 없는 사람에게 블러(원본 영상) 검수를 배정하려 했다."""
-
-
 def check_privacy_reviewers(reviewers: Sequence[str | None], policy: ReviewOpsPolicy) -> None:
-    allowed = set(policy.reviewers.privacy)
-    denied = sorted({r or "(미배정)" for r in reviewers} - allowed)
-    if denied:
-        raise AccessError(
-            f"원본 접근 권한자가 아닌 검수자에게 블러 검수를 배정할 수 없습니다: {denied} "
-            "(config/policies/review.yaml reviewers.privacy)"
-        )
+    roles.check_privacy_reviewers(reviewers, policy.reviewers.privacy)
 
 
 def _open_loads(conn: sa.Connection, reviewers: Sequence[str]) -> Loads:
@@ -216,14 +213,22 @@ def create_assignment_tasks(
     policy: ReviewOpsPolicy,
     now: datetime,
 ) -> list[ReviewTask]:
+    """배정의 검수 도구 작업을 만든다. 이미 만들었으면 그 작업을 그대로 돌려준다 (멱등).
+
+    배정 행을 잠가(SELECT … FOR UPDATE) 동시에 실행해도 작업이 두 번 생기지 않는다.
+    """
+    existing = lock_assignment(conn, a.assignment_id)
+    if existing is not None:
+        return existing
     select = assignment_selector(conn, a)
     assignee = a.assignee or "unassigned"
     if a.label_kinds == ("blur_track",):
         check_privacy_reviewers([a.assignee], policy)  # 블러 검수는 원본 영상을 연다
+        assert a.assignee is not None
         tasks = create_privacy_tasks(
-            conn, a.session_id, setup, now, select=select, mode=a.mode,
-            assignment_id=a.assignment_id, assignee=a.assignee,
-            streams={a.stream_id} if a.stream_id else None,
+            conn, a.session_id, setup, now, assignee=a.assignee,
+            privacy_reviewers=policy.reviewers.privacy, select=select, mode=a.mode,
+            assignment_id=a.assignment_id, streams={a.stream_id} if a.stream_id else None,
         )  # fmt: skip
     else:
         tool = ReviewTool.LABEL_STUDIO if a.stream_id is None else ReviewTool.CVAT

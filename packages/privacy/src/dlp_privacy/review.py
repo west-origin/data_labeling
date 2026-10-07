@@ -78,5 +78,41 @@ def track_segments(
     return out
 
 
+def split_gap_segments(
+    stream_id: str,
+    target: str,
+    covered: Iterable[int],
+    frame_times: list[int],
+    *,
+    max_gap_ms: float,
+    priority: int,
+) -> list[ReviewSegment]:
+    """같은 대상의 트랙이 나뉜 틈(블러가 없는 프레임)을 검수 우선 구간(track_gap)으로 낸다.
+
+    트래커는 max_gap_ms보다 오래 끊기면 트랙을 나누고, 그 사이 프레임은 어떤 트랙도 덮지 않아
+    블러가 빠진다. covered: 이 대상 블러가 보이는 프레임 시각. 앞뒤로 블러가 있는 틈 중
+    (다음 블러 시각 - 이전 블러 시각)이 max_gap_ms 이하인 것만 낸다 (멀리 떨어진 다른 등장은 빼고).
+    """
+    shown = set(covered)
+    out: list[ReviewSegment] = []
+    prev: int | None = None  # 직전에 블러가 보인 프레임 시각
+    gap: list[int] = []
+    for t in frame_times:
+        if t not in shown:
+            if prev is not None:
+                gap.append(t)
+            continue
+        if gap and prev is not None and t - prev <= max_gap_ms:
+            out.append(
+                ReviewSegment(
+                    stream_id=stream_id, target=target, reason="track_gap",
+                    t_start_ms=gap[0], t_end_ms=gap[-1], priority=priority,
+                    detail="split",
+                )
+            )  # fmt: skip
+        prev, gap = t, []
+    return out
+
+
 def sort_segments(segments: list[ReviewSegment]) -> list[ReviewSegment]:
     return sorted(segments, key=lambda s: (s.priority, s.t_start_ms, s.target))

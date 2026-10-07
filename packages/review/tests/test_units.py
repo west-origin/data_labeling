@@ -4,15 +4,20 @@ import hashlib
 import hmac
 import json
 import xml.etree.ElementTree as ET
+from functools import partial
 from pathlib import Path
 from typing import Any
 
+import av
 import numpy as np
 import pytest
 
 from dlp_fixtures.actions import generate_action_scenario
-from dlp_fixtures.video import generate_blur_scenario
+from dlp_fixtures.video import TARGET_COLORS, generate_blur_scenario
+from dlp_media.proxy import make_proxy
 from dlp_media.pts import build_pts_index
+from dlp_media.storage import LocalStore, sha256_file
+from dlp_review.collect import drop_retracted
 from dlp_review.cvat import CvatSchema, from_cvat_tracks, label_spec, quantize, to_cvat_tracks
 from dlp_review.labelstudio import (
     LS_KINDS,
@@ -23,13 +28,27 @@ from dlp_review.labelstudio import (
 )
 from dlp_review.reconcile import ReviewedItem, reconcile
 from dlp_review.roles import RawAccessError, check_stage_uris
+from dlp_review.tasks import frame_times, label_scale, video_size
 from dlp_review.timeseries import write_timeseries_csv
 from dlp_review.watermark import burn_watermark
-from dlp_review.webhook import WebhookAuthError, parse_event
-from dlp_schema.labels import ActionPayload, BlurTrackPayload, VerificationState
+from dlp_review.webhook import (
+    CollectRequest,
+    ReviewerMismatchError,
+    WebhookAuthError,
+    parse_event,
+    resolve_reviewer,
+)
+from dlp_schema.episode import current_labels
+from dlp_schema.labels import (
+    ActionPayload,
+    BlurTrackPayload,
+    BoxTrackPayload,
+    GapPayload,
+    VerificationState,
+)
 from dlp_schema.ontology import Ontology, load_ontology
-from dlp_schema.review import ReviewStage
-from dlp_schema.session import StreamKind, SyncMethod
+from dlp_schema.review import ReviewStage, ReviewTask, ReviewTool
+from dlp_schema.session import Stream, StreamKind, SyncMethod
 from dlp_schema.testing import FIXED_TIME, action_payload, make_label, make_session
 from dlp_sync.signals import Series
 
@@ -65,7 +84,9 @@ def test_cvat_roundtrip_offline_including_keypoints() -> None:
     schema = fake_schema(names)
     for labels, times in ((blur.labels, blur.frame_times), ([kp], actions.frame_times)):
         tracks = to_cvat_tracks(labels, times, schema)
-        back = from_cvat_tracks(tracks, times, schema, labels[0].stream_id or "bodycam")
+        back = from_cvat_tracks(
+            tracks, times, schema, labels[0].stream_id or "bodycam", new_box_kind="blur_track"
+        )
         for original, item in zip(labels, back, strict=True):
             q = quantize(original)
             assert item.origin_label_id == original.label_id
@@ -81,7 +102,9 @@ def test_cvat_new_track_and_bad_frame_time() -> None:
     schema = fake_schema(["face", "reflection", "document", "screen", "photo", "shipping_label"])
     [track] = to_cvat_tracks(blur.labels[:1], blur.frame_times, schema)
     track["attributes"] = []  # 검수자가 새로 그린 트랙에는 ID가 없다
-    [item] = from_cvat_tracks([track], blur.frame_times, schema, "bodycam")
+    [item] = from_cvat_tracks(
+        [track], blur.frame_times, schema, "bodycam", new_box_kind="blur_track"
+    )
     assert item.origin_label_id is None and isinstance(item.payload, BlurTrackPayload)
     with pytest.raises(ValueError, match="프레임 시각"):
         to_cvat_tracks(blur.labels[:1], [t + 1 for t in blur.frame_times], schema)
@@ -206,7 +229,7 @@ def test_watermark_marks_frames_and_keeps_pts(tmp_path: Path) -> None:
     blur = generate_blur_scenario(1)
     src, dst = tmp_path / "a.mp4", tmp_path / "b.mp4"
     blur.write(src)
-    burn_watermark(src, dst, "labeler-07 syn-blur", opacity=0.3)
+    burn_watermark(src, dst, "labeler-07 syn-blur", opacity=0.3, crf=20, encoder_rate=30)
     assert build_pts_index(dst).ms.tolist() == build_pts_index(src).ms.tolist()
     import av
 
@@ -247,8 +270,131 @@ def test_webhook_parsing_and_auth() -> None:
     assert parse_event("cvat", {"X-Signature-256": sig2}, in_progress, "s3cret") is None
 
     ls = json.dumps({"action": "ANNOTATION_UPDATED", "task": {"id": 3},
-                     "annotation": {"completed_by": {"email": "a@x"}}}).encode()  # fmt: skip
+                     "annotation": {"completed_by": 12}}).encode()  # fmt: skip
     req = parse_event("label_studio", {"X-DLP-Secret": "s3cret"}, ls, "s3cret")
-    assert req is not None and (req.task_key, req.reviewer) == ("label_studio:3", "a@x")
+    # completed_by는 도구 내부 숫자 ID라 검수자로 쓰지 않는다
+    assert req is not None and (req.task_key, req.reviewer, req.user_id) == (
+        "label_studio:3", None, 12,
+    )  # fmt: skip
     with pytest.raises(WebhookAuthError):
         parse_event("label_studio", {}, ls, "s3cret")
+
+
+def _task(key: str, assignee: str | None) -> ReviewTask:
+    return ReviewTask(
+        task_key=key, tool=ReviewTool.LABEL_STUDIO, external_id="3", session_id="s001",
+        stream_id="bodycam", stage=ReviewStage.LABELING, assignee=assignee,
+        media_uri="s3://dlp-labeling/x.mp4", label_kinds=("action",), created_at=FIXED_TIME,
+    )  # fmt: skip
+
+
+def test_webhook_reviewer_comes_from_task_assignee() -> None:
+    """회귀: Label Studio 숫자 ID를 검수자로 쓰지 않고, 서비스 계정 주석은 무시하고,
+    CVAT 작업 담당자가 다르면 받지 않는다."""
+    task = _task("label_studio:3", "labeler01")
+    assert resolve_reviewer(CollectRequest("label_studio:3", None, 12), task, 1) == "labeler01"
+    assert resolve_reviewer(CollectRequest("label_studio:3", None, 1), task, 1) is None
+    assert resolve_reviewer(CollectRequest("cvat:7", "labeler01"), task) == "labeler01"
+    with pytest.raises(ReviewerMismatchError):
+        resolve_reviewer(CollectRequest("cvat:7", "someone"), task)
+    with pytest.raises(ReviewerMismatchError):
+        resolve_reviewer(CollectRequest("label_studio:3", None, 12), _task("label_studio:3", None))
+
+
+# ---------------------------------------------------------------- 감사 회귀
+
+
+def test_privacy_boxes_land_on_the_downscaled_proxy(tmp_path: Path) -> None:
+    """회귀: 블러 라벨(원본 720p 화소)을 480p 프록시 검수 화면 좌표로 바꿔 보내고 되돌린다."""
+    blur = generate_blur_scenario(3, duration_ms=400, width=1280, height=720)
+    store = LocalStore(tmp_path / "store", "dlp-raw")
+    src = tmp_path / "raw.mp4"
+    blur.write(src)
+    store.put_file("sessions/s/raw/bodycam.mp4", src, sha256_file(src))
+    proxy = tmp_path / "proxy.mp4"
+    make_proxy(src, proxy)
+    stream = Stream(
+        stream_id="bodycam", kind=StreamKind.BODYCAM, uri=store.uri("sessions/s/raw/bodycam.mp4")
+    )
+    work = tmp_path / "work"
+    work.mkdir()
+    scale = label_scale(store, stream, proxy, work)
+    assert video_size(proxy)[1] == 480 and scale[1] == pytest.approx(480 / 720)
+
+    names = ["face", "reflection", "document", "screen", "photo", "shipping_label"]
+    schema = fake_schema(names)
+    times = frame_times(proxy)
+    tracks = to_cvat_tracks(blur.labels, times, schema, scale=scale)
+    # 프록시 화면에서 박스 가운데가 그 대상의 색이다 (원본 좌표 그대로면 다른 곳을 가리킨다)
+    with av.open(str(proxy)) as c:
+        first = next(c.decode(video=0)).to_ndarray(format="rgb24").astype(int)
+    for label, track in zip(blur.labels, tracks, strict=True):
+        assert isinstance(label.payload, BlurTrackPayload)
+        shape = track["shapes"][0]
+        if shape["outside"] or label.payload.target == "reflection":
+            continue
+        x1, y1, x2, y2 = shape["points"]
+        assert x2 <= 854 and y2 <= 480
+        cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
+        color = np.array(TARGET_COLORS[label.payload.target])
+        assert np.abs(first[cy, cx] - color).max() < 30, label.payload.target
+
+    back = from_cvat_tracks(
+        tracks, times, schema, "bodycam", new_box_kind="blur_track", scale=scale
+    )
+    for original, item in zip(blur.labels, back, strict=True):
+        assert item.payload == quantize(original, scale).payload  # 고치지 않으면 승인만 된다
+        assert isinstance(item.payload, BlurTrackPayload)
+        assert isinstance(original.payload, BlurTrackPayload)
+        for a, b in zip(item.payload.keyframes, original.payload.keyframes, strict=True):
+            assert abs(a.x - b.x) < 0.01 and abs(a.w - b.w) < 0.01
+    out = reconcile(blur.labels, back, session_id="syn-blur", ontology_version="1.0.0",
+                    reviewer_id="r", now=FIXED_TIME,
+                    normalize=partial(quantize, scale=scale))  # fmt: skip
+    assert not out.new_records and len(out.approved) == len(blur.labels)
+
+
+def test_new_cvat_box_kind_follows_task_stage() -> None:
+    """회귀: 작업 라벨(객체) 작업에서 새로 그린 박스는 블러가 아니라 객체 박스 트랙이다."""
+    blur = generate_blur_scenario(2)
+    schema = fake_schema(["cup", "reflection"])
+    track = to_cvat_tracks(blur.labels[:1], blur.frame_times, schema)[0]
+    track["label_id"] = schema.label_ids["cup"]
+    track["attributes"] = []
+    [box] = from_cvat_tracks([track], blur.frame_times, schema, "bodycam", new_box_kind="box_track")
+    assert isinstance(box.payload, BoxTrackPayload) and box.payload.class_id == "cup"
+    [priv] = from_cvat_tracks(
+        [track], blur.frame_times, schema, "bodycam", new_box_kind="blur_track"
+    )
+    assert isinstance(priv.payload, BlurTrackPayload)
+
+
+def test_label_studio_relabel_to_another_kind_is_delete_and_add() -> None:
+    """회귀: 행동 구간을 사이 구간으로 바꿔 붙이면 남은 행동 필드 때문에 수집이 깨졌다."""
+    label = make_label(action_payload())
+    [r] = to_ls_results([label])
+    r["value"]["timeserieslabels"] = ["gap.right:unknown"]
+    [item] = from_ls_results([r], {label.label_id})
+    assert item.origin_label_id is None and isinstance(item.payload, GapPayload)
+    out = reconcile([label], [item], session_id="s001", ontology_version="1.0.0",
+                    reviewer_id="r", now=FIXED_TIME)  # fmt: skip
+    assert (out.retracted, out.added) == (1, 1)
+
+
+def test_correction_of_a_retracted_label_does_not_revive_it() -> None:
+    """회귀: 작업을 보낸 뒤 다른 단계가 지운 라벨을 검수자가 고쳐도 되살리지 않는다."""
+    a = make_label(action_payload(action_id="a1"), label_id="a")
+    b = make_label(action_payload(action_id="b1"), label_id="b")
+    gone = a.model_copy(
+        update={"label_id": "a:retracted", "parent_label_id": "a", "retracted": True}
+    )
+    moved = ActionPayload.model_validate(action_payload(action_id="a1", t_contact_start_ms=300))
+    reviewed = [
+        ReviewedItem("a", None, 0, 1000, moved),
+        ReviewedItem("b", None, 0, 1000, b.payload),
+    ]
+    out = reconcile([a, b], reviewed, session_id="s001", ontology_version="1.0.0",
+                    reviewer_id="r", now=FIXED_TIME)  # fmt: skip
+    assert drop_retracted(out, [a, b, gone]) == ["a"]
+    assert out.approved == ["b"] and not out.new_records
+    assert {x.label_id for x in current_labels([a, b, gone, *out.new_records])} == {"b"}

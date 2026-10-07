@@ -33,6 +33,7 @@ from dlp_review.ops.runner import (
     plan_session,
     quality_report,
 )
+from dlp_review.ops.seeding import seed_prefix
 from dlp_review.tasks import ReviewSetup, frame_times, object_key
 from dlp_schema.db.migrate import upgrade
 from dlp_schema.db.repository import (
@@ -40,6 +41,8 @@ from dlp_schema.db.repository import (
     get_labels,
     insert_golden_set,
     insert_labels,
+    insert_review_task,
+    list_review_tasks,
     record_review,
     register_ontology,
 )
@@ -47,7 +50,14 @@ from dlp_schema.episode import current_labels
 from dlp_schema.labels import LabelRecord, Provenance, Source, VerificationState
 from dlp_schema.lineage import GoldenSet
 from dlp_schema.ontology import load_ontology
-from dlp_schema.review import AssignmentStatus, ReviewMode
+from dlp_schema.review import (
+    AssignmentStatus,
+    ReviewMode,
+    ReviewStage,
+    ReviewTask,
+    ReviewTaskStatus,
+    ReviewTool,
+)
 from dlp_schema.session import Domain
 from dlp_schema.testing import FIXED_TIME
 
@@ -143,6 +153,17 @@ def _session(
             record_review(
                 conn, x.label_id, VerificationState.HUMAN_APPROVED, "privacy01", FIXED_TIME
             )
+        insert_review_task(  # 수집까지 끝난 블러 검수 작업 기록 (승인 조건)
+            conn,
+            ReviewTask(
+                task_key=f"cvat:{sid}-offline", tool=ReviewTool.CVAT, external_id="0",
+                session_id=sid, stream_id="bodycam", stage=ReviewStage.PRIVACY,
+                assignee="privacy01",
+                media_uri=f"s3://dlp-raw/sessions/{sid}/derived/bodycam.proxy.mp4",
+                label_kinds=("blur_track",), created_at=FIXED_TIME,
+                status=ReviewTaskStatus.COLLECTED, collected_at=FIXED_TIME,
+            ),
+        )  # fmt: skip
         approve_session(conn, sid)
         render_session(conn, sid, setup.raw, setup.labeling, load_policy(ROOT))
         insert_labels(conn, temporal)
@@ -227,8 +248,14 @@ def test_blind_and_seeded_tasks_through_label_studio(
         [t_std] = create_assignment_tasks(conn, standard, setup, ops, FIXED_TIME)
         [t_blind] = create_assignment_tasks(conn, blind, setup, ops, FIXED_TIME)
         [t_seed] = create_assignment_tasks(conn, seeded, setup, ops, FIXED_TIME)
-    assert ls.latest_results(int(t_blind.external_id)) == []  # 블라인드: 프리라벨 없음
-    sent = ls.latest_results(int(t_seed.external_id))
+    # 회귀: 같은 배정으로 다시 만들면 (배정 행을 잠그고) 이미 만든 작업을 돌려준다
+    with pg.begin() as conn:
+        before = len(list_review_tasks(conn, work_sid))
+        assert create_assignment_tasks(conn, standard, setup, ops, FIXED_TIME) == [t_std]
+        assert len(list_review_tasks(conn, work_sid)) == before
+    assert ls.prediction_results(int(t_blind.external_id)) == []  # 블라인드: 프리라벨 없음
+    assert ls.latest_results(int(t_std.external_id)) is None  # 프리라벨은 사람 주석이 아니다
+    sent = ls.prediction_results(int(t_seed.external_id))
     assert all(r["id"].startswith("seed-") for r in sent)
 
     # 블라인드 검수자: 처음부터 그림 (여기서는 정답의 절반)
@@ -246,6 +273,8 @@ def test_blind_and_seeded_tasks_through_label_studio(
             r = to_ls_results([original])[0] | {"id": r["id"]}
         fixed.append(r)
     _post(ls, t_seed.external_id, fixed)
+    # 표준 검수자: 프리라벨을 고치지 않고 제출한다
+    _post(ls, t_std.external_id, ls.prediction_results(int(t_std.external_id)))
 
     with pg.begin() as conn:
         collect_task(conn, t_std.task_key, setup, standard.assignee or "r1", FIXED_TIME)
@@ -344,6 +373,10 @@ def test_seeded_blur_deletion_through_cvat(
         gold_after = get_labels(conn, gold_sid)
     assert outcome is not None and outcome.added == len(seeded.injected)
     assert all(x.seeded_error for x in outcome.new_records)
+    # 새로 그린 블러는 이 배정의 사본 접두사가 붙어 발견 판정이 이 배정으로 한정된다
+    assert all(
+        x.label_id.startswith(seed_prefix(seeded.assignment_id)) for x in outcome.new_records
+    )
     [rate] = report.detection
     assert (rate.injected, rate.detected) == (len(seeded.injected), len(seeded.injected))
     # 원래 골든 블러 라벨(운영 라벨)은 그대로다

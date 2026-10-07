@@ -25,9 +25,12 @@ KIND_TO_CHANNEL = {
 
 
 def write_timeseries_csv(
-    session: Session, series: dict[str, Series], out: Path, rate_hz: float = 50.0
+    session: Session, series: dict[str, Series], out: Path, *, rate_hz: float
 ) -> int:
-    """series: 스트림 ID → 그 스트림 시계의 시계열. 쓴 행 수를 돌려준다."""
+    """series: 스트림 ID → 그 스트림 시계의 시계열. 쓴 행 수를 돌려준다.
+
+    rate_hz: 격자 간격 (config/policies/review.yaml media.timeseries_rate_hz).
+    """
     grid = np.arange(0, session.duration_ms, 1000 / rate_hz)
     columns = {c: np.zeros(grid.size) for c in CHANNELS}
     for stream in session.streams:

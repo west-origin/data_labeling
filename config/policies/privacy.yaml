@@ -22,10 +22,15 @@ review_score: 0.6             # 트랙 점수가 이보다 낮은 구간은 검�
 tracker:
   iou_match: 0.2              # 같은 트랙으로 이을 최소 IoU
   max_gap_ms: 600             # 이보다 짧은 끊김은 선형 보간으로 메운다
+  # max_gap_ms보다 길게 끊겨 트랙이 나뉘면 그 사이는 블러가 없다. 같은 대상의 블러 없는 틈이
+  # 이 이하이면 track_gap 검수 우선 구간으로 내보낸다 (놓친 프레임일 가능성이 높다).
+  split_review_ms: 5000
 
 render:
   min_block_px: 6             # 모자이크 블록 최소 크기
   blocks_per_box: 5           # 박스 짧은 변을 이 개수 이하의 블록으로 나눈다
+  encoder_rate: 30            # libx264 명목 프레임레이트 (프레임 PTS는 원본 그대로 둔다)
+  crf: 18                     # 블러본 화질 (낮을수록 좋다)
 
 # 검수 우선 구간 종류와 우선순위 (앞이 먼저)
 # trained_model: 배포된 재학습 블러 모델이 낸 구간 (탐지기와 합집합으로 쓰므로 따로 확인한다)
@@ -35,6 +40,8 @@ detectors:
   yunet:
     kind: yunet
     model: yunet              # config/models.yaml 이름
+    nms_threshold: 0.3        # 겹친 얼굴 박스 NMS IoU 문턱
+    top_k: 5000               # NMS 전 후보 수 상한
   codes:
     kind: opencv_codes        # QR·바코드 (가중치 없음) → 송장 근거
     score: 0.9                # 코드는 찾거나 못 찾으므로 고정 신뢰도

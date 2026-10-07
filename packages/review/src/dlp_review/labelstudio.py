@@ -124,6 +124,23 @@ def to_ls_results(labels: list[LabelRecord]) -> list[dict[str, Any]]:
     return out
 
 
+NAME_KINDS = {
+    "action": "action",
+    "gap": "gap",
+    "skill": "segment",
+    "task": "segment",
+    "substep": "segment",
+    "event": "event",
+    "hand": "hand_state",
+    "state": "object_state",
+}
+
+
+def _kind_of(name: str) -> str | None:
+    """라벨 이름이 가리키는 라벨 종류 (알 수 없으면 None)."""
+    return NAME_KINDS.get(name.partition(":")[0].partition(".")[0])
+
+
 def _apply_name(name: str, meta: dict[str, Any], start: int, end: int) -> dict[str, Any]:
     """라벨 이름의 값을 덮어쓰고, 화면에서 새로 그린 구간이면 나머지 필드를 기본값으로 채운다."""
     head, _, key = name.partition(":")
@@ -170,13 +187,18 @@ def from_ls_results(results: list[dict[str, Any]], known_ids: set[str]) -> list[
         texts = (r.get("meta") or {}).get("text") or []
         meta: dict[str, Any] = json.loads(texts[0]) if texts else {}
         stream_id = meta.pop("_stream_id", None)
-        meta = _apply_name(value["timeserieslabels"][0], meta, start, end)
+        name = value["timeserieslabels"][0]
+        origin = r.get("id") if r.get("id") in known_ids else None
+        if "kind" in meta and meta["kind"] != _kind_of(name):
+            # 다른 종류로 바꿔 붙였다 (예: 행동 → 사이 구간): 남은 필드가 새 종류와 맞지 않으므로
+            # 원래 라벨을 지우고 새로 그린 것으로 본다
+            meta, origin = {}, None
+        meta = _apply_name(name, meta, start, end)
         if meta["kind"] == "action":
             # 구간을 옮겼으면 접근 시작·종료를 맞추고 접촉 시각은 새 구간 안으로 넣는다
             meta |= {"t_approach_ms": start, "t_end_ms": end}
             for k in ("t_contact_start_ms", "t_contact_end_ms"):
                 if meta.get(k) is not None:
                     meta[k] = min(max(meta[k], start), end)
-        origin = r.get("id") if r.get("id") in known_ids else None
         items.append(ReviewedItem(origin, stream_id, start, end, adapter.validate_python(meta)))
     return items

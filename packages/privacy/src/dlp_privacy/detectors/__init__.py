@@ -41,7 +41,12 @@ def build_detectors(
             if spec.kind == "opencv_codes":
                 det: FrameDetector = CodeDetector(name, _required(spec.score, name, "score"))
             elif spec.kind == "yunet":
-                det = YuNetFaceDetector(name, *resolve(root, spec.model or "yunet"))
+                det = YuNetFaceDetector(
+                    name,
+                    *resolve(root, spec.model or "yunet"),
+                    nms_threshold=_required(spec.nms_threshold, name, "nms_threshold"),
+                    top_k=int(_required(spec.top_k, name, "top_k")),
+                )
             elif spec.kind == "open_vocab":
                 det = _open_vocab(name, spec, root)
             elif spec.kind == "reflection":
