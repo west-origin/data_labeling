@@ -1,12 +1,17 @@
 """자동 모델의 공통 인터페이스.
 
-모든 모델(탐지, 포즈, SLAM, VLM)은 Predictor를 구현하고 결과를 LabelRecord로 낸다.
-각 모델에는 CPU에서 바로 도는 stub 구현을 함께 두며, CI와 다른 모듈 개발은 stub으로 진행한다.
+클립 하나를 받아 라벨 레코드를 내는 모델 어댑터(프리라벨 어댑터, 배포된 재학습 모델)는
+Predictor를 구현하고 결과를 LabelRecord로 낸다. 각 모델에는 CPU에서 바로 도는 stub 구현을 함께
+두며, CI와 다른 모듈 개발은 stub으로 진행한다.
+프레임 단위 블러 탐지기(`dlp_privacy.detection.FrameDetector`), 행동 VLM
+(`dlp_actions.vlm.VlmClient`), 깊이 모델(`dlp_prelabel.lift3d.DepthModel`)은 단계별 인터페이스를
+따로 둔다.
 
 위치
-    WP8(프리라벨 어댑터)의 공통 계약. `dlp prelabel run`, `dlp privacy detect` 등이 이 인터페이스를
-    따르는 어댑터를 부른다. 실제 모델 가중치는 `config/models.yaml`과
-    `dlp_models` 레지스트리가 관리한다.
+    WP8(프리라벨 어댑터)의 공통 계약. `dlp prelabel run`이 프리라벨 어댑터를, `dlp privacy detect`가
+    배포된 재학습 블러 모델을 이 인터페이스로 부른다. 재학습 루프(`dlp_train`)의 로더도 학습
+    산출물을 Predictor로 읽는다 (`dlp_train.trainers.ModelLoader`).
+    실제 모델 가중치는 `config/models.yaml`과 `dlp_models` 레지스트리가 관리한다.
 
 주요 이름
     - `ModelUnavailableError`: 가중치·라이브러리가 없어 실제 모델을 쓸 수 없을 때 어댑터가 던진다.

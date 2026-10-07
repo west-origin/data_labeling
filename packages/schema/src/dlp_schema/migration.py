@@ -127,7 +127,7 @@ def load_migration(path: Path) -> OntologyMigration:
 def migrate_labels(
     labels: list[LabelRecord], migration: OntologyMigration, now: datetime
 ) -> MigrationResult:
-    """labels: 세션의 라벨 이력 (현재 라벨만 이관한다).
+    """이력의 현재 라벨을 매핑 표대로 새 온톨로지 버전의 새 레코드로 이관한다.
 
     Args:
         labels: 세션의 라벨 이력 (전체 이력이어도 된다. 여러 세션이 섞여도 동작은 하지만

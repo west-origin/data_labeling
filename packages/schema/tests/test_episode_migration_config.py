@@ -122,7 +122,11 @@ def test_migration_renames_and_flags_removed_ids(tmp_path: Path) -> None:
 
 
 def test_migration_moves_only_current_labels_of_history() -> None:
-    """수정·삭제된 레코드를 다시 이관하면 지운 라벨이 되살아난다 (현재 라벨만 이관)."""
+    """이력의 현재 라벨만 이관한다 (수정·삭제된 레코드까지 이관하면 지운 라벨이 되살아나므로).
+
+    v1(수정됨)·fp(삭제됨)·fp-x(삭제 레코드)는 빠지고 v2와 측정 레코드만 이관된다. 측정 표시는
+    그대로 남고, 결과를 넣어 다시 돌리면 아무것도 하지 않는다 (멱등).
+    """
     migration = OntologyMigration(from_version="1.0.0", to_version="1.1.0")
     history = [
         make_label(action_payload(), label_id="v1"),

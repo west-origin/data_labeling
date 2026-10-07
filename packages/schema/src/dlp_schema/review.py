@@ -164,7 +164,9 @@ class ReviewAssignment(Contract):
 #   media_uri: 도구에 올린 영상 URI. 작업 라벨 검수는 블러본(라벨링 버킷)이어야 한다.
 #   label_kinds: 작업에 넣은 라벨 종류.
 #   mode / assignment_id: 검수 방식과 출처 배정 (배정 없이 만든 작업이면 None).
-#   sent_label_ids: Field description 참고 (None이면 예전 작업: 수집 때 현재 라벨과 비교).
+#   sent_label_ids: Field description 참고. None이면 0006 이전 작업이라, 수집
+#     (`dlp_review.collect`)이 배정이 있으면 배정의 라벨 선택 함수로, 배정도 없으면 현재 운영
+#     라벨로 비교 기준을 다시 고른다.
 #   status / created_at / collected_at: 작업 상태와 시각.
 class ReviewTask(Contract):
     task_key: Identifier  # 도구:작업 ID (예: cvat:42)

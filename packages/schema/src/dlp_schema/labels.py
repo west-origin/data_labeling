@@ -197,7 +197,8 @@ class MaskTrackPayload(Contract):
     keyframes: tuple[MaskKeyframe, ...] = Field(min_length=1)
 
 
-# 키포인트 트랙 (손·전신 포즈). skeleton: 골격. hand: hand21이면 필수, 전신이면 None.
+# 키포인트 트랙 (손·전신 포즈). skeleton: 골격. hand: hand21이면 필수, 전신 골격이면 보통 None
+# (전신에 hand가 있어도 검증기는 거부하지 않는다).
 class KeypointTrackPayload(Contract):
     kind: Literal["keypoint_track"] = "keypoint_track"
     entity_id: Identifier

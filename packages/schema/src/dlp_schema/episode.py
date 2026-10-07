@@ -294,7 +294,8 @@ def retractions(
         now: 삭제 레코드 생성 시각 (시간대 필수).
 
     Returns:
-        삭제 레코드 목록. 페이로드·구간·stream_id는 원래 것을 복사하고, 검증 상태는 미검수,
+        삭제 레코드 목록. 페이로드·구간·stream_id(와 seeded_error·measurement 표시)는 원래 것을
+        복사하고, 검증 상태는 미검수,
         confidence는 원래 값(없으면 1.0. 모델 출처 계약상 필수라서). DB에 쓰지 않는다.
     """
     return [

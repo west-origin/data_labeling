@@ -133,6 +133,7 @@ def test_trajectory_and_relation_parts_must_be_known(ontology: Ontology) -> None
     assert {"corner_0", "corner_3", "wrist", "mop_head", "handle"} <= ontology.known_parts()
 
     def traj(part: str | None) -> dict[str, Any]:
+        """table_01의 3D 궤적 페이로드 (part만 바꿔 가며 쓴다)."""
         return {"kind": "trajectory3d", "entity_id": "table_01", "part": part,
                 "frame": "camera", "source_3d": "mono_depth",
                 "samples": [{"t_ms": 0, "x": 0, "y": 0, "z": 1}]}  # fmt: skip

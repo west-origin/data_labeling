@@ -5,7 +5,7 @@
 # 초안(draft)에서는 새 ID를 덧붙이는 것만 같은 버전으로 허용된다 (ADR 0028).
 
 # 동사. 행동(action) 라벨의 verb는 primitive만 쓴다. skill·human_skill은 상위 구간(segment level=skill)의 ref_id.
-# contactless: true면 접촉 없이 하는 동사 (그 행동 라벨에는 접촉 시각이 있으면 안 된다).
+# contactless: true면 접촉 없이 하는 동사 (그 행동 라벨에는 접촉 시작 시각 t_contact_start_ms가 있으면 안 된다).
 # level: primitive(원시 동작, 라벨 단위) | skill(기술) | human_skill(사람 대상 기술, Phase B부터)
 verbs:
   grasp: {level: primitive, ko: 잡다}

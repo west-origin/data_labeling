@@ -11,8 +11,9 @@
     - `DatasetVersion`: 데이터셋 버전 하나.
 
 주의
-    - 분할은 `dlp_datasets.splitter`로만 만든다. 골든·학습·검증 사이에 작업자·장소가 겹치면 안 된다
-      (`config/defaults.yaml golden_set.split_unit`).
+    - 분할은 `dlp_datasets.splitter`로만 만든다. 골든·학습·검증 사이에 작업자·장소가 겹치면 안 된다.
+      분할기는 작업자·장소 둘 다를 늘 누수 방지 단위로 쓴다 (`config/defaults.yaml
+      golden_set.split_unit`에 같은 값이 적혀 있지만 현재 코드는 그 값을 읽지 않는다).
     - 사용 중지(withdraw)된 세션은 `excluded_sessions`에만
       있고 `splits`에는 없어야 한다 (검증기가 강제).
 """

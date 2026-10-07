@@ -74,8 +74,8 @@ def check_label(label: LabelRecord, ontology: Ontology) -> list[str]:
           작용부·파지부인지.
         - blur_track: 프라이버시 대상이 사전에 있는지.
         - hand_state: 접촉 대상 종류·신체 부위·파지 유형·손 역할.
-        - action: 동사가 있고 원시 동작(primitive)인지, 비접촉 동사에 접촉 시각이 없는지, 대상 신체
-          부위, pre/post 상태 속성과 값.
+        - action: 동사가 있고 원시 동작(primitive)인지, 비접촉 동사에 접촉 시작 시각
+          (`t_contact_start_ms`)이 없는지, 대상 신체 부위, pre/post 상태 속성과 값.
         - segment: skill은 기술 동사(primitive가 아닌 동사),
           task는 작업, substep은 어느 작업의 하위 단계.
         - gap: 사이 구간 유형. object_state: 클래스, 그 클래스가 가진 속성인지, 속성 값.

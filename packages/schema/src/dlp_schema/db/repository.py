@@ -2,7 +2,8 @@
 
 역할
     `dlp_schema` 계약 객체를 `db.tables`의 테이블에 넣고 꺼내는 얇은 저장소 계층 (WP1, ADR 0002).
-    모든 패키지가 DB를 이 함수들로만 다룬다 (직접 SQL을 쓰지 않는다).
+    다른 패키지는 계약 객체를 이 함수들로 읽고 쓴다. 예외로 행 잠금(`FOR UPDATE`)만 필요한 곳은
+    `db.tables`로 직접 질의한다 (`dlp_export.runner`, `dlp_review.collect`, `dlp_review.tasks`).
 
 트랜잭션
     모든 함수는 `sa.Connection`을 받아 그 연결에서 실행만 한다. 커밋·롤백은 호출자가 한다
@@ -178,18 +179,17 @@ def insert_session(
 ) -> None:
     """세션과 스트림을 등록하고, 처음 생애주기 상태를 session_lifecycle_events에 남긴다.
 
-    at: 기록 시각 (시간대 필수). 주지 않으면 DB 시각(now())이다.
-
     Args:
         conn: DB 연결.
         session: 등록할 세션 (스트림 포함).
-        at: 처음 생애주기 기록의 시각.
+        at: 처음 생애주기 기록의 시각 (시간대 필수). 주지 않으면 DB 시각(now())이다.
         actor: 등록한 사람·단계 (선택, 예: `ingest`).
 
     Raises:
         sqlalchemy.exc.IntegrityError: 같은 session_id가 이미 있거나 ontology_version이
             등록되지 않았을 때.
-        ValueError: at에 시간대가 없을 때.
+        ValueError: at에 시간대가 없을 때. 이 검사는 sessions·streams 행을 넣은 뒤
+            (`_record_lifecycle`에서) 하므로, 예외를 잡은 호출자는 트랜잭션을 롤백해야 한다.
 
     부작용:
         `sessions` 1행, `streams` 스트림 수만큼 (position = 계약의 순서),
@@ -523,7 +523,7 @@ def record_review(
     Args:
         state: 새 검증 상태 (unreviewed는 거부).
         reviewer_id: 검수자 ID.
-        reviewed_at: 검수 시각 (시간대 필수).
+        reviewed_at: 검수 시각 (시간대 필수. 이 함수는 검사하지 않으므로 호출자가 지킨다).
 
     Raises:
         ValueError: state가 unreviewed일 때.
