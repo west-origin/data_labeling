@@ -3,7 +3,7 @@ name = "dlp-cli"
 version = "0.1.0"
 description = "dlp 명령줄 진입점"
 requires-python = ">=3.12,<3.14"
-dependencies = ["dlp-fixtures", "dlp-media", "dlp-schema", "dlp-sync"]
+dependencies = ["dlp-fixtures", "dlp-media", "dlp-privacy", "dlp-schema", "dlp-sync"]
 
 [project.scripts]
 dlp = "dlp_cli.main:main"

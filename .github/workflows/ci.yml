@@ -20,6 +20,8 @@ jobs:
           enable-cache: true
       - run: uv python install
       - run: make install
+      - name: Fetch model weights (YuNet, 232 KB)
+        run: make models
       - run: make check
 
   services:

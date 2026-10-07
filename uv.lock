@@ -8,6 +8,7 @@ members = [
     "dlp-cli",
     "dlp-fixtures",
     "dlp-media",
+    "dlp-privacy",
     "dlp-schema",
     "dlp-sync",
 ]
@@ -124,6 +125,7 @@ dependencies = [
     { name = "dlp-cli" },
     { name = "dlp-fixtures" },
     { name = "dlp-media" },
+    { name = "dlp-privacy" },
     { name = "dlp-schema" },
     { name = "dlp-sync" },
 ]
@@ -143,6 +145,7 @@ requires-dist = [
     { name = "dlp-cli", editable = "packages/cli" },
     { name = "dlp-fixtures", editable = "packages/fixtures" },
     { name = "dlp-media", editable = "packages/media" },
+    { name = "dlp-privacy", editable = "packages/privacy" },
     { name = "dlp-schema", editable = "packages/schema" },
     { name = "dlp-sync", editable = "packages/sync" },
 ]
@@ -164,6 +167,7 @@ source = { editable = "packages/cli" }
 dependencies = [
     { name = "dlp-fixtures" },
     { name = "dlp-media" },
+    { name = "dlp-privacy" },
     { name = "dlp-schema" },
     { name = "dlp-sync" },
 ]
@@ -172,6 +176,7 @@ dependencies = [
 requires-dist = [
     { name = "dlp-fixtures", editable = "packages/fixtures" },
     { name = "dlp-media", editable = "packages/media" },
+    { name = "dlp-privacy", editable = "packages/privacy" },
     { name = "dlp-schema", editable = "packages/schema" },
     { name = "dlp-sync", editable = "packages/sync" },
 ]
@@ -218,6 +223,29 @@ requires-dist = [
     { name = "h5py", specifier = ">=3.11" },
     { name = "numpy", specifier = ">=2.0" },
     { name = "pyarrow", specifier = ">=18.0" },
+]
+
+[[package]]
+name = "dlp-privacy"
+version = "0.1.0"
+source = { editable = "packages/privacy" }
+dependencies = [
+    { name = "av" },
+    { name = "dlp-media" },
+    { name = "dlp-schema" },
+    { name = "numpy" },
+    { name = "opencv-python-headless" },
+    { name = "pyyaml" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "av", specifier = ">=14.0" },
+    { name = "dlp-media", editable = "packages/media" },
+    { name = "dlp-schema", editable = "packages/schema" },
+    { name = "numpy", specifier = ">=2.0" },
+    { name = "opencv-python-headless", specifier = ">=4.10" },
+    { name = "pyyaml", specifier = ">=6.0" },
 ]
 
 [[package]]

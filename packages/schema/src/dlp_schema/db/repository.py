@@ -19,7 +19,7 @@ from dlp_schema.db.tables import (
 )
 from dlp_schema.labels import LabelRecord, VerificationState
 from dlp_schema.ontology import Ontology
-from dlp_schema.session import LifecycleState, Session, Stream, can_transition
+from dlp_schema.session import LifecycleState, PrivacyState, Session, Stream, can_transition
 
 
 class TransitionError(ValueError):
@@ -107,6 +107,16 @@ def set_lifecycle(conn: sa.Connection, session_id: str, target: LifecycleState) 
         .where(sessions.c.session_id == session_id)
         .values(lifecycle_state=target.value)
     )
+
+
+def set_privacy_state(conn: sa.Connection, session_id: str, state: PrivacyState) -> None:
+    result = conn.execute(
+        sessions.update()
+        .where(sessions.c.session_id == session_id)
+        .values(privacy_state=state.value)
+    )
+    if result.rowcount != 1:
+        raise KeyError(session_id)
 
 
 def update_stream_sync(conn: sa.Connection, session_id: str, stream: Stream) -> None:

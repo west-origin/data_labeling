@@ -11,6 +11,7 @@
 - `packages/fixtures` (`dlp_fixtures`): 정답을 아는 합성 데이터 생성기 (`dlp fixtures generate`)
 - `packages/media` (`dlp_media`): 세션 수집, PTS 인덱스, 프록시 영상, IMU·장갑 정규화 (`dlp ingest`, `dlp media`)
 - `packages/sync` (`dlp_sync`): 멀티스트림 동기화 (`dlp sync run`, `dlp sync adjust`)
+- `packages/privacy` (`dlp_privacy`): 프라이버시 게이트 (`dlp privacy detect|approve|render`)
 - `packages/cli` (`dlp`): 명령줄 도구
 - `config/ontology/v1`: 온톨로지 v1 초안, `config/defaults.yaml`: 미결정 사항 기본값
 - `schemas/`: 계약 타입의 JSON Schema (생성 파일)
@@ -21,6 +22,7 @@
 
 ```sh
 make install        # Python 3.12 환경과 의존성
+make models         # 모델 가중치 (YuNet 얼굴 탐지)
 make check          # 린트·타입·테스트
 make up             # PostgreSQL, SeaweedFS(S3), Label Studio, Prefect, MLflow
 make health         # 헬스체크

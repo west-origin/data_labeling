@@ -1,0 +1,43 @@
+# 프라이버시 게이트 정책 (WP5). 유지 시간·렌더 방식·오디오 제거는 config/defaults.yaml privacy를 따른다.
+version: 1
+
+# 대상별 박스 여유(박스 크기 대비 비율)와 쓰는 탐지기. 탐지기는 아래 detectors에 정의한다.
+targets:
+  face: {margin: 0.2, detectors: [yunet]}
+  reflection: {margin: 0.2, detectors: [reflection]}
+  shipping_label: {margin: 0.05, detectors: [codes, open_vocab]}
+  document: {margin: 0.05, detectors: [open_vocab]}
+  screen: {margin: 0.05, detectors: [open_vocab]}
+  photo: {margin: 0.05, detectors: [open_vocab]}
+  address_sign: {margin: 0.05, detectors: [open_vocab]}
+
+# 재현율 우선: 낮은 문턱으로 잡고 사람이 오탐을 지운다
+detection_threshold: 0.3
+review_score: 0.6             # 트랙 점수가 이보다 낮은 구간은 검수 우선 구간
+
+tracker:
+  iou_match: 0.2              # 같은 트랙으로 이을 최소 IoU
+  max_gap_ms: 600             # 이보다 짧은 끊김은 선형 보간으로 메운다
+
+render:
+  min_block_px: 6             # 모자이크 블록 최소 크기
+  blocks_per_box: 5           # 박스 짧은 변을 이 개수 이하의 블록으로 나눈다
+
+# 검수 우선 구간 종류와 우선순위 (앞이 먼저)
+review_priority: [no_detector, track_gap, disagreement, low_confidence, reflection]
+
+detectors:
+  yunet:
+    kind: yunet
+    model_path: data/models/face_detection_yunet_2023mar.onnx
+    model_sha256: 8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4
+    model_url: https://media.githubusercontent.com/media/opencv/opencv_zoo/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx
+  codes:
+    kind: opencv_codes        # QR·바코드 (가중치 없음) → 송장 근거
+  reflection:
+    kind: reflection          # 반사면 영역 안에서 얼굴 탐지 문턱을 낮춘다
+    region_detector: open_vocab
+    face_detector: yunet
+    threshold_scale: 0.5
+  open_vocab:
+    kind: unavailable         # Grounding DINO·OWLv2는 GPU 환경에서 연동 (WP8)
