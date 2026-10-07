@@ -17,7 +17,7 @@ from dlp_media.audit import current_actor
 from dlp_ops import audit as audit_mod
 from dlp_ops import metrics as metrics_mod
 from dlp_ops.policy import load_policy
-from dlp_ops.retention import retention_status
+from dlp_ops.retention import RETENTION_NOTE, retention_status
 from dlp_review.ops.policy import load_policy as load_review_policy
 from dlp_schema import load_config, repo_root
 from dlp_schema.db.repository import (
@@ -27,7 +27,6 @@ from dlp_schema.db.repository import (
     insert_retention_decision,
     insert_review_work,
 )
-from dlp_schema.labels import VerificationState
 from dlp_schema.ops import PrivacyAuditRecord, RetentionDecision, ReviewWork
 
 
@@ -92,6 +91,8 @@ def cmd_retention(args: argparse.Namespace) -> int:
     for i in items:
         if i.alert or args.all:
             print(f"  [{i.status}] {i.session_id} 만료 {i.expires_on or '-'} {i.note}")
+    if any(i.status in ("expired", "withdrawn", "delete_decided") for i in items):
+        print(f"참고: {RETENTION_NOTE}")
     return 0
 
 
@@ -114,7 +115,17 @@ def cmd_retention_decide(args: argparse.Namespace) -> int:
     return 0
 
 
+def _aware(text: str) -> datetime:
+    """ISO 시각. 시간대가 없으면 UTC로 본다."""
+    t = datetime.fromisoformat(text)
+    return t if t.tzinfo is not None else t.replace(tzinfo=UTC)
+
+
 def cmd_log_work(args: argparse.Namespace) -> int:
+    # 검수한 시각(--at)의 주에 센다. 나중에 몰아서 기록해도 그 주의 지표에 들어간다
+    at = _aware(args.at) if args.at else datetime.now(UTC)
+    if at > datetime.now(UTC):
+        raise SystemExit(f"--at이 미래입니다: {at.isoformat()}")
     engine = _engine(args)
     with engine.begin() as conn:
         session = get_session(conn, args.session_id)
@@ -129,7 +140,7 @@ def cmd_log_work(args: argparse.Namespace) -> int:
                 seconds=args.minutes * 60,
                 video_ms=args.video_ms or session.duration_ms,
                 source="manual" if args.task_key is None else "cvat",
-                recorded_at=datetime.now(UTC),
+                recorded_at=at,
             ),
         )
     engine.dispose()
@@ -140,18 +151,17 @@ def cmd_privacy_audit(args: argparse.Namespace) -> int:
     engine = _engine(args)
     with engine.begin() as conn:
         session = get_session(conn, args.session_id)
-        blur = [
-            x
-            for x in get_labels(conn, args.session_id, kinds=["blur_track"])
-            if x.stream_id == args.stream_id
-            and x.verification.state
-            in (VerificationState.HUMAN_APPROVED, VerificationState.HUMAN_CORRECTED)
-            and x.verification.reviewer_id
-        ]
-        if not blur:
+        # 운영 현재 블러 트랙의 검수자 모두 (수정 이력 전체가 아니라 지금 렌더에 쓰인 트랙)
+        reviewers = audit_mod.blur_reviewers(get_labels(conn, args.session_id), args.stream_id)
+        if not reviewers:
             raise SystemExit(f"{args.session_id}/{args.stream_id}: 사람이 검수한 블러가 없습니다")
-        reviewer = Counter(x.verification.reviewer_id for x in blur).most_common(1)[0][0]
-        assert reviewer is not None
+        auditor = args.auditor or current_actor()
+        if auditor in reviewers:
+            raise SystemExit(
+                f"감사자 {auditor}는 이 스트림의 블러 검수자입니다 ({', '.join(reviewers)}). "
+                "다른 사람이 감사합니다"
+            )
+        reviewer = reviewers[0]
         insert_privacy_audit(
             conn,
             PrivacyAuditRecord(
@@ -160,7 +170,7 @@ def cmd_privacy_audit(args: argparse.Namespace) -> int:
                 stream_id=args.stream_id,
                 duration_ms=session.duration_ms,
                 misses=args.misses,
-                auditor=args.auditor or current_actor(),
+                auditor=auditor,
                 blur_reviewer=reviewer,
                 audited_at=datetime.now(UTC),
             ),
@@ -203,6 +213,9 @@ def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
     lw.add_argument("--minutes", type=float, required=True)
     lw.add_argument("--video-ms", type=int, help="검수한 영상 길이 (기본: 세션 길이)")
     lw.add_argument("--task-key")
+    lw.add_argument(
+        "--at", help="검수한 시각 (ISO 8601, 시간대 없으면 UTC; 기본: 지금). 그 주의 지표에 센다"
+    )
     lw.add_argument("--url")
     lw.set_defaults(func=cmd_log_work)
     pa = osub.add_parser("privacy-audit", help="잔여 블러 누락 감사 결과 기록")

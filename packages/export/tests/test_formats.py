@@ -16,6 +16,7 @@ from dlp_export.coco import write_coco
 from dlp_export.intervals import write_intervals
 from dlp_export.lerobot import Vocab, build_episode, state_names
 from dlp_export.policy import ExportPolicy
+from dlp_export.pseudonym import Pseudonymizer
 from dlp_export.source import (
     ExportError,
     ExportSession,
@@ -62,8 +63,9 @@ def test_interval_json_validates_against_published_schema(
     scenario: Scenario, policy: ExportPolicy, tmp_path: Path
 ) -> None:
     counts = write_intervals(
-        source(scenario, policy), policy, tmp_path, export_id="e1", now=FIXED_TIME
-    )
+        source(scenario, policy), policy, tmp_path, export_id="e1", now=FIXED_TIME,
+        ids=Pseudonymizer.for_export("e1", b"secret", enabled=True),
+    )  # fmt: skip
     assert counts == {"s1": 4}  # 손 상태, 관계, 행동, 작업 구간 (공간 라벨은 COCO·LeRobot으로)
     data = json.loads((tmp_path / "intervals" / "s1.json").read_text())
     schema = json.loads((ROOT / "schemas" / "export_intervals.schema.json").read_text())
@@ -75,6 +77,28 @@ def test_interval_json_validates_against_published_schema(
     ]  # fmt: skip
     text = (tmp_path / "intervals" / "s1.json").read_text()
     assert "reviewer-7" not in text  # 검수자 ID는 내보내지 않는다
+    # 작업자·장소는 이 내보내기의 가명
+    ids = Pseudonymizer.for_export("e1", b"secret", enabled=True)
+    assert (f.worker_id, f.site_id) == (ids.worker("w01"), ids.site("site01"))
+    assert "w01" not in text and "site01" not in text
+
+
+def test_pseudonyms_are_per_export() -> None:
+    a = Pseudonymizer.for_export("export-a", b"secret", enabled=True)
+    b = Pseudonymizer.for_export("export-b", b"secret", enabled=True)
+    assert a.worker("w1") == a.worker("w1") != a.worker("w2")  # 한 내보내기 안에서 일관
+    assert a.worker("w1") != b.worker("w1")  # 내보내기 사이에서는 이어지지 않는다
+    assert a.worker("w1") != a.site("w1")  # 종류가 다르면 다르다
+    # 비밀값을 아는 내부만 다시 계산할 수 있다
+    assert Pseudonymizer.for_export("export-a", b"secret", enabled=True).worker("w1") == a.worker(
+        "w1"
+    )
+    assert Pseudonymizer.for_export("export-a", b"other", enabled=True).worker("w1") != a.worker(
+        "w1"
+    )
+    # 비밀값이 없으면 실행마다 임의 값
+    assert Pseudonymizer.for_export("export-a", None, enabled=True).worker("w1") != a.worker("w1")
+    assert Pseudonymizer.for_export("export-a", None, enabled=False).worker("w1") == "w1"
 
 
 def test_coco_loads_with_pycocotools(
@@ -106,6 +130,50 @@ def test_coco_loads_with_pycocotools(
     with contextlib.redirect_stdout(io.StringIO()):
         ev = COCOeval(coco, coco.loadRes(dets), "bbox")
         ev.params.catIds = [cup]
+        ev.evaluate()
+        ev.accumulate()
+        ev.summarize()
+    assert ev.stats[0] == pytest.approx(1.0)
+
+
+def test_coco_person_boxes_work_with_keypoint_eval(
+    scenario: Scenario, policy: ExportPolicy, ontology: Ontology, tmp_path: Path
+) -> None:
+    """객체 person 범주에는 coco17 키포인트가 붙는다. 박스만의 person 주석도 keypoints(0)와
+    num_keypoints 0을 가져야 COCO 키포인트 평가가 돈다."""
+    from dlp_schema.testing import make_label
+
+    t = scenario.times
+    person_box = make_label(
+        {"kind": "box_track", "entity_id": "person_1", "class_id": "person",
+         "keyframes": [{"t_ms": t[2], "x": 2, "y": 2, "w": 40, "h": 40}]},
+        label_id="s1-person", session_id="s1", stream_id="bodycam", t_start_ms=t[2],
+        t_end_ms=t[2],
+    )  # fmt: skip
+    body = make_label(
+        {"kind": "keypoint_track", "entity_id": "person_1", "skeleton": "coco17",
+         "keyframes": [{"t_ms": t[2], "points": [{"x": 5 + i, "y": 6 + i, "visibility": 2}
+                                                 for i in range(17)]}]},
+        label_id="s1-body", session_id="s1", stream_id="bodycam", t_start_ms=t[2],
+        t_end_ms=t[2],
+    )  # fmt: skip
+    sc = Scenario(scenario.session, [person_box, body], scenario.times, scenario.labeling)
+    out = tmp_path / "out"
+    write_coco(
+        source(sc, policy), policy, ontology, sc.labeling, out, tmp_path / "w",
+        export_id="e1", now=FIXED_TIME,
+    )  # fmt: skip
+    with contextlib.redirect_stdout(io.StringIO()):
+        coco: Any = COCO(str(out / "coco" / "annotations.json"))
+    person = coco.getCatIds(catNms=["person"])
+    assert len(person) == 1 and len(coco.loadCats(person)[0]["keypoints"]) == 17
+    anns = coco.loadAnns(coco.getAnnIds(catIds=person))
+    box_only = next(a for a in anns if a["label_id"] == "s1-person")
+    assert box_only["num_keypoints"] == 0 and box_only["keypoints"] == [0] * 51
+    dets = [{**a, "score": 1.0} for a in anns if a["num_keypoints"] > 0]
+    with contextlib.redirect_stdout(io.StringIO()):
+        ev = COCOeval(coco, coco.loadRes(dets), "keypoints")
+        ev.params.catIds = person
         ev.evaluate()
         ev.accumulate()
         ev.summarize()
@@ -172,6 +240,33 @@ def test_lerobot_frame_features(
     assert ep.tasks[at(800)] == "cleaning"  # 작업 구간 밖은 도메인
     assert list(ep.tool_surface_contact[at(800)]) == [-1, -1]  # 쥔 도구 없음
     assert np.array_equal(ep.action[:-1], ep.state[1:])
+    # 실제로 프레임 특징에 들어간 라벨만 쓴 라벨로 센다 (박스는 LeRobot 특징이 아니다)
+    assert ep.used == {f"s1-{k}" for k in ("kp", "hs", "tip", "tsc", "act", "task")}
+
+
+def test_lerobot_counts_only_written_labels(
+    scenario: Scenario, policy: ExportPolicy, ontology: Ontology, tmp_path: Path
+) -> None:
+    """LeRobot 종류라도 어느 프레임에도 쓰지 않은 라벨(영상 밖 시각, 다른 스트림)은 세지 않는다."""
+    from dlp_schema.testing import make_label
+
+    video = tmp_path / "v.mp4"
+    scenario.labeling.get_file("sessions/s1/blurred/bodycam.mp4", video)
+    labels = source(scenario, policy).sessions[0].labels
+    late = make_label(
+        {"kind": "action", "action_id": "late", "hand": "left", "verb": "carry",
+         "t_approach_ms": 10_000_000, "t_end_ms": 10_000_500},
+        label_id="s1-late", session_id="s1", t_start_ms=10_000_000, t_end_ms=10_000_500,
+    )  # fmt: skip
+    other = next(x for x in labels if x.label_id == "s1-kp").model_copy(
+        update={"label_id": "s1-kp-third", "stream_id": "third"}
+    )
+    ep = build_episode(
+        scenario.session, scenario.session.streams[0], build_pts_index(video), (64, 48),
+        [*labels, late, other], Vocab.from_ontology(ontology), policy.lerobot,
+    )  # fmt: skip
+    assert "s1-late" not in ep.used and "s1-kp-third" not in ep.used
+    assert "s1-act" in ep.used
 
 
 def test_raw_uri_guard(tmp_path: Path) -> None:

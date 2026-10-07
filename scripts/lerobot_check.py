@@ -28,6 +28,7 @@ def main() -> None:
             "index": int(x["index"]), "episode_index": int(x["episode_index"]),
             "timestamp": float(x["timestamp"]), "task": x["task"],
             "image_shape": list(x[video_key].shape),
+            "image_mean": float(x[video_key].float().mean()),  # 0~1, 프레임 내용 확인용
             "state": [float(v) for v in x["observation.state"]],
             "hand_state": [int(v) for v in x["annotation.hand_state"]],
             "tool_surface_contact": [int(v) for v in x["annotation.tool_surface_contact"]],

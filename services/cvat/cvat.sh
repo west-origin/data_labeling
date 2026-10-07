@@ -9,7 +9,10 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 VERSION=${DLP_CVAT_VERSION:-v2.78.0}
 PORT=${DLP_CVAT_PORT:-8080}
 SRC="$ROOT/services/cvat/.src"
-COMPOSE="docker compose -p dlp-cvat -f $SRC/docker-compose.yml"
+# 공식 compose는 traefik을 호스트 8080에 묶는다. DLP_CVAT_PORT로 호스트 포트를 바꾸도록 ports를 덮어쓴다
+# (컨테이너 안 포트는 그대로 8080, 대시보드 8090은 열지 않는다).
+OVERRIDE="$ROOT/services/cvat/ports.override.yml"
+COMPOSE="docker compose -p dlp-cvat -f $SRC/docker-compose.yml -f $OVERRIDE"
 
 fetch() {
   if [ -d "$SRC" ] && [ "$(git -C "$SRC" describe --tags 2>/dev/null)" = "$VERSION" ]; then
@@ -39,10 +42,17 @@ case "${1:-}" in
     wait_healthy
     ;;
   down)
-    [ -d "$SRC" ] && $COMPOSE down
+    # 받아 둔 compose가 없으면 띄운 적이 없다 (set -e에서 실패로 끝나지 않게 if로 쓴다)
+    if [ -d "$SRC" ]; then
+      $COMPOSE down
+    fi
     ;;
   status)
-    $COMPOSE ps
+    if [ -d "$SRC" ]; then
+      $COMPOSE ps
+    else
+      echo "CVAT를 받아 둔 적이 없습니다 (make cvat-up)"
+    fi
     ;;
   superuser)
     # DLP_CVAT_ADMIN_USER / DLP_CVAT_ADMIN_PASSWORD / DLP_CVAT_ADMIN_EMAIL로 관리자 계정을 만든다.

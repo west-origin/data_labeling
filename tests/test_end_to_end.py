@@ -335,23 +335,23 @@ def test_synthetic_session_end_to_end(pg: sa.Engine, tmp_path: Path) -> None:
     # 8. 내보내기 → 픽스처 정답과 비교
     export_policy = load_export_policy(ROOT)
     out: dict[str, Path] = {}
-    with pg.begin() as conn:
-        for fmt in ("intervals", "coco"):
-            r = run_export(
-                conn, root=ROOT, version_id=f"dv-{sid}", fmt=fmt, target="e2e",  # type: ignore[arg-type]
-                snapshots=snapshots, labeling=labeling, datasets=datasets, raw_bucket="dlp-raw",
-                policy=export_policy, ontology=ontology, include_unreviewed=False, splits=None,
-                now=now + timedelta(minutes=2),
-            )  # fmt: skip
-            assert r.record.session_ids == (sid,)  # 골든 세션은 기본 내보내기에 없다
-            assert not [k for k in r.label_counts if k.endswith("/unreviewed")]
-            dest = tmp_path / "export" / fmt
-            for key in ("manifest.json", "intervals/" + sid + ".json", "coco/annotations.json"):
-                if (fmt == "coco") == key.startswith("coco") or key == "manifest.json":
-                    path = dest / key
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    datasets.get_file(f"exports/{r.record.export_id}/{key}", path)
-            out[fmt] = dest
+    # 트랜잭션은 run_export가 연다 (이력을 올리기 전에 따로 커밋)
+    for fmt in ("intervals", "coco"):
+        r = run_export(
+            pg, root=ROOT, version_id=f"dv-{sid}", fmt=fmt, target="e2e",  # type: ignore[arg-type]
+            snapshots=snapshots, labeling=labeling, datasets=datasets, raw_bucket="dlp-raw",
+            policy=export_policy, ontology=ontology, include_unreviewed=False, splits=None,
+            now=now + timedelta(minutes=2),
+        )  # fmt: skip
+        assert r.record.session_ids == (sid,)  # 골든 세션은 기본 내보내기에 없다
+        assert not [k for k in r.label_counts if k.endswith("/unreviewed")]
+        dest = tmp_path / "export" / fmt
+        for key in ("manifest.json", "intervals/" + sid + ".json", "coco/annotations.json"):
+            if (fmt == "coco") == key.startswith("coco") or key == "manifest.json":
+                path = dest / key
+                path.parent.mkdir(parents=True, exist_ok=True)
+                datasets.get_file(f"exports/{r.record.export_id}/{key}", path)
+        out[fmt] = dest
 
     intervals = json.loads((out["intervals"] / "intervals" / f"{sid}.json").read_text())
     exported_actions = [

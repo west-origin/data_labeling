@@ -4,11 +4,17 @@
 
 - 검수 시간: 영상 1시간당 검수 분 (작업 라벨 검수·QA, 블러 검수는 따로). review_work 기록에서.
 - 수정률: 그 주에 검수한 라벨 중 고침·지움·추가 비율 (개별 검수만, 블러 제외).
-- 자동 승인율: 그 주에 검수한 모델 라벨 중 수정 없이 승인된 비율.
+  골든셋 세션(정답을 사람이 처음부터 만들어 모두 "추가"로 보인다)과 사용 중지 세션은 뺀다
+  (dlp_active와 같은 기준).
+- 자동 승인율: 그 주에 검수한 모델 라벨 중 수정 없이 승인된 비율 (같은 세션 기준).
 - 프리라벨 편향: 그 주에 끝난 블라인드 배정의 편향 평균 (ADR 0014).
 - 오류 삽입 발견율: 그 주에 끝난 오류 삽입 배정에서 발견한 오류 비율.
 - 잔여 블러 누락: 그 주 감사의 영상 1시간당 잔여 누락 수.
-- 검증 에피소드: 사람 검증을 마친 세션 중 마지막 검수가 그 주인 것.
+- 검증 에피소드: 사람 검증을 마친 세션(수명 주기) 중 검증 완료 시각이 그 주인 것.
+  검증 완료 시각(verified_at) = 그 시각까지 있던 운영 현재 라벨 중 모델 라벨이 모두
+  검수된(승인·수정·표본 검증) 가장 이른 검수 시각. 그 뒤의 재검수·QA 수정·새 모델 버전은
+  이 시각을 바꾸지 않으므로 지난 주의 수가 나중에 바뀌지 않는다. 블러(프라이버시 검수)는
+  따로 센다.
   생산원가 = 검수 시간 * 인건비 / 그 수.
 """
 
@@ -30,16 +36,21 @@ from dlp_schema.db.repository import (
     get_labels,
     get_session,
     list_assignments,
+    list_golden_sets,
     list_privacy_audits,
     list_review_work,
     list_session_ids,
+    withdrawn_session_ids,
 )
+from dlp_schema.episode import current_labels
 from dlp_schema.history import review_changes
-from dlp_schema.labels import VerificationState
+from dlp_schema.labels import LabelRecord, Source, VerificationState
 from dlp_schema.review import AssignmentStatus, ReviewMode
 from dlp_schema.session import LifecycleState
 
 REVIEWED = (VerificationState.HUMAN_APPROVED, VerificationState.HUMAN_CORRECTED)
+# 검증 완료로 보는 모델 라벨 상태 (표본 검증 묶음의 나머지도 검증된 것으로 본다)
+VERIFIED_LABEL = (*REVIEWED, VerificationState.SAMPLE_VERIFIED)
 VERIFIED = (LifecycleState.HUMAN_VERIFIED, LifecycleState.SPLIT_ASSIGNED, LifecycleState.EXPORTED)
 
 
@@ -53,6 +64,33 @@ def week_range(week: str) -> tuple[datetime, datetime]:
 def week_of(t: datetime) -> str:
     y, w, _ = t.astimezone(UTC).isocalendar()
     return f"{y}-W{w:02d}"
+
+
+def verified_at(history: list[LabelRecord]) -> datetime | None:
+    """세션의 검증 완료 시각 (블러 제외).
+
+    후보 시각 T(검수 시각과 사람 레코드 작성 시각)마다 T까지 만든 레코드만으로 운영 현재
+    라벨을 구해, 모델 라벨이 모두 T 이전에 검수(VERIFIED_LABEL)됐으면 완료다.
+    그런 T 중 가장 이른 것.
+    T 뒤에 생긴 레코드(재검수·QA 수정·새 모델 버전)는 T의 판정에 끼지 않아 값이 안정적이다.
+    """
+    labels = [x for x in history if x.kind != "blur_track"]
+
+    def reviewed_by(x: LabelRecord, t: datetime) -> bool:
+        v = x.verification
+        return v.state in VERIFIED_LABEL and v.reviewed_at is not None and v.reviewed_at <= t
+
+    candidates = sorted(
+        {x.verification.reviewed_at for x in labels if x.verification.reviewed_at is not None}
+        | {x.created_at for x in labels if x.provenance.source is Source.HUMAN}
+    )
+    for t in candidates:
+        current = current_labels([x for x in labels if x.created_at <= t])
+        if current and all(
+            x.provenance.source is not Source.MODEL or reviewed_by(x, t) for x in current
+        ):
+            return t
+    return None
 
 
 def _ratio(a: float, b: float) -> float:
@@ -102,10 +140,19 @@ def weekly_metrics(
     )
     m.review_hours = sum(w.seconds for w in work) / 3600
 
-    # 수정률·자동 승인율, 검증 에피소드
+    # 수정률·자동 승인율 (골든셋·사용 중지 세션 제외), 검증 에피소드
     accepted = corrected = deleted = added = 0
+    withdrawn = withdrawn_session_ids(conn)
+    golden = {sid for g in list_golden_sets(conn) for sid in g.session_ids}
     for sid in list_session_ids(conn):
+        if sid in withdrawn:
+            continue
         history = get_labels(conn, sid)
+        session = get_session(conn, sid)
+        if session.lifecycle_state in VERIFIED and inside(verified_at(history)):
+            m.verified_episodes += 1
+        if sid in golden:
+            continue
         changes = [c for c in review_changes(history, REVIEWED) if c.label.kind != "blur_track"]
         for c in changes:
             if not inside(c.at):
@@ -118,10 +165,6 @@ def weekly_metrics(
                 deleted += 1
             else:
                 added += 1
-        session = get_session(conn, sid)
-        last = max((c.at for c in changes), default=None)
-        if session.lifecycle_state in VERIFIED and inside(last):
-            m.verified_episodes += 1
     m.counts = {"accepted": accepted, "corrected": corrected, "deleted": deleted, "added": added}
     m.correction_rate = _ratio(corrected + deleted + added, accepted + corrected + deleted + added)
     m.auto_approval_rate = _ratio(accepted, accepted + corrected + deleted)

@@ -3,7 +3,8 @@
 - 이미지: 세션·스트림·시각(t_ms)마다 하나. 파일은 블러본에서 그 시각에 정확히 있는 프레임
   (JPEG). 키프레임이 블러본 프레임 시각에 없으면(허용 오차 밖) 그 주석은 버리고 센다.
 - 범주: 온톨로지 객체(이름순) + 키포인트 범주 hand(hand21), person(coco17; 객체 person이 있으면
-  그 범주에 키포인트를 붙인다).
+  그 범주에 키포인트를 붙인다). 키포인트 범주에 든 박스만의 주석(예: person box_track)은
+  num_keypoints 0과 0으로 채운 keypoints(3*K)를 가진다 (COCO 키포인트 평가가 모든 주석에서 읽는다).
 - 주석마다 track_id(개체), label_id, 검증 상태, 출처, 모델 버전, 신뢰도를 붙인다
   (보간한 값은 넣지 않는다).
 """
@@ -112,6 +113,8 @@ def write_coco(
     now: datetime,
 ) -> CocoResult:
     cats, obj_ids, skel_ids = categories(ontology)
+    # 키포인트 범주 ID → 관절 수 (박스만의 주석도 그 범주면 키포인트 필드를 0으로 채운다)
+    n_points = {c["id"]: len(c["keypoints"]) for c in cats if "keypoints" in c}
     images: list[dict[str, Any]] = []
     anns: list[dict[str, Any]] = []
     result = CocoResult()
@@ -179,10 +182,14 @@ def write_coco(
                     if p.class_id not in obj_ids:
                         drop("unknown_class")
                         continue
-                    anns.append(base | {
-                        "category_id": obj_ids[p.class_id], "track_id": p.entity_id,
+                    cid = obj_ids[p.class_id]
+                    ann = base | {
+                        "category_id": cid, "track_id": p.entity_id,
                         "bbox": [k.x, k.y, k.w, k.h], "area": k.w * k.h,
-                    })  # fmt: skip
+                    }  # fmt: skip
+                    if cid in n_points:
+                        ann |= {"keypoints": [0] * (3 * n_points[cid]), "num_keypoints": 0}
+                    anns.append(ann)
                     result.written(x, s.session_id)
                 elif isinstance(p, KeypointTrackPayload) and p.skeleton in skel_ids:
                     flat: list[float] = []

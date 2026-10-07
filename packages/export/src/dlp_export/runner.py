@@ -4,8 +4,15 @@
 2. 형식별로 쓴다: coco / intervals / lerobot
    (lerobot은 격리 환경에서 공식 API로 쓰고 공식 로더로 다시 읽는다).
 3. manifest.json (대상, 일시, 형식, 검증 정책, 세션, 라벨 수)을 넣고, 원본 버킷 위치가 없는지
-   확인한다.
-4. 데이터셋 버킷 exports/<내보내기 ID>/ 에 올리고 내보내기 이력(exports)을 남긴다.
+   확인한다. 작업자·장소 ID는 내보내기마다 다른 가명으로 바꾼다 (export.yaml ids).
+4. 내보내기 이력(exports)을 **먼저 따로 커밋**한다. 그 트랜잭션에서 내보낼 세션 행을
+   잠그고(FOR SHARE) 사용 중지를 다시 확인하므로, 동시에 사용 중지(세션 행 갱신)가 일어나도
+   둘 중 하나가 기다린다: 사용 중지가 먼저면 내보내기가 실패하고, 내보내기가 먼저면 사용 중지의
+   계보 목록에 이 내보내기가 보인다.
+5. 그 뒤 데이터셋 버킷 exports/<내보내기 ID>/ 에 올린다 (manifest.json은 마지막). 올리는 중에
+   실패하면 이력과 manifest 없는 폴더가 남는다 (manifest 없는 폴더 = 미완성 내보내기, 다시
+   내보낸다). 올린 뒤(manifest 전에) 사용 중지를 다시 확인해, 그 사이 사용 중지된 세션이 있으면
+   manifest를 올리지 않고 실패한다.
 """
 
 from __future__ import annotations
@@ -27,6 +34,7 @@ from dlp_export.coco import write_coco
 from dlp_export.intervals import write_intervals
 from dlp_export.lerobot import Episode, Vocab, build_episode, run_script, write_package
 from dlp_export.policy import ExportPolicy
+from dlp_export.pseudonym import Pseudonymizer
 from dlp_export.source import (
     ExportError,
     ExportSource,
@@ -40,6 +48,7 @@ from dlp_media.pts import build_pts_index
 from dlp_media.storage import ObjectStore, sha256_file
 from dlp_schema.dataset import Split
 from dlp_schema.db.repository import withdrawn_session_ids
+from dlp_schema.db.tables import sessions as sessions_table
 from dlp_schema.labels import LabelRecord, VerificationState
 from dlp_schema.lineage import ExportRecord
 from dlp_schema.ontology import Ontology
@@ -73,10 +82,6 @@ def export_id_for(
 def _label_counts(labels: list[LabelRecord]) -> dict[str, int]:
     c = Counter(f"{x.kind}/{x.verification.state.value}" for x in labels)
     return dict(sorted(c.items()))
-
-
-# LeRobot 특징을 만드는 라벨 종류 (내보낸 라벨 수를 셀 때 쓴다)
-LEROBOT_KINDS = ("keypoint_track", "trajectory3d", "hand_state", "action", "relation", "segment")
 
 
 def _lerobot(
@@ -144,12 +149,14 @@ def _lerobot(
     (dest / "meta" / "dlp_episodes.json").write_text(
         json.dumps(sessions, ensure_ascii=False, indent=2), "utf-8"
     )
+    # 실제로 어느 프레임 특징에 들어간 라벨만 센다 (영상 밖 시각·다른 스트림·쓰지 않는 손 등은 뺀다)
+    used_ids = {lid for _, _, ep in episodes for lid in ep.used}
     used = [
         x
         for es in src.sessions
         if es.session.session_id in written
         for x in es.labels
-        if x.kind in LEROBOT_KINDS
+        if x.label_id in used_ids
     ]
     return (
         used,
@@ -158,8 +165,17 @@ def _lerobot(
     )
 
 
+def lock_sessions(conn: sa.Connection, session_ids: set[str]) -> None:
+    """내보낼 세션 행을 이 트랜잭션 끝까지 공유 잠금한다 (사용 중지의 세션 행 갱신과 직렬화)."""
+    conn.execute(
+        sa.select(sessions_table.c.session_id)
+        .where(sessions_table.c.session_id.in_(sorted(session_ids)))
+        .with_for_update(read=True)
+    ).all()
+
+
 def run_export(
-    conn: sa.Connection,
+    engine: sa.Engine,
     *,
     root: Path,
     version_id: str,
@@ -174,17 +190,25 @@ def run_export(
     include_unreviewed: bool,
     splits: tuple[Split, ...] | None,
     now: datetime,
+    id_secret: bytes | None = None,
 ) -> ExportResult:
+    """내보내기 하나. DB 트랜잭션은 이 함수가 연다 (이력은 올리기 전에 따로 커밋한다).
+
+    id_secret: 작업자·장소 가명 비밀값 (없으면 실행마다 임의 값, export.yaml ids).
+    """
     if labeling.bucket == raw_bucket or datasets.bucket == raw_bucket:
         raise ExportError("내보내기는 원본 버킷을 읽거나 쓰지 않습니다")
-    src = load_source(
-        conn, snapshots, version_id, policy, include_unreviewed=include_unreviewed, splits=splits
-    )
+    with engine.connect() as conn:
+        src = load_source(
+            conn, snapshots, version_id, policy, include_unreviewed=include_unreviewed,
+            splits=splits,
+        )  # fmt: skip
     if not src.sessions:
         raise ExportError(f"{version_id}: 내보낼 세션이 없습니다")
     export_id = export_id_for(
         version_id, fmt, target, src.label_states, splits or policy.splits, now
     )
+    ids = Pseudonymizer.for_export(export_id, id_secret, enabled=policy.ids.pseudonymize)
     with tempfile.TemporaryDirectory() as tmp:
         out, work = Path(tmp) / "out", Path(tmp) / "work"
         out.mkdir()
@@ -192,7 +216,7 @@ def run_export(
         if fmt == "intervals":
             details = {
                 "labels_per_session": write_intervals(
-                    src, policy, out, export_id=export_id, now=now
+                    src, policy, out, export_id=export_id, now=now, ids=ids
                 )
             }
             written = {es.session.session_id for es in src.sessions}
@@ -219,6 +243,7 @@ def run_export(
                 "include_unreviewed": include_unreviewed,
             },
             "splits": [s.value for s in (splits or policy.splits)],
+            "pseudonymized_ids": ["worker_id", "site_id"] if ids.enabled else [],
             "sessions": [
                 {"session_id": es.session.session_id, "split": es.split.value}
                 for es in src.sessions
@@ -231,29 +256,44 @@ def run_export(
             json.dumps(manifest, ensure_ascii=False, indent=2), "utf-8"
         )
         assert_no_raw(out, raw_bucket)
-        # 내보내는 동안 사용 중지된 세션이 생겼으면 아무것도 올리지 않는다
-        late = written & withdrawn_session_ids(conn)
-        if late:
-            raise ExportError(f"내보내는 동안 사용 중지된 세션: {sorted(late)}. 다시 내보내세요")
-        # 이력을 먼저 남기고(같은 트랜잭션), manifest.json은 마지막에 올린다. 중간에 실패하면
-        # 트랜잭션이 되돌아가고 manifest 없는 폴더만 남는다 (manifest 없는 폴더 = 미완성 내보내기).
-        record = record_export(
-            conn,
-            export_id=export_id,
-            dataset_version_id=version_id,
-            target=target,
-            format=fmt,
-            uri=datasets.uri(f"exports/{export_id}"),
-            splits=splits or policy.splits,
-            label_states=src.label_states,
-            session_ids=tuple(sorted(written)),
-            now=now,
-        )
+        # 이력을 먼저 따로 커밋한다 (세션 행 잠금 뒤 사용 중지 재확인, record_export도 확인한다)
+        with engine.begin() as conn:
+            lock_sessions(conn, written)
+            late = written & withdrawn_session_ids(conn)
+            if late:
+                raise ExportError(
+                    f"내보내는 동안 사용 중지된 세션: {sorted(late)}. 다시 내보내세요"
+                )
+            record = record_export(
+                conn,
+                export_id=export_id,
+                dataset_version_id=version_id,
+                target=target,
+                format=fmt,
+                uri=datasets.uri(f"exports/{export_id}"),
+                splits=splits or policy.splits,
+                label_states=src.label_states,
+                session_ids=tuple(sorted(written)),
+                now=now,
+            )
         files = 0
         manifest_path = out / "manifest.json"
-        for p in [*(q for q in walk_files(out) if q != manifest_path), manifest_path]:
+        for p in (q for q in walk_files(out) if q != manifest_path):
             datasets.put_file(
                 f"exports/{export_id}/{p.relative_to(out).as_posix()}", p, sha256_file(p)
             )
             files += 1
+        # 올리는 사이 사용 중지된 세션이 있으면 manifest를 올리지 않는다 (미완성으로 남는다).
+        # 이력은 이미 커밋되어 사용 중지의 계보 목록에 이 내보내기가 보인다.
+        with engine.connect() as conn:
+            late = written & withdrawn_session_ids(conn)
+        if late:
+            raise ExportError(
+                f"{export_id}: 올리는 동안 사용 중지된 세션 {sorted(late)}. "
+                "manifest를 올리지 않았습니다 (미완성 내보내기, 전달하지 마세요). 다시 내보내세요"
+            )
+        datasets.put_file(
+            f"exports/{export_id}/manifest.json", manifest_path, sha256_file(manifest_path)
+        )
+        files += 1
     return ExportResult(record, files, counts, details)

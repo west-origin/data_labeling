@@ -37,11 +37,13 @@ db-upgrade:
 install:
 	uv sync --locked
 
-# FiftyOne(데이터 큐레이션, 약 1 GB). make install을 다시 하면 빠진다
-# 격리된 일회용 환경을 받는 테스트 (LeRobot 공식 쓰기·읽기, PyTorch CPU판 약 1.5 GB, 처음 한 번 수 분)
+# 격리된 일회용 환경을 받는 테스트 (LeRobot 공식 쓰기·읽기, PyTorch CPU판 약 1.5 GB, 처음 한 번 수 분).
+# 환경은 scripts/lerobot-env/uv.lock에 고정한다. 일부 테스트(내보내기 종단)는 DB가 필요하다: make up 먼저.
+# services 표시도 있는 테스트는 여기서만 돈다 (test-services는 isolated_env를 뺀다, 두 번 돌지 않게).
 test-isolated:
 	uv run pytest -m isolated_env
 
+# FiftyOne(데이터 큐레이션, 약 1 GB). make install을 다시 하면 빠진다
 install-curation:
 	uv sync --locked --group curation
 
@@ -80,8 +82,9 @@ logs:
 health:
 	uv run dlp services check
 
+# 격리 환경이 필요한 테스트는 make test-isolated에서 돈다
 test-services:
-	uv run pytest -m services
+	uv run pytest -m "services and not isolated_env"
 
 cvat-up: env
 	services/cvat/cvat.sh up

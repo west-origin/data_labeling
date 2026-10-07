@@ -7,12 +7,11 @@ from pathlib import Path
 
 import sqlalchemy as sa
 
-from dlp_cli.raw_access import raw_bucket, raw_store
+from dlp_cli.raw_access import raw_store, raw_store_offline
 from dlp_cli.schema_cmds import database_url
 from dlp_media.ingest import ingest_session, load_manifest
 from dlp_media.probe import probe
 from dlp_media.pts import build_pts_index
-from dlp_media.storage import store_from_spec
 
 
 def cmd_probe(args: argparse.Namespace) -> int:
@@ -40,16 +39,13 @@ def cmd_pts_index(args: argparse.Namespace) -> int:
 
 
 def cmd_ingest(args: argparse.Namespace) -> int:
-    manifest, base = load_manifest(Path(args.manifest))
-    if args.no_db and args.store == "s3":
-        raise SystemExit(
-            "원본 버킷에 올릴 때는 DB가 필요합니다 (접근 감사 기록). --no-db는 local: 저장소에만"
-        )
+    # 원본 저장소는 늘 감사 저장소다. --no-db(로컬 저장소만)면 기록을 로컬 JSON Lines 파일에 남긴다
     raw = (
-        store_from_spec(args.store, raw_bucket())
+        raw_store_offline(args.store, "media.ingest")
         if args.no_db
         else raw_store(args.store, args.url, "media.ingest")
     )
+    manifest, base = load_manifest(Path(args.manifest))
     if args.no_db:
         result = ingest_session(manifest, base, raw)
     else:

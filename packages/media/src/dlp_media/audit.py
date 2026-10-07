@@ -3,7 +3,8 @@
 원본(블러 전) 저장소는 늘 AuditedStore로 감싸서 쓴다. 내려받기(read)·서명 URL(presign)·
 올리기(write)를 하기 **전에** 감사 이벤트를 남긴다 (시도도 접근으로 본다). 검수 도구에 원본을 올려
 사람에게 보여 주면 grant로 남긴다. DB 기록은 이벤트마다 따로 커밋한다:
-그 뒤 작업이 실패해 트랜잭션이 되돌아가도 접근 기록은 남아야 한다.
+그 뒤 작업이 실패해 트랜잭션이 되돌아가도 접근 기록은 남아야 한다. DB 없이 로컬 저장소로 돌 때는
+FileAccessSink(JSON Lines)에 남긴다.
 """
 
 from __future__ import annotations
@@ -47,6 +48,22 @@ class DbAccessSink:
     def record(self, event: RawAccessEvent) -> None:
         with self.engine.begin() as conn:
             insert_raw_access(conn, event)
+
+
+class FileAccessSink:
+    """DB 없이 돌 때(로컬 저장소 개발·시험) 감사 기록을 JSON Lines 파일에 덧붙인다.
+
+    기록은 접근 전에 한 줄씩 쓰고 바로 flush한다 (DbAccessSink와 같은 규약, 추가만).
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def record(self, event: RawAccessEvent) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self.path.open("a", encoding="utf-8") as f:
+            f.write(event.model_dump_json() + "\n")
+            f.flush()
 
 
 def current_actor() -> str:

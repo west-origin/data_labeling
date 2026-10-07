@@ -18,9 +18,22 @@ alerts:
 # 원본 접근 감사 (월 1회 검토)
 audit:
   service_accounts: [svc-pipeline]   # 파이프라인 계정 (사람이 아님)
+  # 서비스 계정이 원본에 접근해도 되는 용도 (raw_store의 purpose = 명령 이름). 그 밖의 용도는 표시한다.
+  # 실행자는 DLP_ACTOR로 스스로 밝힌 값이라, 사람이 서비스 계정 이름으로 실행한 흔적을 찾는 용도다.
+  service_purposes:
+    - media.ingest
+    - sync.run
+    - privacy.detect
+    - privacy.render
+    - prelabel.run
+    - train.run
+    - review.create
+    - review.assign
+    - review.collect
+    - review.serve
   # 원본을 볼 수 있는 사람 = config/policies/review.yaml reviewers.privacy + 아래
   raw_viewers: []
-  timezone: Asia/Seoul
+  timezone: Asia/Seoul               # 업무 시간 판정과 월간 리포트의 달 경계 시간대
   off_hours: [22, 6]                 # 사람의 원본 접근이 이 시간대(시작 시 이상, 끝 시 미만)면 표시
 
 retention:

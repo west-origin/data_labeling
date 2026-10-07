@@ -24,6 +24,7 @@ class AlertPolicy(Contract):
 
 class AuditPolicy(Contract):
     service_accounts: tuple[str, ...]
+    service_purposes: tuple[str, ...]  # 서비스 계정이 원본에 접근해도 되는 용도 (파이프라인 명령)
     raw_viewers: tuple[str, ...]
     timezone: str
     off_hours: tuple[int, int]

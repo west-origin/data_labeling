@@ -12,30 +12,42 @@ from collections.abc import Iterator
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 import sqlalchemy as sa
 
-from dlp_ops.audit import audit_report, month_range
-from dlp_ops.metrics import WeeklyMetrics, alerts, week_of, week_range, weekly_metrics
+from dlp_ops.audit import audit_report, blur_reviewers, month_range
+from dlp_ops.metrics import (
+    WeeklyMetrics,
+    alerts,
+    verified_at,
+    week_of,
+    week_range,
+    weekly_metrics,
+)
 from dlp_ops.policy import OpsPolicy, load_policy
 from dlp_ops.retention import retention_status
 from dlp_review.ops.policy import load_policy as load_review_policy
 from dlp_schema.db.migrate import upgrade
 from dlp_schema.db.repository import (
     insert_assignment,
+    insert_golden_set,
     insert_labels,
     insert_privacy_audit,
     insert_retention_decision,
     insert_review_work,
     insert_session,
+    insert_withdrawal,
+    list_review_work,
     register_ontology,
 )
 from dlp_schema.labels import LabelRecord, Provenance, Source, Verification, VerificationState
+from dlp_schema.lineage import GoldenSet, Withdrawal
 from dlp_schema.ontology import load_ontology
 from dlp_schema.ops import PrivacyAuditRecord, RawAccessEvent, RetentionDecision, ReviewWork
 from dlp_schema.review import AssignmentStatus, InjectedError, ReviewAssignment, ReviewMode
-from dlp_schema.session import LifecycleState
+from dlp_schema.session import Domain, LifecycleState
 from dlp_schema.testing import make_label, make_session
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -55,6 +67,10 @@ def test_week_and_month_ranges() -> None:
     assert week_of(IN) == WEEK and week_of(BEFORE) == "2026-W40"
     assert month_range("2026-12") == (
         datetime(2026, 12, 1, tzinfo=UTC), datetime(2027, 1, 1, tzinfo=UTC)
+    )  # fmt: skip
+    # 정책 시간대(서울, UTC+9)의 달: 11월 30일 15시 UTC부터
+    assert month_range("2026-12", ZoneInfo("Asia/Seoul")) == (
+        datetime(2026, 11, 30, 15, tzinfo=UTC), datetime(2026, 12, 31, 15, tzinfo=UTC)
     )  # fmt: skip
 
 
@@ -91,17 +107,60 @@ def test_audit_report_flags(policy: OpsPolicy) -> None:
         event("rev-b", "grant", 5, "review.create"),  # 권한 없는 사람에게 보여 줌
         event("unassigned", "grant", 5, "review.create"),  # 담당자 없는 원본 작업
         event("rev-a", "read", 16),  # 권한자지만 서울 새벽 1시
+        event("svc-pipeline", "read", 4, "debug.view"),  # 서비스 계정을 파이프라인 밖 용도로
     ]
     r = audit_report(events, "2026-10", policy, privacy_reviewers=("rev-a",))
-    assert r.events == 7 and r.sessions == 1
-    assert r.by_action == {"grant": 3, "presign": 1, "read": 3}
+    assert r.events == 8 and r.sessions == 1
+    assert r.by_action == {"grant": 3, "presign": 1, "read": 4}
     kinds = sorted(f.split(":")[0] for f in r.flags)
     assert kinds == [
         "담당자 없이 원본 검수 작업을 올림",
+        "서비스 계정을 파이프라인 밖 용도로 씀",
         "업무 시간 밖 원본 접근",
         "원본 권한 없는 사람에게 보여 줌",
         "원본 권한 없는 사람의 열람",
     ]
+
+
+def test_blur_reviewers_use_current_tracks_only() -> None:
+    """감사자 검사는 지금 렌더에 쓰인(운영 현재) 블러 트랙의 검수자 모두와 비교한다."""
+
+    def blur(lid: str, who: str, **kw: Any) -> LabelRecord:
+        return make_label(
+            {"kind": "blur_track", "target": "face",
+             "keyframes": [{"t_ms": 0, "x": 1, "y": 1, "w": 5, "h": 5}]},
+            label_id=lid, session_id="s1", stream_id="bodycam",
+            verification=checked(VerificationState.HUMAN_APPROVED, IN, who), **kw,
+        )  # fmt: skip
+
+    history = [
+        blur("b1", "old-rev"),  # 고쳐져서 지금은 쓰이지 않는다
+        blur("b1-fix", "rev-b", parent_label_id="b1"),
+        blur("b2", "rev-a"),
+        blur("b3", "rev-a"),
+        blur("b4", "rev-c", seeded_error=True),  # 오류 삽입 사본 (운영 라벨 아님)
+        blur("b5", "rev-d").model_copy(update={"stream_id": "third"}),  # 다른 스트림
+    ]
+    assert blur_reviewers(history, "bodycam") == ["rev-a", "rev-b"]
+
+
+def test_verified_at_is_stable() -> None:
+    """검증 완료 시각은 그 뒤의 QA 수정·새 모델 버전·재검수로 바뀌지 않는다."""
+    sid = "v"
+    t1, t2, later = BEFORE, IN, IN + timedelta(days=14)
+    base = [
+        model(sid, "a", t1, verification=checked(VerificationState.HUMAN_APPROVED, t2)),
+        model(sid, "b", t1),  # 미검수
+    ]
+    assert verified_at(base) is None
+    done = [*base, human(sid, "b-fix", t2, parent_label_id=f"{sid}-b")]
+    assert verified_at(done) == t2
+    after = [
+        *done,
+        human(sid, "a-qa", later, parent_label_id=f"{sid}-a"),  # 나중 QA 수정
+        model(sid, "new", later),  # 새 모델 버전의 미검수 라벨
+    ]
+    assert verified_at(after) == t2
 
 
 # ---------------------------------------------------------------- DB (make up)
@@ -185,13 +244,24 @@ def test_weekly_metrics_from_synthetic_events(pg: sa.Engine, policy: OpsPolicy) 
            human(sid, "seed1-fix", IN, seeded_error=True, parent_label_id=f"{sid}-seed1",
                  verification=checked(VerificationState.HUMAN_CORRECTED, IN, "rev-1"))]
     )  # fmt: skip
+    gold, gone = "ops-g", "ops-w"
     with pg.begin() as conn:
         for s, state in (
             (sid, LifecycleState.HUMAN_VERIFIED),
             (old, LifecycleState.HUMAN_VERIFIED),
+            (gold, LifecycleState.HUMAN_VERIFIED),
+            (gone, LifecycleState.WITHDRAWN),
         ):
             insert_session(conn, make_session(s).model_copy(update={"lifecycle_state": state}))
         insert_labels(conn, labels)
+        # 골든셋 정답(사람이 처음부터 만든 것)과 사용 중지 세션의 검수는 수정률에 넣지 않는다
+        insert_labels(conn, [human(gold, f"g{i}", IN) for i in range(5)])
+        insert_golden_set(
+            conn,
+            GoldenSet(version="g1", domain=Domain.CLEANING, session_ids=(gold,), created_at=IN),
+        )
+        insert_labels(conn, [model(gone, "x", BEFORE, verification=checked(approved, IN))])
+        insert_withdrawal(conn, Withdrawal(session_id=gone, reason="동의 철회", withdrawn_at=IN))
         # 다른 세션: 마지막 검수가 지난주 → 이번 주 검증 에피소드 아님
         insert_labels(conn, [model(old, "x", BEFORE, verification=checked(approved, BEFORE))])
         errors = tuple(
@@ -238,15 +308,51 @@ def test_weekly_metrics_from_synthetic_events(pg: sa.Engine, policy: OpsPolicy) 
     assert m.privacy_review_minutes_per_video_hour == pytest.approx(60.0)
     assert m.seeded_detection_rate == pytest.approx(0.5)
     assert m.residual_blur_miss_per_hour == pytest.approx(0.5)
-    assert m.verified_episodes == 1
+    assert m.verified_episodes == 2  # ops-a와 골든 세션 (ops-b는 지난주, 사용 중지 제외)
     assert m.review_hours == pytest.approx(1.0)
-    assert m.cost_per_episode == pytest.approx(30000.0)
+    assert m.cost_per_episode == pytest.approx(15000.0)
     assert math.isnan(m.prelabel_bias)  # 이 주에 끝난 블라인드 배정 없음
     assert m.as_dict()["prelabel_bias"] is None
 
     # 감사·운영 기록은 고치거나 지울 수 없다
     with pytest.raises(sa.exc.DBAPIError, match="추가만"), pg.begin() as conn:  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownArgumentType]
         conn.execute(sa.text("UPDATE review_work SET seconds = 0"))
+
+
+@pytest.mark.services
+def test_cli_log_work_and_privacy_audit(pg: sa.Engine, monkeypatch: pytest.MonkeyPatch) -> None:
+    """log-work --at은 검수한 주에 센다.
+
+    privacy-audit 감사자는 현재 블러 트랙의 모든 검수자와 다르다.
+    """
+    from dlp_cli.main import main
+    from dlp_schema.db.repository import list_privacy_audits
+
+    url = pg.url.render_as_string(hide_password=False)
+    with pg.begin() as conn:
+        insert_session(conn, make_session("cli-1"))
+        insert_labels(conn, [
+            make_label({"kind": "blur_track", "target": "face",
+                        "keyframes": [{"t_ms": 0, "x": 1, "y": 1, "w": 5, "h": 5}]},
+                       label_id=f"cli-1-b{i}", session_id="cli-1", stream_id="bodycam",
+                       verification=checked(VerificationState.HUMAN_APPROVED, IN, who))
+            for i, who in enumerate(["rev-a", "rev-a", "rev-b"])
+        ])  # fmt: skip
+    seoul = "2026-10-07T10:00:00+09:00"
+    assert main(["ops", "log-work", "cli-1", "--reviewer", "rev-a", "--stage", "privacy",
+                 "--minutes", "10", "--at", seoul, "--url", url]) == 0  # fmt: skip
+    with pg.connect() as conn:
+        (w,) = list_review_work(conn)
+    assert w.recorded_at == datetime(2026, 10, 7, 1, tzinfo=UTC) and week_of(w.recorded_at) == WEEK
+    # 검수자 중 소수(rev-b)도 감사자가 될 수 없다
+    with pytest.raises(SystemExit, match="블러 검수자"):
+        main(["ops", "privacy-audit", "cli-1", "bodycam", "--misses", "0", "--auditor", "rev-b",
+              "--url", url])  # fmt: skip
+    monkeypatch.setenv("DLP_ACTOR", "aud-1")
+    assert main(["ops", "privacy-audit", "cli-1", "bodycam", "--misses", "1", "--url", url]) == 0
+    with pg.connect() as conn:
+        (a,) = list_privacy_audits(conn)
+    assert (a.auditor, a.blur_reviewer, a.misses) == ("aud-1", "rev-a", 1)
 
 
 @pytest.mark.services
@@ -259,6 +365,7 @@ def test_retention_alerts(pg: sa.Engine) -> None:
         "r-ext": datetime(2026, 1, 1, tzinfo=UTC),
         "r-del": datetime(2026, 1, 1, tzinfo=UTC),
     }
+    late = datetime(2027, 9, 20, tzinfo=UTC)
     with pg.begin() as conn:
         for sid, at in finished.items():
             insert_session(
@@ -269,10 +376,18 @@ def test_retention_alerts(pg: sa.Engine) -> None:
                 conn,
                 [model(sid, "x", at, verification=checked(VerificationState.HUMAN_APPROVED, at))],
             )
-        insert_session(
-            conn,
-            make_session("r-gone").model_copy(update={"lifecycle_state": LifecycleState.WITHDRAWN}),
-        )
+        # 나중의 모델 레코드(새 버전의 미검수 라벨, 버전 교체로 지운 레코드)와 오류 삽입 레코드는
+        # 기산점을 늦추지 않는다
+        insert_labels(conn, [
+            model("r-old", "new", late),
+            model("r-old", "x-retract", late, parent_label_id="r-old-new", retracted=True),
+            human("r-old", "seed", late, seeded_error=True),
+        ])  # fmt: skip
+        for gone in ("r-gone", "r-gone-del"):
+            insert_session(
+                conn,
+                make_session(gone).model_copy(update={"lifecycle_state": LifecycleState.WITHDRAWN}),
+            )
         insert_session(
             conn,
             make_session("r-wip").model_copy(update={"lifecycle_state": LifecycleState.PRELABELED}),
@@ -280,6 +395,7 @@ def test_retention_alerts(pg: sa.Engine) -> None:
         for sid, kind, until in [
             ("r-ext", "extend", date(2027, 12, 31)),
             ("r-del", "delete", None),
+            ("r-gone-del", "delete", None),
         ]:
             insert_retention_decision(conn, RetentionDecision(
                 decision_id=f"d-{sid}", session_id=sid, decision=kind, until=until,  # type: ignore[arg-type]
@@ -288,12 +404,15 @@ def test_retention_alerts(pg: sa.Engine) -> None:
             ))  # fmt: skip
     with pg.connect() as conn:
         items = {i.session_id: i for i in retention_status(conn, today, 365, 30)}
-        assert retention_status(conn, today, None, 30) == [
-            i for i in retention_status(conn, today, None, 30) if i.status == "withdrawn"
-        ]  # 기간 미정이면 사용 중지만 보인다
+        undecided = retention_status(conn, today, None, 30)
+    # 기간 미정이면 사용 중지 세션만 보인다
+    assert {i.session_id: i.status for i in undecided} == {
+        "r-gone": "withdrawn", "r-gone-del": "delete_decided",
+    }  # fmt: skip
     assert {k: v.status for k, v in items.items()} == {
         "r-old": "expired", "r-soon": "due_soon", "r-new": "ok", "r-ext": "extended",
-        "r-del": "delete_decided", "r-gone": "withdrawn",
+        "r-del": "delete_decided", "r-gone": "withdrawn", "r-gone-del": "delete_decided",
     }  # fmt: skip
     assert items["r-soon"].expires_on == date(2027, 10, 20)
+    assert items["r-old"].finalized_at == finished["r-old"]
     assert {k for k, v in items.items() if v.alert} == {"r-old", "r-soon", "r-gone"}
