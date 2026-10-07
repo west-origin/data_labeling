@@ -1,0 +1,140 @@
+# 개발용 서비스 묶음. CVAT는 서비스 구성이 커서 공식 compose로 따로 띄운다 (services/cvat/README.md).
+name: ${COMPOSE_PROJECT_NAME:-dlp}
+
+x-healthcheck: &healthcheck
+  interval: 5s
+  timeout: 5s
+  retries: 40
+  start_period: 10s
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${DLP_POSTGRES_USER}
+      POSTGRES_PASSWORD: ${DLP_POSTGRES_PASSWORD}
+      POSTGRES_DB: dlp
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres/init-databases.sh:/docker-entrypoint-initdb.d/10-init-databases.sh:ro
+    ports:
+      - "${DLP_POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD-SHELL", "pg_isready -U ${DLP_POSTGRES_USER} -d mlflow"]
+
+  seaweedfs:
+    image: chrislusf/seaweedfs:4.48
+    entrypoint: ["/bin/sh", "/entrypoint-dlp.sh"]
+    environment:
+      S3_ACCESS_KEY: ${DLP_S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${DLP_S3_SECRET_KEY}
+    volumes:
+      - seaweedfs-data:/data
+      - ./seaweedfs/entrypoint.sh:/entrypoint-dlp.sh:ro
+    ports:
+      - "${DLP_S3_PORT:-8333}:8333"
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8333/healthz"]
+
+  # 버킷을 만들고 끝나는 일회성 작업
+  bucket-init:
+    image: amazon/aws-cli:2.37.10
+    depends_on:
+      seaweedfs:
+        condition: service_healthy
+    environment:
+      AWS_ACCESS_KEY_ID: ${DLP_S3_ACCESS_KEY}
+      AWS_SECRET_ACCESS_KEY: ${DLP_S3_SECRET_KEY}
+      AWS_DEFAULT_REGION: us-east-1
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        for b in dlp-raw dlp-labeling dlp-datasets dlp-mlflow; do
+          aws --endpoint-url http://seaweedfs:8333 s3api head-bucket --bucket "$$b" 2>/dev/null \
+            || aws --endpoint-url http://seaweedfs:8333 s3 mb "s3://$$b"
+        done
+
+  label-studio:
+    image: heartexlabs/label-studio:1.23.2
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DJANGO_DB: default
+      POSTGRE_NAME: labelstudio
+      POSTGRE_USER: ${DLP_POSTGRES_USER}
+      POSTGRE_PASSWORD: ${DLP_POSTGRES_PASSWORD}
+      POSTGRE_HOST: postgres
+      POSTGRE_PORT: "5432"
+      LABEL_STUDIO_USERNAME: ${DLP_LABEL_STUDIO_USER}
+      LABEL_STUDIO_PASSWORD: ${DLP_LABEL_STUDIO_PASSWORD}
+      LABEL_STUDIO_DISABLE_SIGNUP_WITHOUT_LINK: "true"
+    volumes:
+      - label-studio-data:/label-studio/data
+    ports:
+      - "${DLP_LABEL_STUDIO_PORT:-8081}:8080"
+    healthcheck:
+      <<: *healthcheck
+      test:
+        - CMD
+        - python3
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=4)"
+
+  prefect:
+    image: prefecthq/prefect:3.8.8-python3.12
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["prefect", "server", "start", "--host", "0.0.0.0", "--port", "4200"]
+    environment:
+      PREFECT_API_DATABASE_CONNECTION_URL: postgresql+asyncpg://${DLP_POSTGRES_USER}:${DLP_POSTGRES_PASSWORD}@postgres:5432/prefect
+      PREFECT_UI_API_URL: http://localhost:${DLP_PREFECT_PORT:-4200}/api
+    ports:
+      - "${DLP_PREFECT_PORT:-4200}:4200"
+    healthcheck:
+      <<: *healthcheck
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4200/api/health', timeout=4)"
+
+  mlflow:
+    build: ./mlflow
+    image: dlp-mlflow:3.16.1
+    depends_on:
+      postgres:
+        condition: service_healthy
+      bucket-init:
+        condition: service_completed_successfully
+    environment:
+      MLFLOW_S3_ENDPOINT_URL: http://seaweedfs:8333
+      AWS_ACCESS_KEY_ID: ${DLP_S3_ACCESS_KEY}
+      AWS_SECRET_ACCESS_KEY: ${DLP_S3_SECRET_KEY}
+      AWS_DEFAULT_REGION: us-east-1
+    command:
+      - mlflow
+      - server
+      - --host=0.0.0.0
+      - --port=5000
+      - --backend-store-uri=postgresql+psycopg2://${DLP_POSTGRES_USER}:${DLP_POSTGRES_PASSWORD}@postgres:5432/mlflow
+      - --artifacts-destination=s3://dlp-mlflow
+      - --serve-artifacts
+    ports:
+      - "${DLP_MLFLOW_PORT:-5000}:5000"
+    healthcheck:
+      <<: *healthcheck
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health', timeout=4)"
+
+volumes:
+  postgres-data:
+  seaweedfs-data:
+  label-studio-data:

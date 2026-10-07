@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+
+# 로컬 환경
+.env
+.DS_Store
+.idea/
+.vscode/
+
+# 외부 소스 체크아웃 (CVAT 공식 compose)
+services/cvat/.src/
+
+# 데이터는 저장소에 넣지 않는다
+data/
+*.mp4
+*.parquet
+*.h5

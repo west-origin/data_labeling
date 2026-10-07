@@ -1,0 +1,46 @@
+# 미결정 사항의 기본값. 사람이 결정하면 이 값만 바꾼다 (기준 문서 "미결정 사항" 참조).
+# 코드는 이 값을 하드코딩하지 않고 설정 로더(WP1)를 통해 읽는다.
+version: 1
+
+infrastructure:
+  object_store: seaweedfs          # seaweedfs | minio
+  data_versioning: lakefs          # lakefs | dvc (WP7에서 연동)
+  annotation_tools: hybrid         # hybrid(CVAT+Label Studio) | cvat_only (Gate 1 결정)
+  orchestrator: prefect
+  experiment_tracking: mlflow
+
+buckets:
+  raw: dlp-raw                     # 원본 영상·오디오 (원본 권한자, 학습 서버만)
+  labeling: dlp-labeling           # 블러본·프록시 (일반 라벨러)
+  datasets: dlp-datasets           # 데이터셋 버전·내보내기
+  mlflow: dlp-mlflow               # 학습 산출물
+
+privacy:
+  blur_hold_ms: 200
+  render_mode: mosaic              # mosaic | solid
+  strip_audio_in_release: true
+  extra_targets_v1: []             # 확장 후보(약봉투, 팔찌 등) 확정 시 추가
+  full_review_exit:
+    weeks_below_target: 8
+    audit_sample_ratio: 0.05
+
+review:
+  qa_sample_ratio: 0.05
+  double_annotation_ratio: 0.05
+  blind_task_ratio: 0.03
+  seeded_error_task_ratio: 0.02
+
+golden_set:
+  min_instances_per_class: 30
+  split_unit: [worker_id, site_id]
+
+export:
+  include_unreviewed: false
+
+retention:
+  raw_retention_days: null         # 미정 (원본 보관 기간)
+
+success_criteria:                  # Gate 0 잠정치, Gate 1 확정
+  review_minutes_per_video_hour: null
+  residual_blur_miss_per_hour_max: null
+  boundary_agreement_min: null

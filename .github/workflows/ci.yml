@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: lint · typecheck · test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv python install
+      - run: make install
+      - run: make check
+
+  services:
+    name: compose smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv python install
+      - run: make install
+      - name: Validate compose file
+        run: cp .env.example .env && docker compose --env-file .env -f services/docker-compose.yml config -q
+      - name: Start services
+        run: make up
+      - run: make health
+      - run: make test-services
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose --env-file .env -f services/docker-compose.yml logs --tail=200
+      - if: always()
+        run: make clean
