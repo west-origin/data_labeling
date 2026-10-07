@@ -1,3 +1,11 @@
+"""프리라벨 실행기 통합 테스트 (`@pytest.mark.services`: PostgreSQL·SeaweedFS S3 필요, `make up`).
+
+테스트마다 새 DB를 만들고 지운다(`pg`). 합성 세션을 실제 수집 경로(`ingest_session`)로 원본
+버킷에 올리고, 모델은 Oracle stub으로 대신한다. 멱등성, 버전 변경 시 검수 전 라벨만 지우기,
+검수자 삭제 존중, 배포 모델 교체, 착용자 다시 찾기, 타임라인 모델 한 번 실행을 본다 (ADR 0015,
+0026).
+"""
+
 from __future__ import annotations
 
 import itertools
@@ -56,6 +64,9 @@ ROOT = Path(__file__).resolve().parents[3]
 
 @pytest.fixture
 def pg() -> Iterator[sa.Engine]:
+    """테스트 전용 PostgreSQL DB를 만들고 마이그레이션·온톨로지 v1 등록 후 엔진을 넘긴다. 끝나면
+    지운다.
+    """
     url = sa.make_url(
         os.environ.get(
             "DLP_DATABASE_URL", "postgresql+psycopg://dlp:dlp-dev-password@localhost:5432/dlp"
@@ -80,6 +91,15 @@ def pg() -> Iterator[sa.Engine]:
 
 
 def test_prelabel_session_with_glove_contacts(pg: sa.Engine, tmp_path: Path) -> None:
+    """장갑이 있는 바디캠 세션에서 프리라벨 전체 흐름과 감사 회귀 네 가지를 본다.
+
+    1차: 손·객체 stub 결과가 들어가고 접촉 수가 정답과 같으며 경계가 한 프레임 안, 대상·종류가
+    정답과 같다 (깊이 가중치가 있으면 3D 궤적 6개). 재실행은 모두 건너뛰고 생애주기는 prelabeled.
+    회귀 1: 객체 예측기 버전이 바뀌면 새 ID로 넣고 검수 전 이전 버전만 지우며, 입력이 바뀐 접촉도
+    다시 만든다. 회귀 2: 검수자가 접촉을 모두 지우면 다시 돌려도 되살리지 않는다. 회귀 3: 배포
+    모델이 objects를 대신하면 objects의 검수 전 라벨을 지운다. 회귀 4: 배포 접촉 모델이 접촉
+    단계를 대신하면 기본 접촉 단계는 돌지 않고 검수 전 접촉을 지운다.
+    """
     actions = generate_action_scenario(1, n_units=10)
     generate_blur_scenario(1).write(tmp_path / "bodycam.mp4")
     write_parquet(
@@ -236,10 +256,12 @@ def test_prelabel_session_with_glove_contacts(pg: sa.Engine, tmp_path: Path) -> 
 
 
 def _builtin_contacts(labels: list[LabelRecord]) -> list[LabelRecord]:
+    """기본 접촉 단계(contact-heuristic)가 만든 라벨만 고른다."""
     return [x for x in labels if (x.provenance.model_version or "").startswith(CONTACT_PREFIX)]
 
 
 def _coco_person(entity: str, t: np.ndarray, motion: np.ndarray, seed: int) -> LabelRecord:
+    """3인칭 coco17 인물 트랙 라벨: 두 손목 x가 motion에 비례해 움직인다 (seed로 잡음 고정)."""
     rng = np.random.default_rng(seed)
     x = np.cumsum(motion * 8 + rng.normal(0, 0.3, t.size)) + 100
     frames: list[KeypointFrame] = []
@@ -260,7 +282,11 @@ def test_wearer_copy_is_unreviewed_and_rematched_after_body_model_change(
     pg: sa.Engine, tmp_path: Path
 ) -> None:
     """감사 회귀: 착용자 사본은 원래 트랙의 검수 상태를 물려받지 않고, 전신 모델 버전이 바뀌어
-    사본이 지워지면 새 트랙으로 다시 찾는다 (이력의 착용자 표시가 다시 찾기를 막지 않는다)."""
+    사본이 지워지면 새 트랙으로 다시 찾는다 (이력의 착용자 표시가 다시 찾기를 막지 않는다).
+
+    정답 근거: IMU 가속도에 착용자 운동 패턴(bursts)을 넣었으므로 "wearer_track"이 뽑힌다. 원래
+    트랙이 승인됐으면 전신 모델이 바뀌어도 사본을 지우지 않는다.
+    """
     rng = np.random.default_rng(0)
     t = np.arange(0, 20_000, 33.0)
     bursts = np.zeros(t.size)
@@ -347,7 +373,10 @@ def test_reviewed_contacts_are_not_duplicated_when_inputs_change(
     pg: sa.Engine, tmp_path: Path
 ) -> None:
     """감사 회귀 (4차): 접촉을 승인한 뒤 입력(객체 박스)이 바뀌어 접촉 단계가 다시 돌아도, 승인된
-    접촉과 같은 손에서 겹치는 새 접촉을 넣지 않는다. 장갑 압력 채널 접두사가 바뀌어도 다시 돈다."""
+    접촉과 같은 손에서 겹치는 새 접촉을 넣지 않는다. 장갑 압력 채널 접두사가 바뀌어도 다시 돈다.
+
+    접두사 "pressure"는 기본값과 같아 버전이 같고(0개), "pressure_"는 다른 버전이라 다시 만든다.
+    """
     actions = generate_action_scenario(1, n_units=10)
     generate_blur_scenario(1).write(tmp_path / "bodycam.mp4")
     write_parquet(
@@ -434,10 +463,12 @@ class _TimelineContacts:
     version = "trained-contact-v1"
 
     def __init__(self, truth: list[LabelRecord]) -> None:
+        """정답 중 손 상태 라벨만 들고, 불린 스트림을 `calls`에 기록한다."""
         self.truth = [x for x in truth if isinstance(x.payload, HandStatePayload)]
         self.calls: list[str] = []
 
     def run(self, clip: Clip) -> list[LabelRecord]:
+        """정답 손 상태를 이 세션·버전의 모델 출처, stream_id=None 구간으로 다시 쓴다."""
         self.calls.append(clip.stream_id)
         return [
             x.model_copy(
@@ -455,7 +486,8 @@ class _TimelineContacts:
 
 def test_timeline_model_runs_once_on_the_reference_stream(pg: sa.Engine, tmp_path: Path) -> None:
     """감사 회귀 (4차): 마스터 타임라인 구간을 내는 배포 모델(접촉)은 3인칭 스트림이 있어도 기준
-    스트림에서 세션당 한 번만 돈다 (같은 접촉이 두 번 남지 않는다). 다시 돌려도 건너뛴다."""
+    스트림에서 세션당 한 번만 돈다 (같은 접촉이 두 번 남지 않는다). 다시 돌려도 건너뛴다.
+    """
     actions = generate_action_scenario(1, n_units=4)
     video = generate_blur_scenario(1)
     video.write(tmp_path / "bodycam.mp4")

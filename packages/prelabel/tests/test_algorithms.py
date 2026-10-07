@@ -1,3 +1,11 @@
+"""접촉·착용자 알고리즘 단위 테스트 (DB 없음).
+
+정답은 합성 행동 시나리오(`dlp_fixtures.actions.generate_action_scenario`)가 아는 접촉
+구간·대상과 장갑 압력이다. 영상 접촉은 고정 위치 개체(서랍·버킷·싱크) 박스만 정답 박스로 쓴다
+(잡아서 옮기는 개체는 박스 정답이 없다). 착용자는 합성 운동 신호로 본다. 관련: WP8, ADR 0015,
+0026.
+"""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -31,10 +39,12 @@ STATIC = {"drawer_01", "bucket_01", "sink_01"}  # 잡아서 옮기는 묶음의 
 
 @pytest.fixture(scope="module")
 def policy() -> PrelabelPolicy:
+    """저장소의 `prelabel.yaml` 정책 (모듈 범위 픽스처)."""
     return load_policy(ROOT)
 
 
 def _gt(sc: ActionScenario) -> list[tuple[int, int, str | None]]:
+    """정답 접촉 구간 (시작, 끝, 대상): 접촉 대상 종류가 none이 아닌 손 상태 라벨."""
     return [
         (x.t_start_ms, x.t_end_ms, x.payload.target_id)
         for x in sc.labels
@@ -43,6 +53,7 @@ def _gt(sc: ActionScenario) -> list[tuple[int, int, str | None]]:
 
 
 def _static_boxes(sc: ActionScenario) -> list[BoxTrackPayload]:
+    """고정 개체(STATIC)의 정답 위치 둘레 30x30 박스 트랙 (영상 모든 프레임 시각)."""
     return [
         BoxTrackPayload(
             entity_id=eid,
@@ -58,6 +69,7 @@ def _static_boxes(sc: ActionScenario) -> list[BoxTrackPayload]:
 
 @pytest.mark.parametrize("seed", range(4))
 def test_glove_contact_timing_within_one_frame(seed: int, policy: PrelabelPolicy) -> None:
+    """장갑 압력만으로 찾은 접촉 구간 수가 정답과 같고 경계가 한 프레임(33 ms) 안인지 본다."""
     sc = generate_action_scenario(seed, n_units=10)
     found = glove_contact_intervals(sc.glove_t_ms, sc.glove_pressure, policy.contact.glove)
     truth = _gt(sc)
@@ -68,6 +80,7 @@ def test_glove_contact_timing_within_one_frame(seed: int, policy: PrelabelPolicy
 
 @pytest.mark.parametrize("seed", range(4))
 def test_fused_contacts_pick_the_touched_object(seed: int, policy: PrelabelPolicy) -> None:
+    """융합 접촉에서 장갑 구간의 대상이 정답 대상(고정 개체일 때)과 같고 출처가 fused인지 본다."""
     sc = generate_action_scenario(seed, n_units=10)
     hand = next(x.payload for x in sc.labels if isinstance(x.payload, KeypointTrackPayload))
     video = video_contact_intervals(hand, _static_boxes(sc), policy.contact.video)
@@ -85,6 +98,9 @@ def test_fused_contacts_pick_the_touched_object(seed: int, policy: PrelabelPolic
 
 
 def test_video_contact_without_glove(policy: PrelabelPolicy) -> None:
+    """장갑 없이 영상 휴리스틱만으로 고정 개체 접촉마다 같은 대상 구간이 정답 길이의 절반 넘게
+    겹치는지 본다.
+    """
     sc = generate_action_scenario(2, n_units=10)
     hand = next(x.payload for x in sc.labels if isinstance(x.payload, KeypointTrackPayload))
     video = video_contact_intervals(hand, _static_boxes(sc), policy.contact.video)
@@ -99,7 +115,11 @@ def test_video_contact_without_glove(policy: PrelabelPolicy) -> None:
 
 
 def test_video_contact_interpolates_sparse_tool_boxes(policy: PrelabelPolicy) -> None:
-    """감사 회귀: 도구 박스는 500 ms마다만 있다. 손 키프레임 시각에서 보간해 접촉을 찾는다."""
+    """감사 회귀: 도구 박스는 500 ms마다만 있다. 손 키프레임 시각에서 보간해 접촉을 찾는다.
+
+    정답 근거: 프레임마다 박스가 있을 때(dense)와 결과가 같아야 한다. box_max_gap_ms를 간격의
+    절반으로 줄이면 보간하지 않아 접촉이 없다.
+    """
     sc = generate_action_scenario(2, n_units=10)
     hand = next(x.payload for x in sc.labels if isinstance(x.payload, KeypointTrackPayload))
     dense = _static_boxes(sc)
@@ -128,6 +148,9 @@ def test_video_contact_interpolates_sparse_tool_boxes(policy: PrelabelPolicy) ->
 
 
 def test_box_interpolation_and_outside_keyframes() -> None:
+    """`box_at`의 선형 보간(50 ms → 중간값), 키프레임 시각 정확 일치, 화면 밖 키프레임과의 보간
+    금지, 간격 초과, 트랙 범위 밖을 본다.
+    """
     track = BoxTrackPayload(
         entity_id="rag_01",
         class_id="rag",
@@ -162,6 +185,7 @@ def test_fusion_keeps_video_contacts_the_glove_missed() -> None:
 def _person(
     entity: str, t: NDArray[np.float64], wrist_xy: NDArray[np.float64]
 ) -> KeypointTrackPayload:
+    """coco17 인물 트랙: 두 손목(9, 10번)을 wrist_xy 궤적으로 움직이고 나머지 관절은 원점."""
     frames: list[KeypointFrame] = []
     for i, tm in enumerate(t):
         pts = [Keypoint(x=0.0, y=0.0, visibility=2) for _ in range(17)]
@@ -172,6 +196,12 @@ def _person(
 
 
 def test_wearer_is_the_person_whose_motion_matches_the_bodycam(policy: PrelabelPolicy) -> None:
+    """IMU 신호와 같은 순간에 움직인 인물이 착용자로 뽑히는지 본다.
+
+    시나리오: 착용자는 무작위 순간 12번 움직이고 IMU도 그때 흔들린다. 다른 사람 둘은 잡음 운동과
+    400 샘플 늦게 움직인 같은 패턴이다. 착용자 상관 > 0.8 > 나머지. IMU가 잡음이면 착용자 없음,
+    겹침 요구가 너무 길면 비교 자체를 하지 않는다.
+    """
     rng = np.random.default_rng(0)
     t = np.arange(0, 20_000, 33.0)
     bursts = np.zeros(t.size)

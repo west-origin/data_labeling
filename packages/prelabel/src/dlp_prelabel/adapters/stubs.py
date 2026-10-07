@@ -2,6 +2,9 @@
 
 - Oracle*: 정답 라벨을 (흔들림을 넣어) 그대로 돌려준다. 실제 모델 대신 CI와 다른 모듈 개발에 쓴다.
 - Unavailable*: 실제 모델을 아직 연동하지 못한 기능. 빈 결과를 내고 이유를 남긴다.
+
+CLAUDE.md 규칙: 새 모델은 공통 Predictor 어댑터와 CPU stub을 함께 둔다. 미연동 자리는
+"TODO(real-model)" 주석으로 표시한다 (`make todo-models`). 관련: WP8, ADR 0008.
 """
 
 from __future__ import annotations
@@ -21,7 +24,12 @@ from dlp_schema.predictor import Clip
 
 
 class OraclePredictor:
-    """정답 라벨 중 kinds에 해당하는 것을 좌표 흔들림(jitter_px)을 넣어 모델 출처로 돌려준다."""
+    """정답 라벨 중 kinds에 해당하는 것을 좌표 흔들림(jitter_px)을 넣어 모델 출처로 돌려준다.
+
+    키포인트 트랙은 모든 점의 x·y에, 박스 트랙은 x에만 정규분포 흔들림(표준편차 jitter_px)을
+    넣는다. 다른 종류는 그대로 낸다. 같은 seed면 결과가 같다 (결정적). version은
+    `oracle-<이름>-j<jitter_px>`라 흔들림을 바꾸면 새 버전이 된다 (재실행·지우기 시험에 쓴다).
+    """
 
     def __init__(
         self,
@@ -34,6 +42,13 @@ class OraclePredictor:
         ontology_version: str = "1.0.0",
         now: datetime,
     ) -> None:
+        """Args:
+        name: 어댑터 이름 (라벨 ID 접두사, 실제 어댑터 이름과 같게 주면 그 단계를 흉내 낸다).
+        truth: 정답 라벨 (합성 픽스처 `dlp_fixtures`의 출력).
+        kinds: 돌려줄 라벨 종류 (예: ("keypoint_track",)).
+        jitter_px: 좌표 흔들림 표준편차(px). 0이면 그대로.
+        seed: 난수 시드. ontology_version, now: 새 라벨에 넣을 값.
+        """
         self.name = name
         self.version = f"oracle-{name}-j{jitter_px}"
         self.truth = [x for x in truth if x.kind in kinds]
@@ -41,6 +56,11 @@ class OraclePredictor:
         self.ontology_version, self.now = ontology_version, now
 
     def run(self, clip: Clip) -> list[LabelRecord]:
+        """clip의 세션·스트림으로 정답을 다시 써서 모델 라벨로 돌려준다.
+
+        시각(t_start/t_end, 키프레임)은 정답 그대로다. 신뢰도는 0.9 고정. clip.video는 읽지
+        않는다.
+        """
         rng = np.random.default_rng(self.seed)
         out: list[LabelRecord] = []
         for i, label in enumerate(self.truth):
@@ -106,10 +126,12 @@ class UnavailablePredictor:
     version = "unavailable"
 
     def __init__(self, name: str, reason: str) -> None:
+        """name: 기능 이름. reason: 왜 없는지 (CLI·테스트가 보여 준다)."""
         self.name = name
         self.reason = reason
 
     def run(self, clip: Clip) -> list[LabelRecord]:
+        """항상 빈 목록."""
         return []
 
 

@@ -1,3 +1,9 @@
+"""관계 실행기 통합 테스트 (`@pytest.mark.services`: PostgreSQL 필요, `make up`).
+
+테스트마다 새 DB에 닦기 시나리오 세션·라벨을 넣고 `run_relations`의 멱등성, 규칙 변경 반영,
+검수자 삭제 존중, 승인 보존, 중복 궤적 처리를 본다 (ADR 0011, 0015, 0026).
+"""
+
 from __future__ import annotations
 
 import os
@@ -32,6 +38,9 @@ SID = "wipe-0000"
 
 @pytest.fixture
 def pg() -> Iterator[sa.Engine]:
+    """테스트 전용 DB를 만들고 마이그레이션·온톨로지·닦기 시나리오(시드 0)를 넣는다. 끝나면
+    지운다.
+    """
     url = sa.make_url(
         os.environ.get(
             "DLP_DATABASE_URL", "postgresql+psycopg://dlp:dlp-dev-password@localhost:5432/dlp"
@@ -58,10 +67,14 @@ def pg() -> Iterator[sa.Engine]:
 
 
 def _current(conn: sa.Connection) -> list[LabelRecord]:
+    """세션의 현재 관계·커버리지 레코드."""
     return current_labels(get_labels(conn, SID, kinds=["relation", "coverage"]))
 
 
 def test_rerun_is_idempotent_and_rule_changes_regenerate(pg: sa.Engine) -> None:
+    """첫 실행은 관계 + 커버리지 1개를 넣고 재실행은 모두 그대로 둔다. 손 파지 규칙을 빼면 그
+    관계만 삭제 표시되고, 되돌리면 같은 내용이 새 ID(`-1` 접미사)로 다시 생긴다.
+    """
     ontology = load_ontology(ROOT / "config/ontology/v1")
     policy = load_policy(ROOT)
     wiping = generate_wiping_scenario(0, session_id=SID)
@@ -102,6 +115,7 @@ def test_rerun_is_idempotent_and_rule_changes_regenerate(pg: sa.Engine) -> None:
 
 
 def test_reviewer_deleted_relation_is_not_reinserted(pg: sa.Engine) -> None:
+    """검수자가 지운 도구-표면 관계는 다시 실행해도 넣지 않는다 (skipped_by_review=1)."""
     ontology = load_ontology(ROOT / "config/ontology/v1")
     policy = load_policy(ROOT)
     with pg.begin() as conn:
@@ -129,6 +143,7 @@ def test_reviewer_deleted_relation_is_not_reinserted(pg: sa.Engine) -> None:
 
 
 def test_rule_change_keeps_approved_relations(pg: sa.Engine) -> None:
+    """승인된 관계는 그 규칙을 빼도 삭제 표시하지 않는다 (ADR 0015)."""
     from dlp_schema.db.repository import record_review
     from dlp_schema.labels import VerificationState
 
@@ -153,7 +168,8 @@ def test_rule_change_keeps_approved_relations(pg: sa.Engine) -> None:
 
 def test_duplicate_tool_trajectory_does_not_crash_the_run(pg: sa.Engine) -> None:
     """감사 회귀 (4차): 같은 도구 작용부 궤적이 새 ID로 다시 나와도 같은 커버리지 ID를 두 번 넣지
-    않는다 (UniqueViolation 없음)."""
+    않는다 (UniqueViolation 없음).
+    """
     ontology = load_ontology(ROOT / "config/ontology/v1")
     policy = load_policy(ROOT)
     wiping = generate_wiping_scenario(0, session_id=SID)
