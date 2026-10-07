@@ -4,6 +4,11 @@ COMPOSE := docker compose --env-file .env -f services/docker-compose.yml
 contracts:
 	uv run dlp ontology validate
 	uv run dlp schema export --check
+	@uv run dlp models licenses > /dev/null || (uv run dlp models licenses | grep 위반; exit 1)
+
+# 정책이 쓰는 모델의 라이선스·학습 데이터·상업 사용 분류 표 (판매 실사 자료)
+licenses:
+	uv run dlp models licenses
 
 schemas:
 	uv run dlp schema export
@@ -26,7 +31,7 @@ db-upgrade:
 	uv run dlp db upgrade
 	uv run dlp ontology register 1.0.0
 
-.PHONY: install lint fmt typecheck test contracts schemas models export-models todo-models fixtures db-upgrade check env up down ps logs health test-services \
+.PHONY: install lint fmt typecheck test contracts schemas models export-models todo-models licenses fixtures db-upgrade check env up down ps logs health test-services \
         cvat-up cvat-down cvat-superuser clean
 
 install:

@@ -29,6 +29,7 @@ class HandsPolicy(Contract):
 
 
 class BodyPolicy(Contract):
+    detector_score: float = Field(ge=0, le=1)
     min_score: float = Field(ge=0, le=1)
     keypoint_score: float = Field(ge=0, le=1)
     max_people: int = Field(ge=1)

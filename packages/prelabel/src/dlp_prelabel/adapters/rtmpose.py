@@ -1,8 +1,9 @@
-"""RTMPose 전신 포즈 (COCO 17점, CPU): YOLOX 사람 탐지(Human-Art) → RTMPose-m (Body7).
+"""RTMPose 전신 포즈 (COCO 17점, CPU): YOLOX-m 사람 탐지(COCO) → RTMPose-m (Body7).
 
-rtmlib로 ONNX Runtime에서 돌린다. 가중치는 `make models`가 OpenMMLab에서 받는다
-(config/models.yaml yolox_m_humanart, rtmpose_m_body7, Apache-2.0). 3인칭 영상의 착용자 매칭과
-바디캠에 보이는 다른 사람(환자 등) 자세에 쓴다.
+rtmlib로 ONNX Runtime에서 돌린다. 가중치는 `make models`가 받는다 (config/models.yaml
+yolox_m_coco: Megvii 공식, rtmpose_m_body7: OpenMMLab). 사람 탐지기는 rtmlib 기본값인 Human-Art판
+대신 COCO판을 쓴다. Human-Art 데이터가 비상업 라이선스이고, 실사 영상에서 성능 차이가 거의 없다
+(ADR 0010). 3인칭 영상의 착용자 매칭과 바디캠에 보이는 다른 사람(환자 등) 자세에 쓴다.
 """
 
 # rtmlib에는 타입 정보가 없어 이 모듈에서만 알 수 없는 타입 경고를 끈다.
@@ -41,13 +42,21 @@ class RtmPose:
         from rtmlib import YOLOX, RTMPose
 
         bp = self.policy.body
-        detector = YOLOX(str(self.detector_path), model_input_size=(640, 640), device="cpu")
+        detector = YOLOX(
+            str(self.detector_path),
+            model_input_size=(640, 640),
+            det_mode="multiclass",
+            score_thr=bp.detector_score,
+            device="cpu",
+        )
         pose = RTMPose(str(self.pose_path), model_input_size=(192, 256), device="cpu")
         detections: list[tuple[int, list[Det]]] = []
         frames: dict[tuple[int, tuple[float, float, float, float]], KeypointFrame] = {}
         for t, rgb in iter_frames(clip.video):
             bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)  # rtmlib은 OpenCV(BGR) 입력을 가정한다
-            boxes = np.asarray(detector(bgr), dtype=np.float32).reshape(-1, 4)[: bp.max_people]
+            found, classes = detector(bgr)
+            people = np.asarray(found, dtype=np.float32).reshape(-1, 4)[np.asarray(classes) == 0]
+            boxes = people[: bp.max_people]  # COCO 0번 = 사람, 점수 순
             dets: list[Det] = []
             if len(boxes):
                 keypoints, scores = pose(bgr, bboxes=boxes.tolist())

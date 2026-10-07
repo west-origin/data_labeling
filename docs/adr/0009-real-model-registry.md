@@ -2,7 +2,7 @@
 
 - 상태: 채택
 - 날짜: 2026-10-07
-- 관련: WP5, WP8. ADR 0008의 미연동 목록 일부를 대체한다.
+- 관련: WP5, WP8. ADR 0008의 미연동 목록 일부를 대체한다. 라이선스 분류는 ADR 0010.
 
 ## 배경
 
@@ -20,10 +20,10 @@
 3. **연동한 모델**
    | 용도 | 모델 | 라이선스 | CPU 속도 (이 환경) |
    | --- | --- | --- | --- |
-   | 전신 17점 (MediaPipe Pose 대체) | YOLOX-m Human-Art + RTMPose-m Body7 (rtmlib) | Apache-2.0 | 실시간에 가까움 |
+   | 전신 17점 (MediaPipe Pose 대체) | YOLOX-m COCO + RTMPose-m Body7 (rtmlib) | Apache-2.0 | 사진당 약 0.3초 |
    | 청소·돌봄 도구 박스 (COCO 밖) | OWLv2 base ensemble, 양자화 ONNX (Xenova) | Apache-2.0 | 프레임당 약 7~9초 |
    | 블러: 문서·화면·사진물·문패·송장, 반사면 영역 | 같은 OWLv2 | Apache-2.0 | 같음 |
-   | 손·객체 카메라 좌표 3D | Depth Anything V2 Metric Indoor Small | **모델 카드에 명시 없음** | 프레임당 약 0.4초 |
+   | 손·객체 카메라 좌표 3D | Depth Anything V2 Metric Indoor Small | Apache-2.0 (공식 Metric-Hypersim-Small 저장소) | 프레임당 약 0.4초 |
 4. **느린 모델은 시간 간격(`frame_stride_ms`)으로만 추론한다.**
    - 프라이버시 OWLv2: 간격 사이 프레임에는 마지막 결과를 그대로 둔다(held). 같은 시각의 반복 호출
      (대상 탐지 + 반사면 영역)은 한 번만 추론한다. 기본 500 ms. 사이에 잠깐 나타난 대상은 놓칠 수
@@ -46,8 +46,7 @@
 
 ## 확인이 남은 것
 
-- 메트릭 깊이 모델(Metric Indoor Small)의 라이선스. 상용화 전에 확인하고, 문제가 되면 상대 깊이
-  모델(Small, Apache-2.0)과 스케일 보정으로 바꾼다.
+- 모델별 상업 사용 분류와 학습 데이터 라이선스는 ADR 0010을 따른다.
 - OWLv2 질의 문장과 문턱은 실제 바디캠 영상에서 골든셋으로 다시 정한다. 한국 가정의 물건(걸레, 밀대
   모양)에서 영어 질의가 잘 맞는지 확인이 필요하다.
 - 광각 액션캠의 왜곡을 보정하지 않고 역투영한다. 캘리브레이션 왜곡 계수를 반영하는 것은 WP12(3D) 범위다.

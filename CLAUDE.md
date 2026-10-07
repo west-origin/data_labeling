@@ -14,6 +14,7 @@
 - `make models` — `config/models.yaml`의 모델 가중치를 `data/models/`에 받고 sha256 확인 (저장소에는 넣지 않음)
 - `make export-models` — 공개 ONNX가 없는 모델(메트릭 깊이)을 공식 가중치에서 변환 (일회용 PyTorch 환경)
 - `make todo-models` — 실제 모델을 아직 연동하지 못한 곳(`TODO(real-model):` 표시) 목록
+- `make licenses` — 정책이 쓰는 모델의 라이선스·학습 데이터·상업 사용 분류 표 (위반이 있으면 실패, `make check`에 포함)
 - `make fixtures` — 합성 픽스처를 `data/fixtures/`에 생성 (저장소에는 넣지 않음)
 - `make db-upgrade` — 개발 DB에 Alembic 마이그레이션 적용 + 온톨로지 v1 등록
 - `make up` / `make down` / `make clean` — 개발 서비스 기동 / 중지 / 볼륨까지 삭제
@@ -64,6 +65,8 @@
 - 새 모델은 공통 `Predictor` 어댑터와 CPU용 stub 구현을 함께 추가한다. CI는 stub으로 돈다.
 - 실제 모델을 연동하지 못하고 stub만 둔 곳에는 주석 `TODO(real-model): <무엇이 필요한지>`를 단다 (코드와 정책 YAML 모두).
   연동하면 표시를 지운다.
+- 라벨링한 데이터를 판매하므로 모델의 상업 사용 여부를 따진다 (ADR 0010). 새 모델은 `config/models.yaml`에 가중치
+  라이선스, 직접 학습 데이터와 그 라이선스, `commercial` 분류를 적는다. 가중치가 비상업(`forbidden`)이면 쓰지 않는다.
 - 각 파이프라인 단계는 멱등적인 `dlp <단계>` 하위 명령으로 만든다.
 - 테스트는 정답을 아는 합성 픽스처(WP2)로 작성한다. 실제 영상·개인정보를 저장소에 넣지 않는다.
 - 코드 주석과 문서는 한국어, 식별자는 영어.

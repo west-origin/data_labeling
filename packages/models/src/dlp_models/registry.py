@@ -12,13 +12,16 @@ import urllib.request
 import zipfile
 from functools import cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import Field
 
 from dlp_schema.common import Contract
 from dlp_schema.predictor import ModelUnavailableError
+
+# 상업 사용 분류 (config/models.yaml 머리말, ADR 0010)
+Commercial = Literal["allowed", "review", "forbidden"]
 
 
 class ModelFile(Contract):
@@ -27,12 +30,26 @@ class ModelFile(Contract):
     url: str | None = None
     archive_member: str | None = None
     export: str | None = Field(default=None, description="공개 파일이 없어 직접 변환하는 스크립트")
-    license: str
+    license: str = Field(description="가중치 라이선스")
+    training_data: tuple[str, ...] = Field(description="직접 학습·미세조정 데이터와 그 라이선스")
+    commercial: Commercial
 
 
 class ModelRegistry(Contract):
     version: int
+    accept: tuple[Commercial, ...] = Field(description="정책이 쓸 수 있는 상업 사용 분류")
     models: dict[str, ModelFile]
+
+    def violations(self, used: dict[str, str]) -> list[str]:
+        """정책이 쓰는 모델(쓰는 곳 → 모델 이름) 중 목록에 없거나 허용 분류가 아닌 것."""
+        out: list[str] = []
+        for where, name in sorted(used.items()):
+            spec = self.models.get(name)
+            if spec is None:
+                out.append(f"{where}: 모델 목록에 없는 {name}")
+            elif spec.commercial not in self.accept:
+                out.append(f"{where}: {name}은 상업 사용 분류가 {spec.commercial}")
+        return out
 
 
 @cache
