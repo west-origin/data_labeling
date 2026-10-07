@@ -85,6 +85,7 @@ class OracleStubTrainer:
                     "classes": sorted(classes),
                     "jitter_px": float(params.get("jitter_px", 0.0)),
                     "seed": int(params.get("seed", 0)),
+                    "confidence": float(params.get("confidence", 0.9)),
                     "examples": len(data.examples),
                 },
                 ensure_ascii=False,
@@ -148,6 +149,7 @@ class OracleStubPredictor:
         self.classes = set(spec["classes"])
         self.jitter = float(spec["jitter_px"])
         self.seed = int(spec["seed"])
+        self.confidence = float(spec.get("confidence", 0.9))
         self.truth = ctx.truth
         self.ctx = ctx
 
@@ -166,7 +168,7 @@ class OracleStubPredictor:
                         "parent_label_id": None,
                         "provenance": Provenance(source=Source.MODEL, model_version=self.version),
                         "verification": Verification(),
-                        "confidence": 0.9,
+                        "confidence": self.confidence,
                         "seeded_error": False,
                         "measurement": None,
                         "retracted": False,
