@@ -204,6 +204,32 @@ def test_set_model_status_rejects_unknown_version(pg: sa.Engine) -> None:
         set_model_status(conn, "nope", ModelStatus.DEPLOYED, FIXED_TIME)
 
 
+def test_set_model_status_rejects_candidate() -> None:
+    """판정된 모델을 candidate로 되돌리면 ValueError (DB에 닿기 전에 거부).
+
+    되돌리면 decided_at이 채워진 candidate가 되어 `ModelVersion` 검증기를 어기고, 이후
+    `get_model_version`이 그 행을 읽지 못한다. 회귀 테스트: 예전에는 그대로 UPDATE했다.
+    """
+    # 연결 객체는 쓰이지 않아야 한다 (검사가 UPDATE보다 먼저). 쓰이면 AttributeError가 난다.
+    conn: sa.Connection = object()  # type: ignore[assignment]
+    with pytest.raises(ValueError, match="candidate"):
+        set_model_status(conn, "m1", ModelStatus.CANDIDATE, FIXED_TIME)
+
+
+@pytest.mark.services
+def test_set_lifecycle_rejects_naive_time_before_update(pg: sa.Engine) -> None:
+    """시간대 없는 at은 sessions를 바꾸기 전에 거부한다.
+
+    예외를 잡고 같은 트랜잭션을 커밋해도 상태가 바뀌지 않고 기록도 남지 않는다.
+    회귀 테스트: 예전에는 UPDATE 뒤 기록 단계에서야 거부해서 기록 없는 전이가 커밋될 수 있었다.
+    """
+    with pg.begin() as conn, pytest.raises(ValueError, match="시간대"):
+        set_lifecycle(conn, "s001", LifecycleState.PRIVACY_APPROVED, at=datetime(2026, 1, 1))
+    with pg.connect() as conn:
+        assert get_session(conn, "s001").lifecycle_state is LifecycleState.RAW_INGESTED
+        assert len(list_lifecycle_events(conn, "s001")) == 1  # 등록 기록만
+
+
 @pytest.mark.services
 def test_update_stream_sync_keeps_reference_clock(pg: sa.Engine) -> None:
     """기준 스트림 시계 변경과 다른 스트림의 reference 지정은 거부한다.

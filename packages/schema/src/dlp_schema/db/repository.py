@@ -262,12 +262,16 @@ def set_lifecycle(
     Raises:
         sqlalchemy.exc.NoResultFound: 세션이 없을 때.
         TransitionError: `can_transition`이 거부할 때 (건너뛰기·되돌아가기, withdrawn 이후 이동).
-        ValueError: at에 시간대가 없을 때 (상태는 이미 바뀐 뒤이므로 호출자가 롤백해야 한다).
+        ValueError: at에 시간대가 없을 때. 세션 행을 읽거나 바꾸기 전에 검사하므로 상태는 그대로다.
 
     부작용:
         세션 행을 `FOR UPDATE`로 잠그고 `sessions.lifecycle_state` 갱신 +
         `session_lifecycle_events` 1행.
     """
+    # 시간대 없는 at은 UPDATE 전에 거부한다. 예전에는 `_record_lifecycle`에서야 검사해서
+    # sessions 행이 이미 바뀐 뒤 예외가 났고, 호출자가 롤백하지 않으면 기록 없는 전이가 남았다.
+    if at is not None and at.utcoffset() is None:
+        raise ValueError("생애주기 기록 시각(at)에는 시간대가 있어야 합니다")
     current = LifecycleState(
         conn.execute(
             sa.select(sessions.c.lifecycle_state)
@@ -794,13 +798,19 @@ def set_model_status(
     """모델 버전의 상태를 바꾸고 판정 시각(decided_at)을 기록한다.
 
     Args:
-        status: 새 상태. 전이 규칙은 검사하지 않는다 (호출자 `dlp_train`이 관리).
+        status: 새 상태. candidate를 뺀 전이 규칙은 검사하지 않는다 (호출자 `dlp_train`이 관리).
         at: 판정·은퇴 시각 (decided_at에 쓴다).
         report_uri: 평가 리포트 위치. None이면 기존 값을 그대로 둔다.
 
     Raises:
         KeyError: 모델 버전이 없을 때.
+        ValueError: status가 candidate일 때. candidate는 등록(`insert_model_version`) 때만 갖는
+            초기 상태다. 여기서 candidate로 되돌리면 decided_at이 채워진 candidate가 되어
+            `ModelVersion` 검증기("candidate일 때만 decided_at이 None")를 어기고, 이후
+            `get_model_version`·`list_model_versions`가 그 행을 읽지 못한다.
     """
+    if status is ModelStatus.CANDIDATE:
+        raise ValueError(f"{model_version}: 판정된 모델을 candidate로 되돌릴 수 없습니다")
     values: dict[str, Any] = {"status": status.value, "decided_at": at}
     if report_uri is not None:
         values["report_uri"] = report_uri

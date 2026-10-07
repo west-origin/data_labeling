@@ -11,12 +11,15 @@ DB 없이 `SessionData`를 직접 만들어 넣는다. 정답은 합성 픽스�
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
+import yaml
+from pydantic import ValidationError
 
 from dlp_eval.gate import decide
 from dlp_eval.harness import EvalReport, SessionData, evaluate
-from dlp_eval.policy import EvaluationPolicy, Task, load_policy
+from dlp_eval.policy import EvaluationPolicy, Task, is_class_metric, load_policy, task_metrics
 from dlp_fixtures.actions import generate_action_scenario
 from dlp_fixtures.wiping import generate_wiping_scenario
 from dlp_schema.labels import (
@@ -572,3 +575,51 @@ def test_hands_pck_matches_same_side_hands_by_distance(policy: EvaluationPolicy)
     assert _pck("hands", truth, as_model([_hand("h1", 100)]), policy) == 0.5
     # 반대쪽 손 예측과는 맞추지 않는다
     assert _pck("hands", truth, as_model([_hand("h1", 100, "right")]), policy) == 0.0
+
+
+def _policy_yaml() -> dict[str, Any]:
+    """저장소 evaluation.yaml을 검증 전 사전으로 읽는다 (일부를 바꿔 검증기를 시험한다)."""
+    data: dict[str, Any] = yaml.safe_load(
+        (ROOT / "config" / "policies" / "evaluation.yaml").read_text("utf-8")
+    )
+    return data
+
+
+@pytest.mark.parametrize(
+    ("task", "key", "value", "bad"),
+    [
+        ("objects", "primary", "hotaa", "hotaa"),  # 주 지표 오타
+        ("contact", "guards", ["contact_end_f1", "grasp_f1"], "grasp_f1"),  # 지키는 지표 오타
+        ("privacy", "max_drop_by", {"blur_precison": 0.05}, "blur_precison"),  # 허용 하락 키 오타
+    ],
+)
+def test_gate_metric_typo_fails_at_policy_load(task: str, key: str, value: Any, bad: str) -> None:
+    """게이트 규칙에 그 과제 평가기가 내지 않는 지표 이름이 있으면 정책을 읽을 때 실패한다.
+
+    감사 회귀: 예전에는 그대로 읽혀, 후보·기존 모두 NaN인 비교를 게이트가 조용히 건너뛰었다.
+    """
+    data = _policy_yaml()
+    data["gate"][task][key] = value
+    with pytest.raises(ValidationError, match=bad):
+        EvaluationPolicy.model_validate(data)
+
+
+def test_segment_metric_names_follow_segment_iou() -> None:
+    """segment_iou에서 0.5를 빼면 gate.actions.primary(segment_f1_0.5)는 모르는 이름이 된다."""
+    data = _policy_yaml()
+    data["segment_iou"] = [0.1, 0.25]
+    with pytest.raises(ValidationError, match=r"segment_f1_0\.5"):
+        EvaluationPolicy.model_validate(data)
+
+
+def test_evaluators_emit_exactly_registered_metrics(policy: EvaluationPolicy) -> None:
+    """평가기 출력 지표가 `task_metrics`(TASK_METRICS + segment_f1_<문턱>)와 같다.
+
+    게이트 지표 이름 검사의 근거 목록이 실제 출력과 어긋나지 않는지 본다 (`evaluate`도 검사한다).
+    """
+    report = run([scenario_data(0, glove=True), scenario_data(1, glove=False)], policy)
+    assert report.overall
+    for task, r in report.overall.items():
+        fixed = {m for m in r.metrics if "/" not in m}  # 클래스별 지표(ap/<클래스>)는 접두사만 본다
+        assert fixed == task_metrics(task, policy.segment_iou)  # type: ignore[arg-type]
+        assert all(is_class_metric(task, m) for m in set(r.metrics) - fixed)  # type: ignore[arg-type]

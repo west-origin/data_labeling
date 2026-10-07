@@ -3,7 +3,8 @@
 모델 파일은 `make models`로 받는다 (config/models.yaml). MediaPipe는 EGL/GLES 시스템 라이브러리가
 필요하다 (Ubuntu: libegl1 libgles2).
 
-모델 입출력 (MediaPipe Tasks, VIDEO 모드: 프레임마다 증가하는 시각(ms)을 넘겨야 한다):
+모델 입출력 (MediaPipe Tasks, VIDEO 모드: 프레임마다 엄격히 증가하는 시각(ms)을 넘겨야 한다.
+반올림한 PTS ms가 앞 프레임과 같은 프레임은 `common.strictly_increasing`이 건너뛴다):
 - HandLandmarker(`hand_landmarker.task`): RGB 프레임 → 손마다 21관절(이미지 크기로 정규화한 0~1 x,
   y)과 손 판정(Left/Right, 거울상 가정). 여기서 픽셀로 바꾼다 (x*W, y*H). skeleton="hand21"
   (MediaPipe 관절 순서: 0 손목, 4 엄지 끝, 8 검지 끝, 12 중지 끝, 16 약지 끝, 20 새끼 끝).
@@ -25,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from dlp_models.registry import resolve
-from dlp_prelabel.common import iter_frames, model_label, track_boxes
+from dlp_prelabel.common import iter_frames, model_label, strictly_increasing, track_boxes
 from dlp_prelabel.policy import PrelabelPolicy
 from dlp_schema.episode import version_tag
 from dlp_schema.labels import (
@@ -126,9 +127,10 @@ class MediaPipeHands:
         )
         frames: dict[Hand, list[tuple[KeypointFrame, float]]] = {Hand.LEFT: [], Hand.RIGHT: []}
         with vision.HandLandmarker.create_from_options(options) as model:
-            for t, img in iter_frames(clip.video):
-                # VIDEO 모드는 넘기는 시각(ms)이 계속 증가해야 한다. 스트림 PTS ms를 그대로 넘긴다
-                # (PTS 반올림으로 같은 ms가 두 번 나오면 MediaPipe가 오류를 낸다)
+            # VIDEO 모드는 넘기는 시각(ms)이 엄격히 증가해야 한다. 스트림 PTS ms를 그대로 넘기되,
+            # PTS 반올림으로 앞 프레임과 같은 ms가 된 프레임은 건너뛴다 (`strictly_increasing`).
+            # 그대로 넘기면 MediaPipe가 예외를 내 세션 전체 프리라벨이 실패했다.
+            for t, img in strictly_increasing(iter_frames(clip.video)):
                 h, w = img.shape[:2]
                 result = model.detect_for_video(
                     mp.Image(image_format=mp.ImageFormat.SRGB, data=img), t
@@ -212,7 +214,9 @@ class MediaPipeObjects:
             tuple[int, list[tuple[str, tuple[float, float, float, float], float]]]
         ] = []
         with vision.ObjectDetector.create_from_options(options) as model:
-            for t, img in iter_frames(clip.video):
+            # 손 어댑터와 같은 이유로 같은 ms의 두 번째 프레임은 건너뛴다
+            # (VIDEO 모드 시각 증가 조건)
+            for t, img in strictly_increasing(iter_frames(clip.video)):
                 result = model.detect_for_video(
                     mp.Image(image_format=mp.ImageFormat.SRGB, data=img), t
                 )

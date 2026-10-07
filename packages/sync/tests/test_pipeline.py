@@ -13,11 +13,15 @@ from pathlib import Path
 
 import pytest
 
+import dlp_sync.pipeline as pipeline_mod
 from dlp_fixtures.sync import SyncScenario
 from dlp_schema.session import Session, SyncMethod
+from dlp_sync.anchors import Anchor
 from dlp_sync.pipeline import StreamMedia, SyncReport, apply_manual_adjustment, synchronize
 from dlp_sync.policy import SyncPolicy
 from dlp_sync.slate import detect_slates
+from dlp_sync.xcorr import XcorrResult
+from dlp_sync.xcorr import audio_anchors as xcorr_audio_anchors
 
 FRAME_MS = 1000 / 30  # conftest의 영상 fps와 같다
 Built = tuple[SyncScenario, Session, dict[str, StreamMedia]]
@@ -89,6 +93,34 @@ def test_short_recording_slates_alone_fit_offset_only(
     assert _chosen(report, "third_person") == "qr_slate"
     assert synced.stream("third_person").clock_scale == 1.0
     assert _errors(built, synced, "third_person")[0] <= FRAME_MS  # 완료 기준: 1프레임 이하
+
+
+def test_audio_refinement_fit_error_falls_back_to_slate_fit(
+    build: Callable[..., Built], policy: SyncPolicy, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """오디오 정밀화가 `FitError`(드리프트 상한 초과)로 실패해도 슬레이트 맞춤을 쓴다.
+
+    정밀화 단계(prior가 있는 호출)의 오디오 상관만 드리프트 5%(50000 ppm)인 앵커를 돌려주게 바꾼다.
+    감사 회귀: 예전에는 그 `FitError`가 `_try`까지 올라가 슬레이트 시도 전체가 신뢰도 0이 되고
+    tap_event로 넘어갔다.
+    """
+    real = xcorr_audio_anchors
+
+    def fake(*args: object, **kwargs: object) -> XcorrResult | None:
+        if kwargs.get("prior") is None:
+            return real(*args, **kwargs)  # type: ignore[arg-type]
+        # 대상 시계 20초가 기준 21초에 해당: |scale - 1| = 5% → fit_clock이 거부한다
+        return XcorrResult([Anchor(0.0, 0.0, "a"), Anchor(21_000.0, 20_000.0, "b")], psr=50.0)
+
+    monkeypatch.setattr(pipeline_mod, "audio_anchors", fake)
+    built = build()
+    synced, report = synchronize(built[1], built[2], policy)
+    assert _chosen(report, "third_person") == "qr_slate"
+    attempt = next(r for r in report.streams if r.stream_id == "third_person").attempts[0]
+    assert "오디오 정밀화 실패" in attempt.reason and attempt.confidence > 0
+    # 슬레이트만으로 맞춘 결과 (오프셋만, 1프레임 이내)
+    assert synced.stream("third_person").clock_scale == 1.0
+    assert _errors(built, synced, "third_person")[0] <= FRAME_MS
 
 
 def test_without_slates_third_person_uses_taps(

@@ -9,7 +9,9 @@
 4차 검수 병합 중, 세션을 `prelabeled → human_verified`로 옮기는 명령이 없다는 것을 확인했다.
 종단 테스트만 `set_lifecycle`을 직접 불렀다. 그러면 운영에서는
 
-- `dlp dataset build`가 human_verified 세션만 분할에 넣으므로 어떤 세션도 데이터셋에 들어가지 못하고,
+- `dlp dataset build`가 human_verified 세션만 split_assigned로 옮기므로 어떤 세션도 분할 배정·내보내기
+  단계로 나아가지 못하고 (빌드 후보 자체는 ADR 0007대로 프라이버시 승인된 세션이다. 검증 전 세션도
+  분할에 들어가며 생애주기만 그대로다 — ADR 0031에서 바로잡은 서술),
 - 운영 지표의 "검증 에피소드"와 원본 보관 기산점이 정해지지 않는다.
 
 `split_assigned → exported` 전이도 어느 단계도 남기지 않았다.

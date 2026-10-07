@@ -240,11 +240,15 @@ def build_dataset_version(
     )
     insert_dataset_version(conn, version)
     # 생애주기: 사람 검증을 마친 세션 중 holdout이 아닌 것(golden·train·val)만 split_assigned로.
-    # 아직 검증 전 세션은 분할에 들어가도 생애주기는 그대로다 (내보내기는 라벨 검증 상태로 거른다)
+    # 아직 검증 전 세션은 분할에 들어가도 생애주기는 그대로다 (내보내기는 라벨 검증 상태로 거른다).
+    # 전이 기록(session_lifecycle_events)에는 버전 생성 시각과 실행자 `dataset:<버전 ID>`를 남긴다.
+    # 시각을 안 주면 DB 시각(트랜잭션 시작)이 되어 manifest의 created_at과 어긋나고, 실행자가 없으면
+    # 어느 빌드가 옮겼는지 계보에서 알 수 없다.
+    actor = f"dataset:{version_id}"
     for s in candidates:
         if (
             s.lifecycle_state is LifecycleState.HUMAN_VERIFIED
             and splits[s.session_id] is not Split.HOLDOUT
         ):
-            set_lifecycle(conn, s.session_id, LifecycleState.SPLIT_ASSIGNED)
+            set_lifecycle(conn, s.session_id, LifecycleState.SPLIT_ASSIGNED, at=now, actor=actor)
     return BuildResult(version, report, dict(label_counts))

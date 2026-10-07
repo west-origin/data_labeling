@@ -9,11 +9,16 @@ from __future__ import annotations
 
 import ctypes.util
 import shutil
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
+import numpy as np
 import pytest
 
+import dlp_prelabel.adapters.mediapipe_models as mp_models
 from dlp_fixtures.actions import generate_action_scenario
 from dlp_fixtures.video import generate_blur_scenario
 from dlp_models.registry import load_registry
@@ -26,6 +31,7 @@ from dlp_prelabel.adapters.mediapipe_models import (
 from dlp_prelabel.adapters.owl_objects import OwlObjects
 from dlp_prelabel.adapters.rtmpose import RtmPose
 from dlp_prelabel.adapters.stubs import UNAVAILABLE, OraclePredictor
+from dlp_prelabel.common import strictly_increasing
 from dlp_prelabel.policy import load_policy
 from dlp_schema.labels import Hand
 from dlp_schema.ontology import load_ontology
@@ -160,3 +166,87 @@ def test_owl_objects_runs_once_per_stride(tmp_path: Path) -> None:
     for label in predictor.run(Clip("s1", "bodycam", video)):
         assert check_label(label, ontology) == []
         assert label.payload.kind == "box_track" and len(label.payload.keyframes) == 1
+
+
+def test_strictly_increasing_drops_repeated_and_backward_ms() -> None:
+    """반올림한 PTS ms가 앞과 같거나 작은 프레임은 건너뛰고 나머지 시각은 그대로 둔다."""
+    img = np.zeros((2, 2, 3), dtype=np.uint8)
+    times = [0, 1, 1, 2, 2, 2, 5, 4, 6]
+    assert [t for t, _ in strictly_increasing((t, img) for t in times)] == [0, 1, 2, 5, 6]
+
+
+class _FakeHandLandmarker:
+    """MediaPipe HandLandmarker 대역. 실제처럼 VIDEO 모드 시각이 엄격히 증가하지 않으면 예외를 낸다.
+
+    프레임마다 왼손("Right" 판정 = 거울상 가정이라 바디캠에서는 왼손) 21관절을 하나 낸다.
+    """
+
+    def __init__(self) -> None:
+        self.stamps: list[int] = []
+
+    def __enter__(self) -> _FakeHandLandmarker:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+    def detect_for_video(self, image: Any, t: int) -> Any:
+        if self.stamps and t <= self.stamps[-1]:
+            raise ValueError("Input timestamp must be monotonically increasing.")
+        self.stamps.append(t)
+        landmarks = [SimpleNamespace(x=0.5, y=0.5) for _ in range(21)]
+        handed = [SimpleNamespace(category_name="Right", score=0.9)]
+        return SimpleNamespace(hand_landmarks=[landmarks], handedness=[handed])
+
+
+def test_mediapipe_hands_skips_frames_with_repeated_ms(monkeypatch: pytest.MonkeyPatch) -> None:
+    """PTS 반올림으로 같은 ms가 반복되는 영상(고fps·VFR)에서도 손 어댑터가 돈다.
+
+    MediaPipe 모듈·가중치 없이 대역으로 시험한다 (`_vision`, `iter_frames`를 바꾼다). 정답: 같은
+    ms의 두 번째 프레임은 MediaPipe에 넘기지 않고, 키프레임 시각은 유일한 PTS ms 그대로다.
+    감사 회귀: 예전에는 같은 ms를 그대로 넘겨 MediaPipe가 예외를 냈다.
+    """
+    model = _FakeHandLandmarker()
+
+    def keywords(**kw: object) -> dict[str, object]:
+        """옵션·이미지 생성자 대역: 받은 키워드를 그대로 돌려준다."""
+        return kw
+
+    def create(_options: object) -> _FakeHandLandmarker:
+        """`HandLandmarker.create_from_options` 대역."""
+        return model
+
+    class BaseOptions:
+        """`mpt.BaseOptions` 대역: 호출 가능하고 Delegate 속성을 가진다."""
+
+        Delegate = SimpleNamespace(CPU=0)
+
+        def __init__(self, **_kw: object) -> None:
+            pass
+
+    vision = SimpleNamespace(
+        HandLandmarkerOptions=keywords,
+        RunningMode=SimpleNamespace(VIDEO="video"),
+        HandLandmarker=SimpleNamespace(create_from_options=create),
+    )
+    mpt = SimpleNamespace(BaseOptions=BaseOptions)
+    mp = SimpleNamespace(Image=keywords, ImageFormat=SimpleNamespace(SRGB="srgb"))
+    monkeypatch.setattr(mp_models, "_vision", lambda: (mp, mpt, vision))
+    img = np.zeros((10, 20, 3), dtype=np.uint8)
+
+    def frames(_video: Path) -> Iterator[tuple[int, np.ndarray[Any, Any]]]:
+        # 1000 fps를 넘는 구간: 0.0, 0.6, 1.2, 1.8 ms PTS → 반올림 0, 1, 1, 2
+        yield from ((t, img) for t in (0, 1, 1, 2, 33))
+
+    monkeypatch.setattr(mp_models, "iter_frames", frames)
+    # 가중치 확인(__init__)을 건너뛰고 필요한 속성만 채운다
+    hands = object.__new__(MediaPipeHands)
+    hands.path = Path("hand_landmarker.task")
+    hands.version = "mediapipe-hand_landmarker-test+pabc"
+    hands.policy = load_policy(ROOT)
+    hands.ontology_version = "1.0.0"
+    hands.now = NOW
+    [label] = hands.run(Clip("s1", "bodycam", Path("v.mp4")))
+    assert model.stamps == [0, 1, 2, 33]
+    assert [k.t_ms for k in label.payload.keyframes] == [0, 1, 2, 33]  # type: ignore[union-attr]
+    assert check_label(label, load_ontology(ROOT / "config/ontology/v1")) == []

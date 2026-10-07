@@ -37,6 +37,7 @@ from dlp_schema.db.repository import (
     insert_labels,
     insert_session,
     insert_withdrawal,
+    list_lifecycle_events,
     register_ontology,
     set_privacy_state,
 )
@@ -181,7 +182,26 @@ def test_build_withdraw_rebuild_export_and_trace(
         )
         assert victim in e1.session_ids
 
-        lineage = withdraw_session(conn, victim, "동의 철회", FIXED_TIME + timedelta(days=1))
+        lineage = withdraw_session(
+            conn, victim, "동의 철회", FIXED_TIME + timedelta(days=1), actor="dpo01"
+        )
+        events = list_lifecycle_events(conn, victim)
+    # 감사 회귀: 빌드와 사용 중지의 생애주기 기록에 시각·실행자가 남는다
+    # (예전에는 둘 다 빠져 DB 시각·실행자 없음으로 기록됐다)
+    assert [(e.from_state, e.to_state, e.at, e.actor) for e in events[-2:]] == [
+        (
+            LifecycleState.HUMAN_VERIFIED,
+            LifecycleState.SPLIT_ASSIGNED,
+            FIXED_TIME,
+            f"dataset:{v1_id}",
+        ),
+        (
+            LifecycleState.SPLIT_ASSIGNED,
+            LifecycleState.WITHDRAWN,
+            FIXED_TIME + timedelta(days=1),
+            "dpo01",
+        ),
+    ]
     # 완료 기준: 계보 조회가 세션 → 버전 → 학습 실행 → 내보내기를 모두 돌려준다
     assert lineage.lifecycle is LifecycleState.WITHDRAWN
     assert lineage.dataset_versions == [v1_id]

@@ -277,6 +277,42 @@ def _stale(labels: list[LabelRecord], prefix: str, version: str) -> list[LabelRe
     ]
 
 
+def pick_hand_tracks(hand_labels: list[LabelRecord]) -> dict[Hand, KeypointTrackPayload]:
+    """손(왼·오른)마다 접촉 추정에 쓸 hand21 트랙 하나를 고른다.
+
+    같은 손 트랙이 여럿일 수 있다 (사람이 새로 그린 트랙과 모델 트랙, 버전이 다른 모델 트랙이 함께
+    현재 라벨인 경우). 예전에는 입력 순서의 마지막 것을 조용히 썼는데, 그 순서는 DB 조회 순서라
+    접촉 결과가 실행마다 달라질 수 있었다. 다음 순서로 가장 앞서는 트랙을 고른다 (병합하지 않는다:
+    서로 다른 트랙의 관절을 섞으면 어느 출처의 위치인지 알 수 없게 된다).
+
+    1. 사람이 만들었거나 검수된 트랙 (`_protected`): 사람이 확인한 위치가 가장 믿을 만하다.
+    2. 더 새로 만든 트랙 (`created_at`): 보통 더 새 모델 버전의 출력이다.
+    3. 더 긴 구간 (`t_end_ms - t_start_ms`): 접촉을 놓치는 시간이 짧다.
+    4. 라벨 ID (사전순으로 큰 것): 위가 모두 같을 때 결과를 고정하는 마지막 기준.
+
+    Args:
+        hand_labels: hand21 키포인트 트랙 라벨 (`payload.hand`가 있는 것).
+
+    Returns:
+        손 → 고른 트랙의 페이로드. 트랙이 없는 손은 키가 없다.
+    """
+    best: dict[Hand, LabelRecord] = {}
+
+    def rank(x: LabelRecord) -> tuple[bool, datetime, int, str]:
+        return (_protected(x), x.created_at, x.t_end_ms - x.t_start_ms, x.label_id)
+
+    for x in hand_labels:
+        assert isinstance(x.payload, KeypointTrackPayload) and x.payload.hand is not None
+        hand = x.payload.hand
+        if hand not in best or rank(x) > rank(best[hand]):
+            best[hand] = x
+    out: dict[Hand, KeypointTrackPayload] = {}
+    for hand, x in best.items():
+        assert isinstance(x.payload, KeypointTrackPayload)
+        out[hand] = x.payload
+    return out
+
+
 def _is_wearer(x: LabelRecord) -> bool:
     """착용자 매칭 단계가 만든 사본 레코드인가 (모델 버전 접두사로 판단)."""
     return (x.provenance.model_version or "").startswith(WEARER_PREFIX)
@@ -468,11 +504,9 @@ def _contacts(
     if any(x.provenance.model_version == version for x in history):
         return 0
     stale = _stale(history, f"{session.session_id}-contact-", version)
-    hands: dict[Hand, KeypointTrackPayload] = {}
-    # 손마다 트랙 하나만 쓴다. 같은 손 트랙이 여럿이면 목록의 마지막 것이 남는다
-    for x in hand_labels:
-        assert isinstance(x.payload, KeypointTrackPayload) and x.payload.hand is not None
-        hands[x.payload.hand] = x.payload
+    # 손마다 트랙 하나만 쓴다. 같은 손 트랙이 여럿이면 정해진 순서로 하나를 고른다
+    # (`pick_hand_tracks`)
+    hands = pick_hand_tracks(hand_labels)
     objects = [x.payload for x in box_labels if isinstance(x.payload, BoxTrackPayload)]
     # entity_id → 클래스 (접촉 대상 종류 판단용)
     classes = {o.entity_id: o.class_id for o in objects}

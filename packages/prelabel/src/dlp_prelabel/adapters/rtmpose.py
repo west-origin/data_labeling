@@ -26,7 +26,7 @@ import cv2
 import numpy as np
 
 from dlp_models.registry import resolve
-from dlp_prelabel.common import iter_frames, model_label, track_boxes
+from dlp_prelabel.common import iter_frames, model_label, strictly_increasing, track_boxes
 from dlp_prelabel.policy import PrelabelPolicy
 from dlp_schema.episode import version_tag
 from dlp_schema.labels import Keypoint, KeypointFrame, KeypointTrackPayload, LabelRecord
@@ -80,7 +80,9 @@ class RtmPose:
         detections: list[tuple[int, list[Det]]] = []
         # (시각, 관절 감싸는 박스) → 키프레임. 추적 결과(시각, 박스)로 키프레임을 되찾는다
         frames: dict[tuple[int, tuple[float, float, float, float]], KeypointFrame] = {}
-        for t, rgb in iter_frames(clip.video):
+        # 반올림한 PTS ms가 앞 프레임과 같은 프레임은 건너뛴다: 한 사람 트랙에 같은 시각 키프레임이
+        # 두 번 들어가면 계약 검사(키프레임 시각 유일)에 걸린다 (`common.strictly_increasing`)
+        for t, rgb in strictly_increasing(iter_frames(clip.video)):
             bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)  # rtmlib은 OpenCV(BGR) 입력을 가정한다
             # found: (N, 4) x1, y1, x2, y2 픽셀, classes: (N,) COCO 클래스 번호
             found, classes = detector(bgr)

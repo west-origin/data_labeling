@@ -22,6 +22,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -119,12 +120,19 @@ class Pseudonymizer:
     def ref(self, session_id: str, value: str) -> str:
         """세션 ID가 들어간 다른 ID(개체·행동·구간 ID 등)의 세션 부분을 세션 가명으로 바꾼다.
 
-        개체 ID("cup_1")처럼 세션 ID가 없으면 그대로 둔다. 문자열 치환이라 `value` 안의 모든
-        `session_id` 부분 문자열이 바뀐다.
+        개체 ID("cup_1")처럼 세션 ID가 없으면 그대로 둔다. 세션 ID가 온전한 토큰으로 나올 때만
+        바꾼다: 앞이 문자열 시작이거나 영숫자가 아닌 문자(구분자 `-`·`:`·`.`·`_`)이고, 뒤가 문자열
+        끝이거나 영숫자가 아닌 문자일 때 (예: 값 전체가 세션 ID, `<세션>-right-…`, `<원래>:<세션>`).
+        예전에는 단순 부분 문자열 치환이라 세션 "s1"이 "s10-right-…"의 앞부분까지 바꿔
+        "session-…0-right-…"처럼 다른 세션의 ID를 망가뜨렸다.
         """
         if self.key is None or session_id not in value:
             return value
-        return value.replace(session_id, self.session(session_id))
+        # 영숫자에 붙어 있는 일치(다른 ID의 일부)는 건너뛴다. 세션 ID 자체의 특수문자(`.` 등)는
+        # re.escape로 글자 그대로 맞춘다
+        token = re.compile(rf"(?<![A-Za-z0-9]){re.escape(session_id)}(?![A-Za-z0-9])")
+        alias = self.session(session_id)
+        return token.sub(lambda _m: alias, value)
 
     def payload_ids(self, session_id: str, data: Any) -> Any:
         """페이로드 사전에서 이름이 _id로 끝나는 문자열 값에 ref를 적용한다 (중첩 포함).

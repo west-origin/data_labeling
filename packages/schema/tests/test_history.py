@@ -77,3 +77,19 @@ def test_human_correction_and_addition_and_deletion() -> None:
         ("accepted", "c", "c"),
         ("added", "new", None),
     }
+
+
+def test_sensor_label_is_not_counted_as_human_addition() -> None:
+    """센서 출처 현재 라벨(states 안, 부모 없음)은 어떤 변화로도 세지 않는다.
+
+    회귀 테스트: 예전에는 사슬 맨 앞이 모델이 아니라는 이유로 "added"(사람이 추가함)로 셌다.
+    같은 이력의 사람 추가 라벨은 그대로 added다.
+    """
+    sensor = box(
+        "glove",
+        0,
+        provenance=Provenance(source=Source.SENSOR, sensor_id="glove-l"),
+        verification=APPROVED,
+    )
+    new = box("new", 9, verification=CORRECTED)
+    assert changes([sensor, new]) == {("added", "new", None)}

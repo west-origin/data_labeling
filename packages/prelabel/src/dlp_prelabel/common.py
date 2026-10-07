@@ -3,6 +3,8 @@
 `dlp prelabel run`의 모든 어댑터와 `lift3d`, `runner`가 쓴다. 관련: WP8, ADR 0019(시간 규약).
 
 - `iter_frames`: 영상 → (그 스트림 PTS ms, RGB 프레임). 프레임 번호가 아닌 PTS로 시각을 낸다.
+- `strictly_increasing`: 반올림한 ms가 앞 프레임과 같거나 작은 프레임을 건너뛴다 (MediaPipe VIDEO
+  모드·키프레임 시각 유일성).
 - `input_digest`: 단계 입력(라벨 ID 집합 등)의 짧은 해시. 모델 버전에 붙여 입력 변화를 감지한다.
 - `iou`, `BoxTrack`, `track_boxes`: 프레임별 탐지를 IoU 탐욕 매칭으로 트랙에 잇는다.
 - `model_label`: 모델 출처(`Source.MODEL`) `LabelRecord`를 만든다.
@@ -56,6 +58,31 @@ def iter_frames(video: Path) -> Iterator[tuple[int, Image]]:
                 round(float(frame.pts * tb * 1000)),
                 np.asarray(frame.to_ndarray(format="rgb24"), dtype=np.uint8),
             )
+
+
+def strictly_increasing(frames: Iterable[tuple[int, Image]]) -> Iterator[tuple[int, Image]]:
+    """시각(ms)이 직전에 내보낸 프레임보다 큰 프레임만 내보낸다.
+
+    `iter_frames`는 PTS를 정수 ms로 반올림하므로 고프레임레이트(예: 1000 fps 초과 구간)나 VFR
+    영상에서 이웃한 두 프레임이 같은 ms가 될 수 있다. 그런 프레임을 그대로 쓰면
+    - MediaPipe VIDEO 모드(`detect_for_video`)는 시각이 엄격히 증가하지 않는다며 예외를 내고,
+    - 한 트랙에 같은 시각 키프레임이 두 번 들어가 계약 검사(키프레임 시각 유일)에 걸린다.
+    그래서 같은 ms의 두 번째 이후 프레임은 버린다 (1 ms 안의 프레임 차이는 라벨 정밀도 밖이다).
+    시각은 PTS 그대로이며 프레임 번호를 만들거나 저장하지 않는다. PTS가 거꾸로 가는 손상 영상의
+    프레임도 같은 규칙으로 건너뛴다.
+
+    Args:
+        frames: (PTS ms, 프레임) 순회 (보통 `iter_frames`).
+
+    Yields:
+        (PTS ms, 프레임). 시각이 엄격히 증가한다.
+    """
+    last: int | None = None
+    for t, img in frames:
+        if last is not None and t <= last:
+            continue
+        last = t
+        yield t, img
 
 
 def input_digest(labels: Iterable[LabelRecord], *extra: str) -> str:
