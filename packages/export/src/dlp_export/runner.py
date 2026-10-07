@@ -240,10 +240,9 @@ def run_export(
 ) -> ExportResult:
     """내보내기 하나. DB 트랜잭션은 이 함수가 연다 (이력은 올리기 전에 따로 커밋한다).
 
-    id_secret: 작업자·장소 가명 비밀값 (없으면 실행마다 임의 값, export.yaml ids).
-
     Args:
-        engine: DB 엔진. 트랜잭션 세 개를 차례로 연다 (읽기 → 이력 커밋 → 생애주기 전이).
+        engine: DB 엔진. 연결을 차례로 연다: 읽기 → 이력 커밋(세션 행 잠금) → 올린 뒤 사용 중지
+            재확인(읽기) → 생애주기 전이.
         root: 저장소 루트 (격리 환경 스크립트 위치).
         version_id: 데이터셋 버전 ID.
         fmt: "coco" | "intervals" | "lerobot".
@@ -257,7 +256,8 @@ def run_export(
         include_unreviewed: 미검수 모델 라벨 포함 (명시적 옵션).
         splits: 내보낼 분할 (None이면 정책 기본).
         now: 내보내기 시각 (시간대 포함). 내보내기 ID에도 들어간다.
-        id_secret: 가명 비밀값 바이트 (CLI가 `check_secret`으로 확인한 뒤 넘긴다).
+        id_secret: 작업자·장소·세션·라벨 가명 비밀값 바이트 (CLI가 `check_secret`으로 확인한 뒤
+            넘긴다). 없으면 실행마다 임의 값이라 아무도 되짚을 수 없다 (export.yaml ids).
 
     Returns:
         `ExportResult`.

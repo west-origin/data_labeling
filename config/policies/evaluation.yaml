@@ -48,15 +48,17 @@ privacy:
 subgroups: [glove, site]
 
 # 배포 게이트: 후보 모델이 기존 모델보다
-#   - 주 지표(primary)가 min_gain 이상 좋고,
-#   - 지키는 지표(guards)가 전체와 각 하위 집단에서 max_drop보다 많이 나빠지지 않아야 통과한다.
+#   - 주 지표(primary)가 전체에서 min_gain 이상 좋고,
+#   - 지키는 지표(guards)가 전체와 각 하위 집단에서, 주 지표가 각 하위 집단에서 허용 하락(max_drop_by에
+#     있으면 그 값, 없으면 max_drop)보다 많이 나빠지지 않아야 통과한다.
 # 기존 모델이 없으면(첫 배포) 주 지표가 first_deploy 기준을 넘으면 통과한다 (오차 지표는 이하).
 # 지표 방향(높을수록 좋은지)은 코드가 안다 (오차·ECE는 낮을수록 좋다).
 # max_drop은 0~1 지표 기준이다. 단위가 다른 지표(ms 오차 등)는 max_drop_by로 따로 준다.
-# 지표 이름은 dlp_eval.harness가 내는 키다 (objects: map·ap50·hota·idf1·mota·ece, hands/body: pck,
+# 지표 이름은 dlp_eval.harness가 내는 키다 (objects: map·ap50·ap75·hota·idf1·mota·ece·ap/<클래스>, hands/body: pck,
 # contact: contact_{start,end}_{f1,error_ms}·grasp_macro_f1, actions: segment_f1_<iou>·temporal_map·
 # boundary_f1·verb_macro_f1, relations: relation_f1, states: transition_accuracy·transition_precision,
-# coverage: coverage_abs_error, privacy: blur_recall·blur_precision). 목록은 dlp_eval.policy.TASK_METRICS.
+# coverage: coverage_abs_error, privacy: blur_recall·blur_precision·blur_recall/<대상>). 목록은
+# dlp_eval.policy.TASK_METRICS.
 # 그 과제가 내지 않는 이름(오타, segment_iou에 없는 문턱)을 적으면 정책을 읽을 때 실패한다
 # (예전에는 NaN으로 취급되어 후보·기존 모두 NaN이면 그 비교를 조용히 건너뛰었다).
 # 규칙이 없는 과제는 판정하지 않고 경고만 남긴다 (통과로 본다).

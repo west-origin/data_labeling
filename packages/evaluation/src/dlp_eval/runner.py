@@ -96,7 +96,7 @@ def golden_sessions(conn: sa.Connection, golden_version: str) -> list[GoldenSess
     이력을 한 번 읽는다 (읽기 전용).
 
     Raises:
-        KeyError 등: 골든셋 버전이나 세션이 DB에 없으면 저장소 함수가 던진다.
+        sqlalchemy.exc.NoResultFound: 골든셋 버전이나 세션이 DB에 없을 때 (저장소 함수가 던진다).
     """
     golden = get_golden_set(conn, golden_version)
     withdrawn = withdrawn_session_ids(conn)
@@ -254,14 +254,12 @@ def report_dict(
     decision: GateDecision | None,
     extra: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """extra: 리포트에 함께 남길 값 (예: 재학습 루프가 비교한 배포 모델 버전).
+    """리포트를 JSON으로 쓸 수 있는 dict로 만든다.
 
-    리포트를 JSON으로 쓸 수 있는 dict로 만든다. 키: golden_version, model_versions, overall,
-    subgroups, lower_is_better, (판정이 있으면) gate, 그리고 extra의 키 (같은 키면 extra가
-    덮어쓴다). 재학습 루프는 extra에 `deployed_baseline`을 넣고, 승인
-    배포(`dlp_train.loop.deploy`)가 다시
-    읽는다.
-    NaN은 null이 된다.
+    extra는 리포트에 함께 남길 값이다 (예: 재학습 루프가 비교한 배포 모델 버전). 키:
+    golden_version, model_versions, overall, subgroups, lower_is_better, (판정이 있으면) gate,
+    그리고 extra의 키 (같은 키면 extra가 덮어쓴다). 재학습 루프는 extra에 `deployed_baseline`을
+    넣고, 승인 배포(`dlp_train.loop.deploy`)가 다시 읽는다. NaN은 null이 된다.
     """
     data: dict[str, Any] = {
         "golden_version": report.golden_version,

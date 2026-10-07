@@ -132,7 +132,7 @@ def load_source(
     Raises:
         ExportError: 영상 스트림이 지금 프라이버시 승인 상태가 아닐 때 (`RenderNotCurrentError`).
         SnapshotError / FileNotFoundError: labels.jsonl을 읽을 수 없을 때.
-        KeyError 등: 버전이 없을 때 (`get_dataset_version`).
+        sqlalchemy.exc.NoResultFound: 버전이 없을 때 (`get_dataset_version`).
     """
     version = get_dataset_version(conn, version_id)
     wanted = splits or policy.splits

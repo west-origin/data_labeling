@@ -1,4 +1,4 @@
-"""내보내기마다 다른 가명: 작업자·장소·세션·라벨 ID (export.yaml ids, ADR 0021·0027).
+"""내보내기마다 다른 가명: 작업자·장소·세션·라벨 ID (export.yaml ids, ADR 0021·0027·0031).
 
 가명 = HMAC-SHA256(내보내기 키, "<종류>:<ID>")의 앞 16자.
 내보내기 키 = HMAC-SHA256(비밀값, 내보내기 ID)라서
@@ -124,7 +124,8 @@ class Pseudonymizer:
         바꾼다: 앞이 문자열 시작이거나 영숫자가 아닌 문자(구분자 `-`·`:`·`.`·`_`)이고, 뒤가 문자열
         끝이거나 영숫자가 아닌 문자일 때 (예: 값 전체가 세션 ID, `<세션>-right-…`, `<원래>:<세션>`).
         예전에는 단순 부분 문자열 치환이라 세션 "s1"이 "s10-right-…"의 앞부분까지 바꿔
-        "session-…0-right-…"처럼 다른 세션의 ID를 망가뜨렸다.
+        "session-…0-right-…"처럼 다른 세션의 ID를 망가뜨렸다 (ADR 0031). 영숫자 판정은 ASCII
+        기준이라 한글 등 다른 글자는 구분자로 본다.
         """
         if self.key is None or session_id not in value:
             return value

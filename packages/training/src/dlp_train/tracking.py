@@ -35,13 +35,22 @@ class Tracker(Protocol):
         """실행을 만들고 실행 ID를 돌려준다."""
         ...
 
-    def log_params(self, run_id: str, params: dict[str, str]) -> None: ...
-    def log_metrics(self, run_id: str, metrics: dict[str, float]) -> None: ...
+    def log_params(self, run_id: str, params: dict[str, str]) -> None:
+        """실행에 파라미터(문자열 값)를 남긴다."""
+        ...
+
+    def log_metrics(self, run_id: str, metrics: dict[str, float]) -> None:
+        """실행에 지표를 남긴다. NaN·무한 값은 기록하지 않는다 (`_finite`)."""
+        ...
+
     def log_artifact(self, run_id: str, path: Path, artifact_path: str) -> str:
         """산출물을 올리고 그 위치(URI)를 돌려준다."""
         ...
 
-    def finish(self, run_id: str, status: RunStatus) -> None: ...
+    def finish(self, run_id: str, status: RunStatus) -> None:
+        """실행을 종료 상태(FINISHED·FAILED)로 끝낸다."""
+        ...
+
     def register(self, name: str, run_id: str, source: str, alias: str) -> str:
         """모델 레지스트리에 버전을 만들고 별칭을 옮긴다. 레지스트리 버전 번호를 돌려준다."""
         ...
@@ -136,8 +145,8 @@ class MlflowTracker:
             `<artifact_uri>/<artifact_path>/<파일 이름>`.
 
         Raises:
-            TrackingError: 서버가 산출물을 대신 받지 않거나(--serve-artifacts 없음) 업로드가 실패할
-            때.
+            TrackingError: 서버가 산출물을 대신 받지 않거나(--serve-artifacts 없음) 업로드가
+                실패할 때.
         """
         root = self._artifact_roots[run_id]
         if not root.startswith("mlflow-artifacts:"):

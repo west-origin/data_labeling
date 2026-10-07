@@ -1,7 +1,8 @@
 """평가 정책 (config/policies/evaluation.yaml).
 
-WP11, ADR 0013·0025. `load_policy(root)`가 YAML을 읽어 `EvaluationPolicy`로 검증한다. 하네스(지표
-계산의 허용 오차·IoU 문턱·보간 간격), 게이트(과제별 배포 규칙), 재학습 루프가 같은 객체를 쓴다.
+WP11, ADR 0013·0025·0031. `load_policy(root)`가 YAML을 읽어 `EvaluationPolicy`로 검증한다.
+하네스(지표 계산의 허용 오차·IoU 문턱·보간 간격), 게이트(과제별 배포 규칙), 재학습 루프가 같은
+객체를 쓴다.
 
 공개 이름:
 - `Task`·`TASKS` — 평가 과제 이름과 평가 순서. 학습 정책(`dlp_train.policy`)과 러너의 과제 키도
@@ -45,10 +46,10 @@ TASKS: tuple[Task, ...] = (
 
 # 과제 → 그 과제 평가기(`dlp_eval.harness.EVALUATORS`)가 내는 지표 이름. 행동 과제의 구간 F1
 # (`segment_f1_<문턱>`)은 정책 `segment_iou`에 따라 달라지므로 여기에 없고 `task_metrics`가 붙인다.
-# 쓰임: (1) 정책을 읽을 때 게이트 규칙의 지표 이름 검사 (`EvaluationPolicy._check_gate_metrics`):
-# 오타가 있으면 후보·기존 모두 NaN이 되어 게이트가 그 비교를 조용히 건너뛰기 때문이다.
-# (2) `harness.evaluate`가 평가기 출력이 이 목록과 같은지 확인해, 평가기에 지표를 더하고 여기를
-# 잊으면 바로 실패한다.
+# 쓰임 (ADR 0031): (1) 정책을 읽을 때 게이트 규칙의 지표 이름 검사
+# (`EvaluationPolicy._check_gate_metrics`): 오타가 있으면 후보·기존 모두 NaN이 되어 게이트가 그
+# 비교를 조용히 건너뛰기 때문이다. (2) `harness.evaluate`가 평가기 출력이 이 목록과 같은지 확인해,
+# 평가기에 지표를 더하고 여기를 잊으면 바로 실패한다.
 TASK_METRICS: dict[Task, frozenset[str]] = {
     "objects": frozenset({"map", "ap50", "ap75", "hota", "idf1", "mota", "ece"}),
     "hands": frozenset({"pck"}),

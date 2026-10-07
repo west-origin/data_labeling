@@ -10,15 +10,17 @@
    학습과 겹치지 않게.
 2. 나머지에서 검증용 작업자를 하나씩 고른다. 작업자를 고르면 그의 장소도 검증 쪽이 된다.
    작업자와 장소가 모두 검증 쪽인 세션은 val, 모두 학습 쪽인 세션은 train, 걸친 세션은 holdout이다.
-   매 단계에서 holdout이 가장 적게 늘어나는 작업자를 고르고(같으면 seed 해시 순), 검증 세션이
-   목표 비율에 이르면 멈춘다.
+   매 단계에서 holdout이 가장 적게 늘어나는 작업자를 고르고(같으면 val이 많은 쪽, 그다음 작업자
+   ID 사전순), 검증 세션이 목표 비율에 이르면 멈춘다.
 결과는 check_isolation으로 다시 검사한다.
 
 예: 작업자 A가 장소 X·Y에서, 작업자 B가 장소 Y에서 일했다. A를 검증으로 고르면 X·Y가 검증 쪽이 되어
 B의 Y 세션은 (작업자 학습 쪽, 장소 검증 쪽) → holdout이다.
 
 holdout은 학습·검증·평가 어디에도 쓰지 않는다 (정보 누수 방지, `dlp_schema.dataset.Split`).
-결정적이다: 같은 세션·골든·seed면 같은 분할이 나온다 (세션 순서와 무관하게 seed 해시로 동점 처리).
+결정적이다: 같은 세션·골든이면 세션 순서와 무관하게 같은 분할이 나온다. `assign_splits`의 동점은
+작업자 ID로 끊으므로 seed는 지금 결과에 영향이 없다 (seed는 `propose_golden`의 동점 처리에만
+쓰인다).
 
 공개 함수: `assign_splits`, `check_isolation`, `propose_golden`. 이 모듈은 DB를 모른다 (순수 함수).
 """
@@ -56,25 +58,24 @@ def assign_splits(
     seed: int = 0,
     golden_sessions: Iterable[Session] = (),
 ) -> tuple[dict[str, Split], SplitReport]:
-    """golden_sessions: 골든셋의 모든 세션 (후보 밖 세션 포함).
-
-    그 작업자·장소는 학습·검증에 못 들어간다.
+    """후보 세션을 golden·train·val·holdout으로 나눈다 (모듈 docstring의 규칙).
 
     Args:
         sessions: 분할할 후보 세션 (데이터셋에 들어갈 세션 전부).
         golden_ids: 골든셋 세션 ID. `sessions`에 있는 것은 golden 분할이 된다.
         val_ratio: 골든 쪽을 뺀 나머지(pool) 중 검증 세션 목표 비율 (dataset.yaml `val_ratio`).
-        seed: 동점 처리 순서 seed.
-        golden_sessions: 후보 밖 골든 세션 (작업자·장소만 골든 쪽으로 막는 데 쓴다,
-            분할에는 안 넣는다).
+        seed: 작업자 후보 순회 순서를 섞는 seed. 고르는 기준(정렬 키)이 작업자 ID로 끝나므로
+            결과에는 영향이 없다.
+        golden_sessions: 후보 밖 골든 세션 (작업자·장소만 골든 쪽으로 막는 데 쓴다, 분할에는
+            안 넣는다). 그 작업자·장소는 학습·검증에 못 들어간다.
 
     Returns:
         (세션 ID → 분할, 요약). `sessions`의 모든 세션이 키로 들어간다.
 
     알고리즘(탐욕): 목표 val 세션 수에 이를 때까지, 아직 고르지 않은 작업자 중 그를 더했을 때
-    "걸친 세션(holdout) 수"가 가장 작고, 같으면 val 수가 큰 작업자를 고른다. val을 늘리지 못하는
-    작업자는 건너뛰고, 고를 작업자가 없으면 멈춘다. 매 단계 pool 전체를 다시 세므로
-    O(작업자² * 세션)이다.
+    "걸친 세션(holdout) 수"가 가장 작고, 같으면 val 수가 크고, 그것도 같으면 ID가 앞인 작업자를
+    고른다. val을 늘리지 못하는 작업자는 건너뛰고, 고를 작업자가 없으면 멈춘다. 매 단계 pool
+    전체를 다시 세므로 O(작업자² * 세션)이다.
     """
     golden = set(golden_ids)
     splits: dict[str, Split] = {}

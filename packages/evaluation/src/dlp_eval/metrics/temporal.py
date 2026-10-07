@@ -81,8 +81,8 @@ def match_events(truth: Sequence[int], pred: Sequence[int], tolerance_ms: int) -
         `EventResult`. 허용 오차를 넘는 짝은 할당되더라도 맞춘 것으로 세지 않는다.
 
     방법: 허용 밖 칸에 큰 비용(1e9)을 넣은 |차이| 행렬에 헝가리안 할당을 하고, 허용 안의 짝만 TP로
-    센다. 맞춘 쌍 수를 먼저 최대로 하는 것이 아니라 비용 합을 최소로 하므로, 허용 밖 칸 비용이
-    충분히 커서 허용 안 짝 수가 최대인 할당이 고른다 (1e9 > 가능한 오차 합).
+    센다. 할당은 비용 합 최소화이지만 허용 밖 칸 비용(1e9)이 가능한 오차 합보다 크므로, 결과적으로
+    허용 안 짝 수가 최대인 할당 중 오차 합이 가장 작은 것을 고르게 된다.
     """
     t, p = np.asarray(truth, dtype=np.int64), np.asarray(pred, dtype=np.int64)
     errors: list[int] = []
@@ -122,8 +122,7 @@ def segment_f1(truth: Sequence[Interval], pred: Sequence[Interval], threshold: f
 
     Args:
         truth, pred: 같은 묶음(세션·손 등) 안의 구간. 묶음이 여럿이면 호출자가 묶음마다 부르고
-        TP·FP·FN을
-            더한다 (`harness.eval_actions`).
+            TP·FP·FN을 더한다 (`harness.eval_actions`).
         threshold: IoU 문턱 (`evaluation.yaml segment_iou`·`relation_iou`).
 
     Returns:

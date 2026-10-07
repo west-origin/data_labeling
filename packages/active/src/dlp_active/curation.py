@@ -186,9 +186,8 @@ def push_to_fiftyone(name: str, samples: list[FoSample], info: dict[str, Any]) -
     """FiftyOne 데이터셋을 (같은 이름이면 덮어써) 만든다. fiftyone.Dataset을 돌려준다.
 
     persistent=True라 FiftyOne 내장 DB에 남는다 (지우려면 `ds.delete()`).
-    프레임 필드: `labels`(Detections), `keypoints`(Keypoints).
-    샘플 필드 `segments`(TemporalDetections,
-    라벨은 "<종류>/<클래스>").
+    프레임 필드: `labels`(Detections), `keypoints`(Keypoints). 샘플 필드: `segments`
+    (TemporalDetections, 라벨은 "<종류>/<클래스>")와 `score_fields`의 필드.
 
     Raises:
         CurationUnavailableError: fiftyone을 import할 수 없을 때.

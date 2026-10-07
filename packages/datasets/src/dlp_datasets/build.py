@@ -4,13 +4,14 @@
 2. 사용 중지된 세션은 빼고 excluded_sessions에 적는다.
 3. 골든셋 세션은 golden, 나머지는 작업자·장소 단위로 train / val / holdout.
 4. 스냅샷: 포함 세션의 라벨 레코드(정책 include_label_history면 수정 이력 포함, 아니면 현재 라벨만.
-   오류 삽입 과제·측정 레코드 제외), 세션 메타데이터
-   (스트림·동기화)와 매니페스트를 커밋한다.
-5. 데이터셋 버전과 분할을 DB에 쓰고, 사람 검증을 마친 세션은 생애주기를
-   분할 배정으로 옮긴다.
+   오류 삽입 레코드와 그 후손·측정 레코드 제외), 세션 메타데이터(스트림·동기화)와 매니페스트를
+   커밋한다.
+5. 데이터셋 버전과 분할을 DB에 쓰고, 사람 검증을 마친 세션(holdout 제외)은 생애주기를 분할
+   배정(split_assigned)으로 옮긴다 (시각 = now, 실행자 = `dataset:<버전 ID>`).
 
 진입점: `dlp dataset build`(`build_dataset_version`), `dlp dataset golden`(`propose_golden_set`).
-관련: WP7, ADR 0007(데이터셋·계보), 0015(오류 삽입·측정 레코드 제외), 0029(생애주기 전이).
+관련: WP7, ADR 0007(데이터셋·계보), 0015(오류 삽입·측정 레코드 제외), 0029(생애주기 전이),
+0031(빌드 후보는 프라이버시 승인 세션, 생애주기 기록의 시각·실행자).
 
 주의:
 - 분할은 `dlp_datasets.splitter`로만 만들고, 결과를 `check_isolation`으로 다시 검사해 겹치면
@@ -18,7 +19,7 @@
 - 스냅샷 커밋(lakeFS)은 DB 트랜잭션 밖의 부작용이다. 그 뒤 DB 쓰기가 실패해 트랜잭션이 롤백되면
   어떤 버전도 가리키지 않는 커밋이 lakeFS에 남는다 (무해하지만 정리 대상).
 - 호출자가 트랜잭션을 연다 (`engine.begin()`). DB 쓰기: `dataset_versions`·분할 배정
-  (`insert_dataset_version`), 생애주기 (`set_lifecycle`).
+  (`insert_dataset_version`), 생애주기 (`set_lifecycle`: sessions·session_lifecycle_events).
 """
 
 from __future__ import annotations
@@ -132,6 +133,7 @@ def build_dataset_version(
     Raises:
         DatasetBuildError: 후보가 없을 때, 골든셋 도메인이 `domain`과 다를 때, 분할 사이
             작업자·장소가 겹칠 때.
+        sqlalchemy.exc.NoResultFound: 골든셋 버전이 DB에 없을 때.
         SnapshotError: 스냅샷 커밋 실패.
     """
     withdrawn = withdrawn_session_ids(conn)
