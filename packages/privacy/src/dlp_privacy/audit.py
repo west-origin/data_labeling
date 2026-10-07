@@ -17,23 +17,27 @@ WP5·WP16, ADR 0020·0023. 정책 값: defaults.yaml `privacy.full_review_exit`
 - `review_mode`: 전수(full) / 표본(sampled) 검수 판정.
 - `iso_week` / `iso_week_bounds` / `previous_weeks`: ISO 주 계산 (UTC).
 - `audit_candidates`: DB에서 그 주의 감사 후보를 고른다 (읽기만).
+- `stream_duration_ms`: 감사할 영상 스트림 자신의 길이 (바디캠은 세션 길이, 그 밖은 PTS 인덱스).
 """
 
 from __future__ import annotations
 
 import hashlib
 import math
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Literal
 
 import sqlalchemy as sa
 
+from dlp_media.pts import PtsIndex
+from dlp_media.storage import ObjectStore
 from dlp_schema.db.repository import get_session, list_review_tasks, list_session_ids
 from dlp_schema.review import ReviewMode as TaskMode
 from dlp_schema.review import ReviewStage, ReviewTaskStatus
-from dlp_schema.session import PrivacyState, StreamKind
+from dlp_schema.session import PrivacyState, Session, Stream, StreamKind
 
 # 감사 대상 영상 스트림 종류 (runner.VIDEO_KINDS와 같다)
 VIDEO_KINDS = {StreamKind.BODYCAM, StreamKind.THIRD_PERSON}
@@ -45,7 +49,7 @@ class AuditCandidate:
 
     session_id: str
     stream_id: str
-    # 영상 길이 (ms). 지금은 세션 길이(바디캠 기준)를 쓴다.
+    # 그 영상 스트림의 길이 (ms, `stream_duration_ms`). 3인칭은 바디캠(세션)과 길이가 다를 수 있다.
     duration_ms: int
     # 원 블러 검수자 (감사자는 이 사람이 아니어야 한다)
     blur_reviewer: str
@@ -173,10 +177,53 @@ def weekly_miss_rates(
     return [residual_miss_rate(by_week[w]) if w in by_week else None for w in weeks]
 
 
-def audit_candidates(conn: sa.Connection, week: str) -> list[AuditCandidate]:
+def stream_duration_ms(
+    session: Session, stream: Stream, raw: ObjectStore | None, work: Path
+) -> int:
+    """감사할 영상 스트림 자신의 길이 (정수 ms). 누락률(누락 수 / 시간)의 분모다.
+
+    회귀: 감사 후보와 `dlp ops privacy-audit`가 3인칭 스트림에도 세션(바디캠) 길이를 써서, 길이가
+    다른 3인칭 영상의 시간당 잔여 누락률이 틀렸다.
+
+    - 바디캠: 세션 길이 (수집이 바디캠 PTS 인덱스의 `duration_ms`를 반올림해 넣은 값과 같다).
+      원본 버킷을 읽지 않는다.
+    - 그 밖의 영상: 그 스트림의 PTS 인덱스(`Stream.pts_index_uri`)를 원본 버킷에서 읽어 같은
+      규칙(`PtsIndex.duration_ms` 반올림)으로 계산한다 (CLAUDE.md: 영상 시각은 PTS 인덱스로만).
+
+    Args:
+        session: 세션.
+        stream: 그 세션의 영상 스트림.
+        raw: 원본 버킷 저장소 (CLI는 감사 저장소 → 읽기 기록이 남는다). 바디캠이면 None이어도 된다.
+        work: PTS 인덱스를 받을 임시 디렉터리.
+
+    Raises:
+        ValueError: 바디캠이 아닌데 PTS 인덱스가 없거나 저장소가 없을 때, 또는 인덱스 URI가 그
+            저장소에 있지 않을 때 (세션 길이로 대신하면 잘못된 누락률이 조용히 기록된다).
+    """
+    if stream.kind is StreamKind.BODYCAM:
+        return session.duration_ms
+    if stream.pts_index_uri is None:
+        raise ValueError(f"{session.session_id}/{stream.stream_id}: PTS 인덱스가 없습니다")
+    if raw is None:
+        raise ValueError(
+            f"{session.session_id}/{stream.stream_id}: 길이를 읽을 원본 저장소가 없습니다"
+        )
+    prefix = raw.uri("")
+    if not stream.pts_index_uri.startswith(prefix):
+        raise ValueError(f"{stream.pts_index_uri}는 저장소 {raw.bucket}에 있지 않습니다")
+    dest = work / f"{session.session_id}__{stream.stream_id}.pts.parquet"
+    raw.get_file(stream.pts_index_uri.removeprefix(prefix), dest)
+    return round(PtsIndex.read(dest).duration_ms)
+
+
+def audit_candidates(
+    conn: sa.Connection, week: str, duration_ms: Callable[[Session, Stream], int]
+) -> list[AuditCandidate]:
     """그 주에 블러 검수 작업을 수집했고 지금 승인 상태인 세션의 영상 스트림.
 
     원 검수자(blur_reviewer)는 그 스트림의 마지막 운영 블러 검수 작업 담당자다.
+    duration_ms: 후보 스트림의 길이를 정하는 함수 (CLI는 `stream_duration_ms`에 원본 저장소를 묶어
+    넘긴다). 후보가 된 스트림에만 부른다 (원본 읽기를 줄인다).
 
     운영 작업(표준·QA)만 본다. 담당자가 비어 있으면 "unknown". 모든 세션을 하나씩 읽으므로 세션 수에
     비례해 느려진다 (DB 읽기만, 쓰기 없음).
@@ -202,8 +249,10 @@ def audit_candidates(conn: sa.Connection, week: str) -> list[AuditCandidate]:
             if not mine:
                 continue
             last = max(mine, key=lambda t: t.collected_at or t.created_at)
-            # 영상 길이는 스트림이 아니라 세션 길이(바디캠)를 쓴다 (3인칭 길이가 다를 수 있다)
+            # 영상 길이는 세션 길이가 아니라 그 스트림의 길이다 (3인칭은 바디캠과 다를 수 있다)
             out.append(
-                AuditCandidate(sid, s.stream_id, session.duration_ms, last.assignee or "unknown")
+                AuditCandidate(
+                    sid, s.stream_id, duration_ms(session, s), last.assignee or "unknown"
+                )
             )
     return out

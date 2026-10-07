@@ -95,7 +95,8 @@ jobs:
       - name: Start CVAT
         # CVAT 공식 compose를 고정 버전으로 받아 띄우고 관리자 계정을 만든다 (수 분)
         run: make cvat-up && make cvat-superuser
-      - run: make health
+      # 이 작업은 CVAT 연동을 시험하므로 헬스체크에 CVAT도 넣는다 (make health는 CVAT를 보지 않는다)
+      - run: uv run dlp services check --include-cvat
       - run: make test-services
       - name: Dump logs on failure
         if: failure()

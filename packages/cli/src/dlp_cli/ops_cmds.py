@@ -11,8 +11,9 @@
   실제 삭제는 이 명령이 하지 않는다 (`RETENTION_NOTE` 참고).
 - `log-work <세션> --reviewer --stage --minutes` — 도구가 재지 않는 검수 작업 시간을 손으로
   기록한다.
-- `privacy-audit <세션> <스트림> --misses` — 잔여 블러 누락 감사 결과를 기록한다.
-  감사자는 그 스트림의 블러 검수자와 달라야 한다. 감사 표본은 `dlp privacy audit-sample`로 뽑는다.
+- `privacy-audit <세션> <스트림> --misses` — 잔여 블러 누락 감사 결과를 기록한다 (길이는 그
+  스트림의 길이). 감사자는 그 스트림의 블러 검수자와 달라야 한다. 감사 표본은
+  `dlp privacy audit-sample`로 뽑는다.
 
 주기: `weekly`는 매주, `audit-report`는 매월, `retention`은 매주 정도 (저장소에 예약 실행 설정은
 없다 — 운영자가 cron 등으로 건다).
@@ -27,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import tempfile
 import uuid
 from collections import Counter
 from dataclasses import asdict
@@ -35,12 +37,14 @@ from pathlib import Path
 
 import sqlalchemy as sa
 
+from dlp_cli.raw_access import raw_store
 from dlp_cli.schema_cmds import database_url
 from dlp_media.audit import current_actor
 from dlp_ops import audit as audit_mod
 from dlp_ops import metrics as metrics_mod
 from dlp_ops.policy import load_policy
 from dlp_ops.retention import RETENTION_NOTE, retention_status
+from dlp_privacy import audit as audit_privacy
 from dlp_review.ops.policy import load_policy as load_review_policy
 from dlp_schema import load_config, repo_root
 from dlp_schema.db.repository import (
@@ -51,6 +55,7 @@ from dlp_schema.db.repository import (
     insert_review_work,
 )
 from dlp_schema.ops import PrivacyAuditRecord, RetentionDecision, ReviewWork
+from dlp_schema.session import StreamKind
 
 
 def _engine(args: argparse.Namespace) -> sa.Engine:
@@ -202,8 +207,8 @@ def cmd_log_work(args: argparse.Namespace) -> int:
         args.stage: `privacy` / `labeling` / `qa`.
         args.minutes: 작업 시간(분, 실수). 초로 바꿔 `seconds`에 저장한다.
         args.video_ms: 검수한 영상 길이(ms). 없거나 0이면 세션 전체 길이.
-        args.task_key: 검수 작업 키. 있으면 출처를 `cvat`로, 없으면 `manual`로 기록한다
-            (Label Studio 작업 키를 줘도 `cvat`으로 기록된다 — 보고서의 버그 의심 참고).
+        args.task_key: 검수 작업 키 (`cvat:<id>` / `label_studio:<id>`). 출처는 키 접두사의 도구,
+            키가 없으면 `manual`이다 (`metrics.work_source`). 알 수 없는 접두사면 `SystemExit`.
         args.at: 검수한 시각 (ISO 8601). 그 시각이 속한 주의 지표에 들어간다. 미래면 `SystemExit`.
 
     부작용: 한 트랜잭션에서 `review_work` INSERT. 세션이 없으면 DB 조회 오류.
@@ -211,6 +216,11 @@ def cmd_log_work(args: argparse.Namespace) -> int:
     at = _aware(args.at) if args.at else datetime.now(UTC)
     if at > datetime.now(UTC):
         raise SystemExit(f"--at이 미래입니다: {at.isoformat()}")
+    try:
+        # 작업 키 접두사로 도구를 정한다 (Label Studio 작업을 CVAT로 세지 않는다)
+        source = metrics_mod.work_source(args.task_key)
+    except ValueError as e:
+        raise SystemExit(str(e)) from e
     engine = _engine(args)
     with engine.begin() as conn:
         session = get_session(conn, args.session_id)
@@ -224,7 +234,7 @@ def cmd_log_work(args: argparse.Namespace) -> int:
                 stage=args.stage,
                 seconds=args.minutes * 60,
                 video_ms=args.video_ms or session.duration_ms,
-                source="manual" if args.task_key is None else "cvat",
+                source=source,
                 recorded_at=at,
             ),
         )
@@ -240,13 +250,19 @@ def cmd_privacy_audit(args: argparse.Namespace) -> int:
     - 감사자(`--auditor`, 없으면 `current_actor()`)가 그 블러 검수자 중 하나면 `SystemExit`
       (독립 감사, `PrivacyAuditRecord`도 같은 규칙을 검증한다).
 
-    기록: `blur_reviewer`에는 검수자 목록의 첫 사람만, `duration_ms`에는 스트림이 아니라 세션 길이를
-    넣는다. 누락률은 시간당(누락 수 / 길이) 계산에 쓴다.
-    부작용: 한 트랜잭션에서 `privacy_audits` INSERT (추가만).
+    기록: `blur_reviewer`에는 검수자 목록의 첫 사람만, `duration_ms`에는 감사한 그 스트림의 길이
+    (`dlp_privacy.audit.stream_duration_ms`: 바디캠은 세션 길이, 3인칭 등은 그 스트림의 PTS
+    인덱스)를 넣는다. 누락률은 시간당(누락 수 / 길이) 계산에 쓴다. 세션에 그 영상 스트림이 없으면
+    `SystemExit`.
+    부작용: 한 트랜잭션에서 `privacy_audits` INSERT (추가만). 바디캠이 아니면 원본 버킷에서 PTS
+    인덱스를 읽는다 (`args.store`, 감사 저장소 → 읽기 기록).
     """
     engine = _engine(args)
-    with engine.begin() as conn:
+    with engine.begin() as conn, tempfile.TemporaryDirectory() as tmp:
         session = get_session(conn, args.session_id)
+        stream = next((s for s in session.streams if s.stream_id == args.stream_id), None)
+        if stream is None or stream.kind not in audit_privacy.VIDEO_KINDS:
+            raise SystemExit(f"{args.session_id}/{args.stream_id}: 세션의 영상 스트림이 아닙니다")
         # 운영 현재 블러 트랙의 검수자 모두 (수정 이력 전체가 아니라 지금 렌더에 쓰인 트랙)
         reviewers = audit_mod.blur_reviewers(get_labels(conn, args.session_id), args.stream_id)
         if not reviewers:
@@ -264,7 +280,16 @@ def cmd_privacy_audit(args: argparse.Namespace) -> int:
                 audit_id=uuid.uuid4().hex,
                 session_id=session.session_id,
                 stream_id=args.stream_id,
-                duration_ms=session.duration_ms,
+                # 회귀: 세션(바디캠) 길이를 써서 길이가 다른 3인칭 스트림의 누락률이 틀렸다.
+                # 원본 저장소는 바디캠이 아닐 때만 만든다 (바디캠은 세션 길이와 같다).
+                duration_ms=audit_privacy.stream_duration_ms(
+                    session,
+                    stream,
+                    None
+                    if stream.kind is StreamKind.BODYCAM
+                    else raw_store(args.store, args.url, "ops.privacy-audit"),
+                    Path(tmp),
+                ),
                 misses=args.misses,
                 auditor=auditor,
                 blur_reviewer=reviewer,
@@ -321,4 +346,6 @@ def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
     pa.add_argument("--misses", type=int, required=True)
     pa.add_argument("--auditor", help="기본: DLP_ACTOR 또는 OS 사용자")
     pa.add_argument("--url")
+    # 바디캠이 아닌 스트림은 그 스트림의 PTS 인덱스(원본 버킷)로 길이를 정한다
+    pa.add_argument("--store", default="s3", help="'s3' 또는 'local:<디렉터리>'")
     pa.set_defaults(func=cmd_privacy_audit)

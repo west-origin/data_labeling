@@ -29,7 +29,7 @@ from datetime import datetime
 
 from dlp_review.ops.policy import ReviewOpsPolicy
 from dlp_review.ops.priority import Unit
-from dlp_schema.review import FlaggedSpan, ReviewAssignment, ReviewMode
+from dlp_schema.review import AssignmentStatus, FlaggedSpan, ReviewAssignment, ReviewMode
 
 
 def draw(seed: int, key: str, mode: str) -> float:
@@ -211,7 +211,8 @@ def plan_qa(
         if draw(seed, a.assignment_id, "qa") >= policy.ratios.qa_sample_ratio:
             continue
         # 원래 배정을 복사해 단위·라벨 범위(only/withheld 등)를 그대로 잇고 상태만 새로 연다.
-        # model_copy는 검증하지 않으므로 status는 문자열 "open"으로 들어간다 (DB 저장 시 같은 값).
+        # model_copy는 검증하지 않으므로 값은 반드시 enum으로 넣는다. 회귀: 문자열 "open"을 넣어
+        # `status is AssignmentStatus.OPEN` 비교가 거짓이 되고 직렬화 경고가 났다.
         out.append(
             a.model_copy(
                 update={
@@ -221,7 +222,7 @@ def plan_qa(
                     "pair_id": a.assignment_id,
                     "sample_label_ids": (),
                     "task_key": None,
-                    "status": "open",
+                    "status": AssignmentStatus.OPEN,
                     "created_at": now,
                     "completed_at": None,
                 }

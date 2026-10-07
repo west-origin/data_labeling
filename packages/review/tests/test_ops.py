@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from collections import Counter
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -14,9 +15,10 @@ from dlp_review.ops.assign import PlannedUnit, plan, plan_qa
 from dlp_review.ops.measure import agreement, as_items, prelabel_bias
 from dlp_review.ops.policy import ReviewOpsPolicy, load_policy
 from dlp_review.ops.priority import Unit, flag_unit, unit_priority
+from dlp_review.ops.runner import shown_prelabels
 from dlp_review.ops.sampling import Lot, draw_sample, judge, lots, sample_size
 from dlp_review.ops.seeding import detected, seed_labels, seed_prefix
-from dlp_schema.episode import current_labels, non_operational_ids
+from dlp_schema.episode import current_labels, non_operational_ids, retractions
 from dlp_schema.labels import (
     ActionPayload,
     BlurTrackPayload,
@@ -31,7 +33,14 @@ from dlp_schema.labels import (
     VerificationState,
 )
 from dlp_schema.ontology import Ontology, load_ontology
-from dlp_schema.review import AssignmentStatus, ReviewMode, ReviewReason
+from dlp_schema.review import (
+    AssignmentStatus,
+    ReviewMode,
+    ReviewReason,
+    ReviewStage,
+    ReviewTask,
+    ReviewTool,
+)
 from dlp_schema.testing import FIXED_TIME, make_label
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -132,6 +141,8 @@ def test_qa_ratio_and_senior(policy: ReviewOpsPolicy) -> None:
     ratio = p.ratios.qa_sample_ratio
     assert abs(len(qa) - 20_000 * ratio) <= 4 * math.sqrt(20_000 * ratio * (1 - ratio))
     assert all(a.mode is ReviewMode.QA and a.assignee == "lead" and a.pair_id for a in qa)
+    # 회귀: model_copy가 검증하지 않아 status가 문자열 "open"으로 남았다 → enum이어야 한다
+    assert all(a.status is AssignmentStatus.OPEN and a.completed_at is None for a in qa)
 
 
 # ---------------------------------------------------------------- 우선순위
@@ -210,6 +221,42 @@ def test_sampling_accepts_or_rejects_lot(policy: ReviewOpsPolicy) -> None:
     ]
     bad = judge(lot.label_ids, sample, fixed, sp)
     assert bad.accepted is False and bad.defects == 2 and bad.to_verify == ()
+
+    # 회귀: 검수 전에 표본이 모두 지워지면(모델 재실행의 삭제 레코드) 판정할 표본이 0개인데
+    # 결함 0 → 합격으로 봐서 사람이 보지 않은 나머지 90개가 표본 검증이 됐다. 이제는 불합격이다.
+    gone = labels + retractions([x for x in labels if x.label_id in sample], "det-2", FIXED_TIME)
+    empty = judge(lot.label_ids, sample, gone, sp)
+    assert (empty.sampled, empty.pending, empty.accepted, empty.to_verify) == (0, 0, False, ())
+
+
+def test_blind_bias_baseline_is_prelabels_shown_to_standard_reviewer() -> None:
+    """회귀: 프리라벨 편향 기준에 이력 전체의 모델 레코드(지워진 이전 버전·삭제 레코드)가 들어갔다.
+
+    시나리오: 모델 v1 박스 m1(FIXED_TIME), 사람 박스 h, 모델 v2 박스 m2와 m1 삭제 레코드(2시간 뒤).
+    - sent_label_ids가 없는 예전 작업(1시간 뒤 생성): 그때 운영 현재였던 모델 라벨 = [m1].
+    - sent_label_ids가 있는 작업(m2·h·단위 밖 ID): 보낸 것 중 모델 라벨 = [m2].
+    정답: 삭제 레코드와 사람 라벨은 어느 쪽에도 들어가지 않는다.
+    """
+    later = FIXED_TIME + timedelta(hours=2)
+    m1 = model(box("m1", "cup", 0), "det-1", 0.9)
+    h = box("h", "cup", 50)
+    m2 = model(box("m2", "cup", 5, created_at=later), "det-2", 0.9)
+    unit = [m1, h, m2, *retractions([m1], "det-2", later)]
+
+    def task(key: str, at: datetime, sent: tuple[str, ...] | None) -> ReviewTask:
+        """짝 표준 배정의 시험용 작업 (created_at=at, sent_label_ids=sent)."""
+        return ReviewTask(
+            task_key=key, tool=ReviewTool.CVAT, external_id="1", session_id="s001",
+            stream_id="bodycam", stage=ReviewStage.LABELING, media_uri="s3://dlp-labeling/x",
+            label_kinds=("box_track",), assignment_id="std", sent_label_ids=sent, created_at=at,
+        )  # fmt: skip
+
+    old = task("cvat:1", FIXED_TIME + timedelta(hours=1), None)
+    sent = task("cvat:2", later, ("m2", "h", "elsewhere"))
+    assert [x.label_id for x in shown_prelabels(unit, [old])] == ["m1"]
+    assert [x.label_id for x in shown_prelabels(unit, [sent])] == ["m2"]
+    assert [x.label_id for x in shown_prelabels(unit, [old, sent])] == ["m1", "m2"]
+    assert shown_prelabels(unit, []) == []
 
 
 # ---------------------------------------------------------------- 오류 삽입

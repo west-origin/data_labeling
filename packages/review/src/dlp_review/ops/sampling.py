@@ -3,7 +3,7 @@
 묶음(lot) = 같은 세션·라벨 종류·모델 버전의, 신뢰도가 high_confidence 이상인 미검수 모델 라벨.
 묶음마다 max(min_sample, ⌈ratio·N⌉)개를 뽑아 검수한다 (같은 seed면 같은 표본). 표본에서 사람이
 고치거나 지운 비율이 max_defect_ratio 이하이면 묶음의 나머지 미검수 라벨을 "표본 검증"으로 둔다.
-넘으면 묶음 전체를 다시 검수한다.
+넘으면(또는 검수 전에 표본이 모두 지워져 판정할 표본이 없으면) 묶음 전체를 다시 검수한다.
 
 WP12, ADR 0014. 정책은 `config/policies/review.yaml` `sampling` 절.
 
@@ -117,6 +117,9 @@ def judge(
     - 그 밖의 표본이 있으면 아직 검수 중(accepted=None).
     - 결함 비율 ≤ max_defect_ratio이면 합격. 합격이면 표본이 아닌 묶음 라벨 중 아직 현재 운영
       라벨이고 미검수인 것만 to_verify에 넣는다 (그 사이 고쳐지거나 지워진 것은 건드리지 않는다).
+    - 판정에 쓸 표본이 하나도 남지 않았으면(모두 검수 전에 지워짐) 불합격이다. 사람이 아무것도 보지
+      않았으므로 나머지를 표본 검증으로 둘 근거가 없다 (호출자가 보류 라벨 전수 재검수 배정을
+      만든다).
     """
     by_id = {x.label_id: x for x in labels}
     # 사람(측정 레코드 제외)이 자식 레코드를 만든 라벨 = 고쳤거나 지웠다
@@ -137,8 +140,9 @@ def judge(
     pending = len(kept) - defects - approved
     if pending:
         return SamplingVerdict(len(kept), defects, pending, None, ())
-    # 표본이 모두 사라졌으면(kept가 빔) 분모를 1로 두어 결함 0 → 합격으로 본다
-    accepted = defects / max(1, len(kept)) <= policy.max_defect_ratio
+    # 회귀: 표본이 모두 사라졌을 때(kept가 빔) 분모를 1로 두어 결함 0 → 합격으로 봐서, 사람이 한
+    # 건도 보지 않은 나머지 라벨이 sample_verified가 됐다. 이제는 불합격(전수 재검수)이다.
+    accepted = bool(kept) and defects / len(kept) <= policy.max_defect_ratio
     rest = tuple(
         i
         for i in lot_ids

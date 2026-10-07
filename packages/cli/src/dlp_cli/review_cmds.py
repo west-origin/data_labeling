@@ -44,6 +44,7 @@ import sqlalchemy as sa
 
 from dlp_cli.raw_access import raw_store
 from dlp_cli.schema_cmds import database_url
+from dlp_media.audit import current_actor
 from dlp_media.storage import S3Store
 from dlp_review.clients import CvatClient, LabelStudioClient
 from dlp_review.collect import collect_task
@@ -180,13 +181,15 @@ def cmd_verify(args: argparse.Namespace) -> int:
     """검수가 끝난 세션을 human_verified로 옮긴다. 남은 일이 있으면 이유를 출력하고 1을 돌려준다.
 
     인자:
-        args.actor: 판정한 사람. 없으면 `DLP_ACTOR`, 그것도 없으면 `"unknown"` (다른 명령의
-            `current_actor()`는 OS 사용자로 대체하는 것과 다르다).
+        args.actor: 판정한 사람. 없으면 다른 명령과 같이 `current_actor()` (`DLP_ACTOR`, 그것도
+            없으면 OS 사용자). 생애주기 기록에 누가 판정했는지 남기려는 것이라 "unknown"으로
+            두지 않는다.
 
     반환: 이미 완료 단계이거나 이번에 완료했으면 0, 아직 조건을 못 맞췄으면 1.
     부작용: 조건을 만족하면 한 트랜잭션에서 세션 생애주기 전이와 생애주기 기록을 쓴다 (ADR 0029).
     """
-    actor = args.actor or os.environ.get("DLP_ACTOR") or "unknown"
+    # 회귀: 예전에는 DLP_ACTOR가 없으면 "unknown"으로 기록해 판정자를 알 수 없었다
+    actor = args.actor or current_actor()
     engine = sa.create_engine(database_url(args.url))
     with engine.begin() as conn:
         result = verify_session(conn, args.session_id, datetime.now(UTC), actor)

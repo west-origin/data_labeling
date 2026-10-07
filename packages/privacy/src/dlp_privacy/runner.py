@@ -14,7 +14,8 @@ WP5, ADR 0005·0019·0023·0024. CLI `dlp_cli.privacy_cmds`가 DB 연결과 저�
   수집도 부른다).
 
 버킷:
-- raw(원본 버킷 `dlp-raw`): 원본 영상을 읽고 검수 우선 구간 JSON을 읽고 쓴다. CLI는 반드시
+- raw(원본 버킷 `dlp-raw`): 원본 영상을 읽고 검수 우선 구간 JSON과 탐지 표시(결과 0개 버전,
+  `detect_marker_key`)를 읽고 쓴다. CLI는 반드시
   `dlp_cli.raw_access.raw_store`로 만든 `AuditedStore`를 넘기므로 `get_file`/`put_file`마다 원본
   접근 기록(`raw_access_log`)이 남는다 (ADR 0020). `head`는 기록하지 않는다.
 - labeling(라벨링 버킷 `dlp-labeling`): 블러본(`blurred_key`)과 렌더 기록(`render_meta_key`)만 쓴다.
@@ -160,6 +161,43 @@ def read_review_segments(
     return [ReviewSegment.model_validate(x) for x in data]
 
 
+def detect_marker_key(session_id: str, stream_id: str) -> str:
+    """원본 버킷의 탐지 실행 표시 (결과가 0개였던 탐지·모델 버전 목록).
+
+    블러 레코드가 하나도 나오지 않은 스트림은 DB 이력에 모델 버전이 남지 않아, 이 표시가 없으면
+    `dlp privacy detect`를 돌릴 때마다 영상 전체를 다시 탐지했다 (CPU OWLv2는 프레임당 수 초).
+    스키마를 바꾸지 않으려고 DB가 아니라 검수 우선 구간 옆의 파생 객체에 둔다. 원본 영상에서 나온
+    판단(대상이 없었다)이라 라벨링 버킷이 아니라 원본 버킷에 둔다.
+    """
+    return f"sessions/{session_id}/derived/privacy_detect/{stream_id}.json"
+
+
+def read_detect_marker(raw: ObjectStore, session_id: str, stream_id: str, work: Path) -> set[str]:
+    """결과 0개로 끝난 적이 있는 탐지·모델 버전. 표시가 없으면 빈 집합.
+
+    부작용: 원본 버킷 읽기 (감사 저장소면 read 기록).
+    """
+    key = detect_marker_key(session_id, stream_id)
+    if raw.head(key) is None:
+        return set()
+    dest = work / f"{stream_id}-detect.in.json"
+    raw.get_file(key, dest)
+    data: dict[str, list[str]] = json.loads(dest.read_text(encoding="utf-8"))
+    return set(data.get("empty_versions", []))
+
+
+def write_detect_marker(
+    raw: ObjectStore, session_id: str, stream_id: str, versions: set[str], work: Path
+) -> None:
+    """결과 0개로 끝난 버전 목록을 덮어쓴다 (파생물이라 불변 업로드가 아니다).
+
+    부작용: 원본 버킷 쓰기 (감사 저장소면 write 기록).
+    """
+    out = work / f"{stream_id}-detect.json"
+    out.write_text(json.dumps({"empty_versions": sorted(versions)}), encoding="utf-8")
+    raw.put_file(detect_marker_key(session_id, stream_id), out, sha256_file(out))
+
+
 def merge_segments(
     old: Sequence[ReviewSegment],
     new: Sequence[ReviewSegment],
@@ -220,8 +258,10 @@ def detect_session(
     블러본을 쓰는 쪽이 assert_render_current로 막지만, 있으면 이전 블러본을 바로 무효로 둔다.
 
     스트림마다:
-    1. 이력에 이 탐지 버전·재학습 모델 버전의 레코드가 모두 있으면 건너뛴다 (멱등).
+    1. 이력에 이 탐지 버전·재학습 모델 버전의 레코드가 모두 있으면 건너뛴다 (멱등). 결과가 0개였던
+       버전은 이력에 흔적이 없으므로 원본 버킷의 탐지 표시(`detect_marker_key`)로 보충한다.
     2. 원본 영상을 받아(감사 기록) 아직 없는 버전만 돌린다 (탐지기 파이프라인, 재학습 모델).
+       결과가 0개인 버전은 탐지 표시에 더한다.
     3. 지금 쓰지 않는 버전의 검수 전 모델 블러를 삭제 레코드로 지우고 새 라벨과 함께 쓴다.
     4. 블러가 바뀌었으면 렌더 기록을 무효로 하고, 검수 우선 구간 파일을 병합해 다시 쓴다.
     끝으로 PENDING이거나 (승인 상태에서 블러가 바뀌었으면) privacy_state를 AUTO_BLURRED로 둔다.
@@ -263,13 +303,36 @@ def detect_session(
                 for x in existing
                 if x.stream_id == stream.stream_id and (v := x.provenance.model_version) is not None
             }
-            if versions <= done:
+            # 탐지기·모델 버전이 바뀌면 검수 전인 이전 버전 블러만 지운다 (검수한 블러는 남긴다)
+            stale = [
+                x
+                for x in current_labels(existing)
+                if x.stream_id == stream.stream_id
+                and x.provenance.source is Source.MODEL
+                and x.provenance.model_version not in versions
+                and x.verification.state is VerificationState.UNREVIEWED
+            ]
+            # 결과가 0개였던 버전은 DB에 흔적이 없으므로 원본 버킷의 표시로 보충한다.
+            # 이력만으로 모두 끝났으면 표시를 읽지 않는다 (불필요한 원본 접근 기록을 줄인다).
+            empty: set[str] = (
+                set()
+                if versions <= done
+                else read_detect_marker(raw, session_id, stream.stream_id, work)
+            )
+            # 표시는 저장소 쓰기라 DB 트랜잭션이 되돌아가도 남는다. 그때 지워지지 못한 이전 버전
+            # 블러(stale)가 남을 수 있으므로, 표시 덕분에 끝난 경우에는 stale이 없을 때만 건너뛰고
+            # 있으면 영상은 다시 돌리지 않고 삭제만 다시 한다. 이력만으로 끝난 경우는 예전 그대로다.
+            if versions <= done or (versions <= done | empty and not stale):
                 summary.skipped.append(stream.stream_id)
                 continue
-            video = _fetch(raw, stream.uri, work)
+            # 다시 돌릴 버전이 있을 때만 원본 영상을 받는다 (stale 삭제만 할 때는 받지 않는다)
+            need_run = versions - done - empty
+            video = _fetch(raw, stream.uri, work) if need_run else None
             labels: list[LabelRecord] = []
             segments: list[ReviewSegment] = []
-            if version not in done:
+            ran_empty: set[str] = set()  # 이번에 돌았지만 블러를 하나도 내지 않은 버전
+            if version in need_run:
+                assert video is not None
                 result = detect_video(
                     video,
                     session_id=session_id,
@@ -283,14 +346,19 @@ def detect_session(
                 summary.missing.update(result.missing)
                 labels += result.labels
                 segments = result.segments
+                if not result.labels:
+                    ran_empty.add(version)
             for p in extra:
-                if p.version not in done:
+                if p.version in need_run:
+                    assert video is not None
                     out = [
                         x
                         for x in p.run(Clip(session_id, stream.stream_id, video))
                         if isinstance(x.payload, BlurTrackPayload)
                     ]
                     labels += out
+                    if not out:
+                        ran_empty.add(p.version)
                     # 재학습 모델이 낸 블러는 전부 trained_model 검수 구간으로 낸다 (detail=버전)
                     order = {r: i for i, r in enumerate(policy.review_priority)}
                     for x in out:
@@ -306,15 +374,6 @@ def detect_session(
                                 detail=p.version,
                             )
                         )
-            # 탐지기·모델 버전이 바뀌면 검수 전인 이전 버전 블러만 지운다 (검수한 블러는 남긴다)
-            stale = [
-                x
-                for x in current_labels(existing)
-                if x.stream_id == stream.stream_id
-                and x.provenance.source is Source.MODEL
-                and x.provenance.model_version not in versions
-                and x.verification.state is VerificationState.UNREVIEWED
-            ]
             # 삭제 레코드의 출처 버전은 이번 탐지 버전이다 (재학습 모델만 바뀐 경우에도)
             changes = [*retractions(stale, version, now), *labels]
             insert_labels(conn, changes)
@@ -322,13 +381,17 @@ def detect_session(
             summary.detected[stream.stream_id] = len(labels)
             if changes and labeling is not None:
                 invalidate_render(labeling, session_id, stream.stream_id, "blur_changed", work)
-            rerun_models = {p.version for p in extra if p.version not in done}
-            if segments or version not in done or rerun_models:
+            if ran_empty:
+                # 결과 0개 버전만 표시에 남긴다. 블러를 낸 버전은 DB 이력이 증거이고, 표시에 넣으면
+                # DB 트랜잭션이 되돌아갔을 때 라벨 없이 "끝났다"고 남아 영영 다시 돌지 않는다.
+                write_detect_marker(raw, session_id, stream.stream_id, empty | ran_empty, work)
+            rerun_models = {p.version for p in extra if p.version in need_run}
+            if segments or version in need_run or rerun_models:
                 # 재학습 모델만 다시 돌았으면 탐지기 구간을 지우지 않는다 (합친다)
                 merged = merge_segments(
                     read_review_segments(raw, session_id, stream.stream_id, work),
                     segments,
-                    detector_rerun=version not in done,
+                    detector_rerun=version in need_run,
                     rerun_models=rerun_models,
                     live_models={p.version for p in extra},
                 )

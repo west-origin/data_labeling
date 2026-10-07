@@ -28,6 +28,7 @@ from dlp_fixtures.sync import generate_sync_scenario
 from dlp_fixtures.video import BlurScenario
 from dlp_media.ingest import ingest_session, load_manifest
 from dlp_media.storage import S3Store
+from dlp_privacy.detection import Detection, Image
 from dlp_privacy.detectors.oracle import OracleDetector
 from dlp_privacy.policy import PrivacyPolicy, TargetPolicy
 from dlp_privacy.runner import (
@@ -35,6 +36,7 @@ from dlp_privacy.runner import (
     RenderNotCurrentError,
     approve_session,
     assert_render_current,
+    detect_marker_key,
     detect_session,
     render_session,
 )
@@ -273,6 +275,62 @@ def test_approval_needs_a_review_task_even_without_detections(
             approve_session(conn, sid)
         reviewed_task(conn, sid, "bodycam", FIXED_TIME)
         assert approve_session(conn, sid).privacy_state is PrivacyState.APPROVED
+
+
+class CountingOracle(OracleDetector):
+    """프레임 탐지 호출 수를 세는 오라클 (영상을 다시 탐지했는지 확인용)."""
+
+    calls = 0
+
+    def detect(self, image: Image, t_ms: int, threshold: float) -> list[Detection]:
+        """호출 수를 늘리고 오라클 결과를 그대로 낸다."""
+        self.calls += 1
+        return super().detect(image, t_ms, threshold)
+
+
+def test_zero_detection_stream_is_not_redetected(
+    pg: sa.Engine, policy: PrivacyPolicy, blur: tuple[BlurScenario, Path], tmp_path: Path
+) -> None:
+    """회귀: 탐지 0개인 스트림은 DB 이력에 모델 버전이 남지 않아 실행마다 영상 전체를 다시 탐지했다.
+
+    정답: 첫 실행은 탐지기를 부르고 원본 버킷에 탐지 표시(결과 0개 버전)를 남긴다. 같은 버전으로
+    다시 돌리면 스트림을 건너뛰고 탐지기를 한 번도 부르지 않는다. 탐지기 버전이 바뀌면 다시 돈다.
+    """
+    _, video = blur
+    sid = f"priv-{uuid.uuid4().hex[:8]}"
+    manifest = {
+        "session_id": sid, "domain": "cleaning", "worker_id": "w01", "site_id": "site01",
+        "consent_version": "c1", "recorded_at": FIXED_TIME.isoformat(), "ontology_version": "1.0.0",
+        "streams": [{"stream_id": "bodycam", "kind": "bodycam", "path": str(video)}],
+    }  # fmt: skip
+    (tmp_path / "m.yaml").write_text(yaml.safe_dump(manifest), encoding="utf-8")
+    raw = S3Store.from_env("dlp-raw")
+    nothing = policy.model_copy(
+        update={
+            "targets": {
+                t: TargetPolicy(margin=tp.margin, detectors=("oracle",))
+                for t, tp in policy.targets.items()
+            }
+        }
+    )
+    first = CountingOracle("oracle", [])
+    with pg.begin() as conn:
+        ingest_session(*load_manifest(tmp_path / "m.yaml"), raw, conn)
+        summary = detect_session(conn, sid, raw, {"oracle": first}, {}, nothing, FIXED_TIME)
+    assert summary.detected == {"bodycam": 0} and first.calls > 0
+    assert raw.head(detect_marker_key(sid, "bodycam")) is not None
+
+    second = CountingOracle("oracle", [])
+    with pg.begin() as conn:
+        again = detect_session(conn, sid, raw, {"oracle": second}, {}, nothing, FIXED_TIME)
+    assert again.skipped == ["bodycam"] and again.detected == {} and second.calls == 0
+
+    # 탐지기 버전이 바뀌면(모델 버전 해시가 달라진다) 다시 탐지한다
+    bumped = CountingOracle("oracle", [])
+    bumped.version = "oracle-2"
+    with pg.begin() as conn:
+        rerun = detect_session(conn, sid, raw, {"oracle": bumped}, {}, nothing, FIXED_TIME)
+    assert rerun.skipped == [] and bumped.calls > 0
 
 
 class TrainedBlur:

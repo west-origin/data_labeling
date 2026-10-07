@@ -136,6 +136,42 @@ def _check_shape(shape: dict[str, Any], name: str) -> None:
         )
 
 
+def _visibility(raw: str, n: int, name: str, shape: dict[str, Any]) -> list[int]:
+    """키포인트 모양의 `dlp_visibility` 속성("2,2,1,…")을 점별 가시성 목록으로 바꾼다.
+
+    회귀: 검수자가 점을 더 찍어 가시성 값이 점 수보다 짧으면 `IndexError`가 나 수집이
+    `CvatFormatError`(옮길 수 없는 주석)가 아닌 내부 오류로 멈췄다.
+
+    Args:
+        raw: 속성 값 (비어 있으면 모든 점이 보임 = 2).
+        n: 그 모양의 점 수.
+        name: CVAT 라벨 이름 (오류 메시지용).
+        shape: CVAT 모양 (오류 메시지의 프레임 번호용).
+
+    Returns:
+        길이 n의 가시성 목록 (값 검증은 `Keypoint`가 한다).
+
+    Raises:
+        CvatFormatError: 정수가 아닌 값이 있거나 값 수가 점 수와 다를 때 (모자란 점의 가시성을
+            지어내거나 남는 값을 조용히 버리지 않는다).
+    """
+    try:
+        vis = [int(v) for v in raw.split(",") if v.strip()]
+    except ValueError as e:
+        raise CvatFormatError(
+            f"라벨 {name}의 dlp_visibility가 정수 목록이 아닙니다 (프레임 {shape.get('frame')}): "
+            f"{raw!r}"
+        ) from e
+    if not vis:
+        return [2] * n
+    if len(vis) != n:
+        raise CvatFormatError(
+            f"라벨 {name}의 dlp_visibility 값 {len(vis)}개가 점 {n}개와 맞지 않습니다 "
+            f"(프레임 {shape.get('frame')})"
+        )
+    return vis
+
+
 def annotation_tracks(
     annotations: dict[str, Any], frame_count: int, schema: CvatSchema
 ) -> list[dict[str, Any]]:
@@ -402,10 +438,8 @@ def from_cvat_tracks(
                     schema.attr_name(a["spec_id"]): a["value"] for a in s.get("attributes", [])
                 }
                 pts = s["points"]
-                # 점별 가시성 "2,2,1,…" (없으면 점 수만큼 2)
-                vis = [int(v) for v in vis_attr.get("dlp_visibility", "").split(",") if v] or [
-                    2
-                ] * (len(pts) // 2)
+                # 점별 가시성 "2,2,1,…" (없으면 점 수만큼 2). 점 수와 맞지 않으면 CvatFormatError
+                vis = _visibility(vis_attr.get("dlp_visibility", ""), len(pts) // 2, name, s)
                 frames.append(
                     KeypointFrame(
                         t_ms=t,
