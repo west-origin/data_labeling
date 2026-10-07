@@ -13,7 +13,12 @@ relation_iou: 0.5
 match_iou: 0.5             # 접촉 파지 유형·행동 동사를 비교할 때 정답·예측 구간을 맞추는 IoU
 pck_alpha: 0.1              # 정답 키포인트 박스 긴 변의 10%
 ece_bins: 15
-min_samples_per_class: 20   # 이보다 정답 표본이 적은 클래스는 리포트에 "표본 부족"으로 표시
+min_samples_per_class: 20
+# 블러(프라이버시): 정답 시각마다 정답 박스가 예측 블러로 coverage 이상 덮이면 재현, 예측 박스 면적의
+# precision_overlap 이상이 정답 대상 위면 정밀. 놓친 대상은 노출이므로 재현을 주 지표로 본다.
+privacy:
+  coverage: 0.9
+  precision_overlap: 0.5   # 이보다 정답 표본이 적은 클래스는 리포트에 "표본 부족"으로 표시
 
 # 하위 집단: 세션 속성별로 따로 리포트한다.
 #   glove: 장갑 스트림이 있는 세션(glove) / 없는 세션(bare)
@@ -40,4 +45,11 @@ gate:
   actions: {primary: segment_f1_0.5, min_gain: 0.0, max_drop: 0.01, guards: [temporal_map, boundary_f1, verb_macro_f1], first_deploy: 0.3}
   relations: {primary: relation_f1, min_gain: 0.0, max_drop: 0.01, guards: [], first_deploy: 0.5}
   states: {primary: transition_accuracy, min_gain: 0.0, max_drop: 0.01, guards: [], first_deploy: 0.5}
+  privacy:
+    primary: blur_recall
+    min_gain: 0.0
+    max_drop: 0.0              # 재현은 하위 집단에서도 떨어지면 안 된다
+    max_drop_by: {blur_precision: 0.05}
+    guards: [blur_precision]
+    first_deploy: 0.95
   coverage: {primary: coverage_abs_error, min_gain: 0.0, max_drop: 0.01, guards: [], first_deploy: 0.1}

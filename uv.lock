@@ -23,6 +23,7 @@ members = [
     "dlp-review",
     "dlp-schema",
     "dlp-sync",
+    "dlp-train",
 ]
 overrides = [
     { name = "opencv-contrib-python", marker = "sys_platform == 'never'" },
@@ -280,6 +281,7 @@ dependencies = [
     { name = "dlp-review" },
     { name = "dlp-schema" },
     { name = "dlp-sync" },
+    { name = "dlp-train" },
 ]
 
 [package.dev-dependencies]
@@ -311,6 +313,7 @@ requires-dist = [
     { name = "dlp-review", editable = "packages/review" },
     { name = "dlp-schema", editable = "packages/schema" },
     { name = "dlp-sync", editable = "packages/sync" },
+    { name = "dlp-train", editable = "packages/training" },
 ]
 
 [package.metadata.requires-dev]
@@ -371,6 +374,7 @@ dependencies = [
     { name = "dlp-review" },
     { name = "dlp-schema" },
     { name = "dlp-sync" },
+    { name = "dlp-train" },
 ]
 
 [package.metadata]
@@ -387,6 +391,7 @@ requires-dist = [
     { name = "dlp-review", editable = "packages/review" },
     { name = "dlp-schema", editable = "packages/schema" },
     { name = "dlp-sync", editable = "packages/sync" },
+    { name = "dlp-train", editable = "packages/training" },
 ]
 
 [[package]]
@@ -637,6 +642,31 @@ requires-dist = [
     { name = "dlp-schema", editable = "packages/schema" },
     { name = "numpy", specifier = ">=2.0" },
     { name = "opencv-contrib-python-headless", specifier = ">=4.10" },
+    { name = "pyyaml", specifier = ">=6.0" },
+]
+
+[[package]]
+name = "dlp-train"
+version = "0.1.0"
+source = { editable = "packages/training" }
+dependencies = [
+    { name = "dlp-datasets" },
+    { name = "dlp-eval" },
+    { name = "dlp-media" },
+    { name = "dlp-schema" },
+    { name = "httpx" },
+    { name = "numpy" },
+    { name = "pyyaml" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "dlp-datasets", editable = "packages/datasets" },
+    { name = "dlp-eval", editable = "packages/evaluation" },
+    { name = "dlp-media", editable = "packages/media" },
+    { name = "dlp-schema", editable = "packages/schema" },
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "numpy", specifier = ">=2.0" },
     { name = "pyyaml", specifier = ">=6.0" },
 ]
 

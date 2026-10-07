@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -15,6 +16,7 @@ from dlp_privacy.detection import FrameDetector
 from dlp_privacy.pipeline import detect_video, model_version
 from dlp_privacy.policy import PrivacyPolicy
 from dlp_privacy.render import render_blurred
+from dlp_privacy.review import ReviewSegment
 from dlp_schema.db.repository import (
     get_labels,
     get_session,
@@ -24,6 +26,7 @@ from dlp_schema.db.repository import (
 )
 from dlp_schema.episode import current_labels, retractions
 from dlp_schema.labels import LabelRecord, Source, VerificationState
+from dlp_schema.predictor import Clip, Predictor
 from dlp_schema.session import LifecycleState, PrivacyState, Session, StreamKind
 
 VIDEO_KINDS = {StreamKind.BODYCAM, StreamKind.THIRD_PERSON}
@@ -68,57 +71,69 @@ def detect_session(
     missing_detectors: dict[str, str],
     policy: PrivacyPolicy,
     now: datetime,
+    extra: Sequence[Predictor] = (),
 ) -> DetectSummary:
-    """영상 스트림마다 블러 프리라벨을 만든다. 같은 모델 버전의 결과가 이미 있으면 건너뛴다."""
+    """영상 스트림마다 블러 프리라벨을 만든다. 같은 모델 버전의 결과가 이미 있으면 건너뛴다.
+
+    extra: 배포된 재학습 블러 모델 (blur_track을 내는 Predictor). 탐지기 결과와 합집합으로 남는다.
+    """
     session = get_session(conn, session_id)
     if session.ontology_version is None:
         raise PrivacyGateError(f"{session_id}: 세션에 온톨로지 버전이 없습니다")
     summary = DetectSummary()
     existing = get_labels(conn, session_id, kinds=["blur_track"])
+    version = model_version(detectors, policy)
+    versions = {version, *(p.version for p in extra)}
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp)
         for stream in session.streams:
             if stream.kind not in VIDEO_KINDS:
                 continue
-            version = model_version(detectors, policy)
-            if any(
-                x.stream_id == stream.stream_id and x.provenance.model_version == version
-                for x in existing
-            ):
+            done = {x.provenance.model_version for x in existing if x.stream_id == stream.stream_id}
+            if versions <= done:
                 summary.skipped.append(stream.stream_id)
                 continue
-            result = detect_video(
-                _fetch(raw, stream.uri, work),
-                session_id=session_id,
-                stream_id=stream.stream_id,
-                detectors=detectors,
-                missing_detectors=missing_detectors,
-                policy=policy,
-                ontology_version=session.ontology_version,
-                now=now,
-            )
-            summary.missing.update(result.missing)
-            # 탐지기 버전이 바뀌면 검수 전인 이전 버전 블러만 지운다 (검수한 블러는 남긴다)
+            video = _fetch(raw, stream.uri, work)
+            labels: list[LabelRecord] = []
+            segments: list[ReviewSegment] = []
+            if version not in done:
+                result = detect_video(
+                    video,
+                    session_id=session_id,
+                    stream_id=stream.stream_id,
+                    detectors=detectors,
+                    missing_detectors=missing_detectors,
+                    policy=policy,
+                    ontology_version=session.ontology_version,
+                    now=now,
+                )
+                summary.missing.update(result.missing)
+                labels += result.labels
+                segments = result.segments
+            for p in extra:
+                if p.version not in done:
+                    out = p.run(Clip(session_id, stream.stream_id, video))
+                    labels += [x for x in out if x.kind == "blur_track"]
+            # 탐지기·모델 버전이 바뀌면 검수 전인 이전 버전 블러만 지운다 (검수한 블러는 남긴다)
             stale = [
                 x
                 for x in current_labels(existing)
                 if x.stream_id == stream.stream_id
                 and x.provenance.source is Source.MODEL
-                and x.provenance.model_version != version
+                and x.provenance.model_version not in versions
                 and x.verification.state is VerificationState.UNREVIEWED
             ]
-            insert_labels(conn, [*retractions(stale, version, now), *result.labels])
-            summary.detected[stream.stream_id] = len(result.labels)
-            key = f"sessions/{session_id}/derived/privacy_review/{stream.stream_id}.json"
-            out = work / f"{stream.stream_id}-review.json"
-            out.write_text(
-                json.dumps(
-                    [s.model_dump(mode="json") for s in result.segments], ensure_ascii=False
-                ),
-                encoding="utf-8",
-            )
-            raw.put_file(key, out, sha256_file(out))
-            summary.review_keys.append(key)
+            insert_labels(conn, [*retractions(stale, version, now), *labels])
+            summary.detected[stream.stream_id] = len(labels)
+            if version not in done:
+                key = f"sessions/{session_id}/derived/privacy_review/{stream.stream_id}.json"
+                out_path = work / f"{stream.stream_id}-review.json"
+                out_path.write_text(
+                    json.dumps([s.model_dump(mode="json") for s in segments], ensure_ascii=False),
+                    encoding="utf-8",
+                )
+                raw.put_file(key, out_path, sha256_file(out_path))
+                summary.review_keys.append(key)
     if session.privacy_state is PrivacyState.PENDING:
         set_privacy_state(conn, session_id, PrivacyState.AUTO_BLURRED)
     return summary

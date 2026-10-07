@@ -77,8 +77,8 @@ contact:
   # 출처별 신뢰도. 검수 우선순위는 장갑 세션에서 fused보다 낮은 접촉(장갑·영상 한쪽만)을 먼저 본다
   # (config/policies/review.yaml contact_mismatch_max_confidence는 glove·video보다 크고 fused보다 작게).
   confidence: {fused: 0.9, glove: 0.6, video: 0.5}
-  # TODO(real-model): 영상만으로 접촉을 판정하는 학습 분류기 (장갑 세션을 정답으로, WP13에서 학습).
-  #   지금은 손가락 끝-객체 거리 휴리스틱만 쓴다.
+  # TODO(real-model): 영상만으로 접촉을 판정하는 학습 분류기 (장갑 세션을 정답으로, `dlp train run contact`).
+  #   재학습 루프는 있지만 실제 학습기가 없어 지금은 손가락 끝-객체 거리 휴리스틱만 쓴다.
 
 wearer_matching:
   rate_hz: 30

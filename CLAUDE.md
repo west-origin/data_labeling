@@ -53,6 +53,9 @@
   정책은 `config/policies/actions.yaml`.
 - `packages/evaluation/` (`dlp_eval`) — 지표 라이브러리(mAP·HOTA·IDF1·PCK·접촉·구간 F1·temporal mAP·ECE 등, 참조 구현과 일치 테스트),
   골든셋 평가 하네스, 하위 집단 리포트, 배포 게이트. `dlp eval golden <골든셋> --model <과제>=<버전>`. 정책은 `config/policies/evaluation.yaml`.
+- `packages/training/` (`dlp_train`) — 재학습 루프: 데이터셋 버전에서 과제별 학습 예제 추출(자동 원본과 수정본 차이),
+  학습 작업 템플릿, MLflow 기록, 모델 레지스트리(DB `model_versions`), 골든셋 평가·게이트 후 배포.
+  `dlp train run|models|approve`. CI·CPU는 `oracle-stub` 학습기. 정책은 `config/policies/training.yaml`.
 - `config/` — 온톨로지·정책·기본값 YAML. 코드에 값을 하드코딩하지 않는다.
 - `schemas/` — 생성된 JSON Schema. 직접 편집하지 않는다 (`make schemas`).
 - `services/` — 개발용 docker compose (PostgreSQL, SeaweedFS S3, Label Studio, Prefect, MLflow, lakeFS), CVAT 실행 스크립트.
@@ -78,6 +81,8 @@
   연동하면 표시를 지운다.
 - 라벨링한 데이터를 판매하므로 모델의 상업 사용 여부를 따진다 (ADR 0010). 새 모델은 `config/models.yaml`에 가중치
   라이선스, 직접 학습 데이터와 그 라이선스, `commercial` 분류를 적는다. 가중치가 비상업(`forbidden`)이면 쓰지 않는다.
+- 학습 예제는 데이터셋 버전의 학습·검증 분할에서만 뽑는다 (`dlp_train.extract`). 후보 모델의 골든셋 예측은
+  DB에 쓰지 않는다. 배포는 게이트를 통과한 모델만, 프라이버시는 사람 승인 후에만 한다.
 - 각 파이프라인 단계는 멱등적인 `dlp <단계>` 하위 명령으로 만든다. 모델 출처 라벨 ID에는 `version_tag(모델 버전)`을
   넣고, 다시 돌릴지는 현재 라벨이 아니라 전체 이력(`get_labels`)으로 정한다. 버전이 바뀌면 검수 전인 이전 버전만
   `retractions()`로 지운다 (ADR 0015).

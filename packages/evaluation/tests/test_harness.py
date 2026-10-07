@@ -230,3 +230,46 @@ def test_ece_without_predictions_is_not_perfect() -> None:
     from dlp_eval.metrics.classification import ece
 
     assert math.isnan(ece([], []))
+
+
+def _blur(label_id: str, target: str, boxes: list[tuple[int, float, float]], size: float = 40):
+    return make_label(
+        {
+            "kind": "blur_track",
+            "target": target,
+            "keyframes": [{"t_ms": t, "x": x, "y": y, "w": size, "h": size} for t, x, y in boxes],
+        },
+        label_id=label_id,
+        stream_id="bodycam",
+        t_start_ms=boxes[0][0],
+        t_end_ms=boxes[-1][0],
+    )
+
+
+def test_privacy_recall_and_precision(policy: EvaluationPolicy) -> None:
+    truth = [
+        _blur("face", "face", [(0, 10, 10), (100, 20, 10), (200, 30, 10)]),
+        _blur("doc", "document", [(0, 200, 200), (100, 200, 200)]),
+    ]
+    # 얼굴은 크게 덮고(3/3), 문서는 첫 시각만 덮는다(1/2). 엉뚱한 곳 블러 하나(오탐).
+    pred = as_model(
+        [
+            _blur("p-face", "face", [(0, 0, 0), (200, 20, 0)], size=60),
+            _blur("p-doc", "document", [(0, 200, 200)]),
+            _blur("p-fp", "face", [(100, 500, 500)]),
+        ]
+    )
+    report = evaluate(
+        {"privacy": [SessionData("s001", truth, pred)]},
+        policy,
+        golden_version="g",
+        model_versions={"privacy": "m1"},
+    )
+    m = report.overall["privacy"].metrics
+    assert m["blur_recall"] == pytest.approx(4 / 5)
+    assert m["blur_recall/face"] == 1.0
+    assert m["blur_recall/document"] == 0.5
+    # 정답 시각별 예측 박스 5개: t0 얼굴·문서, t100 얼굴(보간)·오탐, t200 얼굴.
+    # 얼굴 예측(60x60)은 정답(40x40)이 면적의 0.44만 덮어 정밀 기준 0.5 미만 → 맞음은 문서 1개
+    # (블러를 넉넉히 키우는 것은 재현에는 좋지만 정밀에서 깎인다)
+    assert m["blur_precision"] == pytest.approx(1 / 5)

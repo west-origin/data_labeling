@@ -15,6 +15,7 @@ from dlp_schema.db.tables import (
     exports,
     golden_sets,
     label_records,
+    model_versions,
     ontology_versions,
     review_assignments,
     review_tasks,
@@ -24,7 +25,14 @@ from dlp_schema.db.tables import (
     withdrawals,
 )
 from dlp_schema.labels import LabelRecord, VerificationState
-from dlp_schema.lineage import ExportRecord, GoldenSet, TrainingRun, Withdrawal
+from dlp_schema.lineage import (
+    ExportRecord,
+    GoldenSet,
+    ModelStatus,
+    ModelVersion,
+    TrainingRun,
+    Withdrawal,
+)
 from dlp_schema.ontology import Ontology
 from dlp_schema.review import (
     AssignmentStatus,
@@ -421,6 +429,50 @@ def list_training_runs(conn: sa.Connection, dataset_version_ids: list[str]) -> l
         .order_by(training_runs.c.created_at)
     )
     return [TrainingRun.model_validate(dict(r)) for r in conn.execute(query).mappings()]
+
+
+def get_training_run(conn: sa.Connection, run_id: str) -> TrainingRun:
+    row = conn.execute(sa.select(training_runs).where(training_runs.c.run_id == run_id)).mappings()
+    return TrainingRun.model_validate(dict(row.one()))
+
+
+def insert_model_version(conn: sa.Connection, mv: ModelVersion) -> None:
+    conn.execute(model_versions.insert().values(**mv.model_dump()))
+
+
+def get_model_version(conn: sa.Connection, model_version: str) -> ModelVersion:
+    query = sa.select(model_versions).where(model_versions.c.model_version == model_version)
+    return ModelVersion.model_validate(dict(conn.execute(query).mappings().one()))
+
+
+def list_model_versions(
+    conn: sa.Connection, task: str | None = None, status: ModelStatus | None = None
+) -> list[ModelVersion]:
+    query = sa.select(model_versions).order_by(
+        model_versions.c.created_at, model_versions.c.model_version
+    )
+    if task is not None:
+        query = query.where(model_versions.c.task == task)
+    if status is not None:
+        query = query.where(model_versions.c.status == status.value)
+    return [ModelVersion.model_validate(dict(r)) for r in conn.execute(query).mappings()]
+
+
+def set_model_status(
+    conn: sa.Connection,
+    model_version: str,
+    status: ModelStatus,
+    at: datetime,
+    report_uri: str | None = None,
+) -> None:
+    values: dict[str, Any] = {"status": status.value, "decided_at": at}
+    if report_uri is not None:
+        values["report_uri"] = report_uri
+    conn.execute(
+        model_versions.update()
+        .where(model_versions.c.model_version == model_version)
+        .values(**values)
+    )
 
 
 def insert_export(conn: sa.Connection, export: ExportRecord) -> None:

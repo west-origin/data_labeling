@@ -10,7 +10,9 @@ from pydantic import Field
 
 from dlp_schema.common import Contract
 
-Task = Literal["objects", "hands", "body", "contact", "actions", "relations", "states", "coverage"]
+Task = Literal[
+    "objects", "hands", "body", "contact", "actions", "relations", "states", "coverage", "privacy"
+]
 TASKS: tuple[Task, ...] = (
     "objects",
     "hands",
@@ -20,6 +22,7 @@ TASKS: tuple[Task, ...] = (
     "relations",
     "states",
     "coverage",
+    "privacy",
 )
 
 
@@ -28,6 +31,15 @@ class Tolerances(Contract):
     contact_glove: int
     boundary: int
     state: int
+
+
+class PrivacyEval(Contract):
+    coverage: float = Field(
+        gt=0, le=1, description="정답 블러 박스 면적 중 예측 블러가 덮어야 하는 비율"
+    )
+    precision_overlap: float = Field(
+        gt=0, le=1, description="예측 블러 박스 면적 중 정답 대상 위에 있어야 맞은 것으로 보는 비율"
+    )
 
 
 class GateRule(Contract):
@@ -57,6 +69,7 @@ class EvaluationPolicy(Contract):
     pck_alpha: float = Field(gt=0)
     ece_bins: int = Field(ge=1)
     min_samples_per_class: int = Field(ge=1)
+    privacy: PrivacyEval
     subgroups: tuple[Literal["glove", "site"], ...]
     gate: dict[Task, GateRule]
 

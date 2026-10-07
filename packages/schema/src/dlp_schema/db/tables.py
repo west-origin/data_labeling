@@ -185,6 +185,28 @@ training_runs = sa.Table(
     sa.Column("created_at", Ts, nullable=False),
 )
 
+model_versions = sa.Table(
+    "model_versions",
+    metadata,
+    sa.Column("model_version", sa.String(128), primary_key=True),
+    sa.Column("task", sa.String(64), nullable=False, index=True),
+    sa.Column(
+        "run_id",
+        sa.String(128),
+        sa.ForeignKey("training_runs.run_id"),
+        nullable=False,
+        index=True,
+    ),
+    sa.Column("trainer", sa.String(128), nullable=False),
+    sa.Column("artifact_uri", sa.Text(), nullable=False),
+    sa.Column("sha256", sa.String(64), nullable=False),
+    sa.Column("train_examples", sa.Integer(), nullable=False),
+    sa.Column("status", sa.String(16), nullable=False, index=True),
+    sa.Column("report_uri", sa.Text(), nullable=True),
+    sa.Column("created_at", Ts, nullable=False),
+    sa.Column("decided_at", Ts, nullable=True),
+)
+
 exports = sa.Table(
     "exports",
     metadata,

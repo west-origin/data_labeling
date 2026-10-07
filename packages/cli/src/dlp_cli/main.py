@@ -20,6 +20,7 @@ from dlp_cli import (
     review_cmds,
     schema_cmds,
     sync_cmds,
+    train_cmds,
 )
 from dlp_cli.health import default_checks, run_checks
 
@@ -56,6 +57,7 @@ def build_parser() -> argparse.ArgumentParser:
     relations_cmds.add_commands(sub)
     actions_cmds.add_commands(sub)
     eval_cmds.add_commands(sub)
+    train_cmds.add_commands(sub)
     return parser
 
 

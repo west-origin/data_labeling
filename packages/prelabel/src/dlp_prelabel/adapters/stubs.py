@@ -126,9 +126,10 @@ TOOL_PART_MASKS = UnavailablePredictor("tool_part_masks", "SAM 2.1 마스크 미
 CAMERA_POSE = UnavailablePredictor("camera_pose", "카메라 자세(SLAM·RGB-D 오도메트리) 미연동")
 
 # TODO(real-model): 영상만으로 접촉을 판정하는 학습 분류기. 장갑 세션의 접촉 구간을 정답으로
-#   WP13에서 학습한다. 지금은 contact.video_contact_intervals 휴리스틱을 쓴다.
+#   재학습 루프(`dlp train run contact`, WP13)에서 학습한다. 루프는 있지만 실제 학습기가 없다
+#   (dlp_train.trainers). 지금은 contact.video_contact_intervals 휴리스틱을 쓴다.
 LEARNED_CONTACT = UnavailablePredictor(
-    "learned_contact", "학습 데이터(장갑 세션) 누적 후 WP13에서 학습"
+    "learned_contact", "재학습 루프의 실제 접촉 분류기 학습기 미연동 (dlp train run contact)"
 )
 
 UNAVAILABLE = (TOOL_PART_MASKS, CAMERA_POSE, LEARNED_CONTACT)

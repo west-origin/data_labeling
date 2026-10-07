@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import tempfile
 from datetime import UTC, datetime
+from pathlib import Path
 
 import sqlalchemy as sa
 
@@ -18,6 +20,9 @@ from dlp_prelabel.policy import load_policy
 from dlp_prelabel.runner import run_prelabel
 from dlp_schema import load_config, load_ontology, repo_root
 from dlp_schema.predictor import ModelUnavailableError, Predictor
+from dlp_train.deployed import deployed_predictors
+from dlp_train.policy import load_policy as load_training_policy
+from dlp_train.trainers import LoadContext
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -41,11 +46,30 @@ def cmd_run(args: argparse.Namespace) -> int:
             print(f"[모델 없음] {DepthLifter.name}: {exc}")
     for p in UNAVAILABLE:
         print(f"[미연동] {p.name}: {p.reason}")  # TODO(real-model) 표시가 붙은 기능
-    raw = store_from_spec(args.store, load_config(root / "config/defaults.yaml").buckets.raw)
+    buckets = load_config(root / "config/defaults.yaml").buckets
+    raw = store_from_spec(args.store, buckets.raw)
     engine = sa.create_engine(database_url(args.url))
-    with engine.begin() as conn:
+    with engine.begin() as conn, tempfile.TemporaryDirectory() as tmp:
+        # 게이트를 통과해 배포된 재학습 모델이 있으면 정책의 replaces 기본 어댑터 대신 쓴다
+        deployed = deployed_predictors(
+            conn,
+            store_from_spec(args.store, buckets.mlflow),
+            load_training_policy(root),
+            "prelabel",
+            LoadContext(now=now, ontology_version=ontology.version),
+            Path(tmp),
+        )
+        for note in deployed.notes:
+            print(f"[재학습 모델] {note}")
         s = run_prelabel(
-            conn, args.session_id, raw, predictors, policy, ontology, now, lifter=lifter
+            conn,
+            args.session_id,
+            raw,
+            deployed.apply(predictors),
+            policy,
+            ontology,
+            now,
+            lifter=lifter,
         )
     engine.dispose()
     for key, n in s.produced.items():

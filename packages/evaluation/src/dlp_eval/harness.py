@@ -11,11 +11,13 @@
 - relations: relation → 같은 (주어, 술어, 목적어, 부분) 구간 F1@relation_iou.
 - states: object_state → 상태 전이 정확도.
 - coverage: coverage → 같은 (표면, 도구) 쌍의 비율 절대 오차 평균.
+- privacy: blur_track → 블러 재현(정답 박스가 예측 블러로 충분히 덮인 비율)과 정밀.
 세션 사이의 개체 ID는 세션 ID를 붙여 구분한다 (추적 지표는 여러 시퀀스를 이어 붙인 것과 같다).
 """
 
 from __future__ import annotations
 
+import math
 from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -40,6 +42,7 @@ from dlp_eval.metrics.tracking import TrackingData, clear, hota, identity
 from dlp_eval.policy import TASKS, EvaluationPolicy, Task
 from dlp_schema.labels import (
     ActionPayload,
+    BlurTrackPayload,
     BoxTrackPayload,
     CoveragePayload,
     HandStatePayload,
@@ -450,6 +453,78 @@ def eval_coverage(data: list[SessionData], policy: EvaluationPolicy) -> TaskRepo
     )
 
 
+# ---------------------------------------------------------------- 블러 (프라이버시)
+
+
+def _covered(target: Box, covers: Sequence[Box]) -> float:
+    """target 면적 중 covers의 합집합이 덮는 비율 (1px 격자로 센다)."""
+    x0, y0 = int(np.floor(target[0])), int(np.floor(target[1]))
+    w, h = (
+        max(int(np.ceil(target[0] + target[2])) - x0, 1),
+        max(int(np.ceil(target[1] + target[3])) - y0, 1),
+    )
+    mask = np.zeros((h, w), dtype=bool)
+    for bx, by, bw, bh in covers:
+        c0, r0 = max(int(np.floor(bx)) - x0, 0), max(int(np.floor(by)) - y0, 0)
+        c1, r1 = min(int(np.ceil(bx + bw)) - x0, w), min(int(np.ceil(by + bh)) - y0, h)
+        if c1 > c0 and r1 > r0:
+            mask[r0:r1, c0:c1] = True
+    return float(mask.mean())
+
+
+def eval_privacy(data: list[SessionData], policy: EvaluationPolicy) -> TaskReport | None:
+    """정답 키프레임 시각마다 비교한다. 정답은 보간하지 않고, 예측은 max_interp_ms 안에서 보간한다.
+
+    재현: 정답 박스 면적의 coverage 이상이 예측 블러들로 덮였는가 (대상 종류별로도 낸다).
+    정밀: 예측 박스 면적의 precision_overlap 이상이 정답 박스들 위에 있는가.
+    """
+    hits: Counter[str] = Counter()
+    counts: Counter[str] = Counter()
+    pred_total = pred_ok = 0
+    for s in data:
+        truth = [
+            (x.stream_id, p.target, _box_frames(_as_track(p)))
+            for x, p in _payloads(s.truth, BlurTrackPayload)
+        ]
+        pred = [
+            (x.stream_id, _box_frames(_as_track(p))) for x, p in _payloads(s.pred, BlurTrackPayload)
+        ]
+        times = sorted({(st, t) for st, _, kf in truth for t, v in kf if v is not None})
+        for stream, t in times:
+            g = [
+                (target, _as_box(v))
+                for st, target, kf in truth
+                if st == stream and (v := _interp(kf, t, 0)) is not None
+            ]
+            d = [
+                _as_box(v)
+                for st, kf in pred
+                if st == stream and (v := _interp(kf, t, policy.max_interp_ms)) is not None
+            ]
+            for target, box in g:
+                counts[target] += 1
+                if _covered(box, d) >= policy.privacy.coverage:
+                    hits[target] += 1
+            gb = [b for _, b in g]
+            for box in d:
+                pred_total += 1
+                if _covered(box, gb) >= policy.privacy.precision_overlap:
+                    pred_ok += 1
+    total = sum(counts.values())
+    if not total:
+        return None
+    metrics = {
+        "blur_recall": sum(hits.values()) / total,
+        "blur_precision": pred_ok / pred_total if pred_total else math.nan,
+    }
+    metrics |= {f"blur_recall/{c}": hits[c] / n for c, n in sorted(counts.items())}
+    return _report(metrics, counts, len(data), policy.min_samples_per_class)
+
+
+def _as_track(p: BlurTrackPayload) -> BoxTrackPayload:
+    return BoxTrackPayload(entity_id="blur", class_id=p.target, keyframes=p.keyframes)
+
+
 EVALUATORS: dict[Task, Callable[[list[SessionData], EvaluationPolicy], TaskReport | None]] = {
     "objects": eval_objects,
     "hands": lambda d, p: eval_keypoints(d, p, "hand21"),
@@ -459,6 +534,7 @@ EVALUATORS: dict[Task, Callable[[list[SessionData], EvaluationPolicy], TaskRepor
     "relations": eval_relations,
     "states": eval_states,
     "coverage": eval_coverage,
+    "privacy": eval_privacy,
 }
 
 

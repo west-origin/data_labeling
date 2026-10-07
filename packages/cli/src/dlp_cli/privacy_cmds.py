@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import tempfile
 from datetime import UTC, datetime
+from pathlib import Path
 
 import sqlalchemy as sa
 
@@ -13,6 +15,10 @@ from dlp_privacy.detectors import build_detectors
 from dlp_privacy.policy import load_policy
 from dlp_privacy.runner import approve_session, detect_session, render_session
 from dlp_schema import load_config, repo_root
+from dlp_schema.db.repository import get_session
+from dlp_train.deployed import deployed_predictors
+from dlp_train.policy import load_policy as load_training_policy
+from dlp_train.trainers import LoadContext
 
 
 def _engine(args: argparse.Namespace) -> sa.Engine:
@@ -26,10 +32,24 @@ def cmd_detect(args: argparse.Namespace) -> int:
     detectors, missing = build_detectors(policy, root)
     for name, reason in missing.items():
         print(f"[탐지기 없음] {name}: {reason}")
+    buckets = load_config(root / "config" / "defaults.yaml").buckets
+    now = datetime.now(UTC)
     engine = _engine(args)
-    with engine.begin() as conn:
+    with engine.begin() as conn, tempfile.TemporaryDirectory() as tmp:
+        # 게이트를 통과하고 사람이 승인한 재학습 블러 모델이 있으면 탐지기 결과와 합집합으로 쓴다
+        ontology_version = get_session(conn, args.session_id).ontology_version or ""
+        deployed = deployed_predictors(
+            conn,
+            store_from_spec(args.store, buckets.mlflow),
+            load_training_policy(root),
+            "privacy",
+            LoadContext(now=now, ontology_version=ontology_version),
+            Path(tmp),
+        )
+        for note in deployed.notes:
+            print(f"[재학습 모델] {note}")
         s = detect_session(
-            conn, args.session_id, raw, detectors, missing, policy, datetime.now(UTC)
+            conn, args.session_id, raw, detectors, missing, policy, now, extra=deployed.predictors
         )
     engine.dispose()
     for stream, n in s.detected.items():

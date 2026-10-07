@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +26,7 @@ from dlp_eval.policy import Task
 from dlp_schema.db.repository import get_golden_set, get_labels, get_session
 from dlp_schema.episode import current_labels, non_operational_ids
 from dlp_schema.labels import LabelRecord, Source, VerificationState
-from dlp_schema.session import StreamKind
+from dlp_schema.session import Session, StreamKind
 
 TASK_KINDS: dict[Task, tuple[str, ...]] = {
     "objects": ("box_track",),
@@ -37,6 +37,7 @@ TASK_KINDS: dict[Task, tuple[str, ...]] = {
     "relations": ("relation",),
     "states": ("object_state",),
     "coverage": ("coverage",),
+    "privacy": ("blur_track",),
 }
 TRUSTED = {VerificationState.HUMAN_APPROVED, VerificationState.HUMAN_CORRECTED}
 
@@ -45,21 +46,37 @@ def is_truth(x: LabelRecord) -> bool:
     return x.provenance.source is Source.HUMAN or x.verification.state in TRUSTED
 
 
-def load_golden(
-    conn: sa.Connection, golden_version: str, models: dict[Task, str]
-) -> dict[Task, list[SessionData]]:
+@dataclass(frozen=True)
+class GoldenSession:
+    session: Session
+    labels: list[LabelRecord]  # 전체 이력
+    truth: list[LabelRecord]  # 정답 (현재 라벨 중 사람이 만들거나 승인·수정한 것)
+    groups: dict[str, str]
+
+
+def golden_sessions(conn: sa.Connection, golden_version: str) -> list[GoldenSession]:
     golden = get_golden_set(conn, golden_version)
-    out: dict[Task, list[SessionData]] = {task: [] for task in models}
+    out: list[GoldenSession] = []
     for sid in golden.session_ids:
         session = get_session(conn, sid)
         labels = get_labels(conn, sid)
         truth = [x for x in current_labels(labels) if is_truth(x)]
-        # 오류 삽입 사본·측정 레코드와 그 후손은 모델 버전을 달고 있어도 예측이 아니다
-        excluded = non_operational_ids(labels)
         glove = any(
             s.kind in (StreamKind.GLOVE_LEFT, StreamKind.GLOVE_RIGHT) for s in session.streams
         )
         groups = {"glove": "glove" if glove else "bare", "site": session.site_id}
+        out.append(GoldenSession(session, labels, truth, groups))
+    return out
+
+
+def load_golden(
+    conn: sa.Connection, golden_version: str, models: dict[Task, str]
+) -> dict[Task, list[SessionData]]:
+    out: dict[Task, list[SessionData]] = {task: [] for task in models}
+    for g in golden_sessions(conn, golden_version):
+        sid, labels, truth, groups = g.session.session_id, g.labels, g.truth, g.groups
+        # 오류 삽입 사본·측정 레코드와 그 후손은 모델 버전을 달고 있어도 예측이 아니다
+        excluded = non_operational_ids(labels)
         current = current_labels(labels)
         for task, version in models.items():
             kinds = TASK_KINDS[task]
