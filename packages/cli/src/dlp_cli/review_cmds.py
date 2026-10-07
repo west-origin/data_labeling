@@ -25,6 +25,7 @@ from dlp_review.tasks import (
     create_labeling_tasks,
     create_privacy_tasks,
 )
+from dlp_review.verify import verify_session
 from dlp_review.webhook import CollectRequest, ReviewerMismatchError, resolve_reviewer, serve
 from dlp_schema import load_config, load_ontology, repo_root
 from dlp_schema.db.repository import (
@@ -97,6 +98,25 @@ def cmd_collect(args: argparse.Namespace) -> int:
             f"{args.task_key}: 승인 {len(outcome.approved)}, 수정 {outcome.corrected}, "
             f"삭제 {outcome.retracted}, 추가 {outcome.added}"
         )
+    return 0
+
+
+def cmd_verify(args: argparse.Namespace) -> int:
+    """검수가 끝난 세션을 human_verified로 옮긴다. 남은 일이 있으면 이유를 출력하고 1을 돌려준다."""
+    actor = args.actor or os.environ.get("DLP_ACTOR") or "unknown"
+    engine = sa.create_engine(database_url(args.url))
+    with engine.begin() as conn:
+        result = verify_session(conn, args.session_id, datetime.now(UTC), actor)
+    engine.dispose()
+    if result.already:
+        print(f"{args.session_id}: 이미 검수 완료 단계")
+    elif result.verified:
+        print(f"{args.session_id}: 검수 완료 (human_verified)")
+    else:
+        print(f"{args.session_id}: 아직 완료가 아니다")
+        for reason in result.reasons:
+            print(f"  - {reason}")
+        return 1
     return 0
 
 
@@ -256,6 +276,12 @@ def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
     collect.add_argument("--reviewer", required=True)
     collect.add_argument("--url", help="DB URL (기본: DLP_DATABASE_URL)")
     collect.set_defaults(func=cmd_collect)
+
+    vf = rsub.add_parser("verify", help="검수가 끝난 세션을 검수 완료(human_verified)로 표시")
+    vf.add_argument("session_id")
+    vf.add_argument("--actor", help="판정한 사람 (기본: DLP_ACTOR)")
+    vf.add_argument("--url", help="DB URL (기본: DLP_DATABASE_URL)")
+    vf.set_defaults(func=cmd_verify)
 
     srv = rsub.add_parser("serve", help="웹훅을 받아 끝난 작업을 수집 (DLP_WEBHOOK_SECRET 필요)")
     srv.add_argument("--port", type=int, default=8765)

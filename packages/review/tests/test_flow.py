@@ -305,7 +305,7 @@ def test_privacy_review_scales_boxes_to_downscaled_proxy(
     proxy = tmp_path / "proxy.mp4"
     setup.raw.get_file(object_key(setup.raw, task.media_uri), proxy)
     pw, ph = video_size(proxy)
-    assert (pw, ph) == (854, 480)
+    assert (pw, ph) == (852, 480)  # 짝수로 내림 (yuv420p)
     sent = cvat.get_tracks(int(task.external_id))
     by_id = {x.label_id: x for x in blur}
     for track in sent:

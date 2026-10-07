@@ -10,10 +10,12 @@
 - 프리라벨 편향: 그 주에 끝난 블라인드 배정의 편향 평균 (ADR 0014).
 - 오류 삽입 발견율: 그 주에 끝난 오류 삽입 배정에서 발견한 오류 비율.
 - 잔여 블러 누락: 그 주 감사의 영상 1시간당 잔여 누락 수.
-- 검증 에피소드: 사람 검증을 마친 세션(수명 주기) 중 검증 완료 시각이 그 주인 것.
-  검증 완료 시각(verified_at) = 운영 라벨 항목(수정 이력 사슬)마다 처음 검수한 시각 중 가장
-  늦은 것. 단계별로 늦게 생긴 라벨은 자기 검수 시각까지 늦추고, 이미 검수한 항목의 QA 수정은
-  바꾸지 않는다 (ADR 0027). 블러(프라이버시 검수)는 따로 센다.
+- 검증 에피소드: 검증 완료 시각이 그 주인 세션.
+  검증 완료 시각 = 생애주기 기록(session_lifecycle_events)에서 human_verified로 처음 옮긴 시각
+  (`dlp review verify`가 남긴다, ADR 0028). 한 번 정해지면 바뀌지 않아 지난 주의 수가 그대로다.
+  그 기록이 없는 세션(0011 이전에 검증 단계를 지난 세션)만 라벨 이력에서 추정한다
+  (verified_at: 운영 라벨 항목마다 처음 검수한 시각 중 가장 늦은 것, ADR 0027).
+  블러(프라이버시 검수)는 따로 센다.
   생산원가 = 검수 시간 * 인건비 / 그 수.
 """
 
@@ -36,6 +38,7 @@ from dlp_schema.db.repository import (
     get_session,
     list_assignments,
     list_golden_sets,
+    list_lifecycle_events,
     list_privacy_audits,
     list_review_work,
     list_session_ids,
@@ -63,6 +66,21 @@ def week_range(week: str) -> tuple[datetime, datetime]:
 def week_of(t: datetime) -> str:
     y, w, _ = t.astimezone(UTC).isocalendar()
     return f"{y}-W{w:02d}"
+
+
+def verified_time(
+    conn: sa.Connection, session_id: str, state: LifecycleState, history: list[LabelRecord]
+) -> datetime | None:
+    """세션의 검증 완료 시각.
+
+    생애주기 기록에 human_verified로 옮긴 전이(이전 상태가 있는 것)가 있으면 그 첫 시각이다.
+    0011 이관의 보충 기록(이전 상태 없음)뿐인 옛 세션은 지금 상태가 검증 이후일 때만 라벨 이력에서
+    추정한다 (verified_at).
+    """
+    for event in list_lifecycle_events(conn, session_id):
+        if event.to_state is LifecycleState.HUMAN_VERIFIED and event.from_state is not None:
+            return event.at
+    return verified_at(history) if state in VERIFIED else None
 
 
 def verified_at(history: list[LabelRecord]) -> datetime | None:
@@ -173,7 +191,7 @@ def weekly_metrics(
             continue
         history = get_labels(conn, sid)
         session = get_session(conn, sid)
-        if session.lifecycle_state in VERIFIED and inside(verified_at(history)):
+        if inside(verified_time(conn, sid, session.lifecycle_state, history)):
             m.verified_episodes += 1
         if sid in golden:
             continue

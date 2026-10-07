@@ -44,7 +44,7 @@
 - `packages/privacy/` (`dlp_privacy`) — 프라이버시 게이트: 탐지기(YuNet, QR·바코드, OWLv2 오픈 보캐뷸러리, 반사면, 오라클 stub), 추적·보간·유지,
   모자이크 렌더, 검수 우선 구간, 잔여 누락 감사. `dlp privacy detect|approve|render|audit-sample`. 정책은 `config/policies/privacy.yaml`.
 - `packages/review/` (`dlp_review`) — 검수 도구 연동: CVAT·Label Studio 변환기(무손실 왕복), 작업 생성, reconcile(검수 결과 →
-  라벨 이력), 웹훅 수집, 라벨러 워터마크, 역할 경계. `dlp review create|collect|serve|register-webhooks`.
+  라벨 이력), 웹훅 수집, 라벨러 워터마크, 역할 경계. `dlp review create|collect|verify|serve|register-webhooks` (verify: 검수가 끝난 세션을 human_verified로).
   운영 로직(`dlp_review.ops`): 우선순위 큐, 표본 검증, 블라인드·오류 삽입·이중·QA 배정, 품질 측정.
   `dlp review plan|assign|queue|qa|quality`. 정책은 `config/policies/review.yaml`.
 - `packages/datasets/` (`dlp_datasets`) — 데이터셋 버전(lakeFS 커밋), 작업자·장소 단위 분할(holdout 포함), 골든셋 제안,

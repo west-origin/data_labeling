@@ -1,0 +1,101 @@
+"""세션 검수 완료 판정 (`dlp review verify`).
+
+생애주기의 prelabeled → human_verified 전이를 맡는다. 이 전이가 있어야 데이터셋 버전에 들어가고
+(dlp_datasets.build는 human_verified 세션만 분할에 넣는다), 운영 지표의 "검증 에피소드"와
+보관 기간 기산점이 정해진다. 전이 시각은 session_lifecycle_events에 남는다 (ADR 0028).
+
+완료 조건 (모두 만족해야 한다):
+- 블러 검수가 끝나 privacy_state가 approved다 (승인이 풀린 세션은 완료로 보지 않는다).
+- 이 세션의 검수 작업 중 수거되지 않은 것(open)이 없다. 블러 작업 포함.
+- 열린 검수 배정(review_assignments.status=open)이 없다.
+- 블러를 뺀 현재 운영 라벨 중 모델 라벨은 모두 사람 검수 상태다
+  (human_approved, human_corrected, sample_verified). 사람이 만든 라벨은 그 자체로 검수된 것이다.
+- 블러를 뺀 현재 운영 라벨이 하나 이상 있다 (빈 세션은 완료가 아니다).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime
+
+import sqlalchemy as sa
+
+from dlp_schema.db.repository import (
+    get_labels,
+    get_session,
+    list_assignments,
+    list_review_tasks,
+    set_lifecycle,
+)
+from dlp_schema.episode import current_labels
+from dlp_schema.labels import Source, VerificationState
+from dlp_schema.review import AssignmentStatus, ReviewTaskStatus
+from dlp_schema.session import LifecycleState, PrivacyState
+
+# 모델 라벨이 "사람이 확인했다"고 볼 수 있는 검증 상태
+VERIFIED_STATES = (
+    VerificationState.HUMAN_APPROVED,
+    VerificationState.HUMAN_CORRECTED,
+    VerificationState.SAMPLE_VERIFIED,
+)
+
+
+@dataclass(frozen=True)
+class VerifyResult:
+    """판정 결과. verified면 생애주기를 바꿨거나 이미 완료였다. 아니면 reasons에 남은 일."""
+
+    session_id: str
+    verified: bool
+    already: bool = False
+    reasons: list[str] = field(default_factory=list[str])
+
+
+def verification_gaps(conn: sa.Connection, session_id: str) -> list[str]:
+    """완료를 막는 이유 목록 (비었으면 완료 조건을 모두 만족)."""
+    session = get_session(conn, session_id)
+    reasons: list[str] = []
+    if session.privacy_state is not PrivacyState.APPROVED:
+        reasons.append(f"블러 승인 전 (privacy_state={session.privacy_state.value})")
+    open_tasks = [
+        t.task_key for t in list_review_tasks(conn, session_id) if t.status is ReviewTaskStatus.OPEN
+    ]
+    if open_tasks:
+        reasons.append(f"수거하지 않은 검수 작업 {len(open_tasks)}개: {', '.join(open_tasks[:5])}")
+    open_assignments = list_assignments(conn, session_id, status=AssignmentStatus.OPEN)
+    if open_assignments:
+        reasons.append(f"열린 검수 배정 {len(open_assignments)}개")
+    labels = [x for x in current_labels(get_labels(conn, session_id)) if x.kind != "blur_track"]
+    if not labels:
+        reasons.append("블러를 뺀 운영 라벨이 없다")
+    pending = [
+        x.label_id
+        for x in labels
+        if x.provenance.source is Source.MODEL and x.verification.state not in VERIFIED_STATES
+    ]
+    if pending:
+        reasons.append(f"검수하지 않은 모델 라벨 {len(pending)}개 (예: {pending[0]})")
+    return reasons
+
+
+def verify_session(conn: sa.Connection, session_id: str, now: datetime, actor: str) -> VerifyResult:
+    """조건을 만족하면 prelabeled → human_verified로 옮긴다. 멱등: 이미 그 뒤 단계면 그대로 둔다.
+
+    now: 전이 시각 (시간대 필수, 운영 지표의 검증 주가 된다). actor: 판정을 실행한 사람·서비스.
+    """
+    session = get_session(conn, session_id)
+    state = session.lifecycle_state
+    if state in (
+        LifecycleState.HUMAN_VERIFIED,
+        LifecycleState.SPLIT_ASSIGNED,
+        LifecycleState.EXPORTED,
+    ):
+        return VerifyResult(session_id, verified=True, already=True)
+    if state is not LifecycleState.PRELABELED:
+        return VerifyResult(
+            session_id, verified=False, reasons=[f"프리라벨 전 단계다 (lifecycle={state.value})"]
+        )
+    reasons = verification_gaps(conn, session_id)
+    if reasons:
+        return VerifyResult(session_id, verified=False, reasons=reasons)
+    set_lifecycle(conn, session_id, LifecycleState.HUMAN_VERIFIED, at=now, actor=actor)
+    return VerifyResult(session_id, verified=True)

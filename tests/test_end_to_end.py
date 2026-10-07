@@ -48,6 +48,7 @@ from dlp_privacy.policy import load_policy as load_privacy_policy
 from dlp_privacy.runner import approve_session, detect_session, render_session
 from dlp_relations.policy import load_policy as load_relations_policy
 from dlp_relations.runner import run_relations
+from dlp_review.verify import verify_session
 from dlp_schema.db.migrate import upgrade
 from dlp_schema.db.repository import (
     get_labels,
@@ -58,7 +59,6 @@ from dlp_schema.db.repository import (
     insert_session,
     record_review,
     register_ontology,
-    set_lifecycle,
 )
 from dlp_schema.episode import current_labels
 from dlp_schema.labels import (
@@ -74,7 +74,7 @@ from dlp_schema.lineage import GoldenSet, ModelStatus
 from dlp_schema.ontology import load_ontology
 from dlp_schema.predictor import Clip
 from dlp_schema.review import ReviewStage, ReviewTask, ReviewTaskStatus, ReviewTool
-from dlp_schema.session import Domain, LifecycleState, PrivacyState, StreamKind
+from dlp_schema.session import Domain, PrivacyState, StreamKind
 from dlp_schema.testing import FIXED_TIME, make_label, make_session
 from dlp_sync.policy import load_policy as load_sync_policy
 from dlp_sync.runner import run_sync
@@ -290,7 +290,9 @@ def test_synthetic_session_end_to_end(pg: sa.Engine, tmp_path: Path) -> None:
         approve_all(
             conn, sid, ["keypoint_track", "hand_state", "relation", "coverage"], "labeler-1"
         )
-        set_lifecycle(conn, sid, LifecycleState.HUMAN_VERIFIED)
+        # 검수 완료 판정: 블러 승인·수거·모든 모델 라벨 검수가 끝나야 human_verified로 간다
+        verified = verify_session(conn, sid, now, "labeler-1")
+        assert verified.verified, verified.reasons
 
     # 6. 골든 세션(사람이 처음부터 라벨링, 다른 작업자·장소)과 데이터셋 버전
     golden_sid = f"{sid}-golden"

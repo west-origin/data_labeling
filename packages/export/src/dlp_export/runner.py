@@ -49,12 +49,12 @@ from dlp_media.probe import probe
 from dlp_media.pts import build_pts_index
 from dlp_media.storage import ObjectStore, sha256_file
 from dlp_schema.dataset import Split
-from dlp_schema.db.repository import withdrawn_session_ids
+from dlp_schema.db.repository import get_session, set_lifecycle, withdrawn_session_ids
 from dlp_schema.db.tables import sessions as sessions_table
 from dlp_schema.labels import LabelRecord, VerificationState
 from dlp_schema.lineage import ExportRecord
 from dlp_schema.ontology import Ontology
-from dlp_schema.session import Session
+from dlp_schema.session import LifecycleState, Session
 
 Format = Literal["coco", "intervals", "lerobot"]
 # 결과 파일에서 내보내기마다 다른 가명으로 바꾸는 ID (ADR 0027)
@@ -317,4 +317,12 @@ def run_export(
             f"exports/{export_id}/manifest.json", manifest_path, sha256_file(manifest_path)
         )
         files += 1
+    # 다 올린 뒤 실제로 내보낸 세션을 생애주기 exported로 옮긴다 (split_assigned에서만, 멱등).
+    # holdout처럼 split_assigned가 아닌 세션은 그대로 둔다
+    with engine.begin() as conn:
+        for sid in sorted(written):
+            if get_session(conn, sid).lifecycle_state is LifecycleState.SPLIT_ASSIGNED:
+                set_lifecycle(
+                    conn, sid, LifecycleState.EXPORTED, at=now, actor=f"export:{export_id}"
+                )
     return ExportResult(record, files, counts, details, pseudonyms)

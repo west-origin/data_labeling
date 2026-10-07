@@ -41,6 +41,7 @@ from dlp_schema.db.repository import (
     insert_withdrawal,
     list_review_work,
     register_ontology,
+    set_lifecycle,
 )
 from dlp_schema.labels import LabelRecord, Provenance, Source, Verification, VerificationState
 from dlp_schema.lineage import GoldenSet, Withdrawal
@@ -337,6 +338,15 @@ def test_weekly_metrics_from_synthetic_events(pg: sa.Engine, policy: OpsPolicy) 
                 misses=misses, auditor="aud-1", blur_reviewer="rev-1", audited_at=at,
             ))  # fmt: skip
 
+        # 생애주기 기록이 있으면 그 전이 시각이 검증 주다 (ADR 0028): 라벨 검수는 지난주였어도
+        # 이번 주에 dlp review verify로 human_verified가 됐으면 이번 주 에피소드다
+        insert_session(
+            conn,
+            make_session("ops-v").model_copy(update={"lifecycle_state": LifecycleState.PRELABELED}),
+        )
+        insert_labels(conn, [model("ops-v", "x", BEFORE, verification=checked(approved, BEFORE))])
+        set_lifecycle(conn, "ops-v", LifecycleState.HUMAN_VERIFIED, at=IN, actor="lead")
+
     priced = policy.model_copy(
         update={"cost": policy.cost.model_copy(update={"hourly_cost": 30000.0})}
     )
@@ -350,9 +360,10 @@ def test_weekly_metrics_from_synthetic_events(pg: sa.Engine, policy: OpsPolicy) 
     assert m.privacy_review_minutes_per_video_hour == pytest.approx(60.0)
     assert m.seeded_detection_rate == pytest.approx(0.5)
     assert m.residual_blur_miss_per_hour == pytest.approx(0.5)
-    assert m.verified_episodes == 2  # ops-a와 골든 세션 (ops-b는 지난주, 사용 중지 제외)
+    # ops-a, 골든 세션, ops-v(생애주기 기록) — ops-b는 지난주, 사용 중지 제외
+    assert m.verified_episodes == 3
     assert m.review_hours == pytest.approx(1.0)
-    assert m.cost_per_episode == pytest.approx(15000.0)
+    assert m.cost_per_episode == pytest.approx(10000.0)
     assert math.isnan(m.prelabel_bias)  # 이 주에 끝난 블라인드 배정 없음
     assert m.as_dict()["prelabel_bias"] is None
 

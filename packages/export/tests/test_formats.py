@@ -397,7 +397,13 @@ def test_coco_skips_images_without_annotations(
         t_end_ms=t[4],
     )  # fmt: skip
     out = tmp_path / "out"
-    sc = Scenario(scenario.session, [hidden, unknown], scenario.times, scenario.labeling)
+    sc = Scenario(
+        scenario.session,
+        [hidden, unknown],
+        scenario.times,
+        scenario.labeling,
+        scenario.render_hashes,
+    )
     r = write_coco(
         source(sc, policy), policy, ontology, sc.labeling, out, tmp_path / "w",
         export_id="e1", now=FIXED_TIME, ids=NOIDS,
@@ -408,7 +414,13 @@ def test_coco_skips_images_without_annotations(
     assert not list((out / "coco" / "images").iterdir())
     # 같은 세션에 남는 주석이 있으면 그 프레임의 이미지만 낸다
     box = next(x for x in scenario.labels if x.label_id == "s1-box")
-    sc = Scenario(scenario.session, [hidden, unknown, box], scenario.times, scenario.labeling)
+    sc = Scenario(
+        scenario.session,
+        [hidden, unknown, box],
+        scenario.times,
+        scenario.labeling,
+        scenario.render_hashes,
+    )
     out2 = tmp_path / "out2"
     r = write_coco(
         source(sc, policy), policy, ontology, sc.labeling, out2, tmp_path / "w2",
