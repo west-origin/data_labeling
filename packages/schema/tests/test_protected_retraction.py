@@ -10,12 +10,15 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from typing import Any
 
 import pytest
+import sqlalchemy as sa
 
-from dlp_schema.episode import retractions
+from dlp_schema.db.repository import get_labels, insert_labels, record_review
+from dlp_schema.episode import current_labels, retractions
 from dlp_schema.label_validation import ProtectedLabelRetractionError, validate_session_labels
-from dlp_schema.labels import Provenance, Source, Verification, VerificationState
+from dlp_schema.labels import LabelRecord, Provenance, Source, Verification, VerificationState
 from dlp_schema.ontology import Ontology
 from dlp_schema.testing import FIXED_TIME, action_payload, make_label
 
@@ -64,3 +67,115 @@ def test_model_retraction_of_unreviewed_label_and_human_deletion_are_allowed(
     [deletion] = retractions([approved], "review", FIXED_TIME)
     human_deletion = deletion.model_copy(update={"provenance": Provenance(source=Source.HUMAN)})
     validate_session_labels(ontology, [approved], [human_deletion])
+
+
+# ---------------------------------------------------------------- 조상 사슬 (F-SCH-02)
+#
+# `current_labels`는 다른 레코드의 parent인 레코드를 뺀다. 승인된 원래 트랙에 모델 자식(3인칭
+# 착용자 사본 `<원래>:wearer` 등)이 있으면 원래 트랙은 이미 현재 라벨이 아니고 자식이 그 자리를
+# 대신한다. 모델 단계가 그 자식을 지우면 자식도, 원래 트랙도 현재 라벨에서 사라진다 (아래
+# `test_model_child_retraction_really_removes_approved_lineage`가 이 조건을 고정한다).
+
+BOX = {
+    "kind": "box_track",
+    "entity_id": "rag_01",
+    "class_id": "rag",
+    "keyframes": [{"t_ms": 0, "x": 1, "y": 1, "w": 5, "h": 5}],
+}
+APPROVED = Verification(
+    state=VerificationState.HUMAN_APPROVED,
+    reviewer_id="rev01",
+    reviewed_at=FIXED_TIME + timedelta(minutes=5),
+)
+
+
+def _box(label_id: str, parent: str | None = None, **overrides: Any) -> LabelRecord:
+    """3인칭 스트림 tp1의 모델 박스 트랙 (기본 미검수)."""
+    fields: dict[str, Any] = {
+        "label_id": label_id,
+        "stream_id": "tp1",
+        "provenance": MODEL,
+        "confidence": 0.9,
+        "parent_label_id": parent,
+    }
+    fields.update(overrides)
+    return make_label(BOX, **fields)
+
+
+def _ids(labels: list[LabelRecord]) -> set[str]:
+    return {x.label_id for x in labels}
+
+
+def test_model_child_retraction_really_removes_approved_lineage() -> None:
+    """검사 없이 저장했다면: 승인 트랙 orig도 그 자식 copy도 운영 라벨에 남지 않는다."""
+    orig, copy = _box("orig", verification=APPROVED), _box("copy", parent="orig")
+    assert _ids(current_labels([orig, copy])) == {"copy"}
+    gone = retractions([copy], "p2", FIXED_TIME)
+    assert _ids(current_labels([orig, copy, *gone])) == set()
+
+
+def test_model_retraction_of_last_child_of_approved_label_is_refused(ontology: Ontology) -> None:
+    """승인 트랙의 마지막 현재 후손을 모델이 지우면 거부한다 (메시지는 승인 트랙을 가리킨다)."""
+    orig, copy = _box("orig", verification=APPROVED), _box("copy", parent="orig")
+    with pytest.raises(ProtectedLabelRetractionError, match=r"^copy:retracted: .*라벨 orig\("):
+        validate_session_labels(ontology, [orig, copy], retractions([copy], "p2", FIXED_TIME))
+
+
+def test_protected_ancestor_is_checked_through_the_whole_chain(ontology: Ontology) -> None:
+    """보호 상태가 바로 위 부모가 아닌 더 위 조상에 있어도 막는다 (승인 → 모델 자식 → 손자)."""
+    for state in (VerificationState.SAMPLE_VERIFIED, VerificationState.HUMAN_CORRECTED):
+        verification = APPROVED.model_copy(update={"state": state})
+        a = _box("a", verification=verification)
+        b, c = _box("b", parent="a"), _box("c", parent="b")
+        with pytest.raises(ProtectedLabelRetractionError, match=rf"라벨 a\({state.value}\)"):
+            validate_session_labels(ontology, [a, b, c], retractions([c], "p2", FIXED_TIME))
+
+
+def test_model_child_may_be_replaced_or_dropped_when_lineage_survives(ontology: Ontology) -> None:
+    """같은 배치의 새 자식이 대신하거나 다른 현재 후손이 남으면 승인 트랙은 사라지지 않는다."""
+    orig, copy = _box("orig", verification=APPROVED), _box("copy", parent="orig")
+    # 버전 교체: 이전 사본을 지우고 같은 원래 트랙의 새 사본을 함께 넣는다
+    fresh = _box("copy-v2", parent="orig")
+    validate_session_labels(ontology, [orig, copy], [*retractions([copy], "p2", FIXED_TIME), fresh])
+    # 다른 현재 후손(사람이 원래 트랙을 고친 레코드)이 남는다
+    fix = _box("fix", parent="orig", provenance=Provenance(source=Source.HUMAN), confidence=None)
+    validate_session_labels(ontology, [orig, copy, fix], retractions([copy], "p2", FIXED_TIME))
+
+
+def test_unprotected_lineage_and_human_deletion_are_not_blocked(ontology: Ontology) -> None:
+    """검수 전 조상(모델·사람이 만든 미검수)의 자식 정리와 검수자의 삭제는 막지 않는다."""
+    human = Provenance(source=Source.HUMAN)
+    for root in (_box("orig"), _box("orig", provenance=human, confidence=None)):
+        copy = _box("copy", parent="orig")
+        validate_session_labels(ontology, [root, copy], retractions([copy], "p2", FIXED_TIME))
+    orig, copy = _box("orig", verification=APPROVED), _box("copy", parent="orig")
+    [deletion] = retractions([copy], "review", FIXED_TIME)
+    by_reviewer = deletion.model_copy(update={"provenance": human})
+    validate_session_labels(ontology, [orig, copy], [by_reviewer])
+
+
+def test_non_operational_descendant_does_not_stand_in_for_approved_label(
+    ontology: Ontology,
+) -> None:
+    """측정 레코드(이중 라벨링)가 자식으로 남아도 운영 라벨에서는 승인 트랙이 사라지므로 막는다."""
+    orig, copy = _box("orig", verification=APPROVED), _box("copy", parent="orig")
+    double = _box(
+        "double", parent="orig", provenance=Provenance(source=Source.HUMAN), confidence=None
+    ).model_copy(update={"measurement": "double"})
+    gone = retractions([copy], "p2", FIXED_TIME)
+    assert _ids(current_labels([orig, copy, double, *gone])) == set()
+    with pytest.raises(ProtectedLabelRetractionError, match=r"라벨 orig\("):
+        validate_session_labels(ontology, [orig, copy, double], gone)
+
+
+@pytest.mark.services
+def test_storage_refuses_stale_child_retraction_after_parent_approval(pg: sa.Engine) -> None:
+    """단계가 이력을 읽은 뒤 원래 트랙이 승인되면, 저장(`insert_labels`)이 사본 삭제를 거부한다."""
+    orig, copy = _box("orig"), _box("copy", parent="orig")
+    with pg.begin() as conn:
+        insert_labels(conn, [orig, copy])
+        stale = retractions([copy], "p2", FIXED_TIME)  # 검수 전 이력으로 고른 지울 후보
+        record_review(conn, "orig", VerificationState.HUMAN_APPROVED, "rev01", FIXED_TIME)
+        with pytest.raises(ProtectedLabelRetractionError, match=r"라벨 orig\("):
+            insert_labels(conn, stale)
+        assert _ids(get_labels(conn, "s001")) == {"orig", "copy"}
