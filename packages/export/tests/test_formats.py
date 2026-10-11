@@ -21,7 +21,7 @@ from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
 
 from dlp_export.coco import write_coco
-from dlp_export.intervals import write_intervals
+from dlp_export.intervals import exported, write_intervals
 from dlp_export.lerobot import Vocab, build_episode, state_names
 from dlp_export.policy import ExportPolicy
 from dlp_export.pseudonym import Pseudonymizer, check_secret
@@ -40,11 +40,57 @@ from dlp_schema.dataset import DatasetVersion, Split
 from dlp_schema.export import IntervalFile
 from dlp_schema.labels import VerificationState
 from dlp_schema.ontology import Ontology
-from dlp_schema.testing import FIXED_TIME
+from dlp_schema.testing import FIXED_TIME, action_payload, make_label
 
 from .conftest import ROOT, Scenario
 
 NOIDS = Pseudonymizer(None)  # 가명 처리 없이 (내부 ID를 그대로 확인하는 테스트)
+
+
+def test_segment_children_match_exported_action_ids() -> None:
+    """구간의 child_ids도 가명으로 바뀌어 행동 참조가 이어지고 내부 세션 ID가 남지 않는다."""
+    sid = "private-session-001"
+    action_id = f"{sid}-right-a0"
+    segment = make_label(
+        {"kind": "segment", "segment_id": f"{sid}-task", "level": "task",
+         "ref_id": "floor_sweep_mop", "child_ids": [action_id]}, session_id=sid,
+    )  # fmt: skip
+    action = make_label(action_payload(action_id=action_id), session_id=sid)
+    ids = Pseudonymizer.for_export("e1", b"secret", enabled=True)
+    seg = exported(segment, ids).model_dump(mode="json")
+    act = exported(action, ids).model_dump(mode="json")
+    assert seg["payload"]["child_ids"] == [act["payload"]["action_id"]]
+    assert sid not in json.dumps([seg, act])
+    # 중첩 참조도 바꾸지만 온톨로지 값·서술 문자열은 같은 문자열이어도 그대로 둔다.
+    nested = ids.payload_ids(sid, {"nested": [{"child_ids": (action_id,)}], "text": sid})
+    assert nested == {"nested": [{"child_ids": [ids.ref(sid, action_id)]}], "text": sid}
+    # 합법적인 세션 ID가 온톨로지 과제 ID와 같아도 과제 정의 참조는 보존한다.
+    taxonomy_sid = "floor_sweep_mop"
+    taxonomy = segment.model_copy(
+        update={
+            "session_id": taxonomy_sid,
+            "payload": segment.payload.model_copy(
+                update={
+                    "segment_id": f"{taxonomy_sid}-task",
+                    "child_ids": (f"{taxonomy_sid}-skill",),
+                }
+            ),
+        }
+    )
+    payload = exported(taxonomy, ids).model_dump(mode="json")["payload"]
+    assert payload["ref_id"] == taxonomy_sid
+    assert payload["child_ids"] == [ids.ref(taxonomy_sid, f"{taxonomy_sid}-skill")]
+    box = make_label(
+        {
+            "kind": "box_track",
+            "entity_id": "mop_01",
+            "class_id": "mop",
+            "keyframes": [{"t_ms": 0, "x": 1, "y": 1, "w": 10, "h": 10}],
+        },
+        session_id="mop",
+        stream_id="bodycam",
+    )
+    assert exported(box, ids).model_dump(mode="json")["payload"]["class_id"] == "mop"
 
 
 def source(sc: Scenario, policy: ExportPolicy, include_unreviewed: bool = False) -> ExportSource:

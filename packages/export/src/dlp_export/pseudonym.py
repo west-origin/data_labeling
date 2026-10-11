@@ -5,8 +5,9 @@
 - 한 내보내기 안에서는 같은 ID가 늘 같은 가명이다 (구매자가 작업자·세션 단위로 나눌 수 있다).
 - 다른 내보내기 사이에서는 가명이 달라 ID로 서로 이어 붙일 수 없다. 내용(시각·값)은 같으므로 같은
   세션을 담은 두 내보내기를 내용으로 맞춰 보는 것까지 막지는 않는다 (ADR 0027).
-- 비밀값을 아는 내부만 가명을 다시 계산해 원래 ID와 맞춰 볼 수 있다. 비밀값이 없으면 실행마다 임의의
-  값을 쓰므로 아무도 되짚을 수 없다 (세션 대응표는 내부 경로에 따로 남긴다, runner).
+- 비밀값을 알면 가명을 다시 계산해 원래 ID와 맞춰 볼 수 있다. 비밀값이 없으면 실행마다 임의의
+  값을 쓰므로 원래 ID와 내보내기 ID만으로 가명을 재계산할 수 없다. 내부 경로의 세션 대응표로는
+  세션을 추적할 수 있다 (`runner`). 대응표·실행 중 키의 접근 권한을 별도로 관리해야 한다.
 - 세션 ID가 들어간 다른 ID(예: 행동 ID "<세션>-right-…")는 그 부분을 세션 가명으로 바꾼다 (ref).
 
 가명 형식: "<종류>-<16진 16자>" (예: "worker-1a2b…", "session-…"). 종류를 키에 넣으므로 같은
@@ -70,7 +71,8 @@ class Pseudonymizer:
 
         Args:
             export_id: 내보내기 ID (`runner.export_id_for`). 내보내기마다 달라 가명도 달라진다.
-            secret: 내부 보관 비밀값. None·빈 값이면 32바이트 임의 값을 쓴다 (되짚을 수 없음).
+            secret: 내부 보관 비밀값. None·빈 값이면 32바이트 임의 값을 쓴다.
+                같은 입력으로 다시 실행해도 같은 가명을 재현할 수 없지만 내부 대응표는 남는다.
             enabled: 정책 `ids.pseudonymize`. 거짓이면 가명 처리하지 않는 객체를 돌려준다.
         """
         if not enabled:
@@ -136,23 +138,37 @@ class Pseudonymizer:
         return token.sub(lambda _m: alias, value)
 
     def payload_ids(self, session_id: str, data: Any) -> Any:
-        """페이로드 사전에서 이름이 _id로 끝나는 문자열 값에 ref를 적용한다 (중첩 포함).
+        """페이로드의 `_id` 문자열과 `_ids` 참조 배열에 ref를 적용한다 (중첩 포함).
+
+        온톨로지 식별자인 class_id·ref_id는 세션 ID와 같아도 보존한다.
 
         Args:
             session_id: 이 라벨의 내부 세션 ID.
             data: `payload.model_dump(mode="json")` 결과 (사전·목록·스칼라).
 
         Returns:
-            같은 구조의 새 값. 튜플은 목록이 된다. `_id`로 끝나지 않는 키(예: "verb")의 문자열은
-            세션 ID와 같아도 바꾸지 않는다.
+            같은 구조의 새 값. 튜플은 목록이 된다. 참조 필드가 아닌 키(예: "verb")의 문자열은
+            세션 ID와 같아도 바꾸지 않는다. child_ids도 action_id·segment_id와 같은 규칙을 쓴다.
         """
         if self.key is None:
             return data
         if isinstance(data, dict):
             out: dict[str, Any] = {}
             for k, v in data.items():  # pyright: ignore[reportUnknownVariableType]
-                if isinstance(k, str) and k.endswith("_id") and isinstance(v, str):
+                if (
+                    isinstance(k, str)
+                    and k.endswith("_id")
+                    and k not in {"class_id", "ref_id"}
+                    and isinstance(v, str)
+                ):
                     out[k] = self.ref(session_id, v)
+                elif isinstance(k, str) and k.endswith("_ids") and isinstance(v, list | tuple):
+                    out[k] = [
+                        self.ref(session_id, item)
+                        if isinstance(item, str)
+                        else self.payload_ids(session_id, item)
+                        for item in v  # pyright: ignore[reportUnknownVariableType]
+                    ]
                 else:
                     out[str(k)] = self.payload_ids(session_id, v)  # pyright: ignore[reportUnknownArgumentType]
             return out

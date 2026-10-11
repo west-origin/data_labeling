@@ -1,13 +1,15 @@
 """검수 운영 정책 (config/policies/review.yaml + config/defaults.yaml review 비율).
 
 WP12, ADR 0014. `dlp review plan|assign|qa|quality|create|collect|serve`와 운영 지표
-(`dlp ops weekly`, `dlp ops audit-report`의 `reviewers.privacy`)가 이 로더를 쓴다.
+(`dlp ops weekly`, `dlp ops audit-report`의 `reviewers.privacy`)가 이 정책을 쓴다.
+라이브러리 로더의 기본 파일은 review.yaml이다. CLI는 `dlp_cli.review_config`에서
+`DLP_REVIEW_POLICY_FILE`을 선택한 뒤 이 로더에 명시적으로 넘긴다.
 
 공개 이름:
 - `ErrorType`: 오류 삽입 종류 (boundary_shift, class_swap, blur_deletion).
 - `CVAT_KINDS`: CVAT 공간 검수 화면이 보여 주는 작업 라벨 종류 (블러 제외).
 - `UnitsPolicy`·`PriorityPolicy`·`SamplingPolicy`·`SeedingPolicy`·`MeasurementPolicy`·
-  `ReviewersPolicy`·`MediaPolicy`·`CvatPolicy`: review.yaml의 절별 모델.
+  `ReviewersPolicy`·`MediaPolicy`·`CvatPolicy`·`WebhookPolicy`: review.yaml의 절별 모델.
 - `ReviewOpsPolicy`: 전체 정책 (review.yaml + `ratios` = defaults.yaml `review`).
 - `load_policy`: 저장소 루트에서 정책을 읽어 검증한다.
 
@@ -157,6 +159,16 @@ class CvatPolicy(Contract):
         return self
 
 
+class WebhookPolicy(Contract):
+    """웹훅 HTTP 경계. 정책값으로 메모리·연결·동시 처리량을 제한한다."""
+
+    bind_host: str = Field(min_length=1)
+    max_body_bytes: int = Field(gt=0)
+    request_timeout_s: float = Field(gt=0)
+    max_workers: int = Field(gt=0)
+    retry_after_s: int = Field(gt=0)
+
+
 class ReviewOpsPolicy(Contract):
     """검수 운영 정책 전체. `load_policy`가 만든다."""
 
@@ -170,18 +182,20 @@ class ReviewOpsPolicy(Contract):
     seeding: SeedingPolicy
     reviewers: ReviewersPolicy
     cvat: CvatPolicy
+    webhook: WebhookPolicy
     ratios: ReviewConfig  # 배정 비율 (config/defaults.yaml `review` 절)
 
 
-def load_policy(root: Path) -> ReviewOpsPolicy:
+def load_policy(root: Path, path: Path | None = None) -> ReviewOpsPolicy:
     """저장소 루트(root)에서 검수 운영 정책을 읽는다.
 
-    `config/policies/review.yaml`을 읽고, 배정 비율은 `config/defaults.yaml`의 `review` 절을
+    path가 없으면 `config/policies/review.yaml`을 읽고, 배정 비율은 defaults.yaml의 `review` 절을
     `ratios` 키로 끼워 넣어 함께 검증한다.
 
     예외: 파일이 없으면 OSError, 값이 범위를 벗어나거나 키가 맞지 않으면 pydantic ValidationError.
     부작용 없음 (파일 읽기만).
     """
-    data: Any = yaml.safe_load((root / "config" / "policies" / "review.yaml").read_text("utf-8"))
+    source = path if path is not None else root / "config" / "policies" / "review.yaml"
+    data: Any = yaml.safe_load(source.read_text("utf-8"))
     data["ratios"] = load_config(root / "config" / "defaults.yaml").review.model_dump()
     return ReviewOpsPolicy.model_validate(data)

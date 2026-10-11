@@ -43,7 +43,7 @@ def draw(seed: int, key: str, mode: str) -> float:
 
 
 def assignment_id(unit: Unit, mode: ReviewMode, tag: str = "") -> str:
-    """배정 ID `"<단위 ID>:<방식>[:<tag>]"`. tag는 세대(블러 단위) 또는 오류 삽입 대상 표시."""
+    """배정 ID `"<단위 ID>:<방식>[:<tag>]"`. tag는 입력 세대 또는 오류 삽입 대상 표시."""
     suffix = f":{tag}" if tag else ""
     return f"{unit.unit_id}:{mode.value}{suffix}"
 
@@ -61,8 +61,8 @@ class PlannedUnit:
     sample_label_ids: tuple[str, ...] = ()
     # 표본에 들지 않아 보내지 않을 높은 신뢰도 라벨 ID (표본 판정 뒤 처리)
     withheld_label_ids: tuple[str, ...] = ()
-    # 단위 입력 세대 (블러 단위: 탐지·블러 라벨 집합 해시). 배정 ID에 붙여 재탐지·승인 취소 뒤
-    # 다시 계획하면 새 배정이 생기게 한다. 비어 있으면 붙이지 않는다.
+    # 단위 입력 세대 (블러는 탐지 완료·라벨 집합, 작업 라벨은 현재 입력 ID 집합의 해시).
+    # 같은 입력의 멱등성과 재탐지·재학습 뒤 새 검수를 구분한다. 비어 있으면 붙이지 않는다.
     generation: str = ""
 
 

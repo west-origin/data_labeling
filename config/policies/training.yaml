@@ -25,7 +25,8 @@ mlflow:
   deployed_alias: deployed            # 배포 버전에 붙이는 MLflow 별칭
 
 # 과제별 학습 작업 템플릿.
-#   stage: 배포되면 쓰는 단계 (prelabel: 프리라벨 Predictor, privacy: 블러 탐지기, actions: 행동 분류)
+#   stage: 배포 모델 연결 단계 (prelabel: 프리라벨 Predictor, privacy: 블러 탐지기).
+#     actions는 예약 값이며 현재 행동 실행 경로에는 연결되지 않았다.
 #   replaces: 배포되면 대신하는 기본 어댑터 이름 (Predictor.name). 프라이버시는 탐지기 합집합이라 빼지 않는다
 #   min_examples: 학습을 시작할 최소 예제 수, min_new_examples: 직전 학습 대비 새로 늘어야 할 예제 수
 #     (직전 = 상태와 상관없이 그 과제의 가장 최근 모델 버전. --force로 무시한다)

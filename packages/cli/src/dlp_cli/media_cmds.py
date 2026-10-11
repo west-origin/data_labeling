@@ -4,6 +4,7 @@
 - `dlp media probe <파일>` — PyAV(ffprobe와 같은 libav)로 컨테이너·스트림 정보를 출력하는 진단
   도구.
 - `dlp media pts-index <파일> --out <parquet>` — 영상의 PTS 인덱스를 만든다 (진단·디버그용).
+- `dlp media prepare <파일> --out <mp4>` — 픽셀 방향·PTS를 검증한 별도 사본을 만든다.
 - `dlp ingest <매니페스트> [--store] [--url] [--no-db]` — 세션 수집: 원본을 원본 버킷에
   불변·멱등으로 올리고, PTS 인덱스·프록시·IMU·장갑 정규화본 같은 파생 파일을 만들고, `sessions`
   테이블에 세션을 등록한다. 파이프라인의 첫 단계다.
@@ -12,8 +13,9 @@
 `sessions/<세션>/derived/…` + DB `sessions`(스트림 포함).
 
 주의:
-- 원본 저장소는 항상 `dlp_cli.raw_access`의 감사 저장소로 만든다 (ADR 0020). 수집도 원본 쓰기라
+- 수집의 원본 저장소는 `dlp_cli.raw_access`의 감사 저장소로 만든다 (ADR 0020). 수집도 원본 쓰기라
   `raw_access_log`(또는 `--no-db`일 때 로컬 `raw_access.jsonl`)에 기록이 남는다.
+  로컬 진단 명령(probe·prepare·pts-index)은 저장소 세션을 수집하거나 DB 감사를 대신하지 않는다.
 - 같은 매니페스트를 다시 수집하면 이미 있는 원본·파생 파일은 건너뛰고, DB의 세션이 같은 내용이면
   `unchanged`, 다르면 `SessionConflictError`로 실패한다 (멱등).
 - 영상 시간은 PTS 인덱스로만 계산한다 (프레임 번호 * 간격 금지).
@@ -29,6 +31,8 @@ import sqlalchemy as sa
 from dlp_cli.raw_access import raw_store, raw_store_offline
 from dlp_cli.schema_cmds import database_url
 from dlp_media.ingest import ingest_session, load_manifest
+from dlp_media.prepare import load_policy as load_prepare_policy
+from dlp_media.prepare import prepare_video
 from dlp_media.probe import probe
 from dlp_media.pts import build_pts_index
 from dlp_schema import repo_root
@@ -47,12 +51,23 @@ def cmd_probe(args: argparse.Namespace) -> int:
     print(f"형식 {info.format_name}, 길이 {info.duration_ms} ms, 생성 시각 {info.creation_time}")
     if info.video:
         v = info.video
-        print(f"비디오 #{v.index} {v.codec} {v.width}x{v.height} time_base={v.time_base}")
+        print(
+            f"비디오 #{v.index} {v.codec} {v.width}x{v.height} time_base={v.time_base} "
+            f"표시 회전={v.rotation_degrees}°"
+        )
     if info.audio:
         a = info.audio
         print(f"오디오 #{a.index} {a.codec} {a.sample_rate} Hz {a.channels}ch")
     for d in info.data_streams:
         print(f"데이터 #{d.index} tag={d.codec_tag}")
+    return 0
+
+
+def cmd_prepare(args: argparse.Namespace) -> int:
+    """로컬 영상의 방향과 시간을 정규화한다. 원본/기존 출력은 보존하며 DB에 등록하지 않는다."""
+    info = prepare_video(Path(args.file), Path(args.out), load_prepare_policy(repo_root()))
+    assert info.video is not None
+    print(f"준비 완료: {args.out} {info.video.width}x{info.video.height}, 회전 0°, PTS 보존")
     return 0
 
 
@@ -110,12 +125,16 @@ def cmd_ingest(args: argparse.Namespace) -> int:
 
 
 def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:  # pyright: ignore[reportPrivateUsage]
-    """`media probe|pts-index`와 최상위 `ingest` 명령을 등록한다."""
+    """`media probe|prepare|pts-index`와 최상위 `ingest` 명령을 등록한다."""
     media = sub.add_parser("media", help="미디어 파일 도구")
     media_sub = media.add_subparsers(dest="media_command", required=True)
     p = media_sub.add_parser("probe", help="컨테이너·스트림 정보")
     p.add_argument("file")
     p.set_defaults(func=cmd_probe)
+    p = media_sub.add_parser("prepare", help="픽셀 방향·PTS를 검증한 별도 MP4 사본 생성")
+    p.add_argument("file")
+    p.add_argument("--out", required=True)
+    p.set_defaults(func=cmd_prepare)
     p = media_sub.add_parser("pts-index", help="PTS 인덱스 Parquet 생성")
     p.add_argument("file")
     p.add_argument("--out", required=True)

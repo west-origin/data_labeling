@@ -13,15 +13,15 @@
    계보 목록에 이 내보내기가 보인다.
 5. 그 뒤 데이터셋 버킷 exports/<내보내기 ID>/ 에 올린다 (manifest.json은 마지막). 올리는 중에
    실패하면 이력과 manifest 없는 폴더가 남는다 (manifest 없는 폴더 = 미완성 내보내기, 다시
-   내보낸다). 올린 뒤(manifest 전에) 사용 중지를 다시 확인해, 그 사이 사용 중지된 세션이 있으면
-   manifest를 올리지 않고 실패한다.
+   내보낸다). 마지막 세션 공유 잠금 안에서 사용 중지·프라이버시 승인·블러 해시를 다시 확인하고
+   manifest를 게시한다. 올리는 동안 상태·블러가 바뀌었으면 manifest를 올리지 않고 실패한다.
 6. manifest까지 올린 뒤 실제로 쓴 세션 중 생애주기 split_assigned인 것을 exported로 옮긴다
    (실행자 `export:<내보내기 ID>`, ADR 0029).
 
 왜 이력을 먼저 커밋하나 (ADR 0021): 파일을 먼저 올리고 이력을 나중에 쓰면, 그 사이 실패하거나 사용
 중지가 끼어들 때 "구매자에게 나갔을 수 있는데 계보에 없는" 내보내기가 생긴다. 사용 중지 전파
-(`dlp_datasets.lineage`)는 계보 목록으로 구매자에게 삭제를 요청하므로, 이력이 실제보다 많은
-쪽(미완성 내보내기도 기록)이 안전하다.
+(`dlp_datasets.lineage`)의 계보 목록으로 운영자가 구매자에게 삭제를 요청해야 하므로,
+이력이 실제보다 많은 쪽(미완성 내보내기도 기록)이 안전하다.
 
 DB 쓰기: `exports`(record_export), `session_lifecycle_events`·`sessions`(set_lifecycle).
 저장소 쓰기: 데이터셋 버킷 `exports/<ID>/…`, `internal/export-id-maps/<ID>.json`. 원본 버킷은 읽지도
@@ -59,6 +59,8 @@ from dlp_export.source import (
 from dlp_media.probe import probe
 from dlp_media.pts import build_pts_index
 from dlp_media.storage import ObjectStore, sha256_file
+from dlp_privacy.policy import load_policy as load_privacy_policy
+from dlp_privacy.runner import RenderNotCurrentError, expected_render_hash
 from dlp_schema.dataset import Split
 from dlp_schema.db.repository import get_session, set_lifecycle, withdrawn_session_ids
 from dlp_schema.db.tables import sessions as sessions_table
@@ -207,7 +209,7 @@ def _lerobot(
 
 
 def lock_sessions(conn: sa.Connection, session_ids: set[str]) -> None:
-    """내보낼 세션 행을 이 트랜잭션 끝까지 공유 잠금한다 (사용 중지의 세션 행 갱신과 직렬화).
+    """내보낼 세션 행을 트랜잭션 끝까지 공유 잠금한다 (사용 중지·탐지·라벨 쓰기와 직렬화).
 
     `SELECT … FOR SHARE`. 사용 중지(`withdraw_session`)는 세션 행의 생애주기를 갱신하므로, 이 잠금을
     쥔 동안 기다리거나(내보내기가 먼저) 이 잠금이 기다린다(사용 중지가 먼저).
@@ -216,6 +218,7 @@ def lock_sessions(conn: sa.Connection, session_ids: set[str]) -> None:
     conn.execute(
         sa.select(sessions_table.c.session_id)
         .where(sessions_table.c.session_id.in_(sorted(session_ids)))
+        .order_by(sessions_table.c.session_id)
         .with_for_update(read=True)
     ).all()
 
@@ -241,8 +244,8 @@ def run_export(
     """내보내기 하나. DB 트랜잭션은 이 함수가 연다 (이력은 올리기 전에 따로 커밋한다).
 
     Args:
-        engine: DB 엔진. 연결을 차례로 연다: 읽기 → 이력 커밋(세션 행 잠금) → 올린 뒤 사용 중지
-            재확인(읽기) → 생애주기 전이.
+        engine: DB 엔진. 입력 읽기 → 이력 커밋 → 업로드 → 세션 공유 잠금 안에서 사용 중지·
+            승인·블러 해시 재확인과 manifest 게시 → 생애주기 전이 순으로 연결을 연다.
         root: 저장소 루트 (격리 환경 스크립트 위치).
         version_id: 데이터셋 버전 ID.
         fmt: "coco" | "intervals" | "lerobot".
@@ -257,7 +260,8 @@ def run_export(
         splits: 내보낼 분할 (None이면 정책 기본).
         now: 내보내기 시각 (시간대 포함). 내보내기 ID에도 들어간다.
         id_secret: 작업자·장소·세션·라벨 가명 비밀값 바이트 (CLI가 `check_secret`으로 확인한 뒤
-            넘긴다). 없으면 실행마다 임의 값이라 아무도 되짚을 수 없다 (export.yaml ids).
+            넘긴다). 없으면 실행마다 임의 값을 써 가명을 재현할 수 없다. 세션 추적용 내부 대응표는
+            별도로 남는다 (export.yaml ids).
 
     Returns:
         `ExportResult`.
@@ -274,11 +278,12 @@ def run_export(
     """
     if labeling.bucket == raw_bucket or datasets.bucket == raw_bucket:
         raise ExportError("내보내기는 원본 버킷을 읽거나 쓰지 않습니다")
-    # 1) 고르기 (읽기 전용 연결)
+    privacy = load_privacy_policy(root)
+    # 1) 고르기 (읽기 전용 연결). 같은 정책으로 최종 게시 때도 다시 확인한다.
     with engine.connect() as conn:
         src = load_source(
             conn, snapshots, version_id, policy, include_unreviewed=include_unreviewed,
-            splits=splits,
+            splits=splits, privacy=privacy,
         )  # fmt: skip
     if not src.sessions:
         raise ExportError(f"{version_id}: 내보낼 세션이 없습니다")
@@ -374,18 +379,37 @@ def run_export(
             id_map = Path(tmp) / "session_map.json"
             id_map.write_text(json.dumps(pseudonyms, ensure_ascii=False, indent=2), "utf-8")
             datasets.put_file(id_map_key(export_id), id_map, sha256_file(id_map))
-        # 올리는 사이 사용 중지된 세션이 있으면 manifest를 올리지 않는다 (미완성으로 남는다).
-        # 이력은 이미 커밋되어 사용 중지의 계보 목록에 이 내보내기가 보인다.
-        with engine.connect() as conn:
+        # 최종 확인부터 manifest 게시까지 FOR SHARE를 유지한다. 승인 변경·철회·라벨 추가는
+        # 같은 세션 행을 잠그므로, 게시와 상태 변경 사이 순서를 정할 수 있다 (ADR 0032).
+        # 이력 선커밋 → 파일 → manifest 순서는 그대로이며, 실패하면 이력과 미완성 파일이 남는다.
+        with engine.begin() as conn:
+            lock_sessions(conn, written)
             late = written & withdrawn_session_ids(conn)
-        if late:
-            raise ExportError(
-                f"{export_id}: 올리는 동안 사용 중지된 세션 {sorted(late)}. "
-                "manifest를 올리지 않았습니다 (미완성 내보내기, 전달하지 마세요). 다시 내보내세요"
+            if late:
+                raise ExportError(
+                    f"{export_id}: 올리는 동안 사용 중지된 세션 {sorted(late)}. "
+                    "manifest를 올리지 않았습니다 (미완성 내보내기, 전달하지 마세요). "
+                    "다시 내보내세요"
+                )
+            for es in src.sessions:
+                sid = es.session.session_id
+                if sid not in written:
+                    continue
+                for stream_id, before in es.render_hashes.items():
+                    try:
+                        current = expected_render_hash(conn, sid, stream_id, privacy)
+                    except RenderNotCurrentError as exc:
+                        raise ExportError(
+                            f"{export_id}: 올리는 동안 프라이버시 승인이 바뀌었습니다: {exc}"
+                        ) from exc
+                    if current != before:
+                        raise ExportError(
+                            f"{export_id}: {sid}/{stream_id}의 승인된 블러가 바뀌었습니다. "
+                            "다시 내보내세요"
+                        )
+            datasets.put_file(
+                f"exports/{export_id}/manifest.json", manifest_path, sha256_file(manifest_path)
             )
-        datasets.put_file(
-            f"exports/{export_id}/manifest.json", manifest_path, sha256_file(manifest_path)
-        )
         files += 1
     # 6) 다 올린 뒤 실제로 내보낸 세션을 생애주기 exported로 옮긴다 (split_assigned에서만, 멱등).
     # holdout처럼 split_assigned가 아닌 세션은 그대로 둔다

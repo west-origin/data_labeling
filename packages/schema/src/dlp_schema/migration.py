@@ -1,7 +1,8 @@
 """온톨로지 버전 간 라벨 이관.
 
 매핑 표(config/ontology/migrations/<from>__<to>.yaml)로 ID를 바꾼다. 원본 라벨은 두고
-새 버전의 새 레코드를 만들며(parent_label_id로 연결), 검증 상태는 미검수로 되돌린다.
+새 버전의 새 레코드를 만들며(parent_label_id로 연결), 목적지 사전으로 의미를 검사하고
+검증 상태는 미검수로 되돌린다. 잘못된 목적지 ID는 needs_review로 반환한다.
 골든셋은 이관 후 재검수를 거쳐야 평가에 쓸 수 있기 때문이다.
 
 입력은 세션의 전체 수정 이력이어도 된다. 이관 대상은 이력의 현재 라벨뿐이다
@@ -45,6 +46,8 @@ from pydantic import Field, ValidationError
 from dlp_schema.common import Contract, OntologyId, SemVer, derived_id
 from dlp_schema.episode import current_labels
 from dlp_schema.labels import LabelRecord, Verification
+from dlp_schema.ontology import Ontology
+from dlp_schema.validation import check_label, check_label_set
 
 # 매핑 표의 범주. 대부분 `Ontology`의 같은 이름 사전이고, 예외는 둘이다.
 #   substeps: 작업 사전 안의 하위 단계 ID (segment level=substep의 ref_id).
@@ -125,7 +128,11 @@ def load_migration(path: Path) -> OntologyMigration:
 
 
 def migrate_labels(
-    labels: list[LabelRecord], migration: OntologyMigration, now: datetime
+    labels: list[LabelRecord],
+    migration: OntologyMigration,
+    now: datetime,
+    *,
+    target_ontology: Ontology,
 ) -> MigrationResult:
     """이력의 현재 라벨을 매핑 표대로 새 온톨로지 버전의 새 레코드로 이관한다.
 
@@ -135,6 +142,7 @@ def migrate_labels(
         migration: 매핑 표.
         now: 새 레코드의 created_at (시간대 필수. 없으면 새 레코드 검증이 실패해
             needs_review로 간다).
+        target_ontology: 목적지 사전. 버전이 이관 표와 다르면 작업을 거부한다.
 
     Returns:
         `MigrationResult`. 이관 대상이 아닌 옛 버전 라벨, 제거된 ID를 쓴 라벨, 이관 후 계약 검증에
@@ -142,6 +150,8 @@ def migrate_labels(
 
     부작용: 없음 (DB에 쓰지 않는다).
     """
+    if target_ontology.version != migration.to_version:
+        raise ValueError("이관 목적지와 온톨로지 버전이 다릅니다")
     migrated: list[LabelRecord] = []
     review: list[tuple[str, str]] = []
     for label in current_labels(labels, operational=False):
@@ -172,9 +182,33 @@ def migrate_labels(
             payload=payload,
         )
         try:
-            migrated.append(LabelRecord.model_validate(record))
+            candidate = LabelRecord.model_validate(record)
+            problems = check_label(candidate, target_ontology)
+            if problems:
+                review.append(
+                    (label.label_id, "이관 후 온톨로지 검증 실패: " + "; ".join(problems))
+                )
+            else:
+                migrated.append(candidate)
         except ValidationError as exc:
             review.append((label.label_id, f"이관 후 검증 실패: {exc.error_count()}건"))
+    # 자식이 제거/재검수로 빠졌다면 부모만 새 버전으로 확정하지 않는다. 이미 새 버전인
+    # 현재 라벨도 참조 문맥으로 포함하되, 실패한 이번 배치는 전부 재검수로 돌린다.
+    context = [
+        x
+        for x in current_labels(labels, operational=False)
+        if x.ontology_version == migration.to_version
+    ]
+    problems = check_label_set([*context, *migrated], target_ontology)
+    if problems:
+        for label in migrated:
+            review.append(
+                (
+                    label.parent_label_id or label.label_id,
+                    "이관 후 구간·부분 검증 실패: " + "; ".join(problems),
+                )
+            )
+        migrated = []
     return MigrationResult(migrated=tuple(migrated), needs_review=tuple(review))
 
 

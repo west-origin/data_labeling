@@ -5,7 +5,7 @@ WP5, ADR 0005·0019·0023·0024. CLI `dlp_cli.privacy_cmds`가 DB 연결과 저�
 단계와 진입점:
 - `detect_session` (`dlp privacy detect`): 원본 영상 → blur_track 라벨(DB `label_records`) +
   검수 우선 구간·탐지 표시(원본 버킷 JSON). 세션 `privacy_state`가 PENDING이거나, APPROVED인데
-  블러가 바뀌었으면 AUTO_BLURRED로.
+  새 탐지를 실행하거나 블러가 바뀌었으면 AUTO_BLURRED로 (0건 재탐지도 포함).
 - (사람 검수: `dlp review create --stage privacy` → CVAT → `dlp review collect`. dlp_review 담당)
 - `approve_session` (`dlp privacy approve`): 승인 조건을 확인하고 APPROVED로.
 - `render_session` (`dlp privacy render`): 승인된 세션의 블러본과 렌더 기록을 라벨링 버킷에 쓴다.
@@ -28,56 +28,95 @@ WP5, ADR 0005·0019·0023·0024. CLI `dlp_cli.privacy_cmds`가 DB 연결과 저�
 규칙 (CLAUDE.md, ADR 0015·0019):
 - 라벨은 덮어쓰지 않는다. 버전이 바뀌면 검수 전(UNREVIEWED)인 이전 모델 블러만 `retractions`로
   지운다. 사람이 검수한 블러는 지우지 않는다.
-- 다시 돌릴지는 전체 이력(`get_labels`)에 같은 모델 버전 레코드가 있는지로 정한다. 결과가 0개라
-  이력에 흔적이 없는 버전은 원본 버킷의 탐지 표시(`detect_marker_key`, ADR 0030)로 보충한다.
+- 멱등 판정은 최신 완료 세대의 활성 버전 집합으로 한다. 과거 버전 복귀는 새 탐지 세대다.
+  DB 이력 없는 외부 0건 표시는 복구하고 새 검수를 요구한다 (ADR 0033).
 - 운영 블러(`operational_blur`)만 승인·렌더에 쓴다. 오류 삽입·측정 레코드와 그 후손은 뺀다.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 import sqlalchemy as sa
 
-from dlp_media.storage import ObjectStore, blurred_key, sha256_file
+from dlp_media.storage import ObjectStore, sha256_file
 from dlp_privacy.detection import FrameDetector
+from dlp_privacy.errors import PrivacyGateError as PrivacyGateError
+from dlp_privacy.errors import RenderNotCurrentError as RenderNotCurrentError
+from dlp_privacy.generation import (
+    collected_privacy_reviews as collected_privacy_reviews,
+)
+from dlp_privacy.generation import (
+    last_detection as last_detection,
+)
+from dlp_privacy.generation import (
+    missing_privacy_reviews as missing_privacy_reviews,
+)
+from dlp_privacy.generation import (
+    operational_blur as operational_blur,
+)
 from dlp_privacy.pipeline import detect_video, model_version
 from dlp_privacy.policy import PrivacyPolicy
-from dlp_privacy.render import render_blurred
+from dlp_privacy.rendering import (
+    RenderMeta as RenderMeta,
+)
+from dlp_privacy.rendering import (
+    assert_render_current as assert_render_current,
+)
+from dlp_privacy.rendering import (
+    check_fetched as check_fetched,
+)
+from dlp_privacy.rendering import (
+    check_render_meta as check_render_meta,
+)
+from dlp_privacy.rendering import (
+    expected_render_hash as expected_render_hash,
+)
+from dlp_privacy.rendering import (
+    fetch_video,
+)
+from dlp_privacy.rendering import (
+    invalidate_render as invalidate_render,
+)
+from dlp_privacy.rendering import (
+    read_render_meta as read_render_meta,
+)
+from dlp_privacy.rendering import (
+    render_hash as render_hash,
+)
+from dlp_privacy.rendering import (
+    render_meta_key as render_meta_key,
+)
+from dlp_privacy.rendering import (
+    render_session as render_session,
+)
+from dlp_privacy.rendering import (
+    write_render_meta as write_render_meta,
+)
 from dlp_privacy.review import ReviewSegment
+from dlp_schema.common import derived_id
 from dlp_schema.db.repository import (
     get_labels,
     get_session,
     insert_labels,
-    list_review_tasks,
+    list_privacy_detections,
+    lock_session,
+    record_privacy_detection,
     set_lifecycle,
     set_privacy_state,
 )
-from dlp_schema.episode import current_labels, non_operational_ids, retractions
+from dlp_schema.episode import current_labels, retractions
 from dlp_schema.labels import BlurTrackPayload, LabelRecord, Source, VerificationState
 from dlp_schema.predictor import Clip, Predictor
-from dlp_schema.review import ReviewMode, ReviewStage, ReviewTaskStatus
 from dlp_schema.session import LifecycleState, PrivacyState, Session, StreamKind
 
 # 블러 대상인 영상 스트림 종류 (IMU·장갑·오디오 스트림은 게이트를 거치지 않는다)
 VIDEO_KINDS = {StreamKind.BODYCAM, StreamKind.THIRD_PERSON}
-
-
-class PrivacyGateError(RuntimeError):
-    """게이트 조건을 만족하지 않아 단계를 진행할 수 없다 (승인 전 렌더, 미검수 블러 등).
-
-    메시지에 다음에 할 명령을 적는다.
-    """
-
-
-class RenderNotCurrentError(PrivacyGateError):
-    """블러본이 지금 승인된 블러 라벨·렌더 정책으로 만든 것이 아니다 (쓰면 안 된다)."""
 
 
 @dataclass
@@ -86,59 +125,13 @@ class DetectSummary:
 
     # 스트림 → 이번에 새로 쓴 블러 트랙 수 (삭제 레코드는 세지 않는다. 0이면 결과 0개)
     detected: dict[str, int] = field(default_factory=dict[str, int])
-    # 모든 버전의 결과가 이미 있어(이력 또는 결과 0개 탐지 표시) 건너뛴 스트림
+    # 최신 완료 세대의 활성 버전 집합이 같아 건너뛴 스트림
     skipped: list[str] = field(default_factory=list[str])
     missing: dict[str, str] = field(default_factory=dict[str, str])  # 대상 → 이유
     # 이번에 쓴 검수 우선 구간 객체 키 (원본 버킷)
     review_keys: list[str] = field(default_factory=list[str])
     changed: bool = False  # 블러 라벨 집합이 바뀌었는가 (새 라벨 또는 이전 버전 삭제)
-
-
-def _fetch(store: ObjectStore, uri: str, work: Path) -> Path:
-    """저장소 URI의 객체를 work 아래에 받는다 (이미 받았으면 다시 받지 않는다).
-
-    Args:
-        store: 그 URI가 속한 저장소 (원본이면 감사 저장소 → 읽기 기록이 남는다).
-        uri: `store.uri(key)` 형식의 URI (Stream.uri).
-        work: 임시 작업 디렉터리.
-
-    Returns:
-        로컬 파일 경로 (키의 "/"를 "__"로 바꾼 이름).
-
-    Raises:
-        ValueError: URI가 이 저장소(버킷)에 있지 않을 때.
-    """
-    prefix = store.uri("")
-    if not uri.startswith(prefix):
-        raise ValueError(f"{uri}는 저장소 {store.bucket}에 있지 않습니다")
-    key = uri.removeprefix(prefix)
-    dest = work / key.replace("/", "__")
-    if not dest.exists():
-        store.get_file(key, dest)
-    return dest
-
-
-def operational_blur(history: Sequence[LabelRecord], stream_id: str) -> list[LabelRecord]:
-    """스트림의 운영 블러 라벨 (오류 삽입·측정 레코드와 그 후손 제외). 블러본은 이것으로 만든다.
-
-    Args:
-        history: 세션 라벨 전체 이력 (다른 종류가 섞여도 된다).
-        stream_id: 영상 스트림 ID.
-
-    Returns:
-        그 스트림의 현재(최신·삭제되지 않은) 운영 blur_track 레코드.
-    """
-    # current_labels는 기본으로 운영 라벨만 남긴다. seeded_error 검사는 이중 안전장치다.
-    return [
-        x
-        for x in current_labels([x for x in history if x.kind == "blur_track"])
-        if x.stream_id == stream_id and not x.seeded_error
-    ]
-
-
-def _blur_labels(conn: sa.Connection, session_id: str, stream_id: str) -> list[LabelRecord]:
-    """DB에서 그 스트림의 운영 블러 라벨을 읽는다 (`operational_blur`)."""
-    return operational_blur(get_labels(conn, session_id, kinds=["blur_track"]), stream_id)
+    reran: bool = False  # 탐지를 새로 완료했거나 구버전 0건 표시를 DB 기록으로 복구했는가
 
 
 def review_key(session_id: str, stream_id: str) -> str:
@@ -170,8 +163,9 @@ def detect_marker_key(session_id: str, stream_id: str) -> str:
 
     블러 레코드가 하나도 나오지 않은 스트림은 DB 이력에 모델 버전이 남지 않아, 이 표시가 없으면
     `dlp privacy detect`를 돌릴 때마다 영상 전체를 다시 탐지했다 (CPU OWLv2는 프레임당 수 초).
-    스키마를 바꾸지 않으려고 DB가 아니라 검수 우선 구간 옆의 파생 객체에 둔다. 원본 영상에서 나온
-    판단(대상이 없었다)이라 라벨링 버킷이 아니라 원본 버킷에 둔다.
+    구버전과의 호환을 위해 검수 우선 구간 옆에 계속 둔다. 현재는 DB 완료 이력이 우선이며,
+    표시만 남았다면 확인 시각으로 완료 기록을 복구하고 새 검수를 요구한다 (ADR 0032).
+    원본 영상에서 나온 판단이라 라벨링 버킷이 아니라 원본 버킷에 둔다.
     """
     return f"sessions/{session_id}/derived/privacy_detect/{stream_id}.json"
 
@@ -255,25 +249,25 @@ def detect_session(
     extra: Sequence[Predictor] = (),
     labeling: ObjectStore | None = None,
 ) -> DetectSummary:
-    """영상 스트림마다 블러 프리라벨을 만든다. 같은 모델 버전의 결과가 이미 있으면 건너뛴다.
+    """영상 스트림마다 블러 프리라벨을 만든다. 최신 세대의 활성 버전 집합이 같으면 건너뛴다.
 
     extra: 배포된 재학습 블러 모델 (blur_track을 내는 Predictor). 탐지기 결과와 합집합으로 남는다.
-    labeling: 블러가 바뀐 스트림의 렌더 기록을 무효로 만들 라벨링 버킷 (ADR 0024). 없어도
+    labeling: 블러 변경·새 탐지가 있는 스트림의 렌더 기록을 무효로 만들 라벨링 버킷. 없어도
     블러본을 쓰는 쪽이 assert_render_current로 막지만, 있으면 이전 블러본을 바로 무효로 둔다.
 
-    스트림마다 (ADR 0030):
-    1. 이력에 이 탐지 버전·재학습 모델 버전의 레코드가 모두 있으면 건너뛴다 (멱등, 탐지 표시를
-       읽지 않는다). 아니면 결과가 0개였던 버전을 원본 버킷의 탐지 표시(`detect_marker_key`)에서
-       읽어 보충한다. 표시까지 합쳐 모두 끝났고 지울 이전 버전 블러(stale)가 없으면 건너뛴다.
-    2. 이력·표시 어디에도 없는 버전(`need_run`)이 있을 때만 원본 영상을 받아(감사 기록) 그 버전만
+    스트림마다 (ADR 0030·0032):
+    1. 최신 완료 세대의 활성 버전 집합이 같으면 건너뛴다 (멱등, 탐지 표시를 읽지 않는다).
+       아니면 원본 버킷의 구버전 0건 표시(`detect_marker_key`)를 읽어 복구할 버전을 고른다.
+    2. 현재 활성 세대·복구 표시에 없는 버전(`need_run`)만 원본 영상을 받아(감사 기록)
        돌린다 (탐지기 파이프라인, 재학습 모델). 이번에 돌아 결과가 0개인 버전은 탐지 표시에 더한다.
-       표시 덕분에 끝났지만 stale이 남은 경우에는 영상을 받지 않고 3의 삭제만 한다.
+       구버전 표시로 복구할 버전은 영상을 다시 읽지 않고 완료 이력을 새로 남긴다.
     3. 지금 쓰지 않는 버전의 검수 전 모델 블러를 삭제 레코드로 지우고 새 라벨과 함께 쓴다.
-    4. 쓴 레코드가 있으면 렌더 기록을 무효로 한다. 탐지기나 재학습 모델이 다시 돌았으면 검수 우선
+    4. 쓴 레코드나 새 완료 기록이 있으면 렌더 기록을 무효로 한다. 모델이 다시 돌았으면 검수 우선
        구간 파일을 병합해 다시 쓴다.
-    끝으로 PENDING이거나 (승인 상태에서 블러가 바뀌었으면) privacy_state를 AUTO_BLURRED로 둔다.
-    결과가 모두 0개여도 PENDING이면 AUTO_BLURRED가 된다 (놓친 대상이 있을 수 있어 사람 검수는
-    여전히 필요하다, `missing_privacy_reviews`).
+    완료 버전·시각은 결과 수와 무관하게 DB에 남긴다 (ADR 0032). 외부 0건 표시만 남은 구버전은
+    확인 시각으로 새 기록을 남겨 전수 검수를 다시 요구한다. DB 롤백 뒤 남은 표시도 같은 방식이다.
+    PENDING이거나 승인 뒤 새 탐지·블러 변경이 있으면 AUTO_BLURRED로 둔다. 0건 재탐지도
+    새 검수 작업이 필요하며, 멱등으로 건너뛴 실행은 탐지 시각·승인을 바꾸지 않는다.
 
     Args:
         conn: 호출자가 연 트랜잭션의 DB 연결.
@@ -290,17 +284,20 @@ def detect_session(
         PrivacyGateError: 세션에 온톨로지 버전이 없을 때.
         sqlalchemy.exc.NoResultFound: 세션이 없을 때.
 
-    부작용: DB `label_records` 추가, `sessions.privacy_state` 변경, 원본 버킷 읽기·쓰기(원본 영상
+    부작용: DB `label_records`·`privacy_detection_runs` 추가, `sessions.privacy_state` 변경,
+    원본 버킷 읽기·쓰기(원본 영상
     읽기, 검수 우선 구간·탐지 표시 읽기·덮어쓰기), 라벨링 버킷 렌더 기록 덮어쓰기(labeling이
     있을 때). 저장소 쓰기는 DB 트랜잭션이 되돌아가도 남는다. 그래서 탐지 표시에는 결과 0개
     버전만 넣는다.
     """
+    lock_session(conn, session_id)
     session = get_session(conn, session_id)
     if session.ontology_version is None:
         raise PrivacyGateError(f"{session_id}: 세션에 온톨로지 버전이 없습니다")
     summary = DetectSummary()
-    # 전체 이력(삭제·수정 레코드 포함): 재실행 여부는 현재 라벨이 아니라 이력으로 정한다
+    # 전체 이력은 불변 ID 중복·구버전 복구를 확인하는 데 쓴다
     existing = get_labels(conn, session_id, kinds=["blur_track"])
+    runs = list_privacy_detections(conn, session_id)
     version = model_version(detectors, policy)
     versions = {version, *(p.version for p in extra)}  # 이번에 있어야 할 모든 모델 버전
     with tempfile.TemporaryDirectory() as tmp:
@@ -308,11 +305,27 @@ def detect_session(
         for stream in session.streams:
             if stream.kind not in VIDEO_KINDS:
                 continue
-            # 이 스트림에 이미 레코드가 있는 모델 버전 (삭제 레코드의 버전도 포함된다)
-            done = {
-                v
+            stream_runs = [r for r in runs if r.stream_id == stream.stream_id]
+            latest = stream_runs[-1] if stream_runs else None
+            # 완료 이력은 과거 수행 증거다. 건너뛰기는 현재 활성 버전 집합으로만 정한다.
+            if latest is not None and set(latest.model_versions) == versions:
+                summary.skipped.append(stream.stream_id)
+                continue
+            done = (
+                set(latest.model_versions)
+                if latest
+                else {
+                    x.provenance.model_version
+                    for x in current_labels(existing)
+                    if x.stream_id == stream.stream_id
+                    and x.provenance.source is Source.MODEL
+                    and x.provenance.model_version is not None
+                }
+            )
+            historical = {v for r in stream_runs for v in r.model_versions} | {
+                x.provenance.model_version
                 for x in existing
-                if x.stream_id == stream.stream_id and (v := x.provenance.model_version) is not None
+                if x.stream_id == stream.stream_id and x.provenance.model_version is not None
             }
             # 탐지기·모델 버전이 바뀌면 검수 전인 이전 버전 블러만 지운다 (검수한 블러는 남긴다)
             stale = [
@@ -323,22 +336,16 @@ def detect_session(
                 and x.provenance.model_version not in versions
                 and x.verification.state is VerificationState.UNREVIEWED
             ]
-            # 결과가 0개였던 버전은 DB에 흔적이 없으므로 원본 버킷의 표시로 보충한다.
-            # 이력만으로 모두 끝났으면 표시를 읽지 않는다 (불필요한 원본 접근 기록을 줄인다).
+            # 현재 세대에 없는 과거 버전은 복귀 때 다시 추론한다. 외부 표시는 아직 DB에
+            # 완료한 적 없는 버전(구 버전·롤백 복구)에만 쓴다.
             empty: set[str] = (
-                set()
-                if versions <= done
-                else read_detect_marker(raw, session_id, stream.stream_id, work)
-            )
-            # 표시는 저장소 쓰기라 DB 트랜잭션이 되돌아가도 남는다. 그때 지워지지 못한 이전 버전
-            # 블러(stale)가 남을 수 있으므로, 표시 덕분에 끝난 경우에는 stale이 없을 때만 건너뛰고
-            # 있으면 영상은 다시 돌리지 않고 삭제만 다시 한다. 이력만으로 끝난 경우는 예전 그대로다.
-            if versions <= done or (versions <= done | empty and not stale):
-                summary.skipped.append(stream.stream_id)
-                continue
+                read_detect_marker(raw, session_id, stream.stream_id, work)
+                if versions - done
+                else set[str]()
+            ) - historical
             # 다시 돌릴 버전이 있을 때만 원본 영상을 받는다 (stale 삭제만 할 때는 받지 않는다)
             need_run = versions - done - empty
-            video = _fetch(raw, stream.uri, work) if need_run else None
+            video = fetch_video(raw, stream.uri, work) if need_run else None
             labels: list[LabelRecord] = []
             segments: list[ReviewSegment] = []
             ran_empty: set[str] = set()  # 이번에 돌았지만 블러를 하나도 내지 않은 버전
@@ -385,19 +392,31 @@ def detect_session(
                                 detail=p.version,
                             )
                         )
-            # 삭제 레코드의 출처 버전은 이번 탐지 버전이다 (재학습 모델만 바뀐 경우에도)
+            # 실제 추론을 마친 시각과 활성 버전 전체를 남긴다. 시작 시각(now)은 라벨 생성용이다.
+            event_id = record_privacy_detection(
+                conn, session_id, stream.stream_id, sorted(versions), datetime.now(UTC)
+            )
+            seen = {x.label_id for x in existing}
+            # 정책 복귀는 같은 모델의 결정적 ID를 다시 낸다. 불변 원본을 보존하고 새 세대 ID를 쓴다.
+            labels = [
+                x.model_copy(update={"label_id": derived_id(x.label_id, f"g{event_id}")})
+                if x.label_id in seen
+                else x
+                for x in labels
+            ]
             changes = [*retractions(stale, version, now), *labels]
             insert_labels(conn, changes)
+            summary.reran = True
             summary.changed |= bool(changes)
             summary.detected[stream.stream_id] = len(labels)
-            if changes and labeling is not None:
+            if labeling is not None:
                 invalidate_render(labeling, session_id, stream.stream_id, "blur_changed", work)
             if ran_empty:
                 # 결과 0개 버전만 표시에 남긴다. 블러를 낸 버전은 DB 이력이 증거이고, 표시에 넣으면
                 # DB 트랜잭션이 되돌아갔을 때 라벨 없이 "끝났다"고 남아 영영 다시 돌지 않는다.
                 write_detect_marker(raw, session_id, stream.stream_id, empty | ran_empty, work)
             rerun_models = {p.version for p in extra if p.version in need_run}
-            if segments or version in need_run or rerun_models:
+            if segments or version in need_run or rerun_models or done - versions:
                 # 재학습 모델만 다시 돌았으면 탐지기 구간을 지우지 않는다 (합친다)
                 merged = merge_segments(
                     read_review_segments(raw, session_id, stream.stream_id, work),
@@ -416,70 +435,16 @@ def detect_session(
                 raw.put_file(key, out_path, sha256_file(out_path))
                 summary.review_keys.append(key)
     if session.privacy_state is PrivacyState.PENDING or (
-        summary.changed and session.privacy_state is PrivacyState.APPROVED
+        (summary.changed or summary.reran) and session.privacy_state is PrivacyState.APPROVED
     ):
-        # 승인 뒤 블러가 바뀌면 승인을 푼다: 새 블러를 사람이 검수하고 다시 승인해야 렌더한다
+        # 0건 재탐지도 놓친 대상이 있을 수 있다. 새 실행 뒤 영상을 검수하고 다시 승인해야 한다
         set_privacy_state(conn, session_id, PrivacyState.AUTO_BLURRED)
     return summary
 
 
-def last_detection(labels: Sequence[LabelRecord], stream_id: str) -> datetime | None:
-    """스트림의 마지막 자동 탐지 반영 시각 (모델 출처 블러 레코드, 삭제 레코드 포함).
-
-    오류 삽입 사본·측정 레코드와 그 후손은 운영 블러가 아니므로 세지 않는다 (오류 삽입 계획이
-    모델 출처 사본을 지금 시각으로 만들어도 승인 조건이 움직이지 않게).
-
-    Args:
-        labels: 세션 블러 라벨 전체 이력.
-        stream_id: 영상 스트림 ID.
-
-    Returns:
-        가장 늦은 created_at. 모델 출처 운영 레코드가 없으면 None.
-    """
-    excluded = non_operational_ids(list(labels))
-    times = [
-        x.created_at
-        for x in labels
-        if x.stream_id == stream_id
-        and x.provenance.source is Source.MODEL
-        and x.label_id not in excluded
-    ]
-    return max(times) if times else None
-
-
-def missing_privacy_reviews(conn: sa.Connection, session: Session) -> list[str]:
-    """마지막 자동 탐지 뒤에 만들어 수집까지 끝난 블러 검수 작업이 없는 영상 스트림.
-
-    탐지 결과가 하나도 없어도(놓친 대상이 있을 수 있다) 사람이 영상 전체를 본 작업이 있어야 한다.
-    운영 작업(표준·QA)만 센다. 블라인드·이중·오류 삽입 작업은 운영 블러를 검수하지 않는다.
-
-    "뒤에"는 작업 created_at ≥ 마지막 탐지 시각으로 본다 (재탐지 전에 만든 작업은 새 블러를 보지
-    않았다). 탐지 기록이 없으면 수집한 운영 작업이 하나라도 있으면 된다.
-
-    Returns:
-        조건을 만족하지 못한 영상 스트림 ID 목록 (세션 스트림 순서).
-    """
-    labels = get_labels(conn, session.session_id, kinds=["blur_track"])
-    tasks = [
-        t
-        for t in list_review_tasks(conn, session.session_id, ReviewStage.PRIVACY)
-        if t.status is ReviewTaskStatus.COLLECTED and t.mode in (ReviewMode.STANDARD, ReviewMode.QA)
-    ]
-    missing: list[str] = []
-    for s in session.streams:
-        if s.kind not in VIDEO_KINDS:
-            continue
-        since = last_detection(labels, s.stream_id)
-        if not any(
-            t.stream_id == s.stream_id and (since is None or t.created_at >= since) for t in tasks
-        ):
-            missing.append(s.stream_id)
-    return missing
-
-
 def approve_session(conn: sa.Connection, session_id: str) -> Session:
-    """현재 블러 라벨이 모두 사람 검수를 거쳤고, 영상 스트림마다 마지막 자동 탐지 뒤의 블러 검수
-    작업을 수집했을 때만 프라이버시 승인한다.
+    """현재 운영 블러가 모두 사람 검수를 거쳤고, 영상 스트림마다 최신 완료 탐지 세대의 운영 검수를
+    수집했을 때만 프라이버시 승인한다. 완료 이력 이전 데이터는 시각 규약을 사용한다.
 
     조건:
     1. 자동 탐지를 한 번 이상 돌렸다 (privacy_state가 PENDING이 아니다).
@@ -499,6 +464,7 @@ def approve_session(conn: sa.Connection, session_id: str) -> Session:
 
     부작용: `sessions.privacy_state` = APPROVED, 처음 승인이면 생애주기를 PRIVACY_APPROVED로.
     """
+    lock_session(conn, session_id)
     session = get_session(conn, session_id)
     if session.privacy_state is PrivacyState.PENDING:
         raise PrivacyGateError(f"{session_id}: 자동 탐지가 아직 실행되지 않았습니다")
@@ -508,11 +474,12 @@ def approve_session(conn: sa.Connection, session_id: str) -> Session:
             f"{session_id}: 마지막 자동 탐지 뒤 수집한 블러 검수 작업이 없는 스트림 {missing} "
             "(dlp review create --stage privacy → 검수 → collect)"
         )
+    history = get_labels(conn, session_id, kinds=["blur_track"])
     unreviewed = [
         x.label_id
         for s in session.streams
         if s.kind in VIDEO_KINDS
-        for x in _blur_labels(conn, session_id, s.stream_id)
+        for x in operational_blur(history, s.stream_id)
         if x.verification.state in (VerificationState.UNREVIEWED, VerificationState.SAMPLE_VERIFIED)
     ]
     if unreviewed:
@@ -525,272 +492,3 @@ def approve_session(conn: sa.Connection, session_id: str) -> Session:
         # 블러를 고친 뒤 다시 승인할 때는 생애주기가 이미 앞에 있다 (되돌아가지 않는다)
         set_lifecycle(conn, session_id, LifecycleState.PRIVACY_APPROVED)
     return get_session(conn, session_id)
-
-
-def render_hash(labels: Sequence[LabelRecord], policy: PrivacyPolicy) -> str:
-    """블러본을 정하는 입력의 해시: 블러 라벨 집합(라벨은 불변이라 ID로 충분)과 렌더 정책.
-
-    Args:
-        labels: 운영 블러 라벨 (`operational_blur`).
-        policy: 렌더 정책(`render`)과 `platform.render_mode`만 쓴다.
-
-    Returns:
-        sha256 16진수 64자. 렌더 기록(`RenderMeta.render_hash`)과 비교한다.
-    """
-    content = json.dumps(
-        {
-            "labels": sorted(x.label_id for x in labels),
-            "mode": policy.platform.render_mode,
-            "render": policy.render.model_dump(mode="json"),
-        },
-        sort_keys=True,
-    )
-    return hashlib.sha256(content.encode()).hexdigest()
-
-
-def render_meta_key(session_id: str, stream_id: str) -> str:
-    """블러본 옆에 두는 렌더 입력 기록 (라벨링 버킷). 라벨 ID 해시만 담는다.
-
-    예: `sessions/<세션>/blurred/<스트림>.render.json`.
-    """
-    return blurred_key(session_id, stream_id).removesuffix(".mp4") + ".render.json"
-
-
-@dataclass(frozen=True)
-class RenderMeta:
-    """블러본 옆 렌더 기록. render_hash가 None이면 무효로 둔 기록이다 (승인 취소 등)."""
-
-    # 렌더 당시 `render_hash` 값 (None이면 무효)
-    render_hash: str | None
-    blurred_sha256: str | None = None  # 렌더한 블러본 파일 해시 (이전 기록에는 없다)
-
-
-def read_render_meta(
-    labeling: ObjectStore, session_id: str, stream_id: str, work: Path
-) -> RenderMeta | None:
-    """블러본과 렌더 기록이 둘 다 있으면 기록을, 아니면 None.
-
-    부작용: 라벨링 버킷 읽기, work 디렉터리 생성.
-    """
-    key = blurred_key(session_id, stream_id)
-    meta = render_meta_key(session_id, stream_id)
-    if labeling.head(key) is None or labeling.head(meta) is None:
-        return None
-    work.mkdir(parents=True, exist_ok=True)
-    dest = work / f"{stream_id}.render.json"
-    labeling.get_file(meta, dest)
-    data: dict[str, object] = json.loads(dest.read_text(encoding="utf-8"))
-    value, sha = data.get("render_hash"), data.get("blurred_sha256")
-    # 문자열이 아닌 값(null 등)은 None으로 본다 (무효 기록·이전 형식)
-    return RenderMeta(
-        value if isinstance(value, str) else None, sha if isinstance(sha, str) else None
-    )
-
-
-def _rendered_hash(
-    labeling: ObjectStore, session_id: str, stream_id: str, work: Path
-) -> str | None:
-    """지금 렌더 기록의 render_hash (기록·블러본이 없거나 무효면 None)."""
-    meta = read_render_meta(labeling, session_id, stream_id, work)
-    return None if meta is None else meta.render_hash
-
-
-def write_render_meta(
-    labeling: ObjectStore,
-    session_id: str,
-    stream_id: str,
-    meta: RenderMeta,
-    work: Path,
-    **extra: str,
-) -> None:
-    """렌더 기록 JSON을 라벨링 버킷에 (덮어)쓴다.
-
-    extra: 기록에 덧붙일 문자열 필드 (예: invalidated="blur_changed").
-    """
-    path = work / f"{stream_id}.render.out.json"
-    body = {"render_hash": meta.render_hash, "blurred_sha256": meta.blurred_sha256, **extra}
-    path.write_text(json.dumps(body), encoding="utf-8")
-    labeling.put_file(render_meta_key(session_id, stream_id), path, sha256_file(path))
-
-
-def invalidate_render(
-    labeling: ObjectStore, session_id: str, stream_id: str, reason: str, work: Path
-) -> bool:
-    """렌더 기록을 무효로 덮어쓴다 (블러본 파일은 남지만 어떤 단계도 현재 것으로 보지 않는다).
-
-    라벨링 버킷 저장소에는 삭제가 없어 기록을 render_hash=None으로 바꾼다. 무효로 했으면 True.
-
-    Args:
-        reason: 무효 사유 (기록의 invalidated 필드, 예: "blur_changed").
-
-    Returns:
-        렌더 기록이 있어 무효로 바꿨으면 True, 기록이 없으면 False.
-    """
-    if labeling.head(render_meta_key(session_id, stream_id)) is None:
-        return False
-    write_render_meta(labeling, session_id, stream_id, RenderMeta(None), work, invalidated=reason)
-    return True
-
-
-def expected_render_hash(
-    conn: sa.Connection, session_id: str, stream_id: str, policy: PrivacyPolicy
-) -> str:
-    """지금 DB 상태로 본 블러본 해시. 세션이 지금 프라이버시 승인 상태가 아니면 실패한다
-    (데이터셋 스냅샷의 세션 상태가 아니라 현재 상태를 본다).
-
-    Raises:
-        RenderNotCurrentError: 세션이 지금 APPROVED가 아닐 때.
-    """
-    session = get_session(conn, session_id)
-    if session.privacy_state is not PrivacyState.APPROVED:
-        raise RenderNotCurrentError(
-            f"{session_id}: 지금 프라이버시 승인 상태가 아닙니다 ({session.privacy_state.value}). "
-            "블러 검수·승인(dlp privacy approve)·렌더(dlp privacy render)를 다시 하세요"
-        )
-    return render_hash(_blur_labels(conn, session_id, stream_id), policy)
-
-
-def check_render_meta(
-    meta: RenderMeta | None,
-    expected: str,
-    labeling: ObjectStore,
-    session_id: str,
-    stream_id: str,
-) -> str | None:
-    """렌더 기록이 기대 해시와 같고 블러본 파일이 그 렌더의 것인지 본다.
-
-    렌더한 블러본 파일 해시를 돌려준다 (이전 렌더 기록이면 None).
-
-    Args:
-        meta: `read_render_meta` 결과.
-        expected: `expected_render_hash` 결과 (또는 내보내기가 미리 계산해 둔 값).
-
-    Raises:
-        RenderNotCurrentError: 기록이 없거나 무효, 해시가 다름, 블러본이 없음, 블러본 파일 해시가
-            기록과 다름 (렌더 밖에서 덮어씀).
-    """
-    where = f"{session_id}/{stream_id}"
-    if meta is None or meta.render_hash is None:
-        raise RenderNotCurrentError(
-            f"{where}: 현재 블러본 렌더 기록이 없거나 무효입니다 (dlp privacy render)"
-        )
-    if meta.render_hash != expected:
-        raise RenderNotCurrentError(
-            f"{where}: 블러본이 지금 승인된 블러 라벨·렌더 정책으로 만든 것이 아닙니다 "
-            "(dlp privacy render)"
-        )
-    head = labeling.head(blurred_key(session_id, stream_id))
-    if head is None:
-        raise RenderNotCurrentError(f"{where}: 블러본이 없습니다 (dlp privacy render)")
-    # 둘 다 해시가 있을 때만 비교한다 (이전 형식 기록이나 해시 메타데이터가 없는 객체는 넘어간다)
-    if meta.blurred_sha256 and head.sha256 and head.sha256 != meta.blurred_sha256:
-        raise RenderNotCurrentError(f"{where}: 블러본 파일이 렌더 기록과 다릅니다")
-    return meta.blurred_sha256
-
-
-def assert_render_current(
-    conn: sa.Connection,
-    labeling: ObjectStore,
-    session_id: str,
-    stream_id: str,
-    policy: PrivacyPolicy,
-) -> str | None:
-    """블러본을 읽는 모든 단계(검수 작업·행동 VLM·큐레이션·내보내기)가 먼저 부른다 (ADR 0024).
-
-    세션이 **지금** 프라이버시 승인 상태이고, 블러본 렌더 기록의 해시가 지금 운영 블러 라벨과
-    렌더 정책의 해시와 같아야 한다. 아니면 RenderNotCurrentError. 렌더한 블러본 파일의 sha256을
-    돌려준다 (이전 렌더 기록이면 None). 받은 파일과 비교해 그 사이 다시 렌더된 것을 막는다.
-
-    사용 예::
-
-        sha = assert_render_current(conn, labeling, sid, "bodycam", policy)
-        labeling.get_file(blurred_key(sid, "bodycam"), local)
-        check_fetched(local, sha, sid, "bodycam")
-    """
-    expected = expected_render_hash(conn, session_id, stream_id, policy)
-    with tempfile.TemporaryDirectory() as tmp:
-        meta = read_render_meta(labeling, session_id, stream_id, Path(tmp))
-    return check_render_meta(meta, expected, labeling, session_id, stream_id)
-
-
-def check_fetched(path: Path, expected_sha: str | None, session_id: str, stream_id: str) -> None:
-    """받은 블러본이 렌더 기록의 파일인지 본다 (확인과 받기 사이에 다시 렌더된 경우).
-
-    Args:
-        path: 받은 로컬 블러본.
-        expected_sha: `assert_render_current`의 반환값. None이면 (이전 기록) 확인하지 않는다.
-
-    Raises:
-        RenderNotCurrentError: 파일 해시가 다를 때.
-    """
-    if expected_sha is not None and sha256_file(path) != expected_sha:
-        raise RenderNotCurrentError(
-            f"{session_id}/{stream_id}: 받은 블러본이 확인한 렌더 기록과 다릅니다. 다시 시도하세요"
-        )
-
-
-def render_session(
-    conn: sa.Connection,
-    session_id: str,
-    raw: ObjectStore,
-    labeling: ObjectStore,
-    policy: PrivacyPolicy,
-) -> dict[str, str]:
-    """승인된 세션의 블러본을 라벨링 버킷에 만든다. 스트림 → URI.
-
-    같은 블러 라벨 집합·렌더 정책으로 만든 블러본이 이미 있으면 건너뛴다 (멱등). 검수로 블러가
-    바뀌어 다시 승인했으면 해시가 달라져 새로 렌더한다.
-
-    Args:
-        conn: DB 연결 (읽기만 한다).
-        raw: 원본 버킷 저장소 (감사 저장소 → 원본 읽기 기록).
-        labeling: 라벨링 버킷 저장소 (raw와 다른 버킷이어야 한다).
-        policy: 프라이버시 정책.
-
-    Returns:
-        영상 스트림 ID → 블러본 URI (`s3://dlp-labeling/sessions/<세션>/blurred/<스트림>.mp4`).
-
-    Raises:
-        PrivacyGateError: 오디오를 남기는 설정, 같은 버킷, 세션이 승인 상태가 아님.
-
-    부작용: 라벨링 버킷에 블러본과 렌더 기록을 (덮어)쓴다. 블러본을 먼저 쓰고 기록을 나중에 써서,
-    중간에 실패하면 기록 해시가 맞지 않아(또는 파일 해시가 달라) 소비자가 쓰지 못한다.
-    """
-    if not policy.platform.strip_audio_in_release:
-        raise PrivacyGateError(
-            "오디오를 남기는 블러본은 지원하지 않습니다 (strip_audio_in_release)"
-        )
-    if labeling.bucket == raw.bucket:
-        raise PrivacyGateError("블러본은 원본 버킷이 아닌 라벨링 버킷에 써야 합니다")
-    session = get_session(conn, session_id)
-    if session.privacy_state is not PrivacyState.APPROVED:
-        raise PrivacyGateError(f"{session_id}: 프라이버시 승인 전에는 블러본을 만들 수 없습니다")
-    out: dict[str, str] = {}
-    with tempfile.TemporaryDirectory() as tmp:
-        work = Path(tmp)
-        for stream in session.streams:
-            if stream.kind not in VIDEO_KINDS:
-                continue
-            key = blurred_key(session_id, stream.stream_id)
-            labels = _blur_labels(conn, session_id, stream.stream_id)
-            digest = render_hash(labels, policy)
-            # 기록 해시가 같으면 다시 렌더하지 않는다 (무효 기록·기록 없음은 None이라 다시 렌더)
-            if _rendered_hash(labeling, session_id, stream.stream_id, work) != digest:
-                dst = work / f"{stream.stream_id}-blurred.mp4"
-                render_blurred(
-                    _fetch(raw, stream.uri, work),
-                    dst,
-                    labels,
-                    mode=policy.platform.render_mode,
-                    min_block_px=policy.render.min_block_px,
-                    blocks_per_box=policy.render.blocks_per_box,
-                    encoder_rate=policy.render.encoder_rate,
-                    crf=policy.render.crf,
-                )
-                blurred_sha = sha256_file(dst)
-                labeling.put_file(key, dst, blurred_sha)
-                write_render_meta(
-                    labeling, session_id, stream.stream_id, RenderMeta(digest, blurred_sha), work
-                )
-            out[stream.stream_id] = labeling.uri(key)
-    return out

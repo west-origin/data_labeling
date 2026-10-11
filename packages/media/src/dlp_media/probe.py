@@ -30,13 +30,15 @@ class VideoInfo:
     index: int
     # 코덱 이름 (예: "h264")
     codec: str
-    # 픽셀 크기
+    # 인코딩된 픽셀 크기 (표시 회전 적용 전)
     width: int
     height: int
     # PTS 단위 (초). PTS x time_base = 초.
     time_base: Fraction
     # 컨테이너가 알려 준 프레임 수 (0이면 모름). 시각 계산에는 쓰지 않는다 (PTS 인덱스를 쓴다).
     frames: int
+    # 표시 방향 (반시계 방향 각도). 인코딩된 픽셀 좌표와 플레이어 표시 좌표를 구별한다.
+    rotation_degrees: int = 0
 
 
 @dataclass(frozen=True)
@@ -76,9 +78,10 @@ class MediaInfo:
 
 
 def probe(path: Path) -> MediaInfo:
-    """미디어 파일의 컨테이너·트랙 정보를 읽는다 (디코딩하지 않는다).
+    """미디어 파일의 컨테이너·트랙 정보를 읽는다.
 
     비디오·오디오는 첫 트랙만 본다. 데이터 트랙은 모두 모은다.
+    표시 행렬을 확인하기 위해 첫 비디오 프레임 하나를 디코딩한다 (PyAV VideoFrame.rotation).
 
     Raises:
         av.error.*: 파일을 열 수 없을 때.
@@ -89,6 +92,7 @@ def probe(path: Path) -> MediaInfo:
         data: list[DataStreamInfo] = []
         for s in c.streams:
             if isinstance(s, av.VideoStream) and video is None:
+                first = next(c.decode(s), None)
                 video = VideoInfo(
                     s.index,
                     s.codec_context.name,
@@ -96,6 +100,7 @@ def probe(path: Path) -> MediaInfo:
                     s.codec_context.height,
                     to_fraction(s.time_base),
                     s.frames,
+                    first.rotation if first is not None else 0,
                 )
             elif isinstance(s, av.AudioStream) and audio is None:
                 audio = AudioInfo(
@@ -113,6 +118,20 @@ def probe(path: Path) -> MediaInfo:
             video=video,
             audio=audio,
             data_streams=tuple(data),
+        )
+
+
+def require_upright(info: MediaInfo) -> None:
+    """회전 태그에 의존하는 영상을 명시적으로 거부한다. 현재 공간 라벨은 저장된 픽셀 기준이다.
+
+    방향만 프록시에 반영하면 원본·검수 화면의 좌표가 달라진다. 입력의 픽셀 방향을 정규화한 별도
+    사본이 필요하며 원본은 보존해야 한다. 이미 수집된 세션은 자동으로 고치지 않는다.
+    """
+    if info.video is not None and info.video.rotation_degrees % 360:
+        raise ValueError(
+            f"{info.path}: 표시 회전 {info.video.rotation_degrees}° 영상은 지원하지 않습니다. "
+            "원본을 보존하고 픽셀 방향·PTS를 정규화한 사본을 준비하세요 "
+            "(docs/developer-guide.md의 스마트폰 영상 입력 참조)."
         )
 
 

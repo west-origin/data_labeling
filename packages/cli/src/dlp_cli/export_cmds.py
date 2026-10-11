@@ -30,6 +30,7 @@ from datetime import UTC, datetime
 
 import sqlalchemy as sa
 
+from dlp_cli.ontology_access import dataset_ontology
 from dlp_cli.schema_cmds import database_url
 from dlp_datasets.policy import load_policy as load_dataset_policy
 from dlp_datasets.snapshot import LakeFSSnapshotStore
@@ -37,7 +38,7 @@ from dlp_export.policy import load_policy
 from dlp_export.pseudonym import check_secret
 from dlp_export.runner import run_export
 from dlp_media.storage import store_from_spec
-from dlp_schema import load_config, load_ontology, repo_root
+from dlp_schema import load_config, repo_root
 from dlp_schema.dataset import Split
 
 
@@ -56,7 +57,7 @@ def cmd_export(args: argparse.Namespace) -> int:
     `ExportError`(내보낼 세션 없음, 원본 버킷 사용 등)는 예외로 끝난다.
     부작용: `exports` 이력 INSERT(별도 커밋), 세션 생애주기 전이, 라벨링 버킷 읽기(블러본),
     데이터셋 버킷 쓰기. 비밀값이 없으면 임의 비밀값으로 가명을 만들어 되짚을 수 없음을 알린다.
-    온톨로지는 `config/ontology/v1`을 고정으로 읽는다 (리팩토링 후보).
+    온톨로지는 데이터셋 버전의 DB 등록 사전을 읽는다.
     """
     root = repo_root()
     config = load_config(root / "config/defaults.yaml")
@@ -84,7 +85,7 @@ def cmd_export(args: argparse.Namespace) -> int:
         datasets=store_from_spec(args.store, config.buckets.datasets),
         raw_bucket=config.buckets.raw,
         policy=policy,
-        ontology=load_ontology(root / "config/ontology/v1"),
+        ontology=dataset_ontology(args.url, args.dataset_version),
         include_unreviewed=args.include_unreviewed or config.export.include_unreviewed,
         splits=tuple(Split(s) for s in args.split) or None,
         now=datetime.now(UTC),

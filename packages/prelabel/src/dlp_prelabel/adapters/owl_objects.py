@@ -26,7 +26,7 @@ from dlp_schema.predictor import Clip
 class OwlObjects:
     """OWLv2 도구 박스 어댑터 (name="tools").
 
-    version: `owlv2-<가중치 버전>+p<open_vocab_objects 절 해시>`. 라벨 ID는
+    version: `owlv2-<가중치 버전>+t<토크나이저 버전>+p<open_vocab_objects 절 해시>`. 라벨 ID는
     `<세션>-<스트림>-tools-<version_tag>-<클래스>-<순번>`, entity_id는 `ov_<클래스>_<순번>` (COCO
     탐지 트랙과 겹치지 않게 `ov_` 접두사).
     """
@@ -42,8 +42,10 @@ class OwlObjects:
             ModelUnavailableError: 가중치가 없거나 해시가 다를 때 (`make models`).
         """
         self.model_path, version = resolve(root, policy.models.open_vocab)
-        self.tokenizer_path, _ = resolve(root, policy.models.open_vocab_tokenizer)
-        self.version = f"owlv2-{version}+p{policy.digest('open_vocab_objects')}"
+        self.tokenizer_path, tokenizer_version = resolve(root, policy.models.open_vocab_tokenizer)
+        self.version = (
+            f"owlv2-{version}+t{tokenizer_version}+p{policy.digest('open_vocab_objects')}"
+        )
         self.policy, self.ontology_version, self.now = policy, ontology_version, now
 
     def run(self, clip: Clip) -> list[LabelRecord]:

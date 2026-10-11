@@ -1,8 +1,9 @@
 """배포된 재학습 모델을 단계(프리라벨·프라이버시)에 붙인다.
 
 단계 CLI는 기본 어댑터를 만든 뒤 이 모듈로 배포 모델을 읽어, 정책의 replaces에 적힌 기본 어댑터를
-빼고 배포 모델을 넣는다. 산출물 해시가 레지스트리와 다르거나 로더가 쓸 수 없으면(예: oracle-stub은
-정답이 있어야 한다) 기본 어댑터를 그대로 쓰고 이유를 남긴다.
+빼고 배포 모델을 넣는다. 기본값 strict=False에서는 로더가 없거나 산출물 해시가 레지스트리와
+다르거나 로더가 쓸 수 없으면(예: oracle-stub은 정답이 있어야 한다) 기본 어댑터를 그대로 쓰고
+이유를 남긴다. 프라이버시 CLI는 strict=True로 호출해 이 경우 TrainingError로 탐지를 중단한다.
 
 WP13, ADR 0016. 사용처: `dlp_cli.prelabel_cmds`(stage "prelabel"), `dlp_cli.privacy_cmds`
 (stage "privacy"). 행동 단계는 아직 읽지 않는다 (training.yaml의 TODO(real-model)).

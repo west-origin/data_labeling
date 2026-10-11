@@ -1,9 +1,10 @@
 """계약 타입 ↔ DB 행 변환과 기본 저장·조회. 연결(Connection)과 트랜잭션은 호출자가 관리한다.
 
 역할
-    `dlp_schema` 계약 객체를 `db.tables`의 테이블에 넣고 꺼내는 얇은 저장소 계층 (WP1, ADR 0002).
-    다른 패키지는 계약 객체를 이 함수들로 읽고 쓴다. 예외로 행 잠금(`FOR UPDATE`)만 필요한 곳은
-    `db.tables`로 직접 질의한다 (`dlp_export.runner`, `dlp_review.collect`, `dlp_review.tasks`).
+    `dlp_schema` 계약 객체와 `db.tables` 행을 변환하고 저장·조회·상태 갱신을 담당한다
+    (WP1, ADR 0002).
+    일반 저장·조회는 이 함수들을 사용한다. 잠금·검수 대상 조회·집계 등 전용 질의에서는
+    `db.tables`를 직접 사용하기도 한다 (`db.review_queries`, 검수·평가·내보내기 모듈).
 
 트랜잭션
     모든 함수는 `sa.Connection`을 받아 그 연결에서 실행만 한다. 커밋·롤백은 호출자가 한다
@@ -24,6 +25,8 @@
 
 주의
     - 라벨은 불변이다. `record_review` 외에 라벨 행을 바꾸는 함수는 없고, DB 트리거도 막는다.
+    - `insert_labels`는 세션 버전의 DB 사전으로 의미 검증한다. 오류 삽입·이력 삭제는 별도 규칙이다.
+      클래스·참조가 해당 온톨로지에 유효한지는 호출 경로에서 별도로 검증해야 한다.
     - 운영 기록 표와 session_lifecycle_events는 추가만 한다
       (DB 트리거가 UPDATE·DELETE·TRUNCATE를 막는다).
     - `get_*` 단건 조회와 `set_lifecycle`은 행이 없으면 SQLAlchemy `NoResultFound`를 던진다.
@@ -41,6 +44,37 @@ from typing import Any
 import sqlalchemy as sa
 
 from dlp_schema.dataset import DatasetVersion
+from dlp_schema.db.locks import lock_model_task as lock_model_task
+from dlp_schema.db.locks import lock_session as lock_session
+from dlp_schema.db.ontology_repository import get_ontology as get_ontology
+from dlp_schema.db.ontology_repository import get_session_ontology as get_session_ontology
+from dlp_schema.db.privacy_repository import latest_privacy_detection as latest_privacy_detection
+from dlp_schema.db.privacy_repository import list_privacy_detections as list_privacy_detections
+from dlp_schema.db.privacy_repository import record_privacy_detection as record_privacy_detection
+from dlp_schema.db.review_repository import (
+    get_assignment as get_assignment,
+)
+from dlp_schema.db.review_repository import (
+    get_review_task as get_review_task,
+)
+from dlp_schema.db.review_repository import (
+    insert_assignment as insert_assignment,
+)
+from dlp_schema.db.review_repository import (
+    insert_review_task as insert_review_task,
+)
+from dlp_schema.db.review_repository import (
+    list_assignments as list_assignments,
+)
+from dlp_schema.db.review_repository import (
+    list_review_tasks as list_review_tasks,
+)
+from dlp_schema.db.review_repository import (
+    mark_review_task_collected as mark_review_task_collected,
+)
+from dlp_schema.db.review_repository import (
+    update_assignment as update_assignment,
+)
 from dlp_schema.db.tables import (
     dataset_split_assignments,
     dataset_versions,
@@ -52,8 +86,6 @@ from dlp_schema.db.tables import (
     privacy_audits,
     raw_access_log,
     retention_decisions,
-    review_assignments,
-    review_tasks,
     review_work,
     session_lifecycle_events,
     sessions,
@@ -61,6 +93,7 @@ from dlp_schema.db.tables import (
     training_runs,
     withdrawals,
 )
+from dlp_schema.label_validation import validate_session_labels
 from dlp_schema.labels import LabelRecord, VerificationState
 from dlp_schema.lineage import (
     ExportRecord,
@@ -72,13 +105,6 @@ from dlp_schema.lineage import (
 )
 from dlp_schema.ontology import Ontology
 from dlp_schema.ops import PrivacyAuditRecord, RawAccessEvent, RetentionDecision, ReviewWork
-from dlp_schema.review import (
-    AssignmentStatus,
-    ReviewAssignment,
-    ReviewStage,
-    ReviewTask,
-    ReviewTaskStatus,
-)
 from dlp_schema.session import (
     LifecycleEvent,
     LifecycleState,
@@ -476,14 +502,27 @@ def insert_labels(conn: sa.Connection, labels: Iterable[LabelRecord]) -> int:
     부모(`parent_label_id`)가 가리키는 레코드는 이미 DB에 있거나 같은 배치에서 앞서 있어야 한다
     (자기 참조 FK). 같은 label_id가 이미 있으면 IntegrityError다 (덮어쓰지 않는다).
     멱등하게 쓰려면 호출자가 이력(`get_labels`)을 보고 새 레코드만 넘긴다.
+    세션 버전의 등록 사전으로 배치 전체를 검사한 뒤 저장한다. 의미 오류는
+    `OntologyViolationError`로 실패한다. 시험용 오류·삭제는 `label_validation`의 규칙을 따른다.
 
     Returns:
         추가한 행 수.
     """
-    rows = [label_to_row(x) for x in labels]
-    if rows:
+    batch = list(labels)
+    if batch:
+        # 내보내기 게시의 FOR SHARE 잠금과 같은 세션 행을 쓴다. 배치 잠금은 항상 ID 순서다.
+        for sid in sorted({x.session_id for x in batch}):
+            lock_session(conn, sid)
+        # 배치 전체를 검증한 뒤 INSERT한다. 세션별 이력·사전은 한 번만 읽는다.
+        for sid in sorted({x.session_id for x in batch}):
+            validate_session_labels(
+                get_session_ontology(conn, sid),
+                get_labels(conn, sid),
+                [x for x in batch if x.session_id == sid],
+            )
+        rows = [label_to_row(x) for x in batch]
         conn.execute(label_records.insert(), rows)
-    return len(rows)
+    return len(batch)
 
 
 def get_labels(
@@ -541,118 +580,6 @@ def record_review(
 
 
 # ---------------------------------------------------------------- 검수 작업
-
-
-def insert_review_task(conn: sa.Connection, task: ReviewTask) -> None:
-    """검수 작업 1행을 추가한다 (`review_tasks`). 같은 task_key가 있으면 IntegrityError."""
-    data = task.model_dump(mode="json")
-    # JSON 직렬화는 시각을 문자열로 바꾸므로 datetime 열은 원래 객체로 되돌린다
-    data["created_at"], data["collected_at"] = task.created_at, task.collected_at
-    conn.execute(review_tasks.insert().values(**data))
-
-
-def get_review_task(conn: sa.Connection, task_key: str) -> ReviewTask:
-    """작업 키로 검수 작업을 읽는다. Raises: sqlalchemy.exc.NoResultFound (없을 때)."""
-    row = (
-        conn.execute(sa.select(review_tasks).where(review_tasks.c.task_key == task_key))
-        .mappings()
-        .one()
-    )
-    return ReviewTask.model_validate(dict(row))
-
-
-def list_review_tasks(
-    conn: sa.Connection, session_id: str, stage: ReviewStage | None = None
-) -> list[ReviewTask]:
-    """세션의 검수 작업 목록 (만든 순). stage를 주면 그 단계만."""
-    query = sa.select(review_tasks).where(review_tasks.c.session_id == session_id)
-    if stage is not None:
-        query = query.where(review_tasks.c.stage == stage.value)
-    rows = conn.execute(query.order_by(review_tasks.c.created_at)).mappings().all()
-    return [ReviewTask.model_validate(dict(r)) for r in rows]
-
-
-def mark_review_task_collected(conn: sa.Connection, task_key: str, at: datetime) -> None:
-    """작업을 수집 완료(collected)로 표시하고 collected_at을 기록한다.
-
-    이미 collected여도 다시 덮어쓴다 (시각이 갱신된다). Raises: KeyError (작업이 없을 때).
-    """
-    result = conn.execute(
-        review_tasks.update()
-        .where(review_tasks.c.task_key == task_key)
-        .values(status=ReviewTaskStatus.COLLECTED.value, collected_at=at)
-    )
-    if result.rowcount != 1:
-        raise KeyError(task_key)
-
-
-def insert_assignment(conn: sa.Connection, a: ReviewAssignment) -> None:
-    """검수 배정 1행을 추가한다 (`review_assignments`). 같은 ID가 있으면 IntegrityError."""
-    data = a.model_dump(mode="json")
-    # datetime 열은 JSON 문자열이 아니라 원래 객체로 넣는다
-    data["created_at"], data["completed_at"] = a.created_at, a.completed_at
-    conn.execute(review_assignments.insert().values(**data))
-
-
-def get_assignment(conn: sa.Connection, assignment_id: str) -> ReviewAssignment:
-    """배정 ID로 배정을 읽는다. Raises: sqlalchemy.exc.NoResultFound (없을 때)."""
-    row = (
-        conn.execute(
-            sa.select(review_assignments).where(review_assignments.c.assignment_id == assignment_id)
-        )
-        .mappings()
-        .one()
-    )
-    return ReviewAssignment.model_validate(dict(row))
-
-
-def list_assignments(
-    conn: sa.Connection, session_id: str | None = None, status: AssignmentStatus | None = None
-) -> list[ReviewAssignment]:
-    """우선순위 높은 순 (같으면 만든 순).
-
-    Args:
-        session_id: 주면 그 세션만.
-        status: 주면 그 상태만 (예: open = 검수 대기열).
-
-    Returns:
-        (priority 내림차순, created_at, assignment_id) 순 목록. 마지막 키는 결정적 순서를 위한 것.
-    """
-    query = sa.select(review_assignments)
-    if session_id is not None:
-        query = query.where(review_assignments.c.session_id == session_id)
-    if status is not None:
-        query = query.where(review_assignments.c.status == status.value)
-    query = query.order_by(
-        review_assignments.c.priority.desc(),
-        review_assignments.c.created_at,
-        review_assignments.c.assignment_id,
-    )
-    return [ReviewAssignment.model_validate(dict(r)) for r in conn.execute(query).mappings()]
-
-
-def update_assignment(conn: sa.Connection, assignment_id: str, **values: object) -> None:
-    """배정 상태·담당자·작업 키만 바꾼다.
-
-    Args:
-        assignment_id: 배정 ID.
-        **values: assignee, task_key, status(`AssignmentStatus` 또는 문자열), completed_at 중 일부.
-
-    Raises:
-        ValueError: 허용되지 않은 필드를 바꾸려 할 때.
-        KeyError: 배정이 없을 때.
-    """
-    allowed = {"assignee", "task_key", "status", "completed_at"}
-    if not set(values) <= allowed:
-        raise ValueError(f"바꿀 수 없는 필드: {set(values) - allowed}")
-    data = {k: (v.value if isinstance(v, AssignmentStatus) else v) for k, v in values.items()}
-    result = conn.execute(
-        review_assignments.update()
-        .where(review_assignments.c.assignment_id == assignment_id)
-        .values(**data)
-    )
-    if result.rowcount != 1:
-        raise KeyError(assignment_id)
 
 
 # ---------------------------------------------------------------- 데이터셋 버전

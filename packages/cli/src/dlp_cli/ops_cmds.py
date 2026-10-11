@@ -21,7 +21,8 @@
 (ADR 0020, 0021). 지표 계산 로직은 `dlp_ops` 패키지에 있다.
 
 정책 출처: `config/policies/ops.yaml` (경고 임계값, 원가, 감사 규칙, 보관 알림 일수),
-`config/policies/review.yaml`(`reviewers.privacy`: 원본 접근 권한자).
+기본 `config/policies/review.yaml`(`reviewers.privacy`: 원본 접근 권한자). 검수 정책은 CLI에서
+`DLP_REVIEW_POLICY_FILE`로 다른 파일을 지정할 수 있다.
 """
 
 from __future__ import annotations
@@ -38,6 +39,7 @@ from pathlib import Path
 import sqlalchemy as sa
 
 from dlp_cli.raw_access import raw_store
+from dlp_cli.review_config import load_review_policy
 from dlp_cli.schema_cmds import database_url
 from dlp_media.audit import current_actor
 from dlp_ops import audit as audit_mod
@@ -45,7 +47,7 @@ from dlp_ops import metrics as metrics_mod
 from dlp_ops.policy import load_policy
 from dlp_ops.retention import RETENTION_NOTE, retention_status
 from dlp_privacy import audit as audit_privacy
-from dlp_review.ops.policy import load_policy as load_review_policy
+from dlp_privacy.runner import collected_privacy_reviews, operational_blur
 from dlp_schema import load_config, repo_root
 from dlp_schema.db.repository import (
     get_labels,
@@ -55,7 +57,7 @@ from dlp_schema.db.repository import (
     insert_review_work,
 )
 from dlp_schema.ops import PrivacyAuditRecord, RetentionDecision, ReviewWork
-from dlp_schema.session import StreamKind
+from dlp_schema.session import PrivacyState, StreamKind
 
 
 def _engine(args: argparse.Namespace) -> sa.Engine:
@@ -246,7 +248,8 @@ def cmd_privacy_audit(args: argparse.Namespace) -> int:
     """`dlp ops privacy-audit <세션> <스트림> --misses <N>`: 잔여 블러 누락 감사 결과를 기록한다.
 
     검사:
-    - 그 스트림의 운영 현재 블러 트랙에 사람 검수자가 없으면 `SystemExit` (감사할 블러본이 없다).
+    - 현재 블러 트랙의 검수자를 확인한다. 트랙이 0개인 승인 영상은 최신 탐지 이후 수집한
+      운영 전수 검수 작업의 담당자를 쓴다. 어느 쪽도 확인할 수 없으면 `SystemExit`.
     - 감사자(`--auditor`, 없으면 `current_actor()`)가 그 블러 검수자 중 하나면 `SystemExit`
       (독립 감사, `PrivacyAuditRecord`도 같은 규칙을 검증한다).
 
@@ -264,7 +267,21 @@ def cmd_privacy_audit(args: argparse.Namespace) -> int:
         if stream is None or stream.kind not in audit_privacy.VIDEO_KINDS:
             raise SystemExit(f"{args.session_id}/{args.stream_id}: 세션의 영상 스트림이 아닙니다")
         # 운영 현재 블러 트랙의 검수자 모두 (수정 이력 전체가 아니라 지금 렌더에 쓰인 트랙)
-        reviewers = audit_mod.blur_reviewers(get_labels(conn, args.session_id), args.stream_id)
+        history = get_labels(conn, args.session_id)
+        reviewers = audit_mod.blur_reviewers(history, args.stream_id)
+        if (
+            not operational_blur(history, args.stream_id)
+            and session.privacy_state is PrivacyState.APPROVED
+        ):
+            reviewers = sorted(
+                {
+                    t.assignee
+                    for t in collected_privacy_reviews(
+                        conn, args.session_id, args.stream_id, history
+                    )
+                    if t.assignee is not None
+                }
+            )
         if not reviewers:
             raise SystemExit(f"{args.session_id}/{args.stream_id}: 사람이 검수한 블러가 없습니다")
         auditor = args.auditor or current_actor()

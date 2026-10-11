@@ -11,7 +11,8 @@ ADR 0025(4차 감사: 동의 철회 제외, 타임라인 과제, 승인 배포 �
 - `dlp_train.policy` — `config/policies/training.yaml` 로더 (골든·holdout 분할, 미검수 라벨 금지
   검증).
 - `dlp_train.extract` — 데이터셋 버전 스냅샷 → 과제별 학습 예제 (자동 원본과 수정본의 차이 포함).
-- `dlp_train.trainers` — 학습기(Trainer)·로더(ModelLoader) 등록부. CI·CPU는 `oracle-stub`만 있다.
+- `dlp_train.trainers` — 학습기(Trainer)·로더(ModelLoader) 등록부. 현재 등록된 구현은
+  `oracle-stub`뿐이다. 실제 모델 학습과 사람 검수 후 성능 향상은 아직 검증되지 않았다.
 - `dlp_train.tracking` — MLflow REST 기록기와 테스트용 메모리 기록기.
 - `dlp_train.loop` — 한 번의 재학습 실행, 배포·승인 배포, MLflow 등록 정보.
 - `dlp_train.deployed` — 배포 모델을 단계의 기본 어댑터 목록에 끼운다.

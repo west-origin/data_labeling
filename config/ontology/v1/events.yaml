@@ -8,7 +8,8 @@
 #   category: failure_retry(실패·재시도) | worker_safety(작업자 안전) | subject_safety(대상자 안전)
 #             | infection_control(감염 관리)
 #   requires_action: 라벨에 related_action_id(관련 행동) 필수. requires_object: related_entity_id 필수.
-#   raw_access: 원본 접근 권한자만 기록 (표정 등 블러본으로는 판단할 수 없는 이벤트).
+#   raw_access: 원본 권한자가 기록해야 하는 이벤트라는 운영 표시 (표정 등).
+#               현재 라벨 검증기는 기록자의 원본 접근 권한을 검사하지 않는다.
 # form: point(시점) | interval(구간). severity: 심각도(1~3) 필수 여부.
 events:
   grasp_failure: {category: failure_retry, ko: 파지 실패, form: point, requires_action: true}

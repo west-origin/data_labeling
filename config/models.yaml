@@ -1,7 +1,7 @@
 # 모델 가중치 목록. `make models`가 받아 sha256을 확인한다 (data/models/, 저장소에는 넣지 않는다).
 # 정책 파일(privacy.yaml, prelabel.yaml, actions.yaml vlm.model)은 여기 이름으로 모델을 가리킨다.
 #   url: 직접 받는 파일. archive_member가 있으면 zip을 받아 그 이름으로 끝나는 파일을 꺼낸다
-#        (sha256은 zip의 해시).
+#        (sha256은 zip의 해시, artifact_sha256은 추출 파일의 해시).
 #   export: 공개 ONNX가 없어 공식 가중치를 직접 변환한다 (스크립트 실행, make export-models).
 #           sha256은 내보낸 환경의 값이며 PyTorch 버전에 따라 달라질 수 있다.
 #
@@ -19,7 +19,7 @@
 #   license: 가중치 라이선스. training_data: 직접 학습·미세조정 데이터와 그 라이선스.
 #   commercial: 위 분류. 새 모델은 이 셋을 반드시 적는다 (CLAUDE.md, ADR 0010).
 # 형식 버전 (코드가 검사하지 않는다)
-version: 1
+version: 2
 # 정책이 쓸 수 있는 분류 목록 (make licenses가 검사)
 accept: [allowed, review]
 models:
@@ -64,6 +64,8 @@ models:
     url: https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/rtmpose-m_simcc-body7_pt-body7_420e-256x192-e48f03d0_20230504.zip
     archive_member: end2end.onnx
     sha256: f7fbb6c5c11a1bb70f3d445e4ddec5d144ea89ad5649c081ef976f9b24a0b741
+    # 위 SHA256으로 검증한 ZIP에서 추출한 ONNX의 SHA256. 캐시 파일도 다시 검증한다.
+    artifact_sha256: 5c0a4bf67953e6d2ac43ce15e77dc9d5d354ae18430a47d2c5963a7bc5683e3c
     license: Apache-2.0
     training_data:
       - COCO 2017 (주석 CC BY 4.0, 이미지는 Flickr 개별 CC 라이선스로 CC BY-NC 계열 포함)

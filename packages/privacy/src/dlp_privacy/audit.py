@@ -114,18 +114,19 @@ def residual_miss_rate(results: list[AuditResult]) -> float:
 
 
 # 블러 검수 방식 (검수 작업 방식 dlp_schema.review.ReviewMode와 다르다)
-# full: 모든 블러본을 사람이 전수 검수, sampled: 표본만 검수.
+# 잔여 누락률로 판정하는 권장 검수 범위: full(전수), sampled(표본).
+# 이 값만으로 검수 작업 생성이나 승인 조건이 바뀌지는 않는다.
 ReviewMode = Literal["full", "sampled"]
 
 
 def review_mode(
     weekly_rates: Sequence[float | None], target: float | None, weeks_below_target: int
 ) -> ReviewMode:
-    """전수 검수 종료 판정. 최근 weeks_below_target주 연속 목표 이하면 표본 검수로 전환한다.
+    """최근 weeks_below_target주 연속 목표 이하면 표본 검수 판정값을 반환한다.
 
     weekly_rates의 None은 감사가 없던 주다. 감사가 없으면 목표를 지켰는지 모르므로 통과로 보지
     않는다 (전수 검수 유지). 가장 최근 주가 목표를 넘으면 즉시 전수 검수로 돌아간다.
-    목표가 아직 없으면 전수 검수다.
+    목표가 아직 없으면 전수 검수다. 작업 생성·승인 정책을 자동 변경하지는 않는다.
 
     Args:
         weekly_rates: 주별 잔여 누락률 (오래된 주부터, `weekly_miss_rates`).

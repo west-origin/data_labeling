@@ -23,12 +23,43 @@ from dlp_schema.labels import (
     Verification,
     VerificationState,
 )
-from dlp_schema.session import LifecycleState, Session, StreamKind, can_transition
+from dlp_schema.review import ReviewTask
+from dlp_schema.session import (
+    LifecycleState,
+    PrivacyDetectionRun,
+    Session,
+    StreamKind,
+    can_transition,
+)
 from dlp_schema.testing import FIXED_TIME, action_payload, make_label, make_session
 
 # 공용 페이로드 예시 (모든 kind 하나씩). PAYLOADS의 순서를 인덱스로 참조하는 테스트가 있다.
 BOX = {"kind": "box_track", "entity_id": "rag_01", "class_id": "rag",
        "keyframes": [{"t_ms": 0, "x": 1, "y": 2, "w": 3, "h": 4}]}  # fmt: skip
+
+
+def test_privacy_detection_contract_roundtrip_and_validation() -> None:
+    """0건 완료 기록도 버전·영상 스트림·시간대가 있는 계약으로 직렬화된다."""
+    run = PrivacyDetectionRun(
+        event_id=1,
+        session_id="s001",
+        stream_id="bodycam",
+        model_versions=("privacy-v1",),
+        at=FIXED_TIME,
+    )
+    assert PrivacyDetectionRun.model_validate_json(run.model_dump_json()) == run
+    for change in (
+        {"model_versions": ()},
+        {"model_versions": ("",)},
+        {"at": FIXED_TIME.replace(tzinfo=None)},
+        {"event_id": 0},
+        {"stream_id": ""},
+        {"unexpected": True},
+    ):
+        with pytest.raises(ValidationError):
+            PrivacyDetectionRun.model_validate({**run.model_dump(), **change})
+
+
 HAND21 = [{"x": 0.0, "y": 0.0, "visibility": 2}] * 21
 
 MASK_FRAMES = [{"t_ms": 0, "rle": {"size": [4, 4], "counts": "04"}}, {"t_ms": 500, "outside": True}]
@@ -239,3 +270,24 @@ def test_lifecycle_moves_forward_one_step_or_withdraws() -> None:
     assert can_transition(s.EXPORTED, s.WITHDRAWN)
     assert not can_transition(s.WITHDRAWN, s.RAW_INGESTED)
     assert FIXED_TIME.tzinfo is not None
+
+
+def test_review_task_detection_generation_contract() -> None:
+    """완료 탐지 세대는 양수 ID이며 구 작업의 None과 함께 직렬화된다."""
+    values = dict(
+        task_key="cvat:1",
+        tool="cvat",
+        external_id="1",
+        session_id="s001",
+        stream_id="bodycam",
+        stage="privacy",
+        media_uri="local://raw/video.mp4",
+        label_kinds=("blur_track",),
+        created_at=FIXED_TIME,
+    )
+    legacy = ReviewTask.model_validate(values)
+    assert legacy.privacy_detection_id is None
+    linked = ReviewTask.model_validate({**values, "privacy_detection_id": 42})
+    assert ReviewTask.model_validate_json(linked.model_dump_json()) == linked
+    with pytest.raises(ValidationError):
+        ReviewTask.model_validate({**values, "privacy_detection_id": 0})

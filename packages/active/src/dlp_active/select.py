@@ -60,7 +60,9 @@ def score_sessions(
     policy: ActivePolicy,
     top: int = 3,
 ) -> list[SessionScore]:
-    """세션들에 점수를 매겨 높은 순으로 돌려준다 (순수 함수).
+    """세션들에 점수를 매겨 높은 순으로 돌려준다.
+
+    이 함수는 DB·파일에 쓰지 않는다. 등록한 점수 플러그인의 부작용·결정성은 구현자 책임이다.
 
     Args:
         sessions: (세션, 그 세션의 전체 라벨 이력) 목록.

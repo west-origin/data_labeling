@@ -13,7 +13,8 @@
 
 입력: DB `raw_access_log` (`dlp_cli.raw_access`의 감사 저장소가 접근 **전에** 남긴 기록).
 `action` 값: `read`(내용 읽기), `presign`(서명 URL 발급), `write`(쓰기), `grant`(검수 도구에 원본을
-보여 줌 — 이때 `actor`는 보게 될 담당자, 없으면 `unassigned`).
+제공할 의도 — 이때 `actor`는 예정 담당자, 없으면 `unassigned`). grant는 업로드 전에 기록하므로
+업로드 성공이나 실제 원본 열람의 증거가 아니다.
 
 공개 함수:
 - `month_range(month, tz)` — 달의 [시작, 끝) UTC 경계.

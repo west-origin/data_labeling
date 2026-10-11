@@ -1,0 +1,8 @@
+# 실제 영상 첫 시험의 범위. 임계값은 각 단계의 기존 정책을 그대로 사용한다.
+version: 1
+profiles:
+  hands: [hands]
+  cleaning: [hands, objects, tools]
+# 검수 정책(DLP_REVIEW_POLICY_FILE)에 연결된 일반 라벨 검수자 ID.
+# 이 값만으로 권한을 부여하지 않는다. 계정 연결과 실제 계정 존재를 별도로 검사한다.
+labeler: pilot-labeler

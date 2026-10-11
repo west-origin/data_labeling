@@ -2,8 +2,8 @@
 # 개발 명령 모음 (CLAUDE.md "명령어" 절과 같은 목록).
 #
 # 처음 시작하는 순서:
-#   make install            의존성 설치 (uv, 잠금 파일 기준)
-#   make check              린트·타입·계약·단위 테스트 (서비스 없이)
+#   make install-curation   전체 검사에 필요한 의존성 설치 (FiftyOne 포함, 잠금 파일 기준)
+#   make check              린트·타입·계약·단위 테스트 (개발 Compose 불필요, 큐레이션 Mongo는 필요)
 #   make up                 개발 서비스 기동 (docker 필요, .env 자동 생성)
 #   make db-upgrade         DB 마이그레이션 + 온톨로지 v1 등록
 #   make models             모델 가중치 받기 (실제 모델로 돌릴 때)
@@ -31,7 +31,7 @@ licenses:
 schemas:
 	uv run dlp schema export
 
-# config/models.yaml의 가중치를 data/models/에 받고 sha256을 확인한다 (네트워크 필요, 약 360 MB).
+# config/models.yaml의 가중치를 data/models/에 받고 sha256을 확인한다 (네트워크 필요, 용량은 목록 기준).
 # 이미 받은 파일은 건너뛴다. 가중치는 저장소에 넣지 않는다.
 models:
 	uv run dlp models fetch
@@ -91,7 +91,8 @@ fmt:
 typecheck:
 	uv run pyright
 
-# 단위 테스트 (pyproject addopts가 services·isolated_env 표시 테스트를 뺀다). 서비스 불필요.
+# 단위 테스트 (pyproject addopts가 services·isolated_env 표시 테스트를 뺀다).
+# 개발 Compose는 불필요하지만 FiftyOne 큐레이션 검사는 사용 가능한 내장/외부 MongoDB를 쓴다.
 test:
 	uv run pytest
 

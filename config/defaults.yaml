@@ -44,7 +44,8 @@ privacy:
   # 확장 후보(약봉투, 팔찌 등) 확정 시 추가. 온톨로지 privacy_targets의 required: false 키를 쓴다.
   # 현재 프라이버시 패키지는 이 값을 읽지 않는다 (탐지 대상은 config/policies/privacy.yaml이 정한다).
   extra_targets_v1: []             # 확장 후보(약봉투, 팔찌 등) 확정 시 추가
-  # 블러 전수 검수를 끝내고 표본 감사로 넘어가는 조건 (`dlp privacy audit-sample`).
+  # 전수·표본 검수 권장 범위의 판정 조건 (`dlp privacy audit-sample`).
+  # 판정값을 반환할 뿐 검수 작업 생성·승인 정책을 자동 전환하지 않는다.
   # 목표치는 success_criteria.residual_blur_miss_per_hour_max (null이면 전수 검수를 계속한다).
   full_review_exit:
     weeks_below_target: 8          # 잔여 누락률이 목표 이하로 유지되어야 하는 연속 주 수

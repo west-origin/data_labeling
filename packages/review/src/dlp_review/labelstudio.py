@@ -12,10 +12,11 @@
 (예: action.right:grasp, gap.left:idle, event:slip,
 hand.right:tool, state:cleanliness=clean).
 손별 트랙이 있는 종류는 손을 이름에 넣어, 검수자가 화면에서
-새로 그린 구간도 어느 손인지 알 수 있게 한다. 화면에서 고치지 않는 나머지 필드는 결과의
-meta.text[0]에 JSON으로 싣는다. 결과 id는 원래 라벨 ID다.
+새로 그린 구간도 어느 손인지 알 수 있게 한다. 라벨 이름 외의 왕복 보존용 필드는 결과의
+meta.text[0]에 JSON으로 싣는다. 수정 불가능한 보안 필드는 아니다. 결과 id는 원래 라벨 ID다.
 
-화면에서 새로 그린 객체 상태 구간은 어느 개체인지 알 수 없어 받지 않는다 (CVAT에서 개체를 고른다).
+화면에서 새로 그린 객체 상태 구간은 어느 개체인지 알 수 없어 받지 않는다.
+기존 객체 상태 라벨은 메타데이터의 개체 참조를 보존해 왕복한다.
 
 WP6, ADR 0006(무손실 왕복). 사용처: `tasks.create_labeling_tasks`(보내기: `label_config`,
 `to_ls_results`), `collect.collect_task`(받기: `from_ls_results`), `timeseries`(`CHANNELS`),

@@ -53,6 +53,7 @@ from dlp_schema.db.repository import (
     get_session,
     insert_labels,
     insert_review_task,
+    latest_privacy_detection,
     list_review_tasks,
     record_review,
     register_ontology,
@@ -137,9 +138,11 @@ def _approve_blur(conn: sa.Connection, sid: str) -> None:
     """CVAT 없이 블러 검수가 끝난 것으로 둔다 (Label Studio 쪽만 시험할 때)."""
     for x in get_labels(conn, sid, kinds=["blur_track"]):
         record_review(conn, x.label_id, VerificationState.HUMAN_APPROVED, "privacy01", FIXED_TIME)
+    run = latest_privacy_detection(conn, sid, "bodycam")
     insert_review_task(
         conn,
         ReviewTask(
+            privacy_detection_id=run.event_id if run else None,
             task_key=f"cvat:{sid}-offline", tool=ReviewTool.CVAT, external_id="0",
             session_id=sid, stream_id="bodycam", stage=ReviewStage.PRIVACY,
             assignee="privacy01", media_uri=f"s3://dlp-raw/sessions/{sid}/derived/bodycam.mp4",

@@ -2,7 +2,8 @@
 
 입력: 세션(스트림 목록과 현재 동기화 상태) + 스트림별 신호(`StreamMedia`) + 정책.
 출력: 스트림의 `offset_ms`·`clock_scale`·`sync_method`·`sync_confidence`를 갱신한 새 세션 + 보고서.
-DB·저장소에 접근하지 않는 순수 함수다 (`runner.run_sync`가 저장한다). 같은 입력이면 같은 결과(멱등).
+DB·객체 저장소에는 접근하지 않지만 QR 슬레이트 탐지에서 로컬 영상 파일을 읽는다.
+`runner.run_sync`가 결과를 저장한다. 신호·영상 내용·정책이 같으면 같은 계산 결과를 낸다.
 
 시계 모델: master_ms = offset_ms + manual_adjustment_ms + stream_ms * clock_scale (계약
 `Stream.to_master_ms`). 마스터 타임라인 = 바디캠(기준 스트림) 시계. 앵커와 맞춤은 `anchors.py`.
@@ -21,6 +22,7 @@ manual_adjustment_ms는 다시 동기화해도 유지한다.
   exp(-max(0, 오차 상한 - 양자화) / slate.residual_scale_ms)를 곱한다.
   오차 상한 = 최대 앵커 잔차 + 드리프트가 쌓일 수 있는 양(드리프트를 맞췄으면 앵커 밖 외삽분,
   아니면 max_drift_ppm·앵커에서 가장 먼 거리). 양자화 = 앵커의 프레임 간격(gap_ms) 중 최대.
+  이 상한은 선형 시계·연속 QR 검출 전제의 추정이며, 검출 실패·탐색 경계 오차를 포함하지 않는다.
   긴 녹화를 오프셋만으로 맞추면 신뢰도가 떨어져 다음 방법으로 넘어간다.
   두 영상에 오디오가 있으면(refine_with_audio) 슬레이트 맞춤을 출발점으로 오디오 상관 창을 맞춰
   드리프트까지 다듬고, 그 결과가 슬레이트 앵커와 양자화 안에서 맞으면 쓴다

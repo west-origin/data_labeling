@@ -1,7 +1,9 @@
-"""한 영상 스트림의 프라이버시 프리라벨: 모든 프레임 탐지 → 트랙 → blur_track 라벨 + 검수 우선 구간.
+"""한 영상 스트림의 프라이버시 프리라벨: 프레임 순회 → 탐지·유지 → 트랙 → 라벨 + 검수 우선 구간.
 
-블러는 누락이 사고이므로 프레임을 건너뛰지 않는다. 느린 탐지기(오픈 보캐뷸러리)는 정책의
-frame_stride_ms 간격으로만 추론하고 그 사이 프레임에 마지막 결과를 둔다.
+모든 프레임을 순회하지만 모든 탐지기가 매 프레임 추론하는 것은 아니다.
+느린 탐지기(오픈 보캐뷸러리)는 정책의 frame_stride_ms 간격으로만 추론하고
+그 사이 프레임에 마지막 결과를 둔다.
+유지한 결과가 움직임이나 새 대상의 출현을 모두 포착하지는 못하므로 사람 검수가 필요하다.
 설정된 탐지기가 하나도 없는 대상은 영상 전체를 no_detector 검수 구간으로 내보낸다
 (사람이 전부 본다).
 
@@ -125,8 +127,8 @@ def model_version(detectors: dict[str, FrameDetector], policy: PrivacyPolicy) ->
 
     형식: `iou-tracker-1+<이름>:<탐지기 버전>,...+p<정책 해시 8자>` (이름순). 이 문자열이
     blur_track 라벨의 `provenance.model_version`이 되고, `runner.detect_session`은 같은 버전의
-    레코드가 이미 있거나 그 버전이 결과 0개로 탐지 표시에 남아 있으면 그 스트림을 건너뛴다 (멱등).
-    탐지기 가중치·정책이 바뀌면 다시 탐지한다.
+    완료 세대의 활성 버전 집합이 같으면 스트림을 건너뛴다 (멱등). 외부 0건 표시만 남으면
+    DB 완료 기록으로 복구하고 새 검수를 요구한다. 정책 복귀는 새 세대로 탐지한다 (ADR 0033).
 
     Args:
         detectors: 쓸 수 있는 탐지기. 정책 대상이 쓰는 것만 버전에 들어간다.
@@ -165,11 +167,12 @@ def detect_video(
     ontology_version: str,
     now: datetime,
 ) -> StreamResult:
-    """영상 하나의 모든 프레임에서 블러 대상을 찾아 트랙 라벨과 검수 우선 구간을 만든다.
+    """영상의 모든 프레임을 순회해 블러 트랙 라벨과 검수 우선 구간을 만든다.
 
     단계:
     1. Resettable 탐지기(OWLv2 캐시 등)를 초기화한다.
-    2. 모든 프레임을 디코딩해 정책 대상이 쓰는 탐지기를 돌린다 (정책 대상 밖 탐지는 버린다).
+    2. 모든 프레임을 디코딩해 정책 대상의 탐지기를 호출한다. 탐지기 내부 stride·캐시에 따라
+       모델 추론은 일부 프레임에서만 실행될 수 있다 (정책 대상 밖 탐지는 버린다).
     3. `build_tracks`로 트랙을 만들고, `track_frames`로 보간·유지·여유·자르기를 한
        프레임별 박스를 얻는다.
     4. 트랙마다 `blur_track` 라벨 하나와 검수 우선 구간(track_gap·low_confidence·disagreement·
@@ -207,7 +210,7 @@ def detect_video(
         if isinstance(det, Resettable):
             det.reset()  # 영상마다 새로 시작 (반사면 탐지기가 쓰는 영역 탐지기 포함)
 
-    # 1) 모든 프레임 탐지: (프레임 시각 ms, 그 프레임의 정책 대상 탐지) 목록
+    # 1) 모든 프레임 순회: (프레임 시각 ms, 탐지·유지된 정책 대상 결과) 목록
     frames: list[tuple[int, list[Detection]]] = []
     with av.open(str(video)) as c:
         stream = c.streams.video[0]

@@ -1,4 +1,4 @@
-"""FiftyOne 샘플 변환 단위 테스트 (DB 없이, WP14).
+"""FiftyOne 샘플 변환과 실제 MongoDB 드라이버 왕복 검사 (WP14).
 
 정답 근거: VFR 합성 블러본(프레임 시각 `times`를 안다)에 공간 라벨은 프레임 시각(스트림 PTS)으로,
 시간 구간 라벨은 마스터 시각(= 스트림 시각 + 오프셋)으로 두어, 어느 FiftyOne 프레임(1부터)에
@@ -7,7 +7,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import math
+import os
 import uuid
 from pathlib import Path
 from typing import Any
@@ -80,7 +82,10 @@ def labels(times: list[int], offset: int) -> list[LabelRecord]:
 
 
 def stream(offset: int) -> Stream:
-    """마스터 시각과 offset ms 어긋난 바디캠 스트림."""
+    """시각 변환 시험용 독립 Stream (마스터 시각과 offset ms 차이).
+
+    실제 Session의 기준 바디캠은 오프셋 0이어야 한다. 이 객체를 Session으로 검증하지는 않는다.
+    """
     return Stream(
         stream_id="bodycam",
         kind=StreamKind.BODYCAM,
@@ -153,3 +158,29 @@ def test_push_to_fiftyone_round_trip(video: tuple[Path, list[int]], policy: Acti
         assert view.count("frames.labels.detections") == 1
     finally:
         ds.delete()
+
+
+@pytest.mark.services
+def test_patched_async_mongo_driver_round_trip() -> None:
+    """보안 패치 드라이버 조합의 비동기 삽입/집계를 실제 DB로 확인한다 (ADR 0035)."""
+    motor: Any = pytest.importorskip("motor.motor_asyncio")
+    uri = os.environ.get("FIFTYONE_DATABASE_URI")
+    if not uri:
+        pytest.skip("외부 큐레이션 MongoDB URI 없음")
+    name = "dlp-driver-test-" + uuid.uuid4().hex
+
+    async def query() -> None:
+        client: Any = motor.AsyncIOMotorClient(uri, serverSelectionTimeoutMS=5000)
+        try:
+            await client[name].values.insert_many([{"value": 1}, {"value": 2}])
+            result = (
+                await client[name]
+                .values.aggregate([{"$group": {"_id": None, "total": {"$sum": "$value"}}}])
+                .to_list(length=1)
+            )
+            assert result == [{"_id": None, "total": 3}]
+        finally:
+            await client.drop_database(name)
+            client.close()
+
+    asyncio.run(query())

@@ -11,9 +11,8 @@
     - `validate_label`: 위반이 있으면 예외.
 
 쓰는 곳
-    현재는 각 패키지의 테스트(프리라벨·행동·픽스처 출력이 사전을 지키는지)에서만 부른다. 운영 경로
-    (라벨 저장, 검수 결과 수집)는 이 검사를 거치지 않는다. 행동 단계의 VLM 출력 검사는
-    `dlp_actions`가 따로 한다.
+    공통 라벨 저장·이관·기존 데이터 감사·CLI 파일럿 준비 검사에서 부른다.
+    행동 단계의 VLM 출력 검사는 `dlp_actions`가 따로 한다. 구간 연결은 `label_graph`가 검사한다.
 
 주의
     - 개체 ID(`entity_id`, `target_id` 등) 참조는 여기서 보지 않는다. 에피소드 그래프
@@ -24,7 +23,9 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from typing import TYPE_CHECKING
 
+from dlp_schema.label_graph import check_segment_links
 from dlp_schema.labels import (
     ActionPayload,
     BlurTrackPayload,
@@ -42,6 +43,9 @@ from dlp_schema.labels import (
     Trajectory3DPayload,
 )
 from dlp_schema.ontology import Ontology, VerbLevel
+
+if TYPE_CHECKING:
+    from dlp_schema.episode import EpisodeGraph
 
 
 class OntologyViolationError(ValueError):
@@ -190,3 +194,102 @@ def validate_label(label: LabelRecord, ontology: Ontology) -> None:
     problems = check_label(label, ontology)
     if problems:
         raise OntologyViolationError(label.label_id, problems)
+
+
+def check_entity_parts(
+    labels: list[LabelRecord],
+    ontology: Ontology,
+    classes: Mapping[str, str],
+    *,
+    hand_ids: frozenset[str] = frozenset(),
+) -> list[str]:
+    """3D·관계 부분의 개체별 소속을 검사한다. 클래스 미확인 개체는 전체 ID 검사만 적용한다.
+
+    DB 경로는 박스·마스크·객체 상태에서 클래스를 얻고, 에피소드는 명시한 개체 목록을 쓴다.
+    클래스 없이 ID 문자열만으로 도구를 추정하지 않는다.
+    """
+    problems: list[str] = []
+    for label in labels:
+        p = label.payload
+        refs: tuple[tuple[str, str | None], ...] = ()
+        if isinstance(p, Trajectory3DPayload):
+            refs = ((p.entity_id, p.part),)
+        elif isinstance(p, RelationPayload):
+            refs = ((p.subject_id, p.subject_part), (p.object_id, p.object_part))
+        for entity, part in refs:
+            if part is None:
+                continue
+            class_id = classes.get(entity)
+            if entity in hand_ids:
+                allowed = frozenset(ontology.hand_joints)
+            elif class_id is not None:
+                obj = ontology.objects.get(class_id)
+                allowed = ontology.tool_parts(class_id)
+                if obj is not None and obj.surface:
+                    allowed |= frozenset(ontology.surface_parts)
+            else:
+                continue
+            if part not in allowed:
+                problems.append(f"{label.label_id}: 개체 {entity}({class_id})에 없는 부분 {part}")
+    return problems
+
+
+def check_label_set(
+    labels: list[LabelRecord],
+    ontology: Ontology,
+    *,
+    classes: Mapping[str, str] | None = None,
+    hand_ids: frozenset[str] = frozenset(),
+) -> list[str]:
+    """현재 라벨의 구간 연결·작업 소속·알려진 개체 부분을 검사한다."""
+    if classes is None:
+        classes = {
+            p.entity_id: p.class_id
+            for x in labels
+            if isinstance(p := x.payload, (BoxTrackPayload, MaskTrackPayload, ObjectStatePayload))
+        }
+    # 평가용 여러 모델의 예측은 같은 action_id를 쓸 수 있다. 상위 구간이 있는 경우에만
+    # 그 ID의 유일성을 요구해 자식 참조의 모호성을 막는다. EpisodeGraph는 항상 검사한다.
+    problems = (
+        check_segment_links(labels)
+        if any(isinstance(x.payload, SegmentPayload) for x in labels)
+        else []
+    )
+    problems.extend(check_entity_parts(labels, ontology, classes, hand_ids=hand_ids))
+    segments = {
+        x.payload.segment_id: x.payload for x in labels if isinstance(x.payload, SegmentPayload)
+    }
+    for p in segments.values():
+        if p.level is SegmentLevel.TASK:
+            for child_id in p.child_ids:
+                child = segments.get(child_id)
+                if (
+                    child is not None
+                    and child.level is SegmentLevel.SUBSTEP
+                    and ontology.substep_task(child.ref_id) != p.ref_id
+                ):
+                    problems.append(f"{p.segment_id}: 다른 작업의 하위 단계 {child.ref_id}")
+    return problems
+
+
+def validate_episode(graph: EpisodeGraph, ontology: Ontology) -> None:
+    """에피소드 계약 검증에 사전·개체 클래스·부분·작업/하위 단계 소속 검사를 더한다."""
+    problems: list[str] = []
+    if graph.ontology_version != ontology.version:
+        problems.append("에피소드와 온톨로지 버전 불일치")
+    classes = {e.entity_id: e.class_id for e in graph.entities if e.class_id is not None}
+    for entity, class_id in classes.items():
+        if class_id not in ontology.objects:
+            problems.append(f"{entity}: 알 수 없는 객체 클래스 {class_id}")
+    for label in graph.labels:
+        problems.extend(f"{label.label_id}: {p}" for p in check_label(label, ontology))
+    problems.extend(
+        check_label_set(
+            list(graph.labels),
+            ontology,
+            classes=classes,
+            hand_ids=frozenset(e.entity_id for e in graph.entities if e.kind == "hand"),
+        )
+    )
+    if problems:
+        raise ValueError("; ".join(problems))

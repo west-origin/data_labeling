@@ -30,7 +30,7 @@ from dlp_schema.labels import (
     Trajectory3DPayload,
 )
 from dlp_schema.ontology import Ontology, load_ontology
-from dlp_schema.testing import make_label
+from dlp_schema.testing import make_label, make_session
 
 ROOT = Path(__file__).resolve().parents[3]
 TOLERANCE_MS = 70  # 기준 문서의 접촉 경계 허용 오차 (장갑 ±70 ms, 영상 ±150 ms) 중 엄격한 쪽
@@ -235,3 +235,129 @@ def test_duplicate_working_part_trajectory_gives_one_coverage(
     assert [c.payload for c in d.coverage] == [c.payload for c in base.coverage]
     assert len(d.contacts) == len(base.contacts)
     assert [r.payload for r in d.relations] == [r.payload for r in base.relations]
+
+
+def test_camera_coordinates_are_not_shared_between_streams(
+    policy: RelationsPolicy,
+    ontology: Ontology,
+) -> None:
+    """다른 영상 카메라의 걸레와 꼭짓점을 같은 CAMERA 좌표로 취급하지 않는다."""
+    w = generate_wiping_scenario(0)
+    session = make_session(
+        w.labels[0].session_id,
+        streams=[
+            {
+                "stream_id": "bodycam",
+                "kind": "bodycam",
+                "sync_method": "reference",
+                "uri": "local://raw/bodycam.mp4",
+            },
+            {
+                "stream_id": "third_person",
+                "kind": "third_person",
+                "sync_method": "tap_event",
+                "uri": "local://raw/third.mp4",
+            },
+        ],
+    )
+    mixed = [
+        x.model_copy(update={"stream_id": "third_person"})
+        if isinstance(x.payload, Trajectory3DPayload) and x.payload.entity_id == "rag_01"
+        else x
+        for x in w.labels
+    ]
+    assert derive(mixed, ontology, policy, session).contacts == []
+    world = [
+        x.model_copy(
+            update={"payload": x.payload.model_copy(update={"frame": CoordinateFrame.WORLD})}
+        )
+        if isinstance(x.payload, Trajectory3DPayload)
+        else x
+        for x in mixed
+    ]
+    assert len(derive(world, ontology, policy, session).contacts) == len(w.contacts)
+    with pytest.raises(ValueError, match="Session"):
+        derive(mixed, ontology, policy)
+
+
+def test_third_person_contact_uses_master_clock(
+    policy: RelationsPolicy,
+    ontology: Ontology,
+) -> None:
+    """공간 라벨 PTS와 손 상태 마스터 시각을 오프셋·드리프트·수동 보정 뒤 비교한다."""
+    w = generate_wiping_scenario(0)
+    session = make_session(
+        w.labels[0].session_id,
+        streams=[
+            {
+                "stream_id": "bodycam",
+                "kind": "bodycam",
+                "sync_method": "reference",
+                "uri": "local://raw/bodycam.mp4",
+            },
+            {
+                "stream_id": "third_person",
+                "kind": "third_person",
+                "sync_method": "tap_event",
+                "uri": "local://raw/third.mp4",
+                "offset_ms": 10000,
+                "clock_scale": 1.01,
+                "manual_adjustment_ms": 23,
+            },
+        ],
+    )
+    stream = session.stream("third_person")
+    shifted = [
+        x.model_copy(update={"stream_id": "third_person"})
+        if isinstance(x.payload, Trajectory3DPayload)
+        else x.model_copy(
+            update={
+                "t_start_ms": round(stream.to_master_ms(x.t_start_ms)),
+                "t_end_ms": round(stream.to_master_ms(x.t_end_ms)),
+            }
+        )
+        for x in w.labels
+    ]
+    base = derive(w.labels, ontology, policy)
+    got = derive(shifted, ontology, policy, session)
+    assert len(got.contacts) == len(base.contacts)
+    for actual, original in zip(got.contacts, base.contacts, strict=True):
+        assert actual.start_ms == round(stream.to_master_ms(original.start_ms))
+        assert actual.end_ms == round(stream.to_master_ms(original.end_ms))
+    assert [c.payload for c in got.coverage] == [c.payload for c in base.coverage]
+    assert w.labels[0].t_start_ms == 0  # 입력 계약은 바꾸지 않는다.
+
+
+def test_two_camera_contacts_give_one_surface_coverage(
+    policy: RelationsPolicy,
+    ontology: Ontology,
+) -> None:
+    """같은 도구·표면을 두 카메라에서 각각 계산해도 표면 커버리지와 관계는 중복하지 않는다."""
+    w = generate_wiping_scenario(0)
+    session = make_session(
+        w.labels[0].session_id,
+        streams=[
+            {
+                "stream_id": "bodycam",
+                "kind": "bodycam",
+                "sync_method": "reference",
+                "uri": "local://raw/bodycam.mp4",
+            },
+            {
+                "stream_id": "third_person",
+                "kind": "third_person",
+                "sync_method": "tap_event",
+                "uri": "local://raw/third.mp4",
+            },
+        ],
+    )
+    third = [
+        x.model_copy(update={"label_id": f"{x.label_id}-third", "stream_id": "third_person"})
+        for x in w.labels
+        if isinstance(x.payload, Trajectory3DPayload)
+    ]
+    base = derive(w.labels, ontology, policy, session)
+    got = derive([*w.labels, *third], ontology, policy, session)
+    assert len(got.contacts) == 2 * len(base.contacts)
+    assert got.coverage == base.coverage
+    assert got.relations == base.relations

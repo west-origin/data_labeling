@@ -33,6 +33,7 @@ from dlp_cli import (
     media_cmds,
     models_cmds,
     ops_cmds,
+    pilot_cmds,
     prelabel_cmds,
     privacy_cmds,
     relations_cmds,
@@ -83,6 +84,7 @@ def build_parser() -> argparse.ArgumentParser:
     # 계약·온톨로지·DB: dlp schema export, dlp ontology validate|register, dlp db upgrade (WP1)
     schema_cmds.add_commands(sub)
     fixtures_cmds.add_commands(sub)  # dlp fixtures generate — 합성 픽스처 (WP2)
+    pilot_cmds.add_commands(sub)  # dlp pilot check — 실제 영상 실행 전 준비 검사
     media_cmds.add_commands(sub)  # dlp ingest — 세션 수집 (WP3)
     sync_cmds.add_commands(sub)  # dlp sync run|adjust — 멀티스트림 동기화 (WP4)
     # 프라이버시 게이트: dlp privacy detect|approve|render|audit-sample (WP5)

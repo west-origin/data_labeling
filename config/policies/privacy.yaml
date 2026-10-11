@@ -6,7 +6,7 @@
 #   - render 외 값(문턱·대상·트래커·검수 점수·검수 우선순위·쓰는 탐지기 설정)은 탐지 모델 버전의
 #     정책 해시(dlp_privacy.pipeline.detection_policy_digest)에 들어간다. 바꾸면 그 뒤
 #     `dlp privacy detect`를 돌리는 세션마다 다시 탐지하고 검수 전 블러를 새 버전으로 바꾼다.
-#     승인된 세션도 블러가 바뀌면 승인이 풀려 다시 검수·승인·렌더해야 한다.
+#     승인된 세션도 새 탐지를 실행하면 0건 결과를 포함해 승인이 풀려 다시 검수·승인·렌더해야 한다.
 #   - render 값은 블러본 해시(dlp_privacy.runner.render_hash)에 들어간다. 바꾸면 기존 블러본이
 #     "현재 것이 아님"이 되어 `dlp privacy render`로 다시 만들어야 소비자가 쓸 수 있다.
 #   - 해시는 파싱된 값으로 계산하므로 이 파일의 주석·공백·키 순서는 버전을 바꾸지 않는다.
@@ -74,8 +74,8 @@ review_priority: [no_detector, track_gap, disagreement, low_confidence, reflecti
 # 탐지기 정의 (이름 → 설정). targets.*.detectors와 reflection의 region/face_detector가
 # 이 이름을 쓴다.
 # kind별 구현은 dlp_privacy.detectors. 가중치(model, tokenizer)는 config/models.yaml 키이며
-# `make models`로 받는다. 가중치가 없으면 그 탐지기는 "쓸 수 없음"으로 보고되고 대상은 전수
-# 검수된다.
+# `make models`로 받는다. 가중치가 없으면 그 탐지기는 "쓸 수 없음"으로 보고된다. 대상의 모든
+# 탐지기가 없으면 no_detector 구간을 만든다. 현재 파일럿의 프라이버시 검수는 원본 전수 검수다.
 detectors:
   yunet:
     kind: yunet

@@ -280,3 +280,20 @@ class LifecycleEvent(Contract):
     to_state: LifecycleState
     at: AwareDatetime
     actor: str | None = Field(default=None, description="전이를 일으킨 사람·단계 (모르면 None)")
+
+
+class PrivacyDetectionRun(Contract):
+    """완료한 프라이버시 탐지 기록 (0건 포함, 추가 전용. ADR 0032).
+
+    event_id는 검수 작업·배정의 완료 세대다. at은 실제 추론 완료(또는 복구 확인) 시각이다.
+    model_versions는 이 세대의 활성 모델 전체이며 과거 실행 버전들의 합집합이 아니다.
+    구버전의 외부 0건 표시를 복구할 때도 새 기록을 남겨 이후 전수 검수를 요구한다.
+    """
+
+    event_id: int = Field(ge=1)
+    session_id: Identifier
+    stream_id: Identifier
+    model_versions: tuple[Annotated[str, StringConstraints(min_length=1)], ...] = Field(
+        min_length=1
+    )
+    at: AwareDatetime

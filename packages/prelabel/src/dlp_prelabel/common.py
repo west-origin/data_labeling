@@ -56,7 +56,8 @@ def iter_frames(video: Path) -> Iterator[tuple[int, Image]]:
             yield (
                 # PTS(time_base 단위) → ms. Fraction으로 곱해 부동소수 누적 오차 없이 반올림한다
                 round(float(frame.pts * tb * 1000)),
-                np.asarray(frame.to_ndarray(format="rgb24"), dtype=np.uint8),
+                # PyAV의 행 패딩을 제거한다. MediaPipe C API는 RGB 행이 연속이라고 가정한다.
+                np.ascontiguousarray(frame.to_ndarray(format="rgb24"), dtype=np.uint8),
             )
 
 

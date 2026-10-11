@@ -167,6 +167,7 @@ class ReviewAssignment(Contract):
 #   sent_label_ids: Field description 참고. None이면 0006 이전 작업이라, 수집
 #     (`dlp_review.collect`)이 배정이 있으면 배정의 라벨 선택 함수로, 배정도 없으면 현재 운영
 #     라벨로 비교 기준을 다시 고른다.
+#   privacy_detection_id: 작업에 보낸 블러의 완료 탐지 세대. 구 작업은 None (ADR 0033).
 #   status / created_at / collected_at: 작업 상태와 시각.
 class ReviewTask(Contract):
     task_key: Identifier  # 도구:작업 ID (예: cvat:42)
@@ -183,6 +184,9 @@ class ReviewTask(Contract):
     sent_label_ids: tuple[Identifier, ...] | None = Field(
         default=None,
         description="작업에 보낸 라벨. 수집은 이 라벨과 비교한다 (그 사이 라벨이 바뀌어도)",
+    )
+    privacy_detection_id: int | None = Field(
+        default=None, ge=1, description="작업 생성 시 완료된 탐지 세대. 구 작업·일반 검수는 None"
     )
     status: ReviewTaskStatus = ReviewTaskStatus.OPEN
     created_at: AwareDatetime

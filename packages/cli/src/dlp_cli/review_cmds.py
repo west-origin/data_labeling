@@ -22,8 +22,8 @@
 → `qa` → `verify` → `dlp dataset build`. 블러 검수는 `dlp privacy detect` 뒤 `create --stage
 privacy` (또는 `plan --privacy`) → `collect` → `dlp privacy approve`.
 
-정책 출처: `config/policies/review.yaml` (우선순위·표본·측정 비율, `reviewers.privacy`,
-`cvat.users`, 미디어).
+정책 출처: 기본은 `config/policies/review.yaml` (우선순위·표본·측정 비율, `reviewers.privacy`,
+`cvat.users`, 미디어). CLI에서는 `DLP_REVIEW_POLICY_FILE`로 정책 파일을 바꿀 수 있다.
 
 주의:
 - `_setup`이 원본 저장소를 `raw_store("s3", …, "review.<명령>")` 감사 저장소로 만든다 (블러 검수
@@ -43,33 +43,36 @@ from datetime import UTC, datetime
 import sqlalchemy as sa
 
 from dlp_cli.raw_access import raw_store
+from dlp_cli.review_config import load_review_policy as load_ops_policy
 from dlp_cli.schema_cmds import database_url
 from dlp_media.audit import current_actor
 from dlp_media.storage import S3Store
 from dlp_review.clients import CvatClient, LabelStudioClient
 from dlp_review.collect import collect_task
+from dlp_review.ontology_projects import ontology_project
 from dlp_review.ops.assign import plan_qa
-from dlp_review.ops.policy import load_policy as load_ops_policy
 from dlp_review.ops.runner import create_assignment_tasks, plan_session, quality_report
 from dlp_review.tasks import (
     PRIVACY_PROJECT,
     SPATIAL_PROJECT,
     TEMPORAL_PROJECT,
     ReviewSetup,
-    TaskError,
     create_labeling_tasks,
     create_privacy_tasks,
 )
 from dlp_review.verify import verify_session
-from dlp_review.webhook import CollectRequest, ReviewerMismatchError, resolve_reviewer, serve
-from dlp_schema import load_config, load_ontology, repo_root
+from dlp_review.webhook import CollectRequest, resolve_reviewer, serve
+from dlp_schema import load_config, repo_root
 from dlp_schema.db.repository import (
     get_assignment,
     get_golden_set,
+    get_ontology,
     get_review_task,
+    get_session_ontology,
     insert_assignment,
     list_assignments,
 )
+from dlp_schema.db.tables import ontology_versions
 from dlp_schema.review import AssignmentStatus
 
 
@@ -85,11 +88,12 @@ def _setup(args: argparse.Namespace) -> ReviewSetup:
     - `raw`: 원본 버킷 감사 저장소 (항상 S3, 목적 `review.<명령>`).
     - `labeling`: 라벨링 버킷 (서비스 자격 증명, 블러본·작업 미디어 쓰기).
     - `labeling_reader`: 라벨러 자격 증명(읽기 전용) — 검수 화면 서명 URL용.
-    - `ontology`: `config/ontology/v1`을 고정으로 읽는다 (리팩토링 후보: 세션의 온톨로지 버전을
-      따라야 함).
+    - `ontology`: None. 작업 생성 시 DB에서 각 세션 버전의 사전을 읽는다.
     - `cvat`/`label_studio`: 환경 변수(`DLP_CVAT_*`, `DLP_LABEL_STUDIO_*`)로 만든 클라이언트.
 
-    부작용: 없음 (클라이언트·엔진 생성만). 환경 변수가 빠지면 클라이언트 생성에서 예외가 날 수 있다.
+    부작용: 설정 파일을 읽고 저장소·HTTP 클라이언트를 만든다. CVAT 클라이언트는 생성 중
+    로그인 API를 호출해 토큰을 받는다 (`--no-cvat`이면 생략). 환경 변수 누락, 파일·설정 오류,
+    로그인 실패·통신 오류는 호출자에게 전파된다.
     """
     root = repo_root()
     buckets = load_config(root / "config" / "defaults.yaml").buckets
@@ -97,7 +101,7 @@ def _setup(args: argparse.Namespace) -> ReviewSetup:
         raw=raw_store("s3", getattr(args, "url", None), f"review.{args.review_command}"),
         labeling=S3Store.from_env(buckets.labeling),
         labeling_reader=S3Store.labeler_from_env(buckets.labeling),
-        ontology=load_ontology(root / "config" / "ontology" / "v1"),
+        ontology=None,
         cvat=None if getattr(args, "no_cvat", False) else CvatClient.from_env(),
         label_studio=None if getattr(args, "no_ls", False) else LabelStudioClient.from_env(),
     )
@@ -214,7 +218,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
     1. 작업을 조회하고 검수자를 정한다 — 웹훅의 도구 사용자 ID가 아니라 작업 담당자다
        (`resolve_reviewer`). 담당자와 CVAT job 담당자가 맞지 않으면 수집하지 않는다.
     2. 서비스 계정(Label Studio 서비스 사용자)이 만든 주석이면 수집하지 않는다.
-    3. `collect_task`로 수집한다. `TaskError`는 출력만 하고 넘어간다 (서버는 계속 돈다).
+    3. `collect_task`로 수집한다. 실패는 트랜잭션을 롤백하고 HTTP 경계에 전달한다.
 
     필요 환경 변수: `DLP_WEBHOOK_SECRET`(서명 검증), DB·S3·도구 접속 정보.
     반환: 서버가 끝나면 0.
@@ -226,31 +230,28 @@ def cmd_serve(args: argparse.Namespace) -> int:
     ops_policy = load_ops_policy(repo_root())
 
     def on_collect(req: CollectRequest) -> None:
-        """웹훅 한 건 처리 콜백. 수집 여부를 출력하고 예외를 서버로 올리지 않는다 (거부 사유는
-        출력만)."""
+        """웹훅 한 건을 한 트랜잭션으로 수집한다. 실패를 성공 응답으로 바꾸지 않는다."""
         with engine.begin() as conn:
             task = get_review_task(conn, req.task_key)
-            try:
-                # 검수자는 웹훅의 도구 사용자 ID가 아니라 작업 담당자다
-                reviewer = resolve_reviewer(req, task, service_user, ops_policy.cvat.users)
-            except ReviewerMismatchError as exc:
-                print(f"{req.task_key}: 수집하지 않음 ({exc})")
-                return
+            # 검수자는 웹훅의 도구 사용자 ID가 아니라 작업 담당자다
+            reviewer = resolve_reviewer(req, task, service_user, ops_policy.cvat.users)
             if reviewer is None:
                 print(f"{req.task_key}: 서비스 계정의 주석이라 수집하지 않음")
                 return
-            try:
-                outcome = collect_task(
-                    conn, req.task_key, setup, reviewer, datetime.now(UTC), ops_policy
-                )
-            except TaskError as exc:
-                print(f"{req.task_key}: 수집하지 않음 ({exc})")
-                return
+            outcome = collect_task(
+                conn, req.task_key, setup, reviewer, datetime.now(UTC), ops_policy
+            )
         print(f"{req.task_key} ← {reviewer}: {'이미 수집함' if outcome is None else '수집함'}")
 
-    server = serve(args.port, _secret(), on_collect)
-    print(f"웹훅 대기: http://0.0.0.0:{args.port}/webhooks/{{cvat,label_studio}}")
-    server.serve_forever()
+    server = serve(args.port, _secret(), on_collect, policy=ops_policy.webhook)
+    print(
+        f"웹훅 대기: http://{ops_policy.webhook.bind_host}:{args.port}/webhooks/{{cvat,label_studio}}"
+    )
+    try:
+        server.serve_forever()
+    finally:
+        server.server_close()
+        engine.dispose()
     return 0
 
 
@@ -264,19 +265,37 @@ def cmd_register(args: argparse.Namespace) -> int:
     """
     setup = _setup(args)
     secret = _secret()
+    # 구 프로젝트의 웹훅도 유지하고, 등록된 사전별 새 화면의 프로젝트를 함께 등록한다.
+    engine = sa.create_engine(database_url(getattr(args, "url", None)))
+    try:
+        with engine.connect() as conn:
+            ontologies = [
+                get_ontology(conn, v)
+                for v in conn.execute(sa.select(ontology_versions.c.version)).scalars()
+            ]
+    finally:
+        engine.dispose()
+    cvat_names = [PRIVACY_PROJECT, SPATIAL_PROJECT]
+    ls_names = [TEMPORAL_PROJECT]
+    for ontology in ontologies:
+        cvat_names += [
+            ontology_project(base, ontology) for base in (PRIVACY_PROJECT, SPATIAL_PROJECT)
+        ]
+        ls_names.append(ontology_project(TEMPORAL_PROJECT, ontology))
     if setup.cvat is not None:
-        for name in (PRIVACY_PROJECT, SPATIAL_PROJECT):
+        for name in cvat_names:
             project = setup.cvat.find_project(name)
             if project:
                 setup.cvat.add_webhook(int(project["id"]), f"{args.url_base}/webhooks/cvat", secret)
                 print(f"CVAT {name}: 웹훅 등록")
     if setup.label_studio is not None:
-        project = setup.label_studio.find_project(TEMPORAL_PROJECT)
-        if project:
-            setup.label_studio.add_webhook(
-                int(project["id"]), f"{args.url_base}/webhooks/label_studio", secret
-            )
-            print(f"Label Studio {TEMPORAL_PROJECT}: 웹훅 등록")
+        for name in ls_names:
+            project = setup.label_studio.find_project(name)
+            if project:
+                setup.label_studio.add_webhook(
+                    int(project["id"]), f"{args.url_base}/webhooks/label_studio", secret
+                )
+                print(f"Label Studio {name}: 웹훅 등록")
     return 0
 
 
@@ -292,13 +311,13 @@ def cmd_plan(args: argparse.Namespace) -> int:
 
     반환: 0. 이미 계획된 단위는 새로 만들지 않는다(멱등) — 이때 "새 배정이 없습니다".
     부작용: 한 트랜잭션에서 `review_assignments`에 새 배정 INSERT.
-    온톨로지는 `config/ontology/v1`을 고정으로 읽는다 (리팩토링 후보).
+    온톨로지는 세션 버전의 DB 등록 사전을 읽는다.
     """
     root = repo_root()
     policy = load_ops_policy(root)
-    ontology = load_ontology(root / "config" / "ontology" / "v1")
     engine = sa.create_engine(database_url(args.url))
     with engine.begin() as conn:
+        ontology = get_session_ontology(conn, args.session_id)
         pool: list[str] = []
         for version in args.seed_golden:
             pool += list(get_golden_set(conn, version).session_ids)

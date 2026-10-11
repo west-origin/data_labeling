@@ -48,6 +48,7 @@ from dlp_schema.db.repository import (
     insert_labels,
     insert_review_task,
     insert_session,
+    latest_privacy_detection,
     list_review_tasks,
     record_review,
     register_ontology,
@@ -168,9 +169,11 @@ def _session(
             record_review(
                 conn, x.label_id, VerificationState.HUMAN_APPROVED, "privacy01", FIXED_TIME
             )
+        run = latest_privacy_detection(conn, sid, "bodycam")
         insert_review_task(  # 수집까지 끝난 블러 검수 작업 기록 (승인 조건)
             conn,
             ReviewTask(
+                privacy_detection_id=run.event_id if run else None,
                 task_key=f"cvat:{sid}-offline", tool=ReviewTool.CVAT, external_id="0",
                 session_id=sid, stream_id="bodycam", stage=ReviewStage.PRIVACY,
                 assignee="privacy01",

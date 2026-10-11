@@ -18,6 +18,7 @@ from dlp_schema.episode import Entity, EntityKind, EpisodeGraph, current_labels,
 from dlp_schema.jsonschema import stale_schemas
 from dlp_schema.labels import LabelRecord, Verification, VerificationState
 from dlp_schema.migration import OntologyMigration, load_migration, migrate_labels
+from dlp_schema.ontology import Ontology
 from dlp_schema.testing import FIXED_TIME, action_payload, make_label
 
 # 그래프 테스트용 개체: 걸레(도구)와 세면대(표면)
@@ -92,7 +93,7 @@ def test_current_labels_follow_correction_history() -> None:
     ] == ["v2"]
 
 
-def test_migration_renames_and_flags_removed_ids(tmp_path: Path) -> None:
+def test_migration_renames_and_flags_removed_ids(tmp_path: Path, target_ontology: Ontology) -> None:
     """매핑 표 YAML로 이관: grasp → grip 이름 변경, 검증 상태는 미검수로, ID는 `<원래>:v<새 버전>`.
     제거된 이벤트(slip)와 다른 버전(0.9.0) 라벨은 needs_review로 간다.
     """
@@ -111,7 +112,7 @@ def test_migration_renames_and_flags_removed_ids(tmp_path: Path) -> None:
         make_label({"kind": "event", "event_type": "slip", "severity": 1}, label_id="e"),
         make_label(action_payload(), label_id="old", ontology_version="0.9.0"),
     ]
-    result = migrate_labels(labels, migration, FIXED_TIME)
+    result = migrate_labels(labels, migration, FIXED_TIME, target_ontology=target_ontology)
     [migrated] = result.migrated
     assert migrated.label_id == "a:v1.1.0"
     assert migrated.parent_label_id == "a"
@@ -121,7 +122,7 @@ def test_migration_renames_and_flags_removed_ids(tmp_path: Path) -> None:
     assert {lid for lid, _ in result.needs_review} == {"e", "old"}
 
 
-def test_migration_moves_only_current_labels_of_history() -> None:
+def test_migration_moves_only_current_labels_of_history(target_ontology: Ontology) -> None:
     """이력의 현재 라벨만 이관한다 (수정·삭제된 레코드까지 이관하면 지운 라벨이 되살아나므로).
 
     v1(수정됨)·fp(삭제됨)·fp-x(삭제 레코드)는 빠지고 v2와 측정 레코드만 이관된다. 측정 표시는
@@ -135,18 +136,20 @@ def test_migration_moves_only_current_labels_of_history() -> None:
         make_label(action_payload(), label_id="fp-x", parent_label_id="fp", retracted=True),
         make_label(action_payload(), label_id="blind", measurement="blind"),
     ]
-    result = migrate_labels(history, migration, FIXED_TIME)
+    result = migrate_labels(history, migration, FIXED_TIME, target_ontology=target_ontology)
     assert [(x.label_id, x.parent_label_id) for x in result.migrated] == [
         ("v2:v1.1.0", "v2"),
         ("blind:v1.1.0", "blind"),
     ]
     assert result.migrated[1].measurement == "blind"  # 측정 레코드는 이관 후에도 운영 라벨이 아니다
     assert not any(x.retracted for x in result.migrated)
-    again = migrate_labels([*history, *result.migrated], migration, FIXED_TIME)
+    again = migrate_labels(
+        [*history, *result.migrated], migration, FIXED_TIME, target_ontology=target_ontology
+    )
     assert again.migrated == () and again.needs_review == ()
 
 
-def test_migration_renames_part_fields() -> None:
+def test_migration_renames_part_fields(target_ontology: Ontology) -> None:
     """부분 ID(parts) 이름 변경이 모든 부분 필드에 적용된다.
 
     mask의 part, 궤적의 part, 관계의 subject_part·object_part.
@@ -167,8 +170,8 @@ def test_migration_renames_part_fields() -> None:
         make_label(traj, label_id="t", stream_id="bodycam"),
         make_label(rel, label_id="r"),
     ]
-    out = {x.parent_label_id: x.payload.model_dump() for x in
-           migrate_labels(labels, migration, FIXED_TIME).migrated}  # fmt: skip
+    result = migrate_labels(labels, migration, FIXED_TIME, target_ontology=target_ontology)
+    out = {x.parent_label_id: x.payload.model_dump() for x in result.migrated}
     assert out["m"]["part"] == "cloth_side"
     assert out["t"]["part"] == "origin"
     assert (out["r"]["subject_part"], out["r"]["object_part"]) == ("cloth_side", "origin")
@@ -207,17 +210,17 @@ def test_committed_json_schemas_are_current(repo: Path) -> None:
     assert stale_schemas(repo / "schemas") == [], "`dlp schema export`로 다시 생성하세요"
 
 
-def test_derived_ids_stay_within_identifier_length() -> None:
+def test_derived_ids_stay_within_identifier_length(target_ontology: Ontology) -> None:
     """128자에 가까운 라벨 ID도 이관·삭제 레코드 ID가 계약 길이 안이고 결정적이다."""
     long_id = "s001-" + "x" * 109 + ":rabcdef123456"  # 128자
     label = make_label(action_payload(), label_id=long_id)
     migration = OntologyMigration(from_version="1.0.0", to_version="1.1.0")
-    result = migrate_labels([label], migration, FIXED_TIME)
+    result = migrate_labels([label], migration, FIXED_TIME, target_ontology=target_ontology)
     assert result.needs_review == ()
     [new] = result.migrated
     assert len(new.label_id) <= IDENTIFIER_MAX and new.label_id.endswith(":v1.1.0")
     assert new.parent_label_id == long_id
-    again = migrate_labels([label], migration, FIXED_TIME)
+    again = migrate_labels([label], migration, FIXED_TIME, target_ontology=target_ontology)
     assert again.migrated[0].label_id == new.label_id  # 멱등
 
     [gone] = retractions([label], "m:2", FIXED_TIME)

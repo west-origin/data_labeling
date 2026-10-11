@@ -31,11 +31,15 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
+import threading
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
+from dlp_review.ops.policy import WebhookPolicy
 from dlp_schema.review import ReviewStage, ReviewTask, ReviewTool
 
 
@@ -125,73 +129,190 @@ def parse_event(
     반환: `CollectRequest`, 또는 수집할 사건이 아니면 None
     (CVAT: `update:job`이면서 job 상태가 completed일 때만, Label Studio: 주석 생성·갱신일 때만).
     예외: `WebhookAuthError`(인증 실패), `ValueError`(알 수 없는 도구·JSON 오류),
-    `KeyError`(필수 필드 없음). 서버는 앞의 것은 401, 뒤 둘은 400으로 답한다.
+    `KeyError`(필수 필드 없음). 서버는 인증 실패 401, 형식 오류 400으로 답한다.
     """
     lower = {k.lower(): v for k, v in headers.items()}
     if tool == "cvat":
         expected = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
         if not hmac.compare_digest(lower.get("x-signature-256", ""), expected):
             raise WebhookAuthError("CVAT 웹훅 서명이 맞지 않습니다")
-        event: Any = json.loads(body)
-        job = event.get("job") or {}
+        event = _object(json.loads(body))
+        job = _object(event.get("job") or {})
         if event.get("event") != "update:job" or job.get("state") != "completed":
             return None
         # 상태를 바꾼 사람(sender)은 관리자일 수 있어 쓰지 않는다. 작업(job) 담당자만 본다
-        assignee = (job.get("assignee") or {}).get("username")
-        return CollectRequest(f"cvat:{job['task_id']}", assignee or None)
+        assignee = _object(job.get("assignee") or {}).get("username")
+        if assignee is not None and not isinstance(assignee, str):
+            raise ValueError("assignee.username은 문자열이어야 합니다")
+        return CollectRequest(f"cvat:{_task_id(job['task_id'])}", assignee or None)
     if tool == "label_studio":
         if not hmac.compare_digest(lower.get("x-dlp-secret", ""), secret):
             raise WebhookAuthError("Label Studio 웹훅 비밀이 맞지 않습니다")
-        event = json.loads(body)
+        event = _object(json.loads(body))
         if event.get("action") not in ("ANNOTATION_CREATED", "ANNOTATION_UPDATED"):
             return None
         # completed_by는 숫자 ID 또는 사용자 객체({"id": …})로 온다
-        user = (event.get("annotation") or {}).get("completed_by")
+        user = _object(event.get("annotation") or {}).get("completed_by")
         if isinstance(user, dict):
             user = user.get("id")
         user_id = int(user) if isinstance(user, int | str) and str(user).isdigit() else None
-        return CollectRequest(f"label_studio:{event['task']['id']}", None, user_id)
+        return CollectRequest(
+            f"label_studio:{_task_id(_object(event['task'])['id'])}", None, user_id
+        )
     raise ValueError(f"알 수 없는 도구: {tool}")
 
 
+def _object(value: Any) -> dict[str, Any]:
+    """JSON 객체만 허용한다. 인증된 요청도 입력 형식을 신뢰하지 않는다."""
+    if not isinstance(value, dict):
+        raise ValueError("JSON 객체가 필요합니다")
+    return value
+
+
+def _task_id(value: Any) -> int:
+    """도구 작업 ID는 양의 정수다 (문자열 숫자도 허용)."""
+    if isinstance(value, bool) or not isinstance(value, int | str):
+        raise ValueError("작업 ID는 양의 정수여야 합니다")
+    if isinstance(value, str) and not value.isascii():
+        raise ValueError("작업 ID는 ASCII 숫자여야 합니다")
+    result = int(value)
+    if result <= 0:
+        raise ValueError("작업 ID는 양의 정수여야 합니다")
+    return result
+
+
 def serve(
-    port: int, secret: str, on_collect: Callable[[CollectRequest], None]
+    port: int, secret: str, on_collect: Callable[[CollectRequest], None], *, policy: WebhookPolicy
 ) -> ThreadingHTTPServer:
-    """POST /webhooks/cvat, /webhooks/label_studio를 받는 서버 (호출자가 serve_forever).
+    """정책으로 연결 수·본문 크기·읽기 시간을 제한하는 웹훅 서버.
 
-    인자:
-    - port: 들을 포트 (모든 인터페이스 0.0.0.0에 묶는다).
-    - secret: 웹훅 공유 비밀.
-    - on_collect: 수집 요청마다 부를 콜백. 요청 스레드에서 동기로 불린다. 예외 처리는 콜백이
-      맡는다 (`dlp_cli.review_cmds`의 콜백이 담당자 불일치·작업 오류를 잡아 출력만 한다).
-
-    응답: 성공·무시 204, 인증 실패 401, 형식 오류 400.
+    호출자가 serve_forever/server_close를 맡는다. 콜백은 트랜잭션을 커밋한 후 반환해야 한다.
+    성공/무시 204, 인증 실패 401, 담당자 불일치 403, 경로 오류 404, 형식 오류 400/411,
+    본문 초과 413, 읽기 제한 408, 수집 실패/과부하 503(Retry-After)으로 답한다.
+    실패 응답의 재전송은 도구 설정에 달려 있다. 영속 큐와 TLS는 별도 운영 구성이다.
     """
+    if not secret:
+        raise ValueError("웹훅 비밀은 비어 있을 수 없습니다")
+    logger = logging.getLogger(__name__)
 
     class Handler(BaseHTTPRequestHandler):
-        """요청 하나를 처리한다 (ThreadingHTTPServer가 요청마다 스레드를 만든다)."""
+        def setup(self) -> None:
+            # 헤더를 읽기 전부터 유휴 제한을 적용한다.
+            self.request.settimeout(policy.request_timeout_s)
+            super().setup()
+
+        def reply(self, status: int) -> None:
+            self.send_response(status)
+            self.send_header("Content-Length", "0")
+            self.send_header("Connection", "close")
+            if status == 503:
+                self.send_header("Retry-After", str(policy.retry_after_s))
+            self.end_headers()
+            self.close_connection = True
 
         def do_POST(self) -> None:
-            """웹훅 본문을 읽어 확인하고, 수집할 사건이면 콜백을 부른 뒤 204로 답한다."""
-            tool = self.path.removeprefix("/webhooks/")
-            body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
-            try:
-                request = parse_event(tool, dict(self.headers.items()), body, secret)
-            except WebhookAuthError:
-                self.send_response(401)
-                self.end_headers()
+            if self.path not in ("/webhooks/cvat", "/webhooks/label_studio"):
+                self.reply(404)
                 return
-            except (ValueError, KeyError):
-                self.send_response(400)
-                self.end_headers()
+            # 압축/청크 전송은 지원하지 않는다. 해석이 모호한 중복 길이도 거부한다.
+            lengths = self.headers.get_all("Content-Length", [])
+            if self.headers.get("Transfer-Encoding") is not None:
+                self.reply(400)
+                return
+            if not lengths:
+                self.reply(411)
+                return
+            if len(lengths) != 1 or not lengths[0].isascii() or not lengths[0].isdigit():
+                self.reply(400)
+                return
+            length_text = lengths[0].lstrip("0") or "0"
+            # 매우 긴 숫자는 int()의 자릿수 제한에 걸리기 전에 크기 초과로 처리한다.
+            if len(length_text) > len(str(policy.max_body_bytes)):
+                self.reply(413)
+                return
+            length = int(length_text)
+            if length > policy.max_body_bytes:
+                self.reply(413)
+                return
+            try:
+                deadline = time.monotonic() + policy.request_timeout_s
+                body = bytearray()
+                while len(body) < length:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError
+                    self.connection.settimeout(remaining)
+                    chunk = self.rfile.read1(length - len(body))
+                    if not chunk:
+                        self.reply(400)
+                        return
+                    body.extend(chunk)
+                request = parse_event(
+                    self.path.removeprefix("/webhooks/"),
+                    dict(self.headers.items()),
+                    bytes(body),
+                    secret,
+                )
+            except TimeoutError:
+                self.reply(408)
+                return
+            except WebhookAuthError:
+                self.reply(401)
+                return
+            except (ValueError, KeyError, TypeError, RecursionError):
+                self.reply(400)
                 return
             if request is not None:
-                on_collect(request)
-            self.send_response(204)
-            self.end_headers()
+                try:
+                    on_collect(request)
+                except ReviewerMismatchError:
+                    logger.warning("웹훅 담당자 확인 실패: task=%s", request.task_key)
+                    self.reply(403)
+                    return
+                except Exception as exc:
+                    # 본문·비밀·내부 예외 텍스트를 HTTP 응답이나 로그에 노출하지 않는다.
+                    logger.error(
+                        "웹훅 수집 실패: task=%s error=%s", request.task_key, type(exc).__name__
+                    )
+                    self.reply(503)
+                    return
+            self.reply(204)
 
         def log_message(self, format: str, *args: object) -> None:
-            """기본 접근 로그(stderr)를 끈다."""
-            pass
+            """기본 접근 로그에는 인증 정보가 들어갈 수 있어 끈다."""
 
-    return ThreadingHTTPServer(("0.0.0.0", port), Handler)
+    class LimitedServer(ThreadingHTTPServer):
+        daemon_threads = True
+
+        def __init__(self) -> None:
+            self.slots = threading.BoundedSemaphore(policy.max_workers)
+            super().__init__((policy.bind_host, port), Handler)
+
+        def process_request(self, request: Any, client_address: Any) -> None:
+            if not self.slots.acquire(blocking=False):
+                try:
+                    request.settimeout(policy.request_timeout_s)
+                    request.sendall(
+                        (
+                            "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n"
+                            f"Retry-After: {policy.retry_after_s}\r\nConnection: close\r\n\r\n"
+                        ).encode("ascii")
+                    )
+                except OSError:
+                    pass
+                finally:
+                    self.shutdown_request(request)
+                return
+            try:
+                super().process_request(request, client_address)
+            except Exception:
+                self.slots.release()
+                raise
+
+        def process_request_thread(self, request: Any, client_address: Any) -> None:
+            try:
+                super().process_request_thread(request, client_address)
+            finally:
+                self.slots.release()
+
+    return LimitedServer()

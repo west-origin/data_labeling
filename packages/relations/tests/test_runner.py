@@ -19,6 +19,7 @@ from dlp_relations.policy import load_policy
 from dlp_relations.runner import run_relations
 from dlp_schema.db.migrate import upgrade
 from dlp_schema.db.repository import get_labels, insert_labels, insert_session, register_ontology
+from dlp_schema.db.tables import sessions
 from dlp_schema.episode import current_labels
 from dlp_schema.labels import (
     CoveragePayload,
@@ -232,6 +233,10 @@ def test_new_records_use_the_session_ontology_version(pg: sa.Engine) -> None:
     policy = load_policy(ROOT)
     with pg.begin() as conn:
         register_ontology(conn, ontology.model_copy(update={"version": "0.9.0"}))
+        # 옛 버전 세션에 라벨을 쓴 뒤 세션을 새 버전으로 전환해 기존 이력을 재현한다.
+        conn.execute(
+            sessions.update().where(sessions.c.session_id == SID).values(ontology_version="0.9.0")
+        )
         insert_labels(
             conn,
             [
@@ -242,6 +247,9 @@ def test_new_records_use_the_session_ontology_version(pg: sa.Engine) -> None:
                     ontology_version="0.9.0",
                 )
             ],
+        )
+        conn.execute(
+            sessions.update().where(sessions.c.session_id == SID).values(ontology_version="1.0.0")
         )
         assert get_labels(conn, SID)[0].ontology_version == "0.9.0"  # 시각 순 첫 라벨
         run_relations(conn, SID, ontology, policy, FIXED_TIME)

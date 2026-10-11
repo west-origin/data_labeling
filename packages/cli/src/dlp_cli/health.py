@@ -93,7 +93,7 @@ def default_checks(
 
 
 def run_check(check: ServiceCheck, timeout: float = 3.0) -> CheckResult:
-    """점검 하나를 실행한다. 예외를 던지지 않고 항상 `CheckResult`를 돌려준다.
+    """점검 하나를 실행한다. 예상한 연결·HTTP 실패는 `CheckResult`로 돌려준다.
 
     - tcp: `host:port`로 소켓 연결을 시도한다 (`rpartition`이라 IPv6 주소의 마지막 `:`를 포트로
       본다).
@@ -101,7 +101,10 @@ def run_check(check: ServiceCheck, timeout: float = 3.0) -> CheckResult:
       판정한다. 연결 실패·시간 초과는 실패.
 
     인자:
-        timeout: 연결·응답 제한 시간(초).
+        timeout: 소켓 연결·응답 대기의 제한 시간(초). 전체 점검의 절대 마감은 아니다.
+
+    Raises:
+        ValueError: 숫자가 아닌 TCP 포트 등 잘못된 대상 설정. 모든 예외를 삼키지는 않는다.
     """
     if check.kind == "tcp":
         host, _, port = check.target.rpartition(":")
@@ -123,5 +126,8 @@ def run_check(check: ServiceCheck, timeout: float = 3.0) -> CheckResult:
 
 
 def run_checks(checks: list[ServiceCheck], timeout: float = 3.0) -> list[CheckResult]:
-    """점검 목록을 순서대로 실행한다 (병렬 아님: 서비스 수 * `timeout`초까지 걸릴 수 있다)."""
+    """점검 목록을 순서대로 실행한다.
+
+    `timeout`은 각 연결에 적용하며 전체 소요 시간 상한은 아니다.
+    """
     return [run_check(c, timeout) for c in checks]

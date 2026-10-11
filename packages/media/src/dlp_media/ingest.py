@@ -10,8 +10,9 @@
 4. 센서 스트림(IMU, 장갑): 정규화된 Parquet을 만들고 스트림 uri가 이를 가리키게 한다.
 5. 세션 계약 객체를 만들고 (DB 연결이 있으면) 등록한다.
 
-같은 매니페스트로 다시 실행하면 아무것도 바꾸지 않는다. 파생 파일은 이미 있으면 다시 만들지
-않는다 (인코딩 결과가 실행마다 바이트 단위로 같다는 보장이 없기 때문이다).
+같은 매니페스트·파일로 다시 실행하면 원본 내용과 세션 등록을 중복 변경하지 않는다. 기존 파생 파일은
+다시 만들지 않는다 (인코딩 결과가 실행마다 바이트 단위로 같다는 보장이 없기 때문이다).
+파일 확인·저장소 접근은 다시 수행할 수 있고, 감사 저장소를 통한 접근 기록은 새로 남을 수 있다.
 이미 등록된 세션과는 매니페스트·미디어에서 나온 필드만 비교한다. 동기화 결과, 프라이버시·생애주기
 상태, 온톨로지 이관처럼 수집 뒤 단계가 바꾸는 필드는 다시 수집해도 충돌로 보지 않는다.
 
@@ -48,7 +49,7 @@ from sqlalchemy.exc import NoResultFound
 
 from dlp_media.glove import read_glove
 from dlp_media.imu import ImuData, extract_embedded_imu, read_imu_table
-from dlp_media.probe import probe
+from dlp_media.probe import MediaInfo, probe, require_upright
 from dlp_media.proxy import make_proxy
 from dlp_media.pts import build_pts_index
 from dlp_media.storage import ObjectStore, put_immutable
@@ -152,8 +153,8 @@ def ingest_session(
         바로 뒤에 들어간다.
 
     Raises:
-        ValueError: 바디캠이 하나가 아님, 영상에 비디오 트랙 없음, recorded_at을 정할 수 없음,
-            센서 파일 형식 오류.
+        ValueError: 바디캠이 하나가 아님, 비디오 트랙 없음/표시 회전 있음,
+            recorded_at을 정할 수 없음, 센서 파일 형식 오류.
         FileNotFoundError: 매니페스트의 파일이 없을 때.
         ImmutableObjectError: 원본 키에 다른 내용이 이미 있을 때 (원본 파일이 바뀌었다).
         SessionConflictError: DB에 같은 세션이 다른 내용으로 있을 때.
@@ -166,6 +167,16 @@ def ingest_session(
     kinds = [s.kind for s in manifest.streams]
     if kinds.count(StreamKind.BODYCAM) != 1:
         raise ValueError("매니페스트에는 바디캠 스트림이 정확히 하나 있어야 합니다")
+    # 잘못된 방향의 공간 라벨을 만들기 전에 전체 영상 입력을 확인한다. 실패 시 업로드하지 않는다.
+    video_info: dict[str, MediaInfo] = {}
+    for stream in manifest.streams:
+        if stream.kind in VIDEO_KINDS:
+            src = base_dir / stream.path
+            info = probe(src)
+            if info.video is None:
+                raise ValueError(f"{src}: 비디오 트랙이 없습니다")
+            require_upright(info)
+            video_info[stream.stream_id] = info
     result_uploaded: list[str] = []
     result_skipped: list[str] = []
 
@@ -203,7 +214,7 @@ def ingest_session(
 
         if ms.kind in VIDEO_KINDS:
             # 2) 영상: PTS 인덱스와 프록시
-            info = probe(src)
+            info = video_info[ms.stream_id]
             if info.video is None:
                 raise ValueError(f"{src}: 비디오 트랙이 없습니다")
             index = build_pts_index(src)

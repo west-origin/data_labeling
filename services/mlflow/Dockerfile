@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-# 공식 이미지에는 PostgreSQL·S3 드라이버가 없어 직접 빌드한다.
+# Python 기반 이미지에 MLflow와 PostgreSQL·S3 드라이버를 함께 설치해 빌드한다.
 # TLS를 가로채는 사내 프록시 뒤에서는 CA 묶음을 빌드 시크릿으로 넘긴다:
 #   docker build --secret id=extra_ca,src=<ca-bundle.crt> -t dlp-mlflow:3.16.1 services/mlflow
 # services/docker-compose.yml의 mlflow 서비스가 `build: ./mlflow`, 이미지 이름 dlp-mlflow:3.16.1로 빌드한다.

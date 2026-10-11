@@ -92,7 +92,8 @@ def _new_id(base: str, reviewer: str, now: datetime, content: str) -> str:
     """새 사람 레코드 ID `"<base>:r<해시 12자>"` (128자를 넘으면 뒤쪽 128자만 남긴다).
 
     base: 원래 라벨 ID(수정·삭제) 또는 `"<세션>-h"`(새로 그린 것). 해시 입력이 검수자·시각·내용이라
-    같은 결과를 다시 수집하면 같은 ID가 나온다 (중복 삽입 방지·멱등).
+    base·검수자·시각·내용이 모두 같아야 같은 ID가 나온다. 수집 시각이 달라지면 ID도 달라진다.
+    수집 재시도의 중복 방지는 이 함수가 아니라 저장된 작업의 COLLECTED 상태로 처리한다.
     """
     digest = hashlib.sha256(f"{base}|{reviewer}|{now.isoformat()}|{content}".encode()).hexdigest()
     return f"{base}:r{digest[:12]}"[-128:]

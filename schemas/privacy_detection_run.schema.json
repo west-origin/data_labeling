@@ -1,0 +1,44 @@
+{
+  "additionalProperties": false,
+  "description": "완료한 프라이버시 탐지 기록 (0건 포함, 추가 전용. ADR 0032).\n\nevent_id는 검수 작업·배정의 완료 세대다. at은 실제 추론 완료(또는 복구 확인) 시각이다.\nmodel_versions는 이 세대의 활성 모델 전체이며 과거 실행 버전들의 합집합이 아니다.\n구버전의 외부 0건 표시를 복구할 때도 새 기록을 남겨 이후 전수 검수를 요구한다.",
+  "properties": {
+    "at": {
+      "format": "date-time",
+      "title": "At",
+      "type": "string"
+    },
+    "event_id": {
+      "minimum": 1,
+      "title": "Event Id",
+      "type": "integer"
+    },
+    "model_versions": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "minItems": 1,
+      "title": "Model Versions",
+      "type": "array"
+    },
+    "session_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Session Id",
+      "type": "string"
+    },
+    "stream_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Stream Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "event_id",
+    "session_id",
+    "stream_id",
+    "model_versions",
+    "at"
+  ],
+  "title": "PrivacyDetectionRun",
+  "type": "object"
+}

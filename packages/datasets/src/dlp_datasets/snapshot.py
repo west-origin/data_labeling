@@ -42,6 +42,10 @@ class SnapshotError(RuntimeError):
     """lakeFS 요청 실패 (저장소 생성·업로드·커밋·읽기)."""
 
 
+class SnapshotNotFoundError(SnapshotError, FileNotFoundError):
+    """스냅샷 객체가 없다 (HTTP 404). 인증·서버·통신 오류와 구분한다."""
+
+
 class LakeFSSnapshotStore:
     """lakeFS REST API(/api/v1)로 스냅샷을 커밋·읽는다."""
 
@@ -123,12 +127,15 @@ class LakeFSSnapshotStore:
         """커밋 ID 참조(refs/<커밋>)로 파일을 읽어 `dest`에 쓴다.
 
         Raises:
-            SnapshotError: 200이 아닐 때 (없는 파일 포함).
+            SnapshotNotFoundError: 객체가 없을 때 (404).
+            SnapshotError: 그 밖의 HTTP 오류. 통신 오류는 httpx 예외를 그대로 전파한다.
         """
         repo, commit, prefix = snapshot_uri.removeprefix("lakefs://").split("/", 2)
         resp = self.http.get(
             f"/repositories/{repo}/refs/{commit}/objects", params={"path": f"{prefix}/{path}"}
         )
+        if resp.status_code == 404:
+            raise SnapshotNotFoundError(f"lakeFS 파일이 없습니다: {path}")
         if resp.status_code != 200:
             raise SnapshotError(f"lakeFS 읽기 실패 {path}: {resp.status_code}")
         dest.write_bytes(resp.content)

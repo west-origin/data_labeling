@@ -6,7 +6,15 @@
 # 키를 더하거나 이름을 바꾸면 dlp_review/ops/policy.py 모델도 함께 바꿔야 한다.
 
 # 정책 파일 형식 버전 (정수). 형식이 바뀔 때만 올린다.
-version: 1
+version: 2
+
+# 웹훅 HTTP 경계. 운영에서는 TLS·요청 속도 제한을 제공하는 게이트웨이 뒤에서 실행한다.
+webhook:
+  bind_host: "0.0.0.0"                # 도구 컨테이너의 연결을 허용; 방화벽으로 도구/게이트웨이만 허용
+  max_body_bytes: 1048576              # 본문 최대 1 MiB (초과 요청은 413)
+  request_timeout_s: 10                # 헤더의 유휴 제한 및 본문 전체 읽기 제한 (초)
+  max_workers: 16                      # 연결 처리 스레드 상한 (초과 요청은 503)
+  retry_after_s: 30                    # 일시 실패·과부하의 Retry-After (초)
 
 # 검수 화면용 매체 (dlp_review.watermark, dlp_review.timeseries)
 media:
@@ -92,7 +100,8 @@ reviewers:
 
 # CVAT 계정 연결 (ADR 0024). 작업을 만들면 담당자의 CVAT 계정에 작업(job)을 배정하고, 웹훅은 job 담당자가
 # 이 연결과 맞을 때만 수집한다. 블러 검수 담당자는 여기 없으면 작업을 만들지 않는다 (원본을 올리기 전에 멈춘다).
-# 검수자 CVAT 계정은 관리자가 아닌 일반 사용자(user/worker 그룹)로 만든다: 일반 사용자는 배정받은 job만 본다.
+# 검수자 CVAT 계정은 관리자가 아닌 일반 사용자(user/worker 그룹)로 만든다.
+# 배정만으로 열람 범위를 보장하지 않는다. 프로젝트·조직 권한까지 실제 계정으로 점검한다.
 cvat:
   # dlp 검수자 ID → CVAT 사용자 이름. 한 CVAT 계정을 두 검수자에게 줄 수 없다 (로드 시 검증).
   users: {}                           # 예: {rev01: cvat-rev01}

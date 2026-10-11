@@ -34,6 +34,7 @@ from pathlib import Path
 
 import sqlalchemy as sa
 
+from dlp_cli.ontology_access import session_ontology
 from dlp_cli.raw_access import raw_store
 from dlp_cli.schema_cmds import database_url
 from dlp_media.storage import store_from_spec
@@ -44,7 +45,7 @@ from dlp_prelabel.adapters.stubs import UNAVAILABLE
 from dlp_prelabel.lift3d import DepthLifter
 from dlp_prelabel.policy import load_policy
 from dlp_prelabel.runner import CONTACT_STEP, run_prelabel
-from dlp_schema import load_config, load_ontology, repo_root
+from dlp_schema import load_config, repo_root
 from dlp_schema.db.repository import list_model_versions
 from dlp_schema.lineage import ModelStatus
 from dlp_schema.predictor import ModelUnavailableError, Predictor
@@ -67,74 +68,94 @@ def cmd_run(args: argparse.Namespace) -> int:
             각 어댑터 클래스의 `name`과 비교한다.
 
     흐름:
-    1. 기본 어댑터를 만든다. 가중치가 없으면(`ModelUnavailableError`) `[모델 없음]`만 출력하고 뺀다.
+    1. 기본 어댑터를 만든다. 가중치가 없으면 `[모델 없음]`으로 알린다.
        아직 실제 모델이 없는 기능(`UNAVAILABLE`)은 `[미연동]`으로 알린다.
     2. 배포된 재학습 모델을 불러 `deployed.apply`로 기본 어댑터를 바꾼다.
-    3. `run_prelabel`이 스트림·모델마다 라벨을 쓰고 요약을 돌려준다.
+    3. 선택한 모델을 준비하지 못하면 쓰기 전에 실패한다. 부분 실행은 --allow-missing-models로만
+       허용한다. `run_prelabel`이 스트림·모델마다 라벨을 쓰고 요약을 돌려준다.
 
-    반환: 0. 부작용: 한 트랜잭션에서 `label_records` INSERT(철회 레코드 포함)·세션 생애주기 갱신,
-    원본 버킷 읽기(감사 기록). 온톨로지는 `config/ontology/v1`을 고정으로 읽는다 (리팩토링 후보).
+    반환: 성공 0, 선택한 모델 미준비 1.
+    부작용: 한 트랜잭션에서 `label_records` INSERT(철회 레코드 포함)·세션 생애주기 갱신,
+    원본 버킷 읽기(감사 기록). 온톨로지는 세션 버전의 DB 등록 사전을 읽는다.
     """
     root = repo_root()
     policy = load_policy(root)
-    ontology = load_ontology(root / "config/ontology/v1")
+    ontology = session_ontology(args.url, args.session_id)
     now = datetime.now(UTC)
     predictors: list[Predictor] = []
+    missing: dict[str, str] = {}
     for cls in (MediaPipeHands, RtmPose, MediaPipeObjects, OwlObjects):
         if cls.name in args.skip:
             continue
         try:
             predictors.append(cls(root, policy, ontology_version=ontology.version, now=now))
         except ModelUnavailableError as exc:
+            missing[cls.name] = str(exc)
             print(f"[모델 없음] {cls.name}: {exc}")
     lifter: DepthLifter | None = None
     if DepthLifter.name not in args.skip:
         try:
             lifter = DepthLifter(root, policy, now=now)
         except ModelUnavailableError as exc:
+            missing[DepthLifter.name] = str(exc)
             print(f"[모델 없음] {DepthLifter.name}: {exc}")
     for p in UNAVAILABLE:
         print(f"[미연동] {p.name}: {p.reason}")  # TODO(real-model) 표시가 붙은 기능
     buckets = load_config(root / "config/defaults.yaml").buckets
     raw = raw_store(args.store, args.url, "prelabel.run")
     engine = sa.create_engine(database_url(args.url))
-    with engine.begin() as conn, tempfile.TemporaryDirectory() as tmp:
-        # 게이트를 통과해 배포된 재학습 모델이 있으면 정책의 replaces 기본 어댑터 대신 쓴다
-        deployed = deployed_predictors(
-            conn,
-            store_from_spec(args.store, buckets.mlflow),
-            load_training_policy(root),
-            "prelabel",
-            LoadContext(now=now, ontology_version=ontology.version),
-            Path(tmp),
-        )
-        for note in deployed.notes:
-            print(f"[재학습 모델] {note}")
-        replaced = set(deployed.replaces)
-        # 배포된 재학습 접촉 모델(hand_state를 낸다)을 실제로 불러왔으면 기본 접촉 단계를 대신한다.
-        # 둘 다 돌면 같은 접촉이 두 번 남는다 (training.yaml contact.replaces에 contact가 있으면
-        # deployed.replaces로도 들어온다)
-        contact_models = list_model_versions(conn, CONTACT_TASK, ModelStatus.DEPLOYED)
-        loaded = {p.version for p in deployed.predictors}
-        if contact_models and contact_models[-1].model_version in loaded:
-            replaced.add(CONTACT_STEP)
-            print(f"[재학습 모델] {CONTACT_TASK}: 기본 접촉 단계(장갑·영상 휴리스틱)를 대신합니다")
-        s = run_prelabel(
-            conn,
-            args.session_id,
-            raw,
-            deployed.apply(predictors),
-            policy,
-            ontology,
-            now,
-            lifter=lifter,
-            replaced=replaced,
-            # 접촉 단계가 쓰는 장갑 압력 채널 (접촉 모델 버전에 들어간다)
-            pressure_prefixes=load_sync_policy(
-                root / "config/policies/sync.yaml"
-            ).glove.pressure_prefixes,
-        )
-    engine.dispose()
+    try:
+        with engine.begin() as conn, tempfile.TemporaryDirectory() as tmp:
+            # 게이트를 통과해 배포된 재학습 모델이 있으면 정책의 replaces 기본 어댑터 대신 쓴다
+            deployed = deployed_predictors(
+                conn,
+                store_from_spec(args.store, buckets.mlflow),
+                load_training_policy(root),
+                "prelabel",
+                LoadContext(now=now, ontology_version=ontology.version),
+                Path(tmp),
+            )
+            for note in deployed.notes:
+                print(f"[재학습 모델] {note}")
+            replaced = set(deployed.replaces)
+            unresolved = sorted(set(missing) - replaced)
+            if not getattr(args, "allow_missing_models", False) and (
+                unresolved or (not deployed.apply(predictors) and lifter is None)
+            ):
+                print(
+                    "[실행 거부] 선택한 모델을 준비하지 못했습니다: "
+                    + (", ".join(unresolved) or "선택한 모델 없음")
+                    + ". 가중치를 설치하거나 --skip으로 단계를 명시적으로 제외하세요. "
+                    "부분 실행은 --allow-missing-models로만 허용합니다."
+                )
+                return 1
+            # 배포된 재학습 접촉 모델(hand_state)을 불러왔으면 기본 접촉 단계를 대신한다.
+            # 둘 다 돌면 같은 접촉이 두 번 남는다 (training.yaml contact.replaces에 contact가 있으면
+            # deployed.replaces로도 들어온다)
+            contact_models = list_model_versions(conn, CONTACT_TASK, ModelStatus.DEPLOYED)
+            loaded = {p.version for p in deployed.predictors}
+            if contact_models and contact_models[-1].model_version in loaded:
+                replaced.add(CONTACT_STEP)
+                print(
+                    f"[재학습 모델] {CONTACT_TASK}: 기본 접촉 단계(장갑·영상 휴리스틱)를 대신합니다"
+                )
+            s = run_prelabel(
+                conn,
+                args.session_id,
+                raw,
+                deployed.apply(predictors),
+                policy,
+                ontology,
+                now,
+                lifter=lifter,
+                replaced=replaced,
+                # 접촉 단계가 쓰는 장갑 압력 채널 (접촉 모델 버전에 들어간다)
+                pressure_prefixes=load_sync_policy(
+                    root / "config/policies/sync.yaml"
+                ).glove.pressure_prefixes,
+            )
+    finally:
+        engine.dispose()
     for key, n in s.produced.items():
         print(f"{key}: 라벨 {n}개")
     for key in s.skipped:
@@ -157,5 +178,10 @@ def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
         default=[],
         choices=["hands", "body", "objects", "tools", "depth3d"],
         help="건너뛸 단계 (여러 번 쓸 수 있다). CPU에서 tools(OWLv2)는 프레임당 수 초가 걸린다",
+    )
+    run.add_argument(
+        "--allow-missing-models",
+        action="store_true",
+        help="준비되지 않은 모델을 제외한 부분 실행 허용 (기본은 쓰기 전에 실패)",
     )
     run.set_defaults(func=cmd_run)

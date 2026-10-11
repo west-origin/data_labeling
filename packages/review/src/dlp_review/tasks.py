@@ -33,6 +33,9 @@ WP6, ADR 0006·0020·0023·0024. 진입점: `dlp review create <세션>`(직접 
 - 라벨링 버킷: `sessions/<세션>/review/<담당자>/<스트림>.mp4`(워터마크 영상),
   `sessions/<세션>/review/timeseries.csv`(시계열).
 원본 접근은 `setup.raw`가 감사 저장소(`dlp_cli.raw_access.raw_store`)일 때 기록된다 (ADR 0020).
+
+DB 트랜잭션은 호출자가 관리한다. DB 롤백으로 CVAT·Label Studio 작업이나 저장소 사본이 삭제되지는
+않는다. 프라이버시 작업 생성은 세션 행을 잠근 상태로 원본 접근·업로드·도구 호출까지 수행한다.
 """
 
 from __future__ import annotations
@@ -63,6 +66,7 @@ from dlp_privacy.runner import (
 from dlp_review.clients import CvatClient, LabelStudioClient
 from dlp_review.cvat import CvatSchema, Scale, label_spec, to_cvat_tracks
 from dlp_review.labelstudio import LS_KINDS, label_config, to_ls_results
+from dlp_review.ontology_projects import ontology_project
 from dlp_review.ops.policy import CvatPolicy, MediaPolicy
 from dlp_review.ops.policy import load_policy as load_ops_policy
 from dlp_review.roles import check_privacy_reviewers, check_stage_uris
@@ -73,8 +77,11 @@ from dlp_schema.db.repository import (
     get_assignment,
     get_labels,
     get_session,
+    get_session_ontology,
     insert_review_task,
+    latest_privacy_detection,
     list_review_tasks,
+    lock_session,
 )
 from dlp_schema.db.tables import review_assignments
 from dlp_schema.episode import current_labels
@@ -109,8 +116,8 @@ class ReviewSetup:
     # 라벨링 버킷 저장소 (블러본·워터마크 영상·시계열 CSV)
     labeling: ObjectStore
     labeling_reader: S3Store  # 라벨러 자격 증명. 서명 URL용
-    # 라벨 이름·블러 대상·객체 클래스 목록의 출처
-    ontology: Ontology
+    # 구 호출자 호환용 필드. 라벨 이름·블러 대상·객체 클래스의 출처는 DB 등록 사전이다.
+    ontology: Ontology | None  # 구 호출자 호환용. 실제 작업의 사전은 DB 세션 버전으로 읽는다.
     # CVAT 클라이언트 (없으면 CVAT 작업을 만들지 않는다)
     cvat: CvatClient | None = None
     # Label Studio 클라이언트 (없으면 Label Studio 작업을 만들지 않는다)
@@ -332,11 +339,14 @@ def create_privacy_tasks(
     """
     # 원본을 읽기 전에 권한부터 확인한다 (권한이 없으면 감사 기록도 남지 않는다)
     check_privacy_reviewers([assignee], privacy_reviewers)
+    # 탐지·수집과 같은 순서로 세션을 먼저 잠가, 보낸 라벨과 완료 세대를 함께 고정한다.
+    lock_session(conn, session_id)
     pick = select or default_selector(conn, session_id)
     if setup.cvat is None:
         raise TaskError("CVAT 클라이언트가 없습니다")
     cvat_conf = setup.cvat_policy()
-    # 담당자의 CVAT 계정에 배정해야 그 사람만 본다. 연결이 없으면 원본을 올리기 전에 멈춘다
+    # 담당자 계정에 배정한다. 원본 열람 범위는 CVAT 프로젝트 역할·관리자 권한에도 좌우된다.
+    # 계정 연결이 없으면 원본을 올리기 전에 멈춘다.
     cvat_user = cvat_user_id(setup.cvat, cvat_conf.users, assignee)
     if cvat_user is None:
         raise TaskError(
@@ -346,7 +356,10 @@ def create_privacy_tasks(
     session = get_session(conn, session_id)
     if session.privacy_state is PrivacyState.PENDING:
         raise TaskError(f"{session_id}: 블러 자동 탐지를 먼저 실행하세요 (dlp privacy detect)")
-    pid, schema = _cvat_project(setup.cvat, PRIVACY_PROJECT, list(setup.ontology.privacy_targets))
+    ontology = get_session_ontology(conn, session_id)
+    pid, schema = _cvat_project(
+        setup.cvat, ontology_project(PRIVACY_PROJECT, ontology), list(ontology.privacy_targets)
+    )
     out: list[ReviewTask] = []
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp)
@@ -359,6 +372,7 @@ def create_privacy_tasks(
             # 블러 라벨(원본 화소) → 프록시 화면 화소 비율
             scale = label_scale(setup.raw, stream, video, work)
             labels = pick(stream.stream_id, ("blur_track",))
+            run = latest_privacy_detection(conn, session_id, stream.stream_id)
             segments = read_review_segments(setup.raw, session_id, stream.stream_id, work)
             grant(setup.raw, key, assignee)  # 원본을 검수자에게 보여 준다 (올리기 전에 기록)
             tid = setup.cvat.create_task(f"{session_id}/{stream.stream_id}/privacy", pid, video)
@@ -373,6 +387,7 @@ def create_privacy_tasks(
                 media_uri=setup.raw.uri(key), label_kinds=("blur_track",), created_at=now,
                 mode=mode, assignment_id=assignment_id, assignee=assignee,
                 sent_label_ids=tuple(x.label_id for x in labels),
+                privacy_detection_id=run.event_id if run else None,
             )  # fmt: skip
             insert_review_task(conn, task)
             out.append(task)
@@ -448,14 +463,16 @@ def create_labeling_tasks(
     `RawAccessError`(작업 URI에 원본 버킷이 섞임), `clients.ToolError`.
     부작용: 라벨링 버킷 쓰기(워터마크 영상, 시계열 CSV), 원본 버킷 읽기(장갑·IMU Parquet,
     감사 기록), 도구 작업 생성, DB 삽입.
-    주의: Label Studio 작업은 바디캠 스트림마다 하나씩 생긴다. 바디캠이 여럿이면 같은 시간 라벨로
-    작업이 여러 개 생기고 시계열 CSV 키가 같아 덮어쓴다 (배정 경로는 기준 스트림 하나만 넘긴다).
+    주의: Label Studio 시간 작업은 세션 계약의 단일 바디캠 스트림에 만든다.
+    직접 호출로 반복 생성하면 기존 도구 작업을 재사용하지 않으며
+    같은 시계열 CSV 키를 다시 쓸 수 있다.
     """
     pick = select or default_selector(conn, session_id)
     use_cvat = setup.cvat is not None and (tools is None or ReviewTool.CVAT in tools)
     use_ls = setup.label_studio is not None and (tools is None or ReviewTool.LABEL_STUDIO in tools)
     session = get_session(conn, session_id)
     media = setup.media_policy()
+    ontology = get_session_ontology(conn, session_id)
     if session.privacy_state is not PrivacyState.APPROVED:
         raise TaskError(f"{session_id}: 프라이버시 승인 전에는 작업 라벨 검수를 만들 수 없습니다")
     raw_bucket = setup.raw.bucket
@@ -493,8 +510,10 @@ def create_labeling_tasks(
                 labels = pick(stream.stream_id, ("box_track", "keypoint_track"))
                 # 프로젝트 라벨: 온톨로지 객체 클래스 + 키포인트 골격
                 # (kp_<골격>, cvat.cvat_label_name)
-                names = [*setup.ontology.objects, "kp_hand21", "kp_coco17", "kp_wholebody133"]
-                pid, schema = _cvat_project(setup.cvat, SPATIAL_PROJECT, names)
+                names = [*ontology.objects, "kp_hand21", "kp_coco17", "kp_wholebody133"]
+                pid, schema = _cvat_project(
+                    setup.cvat, ontology_project(SPATIAL_PROJECT, ontology), names
+                )
                 cvat_user = cvat_user_id(setup.cvat, setup.cvat_policy().users, assignee)
                 tid = setup.cvat.create_task(
                     f"{session_id}/{stream.stream_id}/{assignee}", pid, marked
@@ -523,12 +542,13 @@ def create_labeling_tasks(
                 # 시간 라벨은 세션 단위 (스트림 None)
                 labels = pick(None, LS_KINDS)
                 ls = setup.label_studio
-                project = ls.find_project(TEMPORAL_PROJECT)
+                project_name = ontology_project(TEMPORAL_PROJECT, ontology)
+                project = ls.find_project(project_name)
                 if project:
                     lpid = int(project["id"])
                     ls.ensure_prelabel_settings(lpid)  # 예측 방식 이전에 만든 프로젝트
                 else:
-                    lpid = ls.create_project(TEMPORAL_PROJECT, label_config(setup.ontology))
+                    lpid = ls.create_project(project_name, label_config(ontology))
                 # 라벨러가 여는 URL은 라벨러 자격 증명(라벨링 버킷 읽기 전용)으로 서명한다
                 data = {
                     "video": setup.labeling_reader.presign(vkey),

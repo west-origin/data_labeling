@@ -5,7 +5,8 @@
     `Annotated` 별칭으로 한곳에 모은다 (WP1, ADR 0002).
 
 시간 단위 (ADR 0019)
-    모든 시각은 정수 ms다. 다만 기준이 둘이다.
+    이 모듈의 `Ms` 계약은 정수 ms다. 동기화 오프셋·배율 계산 등에는 실수 값도 사용한다.
+    라벨 시각의 기준은 둘이다.
     - 시간 구간 라벨(행동·공백·상위 구간·손 상태·객체 상태·이벤트·관계·커버리지·설명)과 세션 길이는
       마스터 타임라인(= 기준 스트림인 바디캠 시계) ms.
     - 공간 라벨(박스·마스크·키포인트·블러 트랙, 3D 궤적)의 키프레임과 그 라벨의 구간은 그 스트림
@@ -53,7 +54,8 @@ def derived_id(base: str, suffix: str) -> str:
     """기존 ID에 접미사를 붙인 파생 ID (`<base>:<suffix>`). Identifier 길이(128자)를 넘으면
     base 앞부분 + base의 해시로 줄인다: `<base 앞부분>:h<sha256 16자>:<suffix>`.
 
-    결정적이라 같은 입력은 같은 ID가 된다 (멱등). 줄인 ID도 해시로 원래 ID와 1:1이다.
+    결정적이라 같은 입력은 같은 ID가 된다 (멱등). 축약 시 원래 ID의 SHA-256 앞 64비트를 넣어
+    충돌 가능성을 낮추지만, 유한 길이 해시이므로 서로 다른 입력의 1:1 대응을 보장하지 않는다.
 
     쓰임: 온톨로지 이관 레코드(`<원래>:v<새 버전>`, `migration.migrate_labels`),
     모델 버전 교체 때의 삭제 레코드(`<원래>:retracted`, `episode.retractions`).
@@ -72,7 +74,7 @@ def derived_id(base: str, suffix: str) -> str:
     full = f"{base}:{suffix}"
     if len(full) <= IDENTIFIER_MAX:
         return full
-    # base 전체의 해시를 넣어, 앞부분만 같은 서로 다른 base가 같은 ID로 겹치지 않게 한다.
+    # base 전체의 해시를 넣어, 앞부분만 같은 서로 다른 base의 충돌 가능성을 낮춘다.
     digest = hashlib.sha256(base.encode()).hexdigest()[:16]
     tail = f":h{digest}:{suffix}"
     keep = IDENTIFIER_MAX - len(tail)
@@ -86,6 +88,7 @@ class Contract(BaseModel):
 
     # extra="forbid": 오타·알 수 없는 필드를 검증 오류로 낸다 (계약 표류 방지).
     # frozen=True: 생성 후 속성 대입을 막는다. 값을 바꾼 사본은 `model_copy(update=...)`로 만든다.
+    #   중첩 dict/list까지 동결하지는 않는다. 불변 이력은 저장 경로와 DB 트리거도 함께 지킨다.
     #   주의: `model_copy(update=...)`는 검증을 다시 하지 않는다. 검증이 필요하면 `model_validate`.
     # use_enum_values=False: 열거형 필드는 문자열이 아니라 열거형 멤버로 보관한다 (`is` 비교 가능).
     # 하위 클래스의 클래스 docstring은 생성 JSON Schema의 description이 되므로 함부로 바꾸지 않는다.

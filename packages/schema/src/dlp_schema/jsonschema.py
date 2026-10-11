@@ -35,13 +35,14 @@ from dlp_schema.migration import OntologyMigration
 from dlp_schema.ontology import Ontology
 from dlp_schema.ops import PrivacyAuditRecord, RawAccessEvent, RetentionDecision, ReviewWork
 from dlp_schema.review import ReviewAssignment, ReviewTask
-from dlp_schema.session import LifecycleEvent, Session
+from dlp_schema.session import LifecycleEvent, PrivacyDetectionRun, Session
 
 # 생성할 스키마 목록. 키가 파일 이름이 된다 (`<키>.schema.json`).
 # 새 최상위 계약을 추가하면 여기에 등록하고 `make schemas`로 파일을 만든다.
 CONTRACTS: dict[str, type[BaseModel]] = {
     "session": Session,
     "lifecycle_event": LifecycleEvent,
+    "privacy_detection_run": PrivacyDetectionRun,
     "label_record": LabelRecord,
     "episode_graph": EpisodeGraph,
     "dataset_version": DatasetVersion,

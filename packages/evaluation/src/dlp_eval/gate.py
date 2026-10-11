@@ -39,7 +39,7 @@ class TaskDecision:
 
 @dataclass
 class GateDecision:
-    """전체 판정. 모든 과제가 통과해야 통과한다."""
+    """전체 판정. 평가 과제가 하나 이상이고 모든 과제가 통과해야 통과한다."""
 
     passed: bool
     tasks: dict[str, TaskDecision]
@@ -103,7 +103,8 @@ def decide(
     """후보 리포트를 기존 리포트(없으면 첫 배포 기준)와 비교해 배포 여부를 정한다.
 
     Args:
-        candidate: 후보 모델의 골든셋 리포트. 판정 대상 과제는 `candidate.overall`에 있는 과제다.
+        candidate: 후보 모델의 골든셋 리포트. 판정 대상은 요청 모델과 평가 과제의 합집합이다.
+            요청 과제 누락은 실패다.
         baseline: 기존(배포 중이거나 대신할 기본 어댑터) 모델의 리포트. None이면 모든 과제가 첫
             배포다. 기존 리포트에 그 과제가 없어도 그 과제는 첫 배포 기준으로 본다.
         policy: 평가 정책 (`gate` 절).
@@ -115,7 +116,12 @@ def decide(
     첫 배포에서 주 지표가 NaN이면 비교가 거짓이라 실패한다.
     """
     tasks: dict[str, TaskDecision] = {}
-    for task, cand in candidate.overall.items():
+    # 리포트의 요청 모델 목록을 포함해, 정답 부재로 빠진 과제도 실패로 남긴다.
+    for task in sorted(candidate.overall.keys() | candidate.model_versions.keys()):
+        cand = candidate.overall.get(task)
+        if cand is None:
+            tasks[task] = TaskDecision(task, False, ["미평가: 요청 과제의 평가 가능한 정답이 없음"])
+            continue
         rule = policy.gate.get(task)  # type: ignore[call-overload]
         decision = TaskDecision(task, True)
         tasks[task] = decision
@@ -145,4 +151,4 @@ def decide(
                 if c_sub is not None and b_sub is not None:
                     _compare(rule, c_sub, b_sub, group, decision, primary=False)
         decision.passed = not decision.reasons
-    return GateDecision(all(d.passed for d in tasks.values()), tasks)
+    return GateDecision(bool(tasks) and all(d.passed for d in tasks.values()), tasks)

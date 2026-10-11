@@ -18,7 +18,7 @@ from pathlib import Path
 import av
 from av.video.frame import PictureType
 
-from dlp_media.probe import to_fraction
+from dlp_media.probe import probe, require_upright, to_fraction
 from dlp_schema.config import ProxyConfig
 
 
@@ -47,6 +47,8 @@ def make_proxy(src: Path, dst: Path, settings: ProxyConfig) -> None:
         settings: 프록시 설정 (높이 상한, CRF, 키프레임 간격 ms).
     """
     max_height, crf, keyframe_ms = settings.max_height, settings.crf, settings.keyframe_ms
+    # 원본과 프록시의 공간 좌표가 달라지는 입력은 출력 파일을 열기 전에 거부한다.
+    require_upright(probe(src))
     with av.open(str(src)) as inp, av.open(str(dst), "w") as out:
         vin = inp.streams.video[0]
         width, height = proxy_size(vin.codec_context.width, vin.codec_context.height, max_height)

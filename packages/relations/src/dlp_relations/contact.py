@@ -18,13 +18,14 @@ from numpy.typing import NDArray
 from dlp_relations.geometry import SurfaceFrame, interpolate
 from dlp_relations.policy import ToolSurfacePolicy
 from dlp_schema.labels import Trajectory3DPayload
+from dlp_schema.session import Stream
 
 
 @dataclass(frozen=True)
 class Track3D:
     """시각 순으로 정렬한 3D 궤적 (계산용).
 
-    entity_id, part: 개체·부위. times: (N,) int64 ms. xyz: (N, 3) m (궤적의 좌표계 그대로).
+    entity_id, part: 개체·부위. times: (N,) int64 마스터 ms. xyz: (N, 3) m (궤적의 좌표계 그대로).
     """
 
     entity_id: str
@@ -33,9 +34,18 @@ class Track3D:
     xyz: NDArray[np.float64]  # (N, 3)
 
     @classmethod
-    def from_payload(cls, p: Trajectory3DPayload) -> Track3D:
-        """trajectory3d 페이로드 → 시각 순 정렬 (같은 시각은 원래 순서 유지)."""
-        times = np.array([s.t_ms for s in p.samples], dtype=np.int64)
+    def from_payload(cls, p: Trajectory3DPayload, stream: Stream | None = None) -> Track3D:
+        """스트림 PTS를 마스터 ms로 변환·반올림해 시각 순 정렬한다.
+
+        stream 생략은 이미 마스터 시각인 입력용이다. 원본 페이로드는 바꾸지 않는다.
+        """
+        times = np.array(
+            [
+                round(stream.to_master_ms(s.t_ms)) if stream is not None else s.t_ms
+                for s in p.samples
+            ],
+            dtype=np.int64,
+        )
         xyz = np.array([[s.x, s.y, s.z] for s in p.samples], dtype=np.float64)
         order = np.argsort(times, kind="stable")
         return cls(p.entity_id, p.part, times[order], xyz[order])
@@ -93,7 +103,7 @@ def tool_surface_contacts(
     1. 같은 시각 표면 좌표계를 만들고(꼭짓점 보간) 작용부를 (a, b, 거리)로 바꾼다.
     2. 표면 안·쥐는 중(`require_grasp`)·거리 ≤ on이면 접촉 시작. 접촉 중 표면 밖·안 쥠·거리 > off면
        끝. 끝 시각은 마지막으로 거리 ≤ on이었던 샘플이다.
-    3. 구간 밖(on 위) 샘플 좌표는 커버리지에서 뺀다.
+    3. 시작·마지막 on 샘플로 정한 시간 구간 밖의 좌표는 뺀다. 구간 내부의 on~off 샘플은 남긴다.
     4. merge_gap_ms 이하로 끊긴 구간을 잇고, min_duration_ms 미만 구간은 버린다.
 
     Args:
@@ -135,7 +145,7 @@ def tool_surface_contacts(
     if current is not None and last_on is not None:
         current.end_ms = last_on
         runs.append(current)
-    for r in runs:  # 경계 밖(on 문턱 위) 샘플 좌표는 커버리지에서 뺀다 (sizes는 그대로)
+    for r in runs:  # 시작·끝 시각 밖 샘플 좌표만 뺀다. 구간 안의 on~off 샘플과 sizes는 남긴다.
         r.points = [x for x in r.points if r.start_ms <= x[0] <= r.end_ms]
 
     # merge_gap_ms 이하로 끊긴 구간을 잇는다 (커버리지 점·크기도 합친다)

@@ -104,6 +104,20 @@
       "$ref": "#/$defs/ReviewMode",
       "default": "standard"
     },
+    "privacy_detection_id": {
+      "anyOf": [
+        {
+          "minimum": 1,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "작업 생성 시 완료된 탐지 세대. 구 작업·일반 검수는 None",
+      "title": "Privacy Detection Id"
+    },
     "sent_label_ids": {
       "anyOf": [
         {

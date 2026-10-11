@@ -32,8 +32,11 @@ services:
       - "${DLP_POSTGRES_PORT:-5432}:5432"
     healthcheck:
       <<: *healthcheck
-      # 마지막에 만드는 mlflow DB로 확인한다 (init 스크립트가 끝나야 의존 서비스가 뜬다)
-      test: ["CMD-SHELL", "pg_isready -U ${DLP_POSTGRES_USER} -d mlflow"]
+      # TCP의 최종 서버에서 실제 DB 쿼리가 성공해야 준비된 것이다.
+      # pg_isready는 없는 DB에도 성공하며, 소켓은 초기화 중 임시 서버에 연결될 수 있다.
+      test:
+        - CMD-SHELL
+        - 'PGPASSWORD="$${POSTGRES_PASSWORD}" psql -h 127.0.0.1 -U "$${POSTGRES_USER}" -d mlflow -v ON_ERROR_STOP=1 -c "SELECT 1" >/dev/null'
 
   # SeaweedFS 단일 노드 S3 (마스터+볼륨+파일러+S3). 자격 증명 파일은 entrypoint가 환경 변수로 만든다
   # (관리자 = 서비스 계정, labeler = 라벨링 버킷 읽기 전용)

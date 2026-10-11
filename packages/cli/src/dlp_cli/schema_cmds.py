@@ -26,11 +26,19 @@ from pathlib import Path
 
 import sqlalchemy as sa
 from pydantic import ValidationError
+from sqlalchemy.exc import NoResultFound
 
 from dlp_schema import find_ontology_dir, load_ontology, repo_root
 from dlp_schema.db.migrate import upgrade
-from dlp_schema.db.repository import register_ontology
+from dlp_schema.db.repository import (
+    get_labels,
+    get_session_ontology,
+    list_session_ids,
+    register_ontology,
+)
+from dlp_schema.episode import current_labels
 from dlp_schema.jsonschema import stale_schemas, write_schemas
+from dlp_schema.validation import check_label, check_label_set
 
 # 개발용 docker compose PostgreSQL(services/docker-compose.yml, .env.example 기본값)의 접속 URL.
 # 운영에서는 반드시 `DLP_DATABASE_URL` 또는 `--url`로 덮어쓴다 (비밀번호가 개발용이다).
@@ -138,6 +146,34 @@ def cmd_ontology_register(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ontology_audit(args: argparse.Namespace) -> int:
+    """기존 운영 라벨을 현재 세션 사전과 대조한다. 이력·사전·DB를 수정하지 않는다."""
+    engine = sa.create_engine(database_url(args.url))
+    checked = failed = 0
+    try:
+        with engine.connect() as conn:
+            ids = [args.session_id] if args.session_id else list_session_ids(conn)
+            for sid in ids:
+                checked += 1
+                try:
+                    ontology = get_session_ontology(conn, sid)
+                    labels = current_labels(get_labels(conn, sid))
+                    problems = [
+                        f"{x.label_id}: {p}" for x in labels for p in check_label(x, ontology)
+                    ]
+                    problems.extend(check_label_set(labels, ontology))
+                except (ValueError, NoResultFound) as exc:
+                    problems = [str(exc)]
+                if problems:
+                    failed += 1
+                    for problem in problems:
+                        print(f"[FAIL] {sid}: {problem}")
+            print(f"온톨로지 감사: 세션 {checked}개, 위반 세션 {failed}개 (읽기 전용)")
+    finally:
+        engine.dispose()
+    return 1 if failed else 0
+
+
 def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:  # pyright: ignore[reportPrivateUsage]
     """`schema`, `ontology`, `db` 하위 명령 묶음을 최상위 파서에 등록한다."""
     schema = sub.add_parser("schema", help="계약 타입 JSON Schema")
@@ -157,6 +193,12 @@ def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
     register.add_argument("--root")
     register.add_argument("--url", help="DB URL (기본: DLP_DATABASE_URL)")
     register.set_defaults(func=cmd_ontology_register)
+    audit = onto_sub.add_parser(
+        "audit", help="기존 운영 라벨의 사전·버전·구간 참조 검사 (읽기 전용)"
+    )
+    audit.add_argument("--session", dest="session_id", help="한 세션만 검사 (생략하면 전체)")
+    audit.add_argument("--url", help="DB URL (기본: DLP_DATABASE_URL)")
+    audit.set_defaults(func=cmd_ontology_audit)
 
     db = sub.add_parser("db", help="메타데이터 DB")
     db_sub = db.add_subparsers(dest="db_command", required=True)

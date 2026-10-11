@@ -1,0 +1,350 @@
+file,baseline_lines,baseline_comment_sites,automatic_structural_check,additional_implementation_comparison,changed_in_this_audit
+.env.example,82,47,checked,not certified sentence by sentence,no
+.github/workflows/ci.yml,105,20,checked,not certified sentence by sentence,no
+.gitignore,27,4,checked,not certified sentence by sentence,no
+.python-version,1,0,checked,not certified sentence by sentence,no
+Makefile,149,58,checked,not certified sentence by sentence,no
+config/defaults.yaml,82,59,checked,corrected passages,yes
+config/models.yaml,123,43,checked,not certified sentence by sentence,no
+config/ontology/v1/domains_tasks.yaml,33,9,checked,not certified sentence by sentence,no
+config/ontology/v1/events.yaml,28,11,checked,corrected passages,yes
+config/ontology/v1/hand.yaml,42,11,checked,not certified sentence by sentence,no
+config/ontology/v1/manifest.yaml,9,6,checked,not certified sentence by sentence,no
+config/ontology/v1/objects.yaml,65,12,checked,not certified sentence by sentence,no
+config/ontology/v1/privacy.yaml,23,8,checked,not certified sentence by sentence,no
+config/ontology/v1/subjects.yaml,47,8,checked,not certified sentence by sentence,no
+config/ontology/v1/verbs.yaml,52,9,checked,not certified sentence by sentence,no
+config/policies/actions.yaml,56,44,checked,not certified sentence by sentence,no
+config/policies/active.yaml,34,21,checked,corrected passages,yes
+config/policies/dataset.yaml,19,14,checked,corrected passages,yes
+config/policies/evaluation.yaml,87,54,checked,not certified sentence by sentence,no
+config/policies/export.yaml,67,43,checked,corrected passages,yes
+config/policies/media.yaml,6,1,checked,not certified sentence by sentence,no
+config/policies/ops.yaml,52,28,checked,not certified sentence by sentence,no
+config/policies/pilot.yaml,8,3,checked,not certified sentence by sentence,no
+config/policies/prelabel.yaml,135,82,checked,not certified sentence by sentence,no
+config/policies/privacy.yaml,118,77,checked,not certified sentence by sentence,no
+config/policies/relations.yaml,81,38,checked,corrected passages,yes
+config/policies/review.yaml,108,77,checked,corrected passages,yes
+config/policies/sync.yaml,90,71,checked,corrected passages,yes
+config/policies/training.yaml,61,37,checked,corrected passages,yes
+packages/actions/pyproject.toml,23,0,checked,not certified sentence by sentence,no
+packages/actions/src/dlp_actions/__init__.py,22,1,checked,not certified sentence by sentence,no
+packages/actions/src/dlp_actions/assemble.py,239,11,checked,not certified sentence by sentence,no
+packages/actions/src/dlp_actions/boundaries.py,189,15,checked,not certified sentence by sentence,no
+packages/actions/src/dlp_actions/clients.py,190,14,checked,not certified sentence by sentence,no
+packages/actions/src/dlp_actions/pipeline.py,112,4,checked,not certified sentence by sentence,no
+packages/actions/src/dlp_actions/policy.py,119,27,checked,not certified sentence by sentence,no
+packages/actions/src/dlp_actions/runner.py,400,32,checked,not certified sentence by sentence,no
+packages/actions/src/dlp_actions/vlm.py,278,17,checked,not certified sentence by sentence,no
+packages/actions/tests/test_actions.py,361,33,checked,not certified sentence by sentence,no
+packages/actions/tests/test_runner.py,358,29,checked,not certified sentence by sentence,no
+packages/active/pyproject.toml,19,0,checked,not certified sentence by sentence,no
+packages/active/src/dlp_active/__init__.py,18,1,checked,not certified sentence by sentence,no
+packages/active/src/dlp_active/curation.py,315,34,checked,not certified sentence by sentence,no
+packages/active/src/dlp_active/policy.py,70,18,checked,not certified sentence by sentence,no
+packages/active/src/dlp_active/rates.py,85,12,checked,not certified sentence by sentence,no
+packages/active/src/dlp_active/select.py,127,13,checked,corrected passages,yes
+packages/active/src/dlp_active/terms.py,136,20,checked,not certified sentence by sentence,no
+packages/active/tests/test_curation.py,183,15,checked,corrected passages,yes
+packages/active/tests/test_db.py,184,15,checked,not certified sentence by sentence,no
+packages/active/tests/test_select.py,281,41,checked,not certified sentence by sentence,no
+packages/cli/pyproject.toml,19,3,checked,not certified sentence by sentence,no
+packages/cli/src/dlp_cli/__init__.py,19,2,checked,not certified sentence by sentence,no
+packages/cli/src/dlp_cli/actions_cmds.py,109,9,checked,not certified sentence by sentence,no
+packages/cli/src/dlp_cli/active_cmds.py,110,6,checked,not certified sentence by sentence,no
+packages/cli/src/dlp_cli/dataset_cmds.py,241,10,checked,not certified sentence by sentence,no
+packages/cli/src/dlp_cli/eval_cmds.py,140,9,checked,not certified sentence by sentence,no
+packages/cli/src/dlp_cli/export_cmds.py,120,6,checked,not certified sentence by sentence,no
+packages/cli/src/dlp_cli/fixtures_cmds.py,41,4,checked,not certified sentence by sentence,no
+packages/cli/src/dlp_cli/health.py,133,9,checked,not certified sentence by sentence,no
+packages/cli/src/dlp_cli/main.py,118,23,checked,not certified sentence by sentence,no
+packages/cli/src/dlp_cli/media_cmds.py,148,11,checked,not certified sentence by sentence,no
+packages/cli/src/dlp_cli/models_cmds.py,159,15,checked,not certified sentence by sentence,no
+packages/cli/src/dlp_cli/ops_cmds.py,368,19,checked,not certified sentence by sentence,no
+packages/cli/src/dlp_cli/pilot_cmds.py,197,5,checked,not certified sentence by sentence,no
+packages/cli/src/dlp_cli/prelabel_cmds.py,186,11,checked,not certified sentence by sentence,no
+packages/cli/src/dlp_cli/privacy_cmds.py,258,18,checked,not certified sentence by sentence,no
+packages/cli/src/dlp_cli/raw_access.py,74,5,checked,not certified sentence by sentence,no
+packages/cli/src/dlp_cli/relations_cmds.py,61,4,checked,not certified sentence by sentence,no
+packages/cli/src/dlp_cli/review_cmds.py,459,22,checked,not certified sentence by sentence,no
+packages/cli/src/dlp_cli/review_config.py,18,2,checked,not certified sentence by sentence,no
+packages/cli/src/dlp_cli/schema_cmds.py,166,11,checked,not certified sentence by sentence,no
+packages/cli/src/dlp_cli/sync_cmds.py,102,6,checked,not certified sentence by sentence,no
+packages/cli/src/dlp_cli/train_cmds.py,192,10,checked,not certified sentence by sentence,no
+packages/cli/tests/test_health.py,104,11,checked,not certified sentence by sentence,no
+packages/cli/tests/test_pilot.py,95,1,checked,not certified sentence by sentence,no
+packages/cli/tests/test_raw_access_offline.py,58,4,checked,not certified sentence by sentence,no
+packages/datasets/pyproject.toml,17,0,checked,not certified sentence by sentence,no
+packages/datasets/src/dlp_datasets/__init__.py,21,1,checked,corrected passages,yes
+packages/datasets/src/dlp_datasets/build.py,256,24,checked,not certified sentence by sentence,no
+packages/datasets/src/dlp_datasets/lineage.py,167,17,checked,corrected passages,yes
+packages/datasets/src/dlp_datasets/policy.py,47,12,checked,not certified sentence by sentence,no
+packages/datasets/src/dlp_datasets/snapshot.py,182,20,checked,not certified sentence by sentence,no
+packages/datasets/src/dlp_datasets/splitter.py,214,16,checked,not certified sentence by sentence,no
+packages/datasets/tests/test_lineage.py,396,22,checked,not certified sentence by sentence,no
+packages/datasets/tests/test_splits.py,109,12,checked,not certified sentence by sentence,no
+packages/evaluation/pyproject.toml,19,0,checked,not certified sentence by sentence,no
+packages/evaluation/src/dlp_eval/__init__.py,21,1,checked,not certified sentence by sentence,no
+packages/evaluation/src/dlp_eval/gate.py,154,14,checked,not certified sentence by sentence,no
+packages/evaluation/src/dlp_eval/harness.py,833,68,checked,not certified sentence by sentence,no
+packages/evaluation/src/dlp_eval/metrics/__init__.py,16,1,checked,not certified sentence by sentence,no
+packages/evaluation/src/dlp_eval/metrics/assign.py,31,4,checked,not certified sentence by sentence,no
+packages/evaluation/src/dlp_eval/metrics/classification.py,108,8,checked,not certified sentence by sentence,no
+packages/evaluation/src/dlp_eval/metrics/detection.py,197,31,checked,not certified sentence by sentence,no
+packages/evaluation/src/dlp_eval/metrics/keypoints.py,59,8,checked,not certified sentence by sentence,no
+packages/evaluation/src/dlp_eval/metrics/states.py,85,12,checked,not certified sentence by sentence,no
+packages/evaluation/src/dlp_eval/metrics/temporal.py,240,25,checked,not certified sentence by sentence,no
+packages/evaluation/src/dlp_eval/metrics/tracking.py,286,41,checked,not certified sentence by sentence,no
+packages/evaluation/src/dlp_eval/policy.py,216,44,checked,not certified sentence by sentence,no
+packages/evaluation/src/dlp_eval/runner.py,322,25,checked,not certified sentence by sentence,no
+packages/evaluation/tests/test_harness.py,656,109,checked,not certified sentence by sentence,no
+packages/evaluation/tests/test_metrics_hand.py,113,24,checked,not certified sentence by sentence,no
+packages/evaluation/tests/test_metrics_reference.py,191,20,checked,not certified sentence by sentence,no
+packages/evaluation/tests/test_metrics_temporal_reference.py,200,18,checked,not certified sentence by sentence,no
+packages/evaluation/tests/test_runner.py,218,15,checked,not certified sentence by sentence,no
+packages/export/pyproject.toml,21,0,checked,not certified sentence by sentence,no
+packages/export/src/dlp_export/__init__.py,27,1,checked,not certified sentence by sentence,no
+packages/export/src/dlp_export/coco.py,288,38,checked,not certified sentence by sentence,no
+packages/export/src/dlp_export/frames.py,69,5,checked,not certified sentence by sentence,no
+packages/export/src/dlp_export/intervals.py,98,3,checked,not certified sentence by sentence,no
+packages/export/src/dlp_export/lerobot.py,548,73,checked,not certified sentence by sentence,no
+packages/export/src/dlp_export/policy.py,136,34,checked,not certified sentence by sentence,no
+packages/export/src/dlp_export/pseudonym.py,177,20,checked,not certified sentence by sentence,no
+packages/export/src/dlp_export/runner.py,422,36,checked,corrected passages,yes
+packages/export/src/dlp_export/source.py,263,26,checked,corrected passages,yes
+packages/export/tests/__init__.py,1,1,checked,not certified sentence by sentence,no
+packages/export/tests/conftest.py,195,19,checked,not certified sentence by sentence,no
+packages/export/tests/test_formats.py,532,75,checked,not certified sentence by sentence,no
+packages/export/tests/test_lerobot_official.py,88,7,checked,not certified sentence by sentence,no
+packages/export/tests/test_runner.py,447,49,checked,not certified sentence by sentence,no
+packages/fixtures/pyproject.toml,19,0,checked,not certified sentence by sentence,no
+packages/fixtures/src/dlp_fixtures/__init__.py,86,3,checked,not certified sentence by sentence,no
+packages/fixtures/src/dlp_fixtures/actions.py,444,37,checked,not certified sentence by sentence,no
+packages/fixtures/src/dlp_fixtures/io.py,91,10,checked,not certified sentence by sentence,no
+packages/fixtures/src/dlp_fixtures/sessions.py,109,7,checked,not certified sentence by sentence,no
+packages/fixtures/src/dlp_fixtures/sync.py,338,31,checked,not certified sentence by sentence,no
+packages/fixtures/src/dlp_fixtures/video.py,343,31,checked,not certified sentence by sentence,no
+packages/fixtures/src/dlp_fixtures/wiping.py,314,29,checked,not certified sentence by sentence,no
+packages/fixtures/tests/conftest.py,18,3,checked,not certified sentence by sentence,no
+packages/fixtures/tests/test_actions.py,113,11,checked,not certified sentence by sentence,no
+packages/fixtures/tests/test_sessions_and_determinism.py,67,6,checked,not certified sentence by sentence,no
+packages/fixtures/tests/test_sync.py,126,12,checked,not certified sentence by sentence,no
+packages/fixtures/tests/test_video.py,91,9,checked,corrected passages,yes
+packages/fixtures/tests/test_wiping.py,53,6,checked,not certified sentence by sentence,no
+packages/media/pyproject.toml,20,0,checked,not certified sentence by sentence,no
+packages/media/src/dlp_media/audit.py,194,23,checked,corrected passages,yes
+packages/media/src/dlp_media/glove.py,126,16,checked,not certified sentence by sentence,no
+packages/media/src/dlp_media/imu.py,368,46,checked,not certified sentence by sentence,no
+packages/media/src/dlp_media/ingest.py,349,34,checked,not certified sentence by sentence,no
+packages/media/src/dlp_media/prepare.py,125,4,checked,not certified sentence by sentence,no
+packages/media/src/dlp_media/probe.py,159,24,checked,not certified sentence by sentence,no
+packages/media/src/dlp_media/proxy.py,78,9,checked,not certified sentence by sentence,no
+packages/media/src/dlp_media/pts.py,156,21,checked,not certified sentence by sentence,no
+packages/media/src/dlp_media/storage.py,253,32,checked,not certified sentence by sentence,no
+packages/media/src/dlp_media/tables.py,46,5,checked,not certified sentence by sentence,no
+packages/media/tests/conftest.py,73,6,checked,not certified sentence by sentence,no
+packages/media/tests/test_audit.py,58,7,checked,not certified sentence by sentence,no
+packages/media/tests/test_gpmf.py,154,17,checked,not certified sentence by sentence,no
+packages/media/tests/test_ingest.py,247,19,checked,not certified sentence by sentence,no
+packages/media/tests/test_orientation.py,70,2,checked,not certified sentence by sentence,no
+packages/media/tests/test_prepare.py,83,4,checked,not certified sentence by sentence,no
+packages/media/tests/test_pts_proxy.py,133,11,checked,not certified sentence by sentence,no
+packages/media/tests/test_sensors_storage.py,111,6,checked,not certified sentence by sentence,no
+packages/models/pyproject.toml,20,0,checked,not certified sentence by sentence,no
+packages/models/src/dlp_models/__init__.py,19,1,checked,corrected passages,yes
+packages/models/src/dlp_models/depth.py,165,15,checked,not certified sentence by sentence,no
+packages/models/src/dlp_models/onnx.py,63,7,checked,not certified sentence by sentence,no
+packages/models/src/dlp_models/owlv2.py,204,19,checked,not certified sentence by sentence,no
+packages/models/src/dlp_models/registry.py,251,20,checked,not certified sentence by sentence,no
+packages/models/tests/test_models.py,266,23,checked,corrected passages,yes
+packages/ops/pyproject.toml,19,1,checked,not certified sentence by sentence,no
+packages/ops/src/dlp_ops/__init__.py,13,1,checked,not certified sentence by sentence,no
+packages/ops/src/dlp_ops/audit.py,173,11,checked,corrected passages,yes
+packages/ops/src/dlp_ops/metrics.py,419,24,checked,not certified sentence by sentence,no
+packages/ops/src/dlp_ops/policy.py,87,20,checked,not certified sentence by sentence,no
+packages/ops/src/dlp_ops/retention.py,158,12,checked,not certified sentence by sentence,no
+packages/ops/tests/test_ops.py,590,101,checked,not certified sentence by sentence,no
+packages/prelabel/pyproject.toml,23,0,checked,not certified sentence by sentence,no
+packages/prelabel/src/dlp_prelabel/__init__.py,21,1,checked,not certified sentence by sentence,no
+packages/prelabel/src/dlp_prelabel/adapters/__init__.py,17,1,checked,not certified sentence by sentence,no
+packages/prelabel/src/dlp_prelabel/adapters/mediapipe_models.py,306,26,checked,not certified sentence by sentence,no
+packages/prelabel/src/dlp_prelabel/adapters/owl_objects.py,83,7,checked,not certified sentence by sentence,no
+packages/prelabel/src/dlp_prelabel/adapters/rtmpose.py,139,17,checked,not certified sentence by sentence,no
+packages/prelabel/src/dlp_prelabel/adapters/stubs.py,158,19,checked,not certified sentence by sentence,no
+packages/prelabel/src/dlp_prelabel/common.py,225,20,checked,not certified sentence by sentence,no
+packages/prelabel/src/dlp_prelabel/contact.py,209,22,checked,not certified sentence by sentence,no
+packages/prelabel/src/dlp_prelabel/lift3d.py,216,19,checked,not certified sentence by sentence,no
+packages/prelabel/src/dlp_prelabel/policy.py,253,23,checked,not certified sentence by sentence,no
+packages/prelabel/src/dlp_prelabel/runner.py,655,61,checked,not certified sentence by sentence,no
+packages/prelabel/src/dlp_prelabel/wearer.py,98,8,checked,not certified sentence by sentence,no
+packages/prelabel/tests/test_adapters.py,258,27,checked,not certified sentence by sentence,no
+packages/prelabel/tests/test_algorithms.py,248,19,checked,not certified sentence by sentence,no
+packages/prelabel/tests/test_lift3d.py,117,9,checked,not certified sentence by sentence,no
+packages/prelabel/tests/test_runner.py,522,37,checked,not certified sentence by sentence,no
+packages/prelabel/tests/test_runner_units.py,189,21,checked,not certified sentence by sentence,no
+packages/privacy/pyproject.toml,21,0,checked,not certified sentence by sentence,no
+packages/privacy/src/dlp_privacy/__init__.py,71,1,checked,not certified sentence by sentence,no
+packages/privacy/src/dlp_privacy/audit.py,259,22,checked,corrected passages,yes
+packages/privacy/src/dlp_privacy/detection.py,71,14,checked,not certified sentence by sentence,no
+packages/privacy/src/dlp_privacy/detectors/__init__.py,155,9,checked,not certified sentence by sentence,no
+packages/privacy/src/dlp_privacy/detectors/codes.py,60,10,checked,not certified sentence by sentence,no
+packages/privacy/src/dlp_privacy/detectors/open_vocab.py,101,12,checked,not certified sentence by sentence,no
+packages/privacy/src/dlp_privacy/detectors/oracle.py,89,6,checked,not certified sentence by sentence,no
+packages/privacy/src/dlp_privacy/detectors/reflection.py,62,7,checked,not certified sentence by sentence,no
+packages/privacy/src/dlp_privacy/detectors/yunet.py,56,7,checked,not certified sentence by sentence,no
+packages/privacy/src/dlp_privacy/errors.py,12,3,checked,not certified sentence by sentence,no
+packages/privacy/src/dlp_privacy/generation.py,116,6,checked,not certified sentence by sentence,no
+packages/privacy/src/dlp_privacy/geometry.py,73,10,checked,not certified sentence by sentence,no
+packages/privacy/src/dlp_privacy/pipeline.py,314,33,checked,corrected passages,yes
+packages/privacy/src/dlp_privacy/policy.py,156,49,checked,not certified sentence by sentence,no
+packages/privacy/src/dlp_privacy/render.py,227,23,checked,not certified sentence by sentence,no
+packages/privacy/src/dlp_privacy/rendering.py,345,20,checked,not certified sentence by sentence,no
+packages/privacy/src/dlp_privacy/review.py,186,19,checked,not certified sentence by sentence,no
+packages/privacy/src/dlp_privacy/runner.py,494,36,checked,not certified sentence by sentence,no
+packages/privacy/src/dlp_privacy/tracker.py,193,25,checked,not certified sentence by sentence,no
+packages/privacy/tests/conftest.py,35,3,checked,not certified sentence by sentence,no
+packages/privacy/tests/test_audit.py,123,12,checked,not certified sentence by sentence,no
+packages/privacy/tests/test_gate.py,618,68,checked,not certified sentence by sentence,no
+packages/privacy/tests/test_render_recovery.py,101,5,checked,not certified sentence by sentence,no
+packages/privacy/tests/test_runner.py,449,33,checked,not certified sentence by sentence,no
+packages/relations/pyproject.toml,18,0,checked,not certified sentence by sentence,no
+packages/relations/src/dlp_relations/__init__.py,21,1,checked,not certified sentence by sentence,no
+packages/relations/src/dlp_relations/contact.py,160,16,checked,corrected passages,yes
+packages/relations/src/dlp_relations/coverage.py,62,7,checked,corrected passages,yes
+packages/relations/src/dlp_relations/derive.py,222,22,checked,not certified sentence by sentence,no
+packages/relations/src/dlp_relations/geometry.py,89,12,checked,corrected passages,yes
+packages/relations/src/dlp_relations/policy.py,139,13,checked,not certified sentence by sentence,no
+packages/relations/src/dlp_relations/rules.py,149,14,checked,not certified sentence by sentence,no
+packages/relations/src/dlp_relations/runner.py,173,21,checked,not certified sentence by sentence,no
+packages/relations/tests/test_relations.py,363,24,checked,not certified sentence by sentence,no
+packages/relations/tests/test_runner.py,249,19,checked,not certified sentence by sentence,no
+packages/review/pyproject.toml,24,0,checked,not certified sentence by sentence,no
+packages/review/src/dlp_review/__init__.py,34,1,checked,not certified sentence by sentence,no
+packages/review/src/dlp_review/clients.py,327,49,checked,corrected passages,yes
+packages/review/src/dlp_review/collect.py,316,31,checked,not certified sentence by sentence,no
+packages/review/src/dlp_review/cvat.py,463,45,checked,corrected passages,yes
+packages/review/src/dlp_review/labelstudio.py,262,25,checked,corrected passages,yes
+packages/review/src/dlp_review/ops/__init__.py,20,1,checked,not certified sentence by sentence,no
+packages/review/src/dlp_review/ops/assign.py,231,25,checked,not certified sentence by sentence,no
+packages/review/src/dlp_review/ops/measure.py,161,18,checked,not certified sentence by sentence,no
+packages/review/src/dlp_review/ops/policy.py,201,43,checked,not certified sentence by sentence,no
+packages/review/src/dlp_review/ops/priority.py,245,26,checked,not certified sentence by sentence,no
+packages/review/src/dlp_review/ops/results.py,225,25,checked,not certified sentence by sentence,no
+packages/review/src/dlp_review/ops/runner.py,366,32,checked,not certified sentence by sentence,no
+packages/review/src/dlp_review/ops/sampling.py,156,20,checked,not certified sentence by sentence,no
+packages/review/src/dlp_review/ops/seeding.py,288,29,checked,not certified sentence by sentence,no
+packages/review/src/dlp_review/ops/selection.py,81,8,checked,not certified sentence by sentence,no
+packages/review/src/dlp_review/reconcile.py,189,22,checked,corrected passages,yes
+packages/review/src/dlp_review/roles.py,93,8,checked,not certified sentence by sentence,no
+packages/review/src/dlp_review/tasks.py,574,68,checked,not certified sentence by sentence,no
+packages/review/src/dlp_review/timeseries.py,79,7,checked,not certified sentence by sentence,no
+packages/review/src/dlp_review/verify.py,131,15,checked,not certified sentence by sentence,no
+packages/review/src/dlp_review/watermark.py,101,13,checked,not certified sentence by sentence,no
+packages/review/src/dlp_review/webhook.py,318,25,checked,not certified sentence by sentence,no
+packages/review/tests/conftest.py,58,8,checked,not certified sentence by sentence,no
+packages/review/tests/test_flow.py,589,53,checked,not certified sentence by sentence,no
+packages/review/tests/test_ops.py,504,54,checked,not certified sentence by sentence,no
+packages/review/tests/test_ops_flow.py,434,31,checked,not certified sentence by sentence,no
+packages/review/tests/test_units.py,659,72,checked,not certified sentence by sentence,no
+packages/review/tests/test_verify.py,147,10,checked,not certified sentence by sentence,no
+packages/review/tests/test_webhook_http.py,209,4,checked,not certified sentence by sentence,no
+packages/schema/pyproject.toml,19,0,checked,not certified sentence by sentence,no
+packages/schema/src/dlp_schema/__init__.py,67,1,checked,not certified sentence by sentence,no
+packages/schema/src/dlp_schema/common.py,92,17,checked,corrected passages,yes
+packages/schema/src/dlp_schema/config.py,192,50,checked,not certified sentence by sentence,no
+packages/schema/src/dlp_schema/dataset.py,74,19,checked,not certified sentence by sentence,no
+packages/schema/src/dlp_schema/db/__init__.py,4,1,checked,not certified sentence by sentence,no
+packages/schema/src/dlp_schema/db/locks.py,33,3,checked,not certified sentence by sentence,no
+packages/schema/src/dlp_schema/db/migrate.py,52,7,checked,not certified sentence by sentence,no
+packages/schema/src/dlp_schema/db/migrations/__init__.py,5,1,checked,not certified sentence by sentence,no
+packages/schema/src/dlp_schema/db/migrations/env.py,61,7,checked,not certified sentence by sentence,no
+packages/schema/src/dlp_schema/db/migrations/script.py.mako,29,4,checked,not certified sentence by sentence,no
+packages/schema/src/dlp_schema/db/migrations/versions/0001_initial_schema.py,244,13,checked,not certified sentence by sentence,no
+packages/schema/src/dlp_schema/db/migrations/versions/0002_stream_position.py,45,8,checked,not certified sentence by sentence,no
+packages/schema/src/dlp_schema/db/migrations/versions/0003_review_tasks.py,58,5,checked,not certified sentence by sentence,no
+packages/schema/src/dlp_schema/db/migrations/versions/0004_lineage_tables.py,101,5,checked,not certified sentence by sentence,no
+packages/schema/src/dlp_schema/db/migrations/versions/0005_review_operations.py,114,12,checked,not certified sentence by sentence,no
+packages/schema/src/dlp_schema/db/migrations/versions/0006_review_task_sent_labels.py,39,6,checked,not certified sentence by sentence,no
+packages/schema/src/dlp_schema/db/migrations/versions/0007_model_versions.py,54,5,checked,not certified sentence by sentence,no
+packages/schema/src/dlp_schema/db/migrations/versions/0008_export_label_states.py,39,5,checked,not certified sentence by sentence,no
+packages/schema/src/dlp_schema/db/migrations/versions/0009_ops_records.py,135,10,checked,not certified sentence by sentence,no
+packages/schema/src/dlp_schema/db/migrations/versions/0010_audit_3_columns_truncate.py,89,12,checked,not certified sentence by sentence,no
+packages/schema/src/dlp_schema/db/migrations/versions/0011_session_lifecycle_events.py,75,9,checked,not certified sentence by sentence,no
+packages/schema/src/dlp_schema/db/migrations/versions/0012_privacy_detection_and_deployment.py,77,3,checked,not certified sentence by sentence,no
+packages/schema/src/dlp_schema/db/migrations/versions/0013_privacy_review_generation.py,43,3,checked,not certified sentence by sentence,no
+packages/schema/src/dlp_schema/db/privacy_repository.py,80,5,checked,not certified sentence by sentence,no
+packages/schema/src/dlp_schema/db/repository.py,858,59,checked,not certified sentence by sentence,no
+packages/schema/src/dlp_schema/db/review_queries.py,93,5,checked,not certified sentence by sentence,no
+packages/schema/src/dlp_schema/db/review_repository.py,126,11,checked,not certified sentence by sentence,no
+packages/schema/src/dlp_schema/db/tables.py,452,45,checked,not certified sentence by sentence,no
+packages/schema/src/dlp_schema/episode.py,315,36,checked,not certified sentence by sentence,no
+packages/schema/src/dlp_schema/export.py,120,29,checked,not certified sentence by sentence,no
+packages/schema/src/dlp_schema/history.py,185,18,checked,not certified sentence by sentence,no
+packages/schema/src/dlp_schema/jsonschema.py,114,6,checked,not certified sentence by sentence,no
+packages/schema/src/dlp_schema/labels.py,554,123,checked,not certified sentence by sentence,no
+packages/schema/src/dlp_schema/lineage.py,137,41,checked,not certified sentence by sentence,no
+packages/schema/src/dlp_schema/migration.py,200,24,checked,not certified sentence by sentence,no
+packages/schema/src/dlp_schema/ontology.py,251,43,checked,not certified sentence by sentence,no
+packages/schema/src/dlp_schema/ops.py,135,39,checked,corrected passages,yes
+packages/schema/src/dlp_schema/predictor.py,77,5,checked,not certified sentence by sentence,no
+packages/schema/src/dlp_schema/review.py,193,58,checked,not certified sentence by sentence,no
+packages/schema/src/dlp_schema/session.py,299,73,checked,not certified sentence by sentence,no
+packages/schema/src/dlp_schema/testing.py,133,5,checked,not certified sentence by sentence,no
+packages/schema/src/dlp_schema/validation.py,192,12,checked,not certified sentence by sentence,no
+packages/schema/tests/conftest.py,69,6,checked,not certified sentence by sentence,no
+packages/schema/tests/test_contracts.py,293,25,checked,not certified sentence by sentence,no
+packages/schema/tests/test_db.py,359,37,checked,not certified sentence by sentence,no
+packages/schema/tests/test_episode_migration_config.py,235,28,checked,not certified sentence by sentence,no
+packages/schema/tests/test_history.py,95,10,checked,not certified sentence by sentence,no
+packages/schema/tests/test_ontology.py,147,18,checked,not certified sentence by sentence,no
+packages/schema/tests/test_privacy_detection.py,43,2,checked,not certified sentence by sentence,no
+packages/schema/tests/test_review_queries.py,132,3,checked,not certified sentence by sentence,no
+packages/sync/pyproject.toml,20,0,checked,not certified sentence by sentence,no
+packages/sync/src/dlp_sync/__init__.py,43,1,checked,not certified sentence by sentence,no
+packages/sync/src/dlp_sync/anchors.py,116,7,checked,not certified sentence by sentence,no
+packages/sync/src/dlp_sync/loader.py,63,5,checked,not certified sentence by sentence,no
+packages/sync/src/dlp_sync/pipeline.py,539,41,checked,corrected passages,yes
+packages/sync/src/dlp_sync/policy.py,168,34,checked,not certified sentence by sentence,no
+packages/sync/src/dlp_sync/runner.py,106,7,checked,not certified sentence by sentence,no
+packages/sync/src/dlp_sync/signals.py,194,17,checked,not certified sentence by sentence,no
+packages/sync/src/dlp_sync/slate.py,142,19,checked,corrected passages,yes
+packages/sync/src/dlp_sync/taps.py,131,13,checked,not certified sentence by sentence,no
+packages/sync/src/dlp_sync/xcorr.py,412,40,checked,not certified sentence by sentence,no
+packages/sync/tests/conftest.py,104,9,checked,not certified sentence by sentence,no
+packages/sync/tests/test_long_recording.py,154,19,checked,not certified sentence by sentence,no
+packages/sync/tests/test_pipeline.py,276,32,checked,not certified sentence by sentence,no
+packages/sync/tests/test_runner.py,117,5,checked,not certified sentence by sentence,no
+packages/sync/tests/test_units.py,157,15,checked,not certified sentence by sentence,no
+packages/training/pyproject.toml,21,0,checked,not certified sentence by sentence,no
+packages/training/src/dlp_train/__init__.py,27,1,checked,not certified sentence by sentence,no
+packages/training/src/dlp_train/deployed.py,108,10,checked,not certified sentence by sentence,no
+packages/training/src/dlp_train/extract.py,149,14,checked,not certified sentence by sentence,no
+packages/training/src/dlp_train/loop.py,596,49,checked,not certified sentence by sentence,no
+packages/training/src/dlp_train/policy.py,95,22,checked,corrected passages,yes
+packages/training/src/dlp_train/tracking.py,244,39,checked,not certified sentence by sentence,no
+packages/training/src/dlp_train/trainers.py,242,27,checked,not certified sentence by sentence,no
+packages/training/tests/test_extract.py,172,22,checked,not certified sentence by sentence,no
+packages/training/tests/test_loop.py,487,59,checked,not certified sentence by sentence,no
+packages/training/tests/test_mlflow.py,47,3,checked,not certified sentence by sentence,no
+pyproject.toml,97,8,checked,not certified sentence by sentence,no
+scripts/export_depth_onnx.py,75,7,checked,not certified sentence by sentence,no
+scripts/lerobot-env/pyproject.toml,31,10,checked,not certified sentence by sentence,no
+scripts/lerobot_check.py,55,4,checked,not certified sentence by sentence,no
+scripts/lerobot_write.py,102,8,checked,not certified sentence by sentence,no
+scripts/profile_review.py,139,2,checked,not certified sentence by sentence,no
+services/cvat/cvat.sh,85,23,checked,not certified sentence by sentence,no
+services/cvat/ports.override.yml,6,2,checked,not certified sentence by sentence,no
+services/docker-compose.yml,204,31,checked,not certified sentence by sentence,no
+services/label-studio/bootstrap.py,93,4,checked,not certified sentence by sentence,no
+services/mlflow/Dockerfile,13,7,checked,corrected passages,yes
+services/postgres/init-databases.sh,14,7,checked,not certified sentence by sentence,no
+services/seaweedfs/entrypoint.sh,32,11,checked,not certified sentence by sentence,no
+tests/test_end_to_end.py,464,44,checked,not certified sentence by sentence,no
+tests/test_model_licenses.py,49,5,checked,not certified sentence by sentence,no
+tests/test_policy_consistency.py,24,2,checked,not certified sentence by sentence,no
+tests/test_raw_access_audited.py,56,6,checked,not certified sentence by sentence,no
+tests/test_raw_access_db.py,170,18,checked,not certified sentence by sentence,no
+tests/test_review_regressions.py,1160,28,checked,not certified sentence by sentence,no
+tests/test_services.py,83,6,checked,not certified sentence by sentence,no
+tests/test_webhook_transaction.py,65,1,checked,not certified sentence by sentence,no

@@ -1,0 +1,6 @@
+# 로컬 영상 준비. 원본은 보존하고 PTS/오디오/데이터 트랙을 검증한 사본만 출력한다.
+version: 1
+normalize:
+  crf: 18
+  preset: fast
+  threads: 2

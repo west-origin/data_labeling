@@ -37,6 +37,18 @@ from dlp_schema.testing import make_label
 ROOT = Path(__file__).resolve().parents[3]
 
 
+def test_empty_evaluation_cannot_pass_gate(policy: EvaluationPolicy) -> None:
+    """모델이 없거나 정답이 없어 실제 평가 과제가 0개면 배포 게이트를 통과하지 않는다."""
+    cases: list[tuple[dict[Task, list[SessionData]], dict[str, str]]] = [
+        ({}, {}),
+        ({"objects": []}, {"objects": "m1"}),
+    ]
+    for data, models in cases:
+        report = evaluate(data, policy, golden_version="g1", model_versions=models)
+        decision = decide(report, None, policy)
+        assert not report.overall and not decision.passed
+
+
 @pytest.fixture(scope="module")
 def policy() -> EvaluationPolicy:
     """저장소의 실제 평가 정책 (config/policies/evaluation.yaml)."""
@@ -623,3 +635,22 @@ def test_evaluators_emit_exactly_registered_metrics(policy: EvaluationPolicy) ->
         fixed = {m for m in r.metrics if "/" not in m}  # 클래스별 지표(ap/<클래스>)는 접두사만 본다
         assert fixed == task_metrics(task, policy.segment_iou)  # type: ignore[arg-type]
         assert all(is_class_metric(task, m) for m in set(r.metrics) - fixed)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("missing", [[], [SessionData("empty", [], [])]])
+def test_partial_requested_evaluation_cannot_pass_gate(
+    policy: EvaluationPolicy,
+    missing: list[SessionData],
+) -> None:
+    """요청 hands가 비었거나 정답이 없으면 objects가 완벽해도 전체는 미평가 실패다."""
+    truth = boxes("s1")
+    report = evaluate(
+        {"objects": [SessionData("s1", truth, as_model(truth))], "hands": missing},
+        policy,
+        golden_version="g1",
+        model_versions={"objects": "m1", "hands": "m2"},
+    )
+    decision = decide(report, None, policy)
+    assert decision.tasks["objects"].passed
+    assert not decision.passed and not decision.tasks["hands"].passed
+    assert "미평가" in decision.tasks["hands"].reasons[0]

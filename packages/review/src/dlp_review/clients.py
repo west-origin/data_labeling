@@ -160,6 +160,16 @@ class CvatClient:
         res = _check(self.http.get("/api/users", params={"search": username, "page_size": 100}))
         return next((int(u["id"]) for u in res["results"] if u["username"] == username), None)
 
+    def is_non_admin_reviewer(self, user_id: int) -> bool:
+        """활성 일반 계정인지 확인한다. 관리자 계정으로 원본/라벨러 권한을 분리할 수 없다."""
+        user = _check(self.http.get(f"/api/users/{user_id}"))
+        return (
+            user.get("is_active") is True
+            and user.get("is_staff") is False
+            and user.get("is_superuser") is False
+            and "admin" not in user.get("groups", ["admin"])
+        )
+
     def jobs(self, task_id: int) -> list[dict[str, Any]]:
         """작업의 job 목록 (ID 순). 각 job에 start_frame·stop_frame·assignee가 있다."""
         res = _check(self.http.get("/api/jobs", params={"task_id": task_id, "page_size": 500}))
@@ -177,7 +187,11 @@ class CvatClient:
         }
 
     def assign(self, task_id: int, user_id: int) -> None:
-        """작업(task)과 그 모든 job의 담당자를 정한다. 일반 사용자는 담당한 job만 볼 수 있다."""
+        """작업(task)과 그 모든 job의 담당자를 정한다.
+
+        실제 열람 범위는 CVAT의 프로젝트·조직·사용자 권한에도 달려 있다.
+        담당자 지정만으로 다른 작업의 접근 권한을 회수하지는 않는다.
+        """
         _check(self.http.patch(f"/api/tasks/{task_id}", json={"assignee_id": user_id}))
         for job in self.job_ids(task_id):
             _check(self.http.patch(f"/api/jobs/{job}", json={"assignee": user_id}))

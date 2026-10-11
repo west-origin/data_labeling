@@ -1,35 +1,40 @@
 """프라이버시 게이트 (WP5, ADR 0005·0019·0023·0024).
 
 원본 영상(얼굴·문서·화면·송장 등이 그대로 보이는 영상)을 일반 라벨러에게 보여 주기 전에 반드시
-거치는 관문이다. 이 패키지가 만든 **블러본**만 검수 작업·행동 VLM·큐레이션·내보내기에 쓰인다.
+거치는 관문이다. 이 패키지가 만든 **블러본**을 일반 라벨링 검수·행동 VLM·큐레이션·내보내기에
+쓴다. 프라이버시 검수자는 별도 원본 접근 권한으로 원본 프록시를 본다.
 
 게이트 흐름 (명령은 `dlp privacy …`, 구현은 `dlp_privacy.runner`):
 
 1. 탐지 `dlp privacy detect <세션>` → `runner.detect_session`
    - 원본 버킷(`dlp-raw`)에서 영상 스트림을 감사 저장소(`AuditedStore`)로 받는다
      (접근 기록이 남는다).
-   - `pipeline.detect_video`가 모든 프레임에 탐지기(`detectors/`)를 돌리고, `tracker`로
+   - `pipeline.detect_video`가 모든 프레임을 순회한다. 느린 탐지기는 정책 간격으로 추론하고
+     사이 프레임에는 직전 결과를 유지한다. `tracker`로
      트랙을 만들고(병합·IoU 매칭·보간·유지), 트랙마다 `blur_track` 라벨(모델 출처, 미검수)을
      DB `label_records`에 쓴다.
    - 사람이 먼저 봐야 할 **검수 우선 구간**(`review.ReviewSegment`)을 원본 버킷
      `sessions/<세션>/derived/privacy_review/<스트림>.json`에 쓴다.
-   - 결과가 0개인 탐지·모델 버전은 DB에 흔적이 남지 않으므로 원본 버킷 탐지 표시
-     `sessions/<세션>/derived/privacy_detect/<스트림>.json`에 남겨 다음 실행이 건너뛰게 한다
-     (ADR 0030). 블러가 0개여도 사람 검수(2)는 필요하다.
-   - 세션 `privacy_state`: PENDING → AUTO_BLURRED. 승인 뒤 블러가 바뀌면 APPROVED → AUTO_BLURRED.
+   - 결과가 0개여도 DB `privacy_detection_runs`에 완료 탐지 세대와 활성 모델 버전을 기록한다.
+     최신 완료 세대의 버전 집합이 같을 때만 건너뛴다. 원본 버킷의 0건 탐지 표시는 호환·복구용이며,
+     DB 이력 없이 표시만 남았다면 새 완료 세대로 복구하고 새 검수를 요구한다 (ADR 0032·0033).
+   - 세션 `privacy_state`: PENDING → AUTO_BLURRED. 승인 뒤 새 탐지를 실행하거나 블러가 바뀌면
+     APPROVED → AUTO_BLURRED. 탐지 결과가 0개여도 새 사람 검수(2)가 필요하다.
 2. 사람 검수 (CVAT, `dlp review create --stage privacy` → 검수 → `dlp review collect`)
    - 블러 검수는 원본 접근 권한자(`review.yaml reviewers.privacy`)에게만 배정한다. 검수자는 원본
      프록시를 보며 빠진 블러를 그리고 잘못된 블러를 지운다. 수집하면 수정본이 새 레코드
      (`parent_label_id`)로 남고 원 레코드는 `HUMAN_APPROVED` 등으로 검증 상태가 바뀐다.
 3. 승인 `dlp privacy approve <세션>` → `runner.approve_session`
-   - 영상 스트림마다 "마지막 자동 탐지 뒤에 만들어 수집까지 끝난 운영 블러 검수 작업"이 있고,
-     운영 블러 라벨이 모두 사람 검수를 거쳤을 때만 APPROVED로 바꾼다.
+   - 영상 스트림마다 최신 완료 탐지 ID에 연결된 수집 완료 운영 검수 작업이 있고,
+     운영 블러 라벨이 모두 사람 검수를 거쳤을 때만 APPROVED로 바꾼다. 완료 이력이 없는 구 데이터만
+     작업 생성 시각과 마지막 모델 라벨 시각으로 판단한다 (ADR 0033).
 4. 렌더 `dlp privacy render <세션>` → `runner.render_session`
    - 승인된 세션만, 운영 블러 라벨로 모자이크(또는 단색) 블러본을 만들어 **라벨링 버킷**
      (`dlp-labeling`) `sessions/<세션>/blurred/<스트림>.mp4`에 쓴다. 오디오는 넣지 않고
      PTS는 원본 그대로.
    - 옆에 렌더 기록 `<스트림>.render.json`(`render_hash` = 블러 라벨 ID 집합 + 렌더 정책의 해시,
-     `blurred_sha256` = 블러본 파일 해시)을 둔다. 같은 해시면 다시 렌더하지 않는다 (멱등).
+     `blurred_sha256` = 블러본 파일 해시)을 둔다. 입력·객체 메타데이터·실제 파일 해시가 모두 맞으면
+     다시 인코딩하지 않는다 (멱등). 손상된 출력/기록은 재렌더로 복구한다 (ADR 0036).
 5. 소비자 확인 `runner.assert_render_current` (ADR 0024)
    - 블러본을 읽는 모든 단계가 먼저 부른다. 세션이 **지금** APPROVED이고, 렌더 기록 해시가 지금 운영
      블러 라벨·렌더 정책의 해시와 같고, 저장소의 블러본 파일이 그 기록의 파일이어야 한다.
@@ -59,6 +64,8 @@
 - `review`: 검수 우선 구간 계산.
 - `pipeline`: 영상 한 개의 탐지 파이프라인과 탐지 모델 버전(정책 해시 포함).
 - `render`: 블러본 렌더 (CVAT와 같은 프레임 번호 보간).
-- `runner`: DB·저장소를 엮은 게이트 단계(탐지·승인·렌더·렌더 확인).
+- `generation`: 운영 블러·완료 탐지 세대·승인 대상 검수 판정.
+- `rendering`: 렌더 이력·파일 해시 검증과 승인된 세션 렌더.
+- `runner`: DB·저장소를 엮은 탐지·승인 (기존 렌더 진입점은 재수출).
 - `audit`: 잔여 누락 감사와 전수 검수 종료 판정.
 """

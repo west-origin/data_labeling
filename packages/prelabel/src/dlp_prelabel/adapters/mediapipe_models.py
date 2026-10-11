@@ -93,7 +93,8 @@ def best_per_hand[T](
 class MediaPipeHands:
     """손 21관절 어댑터 (name="hands").
 
-    version: `mediapipe-<가중치 버전>+p<hands 절 해시>`. 손(왼·오른)마다 트랙 하나를 낸다. 라벨
+    version: `mediapipe-<가중치 버전>+rgb1+p<hands 절 해시>`.
+    RGB 행 패딩 제거 버전을 포함한다. 손(왼·오른)마다 트랙 하나를 낸다. 라벨
     ID는 `<세션>-<스트림>-hands-<version_tag>-<left|right>`, entity_id는 `<left|right>_hand`.
     """
 
@@ -104,7 +105,7 @@ class MediaPipeHands:
     ) -> None:
         """가중치를 확인하고 버전을 정한다. Raises: ModelUnavailableError."""
         self.path, version = _model(root, policy.models.hands)
-        self.version = f"{version}+p{policy.digest('hands')}"
+        self.version = f"{version}+rgb1+p{policy.digest('hands')}"
         self.policy, self.ontology_version, self.now = policy, ontology_version, now
 
     def run(self, clip: Clip) -> list[LabelRecord]:
@@ -190,9 +191,9 @@ class MediaPipeObjects:
     def __init__(
         self, root: Path, policy: PrelabelPolicy, *, ontology_version: str, now: datetime
     ) -> None:
-        """가중치를 확인하고 버전을 정한다 (`mediapipe-...+p<objects 절 해시>`)."""
+        """가중치를 확인하고 버전을 정한다 (`mediapipe-...+rgb1+p<objects 절 해시>`)."""
         self.path, version = _model(root, policy.models.coco_objects)
-        self.version = f"{version}+p{policy.digest('objects')}"
+        self.version = f"{version}+rgb1+p{policy.digest('objects')}"
         self.policy, self.ontology_version, self.now = policy, ontology_version, now
 
     def run(self, clip: Clip) -> list[LabelRecord]:

@@ -21,10 +21,11 @@ from datetime import UTC, datetime
 
 import sqlalchemy as sa
 
+from dlp_cli.ontology_access import session_ontology
 from dlp_cli.schema_cmds import database_url
 from dlp_relations.policy import load_policy
 from dlp_relations.runner import run_relations
-from dlp_schema import load_ontology, repo_root
+from dlp_schema import repo_root
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -33,11 +34,11 @@ def cmd_run(args: argparse.Namespace) -> int:
     출력: 정책 버전과 관계 수, 레코드 변화(새로/유지/삭제 표시), 검수 때문에 건너뛴 수,
     (도구→표면)별 커버리지 비율.
     부작용: 한 트랜잭션에서 `label_records` INSERT(새 관계·철회 레코드).
-    온톨로지는 `config/ontology/v1`을 고정으로 읽는다 (리팩토링 후보).
+    온톨로지는 세션 버전의 DB 등록 사전을 읽는다.
     """
     root = repo_root()
     policy = load_policy(root)
-    ontology = load_ontology(root / "config/ontology/v1")
+    ontology = session_ontology(args.url, args.session_id)
     engine = sa.create_engine(database_url(args.url))
     with engine.begin() as conn:
         s = run_relations(conn, args.session_id, ontology, policy, datetime.now(UTC))

@@ -1,62 +1,65 @@
 # data_labeling
 
-청소·요양돌봄·간호 작업자의 1인칭 바디캠 영상을 로봇 모방학습용 데이터로 라벨링하는 플랫폼.
+바디캠 영상에서 손·객체·도구 라벨 초안을 만들고, CVAT·Label Studio에서 사람이 수정한 이력을
+데이터셋으로 저장하는 Python CLI 플랫폼이다.
 
-- 계획: [docs/labeling-platform-plan.md](docs/labeling-platform-plan.md)
-- 구현 계획: [docs/ai-implementation-plan.md](docs/ai-implementation-plan.md)
-- 개발자 안내 (처음 맡는 개발자용 전체 지도): [docs/developer-guide.md](docs/developer-guide.md)
+**전문가에게 넘길 때는 [인수인계 첫 화면](docs/handover/README.md)부터 읽는다.**
+현재는 단일 환경의 청소 영상 파일럿을 준비한 단계다. 실제 재학습기는 모의 구현이며, 다중 고객
+SaaS의 인증·격리·복구와 미해결 의존성 취약점은 [남은 과제](docs/handover/known-issues.md)에 정리했다.
 
-## 구성
+| 목적 | 안내 |
+| --- | --- |
+| 프로그램 구조·기능 상태 | [인수인계](docs/handover/README.md), [구조 지도](docs/handover/architecture.md) |
+| 다른 환경에서 설치·검사 | [환경 준비](docs/handover/development.md) |
+| 코드 수정·장애 복구 | [변경 및 복구 안내](docs/handover/change-guide.md) |
+| 실제 촬영 영상으로 시험 | [청소 영상 파일럿](docs/weekend-video-pilot.md) |
+| 개발 규칙·요구사항·결정 이유 | [CLAUDE.md](CLAUDE.md), [제품 계획](docs/labeling-platform-plan.md), [구현 계획](docs/ai-implementation-plan.md), [ADR](docs/adr/README.md) |
 
-- `packages/schema` (`dlp_schema`): 세션·스트림·라벨·에피소드 그래프 계약 타입, 온톨로지 로더·검증, 온톨로지 이관, DB 스키마
-- `packages/fixtures` (`dlp_fixtures`): 정답을 아는 합성 데이터 생성기 (`dlp fixtures generate`)
-- `packages/media` (`dlp_media`): 세션 수집, PTS 인덱스, 프록시 영상, IMU·장갑 정규화 (`dlp ingest`, `dlp media`)
-- `packages/sync` (`dlp_sync`): 멀티스트림 동기화 (`dlp sync run`, `dlp sync adjust`)
-- `packages/privacy` (`dlp_privacy`): 프라이버시 게이트 (`dlp privacy detect|approve|render|audit-sample`)
-- `packages/review` (`dlp_review`): 검수 도구 연동·검수 운영 (`dlp review create|collect|verify|serve|register-webhooks|plan|assign|queue|qa|quality`)
-- `packages/datasets` (`dlp_datasets`): 데이터셋 버전·분할·골든셋·계보 (`dlp dataset`, `dlp lineage`)
-- `packages/models` (`dlp_models`): 모델 레지스트리(`config/models.yaml`, 해시·라이선스)와 공용 ONNX 런타임
-- `packages/prelabel` (`dlp_prelabel`): 자동 프리라벨 (`dlp prelabel run`). 미연동 모델은 `make todo-models`
-- `packages/relations` (`dlp_relations`): 관계 도출·도구-표면 접촉·표면 커버리지 (`dlp relations run`)
-- `packages/actions` (`dlp_actions`): 행동 구간 경계 후보 + VLM 분류·설명 (`dlp actions run`)
-- `packages/evaluation` (`dlp_eval`): 지표 라이브러리, 골든셋 평가, 배포 게이트 (`dlp eval golden`)
-- `packages/training` (`dlp_train`): 재학습 루프와 모델 버전 배포 (`dlp train run|models|approve`)
-- `packages/active` (`dlp_active`): 액티브 러닝 세션 순위, FiftyOne 연동 (`dlp active rank|fiftyone`)
-- `packages/export` (`dlp_export`): COCO·구간 JSON·LeRobot v3.0 내보내기 (`dlp export coco|intervals|lerobot`)
-- `packages/ops` (`dlp_ops`): 주간 운영 지표, 원본 접근 감사, 보관 만료 (`dlp ops weekly|audit-report|retention|...`)
-- `packages/cli` (`dlp`): 명령줄 도구
-- `config/ontology/v1`: 온톨로지 v1 초안, `config/defaults.yaml`: 미결정 사항 기본값
-- `schemas/`: 계약 타입의 JSON Schema (생성 파일)
+## 개발 시작
 
-## 시작하기
+필요: Python 3.12, uv, make, Git, Docker/Compose v2, FFmpeg/ffprobe, MediaPipe용 EGL/GLES.
+저장소 루트에서 실행한다. 모델·검수 계정·MongoDB 등 전체 준비 순서는 [환경 준비](docs/handover/development.md)를 따른다.
 
-필요: [uv](https://docs.astral.sh/uv/), Docker (Compose v2), make
-
-```sh
-make install        # Python 3.12 환경과 의존성
-make models         # 모델 가중치 (YuNet 얼굴, MediaPipe 손·객체, RTMPose 전신, OWLv2 도구). MediaPipe는 libegl1 libgles2 필요
-make export-models  # 공개 ONNX가 없는 모델(메트릭 깊이)을 공식 가중치에서 변환 (일회용 PyTorch 환경)
-make check          # 린트·타입·테스트
-make up             # PostgreSQL, SeaweedFS(S3), Label Studio, Prefect, MLflow, lakeFS
-make health         # 헬스체크
-make db-upgrade     # 메타데이터 DB 마이그레이션 + 온톨로지 v1 등록
-make cvat-up        # CVAT (선택, 이미지가 커서 별도)
+```bash
+make install-curation
+make env
+# .env의 포트·개발 계정·저장소 설정을 확인한 다음
+set -a
+. ./.env
+set +a
+make up
+make db-upgrade
+make health
+make check
 ```
 
-| 서비스 | 주소 | 비고 |
+`make check`는 서비스·격리 환경 테스트를 제외하며 모델이 없으면 생략되는 검사도 있다.
+전체 검사에는 FiftyOne과 사용 가능한 내장 또는 외부 MongoDB가 필요하다.
+실제 파일럿 전에는 `dlp pilot check`와 검수 계정의 권한 확인이 필요하다.
+현재 작은 클라우드는 저장소 밖의 별도 시작 구성을 사용하므로 [파일럿의 시작 절차](docs/weekend-video-pilot.md#이-클라우드-환경-시작)를 따른다.
+
+## 서비스와 포트
+
+아래는 개발 기본값이다. `.env`로 포트를 바꾼다. 서비스 헬스체크 통과는 인증·계정·실제 기능의
+준비 완료를 의미하지 않는다. CVAT와 외부 큐레이션 MongoDB는 `make up`에 포함되지 않는다.
+
+| 서비스 | 기본 주소 | 비고 |
 | --- | --- | --- |
-| PostgreSQL | localhost:5432 | DB: dlp, labelstudio, prefect, mlflow |
-| SeaweedFS S3 | http://localhost:8333 | 버킷: dlp-raw, dlp-labeling, dlp-datasets, dlp-mlflow |
-| Label Studio | http://localhost:8081 | 계정은 `.env`의 `DLP_LABEL_STUDIO_*`. `make up`이 API 토큰을 켠다 |
-| Prefect | http://localhost:4200 | |
+| PostgreSQL | localhost:5432 | 메타데이터 및 개발 서비스 DB |
+| SeaweedFS S3 | http://localhost:8333 | 원본·라벨링·데이터셋·MLflow 버킷 |
+| Label Studio | http://localhost:8081 | `make up`이 서비스 API 토큰을 활성화 |
+| Prefect | http://localhost:4200 | 전체 CLI 자동 재개 큐는 미구현 |
 | MLflow | http://localhost:5000 | 산출물은 S3 `dlp-mlflow` |
-| lakeFS | http://localhost:8000 | 데이터셋 버전. 키는 `.env`의 `DLP_LAKEFS_*` |
-| CVAT | http://localhost:8080 | `make cvat-up`, 관리자는 `make cvat-superuser` |
+| lakeFS | http://localhost:8000 | 데이터셋 버전 |
+| CVAT | http://localhost:8080 | 일반 개발 호스트의 `make cvat-up`; 현재 클라우드는 별도 절차 |
+| MongoDB | localhost:27017 | 선택 큐레이션의 외부 DB; 별도 준비 |
 
-포트와 계정은 `.env`(최초 `make up` 시 `.env.example`에서 복사)로 바꾼다. 기본값은 개발용이다.
+TLS 프록시 뒤에서 MLflow 이미지 빌드에 추가 CA가 필요하면 빌드 시크릿으로 전달한다.
+인증서 검증을 비활성화하지 않는다.
 
-TLS를 가로채는 프록시 뒤에서 MLflow 이미지 빌드가 실패하면, CA 묶음을 빌드 시크릿으로 넘겨 먼저 빌드한다:
-
-```sh
-docker build --secret id=extra_ca,src=<ca-bundle.crt> -t dlp-mlflow:3.16.1 services/mlflow
+```bash
+docker build --secret id=extra_ca,src=/path/to/ca-bundle.crt -t dlp-mlflow:3.16.1 services/mlflow
 ```
+
+실제 영상·동의 정보·계정·모델 가중치는 Git에 넣지 않는다. 개인정보 검수와 모델 라이선스의
+상업 이용 검토는 사람이 완료해야 한다.

@@ -19,7 +19,7 @@ retired.
 부작용 요약:
 - DB 쓰기: training_runs(`register_training_run`), model_versions(삽입·상태 변경). 트랜잭션은
   호출자가 연다. 예외가 나면 호출자 트랜잭션이 되돌리지만, 이미 올린 산출물·MLflow 기록은 남는다
-  (MLflow 실행은 FAILED로 끝낸다).
+  (MLflow 실행을 FAILED로 끝내려 시도하지만 해당 통신까지 실패하면 종료 기록은 보장되지 않는다).
 - 저장소 쓰기: 학습 산출물 버킷 `<artifact_prefix>/<과제>/<모델 버전>/`에
   산출물·golden.json·golden.md.
 - 원본 읽기: 골든셋 영상(`clips`). CLI는 `raw_clips(raw_store(...))`로 감사 저장소를 넘긴다 (ADR
@@ -63,6 +63,7 @@ from dlp_schema.db.repository import (
     get_training_run,
     insert_model_version,
     list_model_versions,
+    lock_model_task,
     set_model_status,
     withdrawn_session_ids,
 )
@@ -456,7 +457,7 @@ def run_training_job(
             set_model_status(conn, model_version, ModelStatus.PASSED, now, report_uri)
             result.status, result.reason = "passed", "게이트 통과, 사람 배포 승인 대기"
         else:
-            mv = deploy(conn, model_version, now=now, report_uri=report_uri)
+            mv = deploy(conn, model_version, now=now, report_uri=report_uri, artifacts=artifacts)
             result.registration = registration(conn, mv, policy)
             result.status, result.reason = "deployed", "게이트 통과, 배포"
         tracker.finish(mlflow_run, "FINISHED")
@@ -509,7 +510,7 @@ def deploy(
 ) -> ModelVersion:
     """게이트를 통과한 모델(candidate 판정 직후 또는 passed)을 배포한다. 과제마다 배포는 하나다.
 
-    passed 모델은 평가 리포트(report_uri, artifacts 저장소)에 적힌 비교 대상 배포 모델이 지금 배포
+    평가 리포트(report_uri, artifacts 저장소)에 적힌 비교 대상 배포 모델이 지금 배포
     모델과 다르면 배포하지 않는다 (지금 모델과 비교하지 않았으므로 다시 평가해야 한다). 판정 시각은
     학습 실행 시작 시각이라 비교에 쓰지 않는다. MLflow 등록은 DB 커밋 뒤에 register()로 한다.
 
@@ -518,7 +519,7 @@ def deploy(
         model_version: 배포할 모델 버전.
         now: 상태 변경 시각 (decided_at).
         report_uri: candidate를 바로 배포할 때(루프 안) 남길 리포트 URI. candidate는 이것이 필수다.
-        artifacts: passed(승인 배포)일 때 리포트를 읽을 산출물 저장소. passed면 필수다.
+        artifacts: 리포트의 비교 기준을 읽을 산출물 저장소. 자동·승인 배포 모두 필수다.
 
     Returns:
         배포 전 상태로 읽은 `ModelVersion` (status 필드는 옛 값이다).
@@ -533,22 +534,26 @@ def deploy(
     mv = next((m for m in list_model_versions(conn) if m.model_version == model_version), None)
     if mv is None:
         raise TrainingError(f"모델 버전이 없습니다: {model_version}")
+    lock_model_task(conn, mv.task)
+    # 잠금을 기다리는 동안 같은 모델이 이미 배포·퇴역됐을 수 있으므로 상태도 다시 읽는다.
+    mv = next(m for m in list_model_versions(conn) if m.model_version == model_version)
     if mv.status not in (ModelStatus.CANDIDATE, ModelStatus.PASSED):
         raise TrainingError(f"{model_version}은 배포할 수 없는 상태입니다: {mv.status.value}")
     if mv.status is ModelStatus.CANDIDATE and report_uri is None:
         raise TrainingError(f"{model_version}은 게이트 판정 전입니다")
     current = list_model_versions(conn, mv.task, ModelStatus.DEPLOYED)
-    if mv.status is ModelStatus.PASSED:
-        if artifacts is None:
-            raise TrainingError(f"{model_version}: 승인 배포에는 평가 리포트 저장소가 필요합니다")
-        compared = _compared_with(artifacts, mv)
-        now_deployed = current[-1].model_version if current else None
-        if compared != now_deployed:
-            raise TrainingError(
-                f"{model_version}은 게이트에서 {compared or '배포 모델 없음'}과 비교했지만 "
-                f"지금 배포 모델은 {now_deployed or '없음'}입니다. "
-                "그 모델과 비교하도록 다시 학습·평가하세요"
-            )
+    if artifacts is None:
+        raise TrainingError(f"{model_version}: 배포에는 평가 리포트 저장소가 필요합니다")
+    compared = _compared_with(
+        artifacts, mv.model_copy(update={"report_uri": report_uri or mv.report_uri})
+    )
+    now_deployed = current[-1].model_version if current else None
+    if compared != now_deployed:
+        raise TrainingError(
+            f"{model_version}은 게이트에서 {compared or '배포 모델 없음'}과 비교했지만 "
+            f"지금 배포 모델은 {now_deployed or '없음'}입니다. "
+            "그 모델과 비교하도록 다시 학습·평가하세요"
+        )
     for cur in current:
         set_model_status(conn, cur.model_version, ModelStatus.RETIRED, now)
     set_model_status(conn, model_version, ModelStatus.DEPLOYED, now, report_uri)

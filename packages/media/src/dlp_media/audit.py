@@ -1,8 +1,8 @@
 """원본 버킷 접근 감사 (WP16).
 
 원본(블러 전) 저장소는 늘 AuditedStore로 감싸서 쓴다. 내려받기(read)·서명 URL(presign)·
-올리기(write)를 하기 **전에** 감사 이벤트를 남긴다 (시도도 접근으로 본다). 검수 도구에 원본을 올려
-사람에게 보여 주면 grant로 남긴다. DB 기록은 이벤트마다 따로 커밋한다:
+올리기(write)를 하기 **전에** 감사 이벤트를 남긴다 (시도도 접근으로 본다). 검수 도구에 원본을
+제공하려는 시도도 업로드 전에 grant로 남긴다. DB 기록은 이벤트마다 따로 커밋한다:
 그 뒤 작업이 실패해 트랜잭션이 되돌아가도 접근 기록은 남아야 한다. DB 없이 로컬 저장소로 돌 때는
 FileAccessSink(JSON Lines)에 남긴다.
 
@@ -15,7 +15,7 @@ ADR 0020·0021. 만드는 곳은 `dlp_cli.raw_access`뿐이다:
 
 - `AccessSink` / `MemorySink` / `DbAccessSink` / `FileAccessSink`: 기록 대상.
 - `AuditedStore`: `ObjectStore`를 감싸 접근을 기록하는 저장소.
-- `grant`: 감사 저장소면 원본을 사람에게 보여 준 사실을 남긴다.
+- `grant`: 감사 저장소면 원본을 제공하려는 시도를 남긴다 (업로드 성공·실제 열람의 증거는 아님).
 - `current_actor`, `session_of`: 기록 필드 도우미.
 """
 
@@ -88,7 +88,7 @@ class FileAccessSink:
 
 
 def current_actor() -> str:
-    """실행한 사람·서비스 계정 (DLP_ACTOR, 없으면 OS 사용자)."""
+    """기록할 행위자 이름 (DLP_ACTOR, 없으면 OS 사용자). 인증된 사용자 신원을 검증하지 않는다."""
     return os.environ.get("DLP_ACTOR") or getpass.getuser()
 
 
@@ -178,9 +178,10 @@ class AuditedStore:
         return presign(key, expires_s)
 
     def grant(self, key: str, to_actor: str) -> None:
-        """원본을 사람(검수 도구 사용자)에게 보여 줬다.
+        """원본을 사람(검수 도구 사용자)에게 제공하려는 grant 시도를 기록한다.
 
-        행위자는 보여 준 상대(to_actor)로 남긴다 (예: 블러 검수자).
+        실제 업로드·열람 전에 호출하며 성공·열람 완료를 증명하지 않는다.
+        행위자는 제공 대상(to_actor)으로 남긴다 (예: 블러 검수자).
         """
         self._log("grant", key, actor=to_actor)
 

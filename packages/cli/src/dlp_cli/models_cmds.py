@@ -57,18 +57,21 @@ def used_models(root: Path) -> dict[str, str]:
     반환: 쓰는 곳 → 모델 이름 사전. 정책에 없는 탐지기 이름은 조용히 건너뛴다.
     """
     used: dict[str, str] = {}
+    visited: set[str] = set()
     privacy = load_privacy_policy(root)
     names = {n for tp in privacy.targets.values() for n in tp.detectors}
     while names:  # reflection처럼 다른 탐지기를 쓰는 탐지기를 따라간다
         name = names.pop()
+        if name in visited:
+            continue
+        visited.add(name)
         spec = privacy.detectors.get(name)
         if spec is None:
             continue
         for field in ("model", "tokenizer"):
             if (model := getattr(spec, field)) is not None:
                 used[f"privacy.detectors.{name}.{field}"] = model
-        # 하위 탐지기를 작업 목록에 넣는다. 이미 처리한 이름이 다시 들어와도 결과 키가 같아
-        # 덮어쓸 뿐이며, 순환 참조가 있으면 끝나지 않는다 (현재 정책에는 순환이 없다)
+        # 이미 처리한 탐지기는 다시 따라가지 않는다. 잘못된 순환 정책도 검사 명령을 멈추지 않는다.
         names |= {n for n in (spec.region_detector, spec.face_detector) if n is not None}
     for role, model in load_prelabel_policy(root).models.model_dump().items():
         used[f"prelabel.models.{role}"] = model
@@ -110,8 +113,13 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     건너뛴다(멱등).
     """
     root = repo_root()
+    registry = load_registry(root)
+    unknown = set(args.names) - registry.models.keys()
+    if unknown:
+        print(f"[실패] 모델 목록에 없는 이름: {', '.join(sorted(unknown))}")
+        return 1
     failed = 0
-    for name, spec in load_registry(root).models.items():
+    for name, spec in registry.models.items():
         if args.names and name not in args.names:
             continue
         message = fetch(root, name, spec)

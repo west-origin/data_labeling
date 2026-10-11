@@ -17,6 +17,7 @@
     - raw_access_log, review_work, privacy_audits, retention_decisions: 수정·삭제·TRUNCATE 금지
       (0009, 0010).
     - session_lifecycle_events: 수정·삭제·TRUNCATE 금지 (0011).
+    - privacy_detection_runs: 0건을 포함한 탐지 완료 이력, 수정·삭제·TRUNCATE 금지 (0012).
 
 열 규약
     - 시각(`Ts`)은 모두 `TIMESTAMP WITH TIME ZONE`. 파이썬 쪽도 시간대 있는 datetime만 쓴다.
@@ -134,6 +135,27 @@ streams = sa.Table(
     sa.Column("manual_adjustment_ms", sa.Float(), nullable=False),
 )
 
+# 탐지 완료 이력 (PrivacyDetectionRun). 결과가 0건이어도 검수 기준·멱등 실행 증거를 남긴다.
+privacy_detection_runs = sa.Table(
+    "privacy_detection_runs",
+    metadata,
+    sa.Column(
+        "event_id",
+        sa.BigInteger().with_variant(sa.Integer(), "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    ),
+    sa.Column("session_id", sa.String(128), nullable=False),
+    sa.Column("stream_id", sa.String(128), nullable=False),
+    sa.Column("model_versions", Json, nullable=False),
+    sa.Column("at", Ts, nullable=False),
+    sa.ForeignKeyConstraint(
+        ["session_id", "stream_id"], ["streams.session_id", "streams.stream_id"]
+    ),
+    sa.UniqueConstraint("event_id", "session_id", "stream_id"),
+    sa.Index("ix_privacy_detection_runs_session_stream", "session_id", "stream_id"),
+)
+
 # 라벨 레코드 (`LabelRecord`, 변환은 `label_to_row`/`row_to_label`).
 # 출처·검수 정보는 평탄화해 열로 두고(source, model_version, sensor_id, verification_state,
 # reviewer_id, reviewed_at), 페이로드는 JSON으로 둔다.
@@ -197,6 +219,15 @@ review_tasks = sa.Table(
     sa.Column("mode", sa.String(16), nullable=False),
     sa.Column("assignment_id", sa.String(128), nullable=True),
     sa.Column("sent_label_ids", Json, nullable=True),
+    sa.Column("privacy_detection_id", sa.BigInteger().with_variant(sa.Integer(), "sqlite")),
+    sa.ForeignKeyConstraint(
+        ["privacy_detection_id", "session_id", "stream_id"],
+        [
+            "privacy_detection_runs.event_id",
+            "privacy_detection_runs.session_id",
+            "privacy_detection_runs.stream_id",
+        ],
+    ),
     sa.Column("status", sa.String(16), nullable=False),
     sa.Column("created_at", Ts, nullable=False),
     sa.Column("collected_at", Ts, nullable=True),
@@ -281,6 +312,14 @@ model_versions = sa.Table(
     sa.Column("report_uri", sa.Text(), nullable=True),
     sa.Column("created_at", Ts, nullable=False),
     sa.Column("decided_at", Ts, nullable=True),
+    # 첫 배포의 동시 실행도 포함해 과제마다 deployed 하나만 허용한다 (ADR 0032).
+    sa.Index(
+        "uq_model_versions_deployed_task",
+        "task",
+        unique=True,
+        postgresql_where=sa.text("status = 'deployed'"),
+        sqlite_where=sa.text("status = 'deployed'"),
+    ),
 )
 
 # 내보내기 이력 (`ExportRecord`). label_states는 0008에서 추가 (기존 행은 빈 목록).

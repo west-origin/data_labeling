@@ -22,9 +22,9 @@
 저장소를 감사 저장소(`dlp_cli.raw_access.raw_store`, ADR 0020)로 열어 `run_prelabel`을 한
 트랜잭션에서 부른다.
 
-부작용 요약: DB `labels`에 새 레코드(모델 라벨, 삭제 레코드)만 추가한다 (덮어쓰지 않음). 생애주기
-기록 (`set_lifecycle`). 원본 버킷에서 영상·장갑·IMU 파일을 임시 디렉터리로 받는다 (접근 기록은
-넘겨받은 저장소가 남긴다). 관련: WP8, ADR 0015, 0019, 0026.
+부작용 요약: DB `label_records`에 새 레코드(모델 라벨, 삭제 레코드)만 추가한다 (덮어쓰지 않음).
+생애주기 기록 (`set_lifecycle`). 원본 버킷에서 영상·장갑·IMU 파일을 임시 디렉터리로 받는다.
+접근 기록은 넘겨받은 저장소가 남긴다. 관련: WP8, ADR 0015, 0019, 0026.
 """
 
 from __future__ import annotations
@@ -394,7 +394,7 @@ def _lift(
 
     입력: 기준 스트림(바디캠)의 현재 키포인트·박스 트랙 (모델·사람 출처 모두). 출력 라벨 ID 접두사는
     `<세션>-<바디캠>-3d-`. Returns: 새로 넣은 3D 궤적 수.
-    부작용: 원본 버킷에서 바디캠 영상을 받고, `labels`에 새 궤적과 이전 버전 삭제 레코드를
+    부작용: 원본 버킷에서 바디캠 영상을 받고, `label_records`에 새 궤적과 이전 버전 삭제 레코드를
     넣는다.
     """
     body = session.reference_stream
@@ -478,7 +478,7 @@ def _contacts(
     4자리>`다. 신뢰도는 `contact.confidence.<출처>`, 증거는 영상만이면 INFERRED, 그 밖은 OBSERVED.
 
     Returns: 새로 넣은 접촉 라벨 수 (같은 버전이 이력에 있으면 0).
-    부작용: 원본 버킷에서 장갑 Parquet을 받고, `labels`에 새 접촉과 이전 버전 삭제 레코드를
+    부작용: 원본 버킷에서 장갑 Parquet을 받고, `label_records`에 새 접촉과 이전 버전 삭제 레코드를
     넣는다.
     """
     body = session.reference_stream.stream_id
@@ -578,7 +578,7 @@ def _wearer(
     조건: 3인칭 스트림이 있고 동기화됨, 공유 시계(SHARED_CLOCK) IMU 스트림이 있음, 살아 있는 착용자
     레코드가 없음, 3인칭 coco17 트랙이 있음. 하나라도 아니면 아무것도 하지 않는다. IMU 시각은 공유
     시계라 변환 없이 쓰고, 3인칭 손목 속도 시각은 `to_master_ms`로 마스터에 맞춘다.
-    부작용: 원본 버킷에서 IMU Parquet을 받고, `labels`에 착용자 사본 하나를 넣는다.
+    부작용: 원본 버킷에서 IMU Parquet을 받고, `label_records`에 착용자 사본 하나를 넣는다.
     """
     third = next((s for s in session.streams if s.kind is StreamKind.THIRD_PERSON), None)
     imu = next(

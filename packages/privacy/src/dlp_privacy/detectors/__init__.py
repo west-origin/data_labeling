@@ -58,6 +58,7 @@ def build_detectors(
     """
     ready: dict[str, FrameDetector] = dict(extra or {})
     missing: dict[str, str] = {}
+    active: set[str] = set()
 
     def make(name: str) -> FrameDetector | None:
         """이름의 탐지기를 만들어 ready에 넣는다 (이미 있으면 그대로). 못 만들면 missing에 넣고
@@ -66,6 +67,9 @@ def build_detectors(
             return ready[name]
         if name in missing:
             return None
+        if name in active:
+            raise ValueError(f"프라이버시 탐지기 참조가 순환합니다: {name}")
+        active.add(name)
         spec = policy.detectors.get(name)
         try:
             if spec is None:
@@ -102,6 +106,8 @@ def build_detectors(
         except ModelUnavailableError as exc:
             missing[name] = str(exc)
             return None
+        finally:
+            active.remove(name)
         ready[name] = det
         return det
 
@@ -126,7 +132,8 @@ def _open_vocab(name: str, spec: DetectorSpec, root: Path) -> FrameDetector:
     """OWLv2 오픈 보캐뷸러리 탐지기를 만든다.
 
     질의 목록 순서와 대상 목록 순서를 맞춰 넘긴다 (질의 i의 탐지 → 대상 i).
-    버전은 가중치 버전에 frame_stride_ms를 붙인 값이다 (`OpenVocabDetector.version`).
+    버전은 가중치·토크나이저 버전에 frame_stride_ms를 붙인 값이다
+    (`OpenVocabDetector.version`). 토크나이저만 바뀌어도 재탐지한다.
 
     Raises:
         ModelUnavailableError: 정책에 모델·토크나이저·질의가 없거나 가중치를 찾을 수 없을 때.
@@ -135,13 +142,13 @@ def _open_vocab(name: str, spec: DetectorSpec, root: Path) -> FrameDetector:
     if not spec.queries or spec.model is None or spec.tokenizer is None:
         raise ModelUnavailableError(f"{name}: 모델·토크나이저·질의가 정책에 없습니다")
     model, version = resolve(root, spec.model)
-    tokenizer, _ = resolve(root, spec.tokenizer)
+    tokenizer, tokenizer_version = resolve(root, spec.tokenizer)
     queries = list(spec.queries)  # dict 삽입 순서 = YAML 순서
     return OpenVocabDetector(
         name,
         Owlv2(model, tokenizer, queries),
         [spec.queries[q] for q in queries],
-        version=version,
+        version=f"{version}+t{tokenizer_version}",
         frame_stride_ms=spec.frame_stride_ms,
         score_threshold=_required(spec.score_threshold, name, "score_threshold"),
         score_full=_required(spec.score_full, name, "score_full"),

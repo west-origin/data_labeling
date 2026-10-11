@@ -16,7 +16,8 @@ model_version은 "actions-<정책 해시>+<VLM 버전>+i<입력 해시>"다.
   미상(unknown) 공백으로 채운다 (타임라인 공백 0 유지, ADR 0015).
 
 입력은 `current_labels()`(운영 라벨)에서 고르고, 다시 돌릴지는 전체 이력(`get_labels`)으로 정한다.
-DB: `labels` 테이블 읽기·쓰기(추가만). 저장소: 라벨링 버킷의 블러본 읽기(원본 버킷은 읽지 않는다).
+DB: `label_records` 테이블 읽기·쓰기(추가만).
+저장소: 라벨링 버킷의 블러본 읽기(원본 버킷은 읽지 않는다).
 트랜잭션은 호출자(CLI)가 연다.
 """
 
@@ -225,8 +226,8 @@ def run_actions(
             호출자가 트랜잭션을 되돌린다).
         RenderNotCurrentError: 블러본이 지금 승인된 블러 라벨로 렌더한 것이 아닐 때 (ADR 0024).
 
-    부작용: `labels`에 삭제 레코드와 새 라벨을 추가한다. 라벨링 버킷에서 블러본을 임시 디렉터리로
-    받는다.
+    부작용: `label_records`에 삭제 레코드와 새 라벨을 추가한다.
+    라벨링 버킷에서 블러본을 임시 디렉터리로 받는다.
     """
     session = get_session(conn, session_id)
     labels = get_labels(conn, session_id)

@@ -1,6 +1,7 @@
 """반사면 속 얼굴: 반사면 영역(거울, 유리, 꺼진 화면)을 찾고 그 안에서 얼굴 탐지 문턱을 낮춘다.
 
-가슴 캠은 착용자 얼굴이 거울에서만 보이므로 화장실 청소에서 필수다. 영역 탐지기는
+가슴 캠 영상의 거울·유리·화면에 비치는 얼굴을 찾는 데 사용한다. 탐지 성공을 보장하지 않으므로
+누락 여부는 사람이 원본 영상으로 검수해야 한다. 영역 탐지기는
 target이 "reflective_surface"인 탐지를 낸다.
 
 WP5. 정책: privacy.yaml `detectors.reflection` (region_detector: open_vocab, face_detector: yunet,

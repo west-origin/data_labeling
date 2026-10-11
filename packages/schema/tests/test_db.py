@@ -8,9 +8,6 @@
 
 from __future__ import annotations
 
-import os
-import uuid
-from collections.abc import Iterator
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -44,9 +41,6 @@ from dlp_schema.ontology import Ontology
 from dlp_schema.session import LifecycleState, SyncMethod
 from dlp_schema.testing import FIXED_TIME, action_payload, make_label, make_session
 
-# 개발 compose(services/)의 PostgreSQL 기본 접속 정보 (로컬 개발 전용 비밀번호)
-DEFAULT_URL = "postgresql+psycopg://dlp:dlp-dev-password@localhost:5432/dlp"
-
 
 def test_migrations_match_table_definitions(tmp_path: Path) -> None:
     """SQLite에 모든 마이그레이션을 적용한 스키마가 db.tables 메타데이터와 같다.
@@ -61,38 +55,6 @@ def test_migrations_match_table_definitions(tmp_path: Path) -> None:
     engine.dispose()
     assert diff == [], diff
     downgrade(url, "base")
-
-
-@pytest.fixture
-def pg_url() -> Iterator[str]:
-    """테스트마다 새 데이터베이스를 만들고 마이그레이션을 적용한다.
-
-    관리 DB(postgres)에 AUTOCOMMIT으로 붙어 `dlp_test_<임의 8자>` DB를 만들고, 끝나면 강제로 지운다.
-    """
-    admin_url = sa.make_url(os.environ.get("DLP_DATABASE_URL", DEFAULT_URL))
-    name = f"dlp_test_{uuid.uuid4().hex[:8]}"
-    admin = sa.create_engine(admin_url.set(database="postgres"), isolation_level="AUTOCOMMIT")
-    with admin.connect() as conn:
-        conn.execute(sa.text(f'CREATE DATABASE "{name}"'))
-    url = admin_url.set(database=name).render_as_string(hide_password=False)
-    upgrade(url)
-    try:
-        yield url
-    finally:
-        with admin.connect() as conn:
-            conn.execute(sa.text(f'DROP DATABASE "{name}" WITH (FORCE)'))
-        admin.dispose()
-
-
-@pytest.fixture
-def pg(pg_url: str, ontology: Ontology) -> Iterator[sa.Engine]:
-    """마이그레이션된 임시 DB 엔진. 온톨로지 v1과 기본 세션 s001을 미리 등록한다."""
-    engine = sa.create_engine(pg_url)
-    with engine.begin() as conn:
-        register_ontology(conn, ontology)
-        insert_session(conn, make_session())
-    yield engine
-    engine.dispose()
 
 
 @pytest.mark.services
@@ -153,10 +115,10 @@ def test_labels_are_immutable_except_review(pg: sa.Engine) -> None:
             conn.execute(sa.text(statement))
 
 
-# TRUNCATE를 막아야 하는 추가 전용 테이블 (0010, 0011)
+# TRUNCATE를 막아야 하는 추가 전용 테이블 (0010~0012)
 APPEND_ONLY_TABLES = (
     "label_records", "raw_access_log", "review_work", "privacy_audits", "retention_decisions",
-    "session_lifecycle_events",
+    "session_lifecycle_events", "privacy_detection_runs",
 )  # fmt: skip
 
 

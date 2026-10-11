@@ -2,7 +2,8 @@
 
 역할
     1) `EpisodeGraph`: 세션의 한 구간(에피소드)의 개체 목록과 현재 라벨을 묶고, 라벨이 참조하는
-       개체 ID가 모두 있는지 검증한다. 관계·이벤트·커버리지 층과 객체 상태 전이를 꺼내 보는
+       개체 ID와 상위 구간의 자식·계층·시간 연결을 검증한다. 사전 의미와 부분 소속은
+       `validation.validate_episode`가 더 검사한다. 관계·이벤트·커버리지 층과 상태 전이를 꺼내 보는
        도우미를 둔다 (WP1, 기준 문서 "에피소드 그래프").
     2) 라벨 이력 공용 함수: 모든 단계가 다른 단계의 입력을 고를 때 쓰는 `current_labels`, 운영
        라벨이 아닌 레코드를 찾는 `non_operational_ids`, 모델 버전 교체 때 쓰는
@@ -35,6 +36,7 @@ from itertools import pairwise
 from pydantic import Field, model_validator
 
 from dlp_schema.common import Contract, Identifier, Ms, OntologyId, SemVer, derived_id
+from dlp_schema.label_graph import check_segment_links
 from dlp_schema.labels import (
     ActionPayload,
     BoxTrackPayload,
@@ -104,7 +106,7 @@ class EpisodeGraph(Contract):
 
     @model_validator(mode="after")
     def _check(self) -> EpisodeGraph:
-        """개체 ID 중복과 라벨의 세션·버전·삭제 여부·구간·개체 참조를 검사한다.
+        """개체·라벨 ID 중복, 세션·버전·삭제·구간·개체 참조와 구간 자식 연결을 검사한다.
 
         Raises:
             ValueError: 개체 ID 중복이면 즉시, 그 밖의 위반은 모두 모아 `; `로 이은 메시지.
@@ -113,6 +115,8 @@ class EpisodeGraph(Contract):
         if len(ids) != len(self.entities):
             raise ValueError("entity_id가 중복되었습니다")
         problems: list[str] = []
+        if len({label.label_id for label in self.labels}) != len(self.labels):
+            problems.append("label_id가 중복되었습니다")
         for label in self.labels:
             if label.session_id != self.session_id:
                 problems.append(f"{label.label_id}: 다른 세션의 라벨")
@@ -128,6 +132,7 @@ class EpisodeGraph(Contract):
                 for ref in entity_refs(label)
                 if ref not in ids
             )
+        problems.extend(check_segment_links(self.labels))
         if problems:
             raise ValueError("; ".join(problems))
         return self

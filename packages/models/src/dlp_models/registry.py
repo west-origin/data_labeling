@@ -1,7 +1,8 @@
 """모델 가중치 레지스트리 (config/models.yaml).
 
 정책 파일은 모델을 이름으로 가리키고, 실제 파일 경로·해시 확인은 여기서 한다. 파일이 없거나
-해시가 다르면 ModelUnavailableError를 낸다 (어댑터는 이를 받아 stub이나 전수 검수로 넘긴다).
+해시가 다르면 ModelUnavailableError를 낸다. 실행 중단·명시적 부분 실행·전수 검수 여부는 호출자가
+정한다 (기본 프리라벨 명령은 선택한 모델 미준비 시 중단한다).
 
 파이프라인 위치:
 - `make models` / `dlp models fetch` → `fetch`: 가중치를 `data/models/`에 받고 sha256을 확인한다.
@@ -21,9 +22,11 @@ from __future__ import annotations
 
 import hashlib
 import io
+import os
+import tempfile
 import urllib.request
 import zipfile
-from functools import cache
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
@@ -48,6 +51,7 @@ class ModelFile(Contract):
     - sha256: 등록 해시. `url` 파일(압축이면 zip 전체)의 해시다. `export`형은 변환한 환경의 값.
     - url: 직접 받을 주소. `export`와 둘 중 하나만 있다 (테스트가 검사).
     - archive_member: url이 zip이면 꺼낼 파일 이름의 끝부분 (예: `end2end.onnx`).
+    - artifact_sha256: 압축에서 꺼낸 파일의 등록 해시. ZIP 모델은 캐시 검증에도 필요하다.
     - export: 공개 ONNX가 없어 공식 가중치에서 변환하는 스크립트 (`make export-models`).
     - license / training_data / commercial: 상업 사용 판단 근거 (ADR 0010).
     """
@@ -56,6 +60,7 @@ class ModelFile(Contract):
     sha256: str
     url: str | None = None
     archive_member: str | None = None
+    artifact_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     export: str | None = Field(default=None, description="공개 파일이 없어 직접 변환하는 스크립트")
     license: str = Field(description="가중치 라이선스")
     training_data: tuple[str, ...] = Field(description="직접 학습·미세조정 데이터와 그 라이선스")
@@ -107,18 +112,37 @@ class ModelRegistry(Contract):
         return out
 
 
-@cache
-def _digest(path: Path, mtime: float) -> str:
+def _fingerprint(stat: os.stat_result) -> tuple[int, ...]:
+    """내용 변경·원자적 교체를 구별하는 파일 상태. 시각은 나노초 정수로 비교한다."""
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+
+
+@lru_cache(maxsize=128)
+def _digest(path: Path, fingerprint: tuple[int, ...]) -> str:
     """파일 sha256 (16진 64자). 1 MiB씩 읽는다.
 
-    수백 MB 가중치를 어댑터마다 다시 해시하지 않도록 (경로, 수정 시각)으로 프로세스 안에서
-    캐시한다. mtime은 캐시 키로만 쓰인다 (파일이 바뀌면 다시 계산).
+    경로·파일 식별자·크기·나노초 수정/변경 시각으로 프로세스 안에서 캐시한다.
+    mtime을 보존한 파일 변경도 ctime으로 구별한다. 읽는 동안 변경되면 캐시하지 않고 거부한다.
+    검증 뒤의 파일을 다른 프로세스가 수정하지 못하게 하는 운영 권한 설정은 별도로 필요하다.
     """
     h = hashlib.sha256()
     with path.open("rb") as f:
+        if _fingerprint(os.fstat(f.fileno())) != fingerprint:
+            raise ModelUnavailableError(f"해시 검사 중 가중치 파일이 바뀌었습니다: {path}")
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
+        if _fingerprint(os.fstat(f.fileno())) != fingerprint:
+            raise ModelUnavailableError(f"해시 검사 중 가중치 파일이 바뀌었습니다: {path}")
     return h.hexdigest()
+
+
+def _file_digest(path: Path) -> str:
+    """캐시 조회 전후에도 현재 경로가 같은 파일 상태를 가리키는지 확인한다."""
+    fingerprint = _fingerprint(path.stat())
+    digest = _digest(path, fingerprint)
+    if _fingerprint(path.stat()) != fingerprint:
+        raise ModelUnavailableError(f"해시 검사 중 가중치 파일이 바뀌었습니다: {path}")
+    return digest
 
 
 def load_registry(root: Path) -> ModelRegistry:
@@ -133,8 +157,9 @@ def load_registry(root: Path) -> ModelRegistry:
 
 
 def resolve(root: Path, name: str, *, check_hash: bool = True) -> tuple[Path, str]:
-    """(파일 경로, 버전 문자열). 압축에서 꺼낸 파일과 직접 변환한 파일은 꺼낸·변환한 결과의 해시가
-    등록 해시와 다를 수 있어(zip 해시, 환경별 변환) 존재만 확인한다.
+    """(파일 경로, 버전 문자열). ZIP 모델은 추출 파일의 별도 등록 해시로 검증한다.
+
+    직접 변환한 파일은 환경에 따라 바이트가 달라 존재와 실제 버전 해시를 확인한다.
 
     Args:
         root: 저장소 루트 (`config/models.yaml`과 `data/models/`가 있는 곳).
@@ -159,20 +184,20 @@ def resolve(root: Path, name: str, *, check_hash: bool = True) -> tuple[Path, st
     if not path.is_file():
         hint = f"make export-models ({spec.export})" if spec.export else "make models"
         raise ModelUnavailableError(f"{name} 가중치가 없습니다: {path} ({hint})")
-    if check_hash and spec.archive_member is None and spec.export is None:
-        digest = _digest(path, path.stat().st_mtime)
-        if digest != spec.sha256:
+    if check_hash and spec.export is None:
+        digest = _file_digest(path)
+        expected = spec.artifact_sha256 if spec.archive_member else spec.sha256
+        if expected is None or digest != expected:
             raise ModelUnavailableError(f"{name} 가중치 해시가 다릅니다: {digest}")
         return path, f"{name}-{digest[:12]}"
-    # 압축에서 꺼냈거나 직접 변환한 파일은 등록 해시(zip·변환 환경)와 다를 수 있다. 라벨의 모델
-    # 버전에는 실제로 쓴 파일의 해시를 남긴다 (같은 등록 항목이라도 다른 파일이면 다른 버전이 된다).
-    return path, f"{name}-{_digest(path, path.stat().st_mtime)[:12]}"
+    # 직접 변환하거나 명시적으로 검증을 생략한 경우도 실제 파일의 해시를 버전에 남긴다.
+    return path, f"{name}-{_file_digest(path)[:12]}"
 
 
 def fetch(root: Path, name: str, spec: ModelFile) -> str:
     """가중치를 받는다. 결과 메시지를 돌려준다. 변환형은 안내만 한다.
 
-    멱등: 파일이 이미 있고 해시가 맞으면(압축형은 존재만) 다시 받지 않는다.
+    멱등: 파일이 이미 있고 해시가 맞으면 다시 받지 않는다. 실패한 다운로드는 공개하지 않는다.
 
     Args:
         root: 저장소 루트.
@@ -192,9 +217,10 @@ def fetch(root: Path, name: str, spec: ModelFile) -> str:
             if not path.is_file()
             else f"[있음] {name}"
         )
-    if path.is_file() and (
-        spec.archive_member or _digest(path, path.stat().st_mtime) == spec.sha256
-    ):
+    expected = spec.artifact_sha256 if spec.archive_member else spec.sha256
+    if expected is None:
+        return f"[실패] {name}: 압축 모델의 artifact_sha256이 없습니다"
+    if path.is_file() and _file_digest(path) == expected:
         return f"[있음] {name}"
     # export도 url도 없는 항목은 테스트(test_registry_entries_have_source_and_license)가 막는다
     assert spec.url is not None
@@ -207,9 +233,19 @@ def fetch(root: Path, name: str, spec: ModelFile) -> str:
     path.parent.mkdir(parents=True, exist_ok=True)
     if spec.archive_member:
         with zipfile.ZipFile(io.BytesIO(data)) as z:
-            # zip 안 경로는 배포판마다 앞부분이 달라 끝 이름으로 찾는다 (첫 번째 일치)
-            member = next(n for n in z.namelist() if n.endswith(spec.archive_member))
-            path.write_bytes(z.read(member))
-    else:
-        path.write_bytes(data)
+            # 경로 접두사는 배포판마다 다를 수 있지만 일치 파일은 정확히 하나여야 한다.
+            members = [n for n in z.namelist() if n.endswith(spec.archive_member)]
+            if len(members) != 1:
+                return f"[실패] {name}: 압축 파일의 모델 항목이 유일하지 않습니다"
+            data = z.read(members[0])
+        if hashlib.sha256(data).hexdigest() != expected:
+            return f"[실패] {name}: 추출 파일 해시 불일치"
+    with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as tmp:
+        candidate = Path(tmp.name)
+        try:
+            tmp.write(data)
+            tmp.flush()
+            candidate.replace(path)
+        finally:
+            candidate.unlink(missing_ok=True)
     return f"[받음] {name}: {path}"

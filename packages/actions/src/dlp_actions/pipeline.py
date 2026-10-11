@@ -1,7 +1,7 @@
 """한 손의 행동 구간: 경계 후보 → 후보 구간 VLM 분류 → 병합·채우기 → 라벨 (WP10).
 
-DB를 쓰지 않는 순수 흐름이다. `runner.run_actions`가 손마다 부르고, 테스트는 정답 라벨로 답하는
-`OracleVlm`으로 직접 부른다.
+DB에 쓰지 않고 라벨을 반환한다. 전달받은 VLM 클라이언트는 영상 읽기·외부 통신·재시도를 할 수 있다.
+`runner.run_actions`가 손마다 부르고, 테스트는 정답 라벨로 답하는 `OracleVlm`으로 직접 부른다.
 """
 
 from __future__ import annotations

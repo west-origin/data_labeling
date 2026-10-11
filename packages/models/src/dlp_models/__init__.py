@@ -13,7 +13,8 @@
 
 주의:
 - 가중치는 저장소에 넣지 않는다 (`data/models/`, `make models`·`make export-models`).
-- 파일이 없거나 해시가 다르면 `dlp_schema.predictor.ModelUnavailableError`를 낸다. 호출하는 어댑터는
-  이를 받아 stub이나 전수 검수로 넘긴다.
+- 파일이 없거나 해시가 다르면 `dlp_schema.predictor.ModelUnavailableError`를 낸다. 호출 경로가
+  중단·명시적 부분 실행·전수 검수를 결정한다. 기본 프리라벨은 선택 모델 미준비 시 중단하며,
+  실제 모델의 결과를 stub으로 조용히 대신하지 않는다.
 - 이 패키지는 라벨·DB·원본 버킷을 다루지 않는다. 입력은 메모리의 RGB 이미지(uint8)다.
 """

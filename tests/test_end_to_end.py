@@ -60,6 +60,7 @@ from dlp_schema.db.repository import (
     insert_labels,
     insert_review_task,
     insert_session,
+    latest_privacy_detection,
     record_review,
     register_ontology,
 )
@@ -233,9 +234,12 @@ def test_synthetic_session_end_to_end(pg: sa.Engine, tmp_path: Path) -> None:
         for st in get_session(conn, sid).streams:
             if st.kind not in (StreamKind.BODYCAM, StreamKind.THIRD_PERSON):
                 continue
+            run = latest_privacy_detection(conn, sid, st.stream_id)
+            assert run is not None
             insert_review_task(
                 conn,
                 ReviewTask(
+                    privacy_detection_id=run.event_id,
                     task_key=f"cvat:{sid}-{st.stream_id}-e2e", tool=ReviewTool.CVAT,
                     external_id="0", session_id=sid, stream_id=st.stream_id,
                     stage=ReviewStage.PRIVACY, assignee="privacy-reviewer",

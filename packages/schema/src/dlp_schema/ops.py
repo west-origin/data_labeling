@@ -26,7 +26,7 @@ from pydantic import AwareDatetime, Field, model_validator
 from dlp_schema.common import Contract, Identifier, Ms
 
 # 원본 버킷 접근 종류. read=내려받기, presign=서명 URL 발급, write=올리기,
-# grant=검수 도구에 원본을 올려 사람에게 보여 줌 (RawAccessEvent docstring과 같다).
+# grant=검수 도구 사용자에게 원본을 제공하려는 시도 (업로드·열람 성공 기록이 아님).
 RawAction = Literal["read", "presign", "write", "grant"]
 
 
@@ -35,8 +35,10 @@ class RawAccessEvent(Contract):
     grant=검수 도구에 원본을 올려 사람(actor)에게 보여 줌."""
 
     # event_id: 기록 ID (고유).
-    # at: 접근 시각.
-    # actor: 접근한 사람 또는 서비스 계정 (grant면 원본을 보게 되는 사람).
+    # at: 접근 시도 기록 시각. 실제 저장소 호출·검수 도구 업로드 전에 남긴다.
+    # actor: 자기 신고한 사람 또는 서비스 계정 (grant면 원본 제공 예정 담당자).
+    # 생성 스키마의 기존 class description에서 "보여 줌"은 제공 시도를 뜻한다.
+    # 실제 열람 증거가 아니다.
     # purpose: 접근한 단계·명령 (예: privacy.detect, review.create). 월간 감사 리포트의 분류 기준.
     # bucket / key: 접근한 객체 위치 (원본 버킷과 키).
     # session_id: 관련 세션. 세션과 무관한 접근이면 None.

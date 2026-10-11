@@ -8,7 +8,7 @@
 라벨 ID: `<세션>-<rel|cov>-<내용 해시 16자>`. 같은 내용이 지워진 뒤 다시 나오면 `-<n>` 접미사를
 붙인다 (n = 지금까지 넣은 같은 내용 레코드 수, 삭제 레코드는 세지 않는다). 새 레코드의 온톨로지
 버전은 세션의 것이다. 검수자가 승인·표본 검증한 레코드는 규칙이 바뀌어도 지우지 않는다 (ADR 0015).
-부작용: DB `labels`에 새 레코드와 삭제 레코드만 추가한다. 호출자가 트랜잭션을 연다.
+부작용: DB `label_records`에 새 레코드와 삭제 레코드만 추가한다. 호출자가 트랜잭션을 연다.
 """
 
 from __future__ import annotations
@@ -85,7 +85,8 @@ def run_relations(
     version = VERSION_PREFIX + policy.digest
     summary = RelationsSummary(version)
     labels = get_labels(conn, session_id)
-    derived = derive(labels, ontology, policy)
+    session = get_session(conn, session_id)
+    derived = derive(labels, ontology, policy, session)
     summary.relations = len(derived.relations)
     summary.coverage = {
         f"{c.payload.tool_id}→{c.payload.surface_id}": c.payload.ratio for c in derived.coverage
@@ -101,7 +102,7 @@ def run_relations(
     # 새 레코드의 온톨로지 버전은 세션의 것 (DB sessions.ontology_version). 세션에 아직 없으면
     # 넘겨받은 온톨로지. 예전에는 시각 순 첫 라벨의 버전을 써서, 이관 전 옛 라벨이 앞에 있으면
     # 새 관계가 옛 온톨로지 버전으로 기록됐다.
-    ontology_version = get_session(conn, session_id).ontology_version or ontology.version
+    ontology_version = session.ontology_version or ontology.version
 
     desired: set[str] = set()
     new: list[LabelRecord] = []

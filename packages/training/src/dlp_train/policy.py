@@ -35,7 +35,8 @@ class MlflowPolicy(Contract):
 class TaskTraining(Contract):
     """과제 하나의 학습 작업 템플릿 (`tasks.<과제>`)."""
 
-    # 배포되면 쓰이는 단계: prelabel(프리라벨 Predictor), privacy(블러 탐지기), actions(행동 분류)
+    # 배포 모델 연결 단계: prelabel(프리라벨 Predictor), privacy(블러 탐지기).
+    # actions는 예약 값이며 현재 행동 실행 경로에서는 배포 모델을 읽지 않는다.
     stage: Literal["prelabel", "privacy", "actions"]
     # 배포되면 빼는 기본 어댑터 이름 (Predictor.name). 비어 있으면 기본 어댑터에 더한다
     replaces: tuple[str, ...] = ()

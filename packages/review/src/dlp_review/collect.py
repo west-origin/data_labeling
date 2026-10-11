@@ -1,7 +1,8 @@
 """검수 결과 수집.
 
 도구에서 결과를 받아 reconcile하고 DB에 이력으로 쓴다. 한 작업은 한 번만 수집한다
-(작업 행을 SELECT … FOR UPDATE로 잠그고 상태를 본다. 동시에 수집해도 두 번째는 None).
+(세션과 작업 행을 순서대로 잠근다. 같은 작업의 재수집은 None이며, 다른 작업도 같은 세션의
+이력을 직렬로 읽어 같은 부모를 두 번 수정하지 않는다).
 
 - 수집하는 검수자는 작업 담당자여야 한다 (웹훅의 도구 사용자 ID가 아니라 작업의 담당자로 기록).
 - 작업을 보낸 뒤 다른 단계가 지웠거나(retracted) 다른 작업이 먼저 고친(자식 레코드가 생긴) 라벨은
@@ -64,6 +65,7 @@ from dlp_schema.db.repository import (
     get_session,
     insert_labels,
     insert_review_work,
+    lock_session,
     mark_review_task_collected,
     record_review,
     set_privacy_state,
@@ -165,6 +167,9 @@ def collect_task(
     예외: `TaskError` — 담당자가 아님, 세션 온톨로지 버전 없음, 도구 클라이언트 없음, 옮길 수 없는
     CVAT 주석, Label Studio에 제출된 주석 없음. 도구 API 오류는 `clients.ToolError`.
     """
+    # 같은 부모를 보낸 서로 다른 작업도 직렬화한다. 작업 행만 잠그면 stale 이력으로 둘 다
+    # 수정본을 추가할 수 있다. 세션 → 작업 순으로 잠근 뒤에 이력을 읽는다 (ADR 0032).
+    lock_session(conn, get_review_task(conn, task_key).session_id)
     if _lock_task(conn, task_key) is ReviewTaskStatus.COLLECTED:
         return None
     task = get_review_task(conn, task_key)

@@ -7,7 +7,8 @@
 CVAT는 프레임 번호로 주석을 저장하므로 PTS 인덱스의 프레임 시각(정수 ms)으로 맞바꾼다.
 우리 쪽에는 프레임 번호를 남기지 않는다. 라벨마다 트랙 속성 두 개를 붙인다.
 - dlp_label_id: 원래 라벨 ID (검수자가 새로 그린 트랙은 비어 있다)
-- dlp_meta: 화면에서 고치지 않는 필드 (종류, 개체 ID, 손 등)
+- dlp_meta: 모양·라벨 이름 외의 왕복 보존용 필드 (종류, 개체 ID, 손 등)
+이 속성들은 검수 화면에서 수정 불가능한 보안 필드가 아니다.
 키포인트의 점별 가시성은 모양 속성 dlp_visibility("2,2,1,…")로 싣는다.
 
 검수자가 CVAT 기본인 모양(Shape) 모드로 그린 직사각형은 한 프레임에만 있는 주석이다. 이것도
@@ -50,7 +51,8 @@ from dlp_schema.labels import (
 
 # CVAT로 오가는 라벨 종류 (블러 검수의 blur_track 포함)
 CVAT_KINDS = ("box_track", "blur_track", "keypoint_track")
-# 트랙 속성 (바꿀 수 없음, mutable=False): 원래 라벨 ID와 메타 JSON
+# 트랙 속성 (프레임별 값 변화 없음, mutable=False): 원래 라벨 ID와 메타 JSON.
+# mutable=False는 검수자가 속성을 편집하지 못한다는 뜻이 아니다.
 TRACK_ATTRS = ("dlp_label_id", "dlp_meta")
 # 모양(키프레임) 속성 (프레임마다 다를 수 있음): 키포인트 점별 가시성
 SHAPE_ATTRS = ("dlp_visibility",)

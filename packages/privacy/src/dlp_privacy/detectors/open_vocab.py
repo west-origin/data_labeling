@@ -6,7 +6,7 @@ CPU에서 프레임당 수 초가 걸려 frame_stride_ms마다 한 번만 추론
 
 WP5, ADR 0009. 모델 실행은 `dlp_models.owlv2.Owlv2`(공용 ONNX 런타임)가 한다. 정책:
 privacy.yaml `detectors.open_vocab` (model, tokenizer, frame_stride_ms, score_threshold, score_full,
-queries). 버전은 `<가중치 버전>-s<frame_stride_ms>`이다 (간격이 바뀌면 결과가 바뀌므로).
+queries). 버전은 `<가중치·토크나이저 버전>-s<frame_stride_ms>`이다 (어느 입력이든 바뀌면 재탐지).
 주의: 간격 사이에 잠깐 나타났다 사라진 대상은 놓칠 수 있다 (블러 전수 검수가 보완).
 """
 
@@ -49,7 +49,7 @@ class OpenVocabDetector:
             name: 정책 탐지기 이름.
             model: 질의 탐지 모델 (`Owlv2` 또는 테스트용 가짜).
             targets: 질의 i → 대상 ID (model.queries와 길이가 같아야 한다).
-            version: 가중치 버전 (`registry.resolve`).
+            version: 가중치·토크나이저 버전을 합친 값 (공장이 `registry.resolve`로 확인).
             frame_stride_ms: 추론 간격 ms (0이면 매 프레임).
             score_threshold: OWLv2 원점수 문턱 (모델 쪽 필터).
             score_full: 신뢰도 정규화 기준 (원점수 / score_full, 최대 1).

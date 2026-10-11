@@ -1,4 +1,5 @@
-# 데이터셋 버전 정책 (WP7). 분할 단위는 config/defaults.yaml golden_set.split_unit(작업자·장소)을 따른다.
+# 데이터셋 버전 정책 (WP7). 분할기는 작업자·장소를 누수 방지 단위로 고정해 쓴다.
+# config/defaults.yaml golden_set.split_unit 값을 바꿔도 현재 분할 동작은 바뀌지 않는다.
 # 읽는 곳: dlp_datasets.policy.load_policy (`dlp dataset golden|build`). 관련: ADR 0007.
 # 이 파일은 파싱한 값으로만 쓴다 (주석을 바꿔도 결과가 같다).
 version: 1                    # 정책 파일 형식 버전

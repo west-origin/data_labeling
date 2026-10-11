@@ -31,7 +31,7 @@ def scenario() -> BlurScenario:
 
 
 def test_frame_rate_is_variable(scenario: BlurScenario) -> None:
-    """프레임 간격이 세 가지 넘게 섞여 있고 25~50 ms 안인지 (VFR)."""
+    """프레임 간격이 세 가지 이상 섞여 있고 25~50 ms 안인지 (VFR)."""
     gaps = set(np.diff(scenario.frame_times).tolist())
     assert len(gaps) > 2
     assert min(gaps) >= 25 and max(gaps) <= 50
@@ -40,7 +40,10 @@ def test_frame_rate_is_variable(scenario: BlurScenario) -> None:
 def test_labels_cover_every_required_privacy_target(
     scenario: BlurScenario, ontology: Ontology
 ) -> None:
-    """정답 블러 트랙이 필수 대상 6종을 모두 포함하고 온톨로지 검증을 통과하는지 검증한다."""
+    """합성 시나리오의 대상 6종과 온톨로지 유효성을 검증한다.
+
+    v1 필수 대상은 7종이다. 이 시험은 address_sign이나 실제 탐지 모델의 재현율을 검증하지 않는다.
+    """
     targets = {x.payload.target for x in scenario.labels if isinstance(x.payload, BlurTrackPayload)}
     assert {"face", "reflection", "document", "screen", "photo", "shipping_label"} <= targets
     for label in scenario.labels:

@@ -24,7 +24,7 @@ from pathlib import Path
 
 import sqlalchemy as sa
 
-from dlp_datasets.snapshot import SnapshotError, SnapshotStore
+from dlp_datasets.snapshot import SnapshotStore
 from dlp_export.policy import ExportPolicy
 from dlp_media.storage import ObjectStore, blurred_key, sha256_file
 from dlp_privacy.policy import PrivacyPolicy
@@ -131,7 +131,8 @@ def load_source(
 
     Raises:
         ExportError: 영상 스트림이 지금 프라이버시 승인 상태가 아닐 때 (`RenderNotCurrentError`).
-        SnapshotError / FileNotFoundError: labels.jsonl을 읽을 수 없을 때.
+        SnapshotError / FileNotFoundError: 스냅샷 읽기 오류. sessions.jsonl의 파일 부재만
+            구버전으로 보고 현재 DB를 쓴다 (인증·서버·통신 오류는 전파).
         sqlalchemy.exc.NoResultFound: 버전이 없을 때 (`get_dataset_version`).
     """
     version = get_dataset_version(conn, version_id)
@@ -154,22 +155,25 @@ def load_source(
                         by_session[x.session_id].append(x)
     # 세션 메타데이터(스트림·동기화 오프셋)도 스냅샷 것을 쓴다: 빌드 뒤 다시 동기화해도 같은 결과
     pinned: dict[str, Session] = {}
+    legacy = False
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "sessions.jsonl"
         try:
             snapshots.read(version.snapshot_uri, "sessions.jsonl", path)
-        except (FileNotFoundError, SnapshotError):
-            pass  # 세션을 고정하기 전에 만든 버전: DB의 현재 세션을 쓴다
+        except FileNotFoundError:
+            legacy = True  # 파일이 없는 구버전만 현재 DB를 쓴다. 저장소 장애는 숨기지 않는다
         else:
             for line in path.read_text(encoding="utf-8").splitlines():
                 if line.strip():
                     s = Session.model_validate_json(line)
                     pinned[s.session_id] = s
+    if not legacy and (missing := chosen.keys() - pinned.keys()):
+        raise ExportError(f"{version_id}: 세션 스냅샷에 메타데이터가 없습니다: {sorted(missing)}")
     states = label_states(policy, include_unreviewed)
     privacy = privacy or load_privacy_policy(repo_root())
     sessions: list[ExportSession] = []
     for sid in sorted(chosen):
-        session = pinned.get(sid) or get_session(conn, sid)
+        session = get_session(conn, sid) if legacy else pinned[sid]
         hashes: dict[str, str] = {}
         for stream in (s for s in session.streams if s.kind in VIDEO_KINDS):
             try:
@@ -233,14 +237,15 @@ def fetch_blurred(labeling: ObjectStore, es: ExportSession, stream: Stream, work
 
 
 def assert_no_raw(out: Path, raw_bucket: str) -> None:
-    """내보내기 결과의 모든 파일에 원본 위치가 없는지 본다 (parquet·영상 포함, 바이트로).
+    """내보내기 결과의 모든 파일에서 원본 위치의 세 가지 바이트 패턴을 찾는다.
 
     찾는 문자열: `s3://<원본 버킷>`, `local://<원본 버킷>`, `<원본 버킷>/sessions/`.
     텍스트 형식만이 아니라 바이너리(parquet·mp4 메타데이터)에 섞여 들어간 경우도 잡으려고
-    바이트로 본다.
+    바이트로 본다. 압축 해제·인코딩 해석·다른 경로 별칭 검사는 하지 않으므로,
+    모든 원본 참조나 개인정보의 부재를 보장하는 검사는 아니다.
 
     Raises:
-        ExportError: 한 파일이라도 원본 위치를 담고 있을 때 (첫 번째 것을 알린다).
+        ExportError: 한 파일이라도 검사 패턴을 담고 있을 때 (첫 번째 것을 알린다).
     """
     needles = [
         n.encode()

@@ -23,6 +23,7 @@ import av
 import pytest
 import sqlalchemy as sa
 import yaml
+from sqlalchemy.exc import OperationalError
 
 from dlp_fixtures.sync import generate_sync_scenario
 from dlp_fixtures.video import BlurScenario
@@ -46,9 +47,11 @@ from dlp_schema.db.repository import (
     get_session,
     insert_labels,
     insert_review_task,
+    latest_privacy_detection,
     record_review,
     register_ontology,
 )
+from dlp_schema.db.tables import sessions
 from dlp_schema.episode import current_labels
 from dlp_schema.labels import LabelRecord, Provenance, Source, VerificationState
 from dlp_schema.ontology import load_ontology
@@ -170,6 +173,16 @@ def test_detect_review_approve_render(
     with pg.begin() as conn:
         uris = render_session(conn, sid, raw, labeling, oracle_policy)
         assert render_session(conn, sid, raw, labeling, oracle_policy) == uris  # 멱등
+        # 렌더와 게시가 끝나기 전에는 다른 트랜잭션이 승인·블러 상태를 바꾸면 안 된다.
+        with (
+            pg.connect() as contender,
+            pytest.raises(OperationalError, match="could not obtain lock"),
+        ):
+            contender.execute(
+                sa.select(sessions.c.session_id)
+                .where(sessions.c.session_id == sid)
+                .with_for_update(nowait=True)
+            ).scalar_one()
         rendered = assert_render_current(conn, labeling, sid, "bodycam", oracle_policy)
         head = labeling.head(f"sessions/{sid}/blurred/bodycam.mp4")
         assert head is not None and rendered == head.sha256
@@ -229,9 +242,11 @@ def test_detect_review_approve_render(
 
 def reviewed_task(conn: sa.Connection, sid: str, stream: str, at: datetime, tag: str = "1") -> None:
     """수집까지 끝난 블러 검수 작업 기록 (검수 도구 없이 승인 조건만 맞춘다)."""
+    run = latest_privacy_detection(conn, sid, stream)
     insert_review_task(
         conn,
         ReviewTask(
+            privacy_detection_id=run.event_id if run else None,
             task_key=f"cvat:{sid}-{stream}-{tag}", tool=ReviewTool.CVAT, external_id="0",
             session_id=sid, stream_id=stream, stage=ReviewStage.PRIVACY, assignee="rev01",
             media_uri=f"s3://dlp-raw/sessions/{sid}/derived/{stream}.proxy.mp4",

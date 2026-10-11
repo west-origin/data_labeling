@@ -8,16 +8,22 @@ DB·서비스가 필요 없다. 실제 가중치가 필요한 두 테스트(`tes
 
 from __future__ import annotations
 
+import hashlib
+import io
+import os
 import shutil
+import zipfile
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import numpy as np
 import pytest
+import yaml
 
 from dlp_models.depth import Intrinsics, MetricDepth, input_size, sample_depth
 from dlp_models.owlv2 import OwlDetection, Owlv2, decode, nms, preprocess
-from dlp_models.registry import load_registry, resolve
+from dlp_models.registry import fetch, load_registry, resolve
 from dlp_schema.predictor import ModelUnavailableError
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -81,6 +87,72 @@ def test_resolve_reports_missing_and_tampered_weights(tmp_path: Path) -> None:
         resolve(root, "yunet")
 
 
+def test_cached_archive_model_is_not_trusted_by_existence(tmp_path: Path) -> None:
+    root = _root_with_registry(tmp_path)
+    spec = load_registry(root).models["rtmpose_m_body7"]
+    path = root / spec.path
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"tampered cached ONNX")
+    with pytest.raises(ModelUnavailableError, match="해시"):
+        resolve(root, "rtmpose_m_body7")
+
+
+@pytest.mark.parametrize("mutation", ["same-size", "larger", "replacement"])
+def test_model_hash_cache_detects_changes_with_preserved_mtime(
+    tmp_path: Path, mutation: str
+) -> None:
+    """수정 시각을 보존한 덮어쓰기·파일 교체도 등록 해시 검증을 통과하면 안 된다."""
+    root = _root_with_registry(tmp_path)
+    registry_path = root / "config/models.yaml"
+    data = yaml.safe_load(registry_path.read_text())
+    weights = b"verified weights"
+    data["models"]["yunet"]["sha256"] = hashlib.sha256(weights).hexdigest()
+    registry_path.write_text(yaml.safe_dump(data))
+    path = root / load_registry(root).models["yunet"].path
+    path.parent.mkdir(parents=True)
+    path.write_bytes(weights)
+    original = path.stat()
+    resolve(root, "yunet")  # 프로세스 안 캐시를 채운다.
+    changed = b"modified weights" if mutation != "larger" else b"larger modified weights"
+    if mutation == "replacement":
+        candidate = path.with_suffix(".new")
+        candidate.write_bytes(changed)
+        os.utime(candidate, ns=(original.st_atime_ns, original.st_mtime_ns))
+        candidate.replace(path)
+    else:
+        path.write_bytes(changed)
+        os.utime(path, ns=(original.st_atime_ns, original.st_mtime_ns))
+    with pytest.raises(ModelUnavailableError, match="해시"):
+        resolve(root, "yunet")
+
+
+def test_archive_fetch_checks_both_hashes_before_replacing_existing_file(tmp_path: Path) -> None:
+    root = _root_with_registry(tmp_path)
+    original = load_registry(root).models["rtmpose_m_body7"]
+    weights = b"verified ONNX bytes"
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("model/end2end.onnx", weights)
+    downloaded = buffer.getvalue()
+    spec = original.model_copy(
+        update={
+            "sha256": hashlib.sha256(downloaded).hexdigest(),
+            "artifact_sha256": hashlib.sha256(weights).hexdigest(),
+        }
+    )
+    path = root / spec.path
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"old file")
+    with patch("dlp_models.registry.urllib.request.urlopen", return_value=io.BytesIO(downloaded)):
+        assert fetch(root, "test", spec).startswith("[받음]")
+    assert path.read_bytes() == weights
+    bad = spec.model_copy(update={"artifact_sha256": "0" * 64})
+    with patch("dlp_models.registry.urllib.request.urlopen", return_value=io.BytesIO(downloaded)):
+        assert fetch(root, "test", bad).startswith("[실패]")
+    assert path.read_bytes() == weights
+    assert sorted(p.name for p in path.parent.iterdir()) == [path.name]
+
+
 def test_owl_preprocess_pads_to_square_and_decode_maps_back_to_pixels() -> None:
     """OWLv2 전처리가 640x480을 640 정사각형으로 채우고 960 입력을 만들며, 정규화 박스를 원래 픽셀로
     되돌리는지 본다.
@@ -91,7 +163,7 @@ def test_owl_preprocess_pads_to_square_and_decode_maps_back_to_pixels() -> None:
     image = np.zeros((480, 640, 3), dtype=np.uint8)
     pixels, side = preprocess(image)
     assert pixels.shape == (1, 3, 960, 960) and side == 640
-    # 아래쪽 채움 영역(회색 0.5)은 정규화 후 0.5 근처 값이 된다
+    # 아래쪽 채움 영역은 RGB 0.5이며, 정규화 후 값은 (0.5 - 채널 평균) / 채널 표준편차다.
     assert pixels[0, 0, -1, 0] == pytest.approx((0.5 - 0.48145466) / 0.26862954, abs=1e-3)
     logits = np.array([[3.0, -3.0], [-5.0, -5.0]], dtype=np.float32)
     boxes = np.array([[0.5, 0.5, 0.25, 0.25], [0.1, 0.1, 0.1, 0.1]], dtype=np.float32)

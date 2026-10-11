@@ -32,9 +32,10 @@ from dlp_actions.clients import OpenAICompatibleVlm
 from dlp_actions.policy import load_policy
 from dlp_actions.runner import run_actions
 from dlp_actions.vlm import VlmUnavailableError
+from dlp_cli.ontology_access import session_ontology
 from dlp_cli.schema_cmds import database_url
 from dlp_media.storage import store_from_spec
-from dlp_schema import load_config, load_ontology, repo_root
+from dlp_schema import load_config, repo_root
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -48,7 +49,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     반환: 0 성공 / 2 VLM 주소 없음 / 3 VLM 장애 (모듈 docstring 참고).
     부작용: 한 트랜잭션에서 `label_records`에 action·gap·description 레코드와 이전 버전 철회
     레코드 INSERT, VLM 서버 HTTP 호출, 라벨링 버킷 읽기.
-    온톨로지는 `config/ontology/v1`을 고정으로 읽는다 (리팩토링 후보).
+    온톨로지는 세션 버전의 DB 등록 사전을 읽는다.
     """
     root = repo_root()
     policy = load_policy(root)
@@ -70,7 +71,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         max_side=vlm.max_side_px,
         timeout_s=vlm.timeout_s,
     )
-    ontology = load_ontology(root / "config/ontology/v1")
+    ontology = session_ontology(args.url, args.session_id)
     # 블러본만 읽는다 (라벨링 버킷)
     labeling = store_from_spec(
         args.store, load_config(root / "config/defaults.yaml").buckets.labeling
