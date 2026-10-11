@@ -252,6 +252,19 @@ class LabelStudioClient:
         body = {"title": title, "label_config": label_config, **PRELABEL_SETTINGS}
         return int(_check(self.http.post("/api/projects", json=body))["id"])
 
+    def ensure_label_config(self, project_id: int, label_config: str) -> None:
+        """기존 프로젝트의 라벨 설정 XML이 지금 코드가 만드는 것과 다르면 바꾼다.
+
+        설정을 바꾼 뒤(예: 이벤트 속성 입력란 추가) 이전에 만든 프로젝트에도 새 입력란이
+        보이게 한다.
+        Label Studio는 기존 주석이 쓰는 라벨이 새 설정에 없으면 거부한다(HTTP 400) — 라벨을 지우는
+        변경은 새 프로젝트로 해야 한다.
+        """
+        project = _check(self.http.get(f"/api/projects/{project_id}"))
+        if project.get("label_config") != label_config:
+            body = {"label_config": label_config}
+            _check(self.http.patch(f"/api/projects/{project_id}", json=body))
+
     def ensure_prelabel_settings(self, project_id: int) -> None:
         """예측(프리라벨)을 검수 화면에 미리 채워 보이게 하는 프로젝트 설정."""
         _check(self.http.patch(f"/api/projects/{project_id}", json=PRELABEL_SETTINGS))

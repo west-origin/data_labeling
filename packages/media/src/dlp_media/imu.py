@@ -31,7 +31,7 @@ import av
 import numpy as np
 from numpy.typing import NDArray
 
-from dlp_media.probe import MediaInfo, to_fraction
+from dlp_media.probe import MediaInfo, probe, to_fraction
 from dlp_media.tables import read_parquet, write_parquet
 
 log = logging.getLogger(__name__)
@@ -308,8 +308,10 @@ class GpmfExtractor:
         `imu_from_gpmf_payloads`가 다음 패킷 시작(마지막은 중앙값)으로 채운다.
         """
         payloads: list[tuple[float, float, bytes]] = []
+        # 트랙 번호는 probe로 찾는다 (PyAV 19 DataStream에는 codec_tag가 없다)
+        index = next(d.index for d in probe(path).data_streams if d.codec_tag == "gpmd")
         with av.open(str(path)) as c:
-            stream = next(s for s in c.streams if s.type == "data" and s.codec_tag == "gpmd")
+            stream = c.streams[index]
             tb = to_fraction(stream.time_base)
             for packet in c.demux(stream):
                 if packet.pts is None:

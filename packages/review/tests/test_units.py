@@ -64,6 +64,7 @@ from dlp_schema.labels import (
     BlurTrackPayload,
     BoxKeyframe,
     BoxTrackPayload,
+    EventPayload,
     GapPayload,
     KeypointTrackPayload,
     VerificationState,
@@ -72,6 +73,7 @@ from dlp_schema.ontology import Ontology, load_ontology
 from dlp_schema.review import ReviewStage, ReviewTask, ReviewTool
 from dlp_schema.session import Stream, StreamKind, SyncMethod
 from dlp_schema.testing import FIXED_TIME, action_payload, make_label, make_session
+from dlp_schema.validation import check_label
 from dlp_sync.policy import load_policy as load_sync_policy
 from dlp_sync.signals import Series
 
@@ -191,7 +193,8 @@ def test_label_studio_roundtrip_offline_and_new_regions(ontology: Ontology) -> N
             original.payload, original.t_start_ms, original.t_end_ms, original.stream_id,
         )  # fmt: skip
     names = set(label_names(ontology))
-    assert all(r["value"]["timeserieslabels"][0] in names for r in results)
+    regions = [r for r in results if r["type"] == "timeserieslabels"]
+    assert all(r["value"]["timeserieslabels"][0] in names for r in regions)
 
     value = {"start": 100.0, "end": 900.0, "timeserieslabels": ["action.left:press"]}
     drawn = {"id": "xyz", "type": "timeserieslabels", "value": value}
@@ -203,6 +206,54 @@ def test_label_studio_roundtrip_offline_and_new_regions(ontology: Ontology) -> N
     state = {**drawn, "value": {**value, "timeserieslabels": ["state:wetness=wet"]}}
     with pytest.raises(ValueError, match="객체 상태"):
         from_ls_results([state], set())
+
+
+def test_label_studio_event_attributes_round_trip_and_new_events(ontology: Ontology) -> None:
+    """이벤트 속성(심각도·관련 행동·관련 개체)을 구간 입력란(perRegion)으로 주고받는다.
+
+    회귀 (Codex 수정본 검수, 2026-10-11): 온톨로지 v1의 이벤트는 모두 심각도나 관련 ID를 요구하는데
+    화면에 입력란이 없어, 검수자가 새로 그린 이벤트가 저장 검증에서 거부되고 작업 수집 전체가
+    롤백됐다. 정답 근거: events.yaml — slip은 severity, grasp_failure는 requires_action.
+    """
+    config = label_config(ontology)
+    assert 'name="severity"' in config and 'name="related_action_id"' in config
+    assert config.count('perRegion="true"') == 3
+
+    # 기존 이벤트: 속성이 입력란 결과로도 나가고, 그대로 돌아온다
+    slip = make_label(
+        {"kind": "event", "event_type": "slip", "severity": 2}, label_id="ev1", t_end_ms=500
+    )
+    results = to_ls_results([slip])
+    assert {(r["from_name"], r["type"]) for r in results} == {
+        ("labels", "timeserieslabels"), ("severity", "choices"),
+    }  # fmt: skip
+    [back] = from_ls_results(results, {"ev1"})
+    assert back.payload == slip.payload and check_label(slip, ontology) == []
+
+    # 검수자가 심각도를 3으로 바꿨다
+    for r in results:
+        if r["from_name"] == "severity":
+            r["value"]["choices"] = ["3"]
+    [changed] = from_ls_results(results, {"ev1"})
+    assert isinstance(changed.payload, EventPayload) and changed.payload.severity == 3
+
+    # 화면에서 새로 그린 파지 실패 + 관련 행동 ID 입력 → 온톨로지 검사 통과
+    region = {
+        "id": "new1",
+        "type": "timeserieslabels",
+        "value": {"start": 300, "end": 300, "timeserieslabels": ["event:grasp_failure"]},
+    }
+    text = {"id": "new1", "from_name": "related_action_id", "to_name": "ts", "type": "textarea",
+            "value": {"text": ["  a001 "]}}  # fmt: skip
+    [drawn] = from_ls_results([region, text], set())
+    assert isinstance(drawn.payload, EventPayload)
+    assert drawn.payload.related_action_id == "a001" and drawn.origin_label_id is None
+    as_label = make_label(drawn.payload, label_id="ev-new", t_start_ms=300, t_end_ms=300)
+    assert check_label(as_label, ontology) == []
+    # 입력란을 채우지 않은 새 이벤트는 (전처럼) 온톨로지 위반으로 남는다 — 저장 단계가 거부한다
+    [bare] = from_ls_results([region], set())
+    bare_label = make_label(bare.payload, label_id="ev-bare", t_start_ms=300, t_end_ms=300)
+    assert any("related_action_id" in v for v in check_label(bare_label, ontology))
 
 
 def test_moving_an_action_keeps_contact_inside(ontology: Ontology) -> None:

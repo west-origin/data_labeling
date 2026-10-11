@@ -547,6 +547,8 @@ def create_labeling_tasks(
                 if project:
                     lpid = int(project["id"])
                     ls.ensure_prelabel_settings(lpid)  # 예측 방식 이전에 만든 프로젝트
+                    # 이벤트 속성 입력란처럼 설정이 바뀌었으면 기존 프로젝트에도 반영한다
+                    ls.ensure_label_config(lpid, label_config(ontology))
                 else:
                     lpid = ls.create_project(project_name, label_config(ontology))
                 # 라벨러가 여는 URL은 라벨러 자격 증명(라벨링 버킷 읽기 전용)으로 서명한다

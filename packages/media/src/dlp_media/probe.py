@@ -14,6 +14,9 @@ WP3. 수집(`ingest`)이 영상마다 불러 비디오 트랙 유무, 촬영 시
 
 from __future__ import annotations
 
+import json
+import shutil
+import subprocess
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from fractions import Fraction
@@ -90,6 +93,7 @@ def probe(path: Path) -> MediaInfo:
     with av.open(str(path)) as c:
         video = audio = None
         data: list[DataStreamInfo] = []
+        tags: dict[int, str] | None = None
         for s in c.streams:
             if isinstance(s, av.VideoStream) and video is None:
                 first = next(c.decode(s), None)
@@ -107,7 +111,12 @@ def probe(path: Path) -> MediaInfo:
                     s.index, s.codec_context.name, s.codec_context.sample_rate, s.channels
                 )
             elif s.type == "data":
-                data.append(DataStreamInfo(s.index, _tag(s.codec_tag)))
+                # PyAV 19의 DataStream에는 codec_tag가 없다 (접근하면 AttributeError).
+                # ffprobe로 한 번에 읽고, 없으면 트랙 handler_name으로 추정한다 (`data_stream_tags`)
+                if tags is None:
+                    tags = data_stream_tags(path)
+                handler = str(s.metadata.get("handler_name", ""))
+                data.append(DataStreamInfo(s.index, tags.get(s.index) or _handler_tag(handler)))
         created = c.metadata.get("creation_time")
         return MediaInfo(
             path=path,
@@ -152,8 +161,42 @@ def to_fraction(value: object) -> Fraction:
     return Fraction(num, den)
 
 
-def _tag(tag: str | int | None) -> str:
-    """코덱 태그를 4글자 문자열로 (정수 FourCC는 리틀 엔디언 바이트로 푼다, 없으면 "")."""
-    if isinstance(tag, int):
-        return tag.to_bytes(4, "little").decode("latin-1")
-    return tag or ""
+# 데이터 트랙 handler_name → 코덱 태그 (ffprobe가 없을 때의 대체 추정).
+# 정책 값이 아니라 장비가 쓰는 고정 이름이다. 앞뒤 공백·탭을 지우고 비교한다.
+_HANDLER_TAGS = {
+    "GoPro MET": "gpmd",  # GoPro GPMF 센서 트랙 (가속도·자이로)
+    "GoPro TCD": "tmcd",  # GoPro 타임코드
+    "TimeCodeHandler": "tmcd",
+}
+
+
+def data_stream_tags(path: Path) -> dict[int, str]:
+    """데이터 트랙의 4글자 코덱 태그를 ffprobe로 읽는다 (트랙 번호 → 태그).
+
+    PyAV 19는 데이터 트랙의 코덱 태그를 노출하지 않는다. ffprobe가 PATH에 없거나 실패하면 빈 dict를
+    돌려주고, 호출자는 handler_name 추정(`_HANDLER_TAGS`)으로 대신한다. 영상 디코딩은 하지 않는다.
+    """
+    exe = shutil.which("ffprobe")
+    if exe is None:
+        return {}
+    try:
+        out = subprocess.run(
+            [exe, "-v", "error", "-select_streams", "d",
+             "-show_entries", "stream=index,codec_tag_string", "-of", "json", str(path)],
+            capture_output=True, text=True, timeout=60, check=True,
+        ).stdout  # fmt: skip
+        streams = json.loads(out).get("streams", [])
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return {}
+    tags: dict[int, str] = {}
+    for st in streams:
+        tag = str(st.get("codec_tag_string", ""))
+        # ffprobe는 태그가 없으면 "[0][0][0][0]" 형태를 낸다 → 태그 없음으로 본다
+        if isinstance(st.get("index"), int) and tag and not tag.startswith("["):
+            tags[st["index"]] = tag
+    return tags
+
+
+def _handler_tag(handler: str) -> str:
+    """handler_name에서 코덱 태그를 추정한다 (모르는 이름이면 "")."""
+    return _HANDLER_TAGS.get(handler.strip(), "")

@@ -22,8 +22,13 @@ WP6, ADR 0006(무손실 왕복). 사용처: `tasks.create_labeling_tasks`(보내
 `to_ls_results`), `collect.collect_task`(받기: `from_ls_results`), `timeseries`(`CHANNELS`),
 `ops.policy.UnitsPolicy`(`LS_KINDS` 검사).
 
-공개 이름: `LS_KINDS`, `FROM_NAME`, `TO_NAME`, `CHANNELS`, `HANDS`, `label_names`, `label_config`,
-`to_ls_results`, `NAME_KINDS`, `from_ls_results`.
+공개 이름: `LS_KINDS`, `FROM_NAME`, `TO_NAME`, `CHANNELS`, `HANDS`, `EVENT_SEVERITY`,
+`EVENT_TEXT_FIELDS`, `label_names`, `label_config`, `to_ls_results`, `NAME_KINDS`,
+`from_ls_results`.
+
+이벤트 속성(심각도, 관련 행동·개체 ID)은 구간에 딸린 입력란(perRegion)으로 주고받는다. 온톨로지가
+요구하는 속성을 화면에서 채울 수 없으면 새로 그린 이벤트가 저장 검증에서 거부되고 작업 수집 전체가
+롤백되므로(Codex 수정본 검수, 2026-10-11) 입력란을 둔다.
 
 시간 단위: 결과의 start·end는 마스터 타임라인 ms(ADR 0019). 받을 때 반올림해 정수 ms로 만든다.
 """
@@ -51,6 +56,11 @@ from dlp_schema.ontology import Ontology, VerbLevel
 LS_KINDS = ("action", "gap", "segment", "event", "hand_state", "object_state")
 # 라벨 설정 XML의 TimeSeriesLabels 이름(from_name)과 TimeSeries 이름(to_name)
 FROM_NAME, TO_NAME = "labels", "ts"
+# 이벤트 구간마다 붙는 입력란 (perRegion 컨트롤 이름 = EventPayload 필드 이름).
+# 온톨로지가 이벤트에 심각도·관련 행동·관련 개체를 요구하므로(events.yaml), 검수자가 화면에서 새로
+# 그린 이벤트도 이 값을 채울 수 있어야 저장 검증(`insert_labels`)을 통과한다.
+EVENT_SEVERITY = "severity"
+EVENT_TEXT_FIELDS = ("related_action_id", "related_entity_id")
 # 시계열 CSV 열 = 화면 채널 (timeseries.write_timeseries_csv와 같아야 한다)
 CHANNELS = ("glove_left", "glove_right", "imu_acc")
 
@@ -82,6 +92,9 @@ def label_config(o: Ontology) -> str:
 
     영상(`$video`)과 시계열(`$timeseries`, CSV URL)을 sync="v" 그룹으로 함께 재생하고,
     시계열 위에 구간 라벨(TimeSeriesLabels)을 그린다. 시간 열은 `time_ms`(마스터 타임라인 ms).
+    구간을 고르면 이벤트 속성 입력란(심각도 Choices, 관련 행동·개체 ID TextArea, perRegion)이
+    보인다.
+    결과는 구간과 같은 id의 별도 결과(type choices·textarea)로 오며 `from_ls_results`가 합친다.
     라벨 값은 `quoteattr`로 XML 속성 이스케이프한다.
     """
     labels = "\n".join(f"      <Label value={quoteattr(n)}/>" for n in label_names(o))
@@ -99,6 +112,18 @@ def label_config(o: Ontology) -> str:
   <TimeSeriesLabels name="{FROM_NAME}" toName="{TO_NAME}">
 {labels}
   </TimeSeriesLabels>
+  <View visibleWhen="region-selected">
+    <Header value="이벤트 속성 (이벤트 종류가 요구할 때만 채운다)"/>
+    <Choices name="{EVENT_SEVERITY}" toName="{TO_NAME}" perRegion="true" choice="single">
+      <Choice value="1"/>
+      <Choice value="2"/>
+      <Choice value="3"/>
+    </Choices>
+    <TextArea name="related_action_id" toName="{TO_NAME}" perRegion="true" maxSubmissions="1"
+              placeholder="관련 행동 ID (related_action_id)"/>
+    <TextArea name="related_entity_id" toName="{TO_NAME}" perRegion="true" maxSubmissions="1"
+              placeholder="관련 개체 ID (related_entity_id)"/>
+  </View>
 </View>
 """
 
@@ -142,6 +167,9 @@ def to_ls_results(labels: list[LabelRecord]) -> list[dict[str, Any]]:
         name, meta = _name_and_meta(label)
         # 스트림 ID는 페이로드 밖 필드라 메타에 따로 실어 왕복시킨다
         meta["_stream_id"] = label.stream_id
+        if isinstance(label.payload, EventPayload):
+            # 이벤트 속성은 화면 입력란에도 채워 보낸다 (검수자가 보고 고칠 수 있게)
+            out += _event_attribute_results(label.label_id, label.payload)
         out.append(
             {
                 "id": label.label_id,
@@ -158,6 +186,48 @@ def to_ls_results(labels: list[LabelRecord]) -> list[dict[str, Any]]:
             }
         )
     return out
+
+
+def _event_attribute_results(region_id: str, p: EventPayload) -> list[dict[str, Any]]:
+    """이벤트 속성 → 구간에 딸린 perRegion 결과 (값이 있는 것만)."""
+    out: list[dict[str, Any]] = []
+    if p.severity is not None:
+        out.append(_region_result(region_id, EVENT_SEVERITY, "choices", [str(p.severity)]))
+    for field in EVENT_TEXT_FIELDS:
+        value = getattr(p, field)
+        if value is not None:
+            out.append(_region_result(region_id, field, "textarea", [value]))
+    return out
+
+
+def _region_result(region_id: str, name: str, kind: str, values: list[str]) -> dict[str, Any]:
+    """구간(id)에 딸린 perRegion 컨트롤 결과 하나 (Label Studio 결과 형식)."""
+    key = "choices" if kind == "choices" else "text"
+    return {
+        "id": region_id, "from_name": name, "to_name": TO_NAME, "type": kind,
+        "value": {key: values},
+    }  # fmt: skip
+
+
+def _event_attributes(results: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """perRegion 결과 → 구간 id별 이벤트 속성 (severity는 정수, ID는 앞뒤 공백 제거).
+
+    빈 문자열·선택 없음은 값 없음으로 본다. 알 수 없는 컨트롤은 무시한다.
+    """
+    attrs: dict[str, dict[str, Any]] = {}
+    for r in results:
+        name, rid, value = r.get("from_name"), r.get("id"), r.get("value") or {}
+        if rid is None:
+            continue
+        if name == EVENT_SEVERITY and r.get("type") == "choices":
+            picked = value.get("choices") or []
+            if picked:
+                attrs.setdefault(rid, {})[EVENT_SEVERITY] = int(picked[0])
+        elif name in EVENT_TEXT_FIELDS and r.get("type") == "textarea":
+            texts = [t.strip() for t in value.get("text") or [] if t and t.strip()]
+            if texts:
+                attrs.setdefault(rid, {})[name] = texts[-1]
+    return attrs
 
 
 # 라벨 이름 머리("<종류>" 또는 "<종류>.<손>"의 종류 부분) → LabelRecord.kind
@@ -235,6 +305,8 @@ def from_ls_results(results: list[dict[str, Any]], known_ids: set[str]) -> list[
     from pydantic import TypeAdapter
 
     adapter: TypeAdapter[LabelPayload] = TypeAdapter(LabelPayload)
+    # 이벤트 속성 입력란(perRegion)은 구간과 같은 id의 별도 결과로 온다
+    attributes = _event_attributes(results)
     items: list[ReviewedItem] = []
     for r in results:
         if r.get("type") != "timeserieslabels":
@@ -253,6 +325,14 @@ def from_ls_results(results: list[dict[str, Any]], known_ids: set[str]) -> list[
             # 원래 라벨을 지우고 새로 그린 것으로 본다
             meta, origin = {}, None
         meta = _apply_name(name, meta, start, end)
+        if meta["kind"] == "event":
+            # 화면 입력란의 값이 메타(원래 값)보다 우선한다. 입력란을 비우면 원래 값을 지운다
+            region = attributes.get(str(r.get("id")), {})
+            for field in (EVENT_SEVERITY, *EVENT_TEXT_FIELDS):
+                if field in region:
+                    meta[field] = region[field]
+                elif r.get("id") in attributes or origin is None:
+                    meta.pop(field, None)
         if meta["kind"] == "action":
             # 구간을 옮겼으면 접근 시작·종료를 맞추고 접촉 시각은 새 구간 안으로 넣는다
             meta |= {"t_approach_ms": start, "t_end_ms": end}
