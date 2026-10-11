@@ -57,8 +57,11 @@ flowchart LR
 
 배포 직후에는 렌더 해시가 없는 구 작업을 `dlp review revoke <세션> --dry-run --include-legacy`로
 확인하고 필요하면 `--include-legacy`로 회수한다. 라벨러가 노출을 신고하면
-`dlp review revoke <세션> --stream <스트림> --all --reason incident`(작업을 알면
-`--task <작업 키> --reason incident`)로 즉시 끊는다. 작업 생성이 실패해 DB 기록 없이 남은 도구
+`dlp privacy hold <세션> --reason <신고>`로 승인을 보류한다 (승인 해제·렌더 무효·배포된 라벨링 작업
+전부 회수, 보류 중 승인·라벨링 작업 생성 거부). 블러 검수·수집 뒤 `--release --reason <조치>`로
+해제하고 `dlp privacy approve` → `render`로 재승인한다 ([ADR 0042](../adr/0042-privacy-approval-hold.md)).
+한 스트림·작업만 끊을 때는 `dlp review revoke <세션> --stream <스트림> --all --reason incident`(작업을
+알면 `--task <작업 키> --reason incident`). 작업 생성이 실패해 DB 기록 없이 남은 도구
 작업·사본(고아)은 `dlp review revoke --orphans`로 보고, 확인한 뒤 `--orphans --apply`로 지운다
 (이 플랫폼 이름 규칙에 맞고 나이 하한 `review.yaml orphans.min_age_s`가 지난 것만, F-REV-15).
 세션을 사용 중지하면(`dlp dataset withdraw`) 그 세션의 배포된 라벨링 작업이 같은 커밋에서 회수

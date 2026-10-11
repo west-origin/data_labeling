@@ -25,6 +25,7 @@ import sqlalchemy as sa
 
 from dlp_fixtures.video import generate_blur_scenario
 from dlp_media.storage import LocalStore, ObjectStore, StoredObject, sha256_file
+from dlp_privacy.hold import hold_session
 from dlp_privacy.policy import PrivacyPolicy
 from dlp_privacy.policy import load_policy as load_privacy_policy
 from dlp_privacy.runner import operational_blur, render_hash, request_media_revocation
@@ -827,6 +828,36 @@ def test_withdrawn_session_gets_no_new_review_tasks(
     with pytest.raises(TaskError, match="사용 중지"), engine.begin() as conn:
         create_privacy_tasks(conn, SID, setup, NOW, assignee="rev01", privacy_reviewers=("rev01",))
     assert cvat.mock_calls == [] and ls.mock_calls == []
+
+
+def test_held_session_refuses_labeling_tasks_but_allows_blur_review(
+    engine: sa.Engine,
+    seven: dict[str, ReviewTask],
+    stores: tuple[LocalStore, LocalStore],
+    policy: PrivacyPolicy,
+) -> None:
+    """F-REV-18: 승인 보류 중에는 라벨링 작업을 도구 호출 전에 거부하고, 배포된 작업은 회수
+    요청된다 (해시가 지금과 같아도). 블러 검수 작업은 보류 중에도 만들 수 있다 (보류 중에 블러를
+    고친다)."""
+    raw, labeling = stores
+    cvat, ls = MagicMock(), MagicMock()
+    setup = ReviewSetup(
+        raw=raw, labeling=labeling, labeling_reader=MagicMock(), ontology=None, cvat=cvat,
+        label_studio=ls, privacy=policy,
+    )  # fmt: skip
+    with engine.begin() as conn:
+        result = hold_session(
+            conn, SID, policy, NOW, reason="labeler report", actor="ops01", labeling=labeling
+        )
+    assert sorted(t.task_key for t in result.revocations) == [
+        "cvat:2", "cvat:4", "cvat:5", "cvat:6", "cvat:7", "label_studio:3",
+    ]  # fmt: skip
+    with pytest.raises(TaskError, match="승인 보류 중"), engine.begin() as conn:
+        create_labeling_tasks(conn, SID, setup, "labeler09", NOW)
+    assert cvat.mock_calls == [] and ls.mock_calls == []
+    # 블러 검수 작업 생성은 보류로 막지 않는다 (계정 연결이 없어 그 다음 단계에서 멈춘다)
+    with pytest.raises(TaskError, match="CVAT 계정"), engine.begin() as conn:
+        create_privacy_tasks(conn, SID, setup, NOW, assignee="rev01", privacy_reviewers=("rev01",))
 
 
 def test_finish_assignment_ignores_revoked_tasks(

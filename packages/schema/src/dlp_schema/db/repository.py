@@ -13,7 +13,9 @@
 절별 함수
     - 온톨로지: `register_ontology` (초안 덧붙이기 허용, ADR 0028).
     - 세션: `insert_session`, `get_session`, `set_lifecycle`(+ 전이 기록), `list_lifecycle_events`,
-      `set_privacy_state`, `update_stream_sync`.
+      `set_privacy_state`, `update_stream_sync`. 승인 보류 기록(추가만, ADR 0042):
+      `record_privacy_hold`, `list_privacy_holds`, `active_privacy_hold`. 잠금: `lock_session`,
+      `try_lock_session`(기다리지 않음, 고아 정리).
     - 라벨: `label_to_row`, `row_to_label`, `insert_labels`, `get_labels`, `record_review`.
     - 검수 작업·배정: `insert_review_task`, `get_review_task`, `list_review_tasks`,
       `mark_review_task_collected`, `insert_assignment`, `get_assignment`, `list_assignments`,
@@ -50,9 +52,12 @@ from dlp_schema.db.locks import lock_session as lock_session
 from dlp_schema.db.locks import try_lock_session as try_lock_session
 from dlp_schema.db.ontology_repository import get_ontology as get_ontology
 from dlp_schema.db.ontology_repository import get_session_ontology as get_session_ontology
+from dlp_schema.db.privacy_repository import active_privacy_hold as active_privacy_hold
 from dlp_schema.db.privacy_repository import latest_privacy_detection as latest_privacy_detection
 from dlp_schema.db.privacy_repository import list_privacy_detections as list_privacy_detections
+from dlp_schema.db.privacy_repository import list_privacy_holds as list_privacy_holds
 from dlp_schema.db.privacy_repository import record_privacy_detection as record_privacy_detection
+from dlp_schema.db.privacy_repository import record_privacy_hold as record_privacy_hold
 from dlp_schema.db.review_repository import (
     get_assignment as get_assignment,
 )

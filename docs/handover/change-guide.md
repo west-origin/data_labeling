@@ -46,6 +46,7 @@ DB·외부 도구·내보내기 동작을 바꾸면 그 경로의 서비스/격�
 | --- | --- | --- |
 | 입력 정규화 | 원본, 실패 변환의 임시 산출물 | `media prepare` 오류와 PTS/방향 확인. 검수한 세션의 파일 교체 금지 |
 | 탐지/블러 검수 | 이전 완료 세대 또는 생성된 외부 작업 | 현재 완료 세대와 작업의 `privacy_detection_id` 확인. 승인 우회 금지 |
+| 승인 보류(사고 대응) | `privacy_holds`의 hold 기록, auto_blurred 상태, 회수 대기 | `dlp privacy hold <세션> --reason`은 다시 실행해도 기록을 더하지 않고 회수 요청·렌더 무효만 다시 한다. 해제는 `--release --reason` 뒤 `approve` → `render`. 보류 기록을 DB에서 지우거나 privacy_state를 직접 고치지 않는다 (ADR 0042) |
 | 세대 변경 | 이전 작업 완료 기록 | 새 세대 작업 생성 → 실제 전수 검수 → collect → approve → render. 옛 작업 재수집으로 승인하지 않음 |
 | 블러 렌더 | 승인 상태, 누락/손상된 블러 파일·렌더 기록 | `privacy render` 재실행은 파일 해시/기록을 대조해 손상 산출물을 복구. 접근·네트워크 오류는 원인 해결 |
 | CVAT/Label Studio 생성 | DB 롤백과 별개로 도구 작업/라벨링 버킷 사본 (고아) | `dlp review revoke --orphans [<세션>]`로 이름 규칙·DB 대조 결과를 보고, 확인 뒤 `--apply`로 지운다 (나이 하한 `review.yaml orphans.min_age_s`, 작업 생성 중인 세션은 건너뜀, F-REV-15). 확인 없이 create 반복 금지 |

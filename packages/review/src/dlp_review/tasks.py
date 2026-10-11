@@ -9,6 +9,7 @@
   - Label Studio: 시간 구간 라벨, 영상과 장갑·IMU 시계열 동기 재생
   일반 라벨러 경로의 URL은 라벨러 자격 증명(라벨링 버킷 읽기 전용)으로 서명한다.
 - 블러본은 지금 승인된 블러 라벨로 렌더한 것만 쓴다 (dlp_privacy.runner.assert_render_current).
+  사용 중지한 세션·승인 보류 중인 세션(`dlp privacy hold`)에는 라벨링 작업을 만들지 않는다.
   작업에는 그 블러본의 렌더 해시(`ReviewTask.render_hash`)를 남긴다. 블러가 바뀌면 이 해시로 낡은
   매체를 찾아 회수한다 (ADR 0039). 회수가 끝나지 않은 스트림에는 새 라벨링 작업을 만들지 않는다.
 - CVAT 작업은 담당자의 CVAT 계정(review.yaml cvat.users)에 배정한다. 블러 검수는 연결이 없으면
@@ -88,6 +89,7 @@ from dlp_review.ui_theme import UiTheme, cvat_label_color, load_ui_theme, logo_d
 from dlp_review.watermark import burn_watermark
 from dlp_schema import repo_root
 from dlp_schema.db.repository import (
+    active_privacy_hold,
     get_assignment,
     get_labels,
     get_session,
@@ -405,6 +407,21 @@ def _check_not_withdrawn(session: Session) -> None:
         raise TaskError(f"{session.session_id}: 사용 중지한 세션에는 검수 작업을 만들지 않습니다")
 
 
+def _check_not_held(conn: sa.Connection, session_id: str) -> None:
+    """승인 보류 중(`dlp privacy hold`)이면 `TaskError` (F-REV-18, ADR 0042).
+
+    보류는 승인을 풀어 아래 승인 확인도 막지만, 보류라는 이유와 해제 방법을 알린다. 블러 검수
+    작업(`create_privacy_tasks`)은 막지 않는다 (보류 중에 블러를 고친다).
+    """
+    held = active_privacy_hold(conn, session_id)
+    if held is not None:
+        raise TaskError(
+            f"{session_id}: 승인 보류 중이라 라벨링 작업을 만들지 않습니다 ({held.actor}: "
+            f"{held.reason}). 블러 검수 → dlp privacy hold {session_id} --release → "
+            "dlp privacy approve → dlp privacy render"
+        )
+
+
 def create_privacy_tasks(
     conn: sa.Connection,
     session_id: str,
@@ -589,7 +606,8 @@ def create_labeling_tasks(
     - streams: 이 스트림만 (None이면 모든 영상 스트림).
 
     반환: 만든 `ReviewTask` 목록 (모두 만든 뒤 한꺼번에 DB `review_tasks`에 삽입).
-    예외: `TaskError`(사용 중지한 세션, 프라이버시 승인 전, 블러본이 현재 블러 라벨과 다름·무효),
+    예외: `TaskError`(사용 중지한 세션, 승인 보류 중, 프라이버시 승인 전, 블러본이 현재 블러 라벨과
+    다름·무효),
     `RawAccessError`(작업 URI에 원본 버킷이 섞임), `clients.ToolError`.
     부작용: 세션 행 잠금, 라벨링 버킷 쓰기(워터마크 영상, 시계열 CSV), 원본 버킷 읽기(장갑·IMU
     Parquet, 감사 기록), 도구 작업 생성, DB 삽입.
@@ -607,6 +625,7 @@ def create_labeling_tasks(
     use_ls = setup.label_studio is not None and (tools is None or ReviewTool.LABEL_STUDIO in tools)
     session = get_session(conn, session_id)
     _check_not_withdrawn(session)
+    _check_not_held(conn, session_id)
     media = setup.media_policy()
     ontology = get_session_ontology(conn, session_id)
     if session.privacy_state is not PrivacyState.APPROVED:

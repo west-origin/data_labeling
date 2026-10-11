@@ -27,12 +27,13 @@ from dlp_cli.review_config import REVOCATION_PENDING_EXIT
 from dlp_media.storage import LocalStore, sha256_file
 from dlp_privacy.pipeline import StreamResult
 from dlp_privacy.policy import load_policy as load_privacy_policy
-from dlp_privacy.runner import render_hash, request_media_revocation
+from dlp_privacy.runner import PrivacyGateError, render_hash, request_media_revocation
 from dlp_review.revoke import RevocationReport
 from dlp_review.tasks import ReviewSetup, labeling_media_key
 from dlp_schema import load_ontology, repo_root
 from dlp_schema.db.repository import (
     get_review_task,
+    get_session,
     insert_labels,
     insert_review_task,
     insert_session,
@@ -548,3 +549,39 @@ def test_dataset_withdraw_requests_and_runs_revocation_after_commit(
     monkeypatch.setattr(review_config, "review_setup", no_setup)
     args = argparse.Namespace(session_id="s002", reason="동의 철회", actor="dpo01", url=url)
     assert dataset_cmds.cmd_withdraw(args) == 0
+
+
+def test_privacy_hold_revokes_current_tasks_and_release_needs_reapproval(
+    url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """F-REV-18: `dlp privacy hold`는 렌더 해시가 지금과 같은 작업도 회수 요청하고 커밋 뒤 사본을
+    지운다 (도구가 없으면 4). 보류 중에는 승인이 거부된다. `--release`는 기록만 남기고 승인은 풀린
+    채다. 보류 중이 아니면 해제를 거부한다."""
+    current = render_hash([], load_privacy_policy(repo_root()))
+    uri = _media_at(tmp_path, labeling_media_key("s001", "labeler01", "bodycam", current))
+    with _engine(url).begin() as conn:
+        insert_review_task(conn, _task("cvat:2", "s001", uri, current))
+    monkeypatch.setattr(review_config, "review_setup", _revocation_only(tmp_path))
+    monkeypatch.setattr(privacy_cmds, "store_from_spec", Mock(return_value=_labeling(tmp_path)))
+    hold = argparse.Namespace(
+        session_id="s001", reason="labeler report", release=False, actor="ops01", url=url,
+        store="unused",
+    )  # fmt: skip
+    assert privacy_cmds.cmd_hold(hold) == REVOCATION_PENDING_EXIT
+    out = capsys.readouterr().out
+    assert "승인 보류 (새 보류, ops01: labeler report" in out and "회수: cvat:2" in out
+    with _engine(url).connect() as conn:
+        task = get_review_task(conn, "cvat:2")
+        assert task.revoke_reason == "hold:ops01:labeler report"
+        assert task.media_revoked_at is not None
+        assert get_session(conn, "s001").privacy_state is PrivacyState.AUTO_BLURRED
+    approve = argparse.Namespace(session_id="s001", url=url)
+    with pytest.raises(PrivacyGateError, match="승인 보류 중"):
+        privacy_cmds.cmd_approve(approve)
+    release = argparse.Namespace(**{**vars(hold), "release": True, "reason": "re-reviewed"})
+    assert privacy_cmds.cmd_hold(release) == 0
+    assert "재승인" in capsys.readouterr().out
+    with _engine(url).connect() as conn:
+        assert get_session(conn, "s001").privacy_state is PrivacyState.AUTO_BLURRED
+    with pytest.raises(PrivacyGateError, match="보류 중이 아닙니다"):
+        privacy_cmds.cmd_hold(release)

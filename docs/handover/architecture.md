@@ -13,7 +13,7 @@ Prefect 서비스가 기동된 것만으로 모든 작업이 영속 큐에서 �
 | 명령 등록·실행 인자 | [CLI main](../../packages/cli/src/dlp_cli/main.py), 같은 디렉터리의 `*_cmds.py` | `.env.example` |
 | 입력 정규화·원본 수집·PTS | [media](../../packages/media/src/dlp_media/)의 `prepare.py`, `ingest.py`, `pts.py` | `config/policies/media.yaml` |
 | 멀티스트림 시각 보정 | [sync pipeline](../../packages/sync/src/dlp_sync/pipeline.py) | `config/policies/sync.yaml` |
-| 탐지·승인·렌더 | [privacy](../../packages/privacy/src/dlp_privacy/)의 `runner.py`, `generation.py`, `rendering.py`, `revocation.py`(블러 변경 뒤 배포 매체 회수 요청) | `config/policies/privacy.yaml` |
+| 탐지·승인·렌더 | [privacy](../../packages/privacy/src/dlp_privacy/)의 `runner.py`, `generation.py`, `rendering.py`, `revocation.py`(블러 변경 뒤 배포 매체 회수 요청), `hold.py`(사고 대응 승인 보류, ADR 0042) | `config/policies/privacy.yaml` |
 | 자동 라벨 초안 | [prelabel runner](../../packages/prelabel/src/dlp_prelabel/runner.py), `adapters/` | `config/policies/prelabel.yaml`, `config/models.yaml` |
 | 관계·접촉·행동 | [relations](../../packages/relations/src/dlp_relations/), [actions](../../packages/actions/src/dlp_actions/) | 각 단계의 `config/policies/*.yaml` |
 | 검수 도구·이력 수집 | [review](../../packages/review/src/dlp_review/)의 `tasks.py`, `collect.py`, `reconcile.py`, `clients.py`, `webhook.py`, `revoke.py`(회수 실행기), `orphans.py`(DB 기록 없이 남은 도구 작업·사본 정리) | `config/policies/review.yaml` |
@@ -50,7 +50,9 @@ Prefect 서비스가 기동된 것만으로 모든 작업이 영속 큐에서 �
 - 생애주기: `raw_ingested → privacy_approved → prelabeled → human_verified → split_assigned → exported`.
   어디서든 `withdrawn`으로 갈 수 있다. 이력은 추가하며 사용 중지를 되돌리지 않는다.
 - 프라이버시 상태: `pending → auto_blurred → approved`. 재탐지·블러 수정은 승인과 렌더의 유효성을
-  다시 판단하게 한다. 생애주기가 앞 단계로 돌아가는 것과는 별개다.
+  다시 판단하게 한다. 생애주기가 앞 단계로 돌아가는 것과는 별개다. 사고 대응 보류(`dlp privacy
+  hold`, `privacy_holds` 추가 전용 기록)는 승인을 auto_blurred로 되돌리고 해제 기록 전까지 재승인을
+  막는다 (ADR 0042).
 - 최신 **완료 탐지 세대**와 그 세대를 본 검수 작업이 맞아야 승인할 수 있다. 정책을 옛 값으로
   되돌려도 새 세대다. [ADR 0033](../adr/0033-privacy-generation-and-review-query.md)을 따른다.
 - 라벨 저장은 `label_records`의 추가 이력이다. 현재 라벨 조회는 철회와 검수 측정용 사본을 제외한다.

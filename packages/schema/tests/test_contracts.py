@@ -27,6 +27,7 @@ from dlp_schema.review import ReviewTask
 from dlp_schema.session import (
     LifecycleState,
     PrivacyDetectionRun,
+    PrivacyHoldEvent,
     Session,
     StreamKind,
     can_transition,
@@ -58,6 +59,26 @@ def test_privacy_detection_contract_roundtrip_and_validation() -> None:
     ):
         with pytest.raises(ValidationError):
             PrivacyDetectionRun.model_validate({**run.model_dump(), **change})
+
+
+def test_privacy_hold_contract_requires_reason_actor_and_timezone() -> None:
+    """승인 보류·해제 기록(ADR 0042)은 사유·행위자·시간대가 있어야 하고 동작은 hold|release다."""
+    event = PrivacyHoldEvent(
+        event_id=1, session_id="s001", action="hold", reason="labeler report", actor="ops01",
+        at=FIXED_TIME,
+    )  # fmt: skip
+    assert PrivacyHoldEvent.model_validate_json(event.model_dump_json()) == event
+    for change in (
+        {"reason": ""},
+        {"reason": "   "},
+        {"actor": " "},
+        {"action": "pause"},
+        {"at": FIXED_TIME.replace(tzinfo=None)},
+        {"event_id": 0},
+        {"unexpected": True},
+    ):
+        with pytest.raises(ValidationError):
+            PrivacyHoldEvent.model_validate({**event.model_dump(), **change})
 
 
 HAND21 = [{"x": 0.0, "y": 0.0, "visibility": 2}] * 21
