@@ -4,9 +4,11 @@
 명령은 메모리 SQLite 엔진을 열기만 하고, 도구·DB를 쓰는 라이브러리 함수는 호출 인자만 받아 둔다.
 
 정답 근거: 시험이 정책 파일에 직접 적은 CVAT 계정 연결(`cvat.users`), 원본 검수자
-(`reviewers.privacy`), 매체 화질(`media.watermark_crf`)이 작업 생성·수집·웹훅 서버·매체 회수가 보는
-값과 같아야 한다. Git의 기본 `review.yaml`은 계정 연결과 원본 검수자가 비어 있다. 한 명령 안에서는
-정책을 한 번만 읽어 `ReviewSetup`과 명령이 같은 객체를 본다 (`is`로 확인한다).
+(`reviewers.privacy`), 매체 화질(`media.watermark_crf`), 웹훅 바인드 주소(`webhook.bind_host`)가
+작업 생성·수집·웹훅 서버가 보는 값과 같아야 한다. Git의 기본 `review.yaml`은 계정 연결과 원본
+검수자가 비어 있고 바인드 주소도 다르다. 한 명령 안에서는 정책을 한 번만 읽어 `ReviewSetup`과
+명령이 같은 객체를 본다 (`is`로 확인한다). 매체 회수는 검수 정책 값을 쓰지 않으므로 정책 파일을
+읽지 않는다: 파일이 없거나 깨져도 회수 대기를 실행한다.
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ from typing import Any
 from unittest.mock import Mock
 
 import pytest
+import sqlalchemy as sa
 import yaml
 
 from dlp_cli import review_cmds, review_config
@@ -27,13 +30,23 @@ from dlp_review.ops.policy import load_policy as load_default_policy
 from dlp_review.revoke import RevocationReport
 from dlp_review.tasks import ReviewSetup
 from dlp_review.webhook import CollectRequest
-from dlp_schema import repo_root
-from dlp_schema.review import ReviewTaskStatus
+from dlp_schema import load_ontology, repo_root
+from dlp_schema.db.repository import (
+    insert_review_task,
+    insert_session,
+    register_ontology,
+    request_task_revocation,
+)
+from dlp_schema.review import ReviewStage, ReviewTask, ReviewTaskStatus, ReviewTool
+from dlp_schema.testing import FIXED_TIME, make_session, sqlite_db
 
 # 시험이 고른 정책 파일에 적는 값 (Git 기본 정책과 다르다)
 USERS = {"pilot-privacy": "cvat-privacy", "pilot-labeler": "cvat-labeler"}
 PRIVACY_REVIEWERS = ("pilot-privacy",)
 WATERMARK_CRF = 31
+BIND_HOST = "10.20.30.40"
+# 깨진 검수 정책 파일: 없음(FileNotFoundError), 필수 절 없음(ValidationError), YAML 문법 오류
+BROKEN_POLICIES = {"missing": None, "invalid": "version: 1\n", "syntax": "media: [\n"}
 
 
 @pytest.fixture
@@ -44,20 +57,36 @@ def selected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ReviewOpsPolicy
     data["reviewers"]["privacy"] = list(PRIVACY_REVIEWERS)
     data["cvat"]["users"] = dict(USERS)
     data["media"]["watermark_crf"] = WATERMARK_CRF
+    data["webhook"]["bind_host"] = BIND_HOST
     path = tmp_path / "review.yaml"
     path.write_text(yaml.safe_dump(data, allow_unicode=True), "utf-8")
     monkeypatch.setenv("DLP_REVIEW_POLICY_FILE", str(path))
     default = load_default_policy(root)
     # 전제: 기본 정책(라이브러리 로더)은 이 값들을 갖지 않는다
     assert default.cvat.users == {} and default.media.watermark_crf != WATERMARK_CRF
+    assert default.webhook.bind_host != BIND_HOST
     return review_config.load_review_policy(root)
 
 
+@pytest.fixture(params=sorted(BROKEN_POLICIES))
+def broken(request: pytest.FixtureRequest, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
+    """`DLP_REVIEW_POLICY_FILE`이 깨진 파일을 고른다 (종류 이름을 돌려준다)."""
+    kind: str = request.param
+    path = tmp_path / f"{kind}.yaml"
+    text = BROKEN_POLICIES[kind]
+    if text is not None:
+        path.write_text(text, "utf-8")
+    monkeypatch.setenv("DLP_REVIEW_POLICY_FILE", str(path))
+    return kind
+
+
 @pytest.fixture(autouse=True)
-def no_clients(monkeypatch: pytest.MonkeyPatch) -> None:
-    """저장소·도구 클라이언트를 만들지 않는다 (네트워크·DB 없이 정책 연결만 본다)."""
-    for name in ("raw_store", "S3Store", "CvatClient", "LabelStudioClient"):
-        monkeypatch.setattr(review_config, name, Mock())
+def no_clients(monkeypatch: pytest.MonkeyPatch) -> dict[str, Mock]:
+    """저장소·도구 클라이언트를 만들지 않는다 (네트워크·DB 없이 정책 연결만 본다). 이름 → 대역."""
+    fakes = {name: Mock() for name in ("raw_store", "S3Store", "CvatClient", "LabelStudioClient")}
+    for name, fake in fakes.items():
+        monkeypatch.setattr(review_config, name, fake)
+    return fakes
 
 
 def _args(command: str, **kw: Any) -> argparse.Namespace:
@@ -72,28 +101,72 @@ def _same_source(setup: ReviewSetup, policy: ReviewOpsPolicy, expected: ReviewOp
     assert setup.media_policy() is policy.media
 
 
-@pytest.mark.parametrize(
-    "command", ["create", "collect", "serve", "assign", "register-webhooks", "revoke"]
-)
-def test_setup_carries_selected_policy(command: str, selected: ReviewOpsPolicy) -> None:
-    """`_setup`이 만든 설정의 CVAT 계정 연결·매체 정책이 고른 파일의 값이다 (지연 기본 로더 아님).
+def test_setup_common_path_carries_selected_policy(selected: ReviewOpsPolicy) -> None:
+    """`_setup` 공통 경로: 설정의 CVAT 계정 연결·매체 정책이 고른 파일의 값이다 (기본 로더 아님).
 
-    회귀: 예전에는 `ReviewSetup`에 정책을 넘기지 않아 처음 쓸 때 Git의 review.yaml을 읽었다.
+    create·collect·serve·assign·register-webhooks가 이 함수를 부르고, 명령 이름은 원본 감사 기록의
+    목적 문자열에만 쓰여 명령마다 갈리지 않는다. 명령별로 정책을 함께 쓰는 연결은 아래 명령 시험이
+    본다. 회귀: 예전에는 `ReviewSetup`에 정책을 넘기지 않아 처음 쓸 때 Git의 review.yaml을 읽었다.
     그래서 파일럿의 `dlp review create --stage privacy --assignee pilot-privacy`가 "CVAT 계정이
     없습니다"로 실패했다.
     """
-    setup = review_cmds._setup(_args(command))  # pyright: ignore[reportPrivateUsage]
+    setup = review_cmds._setup(_args("create"))  # pyright: ignore[reportPrivateUsage]
     assert setup.cvat_policy() == selected.cvat
     assert setup.cvat_policy().users == USERS
     assert setup.media_policy().watermark_crf == WATERMARK_CRF
 
 
-def test_revocation_setup_uses_selected_policy(selected: ReviewOpsPolicy) -> None:
-    """매체 회수가 스스로 만드는 설정(`tolerant`, `dlp privacy detect|render`·`revoke --pending`)도
-    고른 정책을 싣는다."""
-    setup, _ = review_config.review_setup("privacy.detect", None, tolerant=True)
-    assert setup.cvat_policy() == selected.cvat
-    assert setup.media_policy() == selected.media
+def test_revocation_setup_does_not_read_review_policy(
+    broken: str, no_clients: dict[str, Mock]
+) -> None:
+    """매체 회수가 스스로 만드는 설정(`revocation_only`)은 검수 정책 파일을 읽지 않는다.
+
+    회수 실행기는 정책 값을 쓰지 않는다. 깨진 파일 때문에 회수 설정이 실패하면 낡은 라벨링 매체가
+    지워지지 않는다. 정책 필드는 비어 있다 (작업 생성·수집에 쓰는 설정이 아니다).
+    """
+    setup, _ = review_config.review_setup("privacy.detect", None, revocation_only=True)
+    assert setup.cvat_config is None and setup.media is None
+    assert setup.labeling is no_clients["S3Store"].from_env.return_value
+
+
+def _pending_db(tmp_path: Path) -> sa.Engine:
+    """회수 요청이 남은 라벨링 작업(s001, cvat:2)이 있는 시간대 보존 SQLite 파일 DB."""
+    engine = sqlite_db(f"sqlite:///{tmp_path / 'revoke.db'}")
+    task = ReviewTask(
+        task_key="cvat:2", tool=ReviewTool.CVAT, external_id="2", session_id="s001",
+        stream_id="bodycam", stage=ReviewStage.LABELING,
+        media_uri="s3://dlp-labeling/sessions/s001/review/labeler01/bodycam.mp4",
+        label_kinds=("box_track",), created_at=FIXED_TIME, assignee="labeler01",
+    )  # fmt: skip
+    with engine.begin() as conn:
+        register_ontology(conn, load_ontology(repo_root() / "config/ontology/v1"))
+        insert_session(conn, make_session("s001"))
+        insert_review_task(conn, task)
+        request_task_revocation(conn, "cvat:2", reason="privacy_detect", at=FIXED_TIME)
+    return engine
+
+
+@pytest.mark.parametrize("session_id", ["s001", None])
+def test_revocations_run_with_broken_review_policy(
+    session_id: str | None,
+    broken: str,
+    no_clients: dict[str, Mock],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """검수 정책 파일이 깨져도 회수 대기를 실행한다 (`dlp privacy detect|render` 뒤 회수,
+    `dlp review revoke <세션>`은 세션, cron `revoke --pending`은 None).
+
+    회귀: 회수 설정이 고른 정책을 엄격히 읽어 FileNotFoundError·ValidationError로 끝났고, 라벨링
+    버킷 사본이 지워지지 않았다 (고치기 전에는 정책을 읽지 않던 경로였다).
+    """
+    execute = Mock(return_value=RevocationReport())
+    monkeypatch.setattr(review_config, "execute_media_revocations", execute)
+    engine = _pending_db(tmp_path)
+    review_config.run_revocations(engine, session_id, purpose="privacy.detect")
+    execute.assert_called_once()
+    assert execute.call_args.args[1] == session_id
+    assert execute.call_args.kwargs["labeling"] is no_clients["S3Store"].from_env.return_value
 
 
 def test_broken_selected_policy_fails_before_clients(
@@ -184,7 +257,35 @@ def test_serve_resolves_reviewers_and_collects_with_one_policy(
     assert review_cmds.cmd_serve(_args("serve", port=0)) == 0
     on_collect = serve.call_args.args[2]
     assert serve.call_args.kwargs["policy"] == selected.webhook
+    assert serve.call_args.kwargs["policy"].bind_host == BIND_HOST
     on_collect(CollectRequest(task_key="cvat:1", reviewer="cvat-labeler"))
     _, _, setup, _, _, policy = got["args"]
     _same_source(setup, policy, selected)
     assert users["args"][3] is policy.cvat.users
+
+
+def test_register_webhooks_reads_selected_policy_before_tools(
+    no_clients: dict[str, Mock], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`dlp review register-webhooks`도 `_setup`으로 고른 파일을 엄격히 읽는다.
+
+    정책 값은 쓰지 않지만, 깨진 파일이면 도구에 접속하기 전에 실패한다 (웹훅을 받을 `serve`가 같은
+    파일을 읽으므로 설정 단계에서 알린다). 파일이 맞으면 찾은 프로젝트마다 웹훅을 등록한다.
+    """
+    monkeypatch.setenv("DLP_WEBHOOK_SECRET", "s3cret")
+    url = f"sqlite:///{tmp_path / 'register.db'}"
+    sqlite_db(url).dispose()  # 표만 만든다 (등록된 사전 없음: 기본 프로젝트만 찾는다)
+    cvat_cls, ls_cls = no_clients["CvatClient"], no_clients["LabelStudioClient"]
+    cvat: Mock = cvat_cls.from_env.return_value
+    cvat.find_project.return_value = {"id": 7}
+    ls_cls.from_env.return_value.find_project.return_value = None
+    args = _args("register-webhooks", url_base="http://gw:8000")
+    args.url = url
+    monkeypatch.setenv("DLP_REVIEW_POLICY_FILE", str(tmp_path / "missing.yaml"))
+    with pytest.raises(FileNotFoundError):
+        review_cmds.cmd_register(args)
+    cvat_cls.from_env.assert_not_called()
+    monkeypatch.delenv("DLP_REVIEW_POLICY_FILE")
+    assert review_cmds.cmd_register(args) == 0
+    urls: set[str] = {c.args[1] for c in cvat.add_webhook.call_args_list}
+    assert urls == {"http://gw:8000/webhooks/cvat"}

@@ -98,7 +98,8 @@ def cmd_detect(args: argparse.Namespace) -> int:
     철회), 세션 프라이버시 상태 갱신, 블러가 바뀐 스트림의 라벨링 작업 회수 요청(ADR 0039),
     라벨링 버킷의 이전 블러본 렌더 기록 무효화(ADR 0024), 원본 버킷 읽기와 쓰기(검수 우선 구간
     JSON, 결과 0개 버전의 탐지 표시; 감사 기록 `privacy.detect`). 커밋 뒤 회수 대기 실행
-    (검수 도구 설정에 실패해도 매체 삭제는 하고 도구 작업은 대기로 남긴다).
+    (CVAT에 접속하지 못해도 매체 삭제는 하고 도구 작업은 대기로 남긴다. 검수 정책 파일
+    `DLP_REVIEW_POLICY_FILE`은 읽지 않으므로 그 파일 오류도 매체 삭제를 막지 않는다).
     """
     root = repo_root()
     policy = load_policy(root)
@@ -170,7 +171,8 @@ def cmd_render(args: argparse.Namespace) -> int:
     렌더한 트랜잭션에서 렌더 해시가 지금 블러본과 다른 라벨링 작업에 회수를 요청한다 (백스톱,
     ADR 0039). 렌더 해시에는 `privacy.yaml render` 절 전체가 들어가므로 블러 강도뿐 아니라 블러와
     무관한 인코더 설정(crf, encoder_rate)만 바꿔도 그 세션의 해시 있는 라벨링 작업이 모두 회수되고
-    도구 작업이 지워진다. 커밋 뒤 회수 대기를 실행하고, 남으면 `REVOCATION_PENDING_EXIT`(4).
+    도구 작업이 지워진다. 커밋 뒤 회수 대기를 실행하고(`detect`와 같이 검수 정책 파일은 읽지
+    않는다), 남으면 `REVOCATION_PENDING_EXIT`(4).
 
     예외: 승인 전 세션, 라벨링 버킷이 원본 버킷과 같을 때, 오디오를 남기는 정책이면
     `PrivacyGateError`.

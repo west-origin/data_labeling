@@ -97,11 +97,14 @@ uv run --no-sync dlp pilot check --profile cleaning
 
 준비 검사는 서비스 응답·DB head·모델 실행·CVAT 일반 계정·Label Studio 서비스 계정 인증을
 확인한다. 일반 라벨러의 원본 작업 접근 거부와 Label Studio 검수 계정 로그인도 별도로 확인한다.
-`DLP_REVIEW_POLICY_FILE`은 `dlp` CLI 전체가 같은 로더(`dlp_cli.review_config.load_review_policy`)로
-따른다: 준비 검사, 검수 명령(`dlp review create|collect|serve|assign|plan|qa|quality|revoke|
-register-webhooks`, 작업의 CVAT 계정 배정·웹훅 담당자 확인·워터마크 매체 설정 포함), `dlp privacy
-detect|render` 뒤의 매체 회수, 운영 명령(`dlp ops …`). 한 명령 안에서는 정책을 한 번 읽어
-`ReviewSetup`과 명령이 같은 값을 본다. 반면 라이브러리 기본 로더(`dlp_review.ops.policy.load_policy(root)`,
+`DLP_REVIEW_POLICY_FILE`은 검수 정책을 읽는 `dlp` CLI 명령이 모두 같은 로더
+(`dlp_cli.review_config.load_review_policy`)로 따른다: 준비 검사, 검수 명령(`dlp review create|collect|
+serve|assign|register-webhooks|plan|qa|quality`, 작업의 CVAT 계정 배정·웹훅 담당자 확인·워터마크
+매체 설정·표본 판정 포함), 운영 명령(`dlp ops …`). 고른 파일이 없거나 깨졌으면 기본 정책으로
+되돌리지 않고 실패한다. 한 명령 안에서는 정책을 한 번 읽어 `ReviewSetup`과 명령이 같은 값을 본다.
+매체 회수(`dlp review revoke`, cron `revoke --pending`, `dlp privacy detect|render`와 검수 명령의 커밋
+뒤 회수)는 검수 정책 값을 쓰지 않는다. 회수가 스스로 만드는 설정은 이 파일을 읽지 않으므로 파일이
+깨져도 낡은 라벨링 매체는 지운다 (ADR 0039). 반면 라이브러리 기본 로더(`dlp_review.ops.policy.load_policy(root)`,
 정책을 넘기지 않은 `ReviewSetup`의 지연 로더)는 이 변수를 보지 않고 Git의 기본 `review.yaml`을 읽는다.
 그래서 라이브러리 함수를 직접 부르는 테스트는 기본 정책을, CLI 명령 함수를 부르는 테스트는 이 변수를 따른다.
 테스트에서는 파일럿 권한 설정이 테스트 픽스처를 덮어쓰지 않도록 서브셸 안에서만 해제한다.

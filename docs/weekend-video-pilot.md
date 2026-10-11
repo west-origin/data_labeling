@@ -79,10 +79,11 @@ uv run --no-sync dlp privacy detect SESSION_ID
 uv run --no-sync dlp review create SESSION_ID --stage privacy --assignee pilot-privacy
 ```
 
-검수 명령(`dlp review create|collect|assign|serve`)은 준비 검사와 같은 검수 정책 파일
-(`DLP_REVIEW_POLICY_FILE`)의 원본 검수자·CVAT 계정 연결을 쓴다. 준비 검사를 통과한 셸에서 이어서
-실행한다. 이 변수가 없는 셸에서는 Git의 기본 정책(원본 검수자·계정 연결 없음)을 읽어 블러 검수
-작업 생성이 원본 접근 권한자가 아니라는 오류로 거부된다.
+검수 명령은 준비 검사와 같은 검수 정책 파일(`DLP_REVIEW_POLICY_FILE`)을 읽는다. `create`·`assign`은
+원본 검수자와 CVAT 계정 연결을, `serve`는 CVAT 계정 연결(웹훅 담당자 확인)을, `collect`는 표본 판정
+정책을 이 파일에서 읽는다. 준비 검사를 통과한 셸에서 이어서 실행한다. 이 변수가 없는 셸에서는 Git의
+기본 정책(원본 검수자·계정 연결 없음)을 읽어 블러 검수 작업 생성이 원본 접근 권한자가 아니라는
+오류로 거부된다.
 
 ## 사람 검수에서 두 번 멈춘다
 

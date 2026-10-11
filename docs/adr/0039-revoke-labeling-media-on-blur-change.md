@@ -106,6 +106,10 @@ ADR 0024는 블러가 바뀌면 승인을 풀고 렌더 기록을 무효로 둬,
   (0015) → 코드 배포·serve 재기동 → `dlp review revoke <세션> --dry-run --include-legacy`로 구 작업을
   확인하고, 승인 뒤 블러가 바뀐 이력이 있는 세션부터 `dlp review revoke <세션> --include-legacy`를
   돌린다 → cron(또는 Prefect)으로 `dlp review revoke --pending`을 10분마다 돌려 종료 코드 4를 경보로 쓴다.
+- 회수 실행이 스스로 만드는 설정(`revoke`, `dlp privacy detect|render` 뒤)은 검수 정책 파일
+  (`DLP_REVIEW_POLICY_FILE`)을 읽지 않는다. 실행기는 라벨링 버킷·원본 버킷 이름·도구 클라이언트만 쓰므로
+  그 파일이 없거나 깨져도 매체 삭제와 cron 백스톱이 멈추지 않는다. 작업 생성·수집 명령은 그 파일을
+  엄격히 읽어 실패한다.
 - 재생성: 수집 출력의 회수 내용 확인 → 남은 블러 검수 → `dlp privacy approve` → `dlp privacy render` →
   출력된 배정마다 `dlp review assign <배정>`, 직접 작업은 `dlp review create <세션> --stage labeling
   --assignee <담당자> --stream <스트림> --tool <도구>` → 검수·수집 → 배정 완료 → `dlp review verify`.

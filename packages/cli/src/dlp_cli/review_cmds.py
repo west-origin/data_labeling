@@ -31,11 +31,14 @@
 privacy` (또는 `plan --privacy`) → `collect` → `dlp privacy approve`.
 
 정책 출처: 기본은 `config/policies/review.yaml` (우선순위·표본·측정 비율, `reviewers.privacy`,
-`cvat.users`, 미디어). CLI에서는 `DLP_REVIEW_POLICY_FILE`로 정책 파일을 바꿀 수 있다. 모든 하위
-명령은 `review_config.load_review_policy` 하나로 읽는다. 저장소·도구 설정(`_setup`)을 쓰는 명령은
-정책을 한 번 읽어 `_setup`과 자기 몫(원본 검수자, 수집·배정 마무리, 웹훅 검수자 확인)에 같은 객체를
-넘긴다. 그래서 `ReviewSetup`의 CVAT 계정 연결(`cvat_policy`)·매체(`media_policy`)도 고른 파일의
-값이다 (라이브러리 지연 로더의 Git 기본값이 아니다, F-REV-01).
+`cvat.users`, 미디어). CLI에서는 `DLP_REVIEW_POLICY_FILE`로 정책 파일을 바꿀 수 있다. 검수 정책을
+읽는 하위 명령은 모두 `review_config.load_review_policy` 하나로 읽는다. 저장소·도구 설정(`_setup`)을
+쓰는 명령(create·collect·serve·assign·register-webhooks)은 정책을 한 번 읽어 `_setup`과 자기
+몫(원본 검수자, 수집·배정 마무리, 웹훅 검수자 확인)에 같은 객체를 넘긴다. 그래서 `ReviewSetup`의
+CVAT 계정 연결(`cvat_policy`)·매체(`media_policy`)도 고른 파일의 값이다 (라이브러리 지연 로더의
+Git 기본값이 아니다, F-REV-01). `plan`·`qa`·`quality`는 같은 로더로 정책만 읽고, `queue`·`verify`는
+검수 정책을 쓰지 않는다. 매체 회수만 하는 `revoke`도 검수 정책을 읽지 않는다 (회수 실행기는 정책
+값을 쓰지 않는다. 정책 파일이 깨져도 낡은 라벨링 매체를 지운다).
 
 주의:
 - `_setup`(`review_config.review_setup`)이 원본 저장소를 `raw_store("s3", …, "review.<명령>")` 감사

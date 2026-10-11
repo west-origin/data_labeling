@@ -3,7 +3,8 @@
 시간대 보존 SQLite 파일 DB와 LocalStore로 돈다 (서비스 없음).
 
 정답 근거: 회수 실행은 수집·탐지 커밋 뒤에 돌고, 대기가 남으면 종료 코드 4다. `--dry-run`은 쓰지
-않는다. `--pending`은 모든 세션의 대기를 실행한다. 도구 설정이 실패해도(tolerant) 매체 삭제는 한다.
+않는다. `--pending`은 모든 세션의 대기를 실행한다. CVAT 접속이 실패해도(회수 전용 설정) 매체
+삭제는 한다.
 """
 
 from __future__ import annotations
@@ -140,11 +141,11 @@ def _local_setup(tmp_path: Path) -> ReviewSetup:
     )  # fmt: skip
 
 
-def _tolerant(tmp_path: Path) -> Any:
-    """`review_setup` 대역: tolerant 설정만 받고 CVAT 접속 실패 경고를 돌려준다."""
+def _revocation_only(tmp_path: Path) -> Any:
+    """`review_setup` 대역: 회수 전용(`revocation_only`) 설정만 받고 CVAT 접속 실패 경고를 낸다."""
 
     def fake(purpose: str, url: str | None, **kw: Any) -> tuple[ReviewSetup, list[str]]:
-        assert kw.get("tolerant") is True
+        assert kw.get("revocation_only") is True
         return _local_setup(tmp_path), ["CVAT에 접속하지 못했습니다 (ConnectError)"]
 
     return fake
@@ -292,7 +293,7 @@ def test_revoke_task_refuses_keys_it_cannot_request(
             assert get_review_task(conn, key).revoke_requested_at is None
     with _engine(url).begin() as conn:
         request_task_revocation(conn, "cvat:2", reason="sweep", at=NOW)
-    monkeypatch.setattr(review_config, "review_setup", _tolerant(tmp_path))
+    monkeypatch.setattr(review_config, "review_setup", _revocation_only(tmp_path))
     args = _revoke_args(url, session_id="s001", task=["cvat:2"], reason="incident")
     assert review_cmds.cmd_revoke(args) == REVOCATION_PENDING_EXIT  # CVAT 클라이언트 없음
     assert "cvat:2: 이미 회수 요청됨 (sweep" in capsys.readouterr().out
@@ -310,7 +311,7 @@ def test_revoke_task_records_manual_reason_only_for_named_task(
         insert_review_task(conn, _task("cvat:3", "s001", _media(tmp_path, "s001", "b"), None))
         insert_labels(conn, [_face()])
     monkeypatch.setenv("DLP_ACTOR", "ops")
-    monkeypatch.setattr(review_config, "review_setup", _tolerant(tmp_path))
+    monkeypatch.setattr(review_config, "review_setup", _revocation_only(tmp_path))
     args = _revoke_args(url, session_id="s001", task=["cvat:3"], reason="incident")
     assert review_cmds.cmd_revoke(args) == REVOCATION_PENDING_EXIT
     out = capsys.readouterr().out
@@ -330,7 +331,7 @@ def test_revoke_pending_runs_every_session_and_tolerates_missing_tools(
         for sid, key in keys.items():
             insert_review_task(conn, _task(key, sid, _media(tmp_path, sid, "bodycam"), None))
             request_task_revocation(conn, key, reason="sweep", at=NOW)
-    monkeypatch.setattr(review_config, "review_setup", _tolerant(tmp_path))
+    monkeypatch.setattr(review_config, "review_setup", _revocation_only(tmp_path))
     assert review_cmds.cmd_revoke(_revoke_args(url, pending=True)) == REVOCATION_PENDING_EXIT
     out = capsys.readouterr().out
     assert "CVAT에 접속하지 못했습니다" in out and "회수 대기 2개" in out
@@ -353,7 +354,7 @@ def test_detect_requests_and_runs_revocation_even_without_tools(
     uri = _media_at(tmp_path, labeling_media_key("s001", "labeler01", "bodycam", empty))
     with _engine(url).begin() as conn:
         insert_review_task(conn, _task("cvat:2", "s001", uri, empty))
-    monkeypatch.setattr(review_config, "review_setup", _tolerant(tmp_path))
+    monkeypatch.setattr(review_config, "review_setup", _revocation_only(tmp_path))
     model = Provenance(source=Source.MODEL, model_version="m1")
     found = [_face().model_copy(update={"provenance": model, "confidence": 0.9})]
     args = argparse.Namespace(session_id="s001", store="unused", url=url)
@@ -431,7 +432,7 @@ def test_render_backstop_requests_tasks_made_under_other_render_policy(
     uri = _media_at(tmp_path, labeling_media_key("s001", "labeler01", "bodycam", old))
     with _engine(url).begin() as conn:
         insert_review_task(conn, _task("cvat:2", "s001", uri, old))
-    monkeypatch.setattr(review_config, "review_setup", _tolerant(tmp_path))
+    monkeypatch.setattr(review_config, "review_setup", _revocation_only(tmp_path))
     monkeypatch.setattr(privacy_cmds, "raw_store", Mock(return_value=raw))
     monkeypatch.setattr(privacy_cmds, "store_from_spec", Mock(return_value=_labeling(tmp_path)))
     args = argparse.Namespace(session_id="s001", store="unused", url=url)

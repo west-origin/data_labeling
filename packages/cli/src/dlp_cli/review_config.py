@@ -7,7 +7,9 @@
 연결)·`media`(검수 화면 매체)를 `ReviewSetup`에 싣는다. 라이브러리 `ReviewSetup`의 지연 로더는
 환경 변수를 보지 않고 Git의 기본 `review.yaml`을 읽으므로 CLI가 비워 두면 안 된다 (F-REV-01).
 `run_revocations`는 블러를 바꾼 트랜잭션이 커밋된 뒤 회수 대기를 실행한다 (`dlp review …`,
-`dlp privacy detect|render`).
+`dlp privacy detect|render`). 회수 실행기는 검수 정책 값을 쓰지 않으므로 회수가 스스로 만드는
+설정(`revocation_only`)은 검수 정책 파일을 읽지 않는다. 정책 파일이 없거나 깨져도 낡은 라벨링
+매체는 지운다 (노출을 줄이는 경로를 설정 오류에 묶지 않는다).
 
 공개 이름:
 - `REVOCATION_PENDING_EXIT`: 회수 대기가 남았을 때의 종료 코드 (4, argparse 사용 오류 2와 다르다).
@@ -58,7 +60,7 @@ def review_setup(
     *,
     cvat: bool = True,
     label_studio: bool = True,
-    tolerant: bool = False,
+    revocation_only: bool = False,
     policy: ReviewOpsPolicy | None = None,
 ) -> tuple[ReviewSetup, list[str]]:
     """검수 연동에 필요한 저장소·도구 클라이언트를 묶는다. (설정, 경고).
@@ -68,10 +70,14 @@ def review_setup(
             않고 원본 버킷 이름만 쓴다.
         url: 감사 기록용 DB URL (None이면 `DLP_DATABASE_URL`/기본값).
         cvat / label_studio: False면 그 도구 클라이언트를 만들지 않는다 (None).
-        tolerant: True면 CVAT 로그인 실패(`ToolError`·`httpx.HTTPError`)를 None과 경고로 바꾼다
-            (회수 실행처럼 도구 없이도 할 수 있는 일을 막지 않는다). 정책 파일 오류는 바꾸지 않는다.
-        policy: 명령이 이미 읽은 검수 정책. None이면 `load_review_policy`로 읽는다 (고른 파일).
-            명령이 정책을 따로 쓰면(원본 검수자·수집·웹훅) 같은 객체를 넘겨 한 출처로 맞춘다.
+        revocation_only: True면 매체 회수 전용 설정이다 (`run_revocations`만 쓴다).
+            CVAT 로그인 실패(`ToolError`·`httpx.HTTPError`)를 None과 경고로 바꾸고, 검수 정책을
+            읽지 않는다(`policy`가 없으면 `cvat_config`·`media`가 None). 회수 실행기는 이 값을 쓰지
+            않으므로 정책 파일이 없거나 깨져도 매체 삭제를 막지 않는다. 이 설정을 작업 생성·수집·
+            웹훅에 쓰면 `ReviewSetup` 지연 로더가 Git 기본값을 읽으므로 그 용도로 쓰지 않는다.
+        policy: 명령이 이미 읽은 검수 정책. None이면 `load_review_policy`로 읽는다 (고른 파일,
+            `revocation_only`면 읽지 않는다). 명령이 정책을 따로 쓰면(원본 검수자·수집·웹훅) 같은
+            객체를 넘겨 한 출처로 맞춘다.
 
     반환: `ReviewSetup`과 경고 문장 목록.
     - `raw`: 원본 버킷 감사 저장소 (항상 S3).
@@ -79,12 +85,16 @@ def review_setup(
     - `labeling_reader`: 라벨러 자격 증명(읽기 전용) — 검수 화면 서명 URL용.
     - `ontology`: None. 작업 생성 시 DB에서 각 세션 버전의 사전을 읽는다.
     - `cvat_config`·`media`: 고른 정책의 `cvat`·`media` (라이브러리 지연 로더를 쓰지 않는다).
+      `revocation_only`이고 `policy`가 없으면 None.
     부작용: 설정 파일을 읽고 저장소·HTTP 클라이언트를 만든다. 정책은 클라이언트보다 먼저 읽어
-    파일 오류면 도구에 접속하지 않고 실패한다. CVAT 클라이언트는 생성 중 로그인 API를 호출한다.
-    tolerant가 아니면 로그인 실패·통신 오류는 호출자에게 전파된다.
+    파일 오류면 도구에 접속하지 않고 실패한다 (`revocation_only`면 읽지 않는다). CVAT 클라이언트는
+    생성 중 로그인 API를 호출한다. `revocation_only`가 아니면 로그인 실패·통신 오류는 호출자에게
+    전파된다.
     """
     root = repo_root()
-    selected = policy if policy is not None else load_review_policy(root)
+    selected = policy
+    if selected is None and not revocation_only:
+        selected = load_review_policy(root)
     buckets = load_config(root / "config" / "defaults.yaml").buckets
     warnings: list[str] = []
     client: CvatClient | None = None
@@ -92,7 +102,7 @@ def review_setup(
         try:
             client = CvatClient.from_env()
         except (ToolError, httpx.HTTPError) as exc:
-            if not tolerant:
+            if not revocation_only:
                 raise
             warnings.append(f"CVAT에 접속하지 못했습니다 ({type(exc).__name__}): CVAT 회수는 대기")
     setup = ReviewSetup(
@@ -102,8 +112,8 @@ def review_setup(
         ontology=None,
         cvat=client,
         label_studio=LabelStudioClient.from_env() if label_studio else None,
-        media=selected.media,
-        cvat_config=selected.cvat,
+        media=selected.media if selected is not None else None,
+        cvat_config=selected.cvat if selected is not None else None,
     )
     return setup, warnings
 
@@ -122,8 +132,9 @@ def run_revocations(
     1. sweep이고 세션이 있으면 짧은 트랜잭션에서 렌더 해시가 지금과 다른 작업에 회수를 요청한다
        (`reason="sweep"`, 구 작업 제외). 알려지지 않은 경로로 블러본이 바뀐 경우의 백스톱이다.
     2. 대기가 없으면 빈 보고서를 돌려준다 (도구 클라이언트를 만들지 않는다).
-    3. setup이 없으면 `review_setup(tolerant=True)`로 만든다 (도구가 없어도 매체 삭제는 한다).
-       고른 검수 정책도 읽으므로 정책 파일 오류면 실패한다 (회수 요청은 DB에 남아 있다).
+    3. setup이 없으면 `review_setup(revocation_only=True)`로 만든다. CVAT에 접속하지 못해도 매체
+       삭제는 하고, 검수 정책 파일은 읽지 않는다 (회수는 정책 값을 쓰지 않는다. 파일이 없거나
+       깨져도 `dlp privacy detect|render` 뒤 회수와 `dlp review revoke [--pending]`이 돈다).
     4. `execute_media_revocations`로 매체 → CVAT → Label Studio 순으로 끊는다.
 
     인자: session_id가 None이면 모든 세션의 대기 (`--pending`). url: 설정을 만들 때의 DB URL.
@@ -140,7 +151,7 @@ def run_revocations(
             return RevocationReport()
     warnings: list[str] = []
     if setup is None:
-        setup, warnings = review_setup(purpose, url, tolerant=True)
+        setup, warnings = review_setup(purpose, url, revocation_only=True)
     report = execute_media_revocations(
         engine,
         session_id,
