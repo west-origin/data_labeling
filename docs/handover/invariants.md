@@ -11,7 +11,7 @@
 | 라벨은 덮어쓰지 않는다 (수정 = 새 레코드 + parent_label_id) | DB 트리거: `label_records` UPDATE·DELETE 금지(검수 필드 제외) — `packages/schema/tests/test_db.py::test_labels_are_immutable_except_review` | 검수 상태 갱신만 허용 |
 | 운영·감사 기록은 추가만 | DB 트리거(추가 전용·TRUNCATE 금지) — `test_db.py::test_append_only_tables_cannot_be_truncated` | 일부 표의 TRUNCATE 검사가 약함 (F-SCH-05) |
 | 검수자가 승인·표본 검증한 라벨은 어떤 단계도 지우지 않는다 | 저장 검증 `ProtectedLabelRetractionError`(지우는 레코드 자체, 그리고 조상 사슬의 보호 라벨이 마지막 현재 후손을 잃는 경우) — `packages/schema/tests/test_protected_retraction.py`, 각 단계 `retractions()`는 검수 전만 | 단계의 지울 후보 선택은 바로 위 부모만 본다(프리라벨 착용자 사본). 더 깊은 조상은 저장이 거부해 단계가 실패한다 |
-| 라벨 사전·세션 버전·구간 참조가 유효해야 저장 | `insert_labels` → `label_validation`, 0014 INSERT 버전 트리거 — `test_ontology_boundaries.py`, 양손 행동 노드 `test_label_graph.py` | 트리거 테스트가 약함 (F-SCH-04) |
+| 라벨 사전·세션 버전·구간 참조가 유효해야 저장 | `insert_labels` → `label_validation`, 0014 INSERT 버전 트리거 — `test_ontology_boundaries.py`(트리거는 SQLSTATE 23514·트리거 함수로 확인하고 트리거를 지운 대조와 비교), 양손 행동 노드 `test_label_graph.py` | |
 | 다른 단계 입력은 `current_labels()` (오류 삽입·측정 레코드 제외) | 단위 테스트(episode·review ops), 학습 추출·내보내기 테스트 | 호출부가 `get_labels`를 직접 쓰는지는 **문서뿐** |
 | DB 스키마는 tables.py와 Alembic을 함께 바꾼다 | `test_db.py::test_migrations_match_table_definitions` | |
 | 계약 변경은 ADR + 마이그레이션 + `make schemas` | `make contracts`(`dlp schema export --check`) | ADR 동반은 **문서뿐** |
