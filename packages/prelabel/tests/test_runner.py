@@ -29,7 +29,7 @@ from dlp_prelabel.adapters.stubs import OraclePredictor
 from dlp_prelabel.common import Image, iter_frames
 from dlp_prelabel.lift3d import DepthLifter, lift_tracks
 from dlp_prelabel.policy import PrelabelPolicy, load_policy
-from dlp_prelabel.runner import CONTACT_PREFIX, CONTACT_STEP, run_prelabel
+from dlp_prelabel.runner import CONTACT_PREFIX, CONTACT_STEP, pick_lift_tracks, run_prelabel
 from dlp_schema.db.migrate import upgrade
 from dlp_schema.db.repository import (
     get_labels,
@@ -54,6 +54,7 @@ from dlp_schema.labels import (
     Provenance,
     Source,
     Trajectory3DPayload,
+    Trajectory3DSample,
     VerificationState,
 )
 from dlp_schema.ontology import load_ontology
@@ -554,6 +555,35 @@ class _UnitLifter(DepthLifter):
         self.model = _UnitDepth()
 
 
+def _bodycam_only_session(
+    pg: sa.Engine, tmp_path: Path, actions: ActionScenario, prefix: str
+) -> tuple[str, S3Store]:
+    """손 키프레임 시각 그대로 쓴 회색 바디캠 영상 하나뿐인 세션을 수집한다 (3D 단계 테스트용).
+
+    깊이를 읽는 프레임이 손 키프레임 시각과 같아 `lift_tracks` 결과를 정답으로 쓸 수 있다.
+
+    Returns:
+        (세션 ID, 원본 저장소).
+    """
+    write_video(
+        tmp_path / "bodycam.mp4",
+        ((t, np.full((240, 320, 3), 90, np.uint8)) for t in actions.frame_times),
+        width=320,
+        height=240,
+    )
+    sid = f"{prefix}-{uuid.uuid4().hex[:8]}"
+    manifest = {
+        "session_id": sid, "domain": "cleaning", "worker_id": "w01", "site_id": "site01",
+        "consent_version": "c1", "recorded_at": FIXED_TIME.isoformat(), "ontology_version": "1.0.0",
+        "streams": [{"stream_id": "bodycam", "kind": "bodycam", "path": "bodycam.mp4"}],
+    }  # fmt: skip
+    (tmp_path / "m.yaml").write_text(yaml.safe_dump(manifest), encoding="utf-8")
+    raw = S3Store.from_env("dlp-raw")
+    with pg.begin() as conn:
+        ingest_session(*load_manifest(tmp_path / "m.yaml"), raw, conn)
+    return sid, raw
+
+
 def test_depth_lift_uses_the_reviewed_track_when_hand_versions_coexist(
     pg: sa.Engine, tmp_path: Path
 ) -> None:
@@ -568,27 +598,13 @@ def test_depth_lift_uses_the_reviewed_track_when_hand_versions_coexist(
     돌리면 같은 입력이라 건너뛴다.
     """
     actions = generate_action_scenario(1, n_units=2)
-    write_video(
-        tmp_path / "bodycam.mp4",
-        ((t, np.full((240, 320, 3), 90, np.uint8)) for t in actions.frame_times),
-        width=320,
-        height=240,
-    )
-    sid = f"lift-{uuid.uuid4().hex[:8]}"
-    manifest = {
-        "session_id": sid, "domain": "cleaning", "worker_id": "w01", "site_id": "site01",
-        "consent_version": "c1", "recorded_at": FIXED_TIME.isoformat(), "ontology_version": "1.0.0",
-        "streams": [{"stream_id": "bodycam", "kind": "bodycam", "path": "bodycam.mp4"}],
-    }  # fmt: skip
-    (tmp_path / "m.yaml").write_text(yaml.safe_dump(manifest), encoding="utf-8")
-    raw = S3Store.from_env("dlp-raw")
+    sid, raw = _bodycam_only_session(pg, tmp_path, actions, "lift")
     policy, ontology = load_policy(ROOT), load_ontology(ROOT / "config/ontology/v1")
     hands = OraclePredictor("hands", actions.labels, ("keypoint_track",), now=FIXED_TIME)
     hands2 = OraclePredictor(
         "hands", actions.labels, ("keypoint_track",), jitter_px=3.0, now=FIXED_TIME
     )
     with pg.begin() as conn:
-        ingest_session(*load_manifest(tmp_path / "m.yaml"), raw, conn)
         run_prelabel(conn, sid, raw, [hands], policy, ontology, FIXED_TIME)
         [old] = get_labels(conn, sid, kinds=["keypoint_track"])
         record_review(conn, old.label_id, VerificationState.HUMAN_APPROVED, "rev01", FIXED_TIME)
@@ -616,6 +632,129 @@ def test_depth_lift_uses_the_reviewed_track_when_hand_versions_coexist(
         assert isinstance(x.payload, Trajectory3DPayload)
         key = (x.payload.entity_id, x.payload.part)
         assert list(x.payload.samples) == from_old[key] != from_new[key]
+
+
+def _lifted_from(
+    video: Path, track: LabelRecord, policy: PrelabelPolicy
+) -> dict[tuple[str, str | None], list[Trajectory3DSample]]:
+    """정답: 가짜 깊이(1 m)로 트랙 하나만 올린 (개체, 부위) → 3D 표본."""
+    return lift_tracks(iter_frames(video), _UnitDepth(), [track], None, policy.depth)
+
+
+def _two_unreviewed_hand_tracks(actions: ActionScenario) -> list[Predictor]:
+    """같은 entity_id 손 트랙을 내는 두 어댑터 ("hands", 흔들림을 넣은 "hands-alt").
+
+    어댑터 이름이 달라 라벨 ID 접두사가 다르므로 서로의 이전 버전으로 지워지지 않고, 둘 다 검수 전
+    모델 트랙으로 함께 현재 라벨이 된다.
+    """
+    kinds = ("keypoint_track",)
+    return [
+        OraclePredictor("hands", actions.labels, kinds, now=FIXED_TIME),
+        OraclePredictor("hands-alt", actions.labels, kinds, jitter_px=3.0, now=FIXED_TIME),
+    ]
+
+
+def test_depth_lift_ignores_body_tracks_it_does_not_lift(pg: sa.Engine, tmp_path: Path) -> None:
+    """검증 지적 회귀 (F-PAR-09): 3D 입력 해시는 실제로 올리는 트랙(`pick_lift_tracks`)으로 만든다.
+    바디캠에 coco17 전신 트랙이 더해져도 3D로 올리지 않으므로 버전이 같아 다시 만들지 않는다.
+
+    예전 해시(바디캠 키포인트·박스 트랙 전체)는 전신 트랙 ID가 더해져 버전이 바뀌고, 같은 손 궤적을
+    지웠다가 다시 만들었다.
+
+    정답: 3D 궤적은 hand_points 수만큼 한 번만 만들어지고, 전신 어댑터를 더해 다시 돌려도 이력이
+    그대로다. 표본은 고른 손 트랙만 올린 `lift_tracks` 결과와 같다.
+    """
+    actions = generate_action_scenario(1, n_units=2)
+    sid, raw = _bodycam_only_session(pg, tmp_path, actions, "body3d")
+    policy, ontology = load_policy(ROOT), load_ontology(ROOT / "config/ontology/v1")
+    hands = _two_unreviewed_hand_tracks(actions)
+    t = np.asarray(actions.frame_times, dtype=np.float64)
+    body = OraclePredictor(
+        "body", [_coco_person("worker", t, np.zeros(t.size), 3)], ("keypoint_track",),
+        now=FIXED_TIME,
+    )  # fmt: skip
+    lifter = _UnitLifter(policy)
+    with pg.begin() as conn:
+        first = run_prelabel(conn, sid, raw, hands, policy, ontology, FIXED_TIME, lifter=lifter)
+        lifted = get_labels(conn, sid, kinds=["trajectory3d"])
+        with_body = run_prelabel(
+            conn, sid, raw, [*hands, body], policy, ontology, FIXED_TIME, lifter=lifter
+        )
+        after = get_labels(conn, sid, kinds=["trajectory3d"])
+        tracks = current_labels(get_labels(conn, sid, kinds=["keypoint_track"]))
+    skeletons = sorted(
+        x.payload.skeleton for x in tracks if isinstance(x.payload, KeypointTrackPayload)
+    )
+    assert skeletons == ["coco17", "hand21", "hand21"]
+    assert first.lifted == len(lifted) == len(policy.depth.hand_points)
+    assert with_body.produced == {"bodycam/body": 1}
+    assert with_body.lifted == 0 and after == lifted
+    [picked] = pick_lift_tracks(tracks, "bodycam")
+    want = _lifted_from(tmp_path / "bodycam.mp4", picked, policy)
+    for x in lifted:
+        assert isinstance(x.payload, Trajectory3DPayload)
+        assert list(x.payload.samples) == want[(x.payload.entity_id, x.payload.part)]
+
+
+def test_approving_the_other_hand_track_relifts_and_keeps_reviewed_trajectories(
+    pg: sa.Engine, tmp_path: Path
+) -> None:
+    """검증 지적 회귀: 같은 entity_id의 검수 전 손 트랙 둘 중 고르지 않은 쪽을 승인하면 고르는
+    트랙이 바뀐다 (승인은 라벨 ID를 바꾸지 않는다). 3D는 고른 트랙으로 만든 입력 해시가 바뀌어 새
+    버전으로 다시 돌고, 이전 버전 3D 중 검수 전인 것만 지운다.
+
+    예전 해시(후보 트랙 ID 전체)는 승인 전후가 같아 3D가 다시 돌지 않았고, 승인 트랙이 아닌
+    트랙으로 올린 궤적이 남았다.
+
+    시나리오: 첫 실행에서 고른 트랙(`pick_lift_tracks`)으로 3D 궤적(hand_points 수)이 생긴다. 그중
+    하나를 검수자가 승인하고, 고르지 않은 손 트랙도 승인한 뒤 다시 돌린다.
+    정답: 새 궤적은 승인한 손 트랙만 올린 `lift_tracks` 결과와 같고, 승인한 이전 궤적의 (개체,
+    부위)는 새 궤적을 만들지 않는다 (hand_points 수 - 1개). 지운 것은 승인하지 않은 이전 궤적뿐이다.
+    다시 돌리면 같은 버전이라 건너뛴다.
+    """
+    actions = generate_action_scenario(1, n_units=2)
+    sid, raw = _bodycam_only_session(pg, tmp_path, actions, "relift")
+    policy, ontology = load_policy(ROOT), load_ontology(ROOT / "config/ontology/v1")
+    hands = _two_unreviewed_hand_tracks(actions)
+    lifter = _UnitLifter(policy)
+    video = tmp_path / "bodycam.mp4"
+    with pg.begin() as conn:
+        first = run_prelabel(conn, sid, raw, hands, policy, ontology, FIXED_TIME, lifter=lifter)
+        before = get_labels(conn, sid, kinds=["trajectory3d"])
+        tracks = current_labels(get_labels(conn, sid, kinds=["keypoint_track"]))
+    assert len(tracks) == 2 and all(
+        x.verification.state is VerificationState.UNREVIEWED for x in tracks
+    )
+    [picked] = pick_lift_tracks(tracks, "bodycam")
+    [other] = [x for x in tracks if x.label_id != picked.label_id]
+    from_picked, from_other = (_lifted_from(video, x, policy) for x in (picked, other))
+    n = len(policy.depth.hand_points)
+    assert first.lifted == len(before) == n
+    for x in before:
+        assert isinstance(x.payload, Trajectory3DPayload)
+        key = (x.payload.entity_id, x.payload.part)
+        assert list(x.payload.samples) == from_picked[key] != from_other[key]
+
+    reviewed = before[0]
+    with pg.begin() as conn:
+        record_review(
+            conn, reviewed.label_id, VerificationState.HUMAN_APPROVED, "rev01", FIXED_TIME
+        )
+        record_review(conn, other.label_id, VerificationState.HUMAN_APPROVED, "rev01", FIXED_TIME)
+        relift = run_prelabel(conn, sid, raw, hands, policy, ontology, FIXED_TIME, lifter=lifter)
+        again = run_prelabel(conn, sid, raw, hands, policy, ontology, FIXED_TIME, lifter=lifter)
+        history = get_labels(conn, sid, kinds=["trajectory3d"])
+    assert relift.lifted == n - 1 and again.lifted == 0
+    removed = {x.parent_label_id for x in history if x.retracted}
+    assert removed == {x.label_id for x in before} - {reviewed.label_id}
+    live = current_labels(history)
+    assert reviewed.label_id in {x.label_id for x in live} and len(live) == n
+    new = [x for x in live if x.label_id != reviewed.label_id]
+    assert all(x.provenance.model_version != reviewed.provenance.model_version for x in new)
+    for x in new:
+        assert isinstance(x.payload, Trajectory3DPayload)
+        assert list(x.payload.samples) == from_other[(x.payload.entity_id, x.payload.part)]
+    assert all(check_label(x, ontology) == [] for x in new)
 
 
 def test_glove_started_before_the_bodycam_keeps_only_contacts_inside_the_session(
