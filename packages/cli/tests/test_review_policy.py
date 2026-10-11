@@ -27,9 +27,10 @@ import yaml
 from dlp_cli import review_cmds, review_config
 from dlp_review.ops.policy import ReviewOpsPolicy
 from dlp_review.ops.policy import load_policy as load_default_policy
+from dlp_review.refresh import RefreshReport
 from dlp_review.revoke import RevocationReport
 from dlp_review.tasks import ReviewSetup
-from dlp_review.webhook import CollectRequest
+from dlp_review.webhook import CollectRequest, ReviewerMismatchError
 from dlp_schema import load_ontology, repo_root
 from dlp_schema.db.repository import (
     insert_review_task,
@@ -42,6 +43,7 @@ from dlp_schema.testing import FIXED_TIME, make_session, sqlite_db
 
 # 시험이 고른 정책 파일에 적는 값 (Git 기본 정책과 다르다)
 USERS = {"pilot-privacy": "cvat-privacy", "pilot-labeler": "cvat-labeler"}
+LS_USERS = {"pilot-labeler": "pilot-labeler@example.invalid"}
 PRIVACY_REVIEWERS = ("pilot-privacy",)
 WATERMARK_CRF = 31
 BIND_HOST = "10.20.30.40"
@@ -56,6 +58,7 @@ def selected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ReviewOpsPolicy
     data = yaml.safe_load((root / "config/policies/review.yaml").read_text("utf-8"))
     data["reviewers"]["privacy"] = list(PRIVACY_REVIEWERS)
     data["cvat"]["users"] = dict(USERS)
+    data["label_studio"]["users"] = dict(LS_USERS)
     data["media"]["watermark_crf"] = WATERMARK_CRF
     data["webhook"]["bind_host"] = BIND_HOST
     path = tmp_path / "review.yaml"
@@ -64,6 +67,7 @@ def selected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ReviewOpsPolicy
     default = load_default_policy(root)
     # 전제: 기본 정책(라이브러리 로더)은 이 값들을 갖지 않는다
     assert default.cvat.users == {} and default.media.watermark_crf != WATERMARK_CRF
+    assert default.label_studio.users == {}
     assert default.webhook.bind_host != BIND_HOST
     return review_config.load_review_policy(root)
 
@@ -98,6 +102,7 @@ def _same_source(setup: ReviewSetup, policy: ReviewOpsPolicy, expected: ReviewOp
     """설정과 명령이 한 번 읽은 같은 정책 객체를 보고, 그 값이 고른 파일의 값이다."""
     assert policy == expected
     assert setup.cvat_policy() is policy.cvat
+    assert setup.label_studio_policy() is policy.label_studio
     assert setup.media_policy() is policy.media
 
 
@@ -113,6 +118,7 @@ def test_setup_common_path_carries_selected_policy(selected: ReviewOpsPolicy) ->
     setup = review_cmds._setup(_args("create"))  # pyright: ignore[reportPrivateUsage]
     assert setup.cvat_policy() == selected.cvat
     assert setup.cvat_policy().users == USERS
+    assert setup.label_studio_policy().users == LS_USERS
     assert setup.media_policy().watermark_crf == WATERMARK_CRF
 
 
@@ -276,7 +282,10 @@ def test_serve_resolves_reviewers_and_collects_with_one_policy(
     server = Mock()
     serve = Mock(return_value=server)
     monkeypatch.setattr(review_cmds, "serve", serve)
-    task = SimpleNamespace(session_id="s001", task_key="cvat:1", status=ReviewTaskStatus.OPEN)
+    task = SimpleNamespace(
+        session_id="s001", task_key="cvat:1", status=ReviewTaskStatus.OPEN,
+        tool=ReviewTool.CVAT, assignee="pilot-labeler",
+    )  # fmt: skip
     monkeypatch.setattr(review_cmds, "get_review_task", Mock(return_value=task))
     users: dict[str, Any] = {}
     monkeypatch.setattr(review_cmds, "resolve_reviewer", _capture(users, "pilot-labeler"))
@@ -291,6 +300,67 @@ def test_serve_resolves_reviewers_and_collects_with_one_policy(
     _, _, setup, _, _, policy = got["args"]
     _same_source(setup, policy, selected)
     assert users["args"][3] is policy.cvat.users
+
+
+def test_serve_checks_label_studio_author_against_selected_accounts(
+    selected: ReviewOpsPolicy, no_clients: dict[str, Mock], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Label Studio 웹훅은 고른 정책의 `label_studio.users`로 찾은 담당자 계정 ID와 대조한다.
+
+    회귀(F-REV-06): 예전에는 서비스 계정만 아니면 누가 낸 주석이든 담당자의 검수로 수집했다.
+    담당자 계정(이메일 → 사용자 21)이 아닌 사용자(22)의 주석이면 수집하지 않고
+    `ReviewerMismatchError`(서버는 403)를 낸다. 담당자 계정의 주석이면 담당자로 수집한다.
+    """
+    monkeypatch.setenv("DLP_WEBHOOK_SECRET", "s3cret")
+    ls: Mock = no_clients["LabelStudioClient"].from_env.return_value
+    ls.service_user_id.return_value = 1
+    accounts = {"pilot-labeler@example.invalid": 21}
+    ls.find_user_id.side_effect = accounts.get
+    serve = Mock(return_value=Mock())
+    monkeypatch.setattr(review_cmds, "serve", serve)
+    task = SimpleNamespace(
+        session_id="s001", task_key="label_studio:4", status=ReviewTaskStatus.OPEN,
+        tool=ReviewTool.LABEL_STUDIO, assignee="pilot-labeler",
+    )  # fmt: skip
+    monkeypatch.setattr(review_cmds, "get_review_task", Mock(return_value=task))
+    got: dict[str, Any] = {}
+    monkeypatch.setattr(review_cmds, "collect_task", _capture(got, None))
+    monkeypatch.setattr(review_cmds, "run_revocations", Mock(return_value=RevocationReport()))
+    assert review_cmds.cmd_serve(_args("serve", port=0)) == 0
+    on_collect = serve.call_args.args[2]
+    with pytest.raises(ReviewerMismatchError):
+        on_collect(CollectRequest("label_studio:4", None, 22, 22))
+    assert "args" not in got  # 수집하지 않았다
+    on_collect(CollectRequest("label_studio:4", None, 21, 21))
+    assert got["args"][3] == "pilot-labeler"
+
+
+def test_refresh_urls_uses_selected_media_policy_without_cvat(
+    selected: ReviewOpsPolicy, no_clients: dict[str, Mock], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`dlp review refresh-urls`(F-REV-08)는 고른 정책의 매체 절(서명 URL 유효 시간)로 설정을
+    만들고 CVAT에는 접속하지 않는다. 세션을 주지 않으면 열린 Label Studio 작업이 있는 모든 세션을
+    세션마다 갱신하고, 갱신하지 못한 작업이 있으면 1로 끝난다 (cron 경보)."""
+    monkeypatch.setattr(
+        review_cmds, "sessions_with_open_ls_tasks", Mock(return_value=["s001", "s002"])
+    )
+    seen: list[tuple[str, ReviewSetup]] = []
+
+    def refresh(conn: sa.Connection, sid: str, setup: ReviewSetup) -> RefreshReport:
+        seen.append((sid, setup))
+        errors = ["label_studio:9: 도구 작업의 주인이 다릅니다"] if sid == "s002" else []
+        return RefreshReport(refreshed=[f"label_studio:{sid}"], errors=errors)
+
+    monkeypatch.setattr(review_cmds, "refresh_session_urls", refresh)
+    args = _args("refresh-urls", session=[], no_cvat=True)
+    assert review_cmds.cmd_refresh_urls(args) == 1
+    assert [sid for sid, _ in seen] == ["s001", "s002"]
+    setup = seen[0][1]
+    assert setup.media_policy() == selected.media and setup.cvat is None
+    no_clients["CvatClient"].from_env.assert_not_called()
+    seen.clear()
+    assert review_cmds.cmd_refresh_urls(_args("refresh-urls", session=["s001"], no_cvat=True)) == 0
+    assert [sid for sid, _ in seen] == ["s001"]
 
 
 def test_register_webhooks_reads_selected_policy_before_tools(

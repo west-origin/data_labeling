@@ -4,7 +4,8 @@
 `DLP_REVIEW_POLICY_FILE`). CLI에서 검수 정책을 읽는 곳은 모두 이 함수를 거친다: 검수 명령
 (`dlp review …`), 운영 명령(`dlp ops …`), 파일럿 검사(`dlp pilot check`).
 `review_setup`은 검수 명령이 쓰는 저장소·도구 클라이언트 묶음을 만들고, 고른 정책의 `cvat`(계정
-연결)·`media`(검수 화면 매체)를 `ReviewSetup`에 싣는다. 라이브러리 `ReviewSetup`의 지연 로더는
+연결)·`label_studio`(계정 연결)·`media`(검수 화면 매체)를 `ReviewSetup`에 싣는다.
+라이브러리 `ReviewSetup`의 지연 로더는
 환경 변수를 보지 않고 Git의 기본 `review.yaml`을 읽으므로 CLI가 비워 두면 안 된다 (F-REV-01).
 `run_revocations`는 블러를 바꾼 트랜잭션이 커밋된 뒤 회수 대기를 실행한다 (`dlp review …`,
 `dlp privacy detect|render`). 회수 실행기는 검수 정책 값을 쓰지 않으므로 회수가 스스로 만드는
@@ -84,8 +85,8 @@ def review_setup(
     - `labeling`: 라벨링 버킷 (서비스 자격 증명: 블러본·작업 매체 쓰기, 회수 삭제).
     - `labeling_reader`: 라벨러 자격 증명(읽기 전용) — 검수 화면 서명 URL용.
     - `ontology`: None. 작업 생성 시 DB에서 각 세션 버전의 사전을 읽는다.
-    - `cvat_config`·`media`: 고른 정책의 `cvat`·`media` (라이브러리 지연 로더를 쓰지 않는다).
-      `revocation_only`이고 `policy`가 없으면 None.
+    - `cvat_config`·`label_studio_config`·`media`: 고른 정책의 `cvat`·`label_studio`·`media`
+      (라이브러리 지연 로더를 쓰지 않는다). `revocation_only`이고 `policy`가 없으면 None.
     부작용: 설정 파일을 읽고 저장소·HTTP 클라이언트를 만든다. 정책은 클라이언트보다 먼저 읽어
     파일 오류면 도구에 접속하지 않고 실패한다 (`revocation_only`면 읽지 않는다). CVAT 클라이언트는
     생성 중 로그인 API를 호출한다. `revocation_only`가 아니면 로그인 실패·통신 오류는 호출자에게
@@ -114,6 +115,7 @@ def review_setup(
         label_studio=LabelStudioClient.from_env() if label_studio else None,
         media=selected.media if selected is not None else None,
         cvat_config=selected.cvat if selected is not None else None,
+        label_studio_config=selected.label_studio if selected is not None else None,
     )
     return setup, warnings
 

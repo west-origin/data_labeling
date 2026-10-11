@@ -13,8 +13,9 @@ WP6, ADR 0006. `dlp_review.tasks`(작업 만들기), `dlp_review.collect`(결과
 - `PRELABEL_VERSION`, `PRELABEL_SETTINGS`: Label Studio 프리라벨(예측) 표시 설정.
 - `CvatClient`: CVAT REST (프로젝트·작업·주석·job 담당자·이슈·웹훅, 회수용 주인 확인·배정 해제·
   스냅숏·삭제).
-- `LabelStudioClient`: Label Studio REST (프로젝트·작업·예측·주석·웹훅, 회수용 주인 확인·스냅숏·
-  삭제).
+- `LabelStudioClient`: Label Studio REST (프로젝트·작업·예측·주석·웹훅·사용자, 작업 data 갱신,
+  회수용 주인 확인·스냅숏·삭제).
+- `IgnoredAnnotation`: 수집이 받지 않은 주석의 작성자 정보 (기록·오류 메시지용).
 
 회수(ADR 0039)용 메서드는 `dlp_review.revoke`가 쓴다. 삭제·존재 확인은 404를 "없음"으로 보고
 (이미 지운 작업의 재시도가 성공한다), 그 밖의 4xx·5xx는 `ToolError`다. 실행기는 지우기 전에
@@ -28,6 +29,11 @@ WP6, ADR 0006. `dlp_review.tasks`(작업 만들기), `dlp_review.collect`(결과
 
 주의: 이 클라이언트는 서비스(관리자) 계정으로 동작한다. 검수자 계정과 섞이지 않도록 프리라벨은
 Label Studio 예측으로만 올린다 (`LabelStudioClient.create_task`).
+
+Label Studio 주석의 작성자(F-REV-06): `completed_by`는 주석을 만든 사용자, `updated_by`는 마지막으로
+고친 사용자다 (둘 다 숫자 ID, 1.23.2 응답으로 확인). API로 주석을 올리는 사람은 `completed_by`를
+다른 사용자 ID로 적을 수 있지만 `updated_by`는 늘 요청한 계정이 된다. 그래서 검수 결과·검수 시간은
+두 값이 모두 담당자 계정인 주석만 쓴다 (`latest_results`, `lead_seconds`).
 """
 
 from __future__ import annotations
@@ -74,12 +80,44 @@ PRELABEL_VERSION = (
 PRELABEL_SETTINGS = {"show_collab_predictions": True}
 
 
+def _user_id(value: Any) -> int | None:
+    """사용자 칸(숫자 ID 또는 `{"id": …}` 사용자 객체) → 숫자 ID. 비었으면 None."""
+    if isinstance(value, dict):
+        value = value.get("id")
+    return int(value) if value is not None else None
+
+
 def _user(annotation: dict[str, Any]) -> int | None:
-    """주석을 만든 사용자 ID (completed_by는 ID 또는 사용자 객체)."""
-    user = annotation.get("completed_by")
-    if isinstance(user, dict):
-        user = user.get("id")
-    return int(user) if user is not None else None
+    """주석을 만든 사용자 ID (`completed_by`)."""
+    return _user_id(annotation.get("completed_by"))
+
+
+def _editor(annotation: dict[str, Any]) -> int | None:
+    """주석을 마지막으로 고친 사용자 ID (`updated_by`, 없으면 None)."""
+    return _user_id(annotation.get("updated_by"))
+
+
+def _authored_by(annotation: dict[str, Any], user: int) -> bool:
+    """user가 만들고 마지막으로 고친 주석인가.
+
+    `updated_by` 칸이 응답에 있으면 그것도 user여야 한다 (비어 있으면 누가 고쳤는지 몰라 받지
+    않는다). 칸이 아예 없는 응답만 `completed_by`로 판정한다.
+    """
+    if _user(annotation) != user:
+        return False
+    return "updated_by" not in annotation or _editor(annotation) == user
+
+
+@dataclass(frozen=True)
+class IgnoredAnnotation:
+    """수집이 받지 않은 Label Studio 주석: 담당자 계정이 만들거나 마지막으로 고치지 않은 것.
+
+    건너뛴(취소한) 주석은 결과가 아니므로 넣지 않는다. 사람이 읽는 이름은 담지 않는다 (숫자 ID만).
+    """
+
+    annotation_id: int
+    completed_by: int | None
+    updated_by: int | None
 
 
 def _gone(resp: httpx.Response) -> bool:
@@ -400,6 +438,13 @@ class LabelStudioClient:
             _check(self.http.patch(f"/api/projects/{project_id}", json=body))
         self._versioned.add(project_id)
 
+    def update_task_data(self, task_id: int, data: dict[str, Any]) -> None:
+        """작업 data를 통째로 바꾼다 (서명 URL 갱신, `dlp_review.refresh`). 주석·예측은 그대로다.
+
+        예외: 작업이 없거나(404) 응답이 실패하면 `ToolError`.
+        """
+        _check(self.http.patch(f"/api/tasks/{task_id}/", json={"data": data}))
+
     def prediction_results(self, task_id: int) -> list[dict[str, Any]]:
         """작업에 올린 프리라벨 (예측) 결과."""
         res = _check(self.http.get("/api/predictions", params={"task": task_id}))
@@ -407,29 +452,62 @@ class LabelStudioClient:
         # 필터가 무시되는 버전에 대비해 작업 ID를 다시 확인한다
         return [r for p in preds if int(p["task"]) == task_id for r in p["result"]]
 
-    def latest_results(
-        self, task_id: int, *, exclude_user: int | None = None
-    ) -> list[dict[str, Any]] | None:
-        """사람이 제출한 최신 주석의 결과. 제출한 주석이 없으면 None (빈 목록과 구별한다).
+    def find_user_id(self, email: str) -> int | None:
+        """Label Studio 사용자 이메일 → 숫자 사용자 ID (대소문자 무시, 조직 구성원만). 없으면 None.
 
-        취소(건너뛰기)한 주석과 exclude_user(예: 서비스 계정)가 만든 주석은 보지 않는다.
+        `/api/users/`는 버전에 따라 배열 또는 페이지 객체(`results`)로 와서 둘 다 받는다.
         """
-        anns = _check(self.http.get(f"/api/tasks/{task_id}/annotations"))
-        anns = [
+        res = _check(self.http.get("/api/users/"))
+        items = res["results"] if isinstance(res, dict) else res
+        want = email.casefold()
+        return next(
+            (int(u["id"]) for u in items if str(u.get("email") or "").casefold() == want), None
+        )
+
+    def _annotations(self, task_id: int) -> list[dict[str, Any]]:
+        """작업의 주석 전체 (취소한 것 포함)."""
+        return list(_check(self.http.get(f"/api/tasks/{task_id}/annotations")))
+
+    def _own(self, task_id: int, user: int) -> list[dict[str, Any]]:
+        """user가 만들고 마지막으로 고친, 건너뛰지(취소) 않은 주석."""
+        return [
             a
-            for a in anns
-            if not a.get("was_cancelled") and (exclude_user is None or _user(a) != exclude_user)
+            for a in self._annotations(task_id)
+            if not a.get("was_cancelled") and _authored_by(a, user)
         ]
+
+    def latest_results(self, task_id: int, *, user: int) -> list[dict[str, Any]] | None:
+        """user(담당자의 Label Studio 계정)가 제출한 최신 주석의 결과. 없으면 None (빈 목록과 구별).
+
+        다른 사용자·서비스 계정이 만들었거나 마지막으로 고친 주석, 건너뛴 주석은 보지 않는다
+        (F-REV-06). 프리라벨은 예측이라 주석이 아니다.
+        """
+        anns = self._own(task_id, user)
         if not anns:
             return None
         # ISO 시각 문자열 비교로 가장 최근 것 (갱신 시각이 없으면 생성 시각)
         latest = max(anns, key=lambda a: a.get("updated_at") or a.get("created_at") or "")
         return list(latest["result"])
 
-    def lead_seconds(self, task_id: int) -> float:
-        """작업에 쓴 시간(초): 주석들의 lead_time 합 (Label Studio가 편집 화면에서 잰다)."""
-        anns = _check(self.http.get(f"/api/tasks/{task_id}/annotations"))
-        return float(sum(float(a.get("lead_time") or 0.0) for a in anns))
+    def lead_seconds(self, task_id: int, *, user: int) -> float:
+        """user가 작업에 쓴 시간(초): `latest_results`와 같은 주석들의 lead_time 합.
+
+        lead_time은 Label Studio가 편집 화면에서 잰다. 건너뛴 주석, 다른 사용자·서비스 계정의 주석은
+        더하지 않는다 (A-10).
+        """
+        return float(sum(float(a.get("lead_time") or 0.0) for a in self._own(task_id, user)))
+
+    def ignored_annotations(self, task_id: int, *, user: int) -> list[IgnoredAnnotation]:
+        """수집이 받지 않는 주석 (건너뛰지 않았는데 user가 만들고 마지막으로 고친 것이 아닌 것).
+
+        결과로 쓰지 않고 기록·오류 메시지에만 쓴다 (주석 ID 순).
+        """
+        out = [
+            IgnoredAnnotation(int(a["id"]), _user(a), _editor(a))
+            for a in self._annotations(task_id)
+            if not a.get("was_cancelled") and not _authored_by(a, user)
+        ]
+        return sorted(out, key=lambda a: a.annotation_id)
 
     def task_exists(self, task_id: int) -> bool:
         """작업이 있으면 True, 404면 False. 그 밖의 실패는 `ToolError`."""

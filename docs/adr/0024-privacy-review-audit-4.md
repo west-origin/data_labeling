@@ -80,6 +80,12 @@
 ## 남은 일
 
 - 후속: 이미 배포한 라벨링 작업(CVAT 사본·Label Studio 서명 URL)의 회수는 ADR 0039.
+- 후속(F-REV-06): Label Studio도 같은 구조로 `review.yaml label_studio.users`(dlp 검수자 ID → Label
+  Studio 사용자 이메일, 일대일)를 둔다. 연결이 없는 담당자에게는 시간 검수 작업을 만들지 않고, 수집·
+  웹훅은 주석을 만든 사람(`completed_by`)과 마지막으로 고친 사람(`updated_by`)이 모두 담당자 계정인
+  주석만 받는다 (검수 시간 `lead_time`도). Label Studio Community는 작업 배정 API가 없어(Enterprise
+  기능) 조직의 다른 사용자도 작업을 열 수 있다. 연결은 그 제출을 담당자의 검수로 기록하지 않게 할
+  뿐이다.
 - CVAT 조직·프로젝트 권한은 문서 절차로만 지킨다 (위 4번). 운영 CVAT에서 조직을 나누면 클라이언트가
   `X-Organization` 헤더를 붙이도록 바꿔야 한다.
 - CVAT 작업 시간은 여전히 재지 않는다 (`dlp ops log-work`).

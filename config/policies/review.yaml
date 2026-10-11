@@ -27,6 +27,10 @@ media:
   # Hz > 0. 격자 간격 = 1000 / 값 (ms). 1000의 약수가 아니면 time_ms 열에 소수가 생긴다.
   # 높이면 CSV가 커지고 Label Studio 화면이 느려진다.
   timeseries_rate_hz: 50              # 장갑·IMU 시계열 CSV 격자 (마스터 타임라인)
+  # 초, 범위 (0, 604800] (S3 SigV4 서명 상한 7일). Label Studio 작업에 박는 영상·시계열 서명 URL의
+  # 유효 시간이다 (라벨러 자격 증명으로 서명). 줄이면 새어 나간 URL이 빨리 끊기지만 열린 작업을 그만큼
+  # 자주 다시 서명해야 한다: `dlp review refresh-urls`를 이 값보다 짧은 주기로 돌린다 (F-REV-08).
+  signed_url_ttl_s: 604800            # 7일
 
 # 검수 단위: 세션 × 스트림 × 라벨 종류 묶음. 묶음마다 검수 도구가 다르다.
 # 도구가 보여 주는 종류만 쓴다 (보여 주지 않는 종류를 표본으로 뽑으면 판정이 끝나지 않는다).
@@ -107,3 +111,14 @@ cvat:
   users: {}                           # 예: {rev01: cvat-rev01}
   # 0 이상. 0이면 이슈를 남기지 않는다.
   privacy_issue_limit: 50             # 블러 검수 작업에 이슈로 남기는 검수 우선 구간 최대 수 (우선순위 순)
+
+# Label Studio 계정 연결 (F-REV-06). 수집(dlp review collect)과 웹훅(dlp review serve)은 작업 담당자의
+# Label Studio 계정이 만들고(completed_by) 마지막으로 고친(updated_by) 주석만 받는다. 다른 사용자·서비스
+# 계정의 주석은 결과로 쓰지 않고 오류·서버 로그로만 남긴다. 검수 시간(lead_time)도 같은 주석만 더한다.
+# 담당자가 여기 없으면 Label Studio 시간 검수 작업을 만들지 않는다 (매체를 올리기 전에 멈춘다).
+# Label Studio Community는 작업을 사람에게 배정하는 API가 없어(Enterprise 기능) 조직의 다른 사용자도
+# 작업을 열 수 있다. 이 연결은 그 제출을 담당자의 검수로 기록하지 않게 할 뿐 열람을 막지는 않는다.
+# 검수자 계정은 서비스 계정(DLP_LABEL_STUDIO_TOKEN의 계정)과 다른 사람별 계정으로 만든다.
+label_studio:
+  # dlp 검수자 ID → Label Studio 사용자 이메일. 한 계정을 두 검수자에게 줄 수 없다 (로드 시 검증).
+  users: {}                           # 예: {labeler01: labeler01@example.com}

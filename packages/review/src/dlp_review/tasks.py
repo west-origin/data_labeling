@@ -7,12 +7,16 @@
 - 작업 라벨 검수 (일반 라벨러): 라벨러 워터마크를 입힌 블러본.
   - CVAT: 객체·도구 박스 트랙과 키포인트 트랙
   - Label Studio: 시간 구간 라벨, 영상과 장갑·IMU 시계열 동기 재생
-  일반 라벨러 경로의 URL은 라벨러 자격 증명(라벨링 버킷 읽기 전용)으로 서명한다.
+  일반 라벨러 경로의 URL은 라벨러 자격 증명(라벨링 버킷 읽기 전용)으로 서명한다. 유효 시간은
+  `review.yaml media.signed_url_ttl_s`이고 열린 작업은 `dlp review refresh-urls`가 다시 서명한다.
 - 블러본은 지금 승인된 블러 라벨로 렌더한 것만 쓴다 (dlp_privacy.runner.assert_render_current).
   작업에는 그 블러본의 렌더 해시(`ReviewTask.render_hash`)를 남긴다. 블러가 바뀌면 이 해시로 낡은
   매체를 찾아 회수한다 (ADR 0039). 회수가 끝나지 않은 스트림에는 새 라벨링 작업을 만들지 않는다.
 - CVAT 작업은 담당자의 CVAT 계정(review.yaml cvat.users)에 배정한다. 블러 검수는 연결이 없으면
   만들지 않고, 검수 우선 구간을 CVAT 이슈로 남겨 검수자가 먼저 보게 한다 (ADR 0024).
+- Label Studio 시간 검수 작업은 담당자의 Label Studio 계정 연결(review.yaml label_studio.users)이
+  있어야 만든다. 수집은 그 계정의 주석만 받는다 (F-REV-06). Label Studio Community에는 작업 배정
+  API가 없어(Enterprise 기능) 작업을 그 계정에만 보이게 할 수는 없다.
 
 WP6, ADR 0006·0020·0023·0024. 진입점: `dlp review create <세션>`(직접 만들기)과
 `dlp review assign <배정>`(`ops.runner.create_assignment_tasks` 경유).
@@ -27,11 +31,15 @@ WP6, ADR 0006·0020·0023·0024. 진입점: `dlp review create <세션>`(직접 
   매체 도우미.
 - `current_for_review`, `Selector`, `default_selector`: 작업에 넣을 라벨 고르기.
 - `cvat_user_id`: dlp 검수자 → CVAT 사용자 ID.
+- `label_studio_user_id`, `require_label_studio_user`: dlp 검수자 → Label Studio 사용자 ID
+  (서비스 계정 거부, 뒤쪽은 연결이 없어도 `TaskError`).
 - `create_privacy_tasks`: 블러 검수 작업 (스트림별 CVAT).
 - `lock_assignment`: 배정 행 잠금 (작업 중복 생성 방지). 회수한 작업은 "작업 없음"으로 본다.
 - `create_labeling_tasks`: 작업 라벨 검수 작업 (CVAT 공간 + Label Studio 시간).
 - `MEDIA_HASH_CHARS`, `labeling_media_key`: 워터마크 사본 키 (회수 실행기가 같은 값으로 키
   모양을 본다).
+- `timeseries_key`, `label_studio_task_data`: 시계열 CSV 키와 Label Studio 작업 data (서명 URL
+  유효 시간은 `review.yaml media.signed_url_ttl_s`, 다시 서명은 `dlp_review.refresh`, F-REV-08).
 
 저장소 키:
 - 원본 버킷: `sessions/<세션>/derived/<스트림>.proxy.mp4`(검수 프록시), 장갑·IMU 원본 Parquet.
@@ -77,7 +85,7 @@ from dlp_review.clients import CvatClient, LabelStudioClient, cvat_task_name
 from dlp_review.cvat import KEYPOINT_LABELS, CvatSchema, Scale, label_spec, to_cvat_tracks
 from dlp_review.labelstudio import LS_KINDS, label_config, to_ls_results
 from dlp_review.ontology_projects import ontology_project
-from dlp_review.ops.policy import CvatPolicy, MediaPolicy
+from dlp_review.ops.policy import CvatPolicy, LabelStudioPolicy, MediaPolicy
 from dlp_review.ops.policy import load_policy as load_ops_policy
 from dlp_review.roles import check_privacy_reviewers, check_stage_uris
 from dlp_review.timeseries import write_timeseries_csv
@@ -130,6 +138,7 @@ class ReviewSetup:
     회수 전용 설정(`review_setup(revocation_only=True)`)으로, 회수 실행기가 두 값을 쓰지 않아 정책을
     읽지 않고 None으로 둔다 (그 설정을 작업 생성·수집에 쓰면 안 된다). 라이브러리를
     직접 쓰는 호출자도 별도 정책 파일을 쓰려면 두 필드를 채워서 넘긴다 (F-REV-01).
+    Label Studio 계정 연결(`label_studio_config`)도 같다 (F-REV-06).
     """
 
     # 원본 버킷 저장소 (운영에서는 감사 저장소 `dlp_cli.raw_access.raw_store`)
@@ -147,6 +156,8 @@ class ReviewSetup:
     # (CLI는 고른 정책을 넘긴다. 회수 전용 설정만 None)
     media: MediaPolicy | None = None  # review.yaml media (워터마크·시계열 격자)
     cvat_config: CvatPolicy | None = None  # review.yaml cvat (검수자 → CVAT 계정 연결)
+    # review.yaml label_studio (검수자 → Label Studio 계정 연결, F-REV-06)
+    label_studio_config: LabelStudioPolicy | None = None
     privacy: PrivacyPolicy | None = None  # 없으면 config/policies/privacy.yaml (블러본 해시)
     glove_prefixes: tuple[str, ...] | None = None  # 없으면 config/policies/sync.yaml glove
     ui: UiTheme | None = None  # 없으면 config/review_ui.yaml (검수 화면 색·단축키·로고)
@@ -170,6 +181,17 @@ class ReviewSetup:
         if self.cvat_config is None:
             self.cvat_config = load_ops_policy(repo_root()).cvat
         return self.cvat_config
+
+    def label_studio_policy(self) -> LabelStudioPolicy:
+        """Label Studio 계정 연결 정책 (`review.yaml label_studio`).
+
+        `label_studio_config`가 없으면 처음 부를 때 기본 로더(환경 변수 무관, Git 기본값은 연결이
+        비어 있다)로 읽어 둔다. CLI는 `DLP_REVIEW_POLICY_FILE`로 고른 정책의 `label_studio`를
+        넘긴다.
+        """
+        if self.label_studio_config is None:
+            self.label_studio_config = load_ops_policy(repo_root()).label_studio
+        return self.label_studio_config
 
     def privacy_policy(self) -> PrivacyPolicy:
         """프라이버시 정책 (`privacy.yaml`). 블러본 렌더 해시 확인에 쓴다."""
@@ -204,6 +226,35 @@ def labeling_media_key(session_id: str, assignee: str, stream_id: str, render_ha
     """
     digest = render_hash[:MEDIA_HASH_CHARS]
     return f"sessions/{session_id}/review/{assignee}/{stream_id}-{digest}.mp4"
+
+
+def timeseries_key(session_id: str) -> str:
+    """세션의 검수 시계열 CSV 키 `sessions/<세션>/review/timeseries.csv` (라벨링 버킷)."""
+    return f"sessions/{session_id}/review/timeseries.csv"
+
+
+def label_studio_task_data(
+    setup: ReviewSetup, session_id: str, assignee: str, video_key: str, csv_key: str
+) -> dict[str, str]:
+    """Label Studio 작업 data: 영상·시계열 서명 URL과 주인(session_id·assignee).
+
+    URL은 라벨러 자격 증명(`setup.labeling_reader`, 라벨링 버킷 읽기 전용)으로
+    `review.yaml media.signed_url_ttl_s` 초 동안 유효하게 서명한다 (F-REV-08). 작업을 만들 때와
+    `dlp review refresh-urls`로 다시 서명할 때 같은 함수를 쓴다. session_id·assignee는 회수
+    실행기·갱신이 도구 작업의 주인을 대조하는 값이다 (`LabelStudioClient.task_owner`).
+
+    인자: video_key·csv_key는 라벨링 버킷 키 (`labeling_media_key`, `timeseries_key`).
+    예외: `RawAccessError` — 서명한 URL이 원본 버킷을 가리킨다 (`roles.check_stage_uris`).
+    """
+    ttl = setup.media_policy().signed_url_ttl_s
+    data = {
+        "video": setup.labeling_reader.presign(video_key, expires_s=ttl),
+        "timeseries": setup.labeling_reader.presign(csv_key, expires_s=ttl),
+        "session_id": session_id,
+        "assignee": assignee,
+    }
+    check_stage_uris(ReviewStage.LABELING, list(data.values()), setup.raw.bucket)
+    return data
 
 
 def frame_times(video: Path) -> list[int]:
@@ -310,6 +361,41 @@ def cvat_user_id(cvat: CvatClient, users: Mapping[str, str], reviewer: str) -> i
     uid = cvat.find_user_id(username)
     if uid is None:
         raise TaskError(f"CVAT에 사용자 {username}(검수자 {reviewer})가 없습니다")
+    return uid
+
+
+def label_studio_user_id(
+    ls: LabelStudioClient, users: Mapping[str, str], reviewer: str
+) -> int | None:
+    """dlp 검수자 → Label Studio 사용자 숫자 ID (review.yaml label_studio.users의 이메일로 찾는다).
+
+    연결이 없으면 None (호출자가 거부한다). 수집·웹훅은 이 계정이 만들고 마지막으로 고친 주석만
+    받는다 (F-REV-06).
+    예외: 연결은 있는데 Label Studio에 그 이메일의 사용자가 없거나, 그 사용자가 이 클라이언트의
+    서비스 계정이면 `TaskError` (서비스 계정이 올린 주석을 사람 검수로 받지 않는다).
+    """
+    email = users.get(reviewer)
+    if email is None:
+        return None
+    uid = ls.find_user_id(email)
+    if uid is None:
+        raise TaskError(f"Label Studio에 사용자 {email}(검수자 {reviewer})가 없습니다")
+    if uid == ls.service_user_id():
+        raise TaskError(
+            f"검수자 {reviewer}의 Label Studio 계정 {email}이 서비스 계정입니다 "
+            "(검수자마다 서비스 계정과 다른 계정을 연결하세요)"
+        )
+    return uid
+
+
+def require_label_studio_user(ls: LabelStudioClient, setup: ReviewSetup, reviewer: str) -> int:
+    """`label_studio_user_id`와 같되 연결이 없으면 `TaskError` (작업 생성·수집 공통 안내)."""
+    uid = label_studio_user_id(ls, setup.label_studio_policy().users, reviewer)
+    if uid is None:
+        raise TaskError(
+            f"검수자 {reviewer}의 Label Studio 계정 연결이 없습니다 (검수 정책 label_studio.users: "
+            "DLP_REVIEW_POLICY_FILE 또는 config/policies/review.yaml)"
+        )
     return uid
 
 
@@ -519,6 +605,25 @@ def _check_no_pending_revocation(
         )
 
 
+def _check_ls_account(
+    setup: ReviewSetup, session: Session, assignee: str, streams: set[str] | None
+) -> None:
+    """Label Studio 시간 작업을 만들 바디캠 스트림이 있으면 담당자 계정 연결을 확인한다.
+
+    매체를 올리거나 도구 작업을 만들기 전에 부른다. 연결 없이 만든 작업은 누가 제출했는지 확인할
+    수 없어 수집할 수 없다 (F-REV-06). 예외: `TaskError` (`require_label_studio_user`).
+    """
+    if setup.label_studio is None:
+        return
+    targets = [
+        s
+        for s in session.streams
+        if s.kind is StreamKind.BODYCAM and (streams is None or s.stream_id in streams)
+    ]
+    if targets:
+        require_label_studio_user(setup.label_studio, setup, assignee)
+
+
 def _series(
     session: Session, raw: ObjectStore, work: Path, prefixes: Sequence[str]
 ) -> dict[str, Series]:
@@ -564,8 +669,9 @@ def create_labeling_tasks(
     - streams: 이 스트림만 (None이면 모든 영상 스트림).
 
     반환: 만든 `ReviewTask` 목록 (모두 만든 뒤 한꺼번에 DB `review_tasks`에 삽입).
-    예외: `TaskError`(프라이버시 승인 전, 블러본이 현재 블러 라벨과 다름·무효),
-    `RawAccessError`(작업 URI에 원본 버킷이 섞임), `clients.ToolError`.
+    예외: `TaskError`(프라이버시 승인 전, 블러본이 현재 블러 라벨과 다름·무효, Label Studio 작업을
+    만들 담당자의 Label Studio 계정 연결이 없음), `RawAccessError`(작업 URI에 원본 버킷이 섞임),
+    `clients.ToolError`.
     부작용: 세션 행 잠금, 라벨링 버킷 쓰기(워터마크 영상, 시계열 CSV), 원본 버킷 읽기(장갑·IMU
     Parquet, 감사 기록), 도구 작업 생성, DB 삽입.
     주의: Label Studio 시간 작업은 세션 계약의 단일 바디캠 스트림에 만든다.
@@ -573,6 +679,8 @@ def create_labeling_tasks(
     같은 시계열 CSV 키를 다시 쓸 수 있다.
     회수(ADR 0039): 세션을 먼저 잠가 블러 검수 수집·탐지·렌더의 회수 요청과 직렬화한다. 대상
     스트림에 회수 대기(또는 요청 없는 낡은 작업)가 있으면 `TaskError` (도구·매체 작업 전).
+    계정(F-REV-06): Label Studio 작업을 만들 바디캠 스트림이 있으면 그다음에 담당자의 Label Studio
+    계정 연결을 확인한다 (역시 도구·매체 작업 전).
     """
     # 회수 요청과 같은 세션 잠금. 없으면 수집이 대상을 고른 뒤 이전 렌더로 만든 작업이 커밋될
     # 수 있다 (READ COMMITTED)
@@ -592,6 +700,8 @@ def create_labeling_tasks(
         [s for s in videos if streams is None or s in streams],
         setup.privacy_policy(),
     )
+    if use_ls:
+        _check_ls_account(setup, session, assignee, streams)
     raw_bucket = setup.raw.bucket
     out: list[ReviewTask] = []
     with tempfile.TemporaryDirectory() as tmp:
@@ -661,7 +771,7 @@ def create_labeling_tasks(
                     session, _series(session, setup.raw, work, setup.pressure_prefixes()), csv,
                     rate_hz=media.timeseries_rate_hz,
                 )  # fmt: skip
-                ckey = f"sessions/{session_id}/review/timeseries.csv"
+                ckey = timeseries_key(session_id)
                 setup.labeling.put_file(ckey, csv, sha256_file(csv))
                 # 시간 라벨은 세션 단위 (스트림 None)
                 labels = pick(None, LS_KINDS)
@@ -675,15 +785,8 @@ def create_labeling_tasks(
                     ls.ensure_label_config(lpid, setup.ls_label_config(ontology))
                 else:
                     lpid = ls.create_project(project_name, setup.ls_label_config(ontology))
-                # 라벨러가 여는 URL은 라벨러 자격 증명(라벨링 버킷 읽기 전용)으로 서명한다.
-                # session_id·assignee는 회수 실행기가 지우기 전에 대조한다 (`task_owner`)
-                data = {
-                    "video": setup.labeling_reader.presign(vkey),
-                    "timeseries": setup.labeling_reader.presign(ckey),
-                    "session_id": session_id,
-                    "assignee": assignee,
-                }
-                check_stage_uris(ReviewStage.LABELING, [str(v) for v in data.values()], raw_bucket)
+                # 라벨러 자격 증명으로 정책 유효 시간만큼 서명한 URL (원본 버킷 검사 포함)
+                data = label_studio_task_data(setup, session_id, assignee, vkey, ckey)
                 tid = ls.create_task(lpid, data, to_ls_results(labels))
                 out.append(_task(f"label_studio:{tid}", ReviewTool.LABEL_STUDIO, tid, session_id,
                                  stream.stream_id, assignee, media_uri, LS_KINDS, now, mode,

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
@@ -35,7 +35,7 @@ from dlp_review.collect import collect_task
 from dlp_review.cvat import CvatSchema, to_cvat_tracks
 from dlp_review.labelstudio import LS_KINDS, to_ls_results
 from dlp_review.ops.assign import plan_qa
-from dlp_review.ops.policy import CvatPolicy
+from dlp_review.ops.policy import CvatPolicy, LabelStudioPolicy
 from dlp_review.ops.policy import load_policy as load_ops_policy
 from dlp_review.ops.runner import (
     AccessError,
@@ -122,8 +122,8 @@ def pg() -> Iterator[sa.Engine]:
 
 
 @pytest.fixture
-def setup(cvat_config: CvatPolicy) -> ReviewSetup:
-    """개발 서비스(S3·Label Studio)와 시험용 CVAT 계정 연결로 만든 `ReviewSetup`.
+def setup(cvat_config: CvatPolicy, ls_config: LabelStudioPolicy) -> ReviewSetup:
+    """개발 서비스(S3·Label Studio)와 시험용 CVAT·Label Studio 계정 연결로 만든 `ReviewSetup`.
 
     CVAT 클라이언트는 넣지 않는다 (CVAT 테스트는 따로 붙인다)."""
     return ReviewSetup(
@@ -133,6 +133,7 @@ def setup(cvat_config: CvatPolicy) -> ReviewSetup:
         ontology=load_ontology(ROOT / "config" / "ontology" / "v1"),
         label_studio=LabelStudioClient.from_env(),
         cvat_config=cvat_config,
+        label_studio_config=ls_config,
     )
 
 
@@ -207,14 +208,20 @@ def _session(
     return temporal
 
 
-def _post(ls: LabelStudioClient, task_id: str, results: list[dict[str, Any]]) -> None:
-    """Label Studio 작업에 사람 주석(results)을 제출한다 (검수자 제출 흉내)."""
-    resp = ls.http.post(f"/api/tasks/{task_id}/annotations", json={"result": results})
+def _post(reviewer: LabelStudioClient, task_id: str, results: list[dict[str, Any]]) -> None:
+    """Label Studio 작업에 검수자 계정(reviewer)으로 사람 주석(results)을 제출한다.
+
+    수집은 담당자 계정의 주석만 받으므로 서비스 계정으로 내지 않는다 (F-REV-06).
+    """
+    resp = reviewer.http.post(f"/api/tasks/{task_id}/annotations", json={"result": results})
     resp.raise_for_status()
 
 
 def test_blind_and_seeded_tasks_through_label_studio(
-    pg: sa.Engine, setup: ReviewSetup, tmp_path: Path
+    pg: sa.Engine,
+    setup: ReviewSetup,
+    tmp_path: Path,
+    ls_as: Callable[[LabelStudioClient, str], LabelStudioClient],
 ) -> None:
     """Label Studio로 표준·블라인드·오류 삽입 배정을 끝까지 돌리고 품질 리포트를 본다.
 
@@ -301,7 +308,10 @@ def test_blind_and_seeded_tasks_through_label_studio(
         assert create_assignment_tasks(conn, standard, setup, ops, FIXED_TIME) == [t_std]
         assert len(list_review_tasks(conn, work_sid)) == before
     assert ls.prediction_results(int(t_blind.external_id)) == []  # 블라인드: 프리라벨 없음
-    assert ls.latest_results(int(t_std.external_id)) is None  # 프리라벨은 사람 주석이 아니다
+    std_user = ls.find_user_id(setup.label_studio_policy().users[standard.assignee or ""])
+    assert std_user is not None
+    # 프리라벨은 사람 주석이 아니다
+    assert ls.latest_results(int(t_std.external_id), user=std_user) is None
     sent = ls.prediction_results(int(t_seed.external_id))
     assert all(r["id"].startswith("seed-") for r in sent)
 
@@ -309,7 +319,7 @@ def test_blind_and_seeded_tasks_through_label_studio(
     blind_results = to_ls_results(work[::2])
     for i, r in enumerate(blind_results):
         r["id"] = f"b{i}"
-    _post(ls, t_blind.external_id, blind_results)
+    _post(ls_as(ls, blind.assignee or ""), t_blind.external_id, blind_results)
     # 오류 삽입 검수자: 넣은 오류를 모두 되돌린다
     gold = {x.label_id: x for x in get_labels_sync(pg, gold_sid) if not x.seeded_error}
     fixed: list[dict[str, Any]] = []
@@ -319,9 +329,13 @@ def test_blind_and_seeded_tasks_through_label_studio(
             original = gold[err.original_label_id]
             r = to_ls_results([original])[0] | {"id": r["id"]}
         fixed.append(r)
-    _post(ls, t_seed.external_id, fixed)
+    _post(ls_as(ls, seeded.assignee or ""), t_seed.external_id, fixed)
     # 표준 검수자: 프리라벨을 고치지 않고 제출한다
-    _post(ls, t_std.external_id, ls.prediction_results(int(t_std.external_id)))
+    _post(
+        ls_as(ls, standard.assignee or ""),
+        t_std.external_id,
+        ls.prediction_results(int(t_std.external_id)),
+    )
 
     with pg.begin() as conn:
         collect_task(conn, t_std.task_key, setup, standard.assignee or "r1", FIXED_TIME)
@@ -470,7 +484,10 @@ class _FlakyLs:
 
 
 def test_revoked_assignment_is_reissued_after_reapproval(
-    pg: sa.Engine, setup: ReviewSetup, tmp_path: Path
+    pg: sa.Engine,
+    setup: ReviewSetup,
+    tmp_path: Path,
+    ls_as: Callable[[LabelStudioClient, str], LabelStudioClient],
 ) -> None:
     """F-REV-02(ADR 0039): 배정의 LS 작업이 블러 변경으로 회수되면 재승인·렌더 뒤 다시 만든다.
 
@@ -558,7 +575,7 @@ def test_revoked_assignment_is_reissued_after_reapproval(
     assert renewed.media_uri == setup.labeling.uri(
         labeling_media_key(sid, renewed.assignee or "", "bodycam", new_hash)
     )
-    _post(ls, renewed.external_id, ls.prediction_results(int(renewed.external_id)))
+    _post(ls_as(ls, "r1"), renewed.external_id, ls.prediction_results(int(renewed.external_id)))
     with pg.begin() as conn:
         assert collect_task(conn, renewed.task_key, setup, "r1", later) is not None
         assert get_assignment(conn, unit.assignment_id).status is AssignmentStatus.DONE

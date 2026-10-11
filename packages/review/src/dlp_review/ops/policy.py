@@ -12,8 +12,10 @@ WP12, ADR 0014. `dlp review plan|assign|qa|quality|create|collect|serve`와 운�
 공개 이름:
 - `ErrorType`: 오류 삽입 종류 (boundary_shift, class_swap, blur_deletion).
 - `CVAT_KINDS`: CVAT 공간 검수 화면이 보여 주는 작업 라벨 종류 (블러 제외).
+- `SIGV4_MAX_EXPIRES_S`: 서명 URL 유효 시간 상한 (`media.signed_url_ttl_s` 검증).
 - `UnitsPolicy`·`PriorityPolicy`·`SamplingPolicy`·`SeedingPolicy`·`MeasurementPolicy`·
-  `ReviewersPolicy`·`MediaPolicy`·`CvatPolicy`·`WebhookPolicy`: review.yaml의 절별 모델.
+  `ReviewersPolicy`·`MediaPolicy`·`CvatPolicy`·`LabelStudioPolicy`·`WebhookPolicy`: review.yaml의
+  절별 모델.
 - `ReviewOpsPolicy`: 전체 정책 (review.yaml + `ratios` = defaults.yaml `review`).
 - `load_policy`: 저장소 루트에서 정책을 읽어 검증한다.
 
@@ -43,6 +45,10 @@ ErrorType = Literal["boundary_shift", "class_swap", "blur_deletion"]
 # CVAT 작업 라벨(공간) 검수 화면이 보여 주는 라벨 종류. 블러(blur_track)는 프라이버시 검수 단위라
 # 여기에 넣지 않는다. dlp_review.cvat.CVAT_KINDS(블러 포함, 변환기가 다루는 종류)와 다르다.
 CVAT_KINDS = ("box_track", "keypoint_track")
+
+# 서명 URL 유효 시간의 상한(초, 7일). 정책 값이 아니라 S3 SigV4 서명 규격의 상한이다 (boto3 기본
+# 설정의 개발 SeaweedFS는 만료 시각을 담는 SigV2 URL을 만들어 상한이 없지만 같은 상한을 둔다)
+SIGV4_MAX_EXPIRES_S = 7 * 24 * 3600
 
 
 class UnitsPolicy(Contract):
@@ -142,6 +148,9 @@ class MediaPolicy(Contract):
     encoder_rate: int = Field(gt=0, description="인코더 명목 프레임레이트 (PTS는 원본 그대로)")
     # Label Studio 시계열 CSV 격자 주파수 (Hz, 마스터 타임라인)
     timeseries_rate_hz: float = Field(gt=0)
+    # Label Studio 작업에 박는 영상·시계열 서명 URL의 유효 시간 (초, F-REV-08). S3 SigV4 서명의
+    # 상한이 7일(604800초)이다. 열린 작업은 `dlp review refresh-urls`로 이보다 자주 다시 서명한다
+    signed_url_ttl_s: int = Field(gt=0, le=SIGV4_MAX_EXPIRES_S)
 
 
 class CvatPolicy(Contract):
@@ -161,6 +170,32 @@ class CvatPolicy(Contract):
         names = list(self.users.values())
         if len(names) != len(set(names)):
             raise ValueError("cvat.users: 한 CVAT 사용자를 두 검수자에게 줄 수 없습니다")
+        return self
+
+
+class LabelStudioPolicy(Contract):
+    """Label Studio 계정 연결 (review.yaml `label_studio`, F-REV-06).
+
+    수집·웹훅은 작업 담당자의 Label Studio 계정이 만들고 마지막으로 고친 주석만 받는다. 연결이
+    없는 담당자에게는 Label Studio 시간 검수 작업을 만들지 않는다
+    (`dlp_review.tasks.require_label_studio_user`). 절을 빼면 연결이 비어 있는 것으로 본다 (이전
+    형식의 정책 파일도 읽힌다).
+    """
+
+    users: dict[str, str] = Field(
+        default_factory=dict[str, str],
+        description="dlp 검수자 ID → Label Studio 사용자 이메일. 시간 검수 담당자는 반드시 둔다",
+    )
+
+    @model_validator(mode="after")
+    def _one_to_one(self) -> LabelStudioPolicy:
+        """값은 이메일이고, 한 계정을 두 검수자에게 줄 수 없다 (이메일 대소문자 무시)."""
+        bad = sorted(k for k, v in self.users.items() if "@" not in v)
+        if bad:
+            raise ValueError(f"label_studio.users: 이메일이 아닌 값 ({bad})")
+        emails = [v.casefold() for v in self.users.values()]
+        if len(emails) != len(set(emails)):
+            raise ValueError("label_studio.users: 한 계정을 두 검수자에게 줄 수 없습니다")
         return self
 
 
@@ -187,6 +222,8 @@ class ReviewOpsPolicy(Contract):
     seeding: SeedingPolicy
     reviewers: ReviewersPolicy
     cvat: CvatPolicy
+    # 절이 없으면 연결이 비어 있다 (Label Studio 작업 생성·수집이 계정 연결 없음으로 거부된다)
+    label_studio: LabelStudioPolicy = Field(default_factory=LabelStudioPolicy)
     webhook: WebhookPolicy
     ratios: ReviewConfig  # 배정 비율 (config/defaults.yaml `review` 절)
 
