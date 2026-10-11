@@ -7,6 +7,9 @@
 - 재시도 조건(파싱 실패 또는 위반 비율), 부분 수용
 - `reason_guard` (URL·숫자열·프레임 참조·금지어·글자 수)
 - gap→action 제안의 새 action_id는 `h-<손>-<시작>`
+- 해시할 수 없는 값·bool·실수 제안 값도 예외 없이 위반, 기록 문장에 모델이 쓴 값이 없음
+- 근거 프레임 번호는 단위 번호(문맥 초과로 줄인 요청도), 누락 후보 검사(범위·온톨로지·겹침·이유
+  검사)
 """
 
 from __future__ import annotations
@@ -69,7 +72,7 @@ HAND = _label(
     ),
     1_300, 1_800,
 )  # fmt: skip
-VIEW = RequestView(AiGroup.TEMPORAL, (ACTION, GAP, EVENT, HAND), 6, ENTITIES)
+VIEW = RequestView(AiGroup.TEMPORAL, (ACTION, GAP, EVENT, HAND), tuple(range(6)), ENTITIES)
 
 
 def _s(**values: Any) -> dict[str, Any]:
@@ -115,9 +118,9 @@ def test_number_violations_and_missing(policy: AiReviewPolicy, ontology: Ontolog
     """
     got = _answer([0, 0, 7], [_item(2)], policy=policy, ontology=ontology)
     assert got.parsed
-    assert any("목록 밖" in v for v in got.violations)
-    assert any("두 번" in v for v in got.violations)
-    assert any("#1가 빠짐" in v or "#3가 빠짐" in v for v in got.violations)
+    assert any("목록 밖" in v.text for v in got.violations)
+    assert any("두 번" in v.text for v in got.violations)
+    assert any("#1가 빠짐" in v.text or "#3가 빠짐" in v.text for v in got.violations)
     for k in (0, 1, 3):
         d = got.items[k]
         assert (d.verdict, d.problems, d.answered) == (
@@ -138,7 +141,7 @@ def test_number_violations_and_missing(policy: AiReviewPolicy, ontology: Ontolog
         (_item(0, p=("wrong_class",)), "쓸 수 없는 문제 유형"),
         (_item(0, p=()), "문제 유형이 필요"),
         (_item(0, r="bad"), "한국어"),
-        (_item(0, f=9), "보낸 프레임 밖"),
+        (_item(0, f=9), "보낸 프레임이 아니다"),
         (_item(0, v="ok"), "ok 목록"),
         (_item(0, v="maybe"), "판정 값"),
         (_item(0, s={"verb": "rub"}), "필수"),
@@ -152,7 +155,7 @@ def test_item_violations_downgrade_to_unsure(
     if message == "필수":  # 제안 객체의 키가 빠져도 받아 준다 (프롬프트 강제 서버 호환)
         assert got.invalid == 0
         return
-    assert any(message in v for v in got.violations), got.violations
+    assert any(message in v.text for v in got.violations), got.violations
     d = got.items[item["i"]]
     assert d.verdict is AiVerdictValue.UNSURE and not d.answered
 
@@ -221,7 +224,7 @@ def test_spatial_hand_and_class_suggestions(policy: AiReviewPolicy, ontology: On
                               keyframes=(BoxKeyframe(t_ms=0, x=1, y=1, w=5, h=5),)),
         0, 0, stream_id="bodycam",
     )  # fmt: skip
-    view = RequestView(AiGroup.SPATIAL, (box,), 4, ())
+    view = RequestView(AiGroup.SPATIAL, (box,), tuple(range(4)), ())
 
     def sp(**values: Any) -> dict[str, Any]:
         return {k: values.get(k, False if k == "delete" else None) for k in SPATIAL_FIELDS}
@@ -230,7 +233,7 @@ def test_spatial_hand_and_class_suggestions(policy: AiReviewPolicy, ontology: On
     ok = _answer([], [_item(0, p=("wrong_class",), s=sp(class_id="bucket"))], view, **kw)
     assert ok.invalid == 0 and ok.items[0].suggestion is not None
     bad = _answer([], [_item(0, p=("wrong_class",), s=sp(hand="left"))], view, **kw)
-    assert any("hand" in v for v in bad.violations)
+    assert any("hand" in v.text for v in bad.violations)
 
 
 def test_retry_condition_and_parse_failure(policy: AiReviewPolicy, ontology: Ontology) -> None:
@@ -282,3 +285,147 @@ def test_guarded_reason_keeps_the_verdict(policy: AiReviewPolicy, ontology: Onto
     )
     assert got.invalid == 0
     assert got.items[0].verdict is AiVerdictValue.WRONG and got.items[0].reason == "AI: 동사가 다름"
+
+
+@pytest.mark.parametrize(
+    ("index", "s"),
+    [
+        (0, _s(verb=["wipe"])),
+        (0, _s(verb={"id": "rub"})),
+        (0, _s(target=True)),
+        (0, _s(target=1.0)),
+        (0, _s(kind=["gap"], gap_type="idle")),
+        (1, _s(gap_type=["idle"])),
+        (2, _s(event_type={"x": 1})),
+        (2, _s(severity=2.5)),
+        (2, _s(severity=True)),
+        (2, _s(delete="yes")),
+        (3, _s(contact_kind=["object"])),
+    ],
+)
+def test_unhashable_or_wrong_typed_suggestion_values_are_violations(
+    index: int, s: dict[str, Any], policy: AiReviewPolicy, ontology: Ontology
+) -> None:
+    """제안 값이 목록·객체·실수·bool처럼 온톨로지 값이 될 수 없는 형태여도 예외 없이 항목 위반이다
+    (서버가 enum을 강제하지 않거나 스키마를 프롬프트로만 줄 때)."""
+    p = {0: "wrong_verb", 1: "wrong_gap_type", 2: "wrong_event_type", 3: "wrong_contact_kind"}
+    item = _item(index, p=(p[index],), s=s)
+    got = _answer([k for k in range(4) if k != index], [item], policy=policy, ontology=ontology)
+    assert got.invalid == 1 and got.items[index].verdict is AiVerdictValue.UNSURE
+    assert not got.items[index].answered
+
+
+def test_violation_records_carry_no_model_written_values(
+    policy: AiReviewPolicy, ontology: Ontology
+) -> None:
+    """기록용 위반 문장(`Violation.record`, 추가 전용 표에 남는다)에는 모델이 쓴 값·키 이름·목록 밖
+    번호가 없다. 재시도 문장(`text`)에는 고칠 수 있게 값이 들어간다."""
+    pii = "김철수 환자 302호 010-1234-5678"
+    got = _answer(
+        [1, 1012345678],
+        [
+            _item(0, v=pii),
+            _item(2, p=(pii,)),
+            _item(3, p=("wrong_contact_kind",), s={**_s(), pii: 1}),
+        ],
+        policy=policy, ontology=ontology,
+    )  # fmt: skip
+    records = " ".join(v.record for v in got.violations)
+    texts = " ".join(v.text for v in got.violations)
+    assert pii in texts and "1012345678" in texts
+    assert pii not in records and "1012345678" not in records and "302" not in records
+    broken = validate_answer(json.dumps({"ok": [], "items": [], pii: 1}), VIEW, ontology, policy)
+    assert [v.record for v in broken.violations] == ["응답 구조 위반"]
+    assert pii in broken.violations[0].text
+
+
+def test_frame_numbers_are_unit_numbers_of_sent_frames(
+    policy: AiReviewPolicy, ontology: Ontology
+) -> None:
+    """문맥 초과로 프레임을 줄인 요청(F0, F2, F4)의 f는 단위 프레임 번호다: 보낸 번호만 받는다."""
+    halved = RequestView(AiGroup.TEMPORAL, VIEW.targets, (0, 2, 4), ENTITIES)
+    rest = [1, 2, 3]
+    kw: dict[str, Any] = {"policy": policy, "ontology": ontology}
+    ok = _answer(rest, [_item(0, p=("wrong_verb",), f=4)], halved, **kw)
+    assert ok.invalid == 0 and ok.items[0].frame == 4
+    bad = _answer(rest, [_item(0, p=("wrong_verb",), f=1)], halved, **kw)
+    assert bad.invalid == 1 and any("F0, F2, F4" in v.text for v in bad.violations)
+
+
+# ---------------------------------------------------------------- 누락 후보 (max_findings > 0)
+
+BOX = _label(
+    "b-cup", BoxTrackPayload(entity_id="cup_01", class_id="cup",
+                             keyframes=(BoxKeyframe(t_ms=0, x=100, y=100, w=40, h=40),
+                                        BoxKeyframe(t_ms=900, x=100, y=100, w=40, h=40))),
+    0, 900, stream_id="bodycam",
+)  # fmt: skip
+SPATIAL_VIEW = RequestView(
+    AiGroup.SPATIAL, (BOX,), (0, 1, 2), (), frame_ms=(0, 300, 600), known=(BOX,),
+    src_size=(400, 200),
+)  # fmt: skip
+TEMPORAL_VIEW = RequestView(
+    AiGroup.TEMPORAL, VIEW.targets, (0, 1, 2), ENTITIES, frame_ms=(2_000, 2_600, 3_200),
+    known=VIEW.targets,
+)  # fmt: skip
+
+
+def _findings_policy(policy: AiReviewPolicy) -> AiReviewPolicy:
+    """누락 후보를 켠 정책 (응답 절만 바꾼 사본)."""
+    response = policy.response.model_copy(update={"max_findings": 4})
+    return policy.model_copy(update={"response": response})
+
+
+def _missing(view: RequestView, missing: list[dict[str, Any]], **kw: Any) -> Any:
+    """누락 후보가 든 응답 (대상은 모두 ok)."""
+    raw = json.dumps({"ok": list(range(len(view.targets))), "items": [], "missing": missing})
+    return validate_answer(raw, view, kw["ontology"], _findings_policy(kw["policy"]))
+
+
+def test_spatial_findings_are_checked_not_crashing(
+    policy: AiReviewPolicy, ontology: Ontology
+) -> None:
+    """공간 누락 후보: 범위 밖 상자, 온톨로지 밖·ID 형식이 아닌 클래스, 보내지 않은 프레임, 같은
+    클래스 박스와 겹치는 후보는 버린다 (예외 없음). 이유는 안전 검사를 거친다."""
+    kw: dict[str, Any] = {"policy": policy, "ontology": ontology}
+    cup_box = [250, 500, 100, 200]  # 원 좌표 (100, 100, 40, 40) / (400, 200) → 정규화와 같다
+    got = _missing(
+        SPATIAL_VIEW,
+        [
+            {
+                "class_id": "bucket",
+                "f": 1,
+                "box": [10, 20, 100, 30],
+                "r": "김철수 씨 010-1234-5678",
+            },
+            {"class_id": "mop", "f": 0, "box": [10, 20, 1500, 30], "r": "빠진 물체가 있다"},
+            {"class_id": "Not An Id!", "f": 0, "box": [10, 20, 30, 30], "r": "빠진 물체"},
+            {"class_id": "mop", "f": 7, "box": [10, 20, 30, 30], "r": "빠진 물체"},
+            {"class_id": "cup", "f": 1, "box": cup_box, "r": "컵이 빠졌다"},
+            {"class_id": ["mop"], "f": 0, "box": [10, 20, 30, 30], "r": "빠진 물체"},
+        ],
+        **kw,
+    )
+    assert got.parsed and got.invalid == 0
+    assert [(f.value, f.f0, f.box) for f in got.findings] == [("bucket", 1, (10, 20, 100, 30))]
+    assert got.findings[0].reason == "AI: 빠진 물체"
+
+
+def test_temporal_findings_drop_raw_access_and_already_labeled(
+    policy: AiReviewPolicy, ontology: Ontology
+) -> None:
+    """시간 누락 후보: 원본 접근 이벤트(불편 반응)와 같은 유형 라벨이 이미 겹치는 구간은 버린다."""
+    kw: dict[str, Any] = {"policy": policy, "ontology": ontology}
+    got = _missing(
+        TEMPORAL_VIEW,
+        [
+            {"event_type": "discomfort", "f0": 0, "f1": 1, "r": "불편해 보임"},
+            {"event_type": "slip", "f0": 1, "f1": 2, "r": "미끄러짐"},  # EVENT(slip 2500~2900)
+            {"event_type": "drop", "f0": 0, "f1": 1, "r": "http://evil 떨어뜨림"},
+            {"event_type": "drop", "f0": 2, "f1": 1, "r": "거꾸로 된 구간"},
+        ],
+        **kw,
+    )
+    assert [(f.value, f.f0, f.f1, f.reason) for f in got.findings] == [
+        ("drop", 0, 1, "AI: 빠진 이벤트")
+    ]

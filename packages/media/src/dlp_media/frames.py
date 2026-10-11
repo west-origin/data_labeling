@@ -4,7 +4,8 @@ AI 1차 검수(`dlp_aireview`)가 블러본에서 판정용 프레임을 얻을 
 인덱스로만 계산한다 (CLAUDE.md: 프레임 번호에 간격을 곱하지 않는다). VFR 영상에서도 "그 시각에
 화면에 떠 있는 프레임"(`PtsIndex.frame_at`)을 고른다.
 
-- `pick_frames`: 원하는 시각(ms) 목록 → 프레임 번호 (중복 제거, 정렬).
+- `pick_frames`: 원하는 시각(ms) 목록 → 프레임 번호 (화면에 떠 있는 프레임 또는 가장 가까운 프레임,
+  중복 제거, 정렬).
 - `plan_seeks`: 정렬된 목표 프레임마다 seek이 필요한지 (필요하면 그 키프레임 번호).
 - `fit_size`: 긴 변 상한·정렬 단위에 맞춘 출력 크기.
 - `decode_frames`: 목표 프레임을 한 번 순차로 디코드해 (번호, 정수 ms, RGB 배열)로 낸다.
@@ -28,14 +29,20 @@ from numpy.typing import NDArray
 from dlp_media.pts import PtsIndex
 
 
-def pick_frames(pts: PtsIndex, wanted_ms: Iterable[float]) -> list[int]:
-    """원하는 시각마다 그 시각에 화면에 떠 있는 프레임 번호 (`PtsIndex.frame_at`), 중복 제거·정렬.
+def pick_frames(pts: PtsIndex, wanted_ms: Iterable[float], *, nearest: bool = False) -> list[int]:
+    """원하는 시각마다 프레임 번호 하나, 중복 제거·정렬.
+
+    기본은 그 시각에 화면에 떠 있는 프레임(`PtsIndex.frame_at`)이다. `nearest`면 가장 가까운 프레임
+    (`PtsIndex.nearest`)이다: 공간 라벨 키프레임처럼 프레임 시각을 정수 ms로 반올림한 값을 그
+    프레임에 맞출 때 쓴다 (반올림으로 내려간 시각은 `frame_at`이 앞 프레임을 고른다).
 
     Args:
         pts: 영상의 PTS 인덱스.
         wanted_ms: 원하는 시각 ms (그 스트림 PTS 기준).
+        nearest: 가장 가까운 프레임으로 맞출지.
     """
-    return sorted({pts.frame_at(float(ms)) for ms in wanted_ms})
+    pick = pts.nearest if nearest else pts.frame_at
+    return sorted({pick(float(ms)) for ms in wanted_ms})
 
 
 def frame_ms(pts: PtsIndex, index: int) -> int:

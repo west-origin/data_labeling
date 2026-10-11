@@ -346,4 +346,7 @@ issues:
      note: "기준 문서가 VLM은 경계를 정하지 않는다고 정했다. boundary_early·late 문제 유형만 남긴다"}
   - {id: F-AIR-08, title: 누락 발견(missing) 표시 기본 끔, severity: low, status: open, kind: product,
      files: [config/policies/aireview.yaml], source: docs/adr/0040-ai-first-pass-review.md,
-     note: "response.max_findings 0. 잡음·스키마 비용 때문에 파일럿에서 켤지 정한다"}
+     note: "response.max_findings 0. 잡음·스키마 비용 때문에 파일럿에서 켤지 정한다. 응답 재검사(값·프레임·상자 범위, 같은 종류 라벨과 겹침 제거, 이유 안전 검사)는 구현했고 검수 화면 표시(LS AI:누락?, CVAT 이슈)는 WP17.6 뒤 후속"}
+  - {id: F-AIR-09, title: 장갑+영상 융합 접촉의 영상 대상은 AI가 판정하지 않음, severity: low, status: open, kind: product,
+     files: [packages/aireview/src/dlp_aireview/plan.py, packages/prelabel/src/dlp_prelabel/runner.py], source: docs/adr/0040-ai-first-pass-review.md,
+     note: "결정(장갑 센서 출처 라벨 제외)에 따라 장갑이 관여한 접촉(증거 OBSERVED: 장갑만·융합)을 통째로 뺀다. 융합 접촉의 대상(영상 근거)만 판정할지, 프리라벨 증거 규칙을 바꾸는 다른 자동 손 상태 단계가 생길 때 표시를 어떻게 둘지는 파일럿 뒤 결정"}

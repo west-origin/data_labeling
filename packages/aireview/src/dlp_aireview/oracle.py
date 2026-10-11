@@ -211,7 +211,8 @@ class OracleJudge:
         full = {k: s.get(k, False if k == "delete" else None) for k in keys} if s else None
         return {
             "i": i, "v": "wrong", "p": [p.value for p in problems[:3]],
-            "r": PROBLEM_KO[problems[0]], "c": 0.9, "f": 0 if request.frame_ms else None, "s": full,
+            "r": PROBLEM_KO[problems[0]], "c": 0.9,
+            "f": request.frame_nos[0] if request.frame_nos else None, "s": full,
         }  # fmt: skip
 
     def answer(self, request: JudgeRequest) -> dict[str, Any]:

@@ -5,8 +5,9 @@
 블러본 프레임(JPEG 바이트)과 글이다.
 
 오류 분류 (서버 응답 → 예외)
-    - `VlmUnavailableError`: 연결 오류·시간 초과·5xx·408·429(Retry-After)·응답 형식 오류. 서버가
-      잠시 응답하지 못한 것이므로 백오프하며 다시 묻는다(`with_backoff`). 결과로 기록하지 않는다.
+    - `VlmUnavailableError`: 연결 오류·시간 초과·5xx·408·429(Retry-After, 정책 대기 상한까지)·응답
+      형식 오류. 서버가 잠시 응답하지 못한 것이므로 백오프하며 다시 묻는다(`with_backoff`). 결과로
+      기록하지 않는다.
     - `VlmRequestError`: 그 밖의 4xx(400·401·403·404·413·422 등)와 응답 모델 불일치. 설정 오류라
       다시 물어도 같으므로 즉시 멈춘다. 행동 단계는 종료 코드 5로 끝난다.
     - `VlmContextError(VlmRequestError)`: 400·413 중 본문이 문맥 길이 초과를 말하는 경우
@@ -303,22 +304,24 @@ def with_backoff[T](
 ) -> T:
     """장애(`VlmUnavailableError`)면 `backoff_s`의 대기마다 다시 부른다. 끝내 실패하면 올린다.
 
-    시도 횟수 = len(backoff_s) + 1. 대기는 max(정책 대기, 서버 Retry-After)다. 설정 오류
-    (`VlmRequestError`)는 다시 부르지 않고 바로 올린다.
+    시도 횟수 = len(backoff_s) + 1. 대기는 max(정책 대기, 서버 Retry-After)이되 `backoff_s`의
+    최댓값을 넘지 않는다 (프록시·레이트 리미터가 큰 Retry-After를 주어도 정책 대기 상한 안에서
+    멈춘다). 설정 오류 (`VlmRequestError`)는 다시 부르지 않고 바로 올린다.
 
     Args:
         call: 부를 함수.
-        backoff_s: 실패 뒤 대기 초 목록.
+        backoff_s: 실패 뒤 대기 초 목록 (최댓값이 대기 상한).
         sleep: 대기 함수 (테스트에서 바꾼다).
         on_error: 실패할 때마다 부를 함수 (오류 기록용).
     """
+    cap = max(backoff_s, default=0.0)
     for wait in backoff_s:
         try:
             return call()
         except VlmUnavailableError as exc:
             if on_error is not None:
                 on_error(exc)
-            sleep(max(wait, exc.retry_after_s or 0.0))
+            sleep(min(max(wait, exc.retry_after_s or 0.0), cap))
     return call()
 
 

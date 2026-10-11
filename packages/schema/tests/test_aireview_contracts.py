@@ -233,3 +233,28 @@ def test_valid_verdicts_two_profiles() -> None:
     assert set(strict) == {"l1"}
     assert valid_verdicts(units, current, versions=[], render_hashes=None) == {}
     assert AiProblem.RESPONSE_INVALID.value == "response_invalid"
+
+
+def test_ok_and_unsure_verdicts_never_carry_suggestions() -> None:
+    """ok·unsure 판정에는 제안이 없다 (제안은 suspect·wrong만)."""
+    gap = GapPayload(hand=Hand.RIGHT, gap_type="idle")
+    to_gap = AiSuggestion(op="change_kind", fields=("kind", "gap_type"), payload=gap)
+    with pytest.raises(ValidationError, match="ok"):
+        _verdict("l1", "ok", suggestion=to_gap)
+    with pytest.raises(ValidationError, match="unsure"):
+        _verdict("l1", "unsure", suggestion=to_gap)
+
+
+def test_valid_verdicts_skip_measurement_seeded_and_human_labels() -> None:
+    """측정(블라인드·이중)·오류 삽입 레코드와 사람 라벨에는 판정을 주지 않는다 (지금 운영 라벨
+    목록에 섞여 들어와도). 검수 전 자동 라벨만 판정이 유효하다."""
+    plain = _model_label("l1")
+    blind = _model_label("l2", measurement="blind")
+    double = _model_label("l3", measurement="double")
+    seeded = _model_label("l4", seeded_error=True)
+    human = _model_label("l5", provenance=Provenance(source=Source.HUMAN), confidence=None)
+    labels = [plain, blind, double, seeded, human]
+    unit = _unit("air-" + "7" * 24, [_verdict(x.label_id, "wrong") for x in labels])
+    for render in ({"bodycam": H1}, None):
+        found = valid_verdicts([unit], labels, versions=[VERSION], render_hashes=render)
+        assert set(found) == {"l1"}

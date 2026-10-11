@@ -239,8 +239,9 @@ def test_list_models_and_tokenize() -> None:
 
 
 def test_with_backoff_retries_only_unavailable() -> None:
-    """장애만 backoff 대기마다 다시 부른다 (시도 = len + 1). Retry-After가 더 길면 그만큼 기다린다.
-    설정 오류(4xx)는 즉시 올린다."""
+    """장애만 backoff 대기마다 다시 부른다 (시도 = len + 1). Retry-After가 더 길면 그만큼 기다리되
+    backoff 최댓값을 넘지 않는다 (큰 Retry-After에 오래 멈추지 않게). 설정 오류(4xx)는 즉시
+    올린다."""
     waits: list[float] = []
     errors: list[str] = []
     calls: list[int] = []
@@ -248,13 +249,17 @@ def test_with_backoff_retries_only_unavailable() -> None:
     def flaky() -> str:
         calls.append(1)
         if len(calls) == 1:
-            raise VlmUnavailableError("busy", retry_after_s=9.0)
+            raise VlmUnavailableError("busy", retry_after_s=3.0)
         if len(calls) == 2:
+            raise VlmUnavailableError("limited", retry_after_s=3600.0)
+        if len(calls) == 3:
             raise VlmUnavailableError("down")
         return "ok"
 
-    out = with_backoff(flaky, (1.0, 2.0), waits.append, on_error=lambda e: errors.append(str(e)))
-    assert out == "ok" and waits == [9.0, 2.0] and errors == ["busy", "down"]
+    out = with_backoff(
+        flaky, (1.0, 5.0, 2.0), waits.append, on_error=lambda e: errors.append(str(e))
+    )
+    assert out == "ok" and waits == [3.0, 5.0, 2.0] and errors == ["busy", "limited", "down"]
 
     def always() -> str:
         raise VlmUnavailableError("down")

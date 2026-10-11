@@ -1,0 +1,21 @@
+[온톨로지 1.0.0 · 시간 라벨]
+원시 동작(verb): carry 옮기다; grasp 잡다; lift 들어 올리다; lower 내리다; press 누르다; pull 당기다; push 밀다; release 놓다; rotate 돌리다; rub 문지르다; support 지지하다
+사이 구간(gap_type): idle 대기(의도적 정지); out_of_scope 범위 외(대화, 기록 작성 등 조작이 아닌 활동); unknown 미상(무엇인지 판단할 수 없음. 온톨로지 확장 후보로 검토)
+접촉 대상 종류(contact_kind): fixed_surface 고정 표면; none 없음; object 객체; person 대상자; self 자기 몸; tool 도구
+파지 유형(grasp): hook 갈고리 걸기; lateral_pinch 옆면 집기; non_prehensile 비파지 접촉; palm_push_wipe 손바닥 밀기·닦기; palm_support 손바닥 지지; power 전체 손 쥐기; precision_pinch 손가락 끝 집기; tool_grip 도구 쥐기
+신체 부위(body_part): abdomen 복부; chest 가슴; head 머리; left_buttock 좌 둔부; left_elbow 좌 팔꿈치; left_foot 좌 발; left_forearm 좌 전완; left_hand 좌 손; left_knee 좌 무릎; left_lower_leg 좌 하퇴; left_shoulder 좌 어깨; left_thigh 좌 대퇴; left_upper_arm 좌 상완; lower_back 허리; neck 목; right_buttock 우 둔부; right_elbow 우 팔꿈치; right_foot 우 발; right_forearm 우 전완; right_hand 우 손; right_knee 우 무릎; right_lower_leg 우 하퇴; right_shoulder 우 어깨; right_thigh 우 대퇴; right_upper_arm 우 상완; upper_back 등 상부
+이벤트(event_type): action_retry 행동 재시도(구간); bare_hand_contamination 장갑 미착용 체액·오염물 접촉(시점); collision 충돌(구간); cross_contamination_hand 오염 후 청결 표면 접촉(시점); cross_contamination_tool 오염 도구로 청결 표면 접촉(시점); drop 물체 놓침·낙하(시점); fall_risk 낙상 위험(구간); grasp_failure 파지 실패(시점); loss_of_balance 균형 상실(구간); regrasp 재파지(시점); rework_missed_area 미처리 영역 재작업(구간); sharp_contact 날카로운 물체 접촉(구간); slip 미끄러짐(구간); step_abort 단계 중단(시점)
+상위 구간 참조(ref_id): attach 붙이다; close 닫다; detach 떼다; dress_person 입히다; fold 접다; insert 끼우다; inspect 확인하다; lay_down_person 눕히다; lift_transfer_person 들어 옮기다; measure 측정하다; open 열다; pour 붓다; raise_person 일으키다; remove 빼다; rinse 헹구다; roll_person 굴리다; spray 뿌리다; spread 펴다; sweep 쓸다; undress_person 벗기다; wipe 닦다; wrap 감싸다; wring 짜다; bathing_assist 세면·목욕 보조; bed_making 침상 정리·시트 교체; blood_glucose 혈당 측정; diaper_change 기저귀 교체; dressing_assist 옷 입히고 벗기기; dressing_change 드레싱 교체; feeding_assist 식사 보조; floor_sweep_mop 바닥 쓸기·닦기; hand_hygiene_ppe 손 위생·보호구 착용; medication 투약 준비·투약; oral_hygiene 구강 위생; repositioning 체위 변경; surface_wipe_disinfect 표면 닦기·소독; toilet_cleaning 화장실 청소; transfer_assist 이승 보조(침대↔휠체어); vital_signs 활력징후 측정; waste_collection 쓰레기 수거·분리
+객체 상태 속성(value는 = 뒤 값): cleanliness 청결 상태=dirty/clean; fill_state 채움 상태=full/partial/empty; fold_state 접힘 상태=unfolded/folded; open_state 열림 상태=open/closed; wetness 젖음 상태=wet/dry; worn_state 착용 상태=worn/not_worn
+객체 클래스: bathtub 욕조; bed 침대; bed_rail 침대 난간; bedsheet 시트; broom 빗자루; brush 솔; bucket 양동이; clothing 의류; cup 컵; diaper 기저귀; door 문; drawer 서랍; dustpan 쓰레받기; floor 바닥; glove 장갑; mirror 거울; mop 밀대; person 사람; pillow 베개; rag 걸레; sink 세면대; sponge 스펀지; spray_bottle 분무기; table 탁자; toilet 변기; toilet_brush 변기솔; towel 수건; trash_bag 쓰레기봉투; trash_bin 쓰레기통; wall 벽
+문제 유형(p):
+- 행동: wrong_verb(동사가 다름), wrong_target(대상이 다름), wrong_tool(도구가 다름), wrong_hand(손이 다름), should_be_gap(행동이 아니라 사이 구간), boundary_early(경계가 이름), boundary_late(경계가 늦음), not_visible(보이지 않음), insufficient_frames(프레임이 부족함), other(기타)
+- 사이 구간: should_be_action(사이 구간이 아니라 행동), wrong_gap_type(사이 구간 종류가 다름), not_visible(보이지 않음), insufficient_frames(프레임이 부족함), other(기타)
+- 손 상태: contact_mismatch_sensor(장갑 센서 접촉과 다름), wrong_contact_kind(접촉 대상 종류가 다름), wrong_contact_target(접촉 대상이 다름), wrong_grasp(파지 유형이 다름), not_visible(보이지 않음), insufficient_frames(프레임이 부족함), other(기타)
+- 이벤트: false_event(일어나지 않은 이벤트), wrong_event_type(이벤트 종류가 다름), wrong_severity(심각도가 다름), not_visible(보이지 않음), insufficient_frames(프레임이 부족함), other(기타)
+- 상위 구간: wrong_ref(상위 구간 참조가 다름), hierarchy_inconsistent(하위 행동과 맞지 않음), not_visible(보이지 않음), insufficient_frames(프레임이 부족함), other(기타)
+- 객체 상태: wrong_state_value(상태 값이 다름), not_visible(보이지 않음), insufficient_frames(프레임이 부족함), other(기타)
+- 공통: not_visible(보이지 않음), insufficient_frames(프레임이 부족함), other(기타)
+시간 라벨은 프레임에 그리지 않았다. 프레임에는 글자가 없다. 이미지는 프레임 지도의 F# 순서이고 상대 시각은 프레임 지도에 있다.
+응답: {"ok": [번호], "items": [{"i": 번호, "v": "suspect|wrong|unsure", "p": [문제], "r": "이유", "c": 확신도, "f": 근거 프레임 번호, "s": 제안 또는 null}], "missing": []}
+제안 s의 키: kind(action↔gap 종류 변경), verb, gap_type, target·tool(개체 번호 e#의 숫자), contact_kind, grasp, body_part, event_type, severity(1~3), ref_id, value, delete(이벤트 삭제).

@@ -5,9 +5,11 @@
 - 대상 상한으로 나눈 요청은 같은 증거 구간·프레임을 쓴다.
 - flagged·감사 선택이 결정적이고, 선택 방식은 단위 키에 들어가지 않는다.
 - 라벨 하나를 고치면 그 라벨이 든 단위 키만 바뀌고, 렌더 해시를 바꾸면 그 스트림 단위만 바뀐다.
-- 측정·오류 삽입·사람·검수된 라벨, 원본 접근 이벤트, 블러는 대상에 없고, 측정·오류 삽입·블러·원본
-  접근 이벤트는 맥락에도 없다.
-- 프레임 시각은 PTS 인덱스에서 나온다 (VFR).
+- 측정·오류 삽입·사람·검수된 라벨, 원본 접근 이벤트, 블러, 장갑 센서에서 나온 접촉, 아주 긴 상위
+  구간은 대상에 없고, 측정·오류 삽입·블러·원본 접근 이벤트는 맥락에도 없다.
+- 프레임 시각은 PTS 인덱스에서 나온다 (VFR, 29.97 fps). 공간 대상은 단위마다 적어도 한 프레임에
+  표식이 그려진다.
+- 장갑 구간이 바뀌면 장갑 문장을 쓰는 단위 키만 바뀌고, `kinds`는 대상만 고른다 (요청 본문 불변).
 """
 
 from __future__ import annotations
@@ -24,15 +26,22 @@ from dlp_aireview.plan import (
     PlannedWindow,
     StreamMedia,
     estimate_units,
+    glove_derived,
     plan_session,
     plan_windows,
     targets,
     uncovered_targets,
 )
 from dlp_aireview.policy import AiReviewPolicy
+from dlp_aireview.prompt import ontology_text, unit_text
+from dlp_aireview.schema import response_schema
 from dlp_aireview.sensors import SensorContext
+from dlp_aireview.tracks import drawn_at
 from dlp_fixtures.video import vfr_times
 from dlp_media.pts import PtsIndex
+from dlp_prelabel.contact import ContactInterval
+from dlp_prelabel.policy import load_policy as load_prelabel_policy
+from dlp_prelabel.runner import contact_label
 from dlp_schema.aireview import AiGroup
 from dlp_schema.labels import (
     ActionPayload,
@@ -41,9 +50,12 @@ from dlp_schema.labels import (
     EventPayload,
     GapPayload,
     Hand,
+    HandStatePayload,
     LabelRecord,
     ObjectStatePayload,
     Provenance,
+    SegmentLevel,
+    SegmentPayload,
     Source,
     Verification,
     VerificationState,
@@ -52,7 +64,7 @@ from dlp_schema.ontology import Ontology
 from dlp_schema.review import FlaggedSpan, ReviewReason
 from dlp_schema.testing import FIXED_TIME
 
-from .conftest import RENDER, SID, Scene, images_for, with_policy
+from .conftest import RENDER, ROOT, SID, Scene, box_track, images_for, with_policy
 
 ABSENT = SensorContext.absent()
 
@@ -355,3 +367,166 @@ def test_uncovered_targets_by_version_and_render(
     )
     moved = {"bodycam": "d" * 64, "tp1": RENDER["tp1"]}
     assert set(uncovered_targets(ws, done, version=version, render_hashes=moved)) >= covered
+
+
+def test_glove_derived_contacts_are_never_targets(
+    scene: Scene, policy: AiReviewPolicy, ontology: Ontology
+) -> None:
+    """장갑 센서에서 나온 라벨은 판정 대상이 아니다 (사용자 결정, ADR 0040 결정 5).
+
+    프리라벨 접촉 단계의 실제 출력(`contact_label`)으로 본다: 장갑만 잡은 접촉(대상 unresolved)과
+    장갑+영상 융합 접촉은 증거 OBSERVED라 빼고, 영상만 잡은 접촉(INFERRED)은 대상이다. 센서 출처 손
+    상태도 뺀다. 빠진 라벨은 맥락(텍스트)으로는 남는다.
+    """
+    pre = load_prelabel_policy(ROOT)
+    made = [
+        contact_label(scene.session, "contact-heuristic-1+ptest+itest", Hand.RIGHT, k, c,
+                      "object", pre, FIXED_TIME)
+        for k, c in enumerate([
+            ContactInterval(2_000, 2_900, None, "glove"),
+            ContactInterval(4_000, 4_600, "bucket_01", "fused"),
+            ContactInterval(6_000, 6_500, "bucket_01", "video"),
+        ])
+    ]  # fmt: skip
+    glove, fused, video = made
+    assert glove.label_id.startswith(f"{SID}-contact-") and glove.label_id.endswith("-right-0000")
+    assert glove.provenance.source is Source.MODEL
+    assert isinstance(glove.payload, HandStatePayload)
+    assert glove.payload.target_id == pre.contact.unresolved_target_id
+    sensor = _label(
+        "sensor-contact",
+        HandStatePayload(
+            hand=Hand.LEFT, contact_target_kind="object", target_id="bucket_01", role="active"
+        ),
+        3_000, 3_500,
+        provenance=Provenance(source=Source.SENSOR, sensor_id="glove_left"), confidence=None,
+    )  # fmt: skip
+    labels = [*scene.labels, *made, sensor]
+    found = {x.label_id for x in targets(labels, policy, ontology)}
+    assert video.label_id in found
+    assert not found & {glove.label_id, fused.label_id, sensor.label_id}
+    assert [glove_derived(x) for x in (glove, fused, video, sensor)] == [True, True, False, True]
+    ws = plan_windows(scene.session, labels, policy, ontology)
+    in_context = {x.label_id for w in ws for x in w.context}
+    assert {glove.label_id, fused.label_id} <= in_context
+
+
+def test_sensor_change_rekeys_only_units_with_the_sensor_sentence(
+    scene: Scene, policy: AiReviewPolicy, ontology: Ontology
+) -> None:
+    """장갑 접촉 구간이 바뀌면 장갑 문장을 쓰는 단위(손 상태 대상이 든 시간 단위)의 키만 바뀐다."""
+    a = SensorContext.of({Hand.RIGHT: [(1_200.0, 2_800.0)]})
+    b = SensorContext.of({Hand.RIGHT: [(1_200.0, 3_000.0)]})
+    ua = plan_session(scene.session, scene.labels, policy, ontology, media=scene.media, sensor=a)
+    ub = plan_session(scene.session, scene.labels, policy, ontology, media=scene.media, sensor=b)
+    assert len(ua) == len(ub)
+    for x, y in zip(ua, ub, strict=True):
+        assert (x.unit_id != y.unit_id) == (x.sensor_sha256 != "absent")
+    assert {u.sensor_sha256 == "absent" for u in ua} == {True, False}
+
+
+def test_very_long_segments_are_not_targets(
+    scene: Scene, policy: AiReviewPolicy, ontology: Ontology
+) -> None:
+    """`long_max_span_ms`보다 긴 상위 구간(작업 전체 등)은 판정하지 않는다. 그 이하는
+    temporal_long."""
+    short_limit = with_policy(policy, temporal={"long_max_span_ms": 5_000})
+    seg = SegmentPayload(
+        segment_id="seg-x", level=SegmentLevel.TASK, ref_id="surface_wipe_disinfect"
+    )
+    long_seg = _label("seg-long", seg, 0, 5_001)
+    ok_seg = _label("seg-ok", seg.model_copy(update={"segment_id": "seg-y"}), 0, 5_000)
+    found = {x.label_id for x in targets([*scene.labels, long_seg, ok_seg], short_limit, ontology)}
+    assert "seg-ok" in found and "seg-long" not in found
+    ws = plan_windows(scene.session, [*scene.labels, long_seg, ok_seg], short_limit, ontology)
+    assert ["seg-ok"] in [[x.label_id for x in w.targets] for w in ws]
+
+
+def _drawn_somewhere(unit_frame_ms: tuple[int, ...], label: LabelRecord) -> bool:
+    """단위 프레임 중 하나라도 이 트랙의 표식이 그려지는가 (그리기와 같은 규칙)."""
+    return any(drawn_at(label, t) for t in unit_frame_ms)
+
+
+def test_every_spatial_target_is_drawn_in_some_frame(
+    scene: Scene, policy: AiReviewPolicy, ontology: Ontology
+) -> None:
+    """공간 대상은 계획된 단위마다 적어도 한 프레임에 표식이 그려진다 (설계 2.2: 대상 키프레임
+    시각).
+
+    짧은 트랙, 키프레임이 하나인 트랙, 합쳐진 창 끝에서 시작하는 트랙, 한 창에 프레임 수보다 많이
+    흩어진 한 순간 트랙(다음 창으로 넘긴다)을 넣는다.
+    """
+    short = box_track("tp-short", "cup_01", "cup", "tp1", (60.0, 60.0), [3_100, 3_300])
+    single = box_track("tp-single", "sponge_01", "sponge", "tp1", (80.0, 80.0), [6_000])
+    late = box_track("tp-late", "mop_01", "mop", "tp1", (90.0, 90.0), [3_700, 3_733, 3_767])
+    scattered = [
+        box_track(f"tp-dot-{k}", f"dot_{k}", "cup", "tp1", (20.0 + 10 * k, 20.0), [9_000 + 300 * k])
+        for k in range(6)
+    ]
+    labels = [*scene.labels, short, single, late, *scattered]
+    units = plan_session(scene.session, labels, policy, ontology, media=scene.media, sensor=ABSENT)
+    spatial = [u for u in units if u.group is AiGroup.SPATIAL]
+    for u in spatial:
+        undrawn = [x.label_id for x in u.targets if not _drawn_somewhere(u.frame_ms, x)]
+        assert undrawn == [], (u.window.window_key, u.frame_ms, undrawn)
+        assert len(u.frame_ms) <= policy.spatial.frames
+    planned = {x.label_id for u in spatial for x in u.targets}
+    assert {x.label_id for x in (short, single, late, *scattered)} <= planned
+    keys = {u.window.window_key for u in spatial}
+    assert any(k.endswith("|1") for k in keys)  # 프레임 4장으로 다 덮지 못한 창은 다음 창으로
+
+
+def test_spatial_keyframes_map_to_their_own_frame_on_ntsc_pts(
+    scene: Scene, policy: AiReviewPolicy, ontology: Ontology
+) -> None:
+    """29.97 fps(PTS 시각이 정수 ms가 아님): 정수 ms로 반올림된 키프레임 시각이 내림이면
+    "그 시각에 떠 있는 프레임"은 앞 프레임이다. 공간 창은 가장 가까운 프레임으로 맞춰 키프레임
+    하나짜리 트랙도 그 프레임에 그려진다."""
+    n = scene.session.duration_ms * 30 // 1001
+    pts = PtsIndex(Fraction(1, 30_000), np.arange(n, dtype=np.int64) * 1001, np.ones(n, dtype=bool))
+    kf = round(181 * 1001 / 30)  # 6039.43 → 6039 (내림)
+    assert pts.frame_at(kf) == 180 and pts.nearest(kf) == 181
+    single = box_track("tp-ntsc", "sponge_01", "sponge", "tp1", (80.0, 80.0), [kf])
+    media = dict(scene.media) | {"tp1": StreamMedia(pts, RENDER["tp1"])}
+    units = plan_session(
+        scene.session, [*scene.labels, single], policy, ontology, media=media, sensor=ABSENT
+    )
+    [unit] = [u for u in units if "tp-ntsc" in {x.label_id for x in u.targets}]
+    assert kf in unit.frame_ms and _drawn_somewhere(unit.frame_ms, single)
+
+
+def test_kinds_only_choose_targets_not_requests(
+    scene: Scene, policy: AiReviewPolicy, ontology: Ontology
+) -> None:
+    """`kinds`(digest 밖)는 대상만 고른다. 바꿔도 고정 블록·응답 스키마가 같고, 남은 단위의 키와
+    가변 글이 같다 (맥락은 판정할 수 있는 종류 전체). 판정 버전도 같으므로 같은 키 = 같은 요청이어야
+    한다."""
+    temporal = policy.kinds.temporal
+    no_state = with_policy(policy, kinds={"temporal": [k for k in temporal if k != "object_state"]})
+    no_gap = with_policy(policy, kinds={"temporal": [k for k in temporal if k != "gap"]})
+    for other in (no_state, no_gap):
+        assert other.verdict_version == policy.verdict_version
+        for group in AiGroup:
+            assert ontology_text(ontology, group, other) == ontology_text(ontology, group, policy)
+            assert response_schema(ontology, group, other) == response_schema(
+                ontology, group, policy
+            )
+    base = plan_session(scene.session, scene.labels, policy, ontology, media=scene.media,
+                        sensor=ABSENT)  # fmt: skip
+    same = plan_session(scene.session, scene.labels, no_state, ontology, media=scene.media,
+                        sensor=ABSENT)  # fmt: skip
+    assert [u.unit_id for u in same] == [u.unit_id for u in base]  # 장면에 객체 상태가 없다
+    after = {
+        u.unit_id: u
+        for u in plan_session(
+            scene.session, scene.labels, no_gap, ontology, media=scene.media, sensor=ABSENT
+        )
+    }
+    kept = [u for u in base if not any(x.kind == "gap" for x in u.targets)]
+    assert kept and all(u.unit_id in after for u in kept)
+    for u in kept:
+        positions = range(len(u.targets))
+        images = images_for(u, policy)
+        assert unit_text(u, images, positions, ontology, ABSENT) == unit_text(
+            after[u.unit_id], images, positions, ontology, ABSENT
+        )

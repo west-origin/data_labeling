@@ -5,7 +5,8 @@
   (`B3`, `H1 R`, `P2`)를 그린다. 블러 모자이크(사각 픽셀 덩어리)와 모양이 다르다. 손 키포인트는 얇은
   골격선, 전신은 점과 외접 상자.
 - `crop`: 작은 박스 주변을 잘라 정사각형으로 키운다 (원 해상도 프레임에서).
-- `box_at`, `points_at`: 키프레임 선형 보간 (outside를 지킨다).
+- 상자·점 보간은 `dlp_aireview.tracks`(`box_at`, `points_at`)를 쓴다 (계획이 프레임을 고를 때와 같은
+  규칙).
 - `render_unit_images`: 단위의 원 해상도 프레임 → 보낼 이미지(`PromptImage`) 목록.
 
 시간 라벨은 그리지 않는다 (VLM이 화면 글자에 끌리지 않게, 같은 창의 분할 요청끼리 이미지 캐시가
@@ -24,13 +25,13 @@ from numpy.typing import NDArray
 from dlp_aireview.plan import PlannedUnit
 from dlp_aireview.policy import AiReviewPolicy
 from dlp_aireview.prompt import PromptImage, mark_tag
+from dlp_aireview.tracks import Box, box_at, points_at
 from dlp_media.frames import fit_size
 from dlp_models.vlm import encode_jpeg
 from dlp_schema.aireview import AiGroup
-from dlp_schema.labels import BoxKeyframe, BoxTrackPayload, Hand, KeypointTrackPayload, LabelRecord
+from dlp_schema.labels import BoxTrackPayload, Hand, KeypointTrackPayload, LabelRecord
 
 Image = NDArray[np.uint8]
-Box = tuple[float, float, float, float]
 # 표식 색 (RGB): 밝은 안쪽 선과 검은 바깥선
 _MARK = (255, 230, 0)
 _OUTLINE = (0, 0, 0)
@@ -118,38 +119,6 @@ def crop(img: Image, box: Box, side: int) -> Image:
     return out
 
 
-def box_at(keyframes: Sequence[BoxKeyframe], t_ms: float) -> Box | None:
-    """시각 t의 상자 (앞뒤 키프레임 선형 보간). 첫 키프레임 전·마지막 뒤·outside 구간이면 None."""
-    if not keyframes or t_ms < keyframes[0].t_ms or t_ms > keyframes[-1].t_ms:
-        return None
-    prev = max((k for k in keyframes if k.t_ms <= t_ms), key=lambda k: k.t_ms)
-    if prev.outside:
-        return None
-    nxt = next((k for k in keyframes if k.t_ms > t_ms), None)
-    if nxt is None or nxt.outside or nxt.t_ms == prev.t_ms:
-        return prev.x, prev.y, prev.w, prev.h
-    a = (t_ms - prev.t_ms) / (nxt.t_ms - prev.t_ms)
-    return (
-        prev.x + a * (nxt.x - prev.x), prev.y + a * (nxt.y - prev.y),
-        prev.w + a * (nxt.w - prev.w), prev.h + a * (nxt.h - prev.h),
-    )  # fmt: skip
-
-
-def points_at(p: KeypointTrackPayload, t_ms: float) -> list[tuple[float, float]] | None:
-    """시각 t의 보이는 키포인트 (앞뒤 키프레임 선형 보간). 구간 밖이면 None."""
-    kfs = p.keyframes
-    if t_ms < kfs[0].t_ms or t_ms > kfs[-1].t_ms:
-        return None
-    prev = max((k for k in kfs if k.t_ms <= t_ms), key=lambda k: k.t_ms)
-    nxt = next((k for k in kfs if k.t_ms > t_ms), prev)
-    a = 0.0 if nxt.t_ms == prev.t_ms else (t_ms - prev.t_ms) / (nxt.t_ms - prev.t_ms)
-    return [
-        (q.x + a * (r.x - q.x), q.y + a * (r.y - q.y))
-        for q, r in zip(prev.points, nxt.points, strict=True)
-        if q.visibility > 0
-    ]
-
-
 def _scaled(box: Box | None, sx: float, sy: float) -> Box | None:
     """원 좌표 상자 → 보낸 프레임 좌표."""
     return None if box is None else (box[0] * sx, box[1] * sy, box[2] * sx, box[3] * sy)
@@ -176,9 +145,11 @@ def render_unit_images(
 ) -> tuple[PromptImage, ...]:
     """단위의 원 해상도 프레임(RGB, `unit.frame_idx` 순) → 보낼 이미지 (프레임 F0… 다음 확대 조각).
 
-    프레임은 긴 변 상한·정렬 단위(`image.align_px`)로 줄인다. temporal은 시각 표기만, spatial은 시각
-    표기 + 대상 표식을 그린다. 작은 박스(보낸 프레임에서 짧은 변 < `crops.min_box_side_px`)는 원
-    해상도에서 확대 조각을 만든다 (요청당 `crops.max`개, 대상마다 처음 보이는 프레임에서 하나).
+    프레임은 긴 변 상한·정렬 단위(`image.align_px`)로 줄인다. temporal은 시각 표기만
+    (`temporal.timestamp_overlay`가 켜졌을 때), spatial은 시각 표기 + 대상 표식을 그린다. 시각
+    표기의 F#는 단위 프레임 번호(`PromptImage.frame_no`)다. 작은 박스(보낸 프레임에서 짧은 변 <
+    `crops.min_box_side_px`)는 원 해상도에서 확대 조각을 만든다 (요청당 `crops.max`개, 대상마다 처음
+    보이는 프레임에서 하나).
 
     Raises:
         ValueError: 프레임 수가 단위 프레임 수와 다를 때.
@@ -212,9 +183,11 @@ def render_unit_images(
                     cropped.add(n)
                     jpeg = encode_jpeg(crop(img, raw, cp.side_px), quality)
                     crops.append(
-                        PromptImage(jpeg, t_ms, cp.side_px, cp.side_px, crop_of=k, label=tag)
+                        PromptImage(
+                            jpeg, t_ms, cp.side_px, cp.side_px, k, (w0, h0), crop=True, label=tag
+                        )
                     )
         if policy.temporal.timestamp_overlay or spatial:
             small = draw_stamp(small, f"F{k} +{(t_ms - start) / 1000:.1f}s")
-        images.append(PromptImage(encode_jpeg(small, quality), t_ms, w, h))
+        images.append(PromptImage(encode_jpeg(small, quality), t_ms, w, h, k, (w0, h0)))
     return (*images, *crops)

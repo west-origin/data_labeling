@@ -3,11 +3,12 @@
 # 쓰는 명령: dlp aireview run|status|show|estimate|bench|probe|eval (WP17.3~17.8에서 연결).
 #
 # 판정 버전 = aireview-<digest>+vlm-<backend.model>.
-# digest는 selection·kinds·pending·server·gate·estimate를 뺀 파싱값의 sha256 앞 12자다
-# (그 절들은 어느 단위를 묻는지·어떻게 돌리는지만 바꾼다. 대상 집합은 단위 키가 담는다).
-# 그 밖의 값을 바꾸면 새 버전이 되어 모든 단위를 다시 판정한다. 예전 값으로 되돌리면 그 버전의 기존
-# 단위를 다시 쓴다. 판정은 라벨이 아니라서 이전 버전 행은 지우지 않고 표시 허용 버전으로 거른다.
-# 주석·서식은 해시에 영향이 없다.
+# digest는 selection·kinds·pending·server·gate·estimate를 뺀 파싱값의 sha256 앞 12자다.
+# 그 절들은 어느 대상을 묻는지·어떻게 돌리는지만 바꾸고 요청 본문(프롬프트·응답 스키마·맥락)은 바꾸지
+# 않는다 (프롬프트·스키마는 kinds가 아니라 판정할 수 있는 종류 전체 기준이다). 대상 집합은 단위 키가
+# 담는다. 그 밖의 값을 바꾸면 새 버전이 되어 모든 단위를 다시 판정한다. 예전 값으로 되돌리면 그 버전의
+# 기존 단위를 다시 쓴다. 판정은 라벨이 아니라서 이전 버전 행은 지우지 않고 표시 허용 버전으로 거른다.
+# 주석·서식은 해시에 영향이 없다. 프롬프트 틀 문장(코드)을 바꾸면 prompt_version을 올린다.
 #
 # 운영 모드(검수 화면 표시)는 config/policies/review.yaml ai_review.mode에서 정한다 (WP17.6).
 # 코드 기본값 off, 장비 도착 전 저장소 설정값 advisory. 파일럿(WP17.9) 뒤 required로 바꾸면
@@ -31,22 +32,29 @@ backend:
   #   라이선스: config/models.yaml external (Hugging Face 모델 카드 cardData.license = apache-2.0 확인,
   #   학습 데이터 미공개 → commercial: review).
   model: Qwen/Qwen3-VL-8B-Instruct
-  served_name: null               # 서버가 보고하는 모델 이름이 다르면 (vLLM --served-model-name 등)
+  # 서버에 등록된 모델 이름이 model과 다르면 그 이름 (vLLM --served-model-name, llama.cpp 별칭 등).
+  # 값이 있으면 요청 본문 model과 응답 model 대조 모두 이 이름을 쓴다. model은 라이선스·버전 기록용이다.
+  served_name: null
   fingerprint: vllm-bf16          # 엔진·양자화·가중치 revision. 다르면 버전이 달라 한 실행에 섞지 않는다
   frames_as: images               # images (video 입력은 WP17.3 bench에서 비교한 뒤 추가)
   schema_enforcement: server      # server(response_format json_schema) | prompt(스키마를 프롬프트에 싣는다)
   schema_profile: portable        # portable | full (probe가 서버 지원을 확인한 뒤에만 full)
   max_tokens: 1024                # 응답 생성 토큰 상한
 
-kinds:                            # 해시 제외 (대상 집합은 단위 키에 들어간다)
+# 해시 제외. 판정 대상만 고른다 (대상 집합은 단위 키에 들어간다). 프롬프트 고정 블록·응답 스키마·맥락은
+# 이 목록과 무관하게 판정할 수 있는 종류 전체를 쓴다 (목록을 줄여도 남은 단위의 요청이 그대로다).
+kinds:
   temporal: [action, gap, hand_state, event, segment, object_state]   # Label Studio로 검수하는 종류
   spatial: [box_track, keypoint_track]                                 # CVAT로 검수하는 종류
-  # 판정 대상 출처. 장갑 센서 출처 라벨(sensor)은 판정하지 않는다 (사용자 결정, ADR 0040).
+  # 판정 대상 출처 (model만 허용). 장갑 센서에서 나온 라벨은 이 값과 별개로 늘 뺀다 (사용자 결정,
+  # ADR 0040 결정 5, dlp_aireview.plan.glove_derived): 센서 출처 라벨, 그리고 프리라벨 접촉 단계의
+  # 장갑만·장갑+영상 융합 접촉(자동 손 상태 중 증거 OBSERVED). 영상만 잡은 접촉(INFERRED)은 판정한다.
   sources: [model]
 
 selection:                        # 해시 제외
   mode: all                       # all(전량, 기본) | flagged(지적 단위 + 감사 표본)
-  # flagged에서 고르는 우선순위 사유 (dlp_schema.review.ReviewReason 값, CLI가 flag_unit으로 계산)
+  # flagged에서 고르는 우선순위 사유 (dlp_schema.review.ReviewReason 값, CLI가 flag_unit으로 계산).
+  # 모르는 값과 AI 판정 사유(ai_*)는 로드 오류다
   reasons: [low_confidence, contact_mismatch, model_disagreement, new_object]
   unknown_gaps: true              # flagged: 미상(unknown) 사이 구간이 든 단위도 고른다
   audit_ratio: 0.05               # flagged: 지적이 없는 단위 중 이 비율을 감사 표본으로 (0~1)
@@ -71,7 +79,9 @@ temporal:
   long_frames: 8                  # temporal_long 프레임 수 (구간 전체에 고르게)
   long_max_side_px: 336           # temporal_long 프레임 긴 변 상한
   long_max_span_ms: 600000        # 이보다 긴 상위 구간(segment)은 판정하지 않는다 (작업 전체 등)
-  timestamp_overlay: true         # 프레임 모서리에 상대 시각 표기 (라벨은 그리지 않는다)
+  # 프레임 모서리에 F#·상대 시각 표기 (라벨은 그리지 않는다). false면 고정 블록이 "글자 없는 프레임"이라고
+  # 알리고 시각은 프레임 지도로만 준다 (공간 프레임은 늘 표기한다)
+  timestamp_overlay: true
 
 # 공간 라벨 (영상 스트림마다 그 블러본, 그 스트림 PTS ms)
 spatial:
@@ -91,13 +101,19 @@ image: {jpeg_quality: 85, align_px: 32}   # 크기 정렬 단위: Qwen3-VL 32 (p
 response:
   reason_max_chars: 60            # 이유 글자 상한 (계약 상한 60)
   max_problems: 3                 # 항목당 문제 유형 상한
-  max_findings: 0                 # 누락 발견 (0 = 끔. 파일럿에서 정한다)
+  max_findings: 0                 # 누락 발견 (0 = 끔. 파일럿에서 정한다, 표시는 F-AIR-08)
+  # 공간 누락 후보 상자가 같은 클래스 트랙 상자와 이 IoU 이상 겹치면 버린다 (이미 라벨이 있다).
+  # 시간 누락 후보는 같은 이벤트 유형 라벨과 구간이 겹치면 버린다
+  finding_overlap_iou: 0.3
   # 경계 이동은 제안하지 않는다 (VLM은 경계를 정하지 않는다). 종류 변경(action↔gap) 제안은 받는다.
   # 삭제 제안은 이 종류만 (action·gap·hand_state는 손별 타임라인 공백 0이라 삭제 불가).
   suggest: {kind_change: true, delete_kinds: [event, box_track, keypoint_track]}
   max_retries: 1                  # 파싱 실패 또는 위반 비율이 높을 때 위반 목록을 붙여 다시 묻는 횟수
   retry_invalid_ratio: 0.5        # (번호 위반 + 항목 위반) / 대상 수가 이보다 크면 다시 묻는다
   reason_banned_terms: [얼굴, 이름, 나이, 머리카락, 피부, 문신, 번호판, 주소]
+  # 문맥 초과: 단위 안에서 프레임 절반 → 대상 절반으로 나누는 횟수 (0~2). 끝내 실패한 대상은 미응답이라
+  # 결과를 바꾸므로 해시에 들어간다
+  max_context_splits: 2
 
 estimate: {ok_tokens: 2, item_tokens: 60}   # 해시 제외. 예상 출력 토큰 (ok 번호, 지적 항목)
 # 해시 제외. 골든 게이트 (dlp aireview eval --gate). 실패해도 지금은 경고만 한다 (차단은 파일럿 뒤 결정).
@@ -109,11 +125,10 @@ server:                           # 해시 제외 (결과에 영향 없음)
   allow_external: false           # 외부 API(Claude 등)는 쓰지 않는다. true는 로드 오류 (별도 ADR 필요)
   concurrency_per_endpoint: 32    # 엔드포인트마다 동시 요청
   timeout_s: 120
-  backoff_s: [2, 10, 30]          # 서버 장애 뒤 대기 (429는 Retry-After와 큰 쪽)
+  backoff_s: [2, 10, 30]          # 서버 장애 뒤 대기 (429는 Retry-After와 큰 쪽, 이 목록의 최댓값까지만)
   breaker_failures: 5             # 엔드포인트가 이만큼 연속 실패하면 차단기를 연다
   breaker_cooldown_s: 60
   abort_after_s: 900              # 모든 엔드포인트가 이만큼 넘게 차단되면 중단 (종료 3)
-  max_context_splits: 2           # 문맥 초과: 프레임 절반 → 대상 절반 (단위 안에서)
   commit_every: 50
   commit_interval_s: 5
   render_check_interval_s: 60     # 실행 중 렌더 해시 재확인 주기

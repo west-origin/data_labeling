@@ -1,0 +1,206 @@
+{
+ "additionalProperties": false,
+ "properties": {
+  "items": {
+   "items": {
+    "additionalProperties": false,
+    "properties": {
+     "c": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "f": {
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "i": {
+      "type": "integer"
+     },
+     "p": {
+      "items": {
+       "enum": [
+        "box_misaligned",
+        "false_positive",
+        "hand_side_swapped",
+        "identity_switch",
+        "insufficient_frames",
+        "keypoint_misplaced",
+        "not_visible",
+        "other",
+        "track_drift",
+        "wrong_class"
+       ]
+      },
+      "maxItems": 3,
+      "type": "array"
+     },
+     "r": {
+      "type": "string"
+     },
+     "s": {
+      "anyOf": [
+       {
+        "type": "null"
+       },
+       {
+        "additionalProperties": false,
+        "properties": {
+         "class_id": {
+          "enum": [
+           "bathtub",
+           "bed",
+           "bed_rail",
+           "bedsheet",
+           "broom",
+           "brush",
+           "bucket",
+           "clothing",
+           "cup",
+           "diaper",
+           "door",
+           "drawer",
+           "dustpan",
+           "floor",
+           "glove",
+           "mirror",
+           "mop",
+           "person",
+           "pillow",
+           "rag",
+           "sink",
+           "sponge",
+           "spray_bottle",
+           "table",
+           "toilet",
+           "toilet_brush",
+           "towel",
+           "trash_bag",
+           "trash_bin",
+           "wall",
+           null
+          ]
+         },
+         "delete": {
+          "type": "boolean"
+         },
+         "hand": {
+          "enum": [
+           "left",
+           "right",
+           null
+          ]
+         }
+        },
+        "required": [
+         "class_id",
+         "hand",
+         "delete"
+        ],
+        "type": "object"
+       }
+      ]
+     },
+     "v": {
+      "enum": [
+       "suspect",
+       "wrong",
+       "unsure"
+      ]
+     }
+    },
+    "required": [
+     "i",
+     "v",
+     "p",
+     "r",
+     "c",
+     "f",
+     "s"
+    ],
+    "type": "object"
+   },
+   "maxItems": 12,
+   "type": "array"
+  },
+  "missing": {
+   "items": {
+    "additionalProperties": false,
+    "properties": {
+     "box": {
+      "items": {
+       "type": "integer"
+      },
+      "maxItems": 4,
+      "type": "array"
+     },
+     "class_id": {
+      "enum": [
+       "bathtub",
+       "bed",
+       "bed_rail",
+       "bedsheet",
+       "broom",
+       "brush",
+       "bucket",
+       "clothing",
+       "cup",
+       "diaper",
+       "door",
+       "drawer",
+       "dustpan",
+       "floor",
+       "glove",
+       "mirror",
+       "mop",
+       "person",
+       "pillow",
+       "rag",
+       "sink",
+       "sponge",
+       "spray_bottle",
+       "table",
+       "toilet",
+       "toilet_brush",
+       "towel",
+       "trash_bag",
+       "trash_bin",
+       "wall"
+      ]
+     },
+     "f": {
+      "type": "integer"
+     },
+     "r": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "class_id",
+     "f",
+     "box",
+     "r"
+    ],
+    "type": "object"
+   },
+   "maxItems": 0,
+   "type": "array"
+  },
+  "ok": {
+   "items": {
+    "type": "integer"
+   },
+   "maxItems": 12,
+   "type": "array"
+  }
+ },
+ "required": [
+  "ok",
+  "items",
+  "missing"
+ ],
+ "type": "object"
+}

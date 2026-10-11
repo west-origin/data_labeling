@@ -47,7 +47,8 @@ class JudgeRequest:
         max_tokens: 생성 토큰 상한.
         targets: 이 요청의 대상 라벨 (번호 순, stub용).
         entities: 창 개체표 (개체 ID, 클래스) (stub용).
-        frame_ms: 이 요청의 프레임 시각 (F# 순, stub용).
+        frame_nos: 이 요청에 보낸 프레임의 단위 프레임 번호 F# (보낸 순서, stub용).
+        frame_ms: 그 프레임들의 시각 (frame_nos 순, stub용).
     """
 
     unit_id: str
@@ -60,6 +61,7 @@ class JudgeRequest:
     max_tokens: int
     targets: tuple[LabelRecord, ...]
     entities: tuple[tuple[str, str | None], ...]
+    frame_nos: tuple[int, ...]
     frame_ms: tuple[int, ...]
 
 
@@ -135,7 +137,10 @@ def chat_request(request: JudgeRequest) -> ChatRequest:
 class OpenAICompatibleJudge:
     """사내 OpenAI 호환 서버 하나로 판정한다 (`JudgeBackend` 구현).
 
-    응답 `model`이 정책 모델(`served_name`, 없으면 `model`)과 다르면 `VlmRequestError`다 (I7).
+    요청 본문의 `model`은 서버에 등록된 이름(`backend.served_name`, 없으면 `backend.model`)이다.
+    vLLM은 `--served-model-name`에 준 이름만 받는다. 응답 `model`이 그 이름과 다르면
+    `VlmRequestError`다 (I7). `backend.model`은 라이선스 검사(`make licenses`)와 판정 버전에 쓰는
+    정책 모델 이름이다.
 
     TODO(real-model): 실제 VLM 서버(DGX Spark의 vLLM, OpenAI 호환 구조화 출력)에서 아직 검증하지
       않았다. 요청 형식·오류 분류만 MockTransport와 가짜 서버로 테스트한다. WP17.3 probe·bench로
@@ -169,7 +174,7 @@ class OpenAICompatibleJudge:
         )
         self.chat = OpenAICompatibleChat(
             base_url,
-            policy.backend.model,
+            policy.served_model,
             timeout_s=policy.server.timeout_s,
             api_key=api_key,
             expected_model=policy.served_model,

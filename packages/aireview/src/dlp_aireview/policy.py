@@ -3,7 +3,12 @@
 - `AiReviewPolicy`: 최상위. `digest`(파싱값 해시 12자)와 `verdict_version`
   (`aireview-<digest>+vlm-<model>`)이 판정 단위 키와 기록에 들어간다. `selection`·`kinds`·
   `pending`·`server`·`gate`·`estimate`는 "어느 단위를 묻나"나 "어떻게 돌리나"만 바꾸므로 digest에서
-  뺀다 (대상 집합은 단위 키가 담는다).
+  뺀다 (대상 집합은 단위 키가 담는다). 그래서 이 절들은 요청 본문을 바꾸면 안 된다: 프롬프트 고정
+  블록·응답 스키마·맥락은 `kinds`가 아니라 판정할 수 있는 종류 전체(`TEMPORAL_KINDS`,
+  `SPATIAL_KINDS`) 기준이고, 결과를 바꾸는 문맥 초과 분할 횟수는
+  `response.max_context_splits`(해시)에 둔다. 프롬프트 틀 문장은 정책 값이 아니라
+  `PROMPT_VERSION`으로 버전에 들어간다 (틀을 바꾸면 올린다, `packages/aireview/tests/golden/`의
+  골든 파일이 틀 바이트를 고정한다).
 - 절별 모델: `BackendPolicy`, `KindsPolicy`, `SelectionPolicy`, `PendingPolicy`, `TemporalPolicy`,
   `SpatialPolicy`, `CropPolicy`, `SensorPolicy`, `ImagePolicy`, `ResponsePolicy`, `SuggestPolicy`,
   `EstimatePolicy`, `GatePolicy`, `ServerPolicy`.
@@ -26,17 +31,28 @@ from pydantic import Field, model_validator
 
 from dlp_schema.aireview import REASON_MAX
 from dlp_schema.common import Contract
+from dlp_schema.review import ReviewReason
 
-# 프롬프트 틀 버전. dlp_aireview.prompt의 고정 문장을 바꾸면 올리고 aireview.yaml
-# prompt_version도 같이 올린다 (값이 digest에 들어가 판정 버전이 바뀐다).
+# 프롬프트 틀 버전. dlp_aireview.prompt·schema의 고정 문장·스키마 모양을 바꾸면 올리고 aireview.yaml
+# prompt_version도 같이 올린다 (값이 digest에 들어가 판정 버전이 바뀐다). 틀 바이트는
+# packages/aireview/tests/golden/의 골든 파일이 고정한다 (바뀌면 테스트가 이 절차를 알린다).
 PROMPT_VERSION = 1
 # 판정할 수 있는 종류 (검수 도구 화면이 있는 종류). 블러 트랙은 넣을 수 없다 (I2).
 TEMPORAL_KINDS = ("action", "gap", "hand_state", "event", "segment", "object_state")
 SPATIAL_KINDS = ("box_track", "keypoint_track")
 # 삭제 제안을 받을 수 있는 종류 (행동·사이 구간·손 상태는 손별 타임라인 공백 0이라 삭제 불가)
 DELETABLE_KINDS = ("event", "box_track", "keypoint_track")
-# digest에서 빼는 절
+# digest에서 빼는 절 (요청 본문·결과를 바꾸지 않는 절만)
 _NOT_HASHED = {"selection", "kinds", "pending", "server", "gate", "estimate"}
+# flagged 선택에 쓸 수 없는 사유: AI 판정 자신이 만든 사유 (판정이 다음 판정의 대상을 고르는 순환)
+_AI_REASONS = frozenset(
+    {
+        ReviewReason.AI_WRONG,
+        ReviewReason.AI_SUSPECT,
+        ReviewReason.AI_UNSURE,
+        ReviewReason.AI_MISSING,
+    }
+)
 
 
 class BackendPolicy(Contract):
@@ -46,7 +62,8 @@ class BackendPolicy(Contract):
     kind: Literal["openai_compatible"]
     # 정책 모델 (config/models.yaml external 이름, make licenses가 검사)
     model: str = Field(min_length=1)
-    # 서버가 보고하는 모델 이름이 다르면 그 이름 (없으면 model과 같아야 한다)
+    # 서버에 등록된 모델 이름이 model과 다르면 그 이름 (vLLM --served-model-name 등). 있으면 요청
+    # 본문 model과 응답 model 대조 모두 이 이름을 쓴다 (없으면 model)
     served_name: str | None = None
     # 엔진·양자화·가중치 revision. 다르면 버전이 달라진다
     fingerprint: str = Field(min_length=1)
@@ -61,11 +78,15 @@ class BackendPolicy(Contract):
 
 
 class KindsPolicy(Contract):
-    """`kinds`: 판정할 라벨 종류와 출처 (digest 제외)."""
+    """`kinds`: 판정할 라벨 종류와 출처 (digest 제외).
+
+    대상만 고른다. 프롬프트·응답 스키마·맥락은 이 값과 무관하다 (모듈 docstring).
+    """
 
     temporal: tuple[str, ...]
     spatial: tuple[str, ...]
-    # 판정 대상 출처. 사람 라벨은 판정하지 않고, 장갑 센서 출처는 판정에서 뺀다 (결정, ADR 0040)
+    # 판정 대상 출처. 사람 라벨은 판정하지 않는다. 장갑 센서에서 나온 라벨(센서 출처, 그리고 자동
+    # 손 상태 중 장갑 근거 OBSERVED)은 이 값과 별개로 늘 뺀다 (결정, `plan.glove_derived`, ADR 0040)
     sources: tuple[Literal["model"], ...] = Field(min_length=1)
 
     @model_validator(mode="after")
@@ -85,13 +106,22 @@ class SelectionPolicy(Contract):
     """`selection`: 어느 단위를 묻나 (digest 제외)."""
 
     mode: Literal["all", "flagged"]
-    # flagged에서 고르는 우선순위 사유 (ReviewReason 값)
-    reasons: tuple[str, ...] = ()
+    # flagged에서 고르는 우선순위 사유 (`ReviewReason` 값, 모르는 값은 로드 오류). AI 판정 사유
+    # (ai_*)는 쓸 수 없다 (판정이 다음 판정의 대상을 고르는 순환)
+    reasons: tuple[ReviewReason, ...] = ()
     # flagged: 미상 사이 구간이 든 단위도 고른다
     unknown_gaps: bool = True
     # flagged: 지적 없는 단위 중 감사 표본 비율
     audit_ratio: float = Field(ge=0, le=1)
     seed: int = 0
+
+    @model_validator(mode="after")
+    def _check(self) -> SelectionPolicy:
+        """AI 판정 사유는 선택 사유가 될 수 없다. Raises: ValueError."""
+        bad = sorted(r.value for r in set(self.reasons) & _AI_REASONS)
+        if bad:
+            raise ValueError(f"AI 판정 사유는 selection.reasons에 쓸 수 없습니다: {bad}")
+        return self
 
 
 class PendingPolicy(Contract):
@@ -183,18 +213,24 @@ class SuggestPolicy(Contract):
 
 
 class ResponsePolicy(Contract):
-    """`response`: 응답 형식과 재검사."""
+    """`response`: 응답 형식과 재검사 (모두 digest에 들어간다)."""
 
     reason_max_chars: int = Field(ge=2, le=REASON_MAX)
     max_problems: int = Field(ge=1, le=3)
     # 누락 발견 상한 (0 = 끔)
     max_findings: int = Field(ge=0)
+    # 공간 누락 후보 상자가 같은 클래스 트랙 상자와 이 IoU 이상 겹치면 이미 라벨이 있는 것으로 보고
+    # 버린다
+    finding_overlap_iou: float = Field(gt=0, le=1)
     suggest: SuggestPolicy
     max_retries: int = Field(ge=0)
     # (번호 위반 + 항목 위반) / 대상 수가 이보다 크면 위반 목록을 붙여 다시 묻는다
     retry_invalid_ratio: float = Field(ge=0, le=1)
     # 이유에 쓰면 고정 문장으로 바꾸는 낱말 (사람의 외모·신원)
     reason_banned_terms: tuple[str, ...] = ()
+    # 문맥 초과 때 단위 안에서 나누는 횟수 (프레임 절반 → 대상 절반). 끝내 실패한 대상은 미응답이라
+    # 결과를 바꾸므로 digest에 들어간다 (바꾸면 그 단위들을 다시 판정한다)
+    max_context_splits: int = Field(ge=0, le=2)
 
 
 class EstimatePolicy(Contract):
@@ -224,7 +260,6 @@ class ServerPolicy(Contract):
     breaker_failures: int = Field(ge=1)
     breaker_cooldown_s: float = Field(ge=0)
     abort_after_s: float = Field(gt=0)
-    max_context_splits: int = Field(ge=0, le=2)
     commit_every: int = Field(ge=1)
     commit_interval_s: float = Field(gt=0)
     render_check_interval_s: float = Field(gt=0)
@@ -281,7 +316,8 @@ class AiReviewPolicy(Contract):
 
     @property
     def served_model(self) -> str:
-        """서버 응답 `model`이 가져야 할 이름 (`served_name`, 없으면 `model`)."""
+        """서버에 등록된 모델 이름 (`served_name`, 없으면 `model`). 요청 본문 `model`로 보내고 응답
+        `model`과 대조한다."""
         return self.backend.served_name or self.backend.model
 
 

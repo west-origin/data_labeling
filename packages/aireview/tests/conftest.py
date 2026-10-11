@@ -1,9 +1,10 @@
 """AI 1차 검수 테스트 공용 픽스처 (WP17.2).
 
 정답을 아는 합성 행동 시나리오(`dlp_fixtures.actions.generate_action_scenario`)의 라벨을 모델 출처
-(검수 전 자동 라벨)로 바꾸고, 장면 개체마다 바디캠 박스 트랙을, 3인칭 스트림에는 박스 트랙 하나를
-더한다. 블러본 PTS 인덱스는 시나리오 프레임 시각(바디캠, 정수 ms)으로 만든다. 영상·DB·서버는 쓰지
-않는다 (이미지는 단색 합성 프레임).
+(검수 전 자동 라벨)로 바꾸고 (손 상태는 영상만 잡은 접촉처럼 증거 INFERRED로 둔다. 장갑 근거 접촉
+(OBSERVED)은 판정 대상이 아니다, `plan.glove_derived`), 장면 개체마다 바디캠 박스 트랙을, 3인칭
+스트림에는 박스 트랙 하나를 더한다. 블러본 PTS 인덱스는 시나리오 프레임 시각(바디캠, 정수 ms)으로
+만든다. 영상·DB·서버는 쓰지 않는다 (이미지는 단색 합성 프레임).
 """
 
 from __future__ import annotations
@@ -22,7 +23,15 @@ from dlp_aireview.prompt import PromptImage
 from dlp_fixtures.actions import ENTITIES, generate_action_scenario
 from dlp_media.pts import PtsIndex
 from dlp_schema import repo_root
-from dlp_schema.labels import BoxKeyframe, BoxTrackPayload, LabelRecord, Provenance, Source
+from dlp_schema.labels import (
+    BoxKeyframe,
+    BoxTrackPayload,
+    Evidence,
+    HandStatePayload,
+    LabelRecord,
+    Provenance,
+    Source,
+)
 from dlp_schema.ontology import Ontology, load_ontology
 from dlp_schema.session import Session, StreamKind, SyncMethod
 from dlp_schema.testing import FIXED_TIME, make_session
@@ -34,12 +43,14 @@ SIZE = (320, 240)
 
 
 def as_model(x: LabelRecord, version: str = "prelabel-test-0123") -> LabelRecord:
-    """출처를 모델(검수 전)로 바꾼 사본."""
+    """출처를 모델(검수 전)로 바꾼 사본. 손 상태는 영상 근거 접촉(INFERRED)으로 둔다."""
+    evidence = Evidence.INFERRED if isinstance(x.payload, HandStatePayload) else x.evidence
     return x.model_copy(
         update={
             "session_id": SID,
             "provenance": Provenance(source=Source.MODEL, model_version=version),
             "confidence": 0.8,
+            "evidence": evidence,
         }
     )
 

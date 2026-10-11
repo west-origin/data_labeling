@@ -1,8 +1,8 @@
 """판정 응답 JSON Schema와 라벨 종류별 문제 유형·제안 필드 (WP17.2, ADR 0040 3.1).
 
-응답 스키마는 온톨로지 버전·묶음·정책이 같으면 같은 사전이다. 개체·라벨은 창 지역 정수 번호로
-가리키므로 세션·창과 무관하다 (서버가 문법(xgrammar, GBNF)을 다시 컴파일하지 않는다). 시간 묶음
-(temporal, temporal_long)은 같은 스키마를 쓰고, 공간 묶음은 따로다.
+응답 스키마는 온톨로지 버전·묶음·정책(digest에 드는 절)이 같으면 같은 사전이다. 개체·라벨은 창 지역
+정수 번호로 가리키므로 세션·창과 무관하다 (서버가 문법(xgrammar, GBNF)을 다시 컴파일하지 않는다).
+시간 묶음 (temporal, temporal_long)은 같은 스키마를 쓰고, 공간 묶음은 따로다.
 
 응답 모양 (키는 모두 필수, 값이 없을 수 있으면 null)
     {"ok": [번호], "items": [{"i", "v", "p", "r", "c", "f", "s"}], "missing": [...]}
@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from dlp_aireview.policy import AiReviewPolicy
+from dlp_aireview.policy import SPATIAL_KINDS, TEMPORAL_KINDS, AiReviewPolicy
 from dlp_schema.aireview import AiGroup, AiProblem
 from dlp_schema.ontology import Ontology, VerbLevel
 
@@ -76,9 +76,13 @@ SUGGEST_FIELDS_BY_KIND: dict[str, frozenset[str]] = {
 }
 
 
-def group_problems(group: AiGroup, policy: AiReviewPolicy) -> tuple[AiProblem, ...]:
-    """묶음이 판정하는 종류들의 문제 유형 합집합 (정렬, 공통 포함)."""
-    kinds = policy.kinds.spatial if group is AiGroup.SPATIAL else policy.kinds.temporal
+def group_problems(group: AiGroup) -> tuple[AiProblem, ...]:
+    """묶음이 판정할 수 있는 종류 전체의 문제 유형 합집합 (정렬, 공통 포함).
+
+    정책 `kinds`(digest 제외)가 아니라 `TEMPORAL_KINDS`·`SPATIAL_KINDS`를 쓴다: kinds를 바꿔도 응답
+    스키마가 그대로여야 판정 버전과 요청 본문이 어긋나지 않는다.
+    """
+    kinds = SPATIAL_KINDS if group is AiGroup.SPATIAL else TEMPORAL_KINDS
     found = {p for k in kinds for p in PROBLEMS_BY_KIND[k]} | set(COMMON_PROBLEMS)
     return tuple(sorted(found, key=lambda p: p.value))
 
@@ -182,7 +186,7 @@ def response_schema(o: Ontology, group: AiGroup, policy: AiReviewPolicy) -> dict
         "p": {
             "type": "array",
             "maxItems": policy.response.max_problems,
-            "items": {"enum": [p.value for p in group_problems(group, policy)]},
+            "items": {"enum": [p.value for p in group_problems(group)]},
             **({"minItems": 1} if full else {}),
         },
         "r": {

@@ -48,7 +48,10 @@ docker compose --env-file vlm.env logs -f vlm-aireview        # 가중치 내려
 curl -s -H "Authorization: Bearer $DLP_VLM_API_KEY" http://10.0.0.11:8000/v1/models
 ```
 
-응답의 `id`가 `aireview.yaml backend.model`(또는 `served_name`)과 같아야 한다. 다르면 판정 실행이 설정
+응답의 `id`가 `aireview.yaml backend.model`과 같아야 한다 (compose는 `--served-model-name`을 모델 저장소
+이름과 같게 둔다). 서버 이름을 따로 두려면(`--served-model-name` 별칭, llama.cpp 등) 그 이름을
+`backend.served_name`에 적는다. 그러면 요청 본문의 `model`과 응답 대조 모두 그 이름을 쓴다 (vLLM은
+`--served-model-name`에 준 이름이 아닌 요청 `model`을 404로 거부한다). 다르면 판정 실행이 설정
 오류(종료 5)로 멈춘다 (I7).
 
 ### 권장 설정과 보안
@@ -70,11 +73,13 @@ curl -s -H "Authorization: Bearer $DLP_VLM_API_KEY" http://10.0.0.11:8000/v1/mod
 
 | 변수 | 쓰는 곳 | 예 |
 | --- | --- | --- |
-| `DLP_VLM_URL` | `dlp actions run` (지금), `dlp aireview` 엔드포인트가 하나일 때 (WP17.5) | `http://10.0.0.11:8001` |
-| `DLP_VLM_URLS` | `dlp aireview run`의 여러 엔드포인트 (WP17.5) | `spark-01=http://10.0.0.11:8000,spark-02=http://10.0.0.12:8000` |
+| `DLP_VLM_URL` | `dlp actions run`만 (행동 분류 서버) | `http://10.0.0.11:8001` |
+| `DLP_VLM_URLS` | `dlp aireview run`·`bench`·`probe`의 판정 서버 (하나여도 이 변수, WP17.5) | `spark-01=http://10.0.0.11:8000,spark-02=http://10.0.0.12:8000` |
 | `DLP_VLM_API_KEY` | 두 명령의 서버 API 키 | (출력·기록 금지) |
 
-주소는 `aireview.yaml server.internal_hosts`(사내 대역) 안이어야 한다 (WP17.5에서 검사).
+- `dlp aireview`는 `DLP_VLM_URL`로 대신하지 않는다. 판정 모델은 행동 분류 모델과 달라(위 구성) 행동 분류
+  서버로 보내면 늘 서버 모델 불일치(I7, 종료 5)가 난다. `DLP_VLM_URLS`도 `--vlm-url`도 없으면 종료 2다.
+- 주소는 `aireview.yaml server.internal_hosts`(사내 대역) 안이어야 한다 (WP17.5에서 검사).
 
 ## 처리량 재기와 대수 정하기 (WP17.3)
 

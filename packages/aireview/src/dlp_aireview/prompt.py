@@ -31,7 +31,7 @@ from typing import Any
 
 from dlp_aireview.plan import PlannedUnit
 from dlp_aireview.policy import PROMPT_VERSION as PROMPT_VERSION
-from dlp_aireview.policy import AiReviewPolicy
+from dlp_aireview.policy import SPATIAL_KINDS, TEMPORAL_KINDS, AiReviewPolicy
 from dlp_aireview.schema import PROBLEMS_BY_KIND, response_schema, temporal_values
 from dlp_aireview.sensors import SensorContext, contact_text
 from dlp_models.vlm import ChatImage
@@ -103,7 +103,12 @@ class PromptImage:
         image: JPEG와 sha256.
         t_ms: 원 프레임의 PTS 정수 ms.
         w, h: 보낸 크기 px.
-        crop_of: 확대 조각이면 원 프레임의 요청 안 번호(F#), 프레임이면 None.
+        frame_no: 단위 프레임 번호 F# (`unit.frame_ms`의 위치, 이미지 모서리 도장과 같다). 확대
+            조각이면 원 프레임의 번호. 문맥 초과로 프레임을 줄인 요청에서도 바꾸지 않는다 (응답의
+            f도 이 번호).
+        src_size: 원 프레임 크기 (너비, 높이) px. 공간 누락 후보의 정규화 상자를 라벨 좌표와
+            비교한다.
+        crop: 확대 조각인가.
         label: 확대 조각 설명 (예: "B3"). 프레임이면 빈 문자열.
     """
 
@@ -111,8 +116,15 @@ class PromptImage:
     t_ms: int
     w: int
     h: int
-    crop_of: int | None = None
+    frame_no: int
+    src_size: tuple[int, int]
+    crop: bool = False
     label: str = ""
+
+    @property
+    def crop_of(self) -> int | None:
+        """확대 조각이면 원 프레임 번호, 프레임이면 None."""
+        return self.frame_no if self.crop else None
 
 
 @dataclass(frozen=True)
@@ -223,15 +235,21 @@ _SPATIAL_SUGGESTION = (
 )
 _SPATIAL_MARKS = (
     "프레임의 B# 테두리는 박스 트랙, H#는 손 키포인트, P#는 전신 키포인트다. "
-    "어느 대상의 표식인지는 대상 표에 적었다."
+    "어느 대상의 표식인지는 대상 표에 적었다. "
+    "프레임 모서리의 F#과 +초가 프레임 번호와 상대 시각이다."
 )
 _TEMPORAL_SUGGESTION = (
     "제안 s의 키: kind(action↔gap 종류 변경), verb, gap_type, "
     "target·tool(개체 번호 e#의 숫자), contact_kind, grasp, body_part, event_type, "
     "severity(1~3), ref_id, value, delete(이벤트 삭제)."
 )
+# 시간 묶음 프레임 안내 (정책 temporal.timestamp_overlay에 따라 둘 중 하나, 그 값은 digest에 든다)
 _TEMPORAL_MARKS = (
     "시간 라벨은 프레임에 그리지 않았다. 프레임 모서리의 F#과 +초가 프레임 번호와 상대 시각이다."
+)
+_TEMPORAL_MARKS_PLAIN = (
+    "시간 라벨은 프레임에 그리지 않았다. 프레임에는 글자가 없다. "
+    "이미지는 프레임 지도의 F# 순서이고 상대 시각은 프레임 지도에 있다."
 )
 _ANSWER_SHAPE = (
     '응답: {"ok": [번호], "items": [{"i": 번호, "v": "suspect|wrong|unsure", "p": [문제], '
@@ -242,11 +260,12 @@ _ANSWER_SHAPE = (
 def ontology_text(o: Ontology, group: AiGroup, policy: AiReviewPolicy) -> str:
     """묶음별 고정 블록 (캐시 경계). 세션·시각·개체 ID가 없다.
 
-    시간 묶음(temporal, temporal_long)은 같은 블록을 쓴다. 스키마를 프롬프트로 강제하면 응답 JSON
-    Schema를 끝에 싣는다 (이것도 묶음·정책마다 고정).
+    시간 묶음(temporal, temporal_long)은 같은 블록을 쓴다. 문제 유형 줄은 판정할 수 있는 종류 전체
+    (`TEMPORAL_KINDS`, `SPATIAL_KINDS`)로 쓴다 (정책 `kinds`는 digest 밖이라 요청 본문을 바꾸면 안
+    된다). 스키마를 프롬프트로 강제하면 응답 JSON Schema를 끝에 싣는다 (이것도 묶음·정책마다 고정).
     """
     spatial = group is AiGroup.SPATIAL
-    kinds = policy.kinds.spatial if spatial else policy.kinds.temporal
+    kinds = SPATIAL_KINDS if spatial else TEMPORAL_KINDS
     if spatial:
         dictionary = [
             _terms("객체 클래스(class_id)", _pairs(o.objects)),
@@ -255,7 +274,8 @@ def ontology_text(o: Ontology, group: AiGroup, policy: AiReviewPolicy) -> str:
         suggestion, marks = _SPATIAL_SUGGESTION, _SPATIAL_MARKS
     else:
         dictionary = _temporal_dictionary(o)
-        suggestion, marks = _TEMPORAL_SUGGESTION, _TEMPORAL_MARKS
+        suggestion = _TEMPORAL_SUGGESTION
+        marks = _TEMPORAL_MARKS if policy.temporal.timestamp_overlay else _TEMPORAL_MARKS_PLAIN
     lines = [
         f"[온톨로지 {o.version} · {'공간' if spatial else '시간'} 라벨]",
         *dictionary,
@@ -415,16 +435,16 @@ def unit_text(
     images: Sequence[PromptImage],
     target_positions: Sequence[int],
     o: Ontology,
-    policy: AiReviewPolicy,
     sensor: SensorContext,
 ) -> str:
     """가변 글: 프레임 지도, 개체표, 센서 문장, 대상 표(#번호는 이 요청 안 순서), 맥락 표.
 
     Args:
         unit: 단위.
-        images: 이 요청에 넣는 이미지 (프레임 F0… 다음 확대 조각 C0…).
+        images: 이 요청에 넣는 이미지 (프레임 다음 확대 조각 C0…). 프레임 번호 F#는 단위 번호
+            (`PromptImage.frame_no`)라 문맥 초과로 줄인 요청에서는 건너뛴다 (F0, F2, …).
         target_positions: 이 요청이 묻는 대상의 단위 안 위치 (문맥 초과로 나눈 요청이면 일부).
-        o, policy, sensor: 온톨로지, 정책, 장갑 접촉 구간.
+        o, sensor: 온톨로지, 장갑 접촉 구간.
     """
     start, end = unit.span
     entities = {eid: k for k, (eid, _) in enumerate(unit.window.entities)}
@@ -446,7 +466,7 @@ def unit_text(
         tag = f" {mark_tag(x, pos)}" if unit.group is AiGroup.SPATIAL else ""
         row = _Row(o, start, entities, _children(x, context))
         lines.append(f"#{n}{tag} {_describe(x, row)}")
-    lines += _context_lines(unit, policy, o, entities)
+    lines += _context_lines(unit, o, entities)
     lines.append(
         f"대상 #0~#{len(chosen) - 1}를 판정해 JSON 하나만 출력한다. 맞는 대상은 ok에 번호만 넣는다."
     )
@@ -454,12 +474,12 @@ def unit_text(
 
 
 def _image_lines(images: Sequence[PromptImage], start: int) -> list[str]:
-    """프레임 지도와 확대 조각 설명."""
-    frames = [i for i in images if i.crop_of is None]
-    crops = [i for i in images if i.crop_of is not None]
-    lines = ["프레임: " + ", ".join(f"F{k} {_rel(f.t_ms, start)}" for k, f in enumerate(frames))]
+    """프레임 지도(이미지 순서, 단위 프레임 번호)와 확대 조각 설명."""
+    frames = [i for i in images if not i.crop]
+    crops = [i for i in images if i.crop]
+    lines = ["프레임: " + ", ".join(f"F{f.frame_no} {_rel(f.t_ms, start)}" for f in frames)]
     if crops:
-        pieces = ", ".join(f"C{k} = F{c.crop_of}의 {c.label}" for k, c in enumerate(crops))
+        pieces = ", ".join(f"C{k} = F{c.frame_no}의 {c.label}" for k, c in enumerate(crops))
         lines.append("확대 조각: " + pieces)
     return lines
 
@@ -480,13 +500,14 @@ def _sensor_line(
     return contact_text(sensor, unit.span)
 
 
-def _context_lines(
-    unit: PlannedUnit, policy: AiReviewPolicy, o: Ontology, entities: dict[str, int]
-) -> list[str]:
-    """시간 묶음의 맥락 표 (공간 묶음은 맥락 글을 넣지 않는다)."""
+def _context_lines(unit: PlannedUnit, o: Ontology, entities: dict[str, int]) -> list[str]:
+    """시간 묶음의 맥락 표 (공간 묶음은 맥락 글을 넣지 않는다).
+
+    맥락의 시간 종류 라벨 전부를 쓴다 (`TEMPORAL_KINDS`, 정책 `kinds`와 무관).
+    """
     if unit.group is AiGroup.SPATIAL:
         return []
-    shown = [c for c in unit.window.context if c.kind in policy.kinds.temporal]
+    shown = [c for c in unit.window.context if c.kind in TEMPORAL_KINDS]
     if not shown:
         return []
     row = _Row(o, unit.span[0], entities)
@@ -509,5 +530,5 @@ def build_parts(
         system=system_text(policy),
         ontology=ontology_text(o, unit.group, policy),
         images=tuple(images),
-        text=unit_text(unit, images, target_positions, o, policy, sensor),
+        text=unit_text(unit, images, target_positions, o, sensor),
     )

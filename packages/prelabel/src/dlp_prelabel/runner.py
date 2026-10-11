@@ -534,32 +534,64 @@ def _contacts(
             intervals = fuse_contacts(
                 glove_contact_intervals(master, series.values, policy.contact.glove), video
             )
-        for i, c in drop_protected_contacts(intervals, hand, current):
-            kind = _contact_kind(classes.get(c.target_id or ""), ontology)
-            payload = HandStatePayload(
-                hand=hand,
-                contact_target_kind=kind,
-                # 장갑만 잡은 접촉은 대상을 모른다 (관계·행동 단계가 이 ID를 버린다)
-                target_id=c.target_id or policy.contact.unresolved_target_id,
-                role="active",
+        labels += [
+            contact_label(
+                session,
+                version,
+                hand,
+                i,
+                c,
+                _contact_kind(classes.get(c.target_id or ""), ontology),
+                policy,
+                now,
             )
-            labels.append(
-                model_label(
-                    label_id=f"{session.session_id}-contact-{version_tag(version)}-{hand.value}-{i:04d}",
-                    session_id=session.session_id,
-                    stream_id=None,
-                    t_start_ms=c.start_ms,
-                    t_end_ms=c.end_ms,
-                    ontology_version=session.ontology_version or "",
-                    model_version=version,
-                    confidence=getattr(policy.contact.confidence, c.source),
-                    payload=payload,
-                    now=now,
-                    evidence=Evidence.OBSERVED if c.source != "video" else Evidence.INFERRED,
-                )
-            )
+            for i, c in drop_protected_contacts(intervals, hand, current)
+        ]
     insert_labels(conn, [*retractions(stale, version, now), *labels])
     return len(labels)
+
+
+def contact_label(
+    session: Session,
+    version: str,
+    hand: Hand,
+    index: int,
+    c: ContactInterval,
+    kind: str,
+    policy: PrelabelPolicy,
+    now: datetime,
+) -> LabelRecord:
+    """접촉 구간 하나 → 손 상태 라벨 (모델 출처, 마스터 타임라인 구간, stream_id=None).
+
+    ID는 `<세션>-contact-<version_tag>-<손>-<순번 4자리>`, 신뢰도는 `contact.confidence.<출처>`다.
+    증거는 영상만 잡은 접촉이면 INFERRED, 장갑이 관여한 접촉(장갑만·융합)이면 OBSERVED다. AI 1차
+    검수(`dlp_aireview.plan.glove_derived`)는 이 표시로 장갑 센서에서 나온 접촉을 판정 대상에서
+    뺀다. 장갑만 잡은 접촉은 대상을 몰라 `contact.unresolved_target_id`를 쓴다 (관계·행동 단계가
+    버린다).
+
+    Args:
+        session: 세션. version: 접촉 단계 모델 버전. hand: 손. index: 그 손의 순번.
+        c: 접촉 구간. kind: 접촉 대상 종류 (`_contact_kind`). policy: 프리라벨 정책. now: 기록 시각.
+    """
+    payload = HandStatePayload(
+        hand=hand,
+        contact_target_kind=kind,
+        target_id=c.target_id or policy.contact.unresolved_target_id,
+        role="active",
+    )
+    return model_label(
+        label_id=f"{session.session_id}-contact-{version_tag(version)}-{hand.value}-{index:04d}",
+        session_id=session.session_id,
+        stream_id=None,
+        t_start_ms=c.start_ms,
+        t_end_ms=c.end_ms,
+        ontology_version=session.ontology_version or "",
+        model_version=version,
+        confidence=getattr(policy.contact.confidence, c.source),
+        payload=payload,
+        now=now,
+        evidence=Evidence.OBSERVED if c.source != "video" else Evidence.INFERRED,
+    )
 
 
 def _wearer(

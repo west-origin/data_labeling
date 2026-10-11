@@ -1,0 +1,354 @@
+{
+ "additionalProperties": false,
+ "properties": {
+  "items": {
+   "items": {
+    "additionalProperties": false,
+    "properties": {
+     "c": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "f": {
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "i": {
+      "type": "integer"
+     },
+     "p": {
+      "items": {
+       "enum": [
+        "boundary_early",
+        "boundary_late",
+        "contact_mismatch_sensor",
+        "false_event",
+        "hierarchy_inconsistent",
+        "insufficient_frames",
+        "not_visible",
+        "other",
+        "should_be_action",
+        "should_be_gap",
+        "wrong_contact_kind",
+        "wrong_contact_target",
+        "wrong_event_type",
+        "wrong_gap_type",
+        "wrong_grasp",
+        "wrong_hand",
+        "wrong_ref",
+        "wrong_severity",
+        "wrong_state_value",
+        "wrong_target",
+        "wrong_tool",
+        "wrong_verb"
+       ]
+      },
+      "maxItems": 3,
+      "type": "array"
+     },
+     "r": {
+      "type": "string"
+     },
+     "s": {
+      "anyOf": [
+       {
+        "type": "null"
+       },
+       {
+        "additionalProperties": false,
+        "properties": {
+         "body_part": {
+          "enum": [
+           "abdomen",
+           "chest",
+           "head",
+           "left_buttock",
+           "left_elbow",
+           "left_foot",
+           "left_forearm",
+           "left_hand",
+           "left_knee",
+           "left_lower_leg",
+           "left_shoulder",
+           "left_thigh",
+           "left_upper_arm",
+           "lower_back",
+           "neck",
+           "right_buttock",
+           "right_elbow",
+           "right_foot",
+           "right_forearm",
+           "right_hand",
+           "right_knee",
+           "right_lower_leg",
+           "right_shoulder",
+           "right_thigh",
+           "right_upper_arm",
+           "upper_back",
+           null
+          ]
+         },
+         "contact_kind": {
+          "enum": [
+           "fixed_surface",
+           "none",
+           "object",
+           "person",
+           "self",
+           "tool",
+           null
+          ]
+         },
+         "delete": {
+          "type": "boolean"
+         },
+         "event_type": {
+          "enum": [
+           "action_retry",
+           "bare_hand_contamination",
+           "collision",
+           "cross_contamination_hand",
+           "cross_contamination_tool",
+           "drop",
+           "fall_risk",
+           "grasp_failure",
+           "loss_of_balance",
+           "regrasp",
+           "rework_missed_area",
+           "sharp_contact",
+           "slip",
+           "step_abort",
+           null
+          ]
+         },
+         "gap_type": {
+          "enum": [
+           "idle",
+           "out_of_scope",
+           "unknown",
+           null
+          ]
+         },
+         "grasp": {
+          "enum": [
+           "hook",
+           "lateral_pinch",
+           "non_prehensile",
+           "palm_push_wipe",
+           "palm_support",
+           "power",
+           "precision_pinch",
+           "tool_grip",
+           null
+          ]
+         },
+         "kind": {
+          "enum": [
+           "action",
+           "gap",
+           null
+          ]
+         },
+         "ref_id": {
+          "enum": [
+           "attach",
+           "bathing_assist",
+           "bed_making",
+           "blood_glucose",
+           "close",
+           "detach",
+           "diaper_change",
+           "dress_person",
+           "dressing_assist",
+           "dressing_change",
+           "feeding_assist",
+           "floor_sweep_mop",
+           "fold",
+           "hand_hygiene_ppe",
+           "insert",
+           "inspect",
+           "lay_down_person",
+           "lift_transfer_person",
+           "measure",
+           "medication",
+           "open",
+           "oral_hygiene",
+           "pour",
+           "raise_person",
+           "remove",
+           "repositioning",
+           "rinse",
+           "roll_person",
+           "spray",
+           "spread",
+           "surface_wipe_disinfect",
+           "sweep",
+           "toilet_cleaning",
+           "transfer_assist",
+           "undress_person",
+           "vital_signs",
+           "waste_collection",
+           "wipe",
+           "wrap",
+           "wring",
+           null
+          ]
+         },
+         "severity": {
+          "enum": [
+           1,
+           2,
+           3,
+           null
+          ]
+         },
+         "target": {
+          "type": [
+           "integer",
+           "null"
+          ]
+         },
+         "tool": {
+          "type": [
+           "integer",
+           "null"
+          ]
+         },
+         "value": {
+          "enum": [
+           "clean",
+           "closed",
+           "dirty",
+           "dry",
+           "empty",
+           "folded",
+           "full",
+           "not_worn",
+           "open",
+           "partial",
+           "unfolded",
+           "wet",
+           "worn",
+           null
+          ]
+         },
+         "verb": {
+          "enum": [
+           "carry",
+           "grasp",
+           "lift",
+           "lower",
+           "press",
+           "pull",
+           "push",
+           "release",
+           "rotate",
+           "rub",
+           "support",
+           null
+          ]
+         }
+        },
+        "required": [
+         "kind",
+         "verb",
+         "gap_type",
+         "target",
+         "tool",
+         "contact_kind",
+         "grasp",
+         "body_part",
+         "event_type",
+         "severity",
+         "ref_id",
+         "value",
+         "delete"
+        ],
+        "type": "object"
+       }
+      ]
+     },
+     "v": {
+      "enum": [
+       "suspect",
+       "wrong",
+       "unsure"
+      ]
+     }
+    },
+    "required": [
+     "i",
+     "v",
+     "p",
+     "r",
+     "c",
+     "f",
+     "s"
+    ],
+    "type": "object"
+   },
+   "maxItems": 24,
+   "type": "array"
+  },
+  "missing": {
+   "items": {
+    "additionalProperties": false,
+    "properties": {
+     "event_type": {
+      "enum": [
+       "action_retry",
+       "bare_hand_contamination",
+       "collision",
+       "cross_contamination_hand",
+       "cross_contamination_tool",
+       "drop",
+       "fall_risk",
+       "grasp_failure",
+       "loss_of_balance",
+       "regrasp",
+       "rework_missed_area",
+       "sharp_contact",
+       "slip",
+       "step_abort"
+      ]
+     },
+     "f0": {
+      "type": "integer"
+     },
+     "f1": {
+      "type": "integer"
+     },
+     "r": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "event_type",
+     "f0",
+     "f1",
+     "r"
+    ],
+    "type": "object"
+   },
+   "maxItems": 0,
+   "type": "array"
+  },
+  "ok": {
+   "items": {
+    "type": "integer"
+   },
+   "maxItems": 24,
+   "type": "array"
+  }
+ },
+ "required": [
+  "ok",
+  "items",
+  "missing"
+ ],
+ "type": "object"
+}

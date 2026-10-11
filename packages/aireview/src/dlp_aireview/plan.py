@@ -5,7 +5,10 @@
 
 단계
 1. `targets`: 판정 대상 = 검수 전 자동(model) 운영 라벨 중 판정 종류. 측정·오류 삽입 레코드,
-   원본 접근 이벤트(raw_access), 블러 트랙, `long_max_span_ms`보다 긴 상위 구간은 뺀다.
+   원본 접근 이벤트(raw_access), 블러 트랙, 장갑 센서에서 나온 라벨(`glove_derived`),
+   `long_max_span_ms`보다 긴 상위 구간은 뺀다.
+   정책 `kinds`는 대상만 고른다. 맥락·개체표·프롬프트·응답 스키마는 판정할 수 있는 종류 전체
+   (`TEMPORAL_KINDS`, `SPATIAL_KINDS`) 기준이라 `kinds`를 바꿔도 남은 단위의 키와 요청이 그대로다.
 2. `plan_windows`: 묶음별 창을 만든다 (영상 없이 같은 결과라 `estimate_units`,
    `uncovered_targets`도 쓴다).
    - temporal: 0부터 `window_ms` 격자. 짧은 대상은 중점이 든 창 하나에만 든다. 증거 구간 = 창과
@@ -14,8 +17,9 @@
    - temporal_long: 긴 라벨(상위 구간 전부, `long_label_ms`보다 긴 라벨,
      `long_object_state_ms`보다 긴 객체 상태) 하나가 한 단위다.
    - spatial: 영상 스트림마다 `stride_ms` 격자와 트랙 첫 키프레임에 스냅샷 창을 두고(가까운
-     시각은 합침), 창 안에 보이는 키프레임이 있는 트랙이 대상이다 (트랙당
-     `max_windows_per_track`개까지).
+     시각은 합침), 창 안에 표식이 그려지는 키프레임이 있는 트랙이 대상이다 (트랙당
+     `max_windows_per_track`개까지). 프레임은 대상 트랙의 키프레임 시각에서 골라 대상마다 적어도 한
+     프레임에 표식이 그려지게 한다 (`spatial.frames`장으로 다 덮지 못하면 같은 구간의 다음 창).
    - `selection.mode=flagged`면 지적 단위 → 감사 표본 순으로 고른다.
 3. `plan_session`: 창마다 프레임을 고르고(`dlp_media.frames.pick_frames`) 단위 키를 만든다.
 
@@ -32,12 +36,14 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from bisect import bisect_left
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Literal
 
-from dlp_aireview.policy import AiReviewPolicy
+from dlp_aireview.policy import SPATIAL_KINDS, TEMPORAL_KINDS, AiReviewPolicy
 from dlp_aireview.sensors import ABSENT, SensorContext
+from dlp_aireview.tracks import Timeline
 from dlp_media.frames import frame_ms, pick_frames
 from dlp_media.pts import PtsIndex
 from dlp_schema.aireview import AiGroup, AiReviewUnit
@@ -45,17 +51,18 @@ from dlp_schema.episode import entity_refs
 from dlp_schema.labels import (
     BoxTrackPayload,
     EventPayload,
+    Evidence,
     GapPayload,
     HandStatePayload,
-    KeypointTrackPayload,
     LabelRecord,
     MaskTrackPayload,
     ObjectStatePayload,
     SegmentPayload,
+    Source,
     VerificationState,
 )
 from dlp_schema.ontology import Ontology
-from dlp_schema.review import FlaggedSpan
+from dlp_schema.review import FlaggedSpan, ReviewReason
 from dlp_schema.session import Session, StreamKind
 
 # 공간 판정을 하는 영상 스트림 종류 (블러본이 있는 스트림)
@@ -89,7 +96,9 @@ class PlannedWindow:
         targets: 판정 대상 (순서 = 응답 번호 i).
         context: 맥락 라벨 (텍스트로만 준다, label_id 정렬).
         entities: 창 개체표 (개체 ID, 클래스) — 응답의 target·tool 번호는 이 순서다.
-        wanted_ms: 프레임을 고를 시각 (오름차순).
+        wanted_ms: 프레임을 고를 시각 (오름차순). temporal은 그 시각에 화면에 떠 있는 프레임,
+            spatial은 가장 가까운 프레임으로 맞춘다 (spatial 시각은 대상 키프레임 = 그 스트림 PTS
+            시각).
         window_key: 묶음·스트림·창 시작 (같은 창의 분할 요청을 같은 엔드포인트로, 감사 표본 해시).
         selection: 고른 이유 (all | flagged | unknown_gap | audit).
         max_side_px: 프레임 긴 변 상한.
@@ -197,13 +206,35 @@ def _operational(label: LabelRecord, o: Ontology) -> bool:
     )
 
 
+def glove_derived(label: LabelRecord) -> bool:
+    """장갑 압력 센서에서 나온 라벨인가 (판정 대상에서 뺀다, 사용자 결정·ADR 0040 결정 5).
+
+    - 출처가 센서(`Source.SENSOR`)인 라벨.
+    - 자동(모델 출처) 손 상태 중 증거가 관찰(OBSERVED)인 라벨. 프리라벨 접촉 단계
+      (`dlp_prelabel.runner.contact_label`)는 장갑만 잡은 접촉(대상 미상 `unresolved`)과 장갑 시각 +
+      영상 대상 융합 접촉을 OBSERVED로, 영상만 잡은 접촉을 INFERRED로 쓴다. 융합 접촉도 접촉의 있고
+      없음과 경계가 장갑 압력에서 나오므로 함께 뺀다. 영상만 잡은 접촉은 대상이다 (장갑 문장과
+      대조).
+
+    손 상태를 만드는 다른 자동 단계가 생기면 영상 근거 라벨은 INFERRED로 써야 판정 대상이 된다
+    (계약 기본값이 OBSERVED라 표시를 빠뜨리면 판정에서 빠지는 쪽으로 틀린다).
+    """
+    if label.provenance.source is Source.SENSOR:
+        return True
+    return (
+        label.provenance.source is Source.MODEL
+        and isinstance(label.payload, HandStatePayload)
+        and label.evidence is Evidence.OBSERVED
+    )
+
+
 def targets(
     current: Sequence[LabelRecord], policy: AiReviewPolicy, o: Ontology
 ) -> list[LabelRecord]:
     """판정 대상: 검수 전 자동 운영 라벨 중 정책 종류·출처 (시작 시각, ID 순).
 
-    모델 버전·신뢰도·검수자·우선순위 사유는 판정 입력에 넣지 않는다 (자동 라벨의 자신감에 끌리지
-    않게).
+    장갑 센서에서 나온 라벨(`glove_derived`)과 `long_max_span_ms`보다 긴 상위 구간은 뺀다. 모델
+    버전·신뢰도·검수자·우선순위 사유는 판정 입력에 넣지 않는다 (자동 라벨의 자신감에 끌리지 않게).
     """
     kinds = set(policy.kinds.temporal) | set(policy.kinds.spatial)
     sources = set(policy.kinds.sources)
@@ -212,6 +243,7 @@ def targets(
         for x in current
         if x.kind in kinds
         and x.provenance.source.value in sources
+        and not glove_derived(x)
         and x.verification.state is VerificationState.UNREVIEWED
         and _operational(x, o)
         and not (
@@ -237,16 +269,6 @@ def _overlaps(label: LabelRecord, start: int, end: int) -> bool:
     if label.t_start_ms == label.t_end_ms:
         return start <= label.t_start_ms <= end
     return label.t_start_ms < end and label.t_end_ms > start
-
-
-def _visible_times(label: LabelRecord) -> list[int]:
-    """공간 트랙의 보이는(outside가 아닌) 키프레임 시각."""
-    p = label.payload
-    if isinstance(p, BoxTrackPayload):
-        return [k.t_ms for k in p.keyframes if not k.outside]
-    if isinstance(p, KeypointTrackPayload):
-        return [k.t_ms for k in p.keyframes]
-    return []
 
 
 def _entity_table(
@@ -378,8 +400,12 @@ def _windows_from(
 
 
 def _temporal_context(ctx: _Ctx, span: tuple[int, int], ref_id: str) -> list[LabelRecord]:
-    """시간 창의 맥락: 증거 구간과 겹치는 시간 라벨 + 기준 스트림 박스 트랙(개체표용)."""
-    temporal = set(ctx.policy.kinds.temporal)
+    """시간 창의 맥락: 증거 구간과 겹치는 시간 라벨 + 기준 스트림 박스 트랙(개체표용).
+
+    판정할 수 있는 시간 종류 전체(`TEMPORAL_KINDS`)를 본다. 정책 `kinds`는 대상만 고른다 (바꿔도
+    남은 단위의 맥락·키·프롬프트가 그대로).
+    """
+    temporal = set(TEMPORAL_KINDS)
     return [
         x
         for x in ctx.pool
@@ -434,12 +460,32 @@ def _long_windows(ctx: _Ctx, long: Sequence[LabelRecord]) -> list[PlannedWindow]
     return out
 
 
-def _snapshot_times(tracks: Sequence[LabelRecord], policy: AiReviewPolicy) -> list[int]:
+@dataclass(frozen=True)
+class _Track:
+    """공간 대상·맥락 트랙과 표식 시간표 (창마다 다시 계산하지 않게)."""
+
+    label: LabelRecord
+    timeline: Timeline
+    drawn: tuple[int, ...]  # 표식이 그려지는 키프레임 시각 (오름차순)
+
+    @classmethod
+    def of(cls, label: LabelRecord) -> _Track:
+        """라벨 → 트랙."""
+        timeline = Timeline.of(label)
+        return cls(label, timeline, tuple(timeline.drawn_times()))
+
+    def drawn_in(self, span: tuple[int, int]) -> bool:
+        """구간 안에 표식이 그려지는 키프레임이 있는가."""
+        k = bisect_left(self.drawn, span[0])
+        return k < len(self.drawn) and self.drawn[k] <= span[1]
+
+
+def _snapshot_times(tracks: Sequence[_Track], policy: AiReviewPolicy) -> list[int]:
     """스냅샷 창 시작 시각: 격자와 트랙 첫 키프레임 (`snapshot_ms` 안의 가까운 시각은 앞 것으로)."""
     sp = policy.spatial
     times: set[int] = set()
     for x in tracks:
-        seen = _visible_times(x)
+        seen = x.drawn
         if not seen:
             continue
         times |= {
@@ -454,36 +500,80 @@ def _snapshot_times(tracks: Sequence[LabelRecord], policy: AiReviewPolicy) -> li
     return merged
 
 
+def _cover(
+    members: Sequence[_Track], span: tuple[int, int], budget: int
+) -> tuple[list[int], list[_Track], list[_Track]]:
+    """대상마다 표식이 적어도 한 프레임에 그려지게 시각을 `budget`개까지 고른다 (탐욕 집합 덮기).
+
+    후보는 창 안에서 대상 표식이 그려지는 키프레임 시각이다 (공간 키프레임은 그 스트림 PTS 시각이라
+    가장 가까운 프레임이 바로 그 키프레임이다). 아직 덮이지 않은 대상을 가장 많이 그리는 시각부터
+    (같으면 이른 시각) 고른다.
+
+    Returns: (고른 시각, 덮은 대상, 덮지 못한 대상). 대상 순서는 입력 순서를 지킨다.
+    """
+    cands = sorted({t for m in members for t in m.drawn if span[0] <= t <= span[1]})
+    left = {m.label.label_id for m in members}
+    picked: list[int] = []
+    while left and len(picked) < budget and cands:
+        gains = [
+            (
+                t,
+                {
+                    m.label.label_id
+                    for m in members
+                    if m.label.label_id in left and m.timeline.drawn_at(t)
+                },
+            )
+            for t in cands
+        ]
+        best, gain = max(gains, key=lambda g: (len(g[1]), -g[0]))
+        if not gain:
+            break
+        picked.append(best)
+        left -= gain
+    covered = [m for m in members if m.label.label_id not in left]
+    return picked, covered, [m for m in members if m.label.label_id in left]
+
+
 def _spatial_windows(
     ctx: _Ctx, spatial: Sequence[LabelRecord], stream_id: str
 ) -> list[PlannedWindow]:
-    """spatial 묶음 (한 스트림): 스냅샷 창마다 보이는 키프레임이 있는 대상 트랙."""
+    """spatial 묶음 (한 스트림): 스냅샷 창마다 표식이 그려지는 키프레임이 있는 대상 트랙.
+
+    프레임 시각은 대상 트랙의 키프레임 시각에서 고른다 (`_cover`, 대상마다 적어도 한 프레임에 표식).
+    `spatial.frames`장으로 창의 대상을 다 덮지 못하면 남은 대상으로 같은 증거 구간의 다음 창을
+    만든다 (창 키 끝에 `|<순번>`). 덮고 남은 자리는 창에 고르게 채운다 (`_spread`).
+    """
     sp = ctx.policy.spatial
-    tracks = [x for x in spatial if x.stream_id == stream_id]
+    tracks = [_Track.of(x) for x in spatial if x.stream_id == stream_id]
+    # 맥락은 판정할 수 있는 공간 종류 전체 (정책 kinds는 대상만 고른다)
     others = [
-        x for x in ctx.pool if x.stream_id == stream_id and x.kind in ctx.policy.kinds.spatial
+        _Track.of(x) for x in ctx.pool if x.stream_id == stream_id and x.kind in SPATIAL_KINDS
     ]
     used: dict[str, int] = {}
     out: list[PlannedWindow] = []
     for t0 in _snapshot_times(tracks, ctx.policy):
         span = (t0, t0 + sp.snapshot_ms)
-
-        def inside(x: LabelRecord, span: tuple[int, int] = span) -> bool:
-            return any(span[0] <= t <= span[1] for t in _visible_times(x))
-
         members = [
-            x for x in tracks if inside(x) and used.get(x.label_id, 0) < sp.max_windows_per_track
+            x
+            for x in tracks
+            if x.drawn_in(span) and used.get(x.label.label_id, 0) < sp.max_windows_per_track
         ]
-        if not members:
-            continue
-        for x in members:
-            used[x.label_id] = used.get(x.label_id, 0) + 1
-        context = [x for x in others if inside(x)]
-        wanted = tuple(_uniform(*span, sp.frames))
-        out += _windows_from(
-            ctx, AiGroup.SPATIAL, stream_id, span, members, context, wanted,
-            f"spatial|{stream_id}|{t0}",
-        )  # fmt: skip
+        context = [x.label for x in others if x.drawn_in(span)]
+        part = 0
+        while members:
+            times, covered, members = _cover(members, span, sp.frames)
+            if not covered:
+                break
+            for x in covered:
+                used[x.label.label_id] = used.get(x.label.label_id, 0) + 1
+            wanted = _spread(times, _uniform(*span, sp.frames), span, 1, sp.frames)
+            key = f"spatial|{stream_id}|{t0}" + (f"|{part}" if part else "")
+            out += _windows_from(
+                ctx, AiGroup.SPATIAL, stream_id, span, [x.label for x in covered], context,
+                wanted, key,
+            )  # fmt: skip
+            part += 1
     return out
 
 
@@ -496,11 +586,13 @@ def _audit_draw(session_id: str, key: str, seed: int) -> float:
     return int(digest[:8], 16) / 2**32
 
 
-def _is_flagged(w: PlannedWindow, flagged: Sequence[FlaggedSpan], reasons: set[str]) -> bool:
+def _is_flagged(
+    w: PlannedWindow, flagged: Sequence[FlaggedSpan], reasons: set[ReviewReason]
+) -> bool:
     """우선순위 사유 구간이 이 창의 대상을 가리키거나(라벨 ID), 라벨 없이 시간 창과 겹치는가."""
     ids = {x.label_id for x in w.targets}
     for f in flagged:
-        if f.reason.value not in reasons:
+        if f.reason not in reasons:
             continue
         if set(f.label_ids) & ids:
             return True
@@ -638,7 +730,7 @@ def plan_session(
         m = media.get(w.stream_id)
         if m is None:
             continue
-        idx = tuple(pick_frames(m.pts, w.wanted_ms))
+        idx = tuple(pick_frames(m.pts, w.wanted_ms, nearest=w.group is AiGroup.SPATIAL))
         ms = tuple(frame_ms(m.pts, i) for i in idx)
         sensor_sha = unit_sensor_sha(w, policy, sensor)
         uid = unit_id(version, session.session_id, w, ms, m.render_hash, sensor_sha, o.version)

@@ -1,17 +1,25 @@
 """AI 1차 검수 패키지의 경계 정적 검사 (WP17, ADR 0040 I1·I3·I4).
 
-`packages/aireview/src`를 줄 단위 텍스트로 훑는다 (주석·docstring 포함, 기존 원본 접근 검사와 같은
-방식). 판정은 라벨도 검수 상태도 아니므로 이 패키지는 라벨·검수·생애주기 기록 함수와 라벨 이력 표
-이름을 쓰지 않는다. 원본 버킷·프록시·감사 원본 저장소·CLI·검수 패키지도 쓰지 않는다. 픽셀은 블러본
-경계 모듈(`media.py`, WP17.5)에서만 얻는다. 반대로 내보내기·학습·데이터셋·액티브 러닝 패키지는 AI
-판정 계약과 저장소를 import하지 않는다 (판정이 학습·판매 데이터에 섞이지 않게).
+두 가지 방식으로 훑는다.
+
+- 줄 단위 텍스트 (주석·docstring 포함, 기존 원본 접근 검사와 같은 방식): 판정은 라벨도 검수 상태도
+  아니므로 `packages/aireview/src`는 라벨·검수·생애주기 기록 함수와 라벨 이력 표 이름, 원본
+  버킷·프록시 이름을 쓰지 않는다. 픽셀을 얻는 호출(저장소 파일 받기, 블러본 프레임 객체, 영상
+  디코드·파일 열기)은 블러본 경계 모듈(`media.py`, WP17.5)에서만 한다.
+- import 문 (ast, 모듈 이름과 가져오는 이름을 함께 본다): `from dlp_media import audit`처럼 점 없이
+  가져오는 형태와 `from dlp_schema.db import aireview_repository`처럼 이름으로 가져오는 형태도
+  잡는다.
+  - aireview는 CLI·검수 패키지·감사 원본 저장소(`dlp_media.audit`)를 import하지 않고, 영상 디코드
+    (`av`, `dlp_media.frames.decode_frames`)는 `media.py`에서만 import한다.
+  - 내보내기·학습·데이터셋·액티브 러닝은 AI 판정 계약·저장소·패키지(이름에 aireview가 든 모듈이나
+    이름)를 import하지 않는다 (판정이 학습·판매 데이터에 섞이지 않게).
 
 정답은 저장소 소스 자체다. 서비스 없이 돈다.
 """
 
 from __future__ import annotations
 
-import re
+import ast
 from pathlib import Path
 
 from dlp_schema import repo_root
@@ -23,9 +31,11 @@ FORBIDDEN = (
     "insert_labels", "record_review", "set_lifecycle", "update_assignment", "label_records",
     "proxy_key", "raw_store", '"dlp-raw"',
 )  # fmt: skip
-FORBIDDEN_IMPORTS = re.compile(r"^\s*(from|import)\s+(dlp_cli|dlp_review|dlp_media\.audit)\b")
-# 블러본 경계 모듈 밖에서 쓰면 안 되는 것 (저장소에서 파일 받기, 픽셀 객체 만들기)
-MEDIA_ONLY = ("get_file(", "BlurredFrame(")
+# 블러본 경계 모듈 밖에서 쓰면 안 되는 것 (저장소에서 파일 받기, 픽셀 객체 만들기, 영상 디코드·열기)
+MEDIA_ONLY = (
+    "get_file(", "BlurredFrame(", "decode_frames(", "av.open(", "cv2.imread", "VideoCapture",
+    "imageio", "Image.open(",
+)  # fmt: skip
 # AI 판정을 import하면 안 되는 패키지 (학습·판매 데이터 경로)
 CLEAN_PACKAGES = ("export", "training", "datasets", "active")
 
@@ -35,19 +45,64 @@ def _lines(path: Path) -> list[tuple[int, str]]:
     return list(enumerate(path.read_text("utf-8").splitlines(), start=1))
 
 
+def imports_in(source: str) -> list[tuple[int, str, tuple[str, ...]]]:
+    """소스의 import 문 → (줄 번호, 모듈 이름, 가져오는 이름들). `import a.b`는 (a.b, ()).
+
+    상대 import(`from . import x`)는 모듈 이름을 빈 문자열로 둔다. 함수 안 import도 센다.
+    """
+    out: list[tuple[int, str, tuple[str, ...]]] = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.ImportFrom):
+            module = node.module if node.level == 0 and node.module else ""
+            out.append((node.lineno, module, tuple(a.name for a in node.names)))
+        elif isinstance(node, ast.Import):
+            out += [(node.lineno, a.name, ()) for a in node.names]
+    return out
+
+
+def aireview_forbidden_import(module: str, names: tuple[str, ...], in_media: bool) -> bool:
+    """aireview 소스에서 금지한 import인가.
+
+    CLI·검수 패키지, 감사 원본 저장소(`dlp_media.audit`, `from dlp_media import audit` 포함), 그리고
+    `media.py` 밖의 영상 디코드(`av`, `decode_frames`).
+    """
+    top = module.split(".")[0]
+    full = {module, *(f"{module}.{n}" for n in names)}
+    if top in ("dlp_cli", "dlp_review"):
+        return True
+    if any(m == "dlp_media.audit" or m.startswith("dlp_media.audit.") for m in full):
+        return True
+    if in_media:
+        return False
+    return top == "av" or "decode_frames" in names
+
+
+def mentions_aireview(module: str, names: tuple[str, ...]) -> bool:
+    """AI 판정 계약·저장소·패키지를 가리키는 import인가 (모듈이나 가져오는 이름에 aireview)."""
+    return "aireview" in module or any("aireview" in n for n in names)
+
+
 def test_aireview_does_not_write_labels_or_touch_raw() -> None:
     """판정 패키지 소스에 쓰기 함수·라벨 이력 표·원본·프록시 이름과 금지 import가 없다."""
     offenders: list[str] = []
     for path in sorted(SRC.rglob("*.py")):
-        for n, line in _lines(path):
-            hits = [name for name in FORBIDDEN if name in line]
-            if hits or FORBIDDEN_IMPORTS.match(line):
-                offenders.append(f"{path.relative_to(ROOT)}:{n}: {line.strip()}")
+        rel = path.relative_to(ROOT)
+        offenders += [
+            f"{rel}:{n}: {line.strip()}"
+            for n, line in _lines(path)
+            if any(name in line for name in FORBIDDEN)
+        ]
+        offenders += [
+            f"{rel}:{n}: import {module} {names}"
+            for n, module, names in imports_in(path.read_text("utf-8"))
+            if aireview_forbidden_import(module, names, path.name == "media.py")
+        ]
     assert offenders == [], "\n".join(offenders)
 
 
 def test_pixels_only_through_blurred_media_module() -> None:
-    """저장소 파일 받기와 블러본 프레임 생성은 `media.py`(블러본 경계)에서만 한다."""
+    """저장소 파일 받기, 블러본 프레임 생성, 영상 디코드·열기는 `media.py`(블러본 경계)에서만
+    한다."""
     offenders = [
         f"{path.relative_to(ROOT)}:{n}"
         for path in sorted(SRC.rglob("*.py"))
@@ -60,20 +115,45 @@ def test_pixels_only_through_blurred_media_module() -> None:
 
 def test_training_and_export_never_import_ai_verdicts() -> None:
     """내보내기·학습·데이터셋·액티브 러닝은 AI 판정 계약·저장소·패키지를 import하지 않는다."""
-    pattern = re.compile(r"^\s*(from|import)\s+\S*aireview")
     offenders = [
-        f"{path.relative_to(ROOT)}:{n}"
+        f"{path.relative_to(ROOT)}:{n}: {module} {names}"
         for pkg in CLEAN_PACKAGES
         for path in sorted((ROOT / "packages" / pkg / "src").rglob("*.py"))
-        for n, line in _lines(path)
-        if pattern.match(line)
+        for n, module, names in imports_in(path.read_text("utf-8"))
+        if mentions_aireview(module, names)
     ]
     assert offenders == []
 
 
-def test_scan_patterns_catch_examples() -> None:
-    """검사 정규식의 회귀 테스트."""
-    assert FORBIDDEN_IMPORTS.match("from dlp_review.tasks import x")
-    assert FORBIDDEN_IMPORTS.match("    import dlp_cli.main")
-    assert FORBIDDEN_IMPORTS.match("from dlp_media.audit import AuditedStore")
-    assert not FORBIDDEN_IMPORTS.match("from dlp_media.frames import pick_frames")
+def _one(source: str) -> tuple[str, tuple[str, ...]]:
+    """한 줄 import → (모듈, 이름)."""
+    [(_, module, names)] = imports_in(source)
+    return module, names
+
+
+def test_scan_catches_bypass_forms() -> None:
+    """검사의 회귀 테스트: 점 없는 형태·이름으로 가져오는 형태·함수 안 import도 잡는다."""
+    for source in (
+        "from dlp_review.tasks import x",
+        "import dlp_cli.main",
+        "from dlp_media.audit import AuditedStore",
+        "from dlp_media import audit",
+        "import dlp_media.audit as a",
+        "from dlp_media.frames import decode_frames",
+        "import av",
+    ):
+        assert aireview_forbidden_import(*_one(source), in_media=False), source
+    assert not aireview_forbidden_import(*_one("from dlp_media.frames import pick_frames"), False)
+    assert not aireview_forbidden_import(*_one("import av"), in_media=True)
+    for source in (
+        "from dlp_schema.db import aireview_repository",
+        "from dlp_schema import aireview",
+        "from dlp_schema.aireview import AiVerdict",
+        "import dlp_aireview.plan",
+    ):
+        assert mentions_aireview(*_one(source)), source
+    assert not mentions_aireview(*_one("from dlp_schema.labels import LabelRecord"))
+    nested = imports_in("def f():\n    from dlp_media import audit\n")
+    assert [(m, n) for _, m, n in nested] == [("dlp_media", ("audit",))]
+    for line in ("frames = decode_frames(path, pts, idx)", "with av.open(path) as c:"):
+        assert any(name in line for name in MEDIA_ONLY), line

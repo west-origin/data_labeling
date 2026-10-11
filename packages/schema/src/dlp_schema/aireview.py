@@ -307,7 +307,8 @@ class AiFinding(Contract):
 class AiFrameRef(Contract):
     """VLM에 보낸 이미지 하나의 감사 기록 (픽셀은 저장하지 않는다)."""
 
-    # i: 요청 안 이미지 번호 (프레임 F0…, 확대 조각은 crop_of에 원 프레임 번호).
+    # i: 단위 이미지 번호 (프레임은 단위 프레임 번호 F#, 확대 조각은 그 뒤 순번. 문맥 초과로 줄여
+    #   보낸 요청에서도 같은 번호라 건너뛸 수 있다). 확대 조각은 crop_of에 원 프레임 번호.
     # t_ms: 그 프레임의 PTS ms (블러본 PTS 인덱스). sha256: 보낸 JPEG의 해시. w, h: 보낸 크기 px.
 
     i: int = Field(ge=0)
@@ -328,10 +329,13 @@ class AiReviewUnit(Contract):
     # context_label_ids: 텍스트로만 준 맥락 라벨 (정렬).
     # render_hash / blurred_sha256: 그 스트림 블러본의 렌더 해시와 파일 sha (이전 형식이면 None).
     # sensor_sha256: 장갑 접촉 구간 해시 (이 단위가 센서 문장을 쓰지 않으면 "absent").
-    # frames: 보낸 이미지. prompt_digest: 정적 접두사·글·이미지 해시의 해시.
+    # frames: 실제로 보낸 이미지 (문맥 초과로 나눈 요청들의 합). prompt_digest: 실제로 보낸 요청의
+    #   다이제스트 (정적 접두사·글·이미지 해시의 해시, 재시도 대화가 있으면 그 해시까지. 나눈 단위는
+    #   요청별 다이제스트 목록의 해시, dlp_aireview.judge.request_digest).
     # outcome: answered(응답을 받음, 일부 항목이 response_invalid일 수 있음) | fallback(형식에 맞는
     #   응답을 끝내 받지 못해 모든 대상이 unsure).
-    # attempts / sub_requests: 모델 호출 수와 문맥 초과로 대상을 나눈 요청 수.
+    # attempts / sub_requests: 모델 호출 수와 문맥 초과로 나눈 뒤 결과를 낸 요청 수.
+    # errors: 위반·장애 기록 문장 (번호·위반 종류만, 모델이 쓴 값·서버 응답 본문 없음).
     # verdicts: 대상마다 정확히 하나 (ok 포함). findings: 누락 후보.
     # response_sha256: 받아들인 응답 원문의 해시 (원문은 저장하지 않는다).
     # served_model / endpoint: 서버가 보고한 모델과 엔드포인트 이름 (URL·키 아님).

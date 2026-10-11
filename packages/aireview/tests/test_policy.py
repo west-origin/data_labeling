@@ -26,14 +26,19 @@ UNHASHED: dict[str, dict[str, Any]] = {
     "gate": {"min_wrong_recall": 0.9},
     "estimate": {"ok_tokens": 3},
 }
-HASHED: dict[str, dict[str, Any]] = {
-    "backend": {"model": "Qwen/Qwen2.5-VL-32B-Instruct"},
-    "temporal": {"frames": 6},
-    "spatial": {"max_side_px": 512},
-    "image": {"jpeg_quality": 90},
-    "response": {"max_retries": 2},
-    "sensor": {"enabled": False},
-}
+HASHED: list[tuple[str, dict[str, Any]]] = [
+    ("backend", {"model": "Qwen/Qwen2.5-VL-32B-Instruct"}),
+    ("backend", {"served_name": "judge"}),
+    ("temporal", {"frames": 6}),
+    ("temporal", {"timestamp_overlay": False}),
+    ("spatial", {"max_side_px": 512}),
+    ("image", {"jpeg_quality": 90}),
+    ("response", {"max_retries": 2}),
+    # 문맥 초과 분할 횟수는 끝내 미응답이 되는 대상을 바꾼다 (결과를 바꾸므로 해시)
+    ("response", {"max_context_splits": 1}),
+    ("response", {"finding_overlap_iou": 0.5}),
+    ("sensor", {"enabled": False}),
+]
 
 
 def test_repo_policy_loads_with_user_decisions(policy: AiReviewPolicy) -> None:
@@ -60,10 +65,13 @@ def test_digest_ignores_run_and_selection_sections(policy: AiReviewPolicy, secti
     assert changed.digest == policy.digest and changed.verdict_version == policy.verdict_version
 
 
-@pytest.mark.parametrize("section", sorted(HASHED))
-def test_digest_follows_result_sections(policy: AiReviewPolicy, section: str) -> None:
-    """모델·프레임·이미지·응답·센서 절을 바꾸면 판정 버전이 바뀐다 (전부 다시 판정)."""
-    changed = with_policy(policy, **{section: HASHED[section]})
+@pytest.mark.parametrize(("section", "values"), HASHED)
+def test_digest_follows_result_sections(
+    policy: AiReviewPolicy, section: str, values: dict[str, Any]
+) -> None:
+    """모델·프레임·이미지·응답(문맥 초과 분할 포함)·센서 절을 바꾸면 판정 버전이 바뀐다 (전부 다시
+    판정)."""
+    changed = with_policy(policy, **{section: values})
     assert changed.digest != policy.digest
 
 
@@ -78,13 +86,17 @@ def test_digest_follows_result_sections(policy: AiReviewPolicy, section: str) ->
         ("response", {"reason_max_chars": 80}, "reason_max_chars"),
         ("temporal", {"frames": 20}, "max_frames"),
         ("backend", {"kind": "anthropic"}, "kind"),
+        ("selection", {"reasons": ["low_confidense"]}, "reasons"),
+        ("selection", {"reasons": ["low_confidence", "ai_wrong"]}, "AI 판정 사유"),
+        ("server", {"max_context_splits": 2}, "max_context_splits"),
     ],
 )
 def test_fixed_decisions_are_load_errors(
     policy: AiReviewPolicy, section: str, values: dict[str, Any], message: str
 ) -> None:
     """블러 판정, 검수 화면 없는 종류, 센서 출처, 외부 백엔드, 타임라인 종류 삭제, 계약보다 긴 이유,
-    프레임 상한 초과는 로드 오류다."""
+    프레임 상한 초과, 모르는 선택 사유(오타)와 AI 판정 사유, 해시 밖 절의 결과 바꾸는 키는 로드
+    오류다."""
     with pytest.raises(ValidationError, match=message):
         with_policy(policy, **{section: values})
 

@@ -1,5 +1,8 @@
 """프롬프트·스키마·백엔드 요청 테스트 (`dlp_aireview.prompt`·`schema`·`backend`, WP17.2).
 
+- 프롬프트 틀(system, 묶음별 온톨로지 블록, 응답 스키마, 가변 글, 재시도 글)은 `golden/`의 골든
+  파일과 바이트까지 같다. 틀을 바꾸면 판정 버전이 바뀌어야 하므로 실패 메시지가 PROMPT_VERSION과
+  aireview.yaml prompt_version을 함께 올리라고 알린다 (`DLP_UPDATE_GOLDEN=1`로 골든을 다시 쓴다).
 - 고정 부분(system, 묶음별 온톨로지 블록, 응답 스키마)은 세션·시각·개체 ID와 무관하게 바이트까지
   같다.
 - 시간 묶음 둘(temporal, temporal_long)은 같은 고정 블록·스키마를 쓴다.
@@ -11,31 +14,63 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
+import os
+from fractions import Fraction
+from pathlib import Path
 from typing import Any
 
 import httpx
+import numpy as np
 import pytest
 
 from dlp_aireview.backend import JudgeRequest, OpenAICompatibleJudge, chat_request
-from dlp_aireview.plan import PlannedUnit, plan_session
+from dlp_aireview.plan import PlannedUnit, StreamMedia, plan_session
 from dlp_aireview.policy import PROMPT_VERSION, AiReviewPolicy
-from dlp_aireview.prompt import build_parts, ontology_text, retry_text, system_text
+from dlp_aireview.prompt import build_parts, ontology_text, retry_text, system_text, unit_text
 from dlp_aireview.schema import response_schema
 from dlp_aireview.sensors import SensorContext, contact_text
+from dlp_media.pts import PtsIndex
 from dlp_models.vlm import VlmRequestError, chat_body
 from dlp_schema.aireview import AiGroup
-from dlp_schema.labels import Hand
+from dlp_schema.labels import (
+    ActionPayload,
+    BoxKeyframe,
+    BoxTrackPayload,
+    EventPayload,
+    Evidence,
+    GapPayload,
+    Hand,
+    HandStatePayload,
+    LabelRecord,
+    Provenance,
+    Source,
+)
 from dlp_schema.ontology import Ontology
+from dlp_schema.testing import FIXED_TIME, make_session
 
 from .conftest import Scene, images_for, make_scene, with_policy
 
 ABSENT = SensorContext.absent()
-# 고정 system 문장의 해시. 문장을 바꾸면 PROMPT_VERSION(코드)과 aireview.yaml prompt_version을 함께
-# 올리고 이 값을 갱신한다 (판정 버전이 바뀌어 다시 판정한다).
-SYSTEM_SHA = "13d00fc583cd2c523fa85c498a3afe3f921d8a2c8bf8a68871d348543fa7d375"
 FORBIDDEN = {"minimum", "maximum", "minLength", "maxLength", "minItems", "exclusiveMinimum"}
+GOLDEN = Path(__file__).parent / "golden"
+# 골든이 다를 때 알리는 절차 (판정 버전에는 정책 값만 들어가므로 틀 변경은 이 버전으로만 드러난다)
+BUMP = (
+    "프롬프트 틀(dlp_aireview.prompt·schema의 고정 문장·스키마 모양)이 바뀌었다. "
+    "판정 버전이 바뀌어야 하므로 dlp_aireview.policy.PROMPT_VERSION과 "
+    "config/policies/aireview.yaml prompt_version을 함께 올리고 "
+    "DLP_UPDATE_GOLDEN=1로 골든을 다시 쓴다. 온톨로지 v1이나 정책 값(digest에 드는 절)이 "
+    "바뀐 것이면 판정 버전이 이미 바뀌므로 골든만 다시 쓴다."
+)
+
+
+def _golden(name: str, text: str) -> None:
+    """골든 파일과 바이트 비교 (`DLP_UPDATE_GOLDEN=1`이면 다시 쓴다)."""
+    path = GOLDEN / name
+    if os.environ.get("DLP_UPDATE_GOLDEN") == "1":
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(text, "utf-8")
+    assert path.read_text("utf-8") == text, f"{name}: {BUMP}"
 
 
 def _keys(node: Any) -> set[str]:
@@ -55,11 +90,10 @@ def _units(scene: Scene, policy: AiReviewPolicy, ontology: Ontology) -> list[Pla
 
 
 def test_static_blocks_are_byte_fixed(policy: AiReviewPolicy, ontology: Ontology) -> None:
-    """system 문장은 해시로 고정한다. 고정 블록에는 세션 ID·개체 ID·시각이 없고, 시간 묶음 둘은 같은
-    블록을 쓴다. 원본 접근 이벤트(discomfort)는 넣지 않는다."""
+    """고정 블록에는 세션 ID·개체 ID·시각이 없고, 시간 묶음 둘은 같은 블록을 쓴다. 원본 접근
+    이벤트(discomfort)는 넣지 않는다 (바이트 고정은 `test_prompt_templates_match_golden_files`)."""
     system = system_text(policy)
     assert f"v{PROMPT_VERSION}" in system
-    assert hashlib.sha256(system.encode()).hexdigest() == SYSTEM_SHA
     temporal = ontology_text(ontology, AiGroup.TEMPORAL, policy)
     assert temporal == ontology_text(ontology, AiGroup.TEMPORAL_LONG, policy)
     spatial = ontology_text(ontology, AiGroup.SPATIAL, policy)
@@ -148,7 +182,8 @@ def _request(
         unit_id=unit.unit_id, affinity=unit.window.window_key, group=unit.group, parts=parts,
         history=history, schema=response_schema(ontology, unit.group, policy),
         schema_enforcement="server", max_tokens=policy.backend.max_tokens, targets=unit.targets,
-        entities=unit.window.entities, frame_ms=unit.frame_ms,
+        entities=unit.window.entities, frame_nos=tuple(range(len(unit.frame_ms))),
+        frame_ms=unit.frame_ms,
     )  # fmt: skip
 
 
@@ -207,3 +242,132 @@ def test_openai_compatible_judge_request_and_model_check(
     )
     with pytest.raises(VlmRequestError):
         wrong.judge(_request(unit, policy, ontology))
+
+
+def _golden_units(policy: AiReviewPolicy, o: Ontology) -> tuple[list[PlannedUnit], SensorContext]:
+    """골든용 고정 장면의 단위: 생성기와 무관하게 손으로 만든 라벨 (바디캠 100 ms 간격 프레임).
+
+    시간 대상 4개(행동·사이 구간·이벤트·영상 접촉 손 상태), 사람이 만든 맥락 행동 하나, 박스 트랙
+    둘(개체표·공간 대상), 오른손 장갑 접촉 구간.
+    """
+    session = make_session("s900", duration_ms=12_000)
+
+    def label(label_id: str, payload: Any, start: int, end: int, **kw: Any) -> LabelRecord:
+        data: dict[str, Any] = {
+            "label_id": label_id, "session_id": "s900", "t_start_ms": start, "t_end_ms": end,
+            "ontology_version": "1.0.0", "created_at": FIXED_TIME, "payload": payload,
+            "provenance": Provenance(source=Source.MODEL, model_version="m-1"), "confidence": 0.7,
+        } | kw  # fmt: skip
+        return LabelRecord.model_validate(data)
+
+    def box(label_id: str, entity: str, cls: str, x: float) -> LabelRecord:
+        kfs = tuple(BoxKeyframe(t_ms=t, x=x, y=60, w=30, h=30) for t in range(0, 3_001, 500))
+        payload = BoxTrackPayload(entity_id=entity, class_id=cls, keyframes=kfs)
+        return label(label_id, payload, 0, 3_000, stream_id="bodycam")
+
+    grasp = ActionPayload(
+        action_id="act-1", hand=Hand.RIGHT, verb="grasp", target_id="cup_01",
+        t_approach_ms=1_000, t_contact_start_ms=1_300, t_contact_end_ms=1_800, t_end_ms=2_000,
+    )  # fmt: skip
+    push = ActionPayload(
+        action_id="act-p", hand=Hand.LEFT, verb="push", target_id="sink_01",
+        t_approach_ms=1_000, t_end_ms=2_500,
+    )  # fmt: skip
+    hand = HandStatePayload(
+        hand=Hand.RIGHT, contact_target_kind="object", target_id="cup_01", grasp_type="power",
+        role="active",
+    )  # fmt: skip
+    labels = [
+        label("a1", grasp, 1_000, 2_000),
+        label("g1", GapPayload(hand=Hand.RIGHT, gap_type="idle"), 2_000, 3_000),
+        label("e1", EventPayload(event_type="slip", severity=2), 2_500, 2_900),
+        label("h1", hand, 1_300, 1_800, evidence=Evidence.INFERRED),
+        label(
+            "p1", push, 1_000, 2_500, provenance=Provenance(source=Source.HUMAN), confidence=None
+        ),
+        box("b-cup", "cup_01", "cup", 100.0),
+        box("b-sink", "sink_01", "sink", 200.0),
+    ]
+    times = np.arange(0, 12_000, 100, dtype=np.int64)
+    pts = PtsIndex(Fraction(1, 1000), times, np.ones(len(times), dtype=bool))
+    sensor = SensorContext.of({Hand.RIGHT: [(1_300.0, 1_800.0)]})
+    units = plan_session(
+        session, labels, policy, o, media={"bodycam": StreamMedia(pts, "e" * 64)}, sensor=sensor
+    )
+    return units, sensor
+
+
+def test_prompt_templates_match_golden_files(policy: AiReviewPolicy, ontology: Ontology) -> None:
+    """프롬프트 틀 전부(system, 묶음별 고정 블록, 응답 스키마, 시간·공간 가변 글, 재시도 글)를 골든
+    파일과 바이트 비교한다. 판정 버전(digest)에는 정책 값만 들어가므로, 틀을 바꾸면 이 테스트가
+    PROMPT_VERSION을 올리라고 알린다 (같은 버전에 다른 프롬프트의 판정이 섞이지 않게)."""
+    _golden("system.txt", system_text(policy))
+    _golden("ontology_temporal.txt", ontology_text(ontology, AiGroup.TEMPORAL, policy))
+    _golden("ontology_spatial.txt", ontology_text(ontology, AiGroup.SPATIAL, policy))
+    plain = with_policy(policy, temporal={"timestamp_overlay": False})
+    _golden("ontology_temporal_plain.txt", ontology_text(ontology, AiGroup.TEMPORAL, plain))
+    for group in (AiGroup.TEMPORAL, AiGroup.SPATIAL):
+        schema = json.dumps(
+            response_schema(ontology, group, policy), ensure_ascii=False, indent=1, sort_keys=True
+        )
+        _golden(f"schema_{group.value}.json", schema + "\n")
+    units, sensor = _golden_units(policy, ontology)
+    for group in (AiGroup.TEMPORAL, AiGroup.SPATIAL):
+        unit = next(u for u in units if u.group is group)
+        images = images_for(unit, policy)
+        text = unit_text(unit, images, range(len(unit.targets)), ontology, sensor)
+        _golden(f"unit_{group.value}.txt", text)
+    _golden("retry.txt", retry_text(["번호 #0가 빠짐", "#1: 이유는 한국어 한 문장"]))
+
+
+def test_golden_scene_covers_every_text_row(policy: AiReviewPolicy, ontology: Ontology) -> None:
+    """골든 가변 글이 행 종류(행동·사이 구간·이벤트·손 상태·맥락·개체표·장갑 문장·표식)를 다
+    담는다."""
+    units, sensor = _golden_units(policy, ontology)
+    temporal = next(u for u in units if u.group is AiGroup.TEMPORAL)
+    text = unit_text(temporal, images_for(temporal, policy), range(4), ontology, sensor)
+    for piece in ("행동 오른손", "사이 구간", "이벤트", "손 상태", "(확정)", "개체:", "장갑 압력"):
+        assert piece in text, piece
+    spatial = next(u for u in units if u.group is AiGroup.SPATIAL)
+    assert "B0" in unit_text(spatial, images_for(spatial, policy), [0], ontology, sensor)
+
+
+def test_plain_frames_prompt_matches_overlay(
+    scene: Scene, policy: AiReviewPolicy, ontology: Ontology
+) -> None:
+    """`timestamp_overlay: false`면 시간 프레임에 글자를 그리지 않고, 고정 블록도 모서리 표기가
+    있다고 말하지 않는다 (프롬프트가 그림과 맞다). 공간 프레임은 늘 표기한다."""
+    plain = with_policy(policy, temporal={"timestamp_overlay": False})
+    block = ontology_text(ontology, AiGroup.TEMPORAL, plain)
+    assert "모서리" not in block and "글자가 없다" in block
+    assert "모서리의 F#" in ontology_text(ontology, AiGroup.SPATIAL, plain)
+    units = _units(scene, plain, ontology)
+    unit = next(u for u in units if u.group is AiGroup.TEMPORAL)
+    stamped = images_for(unit, policy)
+    bare = images_for(unit, plain)
+    assert all(a.image.sha256 != b.image.sha256 for a, b in zip(stamped, bare, strict=True))
+    assert plain.verdict_version != policy.verdict_version
+
+
+def test_served_name_is_sent_as_request_model(
+    scene: Scene, policy: AiReviewPolicy, ontology: Ontology
+) -> None:
+    """`served_name`이 있으면 요청 본문의 model과 응답 대조 모두 그 이름이다 (vLLM은
+    --served-model-name이 아닌 이름을 404로 거부한다). 판정 버전·라이선스 이름은 backend.model."""
+    aliased = with_policy(policy, backend={"served_name": "judge"})
+    unit = _units(scene, aliased, ontology)[0]
+    seen: list[dict[str, Any]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(req.content))
+        return httpx.Response(
+            200, json={"model": "judge", "choices": [{"message": {"content": "{}"}}]}
+        )
+
+    judge = OpenAICompatibleJudge(
+        "spark-01", "http://10.0.0.11:8000", aliased, transport=httpx.MockTransport(handler)
+    )
+    assert judge.judge(_request(unit, aliased, ontology)).served_model == "judge"
+    assert seen[0]["model"] == "judge"
+    assert aliased.verdict_version.endswith("+vlm-" + policy.backend.model)
+    assert judge.info.model == policy.backend.model
