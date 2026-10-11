@@ -20,7 +20,7 @@ import sqlalchemy as sa
 import yaml
 from numpy.typing import NDArray
 
-from dlp_fixtures.actions import ENTITIES, generate_action_scenario
+from dlp_fixtures.actions import ENTITIES, ActionScenario, generate_action_scenario
 from dlp_fixtures.io import write_parquet
 from dlp_fixtures.video import generate_blur_scenario, write_video
 from dlp_media.ingest import ingest_session, load_manifest
@@ -93,6 +93,15 @@ def pg() -> Iterator[sa.Engine]:
         admin.dispose()
 
 
+def _write_bodycam(path: Path, actions: ActionScenario) -> None:
+    """행동 시나리오 전체(마지막 손 키프레임 뒤까지)를 덮는 합성 바디캠 영상을 쓴다.
+
+    세션 길이(`Session.duration_ms`)는 바디캠 PTS로 정해지고 접촉은 그 안으로 잘린다 (F-PAR-02).
+    영상이 시나리오보다 짧으면 영상 끝 뒤 접촉이 빠져 정답 수와 맞지 않는다.
+    """
+    generate_blur_scenario(1, duration_ms=actions.frame_times[-1] + 200).write(path)
+
+
 def test_prelabel_session_with_glove_contacts(pg: sa.Engine, tmp_path: Path) -> None:
     """장갑이 있는 바디캠 세션에서 프리라벨 전체 흐름과 감사 회귀 네 가지를 본다.
 
@@ -104,7 +113,7 @@ def test_prelabel_session_with_glove_contacts(pg: sa.Engine, tmp_path: Path) -> 
     단계를 대신하면 기본 접촉 단계는 돌지 않고 검수 전 접촉을 지운다.
     """
     actions = generate_action_scenario(1, n_units=10)
-    generate_blur_scenario(1).write(tmp_path / "bodycam.mp4")
+    _write_bodycam(tmp_path / "bodycam.mp4", actions)
     write_parquet(
         tmp_path / "glove_right.parquet",
         {"t_ms": actions.glove_t_ms, "pressure_0": actions.glove_pressure},
@@ -381,7 +390,7 @@ def test_reviewed_contacts_are_not_duplicated_when_inputs_change(
     접두사 "pressure"는 기본값과 같아 버전이 같고(0개), "pressure_"는 다른 버전이라 다시 만든다.
     """
     actions = generate_action_scenario(1, n_units=10)
-    generate_blur_scenario(1).write(tmp_path / "bodycam.mp4")
+    _write_bodycam(tmp_path / "bodycam.mp4", actions)
     write_parquet(
         tmp_path / "glove_right.parquet",
         {"t_ms": actions.glove_t_ms, "pressure_0": actions.glove_pressure},
@@ -606,3 +615,50 @@ def test_depth_lift_uses_the_reviewed_track_when_hand_versions_coexist(
         assert isinstance(x.payload, Trajectory3DPayload)
         key = (x.payload.entity_id, x.payload.part)
         assert list(x.payload.samples) == from_old[key] != from_new[key]
+
+
+def test_glove_started_before_the_bodycam_keeps_only_contacts_inside_the_session(
+    pg: sa.Engine, tmp_path: Path
+) -> None:
+    """F-PAR-02 회귀: 장갑을 바디캠보다 2초 먼저 켜(offset -2000 ms) 마스터로 바꾼 장갑 접촉이 0
+    앞이나 세션 끝 뒤에 놓여도 프리라벨이 롤백되지 않고, 세션 [0, 길이] 안 구간만 손 상태가 된다.
+
+    예전에는 음수 시각 손 상태 라벨이 Ms(ge=0) 검증에서 실패해 프리라벨 트랜잭션 전체가 롤백됐다.
+
+    장갑 시계 접촉(압력 1, ms): 500~1200 → 마스터 -1500~-800 (버림), 1600~2600 → -400~600 (0~600),
+    3000~4000 → 1000~2000 (그대로), 4500~5800 → 2500~3800 (2500~세션 길이). 세션 길이는 바디캠
+    PTS로 정한 `Session.duration_ms` (약 3000 ms 합성 영상).
+    """
+    generate_blur_scenario(1).write(tmp_path / "bodycam.mp4")
+    t = np.arange(0, 6_000, 10.0)
+    pressure = np.zeros(t.size)
+    for a, b in ((500, 1_200), (1_600, 2_600), (3_000, 4_000), (4_500, 5_800)):
+        pressure[(t >= a) & (t < b)] = 1.0
+    write_parquet(tmp_path / "glove_right.parquet", {"t_ms": t, "pressure_0": pressure})
+    sid = f"neg-{uuid.uuid4().hex[:8]}"
+    manifest = {
+        "session_id": sid, "domain": "cleaning", "worker_id": "w01", "site_id": "site01",
+        "consent_version": "c1", "recorded_at": FIXED_TIME.isoformat(), "ontology_version": "1.0.0",
+        "streams": [
+            {"stream_id": "bodycam", "kind": "bodycam", "path": "bodycam.mp4"},
+            {"stream_id": "glove_right", "kind": "glove_right", "path": "glove_right.parquet"},
+        ],
+    }  # fmt: skip
+    (tmp_path / "m.yaml").write_text(yaml.safe_dump(manifest), encoding="utf-8")
+    raw = S3Store.from_env("dlp-raw")
+    policy, ontology = load_policy(ROOT), load_ontology(ROOT / "config/ontology/v1")
+    with pg.begin() as conn:
+        session = ingest_session(*load_manifest(tmp_path / "m.yaml"), raw, conn).session
+        glove = session.stream("glove_right").model_copy(
+            update={"sync_method": SyncMethod.TAP_EVENT, "offset_ms": -2_000.0}
+        )
+        update_stream_sync(conn, sid, glove)
+    duration = session.duration_ms
+    assert 2_500 < duration < 3_800  # 마지막 접촉이 세션 끝에 걸친다
+    with pg.begin() as conn:
+        summary = run_prelabel(conn, sid, raw, [], policy, ontology, FIXED_TIME)
+        contacts = _builtin_contacts(current_labels(get_labels(conn, sid, kinds=["hand_state"])))
+    spans = sorted((x.t_start_ms, x.t_end_ms) for x in contacts)
+    assert spans == [(0, 600), (1_000, 2_000), (2_500, duration)]
+    assert summary.contacts == len(contacts)
+    assert all(check_label(x, ontology) == [] for x in contacts)

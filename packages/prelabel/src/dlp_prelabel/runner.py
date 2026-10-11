@@ -3,16 +3,16 @@
 1. 영상 스트림마다 Predictor를 돌린다 (원본 영상: 모델 추론은 접근 통제된 서버에서 원본으로 한다).
    같은 Predictor·모델 버전 결과가 그 스트림에 이미 있으면 건너뛴다.
 2. 깊이 모델이 있으면 바디캠 손 관절·객체 박스를 카메라 좌표 3D 궤적으로 올린다 (lift3d).
-3. 바디캠의 손 키포인트·객체 박스와 장갑 신호로 접촉 구간을 만들어 hand_state 라벨로 쓴다. 배포된
-   재학습 접촉 모델이 있으면(replaced에 CONTACT_STEP) 이 단계는 돌지 않고, 이 단계가 냈던 검수 전
-   접촉을 지운다. 2·3의 모델 버전에는 정책 절 해시(depth·contact)와 입력 해시를 넣는다. 입력은
-   2가 (개체, 트랙 종류)마다 하나씩 고른 바디캠 hand21 손·박스 트랙의 라벨 ID(`pick_lift_tracks`),
-   3이 바디캠 손·박스 트랙의 현재 라벨 ID와 장갑 동기화, 장갑 압력 채널
-   접두사(sync.yaml glove.pressure_prefixes)다. 입력이 바뀌면 (예측기 버전 변경, 검수자 수정) 다시
-   돌고, 검수 전인 이전 결과만 지운다. 검수된(승인·표본 검증) 결과와 사람이 고치거나 만든 결과는
-   남으므로, 새 결과 중 그와 겹치는 것은 버린다: 접촉은 같은 손에서 시간이
-   겹치는 구간, 3D 궤적은 같은 (개체, 부위, 좌표계) (ADR 0015, 검수 결과 옆에 같은 대상의 모델
-   출력이 중복으로 남지 않게).
+3. 바디캠의 손 키포인트·객체 박스와 장갑 신호로 접촉 구간을 만들어 세션 [0, 길이]로 자른 뒤
+   hand_state 라벨로 쓴다. 배포된 재학습 접촉 모델이 있으면(replaced에 CONTACT_STEP) 이 단계는
+   돌지 않고, 이 단계가 냈던 검수 전 접촉을 지운다. 2·3의 모델 버전에는 정책 절
+   해시(depth·contact)와 입력 해시를 넣는다. 입력은 2가 (개체, 트랙 종류)마다 하나씩 고른 바디캠
+   hand21 손·박스 트랙의 라벨 ID(`pick_lift_tracks`), 3이 바디캠 손·박스 트랙의 현재 라벨 ID와
+   장갑 동기화, 장갑 압력 채널 접두사(sync.yaml glove.pressure_prefixes)다. 입력이 바뀌면
+   (예측기 버전 변경, 검수자 수정) 다시 돌고, 검수 전인 이전 결과만 지운다. 검수된(승인·표본 검증)
+   결과와 사람이 고치거나 만든 결과는 남으므로, 새 결과 중 그와 겹치는 것은 버린다: 접촉은 같은
+   손에서 시간이 겹치는 구간, 3D 궤적은 같은 (개체, 부위, 좌표계) (ADR 0015, 검수 결과 옆에 같은
+   대상의 모델 출력이 중복으로 남지 않게).
 4. 3인칭 영상이 있으면 바디캠 IMU와 3인칭 인물 손목 속도를 상관시켜 착용자를 찾는다. 찾은 인물의
    키포인트 트랙은 entity_id="wearer"인 새 레코드(parent=원래 트랙)로 남긴다. 이 레코드는 모델
    출력(검수 전, 출처 MODEL)이다. 원래 트랙이 사람 출처여도 출처를 물려받지 않는다. 전신 모델 버전이
@@ -43,6 +43,7 @@ from dlp_media.storage import ObjectStore
 from dlp_prelabel.common import input_digest, model_label
 from dlp_prelabel.contact import (
     ContactInterval,
+    clip_to_session,
     fuse_contacts,
     glove_contact_intervals,
     video_contact_intervals,
@@ -77,7 +78,11 @@ VIDEO = {StreamKind.BODYCAM, StreamKind.THIRD_PERSON}
 # 배포 모델이 기본 어댑터를 대신해 지울 때 삭제 레코드에 남기는 model_version
 REPLACED_VERSION = "replaced-by-deployed-model"
 # 접촉(CONTACT_PREFIX)·착용자(WEARER_PREFIX) 단계 버전 접두사. 알고리즘을 바꾸면 숫자를 올려
-# 다시 돌게 한다 (이력에 같은 버전이 없어진다)
+# 다시 돌게 한다 (이력에 같은 버전이 없어진다).
+# 세션 [0, 길이] 자르기(F-PAR-02, `clip_to_session`)는 숫자를 올리지 않았다: 0 앞 구간이 생기던
+# 세션은 예전에 트랜잭션이 롤백되어 이력이 없고, 세션 끝 뒤 구간이 남은 세션은 입력이 바뀌어
+# 다시 돌 때 잘린다. 올리면 모든 세션의 검수 전 접촉이 새 ID로 다시 만들어지고, 평가 기준
+# 버전 패턴(`contact-heuristic-1*`, ADR 0013·0025, training.yaml)도 함께 바꿔야 한다.
 CONTACT_PREFIX = "contact-heuristic-1"
 WEARER_PREFIX = "wearer-xcorr-1"
 # replaced에 이 이름이 있으면 배포된 재학습 접촉 모델이 기본 접촉 단계(장갑·영상 휴리스틱)를
@@ -503,9 +508,11 @@ def _contacts(
     절)이나 입력(손·객체 트랙, 장갑 동기화, 압력 채널 접두사)이 바뀌면 버전이 바뀌어 다시 만들고,
     검수 전인 이전 버전 접촉만 지운다. 같은 손의 검수된·사람 손 상태와 겹치는 새 구간은 버린다.
 
-    장갑이 있는 손은 `fuse_contacts`(장갑 시각 + 영상 대상), 없는 손은 영상 구간만 쓴다. 라벨은
-    마스터 타임라인 구간(stream_id=None)이고 ID는 `<세션>-contact-<version_tag>-<손>-<순번
-    4자리>`다. 신뢰도는 `contact.confidence.<출처>`, 증거는 영상만이면 INFERRED, 그 밖은 OBSERVED.
+    장갑이 있는 손은 `fuse_contacts`(장갑 시각 + 영상 대상), 없는 손은 영상 구간만 쓴다. 구간은
+    세션 [0, `session.duration_ms`]로 자르고 다 잘린 구간은 버린다 (`clip_to_session`, F-PAR-02:
+    오프셋이 음수인 장갑). 라벨은 마스터 타임라인 구간(stream_id=None)이고 ID는
+    `<세션>-contact-<version_tag>-<손>-<순번 4자리>`다 (순번은 자른 뒤 목록 기준). 신뢰도는
+    `contact.confidence.<출처>`, 증거는 영상만이면 INFERRED, 그 밖은 OBSERVED.
 
     Returns: 새로 넣은 접촉 라벨 수 (같은 버전이 이력에 있으면 0).
     부작용: 원본 버킷에서 장갑 Parquet을 받고, `label_records`에 새 접촉과 이전 버전 삭제 레코드를
@@ -564,6 +571,9 @@ def _contacts(
             intervals = fuse_contacts(
                 glove_contact_intervals(master, series.values, policy.contact.glove), video
             )
+        # 마스터로 바꾼 장갑 시각은 세션 밖일 수 있다 (오프셋이 음수면 0 앞). 세션 [0, 길이]로
+        # 자르고 빈 구간은 버린다 (음수 시각 라벨은 검증에서 실패해 트랜잭션 전체가 롤백된다)
+        intervals = clip_to_session(intervals, session.duration_ms)
         for i, c in drop_protected_contacts(intervals, hand, current):
             kind = _contact_kind(classes.get(c.target_id or ""), ontology)
             payload = HandStatePayload(

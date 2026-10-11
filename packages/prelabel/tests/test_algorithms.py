@@ -18,6 +18,7 @@ from dlp_fixtures.actions import ENTITIES, ActionScenario, generate_action_scena
 from dlp_prelabel.contact import (
     ContactInterval,
     box_at,
+    clip_to_session,
     fuse_contacts,
     glove_contact_intervals,
     video_contact_intervals,
@@ -180,6 +181,31 @@ def test_fusion_keeps_video_contacts_the_glove_missed() -> None:
         ContactInterval(1000, 2000, "bucket_01", "fused"),
         ContactInterval(3000, 3500, "sink_01", "video"),
     ]
+
+
+def test_contacts_are_clipped_to_the_session() -> None:
+    """F-PAR-02 회귀: 마스터 시각 접촉 구간을 세션 [0, 길이]로 자르고, 다 잘려 없어지거나 길이가 0
+    이하가 된 구간은 버린다.
+
+    장갑을 바디캠보다 2초 먼저 켜면(offset -2000 ms) 장갑 시계 0.5~1.2 s 접촉은 마스터
+    -1500~-800 ms로 세션 앞이다. 예전에는 그대로 손 상태 라벨이 되어 Ms(ge=0) 검증이 실패하고
+    프리라벨 전체가 롤백됐다. 세션 길이 3000 ms 기준 정답을 손으로 적었다.
+    """
+    intervals = [
+        ContactInterval(-1_500, -800, None, "glove"),  # 세션 앞: 버린다
+        ContactInterval(-400, 600, "bucket_01", "fused"),  # 0에 걸침: 0~600
+        ContactInterval(-300, 0, None, "glove"),  # 0에서 끝남: 길이 0이 되어 버린다
+        ContactInterval(1_000, 2_000, None, "glove"),  # 세션 안: 그대로
+        ContactInterval(2_500, 3_800, None, "glove"),  # 끝에 걸침: 2500~3000
+        ContactInterval(3_000, 3_500, "sink_01", "video"),  # 끝에서 시작: 버린다
+        ContactInterval(4_000, 4_500, None, "glove"),  # 세션 뒤: 버린다
+    ]
+    assert clip_to_session(intervals, 3_000) == [
+        ContactInterval(0, 600, "bucket_01", "fused"),
+        ContactInterval(1_000, 2_000, None, "glove"),
+        ContactInterval(2_500, 3_000, None, "glove"),
+    ]
+    assert clip_to_session(intervals, 0) == []
 
 
 def _person(

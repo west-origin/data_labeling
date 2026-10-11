@@ -14,13 +14,15 @@
 쓴다. 정책: `prelabel.yaml contact.glove`, `contact.video`. 관련: WP8, ADR 0015, 0026.
 
 시간 단위 주의: 장갑 구간은 러너가 장갑 시각을 마스터 ms로 바꿔 넘긴다. 영상 구간은 손 키프레임의
-스트림 PTS ms다. 러너는 바디캠(기준 스트림, ADR 0019)만 쓰므로 둘이 같은 축이 된다.
+스트림 PTS ms다. 러너는 바디캠(기준 스트림, ADR 0019)만 쓰므로 둘이 같은 축이 된다. 마스터로 바꾼
+장갑 시각은 세션 밖(오프셋이 음수면 0 앞, 장갑을 늦게 끄면 세션 끝 뒤)일 수 있어, 러너는 융합한
+구간을 `clip_to_session`으로 세션 [0, 길이]에 자른 뒤 라벨로 쓴다 (F-PAR-02).
 """
 
 from __future__ import annotations
 
 import bisect
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 from numpy.typing import NDArray
@@ -207,3 +209,31 @@ def fuse_contacts(
         out.append(ContactInterval(g.start_ms, g.end_ms, target, "fused" if target else "glove"))
     out += [v for v in video if not any(_overlap(g, v) > 0 for g in glove)]
     return sorted(out, key=lambda c: (c.start_ms, c.end_ms))
+
+
+def clip_to_session(intervals: list[ContactInterval], duration_ms: int) -> list[ContactInterval]:
+    """마스터 ms 접촉 구간을 세션 [0, duration_ms]로 자른다. 잘린 뒤 길이가 0 이하면 버린다.
+
+    장갑 시각을 마스터로 바꾸면 세션 밖 구간이 생길 수 있다: 장갑을 바디캠보다 먼저 켜 오프셋이
+    음수면 0 앞(sync.yaml max_offset_ms는 양방향), 바디캠보다 늦게 끄면 세션 끝 뒤. 손 상태 라벨
+    시각은 Ms(0 이상)라 0 앞 구간을 그대로 쓰면 라벨 검증이 실패해 프리라벨 트랜잭션 전체가
+    롤백됐다 (F-PAR-02). 관계 단계도 세션 밖 표본을 자른다 (`dlp_relations.derive`). 영상 구간은
+    바디캠 손 키프레임(PTS) 시각이라 보통 이미 세션 안이지만 같은 경계를 적용한다.
+
+    출처·대상은 그대로 둔다. min_duration_ms는 다시 적용하지 않는다 (세션 경계에서 잘린 접촉도 세션
+    안 부분은 실제 접촉이다). 0에서 끝나거나 세션 끝에서 시작하는 구간(잘린 길이 0)은 버린다.
+
+    Args:
+        intervals: 마스터 ms 접촉 구간 (`fuse_contacts` 결과 또는 영상 구간).
+        duration_ms: 세션 길이 (`Session.duration_ms`: 수집이 바디캠 PTS 인덱스의 길이, 즉 마지막
+            프레임 시각 + 프레임 간격 중앙값을 반올림한 정수 ms).
+
+    Returns:
+        자른 구간 (입력 순서 유지).
+    """
+    out: list[ContactInterval] = []
+    for c in intervals:
+        start, end = max(c.start_ms, 0), min(c.end_ms, duration_ms)
+        if end > start:
+            out.append(replace(c, start_ms=start, end_ms=end))
+    return out
