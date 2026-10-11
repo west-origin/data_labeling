@@ -131,7 +131,7 @@ class IngestResult:
     db: str = "skipped"  # inserted | unchanged | skipped
 
 
-def ingest_session(
+def ingest_session(  # noqa: C901
     manifest: SessionManifest,
     base_dir: Path,
     raw: ObjectStore,

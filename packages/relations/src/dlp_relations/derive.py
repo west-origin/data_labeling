@@ -94,7 +94,7 @@ def class_of(entity_id: str, classes: dict[str, str]) -> str:
     return re.sub(r"_\d+$", "", entity_id.removeprefix("ov_"))
 
 
-def derive(
+def derive(  # noqa: C901
     labels: list[LabelRecord],
     ontology: Ontology,
     policy: RelationsPolicy,

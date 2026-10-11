@@ -26,6 +26,10 @@ AI 에이전트가 맡는 일과 사람이 맡아야 하는 일을 처음부터 
 
 ## 저장소 구조
 
+> 아래는 계획 당시의 목표 구조다. `bridges/`, `metrics/`, `flows/`, `dashboards/`처럼 실제와 다른 이름이 있다.
+> 현재 구조와 패키지 의존은 [구조 지도](handover/architecture.md)가 기준이다 (의존 표는
+> `tests/test_import_boundaries.py`가 코드와 대조한다). Python 버전은 `pyproject.toml`의 `>=3.12,<3.14`가 기준이다.
+
 ```
 data_labeling/
 ├── CLAUDE.md                  # 에이전트 작업 규칙, 명령어, 금지 사항

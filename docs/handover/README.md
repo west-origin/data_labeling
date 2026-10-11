@@ -23,7 +23,7 @@ flowchart LR
 감사 경로로 원본을 읽고, 일반 검수자·행동 VLM·큐레이션·내보내기는 승인된 블러본을 사용한다.
 실제 재학습기는 아직 연결되지 않았다.
 
-## 현재 상태: 2026-10-10 기준
+## 현재 상태: 2026-10-11 기준
 
 | 영역 | 구현·확인된 범위 | 인수자가 추가 확인할 것 |
 | --- | --- | --- |
@@ -37,13 +37,17 @@ flowchart LR
 | 내보내기 | COCO·구간 JSON·LeRobot 경로, 게시 전 재검사 | 이번 LeRobot 격리 환경 검사 미실행; 고객 전달 샘플 |
 | SaaS 운영 | 개발 서비스·감사·보관 명령 | 인증·테넌트 격리·영속 작업 큐·복구·부하 검증 |
 
-현재 테스트 결과와 확정된 미해결 문제는 [남은 과제](known-issues.md)가 기준이다.
+현재 테스트 결과는 [남은 과제](known-issues.md), 확정·후보 문제의 단일 목록은 [레지스트리](issues.yaml)가 기준이다.
 테스트 통과와 실영상 정확도·상용 서비스 준비 완료는 별개의 판단이다.
 
 ## 읽는 순서와 문서의 책임
 
 | 목적 | 문서 |
 | --- | --- |
+| 외주 검수·리팩토링의 범위·결과물 형식·인수 기준 | [인수 기준](acceptance.md), PR 양식(`.github/pull_request_template.md`) |
+| 알려진 문제 전체(ID·상태·심각도·관련 파일·재현 테스트) | [레지스트리](issues.yaml), 재현은 `tests/test_known_defects.py` |
+| 작업 규칙마다 실제로 막는 수단(트리거·테스트)과 문서뿐인 규칙 | [불변 조건과 강제 수단](invariants.md) |
+| 2026-10-11 전 파일 전수 검수 결과 | [전수 검수 결과](full-review-2026-10-11.md) |
 | 코드를 어디서 읽을지, 상태·시간·원본 경계 | [구조 지도](architecture.md) |
 | 새 개발 환경 재현, 현재 클라우드와의 차이 | [환경 준비](development.md) |
 | 변경할 파일·테스트, 실패·재시도·잠금 | [변경 및 복구 안내](change-guide.md) |
@@ -52,7 +56,7 @@ flowchart LR
 | 클래스·동작·작업 계층, 버전·의미 검증과 청소 확장 범위 | [온톨로지 구조 검사](ontology-structure-review.md) |
 | 온톨로지 변경 위치·용어 기준 초안·현장 예시 작성법 | [온톨로지 검수 안내](../ontology-guide.md) |
 | 주석과 구현의 불일치, 설명 수정 범위·검증 | [주석 집중 검수](comment-review.md) |
-| 전체 소스·설정 검사 목록, 추가 정정·새 실행 결과 | [전체 파일 검사](full-comment-review.md), [파일별 목록](full-comment-review-files.csv) |
+| 전체 소스·설정 검사 목록, 추가 정정·새 실행 결과 | [전체 파일 검사](full-comment-review.md), [파일별 목록](full-comment-review-files.csv)(2026-10-10 시점, 지금 범위는 `make review-scope`) |
 | 실제 촬영 영상의 첫 실행 | [청소 영상 파일럿](../weekend-video-pilot.md) |
 | 작업 규칙·필수 검사 | [CLAUDE.md](../../CLAUDE.md) |
 | 목표와 작업 패키지별 요구사항 | [제품 계획](../labeling-platform-plan.md), [구현 계획](../ai-implementation-plan.md) |

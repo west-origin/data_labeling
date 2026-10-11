@@ -217,7 +217,7 @@ def _truth_lookup(golden: list[GoldenSession]) -> Callable[[str, str], list[Labe
     return lambda sid, stream: by_key.get((sid, stream), []) + by_key.get((sid, None), [])
 
 
-def run_training_job(
+def run_training_job(  # noqa: C901
     conn: sa.Connection,
     job: TrainingJob,
     *,

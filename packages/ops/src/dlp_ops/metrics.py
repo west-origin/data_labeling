@@ -241,7 +241,7 @@ class WeeklyMetrics:
         }
 
 
-def weekly_metrics(
+def weekly_metrics(  # noqa: C901
     conn: sa.Connection, week: str, review_policy: ReviewOpsPolicy, policy: OpsPolicy
 ) -> WeeklyMetrics:
     """한 주의 운영 지표를 DB에서 계산한다. 읽기 전용.

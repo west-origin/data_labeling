@@ -251,7 +251,7 @@ class Episode:
     used: frozenset[str] = frozenset()  # 실제로 어느 프레임 특징에 들어간 라벨 ID
 
 
-def build_episode(
+def build_episode(  # noqa: C901
     session: Session,
     stream: Stream,
     index: PtsIndex,

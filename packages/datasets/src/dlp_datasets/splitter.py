@@ -50,7 +50,7 @@ def _h(seed: int, s: str) -> str:
     return hashlib.sha256(f"{seed}|{s}".encode()).hexdigest()
 
 
-def assign_splits(
+def assign_splits(  # noqa: C901
     sessions: list[Session],
     golden_ids: Iterable[str],
     *,

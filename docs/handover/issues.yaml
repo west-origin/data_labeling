@@ -1,0 +1,298 @@
+# 알려진 문제 레지스트리 (단일 출처). 외주 검수·리팩토링은 새 발견을 이 목록과 대조해
+# "기존 ID 중복"인지 "신규"인지 먼저 가른다. 사람이 읽는 설명은 각 source 문서에 있다.
+#
+# 필드:
+#   id        S·R(known-issues), T(training-loop-review), O(ontology-structure-review),
+#             A-nn(audit-notes, 재현 전 후보), F-<영역>-nn(2026-10-11 전수 검수). 지우지 않고 status만 바꾼다.
+#   title     한 줄 요약
+#   severity  high | medium | low
+#   status    open(확정·미수정) | candidate(재현 전 후보) | fixed(반영) | superseded(다른 ID로 옮김)
+#   kind      code | comment | test | ops | product
+#   files     관련 경로 (저장소 루트 기준, 있어야 한다)
+#   source    설명이 있는 문서
+#   repro     (선택) 재현 테스트 `경로::함수`. 확정·미수정 결함의 재현은 tests/test_known_defects.py에
+#             xfail(strict=True)로 둔다. 고치면 XPASS가 실패로 떠서 이 항목 갱신을 강제한다.
+#   see       (선택) 관련 ID
+#   note      (선택) 보충
+# 영역 코드: SCH(schema) REV(review) PMS(privacy·media·sync) PAR(prelabel·actions·relations·models)
+#            ETA(evaluation·training·active·datasets) COE(cli·export·ops·fixtures·스크립트)
+# 검사: tests/test_issue_registry.py (ID 형식·중복, 값, 경로, 재현 테스트, 문서 속 ID 대응).
+
+issues:
+  # ── 외부 서비스 제공 전 해결할 과제 (known-issues.md) ──
+  - {id: S1, title: 인증·테넌트 경계 미구현 (DLP_ACTOR는 자기 신고), severity: high, status: open, kind: product,
+     files: [packages/cli/src/dlp_cli/raw_access.py], source: docs/handover/known-issues.md}
+  - {id: S2, title: CVAT 원본 사본 자동 삭제 없음, severity: high, status: open, kind: product,
+     files: [packages/review/src/dlp_review/tasks.py, packages/ops/src/dlp_ops/retention.py], source: docs/handover/known-issues.md}
+  - {id: S3, title: FiftyOne GraphQL 의존성 취약점 2건 미패치, severity: high, status: open, kind: ops,
+     files: [pyproject.toml, uv.lock], source: docs/handover/known-issues.md}
+  - {id: S4, title: "commercial: review 모델의 상업 이용 법적 결론 없음", severity: high, status: open, kind: product,
+     files: [config/models.yaml], source: docs/handover/known-issues.md}
+  - {id: S5, title: 영속 작업 큐·백업 복구·장기 부하 검증 미완료, severity: medium, status: open, kind: ops,
+     files: [packages/review/src/dlp_review/webhook.py, services/docker-compose.yml], source: docs/handover/known-issues.md}
+
+  # ── 리팩토링 우선순위 (known-issues.md) ──
+  - {id: R1, title: insert_labels 배치 의미·버전·구간 검증과 0014 트리거, severity: high, status: fixed, kind: code,
+     files: [packages/schema/src/dlp_schema/db/repository.py], source: docs/handover/known-issues.md, note: ADR 0037}
+  - {id: R2, title: 세션·데이터셋 온톨로지 버전 공통 로더, severity: high, status: fixed, kind: code,
+     files: [packages/schema/src/dlp_schema/db/ontology_repository.py, packages/cli/src/dlp_cli/ontology_access.py],
+     source: docs/handover/known-issues.md, note: ADR 0037}
+  - {id: R3, title: 탐지·렌더·작업 생성의 긴 세션 잠금, severity: medium, status: open, kind: code,
+     files: [packages/privacy/src/dlp_privacy/runner.py, packages/review/src/dlp_review/tasks.py], source: docs/handover/known-issues.md}
+  - {id: R4, title: DB 롤백과 외부 도구·저장소 부작용 불일치, severity: medium, status: open, kind: code,
+     files: [packages/review/src/dlp_review/tasks.py, packages/export/src/dlp_export/runner.py], source: docs/handover/known-issues.md}
+  - {id: R5, title: 검수 클라이언트·lakeFS가 localhost와 포트를 조합, severity: low, status: open, kind: code,
+     files: [packages/review/src/dlp_review/clients.py, packages/datasets/src/dlp_datasets/snapshot.py], source: docs/handover/known-issues.md}
+  - {id: R6, title: 주간 지표·세션 순위·감사 후보의 전체 이력 조회, severity: low, status: open, kind: code,
+     files: [packages/ops/src/dlp_ops/metrics.py, packages/active/src/dlp_active/select.py, packages/privacy/src/dlp_privacy/audit.py],
+     source: docs/handover/known-issues.md}
+  - {id: R7, title: CLI 정책 선택·schema의 계약/DB 혼합·큰 실행 함수, severity: low, status: open, kind: code,
+     files: [packages/cli/src/dlp_cli/review_config.py, packages/export/src/dlp_export/runner.py, packages/training/src/dlp_train/loop.py],
+     source: docs/handover/known-issues.md}
+
+  # ── 학습 루프 구조 검사 (training-loop-review.md) ──
+  - {id: T1, title: 실제 CLI 경로(stub_truth=False)에서 학습 루프가 ModelUnavailableError, severity: high, status: open, kind: code,
+     files: [packages/training/src/dlp_train/trainers.py, packages/cli/src/dlp_cli/train_cmds.py], source: docs/handover/training-loop-review.md}
+  - {id: T2, title: 기존 라벨만 고치면 예제 수가 같아 재학습 생략, severity: high, status: open, kind: code,
+     files: [packages/training/src/dlp_train/loop.py], source: docs/handover/training-loop-review.md}
+  - {id: T3, title: 학습 도중 철회된 세션의 모델이 배포될 수 있음, severity: high, status: open, kind: code,
+     files: [packages/training/src/dlp_train/loop.py, packages/datasets/src/dlp_datasets/lineage.py], source: docs/handover/training-loop-review.md}
+  - {id: T4, title: 직접 deploy() 호출은 게이트 통과·후보 ID를 검사하지 않음, severity: medium, status: open, kind: code,
+     files: [packages/training/src/dlp_train/loop.py], source: docs/handover/training-loop-review.md}
+  - {id: T5, title: 같은 골든 버전이어도 정답이 현재 라벨로 바뀜, severity: medium, status: open, kind: code,
+     files: [packages/evaluation/src/dlp_eval/runner.py], source: docs/handover/training-loop-review.md}
+
+  # ── 온톨로지 구조 검사 (ontology-structure-review.md) ──
+  - {id: O1, title: 사전 밖 동사가 저장을 통과, severity: high, status: fixed, kind: code,
+     files: [packages/schema/src/dlp_schema/label_validation.py], source: docs/handover/ontology-structure-review.md, note: ADR 0037}
+  - {id: O2, title: 세션과 다른 온톨로지 버전 라벨 저장, severity: high, status: fixed, kind: code,
+     files: [packages/schema/src/dlp_schema/db/ontology_repository.py], source: docs/handover/ontology-structure-review.md, note: ADR 0037}
+  - {id: O3, title: 없는 행동을 가리키는 child_ids 통과, severity: medium, status: fixed, kind: code,
+     files: [packages/schema/src/dlp_schema/label_graph.py], source: docs/handover/ontology-structure-review.md, note: ADR 0037}
+  - {id: O4, title: 이관 목적지 동사 미검증, severity: medium, status: fixed, kind: code,
+     files: [packages/schema/src/dlp_schema/migration.py], source: docs/handover/ontology-structure-review.md, note: ADR 0037}
+  - {id: O5, title: 개체 클래스와 맞지 않는 3D 부분, severity: medium, status: open, kind: code,
+     files: [packages/schema/src/dlp_schema/validation.py], source: docs/handover/ontology-structure-review.md,
+     note: 알려진 개체의 부분 소속은 반영. 명시적 개체 없는 부분 소속 확인이 남음}
+
+  # ── 이전 검토 메모: 재현 전 후보 (audit-notes.md) ──
+  - {id: A-01, title: 카메라 내부 파라미터 근사(주점 width/2, 왜곡 무시), severity: low, status: candidate, kind: code,
+     files: [packages/models/src/dlp_models/depth.py, packages/prelabel/src/dlp_prelabel/lift3d.py], source: docs/handover/audit-notes.md}
+  - {id: A-02, title: "평가 기준 확인: 키프레임 시각만 센 정밀도, missing 클래스, kappa=1.0", severity: low, status: candidate, kind: code,
+     files: [packages/evaluation/src/dlp_eval/harness.py, packages/evaluation/src/dlp_eval/metrics/classification.py], source: docs/handover/audit-notes.md}
+  - {id: A-03, title: 접촉 merge_gap 커버리지·히스테리시스 경계 비대칭, severity: low, status: candidate, kind: code,
+     files: [packages/relations/src/dlp_relations/contact.py, packages/relations/src/dlp_relations/coverage.py], source: docs/handover/audit-notes.md}
+  - {id: A-04, title: 3인칭 착용자 매칭 키프레임 2개면 속도 0, severity: low, status: candidate, kind: code,
+     files: [packages/prelabel/src/dlp_prelabel/wearer.py], source: docs/handover/audit-notes.md}
+  - {id: A-05, title: OWLv2 질의 16토큰 초과 시 EOS 잘림, severity: low, status: candidate, kind: code,
+     files: [packages/models/src/dlp_models/owlv2.py], source: docs/handover/audit-notes.md}
+  - {id: A-06, title: RTMPose YOLOX 출력 점수 순 보장 미확인, severity: low, status: candidate, kind: code,
+     files: [packages/prelabel/src/dlp_prelabel/adapters/rtmpose.py], source: docs/handover/audit-notes.md}
+  - {id: A-07, title: 끝 슬레이트 seek 직후 프레임·sync adjust 실수 ms, severity: low, status: candidate, kind: code,
+     files: [packages/sync/src/dlp_sync/slate.py], source: docs/handover/audit-notes.md}
+  - {id: A-08, title: "행동: VFR 프레임 수 부족, VLM 4xx를 장애로 처리, gap tool_id 미검사", severity: low, status: candidate, kind: code,
+     files: [packages/actions/src/dlp_actions/vlm.py, packages/actions/src/dlp_actions/runner.py], source: docs/handover/audit-notes.md}
+  - {id: A-09, title: reconcile 128자 초과 ID 앞부분 잘림, severity: low, status: superseded, kind: code,
+     files: [packages/review/src/dlp_review/reconcile.py], source: docs/handover/audit-notes.md, see: [F-REV-05]}
+  - {id: A-10, title: lead_seconds가 취소·서비스 계정 주석 시간도 더함, severity: low, status: open, kind: code,
+     files: [packages/review/src/dlp_review/clients.py], source: docs/handover/audit-notes.md, see: [F-REV-06],
+     note: 2026-10-11 전수 검수에서 코드로 다시 확인}
+  - {id: A-11, title: timeseries rate_hz가 1000의 약수가 아니면 time_ms 비정수, severity: low, status: candidate, kind: code,
+     files: [packages/review/src/dlp_review/timeseries.py], source: docs/handover/audit-notes.md}
+  - {id: A-12, title: EpisodeGraph가 공간 라벨(스트림 PTS)을 마스터 구간과 비교, severity: low, status: candidate, kind: code,
+     files: [packages/schema/src/dlp_schema/episode.py], source: docs/handover/audit-notes.md}
+  - {id: A-13, title: "_is_additive 목록 원소, set_privacy_state 전이 미검사·기록 없음", severity: low, status: candidate, kind: code,
+     files: [packages/schema/src/dlp_schema/db/repository.py], source: docs/handover/audit-notes.md}
+  - {id: A-14, title: 잘린 관측 프레임 score·렌더 applied 수, severity: low, status: candidate, kind: code,
+     files: [packages/privacy/src/dlp_privacy/tracker.py, packages/privacy/src/dlp_privacy/render.py], source: docs/handover/audit-notes.md}
+  - {id: A-15, title: MLflow 실험 조회 실패를 없음으로 처리, severity: low, status: open, kind: code,
+     files: [packages/training/src/dlp_train/tracking.py], source: docs/handover/audit-notes.md,
+     note: 2026-10-11 전수 검수에서 코드로 다시 확인. min_new_examples 부분은 T2}
+  - {id: A-16, title: 여러 바디캠 LS 작업 CSV 키 중복 가능, golden_set 설정 미사용, severity: low, status: candidate, kind: code,
+     files: [packages/review/src/dlp_review/tasks.py, config/defaults.yaml], source: docs/handover/audit-notes.md}
+  - {id: A-17, title: "중복 코드: stream_ms, VIDEO_KINDS 11곳, IoU 5곳, version_tag 2곳, pg 픽스처 19벌", severity: low, status: open, kind: code,
+     files: [packages/export/src/dlp_export/frames.py, packages/active/src/dlp_active/curation.py], source: docs/handover/audit-notes.md,
+     note: 2026-10-11 외주 용이성 평가에서 개수 재확인}
+  - {id: A-18, title: "하드코딩: dataset_cmds 기본값, train_cmds 선택지, proxy rate 30, kp 골격 이름", severity: low, status: candidate, kind: code,
+     files: [packages/cli/src/dlp_cli/dataset_cmds.py, packages/cli/src/dlp_cli/train_cmds.py, packages/media/src/dlp_media/proxy.py],
+     source: docs/handover/audit-notes.md}
+  - {id: A-19, title: "경계·타입: deployed가 loop._download import, collect가 cvat.http 직접 호출", severity: low, status: open, kind: code,
+     files: [packages/training/src/dlp_train/deployed.py, packages/review/src/dlp_review/collect.py], source: docs/handover/audit-notes.md,
+     note: 비공개 import는 tests/test_import_boundaries.py 허용 목록에 고정}
+  - {id: A-20, title: 성능 후보(splitter O(작업자²×세션) 등), severity: low, status: candidate, kind: code,
+     files: [packages/datasets/src/dlp_datasets/splitter.py, packages/evaluation/src/dlp_eval/metrics/detection.py], source: docs/handover/audit-notes.md}
+  - {id: A-21, title: "기타: httpx 미종료, 웹훅 중복 등록, 예외 종류 불일치, 이름 혼동", severity: low, status: candidate, kind: code,
+     files: [packages/training/src/dlp_train/tracking.py, packages/cli/src/dlp_cli/review_cmds.py], source: docs/handover/audit-notes.md}
+
+  # ── 2026-10-11 전수 검수: schema ──
+  - {id: F-SCH-01, title: 양손 행동(같은 action_id)이 있으면 상위 구간과 함께 저장되지 않음, severity: medium, status: open, kind: code,
+     files: [packages/schema/src/dlp_schema/label_graph.py, packages/schema/src/dlp_schema/label_validation.py],
+     source: docs/handover/full-review-2026-10-11.md, repro: tests/test_known_defects.py::test_bimanual_action_with_segment_is_valid}
+  - {id: F-SCH-02, title: 승인 트랙의 모델 자식(착용자 사본) 삭제로 승인 라벨이 운영에서 사라짐, severity: medium, status: open, kind: code,
+     files: [packages/schema/src/dlp_schema/label_validation.py], source: docs/handover/full-review-2026-10-11.md,
+     repro: tests/test_known_defects.py::test_retracting_model_child_of_approved_label_is_rejected}
+  - {id: F-SCH-03, title: 오류 삽입 사본·측정 레코드가 있으면 이관이 운영 라벨을 재검수로 보냄, severity: medium, status: open, kind: code,
+     files: [packages/schema/src/dlp_schema/migration.py], source: docs/handover/full-review-2026-10-11.md,
+     repro: tests/test_known_defects.py::test_migration_ignores_seeded_copies}
+  - {id: F-SCH-04, title: 0014 트리거 테스트가 PK 중복으로 통과(트리거를 검사하지 않음), severity: medium, status: open, kind: test,
+     files: [packages/schema/tests/test_ontology_boundaries.py], source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-SCH-05, title: "TRUNCATE 금지 테스트의 match가 모든 오류에 맞음", severity: low, status: open, kind: test,
+     files: [packages/schema/tests/test_db.py], source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-SCH-06, title: 기존 위반이 하나라도 있으면 무관한 새 라벨까지 저장 거부, severity: low, status: open, kind: code,
+     files: [packages/schema/src/dlp_schema/label_validation.py], source: docs/handover/full-review-2026-10-11.md,
+     repro: tests/test_known_defects.py::test_legacy_violation_does_not_block_unrelated_label}
+  - {id: F-SCH-07, title: repository·episode의 "검증은 호출자 몫" 주석이 R1 이후 낡음, severity: low, status: open, kind: comment,
+     files: [packages/schema/src/dlp_schema/db/repository.py, packages/schema/src/dlp_schema/episode.py], source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-SCH-08, title: insert_labels docstring의 IntegrityError가 실제와 다름, severity: low, status: open, kind: comment,
+     files: [packages/schema/src/dlp_schema/db/repository.py], source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-SCH-09, title: tables.py 머리말의 SQLite 트리거 서술 오류, severity: low, status: open, kind: comment,
+     files: [packages/schema/src/dlp_schema/db/tables.py], source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-SCH-10, title: validation·패키지 지도·session의 주요 이름 목록 누락, severity: low, status: open, kind: comment,
+     files: [packages/schema/src/dlp_schema/validation.py, packages/schema/src/dlp_schema/__init__.py, packages/schema/src/dlp_schema/session.py],
+     source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-SCH-11, title: contact_held 테스트가 아무 규칙도 검사하지 않음, severity: low, status: open, kind: test,
+     files: [packages/schema/tests/test_contracts.py], source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-SCH-12, title: 여러 저장 함수가 시간대 없는 datetime을 검사하지 않음, severity: low, status: open, kind: code,
+     files: [packages/schema/src/dlp_schema/db/repository.py, packages/schema/src/dlp_schema/db/review_repository.py],
+     source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-SCH-13, title: 마이그레이션 0001~0011 docstring·0014 트리거 메시지가 영어, severity: low, status: open, kind: comment,
+     files: [packages/schema/src/dlp_schema/db/migrations/versions], source: docs/handover/full-review-2026-10-11.md}
+
+  # ── 2026-10-11 전수 검수: review ──
+  - {id: F-REV-01, title: dlp review의 ReviewSetup이 DLP_REVIEW_POLICY_FILE의 cvat·media를 무시, severity: high, status: open, kind: code,
+     files: [packages/cli/src/dlp_cli/review_cmds.py, packages/review/src/dlp_review/tasks.py], source: docs/handover/full-review-2026-10-11.md,
+     repro: tests/test_known_defects.py::test_review_setup_uses_selected_policy_file, note: 두 검수 영역이 독립으로 같은 결함을 재현}
+  - {id: F-REV-02, title: 승인 뒤 블러가 바뀌어도 이미 배포한 라벨링 작업 매체를 회수하지 않음, severity: high, status: open, kind: code,
+     files: [packages/review/src/dlp_review/collect.py], source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-REV-03, title: Label Studio에서 그릴 수 있지만 수집할 수 없는 구간이 작업 수집 전체를 멈춤, severity: medium, status: open, kind: code,
+     files: [packages/review/src/dlp_review/labelstudio.py], source: docs/handover/full-review-2026-10-11.md,
+     repro: tests/test_known_defects.py::test_ls_hand_state_changed_to_none_is_collectable}
+  - {id: F-REV-04, title: CVAT에서 새로 그린 손 골격이 hand 없음 ValidationError, severity: medium, status: open, kind: code,
+     files: [packages/review/src/dlp_review/cvat.py], source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-REV-05, title: reconcile _new_id 앞 자르기로 잘못된 ID가 생겨 수집 실패, severity: medium, status: open, kind: code,
+     files: [packages/review/src/dlp_review/reconcile.py], source: docs/handover/full-review-2026-10-11.md, see: [A-09]}
+  - {id: F-REV-06, title: LS 수집·웹훅이 결과 작성자를 담당자와 대조하지 않음, severity: medium, status: open, kind: code,
+     files: [packages/review/src/dlp_review/collect.py, packages/review/src/dlp_review/clients.py, packages/review/src/dlp_review/webhook.py],
+     source: docs/handover/full-review-2026-10-11.md, see: [S1, A-10]}
+  - {id: F-REV-07, title: 담당자 없는 배정에 "unassigned"를 실제 담당자로 넣음, severity: medium, status: open, kind: code,
+     files: [packages/review/src/dlp_review/ops/runner.py], source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-REV-08, title: LS 작업의 서명 URL이 7일 고정이고 갱신 경로 없음, severity: medium, status: open, kind: code,
+     files: [packages/review/src/dlp_review/tasks.py], source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-REV-09, title: 이중·블라인드 측정 레코드를 배정이 아닌 (단위, 담당자)로 모음, severity: low, status: open, kind: code,
+     files: [packages/review/src/dlp_review/ops/results.py], source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-REV-10, title: 깨진 dlp_meta·중복 원래 ID가 TaskError가 아닌 예외로 올라감, severity: low, status: open, kind: code,
+     files: [packages/review/src/dlp_review/cvat.py, packages/review/src/dlp_review/reconcile.py, packages/review/src/dlp_review/collect.py],
+     source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-REV-11, title: 이벤트 속성 입력란을 모두 비우면 원래 값이 남음, severity: low, status: open, kind: code,
+     files: [packages/review/src/dlp_review/labelstudio.py], source: docs/handover/full-review-2026-10-11.md,
+     repro: tests/test_known_defects.py::test_ls_event_attributes_cleared_are_cleared}
+  - {id: F-REV-12, title: verify가 잠금 없이 조건을 읽음(TOCTOU), severity: low, status: open, kind: code,
+     files: [packages/review/src/dlp_review/verify.py], source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-REV-13, title: ops/__init__ 모듈 구성에 results 누락, severity: low, status: open, kind: comment,
+     files: [packages/review/src/dlp_review/ops/__init__.py], source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-REV-14, title: CVAT 담당자 검사 테스트가 LS 작업으로 돌아 CVAT 분기를 타지 않음, severity: low, status: open, kind: test,
+     files: [packages/review/tests/test_units.py], source: docs/handover/full-review-2026-10-11.md}
+
+  # ── 2026-10-11 전수 검수: privacy·media·sync ──
+  - {id: F-PMS-01, title: 다른 시간대로 적은 같은 recorded_at으로 재수집하면 충돌, severity: medium, status: open, kind: code,
+     files: [packages/media/src/dlp_media/ingest.py], source: docs/handover/full-review-2026-10-11.md,
+     repro: tests/test_known_defects.py::test_reingest_same_instant_other_offset_is_not_conflict}
+  - {id: F-PMS-02, title: 홀수 크기 원본은 수집되지만 블러본을 만들 수 없음, severity: medium, status: open, kind: code,
+     files: [packages/privacy/src/dlp_privacy/render.py, packages/media/src/dlp_media/ingest.py], source: docs/handover/full-review-2026-10-11.md,
+     repro: tests/test_known_defects.py::test_odd_size_video_renders_blurred}
+  - {id: F-PMS-03, title: 반사면 영역 폭·높이가 1px 미만이면 YuNet 단언 실패로 탐지 중단, severity: medium, status: open, kind: code,
+     files: [packages/privacy/src/dlp_privacy/detectors/reflection.py], source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-PMS-04, title: defaults.yaml이 프록시를 라벨링 버킷에 둔다고 잘못 설명, severity: medium, status: open, kind: comment,
+     files: [config/defaults.yaml], source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-PMS-05, title: 반올림 ms가 같은 두 프레임이면 블러 탐지가 키프레임 중복으로 실패, severity: low, status: open, kind: code,
+     files: [packages/privacy/src/dlp_privacy/pipeline.py], source: docs/handover/full-review-2026-10-11.md,
+     repro: tests/test_known_defects.py::test_privacy_detect_tolerates_frames_rounding_to_same_ms}
+  - {id: F-PMS-06, title: GPMF 패킷 하나가 잘리면 세션 수집 전체 실패, severity: low, status: open, kind: code,
+     files: [packages/media/src/dlp_media/imu.py], source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-PMS-07, title: NaN이 섞인 장갑·IMU 시각이 단조 검사를 통과, severity: low, status: open, kind: code,
+     files: [packages/media/src/dlp_media/glove.py, packages/media/src/dlp_media/imu.py], source: docs/handover/full-review-2026-10-11.md,
+     repro: tests/test_known_defects.py::test_glove_times_with_nan_rejected}
+  - {id: F-PMS-08, title: 회전 영상 거부 메시지가 없어진 문서 절을 안내, severity: low, status: open, kind: comment,
+     files: [packages/media/src/dlp_media/probe.py], source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-PMS-09, title: 탐지기 값이 비면 오류라는 주석과 달리 기본값으로 대체, severity: low, status: open, kind: comment,
+     files: [packages/privacy/src/dlp_privacy/policy.py, config/policies/privacy.yaml], source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-PMS-10, title: 상관 앵커 실패 이유를 모두 "겹치지 않음"으로 기록, severity: low, status: open, kind: code,
+     files: [packages/sync/src/dlp_sync/pipeline.py], source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-PMS-11, title: 오디오 정밀화 테스트 단언이 실패 사유에도 맞음, severity: low, status: open, kind: test,
+     files: [packages/sync/tests/test_pipeline.py], source: docs/handover/full-review-2026-10-11.md}
+
+  # ── 2026-10-11 전수 검수: prelabel·actions·relations·models ──
+  - {id: F-PAR-01, title: 같은 entity_id 손 트랙 둘이면 3D 표본 시각 중복으로 프리라벨 전체 롤백, severity: high, status: open, kind: code,
+     files: [packages/prelabel/src/dlp_prelabel/lift3d.py, packages/prelabel/src/dlp_prelabel/runner.py], source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-PAR-02, title: 장갑 오프셋이 음수면 음수 시각 접촉 라벨로 프리라벨 전체 롤백, severity: high, status: open, kind: code,
+     files: [packages/prelabel/src/dlp_prelabel/runner.py, packages/prelabel/src/dlp_prelabel/contact.py], source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-PAR-03, title: 사람(person) 박스 접촉을 객체 접촉으로 기록, severity: medium, status: open, kind: code,
+     files: [packages/prelabel/src/dlp_prelabel/runner.py], source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-PAR-04, title: 행동 단계의 손 트랙 선택 기준이 프리라벨 접촉 단계와 다름, severity: medium, status: open, kind: code,
+     files: [packages/actions/src/dlp_actions/runner.py], source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-PAR-05, title: 없어진 절단 후보가 대표 경계로 골라져 두 접촉이 한 행동으로 합쳐짐, severity: low, status: open, kind: code,
+     files: [packages/actions/src/dlp_actions/pipeline.py, packages/actions/src/dlp_actions/assemble.py], source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-PAR-06, title: 예측기 접촉 단계가 검수된 손 상태와 겹침 검사를 하지 않음, severity: low, status: open, kind: code,
+     files: [packages/prelabel/src/dlp_prelabel/runner.py], source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-PAR-07, title: 결과와 무관한 VLM timeout이 행동 정책 해시에 들어감, severity: low, status: open, kind: code,
+     files: [packages/actions/src/dlp_actions/policy.py], source: docs/handover/full-review-2026-10-11.md,
+     repro: tests/test_known_defects.py::test_actions_policy_digest_ignores_timeout}
+  - {id: F-PAR-08, title: 도구 박스 3D가 손 키프레임과 겹친 시각에만 생김, severity: low, status: open, kind: code,
+     files: [packages/prelabel/src/dlp_prelabel/lift3d.py], source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-PAR-09, title: 3D 단계 입력 해시에 전신 트랙이 들어가 불필요한 재계산, severity: low, status: open, kind: code,
+     files: [packages/prelabel/src/dlp_prelabel/runner.py], source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-PAR-10, title: visibility 0 점 좌표가 접촉·속도 계산에 들어감, severity: low, status: open, kind: code,
+     files: [packages/prelabel/src/dlp_prelabel/contact.py, packages/actions/src/dlp_actions/boundaries.py], source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-PAR-11, title: lift3d docstring의 "가중치가 없으면 건너뛴다"가 실제(실행 거부)와 다름, severity: low, status: open, kind: comment,
+     files: [packages/prelabel/src/dlp_prelabel/lift3d.py], source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-PAR-12, title: unresolved 대상 ID가 세 YAML에 있고 일치 검사 없음, severity: low, status: open, kind: comment,
+     files: [packages/prelabel/src/dlp_prelabel/policy.py, config/policies/prelabel.yaml, config/policies/relations.yaml, config/policies/actions.yaml],
+     source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-PAR-13, title: 사람 접촉 관계 테스트가 빈 자리 검사에 닿지 않음, severity: low, status: open, kind: test,
+     files: [packages/relations/tests/test_relations.py], source: docs/handover/full-review-2026-10-11.md}
+
+  # ── 2026-10-11 전수 검수: evaluation·training·active·datasets (T1~T5·A-15 재확인 외) ──
+  - {id: F-ETA-06, title: 액티브 러닝 수정률이 모델 예측 클래스가 아닌 수정 후 클래스로 세어짐, severity: medium, status: open, kind: code,
+     files: [packages/active/src/dlp_active/rates.py], source: docs/handover/full-review-2026-10-11.md,
+     repro: tests/test_known_defects.py::test_correction_rate_counts_model_predicted_class}
+  - {id: F-ETA-08, title: 큐레이션이 마스크·3D 궤적을 시간 구간처럼 시각 변환, severity: low, status: open, kind: code,
+     files: [packages/active/src/dlp_active/curation.py], source: docs/handover/full-review-2026-10-11.md,
+     repro: tests/test_known_defects.py::test_curation_keeps_mask_in_stream_time}
+  - {id: F-ETA-09, title: "rank --limit 0·음수가 정책 기본값·잘못된 개수를 돌려줌", severity: low, status: open, kind: code,
+     files: [packages/active/src/dlp_active/select.py], source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-ETA-10, title: 계보의 학습 분할이 training.yaml과 따로 하드코딩, severity: low, status: open, kind: code,
+     files: [packages/datasets/src/dlp_datasets/lineage.py], source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-ETA-11, title: CLEAR docstring의 "TrackEval과 같다"가 틀림, severity: low, status: open, kind: comment,
+     files: [packages/evaluation/src/dlp_eval/metrics/tracking.py], source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-ETA-12, title: 데이터셋 빌드 seed가 결과에 영향이 없는데 동점 처리용이라고 설명, severity: low, status: open, kind: comment,
+     files: [packages/datasets/src/dlp_datasets/build.py, packages/cli/src/dlp_cli/dataset_cmds.py], source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-ETA-13, title: 학습 루프 테스트 주석이 실제 판정 경로와 다름, severity: low, status: open, kind: test,
+     files: [packages/training/tests/test_loop.py], source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-ETA-14, title: 게이트 향상 통과 테스트가 향상 사례를 검사하지 않음, severity: low, status: open, kind: test,
+     files: [packages/evaluation/tests/test_harness.py], source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-ETA-15, title: _compared_with docstring이 사용 범위보다 좁음, severity: low, status: open, kind: comment,
+     files: [packages/training/src/dlp_train/loop.py], source: docs/handover/full-review-2026-10-11.md}
+
+  # ── 2026-10-11 전수 검수: cli·export·ops·fixtures·스크립트 (F-REV-01 중복 제외) ──
+  - {id: F-COE-02, title: 하위 탐지기 추적 테스트가 추적을 지워도 통과, severity: low, status: open, kind: test,
+     files: [tests/test_model_licenses.py], source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-COE-03, title: 파일럿 검사 테스트가 주장한 단락 처리를 검사하지 않음, severity: low, status: open, kind: test,
+     files: [packages/cli/tests/test_pilot.py], source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-COE-04, title: 닦기 커버리지 단조 증가 주장이 사실이 아니고 테스트도 약함, severity: low, status: open, kind: test,
+     files: [packages/fixtures/tests/test_wiping.py], source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-COE-05, title: 장갑 Parquet 왕복을 검사하지 않음, severity: low, status: open, kind: test,
+     files: [packages/fixtures/tests/test_sync.py], source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-COE-06, title: 초안 온톨로지 갱신 뒤 이전 프로젝트에 웹훅이 등록되지 않음, severity: low, status: open, kind: code,
+     files: [packages/cli/src/dlp_cli/review_cmds.py], source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-COE-07, title: export_cmds 주석이 COCO에 마스크가 들어간다고 설명, severity: low, status: open, kind: comment,
+     files: [packages/cli/src/dlp_cli/export_cmds.py], source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-COE-08, title: ExportError를 CLI가 사용자 메시지로 보여 준다는 주석이 실제와 다름, severity: low, status: open, kind: comment,
+     files: [packages/export/src/dlp_export/source.py], source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-COE-09, title: ops_cmds retention 주석이 사용 중지 알림을 빠뜨림, severity: low, status: open, kind: comment,
+     files: [packages/cli/src/dlp_cli/ops_cmds.py], source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-COE-10, title: schema_cmds 명령 목록에 ontology audit 누락, severity: low, status: open, kind: comment,
+     files: [packages/cli/src/dlp_cli/schema_cmds.py], source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-COE-11, title: pilot --profile 선택지가 pilot.yaml 키를 하드코딩, severity: low, status: open, kind: code,
+     files: [packages/cli/src/dlp_cli/pilot_cmds.py], source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-COE-12, title: ops off_hours 범위 검증 없음, severity: low, status: open, kind: code,
+     files: [packages/ops/src/dlp_ops/policy.py], source: docs/handover/full-review-2026-10-11.md}

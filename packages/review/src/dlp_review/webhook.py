@@ -181,7 +181,7 @@ def _task_id(value: Any) -> int:
     return result
 
 
-def serve(
+def serve(  # noqa: C901
     port: int, secret: str, on_collect: Callable[[CollectRequest], None], *, policy: WebhookPolicy
 ) -> ThreadingHTTPServer:
     """정책으로 연결 수·본문 크기·읽기 시간을 제한하는 웹훅 서버.
@@ -210,7 +210,7 @@ def serve(
             self.end_headers()
             self.close_connection = True
 
-        def do_POST(self) -> None:
+        def do_POST(self) -> None:  # noqa: C901
             if self.path not in ("/webhooks/cvat", "/webhooks/label_studio"):
                 self.reply(404)
                 return

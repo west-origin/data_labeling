@@ -5,7 +5,7 @@ from collections.abc import Sequence
 from dlp_schema.labels import ActionPayload, LabelRecord, SegmentLevel, SegmentPayload
 
 
-def check_segment_links(labels: Sequence[LabelRecord]) -> list[str]:
+def check_segment_links(labels: Sequence[LabelRecord]) -> list[str]:  # noqa: C901
     """자식 ID·중복·시간 포함·계층 순서·순환을 검사한다. 입력은 현재 라벨이어야 한다.
 
     ID는 label_id가 아니라 action_id / segment_id다. 같은 수준이나 상위 수준을 자식으로

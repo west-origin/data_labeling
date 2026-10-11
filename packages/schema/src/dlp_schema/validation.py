@@ -63,7 +63,7 @@ class OntologyViolationError(ValueError):
         self.problems = problems
 
 
-def check_label(label: LabelRecord, ontology: Ontology) -> list[str]:
+def check_label(label: LabelRecord, ontology: Ontology) -> list[str]:  # noqa: C901
     """위반 사항 목록을 돌려준다. 비어 있으면 통과.
 
     Args:

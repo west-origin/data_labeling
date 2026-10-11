@@ -223,7 +223,7 @@ def lock_sessions(conn: sa.Connection, session_ids: set[str]) -> None:
     ).all()
 
 
-def run_export(
+def run_export(  # noqa: C901
     engine: sa.Engine,
     *,
     root: Path,

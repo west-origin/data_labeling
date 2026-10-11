@@ -33,6 +33,16 @@ licenses:
 ui-theme:
 	uv run dlp review ui-theme
 
+# 커버리지 (기본 테스트 범위, 서비스 불필요). 결과: 터미널 요약 + reports/coverage/index.html (Git 제외).
+# 서비스 테스트까지 합치려면 make up 뒤 `uv run pytest -m "services and not isolated_env" --cov --cov-append`.
+# 아직 하한(fail-under)은 두지 않는다. 기준선을 기록해 리팩토링 전후를 비교한다.
+coverage:
+	uv run pytest --cov --cov-report=term:skip-covered --cov-report=html:reports/coverage
+
+# 전수 검수 범위표: 추적 파일별 영역·종류·위험 등급·줄 수·관련 미해결 문제 수 (reports/review-scope.csv)
+review-scope:
+	uv run python scripts/review_scope.py
+
 # 계약 타입(dlp_schema)을 바꾼 뒤 schemas/*.schema.json을 다시 만든다 (직접 편집 금지).
 # 계약 변경은 ADR + Alembic 마이그레이션 + 계약 테스트와 함께 한다.
 schemas:
@@ -64,7 +74,7 @@ db-upgrade:
 	uv run dlp ontology register 1.0.0
 
 # 파일이 아닌 명령 대상 (같은 이름의 파일이 있어도 항상 실행)
-.PHONY: install install-curation test-isolated lint fmt typecheck test contracts schemas ui-theme models export-models todo-models licenses fixtures db-upgrade check env up down ps logs health test-services \
+.PHONY: install install-curation test-isolated lint fmt typecheck test contracts schemas ui-theme coverage review-scope models export-models todo-models licenses fixtures db-upgrade check env up down ps logs health test-services \
         cvat-up cvat-down cvat-superuser clean
 
 # 작업공간 의존성 설치 (uv.lock 그대로, --locked: 잠금 파일과 pyproject가 어긋나면 실패).

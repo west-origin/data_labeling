@@ -117,6 +117,8 @@ CLI의 `DLP_REVIEW_POLICY_FILE` 선택은 라이브러리 기본 정책 로더�
 | `make test-services` | DB·S3·lakeFS·MLflow·검수 도구 통합 | 도구 미기동 시 일부 생략; isolated_env 제외 |
 | `make test-isolated` | 공식 LeRobot 격리 환경 쓰기·읽기 등 | 일부는 DB 필요; 추가 PyTorch 환경 약 1.5 GB |
 | `make export-models` | 깊이 모델 ONNX 변환 준비 | 큰 다운로드·추가 CPU 환경; 정확도 판정 아님 |
+| `make coverage` | 기본 테스트의 줄 커버리지(모듈별, 실행 안 된 모듈은 0%) | 하한 없음; 서비스 테스트는 `--cov-append`로 합침 |
+| `make review-scope` | 추적 파일별 영역·위험 등급·관련 미해결 문제 수 (reports/review-scope.csv) | 위험 등급 규칙은 scripts/review_scope.py |
 | `dlp pilot check` | 선택한 파일럿의 모델·서비스·검수 계정 준비 | 동의·실영상 정확도·사람 검수 완료는 판정하지 않음 |
 
 `pytest` 결과의 passed/failed/skipped/deselected를 함께 기록한다. 성공 종료만으로 모든 모델·도구를

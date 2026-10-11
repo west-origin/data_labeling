@@ -142,7 +142,7 @@ def drop_retracted(outcome: ReviewOutcome, labels: list[LabelRecord]) -> list[st
     return dropped
 
 
-def collect_task(
+def collect_task(  # noqa: C901
     conn: sa.Connection,
     task_key: str,
     setup: ReviewSetup,

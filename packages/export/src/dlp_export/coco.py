@@ -126,7 +126,7 @@ class CocoResult:
         self.labels[x.label_id] = x
 
 
-def write_coco(
+def write_coco(  # noqa: C901
     src: ExportSource,
     policy: ExportPolicy,
     ontology: Ontology,

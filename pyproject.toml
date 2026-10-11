@@ -7,6 +7,8 @@ dependencies = ["dlp-actions", "dlp-active", "dlp-cli", "dlp-datasets", "dlp-eva
 
 [tool.uv]
 package = false
+# 잠금 파일을 같은 방식으로 해석하도록 uv 최소 버전을 둔다 (CI는 .github/workflows/ci.yml에서 정확한 버전 고정)
+required-version = ">=0.11"
 # MediaPipe는 GUI판 opencv-contrib-python을, FiftyOne은 opencv-python-headless를 요구하지만, 같은 cv2
 # 모듈을 주는 판끼리 함께 깔면 충돌한다. 작업공간 전체를 opencv-contrib-python-headless(상위 집합)로
 # 통일하고 다른 판 요구는 지운다.
@@ -52,6 +54,7 @@ dev = [
     "pycocotools>=2.0.11",
     "pyright>=1.1.400",
     "pytest>=8.3",
+    "pytest-cov>=6.0",
     "ruff>=0.12",
     "scikit-learn>=1.9.1",
     "trackeval",
@@ -70,7 +73,13 @@ target-version = "py312"
 extend-exclude = ["services/cvat/.src"]
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "PTH", "N"]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "PTH", "N", "C901"]
+
+# 함수 복잡도 상한 (외주 리팩토링 중 함수가 다시 커지지 않게). 지금 상한을 넘는 함수 13개는 def 줄에
+# `# noqa: C901`을 달아 기준선으로 둔다. 그 표시가 곧 분해 대상 목록이다 (`grep -rn "noqa: C901" packages`).
+# 분해해서 상한 안으로 들어오면 표시를 지운다. 새 표시는 늘리지 않는다.
+[tool.ruff.lint.mccabe]
+max-complexity = 15
 
 [tool.ruff.lint.per-file-ignores]
 "**/migrations/versions/*.py" = ["E501"]
@@ -95,3 +104,12 @@ markers = [
     "services: 실행 중인 docker compose 서비스가 필요한 테스트 (make up 후 실행)",
     "isolated_env: 격리된 일회용 환경(LeRobot·PyTorch CPU판)을 받는 테스트 (make test-isolated)",
 ]
+
+# make coverage. 실행하지 않은 모듈도 0%로 보이게 packages 아래 소스 전체를 센다
+# (src 디렉터리와 dlp_media에는 __init__.py가 없어 이름공간 패키지 포함이 필요하다).
+[tool.coverage.run]
+source = ["packages"]
+omit = ["*/tests/*", "*/migrations/versions/*"]
+
+[tool.coverage.report]
+include_namespace_packages = true

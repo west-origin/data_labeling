@@ -4,6 +4,7 @@
 구현 계획은 `docs/ai-implementation-plan.md`(작업 패키지 WP0~WP16, 순서, 완료 기준)다.
 작업 전에 해당 WP 절을 읽는다. 처음 맡는 개발자는 `docs/handover/README.md`(전체 지도, 기능 상태,
 환경 재현, 변경·복구 안내, 남은 과제)부터 본다. 계획 문서의 목표와 현재 구현 상태를 구분한다.
+알려진 문제의 단일 목록은 `docs/handover/issues.yaml`, 외주 검수·리팩토링의 인수 기준은 `docs/handover/acceptance.md`다.
 
 ## 명령어
 
@@ -26,6 +27,8 @@
   내보내기 종단 테스트는 DB도 쓰므로 `make up` 뒤에 돌린다. 환경은 `scripts/lerobot-env/uv.lock`에 고정한다
   (바꾸면 그 디렉터리에서 `uv lock`)
 - `make install-curation` — FiftyOne(데이터 큐레이션, 약 1 GB) 포함 설치. `make install`을 다시 하면 빠진다
+- `make coverage` — 기본 테스트의 줄 커버리지 (reports/coverage, 하한 없음)
+- `make review-scope` — 전수 검수 범위표 (추적 파일별 위험 등급·관련 미해결 문제 수, reports/review-scope.csv)
 - `make cvat-up` / `make cvat-down` / `make cvat-superuser` — CVAT (공식 compose, 고정 버전, UI는 검수 화면 테마를 얹은 이미지)
 - `make ui-theme` — 검수 화면 테마(`config/review_ui.yaml`)를 바꾼 뒤 CVAT 테마 색 파일 재생성 (`make contracts`가 일치 검사, ADR 0038)
 
@@ -92,7 +95,10 @@
 - 라벨은 덮어쓰지 않는다. 수정은 새 레코드 + `parent_label_id`.
 - 다른 단계의 입력은 `current_labels()`(운영 라벨)로 고른다. 오류 삽입 레코드와 그 후손, 블라인드·이중 측정
   레코드(`measurement`)는 운영 라벨이 아니며 학습·내보내기에 들어가면 안 된다.
-- 모듈 사이 데이터는 `dlp_schema` 타입으로만 주고받는다. 계약 변경은 ADR + Alembic 마이그레이션 + 계약 테스트 + `make schemas`를 함께 한다.
+- 모듈 사이 계약 데이터(세션·라벨·검수·데이터셋 등)는 `dlp_schema` 타입으로 주고받는다. 저장소·렌더 게이트 같은
+  인프라 API를 다른 패키지에서 쓰는 것은 `docs/handover/architecture.md` 의존 표 안에서만 한다
+  (`tests/test_import_boundaries.py`가 표와 실제 import를 대조한다). 다른 모듈의 `_` 이름은 import하지 않는다.
+  계약 변경은 ADR + Alembic 마이그레이션 + 계약 테스트 + `make schemas`를 함께 한다.
 - DB 스키마는 `dlp_schema/db/tables.py`와 새 Alembic 리비전을 함께 바꾼다. 테스트가 둘의 일치를 검사한다.
 - 모든 datetime은 시간대 정보가 있어야 한다 (UTC 권장).
 - 영상 시각은 PTS 인덱스로만 계산한다. 프레임 번호에 프레임 간격을 곱해 계산하지 않는다.
@@ -118,4 +124,7 @@
   한다 (ADR 0020, 0021). 정적 검사 테스트가 우회(`buckets.raw`, `raw_bucket()`)를 막는다.
 - 블러(원본 영상) 검수는 `review.yaml reviewers.privacy`의 원본 접근 권한자에게만 배정한다.
 - 테스트는 정답을 아는 합성 픽스처(WP2)로 작성한다. 실제 영상·개인정보를 저장소에 넣지 않는다.
+- 함수 복잡도 상한은 15다 (ruff C901). 상한을 넘는 기존 함수의 `# noqa: C901`은 분해 대상 기준선이며 새로 달지 않는다.
+- 새로 찾은 문제는 `docs/handover/issues.yaml`에 넣는다. 확정 결함은 `tests/test_known_defects.py`에
+  `xfail(strict=True)` 재현을 두고, 고치면 표시를 지우고 status를 fixed로 바꾼다 (`tests/test_issue_registry.py`).
 - 코드 주석과 문서는 한국어, 식별자는 영어.

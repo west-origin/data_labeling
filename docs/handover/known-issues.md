@@ -5,6 +5,22 @@
 기준일: **2026-10-11**. 아래는 코드와 실행 검사로 확인한 상태다. 개발 환경에서의 통과는
 실영상 정확도·다중 고객 격리·상용 출시 승인에 대한 증거가 아니다.
 
+알려진 문제 전체의 단일 목록은 [레지스트리](issues.yaml)다 (S·R·T·O·A·F 항목, 상태·심각도·관련 파일·
+재현 테스트). 아래 표의 ID도 모두 레지스트리에 있고 `tests/test_issue_registry.py`가 대조한다.
+
+## 2026-10-11 전수 검수와 외주 준비
+
+- 6개 영역 전 파일을 전수 검수했다. 새 발견 71건(상 4·중 17·하 50)은 [전수 검수 결과](full-review-2026-10-11.md)와
+  레지스트리 `F-*`에 있다. 이번에는 고치지 않았고, 14건은 `tests/test_known_defects.py`에 `xfail(strict=True)`로 재현했다.
+- 외주 검수·리팩토링을 위해 [인수 기준](acceptance.md), [불변 조건과 강제 수단](invariants.md), PR 양식,
+  패키지 의존 검사(`tests/test_import_boundaries.py`), 함수 복잡도 상한(ruff C901, 기존 13개는 `noqa` 기준선),
+  `make coverage`, `make review-scope`를 추가했다. CI의 uv 버전을 고정했다.
+
+| 검사 | 결과 | 범위·한계 |
+| --- | --- | --- |
+| `make check` | **526 passed, 122 deselected, 14 xfailed**, 231초 | 14 xfailed는 알려진 결함 재현(의도된 실패). 서비스/격리 환경 제외 |
+| 검수·테마 서비스 검사 | `packages/review`·`tests` 서비스 표시 **46 passed** | 실제 CVAT·Label Studio·PostgreSQL. 전체 `make test-services`는 이번 미실행 |
+
 ## 2026-10-11 온톨로지 개선 검증
 
 [ADR 0037](../adr/0037-ontology-validation-boundaries.md)과 [용어·확장 안내](../ontology-guide.md)에
