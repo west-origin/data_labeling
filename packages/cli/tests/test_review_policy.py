@@ -211,13 +211,42 @@ def test_assign_passes_one_policy_to_setup_and_runner(
     selected: ReviewOpsPolicy, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`dlp review assign`(ops runner)이 작업 생성에 넘기는 정책과 설정의 정책이 같은 출처다."""
-    planned = SimpleNamespace(label_kinds=("blur_track",), session_id="s001")
+    planned = SimpleNamespace(label_kinds=("blur_track",), session_id="s001", assignee="p1")
     monkeypatch.setattr(review_cmds, "get_assignment", Mock(return_value=planned))
     got: dict[str, Any] = {}
     monkeypatch.setattr(review_cmds, "create_assignment_tasks", _capture(got, []))
-    assert review_cmds.cmd_assign(_args("assign", assignment_id="a1")) == 0
+    assert review_cmds.cmd_assign(_args("assign", assignment_id="a1", assignee=None)) == 0
     _, _, setup, policy, _ = got["args"]
     _same_source(setup, policy, selected)
+
+
+def test_assign_without_assignee_needs_explicit_reviewer(
+    selected: ReviewOpsPolicy, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """F-REV-07: 담당자 없는 배정은 `--assignee` 없이는 작업을 만들지 않고 종료 코드 1로 알린다.
+
+    `--assignee`를 주면 같은 정책으로 담당자를 정한 배정(`assign_reviewer` 결과)으로 작업을 만든다.
+    회귀: 예전에는 "unassigned"를 실제 담당자로 넣어 워터마크·경로·검수자 ID가 그 문자열이 됐다.
+    """
+    planned = SimpleNamespace(label_kinds=("action",), session_id="s001", assignee=None)
+    monkeypatch.setattr(review_cmds, "get_assignment", Mock(return_value=planned))
+    revocations = Mock(return_value=RevocationReport())
+    monkeypatch.setattr(review_cmds, "run_revocations", revocations)
+    got: dict[str, Any] = {}
+    monkeypatch.setattr(review_cmds, "create_assignment_tasks", _capture(got, []))
+    args = _args("assign", assignment_id="a1:qa", assignee=None)
+    assert review_cmds.cmd_assign(args) == review_cmds.NO_ASSIGNEE_EXIT == 1
+    assert "--assignee" in capsys.readouterr().out
+    assert not got and not revocations.called  # 회수·작업 생성 전에 멈춘다
+
+    assigned = SimpleNamespace(**{**vars(planned), "assignee": "s1"})
+    picked: dict[str, Any] = {}
+    monkeypatch.setattr(review_cmds, "assign_reviewer", _capture(picked, assigned))
+    args = _args("assign", assignment_id="a1:qa", assignee="s1")
+    assert review_cmds.cmd_assign(args) == 0
+    _, a, reviewer, policy = picked["args"]
+    assert (a, reviewer) == (planned, "s1") and policy == selected
+    assert got["args"][1] is assigned
 
 
 def test_collect_passes_one_policy_to_setup_and_collector(

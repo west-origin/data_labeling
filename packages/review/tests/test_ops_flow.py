@@ -34,11 +34,13 @@ from dlp_review.clients import CvatClient, LabelStudioClient, ToolError
 from dlp_review.collect import collect_task
 from dlp_review.cvat import CvatSchema, to_cvat_tracks
 from dlp_review.labelstudio import LS_KINDS, to_ls_results
+from dlp_review.ops.assign import plan_qa
 from dlp_review.ops.policy import CvatPolicy
 from dlp_review.ops.policy import load_policy as load_ops_policy
 from dlp_review.ops.runner import (
     AccessError,
     FinishResult,
+    assign_reviewer,
     create_assignment_tasks,
     finish_assignment,
     plan_session,
@@ -561,3 +563,55 @@ def test_revoked_assignment_is_reissued_after_reapproval(
         assert collect_task(conn, renewed.task_key, setup, "r1", later) is not None
         assert get_assignment(conn, unit.assignment_id).status is AssignmentStatus.DONE
         assert not any("회수" in g for g in verification_gaps(conn, sid, policy))
+
+
+def test_unassigned_qa_assignment_needs_explicit_reviewer(
+    pg: sa.Engine, setup: ReviewSetup, tmp_path: Path
+) -> None:
+    """F-REV-07 회귀: 담당자 없는 배정에 문자열 "unassigned"를 실제 담당자로 넣어 워터마크·라벨링
+    버킷 경로·검수자 ID가 모두 그 문자열이 됐다.
+
+    시나리오: 선임(reviewers.senior)이 없어 QA 배정의 담당자가 None (기본 review.yaml과 같다).
+    정답 근거: 담당자 없는 배정은 작업을 만들지 않고(TaskError, 작업·사본 없음), 담당자를 정할 때는
+    선임만, 원래 담당자(짝 배정)는 안 되며, 정한 뒤 만든 작업의 담당자·매체 경로가 그 선임이다.
+    이미 담당자가 있는 배정은 다른 사람으로 바꾸지 않는다.
+    """
+    sid = f"qa-{uuid.uuid4().hex[:6]}"
+    _session(pg, setup, tmp_path / "work", sid, human=False)
+    ops = load_ops_policy(ROOT)
+    no_measure = {"blind_task_ratio": 0.0, "seeded_error_task_ratio": 0.0,
+                  "double_annotation_ratio": 0.0, "qa_sample_ratio": 1.0}  # fmt: skip
+    ops = ops.model_copy(update={"ratios": ops.ratios.model_copy(update=no_measure)})
+    ontology = load_ontology(ROOT / "config" / "ontology" / "v1")
+    with pg.begin() as conn:
+        [standard] = plan_session(conn, sid, ["r1"], ops, ontology, seed=1, now=FIXED_TIME)
+        done = standard.model_copy(
+            update={"status": AssignmentStatus.DONE, "completed_at": FIXED_TIME}
+        )
+        [qa] = plan_qa([done], ops, seed=1, now=FIXED_TIME)  # 선임이 없다
+        insert_assignment(conn, qa)
+    assert qa.mode is ReviewMode.QA and qa.assignee is None and qa.pair_id == standard.assignment_id
+
+    with pg.begin() as conn, pytest.raises(TaskError, match="담당자"):
+        create_assignment_tasks(conn, qa, setup, ops, FIXED_TIME)
+    with pg.connect() as conn:
+        assert all(t.stage is ReviewStage.PRIVACY for t in list_review_tasks(conn, sid))
+        rhash = expected_render_hash(conn, sid, "bodycam", load_policy(ROOT))
+    # 예전에는 이 경로에 "unassigned" 워터마크 사본을 올렸다
+    assert setup.labeling.head(labeling_media_key(sid, "unassigned", "bodycam", rhash)) is None
+
+    seniors = ops.model_copy(
+        update={"reviewers": ops.reviewers.model_copy(update={"senior": ("s1", "r1")})}
+    )
+    with pg.begin() as conn, pytest.raises(TaskError, match="선임"):
+        assign_reviewer(conn, qa, "r2", seniors)  # 선임이 아니다
+    with pg.begin() as conn, pytest.raises(TaskError, match="짝"):
+        assign_reviewer(conn, qa, "r1", seniors)  # 원래 담당자는 자기 검수를 QA하지 않는다
+    with pg.begin() as conn:
+        assigned = assign_reviewer(conn, qa, "s1", seniors)
+        [task] = create_assignment_tasks(conn, assigned, setup, seniors, FIXED_TIME)
+        assert get_assignment(conn, qa.assignment_id).assignee == "s1"
+    assert task.assignee == "s1" and "/review/s1/" in task.media_uri
+    assert "unassigned" not in task.media_uri
+    with pg.begin() as conn, pytest.raises(TaskError, match="이미"):
+        assign_reviewer(conn, assigned, "r1", seniors)
