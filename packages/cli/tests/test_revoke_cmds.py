@@ -22,7 +22,7 @@ import pytest
 import sqlalchemy
 import yaml
 
-from dlp_cli import privacy_cmds, review_cmds, review_config
+from dlp_cli import dataset_cmds, privacy_cmds, review_cmds, review_config
 from dlp_cli.review_config import REVOCATION_PENDING_EXIT
 from dlp_media.storage import LocalStore, sha256_file
 from dlp_privacy.pipeline import StreamResult
@@ -519,3 +519,32 @@ def test_revoke_orphans_argument_rules(url: str) -> None:
     for why, kw in bad.items():
         with pytest.raises(SystemExit, match=why):
             review_cmds.cmd_revoke(_revoke_args(url, **kw))
+
+
+def test_dataset_withdraw_requests_and_runs_revocation_after_commit(
+    url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """F-REV-17: `dlp dataset withdraw`는 사용 중지와 같은 커밋에 배포된 작업 회수를 요청하고, 커밋
+    뒤 실행기를 돌려 라벨링 버킷 사본을 지운다. 도구가 없으면 도구 작업은 대기로 남아 종료 코드 4다.
+
+    블러 검수 작업은 회수 대상이 아니다. 회수할 작업이 없는 세션은 실행기 설정을 만들지 않고 0이다.
+    """
+    uri = _media(tmp_path, "s001", "bodycam")
+    with _engine(url).begin() as conn:
+        insert_review_task(conn, _task("cvat:2", "s001", uri, None))
+        insert_review_task(conn, _privacy_task("cvat:1", "s001", tmp_path))
+    monkeypatch.setattr(dataset_cmds, "sa", _AwareSqlalchemy())
+    monkeypatch.setattr(review_config, "review_setup", _revocation_only(tmp_path))
+    args = argparse.Namespace(session_id="s001", reason="동의 철회", actor="dpo01", url=url)
+    assert dataset_cmds.cmd_withdraw(args) == REVOCATION_PENDING_EXIT
+    out = capsys.readouterr().out
+    assert "검수 작업 1개 회수 요청: cvat:2" in out and "회수 대기 1개" in out
+    with _engine(url).connect() as conn:
+        task = get_review_task(conn, "cvat:2")
+        assert task.revoke_reason == "withdrawn:dpo01" and task.media_revoked_at is not None
+        assert get_review_task(conn, "cvat:1").revoke_requested_at is None
+    assert _labeling(tmp_path).head("sessions/s001/review/labeler01/bodycam.mp4") is None
+    no_setup = Mock(side_effect=AssertionError("회수할 작업이 없으면 설정을 만들지 않는다"))
+    monkeypatch.setattr(review_config, "review_setup", no_setup)
+    args = argparse.Namespace(session_id="s002", reason="동의 철회", actor="dpo01", url=url)
+    assert dataset_cmds.cmd_withdraw(args) == 0

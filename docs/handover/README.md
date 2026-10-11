@@ -60,7 +60,10 @@ flowchart LR
 `dlp review revoke <세션> --stream <스트림> --all --reason incident`(작업을 알면
 `--task <작업 키> --reason incident`)로 즉시 끊는다. 작업 생성이 실패해 DB 기록 없이 남은 도구
 작업·사본(고아)은 `dlp review revoke --orphans`로 보고, 확인한 뒤 `--orphans --apply`로 지운다
-(이 플랫폼 이름 규칙에 맞고 나이 하한 `review.yaml orphans.min_age_s`가 지난 것만, F-REV-15). `privacy.yaml render` 절은 화질(crf)만 바꿔도
+(이 플랫폼 이름 규칙에 맞고 나이 하한 `review.yaml orphans.min_age_s`가 지난 것만, F-REV-15).
+세션을 사용 중지하면(`dlp dataset withdraw`) 그 세션의 배포된 라벨링 작업이 같은 커밋에서 회수
+요청되고 명령이 커밋 뒤 회수를 실행한다 (대기가 남으면 4). 그 세션에는 새 검수 작업을 만들지 않는다
+(F-REV-17). `privacy.yaml render` 절은 화질(crf)만 바꿔도
 렌더 해시가 바뀌어 다시 렌더하는 세션의 라벨링 작업이 모두 회수되므로, 진행 중 라벨링이 없을 때
 바꾼다.
 

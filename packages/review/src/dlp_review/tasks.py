@@ -103,7 +103,7 @@ from dlp_schema.episode import current_labels
 from dlp_schema.labels import LabelRecord
 from dlp_schema.ontology import Ontology
 from dlp_schema.review import ReviewMode, ReviewStage, ReviewTask, ReviewTaskStatus, ReviewTool
-from dlp_schema.session import PrivacyState, Session, Stream, StreamKind
+from dlp_schema.session import LifecycleState, PrivacyState, Session, Stream, StreamKind
 from dlp_sync.policy import load_policy as load_sync_policy
 from dlp_sync.signals import Series, glove_series, imu_series
 
@@ -394,6 +394,17 @@ def _cvat_project(
     return pid, CvatSchema.from_labels(existing)
 
 
+def _check_not_withdrawn(session: Session) -> None:
+    """사용 중지한 세션이면 `TaskError` (F-REV-17).
+
+    사용 중지(`dlp dataset withdraw`)는 배포된 작업을 회수 요청한다. 그 뒤 다시 만들면(회수 뒤
+    다시 만들기, 배정 재생성) 동의를 철회한 영상이 다시 배포된다. 세션 잠금 뒤에 부른다
+    (사용 중지도 같은 세션 행을 갱신한다).
+    """
+    if session.lifecycle_state is LifecycleState.WITHDRAWN:
+        raise TaskError(f"{session.session_id}: 사용 중지한 세션에는 검수 작업을 만들지 않습니다")
+
+
 def create_privacy_tasks(
     conn: sa.Connection,
     session_id: str,
@@ -419,8 +430,8 @@ def create_privacy_tasks(
     - streams: 이 스트림만 (None이면 세션의 모든 영상 스트림).
 
     반환: 스트림마다 하나씩 만든 `ReviewTask` (DB `review_tasks`에도 삽입).
-    예외: `AccessError`(권한자 아님), `TaskError`(CVAT 없음, 계정 연결 없음, 자동 탐지 전),
-    `clients.ToolError`(CVAT API 오류).
+    예외: `AccessError`(권한자 아님), `TaskError`(CVAT 없음, 계정 연결 없음, 사용 중지한 세션,
+    자동 탐지 전), `clients.ToolError`(CVAT API 오류).
     부작용: 원본 프록시 내려받기, grant 감사 기록, CVAT 작업 생성·배정·트랙·이슈, DB 삽입.
     순서: 권한·계정 검사 → (스트림마다) 프록시 받기 → grant 기록 → CVAT 업로드.
     """
@@ -428,6 +439,8 @@ def create_privacy_tasks(
     check_privacy_reviewers([assignee], privacy_reviewers)
     # 탐지·수집과 같은 순서로 세션을 먼저 잠가, 보낸 라벨과 완료 세대를 함께 고정한다.
     lock_session(conn, session_id)
+    session = get_session(conn, session_id)
+    _check_not_withdrawn(session)  # 도구에 묻기 전에 막는다
     pick = select or default_selector(conn, session_id)
     if setup.cvat is None:
         raise TaskError("CVAT 클라이언트가 없습니다")
@@ -440,7 +453,6 @@ def create_privacy_tasks(
             f"블러 검수 담당자 {assignee}의 CVAT 계정이 없습니다 "
             "(검수 정책 cvat.users: DLP_REVIEW_POLICY_FILE 또는 config/policies/review.yaml)"
         )
-    session = get_session(conn, session_id)
     if session.privacy_state is PrivacyState.PENDING:
         raise TaskError(f"{session_id}: 블러 자동 탐지를 먼저 실행하세요 (dlp privacy detect)")
     ontology = get_session_ontology(conn, session_id)
@@ -577,7 +589,7 @@ def create_labeling_tasks(
     - streams: 이 스트림만 (None이면 모든 영상 스트림).
 
     반환: 만든 `ReviewTask` 목록 (모두 만든 뒤 한꺼번에 DB `review_tasks`에 삽입).
-    예외: `TaskError`(프라이버시 승인 전, 블러본이 현재 블러 라벨과 다름·무효),
+    예외: `TaskError`(사용 중지한 세션, 프라이버시 승인 전, 블러본이 현재 블러 라벨과 다름·무효),
     `RawAccessError`(작업 URI에 원본 버킷이 섞임), `clients.ToolError`.
     부작용: 세션 행 잠금, 라벨링 버킷 쓰기(워터마크 영상, 시계열 CSV), 원본 버킷 읽기(장갑·IMU
     Parquet, 감사 기록), 도구 작업 생성, DB 삽입.
@@ -594,6 +606,7 @@ def create_labeling_tasks(
     use_cvat = setup.cvat is not None and (tools is None or ReviewTool.CVAT in tools)
     use_ls = setup.label_studio is not None and (tools is None or ReviewTool.LABEL_STUDIO in tools)
     session = get_session(conn, session_id)
+    _check_not_withdrawn(session)
     media = setup.media_policy()
     ontology = get_session_ontology(conn, session_id)
     if session.privacy_state is not PrivacyState.APPROVED:

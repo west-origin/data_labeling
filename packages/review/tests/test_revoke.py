@@ -39,6 +39,7 @@ from dlp_review.tasks import (
     ReviewSetup,
     TaskError,
     create_labeling_tasks,
+    create_privacy_tasks,
     labeling_media_key,
     lock_assignment,
     proxy_key,
@@ -69,7 +70,7 @@ from dlp_schema.review import (
     ReviewTaskStatus,
     ReviewTool,
 )
-from dlp_schema.session import PrivacyState, Session
+from dlp_schema.session import LifecycleState, PrivacyState, Session
 from dlp_schema.testing import FIXED_TIME, make_label, make_session, sqlite_db
 
 NOW = FIXED_TIME + timedelta(hours=1)
@@ -799,6 +800,32 @@ def test_create_labeling_tasks_refuses_pending_revocation_before_tools(
     with pytest.raises(TaskError, match="매체 회수가 끝나지 않은"), engine.begin() as conn:
         create_labeling_tasks(conn, SID, setup, "labeler09", NOW)
     assert locks == [SID, SID]
+    assert cvat.mock_calls == [] and ls.mock_calls == []
+
+
+def test_withdrawn_session_gets_no_new_review_tasks(
+    engine: sa.Engine,
+    seven: dict[str, ReviewTask],
+    stores: tuple[LocalStore, LocalStore],
+    policy: PrivacyPolicy,
+) -> None:
+    """F-REV-17: 사용 중지한 세션에는 블러 검수·라벨링 작업을 새로 만들지 않는다 (도구 호출 전).
+
+    사용 중지가 배포된 작업을 회수한 뒤 다시 만들면(회수 뒤 다시 만들기 안내, 배정 재생성) 동의를
+    철회한 영상이 다시 배포된다.
+    """
+    raw, labeling = stores
+    cvat, ls = MagicMock(), MagicMock()
+    setup = ReviewSetup(
+        raw=raw, labeling=labeling, labeling_reader=MagicMock(), ontology=None, cvat=cvat,
+        label_studio=ls, privacy=policy,
+    )  # fmt: skip
+    with engine.begin() as conn:
+        repository.set_lifecycle(conn, SID, LifecycleState.WITHDRAWN, at=NOW, actor="dpo01")
+    with pytest.raises(TaskError, match="사용 중지"), engine.begin() as conn:
+        create_labeling_tasks(conn, SID, setup, "labeler09", NOW)
+    with pytest.raises(TaskError, match="사용 중지"), engine.begin() as conn:
+        create_privacy_tasks(conn, SID, setup, NOW, assignee="rev01", privacy_reviewers=("rev01",))
     assert cvat.mock_calls == [] and ls.mock_calls == []
 
 
