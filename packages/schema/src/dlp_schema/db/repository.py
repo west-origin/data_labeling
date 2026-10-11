@@ -47,6 +47,7 @@ import sqlalchemy as sa
 from dlp_schema.dataset import DatasetVersion
 from dlp_schema.db.locks import lock_model_task as lock_model_task
 from dlp_schema.db.locks import lock_session as lock_session
+from dlp_schema.db.locks import try_lock_session as try_lock_session
 from dlp_schema.db.ontology_repository import get_ontology as get_ontology
 from dlp_schema.db.ontology_repository import get_session_ontology as get_session_ontology
 from dlp_schema.db.privacy_repository import latest_privacy_detection as latest_privacy_detection

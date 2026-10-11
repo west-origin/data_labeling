@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,6 +20,7 @@ from unittest.mock import Mock, patch
 import numpy as np
 import pytest
 import sqlalchemy
+import yaml
 
 from dlp_cli import privacy_cmds, review_cmds, review_config
 from dlp_cli.review_config import REVOCATION_PENDING_EXIT
@@ -155,7 +157,8 @@ def _revoke_args(url: str, **kw: Any) -> argparse.Namespace:
     """`dlp review revoke` 인자 (기본값)."""
     values: dict[str, Any] = dict(
         session_id=None, stream=[], task=[], all=False, include_legacy=False, dry_run=False,
-        reason=None, pending=False, mark_tool_gone=None, note=None, url=url,
+        reason=None, pending=False, mark_tool_gone=None, note=None, url=url, orphans=False,
+        apply=False,
     )  # fmt: skip
     values.update(kw)
     return argparse.Namespace(**values)
@@ -447,3 +450,72 @@ def test_render_backstop_requests_tasks_made_under_other_render_policy(
         task = get_review_task(conn, "cvat:2")
     assert task.status is ReviewTaskStatus.REVOKED and task.revoke_reason == "render"
     assert task.media_revoked_at is not None
+
+
+def _orphan_policy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, min_age_s: int) -> None:
+    """기본 review.yaml에서 `orphans.min_age_s`만 바꾼 파일을 `DLP_REVIEW_POLICY_FILE`로 고른다."""
+    data = yaml.safe_load((repo_root() / "config/policies/review.yaml").read_text("utf-8"))
+    data["orphans"]["min_age_s"] = min_age_s
+    path = tmp_path / "review-orphans.yaml"
+    path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+    monkeypatch.setenv("DLP_REVIEW_POLICY_FILE", str(path))
+
+
+def test_revoke_orphans_reports_by_default_and_deletes_only_with_apply(
+    url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """F-REV-15: `--orphans`는 기본이 보고만(종료 코드 4)이고 `--apply`일 때만 지운다 (그 뒤 0).
+
+    DB 행이 있는 사본과 시계열 CSV는 그대로다. 나이 하한은 고른 정책 파일에서 읽는다 (하한을
+    늘리면 막 만든 사본은 보지 않아 0). 도구가 없으면 그 채널은 확인하지 못함으로 4다.
+    """
+    live = _media(tmp_path, "s001", "bodycam")
+    orphan_key = "sessions/s001/review/labeler02/bodycam.mp4"
+    _media_at(tmp_path, orphan_key)
+    _media_at(tmp_path, "sessions/s001/review/timeseries.csv")
+    with _engine(url).begin() as conn:
+        insert_review_task(conn, _task("cvat:2", "s001", live, None))
+    setup = _local_setup(tmp_path)
+    no_tools = Mock(return_value=(setup, []))
+    monkeypatch.setattr(review_cmds, "review_setup", no_tools)
+    _orphan_policy(tmp_path, monkeypatch, 0)
+    args = _revoke_args(url, orphans=True)
+    assert review_cmds.cmd_revoke(args) == REVOCATION_PENDING_EXIT
+    out = capsys.readouterr().out
+    assert f"남음 media        {orphan_key} (s001, no_db_row" in out
+    assert "보고만" in out and "확인하지 못함: cvat: 클라이언트 없음" in out
+    assert no_tools.call_args.kwargs["revocation_only"] is True
+    assert _labeling(tmp_path).head(orphan_key) is not None
+    assert review_cmds.cmd_revoke(_revoke_args(url, orphans=True, apply=True)) == 4
+    assert f"지움 media        {orphan_key}" in capsys.readouterr().out
+    assert _labeling(tmp_path).head(orphan_key) is None
+    assert _labeling(tmp_path).head("sessions/s001/review/labeler01/bodycam.mp4") is not None
+    assert _labeling(tmp_path).head("sessions/s001/review/timeseries.csv") is not None
+
+    _media_at(tmp_path, orphan_key)
+    cvat, ls = Mock(), Mock()
+    cvat.list_tasks.return_value = []
+    ls.list_tasks.return_value = []
+    with_tools = replace(setup, cvat=cvat, label_studio=ls)
+    monkeypatch.setattr(review_cmds, "review_setup", Mock(return_value=(with_tools, [])))
+    _orphan_policy(tmp_path, monkeypatch, 3600)
+    assert review_cmds.cmd_revoke(_revoke_args(url, orphans=True, apply=True)) == 0
+    assert "어려 보지 않음 1개" in capsys.readouterr().out
+    assert _labeling(tmp_path).head(orphan_key) is not None
+    _orphan_policy(tmp_path, monkeypatch, 0)
+    assert review_cmds.cmd_revoke(_revoke_args(url, orphans=True, apply=True)) == 0
+    assert _labeling(tmp_path).head(orphan_key) is None
+
+
+def test_revoke_orphans_argument_rules(url: str) -> None:
+    """`--apply`는 `--orphans`와만, `--orphans`는 회수 선택 인자·`--pending`과 함께 쓰지 않는다."""
+    bad = {
+        "--apply는 --orphans와만": {"session_id": "s001", "apply": True},
+        "--apply와 --dry-run": {"orphans": True, "apply": True, "dry_run": True},
+        "--orphans는 --all, --reason, --pending": {
+            "orphans": True, "all": True, "reason": "x", "pending": True,
+        },
+    }  # fmt: skip
+    for why, kw in bad.items():
+        with pytest.raises(SystemExit, match=why):
+            review_cmds.cmd_revoke(_revoke_args(url, **kw))

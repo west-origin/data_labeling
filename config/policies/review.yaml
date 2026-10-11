@@ -1,7 +1,8 @@
 # 검수 운영 정책 (WP12). 배정 비율(QA·이중·블라인드·오류 삽입)은 config/defaults.yaml review를 따른다.
 #
 # 읽는 곳: dlp_review.ops.policy.load_policy (Pydantic ReviewOpsPolicy로 검증, 알 수 없는 키는 오류).
-# 쓰는 명령: dlp review create|collect|serve|plan|assign|qa|quality, dlp ops weekly(운영 지표)·audit-report.
+# 쓰는 명령: dlp review create|collect|serve|plan|assign|qa|quality, dlp review revoke --orphans(orphans 절),
+# dlp ops weekly(운영 지표)·audit-report.
 # 이 파일은 파싱한 값으로만 쓰고 텍스트 해시를 만들지 않으므로 주석을 고쳐도 동작이 바뀌지 않는다.
 # 키를 더하거나 이름을 바꾸면 dlp_review/ops/policy.py 모델도 함께 바꿔야 한다.
 
@@ -15,6 +16,14 @@ webhook:
   request_timeout_s: 10                # 헤더의 유휴 제한 및 본문 전체 읽기 제한 (초)
   max_workers: 16                      # 연결 처리 스레드 상한 (초과 요청은 503)
   retry_after_s: 30                    # 일시 실패·과부하의 Retry-After (초)
+
+# DB 기록 없이 남은 도구 작업·라벨링 버킷 사본(고아) 정리 (dlp review revoke --orphans, F-REV-15).
+# 작업 생성은 CVAT·Label Studio 작업과 워터마크 사본을 먼저 만들고 DB에 나중에 커밋한다. 막 만든 것을
+# 고아로 지우지 않게 생성 시각에서 이만큼 지난 것만 본다 (세션 잠금으로 진행 중 생성도 건너뛴다).
+orphans:
+  # 0 이상 정수(초). 줄이면 고아가 빨리 지워지지만, 오래 걸리는 작업 생성(큰 영상 업로드)보다 짧으면
+  # 세션 잠금만으로 경합을 막는다. 늘리면 롤백으로 남은 노출이 그만큼 오래 남는다.
+  min_age_s: 3600
 
 # 검수 화면용 매체 (dlp_review.watermark, dlp_review.timeseries)
 media:

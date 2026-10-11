@@ -31,7 +31,7 @@ WP6, ADR 0006·0020·0023·0024. 진입점: `dlp review create <세션>`(직접 
 - `lock_assignment`: 배정 행 잠금 (작업 중복 생성 방지). 회수한 작업은 "작업 없음"으로 본다.
 - `create_labeling_tasks`: 작업 라벨 검수 작업 (CVAT 공간 + Label Studio 시간).
 - `MEDIA_HASH_CHARS`, `labeling_media_key`: 워터마크 사본 키 (회수 실행기가 같은 값으로 키
-  모양을 본다).
+  모양을 본다). `parse_labeling_media_key`: 키를 (세션, 담당자, 스트림)으로 되읽는다 (고아 찾기).
 
 저장소 키:
 - 원본 버킷: `sessions/<세션>/derived/<스트림>.proxy.mp4`(검수 프록시), 장갑·IMU 원본 Parquet.
@@ -42,13 +42,16 @@ WP6, ADR 0006·0020·0023·0024. 진입점: `dlp review create <세션>`(직접 
 원본 접근은 `setup.raw`가 감사 저장소(`dlp_cli.raw_access.raw_store`)일 때 기록된다 (ADR 0020).
 
 DB 트랜잭션은 호출자가 관리한다. DB 롤백으로 CVAT·Label Studio 작업이나 저장소 사본이 삭제되지는
-않는다. 작업 생성(블러 검수·라벨링 모두)은 세션 행을 잠근 상태로 원본 접근·업로드·도구 호출까지
-수행한다. 라벨링 작업 생성의 잠금은 회수 요청(같은 세션 잠금 아래에서 남긴다)과 겹치지 않게 한다.
+않는다 (그렇게 남은 고아는 `dlp review revoke --orphans`가 이름 규칙과 DB를 대조해 찾고 지운다,
+`dlp_review.orphans`, F-REV-15). 작업 생성(블러 검수·라벨링 모두)은 세션 행을 잠근 상태로 원본
+접근·업로드·도구 호출까지 수행한다. 라벨링 작업 생성의 잠금은 회수 요청(같은 세션 잠금 아래에서
+남긴다)과 겹치지 않게 하고, 고아 정리는 같은 세션 행을 잠그지 못하면(생성 중) 그 세션을 건너뛴다.
 """
 
 from __future__ import annotations
 
 import bisect
+import re
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -204,6 +207,24 @@ def labeling_media_key(session_id: str, assignee: str, stream_id: str, render_ha
     """
     digest = render_hash[:MEDIA_HASH_CHARS]
     return f"sessions/{session_id}/review/{assignee}/{stream_id}-{digest}.mp4"
+
+
+# `labeling_media_key`(와 해시 없는 구 키 `<담당자>/<스트림>.mp4`)의 모양
+_MEDIA_KEY = re.compile(
+    rf"^sessions/(?P<session>[^/]+)/review/(?P<assignee>[^/]+)/"
+    rf"(?P<stream>[^/]+?)(?:-[0-9a-f]{{{MEDIA_HASH_CHARS}}})?\.mp4$"
+)
+
+
+def parse_labeling_media_key(key: str) -> tuple[str, str, str] | None:
+    """워터마크 사본 키 → (세션, 담당자, 스트림). 그 모양이 아니면 None.
+
+    `labeling_media_key`와 구 작업 키(해시 없음)를 받는다. 시계열 CSV(`review/timeseries.csv`)·
+    블러본·회수 스냅숏은 이 모양이 아니다. 고아 찾기(`dlp_review.orphans`)가 이 플랫폼이 만든
+    사본만 고르는 데 쓴다.
+    """
+    m = _MEDIA_KEY.match(key)
+    return (m["session"], m["assignee"], m["stream"]) if m else None
 
 
 def frame_times(video: Path) -> list[int]:

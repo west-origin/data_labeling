@@ -104,7 +104,9 @@ serve|assign|register-webhooks|plan|qa|quality`, 작업의 CVAT 계정 배정·�
 되돌리지 않고 실패한다. 한 명령 안에서는 정책을 한 번 읽어 `ReviewSetup`과 명령이 같은 값을 본다.
 매체 회수(`dlp review revoke`, cron `revoke --pending`, `dlp privacy detect|render`와 검수 명령의 커밋
 뒤 회수)는 검수 정책 값을 쓰지 않는다. 회수가 스스로 만드는 설정은 이 파일을 읽지 않으므로 파일이
-깨져도 낡은 라벨링 매체는 지운다 (ADR 0039). 반면 라이브러리 기본 로더(`dlp_review.ops.policy.load_policy(root)`,
+깨져도 낡은 라벨링 매체는 지운다 (ADR 0039). 예외로 고아 정리(`dlp review revoke --orphans`)는 나이
+하한(`orphans.min_age_s`)을 이 파일에서 엄격히 읽는다. 이 키는 필수라 별도 정책 파일에도 넣어야 한다.
+반면 라이브러리 기본 로더(`dlp_review.ops.policy.load_policy(root)`,
 정책을 넘기지 않은 `ReviewSetup`의 지연 로더)는 이 변수를 보지 않고 Git의 기본 `review.yaml`을 읽는다.
 그래서 라이브러리 함수를 직접 부르는 테스트는 기본 정책을, CLI 명령 함수를 부르는 테스트는 이 변수를 따른다.
 테스트에서는 파일럿 권한 설정이 테스트 픽스처를 덮어쓰지 않도록 서브셸 안에서만 해제한다.

@@ -15,6 +15,10 @@
     [--pending] [--mark-tool-gone KEY --note]` — 블러가 바뀐 뒤 이미 배포한 라벨링 매체를
     회수한다 (ADR 0039). 세션 경로는 늘 sweep을 하고 `--task`·`--all`은 그 위에 수동 요청을 더한다.
     대기가 남으면 종료 코드 4 (cron `--pending`의 경보).
+    `revoke --orphans [<세션>] [--apply]` — DB 롤백으로 기록 없이 남은 도구 작업·라벨링 버킷 사본
+    (고아)을 이름 규칙과 DB로 찾는다 (`dlp_review.orphans`, F-REV-15). 기본은 보고만 하고
+    `--apply`일 때만 지운다. 나이 하한은 `review.yaml orphans.min_age_s`. 고아가 남거나 확인하지
+    못한 채널이 있으면 종료 코드 4.
   - `register-webhooks <url_base>` — 검수 프로젝트에 웹훅을 등록한다.
   - `verify <세션>` — 검수가 끝난 세션을 `prelabeled → human_verified`로 옮긴다 (ADR 0029).
   - `ui-theme [--check]` — `config/review_ui.yaml`로 CVAT 테마 색 파일을 다시 만든다 (ADR 0038,
@@ -38,7 +42,8 @@ privacy` (또는 `plan --privacy`) → `collect` → `dlp privacy approve`.
 CVAT 계정 연결(`cvat_policy`)·매체(`media_policy`)도 고른 파일의 값이다 (라이브러리 지연 로더의
 Git 기본값이 아니다, F-REV-01). `plan`·`qa`·`quality`는 같은 로더로 정책만 읽고, `queue`·`verify`는
 검수 정책을 쓰지 않는다. 매체 회수만 하는 `revoke`도 검수 정책을 읽지 않는다 (회수 실행기는 정책
-값을 쓰지 않는다. 정책 파일이 깨져도 낡은 라벨링 매체를 지운다).
+값을 쓰지 않는다. 정책 파일이 깨져도 낡은 라벨링 매체를 지운다). 예외는 `revoke --orphans`로, 나이
+하한(`orphans.min_age_s`)을 고른 정책 파일에서 엄격히 읽는다.
 
 주의:
 - `_setup`(`review_config.review_setup`)이 원본 저장소를 `raw_store("s3", …, "review.<명령>")` 감사
@@ -55,7 +60,7 @@ from __future__ import annotations
 
 import argparse
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import sqlalchemy as sa
 from sqlalchemy.exc import NoResultFound
@@ -82,6 +87,7 @@ from dlp_review.ontology_projects import ontology_project
 from dlp_review.ops.assign import plan_qa
 from dlp_review.ops.policy import ReviewOpsPolicy
 from dlp_review.ops.runner import create_assignment_tasks, plan_session, quality_report
+from dlp_review.orphans import OrphanReport, delete_orphans, find_orphans
 from dlp_review.reconcile import ReviewOutcome
 from dlp_review.revoke import RevocationIncompleteError, mark_tool_gone
 from dlp_review.tasks import (
@@ -522,18 +528,38 @@ def cmd_quality(args: argparse.Namespace) -> int:
     return 0
 
 
+def _check_orphan_args(args: argparse.Namespace, selection: list[str]) -> None:
+    """`revoke --orphans [--apply]` 인자 조합. 맞지 않으면 `SystemExit`."""
+    if not args.orphans:
+        raise SystemExit("--apply는 --orphans와만 씁니다")
+    if args.apply and args.dry_run:
+        raise SystemExit("--apply와 --dry-run을 함께 쓸 수 없습니다 (--orphans는 기본이 보고만)")
+    others = {
+        "--pending": args.pending,
+        "--mark-tool-gone": bool(args.mark_tool_gone),
+        "--note": bool(args.note),
+    }
+    extra = selection + [name for name, on in others.items() if on]
+    if extra:
+        raise SystemExit(f"--orphans는 {', '.join(extra)}와 함께 쓸 수 없습니다")
+
+
 def _check_revoke_args(args: argparse.Namespace) -> None:
     """`revoke` 인자 조합을 확인한다. 일부 인자가 조용히 무시되는 조합이면 `SystemExit`.
 
-    특히 `--dry-run`은 미리보기가 있는 경로(세션, `--pending`)에서만 받는다. `--mark-tool-gone`은
-    표시만 하는 쓰기 명령이라 `--dry-run`과 함께 쓰면 실제로 표시되는 것을 막는다.
+    특히 `--dry-run`은 미리보기가 있는 경로(세션, `--pending`, `--orphans`)에서만 받는다.
+    `--mark-tool-gone`은 표시만 하는 쓰기 명령이라 `--dry-run`과 함께 쓰면 실제로 표시되는 것을
+    막는다. `--orphans`는 기본이 보고만이고 `--apply`일 때만 지운다 (`--apply`와 `--dry-run`을 함께
+    쓰면 거부한다). 세션은 고를 수 있고 다른 선택 인자와는 쓰지 않는다.
     """
     chosen = {
         "--task": bool(args.task), "--all": args.all, "--stream": bool(args.stream),
         "--include-legacy": args.include_legacy, "--reason": bool(args.reason),
     }  # fmt: skip
     selection = [name for name, on in chosen.items() if on]
-    if args.mark_tool_gone:
+    if args.apply or args.orphans:
+        _check_orphan_args(args, selection)
+    elif args.mark_tool_gone:
         others = {
             "<세션>": bool(args.session_id),
             "--pending": args.pending,
@@ -658,6 +684,56 @@ def _revoke_pending(engine: sa.Engine, args: argparse.Namespace) -> int:
     return 0
 
 
+def _print_orphans(report: OrphanReport, *, applied: bool, min_age_s: int) -> int:
+    """고아 찾기·지우기 결과를 출력한다. 깨끗하면 0, 아니면 `REVOCATION_PENDING_EXIT`(4).
+
+    실패와 확인하지 못한 채널이 먼저 나온다.
+    """
+    for line in report.errors:
+        print(f"  ! {line}")
+    for line in report.unscanned:
+        print(f"  ! 확인하지 못함: {line}")
+    done = set(report.deleted)
+    for o in report.found:
+        mark = "지움" if o.ref in done else "남음"
+        when = o.created_at.isoformat() if o.created_at else "?"
+        print(f"{mark} {o.channel:<12} {o.ref} ({o.session_id}, {o.reason}, {when}) {o.label}")
+    for line in report.warnings:
+        print(f"  경고: {line}")
+    print(
+        f"고아 {len(report.found)}개, 지움 {len(report.deleted)}개, 스냅숏 "
+        f"{len(report.snapshots)}개, 나이 하한({min_age_s}초)보다 어려 보지 않음 "
+        f"{len(report.young)}개"
+    )
+    if report.busy:
+        print(f"  작업 생성 중이라 건너뜀 {len(report.busy)}개 (다시 실행하세요)")
+    if report.remaining and not applied:
+        print("  지우지 않았습니다 (보고만). 지우려면 dlp review revoke --orphans --apply")
+    return 0 if report.clean else REVOCATION_PENDING_EXIT
+
+
+def _revoke_orphans(engine: sa.Engine, args: argparse.Namespace) -> int:
+    """`revoke --orphans [<세션>] [--apply]`: 고아 도구 작업·라벨링 버킷 사본을 찾고(지운다).
+
+    나이 하한은 고른 검수 정책(`DLP_REVIEW_POLICY_FILE` 또는 review.yaml)의 `orphans.min_age_s`다.
+    도구 클라이언트는 회수 전용 설정으로 만든다 (CVAT 로그인 실패는 경고, 그 채널은 확인하지 못함).
+    """
+    policy = load_ops_policy(repo_root())
+    setup, warnings = review_setup("review.revoke", args.url, revocation_only=True, policy=policy)
+    now = datetime.now(UTC)
+    report = find_orphans(
+        engine, labeling=setup.labeling, cvat=setup.cvat, label_studio=setup.label_studio,
+        min_age=timedelta(seconds=policy.orphans.min_age_s), now=now, session_id=args.session_id,
+    )  # fmt: skip
+    report.warnings[:0] = warnings
+    if args.apply:
+        delete_orphans(
+            engine, report, labeling=setup.labeling, raw_bucket=setup.raw.bucket, cvat=setup.cvat,
+            label_studio=setup.label_studio, now=now,
+        )  # fmt: skip
+    return _print_orphans(report, applied=args.apply, min_age_s=policy.orphans.min_age_s)
+
+
 def _revoke_session(engine: sa.Engine, args: argparse.Namespace) -> int:
     """`revoke <세션>`: 수동 요청(`--task`·`--all`) → sweep 요청을 한 트랜잭션에 남기고 실행한다.
 
@@ -703,6 +779,9 @@ def cmd_revoke(args: argparse.Namespace) -> int:
     - `--mark-tool-gone KEY --note TEXT`: 도구 인스턴스 폐기 등으로 확인할 수 없는 도구 작업을
       사유와 함께 완료로 표시한다 (행위자 = `current_actor()`). 다른 선택 인자·`--dry-run`과 함께
       쓰지 않는다.
+    - `--orphans [<세션>] [--apply]`: DB 기록 없이 남은 도구 작업·라벨링 버킷 사본(고아)을 보고하고,
+      `--apply`면 세션을 잠근 뒤 다시 확인해 지운다 (`dlp_review.orphans`, F-REV-15). 고아가 남거나
+      확인하지 못한 채널·작업 생성 중이라 건너뛴 세션이 있으면 4.
 
     반환: 대기가 남으면 `REVOCATION_PENDING_EXIT`(4), 아니면 0 (`--dry-run`은 늘 0). 인자 조합이
     맞지 않거나 `--task` 키를 요청할 수 없으면 `SystemExit`.
@@ -712,6 +791,8 @@ def cmd_revoke(args: argparse.Namespace) -> int:
     _check_revoke_args(args)
     engine = sa.create_engine(database_url(args.url))
     try:
+        if args.orphans:
+            return _revoke_orphans(engine, args)
         if args.mark_tool_gone:
             return _revoke_mark_gone(engine, args)
         if args.pending:
@@ -806,6 +887,11 @@ def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
         "--mark-tool-gone", metavar="KEY", help="도구 작업 수동 완료 표시 (--note, 단독으로)"
     )
     rv.add_argument("--note", help="--mark-tool-gone 사유")
+    rv.add_argument(
+        "--orphans", action="store_true",
+        help="DB 기록 없이 남은 도구 작업·라벨링 버킷 사본 보고 (기본 보고만, --apply면 지움)",
+    )  # fmt: skip
+    rv.add_argument("--apply", action="store_true", help="--orphans가 찾은 고아를 지운다")
     rv.add_argument("--url", help="DB URL (기본: DLP_DATABASE_URL)")
     rv.set_defaults(func=cmd_revoke)
 

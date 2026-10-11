@@ -13,7 +13,7 @@ import os
 import uuid
 from collections.abc import Callable, Iterator
 from dataclasses import replace
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 
@@ -44,6 +44,7 @@ from dlp_review.labelstudio import LS_KINDS
 from dlp_review.ops.policy import CvatPolicy
 from dlp_review.ops.policy import load_policy as load_ops_policy
 from dlp_review.ops.runner import plan_session
+from dlp_review.orphans import OrphanReport, delete_orphans, find_orphans
 from dlp_review.revoke import RevocationReport, execute_media_revocations, snapshot_key
 from dlp_review.roles import AccessError
 from dlp_review.tasks import (
@@ -606,6 +607,86 @@ def test_blur_change_revokes_deployed_labeling_media_end_to_end(
     new_uri = setup.labeling.uri(labeling_media_key(sid, "labeler01", "bodycam", nhash))
     assert all(t.render_hash == nhash and t.media_uri == new_uri for t in renewed)
     assert httpx.get(video_url).status_code == 404
+
+
+def test_orphans_from_rolled_back_creation_are_reported_then_deleted(
+    pg: sa.Engine, setup: ReviewSetup, tmp_path: Path
+) -> None:
+    """F-REV-15: 작업 생성 트랜잭션이 롤백되면 CVAT·LS 작업과 워터마크 사본이 DB 기록 없이 남는다.
+
+    시나리오: 승인·렌더 → labeler01 작업(커밋) → labeler02 작업(롤백) → 고아 찾기(나이 하한
+    1시간이면 어림, 0이면 고아) → 보고만(아무것도 지우지 않음) → 지우기.
+    정답 근거: 고아는 롤백한 CVAT·LS 작업과 그 사본 셋뿐이고 이유는 no_db_row. 지운 뒤 셋 다 404·
+    없음이고, 커밋한 labeler01 작업·사본과 시계열 CSV는 그대로다.
+    """
+    cvat = _need_cvat(setup)
+    ls = setup.label_studio
+    assert ls is not None
+    policy = load_policy(ROOT)
+    sid, _ = _session(pg, setup, tmp_path)
+    with pg.begin() as conn:
+        [first] = create_privacy_tasks(conn, sid, setup, FIXED_TIME, **PRIVACY)
+        collect_task(conn, first.task_key, setup, "rev01", FIXED_TIME)
+        approve_session(conn, sid)
+        render_session(conn, sid, setup.raw, setup.labeling, policy)
+        kept = create_labeling_tasks(conn, sid, setup, "labeler01", FIXED_TIME)
+
+    class RollbackError(Exception):
+        """작업 생성 뒤 커밋 전 실패."""
+
+    made: list[ReviewTask] = []
+    with pytest.raises(RollbackError), pg.begin() as conn:
+        made = create_labeling_tasks(conn, sid, setup, "labeler02", FIXED_TIME)
+        raise RollbackError
+    assert {t.tool for t in made} == {ReviewTool.CVAT, ReviewTool.LABEL_STUDIO}
+    with pg.connect() as conn:
+        assert {t.task_key for t in list_review_tasks(conn, sid)}.isdisjoint(
+            t.task_key for t in made
+        )
+    media = object_key(setup.labeling, made[0].media_uri)
+    expected = {media, *(t.task_key for t in made)}
+    now = datetime.now(UTC) + timedelta(minutes=1)
+
+    def find(min_age: timedelta) -> OrphanReport:
+        return find_orphans(
+            pg, labeling=setup.labeling, cvat=cvat, label_studio=ls, min_age=min_age, now=now,
+            session_id=sid,
+        )  # fmt: skip
+
+    young = find(timedelta(hours=1))
+    assert young.found == [] and {o.ref for o in young.young} == expected
+    report = find(timedelta(0))
+    assert {o.ref: o.reason for o in report.found} == dict.fromkeys(expected, "no_db_row")
+    assert not report.unscanned and not report.clean
+    # 보고만: 아무것도 지우지 않았다
+    for t in made:
+        tool = cvat if t.tool is ReviewTool.CVAT else ls
+        assert tool.task_exists(int(t.external_id))
+    assert setup.labeling.head(media) is not None
+
+    delete_orphans(
+        pg, report, labeling=setup.labeling, raw_bucket=setup.raw.bucket, cvat=cvat,
+        label_studio=ls, now=now,
+    )  # fmt: skip
+    assert report.clean, (report.errors, report.busy)
+    assert sorted(report.deleted) == sorted(expected)
+    assert (
+        cvat.http.get(
+            f"/api/tasks/{next(t for t in made if t.tool is ReviewTool.CVAT).external_id}"
+        ).status_code
+        == 404
+    )
+    assert not ls.task_exists(
+        int(next(t for t in made if t.tool is ReviewTool.LABEL_STUDIO).external_id)
+    )
+    assert setup.labeling.head(media) is None
+    # 커밋한 작업은 그대로다
+    for t in kept:
+        tool = cvat if t.tool is ReviewTool.CVAT else ls
+        assert tool.task_exists(int(t.external_id))
+        assert setup.labeling.head(object_key(setup.labeling, t.media_uri)) is not None
+    assert setup.labeling.head(f"sessions/{sid}/review/timeseries.csv") is not None
+    assert find(timedelta(0)).found == []
 
 
 def test_unsupported_cvat_annotation_stops_collection(

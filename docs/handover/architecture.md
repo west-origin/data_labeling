@@ -16,7 +16,7 @@ Prefect 서비스가 기동된 것만으로 모든 작업이 영속 큐에서 �
 | 탐지·승인·렌더 | [privacy](../../packages/privacy/src/dlp_privacy/)의 `runner.py`, `generation.py`, `rendering.py`, `revocation.py`(블러 변경 뒤 배포 매체 회수 요청) | `config/policies/privacy.yaml` |
 | 자동 라벨 초안 | [prelabel runner](../../packages/prelabel/src/dlp_prelabel/runner.py), `adapters/` | `config/policies/prelabel.yaml`, `config/models.yaml` |
 | 관계·접촉·행동 | [relations](../../packages/relations/src/dlp_relations/), [actions](../../packages/actions/src/dlp_actions/) | 각 단계의 `config/policies/*.yaml` |
-| 검수 도구·이력 수집 | [review](../../packages/review/src/dlp_review/)의 `tasks.py`, `collect.py`, `reconcile.py`, `clients.py`, `webhook.py`, `revoke.py`(회수 실행기) | `config/policies/review.yaml` |
+| 검수 도구·이력 수집 | [review](../../packages/review/src/dlp_review/)의 `tasks.py`, `collect.py`, `reconcile.py`, `clients.py`, `webhook.py`, `revoke.py`(회수 실행기), `orphans.py`(DB 기록 없이 남은 도구 작업·사본 정리) | `config/policies/review.yaml` |
 | 배정·QA·품질 | [review ops](../../packages/review/src/dlp_review/ops/) | 위 검수 정책, `config/defaults.yaml` |
 | 계약·온톨로지·DB | [schema](../../packages/schema/src/dlp_schema/), `db/` | `config/ontology/v1`, `schemas/`는 생성물 |
 | 데이터셋·학습·평가 | [datasets](../../packages/datasets/src/dlp_datasets/), [training](../../packages/training/src/dlp_train/), [evaluation](../../packages/evaluation/src/dlp_eval/) | `dataset.yaml`, `training.yaml`, `evaluation.yaml` |
@@ -68,7 +68,7 @@ Prefect 서비스가 기동된 것만으로 모든 작업이 영속 큐에서 �
 | 라벨링 버킷 | 승인된 블러본·렌더 기록·워터마크 검수 영상·시계열 CSV |
 | 데이터셋 버킷/lakeFS | 버전 스냅샷·내보내기·내부 가명 대응표(구매자 공개 금지) |
 | MLflow | 학습 기록·산출물 |
-| CVAT/Label Studio | 검수 작업과 도구가 보관하는 사본. DB 롤백으로 함께 지워지지 않음. 블러가 바뀐 라벨링 작업은 `review_tasks`의 회수 요청(outbox)으로 커밋 뒤 지운다 (ADR 0039) |
+| CVAT/Label Studio | 검수 작업과 도구가 보관하는 사본. DB 롤백으로 함께 지워지지 않음 (그렇게 남은 고아는 `dlp review revoke --orphans`가 이름 규칙·DB 대조로 찾아 지운다, F-REV-15). 블러가 바뀐 라벨링 작업은 `review_tasks`의 회수 요청(outbox)으로 커밋 뒤 지운다 (ADR 0039) |
 
 원본 검수자는 `reviewers.privacy`와 CVAT 사용자 연결로 제한한다. 일반 검수자·행동 VLM·큐레이션·
 내보내기는 승인된 블러본을 사용한다. 프라이버시 탐지·서버 내 프리라벨 추론은 감사되는 원본을

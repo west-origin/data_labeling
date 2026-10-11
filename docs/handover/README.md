@@ -58,7 +58,9 @@ flowchart LR
 배포 직후에는 렌더 해시가 없는 구 작업을 `dlp review revoke <세션> --dry-run --include-legacy`로
 확인하고 필요하면 `--include-legacy`로 회수한다. 라벨러가 노출을 신고하면
 `dlp review revoke <세션> --stream <스트림> --all --reason incident`(작업을 알면
-`--task <작업 키> --reason incident`)로 즉시 끊는다. `privacy.yaml render` 절은 화질(crf)만 바꿔도
+`--task <작업 키> --reason incident`)로 즉시 끊는다. 작업 생성이 실패해 DB 기록 없이 남은 도구
+작업·사본(고아)은 `dlp review revoke --orphans`로 보고, 확인한 뒤 `--orphans --apply`로 지운다
+(이 플랫폼 이름 규칙에 맞고 나이 하한 `review.yaml orphans.min_age_s`가 지난 것만, F-REV-15). `privacy.yaml render` 절은 화질(crf)만 바꿔도
 렌더 해시가 바뀌어 다시 렌더하는 세션의 라벨링 작업이 모두 회수되므로, 진행 중 라벨링이 없을 때
 바꾼다.
 

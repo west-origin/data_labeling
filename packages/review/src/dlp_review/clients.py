@@ -10,11 +10,13 @@ WP6, ADR 0006. `dlp_review.tasks`(작업 만들기), `dlp_review.collect`(결과
 공개 이름:
 - `ToolError`: 도구 API가 4xx·5xx로 답했거나 비동기 작업이 실패·시간 초과했다.
 - `TaskOwner`, `cvat_task_name`: 도구 작업이 어느 세션·스트림·담당자의 것인지 (회수 전 대조).
+- `ToolTask`, `cvat_owner`, `ls_owner`: 프로젝트를 훑어 읽은 도구 작업 하나와 작업 이름·data에서
+  주인을 읽는 규칙 (고아 찾기 `dlp_review.orphans`, F-REV-15; `task_owner`도 같은 규칙).
 - `PRELABEL_VERSION`, `PRELABEL_SETTINGS`: Label Studio 프리라벨(예측) 표시 설정.
 - `CvatClient`: CVAT REST (프로젝트·작업·주석·job 담당자·이슈·웹훅, 회수용 주인 확인·배정 해제·
-  스냅숏·삭제).
+  스냅숏·삭제, 고아 찾기용 작업 나열).
 - `LabelStudioClient`: Label Studio REST (프로젝트·작업·예측·주석·웹훅, 회수용 주인 확인·스냅숏·
-  삭제).
+  삭제, 고아 찾기용 작업 나열).
 
 회수(ADR 0039)용 메서드는 `dlp_review.revoke`가 쓴다. 삭제·존재 확인은 404를 "없음"으로 보고
 (이미 지운 작업의 재시도가 성공한다), 그 밖의 4xx·5xx는 `ToolError`다. 실행기는 지우기 전에
@@ -34,7 +36,9 @@ from __future__ import annotations
 
 import os
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -59,12 +63,60 @@ class TaskOwner:
     label: str
 
 
+@dataclass(frozen=True)
+class ToolTask:
+    """프로젝트를 훑어 읽은 도구 작업 하나 (고아 찾기, F-REV-15).
+
+    owner는 `task_owner`와 같은 규칙으로 읽은 주인이다. created_at은 도구가 기록한 생성 시각
+    (시간대 있음, 모르면 None). project는 작업이 든 프로젝트 이름(CVAT)·제목(Label Studio)이다.
+    """
+
+    task_id: int
+    owner: TaskOwner
+    created_at: datetime | None
+    project: str
+
+
 def cvat_task_name(session_id: str, stream_id: str, assignee: str) -> str:
     """CVAT 작업 이름 `<세션>/<스트림>/<담당자>` (블러 검수 작업은 담당자 자리에 `privacy`).
 
     `CvatClient.task_owner`가 이 모양을 되읽는다. 식별자에는 `/`가 없다 (`dlp_schema.common`).
     """
     return f"{session_id}/{stream_id}/{assignee}"
+
+
+def cvat_owner(name: str) -> TaskOwner:
+    """CVAT 작업 이름(`cvat_task_name`)의 세션·스트림·담당자. 모양이 다르면 칸이 모두 None."""
+    parts = name.split("/")
+    if len(parts) != 3 or not all(parts):
+        return TaskOwner(None, None, None, name)
+    return TaskOwner(parts[0], parts[1], parts[2], name)
+
+
+def ls_owner(data: dict[str, Any]) -> TaskOwner:
+    """Label Studio 작업 data의 `session_id`·`assignee` (`create_labeling_tasks`가 넣는다).
+
+    스트림은 담지 않아 None이다. 서명 URL은 읽지 않는다.
+    """
+    sid, who = data.get("session_id"), data.get("assignee")
+    return TaskOwner(
+        str(sid) if sid is not None else None,
+        None,
+        str(who) if who is not None else None,
+        f"session_id={sid}, assignee={who}",
+    )
+
+
+def _when(value: Any) -> datetime | None:
+    """도구의 ISO 시각 문자열(`...Z` 포함) → 시간대 있는 datetime. 없거나 시간대가 없으면 None."""
+    if not isinstance(value, str) or not value:
+        return None
+    at = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return at if at.utcoffset() is not None else None
+
+
+# 목록 API 한 쪽의 크기 (CVAT·Label Studio 공통)
+_PAGE_SIZE = 100
 
 
 PRELABEL_VERSION = (
@@ -258,11 +310,36 @@ class CvatClient:
 
         예외: 작업이 없거나(404 포함) 응답이 실패하면 `ToolError`.
         """
-        name = str(_check(self.http.get(f"/api/tasks/{task_id}"))["name"])
-        parts = name.split("/")
-        if len(parts) != 3 or not all(parts):
-            return TaskOwner(None, None, None, name)
-        return TaskOwner(parts[0], parts[1], parts[2], name)
+        return cvat_owner(str(_check(self.http.get(f"/api/tasks/{task_id}"))["name"]))
+
+    def _pages(self, path: str, params: dict[str, Any]) -> list[dict[str, Any]]:
+        """CVAT 목록 API(`count`·`next`·`results`)를 끝까지 읽는다."""
+        out: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            res = _check(
+                self.http.get(path, params={**params, "page": page, "page_size": _PAGE_SIZE})
+            )
+            out += res["results"]
+            if not res.get("next"):
+                return out
+            page += 1
+
+    def list_tasks(self, project: Callable[[str], bool]) -> list[ToolTask]:
+        """이름이 project(이름) → True인 프로젝트들의 작업 전부 (고아 찾기, F-REV-15).
+
+        주인은 작업 이름(`cvat_owner`), 생성 시각은 `created_date`다. 읽기만 한다.
+        예외: 응답이 실패하면 `ToolError`, 서버에 닿지 않으면 `httpx.HTTPError`.
+        """
+        out: list[ToolTask] = []
+        for p in self._pages("/api/projects", {}):
+            name = str(p["name"])
+            if not project(name):
+                continue
+            for t in self._pages("/api/tasks", {"project_id": int(p["id"])}):
+                owner = cvat_owner(str(t["name"]))
+                out.append(ToolTask(int(t["id"]), owner, _when(t.get("created_date")), name))
+        return out
 
     def task_snapshot(self, task_id: int) -> dict[str, Any]:
         """지우기 전에 남길 작업 사본: 작업 메타 일부, 주석 전체, 프레임 수.
@@ -433,14 +510,57 @@ class LabelStudioClient:
 
         서명 URL은 읽기만 하고 돌려주지 않는다. 예외: 작업이 없거나 응답이 실패하면 `ToolError`.
         """
-        data = _check(self.http.get(f"/api/tasks/{task_id}/")).get("data") or {}
-        sid, who = data.get("session_id"), data.get("assignee")
-        return TaskOwner(
-            str(sid) if sid is not None else None,
-            None,
-            str(who) if who is not None else None,
-            f"session_id={sid}, assignee={who}",
-        )
+        return ls_owner(_check(self.http.get(f"/api/tasks/{task_id}/")).get("data") or {})
+
+    def _project_page(self, page: int) -> tuple[list[dict[str, Any]], bool]:
+        """프로젝트 목록 한 쪽과 다음 쪽이 있는지. 버전에 따라 페이지 객체 또는 배열이 온다."""
+        res = _check(self.http.get("/api/projects", params={"page": page, "page_size": _PAGE_SIZE}))
+        if isinstance(res, dict):
+            return list(res["results"]), bool(res.get("next"))
+        return list(res), False
+
+    def _task_page(self, project_id: int, page: int) -> tuple[list[dict[str, Any]], int | None]:
+        """프로젝트 작업 한 쪽과 전체 수(모르면 None). 끝을 넘긴 쪽(404 "Invalid page")은 빈 쪽."""
+        params = {"project": project_id, "page": page, "page_size": _PAGE_SIZE}
+        resp = self.http.get("/api/tasks", params=params)
+        if resp.status_code == 404 and page > 1:
+            return [], None
+        res = _check(resp)
+        if isinstance(res, dict):
+            return list(res.get("tasks") or res.get("results") or []), res.get("total")
+        return list(res), None
+
+    def _project_tasks(self, project_id: int) -> list[dict[str, Any]]:
+        """프로젝트의 작업 전부 (전체 수에 이르거나 빈 쪽·덜 찬 쪽이 오면 멈춘다)."""
+        out: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            items, total = self._task_page(project_id, page)
+            out += items
+            if len(items) < _PAGE_SIZE or (total is not None and len(out) >= int(total)):
+                return out
+            page += 1
+
+    def list_tasks(self, project: Callable[[str], bool]) -> list[ToolTask]:
+        """제목이 project(제목) → True인 프로젝트들의 작업 전부 (고아 찾기, F-REV-15).
+
+        주인은 data의 `session_id`·`assignee`(`ls_owner`), 생성 시각은 `created_at`이다. 서명
+        URL은 돌려주지 않는다. 읽기만 한다.
+        예외: 응답이 실패하면 `ToolError`, 서버에 닿지 않으면 `httpx.HTTPError`.
+        """
+        out: list[ToolTask] = []
+        page, more = 1, True
+        while more:
+            projects, more = self._project_page(page)
+            page += 1
+            for p in projects:
+                title = str(p["title"])
+                if not project(title):
+                    continue
+                for t in self._project_tasks(int(p["id"])):
+                    owner = ls_owner(t.get("data") or {})
+                    out.append(ToolTask(int(t["id"]), owner, _when(t.get("created_at")), title))
+        return out
 
     def task_snapshot(self, task_id: int) -> dict[str, Any]:
         """지우기 전에 남길 작업 사본: 제출된 주석 전체와 임시 저장(drafts, 없으면 None).
