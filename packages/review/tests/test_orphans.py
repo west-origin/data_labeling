@@ -41,6 +41,7 @@ from dlp_schema.db.repository import (
     mark_task_tool_revoked,
     register_ontology,
     request_task_revocation,
+    try_lock_session,
 )
 from dlp_schema.review import ReviewStage, ReviewTask, ReviewTool
 from dlp_schema.testing import FIXED_TIME, make_session, sqlite_db
@@ -302,7 +303,6 @@ def test_apply_skips_busy_sessions_and_rechecks_db_under_session_lock(
     (나열 뒤 생성이 커밋됨)은 지우지 않는다."""
     labeling, cvat, ls = world["labeling"], world["cvat"], world["ls"]
     busy = _find(engine, world)
-    real_lock = orphans_module.try_lock_session
 
     def never(conn: sa.Connection, session_id: str) -> bool:
         return False
@@ -313,7 +313,7 @@ def test_apply_skips_busy_sessions_and_rechecks_db_under_session_lock(
     )
     assert busy.deleted == [] and sorted(busy.busy) == sorted(EXPECTED)
     assert world["calls"] == [] and not busy.clean
-    monkeypatch.setattr(orphans_module, "try_lock_session", real_lock)
+    monkeypatch.setattr(orphans_module, "try_lock_session", try_lock_session)
 
     report = _find(engine, world)
     with engine.begin() as conn:  # 나열한 뒤 커밋된 작업 생성

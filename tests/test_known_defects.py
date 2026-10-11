@@ -99,19 +99,6 @@ def test_legacy_violation_does_not_block_unrelated_label(ontology: Ontology) -> 
     validate_session_labels(ontology, [legacy], [blur])
 
 
-def _odd_video(path: Path, w: int, h: int) -> None:
-    """홀수 크기 무손실(ffv1) 영상 5프레임."""
-    with av.open(str(path), "w") as c:
-        vs = c.add_stream("ffv1", rate=10)
-        vs.width, vs.height, vs.pix_fmt = w, h, "yuv444p"
-        vs.time_base = Fraction(1, 1000)
-        for i in range(5):
-            frame = av.VideoFrame.from_ndarray(np.full((h, w, 3), 40 * i, np.uint8), format="rgb24")
-            frame.pts, frame.time_base = i * 100, Fraction(1, 1000)
-            c.mux(vs.encode(frame))
-        c.mux(vs.encode(None))
-
-
 @pytest.mark.xfail(
     strict=True,
     raises=ValidationError,
