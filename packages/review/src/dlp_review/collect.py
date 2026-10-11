@@ -9,6 +9,8 @@
   검수 결과로 되살리거나 두 갈래 이력을 만들지 않는다.
 - CVAT는 트랙과 모양(Shape 모드, CVAT 기본) 주석을 모두 받는다. 옮길 수 없는 주석(태그, 다각형 등)이
   있으면 수집하지 않는다 (TaskError).
+- Label Studio 결과에 라벨로 옮길 수 없는 구간(새로 그린 객체 상태, 필수 입력이 빠진 손 상태 등)이
+  있으면 그 구간들의 영역 ID·시각·이유를 담은 TaskError로 수집하지 않는다 (F-REV-03).
 - 운영 블러 라벨이 바뀌면 프라이버시 승인을 풀어 다시 승인·렌더하게 하고, 그 스트림의 이미 배포한
   라벨링 작업 매체에 회수를 요청하고(같은 커밋, ADR 0039), 이전 블러본 렌더 기록을 무효로 둔다
   (ADR 0024). 외부 삭제(S3 사본·도구 작업)는 커밋 뒤 호출자가 `dlp_review.revoke`로 한다.
@@ -50,7 +52,7 @@ from dlp_review.cvat import (
     from_cvat_tracks,
     quantize,
 )
-from dlp_review.labelstudio import from_ls_results
+from dlp_review.labelstudio import LsFormatError, from_ls_results
 from dlp_review.reconcile import ReviewOutcome, reconcile
 from dlp_review.tasks import (
     ReviewSetup,
@@ -217,7 +219,8 @@ def collect_task(  # noqa: C901
     - now: 수집 시각 (시간대 필수). 새 레코드 `created_at`·검수 시각이 된다.
 
     예외: `TaskError` — 담당자가 아님, 세션 온톨로지 버전 없음, 도구 클라이언트 없음, 옮길 수 없는
-    CVAT 주석, Label Studio에 제출된 주석 없음. 도구 API 오류는 `clients.ToolError`.
+    CVAT 주석·Label Studio 구간, Label Studio에 제출된 주석 없음.
+    도구 API 오류는 `clients.ToolError`.
     """
     # 같은 부모를 보낸 서로 다른 작업도 직렬화한다. 작업 행만 잠그면 stale 이력으로 둘 다
     # 수정본을 추가할 수 있다. 세션 → 작업 순으로 잠근 뒤에 이력을 읽는다 (ADR 0032).
@@ -294,7 +297,12 @@ def collect_task(  # noqa: C901
         if results is None:
             # 프리라벨은 예측(prediction)으로 보내므로 사람이 제출한 주석이 없으면 결과가 없다
             raise TaskError(f"{task_key}: 검수자가 제출한 주석이 아직 없습니다")
-        reviewed = from_ls_results(results, {x.label_id for x in originals})
+        try:
+            reviewed = from_ls_results(results, {x.label_id for x in originals})
+        except LsFormatError as exc:
+            # 옮길 수 없는 구간(영역 ID·시각·이유)을 알려 검수자가 고쳐 다시 제출하게 한다
+            # (F-REV-03)
+            raise TaskError(f"{task_key}: {exc}") from exc
         normalize = None
         # 검수 시간 (운영 지표, WP16). CVAT는 작업 시간을 재지 않아 dlp ops log-work로 기록한다
         seconds = setup.label_studio.lead_seconds(int(task.external_id))

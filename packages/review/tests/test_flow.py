@@ -70,6 +70,7 @@ from dlp_schema.db.repository import (
 from dlp_schema.episode import current_labels
 from dlp_schema.labels import (
     BlurTrackPayload,
+    HandStatePayload,
     LabelRecord,
     Provenance,
     Source,
@@ -263,6 +264,65 @@ def test_unchanged_labeling_review_round_trips_losslessly_through_label_studio(
         outcome = collect_task(conn, ls_task.task_key, setup, "labeler01", FIXED_TIME)
     assert outcome is not None and not outcome.new_records
     assert sorted(outcome.approved) == sorted(x.label_id for x in temporal)
+
+
+def test_unconvertible_label_studio_region_stops_collection_with_region_info(
+    pg: sa.Engine, setup: ReviewSetup, tmp_path: Path
+) -> None:
+    """F-REV-03 회귀: 옮길 수 없는 구간은 영역 ID·시각을 담은 TaskError로 멈추고(아무것도 쓰지
+    않음), 그 구간을 고쳐 다시 제출하면 접촉 → none 수정까지 수집된다.
+
+    정답 근거: 합성 행동 시나리오의 접촉 손 상태(target_id·grasp_type 있음)를 화면에서 none으로
+    바꾸면 두 필드를 비운 수정 레코드가 된다 (hand.yaml). 새로 그린 객체 상태 구간은 개체를 알 수
+    없다.
+    """
+    sid, _ = _session(pg, setup, tmp_path)
+    with pg.begin() as conn:
+        _approve_blur(conn, sid)
+        approve_session(conn, sid)
+        render_session(conn, sid, setup.raw, setup.labeling, load_policy(ROOT))
+        temporal = [
+            x.model_copy(update={"session_id": sid, "label_id": f"{sid}-{x.label_id}"})
+            for x in generate_action_scenario(4).labels
+            if x.kind in LS_KINDS
+        ]
+        insert_labels(conn, temporal)
+        [ls_task] = create_labeling_tasks(conn, sid, setup, "labeler01", FIXED_TIME, tools=_LS)
+        before = len(get_labels(conn, sid))
+    ls = setup.label_studio
+    assert ls is not None
+    contact = next(
+        x for x in temporal
+        if isinstance(x.payload, HandStatePayload) and x.payload.contact_target_kind != "none"
+    )  # fmt: skip
+    assert isinstance(contact.payload, HandStatePayload)
+    results = ls.prediction_results(int(ls_task.external_id))
+    for r in results:
+        if r["id"] == contact.label_id:
+            r["value"]["timeserieslabels"] = [f"hand.{contact.payload.hand.value}:none"]
+    state = {
+        "id": "drawn-state", "from_name": "labels", "to_name": "ts", "type": "timeserieslabels",
+        "value": {"start": 100, "end": 400, "instant": False,
+                  "timeserieslabels": ["state:wetness=wet"]},
+    }  # fmt: skip
+    url = f"/api/tasks/{ls_task.external_id}/annotations"
+    ls.http.post(url, json={"result": [*results, state]}).raise_for_status()
+    with pg.begin() as conn, pytest.raises(TaskError, match=r"drawn-state \(100~400 ms"):
+        collect_task(conn, ls_task.task_key, setup, "labeler01", FIXED_TIME)
+    with pg.connect() as conn:
+        assert get_review_task(conn, ls_task.task_key).status is ReviewTaskStatus.OPEN
+        assert len(get_labels(conn, sid)) == before
+
+    # 검수자가 그 구간을 지우고 다시 제출했다 (최신 주석을 읽는다)
+    ls.http.post(url, json={"result": results}).raise_for_status()
+    with pg.begin() as conn:
+        outcome = collect_task(conn, ls_task.task_key, setup, "labeler01", FIXED_TIME)
+    assert outcome is not None and outcome.corrected == 1
+    [fixed] = outcome.new_records
+    assert fixed.parent_label_id == contact.label_id
+    assert isinstance(fixed.payload, HandStatePayload)
+    assert fixed.payload.contact_target_kind == "none"
+    assert (fixed.payload.target_id, fixed.payload.grasp_type) == (None, None)
 
 
 def test_privacy_review_edits_become_label_history(

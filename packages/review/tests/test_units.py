@@ -39,6 +39,7 @@ from dlp_review.cvat import (
 )
 from dlp_review.labelstudio import (
     LS_KINDS,
+    LsFormatError,
     from_ls_results,
     label_config,
     label_names,
@@ -66,6 +67,8 @@ from dlp_schema.labels import (
     BoxTrackPayload,
     EventPayload,
     GapPayload,
+    Hand,
+    HandStatePayload,
     KeypointTrackPayload,
     VerificationState,
 )
@@ -217,7 +220,8 @@ def test_label_studio_event_attributes_round_trip_and_new_events(ontology: Ontol
     """
     config = label_config(ontology)
     assert 'name="severity"' in config and 'name="related_action_id"' in config
-    assert config.count('perRegion="true"') == 3
+    # 이벤트 입력란 3개 + 손 상태 접촉 대상 입력란 2개 (F-REV-03)
+    assert config.count('perRegion="true"') == 5
 
     # 기존 이벤트: 속성이 입력란 결과로도 나가고, 그대로 돌아온다
     slip = make_label(
@@ -529,6 +533,116 @@ def test_new_cvat_box_kind_follows_task_stage() -> None:
         [track], blur.frame_times, schema, "bodycam", new_box_kind="blur_track"
     )
     assert isinstance(priv.payload, BlurTrackPayload)
+
+
+def _hand_inputs(rid: str, target: str | None = None, part: str | None = None) -> list[Any]:
+    """손 상태 구간에 딸린 입력란 결과 (Label Studio가 보내는 perRegion 결과 형식)."""
+    out: list[dict[str, Any]] = []
+    if target is not None:
+        out.append({"id": rid, "from_name": "target_id", "to_name": "ts", "type": "textarea",
+                    "value": {"text": [target]}})  # fmt: skip
+    if part is not None:
+        out.append({"id": rid, "from_name": "body_part", "to_name": "ts", "type": "choices",
+                    "value": {"choices": [part]}})  # fmt: skip
+    return out
+
+
+def _drawn(rid: str, name: str, start: int = 200, end: int = 700) -> dict[str, Any]:
+    """화면에서 새로 그린 시계열 구간 하나 (원래 라벨 메타 없음)."""
+    value = {"start": float(start), "end": float(end), "timeserieslabels": [name]}
+    return {"id": rid, "from_name": "labels", "to_name": "ts", "type": "timeserieslabels",
+            "value": value}  # fmt: skip
+
+
+def test_label_studio_hand_state_inputs_and_kind_change(ontology: Ontology) -> None:
+    """F-REV-03 회귀: 손 상태 접촉 대상을 바꾸거나 새로 그린 구간도 수집할 수 있다.
+
+    정답 근거: hand.yaml·`HandStatePayload` — none이면 target_id·body_part·grasp_type을 비우고,
+    object·tool·fixed_surface는 target_id, person은 body_part가 필수다. 대상 ID는 입력란(TextArea),
+    부위는 온톨로지 body_parts 26개 중 고르는 입력란(Choices)으로 받는다.
+    """
+    root = ET.fromstring(label_config(ontology))
+    target = root.find(".//TextArea[@name='target_id']")
+    part = root.find(".//Choices[@name='body_part']")
+    assert target is not None and target.get("perRegion") == "true"
+    assert part is not None and part.get("perRegion") == "true"
+    assert [c.get("value") for c in part.iter("Choice")] == list(ontology.body_parts)
+
+    # 기존 도구 접촉: 입력란은 미리 채우지 않고(현재 값은 메타), 고치지 않으면 그대로 돌아온다
+    tool = HandStatePayload(
+        hand=Hand.RIGHT, contact_target_kind="tool", target_id="mop_01", grasp_type="power",
+        role="active",
+    )  # fmt: skip
+    [region] = to_ls_results([make_label(tool, label_id="hs1")])
+    assert json.loads(region["meta"]["text"][0])["target_id"] == "mop_01"
+    [same] = from_ls_results([region], {"hs1"})
+    assert same.payload == tool and same.origin_label_id == "hs1"
+
+    # 접촉 → none: 대상 ID·파지 유형을 비운다. 입력란에 대상 ID를 남겨 둬도 비운다 (역할은 그대로)
+    region["value"]["timeserieslabels"] = ["hand.right:none"]
+    none_payload = tool.model_copy(
+        update={"contact_target_kind": "none", "target_id": None, "grasp_type": None}
+    )
+    for extra in ([], _hand_inputs("hs1", target="mop_01")):
+        [none] = from_ls_results([region, *extra], {"hs1"})
+        assert none.payload == none_payload and none.origin_label_id == "hs1"
+
+    # 도구 접촉의 대상만 바꾼다: 채운 입력란이 원래 값을 덮어쓰고 나머지 필드는 그대로
+    region["value"]["timeserieslabels"] = ["hand.right:tool"]
+    [retarget] = from_ls_results([region, *_hand_inputs("hs1", target="towel_01")], {"hs1"})
+    assert retarget.payload == tool.model_copy(update={"target_id": "towel_01"})
+
+    # 대상자 접촉 → 도구 접촉: 대상자 부위는 (입력란에 남아 있어도) 비우고
+    # 대상 ID는 입력란에서 받는다
+    person = HandStatePayload(
+        hand=Hand.LEFT, contact_target_kind="person", body_part="left_forearm", role="assist"
+    )
+    [r] = to_ls_results([make_label(person, label_id="hs2")])
+    # 대상자 접촉에 대상 ID만 채우면 부위는 원래 값을 유지한다 (비운 입력란 = 원래 값)
+    [kept] = from_ls_results([r, *_hand_inputs("hs2", target="subject_01")], {"hs2"})
+    assert kept.payload == person.model_copy(update={"target_id": "subject_01"})
+    r["value"]["timeserieslabels"] = ["hand.left:tool"]
+    inputs = _hand_inputs("hs2", target="towel_01", part="left_forearm")
+    [moved] = from_ls_results([r, *inputs], {"hs2"})
+    assert isinstance(moved.payload, HandStatePayload)
+    assert (moved.payload.target_id, moved.payload.body_part) == ("towel_01", None)
+
+    # 화면에서 새로 그린 도구·대상자 접촉: 입력란 값으로 필수 필드를 채운다
+    [new_tool, new_person] = from_ls_results(
+        [
+            _drawn("n1", "hand.right:tool"), *_hand_inputs("n1", target=" spray_bottle_01 "),
+            _drawn("n2", "hand.left:person"), *_hand_inputs("n2", part="left_forearm"),
+        ],
+        set(),
+    )  # fmt: skip
+    assert isinstance(new_tool.payload, HandStatePayload)
+    assert (new_tool.payload.target_id, new_tool.payload.role) == ("spray_bottle_01", "active")
+    assert isinstance(new_person.payload, HandStatePayload)
+    assert new_person.payload.body_part == "left_forearm"
+    for i, item in enumerate((new_tool, new_person)):
+        drawn = make_label(item.payload, label_id=f"hn{i}", t_start_ms=200, t_end_ms=700)
+        assert check_label(drawn, ontology) == []
+
+
+def test_label_studio_unconvertible_regions_name_each_region() -> None:
+    """F-REV-03 회귀: 옮길 수 없는 구간은 영역 ID·시각·이유를 모두 담은 `LsFormatError`로 멈춘다.
+
+    전에는 첫 구간의 pydantic ValidationError·ValueError가 그대로 올라가 수집이 어느 구간 때문에
+    멈췄는지 알 수 없었다. 정답 근거: 새 객체 상태 구간은 개체를 알 수 없어 받지 않고, 대상 ID 없는
+    새 도구 접촉은 `HandStatePayload` 검증에 걸린다. 멀쩡한 구간은 오류에 넣지 않는다.
+    """
+    results = [
+        _drawn("ok1", "action.left:press", 0, 100),
+        _drawn("st1", "state:wetness=wet", 100, 900),
+        _drawn("hs9", "hand.right:tool", 1200, 1500),
+    ]
+    with pytest.raises(LsFormatError) as caught:
+        from_ls_results(results, set())
+    message = str(caught.value)
+    assert "구간 2개" in message and "ok1" not in message
+    assert "st1 (100~900 ms, state:wetness=wet)" in message and "객체 상태" in message
+    assert "hs9 (1200~1500 ms, hand.right:tool)" in message and "target_id" in message
+    assert isinstance(caught.value, ValueError)  # 기존 호출자의 ValueError 처리와 호환
 
 
 def test_label_studio_relabel_to_another_kind_is_delete_and_add() -> None:
