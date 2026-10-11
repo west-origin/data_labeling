@@ -21,7 +21,8 @@ WP6, ADR 0006·0020·0023·0024. 진입점: `dlp review create <세션>`(직접 
 - `VIDEO_KINDS`, `PRIVACY_PROJECT`, `SPATIAL_PROJECT`, `TEMPORAL_PROJECT`:
   영상 종류와 도구 프로젝트 이름.
 - `TaskError`: 작업을 만들거나 수집할 수 없다 (전제 조건 위반).
-- `ReviewSetup`: 저장소·도구 클라이언트·정책 묶음 (정책은 없으면 저장소에서 늦게 읽는다).
+- `ReviewSetup`: 저장소·도구 클라이언트·정책 묶음 (정책은 없으면 저장소의 기본 YAML에서 늦게
+  읽는다. CLI는 `DLP_REVIEW_POLICY_FILE`로 고른 검수 정책을 넘긴다).
 - `frame_times`, `video_size`, `proxy_key`, `raw_video_size`, `label_scale`, `object_key`:
   매체 도우미.
 - `current_for_review`, `Selector`, `default_selector`: 작업에 넣을 라벨 고르기.
@@ -123,6 +124,10 @@ class ReviewSetup:
     """작업 만들기·수집에 필요한 저장소, 도구 클라이언트, 정책 묶음.
 
     정책 필드가 None이면 처음 쓸 때 저장소 루트의 YAML을 읽어 채운다 (그래서 frozen이 아니다).
+    이 지연 로더는 기본 파일(`config/policies/review.yaml` 등)만 읽고 `DLP_REVIEW_POLICY_FILE`을
+    보지 않는다. CLI(`dlp_cli.review_config.review_setup`)는 고른 검수 정책의 `media`·`cvat`를
+    `media`·`cvat_config`로 넘기므로 `dlp review …` 명령에서는 지연 로더가 돌지 않는다. 라이브러리를
+    직접 쓰는 호출자도 별도 정책 파일을 쓰려면 두 필드를 채워서 넘긴다 (F-REV-01).
     """
 
     # 원본 버킷 저장소 (운영에서는 감사 저장소 `dlp_cli.raw_access.raw_store`)
@@ -136,20 +141,29 @@ class ReviewSetup:
     cvat: CvatClient | None = None
     # Label Studio 클라이언트 (없으면 Label Studio 작업을 만들지 않는다)
     label_studio: LabelStudioClient | None = None
-    media: MediaPolicy | None = None  # 없으면 config/policies/review.yaml media를 읽는다
-    cvat_config: CvatPolicy | None = None  # 없으면 config/policies/review.yaml cvat
+    # 검수 정책의 두 절. 없으면 Git의 config/policies/review.yaml을 읽는다 (CLI는 고른 정책)
+    media: MediaPolicy | None = None  # review.yaml media (워터마크·시계열 격자)
+    cvat_config: CvatPolicy | None = None  # review.yaml cvat (검수자 → CVAT 계정 연결)
     privacy: PrivacyPolicy | None = None  # 없으면 config/policies/privacy.yaml (블러본 해시)
     glove_prefixes: tuple[str, ...] | None = None  # 없으면 config/policies/sync.yaml glove
     ui: UiTheme | None = None  # 없으면 config/review_ui.yaml (검수 화면 색·단축키·로고)
 
     def media_policy(self) -> MediaPolicy:
-        """검수 화면 매체 정책 (`review.yaml media`). 처음 부를 때 읽어 둔다."""
+        """검수 화면 매체 정책 (`review.yaml media`).
+
+        `media`가 없으면 처음 부를 때 기본 로더(`dlp_review.ops.policy.load_policy(repo_root())`,
+        환경 변수 무관)로 읽어 둔다. CLI는 고른 정책을 넘기므로 이 경로를 쓰지 않는다.
+        """
         if self.media is None:
             self.media = load_ops_policy(repo_root()).media
         return self.media
 
     def cvat_policy(self) -> CvatPolicy:
-        """CVAT 계정 연결 정책 (`review.yaml cvat`). 처음 부를 때 읽어 둔다."""
+        """CVAT 계정 연결 정책 (`review.yaml cvat`).
+
+        `cvat_config`가 없으면 처음 부를 때 기본 로더(환경 변수 무관, Git 기본값은 연결이 비어
+        있다)로 읽어 둔다. CLI는 `DLP_REVIEW_POLICY_FILE`로 고른 정책의 `cvat`를 넘긴다.
+        """
         if self.cvat_config is None:
             self.cvat_config = load_ops_policy(repo_root()).cvat
         return self.cvat_config
@@ -400,7 +414,7 @@ def create_privacy_tasks(
     if cvat_user is None:
         raise TaskError(
             f"블러 검수 담당자 {assignee}의 CVAT 계정이 없습니다 "
-            "(config/policies/review.yaml cvat.users)"
+            "(검수 정책 cvat.users: DLP_REVIEW_POLICY_FILE 또는 config/policies/review.yaml)"
         )
     session = get_session(conn, session_id)
     if session.privacy_state is PrivacyState.PENDING:

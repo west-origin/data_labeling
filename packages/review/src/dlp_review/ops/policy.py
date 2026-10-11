@@ -3,7 +3,10 @@
 WP12, ADR 0014. `dlp review plan|assign|qa|quality|create|collect|serve`와 운영 지표
 (`dlp ops weekly`, `dlp ops audit-report`의 `reviewers.privacy`)가 이 정책을 쓴다.
 라이브러리 로더의 기본 파일은 review.yaml이다. CLI는 `dlp_cli.review_config`에서
-`DLP_REVIEW_POLICY_FILE`을 선택한 뒤 이 로더에 명시적으로 넘긴다.
+`DLP_REVIEW_POLICY_FILE`을 선택한 뒤 이 로더에 명시적으로 넘기고, 읽은 정책을 라이브러리
+함수와 `tasks.ReviewSetup`(`media`·`cvat_config`)에 넘긴다. 정책을 받지 않은 라이브러리 경로
+(`ReviewSetup`의 지연 로더, `ops.results.finish_assignment`의 기본값)는 환경 변수를 보지 않고
+기본 파일을 읽는다.
 
 공개 이름:
 - `ErrorType`: 오류 삽입 종류 (boundary_shift, class_swap, blur_deletion).

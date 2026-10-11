@@ -31,7 +31,11 @@
 privacy` (또는 `plan --privacy`) → `collect` → `dlp privacy approve`.
 
 정책 출처: 기본은 `config/policies/review.yaml` (우선순위·표본·측정 비율, `reviewers.privacy`,
-`cvat.users`, 미디어). CLI에서는 `DLP_REVIEW_POLICY_FILE`로 정책 파일을 바꿀 수 있다.
+`cvat.users`, 미디어). CLI에서는 `DLP_REVIEW_POLICY_FILE`로 정책 파일을 바꿀 수 있다. 모든 하위
+명령은 `review_config.load_review_policy` 하나로 읽는다. 저장소·도구 설정(`_setup`)을 쓰는 명령은
+정책을 한 번 읽어 `_setup`과 자기 몫(원본 검수자, 수집·배정 마무리, 웹훅 검수자 확인)에 같은 객체를
+넘긴다. 그래서 `ReviewSetup`의 CVAT 계정 연결(`cvat_policy`)·매체(`media_policy`)도 고른 파일의
+값이다 (라이브러리 지연 로더의 Git 기본값이 아니다, F-REV-01).
 
 주의:
 - `_setup`(`review_config.review_setup`)이 원본 저장소를 `raw_store("s3", …, "review.<명령>")` 감사
@@ -73,6 +77,7 @@ from dlp_privacy.runner import (
 from dlp_review.collect import collect_task
 from dlp_review.ontology_projects import ontology_project
 from dlp_review.ops.assign import plan_qa
+from dlp_review.ops.policy import ReviewOpsPolicy
 from dlp_review.ops.runner import create_assignment_tasks, plan_session, quality_report
 from dlp_review.reconcile import ReviewOutcome
 from dlp_review.revoke import RevocationIncompleteError, mark_tool_gone
@@ -110,13 +115,15 @@ from dlp_schema.review import (
 )
 
 
-def _setup(args: argparse.Namespace) -> ReviewSetup:
-    """명령 인자로 검수 도구 연동에 필요한 저장소·온톨로지·도구 클라이언트를 묶는다.
+def _setup(args: argparse.Namespace, policy: ReviewOpsPolicy | None = None) -> ReviewSetup:
+    """명령 인자로 검수 도구 연동에 필요한 저장소·온톨로지·도구 클라이언트·정책을 묶는다.
 
     인자:
         args.review_command: 감사 기록의 목적 문자열(`review.<명령>`)에 쓴다.
         args.url: (있으면) 감사 기록용 DB URL. 없는 명령은 `DLP_DATABASE_URL`/기본값.
         args.no_cvat / args.no_ls: 참이면 해당 도구 클라이언트를 만들지 않는다 (None).
+        policy: 명령이 이미 읽은 검수 정책 (`load_ops_policy`). None이면 여기서 고른 파일을 읽는다.
+            명령이 정책을 따로 쓰면 반드시 같은 객체를 넘긴다 (한 출처).
 
     반환: `ReviewSetup`.
     - `raw`: 원본 버킷 감사 저장소 (항상 S3, 목적 `review.<명령>`).
@@ -124,6 +131,7 @@ def _setup(args: argparse.Namespace) -> ReviewSetup:
     - `labeling_reader`: 라벨러 자격 증명(읽기 전용) — 검수 화면 서명 URL용.
     - `ontology`: None. 작업 생성 시 DB에서 각 세션 버전의 사전을 읽는다.
     - `cvat`/`label_studio`: 환경 변수(`DLP_CVAT_*`, `DLP_LABEL_STUDIO_*`)로 만든 클라이언트.
+    - `cvat_config`/`media`: 고른 검수 정책(`DLP_REVIEW_POLICY_FILE`)의 `cvat`·`media`.
 
     부작용: 설정 파일을 읽고 저장소·HTTP 클라이언트를 만든다. CVAT 클라이언트는 생성 중
     로그인 API를 호출해 토큰을 받는다 (`--no-cvat`이면 생략). 환경 변수 누락, 파일·설정 오류,
@@ -134,6 +142,7 @@ def _setup(args: argparse.Namespace) -> ReviewSetup:
         getattr(args, "url", None),
         cvat=not getattr(args, "no_cvat", False),
         label_studio=not getattr(args, "no_ls", False),
+        policy=policy,
     )
     return setup
 
@@ -163,7 +172,8 @@ def cmd_create(args: argparse.Namespace) -> int:
     부작용: 한 트랜잭션에서 `review_tasks` 등 DB 쓰기, 검수 도구 API 호출, 라벨링 버킷 쓰기, 블러
     검수면 원본 읽기(감사 기록). 실패 시 DB는 롤백되지만 이미 만든 도구 쪽 작업은 남을 수 있다.
     """
-    setup = _setup(args)
+    policy = load_ops_policy(repo_root())
+    setup = _setup(args, policy)
     engine = sa.create_engine(database_url(args.url))
     now = datetime.now(UTC)
     if not args.assignee:
@@ -183,7 +193,7 @@ def cmd_create(args: argparse.Namespace) -> int:
                 setup,
                 now,
                 assignee=args.assignee,
-                privacy_reviewers=load_ops_policy(repo_root()).reviewers.privacy,
+                privacy_reviewers=policy.reviewers.privacy,
             )
         else:
             tasks = create_labeling_tasks(
@@ -239,13 +249,11 @@ def cmd_collect(args: argparse.Namespace) -> int:
     갱신, 배정 마무리(표본 판정), 블러가 바뀌면 라벨링 작업 회수 요청. 검수 도구 API에서 주석을
     읽는다. 커밋 뒤 라벨링 버킷 사본·도구 작업 삭제 (`review_config.run_revocations`).
     """
-    setup = _setup(args)
+    policy = load_ops_policy(repo_root())
+    setup = _setup(args, policy)
     engine = sa.create_engine(database_url(args.url))
     with engine.begin() as conn:
-        outcome = collect_task(
-            conn, args.task_key, setup, args.reviewer, datetime.now(UTC),
-            load_ops_policy(repo_root()),
-        )  # fmt: skip
+        outcome = collect_task(conn, args.task_key, setup, args.reviewer, datetime.now(UTC), policy)
         task = get_review_task(conn, args.task_key)
     # 수집·회수 요청이 커밋된 뒤에 외부 채널을 끊는다 (도구·S3 장애가 수집을 되돌리지 않는다)
     report = run_revocations(engine, task.session_id, setup)
@@ -302,11 +310,11 @@ def cmd_serve(args: argparse.Namespace) -> int:
     필요 환경 변수: `DLP_WEBHOOK_SECRET`(서명 검증), DB·S3·도구 접속 정보.
     반환: 서버가 끝나면 0.
     """
-    setup = _setup(args)
+    ops_policy = load_ops_policy(repo_root())
+    setup = _setup(args, ops_policy)
     engine = sa.create_engine(database_url(args.url))
 
     service_user = setup.label_studio.service_user_id() if setup.label_studio else None
-    ops_policy = load_ops_policy(repo_root())
 
     def on_collect(req: CollectRequest) -> None:
         """웹훅 한 건을 한 트랜잭션으로 수집한다. 실패를 성공 응답으로 바꾸지 않는다."""
@@ -433,8 +441,9 @@ def cmd_assign(args: argparse.Namespace) -> int:
     원본 프록시를 쓰므로 막지 않는다.
     부작용: `review_tasks` 쓰기, 검수 도구 API 호출, 블러 배정이면 원본 읽기(감사 기록).
     """
+    policy = load_ops_policy(repo_root())
+    setup = _setup(args, policy)
     engine = sa.create_engine(database_url(args.url))
-    setup = _setup(args)
     with engine.connect() as conn:
         planned = get_assignment(conn, args.assignment_id)
     if planned.label_kinds != ("blur_track",):
@@ -445,7 +454,6 @@ def cmd_assign(args: argparse.Namespace) -> int:
             return REVOCATION_PENDING_EXIT
     with engine.begin() as conn:
         a = get_assignment(conn, args.assignment_id)
-        policy = load_ops_policy(repo_root())
         tasks = create_assignment_tasks(conn, a, setup, policy, datetime.now(UTC))
     engine.dispose()
     for t in tasks:
