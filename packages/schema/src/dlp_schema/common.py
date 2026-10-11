@@ -58,7 +58,8 @@ def derived_id(base: str, suffix: str) -> str:
     충돌 가능성을 낮추지만, 유한 길이 해시이므로 서로 다른 입력의 1:1 대응을 보장하지 않는다.
 
     쓰임: 온톨로지 이관 레코드(`<원래>:v<새 버전>`, `migration.migrate_labels`),
-    모델 버전 교체 때의 삭제 레코드(`<원래>:retracted`, `episode.retractions`).
+    모델 버전 교체 때의 삭제 레코드(`<원래>:retracted`, `episode.retractions`),
+    검수 결과 레코드(`<원래>:r<해시>`, `dlp_review.reconcile`).
 
     Args:
         base: 원래 ID (보통 라벨 ID, 최대 128자).

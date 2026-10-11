@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import re
 import xml.etree.ElementTree as ET
 from functools import partial
 from pathlib import Path
@@ -398,6 +399,45 @@ def test_reconcile_approves_corrects_retracts_and_adds() -> None:
     again = reconcile([a, b, c], reviewed, session_id="s001", ontology_version="1.0.0",
                       reviewer_id="rev1", now=FIXED_TIME)  # fmt: skip
     assert [r.label_id for r in again.new_records] == [r.label_id for r in out.new_records]
+
+
+@pytest.mark.parametrize("n", [100, 113, 114, 115, 116, 127, 128])
+def test_reconcile_long_ids_stay_valid_identifiers(n: int) -> None:
+    """F-REV-05 회귀: 긴 원래 ID의 새 레코드 ID를 `[-128:]`로 뒤만 남겨 `-`·`:`로 시작하는 잘못된
+    ID가 생겨 수집이 ValidationError로 멈췄다(A-09).
+
+    정답 근거: `Identifier` 규칙(영숫자로 시작, 128자 이하). 원래 ID·세션 ID를 경계 길이(n) 근처의
+    `a-:-:…` 꼴로 두면, 수정·삭제·추가 레코드 ID가 모두 규칙을 지키고, 같은 입력은 같은 ID(멱등),
+    앞부분이 같은 서로 다른 원래 ID는 다른 ID가 된다. 짧은 ID는 예전과 같은 `<원래>:r<해시>`다.
+    """
+    pattern = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+    body = ("-:" * 64)[: n - 1]
+    first, second = (make_label(action_payload(action_id=f"a{i}"), label_id=f"{c}{body}")
+                     for i, c in ((1, "a"), (2, "b")))  # fmt: skip
+    # 앞부분이 같고 끝만 다른 원래 ID도 새 ID가 달라야 한다
+    third = make_label(action_payload(action_id="a3"), label_id=f"a{body[:-1]}x")
+    moved = ActionPayload.model_validate(action_payload(action_id="a1", t_contact_start_ms=300))
+    reviewed = [
+        ReviewedItem(first.label_id, None, 0, 1000, moved),
+        ReviewedItem(third.label_id, None, 0, 1000,
+                     moved.model_copy(update={"action_id": "a3"})),
+        ReviewedItem(None, None, 0, 1000, moved.model_copy(update={"action_id": "n1"})),
+    ]  # fmt: skip
+    session = f"S{body}"
+
+    def run() -> list[str]:
+        out = reconcile([first, second, third], reviewed, session_id=session,
+                        ontology_version="1.0.0", reviewer_id="rev1", now=FIXED_TIME)  # fmt: skip
+        assert (out.corrected, out.retracted, out.added) == (2, 1, 1)
+        return [r.label_id for r in out.new_records]
+
+    ids = run()
+    assert all(pattern.match(i) for i in ids), ids
+    assert len(set(ids)) == len(ids) and run() == ids
+
+    short = reconcile([make_label(action_payload(), label_id="x1")], [], session_id="s001",
+                      ontology_version="1.0.0", reviewer_id="rev1", now=FIXED_TIME)  # fmt: skip
+    assert re.fullmatch(r"x1:r[0-9a-f]{12}", short.new_records[0].label_id)
 
 
 def test_reconcile_compares_against_normalized_originals() -> None:
