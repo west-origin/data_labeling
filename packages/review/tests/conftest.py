@@ -21,7 +21,7 @@ from dlp_review.ops.policy import CvatPolicy, LabelStudioPolicy
 # 테스트가 쓰는 dlp 검수자 ID (블러 검수 담당자와 작업 라벨 담당자)
 TEST_REVIEWERS = ("rev01", "privacy01", "p1", "p2", "labeler01")
 # Label Studio 시간 검수를 맡는 시험 검수자 (labeler02는 담당자가 아닌 다른 라벨러 역할)
-LS_TEST_REVIEWERS = ("labeler01", "labeler02", "r1", "r2")
+LS_TEST_REVIEWERS = ("labeler01", "labeler02", "r1", "r2", "s1")  # s1: QA 선임 (F-REV-07)
 CVAT_TEST_PASSWORD = "Kq7zr-Wv2mN8-xT4"  # 개발용 CVAT의 시험 계정 (일반 사용자, 관리자 아님)
 
 
