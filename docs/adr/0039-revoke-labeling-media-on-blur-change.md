@@ -65,6 +65,14 @@ ADR 0024는 블러가 바뀌면 승인을 풀고 렌더 기록을 무효로 둬,
      기록되지 않는다. `--task` 키가 없는 작업·다른 세션의 작업·블러 검수 작업이면 아무것도 쓰지
      않고 거부한다 (조용히 빠져 운영자가 회수됐다고 오해하지 않게).
    - `dlp review create|assign` 시작(sweep).
+   - 사용 중지(`dlp dataset withdraw`, `dlp_datasets.lineage.withdraw_session`, F-REV-17 후속):
+     생애주기를 withdrawn으로 바꾸는 트랜잭션(세션 행 잠금)에서 그 세션의 비프라이버시 작업 중
+     요청이 없는 것을 렌더 해시와 무관하게 모두 요청한다 (사유 `withdrawn:<행위자>`). 동의를 철회한
+     영상은 블러가 맞아도 쓰면 안 된다. 쓰기는 `dlp_schema`의 `request_task_revocation`이라 의존 표
+     (datasets → schema)는 그대로다. CLI는 커밋 뒤 실행기를 돌리고 대기가 남으면 종료 코드 4다.
+     사용 중지한 세션에는 블러 검수·라벨링 작업을 새로 만들지 않는다 (`tasks._check_not_withdrawn`,
+     도구 호출 전). 이 변경 전에 사용 중지한 세션은 `dlp review revoke <세션> --all --reason
+     withdrawn`으로 회수한다. 블러 검수 작업(원본 권한자 CVAT 작업)은 회수 대상이 아니라 남는다.
    - dlp_privacy가 `review_tasks`에 쓰는 근거: 블러를 바꾸는 트랜잭션(탐지·렌더)이 이 패키지에 있고
      요청은 같은 커밋에 있어야 한다. `generation`도 이미 `review_tasks`를 읽는다. 쓰기는 `dlp_schema`
      저장소 함수(`request_task_revocation`)로만 하고 패키지 의존 표는 그대로다.
@@ -116,23 +124,69 @@ ADR 0024는 블러가 바뀌면 승인을 풀고 렌더 기록을 무효로 둬,
 - 재생성: 수집 출력의 회수 내용 확인 → 남은 블러 검수 → `dlp privacy approve` → `dlp privacy render` →
   출력된 배정마다 `dlp review assign <배정>`, 직접 작업은 `dlp review create <세션> --stage labeling
   --assignee <담당자> --stream <스트림> --tool <도구>` → 검수·수집 → 배정 완료 → `dlp review verify`.
-- 사고 대응(라벨러가 노출을 신고): `dlp review revoke <세션> --stream <스트림> --all --reason incident`.
-  작업을 알면 `--task <작업 키> --reason incident` (그 세션의 라벨링 작업이어야 한다).
+- 사고 대응(라벨러가 노출을 신고): `dlp privacy hold <세션> --reason <신고>`로 승인을 보류한다
+  (승인 해제·렌더 무효·모든 스트림 작업 회수, 보류 중 승인·라벨링 작업 생성 거부, ADR 0042). 한
+  스트림·작업만 끊을 때는 `dlp review revoke <세션> --stream <스트림> --all --reason incident`,
+  작업을 알면 `--task <작업 키> --reason incident` (그 세션의 라벨링 작업이어야 한다). 다만 이것만으로는
+  블러 검수 수집 전까지 같은 렌더로 새 작업을 만들 수 있다.
 - 도구 인스턴스 폐기 등으로 도구 작업을 확인할 수 없으면(실행기가 "주인이 다르다"고 대기로 남긴 경우
   포함) 원래 작업이 없어진 것을 확인한 뒤 `dlp review revoke --mark-tool-gone <작업> --note <사유>`
   (행위자·사유가 남는다. 미리보기가 없어 `--dry-run`과 함께 쓰지 않는다).
 - 미리보기: `dlp review revoke <세션> --dry-run`(고를 작업·이유), `dlp review revoke --pending
   --dry-run`(모든 세션의 대기와 남은 채널). 어느 것도 쓰지 않는다.
+- 고아 정리(F-REV-15, 후속): 작업 생성 트랜잭션이 롤백되면 CVAT·Label Studio 작업과 워터마크 사본이
+  DB 기록 없이 남는다. `dlp review revoke --orphans [<세션>]`이 도구 프로젝트·라벨링 버킷을 나열해
+  `review_tasks`와 대조하고 보고만 한다(고아가 남으면 종료 코드 4). 확인한 뒤 `--orphans --apply`로
+  지운다. 대상은 이 플랫폼 이름 규칙(프로젝트 `dlp-privacy`·`dlp-labeling-spatial`·
+  `dlp-labeling-temporal`과 `-v<버전>-<해시 12자>`, CVAT 작업 이름 `<세션>/<스트림>/<담당자>`, LS
+  data의 `session_id`·`assignee`, 사본 키 `sessions/<세션>/review/<담당자>/<스트림>[-<해시>].mp4`)에
+  맞고 이 DB에 있는 세션의 것뿐이다. 판정: 행 없음(`no_db_row`), 같은 키의 행이 다른 작업의 것
+  (`other_owner`), 회수 완료 표시가 있는데 남음(`revoked`). 회수 대기(실행기 몫)·살아 있는 행이
+  쓰는 것은 남긴다. 생성 직후 경합은 나이 하한(`review.yaml orphans.min_age_s`, 기본 3600초)과 세션 행 SKIP
+  LOCKED 잠금(생성 중이면 건너뜀) 뒤 DB 재확인으로 피한다. 지우는 순서와 스냅숏(`revoked/orphan-
+  <도구>-<ID>.json`)은 실행기와 같고 DB에는 쓰지 않는다 (`dlp_review.orphans`). 주기 실행은 운영
+  결정이다 (보고만 cron으로 돌려 종료 코드 4를 경보로 쓰고, 지우기는 사람이 확인한 뒤 실행 권장).
 - 0015 downgrade는 회수한 작업이나 회수 대기가 있으면 거부한다 (회수 의도를 잃으면 노출이 잊힌다).
+- 노출 경로 점검(F-REV-19, 코드): `dlp services check --security`가 라벨링 버킷 버전 관리 꺼짐(켜짐,
+  또는 일시 중지 뒤 비현재 버전이 남음이면 실패)과 라벨러 자격 증명 범위(라벨링 버킷 객체 읽기만,
+  쓰기·삭제와 원본·데이터셋·MLflow 버킷 목록·객체 읽기는 403)를 확인한다
+  (`dlp_media.storage_checks`). 운영 배포 전과 월간 원본 접근 감사(`dlp ops audit-report`) 때 함께
+  돌리고, 실패하면 회수가 끝났다고 보지 않는다.
+
+### 사고 대응 (DB 회수 밖의 노출)
+
+DB 회수는 라벨링 버킷 객체와 도구 작업만 끊는다. 다음은 코드가 막지 못한다 (**문서뿐**, 운영자가
+한다). 노출 신고·자격 증명 유출 의심이면 `dlp privacy hold <세션> --reason`(ADR 0042)과 함께:
+
+1. 라벨러 자격 증명 교체: `DLP_S3_LABELER_ACCESS_KEY`·`DLP_S3_LABELER_SECRET_KEY`를 새 값으로
+   바꾸고 S3 신원 설정(개발은 `services/seaweedfs/entrypoint.sh`가 만드는 `labeler` 신원)을 다시
+   적용한다. 이전 키로 서명한 URL(Label Studio 작업에 박힌 것 포함)은 모두 끊긴다. 남은 라벨링
+   작업의 영상은 새 키로 다시 서명해야 열린다 (Label Studio 작업 재생성, F-REV-08과 함께 정한다).
+   교체 뒤 `dlp services check --security`로 범위를 다시 확인한다.
+2. CVAT·Label Studio 내보내기 기록 확인: CVAT는 서버 요청 기록(`/api/requests`, 서버 로그의 dataset
+   export·backup 요청)과 작업 담당자, Label Studio는 프로젝트 내보내기 기록(`/api/projects/<ID>/exports`)
+   을 사고 기간에 대해 확인하고, 내보낸 사람·파일을 회수 대상 목록에 올린다. 라벨러 계정은 관리자가
+   아닌 일반 계정이어야 한다 (`dlp pilot check`의 CVAT 계정 검사).
+3. 내려받기 경로 차단: 라벨링 버킷을 공개 엔드포인트(`DLP_S3_PUBLIC_ENDPOINT`)로 내보내는 경우 사고
+   기간에는 게이트웨이에서 그 세션 접두사(`sessions/<세션>/review/`)를 막고, 브라우저 캐시·이미
+   내려받은 사본은 라벨러에게 삭제 확인을 받는다 (워터마크로 유출자를 추적한다).
+4. 라벨링 버킷 버전 관리를 켰던 적이 있으면 비현재 버전을 지운다 (점검이 실패를 보인다).
 
 ## 한계 (범위 밖)
 
 - 이미 내려받은 사본, 브라우저 캐시, 저장해 둔 서명 URL로 받은 파일, CVAT 작업 내보내기·백업은 회수할
-  수 없다. worker 역할에 내보내기 권한을 주지 않는 운영 점검으로 다룬다.
+  수 없다. worker 역할에 내보내기 권한을 주지 않는 운영 점검과 위 사고 대응 절차로 다룬다 (문서뿐).
 - 라벨링 버킷 버전 관리가 켜져 있으면 지운 객체의 이전 버전이 남는다 (끄거나 비현재 버전 정리).
-- 라벨러 자격 증명을 사람에게 나눠 주면 라벨링 버킷 전체를 읽을 수 있다. 서버만 쥔다.
-- DB 롤백으로 기록 없이 남은 고아 도구 작업·객체(R4)는 DB 기준 회수가 찾지 못한다.
+  `dlp services check --security`가 확인한다 (F-REV-19).
+- 라벨러 자격 증명을 사람에게 나눠 주면 라벨링 버킷 전체를 읽을 수 있다. 서버만 쥔다. 키의 권한
+  범위(라벨링 버킷 읽기만)는 `--security`가 확인하지만, 키가 사람 손에 갔는지는 코드로 알 수 없다
+  (문서뿐, 의심되면 교체).
+- DB 롤백으로 기록 없이 남은 고아 도구 작업·객체(R4)는 DB 기준 회수가 찾지 못한다. 후속으로
+  `dlp review revoke --orphans`가 이름 규칙과 DB를 대조해 찾는다 (F-REV-15, 위 운영 절차). 이 DB에
+  없는 세션의 도구 작업(다른 배포)과 이름 규칙 밖의 것은 보지 않는다.
 - 커밋과 첫 외부 호출 사이에 죽거나 도구·S3가 장애면 재시도 전까지 기존 노출이 남는다.
-- 진행 중 주석의 자동 이어받기, 사용 중지 세션의 검수 매체 회수, 승인 보류 명령, 회수 대기 운영 경고는
-  후속 과제다. 서명 URL 기간(F-REV-08)은 정책 값과 `dlp review refresh-urls`로 다뤘다 (이미 새어 나간
-  URL은 유효 시간이 끝날 때까지 열리므로, 회수는 여전히 매체 객체 삭제로 끊는다).
+- 사용 중지 세션의 블러 검수 작업(원본 프록시를 올린 CVAT 작업)은 회수하지 않는다 (실행기·계약
+  검증기가 블러 검수 작업을 회수 대상에서 뺀다). 원본 접근 권한자만 보지만 동의 철회 뒤에도 남는다.
+- 진행 중 주석의 자동 이어받기, 회수 대기 운영 경고는 후속 과제다. 승인 보류 명령은 ADR 0042
+  (`dlp privacy hold`)다. 서명 URL 기간(F-REV-08)은 정책 값과 `dlp review refresh-urls`로 다뤘다
+  (이미 새어 나간 URL은 유효 시간이 끝날 때까지 열리므로, 회수는 여전히 매체 객체 삭제로 끊는다).

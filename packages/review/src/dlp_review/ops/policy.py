@@ -14,8 +14,8 @@ WP12, ADR 0014. `dlp review plan|assign|qa|quality|create|collect|serve`와 운�
 - `CVAT_KINDS`: CVAT 공간 검수 화면이 보여 주는 작업 라벨 종류 (블러 제외).
 - `SIGV4_MAX_EXPIRES_S`: 서명 URL 유효 시간 상한 (`media.signed_url_ttl_s` 검증).
 - `UnitsPolicy`·`PriorityPolicy`·`SamplingPolicy`·`SeedingPolicy`·`MeasurementPolicy`·
-  `ReviewersPolicy`·`MediaPolicy`·`CvatPolicy`·`LabelStudioPolicy`·`WebhookPolicy`: review.yaml의
-  절별 모델.
+  `ReviewersPolicy`·`MediaPolicy`·`CvatPolicy`·`LabelStudioPolicy`·`WebhookPolicy`·`OrphanPolicy`:
+  review.yaml의 절별 모델.
 - `ReviewOpsPolicy`: 전체 정책 (review.yaml + `ratios` = defaults.yaml `review`).
 - `load_policy`: 저장소 루트에서 정책을 읽어 검증한다.
 
@@ -209,6 +209,17 @@ class WebhookPolicy(Contract):
     retry_after_s: int = Field(gt=0)
 
 
+class OrphanPolicy(Contract):
+    """DB 기록 없이 남은 도구 작업·라벨링 버킷 사본(고아) 정리 (review.yaml `orphans`, F-REV-15).
+
+    `dlp review revoke --orphans`가 쓴다. 작업 생성은 도구 작업·사본을 먼저 만들고 DB에 나중에
+    커밋하므로, 막 만든 것은 아직 DB에 없다. 이 나이보다 어린 것은 고아로 보지 않는다.
+    """
+
+    # 도구·저장소가 기록한 생성 시각에서 이만큼(초) 지나야 고아 후보다 (시각을 모르면 후보 아님)
+    min_age_s: int = Field(ge=0)
+
+
 class ReviewOpsPolicy(Contract):
     """검수 운영 정책 전체. `load_policy`가 만든다."""
 
@@ -225,6 +236,7 @@ class ReviewOpsPolicy(Contract):
     # 절이 없으면 연결이 비어 있다 (Label Studio 작업 생성·수집이 계정 연결 없음으로 거부된다)
     label_studio: LabelStudioPolicy = Field(default_factory=LabelStudioPolicy)
     webhook: WebhookPolicy
+    orphans: OrphanPolicy
     ratios: ReviewConfig  # 배정 비율 (config/defaults.yaml `review` 절)
 
 

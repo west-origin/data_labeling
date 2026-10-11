@@ -19,13 +19,15 @@
     - 열거형: `Domain`, `StreamKind`, `SyncMethod`, `PrivacyState`, `LifecycleState`.
     - `LIFECYCLE_ORDER`, `can_transition`: 생애주기 순서와 전이 규칙.
     - `CameraIntrinsics`, `Calibration`, `Stream`, `Session`, `LifecycleEvent`.
+    - `PrivacyDetectionRun`: 탐지 완료 세대. `PrivacyHoldEvent`, `HoldAction`: 사고 대응 승인
+      보류·해제 기록 (ADR 0042).
     - `ConsentVersion`: 동의서 버전 문자열 타입.
 """
 
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import AwareDatetime, Field, StringConstraints, model_validator
 
@@ -296,4 +298,26 @@ class PrivacyDetectionRun(Contract):
     model_versions: tuple[Annotated[str, StringConstraints(min_length=1)], ...] = Field(
         min_length=1
     )
+    at: AwareDatetime
+
+
+# 승인 보류 기록의 동작: hold=보류 시작, release=보류 해제 (ADR 0042)
+HoldAction = Literal["hold", "release"]
+
+
+class PrivacyHoldEvent(Contract):
+    """프라이버시 승인 보류·해제 기록 하나 (DB privacy_holds, 추가만 한다. ADR 0042).
+
+    사고 대응(라벨러의 노출 신고 등) 중 승인을 보류한다. 세션의 마지막 기록이 hold면 보류 중이고,
+    그동안 승인(`dlp privacy approve`)이 거부된다. 해제(release)는 승인을 돌려놓지 않는다: 재승인
+    절차(승인 조건 확인 → 렌더)를 다시 거친다.
+    """
+
+    event_id: int = Field(ge=1, description="DB가 매기는 일련번호 (같은 세션 안에서 시간 순)")
+    session_id: Identifier
+    action: HoldAction
+    reason: str = Field(
+        min_length=1, pattern=r"\S", description="보류·해제 사유 (공백만은 안 된다)"
+    )
+    actor: str = Field(min_length=1, pattern=r"\S", description="보류·해제한 사람 (DLP_ACTOR 등)")
     at: AwareDatetime

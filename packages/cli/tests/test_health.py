@@ -16,7 +16,7 @@ from collections.abc import Iterator
 
 import pytest
 
-from dlp_cli.health import ServiceCheck, default_checks, run_check
+from dlp_cli.health import CheckResult, ServiceCheck, default_checks, run_check
 from dlp_cli.main import main
 
 
@@ -94,6 +94,39 @@ def test_services_check_exit_code(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(key, port)
     monkeypatch.setenv("DLP_HOST", "127.0.0.1")
     assert main(["services", "check", "--timeout", "0.5"]) == 1
+
+
+def test_services_check_security_runs_storage_checks_only_when_asked(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """F-REV-19: `--security`면 라벨링 버킷 버전 관리·라벨러 키 범위 점검을 더하고, 하나라도 실패면
+    1이다. 플래그가 없으면 S3 점검을 하지 않는다 (헬스체크는 서비스 응답만)."""
+    from dlp_cli import main as main_module
+    from dlp_media import storage_checks
+    from dlp_media.storage_checks import StorageCheck
+
+    calls: list[tuple[str, tuple[str, ...]]] = []
+
+    def versioning(service: object) -> StorageCheck:
+        calls.append(("versioning", ()))
+        return StorageCheck("versioning-off:dlp-labeling", True, "꺼짐")
+
+    def scope(labeler: object, service: object, others: tuple[str, ...]) -> list[StorageCheck]:
+        calls.append(("scope", tuple(others)))
+        return [StorageCheck("labeler-no-write:dlp-labeling", False, "쓰기가 허용됩니다")]
+
+    def no_services(checks: object, timeout: float) -> list[CheckResult]:
+        return []
+
+    monkeypatch.setattr(main_module, "run_checks", no_services)
+    monkeypatch.setattr(storage_checks, "check_versioning_off", versioning)
+    monkeypatch.setattr(storage_checks, "check_labeler_scope", scope)
+    assert main(["services", "check"]) == 0 and calls == []
+    assert main(["services", "check", "--security"]) == 1
+    assert calls == [("versioning", ()), ("scope", ("dlp-raw", "dlp-datasets", "dlp-mlflow"))]
+    out = capsys.readouterr().out
+    assert "[OK  ] versioning-off:dlp-labeling" in out
+    assert "[FAIL] labeler-no-write:dlp-labeling 쓰기가 허용됩니다" in out
 
 
 def test_version(capsys: pytest.CaptureFixture[str]) -> None:

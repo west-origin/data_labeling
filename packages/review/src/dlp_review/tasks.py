@@ -10,6 +10,7 @@
   일반 라벨러 경로의 URL은 라벨러 자격 증명(라벨링 버킷 읽기 전용)으로 서명한다. 유효 시간은
   `review.yaml media.signed_url_ttl_s`이고 열린 작업은 `dlp review refresh-urls`가 다시 서명한다.
 - 블러본은 지금 승인된 블러 라벨로 렌더한 것만 쓴다 (dlp_privacy.runner.assert_render_current).
+  사용 중지한 세션·승인 보류 중인 세션(`dlp privacy hold`)에는 라벨링 작업을 만들지 않는다.
   작업에는 그 블러본의 렌더 해시(`ReviewTask.render_hash`)를 남긴다. 블러가 바뀌면 이 해시로 낡은
   매체를 찾아 회수한다 (ADR 0039). 회수가 끝나지 않은 스트림에는 새 라벨링 작업을 만들지 않는다.
 - CVAT 작업은 담당자의 CVAT 계정(review.yaml cvat.users)에 배정한다. 블러 검수는 연결이 없으면
@@ -37,7 +38,7 @@ WP6, ADR 0006·0020·0023·0024. 진입점: `dlp review create <세션>`(직접 
 - `lock_assignment`: 배정 행 잠금 (작업 중복 생성 방지). 회수한 작업은 "작업 없음"으로 본다.
 - `create_labeling_tasks`: 작업 라벨 검수 작업 (CVAT 공간 + Label Studio 시간).
 - `MEDIA_HASH_CHARS`, `labeling_media_key`: 워터마크 사본 키 (회수 실행기가 같은 값으로 키
-  모양을 본다).
+  모양을 본다). `parse_labeling_media_key`: 키를 (세션, 담당자, 스트림)으로 되읽는다 (고아 찾기).
 - `timeseries_key`, `label_studio_task_data`: 시계열 CSV 키와 Label Studio 작업 data (서명 URL
   유효 시간은 `review.yaml media.signed_url_ttl_s`, 다시 서명은 `dlp_review.refresh`, F-REV-08).
 
@@ -50,13 +51,16 @@ WP6, ADR 0006·0020·0023·0024. 진입점: `dlp review create <세션>`(직접 
 원본 접근은 `setup.raw`가 감사 저장소(`dlp_cli.raw_access.raw_store`)일 때 기록된다 (ADR 0020).
 
 DB 트랜잭션은 호출자가 관리한다. DB 롤백으로 CVAT·Label Studio 작업이나 저장소 사본이 삭제되지는
-않는다. 작업 생성(블러 검수·라벨링 모두)은 세션 행을 잠근 상태로 원본 접근·업로드·도구 호출까지
-수행한다. 라벨링 작업 생성의 잠금은 회수 요청(같은 세션 잠금 아래에서 남긴다)과 겹치지 않게 한다.
+않는다 (그렇게 남은 고아는 `dlp review revoke --orphans`가 이름 규칙과 DB를 대조해 찾고 지운다,
+`dlp_review.orphans`, F-REV-15). 작업 생성(블러 검수·라벨링 모두)은 세션 행을 잠근 상태로 원본
+접근·업로드·도구 호출까지 수행한다. 라벨링 작업 생성의 잠금은 회수 요청(같은 세션 잠금 아래에서
+남긴다)과 겹치지 않게 하고, 고아 정리는 같은 세션 행을 잠그지 못하면(생성 중) 그 세션을 건너뛴다.
 """
 
 from __future__ import annotations
 
 import bisect
+import re
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -93,6 +97,7 @@ from dlp_review.ui_theme import UiTheme, cvat_label_color, load_ui_theme, logo_d
 from dlp_review.watermark import burn_watermark
 from dlp_schema import repo_root
 from dlp_schema.db.repository import (
+    active_privacy_hold,
     get_assignment,
     get_labels,
     get_session,
@@ -108,7 +113,7 @@ from dlp_schema.episode import current_labels
 from dlp_schema.labels import LabelRecord
 from dlp_schema.ontology import Ontology
 from dlp_schema.review import ReviewMode, ReviewStage, ReviewTask, ReviewTaskStatus, ReviewTool
-from dlp_schema.session import PrivacyState, Session, Stream, StreamKind
+from dlp_schema.session import LifecycleState, PrivacyState, Session, Stream, StreamKind
 from dlp_sync.policy import load_policy as load_sync_policy
 from dlp_sync.signals import Series, glove_series, imu_series
 
@@ -255,6 +260,24 @@ def label_studio_task_data(
     }
     check_stage_uris(ReviewStage.LABELING, list(data.values()), setup.raw.bucket)
     return data
+
+
+# `labeling_media_key`(와 해시 없는 구 키 `<담당자>/<스트림>.mp4`)의 모양
+_MEDIA_KEY = re.compile(
+    rf"^sessions/(?P<session>[^/]+)/review/(?P<assignee>[^/]+)/"
+    rf"(?P<stream>[^/]+?)(?:-[0-9a-f]{{{MEDIA_HASH_CHARS}}})?\.mp4$"
+)
+
+
+def parse_labeling_media_key(key: str) -> tuple[str, str, str] | None:
+    """워터마크 사본 키 → (세션, 담당자, 스트림). 그 모양이 아니면 None.
+
+    `labeling_media_key`와 구 작업 키(해시 없음)를 받는다. 시계열 CSV(`review/timeseries.csv`)·
+    블러본·회수 스냅숏은 이 모양이 아니다. 고아 찾기(`dlp_review.orphans`)가 이 플랫폼이 만든
+    사본만 고르는 데 쓴다.
+    """
+    m = _MEDIA_KEY.match(key)
+    return (m["session"], m["assignee"], m["stream"]) if m else None
 
 
 def frame_times(video: Path) -> list[int]:
@@ -467,6 +490,32 @@ def _cvat_project(
     return pid, CvatSchema.from_labels(existing)
 
 
+def _check_not_withdrawn(session: Session) -> None:
+    """사용 중지한 세션이면 `TaskError` (F-REV-17).
+
+    사용 중지(`dlp dataset withdraw`)는 배포된 작업을 회수 요청한다. 그 뒤 다시 만들면(회수 뒤
+    다시 만들기, 배정 재생성) 동의를 철회한 영상이 다시 배포된다. 세션 잠금 뒤에 부른다
+    (사용 중지도 같은 세션 행을 갱신한다).
+    """
+    if session.lifecycle_state is LifecycleState.WITHDRAWN:
+        raise TaskError(f"{session.session_id}: 사용 중지한 세션에는 검수 작업을 만들지 않습니다")
+
+
+def _check_not_held(conn: sa.Connection, session_id: str) -> None:
+    """승인 보류 중(`dlp privacy hold`)이면 `TaskError` (F-REV-18, ADR 0042).
+
+    보류는 승인을 풀어 아래 승인 확인도 막지만, 보류라는 이유와 해제 방법을 알린다. 블러 검수
+    작업(`create_privacy_tasks`)은 막지 않는다 (보류 중에 블러를 고친다).
+    """
+    held = active_privacy_hold(conn, session_id)
+    if held is not None:
+        raise TaskError(
+            f"{session_id}: 승인 보류 중이라 라벨링 작업을 만들지 않습니다 ({held.actor}: "
+            f"{held.reason}). 블러 검수 → dlp privacy hold {session_id} --release → "
+            "dlp privacy approve → dlp privacy render"
+        )
+
+
 def create_privacy_tasks(
     conn: sa.Connection,
     session_id: str,
@@ -492,8 +541,8 @@ def create_privacy_tasks(
     - streams: 이 스트림만 (None이면 세션의 모든 영상 스트림).
 
     반환: 스트림마다 하나씩 만든 `ReviewTask` (DB `review_tasks`에도 삽입).
-    예외: `AccessError`(권한자 아님), `TaskError`(CVAT 없음, 계정 연결 없음, 자동 탐지 전),
-    `clients.ToolError`(CVAT API 오류).
+    예외: `AccessError`(권한자 아님), `TaskError`(CVAT 없음, 계정 연결 없음, 사용 중지한 세션,
+    자동 탐지 전), `clients.ToolError`(CVAT API 오류).
     부작용: 원본 프록시 내려받기, grant 감사 기록, CVAT 작업 생성·배정·트랙·이슈, DB 삽입.
     순서: 권한·계정 검사 → (스트림마다) 프록시 받기 → grant 기록 → CVAT 업로드.
     """
@@ -501,6 +550,8 @@ def create_privacy_tasks(
     check_privacy_reviewers([assignee], privacy_reviewers)
     # 탐지·수집과 같은 순서로 세션을 먼저 잠가, 보낸 라벨과 완료 세대를 함께 고정한다.
     lock_session(conn, session_id)
+    session = get_session(conn, session_id)
+    _check_not_withdrawn(session)  # 도구에 묻기 전에 막는다
     pick = select or default_selector(conn, session_id)
     if setup.cvat is None:
         raise TaskError("CVAT 클라이언트가 없습니다")
@@ -513,7 +564,6 @@ def create_privacy_tasks(
             f"블러 검수 담당자 {assignee}의 CVAT 계정이 없습니다 "
             "(검수 정책 cvat.users: DLP_REVIEW_POLICY_FILE 또는 config/policies/review.yaml)"
         )
-    session = get_session(conn, session_id)
     if session.privacy_state is PrivacyState.PENDING:
         raise TaskError(f"{session_id}: 블러 자동 탐지를 먼저 실행하세요 (dlp privacy detect)")
     ontology = get_session_ontology(conn, session_id)
@@ -669,9 +719,9 @@ def create_labeling_tasks(
     - streams: 이 스트림만 (None이면 모든 영상 스트림).
 
     반환: 만든 `ReviewTask` 목록 (모두 만든 뒤 한꺼번에 DB `review_tasks`에 삽입).
-    예외: `TaskError`(프라이버시 승인 전, 블러본이 현재 블러 라벨과 다름·무효, Label Studio 작업을
-    만들 담당자의 Label Studio 계정 연결이 없음), `RawAccessError`(작업 URI에 원본 버킷이 섞임),
-    `clients.ToolError`.
+    예외: `TaskError`(사용 중지한 세션, 승인 보류 중, 프라이버시 승인 전, 블러본이 현재 블러 라벨과
+    다름·무효, Label Studio 작업을 만들 담당자의 Label Studio 계정 연결이 없음),
+    `RawAccessError`(작업 URI에 원본 버킷이 섞임), `clients.ToolError`.
     부작용: 세션 행 잠금, 라벨링 버킷 쓰기(워터마크 영상, 시계열 CSV), 원본 버킷 읽기(장갑·IMU
     Parquet, 감사 기록), 도구 작업 생성, DB 삽입.
     주의: Label Studio 시간 작업은 세션 계약의 단일 바디캠 스트림에 만든다.
@@ -689,6 +739,8 @@ def create_labeling_tasks(
     use_cvat = setup.cvat is not None and (tools is None or ReviewTool.CVAT in tools)
     use_ls = setup.label_studio is not None and (tools is None or ReviewTool.LABEL_STUDIO in tools)
     session = get_session(conn, session_id)
+    _check_not_withdrawn(session)
+    _check_not_held(conn, session_id)
     media = setup.media_policy()
     ontology = get_session_ontology(conn, session_id)
     if session.privacy_state is not PrivacyState.APPROVED:

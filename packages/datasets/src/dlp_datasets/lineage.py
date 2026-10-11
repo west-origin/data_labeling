@@ -12,6 +12,12 @@
   (`dlp_export.runner.id_map_key`)로 가명을 찾는다.
 - 내보내기와 동시에 일어난 사용 중지는 `dlp_export.runner`의 세션 행 잠금으로 직렬화된다
   (ADR 0021): 둘 중 먼저 커밋한 쪽이 이긴다.
+- 이미 배포한 검수 작업(라벨러 워터마크 사본, Label Studio 서명 URL, CVAT 작업)은 사용 중지
+  트랜잭션이 `review_tasks`에 매체 회수를 요청한다 (outbox, ADR 0039, F-REV-17). 외부 삭제는 커밋
+  뒤 `dlp_review.revoke` 실행기가 한다 (`dlp dataset withdraw`가 돌린다). 요청은 `dlp_schema` 저장소
+  함수(`request_task_revocation`)로만 쓴다 (의존 표: datasets → schema). 블러 검수 작업(원본 접근
+  권한자 화면)은 회수 대상이 아니라 남는다. 사용 중지한 세션에는 새 검수 작업을 만들지 않는다
+  (`dlp_review.tasks`).
 
 진입점: `dlp dataset withdraw <세션> <이유>`(`withdraw_session`),
 `dlp lineage <세션>`(`session_lineage`).
@@ -20,7 +26,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 
 import sqlalchemy as sa
@@ -35,12 +41,15 @@ from dlp_schema.db.repository import (
     insert_withdrawal,
     list_exports,
     list_golden_sets,
+    list_review_tasks,
     list_training_runs,
+    request_task_revocation,
     set_lifecycle,
     withdrawn_session_ids,
 )
 from dlp_schema.labels import VerificationState
 from dlp_schema.lineage import ExportRecord, TrainingRun, Withdrawal
+from dlp_schema.review import ReviewStage
 from dlp_schema.session import LifecycleState
 
 
@@ -54,6 +63,8 @@ class SessionLineage:
     training_runs: list[TrainingRun]  # 이 세션이 학습·검증 분할이던 버전으로 학습한 실행
     exports: list[ExportRecord]  # 이 세션을 실제로 내보낸 기록 (미완성 내보내기 포함)
     golden_sets: list[str] = field(default_factory=list[str])  # 이 세션이 든 골든셋 버전
+    # 이번 사용 중지(`withdraw_session`)가 매체 회수를 요청한 검수 작업 키. 계보 조회는 비어 있다
+    revocations: list[str] = field(default_factory=list[str])
 
 
 # 학습 예제는 학습·검증 분할에서만 뽑는다 (dlp_train.extract).
@@ -90,9 +101,12 @@ def withdraw_session(
 ) -> SessionLineage:
     """세션을 사용 중지하고, 이미 들어간 버전·학습·내보내기 목록을 돌려준다.
 
-    멱등: 이미 `withdrawals`에 있으면 기록을 더하지 않는다 (첫 사유·시각이 남는다).
+    멱등: 이미 `withdrawals`에 있으면 기록을 더하지 않는다 (첫 사유·시각이 남는다). 이미 회수를
+    요청한 작업은 다시 요청하지 않는다.
     부작용: 세션 행의 생애주기를 withdrawn으로 갱신하고 `session_lifecycle_events`에 전이를 남긴다
-    (이 행 갱신이 내보내기의 FOR SHARE 잠금과 직렬화된다), `withdrawals`에 추가.
+    (이 행 갱신이 내보내기의 FOR SHARE 잠금, 검수 작업 생성의 세션 잠금과 직렬화된다),
+    `withdrawals`에 추가, 그 세션의 비프라이버시 검수 작업 중 요청이 없는 것마다 매체 회수 요청
+    (`review_tasks`, 사유 `withdrawn:<actor>`, 열린 작업은 revoked. 외부 삭제는 하지 않는다).
 
     Args:
         conn: 호출자가 연 트랜잭션 연결.
@@ -107,7 +121,26 @@ def withdraw_session(
     set_lifecycle(conn, session_id, LifecycleState.WITHDRAWN, at=now, actor=actor)
     if session_id not in withdrawn_session_ids(conn):
         insert_withdrawal(conn, Withdrawal(session_id=session_id, reason=reason, withdrawn_at=now))
-    return session_lineage(conn, session_id)
+    revoked = _request_review_revocations(conn, session_id, now, actor)
+    return replace(session_lineage(conn, session_id), revocations=revoked)
+
+
+def _request_review_revocations(
+    conn: sa.Connection, session_id: str, now: datetime, actor: str
+) -> list[str]:
+    """사용 중지한 세션의 배포된 검수 작업마다 매체 회수를 요청한다. 이번에 요청한 작업 키.
+
+    동의를 철회한 영상은 렌더 해시와 무관하게 모두 회수한다 (블러가 맞아도 쓰면 안 된다).
+    같은 매체를 쓰는 작업도 같은 세션이라 함께 요청된다. 블러 검수 작업은 저장소 함수가 거른다.
+    호출자가 세션 행을 이미 잠갔다 (`set_lifecycle`).
+    """
+    return [
+        t.task_key
+        for t in list_review_tasks(conn, session_id)
+        if t.stage is not ReviewStage.PRIVACY
+        and t.revoke_requested_at is None
+        and request_task_revocation(conn, t.task_key, reason=f"withdrawn:{actor}", at=now)
+    ]
 
 
 def register_training_run(conn: sa.Connection, run: TrainingRun) -> None:

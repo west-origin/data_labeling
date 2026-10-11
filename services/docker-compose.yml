@@ -48,7 +48,9 @@ services:
       S3_SECRET_KEY: ${DLP_S3_SECRET_KEY}
       S3_LABELER_ACCESS_KEY: ${DLP_S3_LABELER_ACCESS_KEY}
       S3_LABELER_SECRET_KEY: ${DLP_S3_LABELER_SECRET_KEY}
-      # 라벨러 키가 읽을 수 있는 유일한 버킷 (config/defaults.yaml buckets.labeling과 같아야 한다)
+      # 라벨러 키가 읽을 수 있는 유일한 버킷 (config/defaults.yaml buckets.labeling과 같아야 한다).
+      # 라벨링 버킷에 버전 관리를 켜지 않는다 (회수로 지운 사본의 이전 버전이 남는다, ADR 0039).
+      # 권한 범위·버전 관리는 `dlp services check --security`로 점검한다 (F-REV-19)
       LABELING_BUCKET: dlp-labeling
     volumes:
       - seaweedfs-data:/data
