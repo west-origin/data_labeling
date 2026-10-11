@@ -45,6 +45,7 @@ from dlp_schema.episode import current_labels
 from dlp_schema.labels import (
     BoxKeyframe,
     BoxTrackPayload,
+    Hand,
     HandStatePayload,
     Keypoint,
     KeypointFrame,
@@ -625,40 +626,56 @@ def test_glove_started_before_the_bodycam_keeps_only_contacts_inside_the_session
 
     예전에는 음수 시각 손 상태 라벨이 Ms(ge=0) 검증에서 실패해 프리라벨 트랜잭션 전체가 롤백됐다.
 
-    장갑 시계 접촉(압력 1, ms): 500~1200 → 마스터 -1500~-800 (버림), 1600~2600 → -400~600 (0~600),
-    3000~4000 → 1000~2000 (그대로), 4500~5800 → 2500~3800 (2500~세션 길이). 세션 길이는 바디캠
-    PTS로 정한 `Session.duration_ms` (약 3000 ms 합성 영상).
+    장갑 시계 접촉(압력 1, ms), 두 장갑 모두 offset -2000 ms:
+    - 오른손: 500~1200 → 마스터 -1500~-800 (버림), 1600~2600 → -400~600 (0~600), 3000~4000 →
+      1000~2000 (그대로), 4500~5800 → 2500~3800 (2500~세션 길이).
+    - 왼손: 1300~2030 → -700~30 (0~30은 장갑 최소 길이 60 ms보다 짧은 조각이라 버림), 3200~3500 →
+      1200~1500 (그대로).
+    세션 길이는 바디캠 PTS로 정한 `Session.duration_ms` (약 3000 ms 합성 영상).
     """
     generate_blur_scenario(1).write(tmp_path / "bodycam.mp4")
     t = np.arange(0, 6_000, 10.0)
-    pressure = np.zeros(t.size)
-    for a, b in ((500, 1_200), (1_600, 2_600), (3_000, 4_000), (4_500, 5_800)):
-        pressure[(t >= a) & (t < b)] = 1.0
-    write_parquet(tmp_path / "glove_right.parquet", {"t_ms": t, "pressure_0": pressure})
+    contacts_ms = {
+        "glove_right": ((500, 1_200), (1_600, 2_600), (3_000, 4_000), (4_500, 5_800)),
+        "glove_left": ((1_300, 2_030), (3_200, 3_500)),
+    }
+    for name, spans_ms in contacts_ms.items():
+        pressure = np.zeros(t.size)
+        for a, b in spans_ms:
+            pressure[(t >= a) & (t < b)] = 1.0
+        write_parquet(tmp_path / f"{name}.parquet", {"t_ms": t, "pressure_0": pressure})
     sid = f"neg-{uuid.uuid4().hex[:8]}"
     manifest = {
         "session_id": sid, "domain": "cleaning", "worker_id": "w01", "site_id": "site01",
         "consent_version": "c1", "recorded_at": FIXED_TIME.isoformat(), "ontology_version": "1.0.0",
         "streams": [
             {"stream_id": "bodycam", "kind": "bodycam", "path": "bodycam.mp4"},
-            {"stream_id": "glove_right", "kind": "glove_right", "path": "glove_right.parquet"},
+            *({"stream_id": n, "kind": n, "path": f"{n}.parquet"} for n in contacts_ms),
         ],
     }  # fmt: skip
     (tmp_path / "m.yaml").write_text(yaml.safe_dump(manifest), encoding="utf-8")
     raw = S3Store.from_env("dlp-raw")
     policy, ontology = load_policy(ROOT), load_ontology(ROOT / "config/ontology/v1")
+    assert 30 < policy.contact.glove.min_duration_ms <= 300  # 왼손 0~30 조각만 최소 길이 밑이다
     with pg.begin() as conn:
         session = ingest_session(*load_manifest(tmp_path / "m.yaml"), raw, conn).session
-        glove = session.stream("glove_right").model_copy(
-            update={"sync_method": SyncMethod.TAP_EVENT, "offset_ms": -2_000.0}
-        )
-        update_stream_sync(conn, sid, glove)
+        for name in contacts_ms:
+            glove = session.stream(name).model_copy(
+                update={"sync_method": SyncMethod.TAP_EVENT, "offset_ms": -2_000.0}
+            )
+            update_stream_sync(conn, sid, glove)
     duration = session.duration_ms
-    assert 2_500 < duration < 3_800  # 마지막 접촉이 세션 끝에 걸친다
+    assert 2_500 + 300 < duration < 3_800  # 마지막 접촉이 세션 끝에 걸치고 잘려도 충분히 길다
     with pg.begin() as conn:
         summary = run_prelabel(conn, sid, raw, [], policy, ontology, FIXED_TIME)
         contacts = _builtin_contacts(current_labels(get_labels(conn, sid, kinds=["hand_state"])))
-    spans = sorted((x.t_start_ms, x.t_end_ms) for x in contacts)
-    assert spans == [(0, 600), (1_000, 2_000), (2_500, duration)]
+    spans: dict[Hand, list[tuple[int, int]]] = {}
+    for x in contacts:
+        assert isinstance(x.payload, HandStatePayload)
+        spans.setdefault(x.payload.hand, []).append((x.t_start_ms, x.t_end_ms))
+    assert {h: sorted(v) for h, v in spans.items()} == {
+        Hand.RIGHT: [(0, 600), (1_000, 2_000), (2_500, duration)],
+        Hand.LEFT: [(1_200, 1_500)],
+    }
     assert summary.contacts == len(contacts)
     assert all(check_label(x, ontology) == [] for x in contacts)

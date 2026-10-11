@@ -79,10 +79,11 @@ VIDEO = {StreamKind.BODYCAM, StreamKind.THIRD_PERSON}
 REPLACED_VERSION = "replaced-by-deployed-model"
 # 접촉(CONTACT_PREFIX)·착용자(WEARER_PREFIX) 단계 버전 접두사. 알고리즘을 바꾸면 숫자를 올려
 # 다시 돌게 한다 (이력에 같은 버전이 없어진다).
-# 세션 [0, 길이] 자르기(F-PAR-02, `clip_to_session`)는 숫자를 올리지 않았다: 0 앞 구간이 생기던
-# 세션은 예전에 트랜잭션이 롤백되어 이력이 없고, 세션 끝 뒤 구간이 남은 세션은 입력이 바뀌어
-# 다시 돌 때 잘린다. 올리면 모든 세션의 검수 전 접촉이 새 ID로 다시 만들어지고, 평가 기준
-# 버전 패턴(`contact-heuristic-1*`, ADR 0013·0025, training.yaml)도 함께 바꿔야 한다.
+# 세션 [0, 길이] 자르기(F-PAR-02, `clip_to_session`, 잘린 조각의 최소 길이 재적용 포함)는 숫자를
+# 올리지 않았다: 0 앞 구간이 생기던 세션은 예전에 트랜잭션이 롤백되어 이력이 없고, 세션 끝 뒤
+# 구간이 남은 세션은 입력이 바뀌어 다시 돌 때 잘린다. 올리면 모든 세션의 검수 전 접촉이 새 ID로
+# 다시 만들어지고, 평가 기준 버전 패턴(`contact-heuristic-1*`, ADR 0013·0025, training.yaml)도
+# 함께 바꿔야 한다.
 CONTACT_PREFIX = "contact-heuristic-1"
 WEARER_PREFIX = "wearer-xcorr-1"
 # replaced에 이 이름이 있으면 배포된 재학습 접촉 모델이 기본 접촉 단계(장갑·영상 휴리스틱)를
@@ -509,10 +510,11 @@ def _contacts(
     검수 전인 이전 버전 접촉만 지운다. 같은 손의 검수된·사람 손 상태와 겹치는 새 구간은 버린다.
 
     장갑이 있는 손은 `fuse_contacts`(장갑 시각 + 영상 대상), 없는 손은 영상 구간만 쓴다. 구간은
-    세션 [0, `session.duration_ms`]로 자르고 다 잘린 구간은 버린다 (`clip_to_session`, F-PAR-02:
-    오프셋이 음수인 장갑). 라벨은 마스터 타임라인 구간(stream_id=None)이고 ID는
-    `<세션>-contact-<version_tag>-<손>-<순번 4자리>`다 (순번은 자른 뒤 목록 기준). 신뢰도는
-    `contact.confidence.<출처>`, 증거는 영상만이면 INFERRED, 그 밖은 OBSERVED.
+    세션 [0, `session.duration_ms`]로 자르고, 세션 밖 구간과 잘려서 출처의 최소 길이보다 짧아진
+    조각은 버린다 (`clip_to_session`, F-PAR-02: 오프셋이 음수인 장갑). 라벨은 마스터 타임라인
+    구간(stream_id=None)이고 ID는 `<세션>-contact-<version_tag>-<손>-<순번 4자리>`다 (순번은 자른
+    뒤 목록 기준). 신뢰도는 `contact.confidence.<출처>`, 증거는 영상만이면 INFERRED, 그 밖은
+    OBSERVED.
 
     Returns: 새로 넣은 접촉 라벨 수 (같은 버전이 이력에 있으면 0).
     부작용: 원본 버킷에서 장갑 Parquet을 받고, `label_records`에 새 접촉과 이전 버전 삭제 레코드를
@@ -572,8 +574,9 @@ def _contacts(
                 glove_contact_intervals(master, series.values, policy.contact.glove), video
             )
         # 마스터로 바꾼 장갑 시각은 세션 밖일 수 있다 (오프셋이 음수면 0 앞). 세션 [0, 길이]로
-        # 자르고 빈 구간은 버린다 (음수 시각 라벨은 검증에서 실패해 트랜잭션 전체가 롤백된다)
-        intervals = clip_to_session(intervals, session.duration_ms)
+        # 자르고, 세션 밖 구간과 잘려서 최소 길이보다 짧아진 조각은 버린다 (음수 시각 라벨은
+        # 검증에서 실패해 트랜잭션 전체가 롤백된다)
+        intervals = clip_to_session(intervals, session.duration_ms, policy.contact)
         for i, c in drop_protected_contacts(intervals, hand, current):
             kind = _contact_kind(classes.get(c.target_id or ""), ontology)
             payload = HandStatePayload(

@@ -95,11 +95,11 @@ contact:
   glove:
     on_threshold: 0.3         # 압력 합이 이 값을 넘으면 접촉 시작
     off_threshold: 0.15       # 이 값 아래로 내려가면 접촉 종료 (히스테리시스)
-    min_duration_ms: 60       # 이보다 짧은 접촉은 버린다
+    min_duration_ms: 60       # 이보다 짧은 접촉은 버린다 (장갑 시각을 쓰는 융합 접촉, 세션 경계에서 잘린 조각도)
   # 영상 휴리스틱: 손가락 끝 다섯 점과 객체·도구 박스 사이 거리
   video:
     max_distance_px: 12       # 손가락 끝과 객체 박스 사이 거리가 이 이하면 접촉 후보
-    min_duration_ms: 100      # 이보다 짧은 영상 접촉은 버린다
+    min_duration_ms: 100      # 이보다 짧은 영상 접촉은 버린다 (세션 경계에서 잘린 조각도)
     merge_gap_ms: 100         # 같은 대상 접촉이 이 이하로 끊기면 잇는다
     # 객체 박스 키프레임이 손 키프레임 시각에 없으면 앞뒤 키프레임을 선형 보간한다 (도구 박스는
     # open_vocab_objects.frame_stride_ms 간격). 앞뒤 키프레임 간격이 이보다 길면 보간하지 않는다.
