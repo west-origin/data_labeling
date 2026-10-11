@@ -260,16 +260,18 @@ class S3Store:
         )
 
     @classmethod
-    def labeler_from_env(cls, bucket: str) -> S3Store:
+    def labeler_from_env(cls, bucket: str, *, public: bool = True) -> S3Store:
         """일반 라벨러 자격 증명 (라벨링 버킷 읽기 전용). 검수 화면용 서명 URL을 만들 때 쓴다.
 
-        엔드포인트는 브라우저가 닿는 주소(DLP_S3_PUBLIC_ENDPOINT)를 먼저 쓴다. 이 자격 증명은
-        원본 버킷을 읽을 수 없으므로, 실수로 원본 키를 서명해도 그 URL은 열리지 않는다.
+        엔드포인트는 브라우저가 닿는 주소(DLP_S3_PUBLIC_ENDPOINT)를 먼저 쓴다. public이 False면
+        서버가 닿는 주소(DLP_S3_ENDPOINT)만 쓴다 (권한 범위 점검 `dlp services check --security`).
+        이 자격 증명은 원본 버킷을 읽을 수 없으므로, 실수로 원본 키를 서명해도 그 URL은 열리지
+        않는다 (그 범위는 `dlp_media.storage_checks.check_labeler_scope`로 점검한다).
         """
+        public_url = os.environ.get("DLP_S3_PUBLIC_ENDPOINT") if public else None
         return cls(
             bucket,
-            endpoint_url=os.environ.get("DLP_S3_PUBLIC_ENDPOINT")
-            or os.environ.get("DLP_S3_ENDPOINT", "http://localhost:8333"),
+            endpoint_url=public_url or os.environ.get("DLP_S3_ENDPOINT", "http://localhost:8333"),
             access_key=os.environ.get("DLP_S3_LABELER_ACCESS_KEY", "dlp-dev-labeler"),
             secret_key=os.environ.get("DLP_S3_LABELER_SECRET_KEY", "dlp-dev-labeler-secret"),
         )

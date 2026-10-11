@@ -61,7 +61,10 @@ flowchart LR
 전부 회수, 보류 중 승인·라벨링 작업 생성 거부). 블러 검수·수집 뒤 `--release --reason <조치>`로
 해제하고 `dlp privacy approve` → `render`로 재승인한다 ([ADR 0042](../adr/0042-privacy-approval-hold.md)).
 한 스트림·작업만 끊을 때는 `dlp review revoke <세션> --stream <스트림> --all --reason incident`(작업을
-알면 `--task <작업 키> --reason incident`). 작업 생성이 실패해 DB 기록 없이 남은 도구
+알면 `--task <작업 키> --reason incident`). DB 회수 밖의 노출(라벨러 자격 증명 교체, CVAT·Label Studio
+내보내기 기록 확인, 내려받기 경로 차단)은 ADR 0039 "사고 대응" 절차이고 문서뿐이다. 운영 배포 전과
+월간 감사 때 `dlp services check --security`로 라벨링 버킷 버전 관리 꺼짐과 라벨러 키 범위(라벨링
+버킷 읽기만)를 확인한다 (F-REV-19). 작업 생성이 실패해 DB 기록 없이 남은 도구
 작업·사본(고아)은 `dlp review revoke --orphans`로 보고, 확인한 뒤 `--orphans --apply`로 지운다
 (이 플랫폼 이름 규칙에 맞고 나이 하한 `review.yaml orphans.min_age_s`가 지난 것만, F-REV-15).
 세션을 사용 중지하면(`dlp dataset withdraw`) 그 세션의 배포된 라벨링 작업이 같은 커밋에서 회수
