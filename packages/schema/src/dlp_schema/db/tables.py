@@ -204,6 +204,8 @@ label_records = sa.Table(
 )
 
 # 외부 검수 도구 작업 (`ReviewTask`). 색인 (session_id, stage): 세션별·단계별 작업 조회.
+# status: open | collected | revoked (CHECK 없음, 계약이 강제). render_hash·revoke_* 열은 매체 회수
+# outbox다 (0015, ADR 0039): 요청은 블러를 바꾼 트랜잭션에, 완료 표시는 실행기가 확인 뒤에 쓴다.
 review_tasks = sa.Table(
     "review_tasks",
     metadata,
@@ -231,6 +233,12 @@ review_tasks = sa.Table(
     sa.Column("status", sa.String(16), nullable=False),
     sa.Column("created_at", Ts, nullable=False),
     sa.Column("collected_at", Ts, nullable=True),
+    sa.Column("render_hash", sa.String(64), nullable=True),
+    sa.Column("revoke_requested_at", Ts, nullable=True),
+    sa.Column("revoke_reason", sa.Text(), nullable=True),
+    sa.Column("media_revoked_at", Ts, nullable=True),
+    sa.Column("tool_revoked_at", Ts, nullable=True),
+    sa.Column("revoke_note", sa.Text(), nullable=True),
     sa.Index("ix_review_tasks_session", "session_id", "stage"),
 )
 

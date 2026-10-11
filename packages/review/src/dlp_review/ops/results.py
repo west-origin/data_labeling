@@ -64,8 +64,14 @@ def finish_assignment(
     부작용: 배정 상태 done 갱신, 합격이면 나머지 라벨에 `sample_verified` 기록(검수자 ID
     `sampling:<배정>`), 불합격이면 재검수 배정(`<배정>:resample`, 보류 라벨만, 우선순위 +1) 삽입.
     배정의 작업이 하나도 없으면 아무것도 하지 않는다 (done이 아니다).
+    회수한(revoked) 작업은 수집되지 않으므로 세지 않는다. 남은 작업이 회수된 것뿐이면 다시 만든
+    작업을 수집할 때까지 마무리하지 않는다 (ADR 0039).
     """
-    tasks = [t for t in list_review_tasks(conn, a.session_id) if t.assignment_id == a.assignment_id]
+    tasks = [
+        t
+        for t in list_review_tasks(conn, a.session_id)
+        if t.assignment_id == a.assignment_id and t.status is not ReviewTaskStatus.REVOKED
+    ]
     if not tasks:
         # 회귀: any([])가 거짓이라 작업이 없는(아직 `dlp review assign` 전인) 배정이 사람 검수 없이
         # done이 되고, 표본 배정이면 판정까지 돌았다. 작업을 만들고 수집해야만 마무리한다.

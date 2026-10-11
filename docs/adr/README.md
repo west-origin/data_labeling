@@ -45,3 +45,4 @@ ADR은 결정 당시의 이유와 이관 조건을 기록한다. 후속 ADR이 �
 | 0036 | [ADR 0036: 모델 해시 캐시와 블러 렌더 복구](0036-model-cache-and-render-recovery.md) |
 | 0037 | [ADR 0037: 온톨로지 로딩·저장·계층·이관 검증 경계](0037-ontology-validation-boundaries.md) |
 | 0038 | [ADR 0038: 검수 화면 테마를 도구 밖에서 덧씌운다](0038-review-ui-theme-overlay.md) |
+| 0039 | [ADR 0039: 블러가 바뀌면 이미 배포한 라벨링 작업 매체를 회수한다](0039-revoke-labeling-media-on-blur-change.md) |

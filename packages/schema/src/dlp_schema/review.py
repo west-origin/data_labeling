@@ -28,7 +28,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import AwareDatetime, Field
+from pydantic import AwareDatetime, Field, model_validator
 
 from dlp_schema.common import Contract, Identifier, Ms
 
@@ -47,10 +47,13 @@ class ReviewStage(StrEnum):
     QA = "qa"
 
 
-# 검수 작업 상태. open=도구에서 검수 중, collected=결과를 라벨 이력으로 옮김 (collected_at 기록).
+# 검수 작업 상태. open=도구에서 검수 중, collected=결과를 라벨 이력으로 옮김 (collected_at 기록),
+# revoked=수집 전에 회수한 종료 상태 (블러가 바뀌어 매체가 낡음, ADR 0039). 회수한 작업은 수집하지
+# 않는다. 수집 뒤 회수 요청은 상태를 collected로 두고 `revoke_requested_at`만 남긴다.
 class ReviewTaskStatus(StrEnum):
     OPEN = "open"
     COLLECTED = "collected"
+    REVOKED = "revoked"
 
 
 class ReviewMode(StrEnum):
@@ -169,6 +172,17 @@ class ReviewAssignment(Contract):
 #     라벨로 비교 기준을 다시 고른다.
 #   privacy_detection_id: 작업에 보낸 블러의 완료 탐지 세대. 구 작업은 None (ADR 0033).
 #   status / created_at / collected_at: 작업 상태와 시각.
+#   render_hash: 작업 라벨 단계 매체(워터마크 사본)를 만든 블러본의 렌더 해시
+#     (`dlp_privacy.rendering.render_hash`). 블러 검수·구 작업은 None. 지금 운영 블러의 해시와
+#     다르면 매체가 낡았다 (ADR 0039).
+#   revoke_requested_at / revoke_reason: 회수 요청 시각과 사유 (예: `blur_changed:cvat:42`,
+#     `privacy_detect`, `render`, `sweep`, `manual:<행위자>:<사유>`, 같은 매체를 쓰는 작업이면
+#     `…:shared-media`). 블러를 바꾼 트랜잭션과 같은 커밋에 남는다.
+#     블러 검수 작업은 회수하지 않는다.
+#   media_revoked_at: 이 작업 매체 객체가 라벨링 버킷에서 지워졌음을 확인한 시각.
+#   tool_revoked_at: 도구 작업이 없음을 확인한 시각 (이미 없던 404 포함).
+#   revoke_note: 수동 완료 표시(도구 폐기 등)의 `<행위자>: <사유>`.
+#   요청 뒤 media·tool 중 하나라도 비었으면 회수 대기다 (`pending_revocations`).
 class ReviewTask(Contract):
     task_key: Identifier  # 도구:작업 ID (예: cvat:42)
     tool: ReviewTool
@@ -191,3 +205,54 @@ class ReviewTask(Contract):
     status: ReviewTaskStatus = ReviewTaskStatus.OPEN
     created_at: AwareDatetime
     collected_at: AwareDatetime | None = None
+    render_hash: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+        description="작업 매체를 만든 블러본 렌더 해시. 구 작업·블러 검수는 None",
+    )
+    revoke_requested_at: AwareDatetime | None = None
+    revoke_reason: str | None = None
+    media_revoked_at: AwareDatetime | None = None
+    tool_revoked_at: AwareDatetime | None = None
+    revoke_note: str | None = None
+
+    @model_validator(mode="after")
+    def _check_revocation(self) -> ReviewTask:
+        """회수 필드의 상태 규칙 (ADR 0039).
+
+        Raises:
+            ValueError: 회수 상태인데 요청·사유가 없거나 수집 시각이 있음, 열린 작업에 요청이 있음,
+                요청 없이 완료 표시가 있음, 사유 없는 요청, 블러 검수 작업에 렌더 해시·회수 필드.
+        """
+        requested = self.revoke_requested_at is not None
+        rules = (
+            (
+                self.status is ReviewTaskStatus.REVOKED
+                and (not requested or self.revoke_reason is None or self.collected_at is not None),
+                "revoked 작업은 회수 요청 시각·사유가 있고 수집 시각이 없어야 합니다",
+            ),
+            (
+                self.status is ReviewTaskStatus.OPEN and requested,
+                "열린 작업에는 회수 요청이 없어야 합니다",
+            ),
+            (
+                not requested
+                and (self.media_revoked_at is not None or self.tool_revoked_at is not None),
+                "회수 완료 표시에는 회수 요청이 있어야 합니다",
+            ),
+            (requested and not self.revoke_reason, "회수 요청에는 사유가 있어야 합니다"),
+            (
+                self.stage is ReviewStage.PRIVACY
+                and (
+                    self.render_hash is not None
+                    or requested
+                    or self.revoke_reason is not None
+                    or self.revoke_note is not None
+                ),
+                "블러 검수 작업에는 렌더 해시·회수 필드가 없어야 합니다",
+            ),
+        )
+        for broken, message in rules:
+            if broken:
+                raise ValueError(message)
+        return self

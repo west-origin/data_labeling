@@ -79,6 +79,7 @@
 
 ## 남은 일
 
+- 후속: 이미 배포한 라벨링 작업(CVAT 사본·Label Studio 서명 URL)의 회수는 ADR 0039.
 - CVAT 조직·프로젝트 권한은 문서 절차로만 지킨다 (위 4번). 운영 CVAT에서 조직을 나누면 클라이언트가
   `X-Organization` 헤더를 붙이도록 바꿔야 한다.
 - CVAT 작업 시간은 여전히 재지 않는다 (`dlp ops log-work`).

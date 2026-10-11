@@ -1,6 +1,9 @@
 """객체 저장소. 원본(raw)과 라벨링(labeling) 버킷을 별도 인스턴스로 다룬다.
 
 원본은 불변이다. 같은 키에 같은 내용(sha256)을 다시 올리면 건너뛰고, 다른 내용이면 오류를 낸다.
+`ObjectStore` 프로토콜에는 삭제가 없다. 삭제는 `DeletableStore`만 하며, 라벨링 버킷의 일반 라벨러용
+워터마크 사본을 회수 실행기(`dlp_review.revoke`, ADR 0039)가 지울 때만 쓴다. 원본 감사 저장소
+(`dlp_media.audit.AuditedStore`)는 삭제가 없어 원본은 계속 지울 수 없다.
 
 WP3·WP16, ADR 0003·0020. 모든 단계가 이 프로토콜(`ObjectStore`)로 파일을 주고받는다.
 
@@ -19,6 +22,8 @@ WP3·WP16, ADR 0003·0020. 모든 단계가 이 프로토콜(`ObjectStore`)로 �
 - `S3Store`: S3 호환 (개발은 SeaweedFS, `s3://<버킷>/<키>`).
 - `store_from_spec`: CLI `--store` 값('s3' | 'local:<디렉터리>')으로 저장소를 만든다.
 - `put_immutable`: 불변 업로드 (원본 수집용). `sha256_file`: 파일 해시.
+- `DeletableStore`: 삭제할 수 있는 저장소 (`LocalStore`, `S3Store`). 회수 실행기만 쓴다.
+- `STORE_ERRORS`: 저장소 호출 실패로 볼 예외 묶음.
 """
 
 from __future__ import annotations
@@ -28,13 +33,17 @@ import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import boto3
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 
 if TYPE_CHECKING:
     from mypy_boto3_s3 import S3Client
+
+
+# 저장소 호출 실패로 볼 예외 (S3 응답·연결 오류, 로컬 파일 오류). 실패를 모아 보고할 때 쓴다.
+STORE_ERRORS: tuple[type[Exception], ...] = (ClientError, BotoCoreError, OSError)
 
 
 class ImmutableObjectError(RuntimeError):
@@ -72,6 +81,18 @@ class ObjectStore(Protocol):
 
     def get_file(self, key: str, dest: Path) -> None:
         """키의 객체를 로컬 dest에 받는다. 없으면 예외 (구현마다 종류가 다르다)."""
+        ...
+
+
+@runtime_checkable
+class DeletableStore(ObjectStore, Protocol):
+    """객체를 지울 수 있는 저장소. 라벨링 버킷의 워터마크 사본 회수(ADR 0039)에만 쓴다.
+
+    `ObjectStore`를 받는 함수는 삭제할 수 없다. 원본 감사 저장소는 이 프로토콜을 만족하지 않는다.
+    """
+
+    def delete(self, key: str) -> None:
+        """키의 객체를 지운다. 없어도 성공이다 (멱등). 그 밖의 오류는 예외."""
         ...
 
 
@@ -155,6 +176,12 @@ class LocalStore:
         """파일을 dest로 복사한다. 없으면 FileNotFoundError."""
         shutil.copyfile(self._path(key), dest)
 
+    def delete(self, key: str) -> None:
+        """파일과 해시 옆 파일을 지운다. 없어도 성공이다 (경로 탈출 키는 ValueError)."""
+        path = self._path(key)
+        path.unlink(missing_ok=True)
+        path.with_name(path.name + ".sha256").unlink(missing_ok=True)
+
 
 class S3Store:
     """S3 호환 저장소 (SeaweedFS). sha256은 객체 메타데이터에 둔다."""
@@ -235,6 +262,10 @@ class S3Store:
     def get_file(self, key: str, dest: Path) -> None:
         """내려받는다. 없으면 botocore ClientError."""
         self.client.download_file(self.bucket, key, str(dest))
+
+    def delete(self, key: str) -> None:
+        """DELETE 요청. S3는 없는 키도 성공으로 답한다 (멱등). 권한·연결 오류는 ClientError."""
+        self.client.delete_object(Bucket=self.bucket, Key=key)
 
 
 def store_from_spec(spec: str, bucket: str) -> ObjectStore:

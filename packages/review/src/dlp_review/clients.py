@@ -10,8 +10,11 @@ WP6, ADR 0006. `dlp_review.tasks`(작업 만들기), `dlp_review.collect`(결과
 공개 이름:
 - `ToolError`: 도구 API가 4xx·5xx로 답했거나 비동기 작업이 실패·시간 초과했다.
 - `PRELABEL_VERSION`, `PRELABEL_SETTINGS`: Label Studio 프리라벨(예측) 표시 설정.
-- `CvatClient`: CVAT REST (프로젝트·작업·주석·job 담당자·이슈·웹훅).
-- `LabelStudioClient`: Label Studio REST (프로젝트·작업·예측·주석·웹훅).
+- `CvatClient`: CVAT REST (프로젝트·작업·주석·job 담당자·이슈·웹훅, 회수용 배정 해제·스냅숏·삭제).
+- `LabelStudioClient`: Label Studio REST (프로젝트·작업·예측·주석·웹훅, 회수용 스냅숏·삭제).
+
+회수(ADR 0039)용 메서드는 `dlp_review.revoke`가 쓴다. 삭제·존재 확인은 404를 "없음"으로 보고
+(이미 지운 작업의 재시도가 성공한다), 그 밖의 4xx·5xx는 `ToolError`다.
 
 환경 변수 (개발 기본값은 `services/` compose와 맞춘다):
 - CVAT: `DLP_CVAT_PORT`(8080), `DLP_CVAT_ADMIN_USER`, `DLP_CVAT_ADMIN_PASSWORD`.
@@ -49,6 +52,14 @@ def _user(annotation: dict[str, Any]) -> int | None:
     if isinstance(user, dict):
         user = user.get("id")
     return int(user) if user is not None else None
+
+
+def _gone(resp: httpx.Response) -> bool:
+    """404면 True (작업이 없다). 그 밖의 실패는 `ToolError`, 성공은 False."""
+    if resp.status_code == 404:
+        return True
+    _check(resp)
+    return False
 
 
 def _check(resp: httpx.Response) -> Any:
@@ -200,6 +211,42 @@ class CvatClient:
         for job in self.job_ids(task_id):
             _check(self.http.patch(f"/api/jobs/{job}", json={"assignee": user_id}))
 
+    def unassign(self, task_id: int) -> None:
+        """작업(task)과 그 모든 job의 담당자를 비운다 (회수 전에 라벨러 화면에서 먼저 뺀다).
+
+        주의: job 담당자 변경은 CVAT `update:job` 웹훅을 일으킨다. 웹훅 서버는 열린 작업만
+        수집하므로 회수된 작업의 웹훅은 무시한다 (`dlp review serve`).
+        """
+        _check(self.http.patch(f"/api/tasks/{task_id}", json={"assignee_id": None}))
+        for job in self.job_ids(task_id):
+            _check(self.http.patch(f"/api/jobs/{job}", json={"assignee": None}))
+
+    def task_exists(self, task_id: int) -> bool:
+        """작업이 있으면 True, 404면 False. 그 밖의 실패는 `ToolError`."""
+        return not _gone(self.http.get(f"/api/tasks/{task_id}"))
+
+    def task_snapshot(self, task_id: int) -> dict[str, Any]:
+        """지우기 전에 남길 작업 사본: 작업 메타 일부, 주석 전체, 프레임 수.
+
+        영상·데이터 URL은 넣지 않는다 (라벨링 버킷의 JSON 사본에 매체를 다시 담지 않는다).
+        프레임 시각은 넣지 않는다. 필요하면 원본 PTS 인덱스로 다시 만든다 (ADR 0039).
+        """
+        task = _check(self.http.get(f"/api/tasks/{task_id}"))
+        meta = {
+            k: task.get(k)
+            for k in ("id", "name", "project_id", "status", "created_date", "updated_date")
+        }
+        meta["assignee"] = (task.get("assignee") or {}).get("username")
+        return {
+            "task": meta,
+            "annotations": self.get_annotations(task_id),
+            "frame_count": self.frame_count(task_id),
+        }
+
+    def delete_task(self, task_id: int) -> bool:
+        """작업을 지운다 (CVAT가 올린 영상·주석도 함께 지운다). 지웠으면 True, 이미 없으면 False."""
+        return not _gone(self.http.delete(f"/api/tasks/{task_id}"))
+
     def add_issue(self, job_id: int, frame: int, position: list[float], message: str) -> int:
         """검수자에게 보이는 이슈 (먼저 볼 구간 안내).
 
@@ -337,6 +384,27 @@ class LabelStudioClient:
         """작업에 쓴 시간(초): 주석들의 lead_time 합 (Label Studio가 편집 화면에서 잰다)."""
         anns = _check(self.http.get(f"/api/tasks/{task_id}/annotations"))
         return float(sum(float(a.get("lead_time") or 0.0) for a in anns))
+
+    def task_exists(self, task_id: int) -> bool:
+        """작업이 있으면 True, 404면 False. 그 밖의 실패는 `ToolError`."""
+        return not _gone(self.http.get(f"/api/tasks/{task_id}/"))
+
+    def task_snapshot(self, task_id: int) -> dict[str, Any]:
+        """지우기 전에 남길 작업 사본: 제출된 주석 전체와 임시 저장(drafts, 없으면 None).
+
+        작업 data(라벨러용 서명 URL 등)는 넣지 않는다 (사본이 다시 매체를 열게 하지 않는다).
+        """
+        annotations = _check(self.http.get(f"/api/tasks/{task_id}/annotations"))
+        task = _check(self.http.get(f"/api/tasks/{task_id}/"))
+        return {
+            "task": {"id": task.get("id")},
+            "annotations": annotations,
+            "drafts": task.get("drafts"),
+        }
+
+    def delete_task(self, task_id: int) -> bool:
+        """작업을 지운다 (주석·예측 포함). 지웠으면 True, 이미 없으면 False."""
+        return not _gone(self.http.delete(f"/api/tasks/{task_id}/"))
 
     def add_webhook(self, project_id: int, url: str, secret: str) -> int:
         """주석 생성·갱신 웹훅을 등록한다. 비밀은 X-DLP-Secret 헤더로 실려 온다. 웹훅 ID."""

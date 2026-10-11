@@ -1,10 +1,10 @@
 """검수 도구 연동 (WP6 검수 도구, WP12 검수 운영).
 
 관련 ADR: 0006(검수 도구 연동), 0014(검수 운영), 0015·0023·0024(감사 정정), 0020(원본 접근 감사),
-0028·0029(생애주기 기록, 검수 완료 판정).
+0028·0029(생애주기 기록, 검수 완료 판정), 0039(블러 변경 뒤 배포 매체 회수).
 
 파이프라인 위치: 자동 블러·프리라벨이 끝난 세션의 라벨을 사람이 검수하는 단계다.
-`dlp review create|collect|serve|register-webhooks|plan|assign|queue|qa|quality|verify`
+`dlp review create|collect|serve|revoke|register-webhooks|plan|assign|queue|qa|quality|verify`
 (`packages/cli/src/dlp_cli/review_cmds.py`)가 이 패키지의 함수를 부른다.
 
 입력 → 출력:
@@ -24,6 +24,8 @@
 - `roles`: 단계별 원본 접근 경계 검사.
 - `watermark`·`timeseries`: 검수 화면용 매체 (라벨러 ID 워터마크 영상, 센서 시계열 CSV).
 - `verify`: 세션 검수 완료 판정 (`dlp review verify`).
+- `revoke`: 블러가 바뀐 뒤 회수 요청된 라벨링 작업 매체(라벨링 버킷 사본, CVAT·Label Studio 작업)를
+  커밋 뒤 끊는 실행기 (`dlp review revoke`, ADR 0039). 요청은 `dlp_privacy.revocation`이 남긴다.
 - `ops`: 검수 운영 (우선순위·표본·배정·오류 삽입·품질 측정).
 
 주의점:

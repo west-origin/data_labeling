@@ -25,7 +25,8 @@
     "ReviewTaskStatus": {
       "enum": [
         "open",
-        "collected"
+        "collected",
+        "revoked"
       ],
       "title": "ReviewTaskStatus",
       "type": "string"
@@ -96,6 +97,19 @@
       "title": "Label Kinds",
       "type": "array"
     },
+    "media_revoked_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Media Revoked At"
+    },
     "media_uri": {
       "title": "Media Uri",
       "type": "string"
@@ -117,6 +131,57 @@
       "default": null,
       "description": "작업 생성 시 완료된 탐지 세대. 구 작업·일반 검수는 None",
       "title": "Privacy Detection Id"
+    },
+    "render_hash": {
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "작업 매체를 만든 블러본 렌더 해시. 구 작업·블러 검수는 None",
+      "title": "Render Hash"
+    },
+    "revoke_note": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Revoke Note"
+    },
+    "revoke_reason": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Revoke Reason"
+    },
+    "revoke_requested_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Revoke Requested At"
     },
     "sent_label_ids": {
       "anyOf": [
@@ -159,6 +224,19 @@
     },
     "tool": {
       "$ref": "#/$defs/ReviewTool"
+    },
+    "tool_revoked_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Tool Revoked At"
     }
   },
   "required": [

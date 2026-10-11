@@ -1,11 +1,36 @@
-"""CLI의 검수 정책 선택. 계정/원본 권한 설정은 기본 정책과 별도 파일로 관리할 수 있다."""
+"""CLI의 검수 정책·설정 선택과 매체 회수 실행 (ADR 0039).
+
+계정/원본 권한 설정은 기본 정책과 별도 파일로 관리할 수 있다 (`load_review_policy`).
+`review_setup`은 검수 명령이 쓰는 저장소·도구 클라이언트 묶음을 만든다. `run_revocations`는
+블러를 바꾼 트랜잭션이 커밋된 뒤 회수 대기를 실행한다 (`dlp review …`, `dlp privacy detect|render`).
+
+공개 이름:
+- `REVOCATION_PENDING_EXIT`: 회수 대기가 남았을 때의 종료 코드 (4, argparse 사용 오류 2와 다르다).
+- `load_review_policy`, `review_setup`, `run_revocations`, `print_revocations`.
+"""
 
 from __future__ import annotations
 
 import os
+from datetime import UTC, datetime
 from pathlib import Path
 
+import httpx
+import sqlalchemy as sa
+
+from dlp_cli.raw_access import raw_store
+from dlp_media.storage import S3Store
+from dlp_privacy.policy import load_policy as load_privacy_policy
+from dlp_privacy.runner import request_media_revocation
+from dlp_review.clients import CvatClient, LabelStudioClient, ToolError
 from dlp_review.ops.policy import ReviewOpsPolicy, load_policy
+from dlp_review.revoke import RevocationReport, execute_media_revocations
+from dlp_review.tasks import ReviewSetup
+from dlp_schema import load_config, repo_root
+from dlp_schema.db.repository import pending_revocations
+
+# 회수 대기가 남았을 때 CLI 종료 코드. cron(`dlp review revoke --pending`)은 이 값을 경보로 쓴다
+REVOCATION_PENDING_EXIT = 4
 
 
 def load_review_policy(root: Path) -> ReviewOpsPolicy:
@@ -16,3 +41,119 @@ def load_review_policy(root: Path) -> ReviewOpsPolicy:
     """
     selected = os.environ.get("DLP_REVIEW_POLICY_FILE")
     return load_policy(root, Path(selected) if selected else None)
+
+
+def review_setup(
+    purpose: str,
+    url: str | None,
+    *,
+    cvat: bool = True,
+    label_studio: bool = True,
+    tolerant: bool = False,
+) -> tuple[ReviewSetup, list[str]]:
+    """검수 연동에 필요한 저장소·도구 클라이언트를 묶는다. (설정, 경고).
+
+    인자:
+        purpose: 원본 감사 기록의 목적 문자열 (예: `review.create`). 회수 실행기는 원본을 읽지
+            않고 원본 버킷 이름만 쓴다.
+        url: 감사 기록용 DB URL (None이면 `DLP_DATABASE_URL`/기본값).
+        cvat / label_studio: False면 그 도구 클라이언트를 만들지 않는다 (None).
+        tolerant: True면 CVAT 로그인 실패(`ToolError`·`httpx.HTTPError`)를 None과 경고로 바꾼다
+            (회수 실행처럼 도구 없이도 할 수 있는 일을 막지 않는다).
+
+    반환: `ReviewSetup`과 경고 문장 목록.
+    - `raw`: 원본 버킷 감사 저장소 (항상 S3).
+    - `labeling`: 라벨링 버킷 (서비스 자격 증명: 블러본·작업 매체 쓰기, 회수 삭제).
+    - `labeling_reader`: 라벨러 자격 증명(읽기 전용) — 검수 화면 서명 URL용.
+    - `ontology`: None. 작업 생성 시 DB에서 각 세션 버전의 사전을 읽는다.
+    부작용: 설정 파일을 읽고 저장소·HTTP 클라이언트를 만든다. CVAT 클라이언트는 생성 중 로그인
+    API를 호출한다. tolerant가 아니면 로그인 실패·통신 오류는 호출자에게 전파된다.
+    """
+    root = repo_root()
+    buckets = load_config(root / "config" / "defaults.yaml").buckets
+    warnings: list[str] = []
+    client: CvatClient | None = None
+    if cvat:
+        try:
+            client = CvatClient.from_env()
+        except (ToolError, httpx.HTTPError) as exc:
+            if not tolerant:
+                raise
+            warnings.append(f"CVAT에 접속하지 못했습니다 ({type(exc).__name__}): CVAT 회수는 대기")
+    setup = ReviewSetup(
+        raw=raw_store("s3", url, purpose),
+        labeling=S3Store.from_env(buckets.labeling),
+        labeling_reader=S3Store.labeler_from_env(buckets.labeling),
+        ontology=None,
+        cvat=client,
+        label_studio=LabelStudioClient.from_env() if label_studio else None,
+    )
+    return setup, warnings
+
+
+def run_revocations(
+    engine: sa.Engine,
+    session_id: str | None,
+    setup: ReviewSetup | None = None,
+    *,
+    sweep: bool = False,
+    url: str | None = None,
+    purpose: str = "review.revoke",
+) -> RevocationReport:
+    """커밋된 회수 대기를 실행한다 (호출자 트랜잭션 밖에서 부른다).
+
+    1. sweep이고 세션이 있으면 짧은 트랜잭션에서 렌더 해시가 지금과 다른 작업에 회수를 요청한다
+       (`reason="sweep"`, 구 작업 제외). 알려지지 않은 경로로 블러본이 바뀐 경우의 백스톱이다.
+    2. 대기가 없으면 빈 보고서를 돌려준다 (도구 클라이언트를 만들지 않는다).
+    3. setup이 없으면 `review_setup(tolerant=True)`로 만든다 (도구가 없어도 매체 삭제는 한다).
+    4. `execute_media_revocations`로 매체 → CVAT → Label Studio 순으로 끊는다.
+
+    인자: session_id가 None이면 모든 세션의 대기 (`--pending`). url: 설정을 만들 때의 DB URL.
+    반환: `RevocationReport` (setup을 만들며 생긴 경고는 warnings 앞에 붙는다).
+    """
+    if sweep and session_id is not None:
+        policy = setup.privacy_policy() if setup is not None else load_privacy_policy(repo_root())
+        with engine.begin() as conn:
+            request_media_revocation(
+                conn, session_id, policy, datetime.now(UTC), reason="sweep", legacy=False
+            )
+    with engine.connect() as conn:
+        if not pending_revocations(conn, session_id):
+            return RevocationReport()
+    warnings: list[str] = []
+    if setup is None:
+        setup, warnings = review_setup(purpose, url, tolerant=True)
+    report = execute_media_revocations(
+        engine,
+        session_id,
+        labeling=setup.labeling,
+        raw_bucket=setup.raw.bucket,
+        cvat=setup.cvat,
+        label_studio=setup.label_studio,
+    )
+    report.warnings[:0] = warnings
+    return report
+
+
+def print_revocations(report: RevocationReport, session_id: str | None) -> int:
+    """회수 실행 보고를 출력하고 종료 코드를 돌려준다 (대기가 남으면 `REVOCATION_PENDING_EXIT`).
+
+    실패가 먼저 나온다. 매체 실패(`[매체 노출 남음]`)는 Label Studio 영상이 계속 열린다는 뜻이다.
+    """
+    for line in report.errors:
+        print(f"  ! {line}")
+    if report.media_done or report.tools_done or report.snapshots:
+        print(
+            f"  회수: 매체 {len(report.media_done)}개, 도구 작업 {len(report.tools_done)}개, "
+            f"스냅숏 {len(report.snapshots)}개"
+        )
+    for line in report.warnings:
+        print(f"  경고: {line}")
+    if not report.pending:
+        return 0
+    target = session_id or "--pending"
+    print(
+        f"  회수 대기 {len(report.pending)}개: {', '.join(report.pending[:5])} "
+        f"(dlp review revoke {target})"
+    )
+    return REVOCATION_PENDING_EXIT

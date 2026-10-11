@@ -12,6 +12,7 @@ from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any, cast
 from unittest.mock import Mock, patch
 
 import httpx
@@ -47,6 +48,7 @@ from dlp_privacy.runner import (
     detect_session,
     missing_privacy_reviews,
     render_hash,
+    render_session,
     write_render_meta,
 )
 from dlp_review.clients import LabelStudioClient
@@ -1158,3 +1160,107 @@ def test_removing_and_restoring_extra_model_updates_active_generation(
         current = current_labels(repo.get_labels(conn, sid))
         assert len(current) == 1 and current[0].provenance.model_version == model.version
         assert current[0].label_id != "extra-fixed"
+
+
+@pytest.mark.services
+@pytest.mark.parametrize("first", ["create", "collect"])
+def test_direct_labeling_creation_and_blur_collect_never_miss_revocation(
+    pg: sa.Engine,
+    tmp_path: Path,
+    first: str,
+) -> None:
+    """F-REV-02(ADR 0039): 직접 라벨링 작업 생성과 블러 수집이 겹쳐도 회수에서 빠지는 작업이 없다.
+
+    생성이 먼저 세션을 잡으면 수집이 기다렸다가 그 작업까지 회수 요청한다 (REVOKED). 수집이 먼저면
+    생성이 기다렸다가 승인이 풀린 것을 보고 TaskError. 둘 다 실제 PostgreSQL 잠금으로 직렬화된다.
+    """
+    from dlp_review import collect as collect_module
+    from dlp_review.cvat import CvatSchema
+    from dlp_review.reconcile import ReviewedItem
+    from dlp_review.tasks import TaskError, create_labeling_tasks, proxy_key
+    from dlp_schema.labels import BlurTrackPayload, BoxKeyframe
+
+    sid = f"race-revoke-{first}"
+    setup = privacy_setup(tmp_path, sid)
+    policy = privacy_policy(ROOT)
+    setup = ReviewSetup(
+        raw=setup.raw, labeling=setup.labeling, labeling_reader=setup.labeling_reader,
+        ontology=setup.ontology, cvat=setup.cvat, cvat_config=setup.cvat_config, privacy=policy,
+    )  # fmt: skip
+    assert setup.cvat is not None
+    cvat = cast(Mock, setup.cvat)
+    cvat.http = Mock()  # spec에 없는 인스턴스 속성 (수집이 작업의 프로젝트 ID를 읽는다)
+    cvat.http.get.return_value.json.return_value = {"project_id": 1}
+    with pg.begin() as conn:
+        repo.insert_session(conn, session(sid))
+        repo.insert_review_task(
+            conn,
+            task(sid, "cvat:500", privacy=True).model_copy(
+                update={"media_uri": setup.raw.uri(proxy_key(sid, "bodycam"))}
+            ),
+        )
+        render_session(conn, sid, setup.raw, setup.labeling, policy)
+    entered, release, started = threading.Event(), threading.Event(), threading.Event()
+    pids: list[int] = []
+
+    def hold(*_args: object, **_kwargs: object) -> Any:
+        entered.set()
+        assert release.wait(10)
+        return 42 if first == "create" else {"tracks": [], "shapes": [], "tags": []}
+
+    face = BlurTrackPayload(target="face", keyframes=(BoxKeyframe(t_ms=0, x=1, y=1, w=8, h=8),))
+
+    def run_create() -> Any:
+        with pg.begin() as conn:
+            if first == "collect":
+                pids.append(conn.execute(sa.text("SELECT pg_backend_pid()")).scalar_one())
+                started.set()
+            return create_labeling_tasks(conn, sid, setup, "reviewer", NOW, tools={ReviewTool.CVAT})
+
+    def run_collect() -> Any:
+        with pg.begin() as conn:
+            if first == "create":
+                pids.append(conn.execute(sa.text("SELECT pg_backend_pid()")).scalar_one())
+                started.set()
+            return collect_task(conn, "cvat:500", setup, "reviewer", NOW)
+
+    if first == "create":
+        cvat.create_task.side_effect = hold
+    else:
+        cvat.create_task.return_value = 42
+        cvat.get_annotations.side_effect = hold
+    with (
+        patch("dlp_review.tasks._cvat_project", return_value=(1, CvatSchema.from_labels([]))),
+        patch.object(collect_module, "CvatSchema", Mock()),
+        patch.object(collect_module, "annotation_tracks", Mock(return_value=[])),
+        patch.object(
+            collect_module,
+            "from_cvat_tracks",
+            Mock(return_value=[ReviewedItem(None, "bodycam", 0, 100, face)]),
+        ),
+        patch("dlp_review.collect.label_scale", return_value=(1.0, 1.0)),
+        ThreadPoolExecutor(max_workers=2) as pool,
+    ):
+        leader = pool.submit(run_create if first == "create" else run_collect)
+        try:
+            assert entered.wait(10)
+            follower = pool.submit(run_collect if first == "create" else run_create)
+            assert started.wait(5)
+            wait_for_db_lock(pg, pids[0])
+        finally:
+            release.set()
+        made: list[str] = []
+        if first == "create":
+            made = [t.task_key for t in leader.result(timeout=20)]
+            follower.result(timeout=20)
+        else:
+            leader.result(timeout=20)
+            with pytest.raises(TaskError, match="승인"):
+                follower.result(timeout=20)
+    with pg.connect() as conn:
+        tasks = [t for t in repo.list_review_tasks(conn, sid) if t.stage is ReviewStage.LABELING]
+        assert repo.get_session(conn, sid).privacy_state is PrivacyState.AUTO_BLURRED
+    # 생성이 먼저면 그 작업이 회수되고(REVOKED), 수집이 먼저면 작업이 생기지 않는다
+    assert [t.task_key for t in tasks] == made
+    assert all(t.status is ReviewTaskStatus.REVOKED for t in tasks)
+    assert len(made) == (1 if first == "create" else 0)

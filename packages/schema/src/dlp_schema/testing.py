@@ -8,6 +8,7 @@
     - `make_session`: 바디캠(기준) + IMU 두 스트림을 가진 세션 `s001`.
     - `make_label`: 사람 출처 라벨 하나 (세션 `s001`, 온톨로지 1.0.0).
     - `action_payload`: 온톨로지 v1에서 유효한 원시 동작(grasp) 페이로드 사전.
+    - `sqlite_db`: 시간대를 보존하는 SQLite 테스트 DB (서비스 없이 저장소 함수를 시험할 때).
 
 주의
     - 기본 세션의 스트림 URI는 원본 버킷(`s3://dlp-raw/...`)을 가리킨다. 실제 저장소에 접근하지 않는
@@ -19,6 +20,9 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Any
+
+import sqlalchemy as sa
+from sqlalchemy.dialects.sqlite import DATETIME as SQLITE_DATETIME
 
 from dlp_schema.labels import LabelPayload, LabelRecord, Provenance, Source
 from dlp_schema.session import Session, StreamKind, SyncMethod
@@ -131,3 +135,51 @@ def action_payload(**overrides: Any) -> dict[str, Any]:
     }
     data.update(overrides)
     return data
+
+
+class _AwareSqliteDateTime(SQLITE_DATETIME):
+    """SQLite 시각 열: UTC로 바꿔 저장하고 읽을 때 UTC 시간대를 붙인다.
+
+    SQLite는 시간대를 저장하지 않아 계약(AwareDatetime)이 읽기에서 실패한다. 테스트 DB에만 쓴다.
+    """
+
+    # 반환 타입은 SQLAlchemy의 비공개 처리기 타입이라 적지 않고 추론에 맡긴다
+    def bind_processor(self, dialect: sa.Dialect):
+        """시간대 있는 시각을 UTC 기준 시간대 없는 값으로 바꿔 넘긴다."""
+        base = super().bind_processor(dialect)
+
+        def process(value: Any) -> Any:
+            if isinstance(value, datetime) and value.tzinfo is not None:
+                value = value.astimezone(UTC).replace(tzinfo=None)
+            return base(value) if base is not None else value
+
+        return process
+
+    def result_processor(self, dialect: sa.Dialect, coltype: object):
+        """읽은 시각에 UTC 시간대를 붙인다."""
+        base = super().result_processor(dialect, coltype)
+
+        def process(value: Any) -> Any:
+            out = base(value) if base is not None else value
+            return out.replace(tzinfo=UTC) if isinstance(out, datetime) else out
+
+        return process
+
+
+def sqlite_db(url: str = "sqlite://", *, create: bool = True) -> sa.Engine:
+    """시간대를 보존하는 SQLite 테스트 엔진. create면 `tables.metadata`로 표를 만든다.
+
+    PostgreSQL 트리거(불변·추가 전용)와 행 잠금은 없다. 그런 성질은 서비스 테스트에서 본다.
+
+    Args:
+        url: SQLite URL (기본 메모리 DB, 한 스레드에서 같은 연결을 쓴다).
+        create: 표를 만들지 (False면 마이그레이션 시험처럼 호출자가 만든다).
+    """
+    from dlp_schema.db.tables import metadata  # 계약만 쓰는 테스트가 DB 정의를 읽지 않게
+
+    engine = sa.create_engine(url)
+    # 이 엔진의 방언만 시각 열 처리를 바꾼다 (다른 엔진·PostgreSQL에는 영향 없음)
+    engine.dialect.colspecs = {**engine.dialect.colspecs, sa.DateTime: _AwareSqliteDateTime}
+    if create:
+        metadata.create_all(engine)
+    return engine

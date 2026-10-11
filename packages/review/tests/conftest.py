@@ -7,6 +7,8 @@ CVAT 계정 연결(`review.yaml cvat.users` 자리)을 시험용으로 만든다
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import httpx
 import pytest
 
@@ -56,3 +58,13 @@ def cvat_config() -> CvatPolicy:
         for name in users.values():
             ensure_cvat_user(cvat, name)
     return CvatPolicy(users=users, privacy_issue_limit=50)
+
+
+@pytest.fixture
+def cvat_as() -> Callable[[CvatClient, str], CvatClient]:
+    """시험 검수자의 일반 CVAT 계정으로 로그인한다 (라벨러 화면에서 보이는지 본다)."""
+
+    def login(admin: CvatClient, reviewer: str) -> CvatClient:
+        return CvatClient(str(admin.http.base_url), cvat_username(reviewer), CVAT_TEST_PASSWORD)
+
+    return login

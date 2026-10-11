@@ -4,8 +4,8 @@
 
 파이프라인 위치: `dlp_review.tasks.create_labeling_tasks`(작업 라벨 검수 작업 만들기)가
 블러본에 `"<담당자> <세션>"` 글씨를 입혀
-`sessions/<세션>/review/<담당자>/<스트림>.mp4`(라벨링 버킷)로 올린다.
-관련: WP6, ADR 0006.
+`sessions/<세션>/review/<담당자>/<스트림>-<렌더 해시 앞 16자>.mp4`(라벨링 버킷, 내용 주소)로 올린다.
+관련: WP6, ADR 0006·0039.
 
 공개 함수:
 - `watermark_layer`: 워터마크 글씨 마스크(0~255) 이미지.

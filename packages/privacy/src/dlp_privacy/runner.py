@@ -13,6 +13,9 @@ WP5, ADR 0005·0019·0023·0024. CLI `dlp_cli.privacy_cmds`가 DB 연결과 저�
   내보내기)가 쓰기 전에 부르는 확인 (ADR 0024).
 - `invalidate_render`: 블러가 바뀐 스트림의 렌더 기록을 무효로 만든다 (dlp_review의 블러 검수
   수집도 부른다).
+- `stale_media_tasks` / `request_media_revocation` (`revocation`): 블러가 바뀐 스트림의 이미 배포한
+  라벨링 작업 매체에 회수 요청을 남긴다 (ADR 0039). 탐지는 블러가 바뀐 스트림에서 같은 트랜잭션에
+  부르고, `dlp privacy render`·`dlp review` 명령도 부른다.
 
 버킷:
 - raw(원본 버킷 `dlp-raw`): 원본 영상을 읽고 검수 우선 구간 JSON과 탐지 표시(결과 0개 버전,
@@ -99,6 +102,15 @@ from dlp_privacy.rendering import (
     write_render_meta as write_render_meta,
 )
 from dlp_privacy.review import ReviewSegment
+from dlp_privacy.revocation import (
+    StaleMedia as StaleMedia,
+)
+from dlp_privacy.revocation import (
+    request_media_revocation as request_media_revocation,
+)
+from dlp_privacy.revocation import (
+    stale_media_tasks as stale_media_tasks,
+)
 from dlp_schema.common import derived_id
 from dlp_schema.db.repository import (
     get_labels,
@@ -132,6 +144,15 @@ class DetectSummary:
     review_keys: list[str] = field(default_factory=list[str])
     changed: bool = False  # 블러 라벨 집합이 바뀌었는가 (새 라벨 또는 이전 버전 삭제)
     reran: bool = False  # 탐지를 새로 완료했거나 구버전 0건 표시를 DB 기록으로 복구했는가
+    # 스트림 → 이번에 쓴 블러 레코드 수 (삭제 레코드 포함). 0이면 블러 집합이 그대로다
+    changes: dict[str, int] = field(default_factory=dict[str, int])
+    # 이번에 회수를 요청한 라벨링 작업 키 (블러가 바뀐 스트림의 낡은 매체, ADR 0039)
+    revocations: list[str] = field(default_factory=list[str])
+
+    @property
+    def changed_streams(self) -> list[str]:
+        """이번에 블러 레코드를 쓴 스트림 (탐지 순서). 이 스트림의 배포 매체만 회수를 요청한다."""
+        return [s for s, n in self.changes.items() if n]
 
 
 def review_key(session_id: str, stream_id: str) -> str:
@@ -285,7 +306,8 @@ def detect_session(
         sqlalchemy.exc.NoResultFound: 세션이 없을 때.
 
     부작용: DB `label_records`·`privacy_detection_runs` 추가, `sessions.privacy_state` 변경,
-    원본 버킷 읽기·쓰기(원본 영상
+    블러가 바뀐 스트림의 낡은 라벨링 작업에 `review_tasks` 회수 요청(외부 삭제는 하지 않는다,
+    ADR 0039), 원본 버킷 읽기·쓰기(원본 영상
     읽기, 검수 우선 구간·탐지 표시 읽기·덮어쓰기), 라벨링 버킷 렌더 기록 덮어쓰기(labeling이
     있을 때). 저장소 쓰기는 DB 트랜잭션이 되돌아가도 남는다. 그래서 탐지 표시에는 결과 0개
     버전만 넣는다.
@@ -408,6 +430,7 @@ def detect_session(
             insert_labels(conn, changes)
             summary.reran = True
             summary.changed |= bool(changes)
+            summary.changes[stream.stream_id] = len(changes)
             summary.detected[stream.stream_id] = len(labels)
             if labeling is not None:
                 invalidate_render(labeling, session_id, stream.stream_id, "blur_changed", work)
@@ -439,7 +462,30 @@ def detect_session(
     ):
         # 0건 재탐지도 놓친 대상이 있을 수 있다. 새 실행 뒤 영상을 검수하고 다시 승인해야 한다
         set_privacy_state(conn, session_id, PrivacyState.AUTO_BLURRED)
+    # 블러가 바뀐 스트림의 이미 배포한 라벨링 매체는 같은 커밋에서 회수를 요청한다 (ADR 0039)
+    summary.revocations = _request_for_changes(conn, session_id, summary, policy, now)
     return summary
+
+
+def _request_for_changes(
+    conn: sa.Connection,
+    session_id: str,
+    summary: DetectSummary,
+    policy: PrivacyPolicy,
+    now: datetime,
+) -> list[str]:
+    """탐지로 블러 레코드가 생긴 스트림의 낡은 라벨링 작업에 회수를 요청한다. 요청한 작업 키.
+
+    블러 집합이 그대로인 스트림(0건 재탐지 포함)은 렌더 해시가 같아 요청하지 않는다. 바뀐 스트림은
+    렌더 해시가 없는 구 작업도 낡은 것으로 본다 (legacy).
+    """
+    if not summary.changed_streams:
+        return []
+    requested = request_media_revocation(
+        conn, session_id, policy, now, reason="privacy_detect",
+        streams=set(summary.changed_streams), legacy=True,
+    )  # fmt: skip
+    return [t.task_key for t in requested]
 
 
 def approve_session(conn: sa.Connection, session_id: str) -> Session:

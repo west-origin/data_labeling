@@ -17,7 +17,8 @@
     - 라벨: `label_to_row`, `row_to_label`, `insert_labels`, `get_labels`, `record_review`.
     - 검수 작업·배정: `insert_review_task`, `get_review_task`, `list_review_tasks`,
       `mark_review_task_collected`, `insert_assignment`, `get_assignment`, `list_assignments`,
-      `update_assignment`.
+      `update_assignment`. 매체 회수 outbox(ADR 0039): `request_task_revocation`,
+      `mark_task_media_revoked`, `mark_task_tool_revoked`, `pending_revocations`.
     - 데이터셋 버전: `insert_dataset_version`, `get_dataset_version`.
     - 세션 목록·계보: `list_session_ids`, 골든셋·학습 실행·모델 버전·내보내기·사용 중지 함수,
       `dataset_versions_with_session`.
@@ -71,6 +72,18 @@ from dlp_schema.db.review_repository import (
 )
 from dlp_schema.db.review_repository import (
     mark_review_task_collected as mark_review_task_collected,
+)
+from dlp_schema.db.review_repository import (
+    mark_task_media_revoked as mark_task_media_revoked,
+)
+from dlp_schema.db.review_repository import (
+    mark_task_tool_revoked as mark_task_tool_revoked,
+)
+from dlp_schema.db.review_repository import (
+    pending_revocations as pending_revocations,
+)
+from dlp_schema.db.review_repository import (
+    request_task_revocation as request_task_revocation,
 )
 from dlp_schema.db.review_repository import (
     update_assignment as update_assignment,

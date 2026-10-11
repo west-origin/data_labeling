@@ -6,8 +6,9 @@ import os
 import uuid
 from collections.abc import Iterator
 from dataclasses import replace
+from datetime import timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -22,8 +23,14 @@ from dlp_media.storage import S3Store
 from dlp_privacy.detection import FrameDetector
 from dlp_privacy.detectors.oracle import OracleDetector
 from dlp_privacy.policy import TargetPolicy, load_policy
-from dlp_privacy.runner import approve_session, detect_session, render_session
-from dlp_review.clients import CvatClient, LabelStudioClient
+from dlp_privacy.runner import (
+    approve_session,
+    detect_session,
+    expected_render_hash,
+    render_session,
+    request_media_revocation,
+)
+from dlp_review.clients import CvatClient, LabelStudioClient, ToolError
 from dlp_review.collect import collect_task
 from dlp_review.cvat import CvatSchema, to_cvat_tracks
 from dlp_review.labelstudio import LS_KINDS, to_ls_results
@@ -38,7 +45,9 @@ from dlp_review.ops.runner import (
     quality_report,
 )
 from dlp_review.ops.seeding import seed_prefix
-from dlp_review.tasks import ReviewSetup, frame_times, object_key
+from dlp_review.revoke import execute_media_revocations
+from dlp_review.tasks import ReviewSetup, TaskError, frame_times, lock_assignment, object_key
+from dlp_review.verify import verification_gaps
 from dlp_schema.db.migrate import upgrade
 from dlp_schema.db.repository import (
     get_assignment,
@@ -52,9 +61,10 @@ from dlp_schema.db.repository import (
     list_review_tasks,
     record_review,
     register_ontology,
+    set_privacy_state,
 )
 from dlp_schema.episode import current_labels
-from dlp_schema.labels import LabelRecord, Provenance, Source, VerificationState
+from dlp_schema.labels import LabelRecord, Provenance, Source, Verification, VerificationState
 from dlp_schema.lineage import GoldenSet
 from dlp_schema.ontology import load_ontology
 from dlp_schema.review import (
@@ -66,7 +76,7 @@ from dlp_schema.review import (
     ReviewTaskStatus,
     ReviewTool,
 )
-from dlp_schema.session import Domain
+from dlp_schema.session import Domain, PrivacyState
 from dlp_schema.testing import FIXED_TIME, make_session
 
 pytestmark = pytest.mark.services
@@ -432,3 +442,113 @@ def test_seeded_blur_deletion_through_cvat(
     # 원래 골든 블러 라벨(운영 라벨)은 그대로다
     before = {i for i, x in gold.items() if x.kind == "blur_track" and not x.seeded_error}
     assert {x.label_id for x in current_labels(gold_after) if x.kind == "blur_track"} == before
+
+
+class _FlakyLs:
+    """삭제를 처음 한 번 실패시키는 Label Studio (장애 주입). 나머지는 실제 클라이언트로 넘긴다."""
+
+    def __init__(self, real: LabelStudioClient) -> None:
+        self.real, self.failed = real, False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.real, name)
+
+    def delete_task(self, task_id: int) -> bool:
+        if not self.failed:
+            self.failed = True
+            raise ToolError("Label Studio 삭제 장애 (주입)")
+        return self.real.delete_task(task_id)
+
+
+def test_revoked_assignment_is_reissued_after_reapproval(
+    pg: sa.Engine, setup: ReviewSetup, tmp_path: Path
+) -> None:
+    """F-REV-02(ADR 0039): 배정의 LS 작업이 블러 변경으로 회수되면 재승인·렌더 뒤 다시 만든다.
+
+    시나리오: 계획 → assign(LS) → 블러 재검수 결과(사람 얼굴 블러)와 같은 커밋의 회수 요청 →
+    LS 삭제 장애로 대기(매체는 끊김) → 생성 게이트·verify 이유 → 재시도로 완료 → 재승인 전 assign은
+    TaskError → approve·render → assign이 새 작업 → 제출·수집 → 배정 완료 → verify 이유 없음.
+    정답 근거: 회수 대기 중에는 서명 URL이 404, 새 작업은 새 렌더 해시·키, 배정 task_key가 새 작업.
+    """
+    sid = f"rvk-{uuid.uuid4().hex[:6]}"
+    _session(pg, setup, tmp_path / "s", sid, human=False)
+    ops = load_ops_policy(ROOT)
+    zero = {"blind_task_ratio": 0.0, "seeded_error_task_ratio": 0.0, "double_annotation_ratio": 0.0}
+    ops = ops.model_copy(update={"ratios": ops.ratios.model_copy(update=zero)})
+    ontology = load_ontology(ROOT / "config" / "ontology" / "v1")
+    policy = load_policy(ROOT)
+    ls = setup.label_studio
+    assert ls is not None and setup.cvat is None
+    with pg.begin() as conn:
+        planned = plan_session(conn, sid, ["r1"], ops, ontology, seed=1, now=FIXED_TIME)
+    [unit] = [a for a in planned if a.stream_id is None]
+    with pg.begin() as conn:
+        [first] = create_assignment_tasks(conn, unit, setup, ops, FIXED_TIME)
+        old_hash = expected_render_hash(conn, sid, "bodycam", policy)
+    assert first.render_hash == old_hash
+    video_url = ls.http.get(f"/api/tasks/{first.external_id}").json()["data"]["video"]
+    assert httpx.get(video_url).status_code == 200
+
+    # 블러 재검수가 놓친 얼굴을 찾았다 (collect의 블러 변경 처리와 같은 단계를 한 커밋에)
+    later = FIXED_TIME + timedelta(hours=1)
+    [blur] = [x for x in get_labels_sync(pg, sid) if x.kind == "blur_track"][:1]
+    face = blur.model_copy(
+        update={
+            "label_id": f"{sid}-face-new", "provenance": Provenance(source=Source.HUMAN),
+            "confidence": None, "created_at": later,
+            "verification": Verification(
+                state=VerificationState.HUMAN_CORRECTED, reviewer_id="privacy01", reviewed_at=later
+            ),
+        }
+    )  # fmt: skip
+    with pg.begin() as conn:
+        insert_labels(conn, [face])
+        set_privacy_state(conn, sid, PrivacyState.AUTO_BLURRED)
+        requested = request_media_revocation(
+            conn, sid, policy, later, reason="blur_changed:test", streams={"bodycam"}, legacy=True
+        )
+    assert [t.task_key for t in requested] == [first.task_key]
+
+    flaky = replace(setup, label_studio=cast(LabelStudioClient, _FlakyLs(ls)))
+    report = execute_media_revocations(
+        pg, sid, labeling=setup.labeling, raw_bucket=setup.raw.bucket, cvat=None,
+        label_studio=flaky.label_studio,
+    )  # fmt: skip
+    assert report.pending == [first.task_key] and len(report.media_done) == 1
+    assert httpx.get(video_url).status_code == 404  # 매체는 이미 끊겼다
+    with pg.begin() as conn:
+        gaps = verification_gaps(conn, sid, policy)
+        assert any(g.startswith("매체 회수 미완료 1개") for g in gaps)
+        assert any(g.startswith("회수돼 다시 만들 배정 1개") for g in gaps)
+        assert lock_assignment(conn, unit.assignment_id) is None
+        with pytest.raises(TaskError, match="승인"):
+            create_assignment_tasks(
+                conn, get_assignment(conn, unit.assignment_id), setup, ops, later
+            )
+    with pg.begin() as conn:
+        approve_session(conn, sid)
+        render_session(conn, sid, setup.raw, setup.labeling, policy)
+        with pytest.raises(TaskError, match="매체 회수"):
+            create_assignment_tasks(
+                conn, get_assignment(conn, unit.assignment_id), setup, ops, later
+            )
+    retry = execute_media_revocations(
+        pg, sid, labeling=setup.labeling, raw_bucket=setup.raw.bucket, cvat=None,
+        label_studio=flaky.label_studio,
+    )  # fmt: skip
+    assert retry.complete and retry.tools_done == [first.task_key]
+    assert ls.http.get(f"/api/tasks/{first.external_id}/").status_code == 404
+
+    with pg.begin() as conn:
+        [renewed] = create_assignment_tasks(
+            conn, get_assignment(conn, unit.assignment_id), setup, ops, later
+        )
+        new_hash = expected_render_hash(conn, sid, "bodycam", policy)
+        assert get_assignment(conn, unit.assignment_id).task_key == renewed.task_key
+    assert renewed.task_key != first.task_key and renewed.render_hash == new_hash != old_hash
+    assert renewed.media_uri.endswith(f"-{new_hash[:16]}.mp4")
+    _post(ls, renewed.external_id, ls.prediction_results(int(renewed.external_id)))
+    with pg.begin() as conn:
+        assert collect_task(conn, renewed.task_key, setup, "r1", later) is not None
+        assert get_assignment(conn, unit.assignment_id).status is AssignmentStatus.DONE
+        assert not any("회수" in g for g in verification_gaps(conn, sid, policy))

@@ -9,6 +9,8 @@
   - Label Studio: 시간 구간 라벨, 영상과 장갑·IMU 시계열 동기 재생
   일반 라벨러 경로의 URL은 라벨러 자격 증명(라벨링 버킷 읽기 전용)으로 서명한다.
 - 블러본은 지금 승인된 블러 라벨로 렌더한 것만 쓴다 (dlp_privacy.runner.assert_render_current).
+  작업에는 그 블러본의 렌더 해시(`ReviewTask.render_hash`)를 남긴다. 블러가 바뀌면 이 해시로 낡은
+  매체를 찾아 회수한다 (ADR 0039). 회수가 끝나지 않은 스트림에는 새 라벨링 작업을 만들지 않는다.
 - CVAT 작업은 담당자의 CVAT 계정(review.yaml cvat.users)에 배정한다. 블러 검수는 연결이 없으면
   만들지 않고, 검수 우선 구간을 CVAT 이슈로 남겨 검수자가 먼저 보게 한다 (ADR 0024).
 
@@ -25,17 +27,20 @@ WP6, ADR 0006·0020·0023·0024. 진입점: `dlp review create <세션>`(직접 
 - `current_for_review`, `Selector`, `default_selector`: 작업에 넣을 라벨 고르기.
 - `cvat_user_id`: dlp 검수자 → CVAT 사용자 ID.
 - `create_privacy_tasks`: 블러 검수 작업 (스트림별 CVAT).
-- `lock_assignment`: 배정 행 잠금 (작업 중복 생성 방지).
+- `lock_assignment`: 배정 행 잠금 (작업 중복 생성 방지). 회수한 작업은 "작업 없음"으로 본다.
 - `create_labeling_tasks`: 작업 라벨 검수 작업 (CVAT 공간 + Label Studio 시간).
 
 저장소 키:
 - 원본 버킷: `sessions/<세션>/derived/<스트림>.proxy.mp4`(검수 프록시), 장갑·IMU 원본 Parquet.
-- 라벨링 버킷: `sessions/<세션>/review/<담당자>/<스트림>.mp4`(워터마크 영상),
-  `sessions/<세션>/review/timeseries.csv`(시계열).
+- 라벨링 버킷: `sessions/<세션>/review/<담당자>/<스트림>-<렌더 해시 앞 16자>.mp4`
+  (워터마크 영상, 내용 주소: 블러본이 바뀌면 키도 바뀐다. 회수 실행기가 지운다),
+  `sessions/<세션>/review/timeseries.csv`(시계열, 얼굴이 없어 회수하지 않는다).
+  구 작업은 `<담당자>/<스트림>.mp4` 키를 쓴다.
 원본 접근은 `setup.raw`가 감사 저장소(`dlp_cli.raw_access.raw_store`)일 때 기록된다 (ADR 0020).
 
 DB 트랜잭션은 호출자가 관리한다. DB 롤백으로 CVAT·Label Studio 작업이나 저장소 사본이 삭제되지는
-않는다. 프라이버시 작업 생성은 세션 행을 잠근 상태로 원본 접근·업로드·도구 호출까지 수행한다.
+않는다. 작업 생성(블러 검수·라벨링 모두)은 세션 행을 잠근 상태로 원본 접근·업로드·도구 호출까지
+수행한다. 라벨링 작업 생성의 잠금은 회수 요청(같은 세션 잠금 아래에서 남긴다)과 겹치지 않게 한다.
 """
 
 from __future__ import annotations
@@ -61,7 +66,9 @@ from dlp_privacy.runner import (
     RenderNotCurrentError,
     assert_render_current,
     check_fetched,
+    expected_render_hash,
     read_review_segments,
+    stale_media_tasks,
 )
 from dlp_review.clients import CvatClient, LabelStudioClient
 from dlp_review.cvat import CvatSchema, Scale, label_spec, to_cvat_tracks
@@ -83,12 +90,13 @@ from dlp_schema.db.repository import (
     latest_privacy_detection,
     list_review_tasks,
     lock_session,
+    pending_revocations,
 )
 from dlp_schema.db.tables import review_assignments
 from dlp_schema.episode import current_labels
 from dlp_schema.labels import LabelRecord
 from dlp_schema.ontology import Ontology
-from dlp_schema.review import ReviewMode, ReviewStage, ReviewTask, ReviewTool
+from dlp_schema.review import ReviewMode, ReviewStage, ReviewTask, ReviewTaskStatus, ReviewTool
 from dlp_schema.session import PrivacyState, Session, Stream, StreamKind
 from dlp_sync.policy import load_policy as load_sync_policy
 from dlp_sync.signals import Series, glove_series, imu_series
@@ -428,8 +436,10 @@ def lock_assignment(conn: sa.Connection, assignment_id: str) -> list[ReviewTask]
 
     같은 배정으로 동시에 작업을 만들면 두 번째 호출은 첫 트랜잭션이 끝날 때까지 기다렸다가
     이미 만든 작업을 받는다 (검수 도구에 작업이 두 번 생기지 않는다).
+    회수한(revoked) 작업은 빼고 본다. 배정의 작업이 모두 회수됐으면 None이라 호출자가 지금
+    블러본으로 다시 만든다 (`ops.runner.create_assignment_tasks`, ADR 0039).
 
-    반환: 작업이 아직 없으면 None (잠금은 호출자 트랜잭션 끝까지 유지된다).
+    반환: 작업이 아직 없거나 모두 회수됐으면 None (잠금은 호출자 트랜잭션 끝까지 유지된다).
     예외: 배정이 없으면 `scalar_one`이 예외를 던진다.
     """
     task_key = conn.execute(
@@ -440,7 +450,31 @@ def lock_assignment(conn: sa.Connection, assignment_id: str) -> list[ReviewTask]
     if task_key is None:
         return None
     a = get_assignment(conn, assignment_id)
-    return [t for t in list_review_tasks(conn, a.session_id) if t.assignment_id == assignment_id]
+    live = [
+        t
+        for t in list_review_tasks(conn, a.session_id)
+        if t.assignment_id == assignment_id and t.status is not ReviewTaskStatus.REVOKED
+    ]
+    return live or None
+
+
+def _check_no_pending_revocation(
+    conn: sa.Connection, session_id: str, streams: Sequence[str], policy: PrivacyPolicy
+) -> None:
+    """대상 스트림에 끝나지 않은 매체 회수나 회수 요청 없는 낡은 작업이 있으면 `TaskError`.
+
+    회수 대기 중인 스트림에 새 사본을 올리지 않는다 (같은 키에 올리면 실행기가 새 사본을 지운다).
+    렌더 해시가 지금과 다른데 요청이 없는 작업은 알려지지 않은 경로(렌더 정책 변경 등)의 백스톱이다.
+    도구·매체 작업 전에 부른다. 해결: `dlp review revoke <세션>`.
+    """
+    targets = set(streams)
+    pending = [t for t in pending_revocations(conn, session_id) if t.stream_id in targets]
+    stale = stale_media_tasks(conn, session_id, policy, streams=targets)
+    if pending or stale:
+        raise TaskError(
+            f"{session_id}: 매체 회수가 끝나지 않은 작업 {len(pending) + len(stale)}개 "
+            f"(dlp review revoke {session_id})"
+        )
 
 
 def _series(
@@ -490,12 +524,17 @@ def create_labeling_tasks(
     반환: 만든 `ReviewTask` 목록 (모두 만든 뒤 한꺼번에 DB `review_tasks`에 삽입).
     예외: `TaskError`(프라이버시 승인 전, 블러본이 현재 블러 라벨과 다름·무효),
     `RawAccessError`(작업 URI에 원본 버킷이 섞임), `clients.ToolError`.
-    부작용: 라벨링 버킷 쓰기(워터마크 영상, 시계열 CSV), 원본 버킷 읽기(장갑·IMU Parquet,
-    감사 기록), 도구 작업 생성, DB 삽입.
+    부작용: 세션 행 잠금, 라벨링 버킷 쓰기(워터마크 영상, 시계열 CSV), 원본 버킷 읽기(장갑·IMU
+    Parquet, 감사 기록), 도구 작업 생성, DB 삽입.
     주의: Label Studio 시간 작업은 세션 계약의 단일 바디캠 스트림에 만든다.
     직접 호출로 반복 생성하면 기존 도구 작업을 재사용하지 않으며
     같은 시계열 CSV 키를 다시 쓸 수 있다.
+    회수(ADR 0039): 세션을 먼저 잠가 블러 검수 수집·탐지·렌더의 회수 요청과 직렬화한다. 대상
+    스트림에 회수 대기(또는 요청 없는 낡은 작업)가 있으면 `TaskError` (도구·매체 작업 전).
     """
+    # 회수 요청과 같은 세션 잠금. 없으면 수집이 대상을 고른 뒤 이전 렌더로 만든 작업이 커밋될
+    # 수 있다 (READ COMMITTED)
+    lock_session(conn, session_id)
     pick = select or default_selector(conn, session_id)
     use_cvat = setup.cvat is not None and (tools is None or ReviewTool.CVAT in tools)
     use_ls = setup.label_studio is not None and (tools is None or ReviewTool.LABEL_STUDIO in tools)
@@ -504,6 +543,13 @@ def create_labeling_tasks(
     ontology = get_session_ontology(conn, session_id)
     if session.privacy_state is not PrivacyState.APPROVED:
         raise TaskError(f"{session_id}: 프라이버시 승인 전에는 작업 라벨 검수를 만들 수 없습니다")
+    videos = [s.stream_id for s in session.streams if s.kind in VIDEO_KINDS]
+    _check_no_pending_revocation(
+        conn,
+        session_id,
+        [s for s in videos if streams is None or s in streams],
+        setup.privacy_policy(),
+    )
     raw_bucket = setup.raw.bucket
     out: list[ReviewTask] = []
     with tempfile.TemporaryDirectory() as tmp:
@@ -523,6 +569,10 @@ def create_labeling_tasks(
                 setup.labeling.get_file(blurred_key(session_id, stream.stream_id), blurred)
                 # 받은 파일이 렌더 기록의 해시와 같은지 확인한다 (그 사이 바뀐 파일 금지)
                 check_fetched(blurred, rendered, session_id, stream.stream_id)
+                # 작업에 남길 렌더 해시 (블러가 바뀌면 이 값이 달라져 낡은 매체로 판정된다)
+                rhash = expected_render_hash(
+                    conn, session_id, stream.stream_id, setup.privacy_policy()
+                )
             except RenderNotCurrentError as exc:
                 raise TaskError(str(exc)) from exc
             marked = work / f"{stream.stream_id}-{assignee}.mp4"
@@ -530,7 +580,8 @@ def create_labeling_tasks(
                 blurred, marked, f"{assignee} {session_id}", opacity=media.watermark_opacity,
                 crf=media.watermark_crf, encoder_rate=media.encoder_rate,
             )  # fmt: skip
-            vkey = f"sessions/{session_id}/review/{assignee}/{stream.stream_id}.mp4"
+            # 내용 주소 키: 블러본이 바뀌면 키도 바뀌어 회수 대상 사본과 새 사본이 섞이지 않는다
+            vkey = f"sessions/{session_id}/review/{assignee}/{stream.stream_id}-{rhash[:16]}.mp4"
             setup.labeling.put_file(vkey, marked, sha256_file(marked))
             media_uri = setup.labeling.uri(vkey)
 
@@ -556,7 +607,8 @@ def create_labeling_tasks(
                 spatial = ("box_track", "keypoint_track")
                 out.append(
                     _task(f"cvat:{tid}", ReviewTool.CVAT, tid, session_id, stream.stream_id,
-                          assignee, media_uri, spatial, now, mode, assignment_id, labels)
+                          assignee, media_uri, spatial, now, mode, assignment_id, labels,
+                          render_hash=rhash)
                 )  # fmt: skip
 
             if use_ls and stream.kind is StreamKind.BODYCAM:
@@ -591,7 +643,7 @@ def create_labeling_tasks(
                 tid = ls.create_task(lpid, data, to_ls_results(labels))
                 out.append(_task(f"label_studio:{tid}", ReviewTool.LABEL_STUDIO, tid, session_id,
                                  stream.stream_id, assignee, media_uri, LS_KINDS, now, mode,
-                                 assignment_id, labels))  # fmt: skip
+                                 assignment_id, labels, render_hash=rhash))  # fmt: skip
     # 마지막 방어선: 일반 라벨러 작업의 매체 URI에 원본 버킷이 없어야 한다
     check_stage_uris(ReviewStage.LABELING, [t.media_uri for t in out], raw_bucket)
     for task in out:
@@ -603,12 +655,16 @@ def _task(
     key: str, tool: ReviewTool, tid: int, session_id: str, stream_id: str, assignee: str,
     media_uri: str, kinds: tuple[str, ...], now: datetime,
     mode: ReviewMode = ReviewMode.STANDARD, assignment_id: str | None = None,
-    sent: Sequence[LabelRecord] = (),
+    sent: Sequence[LabelRecord] = (), *, render_hash: str,
 ) -> ReviewTask:  # fmt: skip
-    """작업 라벨 단계(LABELING) `ReviewTask`를 만든다. sent: 작업에 실제로 보낸 라벨."""
+    """작업 라벨 단계(LABELING) `ReviewTask`를 만든다.
+
+    sent: 작업에 실제로 보낸 라벨.
+    render_hash: 매체를 만든 블러본의 렌더 해시 (회수 판정, ADR 0039).
+    """
     return ReviewTask(
         task_key=key, tool=tool, external_id=str(tid), session_id=session_id, stream_id=stream_id,
         stage=ReviewStage.LABELING, assignee=assignee, media_uri=media_uri, label_kinds=kinds,
         created_at=now, mode=mode, assignment_id=assignment_id,
-        sent_label_ids=tuple(x.label_id for x in sent),
+        sent_label_ids=tuple(x.label_id for x in sent), render_hash=render_hash,
     )  # fmt: skip

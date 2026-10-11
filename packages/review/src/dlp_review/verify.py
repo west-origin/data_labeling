@@ -8,7 +8,9 @@
 완료 조건 (모두 만족해야 한다):
 - 블러 검수가 끝나 privacy_state가 approved다 (승인이 풀린 세션은 완료로 보지 않는다).
 - 이 세션의 검수 작업 중 수거되지 않은 것(open)이 없다. 블러 작업 포함.
-- 열린 검수 배정(review_assignments.status=open)이 없다.
+- 매체 회수(ADR 0039)가 끝나지 않은 작업이 없고, 렌더 해시가 지금 블러본과 다른데 회수 요청이 없는
+  작업도 없다 (렌더 해시가 없는 구 작업은 이 판정에서 빼 기존 세션을 갑자기 막지 않는다).
+- 열린 검수 배정(review_assignments.status=open)이 없다. 회수돼 다시 만들어야 할 배정은 따로 알린다.
 - 블러를 뺀 현재 운영 라벨 중 모델 라벨은 모두 사람 검수 상태다
   (human_approved, human_corrected, sample_verified). 사람이 만든 라벨은 그 자체로 검수된 것이다.
 - 블러를 뺀 현재 운영 라벨이 하나 이상 있다 (빈 세션은 완료가 아니다).
@@ -29,11 +31,16 @@ from datetime import datetime
 
 import sqlalchemy as sa
 
+from dlp_privacy.policy import PrivacyPolicy
+from dlp_privacy.policy import load_policy as load_privacy_policy
+from dlp_privacy.runner import stale_media_tasks
+from dlp_schema import repo_root
 from dlp_schema.db.repository import (
     get_labels,
     get_session,
     list_assignments,
     list_review_tasks,
+    pending_revocations,
     set_lifecycle,
 )
 from dlp_schema.episode import current_labels
@@ -65,11 +72,14 @@ class VerifyResult:
     reasons: list[str] = field(default_factory=list[str])
 
 
-def verification_gaps(conn: sa.Connection, session_id: str) -> list[str]:
+def verification_gaps(
+    conn: sa.Connection, session_id: str, privacy_policy: PrivacyPolicy | None = None
+) -> list[str]:
     """완료를 막는 이유 목록 (비었으면 완료 조건을 모두 만족).
 
-    인자: conn(DB 연결, 읽기만), session_id(세션 ID).
-    반환: 이유 문장 목록. 순서는 블러 승인 → 작업 → 배정 → 라벨.
+    인자: conn(DB 연결, 읽기만), session_id(세션 ID), privacy_policy(렌더 해시 계산용 프라이버시
+    정책, None이면 저장소의 `privacy.yaml`).
+    반환: 이유 문장 목록. 순서는 블러 승인 → 작업 → 매체 회수 → 배정 → 라벨.
     예외: 세션이 없으면 `get_session`이 던지는 예외.
     부작용 없음 (`sessions`, `review_tasks`, `review_assignments`, `label_records` 조회).
     """
@@ -77,13 +87,22 @@ def verification_gaps(conn: sa.Connection, session_id: str) -> list[str]:
     reasons: list[str] = []
     if session.privacy_state is not PrivacyState.APPROVED:
         reasons.append(f"블러 승인 전 (privacy_state={session.privacy_state.value})")
-    open_tasks = [
-        t.task_key for t in list_review_tasks(conn, session_id) if t.status is ReviewTaskStatus.OPEN
-    ]
+    tasks = list_review_tasks(conn, session_id)
+    open_tasks = [t.task_key for t in tasks if t.status is ReviewTaskStatus.OPEN]
     if open_tasks:
         # 메시지가 길어지지 않게 앞 5개만 보여 준다
         reasons.append(f"수거하지 않은 검수 작업 {len(open_tasks)}개: {', '.join(open_tasks[:5])}")
+    reasons += _revocation_gaps(
+        conn, session_id, privacy_policy or load_privacy_policy(repo_root())
+    )
     open_assignments = list_assignments(conn, session_id, status=AssignmentStatus.OPEN)
+    revoked = {t.task_key for t in tasks if t.status is ReviewTaskStatus.REVOKED}
+    reissue = [a.assignment_id for a in open_assignments if a.task_key in revoked]
+    if reissue:
+        reasons.append(
+            f"회수돼 다시 만들 배정 {len(reissue)}개 "
+            f"(재승인·렌더 뒤 dlp review assign {' '.join(reissue[:3])})"
+        )
     if open_assignments:
         reasons.append(f"열린 검수 배정 {len(open_assignments)}개")
     # 블러 라벨은 블러 승인(privacy_state)으로 따로 판정하므로 라벨 조건에서 뺀다.
@@ -101,10 +120,34 @@ def verification_gaps(conn: sa.Connection, session_id: str) -> list[str]:
     return reasons
 
 
-def verify_session(conn: sa.Connection, session_id: str, now: datetime, actor: str) -> VerifyResult:
+def _revocation_gaps(conn: sa.Connection, session_id: str, policy: PrivacyPolicy) -> list[str]:
+    """매체 회수 미완료와 회수 요청 없는 낡은 작업의 이유 문장 (ADR 0039).
+
+    낡은 작업은 렌더 해시가 있는 것만 센다 (구 작업은 `dlp review revoke --include-legacy`로 정리).
+    """
+    reasons: list[str] = []
+    pending = pending_revocations(conn, session_id)
+    if pending:
+        reasons.append(f"매체 회수 미완료 {len(pending)}개 (dlp review revoke {session_id})")
+    stale = stale_media_tasks(conn, session_id, policy)
+    if stale:
+        reasons.append(
+            f"블러가 바뀐 뒤 회수 요청 없는 작업 {len(stale)}개 (dlp review revoke {session_id})"
+        )
+    return reasons
+
+
+def verify_session(
+    conn: sa.Connection,
+    session_id: str,
+    now: datetime,
+    actor: str,
+    privacy_policy: PrivacyPolicy | None = None,
+) -> VerifyResult:
     """조건을 만족하면 prelabeled → human_verified로 옮긴다. 멱등: 이미 그 뒤 단계면 그대로 둔다.
 
     now: 전이 시각 (시간대 필수, 운영 지표의 검증 주가 된다). actor: 판정을 실행한 사람·서비스.
+    privacy_policy: `verification_gaps`에 그대로 넘긴다 (None이면 저장소 정책).
 
     반환: `VerifyResult`. prelabeled가 아니면(그 전 단계 또는 withdrawn) verified=False와 그 이유를
     돌려준다 (예외 아님. withdrawn이어도 이유 문장은 "프리라벨 전 단계다"로 나온다).
@@ -124,7 +167,7 @@ def verify_session(conn: sa.Connection, session_id: str, now: datetime, actor: s
         return VerifyResult(
             session_id, verified=False, reasons=[f"프리라벨 전 단계다 (lifecycle={state.value})"]
         )
-    reasons = verification_gaps(conn, session_id)
+    reasons = verification_gaps(conn, session_id, privacy_policy)
     if reasons:
         return VerifyResult(session_id, verified=False, reasons=reasons)
     set_lifecycle(conn, session_id, LifecycleState.HUMAN_VERIFIED, at=now, actor=actor)

@@ -12,9 +12,16 @@ import numpy as np
 import pytest
 
 from dlp_fixtures.sync import SyncScenario
+from dlp_media.audit import AuditedStore, MemorySink
 from dlp_media.glove import read_glove
 from dlp_media.imu import read_imu_table
-from dlp_media.storage import ImmutableObjectError, LocalStore, put_immutable
+from dlp_media.storage import (
+    DeletableStore,
+    ImmutableObjectError,
+    LocalStore,
+    put_immutable,
+    sha256_file,
+)
 from dlp_media.tables import read_parquet
 
 
@@ -109,3 +116,27 @@ def test_local_store_is_immutable_and_idempotent(tmp_path: Path) -> None:
         put_immutable(store, "sessions/s/raw/a.bin", src)
     with pytest.raises(ValueError, match="버킷 밖"):
         store.head("../../etc/passwd")
+
+
+def test_local_store_delete_is_idempotent_and_raw_audit_store_cannot_delete(tmp_path: Path) -> None:
+    """라벨링 버킷 사본 삭제(ADR 0039): 객체와 해시 옆 파일을 함께 지우고, 다시 지워도 성공한다.
+
+    원본 감사 저장소(`AuditedStore`)는 삭제가 없어 `DeletableStore`가 아니다 (원본 불변 유지).
+    버킷 밖을 가리키는 키는 지우기 전에 ValueError.
+    """
+    store = LocalStore(tmp_path / "store", "dlp-labeling")
+    src = tmp_path / "v.mp4"
+    src.write_bytes(b"video")
+    key = "sessions/s/review/a/bodycam.mp4"
+    store.put_file(key, src, sha256_file(src))
+    assert isinstance(store, DeletableStore)
+    store.delete(key)
+    assert store.head(key) is None
+    assert not (store.root / (key + ".sha256")).exists()
+    store.delete(key)  # 없어도 성공 (멱등)
+    with pytest.raises(ValueError, match="버킷 밖"):
+        store.delete("../outside.mp4")
+    audited = AuditedStore(
+        LocalStore(tmp_path / "store", "dlp-raw"), MemorySink(), actor="t", purpose="test"
+    )
+    assert not isinstance(audited, DeletableStore)

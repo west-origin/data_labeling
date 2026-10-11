@@ -11,7 +11,7 @@ from __future__ import annotations
 import copy
 import os
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
@@ -27,17 +27,24 @@ from dlp_fixtures.sync import generate_sync_scenario
 from dlp_fixtures.video import generate_blur_scenario
 from dlp_media.audit import AuditedStore, MemorySink
 from dlp_media.ingest import ingest_session, load_manifest
-from dlp_media.storage import S3Store
+from dlp_media.storage import S3Store, blurred_key
 from dlp_privacy.detection import FrameDetector
 from dlp_privacy.detectors.oracle import OracleDetector
 from dlp_privacy.policy import PrivacyPolicy, TargetPolicy, load_policy
-from dlp_privacy.runner import approve_session, detect_session, render_session
+from dlp_privacy.runner import (
+    approve_session,
+    detect_session,
+    expected_render_hash,
+    render_meta_key,
+    render_session,
+)
 from dlp_review.clients import CvatClient, LabelStudioClient
 from dlp_review.collect import collect_task
 from dlp_review.labelstudio import LS_KINDS
 from dlp_review.ops.policy import CvatPolicy
 from dlp_review.ops.policy import load_policy as load_ops_policy
 from dlp_review.ops.runner import plan_session
+from dlp_review.revoke import RevocationReport, execute_media_revocations, snapshot_key
 from dlp_review.roles import AccessError
 from dlp_review.tasks import (
     ReviewSetup,
@@ -50,6 +57,7 @@ from dlp_review.tasks import (
 from dlp_schema.db.migrate import upgrade
 from dlp_schema.db.repository import (
     get_labels,
+    get_review_task,
     get_session,
     insert_labels,
     insert_review_task,
@@ -149,6 +157,14 @@ def _approve_blur(conn: sa.Connection, sid: str) -> None:
             label_kinds=("blur_track",), created_at=FIXED_TIME,
             status=ReviewTaskStatus.COLLECTED, collected_at=FIXED_TIME,
         ),
+    )  # fmt: skip
+
+
+def _revoke(pg: sa.Engine, setup: ReviewSetup, sid: str) -> RevocationReport:
+    """커밋된 회수 대기를 실행한다 (CLI `run_revocations`와 같은 실행기)."""
+    return execute_media_revocations(
+        pg, sid, labeling=setup.labeling, raw_bucket=setup.raw.bucket, cvat=setup.cvat,
+        label_studio=setup.label_studio,
     )  # fmt: skip
 
 
@@ -471,16 +487,116 @@ def test_cvat_shape_mode_box_is_collected_and_stale_blurred_is_refused(
         assert isinstance(new.payload, BlurTrackPayload)
         k0, k1 = new.payload.keyframes
         assert not k0.outside and k1.outside  # 그 프레임에만 보인다
-        # 승인이 풀리고 이전 블러본은 무효
+        # 승인이 풀리고 이전 블러본은 무효. 만든 라벨링 작업은 같은 커밋에서 회수 요청 (ADR 0039)
         assert get_session(conn, sid).privacy_state is PrivacyState.AUTO_BLURRED
+        assert len(out.revoked) == 1
         with pytest.raises(TaskError, match="승인"):
             create_labeling_tasks(conn, sid, setup, "labeler01", later, tools=_LS)
         approve_session(conn, sid)
+        # 회수가 끝나기 전에는 새 라벨링 작업을 만들지 않는다
+        with pytest.raises(TaskError, match="매체 회수"):
+            create_labeling_tasks(conn, sid, setup, "labeler01", later, tools=_LS)
+    assert _revoke(pg, setup, sid).complete
+    with pg.begin() as conn:
         # 다시 승인해도 다시 렌더하기 전에는 이전 블러본으로 작업을 만들지 않는다
         with pytest.raises(TaskError, match="무효"):
             create_labeling_tasks(conn, sid, setup, "labeler01", later, tools=_LS)
         render_session(conn, sid, setup.raw, setup.labeling, load_policy(ROOT))
         assert create_labeling_tasks(conn, sid, setup, "labeler01", later, tools=_LS)
+
+
+def _add_face_shape(cvat: CvatClient, tid: int) -> None:
+    """블러 검수자가 놓친 얼굴을 모양 모드 직사각형 하나로 그린다 (3번 프레임)."""
+    label_id = cvat.get_tracks(tid)[0]["label_id"]
+    body = {"version": 0, "tags": [], "tracks": [], "shapes": [{
+        "type": "rectangle", "frame": 3, "label_id": label_id, "points": [10, 10, 60, 60],
+        "occluded": False, "outside": False, "z_order": 0, "rotation": 0.0, "attributes": [],
+        "group": 0, "source": "manual",
+    }]}  # fmt: skip
+    r = cvat.http.patch(f"/api/tasks/{tid}/annotations", params={"action": "create"}, json=body)
+    r.raise_for_status()
+
+
+def test_blur_change_revokes_deployed_labeling_media_end_to_end(
+    pg: sa.Engine,
+    setup: ReviewSetup,
+    tmp_path: Path,
+    cvat_as: Callable[[CvatClient, str], CvatClient],
+) -> None:
+    """F-REV-02(ADR 0039): 승인 뒤 블러 재검수로 얼굴을 찾으면 배포한 라벨링 매체가 끊긴다.
+
+    시나리오: 승인·렌더 → CVAT·LS 라벨링 작업(렌더 해시·내용 주소 키) → 라벨러가 영상·작업을 연다 →
+    블러 재검수에서 얼굴 추가 → 수집(커밋) → 실행기 → 재승인·렌더 → 다시 만들기.
+    정답 근거: 서명 URL·도구 작업이 모두 404(관리자·라벨러), 라벨러 작업 목록에서 사라짐, 스냅숏이
+    남음, DB 완료 표시, 회수한 작업은 수집하지 않음, 블러본·렌더 기록 파일은 남음, 새 작업은 새 렌더
+    해시와 새 키를 쓰고 이전 URL은 계속 404.
+    """
+    cvat = _need_cvat(setup)
+    ls = setup.label_studio
+    assert ls is not None
+    policy = load_policy(ROOT)
+    sid, _ = _session(pg, setup, tmp_path)
+    with pg.begin() as conn:
+        [first] = create_privacy_tasks(conn, sid, setup, FIXED_TIME, **PRIVACY)
+        collect_task(conn, first.task_key, setup, "rev01", FIXED_TIME)
+        approve_session(conn, sid)
+        render_session(conn, sid, setup.raw, setup.labeling, policy)
+        tasks = create_labeling_tasks(conn, sid, setup, "labeler01", FIXED_TIME)
+        rhash = expected_render_hash(conn, sid, "bodycam", policy)
+    assert {t.tool for t in tasks} == {ReviewTool.CVAT, ReviewTool.LABEL_STUDIO}
+    for t in tasks:
+        assert t.render_hash == rhash
+        assert t.media_uri.endswith(f"/review/labeler01/bodycam-{rhash[:16]}.mp4")
+    ls_task = next(t for t in tasks if t.tool is ReviewTool.LABEL_STUDIO)
+    cvat_task = next(t for t in tasks if t.tool is ReviewTool.CVAT)
+    video_url = ls.http.get(f"/api/tasks/{ls_task.external_id}").json()["data"]["video"]
+    assert httpx.get(video_url).status_code == 200
+    labeler = cvat_as(cvat, "labeler01")
+    assert labeler.http.get(f"/api/tasks/{cvat_task.external_id}").status_code == 200
+
+    later = FIXED_TIME + timedelta(hours=2)
+    with pg.begin() as conn:
+        [again] = create_privacy_tasks(conn, sid, setup, later, **PRIVACY)
+    _add_face_shape(cvat, int(again.external_id))
+    with pg.begin() as conn:
+        out = collect_task(conn, again.task_key, setup, "rev01", later)
+    assert out is not None and out.added == 1
+    assert sorted(out.revoked) == sorted(t.task_key for t in tasks)
+    assert sorted(out.direct_reissue) == [
+        ("labeler01", "bodycam", "cvat"),
+        ("labeler01", "bodycam", "label_studio"),
+    ]
+    report = _revoke(pg, setup, sid)
+    assert report.complete, report.errors
+    # 끊겼다: 라벨러 서명 URL, 도구 작업(관리자·라벨러), 라벨러 작업 목록
+    assert httpx.get(video_url).status_code == 404
+    assert ls.http.get(f"/api/tasks/{ls_task.external_id}/").status_code == 404
+    assert cvat.http.get(f"/api/tasks/{cvat_task.external_id}").status_code == 404
+    assert labeler.http.get(f"/api/tasks/{cvat_task.external_id}").status_code == 404
+    mine = labeler.http.get("/api/tasks", params={"page_size": 500}).json()["results"]
+    assert int(cvat_task.external_id) not in {int(t["id"]) for t in mine}
+    with pg.connect() as conn:
+        for t in tasks:
+            stored = get_review_task(conn, t.task_key)
+            assert stored.status is ReviewTaskStatus.REVOKED
+            assert stored.media_revoked_at is not None and stored.tool_revoked_at is not None
+            assert setup.labeling.head(snapshot_key(t)) is not None
+    with pg.begin() as conn:
+        assert collect_task(conn, ls_task.task_key, setup, "labeler01", later) is None
+    # 블러본 파일·(무효) 렌더 기록은 지우지 않는다 (ADR 0024)
+    assert setup.labeling.head(blurred_key(sid, "bodycam")) is not None
+    assert setup.labeling.head(render_meta_key(sid, "bodycam")) is not None
+
+    with pg.begin() as conn:
+        approve_session(conn, sid)
+        render_session(conn, sid, setup.raw, setup.labeling, policy)
+        renewed = create_labeling_tasks(conn, sid, setup, "labeler01", later)
+        nhash = expected_render_hash(conn, sid, "bodycam", policy)
+    assert nhash != rhash
+    assert all(
+        t.render_hash == nhash and f"bodycam-{nhash[:16]}.mp4" in t.media_uri for t in renewed
+    )
+    assert httpx.get(video_url).status_code == 404
 
 
 def test_unsupported_cvat_annotation_stops_collection(

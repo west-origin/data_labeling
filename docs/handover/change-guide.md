@@ -14,7 +14,7 @@ DB·외부 도구·내보내기 동작을 바꾸면 그 경로의 서비스/격�
 | 영상 회전·PTS·프록시 | `media/prepare.py`, `probe.py`, `proxy.py`, `pts.py` | 공간 좌표·시간·검수 재생. `packages/media/tests`, `tests/test_end_to_end.py` |
 | 모델 파일·어댑터 | `models/registry.py`, `prelabel/adapters`, `config/models.yaml` | 해시·라이선스·라벨 버전·검수 보존. `packages/models/tests`, `packages/prelabel/tests`, `packages/cli/tests/test_pilot.py` |
 | 프라이버시 정책/렌더 | `privacy/generation.py`, `runner.py`, `rendering.py`, `privacy.yaml` | 재검수·재승인·블러 유효성. `packages/privacy/tests`, `packages/schema/tests/test_privacy_detection.py`, `tests/test_review_regressions.py` |
-| 검수 작업/수집/권한 | `review/tasks.py`, `collect.py`, `ops/`, `cli/review_config.py` | 세대·담당자·이력·완료 판정. `packages/review/tests`, `tests/test_webhook_transaction.py`, `packages/schema/tests/test_review_queries.py` |
+| 검수 작업/수집/권한 | `review/tasks.py`, `collect.py`, `revoke.py`, `ops/`, `cli/review_config.py`, `privacy/revocation.py` | 세대·담당자·이력·완료 판정·배포 매체 회수(ADR 0039). `packages/review/tests`(`test_revoke.py`), `tests/test_webhook_transaction.py`, `packages/schema/tests/test_review_queries.py`, `tests/test_review_regressions.py` |
 | 동기화/관계/행동 | `sync`, `relations`, `actions`, 각 정책 | 마스터/스트림 시간과 후속 라벨 재생성. 각 패키지 테스트, 종단 테스트 |
 | 학습/평가/배포 | `training/loop.py`, `trainers.py`, `evaluation/gate.py`, 정책 | 골든셋 누수·거절 시 미배포·활성 모델 유일성. training/evaluation 테스트와 DB 서비스 검사 |
 | 데이터셋/내보내기 | `datasets`, `export/runner.py`, 형식별 모듈 | 분할·사용 중지·프라이버시·가명·게시 순서. datasets/export 테스트, `make test-isolated` |
@@ -50,6 +50,7 @@ DB·외부 도구·내보내기 동작을 바꾸면 그 경로의 서비스/격�
 | 블러 렌더 | 승인 상태, 누락/손상된 블러 파일·렌더 기록 | `privacy render` 재실행은 파일 해시/기록을 대조해 손상 산출물을 복구. 접근·네트워크 오류는 원인 해결 |
 | CVAT/Label Studio 생성 | DB 롤백과 별개로 도구 작업/원본 사본 | 세션·담당자·도구 작업 ID 대조 후 고아/중복 처리. 확인 없이 create 반복 금지 |
 | 웹훅 수집 | 미수집 작업, 또는 일부 이벤트 전달 실패 | 담당자 확인 후 `review collect <작업 키> --reviewer <ID>`. 도구 재시도만으로 전달 보장되지 않음 |
+| 배포 매체 회수 | 커밋된 회수 요청과 남은 S3 사본·도구 작업 (회수 대기) | `dlp review revoke <세션>` 또는 `--pending`. 대기 중에는 그 스트림의 새 라벨링 작업·verify가 막힌다. 도구 인스턴스 폐기는 `--mark-tool-gone <작업> --note <사유>`. 대기 행을 DB에서 직접 지우지 않는다 |
 | lakeFS 빌드 | 미커밋 객체 또는 DB에 없는 커밋 | 브랜치 차이·커밋과 DB 버전 대조. 실패 잔여 객체가 다음 스냅샷에 섞이지 않도록 정리 |
 | 내보내기 | 선커밋된 이력·일부 파일·내부 가명 대응표 | manifest가 최종 전달 기준. 없는 결과는 미완료로 취급하고 현재 승인·사용 중지를 다시 확인 |
 | 학습/배포 | MLflow 실행·산출물, 미승인/거절 모델 | DB 모델 상태·골든 평가·게이트 확인. 산출물 존재만으로 배포하지 않음 |

@@ -58,6 +58,12 @@ class ReviewOutcome:
     # 작업을 보낸 뒤 이미 자식 레코드가 생겨(다른 단계가 지웠거나 다른 작업이 먼저 고침) 검수 결과를
     # 반영하지 않은 원래 라벨 (`collect.drop_retracted`가 채운다)
     stale: list[str] = field(default_factory=list[str])
+    # 블러 검수 결과로 블러가 바뀌어 매체 회수를 요청한 라벨링 작업 키 (ADR 0039, collect가 채운다)
+    revoked: list[str] = field(default_factory=list[str])
+    # 회수 요청 당시 열려 있고 배정이 있던 작업의 배정 ID (재승인·렌더 뒤 `dlp review assign`)
+    reissue_assignments: list[str] = field(default_factory=list[str])
+    # 배정 없이 만든 열린 작업의 (담당자, 스트림, 도구) (`dlp review create … --stream --tool`)
+    direct_reissue: list[tuple[str, str, str]] = field(default_factory=list[tuple[str, str, str]])
 
     @property
     def corrected(self) -> int:

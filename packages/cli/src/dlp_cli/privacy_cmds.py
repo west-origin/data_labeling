@@ -21,6 +21,10 @@
   반드시 라벨링 버킷에 쓴다 (원본 버킷이면 `render_session`이 거부).
 - 프라이버시 배포는 사람 승인 후에만 한다. `detect`는 게이트를 통과하고 승인된 재학습 블러 모델이
   있으면 `strict=True`로 불러 탐지기 결과와 합집합으로 쓴다 (못 부르면 조용히 넘어가지 않고 실패).
+- 블러가 바뀌면(탐지 결과가 바뀐 스트림) 같은 트랜잭션에서 이미 배포한 라벨링 작업 매체에 회수를
+  요청하고, 커밋 뒤 `review_config.run_revocations`로 라벨링 버킷 사본·도구 작업을 지운다
+  (ADR 0039). `render`도 같은 트랜잭션에서 렌더 해시가 지금과 다른 작업에 회수를 요청한다
+  (렌더 정책 변경 등 알려지지 않은 경로의 백스톱). 대기가 남으면 종료 코드 4.
 - 결과가 0개여도 DB에 완료 탐지 세대를 남긴다. 최신 완료 세대의 활성 버전 집합이 같으면
   건너뛴다. 과거 버전으로 복귀하면 새 세대다. DB 이력 없이 원본 버킷의 0건 탐지 표시만 있으면
   완료 세대를 복구하고 새 검수를 요구한다 (ADR 0033).
@@ -37,6 +41,7 @@ from pathlib import Path
 import sqlalchemy as sa
 
 from dlp_cli.raw_access import raw_store
+from dlp_cli.review_config import print_revocations, run_revocations
 from dlp_cli.schema_cmds import database_url
 from dlp_media.storage import ObjectStore, store_from_spec
 from dlp_privacy.audit import (
@@ -52,7 +57,12 @@ from dlp_privacy.audit import (
 )
 from dlp_privacy.detectors import build_detectors
 from dlp_privacy.policy import load_policy
-from dlp_privacy.runner import approve_session, detect_session, render_session
+from dlp_privacy.runner import (
+    approve_session,
+    detect_session,
+    render_session,
+    request_media_revocation,
+)
 from dlp_schema import load_config, repo_root
 from dlp_schema.db.repository import get_session, list_privacy_audits
 from dlp_schema.session import Session, Stream, StreamKind
@@ -82,11 +92,13 @@ def cmd_detect(args: argparse.Namespace) -> int:
         args.store: `s3` 또는 `local:<디렉터리>`. 원본·라벨링·MLflow 버킷 모두 같은 지정으로 연다.
         args.url: DB URL.
 
-    반환: 0. 탐지기가 없는 대상은 실패가 아니라 "전수 검수 필요"로 출력만 한다.
+    반환: 0. 탐지기가 없는 대상은 실패가 아니라 "전수 검수 필요"로 출력만 한다. 커밋 뒤 회수
+    대기가 남으면 `REVOCATION_PENDING_EXIT`(4).
     부작용: 한 트랜잭션에서 `label_records`에 `blur_track` 추가(이전 모델 버전의 미검수 라벨은
-    철회), 세션 프라이버시 상태 갱신, 라벨링 버킷의 이전 블러본 렌더 기록 무효화(ADR 0024),
-    원본 버킷 읽기와 쓰기(검수 우선 구간 JSON, 결과 0개 버전의 탐지 표시; 감사 기록
-    `privacy.detect`).
+    철회), 세션 프라이버시 상태 갱신, 블러가 바뀐 스트림의 라벨링 작업 회수 요청(ADR 0039),
+    라벨링 버킷의 이전 블러본 렌더 기록 무효화(ADR 0024), 원본 버킷 읽기와 쓰기(검수 우선 구간
+    JSON, 결과 0개 버전의 탐지 표시; 감사 기록 `privacy.detect`). 커밋 뒤 회수 대기 실행
+    (검수 도구 설정에 실패해도 매체 삭제는 하고 도구 작업은 대기로 남긴다).
     """
     root = repo_root()
     policy = load_policy(root)
@@ -118,6 +130,8 @@ def cmd_detect(args: argparse.Namespace) -> int:
             # 블러가 바뀐 스트림의 이전 블러본 렌더 기록을 무효로 둔다 (ADR 0024)
             labeling=store_from_spec(args.store, buckets.labeling),
         )  # fmt: skip
+    # 블러가 바뀐 스트림의 회수 요청은 위 커밋에 있다. 외부 채널은 커밋 뒤에 끊는다
+    report = run_revocations(engine, args.session_id, url=args.url, purpose="privacy.detect")
     engine.dispose()
     for stream, n in s.detected.items():
         print(f"{stream}: 블러 트랙 {n}개")
@@ -125,7 +139,9 @@ def cmd_detect(args: argparse.Namespace) -> int:
         print(f"{stream}: 같은 모델 버전 결과가 있어 건너뜀")
     for target, reason in s.missing.items():
         print(f"[전수 검수 필요] {target}: 쓸 수 있는 탐지기가 없음 ({reason})")
-    return 0
+    if s.revocations:
+        print(f"블러가 바뀌어 라벨링 작업 {len(s.revocations)}개 회수: {', '.join(s.revocations)}")
+    return print_revocations(report, args.session_id)
 
 
 def cmd_approve(args: argparse.Namespace) -> int:
@@ -151,21 +167,34 @@ def cmd_render(args: argparse.Namespace) -> int:
     같은 블러 라벨 집합·렌더 정책의 블러본이 이미 있으면 건너뛴다 (멱등). 출력은 스트림 → 블러본
     URI.
 
+    렌더한 트랜잭션에서 렌더 해시가 지금 블러본과 다른 라벨링 작업에 회수를 요청한다 (백스톱:
+    렌더 정책을 바꾸면 그 세션의 해시 있는 작업이 모두 회수된다. 블러 강도 변경은 프라이버시
+    변경이다, ADR 0039). 커밋 뒤 회수 대기를 실행하고, 남으면 `REVOCATION_PENDING_EXIT`(4).
+
     예외: 승인 전 세션, 라벨링 버킷이 원본 버킷과 같을 때, 오디오를 남기는 정책이면
     `PrivacyGateError`.
-    부작용: 원본 영상 읽기(감사 기록 `privacy.render`), 라벨링 버킷에 블러본·렌더 기록 쓰기.
+    부작용: 원본 영상 읽기(감사 기록 `privacy.render`), 라벨링 버킷에 블러본·렌더 기록 쓰기,
+    `review_tasks` 회수 요청, 커밋 뒤 라벨링 버킷 사본·도구 작업 삭제.
     """
     root = repo_root()
     buckets = load_config(root / "config" / "defaults.yaml").buckets
     raw = raw_store(args.store, args.url, "privacy.render")
     labeling = store_from_spec(args.store, buckets.labeling)
+    policy = load_policy(root)
     engine = _engine(args)
     with engine.begin() as conn:
-        uris = render_session(conn, args.session_id, raw, labeling, load_policy(root))
+        uris = render_session(conn, args.session_id, raw, labeling, policy)
+        requested = request_media_revocation(
+            conn, args.session_id, policy, datetime.now(UTC), reason="render", legacy=False
+        )
+    report = run_revocations(engine, args.session_id, url=args.url, purpose="privacy.render")
     engine.dispose()
     for stream, uri in uris.items():
         print(f"{stream}: {uri}")
-    return 0
+    if requested:
+        keys = ", ".join(t.task_key for t in requested)
+        print(f"렌더 해시가 바뀐 라벨링 작업 {len(requested)}개 회수: {keys}")
+    return print_revocations(report, args.session_id)
 
 
 def cmd_audit_sample(args: argparse.Namespace) -> int:

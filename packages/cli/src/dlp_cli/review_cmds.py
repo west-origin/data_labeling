@@ -2,13 +2,17 @@
 
 등록하는 명령 (`dlp review …`):
 - 도구 연동 (WP6, `dlp_review.tasks`·`collect`·`webhook`·`verify`)
-  - `create <세션> --stage privacy|labeling --assignee` — 세션의 검수 작업을 CVAT(공간 라벨·블러)와
-    Label Studio(시간 구간)에 만든다. 블러 검수 담당자는 `review.yaml reviewers.privacy`의 원본 접근
-    권한자여야 한다.
+  - `create <세션> --stage privacy|labeling --assignee [--stream S…] [--tool T]` — 세션의 검수
+    작업을 CVAT(공간 라벨·블러)와 Label Studio(시간 구간)에 만든다. 블러 검수 담당자는
+    `review.yaml reviewers.privacy`의 원본 접근 권한자여야 한다. 라벨링은 먼저 회수 대기를
+    실행하고, 남으면 만들지 않는다 (종료 코드 4).
   - `collect <작업 키> --reviewer` — 끝난 작업의 결과를 라벨 이력으로 들여온다 (reconcile:
-    승인·수정·삭제·추가 → 새 `LabelRecord` + `parent_label_id`). 이미 수집했으면 아무것도 하지
-    않는다(멱등).
+    승인·수정·삭제·추가 → 새 `LabelRecord` + `parent_label_id`). 이미 수집했거나 회수한 작업이면
+    아무것도 하지 않는다(멱등). 블러가 바뀌면 커밋 뒤 배포 매체를 회수하고 다시 만들 명령을 보인다.
   - `serve [--port]` — CVAT·Label Studio 웹훅을 받아 끝난 작업을 자동 수집하는 HTTP 서버.
+  - `revoke [<세션>] [--stream] [--task] [--all] [--include-legacy] [--dry-run] [--pending]
+    [--mark-tool-gone KEY --note]` — 블러가 바뀐 뒤 이미 배포한 라벨링 매체를 회수한다
+    (ADR 0039). 대기가 남으면 종료 코드 4 (cron `--pending`의 경보).
   - `register-webhooks <url_base>` — 검수 프로젝트에 웹훅을 등록한다.
   - `verify <세션>` — 검수가 끝난 세션을 `prelabeled → human_verified`로 옮긴다 (ADR 0029).
   - `ui-theme [--check]` — `config/review_ui.yaml`로 CVAT 테마 색 파일을 다시 만든다 (ADR 0038,
@@ -28,9 +32,11 @@ privacy` (또는 `plan --privacy`) → `collect` → `dlp privacy approve`.
 `cvat.users`, 미디어). CLI에서는 `DLP_REVIEW_POLICY_FILE`로 정책 파일을 바꿀 수 있다.
 
 주의:
-- `_setup`이 원본 저장소를 `raw_store("s3", …, "review.<명령>")` 감사 저장소로 만든다 (블러 검수
-  작업은 원본 영상을 CVAT에 올린다, ADR 0020). 일반 라벨링 작업은 블러본만 쓰고, 라벨러용 서명 URL은
-  라벨러 자격 증명(`S3Store.labeler_from_env`, 라벨링 버킷 읽기 전용)으로 만든다.
+- `_setup`(`review_config.review_setup`)이 원본 저장소를 `raw_store("s3", …, "review.<명령>")` 감사
+  저장소로 만든다 (블러 검수 작업은 원본 영상을 CVAT에 올린다, ADR 0020). 일반 라벨링 작업은
+  블러본만 쓰고, 라벨러용 서명 URL은 라벨러 자격 증명(라벨링 버킷 읽기 전용)으로 만든다.
+- 매체 회수(ADR 0039): 블러를 바꾼 트랜잭션이 회수 요청을 같은 커밋에 남기고, 명령은 커밋 뒤
+  `review_config.run_revocations`로 라벨링 버킷 사본 → CVAT → Label Studio 순으로 끊는다.
 - 블라인드·이중 측정 레코드(`measurement`)와 오류 삽입 레코드는 운영 라벨이 아니다
   (`current_labels()`).
 - 검수자가 승인·표본 검증한 라벨은 어떤 단계도 지우지 않는다 (ADR 0015, 0019).
@@ -44,16 +50,28 @@ from datetime import UTC, datetime
 
 import sqlalchemy as sa
 
-from dlp_cli.raw_access import raw_store
+from dlp_cli.review_config import (
+    REVOCATION_PENDING_EXIT,
+    print_revocations,
+    review_setup,
+    run_revocations,
+)
 from dlp_cli.review_config import load_review_policy as load_ops_policy
 from dlp_cli.schema_cmds import database_url
 from dlp_media.audit import current_actor
-from dlp_media.storage import S3Store
-from dlp_review.clients import CvatClient, LabelStudioClient
+from dlp_privacy.policy import load_policy as load_privacy_policy
+from dlp_privacy.runner import (
+    operational_blur,
+    render_hash,
+    request_media_revocation,
+    stale_media_tasks,
+)
 from dlp_review.collect import collect_task
 from dlp_review.ontology_projects import ontology_project
 from dlp_review.ops.assign import plan_qa
 from dlp_review.ops.runner import create_assignment_tasks, plan_session, quality_report
+from dlp_review.reconcile import ReviewOutcome
+from dlp_review.revoke import RevocationIncompleteError, mark_tool_gone
 from dlp_review.tasks import (
     PRIVACY_PROJECT,
     SPATIAL_PROJECT,
@@ -65,18 +83,20 @@ from dlp_review.tasks import (
 from dlp_review.ui_theme import TOKENS_FILE, cvat_tokens_css, load_ui_theme
 from dlp_review.verify import verify_session
 from dlp_review.webhook import CollectRequest, resolve_reviewer, serve
-from dlp_schema import load_config, repo_root
+from dlp_schema import repo_root
 from dlp_schema.db.repository import (
     get_assignment,
     get_golden_set,
+    get_labels,
     get_ontology,
     get_review_task,
     get_session_ontology,
     insert_assignment,
     list_assignments,
+    pending_revocations,
 )
 from dlp_schema.db.tables import ontology_versions
-from dlp_schema.review import AssignmentStatus
+from dlp_schema.review import AssignmentStatus, ReviewTask, ReviewTaskStatus, ReviewTool
 
 
 def _setup(args: argparse.Namespace) -> ReviewSetup:
@@ -96,18 +116,15 @@ def _setup(args: argparse.Namespace) -> ReviewSetup:
 
     부작용: 설정 파일을 읽고 저장소·HTTP 클라이언트를 만든다. CVAT 클라이언트는 생성 중
     로그인 API를 호출해 토큰을 받는다 (`--no-cvat`이면 생략). 환경 변수 누락, 파일·설정 오류,
-    로그인 실패·통신 오류는 호출자에게 전파된다.
+    로그인 실패·통신 오류는 호출자에게 전파된다. 본문은 `review_config.review_setup`이다.
     """
-    root = repo_root()
-    buckets = load_config(root / "config" / "defaults.yaml").buckets
-    return ReviewSetup(
-        raw=raw_store("s3", getattr(args, "url", None), f"review.{args.review_command}"),
-        labeling=S3Store.from_env(buckets.labeling),
-        labeling_reader=S3Store.labeler_from_env(buckets.labeling),
-        ontology=None,
-        cvat=None if getattr(args, "no_cvat", False) else CvatClient.from_env(),
-        label_studio=None if getattr(args, "no_ls", False) else LabelStudioClient.from_env(),
+    setup, _ = review_setup(
+        f"review.{args.review_command}",
+        getattr(args, "url", None),
+        cvat=not getattr(args, "no_cvat", False),
+        label_studio=not getattr(args, "no_ls", False),
     )
+    return setup
 
 
 def _secret() -> str:
@@ -126,8 +143,11 @@ def cmd_create(args: argparse.Namespace) -> int:
       `reviewers.privacy`에 없으면 원본을 올리기 전에 거부한다.
     - `labeling`: 블러본 기반 공간 라벨 작업(CVAT)과 시간 구간 작업(Label Studio). 세션이 프라이버시
       승인 상태여야 한다(아니면 `TaskError`). 담당자 ID는 라벨러 워터마크에도 쓴다.
+      `--stream`(반복)·`--tool`로 만들 작업을 좁힌다 (회수한 직접 작업만 다시 만들 때).
+      만들기 전에 회수 대기를 실행한다 (렌더 해시가 지금과 다른 작업은 먼저 요청한다, sweep).
+      대기가 남으면 만들지 않고 `REVOCATION_PENDING_EXIT`(4)로 끝낸다.
 
-    반환: 0. 출력: 작업 키, 단계, 스트림, 미디어 URI.
+    반환: 0 (또는 4). 출력: 작업 키, 단계, 스트림, 미디어 URI.
     부작용: 한 트랜잭션에서 `review_tasks` 등 DB 쓰기, 검수 도구 API 호출, 라벨링 버킷 쓰기, 블러
     검수면 원본 읽기(감사 기록). 실패 시 DB는 롤백되지만 이미 만든 도구 쪽 작업은 남을 수 있다.
     """
@@ -136,6 +156,12 @@ def cmd_create(args: argparse.Namespace) -> int:
     now = datetime.now(UTC)
     if not args.assignee:
         raise SystemExit("검수 작업에는 --assignee가 필요합니다 (블러 검수는 원본 접근 권한자)")
+    if args.stage != "privacy":
+        report = run_revocations(engine, args.session_id, setup, sweep=True)
+        if print_revocations(report, args.session_id):
+            engine.dispose()
+            print(f"{args.session_id}: 매체 회수가 끝나지 않아 라벨링 작업을 만들지 않습니다")
+            return REVOCATION_PENDING_EXIT
     with engine.begin() as conn:
         if args.stage == "privacy":
             # 담당자가 review.yaml reviewers.privacy에 없으면 원본을 올리기 전에 막는다
@@ -148,11 +174,42 @@ def cmd_create(args: argparse.Namespace) -> int:
                 privacy_reviewers=load_ops_policy(repo_root()).reviewers.privacy,
             )
         else:
-            tasks = create_labeling_tasks(conn, args.session_id, setup, args.assignee, now)
+            tasks = create_labeling_tasks(
+                conn, args.session_id, setup, args.assignee, now,
+                streams=set(args.stream) if args.stream else None,
+                tools={ReviewTool(args.tool)} if args.tool else None,
+            )  # fmt: skip
     engine.dispose()
     for t in tasks:
         print(f"{t.task_key:<20} {t.stage.value:<9} {t.stream_id:<14} {t.media_uri}")
     return 0
+
+
+def _print_outcome(task: ReviewTask, outcome: ReviewOutcome | None) -> None:
+    """수집 결과와 회수 요청·다시 만들 명령을 출력한다."""
+    if outcome is None:
+        if task.status is ReviewTaskStatus.REVOKED:
+            print(f"{task.task_key}: 회수한 작업이라 수집하지 않음 (결과는 회수 스냅숏에 남는다)")
+        else:
+            print(f"{task.task_key}: 이미 수집함")
+        return
+    print(
+        f"{task.task_key}: 승인 {len(outcome.approved)}, 수정 {outcome.corrected}, "
+        f"삭제 {outcome.retracted}, 추가 {outcome.added}"
+    )
+    if not outcome.revoked:
+        return
+    print(
+        f"  블러가 바뀌어 라벨링 작업 {len(outcome.revoked)}개 회수: {', '.join(outcome.revoked)}"
+    )
+    print("  다시 만들기 (남은 블러 검수 → dlp privacy approve → dlp privacy render 뒤):")
+    for aid in outcome.reissue_assignments:
+        print(f"    dlp review assign {aid}")
+    for assignee, stream, tool in outcome.direct_reissue:
+        print(
+            f"    dlp review create {task.session_id} --stage labeling --assignee {assignee} "
+            f"--stream {stream} --tool {tool}"
+        )
 
 
 def cmd_collect(args: argparse.Namespace) -> int:
@@ -164,24 +221,25 @@ def cmd_collect(args: argparse.Namespace) -> int:
         args.reviewer: 검수자 ID. 작업에 담당자가 있으면 같아야 한다 (다르면 `TaskError`).
 
     반환: 0. 이미 수집한 작업이면 "이미 수집함"만 출력(멱등, 작업 행을 잠가 동시 수집을 막는다).
+    회수한 작업이면 수집하지 않는다. 커밋 뒤 그 세션의 회수 대기를 실행하고(수집 결과와 무관하게),
+    대기가 남으면 `REVOCATION_PENDING_EXIT`(4).
     부작용: 한 트랜잭션에서 `label_records`에 검수 결과 레코드 추가(덮어쓰지 않음), 작업·배정 상태
-    갱신, 배정 마무리(표본 판정). 검수 도구 API에서 주석을 읽는다.
+    갱신, 배정 마무리(표본 판정), 블러가 바뀌면 라벨링 작업 회수 요청. 검수 도구 API에서 주석을
+    읽는다. 커밋 뒤 라벨링 버킷 사본·도구 작업 삭제 (`review_config.run_revocations`).
     """
+    setup = _setup(args)
     engine = sa.create_engine(database_url(args.url))
     with engine.begin() as conn:
         outcome = collect_task(
-            conn, args.task_key, _setup(args), args.reviewer, datetime.now(UTC),
+            conn, args.task_key, setup, args.reviewer, datetime.now(UTC),
             load_ops_policy(repo_root()),
         )  # fmt: skip
+        task = get_review_task(conn, args.task_key)
+    # 수집·회수 요청이 커밋된 뒤에 외부 채널을 끊는다 (도구·S3 장애가 수집을 되돌리지 않는다)
+    report = run_revocations(engine, task.session_id, setup)
     engine.dispose()
-    if outcome is None:
-        print(f"{args.task_key}: 이미 수집함")
-    else:
-        print(
-            f"{args.task_key}: 승인 {len(outcome.approved)}, 수정 {outcome.corrected}, "
-            f"삭제 {outcome.retracted}, 추가 {outcome.added}"
-        )
-    return 0
+    _print_outcome(task, outcome)
+    return print_revocations(report, task.session_id)
 
 
 def cmd_verify(args: argparse.Namespace) -> int:
@@ -218,10 +276,15 @@ def cmd_serve(args: argparse.Namespace) -> int:
     끝냄).
 
     웹훅마다 새 트랜잭션을 열어:
-    1. 작업을 조회하고 검수자를 정한다 — 웹훅의 도구 사용자 ID가 아니라 작업 담당자다
+    1. 작업을 조회한다. 열린 작업이 아니면(수집함·회수함) 검수자 확인 전에 무시한다 (204). 회수
+       실행기의 CVAT 배정 해제가 일으킨 `update:job` 웹훅을 담당자 불일치(403)로 만들지 않는다.
+    2. 검수자를 정한다 — 웹훅의 도구 사용자 ID가 아니라 작업 담당자다
        (`resolve_reviewer`). 담당자와 CVAT job 담당자가 맞지 않으면 수집하지 않는다.
-    2. 서비스 계정(Label Studio 서비스 사용자)이 만든 주석이면 수집하지 않는다.
-    3. `collect_task`로 수집한다. 실패는 트랜잭션을 롤백하고 HTTP 경계에 전달한다.
+    3. 서비스 계정(Label Studio 서비스 사용자)이 만든 주석이면 수집하지 않는다.
+    4. `collect_task`로 수집한다. 실패는 트랜잭션을 롤백하고 HTTP 경계에 전달한다.
+    5. 커밋 뒤 그 세션의 회수 대기를 실행한다. 대기가 남으면 `RevocationIncompleteError`를 던져
+       503으로 답한다 (수집·회수 요청은 이미 커밋됐다. 도구가 재전송하지 않을 수 있어 cron
+       `dlp review revoke --pending`이 보완한다).
 
     필요 환경 변수: `DLP_WEBHOOK_SECRET`(서명 검증), DB·S3·도구 접속 정보.
     반환: 서버가 끝나면 0.
@@ -236,6 +299,10 @@ def cmd_serve(args: argparse.Namespace) -> int:
         """웹훅 한 건을 한 트랜잭션으로 수집한다. 실패를 성공 응답으로 바꾸지 않는다."""
         with engine.begin() as conn:
             task = get_review_task(conn, req.task_key)
+            if task.status is not ReviewTaskStatus.OPEN:
+                # 수집했거나 회수한 작업 (회수 실행기의 배정 해제 웹훅 포함)
+                print(f"{req.task_key}: {task.status.value} 작업이라 수집하지 않음")
+                return
             # 검수자는 웹훅의 도구 사용자 ID가 아니라 작업 담당자다
             reviewer = resolve_reviewer(req, task, service_user, ops_policy.cvat.users)
             if reviewer is None:
@@ -245,6 +312,9 @@ def cmd_serve(args: argparse.Namespace) -> int:
                 conn, req.task_key, setup, reviewer, datetime.now(UTC), ops_policy
             )
         print(f"{req.task_key} ← {reviewer}: {'이미 수집함' if outcome is None else '수집함'}")
+        report = run_revocations(engine, task.session_id, setup)
+        if print_revocations(report, task.session_id):
+            raise RevocationIncompleteError(f"{task.session_id}: 회수 대기 {len(report.pending)}개")
 
     server = serve(args.port, _secret(), on_collect, policy=ops_policy.webhook)
     print(
@@ -342,11 +412,21 @@ def cmd_assign(args: argparse.Namespace) -> int:
     """`dlp review assign <배정 ID>`: 배정의 검수 도구 작업을 만든다.
 
     이미 만든 배정이면 기존 작업을 그대로 돌려준다 (배정 행을 `FOR UPDATE`로 잠가 동시 실행에도 한
-    번만).
+    번만). 작업이 모두 회수된 배정이면 지금 블러본으로 다시 만든다 (ADR 0039).
+    작업 라벨 배정은 만들기 전에 그 세션의 회수 대기를 실행하고(sweep 포함), 대기가 남으면 만들지
+    않고 `REVOCATION_PENDING_EXIT`(4)로 끝낸다. 블러 배정은 원본 프록시를 쓰므로 막지 않는다.
     부작용: `review_tasks` 쓰기, 검수 도구 API 호출, 블러 배정이면 원본 읽기(감사 기록).
     """
     engine = sa.create_engine(database_url(args.url))
     setup = _setup(args)
+    with engine.connect() as conn:
+        planned = get_assignment(conn, args.assignment_id)
+    if planned.label_kinds != ("blur_track",):
+        report = run_revocations(engine, planned.session_id, setup, sweep=True)
+        if print_revocations(report, planned.session_id):
+            engine.dispose()
+            print(f"{args.assignment_id}: 매체 회수가 끝나지 않아 작업을 만들지 않습니다")
+            return REVOCATION_PENDING_EXIT
     with engine.begin() as conn:
         a = get_assignment(conn, args.assignment_id)
         policy = load_ops_policy(repo_root())
@@ -415,6 +495,101 @@ def cmd_quality(args: argparse.Namespace) -> int:
     return 0
 
 
+def _revoke_dry_run(engine: sa.Engine, args: argparse.Namespace) -> int:
+    """`revoke --dry-run`: 쓰지 않고 고를 작업과 이유, 지금 대기를 출력한다. 0.
+
+    `--include-legacy`면 구 작업(렌더 해시 없음)마다 참고용 추정을 함께 보인다: 작업을 만든
+    시각까지의 이력으로 복원한 운영 블러 집합의 렌더 해시가 지금과 같은가. 시계·경합 때문에
+    틀릴 수 있어 결정은 운영자가 한다.
+    """
+    sid = args.session_id
+    policy = load_privacy_policy(repo_root())
+    with engine.connect() as conn:
+        stale = stale_media_tasks(
+            conn, sid, policy, streams=set(args.stream) if args.stream else None,
+            legacy=args.include_legacy, force=args.all, task_keys=tuple(args.task),
+        )  # fmt: skip
+        history = get_labels(conn, sid, kinds=["blur_track"])
+        pending = pending_revocations(conn, sid)
+    for item in stale:
+        t = item.task
+        note = ""
+        if item.cause == "legacy":
+            then = [x for x in history if x.created_at <= t.created_at]
+            same = render_hash(operational_blur(then, t.stream_id), policy) == render_hash(
+                operational_blur(history, t.stream_id), policy
+            )
+            note = f" (추정: 생성 시점 블러가 지금과 {'같음' if same else '다름'})"
+        head = f"{t.task_key:<20} {t.stream_id:<12} {t.status.value:<9} {item.cause:<12}"
+        print(f"{head} {t.media_uri}{note}")
+    print(f"{sid}: 회수 요청 대상 {len(stale)}개, 지금 회수 대기 {len(pending)}개 (쓰지 않음)")
+    return 0
+
+
+def _revoke_mark_gone(engine: sa.Engine, args: argparse.Namespace) -> int:
+    """`revoke --mark-tool-gone KEY --note TEXT`: 도구 작업 수동 완료 표시. 대기가 남으면 4."""
+    if not args.note:
+        raise SystemExit("--mark-tool-gone에는 --note(사유)가 필요합니다")
+    with engine.begin() as conn:
+        task = get_review_task(conn, args.mark_tool_gone)
+        done = mark_tool_gone(
+            conn, task.task_key, note=args.note, actor=current_actor(), now=datetime.now(UTC)
+        )
+        left = [t.task_key for t in pending_revocations(conn, task.session_id)]
+    print(f"{task.task_key}: {'도구 작업 완료로 표시' if done else '표시할 회수 대기가 없음'}")
+    if left:
+        keys = ", ".join(left[:5])
+        print(f"  회수 대기 {len(left)}개: {keys} (dlp review revoke {task.session_id})")
+        return REVOCATION_PENDING_EXIT
+    return 0
+
+
+def cmd_revoke(args: argparse.Namespace) -> int:
+    """`dlp review revoke [<세션>] …`: 블러가 바뀐 뒤 이미 배포한 라벨링 매체를 회수한다 (ADR 0039).
+
+    - `<세션>`: 세션 잠금 트랜잭션에서 회수를 요청하고(렌더 해시가 지금과 다른 작업, 사유
+      `sweep`), 커밋 뒤 대기를 실행한다. `--stream`으로 스트림을, `--include-legacy`로 렌더 해시
+      없는 구 작업을 더한다. `--task KEY`(반복)는 그 작업을, `--all`은 해시와 무관하게 그 스트림의
+      모든 비프라이버시 작업을 요청한다 (사고 대응). 둘 다 `--reason`이 필요하고 사유는
+      `manual:<행위자>:<사유>`다.
+    - `--dry-run`: 쓰지 않고 대상과 이유를 출력한다.
+    - `--pending`(세션 없이): 대기가 있는 모든 세션을 실행한다 (cron, 10분마다 권장).
+    - `--mark-tool-gone KEY --note TEXT`: 도구 인스턴스 폐기 등으로 확인할 수 없는 도구 작업을
+      사유와 함께 완료로 표시한다 (행위자 = `current_actor()`).
+
+    반환: 대기가 남으면 `REVOCATION_PENDING_EXIT`(4), 아니면 0.
+    부작용: `review_tasks` 회수 요청·완료 표시, 라벨링 버킷 사본 삭제·스냅숏, CVAT·Label Studio
+    작업 배정 해제·삭제 (되돌릴 수 없다).
+    """
+    engine = sa.create_engine(database_url(args.url))
+    try:
+        if args.mark_tool_gone:
+            return _revoke_mark_gone(engine, args)
+        if args.pending:
+            if args.session_id:
+                raise SystemExit("--pending은 세션 없이 모든 세션의 대기를 실행한다")
+            return print_revocations(run_revocations(engine, None, url=args.url), None)
+        if not args.session_id:
+            raise SystemExit("세션을 주거나 --pending을 쓰세요")
+        if (args.task or args.all) and not args.reason:
+            raise SystemExit("--task와 --all에는 --reason(사유)이 필요합니다")
+        if args.dry_run:
+            return _revoke_dry_run(engine, args)
+        reason = f"manual:{current_actor()}:{args.reason}" if args.reason else "sweep"
+        with engine.begin() as conn:
+            requested = request_media_revocation(
+                conn, args.session_id, load_privacy_policy(repo_root()), datetime.now(UTC),
+                reason=reason, streams=set(args.stream) if args.stream else None,
+                legacy=args.include_legacy, force=args.all, task_keys=tuple(args.task),
+            )  # fmt: skip
+        for t in requested:
+            print(f"회수 요청 {t.task_key} ({t.stream_id}, {t.status.value}) {t.media_uri}")
+        report = run_revocations(engine, args.session_id, url=args.url)
+        return print_revocations(report, args.session_id)
+    finally:
+        engine.dispose()
+
+
 def cmd_ui_theme(args: argparse.Namespace) -> int:
     """CVAT 테마 색 생성 파일(`ui_theme.TOKENS_FILE`)을 `config/review_ui.yaml`과 맞춘다.
 
@@ -439,7 +614,7 @@ def cmd_ui_theme(args: argparse.Namespace) -> int:
 
 
 def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:  # pyright: ignore[reportPrivateUsage]
-    """`review` 하위 명령 묶음을 등록한다 (도구 연동 5개 + 운영 5개 + 화면 테마 1개)."""
+    """`review` 하위 명령 묶음을 등록한다 (도구 연동 6개 + 운영 5개 + 화면 테마 1개)."""
     review = sub.add_parser("review", help="검수 도구 연동")
     rsub = review.add_subparsers(dest="review_command", required=True)
 
@@ -453,6 +628,14 @@ def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
     )
     create.add_argument("--no-cvat", action="store_true")
     create.add_argument("--no-ls", action="store_true")
+    create.add_argument(
+        "--stream", action="append", default=[], help="이 영상 스트림만 (반복, 라벨링)"
+    )
+    create.add_argument(
+        "--tool",
+        choices=[t.value for t in ReviewTool],
+        help="이 도구만 (라벨링, 회수 뒤 다시 만들기)",
+    )
     create.add_argument("--url", help="DB URL (기본: DLP_DATABASE_URL)")
     create.set_defaults(func=cmd_create)
 
@@ -472,6 +655,22 @@ def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
     srv.add_argument("--port", type=int, default=8765)
     srv.add_argument("--url", help="DB URL (기본: DLP_DATABASE_URL)")
     srv.set_defaults(func=cmd_serve)
+
+    rv = rsub.add_parser(
+        "revoke", help="블러가 바뀐 뒤 이미 배포한 라벨링 매체 회수 (대기가 남으면 종료 코드 4)"
+    )
+    rv.add_argument("session_id", nargs="?")
+    rv.add_argument("--stream", action="append", default=[], help="이 영상 스트림만 (반복)")
+    rv.add_argument("--task", action="append", default=[], help="이 작업을 요청 (반복, --reason)")
+    rv.add_argument("--all", action="store_true", help="해시와 무관하게 모두 요청 (사고 대응)")
+    rv.add_argument("--include-legacy", action="store_true", help="렌더 해시 없는 구 작업 포함")
+    rv.add_argument("--dry-run", action="store_true", help="쓰지 않고 대상만 출력")
+    rv.add_argument("--reason", help="수동 요청 사유 (--task·--all에 필수)")
+    rv.add_argument("--pending", action="store_true", help="대기가 있는 모든 세션 실행 (cron)")
+    rv.add_argument("--mark-tool-gone", metavar="KEY", help="도구 작업 수동 완료 표시 (--note)")
+    rv.add_argument("--note", help="--mark-tool-gone 사유")
+    rv.add_argument("--url", help="DB URL (기본: DLP_DATABASE_URL)")
+    rv.set_defaults(func=cmd_revoke)
 
     reg = rsub.add_parser("register-webhooks", help="검수 프로젝트에 웹훅 등록")
     reg.add_argument("url_base", help="도구에서 닿는 웹훅 서버 주소 (예: http://host:8765)")

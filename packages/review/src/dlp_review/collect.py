@@ -1,16 +1,17 @@
 """검수 결과 수집.
 
 도구에서 결과를 받아 reconcile하고 DB에 이력으로 쓴다. 한 작업은 한 번만 수집한다
-(세션과 작업 행을 순서대로 잠근다. 같은 작업의 재수집은 None이며, 다른 작업도 같은 세션의
-이력을 직렬로 읽어 같은 부모를 두 번 수정하지 않는다).
+(세션과 작업 행을 순서대로 잠근다. 같은 작업의 재수집과 회수한 작업의 수집은 None이며, 다른 작업도
+같은 세션의 이력을 직렬로 읽어 같은 부모를 두 번 수정하지 않는다).
 
 - 수집하는 검수자는 작업 담당자여야 한다 (웹훅의 도구 사용자 ID가 아니라 작업의 담당자로 기록).
 - 작업을 보낸 뒤 다른 단계가 지웠거나(retracted) 다른 작업이 먼저 고친(자식 레코드가 생긴) 라벨은
   검수 결과로 되살리거나 두 갈래 이력을 만들지 않는다.
 - CVAT는 트랙과 모양(Shape 모드, CVAT 기본) 주석을 모두 받는다. 옮길 수 없는 주석(태그, 다각형 등)이
   있으면 수집하지 않는다 (TaskError).
-- 운영 블러 라벨이 바뀌면 프라이버시 승인을 풀어 다시 승인·렌더하게 하고, 그 스트림의 이전 블러본
-  렌더 기록을 무효로 둔다 (ADR 0024).
+- 운영 블러 라벨이 바뀌면 프라이버시 승인을 풀어 다시 승인·렌더하게 하고, 그 스트림의 이미 배포한
+  라벨링 작업 매체에 회수를 요청하고(같은 커밋, ADR 0039), 이전 블러본 렌더 기록을 무효로 둔다
+  (ADR 0024). 외부 삭제(S3 사본·도구 작업)는 커밋 뒤 호출자가 `dlp_review.revoke`로 한다.
 
 WP6·WP12, ADR 0006·0014·0015·0024. 진입점: `dlp review collect <작업 키>`와 웹훅 서버
 (`dlp review serve`)가 `collect_task`를 부른다.
@@ -22,8 +23,9 @@ WP6·WP12, ADR 0006·0014·0015·0024. 진입점: `dlp review collect <작업 �
 
 부작용 요약 (`collect_task`): `label_records` 삽입, 검수 상태 갱신(`record_review`),
 `review_tasks` 수집 표시, `review_work` 기록(Label Studio, 잰 시간이 0보다 클 때만), 세션
-`privacy_state` 되돌림(승인 상태였을 때만),
-라벨링 버킷의 렌더 기록 무효화, 배정 마무리(`review_assignments`). 블러 검수 작업이면 원본 버킷의
+`privacy_state` 되돌림(승인 상태였을 때만), 블러가 바뀐 스트림의 라벨링 작업 회수 요청
+(`review_tasks`, 외부 호출 없음), 라벨링 버킷의 렌더 기록 무효화, 배정 마무리
+(`review_assignments`). 블러 검수 작업이면 원본 버킷의
 프록시를 내려받으므로 원본 접근 기록이 남는다 (setup.raw가 감사 저장소일 때, ADR 0020).
 트랜잭션은 호출자가 연다 (잠금이 트랜잭션 끝까지 유지된다).
 """
@@ -39,7 +41,7 @@ from typing import TYPE_CHECKING
 
 import sqlalchemy as sa
 
-from dlp_privacy.runner import invalidate_render
+from dlp_privacy.runner import invalidate_render, request_media_revocation
 from dlp_review.cvat import (
     UNIT_SCALE,
     CvatFormatError,
@@ -73,8 +75,8 @@ from dlp_schema.db.repository import (
 from dlp_schema.db.tables import review_tasks
 from dlp_schema.labels import LabelRecord, VerificationState
 from dlp_schema.ops import ReviewWork
-from dlp_schema.review import ReviewMode, ReviewStage, ReviewTaskStatus, ReviewTool
-from dlp_schema.session import PrivacyState
+from dlp_schema.review import ReviewMode, ReviewStage, ReviewTask, ReviewTaskStatus, ReviewTool
+from dlp_schema.session import PrivacyState, Session
 
 if TYPE_CHECKING:
     from dlp_review.ops.policy import ReviewOpsPolicy
@@ -88,6 +90,7 @@ def _lock_task(conn: sa.Connection, task_key: str) -> ReviewTaskStatus:
     """작업 행을 잠그고(SELECT … FOR UPDATE) 현재 상태를 돌려준다.
 
     잠금은 호출자 트랜잭션이 끝날 때까지 유지된다. 작업이 없으면 `scalar_one`이 예외를 던진다.
+    열린(open) 작업만 수집한다. 수집한 작업·회수한 작업은 호출자가 아무것도 쓰지 않는다.
     """
     status = conn.execute(
         sa.select(review_tasks.c.status)
@@ -107,6 +110,51 @@ def _seeded_new_id(assignment_id: str, label_id: str) -> str:
 
     digest = hashlib.sha256(label_id.encode()).hexdigest()[:16]
     return f"{seed_prefix(assignment_id)}new-{digest}"
+
+
+def _after_blur_change(
+    conn: sa.Connection, task: ReviewTask, session: Session, setup: ReviewSetup, now: datetime
+) -> list[ReviewTask]:
+    """블러 검수 결과로 운영 블러가 바뀐 뒤 할 일. 회수를 요청한 작업(요청 전 사본)을 돌려준다.
+
+    1. 승인 상태였으면 AUTO_BLURRED로 되돌린다 (다시 승인해야 새로 렌더한다).
+    2. 그 스트림의 이미 배포한 라벨링 작업에 회수를 요청한다. 승인 상태와 무관하게 부른다: 이전 승인
+       때 만든 작업이 이미 AUTO_BLURRED인 세션에도 남아 있을 수 있다. 블러가 지금 바뀌었으므로
+       렌더 해시 없는 구 작업도 낡은 것으로 본다 (legacy).
+    3. 이전 블러본 렌더 기록을 무효로 둔다. 저장소 부작용이라 DB 쓰기 뒤에 둔다.
+    외부 삭제는 하지 않는다 (커밋 뒤 `dlp_review.revoke` 실행기 몫).
+    """
+    if session.privacy_state is PrivacyState.APPROVED:
+        set_privacy_state(conn, task.session_id, PrivacyState.AUTO_BLURRED)
+    requested = request_media_revocation(
+        conn, task.session_id, setup.privacy_policy(), now, reason=f"blur_changed:{task.task_key}",
+        streams={task.stream_id}, legacy=True,
+    )  # fmt: skip
+    # 이전 블러본을 어떤 단계도 현재 것으로 보지 않게 렌더 기록을 무효로 둔다
+    with tempfile.TemporaryDirectory() as tmp:
+        invalidate_render(
+            setup.labeling, task.session_id, task.stream_id, f"collected:{task.task_key}", Path(tmp)
+        )
+    return requested
+
+
+def _note_revocations(outcome: ReviewOutcome, requested: list[ReviewTask]) -> None:
+    """회수를 요청한 작업과 다시 만들 일을 결과에 적는다 (CLI가 출력한다).
+
+    요청 당시 열려 있던 작업만 다시 만들 대상이다. 배정이 있으면 배정 ID, 없으면
+    (담당자, 스트림, 도구). 수집한 작업은 결과가 이미 이력에 있어 다시 만들지 않는다.
+    """
+    for t in requested:
+        outcome.revoked.append(t.task_key)
+        if t.status is not ReviewTaskStatus.OPEN:
+            continue
+        if t.assignment_id is not None:
+            if t.assignment_id not in outcome.reissue_assignments:
+                outcome.reissue_assignments.append(t.assignment_id)
+            continue
+        direct = (t.assignee or "unassigned", t.stream_id, t.tool.value)
+        if direct not in outcome.direct_reissue:
+            outcome.direct_reissue.append(direct)
 
 
 def drop_retracted(outcome: ReviewOutcome, labels: list[LabelRecord]) -> list[str]:
@@ -150,7 +198,7 @@ def collect_task(  # noqa: C901
     now: datetime,
     ops_policy: ReviewOpsPolicy | None = None,
 ) -> ReviewOutcome | None:
-    """수집했으면 결과를, 이미 수집한 작업이면 None을 돌려준다.
+    """수집했으면 결과를, 이미 수집했거나 회수한(revoked) 작업이면 None을 돌려준다.
 
     검수 결과는 작업에 실제로 보낸 라벨(sent_label_ids)과 비교한다. 그 사이 다른 단계가 라벨을
     바꿨어도 보내지 않은 라벨을 검수자가 지운 것으로 보지 않는다.
@@ -170,7 +218,9 @@ def collect_task(  # noqa: C901
     # 같은 부모를 보낸 서로 다른 작업도 직렬화한다. 작업 행만 잠그면 stale 이력으로 둘 다
     # 수정본을 추가할 수 있다. 세션 → 작업 순으로 잠근 뒤에 이력을 읽는다 (ADR 0032).
     lock_session(conn, get_review_task(conn, task_key).session_id)
-    if _lock_task(conn, task_key) is ReviewTaskStatus.COLLECTED:
+    # 수집한 작업은 다시 수집하지 않고, 회수한 작업에 라벨러가 낸 결과는 받지 않는다
+    # (그 결과는 회수 실행기의 스냅숏에 남는다, ADR 0039)
+    if _lock_task(conn, task_key) is not ReviewTaskStatus.OPEN:
         return None
     task = get_review_task(conn, task_key)
     if task.assignee is not None and reviewer_id != task.assignee:
@@ -299,14 +349,8 @@ def collect_task(  # noqa: C901
         record_review(conn, label_id, VerificationState.HUMAN_APPROVED, reviewer_id, now)
     mark_review_task_collected(conn, task_key, now)
     if task.stage is ReviewStage.PRIVACY and task.mode in OPERATIONAL_MODES and outcome.new_records:
-        if session.privacy_state is PrivacyState.APPROVED:
-            # 승인 뒤 블러가 바뀌었다: 다시 승인해야 블러본을 새로 렌더한다
-            set_privacy_state(conn, task.session_id, PrivacyState.AUTO_BLURRED)
-        # 이전 블러본을 어떤 단계도 현재 것으로 보지 않게 렌더 기록을 무효로 둔다
-        with tempfile.TemporaryDirectory() as tmp:
-            invalidate_render(
-                setup.labeling, task.session_id, task.stream_id, f"collected:{task_key}", Path(tmp)
-            )
+        # 블러가 바뀌었다: 승인 해제 → 배포 매체 회수 요청(같은 커밋) → 렌더 기록 무효
+        _note_revocations(outcome, _after_blur_change(conn, task, session, setup, now))
     if assignment is not None:
         # 함수 안에서 불러온다 (모듈을 읽을 때 ops 계층 전체를 끌어오지 않는다).
         # 모든 작업이 수집됐으면 배정을 끝내고, 표본 배정이면 묶음 합격 판정을 적용한다.

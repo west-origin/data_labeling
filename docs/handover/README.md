@@ -28,7 +28,7 @@ flowchart LR
 | 영역 | 구현·확인된 범위 | 인수자가 추가 확인할 것 |
 | --- | --- | --- |
 | 영상 입력 | 회전 사본 준비, PTS 비교, 수집·프록시·동기화 | 실제 바디캠 코덱·센서 트랙·긴 영상 |
-| 개인정보 처리 | 탐지·원본 전수 검수·승인·블러 렌더·해시 검사 | 현장 누락률, OCR 미구현, CVAT 원본 사본 삭제 |
+| 개인정보 처리 | 탐지·원본 전수 검수·승인·블러 렌더·해시 검사, 블러 변경 뒤 배포한 라벨링 매체 회수(ADR 0039) | 현장 누락률, OCR 미구현, CVAT 원본 사본 삭제, 회수 cron 운영 |
 | 손·객체·도구 | 실제 모델 연결, CPU 합성 영상 실행 검사 | 실제 청소 영상의 정확도·수정시간·처리속도 |
 | 전신·깊이·3D 관계 | 모델/규칙 경로 일부 구현, 합성 테스트 | 깊이 모델은 이번 검사에서 생략; 실제 공간 보정과 품질 미입증 |
 | 사람 검수 | CVAT·Label Studio 수집, 이력, 완료 판정 | 실제 검수 사용성; 고객별 권한 체계 |
@@ -39,6 +39,23 @@ flowchart LR
 
 현재 테스트 결과는 [남은 과제](known-issues.md), 확정·후보 문제의 단일 목록은 [레지스트리](issues.yaml)가 기준이다.
 테스트 통과와 실영상 정확도·상용 서비스 준비 완료는 별개의 판단이다.
+
+## 블러가 바뀐 뒤 라벨링 작업 회수와 재생성
+
+승인 뒤 블러 재검수·재탐지·렌더 정책 변경으로 블러본이 바뀌면, 이미 배포한 라벨링 작업
+(CVAT 워터마크 사본, Label Studio 서명 URL)은 그 커밋에서 회수 요청되고 커밋 뒤 끊긴다
+([ADR 0039](../adr/0039-revoke-labeling-media-on-blur-change.md)).
+
+1. 수집·탐지·렌더 출력의 회수 내용과 다시 만들 명령을 본다. 대기가 남으면 종료 코드 4다.
+   `dlp review revoke <세션>`으로 다시 실행한다 (cron: `dlp review revoke --pending`, 10분마다).
+2. 남은 블러 검수 → `dlp privacy approve` → `dlp privacy render`.
+3. 출력된 배정마다 `dlp review assign <배정>`, 배정 없는 작업은
+   `dlp review create <세션> --stage labeling --assignee <담당자> --stream <스트림> --tool <도구>`.
+4. 검수·수집 → 배정 완료 → `dlp review verify <세션>`.
+
+배포 직후에는 렌더 해시가 없는 구 작업을 `dlp review revoke <세션> --dry-run --include-legacy`로
+확인하고 필요하면 `--include-legacy`로 회수한다. 라벨러가 노출을 신고하면
+`dlp review revoke <세션> --stream <스트림> --all --reason incident`로 즉시 끊는다.
 
 ## 읽는 순서와 문서의 책임
 
