@@ -658,9 +658,32 @@ def list_session_ids(conn: sa.Connection, ontology_version: str | None = None) -
 
 
 def insert_golden_set(conn: sa.Connection, golden: GoldenSet) -> None:
-    """골든셋 버전 1행을 추가한다. 같은 version이 있으면 IntegrityError."""
+    """골든셋 버전 1행을 추가한다. 같은 version이 있으면 IntegrityError.
+
+    고정한 정답 라벨 ID(`truth_label_ids`)는 모두 이 골든셋 세션의 라벨 레코드여야 한다 (라벨
+    레코드는 내용이 불변이고 지워지지 않으므로, 저장 때 확인하면 이후에도 같은 레코드를 읽는다).
+    None이면 열을 NULL로 둔다 (고정하지 않은 이전 형식).
+
+    Raises:
+        ValueError: 골든셋 세션에 없는 라벨 ID가 정답에 있을 때.
+    """
     data = golden.model_dump(mode="json")
     data["created_at"] = golden.created_at
+    if golden.truth_label_ids is None:
+        del data["truth_label_ids"]  # JSON null이 아니라 SQL NULL로 둔다
+    else:
+        known = set(
+            conn.execute(
+                sa.select(label_records.c.label_id).where(
+                    label_records.c.session_id.in_(golden.session_ids)
+                )
+            ).scalars()
+        )
+        missing = sorted(set(golden.truth_label_ids) - known)
+        if missing:
+            raise ValueError(
+                f"골든셋 {golden.version}의 정답 라벨이 골든셋 세션에 없습니다: {missing[:5]}"
+            )
     conn.execute(golden_sets.insert().values(**data))
 
 

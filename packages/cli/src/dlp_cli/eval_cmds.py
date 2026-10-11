@@ -6,6 +6,8 @@
   리포트를 만들고, 배포 게이트(절대 기준 + 기존 모델 대비 회귀)를 판정한다.
 
 입력 → 출력: DB `golden_sets`·`label_records` → `<out>`(JSON)과 같은 이름의 `.md` 리포트.
+정답은 골든 버전에 고정한 라벨이며, JSON 리포트의 `golden_truth`에 고정 여부와 정답 라벨 ID 해시를
+남긴다 (ADR 0047). 고정하지 않은 이전 형식 골든셋은 현재 라벨로 평가하고 경고를 출력한다.
 종료 코드: 게이트 통과 0, 실패 1. 형식 오류는 `SystemExit` 메시지.
 
 주의:
@@ -29,8 +31,16 @@ from dlp_cli.schema_cmds import database_url
 from dlp_eval.gate import decide
 from dlp_eval.harness import evaluate
 from dlp_eval.policy import TASKS, Task, load_policy
-from dlp_eval.runner import MissingPredictionsError, load_golden_merged, write_report
+from dlp_eval.runner import (
+    GOLDEN_TRUTH,
+    MissingPredictionsError,
+    golden_sessions,
+    load_golden_merged,
+    truth_anchor,
+    write_report,
+)
 from dlp_schema import repo_root
+from dlp_schema.db.repository import get_golden_set
 
 
 def _models(items: list[str], flag: str) -> dict[Task, list[str]]:
@@ -80,6 +90,10 @@ def cmd_golden(args: argparse.Namespace) -> int:
     engine = sa.create_engine(database_url(args.url))
     try:
         with engine.connect() as conn:
+            # 정답 고정 근거 (골든 버전에 고정한 정답 라벨 ID 해시, ADR 0047)
+            anchor = truth_anchor(
+                get_golden_set(conn, args.golden), golden_sessions(conn, args.golden)
+            )
             golden = load_golden_merged(conn, args.golden, models)
             # 기존 모델 버전을 잘못 적으면 예측이 비어 기존 지표가 0이 되고 어떤 후보든 통과한다
             old = (
@@ -98,7 +112,13 @@ def cmd_golden(args: argparse.Namespace) -> int:
             old, policy, golden_version=args.golden, model_versions=_names(baseline_models)
         )
     decision = decide(report, baseline, policy)
-    write_report(Path(args.out), report, decision)
+    write_report(Path(args.out), report, decision, {GOLDEN_TRUTH: anchor})
+    if not anchor["truth_frozen"]:
+        print(
+            f"경고: 골든셋 {args.golden}은 정답을 고정하지 않은 이전 형식이라 현재 라벨로 "
+            "평가했습니다 (같은 버전이어도 정답이 바뀔 수 있다. "
+            "`dlp dataset golden --from`으로 고정)"
+        )
     for task, d in decision.tasks.items():
         print(
             f"{task}: {'통과' if d.passed else '실패'}" + "".join(f"\n  - {r}" for r in d.reasons)

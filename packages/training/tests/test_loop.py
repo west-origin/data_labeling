@@ -6,6 +6,7 @@ test_mlflow.py가 따로 확인한다.
 
 from __future__ import annotations
 
+import json
 import os
 import uuid
 from collections.abc import Iterator
@@ -22,7 +23,7 @@ from dlp_datasets.snapshot import LocalSnapshotStore
 from dlp_eval.gate import GateDecision, TaskDecision
 from dlp_eval.harness import EvalReport
 from dlp_eval.policy import load_policy as load_eval_policy
-from dlp_eval.runner import write_report
+from dlp_eval.runner import golden_truth_ids, write_report
 from dlp_media.storage import LocalStore, sha256_file
 from dlp_schema.dataset import DatasetVersion
 from dlp_schema.db.migrate import upgrade
@@ -177,6 +178,7 @@ def populate(conn: sa.Connection) -> None:
             domain=Domain.CLEANING,
             session_ids=("gd0", "gd1"),
             created_at=FIXED_TIME,
+            truth_label_ids=golden_truth_ids(conn, ("gd0", "gd1")),
         ),
     )
 
@@ -235,6 +237,25 @@ def test_training_loop_gate_blocks_or_deploys(engine: sa.Engine, tmp_path: Path)
             now=FIXED_TIME,
         )
         golden_before = {sid: len(get_labels(conn, sid)) for sid in ("gd0", "gd1")}
+        # 정답을 고정하지 않은 이전 형식 골든셋과 그것을 쓰는 데이터셋 버전 (T5)
+        insert_golden_set(
+            conn,
+            GoldenSet(
+                version="golden-legacy",
+                domain=Domain.CLEANING,
+                session_ids=("gd0", "gd1"),
+                created_at=FIXED_TIME,
+            ),
+        )
+        build_dataset_version(
+            conn,
+            snapshots,
+            load_dataset_policy(ROOT),
+            version_id="dv-legacy",
+            ontology_version="1.0.0",
+            golden_set_version="golden-legacy",
+            now=FIXED_TIME,
+        )
 
     # 누적 부족: 기준을 올리면 학습하지 않는다
     strict = policy.tasks["objects"].model_copy(update={"min_examples": 1000})
@@ -246,6 +267,10 @@ def test_training_loop_gate_blocks_or_deploys(engine: sa.Engine, tmp_path: Path)
             eval_policy=eval_policy, now=FIXED_TIME, stub_truth=True,
         )  # fmt: skip
     assert r0.status == "skipped" and "min_examples" in r0.reason
+    assert not tracker.runs
+    # 정답을 고정하지 않은 골든셋은 같은 버전이어도 정답이 바뀌므로 배포 판정에 쓰지 않는다
+    with pytest.raises(TrainingError, match="고정하지 않은"):
+        run(TrainingJob("objects", "dv-legacy", baseline_versions=BASE, force=True), 1)
     assert not tracker.runs
 
     # 1) 흔들림이 큰 후보: 첫 배포 기준(HOTA) 미달 → 미배포
@@ -307,6 +332,18 @@ def test_training_loop_gate_blocks_or_deploys(engine: sa.Engine, tmp_path: Path)
     assert {"model/oracle-stub.json", "golden/golden.json", "golden/golden.md"} <= set(
         rec.artifacts
     )
+    # 리포트에 정답 고정 근거: 골든 버전에 고정한 정답 8개(세션 2개 x 박스 3 + 블러 1)의 ID 해시
+    with engine.connect() as conn:
+        [mv2] = [
+            m for m in list_model_versions(conn, "objects") if m.model_version == r2.model_version
+        ]
+    assert mv2.report_uri is not None
+    report_path = tmp_path / "r2-golden.json"
+    artifacts.get_file(mv2.report_uri.removeprefix(artifacts.uri("")), report_path)
+    anchor = json.loads(report_path.read_text("utf-8"))["golden_truth"]
+    assert anchor["truth_frozen"] is True and anchor["golden_version"] == "golden-v1"
+    assert anchor["truth_labels"] == 8 and anchor["sessions"] == ["gd0", "gd1"]
+    assert rec.params["golden_truth_sha256"] == anchor["truth_label_ids_sha256"]
     # 레지스트리 등록은 DB 커밋 뒤에 CLI가 한다 (배포 결과가 알려 준다)
     assert r2.registration is not None and r1.registration is None and r3.registration is None
     tracker.register(*r2.registration)
@@ -440,7 +477,8 @@ def test_timeline_tasks_withdrawal_and_approval_baseline(engine: sa.Engine, tmp_
         insert_golden_set(
             conn,
             GoldenSet(version="golden-v1", domain=Domain.CLEANING, session_ids=("gd0", "gd1"),
-                      created_at=FIXED_TIME),
+                      created_at=FIXED_TIME,
+                      truth_label_ids=golden_truth_ids(conn, ("gd0", "gd1"))),
         )  # fmt: skip
         version = build_dataset_version(
             conn, snapshots, load_dataset_policy(ROOT), version_id="dv1",

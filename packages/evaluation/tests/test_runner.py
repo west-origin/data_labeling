@@ -20,10 +20,18 @@ import sqlalchemy as sa
 from dlp_eval.gate import decide
 from dlp_eval.harness import evaluate
 from dlp_eval.policy import load_policy
-from dlp_eval.runner import load_golden, write_report
+from dlp_eval.runner import (
+    GoldenSession,
+    golden_sessions,
+    golden_truth_ids,
+    load_golden,
+    truth_anchor,
+    write_report,
+)
 from dlp_fixtures.actions import generate_action_scenario
 from dlp_schema.db.migrate import upgrade
 from dlp_schema.db.repository import (
+    get_golden_set,
     insert_golden_set,
     insert_labels,
     insert_session,
@@ -32,7 +40,14 @@ from dlp_schema.db.repository import (
     register_ontology,
 )
 from dlp_schema.episode import retractions
-from dlp_schema.labels import ActionPayload, LabelRecord, Provenance, Source, VerificationState
+from dlp_schema.labels import (
+    ActionPayload,
+    LabelRecord,
+    Provenance,
+    Source,
+    Verification,
+    VerificationState,
+)
 from dlp_schema.lineage import GoldenSet, Withdrawal
 from dlp_schema.ontology import load_ontology
 from dlp_schema.session import Domain, StreamKind, SyncMethod
@@ -216,3 +231,79 @@ def test_prefix_predictions_keep_reviewer_deleted_records_and_skip_withdrawn(
     assert "fp-v1" in pred_ids  # 검수자가 지운 오탐도 예측이다
     assert not any(i.endswith("-v0") for i in pred_ids)  # 새 버전이 지운 옛 레코드는 빠진다
     assert pred_ids == {x.label_id for x in v1} | {"fp-v1"}
+
+
+def test_frozen_golden_truth_is_unchanged_by_later_human_correction(pg: sa.Engine) -> None:
+    """같은 골든 버전은 정답이 고정된다 (T5, ADR 0047).
+
+    시나리오: 골든 세션 하나에 사람 행동 라벨(정답)과 미검수 모델 라벨. 만들 때의 정답 ID를 고정해
+    golden-v1을 만든다. 뒤에 사람이 정답 하나를 고치고(새 레코드 + parent) 모델 라벨을 승인한다.
+    정답 근거: golden-v1은 고정한 ID 그대로(고친 레코드·승인된 모델 라벨이 들어오지 않음), 리포트
+    근거(truth_anchor)도 같다. 고정하지 않은 이전 형식 골든셋은 현재 라벨을 읽어 바뀐다. 다시
+    고정하면(새 골든 버전) 고친 정답이 들어간다. 없는 라벨은 정답으로 고정할 수 없다.
+    """
+    sid = "f-0001"
+    truth = [x for x in generate_action_scenario(0, session_id=sid).labels if x.kind == "action"]
+    auto = _model(truth[:1], "actions-auto", "auto")  # 미검수 모델 라벨: 아직 정답이 아니다
+
+    def golden(version: str, ids: tuple[str, ...] | None = None) -> GoldenSet:
+        """세션 하나짜리 골든셋 버전 (ids = 고정할 정답 라벨 ID, None이면 이전 형식)."""
+        return GoldenSet(
+            version=version,
+            domain=Domain.CLEANING,
+            session_ids=(sid,),
+            created_at=FIXED_TIME,
+            truth_label_ids=ids,
+        )
+
+    with pg.begin() as conn:
+        register_ontology(conn, load_ontology(ROOT / "config/ontology/v1"))
+        insert_session(conn, make_session(sid))
+        insert_labels(conn, [*truth, *auto])
+        frozen = golden_truth_ids(conn, [sid])
+        insert_golden_set(conn, golden("golden-v1", frozen))
+        insert_golden_set(conn, golden("golden-legacy"))
+    assert set(frozen) == {x.label_id for x in truth}
+
+    def truth_ids(sessions: list[GoldenSession]) -> list[str]:
+        """세션들의 정답 라벨 ID (정렬)."""
+        return sorted(x.label_id for g in sessions for x in g.truth)
+
+    with pg.connect() as conn:
+        before = golden_sessions(conn, "golden-v1")
+        anchor_before = truth_anchor(get_golden_set(conn, "golden-v1"), before)
+    assert anchor_before["truth_frozen"] is True and anchor_before["truth_labels"] == len(truth)
+
+    corrected = truth[0].model_copy(
+        update={
+            "label_id": "fix-1",
+            "parent_label_id": truth[0].label_id,
+            "verification": Verification(
+                state=VerificationState.HUMAN_CORRECTED, reviewer_id="rev01", reviewed_at=FIXED_TIME
+            ),
+        }
+    )
+    with pg.begin() as conn:
+        insert_labels(conn, [corrected])
+        record_review(conn, auto[0].label_id, VerificationState.HUMAN_APPROVED, "rev01", FIXED_TIME)
+
+    with pg.connect() as conn:
+        after = golden_sessions(conn, "golden-v1")
+        anchor_after = truth_anchor(get_golden_set(conn, "golden-v1"), after)
+        loaded = load_golden(conn, "golden-v1", {"actions": "actions-auto"})["actions"]
+        legacy = golden_sessions(conn, "golden-legacy")
+        legacy_anchor = truth_anchor(get_golden_set(conn, "golden-legacy"), legacy)
+        refrozen = golden_truth_ids(conn, [sid])
+    # 같은 골든 버전: 정답 라벨 ID와 근거 해시가 그대로다
+    assert truth_ids(after) == truth_ids(before) == sorted(frozen)
+    assert anchor_after == anchor_before
+    assert sorted(x.label_id for s in loaded for x in s.truth) == sorted(frozen)
+    # 고정하지 않은 이전 형식은 현재 라벨을 읽어 정답이 바뀐다 (리포트에 고정 안 됨으로 남는다)
+    assert "fix-1" in truth_ids(legacy) and truth[0].label_id not in truth_ids(legacy)
+    assert legacy_anchor["truth_frozen"] is False
+    # 정답 수정은 새 골든 버전으로: 다시 고정하면 고친 레코드와 승인된 모델 라벨이 들어간다
+    assert set(refrozen) == (set(frozen) - {truth[0].label_id}) | {"fix-1", auto[0].label_id}
+
+    # 골든셋 세션에 없는 라벨은 정답으로 고정할 수 없다
+    with pytest.raises(ValueError, match="nope"), pg.begin() as conn:
+        insert_golden_set(conn, golden("golden-bad", ("nope",)))

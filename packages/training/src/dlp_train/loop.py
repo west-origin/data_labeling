@@ -9,6 +9,8 @@
    학습 실행(training_runs)과 모델 버전(model_versions, candidate)을 DB에 쓴다.
 4. 골든셋 평가: 후보와 기존 모델(배포 중인 재학습 모델, 없으면 baseline_versions의 DB 예측)을
    골든셋 세션에 메모리에서 돌려 같은 코드로 평가한다. 골든셋 세션에는 아무것도 쓰지 않는다.
+   정답은 골든 버전에 고정한 라벨이다 (정답을 고정하지 않은 이전 형식 골든셋은 거부한다, ADR
+   0047). 리포트에 정답 고정 근거(`golden_truth`: 정답 라벨 ID 해시)를 남긴다.
 5. 게이트(config/policies/evaluation.yaml) 통과 → 배포(정책 deploy: auto) 또는 승인 대기(approve).
    실패 → rejected. 배포하면 이전 배포 모델은 retired가 된다.
 
@@ -47,11 +49,13 @@ from dlp_eval.gate import GateDecision, TaskDecision, decide
 from dlp_eval.harness import EvalReport, SessionData, evaluate
 from dlp_eval.policy import EvaluationPolicy, Task
 from dlp_eval.runner import (
+    GOLDEN_TRUTH,
     TIMELINE_TASKS,
     GoldenSession,
     MissingPredictionsError,
     golden_sessions,
     load_golden_merged,
+    truth_anchor,
     write_report,
 )
 from dlp_media.storage import ObjectStore, sha256_file
@@ -68,7 +72,7 @@ from dlp_schema.db.repository import (
     withdrawn_session_ids,
 )
 from dlp_schema.labels import LabelRecord
-from dlp_schema.lineage import ModelStatus, ModelVersion, TrainingRun
+from dlp_schema.lineage import GoldenSet, ModelStatus, ModelVersion, TrainingRun
 from dlp_schema.predictor import Clip, Predictor
 from dlp_schema.session import LifecycleState, Session, Stream, StreamKind
 from dlp_train.extract import load_training_data, matches
@@ -251,7 +255,8 @@ def run_training_job(  # noqa: C901
         `LoopResult`. skipped면 DB·MLflow에 아무것도 쓰지 않는다.
 
     Raises:
-        TrainingError: 정책·학습기·로더가 없음, 골든셋 없는 데이터셋 버전, 골든셋 세션 누출,
+        TrainingError: 정책·학습기·로더가 없음, 골든셋 없는 데이터셋 버전, 정답을 고정하지 않은
+            이전 형식 골든셋(ADR 0047), 골든셋 세션 누출,
             replaces 과제인데 비교 버전 없음, 비교 버전의 골든 예측 없음, 배포 모델 로더 없음,
             산출물 해시 불일치.
     """
@@ -272,7 +277,8 @@ def run_training_job(  # noqa: C901
         raise TrainingError(
             f"{version.version_id}: 골든셋이 없는 데이터셋 버전은 평가할 수 없습니다"
         )
-    golden_ids = set(get_golden_set(conn, version.golden_set_version).session_ids)
+    golden_set = _frozen_golden_set(conn, version.golden_set_version)
+    golden_ids = set(golden_set.session_ids)
     data = load_training_data(
         snapshots, version, job.task, policy, excluded=withdrawn_sessions(conn, version, policy)
     )
@@ -296,6 +302,8 @@ def run_training_job(  # noqa: C901
             )
             return result
     golden = golden_sessions(conn, version.golden_set_version)
+    # 정답 고정 근거 (골든 버전에 고정한 정답 라벨 ID 해시). 리포트·MLflow에 남긴다
+    anchor = truth_anchor(golden_set, golden)
     if not any(matches(job.task, x) for g in golden for x in g.truth):
         result.reason = (
             f"골든셋 {version.golden_set_version}에 {job.task} 정답이 없어 평가할 수 없습니다"
@@ -433,12 +441,23 @@ def run_training_job(  # noqa: C901
 
             # 리포트를 산출물 버킷과 MLflow에 남긴다 (승인 배포가 deployed_baseline을 다시 읽는다)
             report = work / "report" / "golden.json"
-            write_report(report, candidate, decision, {DEPLOYED_BASELINE: compared_with})
+            write_report(
+                report,
+                candidate,
+                decision,
+                {DEPLOYED_BASELINE: compared_with, GOLDEN_TRUTH: anchor},
+            )
             report_key = f"{policy.artifact_prefix}/{job.task}/{model_version}/golden.json"
             artifacts.put_file(report_key, report, sha256_file(report))
             md = report.with_suffix(".md")
             artifacts.put_file(report_key.removesuffix(".json") + ".md", md, sha256_file(md))
-            tracker.log_params(mlflow_run, {DEPLOYED_BASELINE: compared_with or "none"})
+            tracker.log_params(
+                mlflow_run,
+                {
+                    DEPLOYED_BASELINE: compared_with or "none",
+                    "golden_truth_sha256": anchor["truth_label_ids_sha256"],
+                },
+            )
             tracker.log_artifact(mlflow_run, report, "golden")
             tracker.log_artifact(mlflow_run, md, "golden")
             metrics = candidate.overall[job.task].metrics if job.task in candidate.overall else {}
@@ -465,6 +484,23 @@ def run_training_job(  # noqa: C901
         tracker.finish(mlflow_run, "FAILED")
         raise
     return result
+
+
+def _frozen_golden_set(conn: sa.Connection, golden_version: str) -> GoldenSet:
+    """정답을 고정한 골든셋 버전을 읽는다.
+
+    Raises:
+        TrainingError: 정답을 고정하지 않은 이전 형식(`truth_label_ids` None)일 때. 현재 라벨로
+            정답을 읽으면 같은 골든 버전이라도 배포 판정을 재현할 수 없다 (ADR 0047).
+    """
+    golden_set = get_golden_set(conn, golden_version)
+    if golden_set.truth_label_ids is None:
+        raise TrainingError(
+            f"골든셋 {golden_version}은 정답을 고정하지 않은 이전 형식입니다. "
+            f"`dlp dataset golden --from {golden_version} --create <새 버전>`으로 "
+            "정답을 고정한 골든 버전을 만들고 그 버전으로 데이터셋 버전을 다시 만드세요"
+        )
+    return golden_set
 
 
 def _merged_golden(conn: sa.Connection, golden_version: str, job: TrainingJob) -> list[SessionData]:

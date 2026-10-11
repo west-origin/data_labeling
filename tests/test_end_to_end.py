@@ -36,6 +36,7 @@ from dlp_datasets.build import build_dataset_version
 from dlp_datasets.policy import load_policy as load_dataset_policy
 from dlp_datasets.snapshot import LakeFSSnapshotStore
 from dlp_eval.policy import load_policy as load_eval_policy
+from dlp_eval.runner import golden_truth_ids
 from dlp_export.policy import load_policy as load_export_policy
 from dlp_export.runner import run_export
 from dlp_fixtures.actions import ENTITIES, generate_action_scenario
@@ -357,7 +358,7 @@ def test_synthetic_session_end_to_end(pg: sa.Engine, tmp_path: Path) -> None:
         insert_golden_set(
             conn,
             GoldenSet(version=f"g-{sid}", domain=Domain.CLEANING, session_ids=(golden_sid,),
-                      created_at=now),
+                      created_at=now, truth_label_ids=golden_truth_ids(conn, (golden_sid,))),
         )  # fmt: skip
         dpol = load_dataset_policy(ROOT)
         snapshots = LakeFSSnapshotStore.from_env(

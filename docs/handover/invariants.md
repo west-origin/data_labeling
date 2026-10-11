@@ -24,6 +24,7 @@
 | 골든·학습·검증 사이 작업자·장소 겹침 금지, 분할은 splitter로만 | `packages/datasets/tests/test_splits.py` (격리·누수 보고) | splitter 우회 여부는 **문서뿐** |
 | 학습 예제는 학습·검증 분할에서만, 후보 예측은 DB에 안 씀 | `packages/training/tests/test_extract.py`, 학습 루프 테스트 | 철회 재검사 없음 (T3) |
 | 배포는 게이트 통과 모델만 | `deploy()`가 리포트의 후보 ID·게이트 통과·비교 기준을 검사(자동·CLI approve·직접 호출 공통) — `packages/training/tests/test_loop.py::test_direct_deploy_requires_passing_report_of_same_candidate`, 게이트 테스트 | |
+| 같은 골든 버전의 정답은 바뀌지 않는다 (정답 수정은 새 골든 버전, ADR 0047) | 골든셋에 정답 라벨 ID 고정(`insert_golden_set` 소속 검사), `golden_sessions`가 고정 ID로 읽음, 학습 루프는 미고정 골든셋 거부 — `packages/evaluation/tests/test_runner.py::test_frozen_golden_truth_is_unchanged_by_later_human_correction`, `packages/cli/tests/test_golden_cmds.py` | 0023 이전 행(NULL)은 `dlp eval golden`이 현재 라벨로 평가하고 경고. 골든 영상·동기화 값 해시는 고정하지 않음 |
 | 내보내기는 데이터셋 버전에서만, 기본은 사람이 검수한 라벨만, 블러 라벨·원본 위치·검수자 ID 금지 | `test_formats.py::test_verification_policy`, 내보내기 정책·`ExportedLabel` 검증기, `test_runner.py` | |
 | 내보내기 가명은 내보내기마다 다르다 (HMAC) | `test_formats.py::test_pseudonyms_are_per_export`, `test_ref_replaces_only_whole_session_tokens` | |
 | 비상업(`forbidden`) 가중치는 쓰지 않는다 | `make licenses`(위반 시 실패), `tests/test_model_licenses.py` | 하위 탐지기 추적 테스트가 약함 (F-COE-02) |

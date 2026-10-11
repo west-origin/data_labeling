@@ -269,7 +269,8 @@ review_assignments = sa.Table(
     sa.Index("ix_review_assignments_queue", "status", "priority"),
 )
 
-# 골든셋 버전 (`GoldenSet`). session_ids는 JSON 목록.
+# 골든셋 버전 (`GoldenSet`). session_ids는 JSON 목록. truth_label_ids는 만들 때 고정한 정답 라벨 ID
+# JSON 목록이며, NULL이면 정답을 고정하지 않은 이전 형식 행이다 (0023, ADR 0047).
 golden_sets = sa.Table(
     "golden_sets",
     metadata,
@@ -278,6 +279,7 @@ golden_sets = sa.Table(
     sa.Column("session_ids", Json, nullable=False),
     sa.Column("created_at", Ts, nullable=False),
     sa.Column("note", sa.Text(), nullable=False),
+    sa.Column("truth_label_ids", Json, nullable=True),
 )
 
 # 학습 실행 (`TrainingRun`). 데이터셋 버전에 FK로 묶인다.

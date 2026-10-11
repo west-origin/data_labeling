@@ -1078,6 +1078,8 @@ def test_cli_partial_requested_evaluation_fails(pg: sa.Engine, tmp_path: Path) -
     result = json.loads(out.read_text())
     assert code == 1 and not result["gate"]["passed"]
     assert result["overall"]["objects"]["metrics"]["hota"] == 1.0
+    # 정답을 고정하지 않은 이전 형식 골든셋은 리포트에 그렇게 남는다 (ADR 0047)
+    assert result["golden_truth"]["truth_frozen"] is False
     assert result["gate"]["tasks"]["objects"]["passed"]
     assert not result["gate"]["tasks"]["hands"]["passed"]
     assert "미평가" in result["gate"]["tasks"]["hands"]["reasons"][0]
