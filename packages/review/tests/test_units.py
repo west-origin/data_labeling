@@ -29,9 +29,11 @@ from dlp_media.storage import LocalStore, sha256_file
 from dlp_privacy.render import blur_tracks
 from dlp_review.collect import drop_retracted
 from dlp_review.cvat import (
+    KEYPOINT_LABELS,
     CvatFormatError,
     CvatSchema,
     annotation_tracks,
+    cvat_label_name,
     from_cvat_tracks,
     label_spec,
     quantize,
@@ -178,6 +180,82 @@ def test_cvat_new_track_and_bad_frame_time() -> None:
     assert item.origin_label_id is None and isinstance(item.payload, BlurTrackPayload)
     with pytest.raises(ValueError, match="프레임 시각"):
         to_cvat_tracks(blur.labels[:1], [t + 1 for t in blur.frame_times], schema)
+
+
+def test_cvat_new_hand_skeleton_takes_hand_from_label() -> None:
+    """F-REV-04 회귀: CVAT에서 새로 그린 손 골격은 hand가 없어 ValidationError로 수집이 멈췄다.
+
+    손 골격 라벨을 손별(`kp_hand21_left`·`kp_hand21_right`)로 나눠, 새로 그린 트랙·점 모양도 라벨
+    이름으로 손을 안다. 정답 근거: 행동 시나리오의 손 키포인트 트랙(21점, hand 있음)과 프레임 시각.
+    """
+    actions = generate_action_scenario(2)
+    kp = next(x for x in actions.labels if x.kind == "keypoint_track")
+    assert isinstance(kp.payload, KeypointTrackPayload) and kp.payload.hand is not None
+    hand = kp.payload.hand.value
+    other = "left" if hand == "right" else "right"
+    times = actions.frame_times
+    assert "kp_hand21" not in KEYPOINT_LABELS
+    assert {"kp_hand21_left", "kp_hand21_right"} <= set(KEYPOINT_LABELS)
+    schema = fake_schema(list(KEYPOINT_LABELS))
+
+    # 보낼 때는 손별 라벨, 고치지 않으면 무손실 왕복
+    [track] = to_cvat_tracks([kp], times, schema)
+    assert cvat_label_name(kp) == f"kp_hand21_{hand}"
+    assert track["label_id"] == schema.label_ids[f"kp_hand21_{hand}"]
+    [same] = from_cvat_tracks([track], times, schema, "bodycam", new_box_kind="box_track")
+    assert same.payload == quantize(kp).payload and same.origin_label_id == kp.label_id
+
+    # 검수자가 라벨을 다른 손으로 바꿨다: 화면의 라벨이 메타(원래 손)보다 우선한다
+    [swapped] = from_cvat_tracks(
+        [{**track, "label_id": schema.label_ids[f"kp_hand21_{other}"]}], times, schema, "bodycam",
+        new_box_kind="box_track",
+    )  # fmt: skip
+    assert isinstance(swapped.payload, KeypointTrackPayload)
+    assert swapped.payload.hand is not None and swapped.payload.hand.value == other
+
+    # 새로 그린 트랙 (dlp_label_id·dlp_meta 없음)과 모양 모드 점 21개
+    new_track: dict[str, Any] = {
+        **track,
+        "label_id": schema.label_ids["kp_hand21_left"],
+        "attributes": [],
+    }
+    points = [float(c) for i in range(21) for c in (10 + i, 20 + i)]
+    shape = _shape(schema.label_ids["kp_hand21_right"], 2, "points", points=points)
+    tracks = annotation_tracks({"tracks": [new_track], "shapes": [shape]}, len(times), schema)
+    drawn = from_cvat_tracks(tracks, times, schema, "bodycam", new_box_kind="box_track")
+    assert [(d.origin_label_id, d.payload.hand.value) for d in drawn  # type: ignore[union-attr]
+            ] == [(None, "left"), (None, "right")]  # fmt: skip
+    for d in drawn:
+        assert isinstance(d.payload, KeypointTrackPayload) and d.payload.skeleton == "hand21"
+
+
+def test_cvat_legacy_hand_label_without_hand_is_a_format_error() -> None:
+    """F-REV-04: 손별 라벨 이전에 만든 프로젝트(`kp_hand21` 하나)와 호환한다.
+
+    기존 트랙은 메타의 손으로 그대로 왕복하고, 그 라벨로 새로 그린 골격은 손을 알 수 없어
+    ValidationError가 아니라 `CvatFormatError`(→ 수집에서 TaskError)로 멈춘다. 점 수가 골격과
+    맞지 않는 새 골격도 같다.
+    """
+    actions = generate_action_scenario(2)
+    kp = next(x for x in actions.labels if x.kind == "keypoint_track")
+    times = actions.frame_times
+    legacy = fake_schema(["kp_hand21", "kp_coco17"])
+    [track] = to_cvat_tracks([kp], times, legacy)
+    assert track["label_id"] == legacy.label_ids["kp_hand21"]
+    [same] = from_cvat_tracks([track], times, legacy, "bodycam", new_box_kind="box_track")
+    assert same.payload == quantize(kp).payload
+
+    new_track: dict[str, Any] = {**track, "attributes": []}
+    with pytest.raises(CvatFormatError, match="kp_hand21_left"):
+        from_cvat_tracks([new_track], times, legacy, "bodycam", new_box_kind="box_track")
+
+    split = fake_schema(list(KEYPOINT_LABELS))
+    short = _shape(split.label_ids["kp_hand21_left"], 2, "points", points=[1.0, 2.0, 3.0, 4.0])
+    with pytest.raises(CvatFormatError, match="kp_hand21_left"):
+        from_cvat_tracks(
+            annotation_tracks({"shapes": [short]}, len(times), split), times, split, "bodycam",
+            new_box_kind="box_track",
+        )  # fmt: skip
 
 
 def test_label_studio_roundtrip_offline_and_new_regions(ontology: Ontology) -> None:

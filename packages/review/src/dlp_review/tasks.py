@@ -74,7 +74,7 @@ from dlp_privacy.runner import (
     stale_media_tasks,
 )
 from dlp_review.clients import CvatClient, LabelStudioClient, cvat_task_name
-from dlp_review.cvat import CvatSchema, Scale, label_spec, to_cvat_tracks
+from dlp_review.cvat import KEYPOINT_LABELS, CvatSchema, Scale, label_spec, to_cvat_tracks
 from dlp_review.labelstudio import LS_KINDS, label_config, to_ls_results
 from dlp_review.ontology_projects import ontology_project
 from dlp_review.ops.policy import CvatPolicy, MediaPolicy
@@ -357,15 +357,23 @@ def _cvat_project(
 
     새 프로젝트는 라벨마다 테마 색(`ui_theme.cvat_label_color`)을 넣어 만든다. 이미 있는 프로젝트는
     색이 테마와 다른 라벨만 색을 바꾼다 (화면 모양만, 라벨 ID·속성은 그대로).
-    주의: 이미 있는 프로젝트의 라벨 목록은 바꾸지 않는다 (온톨로지에 새 클래스가 생겨도 그대로).
+    이미 있는 프로젝트에 labels 중 빠진 라벨이 있으면 덧붙인다 (예: 손별 손 골격 라벨
+    `kp_hand21_left`·`kp_hand21_right`, F-REV-04). 있던 라벨은 지우거나 바꾸지 않으므로 그 라벨의
+    기존 트랙(`kp_hand21` 등)은 그대로 수집된다. 프로젝트 이름에 온톨로지 해시가 들어 있어
+    온톨로지가 바뀌면 새 프로젝트가 되므로, 덧붙는 것은 코드가 새로 정한 라벨뿐이다.
     """
+    colors = {n: cvat_label_color(theme, n) for n in labels}
     project = cvat.find_project(name)
     if project is None:
-        colors = {n: cvat_label_color(theme, n) for n in labels}
         pid = cvat.create_project(name, label_spec(labels, colors))
         return pid, CvatSchema.from_labels(cvat.project_labels(pid))
     pid = int(project["id"])
     existing = cvat.project_labels(pid)
+    have = {str(lb["name"]) for lb in existing}
+    missing = [n for n in labels if n not in have]
+    if missing:
+        cvat.add_project_labels(pid, label_spec(missing, colors))
+        existing = cvat.project_labels(pid)
     for lb in existing:
         want = cvat_label_color(theme, lb["name"])
         if str(lb.get("color", "")).lower() != want.lower():
@@ -623,8 +631,8 @@ def create_labeling_tasks(
                 assert setup.cvat is not None
                 labels = pick(stream.stream_id, ("box_track", "keypoint_track"))
                 # 프로젝트 라벨: 온톨로지 객체 클래스 + 키포인트 골격
-                # (kp_<골격>, cvat.cvat_label_name)
-                names = [*ontology.objects, "kp_hand21", "kp_coco17", "kp_wholebody133"]
+                # (kp_<골격>, 손 골격은 손별 kp_hand21_<손>, cvat.cvat_label_name)
+                names = [*ontology.objects, *KEYPOINT_LABELS]
                 pid, schema = _cvat_project(
                     setup.cvat, ontology_project(SPATIAL_PROJECT, ontology), names, setup.ui_theme()
                 )

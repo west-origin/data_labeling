@@ -80,8 +80,9 @@ colors:
     infection_control: "#20c997"
   # 객체 상태 (state:<속성>=<값>)
   state: "#868e96"
-  # CVAT 라벨 (블러 대상 종류, 객체 클래스, kp_<골격>). 표에 없으면 아래 palette에서 이름으로 정해진
-  # 색 하나를 고른다 (같은 이름은 항상 같은 색, 서로 다른 라벨이 한 색으로 몰리지 않게).
+  # CVAT 라벨 (블러 대상 종류, 객체 클래스, kp_<골격>, 손 골격은 손별 kp_hand21_<손>). 표에 없으면
+  # 아래 palette에서 이름으로 정해진 색 하나를 고른다 (같은 이름은 항상 같은 색, 서로 다른 라벨이 한
+  # 색으로 몰리지 않게). kp_hand21은 손별 라벨 이전에 만든 프로젝트의 라벨이다.
   cvat:
     face: "#ff5c8a"
     reflection: "#a78bfa"
@@ -91,6 +92,8 @@ colors:
     address_sign: "#22d3ee"
     shipping_label: "#ffd43b"
     kp_hand21: "#a3e635"
+    kp_hand21_left: "#ffd43b"
+    kp_hand21_right: "#a3e635"
     kp_coco17: "#74c0fc"
     cup: "#4c8dff"
     rag: "#22d3ee"

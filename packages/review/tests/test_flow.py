@@ -70,7 +70,11 @@ from dlp_schema.db.repository import (
 from dlp_schema.episode import current_labels
 from dlp_schema.labels import (
     BlurTrackPayload,
+    Hand,
     HandStatePayload,
+    Keypoint,
+    KeypointFrame,
+    KeypointTrackPayload,
     LabelRecord,
     Provenance,
     Source,
@@ -80,7 +84,7 @@ from dlp_schema.labels import (
 from dlp_schema.ontology import load_ontology
 from dlp_schema.review import ReviewMode, ReviewStage, ReviewTask, ReviewTaskStatus, ReviewTool
 from dlp_schema.session import PrivacyState
-from dlp_schema.testing import FIXED_TIME
+from dlp_schema.testing import FIXED_TIME, make_label
 
 pytestmark = pytest.mark.services
 ROOT = Path(__file__).resolve().parents[3]
@@ -687,6 +691,57 @@ def test_unsupported_cvat_annotation_stops_collection(
     r.raise_for_status()
     with pg.begin() as conn, pytest.raises(TaskError, match="polygon"):
         collect_task(conn, task.task_key, setup, "rev01", FIXED_TIME)
+
+
+def test_new_cvat_hand_skeleton_is_collected_with_hand_from_label(
+    pg: sa.Engine, setup: ReviewSetup, tmp_path: Path
+) -> None:
+    """F-REV-04 회귀: CVAT에서 새로 그린 손 골격은 hand가 없어 ValidationError로 수집이 멈췄다.
+
+    작업 라벨 프로젝트에 손별 손 골격 라벨(`kp_hand21_left`·`kp_hand21_right`)이 있고(이전에 만든
+    프로젝트면 덧붙는다), 기존 오른손 트랙은 오른손 라벨로 가서 그대로 승인되며, 검수자가 왼손
+    라벨로 새로 그린 점 21개는 왼손 골격 레코드가 된다. 정답 근거: 블러 시나리오 영상의 프레임 시각.
+    """
+    cvat = _need_cvat(setup)
+    sid, _ = _session(pg, setup, tmp_path)
+    times = generate_blur_scenario(5).frame_times  # _session이 만든 영상과 같은 시드
+    points = tuple(Keypoint(x=10.0 + i, y=20.0 + i, visibility=2) for i in range(21))
+    right = KeypointTrackPayload(
+        entity_id="right_hand", skeleton="hand21", hand=Hand.RIGHT,
+        keyframes=tuple(KeypointFrame(t_ms=t, points=points) for t in times[:2]),
+    )  # fmt: skip
+    kp = make_label(
+        right, label_id=f"{sid}-kp", session_id=sid, stream_id="bodycam", t_start_ms=times[0],
+        t_end_ms=times[1],
+    )  # fmt: skip
+    with pg.begin() as conn:
+        _approve_blur(conn, sid)
+        approve_session(conn, sid)
+        render_session(conn, sid, setup.raw, setup.labeling, load_policy(ROOT))
+        insert_labels(conn, [kp])
+        [task] = create_labeling_tasks(
+            conn, sid, setup, "labeler01", FIXED_TIME, tools={ReviewTool.CVAT}
+        )
+    tid = int(task.external_id)
+    project = cvat.http.get(f"/api/tasks/{tid}").json()["project_id"]
+    names = {lb["name"]: lb["id"] for lb in cvat.project_labels(int(project))}
+    assert {"kp_hand21_left", "kp_hand21_right"} <= set(names)
+    [track] = cvat.get_tracks(tid)
+    assert track["label_id"] == names["kp_hand21_right"]
+    body = {"version": 0, "tags": [], "tracks": [], "shapes": [{
+        "type": "points", "frame": 2, "label_id": names["kp_hand21_left"],
+        "points": [float(c) for i in range(21) for c in (30 + i, 40 + i)], "occluded": False,
+        "outside": False, "z_order": 0, "rotation": 0.0, "attributes": [], "group": 0,
+        "source": "manual",
+    }]}  # fmt: skip
+    r = cvat.http.patch(f"/api/tasks/{tid}/annotations", params={"action": "create"}, json=body)
+    r.raise_for_status()
+    with pg.begin() as conn:
+        out = collect_task(conn, task.task_key, setup, "labeler01", FIXED_TIME)
+    assert out is not None and out.approved == [kp.label_id] and out.added == 1
+    [new] = out.new_records
+    assert isinstance(new.payload, KeypointTrackPayload) and new.payload.skeleton == "hand21"
+    assert new.payload.hand is Hand.LEFT and new.t_start_ms == times[2]
 
 
 def test_privacy_task_needs_cvat_account_of_assignee(

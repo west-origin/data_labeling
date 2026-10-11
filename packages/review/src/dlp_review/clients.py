@@ -144,6 +144,13 @@ class CvatClient:
         )
         return list(res["results"])
 
+    def add_project_labels(self, project_id: int, labels: list[dict[str, Any]]) -> None:
+        """기존 프로젝트에 라벨 정의(`cvat.label_spec`)를 덧붙인다. 있던 라벨·ID·속성은 그대로다.
+
+        CVAT는 프로젝트 PATCH의 labels 중 ID가 없는 것을 새 라벨로 만든다 (2.78에서 확인).
+        """
+        _check(self.http.patch(f"/api/projects/{project_id}", json={"labels": labels}))
+
     def set_label_color(self, label_id: int, color: str) -> None:
         """라벨 하나의 화면 색(#rrggbb)을 바꾼다. 라벨 ID·이름·속성은 그대로다."""
         _check(self.http.patch(f"/api/labels/{label_id}", json={"color": color}))
