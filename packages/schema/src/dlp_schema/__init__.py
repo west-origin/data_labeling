@@ -15,6 +15,7 @@
     - `migration`: 온톨로지 버전 간 라벨 이관.
     - `dataset`, `lineage`: 데이터셋 버전·분할, 골든셋·학습·모델·내보내기·사용 중지 기록.
     - `review`: 검수 작업·배정 계약.
+    - `aireview`: AI 1차 검수 판정·요청 단위·노출·결과 계약 (라벨이 아니다, ADR 0040).
     - `ops`: 운영·감사 기록 (원본 접근, 검수 시간, 블러 감사, 보관 결정).
     - `export`: 구매자에게 주는 구간 JSON 형식.
     - `config`: `config/defaults.yaml` 로더.

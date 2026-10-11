@@ -46,3 +46,4 @@ ADR은 결정 당시의 이유와 이관 조건을 기록한다. 후속 ADR이 �
 | 0037 | [ADR 0037: 온톨로지 로딩·저장·계층·이관 검증 경계](0037-ontology-validation-boundaries.md) |
 | 0038 | [ADR 0038: 검수 화면 테마를 도구 밖에서 덧씌운다](0038-review-ui-theme-overlay.md) |
 | 0039 | [ADR 0039: 블러가 바뀌면 이미 배포한 라벨링 작업 매체를 회수한다](0039-revoke-labeling-media-on-blur-change.md) |
+| 0040 | [ADR 0040: AI 1차 검수(로컬 VLM)는 참고용 판정만 남기고 사람 검수를 줄이지 않는다](0040-ai-first-pass-review.md) |

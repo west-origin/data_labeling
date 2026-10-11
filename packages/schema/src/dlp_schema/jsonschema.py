@@ -25,6 +25,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
+from dlp_schema.aireview import AiExposure, AiOutcome, AiReviewRun, AiReviewUnit
 from dlp_schema.config import PlatformConfig
 from dlp_schema.dataset import DatasetVersion
 from dlp_schema.episode import EpisodeGraph
@@ -61,6 +62,11 @@ CONTRACTS: dict[str, type[BaseModel]] = {
     "review_work": ReviewWork,
     "privacy_audit": PrivacyAuditRecord,
     "retention_decision": RetentionDecision,
+    # AI 1차 검수 기록 (WP17, ADR 0040). 판정은 라벨이 아니다 (label_records 밖의 추가 전용 표).
+    "ai_review_unit": AiReviewUnit,
+    "ai_review_run": AiReviewRun,
+    "ai_exposure": AiExposure,
+    "ai_outcome": AiOutcome,
 }
 
 

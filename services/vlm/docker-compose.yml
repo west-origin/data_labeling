@@ -1,0 +1,84 @@
+# NVIDIA DGX Spark(GB10, Arm64 + CUDA, 통합 메모리 128 GB)용 VLM 서버 (WP17, ADR 0040).
+# 개발 서비스(services/docker-compose.yml)와 따로, Spark 장비에서만 띄운다. 안내: docs/handover/vlm-server.md
+#
+#   cd services/vlm && cp vlm.env.example vlm.env   # 키·이미지 태그·모델 revision을 채운다
+#   docker compose --env-file vlm.env up -d vlm-aireview            # AI 1차 검수 판정 서버 (포트 8000)
+#   docker compose --env-file vlm.env --profile actions up -d       # 행동 분류 서버도 (포트 8001)
+#
+# 두 서버는 모델이 다르다 (판정 모델 ≠ 행동 분류 모델, 자기 검수 상관 오류 방지). 같은 Spark에서
+# 둘을 띄우면 통합 메모리를 나눠 쓴다: gpu-memory-utilization 합이 0.7 안팎이 되게 두고, 나머지를
+# 프리라벨·디코드·OS에 남긴다. 장비가 여러 대면 대마다 서버를 띄우고 DLP_VLM_URLS로 묶는다.
+#
+# 보안: 요청 본문(이미지 base64) 로그를 켜지 않는다 (--enable-log-requests 금지, 구 버전은
+# --disable-log-requests). API 키를 쓰고, 방화벽으로 사내 파이프라인 호스트만 허용한다.
+# 블러본 전용 서버다. 원본 프레임용 VLM이 필요하면 별도 인스턴스와 ADR이 필요하다 (ADR 0040).
+#
+# TODO(real-model): 실제 Spark·vLLM에서 아직 띄워 보지 않았다. 이미지 태그·플래그 이름은 vLLM 버전마다
+#   다르므로 장비 도착 뒤 `dlp aireview probe`(WP17.3)로 확인하고 이 파일과 vlm.env.example에 고정한다.
+
+x-vllm: &vllm
+  image: ${VLM_IMAGE:?vlm.env에 VLM_IMAGE(NGC vLLM 컨테이너, 고정 태그)를 적는다}
+  restart: unless-stopped
+  ipc: host
+  ulimits:
+    memlock: -1
+    stack: 67108864
+  environment:
+    HF_HOME: /models/hf
+    # 공개 모델만 쓴다. 비공개 모델이 필요하면 HF_TOKEN을 vlm.env에 둔다 (저장소에 넣지 않는다)
+    HF_TOKEN: ${HF_TOKEN:-}
+    VLLM_API_KEY: ${DLP_VLM_API_KEY:?vlm.env에 DLP_VLM_API_KEY를 적는다}
+  volumes:
+    - vlm-models:/models
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
+
+services:
+  # AI 1차 검수 판정 서버: config/policies/aireview.yaml backend.model과 같은 모델·이름
+  vlm-aireview:
+    <<: *vllm
+    ports:
+      - "${VLM_AIREVIEW_PORT:-8000}:8000"
+    command:
+      - vllm
+      - serve
+      - ${AIREVIEW_MODEL:-Qwen/Qwen3-VL-8B-Instruct}
+      - --revision=${AIREVIEW_REVISION:?vlm.env에 가중치 revision(커밋 해시)을 고정한다}
+      - --served-model-name=${AIREVIEW_MODEL:-Qwen/Qwen3-VL-8B-Instruct}
+      - --host=0.0.0.0
+      - --port=8000
+      - --max-model-len=16384
+      # 요청당 이미지 상한: temporal 최대 12장, spatial 4장 + 확대 조각 6장 (aireview.yaml)
+      - --limit-mm-per-prompt={"image":16}
+      - --max-num-seqs=${AIREVIEW_MAX_NUM_SEQS:-32}
+      - --gpu-memory-utilization=${AIREVIEW_GPU_MEMORY:-0.4}
+      - --enable-prefix-caching
+
+  # 행동 분류 서버 (dlp actions run, actions.yaml vlm.model). 필요할 때만 (--profile actions)
+  vlm-actions:
+    <<: *vllm
+    profiles: [actions]
+    ports:
+      - "${VLM_ACTIONS_PORT:-8001}:8000"
+    command:
+      - vllm
+      - serve
+      - ${ACTIONS_MODEL:-Qwen/Qwen2.5-VL-7B-Instruct}
+      - --revision=${ACTIONS_REVISION:?vlm.env에 행동 모델 revision을 고정한다}
+      - --served-model-name=${ACTIONS_MODEL:-Qwen/Qwen2.5-VL-7B-Instruct}
+      - --host=0.0.0.0
+      - --port=8000
+      - --max-model-len=16384
+      - --limit-mm-per-prompt={"image":8}
+      - --max-num-seqs=${ACTIONS_MAX_NUM_SEQS:-32}
+      - --gpu-memory-utilization=${ACTIONS_GPU_MEMORY:-0.3}
+      - --enable-prefix-caching
+
+volumes:
+  # 가중치 캐시 (Hugging Face). 저장소·개발 호스트에는 두지 않는다
+  vlm-models:

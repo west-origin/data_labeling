@@ -167,6 +167,46 @@ data_labeling/
 - 산출물: 주간 운영 지표(검수 시간, 수정률, 자동 승인율, 프리라벨 편향, 오류 삽입 발견율, 잔여 블러 누락률, 에피소드당 원가), 원본 접근 감사 로그와 월간 리포트, 원본 보관 기간 만료 알림.
 - 완료 기준: 합성 운영 이벤트로 지표 값이 기대와 일치. 원본 열람 이벤트가 빠짐없이 감사 로그에 기록됨을 테스트.
 
+### WP17 AI 1차 검수(로컬 VLM)
+
+사내 OpenAI 호환 서버(NVIDIA DGX Spark의 vLLM)의 VLM이 **승인된 블러본만** 보고, 검수 전 자동 라벨마다
+맞음·의심·틀림·판단 불가와 한국어 이유, 온톨로지 안의 수정 제안을 남긴다. 판정은 라벨도 검수 상태도
+아니다(추가 전용 표, 사람이 명시적으로 적용할 때만 사람 레코드). AI는 사람 검수를 **늘리는 방향**
+(우선순위, 표본 제외, 늦은 지적의 재검수)으로만 쓴다. 결정과 불변 조건 I1~I10은
+[ADR 0040](adr/0040-ai-first-pass-review.md)이다.
+
+운영 순서: `dlp prelabel run` → `dlp relations run` → `dlp actions run` → `dlp aireview run` →
+`dlp review plan` → `dlp review assign` → 사람 검수 → `dlp review collect` → `dlp review verify`.
+
+| WP | 산출물 | 완료 기준 | 상태 |
+| --- | --- | --- | --- |
+| 17.0 결정·준비 | ADR 0040, `config/policies/aireview.yaml` 골격(`TODO(real-model)`), `config/models.yaml external` 후보(모델 카드로 라이선스 확인), `used_models`에 `aireview.backend.model`, `ops.yaml audit.service_purposes`에 `aireview.run`, Spark vLLM 실행 안내(`services/vlm/`, [VLM 서버 안내](handover/vlm-server.md))와 Arm64 재현 점검표, 이 절 | `make licenses` 통과(후보 모두 분류 기재), `make todo-models`에 aireview 표시 | 완료 (ADR 리뷰 대기) |
+| 17.1 공통 전송 | `dlp_models.vlm`(요청 본문, 오류 분류, 백오프·재시도), 행동 단계 어댑터화, 4xx → `VlmRequestError`·종료 5 | 행동 기존 테스트 무수정 통과, **리팩토링 전 요청 본문과 바이트 동일**, 버전 문자열 불변, import 경계 표 갱신, A-08의 4xx 부분 반영 | 완료 |
+| 17.2 판정 핵심(순수) | `dlp_media.frames`, `dlp_aireview`의 policy·plan·prompt·schema·validate·suggest·judge·overlay·sensors·perturb·oracle·backend(프로토콜), `dlp_schema.aireview` 계약(DB 없음), `ReviewReason` AI 사유, `make schemas` | 계획(대상 정확히 한 번, 긴 라벨 분리, 같은 프레임 분할, 선택 결정성, 단위 키 국소성)·프롬프트(고정 블록 바이트 고정, 재시도는 끝에만)·스키마(portable 키워드)·재검사·**합성 오류 100% 탐지** 테스트, 복잡도 15 이하 | 완료 |
+| 17.3 벤치·점검·추정 + 장비 결정 | `FakeOpenAIServer`, `dlp aireview bench`·`probe`·`estimate`(DB 읽기만, `--include-actions`) | CI에서 가짜 서버로 보고서 생성. **Spark 1대에서** 후보 모델 2~3개의 프리필·디코드 실측, 파일럿 영상의 행동 후보 밀도·aireview 단위 수, VLM 밖 단계(OWLv2·깊이·렌더) 처리 시간 실측, 아래 공식으로 대수를 정한 기록 | 예정 |
+| 17.4 계약·DB | `tables.py` + Alembic `0016_ai_review.py`(5개 표, 추가 전용·TRUNCATE 금지 트리거), `aireview_repository`, `locks.try_lock_aireview`, `record_review`의 `aireview:` 거부 | 마이그레이션 일치, SQLite 저장소 테스트, 트리거 services 테스트, `make contracts` 깨끗 | 예정 |
+| 17.5 실행기·CLI | `runner`(생산자·작업자·기록자, 차단기, 재개, 렌더 재확인), `EndpointPool`, `open_blurred`, 장갑 문장(프리라벨 함수), `dlp aireview run`·`status`·`show`·`waive`, `--pending`, 격리 테스트 | 재개·멱등·차단기·종료 코드 2·3·5·6·7·8, `label_records` 불변, 원본 접근이 `aireview.run` 용도로만 | 예정 |
+| 17.6 검수 화면 표시 | LS 실현 가능성 services 테스트, `ai_display`(LS 컨트롤 상시·예측·요약·단축키, CVAT 1단계 이슈), 노출 기록·arm, `review.yaml ai_review`(코드 기본 off, 저장소 advisory), 우선순위·표본 제외·마무리 보호(증가 프로필), `required` 게이트 | 단위 + LS·CVAT services 테스트, 실화면 사람 확인, 판정 없는 작업의 데이터·예측 불변 | 예정 |
+| 17.7 수집·적용 | `ai_collect.apply_decisions`·`settle`·`record_outcome`, `collect._outcome_for` 추출 | 적용 표의 모든 행, 세션 검증 실패 적용의 되돌림, 실제 도구 종단 services 테스트 | 예정 |
+| 17.8 품질·운영 | `ai_quality`, `dlp review quality --ai`, 주간 지표·경고, `dlp aireview eval`(history·perturb)·게이트(실패 시 경고만) | 손 계산 일치, eval이 DB에 쓰지 않음 | 예정 |
+| 17.9 실장비 파일럿 | 실서버 `real_vlm` 테스트, 실세션 10개 이상 파일럿(holdout 0.1), 표시 임계값·선별·누락 표시 결정, mode를 required로(`max_wait_h` 24) | probe 스키마 위반율 < 1%, 골든 게이트 통과, 실측 처리량·대수와 품질 지표를 ADR 0040 후속·인수인계 상태표에 기록 | 예정 |
+
+의존: 17.1·17.2 병행 → 17.3·17.4 → 17.5 → 17.6 → 17.7 → 17.8. LS 실현 가능성 테스트는 17.2와 병행할 수
+있고, 17.9의 bench는 장비가 오는 대로 17.3 뒤부터 한다. 범위 밖 후속 과제는
+[알려진 문제 레지스트리](handover/issues.yaml)의 `F-AIR-*`다.
+
+장비 대수 (실측으로 정한다, 아래 값은 모두 가정)
+
+```
+U_s  = estimate가 낸 단계 s의 영상 1시간당 요청 수   (s ∈ {aireview 묶음별, actions(--include-actions)})
+T_s  = bench가 잰 장비 1대의 단계 s 지속 처리량(req/s) = min(프리필 한계, 생성 tok/s ÷ 요청당 출력 토큰)
+D    = Σ_s U_s / T_s                                 (영상 1시간당 장비 초)
+대수  = ceil( H × (1+ρ) × D / (86,400 × u) )          H=하루 영상 시간(164), ρ=재실행 여유(0.2), u=가동률(0.7)
+```
+
+aireview 전량은 영상 1시간당 약 530요청(가정)으로 Spark 1대가 1 req/s를 내면 2대 안팎이다. 행동 VLM은
+후보 구간마다 직렬로 물어 영상 1시간당 수천 요청이 될 수 있어 대수를 정할 수 있다 (F-AIR-01).
+
 ## 종단 검증
 
 각 단계가 끝날 때마다 **합성 세션 종단 테스트**를 확장한다. 합성 세션 하나를 수집 → 동기화 → 블러 → 프리라벨 → (검수 시뮬레이터가 정답으로 수정) → 데이터셋 버전 → 재학습(stub) → 평가 → 내보내기까지 CI에서 실행하고, 내보낸 결과가 픽스처 정답과 일치하는지 확인한다. 이 테스트가 깨지면 어떤 WP도 병합하지 않는다.
@@ -189,6 +229,7 @@ data_labeling/
 | Phase 1 · 기반 | WP3, WP4, WP5, WP6, WP7 | 블러 검수, 잔여 누락 감사, 골든셋 수동 라벨링, 라벨 원가 기준선 측정 |
 | Phase 2 · 프리라벨 | WP8, WP9, WP10, WP11, WP12 | 프리라벨 검수, 블라인드·오류 삽입 과제 수행, 실제 모델 품질 확인 |
 | Phase 3 · 루프 | WP13, WP14, WP15, WP16 | 배포 승인, 내보내기 샘플 확인, 블러 전수 검수 종료 판정 |
+| Phase 3 이후 · AI 1차 검수 | WP17 | DGX Spark 1대 구매·실측, 대수 결정, 파일럿 판정 확인, required 전환 결정 |
 
 에이전트 작업은 사람 작업보다 앞서 끝나는 것을 목표로 한다. 예를 들어 Phase 1의 골든셋 수동 라벨링이 시작되는 시점에는 WP6(검수 도구 연동)과 WP7(분할·골든셋 관리)이 이미 동작해야 한다. 따라서 에이전트 일정의 실제 병목은 코드가 아니라 **실제 데이터가 필요한 확인 지점**(WP5·WP8의 실제 영상 품질, WP6의 사용성)이며, 이 지점에 쓸 파일럿 영상을 Phase 0 안에 확보하는 것이 가장 중요하다.
 

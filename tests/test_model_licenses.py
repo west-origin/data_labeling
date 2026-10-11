@@ -47,3 +47,20 @@ def test_stricter_acceptance_flags_review_models() -> None:
     assert "prelabel.models.body" in flagged
     assert "prelabel.models.hands" not in flagged
     assert registry.violations({"x": "no_such_model"}) == ["x: 모델 목록에 없는 no_such_model"]
+
+
+def test_aireview_judge_model_is_registered_and_not_forbidden() -> None:
+    """AI 1차 검수 판정 모델(`aireview.yaml backend.model`)도 라이선스 검사 대상이다 (WP17.0).
+
+    후보는 모델 카드로 라이선스를 확인해 external에 적는다. 비상업 라이선스(Qwen2.5-VL-3B)는
+    forbidden으로 남겨 정책이 고르면 검사가 실패한다.
+    """
+    registry = load_registry(ROOT)
+    used = used_models(ROOT)
+    judge = used["aireview.backend.model"]
+    assert judge in registry.external and judge != used["actions.vlm.model"]
+    assert registry.external["Qwen/Qwen2.5-VL-3B-Instruct"].commercial == "forbidden"
+    flagged = registry.violations(used | {"aireview.backend.model": "Qwen/Qwen2.5-VL-3B-Instruct"})
+    assert flagged == [
+        "aireview.backend.model: Qwen/Qwen2.5-VL-3B-Instruct은 상업 사용 분류가 forbidden"
+    ]

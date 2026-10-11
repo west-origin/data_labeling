@@ -121,3 +121,36 @@ external:
     # 학습 데이터의 라이선스 조건을 확인할 수 없어 allowed로 두지 않는다 (판매 전 법무 확인 대상)
     training_data: ["공개되지 않음 (모델 카드에 학습 데이터 출처 명시 없음)"]
     commercial: review
+  # ── AI 1차 검수 판정 VLM 후보 (WP17, ADR 0040). config/policies/aireview.yaml backend.model로 고른다.
+  # 라이선스는 2026-10-11 Hugging Face 모델 카드(api/models/<저장소>의 cardData.license)로 확인했다
+  # (괄호 안은 그때의 저장소 revision). 기본 후보는 행동 분류(Qwen2.5-VL-7B)와 다른 모델이다 (자기 검수
+  # 상관 오류 방지). 최종 모델은 WP17.3 bench(DGX Spark 실측)와 WP17.8 골든 평가로 정한다.
+  # 양자화·변환본(FP8, GGUF 등)은 원 가중치 라이선스를 잇는지 따로 확인하고, 실행 기록
+  # backend.fingerprint와 served_model에 실제 가중치 저장소@revision을 남긴다.
+  Qwen/Qwen3-VL-8B-Instruct:          # 기본 판정 모델 (revision 0c351dd)
+    served_by: 사내 OpenAI 호환 VLM 서버 (DGX Spark vLLM), config/policies/aireview.yaml backend.model
+    license: Apache-2.0
+    training_data: ["공개되지 않음 (모델 카드에 학습 데이터 출처 명시 없음)"]
+    commercial: review
+  Qwen/Qwen3-VL-30B-A3B-Instruct:     # MoE 후보 (총 30B, 활성 약 3B; revision 9c4b90e)
+    served_by: 사내 OpenAI 호환 VLM 서버 (DGX Spark vLLM), config/policies/aireview.yaml backend.model
+    license: Apache-2.0
+    training_data: ["공개되지 않음 (모델 카드에 학습 데이터 출처 명시 없음)"]
+    commercial: review
+  Qwen/Qwen2.5-VL-32B-Instruct:       # 큰 밀집 모델 후보 (revision 7cfb30d)
+    served_by: 사내 OpenAI 호환 VLM 서버 (DGX Spark vLLM), config/policies/aireview.yaml backend.model
+    license: Apache-2.0
+    training_data: ["공개되지 않음 (모델 카드에 학습 데이터 출처 명시 없음)"]
+    commercial: review
+  mistralai/Mistral-Small-3.2-24B-Instruct-2506:   # 다른 계열 후보 (revision 95a6d26)
+    served_by: 사내 OpenAI 호환 VLM 서버 (DGX Spark vLLM), config/policies/aireview.yaml backend.model
+    license: Apache-2.0
+    training_data: ["공개되지 않음 (모델 카드에 학습 데이터 출처 명시 없음)"]
+    commercial: review
+  # 쓰지 않는다: 모델 카드 license_name qwen-research (비상업 연구 라이선스, revision 6628554).
+  # actions.yaml 주석과 같은 판단을 표에 남긴다. accept에 forbidden이 없어 정책이 쓰면 make licenses가 실패한다.
+  Qwen/Qwen2.5-VL-3B-Instruct:
+    served_by: 쓰지 않음 (비상업 라이선스)
+    license: Qwen Research License (비상업)
+    training_data: ["공개되지 않음 (모델 카드에 학습 데이터 출처 명시 없음)"]
+    commercial: forbidden

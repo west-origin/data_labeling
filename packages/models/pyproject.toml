@@ -1,10 +1,11 @@
 [project]
 name = "dlp-models"
 version = "0.1.0"
-description = "모델 가중치 레지스트리와 공용 런타임 (OWLv2 오픈 보캐뷸러리 탐지, 단안 메트릭 깊이)"
+description = "모델 가중치 레지스트리와 공용 런타임 (OWLv2 오픈 보캐뷸러리 탐지, 단안 메트릭 깊이, OpenAI 호환 VLM 전송)"
 requires-python = ">=3.12,<3.14"
 dependencies = [
     "dlp-schema",
+    "httpx>=0.27",
     "numpy>=2.0",
     "onnxruntime>=1.20",
     "opencv-contrib-python-headless>=4.10",

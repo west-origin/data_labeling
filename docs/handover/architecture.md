@@ -16,6 +16,7 @@ Prefect 서비스가 기동된 것만으로 모든 작업이 영속 큐에서 �
 | 탐지·승인·렌더 | [privacy](../../packages/privacy/src/dlp_privacy/)의 `runner.py`, `generation.py`, `rendering.py`, `revocation.py`(블러 변경 뒤 배포 매체 회수 요청) | `config/policies/privacy.yaml` |
 | 자동 라벨 초안 | [prelabel runner](../../packages/prelabel/src/dlp_prelabel/runner.py), `adapters/` | `config/policies/prelabel.yaml`, `config/models.yaml` |
 | 관계·접촉·행동 | [relations](../../packages/relations/src/dlp_relations/), [actions](../../packages/actions/src/dlp_actions/) | 각 단계의 `config/policies/*.yaml` |
+| AI 1차 검수 (참고용 판정, WP17 진행 중) | [aireview](../../packages/aireview/src/dlp_aireview/)의 `plan.py`, `prompt.py`, `validate.py`, `judge.py`, 공통 VLM 전송 [models vlm](../../packages/models/src/dlp_models/vlm.py) | `config/policies/aireview.yaml`, `config/models.yaml` external |
 | 검수 도구·이력 수집 | [review](../../packages/review/src/dlp_review/)의 `tasks.py`, `collect.py`, `reconcile.py`, `clients.py`, `webhook.py`, `revoke.py`(회수 실행기) | `config/policies/review.yaml` |
 | 배정·QA·품질 | [review ops](../../packages/review/src/dlp_review/ops/) | 위 검수 정책, `config/defaults.yaml` |
 | 계약·온톨로지·DB | [schema](../../packages/schema/src/dlp_schema/), `db/` | `config/ontology/v1`, `schemas/`는 생성물 |
@@ -35,12 +36,14 @@ Prefect 서비스가 기동된 것만으로 모든 작업이 영속 큐에서 �
 | sync | media, schema |
 | privacy | media, models, schema |
 | prelabel | media, models, schema, sync |
-| actions, active | media, privacy, schema |
+| actions | media, models, privacy, schema |
+| active | media, privacy, schema |
+| aireview | media, models, schema |
 | review | eval, media, privacy, schema, sync |
 | train | datasets, eval, media, schema |
 | export | datasets, media, privacy, schema |
 | ops | privacy, review, schema |
-| cli | 나머지 16개 패키지 |
+| cli | 나머지 17개 패키지 |
 
 `schema`에는 계약뿐 아니라 DB 구현도 함께 있다. CLI에는 연결 코드 외에 모델 선택·온톨로지 선택도
 남아 있다. 단순한 계층 구조로 가정해 파일을 옮기기 전에 [후속 과제](known-issues.md)를 확인한다.

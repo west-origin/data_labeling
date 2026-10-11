@@ -1,0 +1,112 @@
+{
+  "$defs": {
+    "AiArm": {
+      "description": "검수 작업에 판정을 보였는지 (대조군 holdout은 편향 없는 품질 측정에 쓴다).",
+      "enum": [
+        "shown",
+        "holdout",
+        "no_verdicts",
+        "mode_excluded",
+        "off"
+      ],
+      "title": "AiArm",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "검수 작업 하나에 AI 판정을 무엇을 보였는가 (작업 생성 때 고정).",
+  "properties": {
+    "arm": {
+      "$ref": "#/$defs/AiArm"
+    },
+    "arm_key": {
+      "title": "Arm Key",
+      "type": "string"
+    },
+    "assignment_id": {
+      "anyOf": [
+        {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Assignment Id"
+    },
+    "coverage": {
+      "maximum": 1,
+      "minimum": 0,
+      "title": "Coverage",
+      "type": "number"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "hidden": {
+      "patternProperties": {
+        "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$": {
+          "pattern": "^air-[0-9a-f]{24}$",
+          "type": "string"
+        }
+      },
+      "title": "Hidden",
+      "type": "object"
+    },
+    "render_hash": {
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Render Hash"
+    },
+    "session_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Session Id",
+      "type": "string"
+    },
+    "shown": {
+      "patternProperties": {
+        "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$": {
+          "pattern": "^air-[0-9a-f]{24}$",
+          "type": "string"
+        }
+      },
+      "title": "Shown",
+      "type": "object"
+    },
+    "task_key": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Task Key",
+      "type": "string"
+    },
+    "versions": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Versions",
+      "type": "array"
+    }
+  },
+  "required": [
+    "task_key",
+    "session_id",
+    "arm",
+    "arm_key",
+    "coverage",
+    "created_at"
+  ],
+  "title": "AiExposure",
+  "type": "object"
+}

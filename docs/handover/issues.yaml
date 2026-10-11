@@ -16,6 +16,7 @@
 #   note      (선택) 보충
 # 영역 코드: SCH(schema) REV(review) PMS(privacy·media·sync) PAR(prelabel·actions·relations·models)
 #            ETA(evaluation·training·active·datasets) COE(cli·export·ops·fixtures·스크립트)
+#            AIR(AI 1차 검수 WP17의 범위 밖 후속·위험, 출처 ADR 0040. 전수 검수 보고의 건수 표에는 세지 않는다)
 # 검사: tests/test_issue_registry.py (ID 형식·중복, 값, 경로, 재현 테스트, 문서 속 ID 대응).
 
 issues:
@@ -91,7 +92,8 @@ issues:
   - {id: A-07, title: 끝 슬레이트 seek 직후 프레임·sync adjust 실수 ms, severity: low, status: candidate, kind: code,
      files: [packages/sync/src/dlp_sync/slate.py], source: docs/handover/audit-notes.md}
   - {id: A-08, title: "행동: VFR 프레임 수 부족, VLM 4xx를 장애로 처리, gap tool_id 미검사", severity: low, status: candidate, kind: code,
-     files: [packages/actions/src/dlp_actions/vlm.py, packages/actions/src/dlp_actions/runner.py], source: docs/handover/audit-notes.md}
+     files: [packages/actions/src/dlp_actions/vlm.py, packages/actions/src/dlp_actions/runner.py], source: docs/handover/audit-notes.md,
+     note: "4xx 부분은 WP17.1에서 해소 (dlp_models.vlm.VlmRequestError, 재시도 없이 dlp actions run 종료 5, ADR 0040). VFR 프레임 수·gap tool_id 부분은 남음 (고치면 행동 버전이 바뀌므로 actions.yaml vlm.prompt_version 결정과 함께)"}
   - {id: A-09, title: reconcile 128자 초과 ID 앞부분 잘림, severity: low, status: superseded, kind: code,
      files: [packages/review/src/dlp_review/reconcile.py], source: docs/handover/audit-notes.md, see: [F-REV-05]}
   - {id: A-10, title: lead_seconds가 취소·서비스 계정 주석 시간도 더함, severity: low, status: open, kind: code,
@@ -269,7 +271,8 @@ issues:
      files: [packages/prelabel/src/dlp_prelabel/lift3d.py], source: docs/handover/full-review-2026-10-11.md}
   - {id: F-PAR-12, title: unresolved 대상 ID가 세 YAML에 있고 일치 검사 없음, severity: low, status: open, kind: comment,
      files: [packages/prelabel/src/dlp_prelabel/policy.py, config/policies/prelabel.yaml, config/policies/relations.yaml, config/policies/actions.yaml],
-     source: docs/handover/full-review-2026-10-11.md}
+     source: docs/handover/full-review-2026-10-11.md,
+     note: "WP17에서 config/policies/aireview.yaml에도 같은 값이 생겼다. aireview와 actions는 tests/test_policy_consistency.py가 대조하고 prelabel·relations는 아직 대조하지 않는다"}
   - {id: F-PAR-13, title: 사람 접촉 관계 테스트가 빈 자리 검사에 닿지 않음, severity: low, status: open, kind: test,
      files: [packages/relations/tests/test_relations.py], source: docs/handover/full-review-2026-10-11.md}
 
@@ -318,3 +321,29 @@ issues:
      files: [packages/cli/src/dlp_cli/pilot_cmds.py], source: docs/handover/full-review-2026-10-11.md}
   - {id: F-COE-12, title: ops off_hours 범위 검증 없음, severity: low, status: open, kind: code,
      files: [packages/ops/src/dlp_ops/policy.py], source: docs/handover/full-review-2026-10-11.md}
+
+  # ── WP17 AI 1차 검수: 이번 범위 밖 후속 과제와 위험 (ADR 0040 "범위 밖") ──
+  - {id: F-AIR-01, title: 행동 VLM이 후보 구간마다 직렬로 물어 장비 대수를 정할 수 있음, severity: medium, status: open, kind: code,
+     files: [packages/actions/src/dlp_actions/pipeline.py, packages/actions/src/dlp_actions/clients.py], source: docs/adr/0040-ai-first-pass-review.md,
+     note: "segment_hand가 후보마다 요청 하나를 직렬로 보내고 sample_frames가 요청마다 영상을 다시 연다. 병렬·창 단위 묶기·공용 프레임 추출기는 행동 버전을 바꾸므로 actions.yaml vlm.prompt_version 결정과 함께 한다. WP17.3 estimate --include-actions로 실측"}
+  - {id: F-AIR-02, title: Label Studio 수집이 결과의 from_name을 보지 않아 AI 컨트롤 결과가 섞이면 수집 실패, severity: medium, status: candidate, kind: code,
+     files: [packages/review/src/dlp_review/labelstudio.py], source: docs/adr/0040-ai-first-pass-review.md,
+     note: "지금 설정에는 다른 컨트롤이 없어 재현되지 않는 잠재 결함. WP17.6 첫 단계에서 from_name이 있고 labels가 아닌 결과를 건너뛰게 하고 일반 테스트로 막는다 (from_name 없는 결과는 labels로 본다)"}
+  - {id: F-AIR-03, title: 오류 삽입 작업에 AI를 보이지 않아 "AI 없음" 화면이 측정 작업 신호가 될 수 있음, severity: low, status: candidate, kind: product,
+     files: [packages/review/src/dlp_review/ops/seeding.py], source: docs/adr/0040-ai-first-pass-review.md,
+     note: "사본의 원천이 골든 단위라 판정이 없다. 누출을 WP17.8 지표로 재고, 사본 판정 여부는 후속 결정"}
+  - {id: F-AIR-04, title: AI 충돌 기반 표적 QA 비율 미정, severity: low, status: open, kind: product,
+     files: [packages/review/src/dlp_review/ops/assign.py], source: docs/adr/0040-ai-first-pass-review.md,
+     note: "QA는 무작위 표본을 유지한다 (충돌 우선으로 고르면 QA 기반 품질 지표가 편향된다). 표적 QA를 따로 둘지 후속 결정"}
+  - {id: F-AIR-05, title: AI 판정 표의 파티션·보관 정책 없음, severity: low, status: open, kind: ops,
+     files: [packages/schema/src/dlp_schema/aireview.py], source: docs/adr/0040-ai-first-pass-review.md,
+     note: "추가 전용 표(WP17.4)라 지울 수 없고 연 수천만 판정이 단위 행 JSON에 쌓인다. 사용 중지 세션(F-REV-17)의 판정 행도 남는다. 보관 ADR 필요"}
+  - {id: F-AIR-06, title: CVAT 공간 검수의 AI 표시 2단계(트랙 속성 결정) 미정, severity: low, status: open, kind: product,
+     files: [packages/review/src/dlp_review/cvat.py], source: docs/adr/0040-ai-first-pass-review.md,
+     note: "1단계는 이슈 메모만 단다. 2단계(새 프로젝트에 dlp_ai·dlp_ai_decision 속성)는 WP17.9 파일럿 뒤 결정"}
+  - {id: F-AIR-07, title: 경계 이동 제안은 표시만 하고 적용하지 않음, severity: low, status: open, kind: product,
+     files: [packages/aireview/src/dlp_aireview/suggest.py], source: docs/adr/0040-ai-first-pass-review.md,
+     note: "기준 문서가 VLM은 경계를 정하지 않는다고 정했다. boundary_early·late 문제 유형만 남긴다"}
+  - {id: F-AIR-08, title: 누락 발견(missing) 표시 기본 끔, severity: low, status: open, kind: product,
+     files: [config/policies/aireview.yaml], source: docs/adr/0040-ai-first-pass-review.md,
+     note: "response.max_findings 0. 잡음·스키마 비용 때문에 파일럿에서 켤지 정한다"}

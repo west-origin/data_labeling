@@ -120,7 +120,11 @@
         "new_object",
         "contact_mismatch",
         "sample",
-        "routine"
+        "routine",
+        "ai_wrong",
+        "ai_suspect",
+        "ai_unsure",
+        "ai_missing"
       ],
       "title": "ReviewReason",
       "type": "string"

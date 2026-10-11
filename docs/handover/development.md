@@ -109,6 +109,14 @@ CLI의 `DLP_REVIEW_POLICY_FILE` 선택은 라이브러리 기본 정책 로더�
 )
 ```
 
+## VLM 서버
+
+행동 분류(`dlp actions run`)와 AI 1차 검수(`dlp aireview`, WP17)는 사내 OpenAI 호환 VLM 서버가 필요하다.
+장비는 NVIDIA DGX Spark, 서빙은 vLLM으로 정했다 (ADR 0040). 띄우는 법·보안 설정·처리량 실측·Arm64
+점검표는 [VLM 서버 안내](vlm-server.md), compose는 `services/vlm/`다. 개발 호스트에는 띄우지 않는다
+(lakeFS가 8000 포트를 쓴다). CI와 단위 테스트는 서버 없이 `OracleVlm`·`OracleJudge` stub과
+`httpx.MockTransport`로만 돈다.
+
 ## 검사 범위와 자원
 
 | 명령 | 보장하는 범위 | 별도 준비·생략 가능성 |
