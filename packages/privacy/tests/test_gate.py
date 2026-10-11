@@ -494,6 +494,44 @@ def test_render_interpolates_by_frame_index_on_vfr_like_cvat(tmp_path: Path) -> 
     assert third[20, 12:20].mean() < 30  # 시각 비율 위치(x≈10.7)에는 없다
 
 
+def test_render_pads_odd_size_keeping_pixel_coordinates_and_pts(tmp_path: Path) -> None:
+    """회귀(F-PMS-02): 홀수 크기(101x75) 원본도 블러본을 만든다.
+
+    libx264 yuv420p는 짝수 크기만 받으므로 오른쪽·아래에 검은 1픽셀을 덧대 102x76으로 쓴다.
+    늘이거나 자르지 않으므로 원본 화소 좌표(블러 박스, 공간 라벨)가 블러본에서도 같은 자리다.
+
+    정답 근거: 원본(무손실 ffv1)은 배경 60에 마지막 열(x=100)·마지막 행(y=74)만 220이다. 블러본은
+    프레임 수·PTS(VFR)가 원본과 같고, 그 밝은 열·행이 같은 좌표에 있으며, 덧댄 열(x=101)·행(y=75)은
+    검다. 단색 블러 박스(x 81~100, y 55~74)는 원본 좌표 그대로 회색(128)이다.
+    """
+    w, h = 101, 75
+    times = [0, 40, 70, 130, 200]  # 고르지 않은 간격 (VFR)
+    img = np.full((h, w, 3), 60, dtype=np.uint8)
+    img[:, w - 1] = 220
+    img[h - 1, :] = 220
+    src = tmp_path / "odd.mkv"
+    write_video(src, ((t, img) for t in times), width=w, height=h, codec="ffv1", pix_fmt="yuv444p")
+    kfs = (BoxKeyframe(t_ms=0, x=81, y=55, w=20, h=20),)
+    label = make_label(
+        BlurTrackPayload(target="face", keyframes=kfs), t_end_ms=200, stream_id="bodycam"
+    )
+    dst = tmp_path / "blurred.mp4"
+    applied = render_blurred(
+        src, dst, [label], mode="solid", min_block_px=6, blocks_per_box=5, encoder_rate=30, crf=0
+    )
+    assert applied == len(times)
+    assert build_pts_index(dst).ms.tolist() == build_pts_index(src).ms.tolist()
+    with av.open(str(dst)) as c:
+        frames = [f.to_ndarray(format="rgb24").astype(int) for f in c.decode(video=0)]
+    assert len(frames) == len(times)
+    for out in frames:
+        assert out.shape == (h + 1, w + 1, 3)
+        assert out[5:50, w - 1].mean() > 200 and out[h - 1, 5:75].mean() > 200  # 같은 좌표
+        assert abs(out[5:50, 5:95].mean() - 60) < 5  # 배경은 그대로 (늘이지 않음)
+        assert out[:, w].max() < 20 and out[h, :].max() < 20  # 덧댄 열·행은 검정
+        assert abs(out[56:74, 82:100].mean() - 128) < 5  # 블러 박스는 원본 좌표 그대로
+
+
 def test_vfr_fixture_positions_match_frame_order() -> None:
     """VFR 픽스처의 모든 프레임에서 보간 위치 = 프레임 번호 비율."""
     times = vfr_times(np.random.default_rng(3), 2_000)

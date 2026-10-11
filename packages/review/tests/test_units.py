@@ -22,7 +22,7 @@ import numpy as np
 import pytest
 
 from dlp_fixtures.actions import generate_action_scenario
-from dlp_fixtures.video import TARGET_COLORS, generate_blur_scenario
+from dlp_fixtures.video import TARGET_COLORS, generate_blur_scenario, write_video
 from dlp_media.proxy import make_proxy
 from dlp_media.pts import build_pts_index
 from dlp_media.storage import LocalStore, sha256_file
@@ -388,6 +388,22 @@ def test_watermark_marks_frames_and_keeps_pts(tmp_path: Path) -> None:
         fb = next(b.decode(video=0)).to_ndarray(format="rgb24").astype(int)
     changed = (np.abs(fa - fb).max(axis=2) > 25).mean()
     assert 0.01 < changed < 0.4  # 글씨가 화면 곳곳에 있지만 화면을 덮지는 않는다
+
+
+def test_watermark_pads_odd_size_and_keeps_pts(tmp_path: Path) -> None:
+    """회귀(F-PMS-02): 홀수 크기(101x75) 입력도 워터마크를 입힌다.
+
+    정답 근거: libx264 yuv420p 요구대로 오른쪽·아래에 1픽셀을 덧대 102x76이 되고(늘이지 않으므로
+    원본 좌표 유지), 프레임 수·PTS(VFR)는 입력과 같다.
+    """
+    w, h = 101, 75
+    times = [0, 40, 70, 130, 200]
+    src, dst = tmp_path / "odd.mkv", tmp_path / "b.mp4"
+    img = np.full((h, w, 3), 60, dtype=np.uint8)
+    write_video(src, ((t, img) for t in times), width=w, height=h, codec="ffv1", pix_fmt="yuv444p")
+    burn_watermark(src, dst, "labeler-07 s1", opacity=0.3, crf=20, encoder_rate=30)
+    assert build_pts_index(dst).ms.tolist() == build_pts_index(src).ms.tolist()
+    assert video_size(dst) == (w + 1, h + 1)
 
 
 def test_stage_uri_guard() -> None:
