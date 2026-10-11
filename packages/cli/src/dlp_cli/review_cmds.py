@@ -11,6 +11,8 @@
   - `serve [--port]` — CVAT·Label Studio 웹훅을 받아 끝난 작업을 자동 수집하는 HTTP 서버.
   - `register-webhooks <url_base>` — 검수 프로젝트에 웹훅을 등록한다.
   - `verify <세션>` — 검수가 끝난 세션을 `prelabeled → human_verified`로 옮긴다 (ADR 0029).
+  - `ui-theme [--check]` — `config/review_ui.yaml`로 CVAT 테마 색 파일을 다시 만든다 (ADR 0038,
+    `make ui-theme`). `--check`는 파일을 쓰지 않고 다르면 1로 끝난다.
 - 운영 로직 (WP12, `dlp_review.ops`)
   - `plan <세션> --reviewer …` — 우선순위·표본 검증·블라인드·이중·오류 삽입 배정을 계획해 DB에 쓴다.
   - `assign <배정 ID>` — 배정 하나의 검수 도구 작업을 만든다 (멱등).
@@ -60,6 +62,7 @@ from dlp_review.tasks import (
     create_labeling_tasks,
     create_privacy_tasks,
 )
+from dlp_review.ui_theme import TOKENS_FILE, cvat_tokens_css, load_ui_theme
 from dlp_review.verify import verify_session
 from dlp_review.webhook import CollectRequest, resolve_reviewer, serve
 from dlp_schema import load_config, repo_root
@@ -412,8 +415,31 @@ def cmd_quality(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ui_theme(args: argparse.Namespace) -> int:
+    """CVAT 테마 색 생성 파일(`ui_theme.TOKENS_FILE`)을 `config/review_ui.yaml`과 맞춘다.
+
+    인자: args.check — 참이면 쓰지 않고 비교만 한다.
+    반환: 0 (썼거나 이미 같음), 1 (`--check`에서 다름).
+    부작용: `--check`가 아니면 생성 파일을 덮어쓴다 (CVAT에 반영하려면 `make cvat-up`으로 테마
+    이미지를 다시 빌드한다).
+    """
+    root = repo_root()
+    path = root / TOKENS_FILE
+    text = cvat_tokens_css(load_ui_theme(root))
+    current = path.read_text("utf-8") if path.exists() else None
+    if args.check:
+        if current != text:
+            print(f"{TOKENS_FILE}가 config/review_ui.yaml과 다릅니다 (make ui-theme)")
+            return 1
+        print(f"{TOKENS_FILE}: 최신")
+        return 0
+    path.write_text(text, "utf-8")
+    print(f"{TOKENS_FILE} 갱신 (CVAT 반영: make cvat-up)")
+    return 0
+
+
 def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:  # pyright: ignore[reportPrivateUsage]
-    """`review` 하위 명령 묶음을 등록한다 (도구 연동 5개 + 운영 5개)."""
+    """`review` 하위 명령 묶음을 등록한다 (도구 연동 5개 + 운영 5개 + 화면 테마 1개)."""
     review = sub.add_parser("review", help="검수 도구 연동")
     rsub = review.add_subparsers(dest="review_command", required=True)
 
@@ -478,3 +504,9 @@ def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
     ql = rsub.add_parser("quality", help="오류 삽입 발견율, 이중 라벨 일치도, 프리라벨 편향")
     ql.add_argument("--url", help="DB URL (기본: DLP_DATABASE_URL)")
     ql.set_defaults(func=cmd_quality)
+
+    ut = rsub.add_parser(
+        "ui-theme", help="검수 화면 테마(config/review_ui.yaml)로 CVAT 색 파일 생성"
+    )
+    ut.add_argument("--check", action="store_true", help="쓰지 않고 다르면 1로 끝낸다")
+    ut.set_defaults(func=cmd_ui_theme)

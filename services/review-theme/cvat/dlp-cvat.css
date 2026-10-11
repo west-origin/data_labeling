@@ -1,0 +1,340 @@
+/* aniatman 검수 화면 테마 (CVAT 화면 규칙, ADR 0038).
+   색 값은 dlp-tokens.css(생성 파일, config/review_ui.yaml)의 --dlp-* 변수에서 읽고, 여기에는 어디에 어떤
+   변수를 쓸지만 둔다. 다크·화이트 두 모드가 같은 규칙을 쓰고 변수 값만 다르다.
+   선택자는 CVAT v2.78 화면의 cvat-* 클래스와 Ant Design(ant-*) 클래스 기준이다. CVAT 버전을 올리면
+   화면을 열어 깨진 곳이 없는지 확인한다 (docs/handover/change-guide.md). Ant Design 기본 규칙은 우선순위가
+   낮아(:where) 대부분 그대로 덮이고, CVAT 자체 규칙을 덮어야 하는 곳만 !important를 쓴다. */
+
+:root[data-dlp-mode] {
+  color-scheme: light;
+  --dlp-accent-soft: color-mix(in srgb, var(--dlp-accent) 16%, transparent);
+  --dlp-danger-soft: color-mix(in srgb, var(--dlp-danger) 14%, transparent);
+}
+:root[data-dlp-mode=dark] { color-scheme: dark; }
+
+/* 바탕과 글자 */
+:root[data-dlp-mode] body,
+:root[data-dlp-mode] #root,
+:root[data-dlp-mode] .ant-layout,
+:root[data-dlp-mode] .cvat-annotation-layout-content,
+:root[data-dlp-mode] .cvat-standard-workspace {
+  background: var(--dlp-bg) !important;
+  color: var(--dlp-text);
+}
+:root[data-dlp-mode] .ant-typography,
+:root[data-dlp-mode] .ant-typography.ant-typography-secondary,
+:root[data-dlp-mode] .ant-form-item-label > label,
+:root[data-dlp-mode] .ant-checkbox-wrapper,
+:root[data-dlp-mode] .ant-radio-wrapper,
+:root[data-dlp-mode] .ant-empty-description,
+:root[data-dlp-mode] .ant-collapse-header,
+:root[data-dlp-mode] .ant-list-item,
+:root[data-dlp-mode] .ant-descriptions-item-label,
+:root[data-dlp-mode] .ant-descriptions-item-content {
+  color: var(--dlp-text) !important;
+}
+:root[data-dlp-mode] .ant-typography-secondary,
+:root[data-dlp-mode] .ant-typography.ant-typography-secondary {
+  color: var(--dlp-muted) !important;
+}
+
+/* 상단 머리글: 로고를 회사 로고로 바꾼다 (흰 로고, 화이트 모드에서는 뒤집어 어둡게) */
+:root[data-dlp-mode] .cvat-header {
+  background: var(--dlp-panel) !important;
+  border-bottom: 1px solid var(--dlp-line);
+}
+:root[data-dlp-mode] .cvat-header .cvat-header-button,
+:root[data-dlp-mode] .cvat-header .ant-btn,
+:root[data-dlp-mode] .cvat-header .anticon,
+:root[data-dlp-mode] .cvat-header-menu-user-dropdown-user {
+  color: var(--dlp-muted) !important;
+}
+:root[data-dlp-mode] .cvat-header .cvat-header-button:hover,
+:root[data-dlp-mode] .cvat-header .ant-btn:hover {
+  color: var(--dlp-text) !important;
+  background: var(--dlp-panel2) !important;
+}
+:root[data-dlp-mode] .cvat-logo-icon {
+  width: 118px !important;
+  min-width: 118px;
+  background: url(/dlp/logo.png) left center / contain no-repeat;
+}
+:root[data-dlp-mode] .cvat-logo-icon > * { visibility: hidden; }
+:root[data-dlp-mode=light] .cvat-logo-icon { filter: invert(1); }
+
+/* 모드 전환 버튼과 검수 단계 배지 (dlp-cvat.js가 넣는다) */
+.dlp-mode-toggle {
+  align-self: center;
+  margin-right: 8px;
+  padding: 5px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--dlp-line);
+  background: var(--dlp-panel2);
+  color: var(--dlp-text);
+  font: 600 12px/1.4 inherit;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.dlp-mode-toggle:hover { border-color: var(--dlp-accent); }
+.dlp-stage {
+  /* CVAT 머리글이 line-height 0을 주므로 글줄 높이를 다시 정한다 */
+  line-height: 18px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 14px 0 6px;
+  padding-left: 14px;
+  border-left: 1px solid var(--dlp-line);
+  white-space: nowrap;
+}
+.dlp-stage-title { font-weight: 700; font-size: 14px; color: var(--dlp-text); }
+.dlp-stage-pill {
+  display: inline-block;
+  line-height: 18px;
+  text-decoration: none;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.dlp-stage-danger {
+  background: var(--dlp-danger-soft);
+  color: var(--dlp-danger);
+  border: 1px solid color-mix(in srgb, var(--dlp-danger) 55%, transparent);
+}
+.dlp-stage-muted {
+  background: var(--dlp-panel2);
+  color: var(--dlp-muted);
+  border: 1px solid var(--dlp-line);
+}
+
+/* 작업 화면 머리글(저장·재생 막대)과 도구 막대·오른쪽 객체 패널 */
+:root[data-dlp-mode] .cvat-annotation-header,
+:root[data-dlp-mode] .cvat-canvas-controls-sidebar,
+:root[data-dlp-mode] .cvat-objects-sidebar,
+:root[data-dlp-mode] .cvat-objects-sidebar .ant-layout-sider-children,
+:root[data-dlp-mode] .cvat-objects-sidebar-tabs,
+:root[data-dlp-mode] .cvat-objects-sidebar-tabs .ant-tabs-nav,
+:root[data-dlp-mode] .cvat-objects-sidebar-states-header,
+:root[data-dlp-mode] .cvat-objects-appearance-collapse,
+:root[data-dlp-mode] .cvat-objects-appearance-collapse .ant-collapse-content,
+:root[data-dlp-mode] .cvat-objects-appearance-content {
+  background: var(--dlp-panel) !important;
+  color: var(--dlp-text) !important;
+  border-color: var(--dlp-line) !important;
+}
+:root[data-dlp-mode] .cvat-annotation-header { border-bottom: 1px solid var(--dlp-line); }
+:root[data-dlp-mode] .cvat-canvas-controls-sidebar { border-right: 1px solid var(--dlp-line); }
+:root[data-dlp-mode] .cvat-objects-sidebar { border-left: 1px solid var(--dlp-line); }
+:root[data-dlp-mode] .cvat-annotation-header .ant-btn,
+:root[data-dlp-mode] .cvat-annotation-header .anticon,
+:root[data-dlp-mode] .cvat-annotation-header span,
+:root[data-dlp-mode] .cvat-player-buttons .anticon,
+:root[data-dlp-mode] .cvat-canvas-controls-sidebar .anticon {
+  color: var(--dlp-muted);
+}
+:root[data-dlp-mode] .cvat-annotation-header .ant-btn,
+:root[data-dlp-mode] .cvat-annotation-header-button { color: var(--dlp-muted) !important; }
+/* CVAT 자체 아이콘 일부는 검은색(#000)을 직접 칠해 currentColor를 따르지 않는다. 다크 모드에서만
+   그 아이콘을 뒤집어 밝게 보이게 한다 (화이트 모드는 원래 색 그대로). */
+:root[data-dlp-mode=dark] .cvat-canvas-controls-sidebar .anticon svg,
+:root[data-dlp-mode=dark] .cvat-annotation-header .anticon svg:not([fill=currentColor]),
+:root[data-dlp-mode=dark] .cvat-objects-sidebar-state-item .anticon svg:not([fill=currentColor]) {
+  filter: invert(0.62);
+}
+:root[data-dlp-mode=dark] .cvat-canvas-controls-sidebar .anticon svg[fill=currentColor] { filter: none; }
+:root[data-dlp-mode] .cvat-annotation-header .ant-btn:hover,
+:root[data-dlp-mode] .cvat-canvas-controls-sidebar .anticon:hover {
+  color: var(--dlp-text) !important;
+}
+:root[data-dlp-mode] .cvat-canvas-controls-sidebar .cvat-active-canvas-control {
+  background: var(--dlp-accent-soft) !important;
+  color: var(--dlp-accent) !important;
+  border-radius: 8px;
+  outline: 1px solid color-mix(in srgb, var(--dlp-accent) 60%, transparent);
+}
+:root[data-dlp-mode] .cvat-player-slider .ant-slider-rail { background: var(--dlp-line) !important; }
+:root[data-dlp-mode] .cvat-player-slider .ant-slider-track { background: var(--dlp-accent) !important; }
+:root[data-dlp-mode] .cvat-player-slider .ant-slider-handle::after {
+  box-shadow: 0 0 0 2px var(--dlp-accent) !important;
+}
+
+/* 영상 캔버스 둘레와 캔버스 위 작은 단추 */
+:root[data-dlp-mode] .cvat-canvas-grid-root,
+:root[data-dlp-mode] .cvat-canvas-grid-item,
+:root[data-dlp-mode] .cvat-canvas-container {
+  background: var(--dlp-bg) !important;
+}
+:root[data-dlp-mode] .cvat-canvas-image-setups-trigger,
+:root[data-dlp-mode] .cvat-canvas-layer-stack-trigger,
+:root[data-dlp-mode] .cvat-objects-sidebar-sider {
+  background: var(--dlp-panel2) !important;
+  color: var(--dlp-muted) !important;
+  border: 1px solid var(--dlp-line) !important;
+}
+:root[data-dlp-mode] .cvat-annotation-header-menu-button {
+  background: var(--dlp-panel2) !important;
+  color: var(--dlp-text) !important;
+}
+
+/* 오른쪽 객체 목록: 탭, 전체 잠금·숨김 줄, 목록 바탕 */
+:root[data-dlp-mode] .cvat-objects-sidebar-tabs .ant-tabs-tab {
+  background: transparent !important;
+  border-color: transparent !important;
+}
+:root[data-dlp-mode] .cvat-objects-sidebar-tabs .ant-tabs-tab.ant-tabs-tab-active {
+  background: var(--dlp-panel2) !important;
+  border-color: var(--dlp-line) !important;
+}
+:root[data-dlp-mode] .cvat-objects-sidebar-states-header .ant-col,
+:root[data-dlp-mode] .cvat-objects-appearance-collapse .ant-collapse-header {
+  background: var(--dlp-panel2) !important;
+  color: var(--dlp-text) !important;
+}
+:root[data-dlp-mode] .cvat-objects-sidebar-states-list { background: var(--dlp-panel) !important; }
+:root[data-dlp-mode] .cvat-objects-sidebar-tabs .ant-tabs-tab .ant-tabs-tab-btn,
+:root[data-dlp-mode] .cvat-objects-sidebar-states-header .anticon {
+  color: var(--dlp-muted) !important;
+}
+
+/* 오른쪽 객체 목록의 항목 카드 */
+:root[data-dlp-mode] .cvat-objects-sidebar-state-item {
+  background: var(--dlp-panel2) !important;
+  border: 1px solid var(--dlp-line) !important;
+  border-radius: 10px;
+  margin: 4px 6px;
+  color: var(--dlp-text) !important;
+}
+:root[data-dlp-mode] .cvat-objects-sidebar-state-active-item {
+  border-color: var(--dlp-accent) !important;
+  box-shadow: 0 0 0 1px var(--dlp-accent);
+}
+:root[data-dlp-mode] .cvat-objects-sidebar-state-item .anticon { color: var(--dlp-muted); }
+:root[data-dlp-mode] .cvat-objects-sidebar-state-item-object-type-text { color: var(--dlp-muted) !important; }
+/* 항목 번호 */
+:root[data-dlp-mode] .cvat-objects-sidebar-state-item > .ant-row:first-child .ant-typography:first-child {
+  background: var(--dlp-line) !important;
+  color: var(--dlp-text) !important;
+}
+
+/* 탭·접기·목록·표·카드 (작업 목록 화면 포함) */
+:root[data-dlp-mode] .ant-tabs-tab { color: var(--dlp-muted) !important; }
+:root[data-dlp-mode] .ant-tabs-tab.ant-tabs-tab-active .ant-tabs-tab-btn { color: var(--dlp-text) !important; }
+:root[data-dlp-mode] .ant-tabs-ink-bar { background: var(--dlp-accent) !important; }
+:root[data-dlp-mode] .ant-tabs-nav::before { border-color: var(--dlp-line) !important; }
+:root[data-dlp-mode] .ant-collapse,
+:root[data-dlp-mode] .ant-collapse-item { border-color: var(--dlp-line) !important; background: transparent; }
+:root[data-dlp-mode] .ant-card,
+:root[data-dlp-mode] .ant-list,
+:root[data-dlp-mode] .ant-table,
+:root[data-dlp-mode] .ant-table-thead > tr > th,
+:root[data-dlp-mode] .ant-table-tbody > tr > td,
+:root[data-dlp-mode] .ant-descriptions-item-label,
+:root[data-dlp-mode] .cvat-tasks-list-item,
+:root[data-dlp-mode] .cvat-projects-project-item-card,
+:root[data-dlp-mode] .cvat-task-details,
+:root[data-dlp-mode] .cvat-job-card {
+  background: var(--dlp-panel) !important;
+  color: var(--dlp-text) !important;
+  border-color: var(--dlp-line) !important;
+}
+:root[data-dlp-mode] .ant-table-tbody > tr:hover > td { background: var(--dlp-panel2) !important; }
+
+/* 입력란·선택·버튼 */
+:root[data-dlp-mode] .ant-input,
+:root[data-dlp-mode] .ant-input-affix-wrapper,
+:root[data-dlp-mode] .ant-input-number,
+:root[data-dlp-mode] .ant-input-number-input,
+:root[data-dlp-mode] .ant-select:not(.ant-select-customize-input) .ant-select-selector,
+:root[data-dlp-mode] .ant-picker {
+  background: var(--dlp-panel2) !important;
+  border-color: var(--dlp-line) !important;
+  color: var(--dlp-text) !important;
+}
+:root[data-dlp-mode] .ant-input-number-handler-wrap,
+:root[data-dlp-mode] .ant-checkbox-inner {
+  background: var(--dlp-panel2) !important;
+  border-color: var(--dlp-line) !important;
+}
+:root[data-dlp-mode] .ant-checkbox-checked .ant-checkbox-inner {
+  background: var(--dlp-accent) !important;
+  border-color: var(--dlp-accent) !important;
+}
+:root[data-dlp-mode] .ant-select-arrow,
+:root[data-dlp-mode] .ant-input::placeholder { color: var(--dlp-muted) !important; }
+:root[data-dlp-mode] .ant-btn-default {
+  background: var(--dlp-panel2);
+  border-color: var(--dlp-line);
+  color: var(--dlp-text);
+}
+:root[data-dlp-mode] .ant-btn-primary:not(:disabled) {
+  background: var(--dlp-accent) !important;
+  border-color: var(--dlp-accent) !important;
+  color: #fff !important;
+}
+:root[data-dlp-mode] .ant-btn-dangerous:not(.ant-btn-primary) { color: var(--dlp-danger) !important; }
+:root[data-dlp-mode] .ant-radio-button-wrapper {
+  background: var(--dlp-panel2);
+  border-color: var(--dlp-line) !important;
+  color: var(--dlp-text);
+}
+:root[data-dlp-mode] .ant-radio-button-wrapper-checked:not(.ant-radio-button-wrapper-disabled) {
+  background: var(--dlp-accent-soft) !important;
+  color: var(--dlp-accent) !important;
+  border-color: var(--dlp-accent) !important;
+}
+:root[data-dlp-mode] .ant-slider-rail { background: var(--dlp-line); }
+:root[data-dlp-mode] .ant-slider-track { background: var(--dlp-accent); }
+
+/* 쪽 번호·진행 막대 (작업 목록 화면) */
+:root[data-dlp-mode] .ant-pagination-item a,
+:root[data-dlp-mode] .ant-pagination-prev .ant-pagination-item-link,
+:root[data-dlp-mode] .ant-pagination-next .ant-pagination-item-link,
+:root[data-dlp-mode] .ant-pagination-jump-next .ant-pagination-item-ellipsis,
+:root[data-dlp-mode] .ant-pagination-options-quick-jumper {
+  color: var(--dlp-muted) !important;
+}
+:root[data-dlp-mode] .ant-pagination-item-active {
+  background: var(--dlp-panel2) !important;
+  border-color: var(--dlp-accent) !important;
+}
+:root[data-dlp-mode] .ant-pagination-item-active a { color: var(--dlp-accent) !important; }
+:root[data-dlp-mode] .ant-pagination-options-quick-jumper input {
+  background: var(--dlp-panel2) !important;
+  border-color: var(--dlp-line) !important;
+  color: var(--dlp-text) !important;
+}
+:root[data-dlp-mode] .ant-progress-inner,
+:root[data-dlp-mode] .ant-progress-rail { background: var(--dlp-line) !important; }
+
+/* 떠 있는 상자: 드롭다운·메뉴·팝오버·모달·알림 */
+:root[data-dlp-mode] .ant-dropdown-menu,
+:root[data-dlp-mode] .ant-menu,
+:root[data-dlp-mode] .ant-select-dropdown,
+:root[data-dlp-mode] .ant-popover-inner,
+:root[data-dlp-mode] .ant-modal-content,
+:root[data-dlp-mode] .ant-modal-header,
+:root[data-dlp-mode] .ant-notification-notice,
+:root[data-dlp-mode] .ant-message-notice-content {
+  background: var(--dlp-panel) !important;
+  color: var(--dlp-text) !important;
+  border: 1px solid var(--dlp-line);
+}
+:root[data-dlp-mode] .ant-modal-title,
+:root[data-dlp-mode] .ant-popover-title,
+:root[data-dlp-mode] .ant-dropdown-menu-item,
+:root[data-dlp-mode] .ant-menu-item,
+:root[data-dlp-mode] .ant-select-item,
+:root[data-dlp-mode] .ant-notification-notice-message,
+:root[data-dlp-mode] .ant-notification-notice-description {
+  color: var(--dlp-text) !important;
+}
+:root[data-dlp-mode] .ant-dropdown-menu-item:hover,
+:root[data-dlp-mode] .ant-menu-item:hover,
+:root[data-dlp-mode] .ant-select-item-option-active,
+:root[data-dlp-mode] .ant-select-item-option-selected {
+  background: var(--dlp-panel2) !important;
+}
+
+/* 스크롤 막대 */
+:root[data-dlp-mode] * { scrollbar-color: var(--dlp-line) transparent; }

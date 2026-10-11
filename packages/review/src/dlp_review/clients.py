@@ -105,6 +105,10 @@ class CvatClient:
         )
         return list(res["results"])
 
+    def set_label_color(self, label_id: int, color: str) -> None:
+        """라벨 하나의 화면 색(#rrggbb)을 바꾼다. 라벨 ID·이름·속성은 그대로다."""
+        _check(self.http.patch(f"/api/labels/{label_id}", json={"color": color}))
+
     def create_task(self, name: str, project_id: int, video: Path) -> int:
         """영상 하나로 작업을 만들고 데이터 처리가 끝날 때까지 기다린다. 작업 ID.
 

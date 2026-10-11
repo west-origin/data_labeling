@@ -1,0 +1,6 @@
+# CVAT 공식 compose에 덧붙여 UI 컨테이너를 테마 이미지로 바꾼다 (services/cvat/cvat.sh가 쓴다, ADR 0038).
+# 이미지는 cvat.sh up이 먼저 빌드한다 (dlp-cvat-ui:<CVAT 버전>).
+services:
+  cvat_ui:
+    image: dlp-cvat-ui:${CVAT_VERSION:-dev}
+    pull_policy: never

@@ -1,0 +1,138 @@
+# 검수 화면 테마 (CVAT·Label Studio 위에 덧씌우는 모양). dlp_review.ui_theme.load_ui_theme가 읽는다.
+# 화면 모양(색·로고·단축키·영상 높이)만 정한다. 라벨 값, 검수 흐름, 저장 형식은 바꾸지 않는다.
+# 값을 바꾼 뒤:
+#   - CVAT: `make ui-theme`으로 services/review-theme/cvat/dlp-tokens.css를 다시 만들고 `make cvat-up`
+#     (테마 이미지를 다시 빌드한다). 테스트가 생성 파일과 이 파일의 일치를 검사한다.
+#   - Label Studio: 다음 `dlp review create` 때 프로젝트 설정(label_config)이 바뀐 값으로 갱신된다.
+#   - CVAT 라벨 색: 다음 `dlp review create` 때 프로젝트 라벨 색이 맞춰진다.
+# 색은 모두 #rrggbb (소문자 또는 대문자 16진수 6자리).
+
+brand:
+  name: aniatman
+  # 흰색 투명 배경 PNG (저장소 루트 기준 경로). 화이트 모드에서는 화면이 색을 뒤집어 어둡게 보인다.
+  logo: services/review-theme/logo.png
+
+# 처음 열었을 때의 모드. 검수자가 바꾸면 브라우저에 기억한다
+# (CVAT는 머리글의 전환 버튼, Label Studio는 사용자 메뉴의 Theme).
+default_mode: dark
+
+# 모드별 화면 색. bg(바탕), panel(패널), panel2(패널 안 칸), line(선), text(글자), muted(보조 글자),
+# accent(강조·주 버튼), danger(원본·삭제 경고), warn(주의), ok(확인).
+modes:
+  dark:
+    bg: "#0f1115"
+    panel: "#171a20"
+    panel2: "#1d2129"
+    line: "#2a2f39"
+    text: "#e7eaf0"
+    muted: "#8b93a3"
+    accent: "#4c8dff"
+    danger: "#ff4d5e"
+    warn: "#ffc53d"
+    ok: "#3ecf8e"
+  light:
+    bg: "#f4f5f7"
+    panel: "#ffffff"
+    panel2: "#f0f2f5"
+    line: "#dde1e7"
+    text: "#161a22"
+    muted: "#5d6575"
+    accent: "#2f6fe4"
+    danger: "#d92d3f"
+    warn: "#b7791f"
+    ok: "#1f9d68"
+
+# 라벨 색. 이름은 온톨로지 ID다. 표에 없는 ID는 fallback 색을 쓴다.
+colors:
+  fallback: "#8b93a3"
+  # 원시 동작 (Label Studio action.<손>:<동사>)
+  verbs:
+    grasp: "#4c8dff"
+    release: "#7aa7ff"
+    lift: "#22d3ee"
+    lower: "#2fb5c9"
+    carry: "#3ecf8e"
+    push: "#ffa94d"
+    pull: "#f59f00"
+    rotate: "#e599f7"
+    press: "#ff7a59"
+    rub: "#a3e635"
+    support: "#b197fc"
+  # 사이 구간 (gap.<손>:<유형>)
+  gap: "#5d6575"
+  # 손 상태의 접촉 대상 종류 (hand.<손>:<종류>)
+  contact_target_kinds:
+    none: "#5d6575"
+    object: "#8fb83a"
+    tool: "#a3e635"
+    person: "#f783ac"
+    fixed_surface: "#9681d6"
+    self: "#adb5bd"
+  # 상위 구간
+  skill: "#7c86a0"
+  task: "#5b6577"
+  substep: "#6c7a96"
+  # 이벤트 분류별 (events.yaml category)
+  event_categories:
+    failure_retry: "#ff922b"
+    worker_safety: "#ff4d5e"
+    subject_safety: "#f06595"
+    infection_control: "#20c997"
+  # 객체 상태 (state:<속성>=<값>)
+  state: "#868e96"
+  # CVAT 라벨 (블러 대상 종류, 객체 클래스, kp_<골격>). 표에 없으면 아래 palette에서 이름으로 정해진
+  # 색 하나를 고른다 (같은 이름은 항상 같은 색, 서로 다른 라벨이 한 색으로 몰리지 않게).
+  cvat:
+    face: "#ff5c8a"
+    reflection: "#a78bfa"
+    screen: "#4c8dff"
+    document: "#3ecf8e"
+    photo: "#ffa94d"
+    address_sign: "#22d3ee"
+    shipping_label: "#ffd43b"
+    kp_hand21: "#a3e635"
+    kp_coco17: "#74c0fc"
+    cup: "#4c8dff"
+    rag: "#22d3ee"
+    mop: "#38d9a9"
+    sponge: "#ffe066"
+    spray_bottle: "#ff8787"
+    bucket: "#748ffc"
+    person: "#f783ac"
+  palette:
+    - "#4dabf7"
+    - "#69db7c"
+    - "#ffa94d"
+    - "#da77f2"
+    - "#3bc9db"
+    - "#ffd43b"
+    - "#ff8787"
+    - "#9775fa"
+    - "#a9e34b"
+    - "#f783ac"
+    - "#63e6be"
+    - "#e599f7"
+
+# 원시 동작 단축키 (Label Studio). 오른손은 이 키, 왼손은 shift+이 키. 키는 서로 달라야 하고,
+# 동사는 온톨로지의 원시 동작이어야 한다.
+hotkeys:
+  grasp: "1"
+  release: "2"
+  lift: "3"
+  lower: "4"
+  carry: "5"
+  rub: "6"
+  push: "7"
+  press: "8"
+  support: "9"
+
+# 센서 그래프 선 색 (Label Studio 시계열 채널, dlp_review.labelstudio.CHANNELS와 같은 이름)
+channels:
+  glove_left: "#b197fc"
+  glove_right: "#a3e635"
+  imu_acc: "#4c8dff"
+
+# Label Studio 화면 크기 (px)
+layout:
+  video_height: 360
+  channel_height: 70

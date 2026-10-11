@@ -1,0 +1,4 @@
+/* 생성 파일: make ui-theme (config/review_ui.yaml에서 만든다). 직접 고치지 않는다. */
+:root{--dlp-default-mode:dark}
+:root[data-dlp-mode=dark]{--dlp-bg:#0f1115;--dlp-panel:#171a20;--dlp-panel2:#1d2129;--dlp-line:#2a2f39;--dlp-text:#e7eaf0;--dlp-muted:#8b93a3;--dlp-accent:#4c8dff;--dlp-danger:#ff4d5e;--dlp-warn:#ffc53d;--dlp-ok:#3ecf8e}
+:root[data-dlp-mode=light]{--dlp-bg:#f4f5f7;--dlp-panel:#ffffff;--dlp-panel2:#f0f2f5;--dlp-line:#dde1e7;--dlp-text:#161a22;--dlp-muted:#5d6575;--dlp-accent:#2f6fe4;--dlp-danger:#d92d3f;--dlp-warn:#b7791f;--dlp-ok:#1f9d68}

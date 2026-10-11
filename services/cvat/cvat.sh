@@ -3,8 +3,9 @@
 # 사용법: services/cvat/cvat.sh up|down|status|superuser
 #
 # 하위 명령 (Makefile 대상):
-#   up        — 공식 저장소를 DLP_CVAT_VERSION 태그로 받아(.src, 저장소에 넣지 않음) 띄우고 API가 응답할 때까지
-#               최대 10분(5초 x 120) 기다린다 (make cvat-up)
+#   up        — 공식 저장소를 DLP_CVAT_VERSION 태그로 받아(.src, 저장소에 넣지 않음), 검수 화면 테마를 얹은
+#               UI 이미지(dlp-cvat-ui, services/review-theme/cvat, ADR 0038)를 빌드한 뒤 띄우고 API가 응답할
+#               때까지 최대 10분(5초 x 120) 기다린다 (make cvat-up)
 #   down      — CVAT 컨테이너를 내린다. 볼륨은 남는다 (make cvat-down)
 #   status    — 컨테이너 상태
 #   superuser — 관리자 계정을 만든다 (make cvat-superuser). `dlp review`의 CVAT 클라이언트가 이 계정을 쓴다
@@ -23,8 +24,11 @@ SRC="$ROOT/services/cvat/.src"
 # 공식 compose는 traefik을 호스트 8080에 묶는다. DLP_CVAT_PORT로 호스트 포트를 바꾸도록 ports를 덮어쓴다
 # (컨테이너 안 포트는 그대로 8080, 대시보드 8090은 열지 않는다).
 OVERRIDE="$ROOT/services/cvat/ports.override.yml"
+# 검수 화면 테마 (ADR 0038): UI 컨테이너를 테마 이미지로 바꾸는 덮어쓰기와 빌드 컨텍스트
+THEME="$ROOT/services/review-theme"
+THEME_OVERRIDE="$THEME/cvat/compose.override.yml"
 # 프로젝트 이름 dlp-cvat: 개발 서비스(dlp)와 컨테이너·볼륨을 섞지 않는다
-COMPOSE="docker compose -p dlp-cvat -f $SRC/docker-compose.yml -f $OVERRIDE"
+COMPOSE="docker compose -p dlp-cvat -f $SRC/docker-compose.yml -f $OVERRIDE -f $THEME_OVERRIDE"
 
 # 공식 저장소를 고정 태그로 얕게 받는다. 이미 같은 태그면 건너뛴다 (멱등). 다른 태그면 지우고 다시 받는다
 fetch() {
@@ -33,6 +37,12 @@ fetch() {
   fi
   rm -rf "$SRC"
   git clone --quiet --depth 1 --branch "$VERSION" https://github.com/cvat-ai/cvat.git "$SRC"
+}
+
+# 공식 cvat/ui 이미지 위에 테마 파일을 얹은 dlp-cvat-ui:<버전> 이미지를 만든다 (테마를 바꿀 때마다 다시 빌드)
+build_theme() {
+  docker build --quiet --build-arg CVAT_VERSION="$VERSION" -t "dlp-cvat-ui:$VERSION" \
+    -f "$THEME/cvat/Dockerfile" "$THEME" >/dev/null
 }
 
 # CVAT API(/api/server/about)가 200을 줄 때까지 5초 간격으로 최대 120번 확인한다
@@ -52,6 +62,7 @@ wait_healthy() {
 case "${1:-}" in
   up)
     fetch
+    build_theme
     # 공식 compose는 CVAT_VERSION으로 이미지 태그를, CVAT_HOST로 traefik 호스트 규칙을 정한다
     CVAT_VERSION="$VERSION" CVAT_HOST=localhost $COMPOSE up -d
     wait_healthy

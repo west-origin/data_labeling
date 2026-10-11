@@ -18,6 +18,7 @@ DB·외부 도구·내보내기 동작을 바꾸면 그 경로의 서비스/격�
 | 동기화/관계/행동 | `sync`, `relations`, `actions`, 각 정책 | 마스터/스트림 시간과 후속 라벨 재생성. 각 패키지 테스트, 종단 테스트 |
 | 학습/평가/배포 | `training/loop.py`, `trainers.py`, `evaluation/gate.py`, 정책 | 골든셋 누수·거절 시 미배포·활성 모델 유일성. training/evaluation 테스트와 DB 서비스 검사 |
 | 데이터셋/내보내기 | `datasets`, `export/runner.py`, 형식별 모듈 | 분할·사용 중지·프라이버시·가명·게시 순서. datasets/export 테스트, `make test-isolated` |
+| 검수 화면 테마 | `config/review_ui.yaml`, `review/ui_theme.py`, `services/review-theme/`, `cvat.sh` | 색·로고·단축키·모드 전환만. 라벨 이름·왕복 불변. `packages/review/tests/test_ui_theme.py`, `make contracts`(생성 파일 일치). CVAT·Label Studio 버전을 올리면 두 모드 화면을 열어 확인 (ADR 0038) |
 | 원본 접근/보관 | `cli/raw_access.py`, `ops`, 버킷 정책 | 감사 우회·CVAT 사본 보관. `tests/test_raw_access_audited.py`, `tests/test_raw_access_db.py`, ops 테스트 |
 | 의존성·환경 | `pyproject.toml`, `uv.lock`, `services`, CI | 모듈 import 외에 실제 서버/DB 실행·의존성 감사. `make check`, 관련 서비스 검사 |
 

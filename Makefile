@@ -15,16 +15,23 @@
 COMPOSE := docker compose --env-file .env -f services/docker-compose.yml
 
 # 계약 검사 (make check에 포함): 온톨로지 YAML 검증, JSON Schema(schemas/)가 코드와 같은지,
+# CVAT 테마 색 생성 파일이 config/review_ui.yaml과 같은지,
 # 정책이 쓰는 모델의 상업 사용 분류 위반이 없는지(위반 줄만 보여 주고 실패). 서비스 불필요.
 contracts:
 	uv run dlp ontology validate
 	uv run dlp schema export --check
+	uv run dlp review ui-theme --check
 	@uv run dlp models licenses > /dev/null || (uv run dlp models licenses | grep 위반; exit 1)
 
 # 정책이 쓰는 모델의 라이선스·학습 데이터·상업 사용 분류 표 (판매 실사 자료)
 # 출력은 Markdown 표. 위반이 있으면 종료 코드 1 (ADR 0010). 서비스 불필요.
 licenses:
 	uv run dlp models licenses
+
+# 검수 화면 테마(config/review_ui.yaml)를 바꾼 뒤 CVAT 테마 색 파일을 다시 만든다 (ADR 0038).
+# CVAT에 반영하려면 make cvat-up (테마 이미지 재빌드). Label Studio는 다음 dlp review create 때 반영된다.
+ui-theme:
+	uv run dlp review ui-theme
 
 # 계약 타입(dlp_schema)을 바꾼 뒤 schemas/*.schema.json을 다시 만든다 (직접 편집 금지).
 # 계약 변경은 ADR + Alembic 마이그레이션 + 계약 테스트와 함께 한다.
@@ -57,7 +64,7 @@ db-upgrade:
 	uv run dlp ontology register 1.0.0
 
 # 파일이 아닌 명령 대상 (같은 이름의 파일이 있어도 항상 실행)
-.PHONY: install install-curation test-isolated lint fmt typecheck test contracts schemas models export-models todo-models licenses fixtures db-upgrade check env up down ps logs health test-services \
+.PHONY: install install-curation test-isolated lint fmt typecheck test contracts schemas ui-theme models export-models todo-models licenses fixtures db-upgrade check env up down ps logs health test-services \
         cvat-up cvat-down cvat-superuser clean
 
 # 작업공간 의존성 설치 (uv.lock 그대로, --locked: 잠금 파일과 pyproject가 어긋나면 실패).

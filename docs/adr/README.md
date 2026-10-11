@@ -44,3 +44,4 @@ ADR은 결정 당시의 이유와 이관 조건을 기록한다. 후속 ADR이 �
 | 0035 | [ADR 0035: 실제 영상 파일럿 준비 검사와 입력 무결성](0035-real-video-pilot-readiness.md) |
 | 0036 | [ADR 0036: 모델 해시 캐시와 블러 렌더 복구](0036-model-cache-and-render-recovery.md) |
 | 0037 | [ADR 0037: 온톨로지 로딩·저장·계층·이관 검증 경계](0037-ontology-validation-boundaries.md) |
+| 0038 | [ADR 0038: 검수 화면 테마를 도구 밖에서 덧씌운다](0038-review-ui-theme-overlay.md) |

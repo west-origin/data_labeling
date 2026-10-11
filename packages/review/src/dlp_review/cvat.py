@@ -34,7 +34,7 @@ WP6, ADR 0006(무손실 왕복), ADR 0019(키프레임 시각 = 스트림 PTS ms
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -65,10 +65,14 @@ UNIT_SCALE: Scale = (1.0, 1.0)
 NewBoxKind = Literal["blur_track", "box_track"]
 
 
-def label_spec(names: Iterable[str]) -> list[dict[str, Any]]:
+def label_spec(
+    names: Iterable[str], colors: Mapping[str, str] | None = None
+) -> list[dict[str, Any]]:
     """CVAT 프로젝트 라벨 정의.
 
     names: CVAT 라벨 이름 (블러 대상 종류, 객체 클래스, `kp_<골격>`).
+    colors: 라벨 이름 → 화면 색(#rrggbb, `ui_theme.cvat_label_color`). 없거나 이름이 빠지면 CVAT가
+    색을 고른다. 색은 화면 모양일 뿐 수집·왕복에 쓰지 않는다.
     라벨마다 텍스트 속성 `dlp_label_id`·`dlp_meta`(트랙, 고정)와 `dlp_visibility`(모양, 변경 가능)를
     붙인다. 라벨 type "any"라 직사각형·점 모두 그릴 수 있다 (모양 검사는 수집 때 한다).
     """
@@ -79,7 +83,13 @@ def label_spec(names: Iterable[str]) -> list[dict[str, Any]]:
         {"name": n, "mutable": True, "input_type": "text", "default_value": "", "values": [""]}
         for n in SHAPE_ATTRS
     ]
-    return [{"name": n, "type": "any", "attributes": attrs} for n in names]
+    out: list[dict[str, Any]] = []
+    for n in names:
+        spec: dict[str, Any] = {"name": n, "type": "any", "attributes": attrs}
+        if colors is not None and n in colors:
+            spec["color"] = colors[n]
+        out.append(spec)
+    return out
 
 
 @dataclass(frozen=True)

@@ -71,6 +71,7 @@ from dlp_review.ops.policy import CvatPolicy, MediaPolicy
 from dlp_review.ops.policy import load_policy as load_ops_policy
 from dlp_review.roles import check_privacy_reviewers, check_stage_uris
 from dlp_review.timeseries import write_timeseries_csv
+from dlp_review.ui_theme import UiTheme, cvat_label_color, load_ui_theme, logo_data_uri
 from dlp_review.watermark import burn_watermark
 from dlp_schema import repo_root
 from dlp_schema.db.repository import (
@@ -126,6 +127,7 @@ class ReviewSetup:
     cvat_config: CvatPolicy | None = None  # 없으면 config/policies/review.yaml cvat
     privacy: PrivacyPolicy | None = None  # 없으면 config/policies/privacy.yaml (블러본 해시)
     glove_prefixes: tuple[str, ...] | None = None  # 없으면 config/policies/sync.yaml glove
+    ui: UiTheme | None = None  # 없으면 config/review_ui.yaml (검수 화면 색·단축키·로고)
 
     def media_policy(self) -> MediaPolicy:
         """검수 화면 매체 정책 (`review.yaml media`). 처음 부를 때 읽어 둔다."""
@@ -144,6 +146,17 @@ class ReviewSetup:
         if self.privacy is None:
             self.privacy = load_privacy_policy(repo_root())
         return self.privacy
+
+    def ui_theme(self) -> UiTheme:
+        """검수 화면 테마 (`config/review_ui.yaml`). 처음 부를 때 읽어 둔다."""
+        if self.ui is None:
+            self.ui = load_ui_theme(repo_root())
+        return self.ui
+
+    def ls_label_config(self, ontology: Ontology) -> str:
+        """테마를 입힌 Label Studio 프로젝트 설정 XML (로고는 저장소 루트의 `brand.logo`)."""
+        theme = self.ui_theme()
+        return label_config(ontology, theme, logo_uri=logo_data_uri(theme, repo_root()))
 
     def pressure_prefixes(self) -> tuple[str, ...]:
         """장갑 압력 채널 접두사 (`sync.yaml glove.pressure_prefixes`). 처음 부를 때 읽어 둔다."""
@@ -297,14 +310,27 @@ def _segment_issues(
     return made
 
 
-def _cvat_project(cvat: CvatClient, name: str, labels: list[str]) -> tuple[int, CvatSchema]:
+def _cvat_project(
+    cvat: CvatClient, name: str, labels: list[str], theme: UiTheme
+) -> tuple[int, CvatSchema]:
     """이름으로 CVAT 프로젝트를 찾거나 만든다. (프로젝트 ID, 라벨·속성 ID 표).
 
+    새 프로젝트는 라벨마다 테마 색(`ui_theme.cvat_label_color`)을 넣어 만든다. 이미 있는 프로젝트는
+    색이 테마와 다른 라벨만 색을 바꾼다 (화면 모양만, 라벨 ID·속성은 그대로).
     주의: 이미 있는 프로젝트의 라벨 목록은 바꾸지 않는다 (온톨로지에 새 클래스가 생겨도 그대로).
     """
     project = cvat.find_project(name)
-    pid = int(project["id"]) if project else cvat.create_project(name, label_spec(labels))
-    return pid, CvatSchema.from_labels(cvat.project_labels(pid))
+    if project is None:
+        colors = {n: cvat_label_color(theme, n) for n in labels}
+        pid = cvat.create_project(name, label_spec(labels, colors))
+        return pid, CvatSchema.from_labels(cvat.project_labels(pid))
+    pid = int(project["id"])
+    existing = cvat.project_labels(pid)
+    for lb in existing:
+        want = cvat_label_color(theme, lb["name"])
+        if str(lb.get("color", "")).lower() != want.lower():
+            cvat.set_label_color(int(lb["id"]), want)
+    return pid, CvatSchema.from_labels(existing)
 
 
 def create_privacy_tasks(
@@ -358,7 +384,10 @@ def create_privacy_tasks(
         raise TaskError(f"{session_id}: 블러 자동 탐지를 먼저 실행하세요 (dlp privacy detect)")
     ontology = get_session_ontology(conn, session_id)
     pid, schema = _cvat_project(
-        setup.cvat, ontology_project(PRIVACY_PROJECT, ontology), list(ontology.privacy_targets)
+        setup.cvat,
+        ontology_project(PRIVACY_PROJECT, ontology),
+        list(ontology.privacy_targets),
+        setup.ui_theme(),
     )
     out: list[ReviewTask] = []
     with tempfile.TemporaryDirectory() as tmp:
@@ -512,7 +541,7 @@ def create_labeling_tasks(
                 # (kp_<골격>, cvat.cvat_label_name)
                 names = [*ontology.objects, "kp_hand21", "kp_coco17", "kp_wholebody133"]
                 pid, schema = _cvat_project(
-                    setup.cvat, ontology_project(SPATIAL_PROJECT, ontology), names
+                    setup.cvat, ontology_project(SPATIAL_PROJECT, ontology), names, setup.ui_theme()
                 )
                 cvat_user = cvat_user_id(setup.cvat, setup.cvat_policy().users, assignee)
                 tid = setup.cvat.create_task(
@@ -548,9 +577,9 @@ def create_labeling_tasks(
                     lpid = int(project["id"])
                     ls.ensure_prelabel_settings(lpid)  # 예측 방식 이전에 만든 프로젝트
                     # 이벤트 속성 입력란처럼 설정이 바뀌었으면 기존 프로젝트에도 반영한다
-                    ls.ensure_label_config(lpid, label_config(ontology))
+                    ls.ensure_label_config(lpid, setup.ls_label_config(ontology))
                 else:
-                    lpid = ls.create_project(project_name, label_config(ontology))
+                    lpid = ls.create_project(project_name, setup.ls_label_config(ontology))
                 # 라벨러가 여는 URL은 라벨러 자격 증명(라벨링 버킷 읽기 전용)으로 서명한다
                 data = {
                     "video": setup.labeling_reader.presign(vkey),

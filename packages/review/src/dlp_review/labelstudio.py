@@ -37,9 +37,11 @@ from __future__ import annotations
 
 import json
 from typing import Any
+from xml.sax.saxutils import escape as xml_escape
 from xml.sax.saxutils import quoteattr
 
 from dlp_review.reconcile import ReviewedItem
+from dlp_review.ui_theme import UiTheme, ls_hotkey, ls_label_color, ls_style
 from dlp_schema.labels import (
     ActionPayload,
     EventPayload,
@@ -87,7 +89,7 @@ def label_names(o: Ontology) -> list[str]:
     return names
 
 
-def label_config(o: Ontology) -> str:
+def label_config(o: Ontology, theme: UiTheme | None = None, *, logo_uri: str = "") -> str:
     """Label Studio 프로젝트 설정 XML.
 
     영상(`$video`)과 시계열(`$timeseries`, CSV URL)을 sync="v" 그룹으로 함께 재생하고,
@@ -96,15 +98,65 @@ def label_config(o: Ontology) -> str:
     보인다.
     결과는 구간과 같은 id의 별도 결과(type choices·textarea)로 오며 `from_ls_results`가 합친다.
     라벨 값은 `quoteattr`로 XML 속성 이스케이프한다.
+
+    theme(`ui_theme.UiTheme`, config/review_ui.yaml)이 있으면 화면 모양을 덧씌운다: 라벨 색
+    (`background`), 원시 동작 단축키(`hotkey`), 채널 선 색, 영상·채널 높이, 화면 CSS(`<Style>`,
+    두 모드 색과 머리글 로고). logo_uri는 `ui_theme.logo_data_uri` 결과(비우면 로고 없음).
+    모양만 바꾸며 라벨 이름·컨트롤 이름(from_name·to_name)은 theme과 상관없이 같다.
+
+    예외: theme 단축키의 동사가 이 온톨로지의 원시 동작이 아니면 ValueError (오타로 단축키가
+    조용히 빠지지 않게).
     """
-    labels = "\n".join(f"      <Label value={quoteattr(n)}/>" for n in label_names(o))
-    channels = "\n".join(
-        f'      <Channel column="{c}" legend="{c}" strokeColor="{color}"/>'
-        for c, color in zip(CHANNELS, ("#1f77b4", "#d62728", "#2ca02c"), strict=True)
+    if theme is not None:
+        primitives = {v for v, t in o.verbs.items() if t.level is VerbLevel.PRIMITIVE}
+        unknown = sorted(set(theme.hotkeys) - primitives)
+        if unknown:
+            raise ValueError(f"review_ui.yaml hotkeys: 원시 동작이 아닌 동사 {unknown}")
+
+    def label(n: str) -> str:
+        attrs = f"value={quoteattr(n)}"
+        if theme is not None:
+            attrs += f' background="{ls_label_color(theme, o, n)}"'
+            key = ls_hotkey(theme, n)
+            if key is not None:
+                attrs += f' hotkey="{key}"'
+        return f"      <Label {attrs}/>"
+
+    labels = "\n".join(label(n) for n in label_names(o))
+    colors = (
+        [theme.channels.get(c, theme.colors.fallback) for c in CHANNELS]
+        if theme is not None
+        else ["#1f77b4", "#d62728", "#2ca02c"]
     )
+    height = f' height="{theme.layout.channel_height}"' if theme is not None else ""
+    channels = "\n".join(
+        f'      <Channel column="{c}" legend="{c}" strokeColor="{color}"{height}/>'
+        for c, color in zip(CHANNELS, colors, strict=True)
+    )
+    if theme is None:
+        head = f'  <Header value="온톨로지 v{o.version}: 손별 원시 동작과 사이 구간으로 빈틈없이"/>'
+        video = '  <Video name="video" value="$video" sync="v"/>'
+        style = ""
+        event_class = ""
+    else:
+        title = quoteattr(f"행동 구간 검수 · 블러본(원본 아님) · 온톨로지 v{o.version}")
+        hint = quoteattr(
+            "손별 원시 동작과 사이 구간으로 빈틈없이 · 단축키: 오른손 숫자, 왼손 shift+숫자"
+        )
+        head = (
+            '  <View className="dlp-brand">\n'
+            f'    <Header value={title} size="5"/>\n'
+            f'    <Header value={hint} size="6"/>\n'
+            "  </View>"
+        )
+        video = (
+            f'  <Video name="video" value="$video" sync="v" height="{theme.layout.video_height}"/>'
+        )
+        style = f"  <Style>{xml_escape(ls_style(theme, logo_uri))}</Style>\n"
+        event_class = ' className="dlp-event"'
     return f"""<View>
-  <Header value="온톨로지 v{o.version}: 손별 원시 동작과 사이 구간으로 빈틈없이"/>
-  <Video name="video" value="$video" sync="v"/>
+{style}{head}
+{video}
   <TimeSeries name="{TO_NAME}" valueType="url" value="$timeseries" sep="," timeColumn="time_ms"
               timeDisplayFormat=",.0f" sync="v">
 {channels}
@@ -112,7 +164,7 @@ def label_config(o: Ontology) -> str:
   <TimeSeriesLabels name="{FROM_NAME}" toName="{TO_NAME}">
 {labels}
   </TimeSeriesLabels>
-  <View visibleWhen="region-selected">
+  <View visibleWhen="region-selected"{event_class}>
     <Header value="이벤트 속성 (이벤트 종류가 요구할 때만 채운다)"/>
     <Choices name="{EVENT_SEVERITY}" toName="{TO_NAME}" perRegion="true" choice="single">
       <Choice value="1"/>

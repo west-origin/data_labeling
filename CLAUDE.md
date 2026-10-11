@@ -26,7 +26,8 @@
   내보내기 종단 테스트는 DB도 쓰므로 `make up` 뒤에 돌린다. 환경은 `scripts/lerobot-env/uv.lock`에 고정한다
   (바꾸면 그 디렉터리에서 `uv lock`)
 - `make install-curation` — FiftyOne(데이터 큐레이션, 약 1 GB) 포함 설치. `make install`을 다시 하면 빠진다
-- `make cvat-up` / `make cvat-down` / `make cvat-superuser` — CVAT (공식 compose, 고정 버전)
+- `make cvat-up` / `make cvat-down` / `make cvat-superuser` — CVAT (공식 compose, 고정 버전, UI는 검수 화면 테마를 얹은 이미지)
+- `make ui-theme` — 검수 화면 테마(`config/review_ui.yaml`)를 바꾼 뒤 CVAT 테마 색 파일 재생성 (`make contracts`가 일치 검사, ADR 0038)
 
 ## 구조
 
@@ -49,6 +50,8 @@
   라벨 이력), 웹훅 수집, 라벨러 워터마크, 역할 경계. `dlp review create|collect|verify|serve|register-webhooks` (verify: 검수가 끝난 세션을 human_verified로).
   운영 로직(`dlp_review.ops`): 우선순위 큐, 표본 검증, 블라인드·오류 삽입·이중·QA 배정, 품질 측정.
   `dlp review plan|assign|queue|qa|quality`. 정책은 `config/policies/review.yaml`.
+  검수 화면 테마(`dlp_review.ui_theme`, `config/review_ui.yaml`, `services/review-theme/`): 색·로고·단축키·다크/화이트만
+  도구 밖에서 덧씌우고 라벨 형식은 바꾸지 않는다 (ADR 0038).
 - `packages/datasets/` (`dlp_datasets`) — 데이터셋 버전(lakeFS 커밋), 작업자·장소 단위 분할(holdout 포함), 골든셋 제안,
   사용 중지 전파, 계보 조회. `dlp dataset golden|build|withdraw`, `dlp lineage <세션>`. 정책은 `config/policies/dataset.yaml`.
 - `packages/models/` (`dlp_models`) — 모델 레지스트리(`config/models.yaml`, 해시 확인)와 공용 ONNX 런타임(OWLv2, 메트릭 깊이).
