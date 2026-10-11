@@ -17,6 +17,7 @@ from datetime import timedelta
 from pathlib import Path
 
 import av
+import cv2
 import numpy as np
 import pytest
 
@@ -24,11 +25,12 @@ from dlp_fixtures.sync import generate_sync_scenario
 from dlp_fixtures.video import BlurScenario, render_qr, target_boxes_at, vfr_times, write_video
 from dlp_media.pts import build_pts_index
 from dlp_models.owlv2 import OwlDetection
-from dlp_privacy.detection import FrameDetector
+from dlp_privacy.detection import Detection, FrameDetector
 from dlp_privacy.detectors import build_detectors
 from dlp_privacy.detectors.codes import CodeDetector
 from dlp_privacy.detectors.open_vocab import OpenVocabDetector
 from dlp_privacy.detectors.oracle import OracleDetector
+from dlp_privacy.detectors.reflection import REGION_TARGET, ReflectionDetector
 from dlp_privacy.geometry import Box
 from dlp_privacy.pipeline import StreamResult, detect_video, model_version
 from dlp_privacy.policy import PrivacyPolicy, ReviewReason, TargetPolicy
@@ -530,6 +532,66 @@ def test_render_pads_odd_size_keeping_pixel_coordinates_and_pts(tmp_path: Path) 
         assert abs(out[5:50, 5:95].mean() - 60) < 5  # 배경은 그대로 (늘이지 않음)
         assert out[:, w].max() < 20 and out[h, :].max() < 20  # 덧댄 열·행은 검정
         assert abs(out[56:74, 82:100].mean() - 128) < 5  # 블러 박스는 원본 좌표 그대로
+
+
+class _Regions:
+    """정해 둔 반사면 영역(reflective_surface)을 매 프레임 내는 가짜 영역 탐지기."""
+
+    name = "regions"
+    version = "x"
+
+    def __init__(self, boxes: list[Box]) -> None:
+        """boxes: 낼 영역 박스 (원 이미지 화소 좌표)."""
+        self.boxes = boxes
+
+    def detect(self, image: np.ndarray, t_ms: int, threshold: float) -> list[Detection]:
+        """모든 영역을 점수 0.9로 낸다."""
+        return [Detection(REGION_TARGET, b, 0.9, self.name) for b in self.boxes]
+
+
+class _CropFaces:
+    """YuNet처럼 입력을 BGR로 바꾸고(빈 이미지면 cv2 단언 실패), 받은 crop 크기를 기록하며
+    crop 좌표 (1, 2)에 3x4 얼굴 하나를 내는 가짜 얼굴 탐지기."""
+
+    name = "faces"
+    version = "y"
+
+    def __init__(self) -> None:
+        """기록 목록을 비운다."""
+        self.shapes: list[tuple[int, int]] = []
+
+    def detect(self, image: np.ndarray, t_ms: int, threshold: float) -> list[Detection]:
+        """crop (높이, 너비)를 기록하고 얼굴 하나를 낸다."""
+        cv2.cvtColor(image, cv2.COLOR_RGB2BGR)  # YuNetFaceDetector.detect와 같은 전처리
+        self.shapes.append((image.shape[0], image.shape[1]))
+        return [Detection("face", Box(1, 2, 3, 4), 0.8, self.name)]
+
+
+def test_reflection_crops_cover_subpixel_and_fractional_regions() -> None:
+    """회귀(F-PMS-03): 폭·높이가 1px 미만인 반사면 영역도 탐지를 멈추지 않는다.
+
+    crop은 영역을 바깥쪽으로 정수화(x·y 내림, 끝 올림)하고 프레임 경계로 자른다.
+    정답 근거 (64x48 프레임):
+    - 폭 0.4 (x 10.3~10.7, y 5~25): 1x20 crop (예전에는 int(0.4)=0 → 빈 crop → cv2 단언 실패).
+    - 높이 0.5 (x 30~40, y 47.2~47.7): 10x1 crop.
+    - x 10.7~16.3, y 5.5~25.2: x 10~17, y 5~26 → 7x21 crop (예전에는 5x19로 끝을 놓쳤다).
+    - 프레임 밖으로 걸친 (-5.5, -3.2, 20, 20): x 0~15, y 0~17 → 15x17 crop.
+    - 프레임 완전히 밖 (70, 0, 5, 5): 건너뛴다.
+    얼굴 박스는 crop 원점(내림한 x, y)을 더해 원 이미지 좌표로 돌아온다.
+    """
+    regions = [
+        Box(10.3, 5.0, 0.4, 20.0),
+        Box(30.0, 47.2, 10.0, 0.5),
+        Box(10.7, 5.5, 5.6, 19.7),
+        Box(-5.5, -3.2, 20.0, 20.0),
+        Box(70.0, 0.0, 5.0, 5.0),
+    ]
+    faces = _CropFaces()
+    detector = ReflectionDetector("reflection", _Regions(regions), faces, threshold_scale=0.5)
+    out = detector.detect(np.zeros((48, 64, 3), dtype=np.uint8), 0, 0.6)
+    assert faces.shapes == [(20, 1), (1, 10), (21, 7), (17, 15)]
+    assert [(d.box.x, d.box.y) for d in out] == [(11, 7), (31, 49), (11, 7), (1, 2)]
+    assert all(d.target == "reflection" and d.detector == "reflection" for d in out)
 
 
 def test_vfr_fixture_positions_match_frame_order() -> None:
