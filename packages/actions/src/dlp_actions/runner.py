@@ -6,8 +6,11 @@ VLM 서버가 재시도(백오프) 후에도 응답하지 않은 구간이 있�
 멈춘다 (호출자의 트랜잭션이 되돌려져 아무것도 쓰지 않으므로 다시 실행하면 처음부터 한다).
 서버 장애를 미상으로 채워 정상 버전으로 쓰면 재실행이 건너뛰어 미상이 영구히 남기 때문이다.
 model_version은 "actions-<정책 해시>+<VLM 버전>+i<입력 해시>"다.
-입력 해시는 이 단계가 읽는 현재 라벨(바디캠 손 키포인트, 손 상태, 객체 트랙)의 ID 집합 해시다.
-입력이 바뀌면(프리라벨 재실행, 검수자의 접촉 수정) 버전이 바뀌어 다시 만든다.
+입력 해시는 이 단계가 읽는 현재 라벨(손마다 고른 바디캠 hand21 트랙, 손 상태, 객체 트랙)의 ID 집합
+해시다. 같은 손 트랙이 여럿이면 프리라벨 접촉·3D 단계와 같은 공용 순위(`dlp_schema.episode.
+track_rank`: 사람·검수 → 최신 → 긴 구간 → 라벨 ID)로 하나를 고른다 (F-PAR-04).
+입력이 바뀌면(프리라벨 재실행, 검수자의 접촉 수정, 승인으로 고르는 트랙이 바뀜) 버전이 바뀌어 다시
+만든다.
 - 같은 버전 결과가 그 손에 이미 있으면 건너뛴다.
 - 버전이 바뀌면 이 모듈이 만든 이전 현재 레코드 중 **검수 전인 것만** 삭제 레코드로 표시하고
   새로 쓴다.
@@ -39,7 +42,7 @@ from dlp_privacy.policy import load_policy as load_privacy_policy
 from dlp_privacy.runner import assert_render_current, check_fetched
 from dlp_schema import repo_root
 from dlp_schema.db.repository import get_labels, get_session, insert_labels
-from dlp_schema.episode import current_labels, retractions, version_tag
+from dlp_schema.episode import current_labels, pick_hand_track_labels, retractions, version_tag
 from dlp_schema.labels import (
     ActionPayload,
     BoxTrackPayload,
@@ -242,18 +245,21 @@ def run_actions(
         and x.payload.skeleton == "hand21"
         and x.payload.hand is not None
     ]
-    # 손마다 트랙 하나 (같은 손이 여럿이면 조회 순서상 마지막 것. 프리라벨 접촉 단계의
-    # `pick_hand_tracks`와 달리 정해진 선택 기준이 없다)
+    # 손마다 트랙 하나. 같은 손 트랙이 여럿이면 프리라벨 접촉·3D 단계와 같은 공용 순위
+    # (`track_rank`: 사람·검수 → 최신 → 긴 구간 → 라벨 ID)로 고른다 (F-PAR-04)
+    picked = pick_hand_track_labels(track_labels)
     tracks: dict[Hand, KeypointTrackPayload] = {}
-    for x in track_labels:
-        assert isinstance(x.payload, KeypointTrackPayload) and x.payload.hand is not None
-        tracks[x.payload.hand] = x.payload
+    for hand, x in picked.items():
+        assert isinstance(x.payload, KeypointTrackPayload)
+        tracks[hand] = x.payload
     object_labels = [
         x for x in current if isinstance(x.payload, BoxTrackPayload | MaskTrackPayload)
     ]
     state_labels = [x for x in current if isinstance(x.payload, HandStatePayload)]
-    # 모델 버전 = 정책 해시 + VLM 버전 + 입력 라벨 ID 집합 해시
-    inputs = input_digest([*track_labels, *object_labels, *state_labels])
+    # 모델 버전 = 정책 해시 + VLM 버전 + 입력 라벨 ID 집합 해시. 손 트랙은 실제로 쓰는 고른
+    # 트랙만 넣는다: 승인은 라벨 ID를 바꾸지 않으므로, 모든 트랙 ID를 넣으면 승인으로 고르는
+    # 트랙이 바뀌어도 버전이 같아 다시 돌지 않는다
+    inputs = input_digest([*picked.values(), *object_labels, *state_labels])
     version = f"{PREFIX}{policy.digest}+{client.version}+i{inputs}"
     summary = ActionsSummary(version)
     unresolved = set(policy.unresolved_entity_ids)

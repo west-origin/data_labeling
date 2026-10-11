@@ -5,8 +5,9 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
@@ -14,9 +15,28 @@ from pydantic import ValidationError
 from dlp_schema.common import IDENTIFIER_MAX, derived_id
 from dlp_schema.config import load_config
 from dlp_schema.dataset import DatasetVersion, Split
-from dlp_schema.episode import Entity, EntityKind, EpisodeGraph, current_labels, retractions
+from dlp_schema.episode import (
+    Entity,
+    EntityKind,
+    EpisodeGraph,
+    current_labels,
+    is_protected,
+    pick_hand_track_labels,
+    retractions,
+    track_rank,
+)
 from dlp_schema.jsonschema import stale_schemas
-from dlp_schema.labels import LabelRecord, Verification, VerificationState
+from dlp_schema.labels import (
+    Hand,
+    Keypoint,
+    KeypointFrame,
+    KeypointTrackPayload,
+    LabelRecord,
+    Provenance,
+    Source,
+    Verification,
+    VerificationState,
+)
 from dlp_schema.migration import OntologyMigration, load_migration, migrate_labels
 from dlp_schema.ontology import Ontology
 from dlp_schema.testing import FIXED_TIME, action_payload, make_label
@@ -236,3 +256,44 @@ def test_retractions_validate_the_contract() -> None:
     label = make_label(action_payload(), label_id="s001-a")
     with pytest.raises(ValidationError):
         retractions([label], "m:2", datetime(2026, 1, 1))  # 시간대 없는 시각
+
+
+def _hand_track(label_id: str, hand: Hand | None, end: int, **kw: Any) -> LabelRecord:
+    """바디캠 hand21 트랙 (0~end ms, 키프레임 하나). hand가 None이면 손이 없는 coco17 트랙."""
+    n, skeleton = (21, "hand21") if hand else (17, "coco17")
+    points = tuple(Keypoint(x=1.0, y=1.0, visibility=2) for _ in range(n))
+    payload = KeypointTrackPayload(
+        entity_id="hand_x", skeleton=skeleton, hand=hand,
+        keyframes=(KeypointFrame(t_ms=0, points=points),),
+    )  # fmt: skip
+    model = {"provenance": Provenance(source=Source.MODEL, model_version="m1"), "confidence": 0.5}
+    return make_label(payload, label_id, 0, end, stream_id="bodycam", **{**model, **kw})
+
+
+def test_track_rank_prefers_reviewed_then_newest_then_longest_then_id() -> None:
+    """F-PAR-04: 같은 손 트랙 선택 공용 기준 (프리라벨 접촉·3D와 행동 단계가 함께 쓴다).
+
+    왼손: 승인(짧고 오래됨) > 더 새로 만든 것 > 더 긴 것. 오른손: 셋 다 모델·같은 시각·같은 길이면
+    라벨 ID가 큰 것. 손이 없는 트랙과 키포인트가 아닌 라벨은 무시한다. 입력 순서와 상관없다.
+    """
+    later = {"created_at": FIXED_TIME + timedelta(days=1)}
+    approved = Verification(
+        state=VerificationState.HUMAN_APPROVED, reviewer_id="rev01", reviewed_at=FIXED_TIME
+    )
+    old_long = _hand_track("l-old", Hand.LEFT, 5_000)
+    new_short = _hand_track("l-new", Hand.LEFT, 1_000, **later)
+    reviewed = _hand_track("l-rev", Hand.LEFT, 500, verification=approved)
+    right = [_hand_track(f"r-{c}", Hand.RIGHT, 1_000) for c in "abc"]
+    noise = [_hand_track("no-hand", None, 9_000, **later), make_label(action_payload(), "act")]
+    labels = [old_long, new_short, reviewed, *right, *noise]
+    for order in (labels, labels[::-1]):
+        picked = pick_hand_track_labels(order)
+        assert {h: x.label_id for h, x in picked.items()} == {Hand.LEFT: "l-rev", Hand.RIGHT: "r-c"}
+    assert pick_hand_track_labels([old_long, new_short])[Hand.LEFT].label_id == "l-new"
+    assert pick_hand_track_labels([old_long, *right[:1]])[Hand.LEFT].label_id == "l-old"
+    assert track_rank(reviewed) > track_rank(new_short) > track_rank(old_long)
+    # 사람 출처, 승인·표본 검증·사람 수정 상태는 모두 보호 대상이다
+    assert is_protected(reviewed) and not is_protected(old_long)
+    assert is_protected(old_long.model_copy(update={"provenance": Provenance(source=Source.HUMAN)}))
+    sampled = approved.model_copy(update={"state": VerificationState.SAMPLE_VERIFIED})
+    assert is_protected(old_long.model_copy(update={"verification": sampled}))

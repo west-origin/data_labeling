@@ -4,11 +4,12 @@
    같은 Predictor·모델 버전 결과가 그 스트림에 이미 있으면 건너뛴다.
 2. 깊이 모델이 있으면 바디캠 손 관절·객체 박스를 카메라 좌표 3D 궤적으로 올린다 (lift3d).
 3. 바디캠의 손 키포인트·객체 박스와 장갑 신호로 접촉 구간을 만들어 세션 [0, 길이]로 자른 뒤
-   hand_state 라벨로 쓴다. 배포된 재학습 접촉 모델이 있으면(replaced에 CONTACT_STEP) 이 단계는
-   돌지 않고, 이 단계가 냈던 검수 전 접촉을 지운다. 2·3의 모델 버전에는 정책 절
-   해시(depth·contact)와 입력 해시를 넣는다. 입력은 2가 (개체, 트랙 종류)마다 하나씩 고른 바디캠
-   hand21 손·박스 트랙의 라벨 ID(`pick_lift_tracks`), 3이 바디캠 손·박스 트랙의 현재 라벨 ID와
-   장갑 동기화, 장갑 압력 채널 접두사(sync.yaml glove.pressure_prefixes)다. 입력이 바뀌면
+   hand_state 라벨로 쓴다. 대상이 사람 박스(온톨로지 물리 유형 person)인 접촉은 부위를 알 수 없어
+   라벨을 만들지 않고 요약에 센다 (검수자가 그린다). 배포된 재학습 접촉 모델이 있으면(replaced에
+   CONTACT_STEP) 이 단계는 돌지 않고, 이 단계가 냈던 검수 전 접촉을 지운다. 2·3의 모델 버전에는
+   정책 절 해시(depth·contact)와 입력 해시를 넣는다. 입력은 2가 (개체, 트랙 종류)마다 하나씩 고른
+   바디캠 hand21 손·박스 트랙의 라벨 ID(`pick_lift_tracks`), 3이 바디캠 손·박스 트랙의 현재 라벨
+   ID와 장갑 동기화, 장갑 압력 채널 접두사(sync.yaml glove.pressure_prefixes)다. 입력이 바뀌면
    (예측기 버전 변경, 검수자 수정) 다시 돌고, 검수 전인 이전 결과만 지운다. 검수된(승인·표본 검증)
    결과와 사람이 고치거나 만든 결과는 남으므로, 새 결과 중 그와 겹치는 것은 버린다: 접촉은 같은
    손에서 시간이 겹치는 구간, 3D 궤적은 같은 (개체, 부위, 좌표계) (ADR 0015, 검수 결과 옆에 같은
@@ -53,7 +54,14 @@ from dlp_prelabel.policy import PrelabelPolicy
 from dlp_prelabel.wearer import match_wearer, wrist_speed
 from dlp_schema.config import repo_root
 from dlp_schema.db.repository import get_labels, get_session, insert_labels, set_lifecycle
-from dlp_schema.episode import current_labels, retractions, version_tag
+from dlp_schema.episode import (
+    current_labels,
+    is_protected,
+    pick_hand_track_labels,
+    retractions,
+    track_rank,
+    version_tag,
+)
 from dlp_schema.labels import (
     BoxTrackPayload,
     Evidence,
@@ -84,8 +92,14 @@ REPLACED_VERSION = "replaced-by-deployed-model"
 # 구간이 남은 세션은 입력이 바뀌어 다시 돌 때 잘린다. 올리면 모든 세션의 검수 전 접촉이 새 ID로
 # 다시 만들어지고, 평가 기준 버전 패턴(`contact-heuristic-1*`, ADR 0013·0025, training.yaml)도
 # 함께 바꿔야 한다.
+# 사람 박스 접촉을 라벨로 만들지 않게 한 수정(F-PAR-03)도 같은 이유로 올리지 않았다: 이미 사람
+# 박스 접촉을 object로 기록한 세션은 입력(손·박스 트랙 등)이 바뀌어 다시 돌 때 검수 전 것이
+# 지워진다.
 CONTACT_PREFIX = "contact-heuristic-1"
 WEARER_PREFIX = "wearer-xcorr-1"
+# 사람 개체의 물리 유형 (온톨로지 physical_types의 ID). 접촉 단계는 이 유형 박스와의 접촉을 사람
+# 접촉으로 보고 라벨을 만들지 않는다 (`contact_target_kind`, F-PAR-03)
+PERSON_PHYSICAL_TYPE = "person"
 # replaced에 이 이름이 있으면 배포된 재학습 접촉 모델이 기본 접촉 단계(장갑·영상 휴리스틱)를
 # 대신한다 (training.yaml contact.replaces)
 CONTACT_STEP = "contact"
@@ -121,15 +135,17 @@ class PrelabelSummary:
 
     produced: "스트림/예측기" → 이번에 넣은 라벨 수. skipped: 같은 버전이 이미 있어 건너뛴
     "스트림/예측기".
-    contacts: 새 접촉 라벨 수. retracted: 예측기 단계(1)의 이전 버전과 배포 모델이 대신한 기본
-    어댑터·접촉 단계에서 지운 라벨 수 (3D·접촉 단계가 새 버전으로 지운 수는 세지 않는다). lifted: 새
-    3D 궤적 수.
+    contacts: 새 접촉 라벨 수. person_contacts: 대상이 사람 박스라 부위(body_part)를 몰라 라벨을
+    만들지 않은 접촉 구간 수 (검수자가 그린다, F-PAR-03).
+    retracted: 예측기 단계(1)의 이전 버전과 배포 모델이 대신한 기본 어댑터·접촉 단계에서 지운 라벨
+    수 (3D·접촉 단계가 새 버전으로 지운 수는 세지 않는다). lifted: 새 3D 궤적 수.
     wearer: 착용자로 찾은 원래 트랙 라벨 ID. wearer_scores: 인물(라벨 ID)별 상관.
     """
 
     produced: dict[str, int] = field(default_factory=dict[str, int])  # "스트림/predictor" → 라벨 수
     skipped: list[str] = field(default_factory=list[str])
     contacts: int = 0
+    person_contacts: int = 0  # 사람 박스 접촉 (부위를 몰라 라벨을 만들지 않음)
     retracted: int = 0  # 예측기 단계·배포 모델 대체로 지운 라벨 (3D·접촉 단계 것은 빠진다)
     lifted: int = 0
     wearer: str | None = None
@@ -167,7 +183,8 @@ def run_prelabel(
         session_id: 세션 ID.
         raw: 원본 버킷 저장소. 반드시 감사 저장소(`raw_store`)여야 한다 (ADR 0020).
         predictors: 돌릴 어댑터 (실제 모델, stub, 배포된 재학습 모델 `trained-<과제>`).
-        policy: 프리라벨 정책. ontology: 접촉 대상 종류(tool/fixed_surface/object) 판단에 쓴다.
+        policy: 프리라벨 정책. ontology: 접촉 대상 종류(tool/fixed_surface/object, 사람 박스는
+            라벨 없음) 판단에 쓴다.
         now: 새 레코드의 created_at (시간대 필수).
         lifter: 깊이 3D 단계 (가중치가 없으면 None → 건너뛴다).
         replaced: 배포된 재학습 모델이 대신하는 기본 어댑터 이름 (`CONTACT_STEP`이면 접촉 단계).
@@ -252,8 +269,8 @@ def run_prelabel(
         if lifter is not None:
             summary.lifted = _lift(conn, session, history, current, raw, work, lifter, now)
         if CONTACT_STEP not in replaced:
-            summary.contacts = _contacts(
-                conn, session, history, current, raw, work, policy, ontology, now, prefixes
+            _contacts(
+                conn, session, history, current, raw, work, policy, ontology, now, prefixes, summary
             )
         _wearer(conn, session, history, current, raw, work, policy, now, summary)
     if session.lifecycle_state is LifecycleState.PRIVACY_APPROVED:
@@ -288,30 +305,14 @@ def _stale(labels: list[LabelRecord], prefix: str, version: str) -> list[LabelRe
     ]
 
 
-def _track_rank(x: LabelRecord) -> tuple[bool, datetime, int, str]:
-    """같은 대상 트랙이 여럿일 때 하나를 고르는 정렬 키 (튜플이 클수록 앞선다).
-
-    `pick_hand_tracks`(접촉)와 `pick_lift_tracks`(3D)가 함께 쓴다. 차례로:
-
-    1. 사람이 만들었거나 검수된 트랙 (`_protected`): 사람이 확인한 위치가 가장 믿을 만하다.
-    2. 더 새로 만든 트랙 (`created_at`): 보통 더 새 모델 버전의 출력이다.
-    3. 더 긴 구간 (`t_end_ms - t_start_ms`): 놓치는 시간이 짧다.
-    4. 라벨 ID (사전순으로 큰 것): 위가 모두 같을 때 결과를 고정하는 마지막 기준.
-
-    검수 상태가 바뀌면(승인은 라벨 ID를 바꾸지 않는다) 고르는 트랙이 바뀔 수 있다. 그래서 3D 단계의
-    입력 해시는 고른 트랙으로 만든다.
-    """
-    return (_protected(x), x.created_at, x.t_end_ms - x.t_start_ms, x.label_id)
-
-
 def pick_hand_tracks(hand_labels: list[LabelRecord]) -> dict[Hand, KeypointTrackPayload]:
     """손(왼·오른)마다 접촉 추정에 쓸 hand21 트랙 하나를 고른다.
 
     같은 손 트랙이 여럿일 수 있다 (사람이 새로 그린 트랙과 모델 트랙, 버전이 다른 모델 트랙이 함께
     현재 라벨인 경우). 예전에는 입력 순서의 마지막 것을 조용히 썼는데, 그 순서는 DB 조회 순서라
-    접촉 결과가 실행마다 달라질 수 있었다. `_track_rank`(사람·검수 → 최신 → 긴 구간 → 라벨 ID)로
-    가장 앞서는 트랙을 고른다 (병합하지 않는다: 서로 다른 트랙의 관절을 섞으면 어느 출처의 위치인지
-    알 수 없게 된다).
+    접촉 결과가 실행마다 달라질 수 있었다. 행동 단계와 같은 공용 기준
+    (`dlp_schema.episode.pick_hand_track_labels`, `track_rank`: 사람·검수 → 최신 → 긴 구간 → 라벨
+    ID)으로 가장 앞서는 트랙을 고른다 (병합하지 않는다).
 
     Args:
         hand_labels: hand21 키포인트 트랙 라벨 (`payload.hand`가 있는 것).
@@ -319,14 +320,8 @@ def pick_hand_tracks(hand_labels: list[LabelRecord]) -> dict[Hand, KeypointTrack
     Returns:
         손 → 고른 트랙의 페이로드. 트랙이 없는 손은 키가 없다.
     """
-    best: dict[Hand, LabelRecord] = {}
-    for x in hand_labels:
-        assert isinstance(x.payload, KeypointTrackPayload) and x.payload.hand is not None
-        hand = x.payload.hand
-        if hand not in best or _track_rank(x) > _track_rank(best[hand]):
-            best[hand] = x
     out: dict[Hand, KeypointTrackPayload] = {}
-    for hand, x in best.items():
+    for hand, x in pick_hand_track_labels(hand_labels).items():
         assert isinstance(x.payload, KeypointTrackPayload)
         out[hand] = x.payload
     return out
@@ -338,7 +333,8 @@ def pick_lift_tracks(current: list[LabelRecord], stream_id: str) -> list[LabelRe
     같은 entity_id 트랙이 함께 현재 라벨일 수 있다 (승인된 이전 모델 버전 + 새 버전, 사람 트랙 +
     모델 트랙). 둘 다 넘기면 같은 (개체, 부위)에 같은 시각 표본이 두 번 들어가 3D 라벨 검증이
     실패하고 프리라벨 트랜잭션 전체가 롤백됐다 (F-PAR-01). `pick_hand_tracks`와 같은 순서
-    (`_track_rank`: 사람·검수 → 최신 → 긴 구간 → 라벨 ID)로 하나를 고르고, 트랙을 섞지 않는다.
+    (`dlp_schema.episode.track_rank`: 사람·검수 → 최신 → 긴 구간 → 라벨 ID)로 하나를 고르고, 트랙을
+    섞지 않는다.
     3D로 올리지 않는 트랙(coco17 등, `lift3d.lift_key`가 None)은 빠진다.
 
     Args:
@@ -351,7 +347,7 @@ def pick_lift_tracks(current: list[LabelRecord], stream_id: str) -> list[LabelRe
     best: dict[tuple[str, str], LabelRecord] = {}
     for x in current:
         key = lift_key(x.payload) if x.stream_id == stream_id else None
-        if key is not None and (key not in best or _track_rank(x) > _track_rank(best[key])):
+        if key is not None and (key not in best or track_rank(x) > track_rank(best[key])):
             best[key] = x
     return sorted(best.values(), key=lambda x: x.label_id)
 
@@ -359,14 +355,6 @@ def pick_lift_tracks(current: list[LabelRecord], stream_id: str) -> list[LabelRe
 def _is_wearer(x: LabelRecord) -> bool:
     """착용자 매칭 단계가 만든 사본 레코드인가 (모델 버전 접두사로 판단)."""
     return (x.provenance.model_version or "").startswith(WEARER_PREFIX)
-
-
-def _protected(x: LabelRecord) -> bool:
-    """검수자가 승인·표본 검증했거나 사람이 고치거나 만든 라벨. 어떤 단계도 지우지 않는다."""
-    return (
-        x.provenance.source is Source.HUMAN
-        or x.verification.state is not VerificationState.UNREVIEWED
-    )
 
 
 def _trajectory_key(p: Trajectory3DPayload) -> tuple[str, str | None, str]:
@@ -384,7 +372,7 @@ def drop_protected_trajectories(
     kept = {
         _trajectory_key(x.payload)
         for x in current
-        if isinstance(x.payload, Trajectory3DPayload) and _protected(x)
+        if isinstance(x.payload, Trajectory3DPayload) and is_protected(x)
     }
     return [
         x
@@ -404,7 +392,7 @@ def drop_protected_contacts(
     spans = [
         (x.t_start_ms, x.t_end_ms)
         for x in current
-        if isinstance(x.payload, HandStatePayload) and x.payload.hand is hand and _protected(x)
+        if isinstance(x.payload, HandStatePayload) and x.payload.hand is hand and is_protected(x)
     ]
     return [
         (i, c)
@@ -476,15 +464,22 @@ def _has_live_wearer(history: list[LabelRecord]) -> bool:
     return bool(wearer - model_retracted)
 
 
-def _contact_kind(class_id: str | None, ontology: Ontology) -> str:
-    """접촉 대상 클래스 → HandStatePayload.contact_target_kind.
+def contact_target_kind(class_id: str | None, ontology: Ontology) -> str | None:
+    """접촉 대상 클래스 → HandStatePayload.contact_target_kind. None이면 접촉 라벨을 만들지 않는다.
 
-    온톨로지 객체의 tool 정의가 있으면 "tool", surface면 "fixed_surface", 그 밖(모르는 클래스
-    포함)은 "object".
+    - 물리 유형이 `PERSON_PHYSICAL_TYPE`인 클래스(COCO person 박스 → 온톨로지 person): None.
+      온톨로지상 사람 접촉(person)은 body_part가 필수인데(hand.yaml, HandStatePayload 검증)
+      subjects.yaml body_parts에는 "모름" 값이 없고, 박스로는 대상자의 어느 부위인지 알 수 없다.
+      바디캠 속 사람 박스는 착용자 자신의 팔(self)일 수도 있다. 예전처럼 object로 쓰면 틀린 종류가
+      관계·행동·내보내기로 흘러가므로(F-PAR-03) 라벨을 만들지 않고, 검수자가 부위와 함께 그린다.
+    - tool 정의가 있으면 "tool", surface면 "fixed_surface", 그 밖(모르는 클래스, 장갑만 잡아 대상이
+      없는 접촉 포함)은 "object".
     """
     obj = ontology.objects.get(class_id or "")
     if obj is None:
         return "object"
+    if obj.physical_type == PERSON_PHYSICAL_TYPE:
+        return None
     if obj.tool is not None:
         return "tool"
     return "fixed_surface" if obj.surface else "object"
@@ -501,9 +496,10 @@ def _contacts(
     ontology: Ontology,
     now: datetime,
     pressure_prefixes: tuple[str, ...],
-) -> int:
+    summary: PrelabelSummary,
+) -> None:
     """접촉 단계: 바디캠 손·박스 트랙과 동기화된 장갑으로 손마다 접촉 구간을 만들어 hand_state로
-    쓴다.
+    쓴다 (결과 수를 summary에 적는다).
 
     멱등: 이력에 이 버전이 있으면 (검수자가 모두 고쳤거나 지웠어도) 다시 만들지 않는다. 정책(contact
     절)이나 입력(손·객체 트랙, 장갑 동기화, 압력 채널 접두사)이 바뀌면 버전이 바뀌어 다시 만들고,
@@ -514,9 +510,12 @@ def _contacts(
     조각은 버린다 (`clip_to_session`, F-PAR-02: 오프셋이 음수인 장갑). 라벨은 마스터 타임라인
     구간(stream_id=None)이고 ID는 `<세션>-contact-<version_tag>-<손>-<순번 4자리>`다 (순번은 자른
     뒤 목록 기준). 신뢰도는 `contact.confidence.<출처>`, 증거는 영상만이면 INFERRED, 그 밖은
-    OBSERVED.
+    OBSERVED. 대상 종류는 `contact_target_kind`로 정한다. 대상이 사람 박스(물리 유형 person)인
+    구간은 부위(body_part)를 알 수 없어 라벨을 만들지 않고 `summary.person_contacts`로 센다
+    (F-PAR-03, 검수자가 부위와 함께 그린다).
 
-    Returns: 새로 넣은 접촉 라벨 수 (같은 버전이 이력에 있으면 0).
+    결과: `summary.contacts`(새로 넣은 접촉 라벨 수), `summary.person_contacts`(라벨을 만들지 않은
+    사람 박스 접촉 수). 같은 버전이 이력에 있으면 둘 다 0 그대로다.
     부작용: 원본 버킷에서 장갑 Parquet을 받고, `label_records`에 새 접촉과 이전 버전 삭제 레코드를
     넣는다.
     """
@@ -549,7 +548,7 @@ def _contacts(
         ),
     )
     if any(x.provenance.model_version == version for x in history):
-        return 0
+        return
     stale = _stale(history, f"{session.session_id}-contact-", version)
     # 손마다 트랙 하나만 쓴다. 같은 손 트랙이 여럿이면 정해진 순서로 하나를 고른다
     # (`pick_hand_tracks`)
@@ -578,7 +577,12 @@ def _contacts(
         # 검증에서 실패해 트랜잭션 전체가 롤백된다)
         intervals = clip_to_session(intervals, session.duration_ms, policy.contact)
         for i, c in drop_protected_contacts(intervals, hand, current):
-            kind = _contact_kind(classes.get(c.target_id or ""), ontology)
+            kind = contact_target_kind(classes.get(c.target_id or ""), ontology)
+            if kind is None:
+                # 사람 박스 접촉: 부위를 몰라 라벨을 만들지 않고 센다 (검수자가 그린다, F-PAR-03).
+                # 순번 i는 건너뛰어도 남은 구간의 라벨 ID가 바뀌지 않는다
+                summary.person_contacts += 1
+                continue
             payload = HandStatePayload(
                 hand=hand,
                 contact_target_kind=kind,
@@ -602,7 +606,7 @@ def _contacts(
                 )
             )
     insert_labels(conn, [*retractions(stale, version, now), *labels])
-    return len(labels)
+    summary.contacts = len(labels)
 
 
 def _wearer(
