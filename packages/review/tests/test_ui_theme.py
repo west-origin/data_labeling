@@ -139,6 +139,9 @@ def test_cvat_label_colors(theme: UiTheme) -> None:
     spec = label_spec(names, {n: cvat_label_color(theme, n) for n in names})
     assert [s["color"] for s in spec] == [theme.colors.cvat["face"], other]
     assert all("color" not in s for s in label_spec(names))  # 색을 안 주면 CVAT가 고른다
+    # 손별 손 골격 라벨(F-REV-04)은 표에 있고 두 손의 색이 다르다
+    left, right = (cvat_label_color(theme, f"kp_hand21_{h}") for h in ("left", "right"))
+    assert left == theme.colors.cvat["kp_hand21_left"] and left != right
 
 
 def test_cvat_theme_image_files() -> None:

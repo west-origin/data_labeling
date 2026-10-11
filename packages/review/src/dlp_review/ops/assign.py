@@ -201,7 +201,9 @@ def plan_qa(
     - now: 새 QA 배정 `created_at`.
 
     반환: QA 배정 목록 (ID `<표준 배정 ID>:qa`, pair_id = 원래 배정). 선임 중 원래 담당자가 아닌
-    사람에게 고르게 준다. 선임이 없거나 원래 담당자뿐이면 담당자가 None이다. DB에 쓰지 않는다.
+    사람에게 고르게 준다. 선임이 없거나 원래 담당자뿐이면 담당자가 None이다 — 그 배정은 작업을
+    만들지 않고 `runner.assign_reviewer`(`dlp review assign --assignee`)로 담당자를 정한 뒤 만든다
+    (F-REV-07). DB에 쓰지 않는다.
     """
     seniors = Loads(policy.reviewers.senior)
     out: list[ReviewAssignment] = []

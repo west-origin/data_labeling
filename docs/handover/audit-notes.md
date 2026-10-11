@@ -31,6 +31,7 @@
 ### 작은 의심
 
 - [A-09] `dlp_review.reconcile`: 128자를 넘는 ID는 앞을 잘라 접두사가 사라질 수 있다 (지금 판정에는 영향 없음).
+  → F-REV-05로 확정·수정 (2026-10-11): `derived_id`처럼 앞부분 + 해시로 줄인다.
 - [A-10] `dlp_review.clients.lead_seconds`: 취소·서비스 계정 주석의 lead_time도 더한다 (프리라벨은 예측으로
   올리므로 현재 영향 없음).
 - [A-11] `dlp_review.timeseries`: `rate_hz`가 1000의 약수가 아니면 `time_ms`가 정수가 아니다 (기본 50 Hz는 정상).

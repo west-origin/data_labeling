@@ -126,7 +126,8 @@ class MeasurementPolicy(Contract):
 class ReviewersPolicy(Contract):
     """검수자 역할 (review.yaml `reviewers`)."""
 
-    # 선임 검수자 (QA 배정 대상). 비어 있으면 QA 배정 담당자가 None이 된다
+    # 선임 검수자 (QA 배정 대상). 비어 있으면 QA 배정 담당자가 None이 된다. 담당자 없는 배정은
+    # 작업을 만들지 않고 `dlp review assign <배정> --assignee <선임>`으로 정한다 (F-REV-07)
     senior: tuple[str, ...] = ()
     privacy: tuple[str, ...] = Field(default=(), description="원본 접근 권한자 (블러 검수)")
 

@@ -12,8 +12,8 @@ DB 조회만 한다). 정책은
 - `seeding`: 오류 삽입 과제 사본 만들기와 발견 판정.
 - `measure`: 이중 라벨 일치도, 프리라벨 편향, 오류 발견율.
 - `selection`: 배정 방식에 따라 작업에 넣을 라벨 고르기 (작업 생성과 수집이 같은 함수를 쓴다).
-- `runner`: 위 부품을 DB와 엮는 실행 함수 (`plan_session`, `create_assignment_tasks`,
-  `finish_assignment`, `quality_report`).
+- `runner`: 위 부품을 DB와 엮는 실행 함수 (`plan_session`, `assign_reviewer`,
+  `create_assignment_tasks`, `finish_assignment`, `quality_report`).
 
 주의: 블라인드·이중 결과는 `measurement` 레코드, 오류 삽입 과제의 모든 레코드는 `seeded_error`라서
 운영 라벨(`current_labels`)에 들어가지 않고 학습·내보내기에서 빠진다.

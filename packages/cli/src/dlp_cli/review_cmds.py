@@ -21,8 +21,10 @@
     `make ui-theme`). `--check`는 파일을 쓰지 않고 다르면 1로 끝난다.
 - 운영 로직 (WP12, `dlp_review.ops`)
   - `plan <세션> --reviewer …` — 우선순위·표본 검증·블라인드·이중·오류 삽입 배정을 계획해 DB에 쓴다.
-  - `assign <배정 ID>` — 배정 하나의 검수 도구 작업을 만든다 (멱등).
-  - `qa` — 끝난 표준 배정에서 QA 재검수 배정을 뽑는다.
+  - `assign <배정 ID> [--assignee]` — 배정 하나의 검수 도구 작업을 만든다 (멱등). 담당자 없는
+    배정은 `--assignee`로 담당자를 정해야 만든다 (없으면 종료 코드 1, F-REV-07).
+  - `qa` — 끝난 표준 배정에서 QA 재검수 배정을 뽑는다. 선임(`reviewers.senior`)이 없으면 담당자를
+    비워 두므로 `assign --assignee <선임>`으로 만든다.
   - `queue [--limit]` — 열린 배정을 우선순위 높은 순으로 보여 준다.
   - `quality` — 오류 삽입 발견율, 이중 라벨 일치도(카파·구간 F1·경계 F1), 프리라벨 편향.
 
@@ -81,7 +83,12 @@ from dlp_review.collect import collect_task
 from dlp_review.ontology_projects import ontology_project
 from dlp_review.ops.assign import plan_qa
 from dlp_review.ops.policy import ReviewOpsPolicy
-from dlp_review.ops.runner import create_assignment_tasks, plan_session, quality_report
+from dlp_review.ops.runner import (
+    assign_reviewer,
+    create_assignment_tasks,
+    plan_session,
+    quality_report,
+)
 from dlp_review.reconcile import ReviewOutcome
 from dlp_review.revoke import RevocationIncompleteError, mark_tool_gone
 from dlp_review.tasks import (
@@ -116,6 +123,9 @@ from dlp_schema.review import (
     ReviewTaskStatus,
     ReviewTool,
 )
+
+# `dlp review assign`: 담당자 없는 배정에 `--assignee`를 주지 않아 작업을 만들지 않았다 (F-REV-07)
+NO_ASSIGNEE_EXIT = 1
 
 
 def _setup(args: argparse.Namespace, policy: ReviewOpsPolicy | None = None) -> ReviewSetup:
@@ -435,20 +445,33 @@ def cmd_plan(args: argparse.Namespace) -> int:
 
 
 def cmd_assign(args: argparse.Namespace) -> int:
-    """`dlp review assign <배정 ID>`: 배정의 검수 도구 작업을 만든다.
+    """`dlp review assign <배정 ID> [--assignee <검수자>]`: 배정의 검수 도구 작업을 만든다.
 
     이미 만든 배정이면 기존 작업을 그대로 돌려준다 (배정 행을 `FOR UPDATE`로 잠가 동시 실행에도 한
     번만). 작업이 모두 회수된 배정이면 지금 블러본으로 다시 만든다 (ADR 0039).
+    담당자 없는 배정(선임이 없어 담당자를 비워 둔 QA 배정 등)은 `--assignee`로 담당자를 정해야
+    만든다 (`ops.runner.assign_reviewer`: 블러는 원본 접근 권한자, QA는 선임, 짝 배정과 다른 사람).
+    없으면 아무것도 하지 않고 `NO_ASSIGNEE_EXIT`(1)로 끝낸다. 담당자가 이미 있는 배정의 담당자는
+    바꾸지 않는다 (F-REV-07, 회귀: 예전에는 "unassigned"를 실제 담당자로 넣어 워터마크·라벨링 버킷
+    경로·검수자 ID가 모두 그 문자열이 됐다).
     작업 라벨 배정은 만들기 전에 그 세션의 회수 대기를 실행하고(sweep 포함), 세션에 대기가 하나라도
     남으면(배정 스트림이 아니어도) 만들지 않고 `REVOCATION_PENDING_EXIT`(4)로 끝낸다. 블러 배정은
     원본 프록시를 쓰므로 막지 않는다.
-    부작용: `review_tasks` 쓰기, 검수 도구 API 호출, 블러 배정이면 원본 읽기(감사 기록).
+    부작용: `review_tasks` 쓰기, 검수 도구 API 호출, 블러 배정이면 원본 읽기(감사 기록),
+    `--assignee`면 배정 담당자 갱신(작업 생성과 같은 트랜잭션).
     """
     policy = load_ops_policy(repo_root())
     setup = _setup(args, policy)
     engine = sa.create_engine(database_url(args.url))
     with engine.connect() as conn:
         planned = get_assignment(conn, args.assignment_id)
+    if planned.assignee is None and not args.assignee:
+        engine.dispose()
+        print(
+            f"{args.assignment_id}: 담당자가 없는 배정입니다. "
+            "--assignee <검수자>로 담당자를 정해야 작업을 만듭니다"
+        )
+        return NO_ASSIGNEE_EXIT
     if planned.label_kinds != ("blur_track",):
         report = run_revocations(engine, planned.session_id, setup, sweep=True)
         if print_revocations(report, planned.session_id):
@@ -457,6 +480,8 @@ def cmd_assign(args: argparse.Namespace) -> int:
             return REVOCATION_PENDING_EXIT
     with engine.begin() as conn:
         a = get_assignment(conn, args.assignment_id)
+        if args.assignee:
+            a = assign_reviewer(conn, a, args.assignee, policy)
         tasks = create_assignment_tasks(conn, a, setup, policy, datetime.now(UTC))
     engine.dispose()
     for t in tasks:
@@ -468,6 +493,8 @@ def cmd_qa(args: argparse.Namespace) -> int:
     """`dlp review qa [--seed]`: 끝난(DONE) 표준 배정 중 정책 비율만큼 QA 재검수 배정을 뽑는다.
 
     이미 있는 배정 ID는 다시 넣지 않는다 (`plan_qa`가 결정적 ID를 만들므로 재실행해도 중복 없음).
+    선임(`reviewers.senior`)이 없거나 원래 담당자뿐이면 담당자 없이 넣고, 그 배정들을
+    `dlp review assign <배정> --assignee <선임>`으로 만들라고 출력한다 (F-REV-07).
     부작용: 한 트랜잭션에서 `review_assignments` INSERT.
     """
     policy = load_ops_policy(repo_root())
@@ -483,6 +510,10 @@ def cmd_qa(args: argparse.Namespace) -> int:
             insert_assignment(conn, a)
     engine.dispose()
     print(f"QA 배정 {len(created)}개")
+    for a in created:
+        if a.assignee is None:
+            print(f"  {a.assignment_id}: 담당자 없음 → dlp review assign {a.assignment_id} "
+                  "--assignee <선임>")  # fmt: skip
     return 0
 
 
@@ -824,6 +855,11 @@ def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
 
     asg = rsub.add_parser("assign", help="배정의 검수 도구 작업 생성")
     asg.add_argument("assignment_id")
+    asg.add_argument(
+        "--assignee",
+        help="담당자 없는 배정에 정할 담당자 (블러: 원본 접근 권한자, QA: 선임, 짝 배정과 다른 "
+        "사람)",
+    )
     asg.add_argument("--url", help="DB URL (기본: DLP_DATABASE_URL)")
     asg.set_defaults(func=cmd_assign)
 
