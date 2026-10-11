@@ -10,6 +10,11 @@
 다시 이관하면 지운 라벨이 되살아나기 때문이다. 오류 삽입·측정 레코드는 표시를 그대로 지닌 채
 이관되므로 이관 후에도 운영 라벨이 아니다.
 
+이관 결과의 구간·부분 연결 검사(`check_label_set`)는 묶음마다 따로 한다: 운영 라벨, 오류 삽입
+배정별 사본(과 그 후손), 측정 레코드(방식·검수자별). 사본은 원래 라벨의 action_id·segment_id를
+그대로 쓰므로 섞어 검사하면 ID 중복이 되어 운영 라벨까지 재검수로 갔다 (F-SCH-03). 한 묶음이
+깨지면 그 묶음의 이번 배치만 재검수로 돌린다.
+
 부분 ID(parts: 도구 작용부·파지부, 표면 부분, 손 관절)는 mask_track·trajectory3d의 part와
 relation의 subject_part·object_part에서 바꾼다.
 
@@ -36,6 +41,7 @@ relation의 subject_part·object_part에서 바꾼다.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -44,7 +50,7 @@ import yaml
 from pydantic import Field, ValidationError
 
 from dlp_schema.common import Contract, OntologyId, SemVer, derived_id
-from dlp_schema.episode import current_labels
+from dlp_schema.episode import current_labels, non_operational_ids
 from dlp_schema.labels import LabelRecord, Verification
 from dlp_schema.ontology import Ontology
 from dlp_schema.validation import check_label, check_label_set
@@ -192,24 +198,85 @@ def migrate_labels(
                 migrated.append(candidate)
         except ValidationError as exc:
             review.append((label.label_id, f"이관 후 검증 실패: {exc.error_count()}건"))
-    # 자식이 제거/재검수로 빠졌다면 부모만 새 버전으로 확정하지 않는다. 이미 새 버전인
-    # 현재 라벨도 참조 문맥으로 포함하되, 실패한 이번 배치는 전부 재검수로 돌린다.
+    kept, broken = _check_sets(labels, migrated, migration, target_ontology)
+    return MigrationResult(migrated=tuple(kept), needs_review=tuple([*review, *broken]))
+
+
+# 오류 삽입 사본 ID 형식: `seed-<배정>-NNNN`(사본, `dlp_review.ops.seeding.seed_prefix`)과
+# `seed-<배정>-new-<sha256 16자>`(오류 삽입 과제에서 검수자가 새로 그린 레코드, 수집 때 붙인다).
+# dlp_schema는 dlp_review를 import하지 않으므로 형식만 여기서 읽는다. 형식이 다르면 그 계보
+# 하나를 묶음으로 본다 (보수적: 같은 배정의 다른 사본을 못 찾으면 그 사본이 재검수로 간다).
+_SEED_ID = re.compile(r"^seed-(?P<assignment>.+)-(?:\d{4}|new-[0-9a-f]{16})$")
+
+
+def _set_key(label: LabelRecord, by_id: dict[str, LabelRecord], excluded: set[str]) -> str:
+    """집합 검사 묶음 키: 운영 라벨, 오류 삽입 배정, 측정 (방식, 검수자).
+
+    비운영 레코드는 계보에서 가장 위의 표시 레코드(seeded_error 또는 measurement가 있는 것)가
+    묶음을 정한다. 검수자가 고친 레코드와 이관 레코드는 그 조상의 묶음을 따른다.
+
+    Args:
+        label: 묶을 현재 레코드.
+        by_id: 이력 + 이번 이관 결과의 label_id 색인 (조상 찾기).
+        excluded: 운영 라벨이 아닌 ID (`non_operational_ids`).
+    """
+    if label.label_id not in excluded:
+        return "operational"
+    origin = label
+    node: LabelRecord | None = label
+    seen: set[str] = set()
+    # 사슬은 보통 짧지만 잘못된 이력의 순환에 대비해 방문한 ID에서 멈춘다
+    while node is not None and node.label_id not in seen:
+        seen.add(node.label_id)
+        if node.seeded_error or node.measurement is not None:
+            origin = node
+        node = by_id.get(node.parent_label_id or "")
+    if origin.seeded_error:
+        match = _SEED_ID.match(origin.label_id)
+        return f"seeded:{match['assignment'] if match else origin.label_id}"
+    return f"measurement:{origin.measurement}:{origin.verification.reviewer_id or ''}"
+
+
+def _check_sets(
+    labels: list[LabelRecord],
+    migrated: list[LabelRecord],
+    migration: OntologyMigration,
+    target: Ontology,
+) -> tuple[list[LabelRecord], list[tuple[str, str]]]:
+    """이관 결과의 구간·부분 연결을 묶음(`_set_key`)마다 검사한다.
+
+    자식이 제거/재검수로 빠졌다면 부모만 새 버전으로 확정하지 않는다. 이미 새 버전인 현재 라벨도
+    같은 묶음의 참조 문맥으로 넣고, 깨진 묶음의 이번 배치는 전부 재검수로 돌린다.
+
+    Returns:
+        (남긴 이관 레코드(입력 순서), 재검수 항목 (원래 label_id, 사유)).
+    """
+    every = [*labels, *migrated]
+    by_id = {x.label_id: x for x in every}
+    excluded = non_operational_ids(every)
     context = [
         x
         for x in current_labels(labels, operational=False)
         if x.ontology_version == migration.to_version
     ]
-    problems = check_label_set([*context, *migrated], target_ontology)
-    if problems:
-        for label in migrated:
-            review.append(
-                (
-                    label.parent_label_id or label.label_id,
-                    "이관 후 구간·부분 검증 실패: " + "; ".join(problems),
-                )
-            )
-        migrated = []
-    return MigrationResult(migrated=tuple(migrated), needs_review=tuple(review))
+    groups: dict[str, list[LabelRecord]] = {}
+    for x in [*context, *migrated]:
+        groups.setdefault(_set_key(x, by_id, excluded), []).append(x)
+    failed = {
+        key: problems
+        for key, members in groups.items()
+        if (problems := check_label_set(members, target))
+    }
+    kept: list[LabelRecord] = []
+    broken: list[tuple[str, str]] = []
+    for label in migrated:
+        problems = failed.get(_set_key(label, by_id, excluded))
+        if problems:
+            reason = "이관 후 구간·부분 검증 실패: " + "; ".join(problems)
+            broken.append((label.parent_label_id or label.label_id, reason))
+        else:
+            kept.append(label)
+    return kept, broken
 
 
 def _apply(payload: dict[str, Any], fields: dict[str, Category], m: OntologyMigration) -> str:
