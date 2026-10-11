@@ -6,7 +6,8 @@
 3. 바디캠의 손 키포인트·객체 박스와 장갑 신호로 접촉 구간을 만들어 hand_state 라벨로 쓴다. 배포된
    재학습 접촉 모델이 있으면(replaced에 CONTACT_STEP) 이 단계는 돌지 않고, 이 단계가 냈던 검수 전
    접촉을 지운다. 2·3의 모델 버전에는 정책 절 해시(depth·contact)와 입력 해시를 넣는다. 입력은
-   2가 바디캠 손·박스 트랙의 현재 라벨 ID, 3이 그 라벨 ID와 장갑 동기화, 장갑 압력 채널
+   2가 (개체, 트랙 종류)마다 하나씩 고른 바디캠 hand21 손·박스 트랙의 라벨 ID(`pick_lift_tracks`),
+   3이 바디캠 손·박스 트랙의 현재 라벨 ID와 장갑 동기화, 장갑 압력 채널
    접두사(sync.yaml glove.pressure_prefixes)다. 입력이 바뀌면 (예측기 버전 변경, 검수자 수정) 다시
    돌고, 검수 전인 이전 결과만 지운다. 검수된(승인·표본 검증) 결과와 사람이 고치거나 만든 결과는
    남으므로, 새 결과 중 그와 겹치는 것은 버린다: 접촉은 같은 손에서 시간이
@@ -46,7 +47,7 @@ from dlp_prelabel.contact import (
     glove_contact_intervals,
     video_contact_intervals,
 )
-from dlp_prelabel.lift3d import DepthLifter
+from dlp_prelabel.lift3d import DepthLifter, lift_key
 from dlp_prelabel.policy import PrelabelPolicy
 from dlp_prelabel.wearer import match_wearer, wrist_speed
 from dlp_schema.config import repo_root
@@ -281,18 +282,30 @@ def _stale(labels: list[LabelRecord], prefix: str, version: str) -> list[LabelRe
     ]
 
 
+def _track_rank(x: LabelRecord) -> tuple[bool, datetime, int, str]:
+    """같은 대상 트랙이 여럿일 때 하나를 고르는 정렬 키 (튜플이 클수록 앞선다).
+
+    `pick_hand_tracks`(접촉)와 `pick_lift_tracks`(3D)가 함께 쓴다. 차례로:
+
+    1. 사람이 만들었거나 검수된 트랙 (`_protected`): 사람이 확인한 위치가 가장 믿을 만하다.
+    2. 더 새로 만든 트랙 (`created_at`): 보통 더 새 모델 버전의 출력이다.
+    3. 더 긴 구간 (`t_end_ms - t_start_ms`): 놓치는 시간이 짧다.
+    4. 라벨 ID (사전순으로 큰 것): 위가 모두 같을 때 결과를 고정하는 마지막 기준.
+
+    검수 상태가 바뀌면(승인은 라벨 ID를 바꾸지 않는다) 고르는 트랙이 바뀔 수 있다. 그래서 3D 단계의
+    입력 해시는 고른 트랙으로 만든다.
+    """
+    return (_protected(x), x.created_at, x.t_end_ms - x.t_start_ms, x.label_id)
+
+
 def pick_hand_tracks(hand_labels: list[LabelRecord]) -> dict[Hand, KeypointTrackPayload]:
     """손(왼·오른)마다 접촉 추정에 쓸 hand21 트랙 하나를 고른다.
 
     같은 손 트랙이 여럿일 수 있다 (사람이 새로 그린 트랙과 모델 트랙, 버전이 다른 모델 트랙이 함께
     현재 라벨인 경우). 예전에는 입력 순서의 마지막 것을 조용히 썼는데, 그 순서는 DB 조회 순서라
-    접촉 결과가 실행마다 달라질 수 있었다. 다음 순서로 가장 앞서는 트랙을 고른다 (병합하지 않는다:
-    서로 다른 트랙의 관절을 섞으면 어느 출처의 위치인지 알 수 없게 된다).
-
-    1. 사람이 만들었거나 검수된 트랙 (`_protected`): 사람이 확인한 위치가 가장 믿을 만하다.
-    2. 더 새로 만든 트랙 (`created_at`): 보통 더 새 모델 버전의 출력이다.
-    3. 더 긴 구간 (`t_end_ms - t_start_ms`): 접촉을 놓치는 시간이 짧다.
-    4. 라벨 ID (사전순으로 큰 것): 위가 모두 같을 때 결과를 고정하는 마지막 기준.
+    접촉 결과가 실행마다 달라질 수 있었다. `_track_rank`(사람·검수 → 최신 → 긴 구간 → 라벨 ID)로
+    가장 앞서는 트랙을 고른다 (병합하지 않는다: 서로 다른 트랙의 관절을 섞으면 어느 출처의 위치인지
+    알 수 없게 된다).
 
     Args:
         hand_labels: hand21 키포인트 트랙 라벨 (`payload.hand`가 있는 것).
@@ -301,21 +314,40 @@ def pick_hand_tracks(hand_labels: list[LabelRecord]) -> dict[Hand, KeypointTrack
         손 → 고른 트랙의 페이로드. 트랙이 없는 손은 키가 없다.
     """
     best: dict[Hand, LabelRecord] = {}
-
-    def rank(x: LabelRecord) -> tuple[bool, datetime, int, str]:
-        """위 1~4 기준을 차례로 담은 정렬 키 (튜플이 클수록 앞선다)."""
-        return (_protected(x), x.created_at, x.t_end_ms - x.t_start_ms, x.label_id)
-
     for x in hand_labels:
         assert isinstance(x.payload, KeypointTrackPayload) and x.payload.hand is not None
         hand = x.payload.hand
-        if hand not in best or rank(x) > rank(best[hand]):
+        if hand not in best or _track_rank(x) > _track_rank(best[hand]):
             best[hand] = x
     out: dict[Hand, KeypointTrackPayload] = {}
     for hand, x in best.items():
         assert isinstance(x.payload, KeypointTrackPayload)
         out[hand] = x.payload
     return out
+
+
+def pick_lift_tracks(current: list[LabelRecord], stream_id: str) -> list[LabelRecord]:
+    """3D 단계 입력: 그 스트림의 현재 hand21 키포인트·박스 트랙을 (개체, 트랙 종류)마다 하나 고른다.
+
+    같은 entity_id 트랙이 함께 현재 라벨일 수 있다 (승인된 이전 모델 버전 + 새 버전, 사람 트랙 +
+    모델 트랙). 둘 다 넘기면 같은 (개체, 부위)에 같은 시각 표본이 두 번 들어가 3D 라벨 검증이
+    실패하고 프리라벨 트랜잭션 전체가 롤백됐다 (F-PAR-01). `pick_hand_tracks`와 같은 순서
+    (`_track_rank`: 사람·검수 → 최신 → 긴 구간 → 라벨 ID)로 하나를 고르고, 트랙을 섞지 않는다.
+    3D로 올리지 않는 트랙(coco17 등, `lift3d.lift_key`가 None)은 빠진다.
+
+    Args:
+        current: 세션 현재 라벨.
+        stream_id: 올릴 스트림 (러너는 기준 스트림 바디캠).
+
+    Returns:
+        고른 트랙 레코드 (라벨 ID 순). 3D 단계의 입력 해시도 이 목록으로 만든다 (실제로 쓰는 트랙).
+    """
+    best: dict[tuple[str, str], LabelRecord] = {}
+    for x in current:
+        key = lift_key(x.payload) if x.stream_id == stream_id else None
+        if key is not None and (key not in best or _track_rank(x) > _track_rank(best[key])):
+            best[key] = x
+    return sorted(best.values(), key=lambda x: x.label_id)
 
 
 def _is_wearer(x: LabelRecord) -> bool:
@@ -389,21 +421,19 @@ def _lift(
     """3D 궤적 단계: 바디캠 손·박스 트랙을 메트릭 깊이로 카메라 좌표 3D 궤적으로 올린다.
 
     멱등: 같은 버전을 낸 적이 있으면(검수자가 모두 고쳤어도) 다시 만들지 않는다. 버전
-    (`<lifter.version>+i<입력 해시>`)에는 입력 트랙(현재 라벨 ID) 해시가 들어가 입력이 바뀌면 다시
-    만든다. 같은 (개체, 부위, 좌표계)의 검수된·사람 궤적이 있으면 새 궤적은 버린다.
+    (`<lifter.version>+i<입력 해시>`)에는 실제로 올리는 트랙(고른 트랙의 라벨 ID) 해시가 들어가
+    입력이 바뀌거나 고르는 트랙이 바뀌면(예: 다른 트랙 승인) 다시 만든다. 같은 (개체, 부위,
+    좌표계)의 검수된·사람 궤적이 있으면 새 궤적은 버린다.
 
-    입력: 기준 스트림(바디캠)의 현재 키포인트·박스 트랙 (모델·사람 출처 모두). 출력 라벨 ID 접두사는
+    입력: 기준 스트림(바디캠)의 현재 hand21 키포인트·박스 트랙 (모델·사람 출처 모두)을 (개체, 트랙
+    종류)마다 하나씩 고른 것 (`pick_lift_tracks`, F-PAR-01). 출력 라벨 ID 접두사는
     `<세션>-<바디캠>-3d-`. Returns: 새로 넣은 3D 궤적 수.
     부작용: 원본 버킷에서 바디캠 영상을 받고, `label_records`에 새 궤적과 이전 버전 삭제 레코드를
     넣는다.
     """
     body = session.reference_stream
-    tracks = [
-        x
-        for x in current
-        if x.stream_id == body.stream_id
-        and isinstance(x.payload, KeypointTrackPayload | BoxTrackPayload)
-    ]
+    # 같은 entity_id 트랙이 여럿이면 하나만 올린다 (표본 시각이 겹쳐 라벨 검증이 실패하지 않게)
+    tracks = pick_lift_tracks(current, body.stream_id)
     version = f"{lifter.version}+i{input_digest(tracks)}"
     if any(x.provenance.model_version == version for x in history):
         return 0

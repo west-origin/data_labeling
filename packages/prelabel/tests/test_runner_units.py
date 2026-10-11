@@ -16,10 +16,13 @@ from dlp_prelabel.runner import (
     drop_protected_contacts,
     drop_protected_trajectories,
     pick_hand_tracks,
+    pick_lift_tracks,
     wearer_copy,
 )
 from dlp_schema.episode import retractions
 from dlp_schema.labels import (
+    BoxKeyframe,
+    BoxTrackPayload,
     CoordinateFrame,
     Hand,
     HandStatePayload,
@@ -187,3 +190,42 @@ def test_hand_track_choice_is_deterministic() -> None:
         assert picked[Hand.RIGHT].keyframes[0].points[0].x == 5.0
     # 검수된 것이 없으면 더 새로 만든 트랙
     assert pick_hand_tracks([new_short, old_long])[Hand.LEFT].keyframes[0].points[0].x == 2.0
+
+
+def _box_track(label_id: str, entity: str, x: float, **kw: Any) -> LabelRecord:
+    """바디캠 박스 트랙 (0 ms 키프레임 하나, 왼쪽 위 x 좌표로 어느 트랙이 골렸는지 구별한다)."""
+    payload = BoxTrackPayload(
+        entity_id=entity,
+        class_id="bucket",
+        keyframes=(BoxKeyframe(t_ms=0, x=x, y=0.0, w=10.0, h=10.0),),
+    )
+    return make_label(payload, label_id, 0, 1_000, stream_id="bodycam", **kw)
+
+
+def test_lift_inputs_are_one_track_per_entity() -> None:
+    """F-PAR-01 회귀: 3D 입력은 바디캠의 (개체, 트랙 종류)마다 트랙 하나다.
+
+    시나리오: 왼손은 승인된 이전 버전(x=3)과 더 새 모델 버전(x=2)이 같은 entity_id로 함께 현재
+    라벨이다. 버킷 박스도 사람 트랙(x=7)과 더 새 모델 트랙(x=8)이 같은 entity_id다. 예전에는 둘을
+    모두 넘겨 같은 (개체, 부위)에 같은 시각 표본이 두 번 들어가 3D 라벨 검증이 실패했다.
+
+    정답: 손은 `pick_hand_tracks`와 같은 순서(사람·검수 → 최신 → 긴 구간 → ID)로 승인 트랙, 박스는
+    사람 트랙. 오른손·걸레처럼 하나뿐인 것은 그대로, 3D로 올리지 않는 coco17 트랙과 다른 스트림
+    트랙은 빠진다. 입력 순서를 뒤집어도 같다.
+    """
+    later = {"created_at": FIXED_TIME + timedelta(days=1)}
+    reviewed = _hand_track("left-v1", Hand.LEFT, 1_000, 3.0, **MODEL, verification=APPROVED)
+    newer = _hand_track("left-v2", Hand.LEFT, 1_000, 2.0, **MODEL, **later)
+    right = _hand_track("right-v2", Hand.RIGHT, 1_000, 4.0, **MODEL)
+    human_box = _box_track(
+        "bucket-fix", "bucket_01", 7.0, provenance=Provenance(source=Source.HUMAN)
+    )
+    model_box = _box_track("bucket-v2", "bucket_01", 8.0, **MODEL, **later)
+    rag = _box_track("rag-v1", "rag_01", 9.0, **MODEL)
+    body = _person("person-v1", **MODEL).model_copy(update={"stream_id": "bodycam"})
+    third = newer.model_copy(update={"label_id": "third-left", "stream_id": "third"})
+    labels = [reviewed, newer, right, human_box, model_box, rag, body, third]
+    for order in (labels, labels[::-1]):
+        picked = pick_lift_tracks(order, "bodycam")
+        assert [x.label_id for x in picked] == ["bucket-fix", "left-v1", "rag-v1", "right-v2"]
+    assert pick_lift_tracks([body, third], "bodycam") == []

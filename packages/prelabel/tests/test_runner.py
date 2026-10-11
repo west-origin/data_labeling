@@ -18,15 +18,17 @@ import numpy as np
 import pytest
 import sqlalchemy as sa
 import yaml
+from numpy.typing import NDArray
 
 from dlp_fixtures.actions import ENTITIES, generate_action_scenario
 from dlp_fixtures.io import write_parquet
-from dlp_fixtures.video import generate_blur_scenario
+from dlp_fixtures.video import generate_blur_scenario, write_video
 from dlp_media.ingest import ingest_session, load_manifest
 from dlp_media.storage import S3Store
 from dlp_prelabel.adapters.stubs import OraclePredictor
-from dlp_prelabel.lift3d import DepthLifter
-from dlp_prelabel.policy import load_policy
+from dlp_prelabel.common import Image, iter_frames
+from dlp_prelabel.lift3d import DepthLifter, lift_tracks
+from dlp_prelabel.policy import PrelabelPolicy, load_policy
 from dlp_prelabel.runner import CONTACT_PREFIX, CONTACT_STEP, run_prelabel
 from dlp_schema.db.migrate import upgrade
 from dlp_schema.db.repository import (
@@ -50,6 +52,7 @@ from dlp_schema.labels import (
     LabelRecord,
     Provenance,
     Source,
+    Trajectory3DPayload,
     VerificationState,
 )
 from dlp_schema.ontology import load_ontology
@@ -520,3 +523,86 @@ def test_timeline_model_runs_once_on_the_reference_stream(pg: sa.Engine, tmp_pat
     assert first.produced == {"bodycam/trained-contact": len(model.truth)}
     assert again.skipped == ["bodycam/trained-contact"]
     assert len(states) == len(model.truth) > 0
+
+
+class _UnitDepth:
+    """깊이를 늘 1 m로 내는 가짜 깊이 모델."""
+
+    def predict(self, image: Image) -> NDArray[np.float32]:
+        """(H, W) 1 m 깊이 맵."""
+        return np.ones(image.shape[:2], dtype=np.float32)
+
+
+class _UnitLifter(DepthLifter):
+    """가중치 파일 없이 `_UnitDepth`로 도는 깊이 3D 단계 (가중치 확인·ONNX 세션을 건너뛴다)."""
+
+    def __init__(self, policy: PrelabelPolicy) -> None:  # pyright: ignore[reportMissingSuperCall]
+        """`DepthLifter.__init__`의 가중치 확인 대신 가짜 모델과 버전을 직접 둔다."""
+        self.path = Path("unused.onnx")
+        self.version = f"depth3d-unit+p{policy.digest('depth')}"
+        self.policy, self.now = policy, FIXED_TIME
+        self.model = _UnitDepth()
+
+
+def test_depth_lift_uses_the_reviewed_track_when_hand_versions_coexist(
+    pg: sa.Engine, tmp_path: Path
+) -> None:
+    """F-PAR-01 회귀: 승인된 이전 버전 손 트랙과 새 버전 손 트랙(같은 entity_id)이 함께 현재 라벨일
+    때 3D 단계가 프리라벨 전체를 되돌리지 않고, 승인 트랙으로 궤적을 만든다.
+
+    예전에는 두 트랙의 같은 시각 표본이 한 궤적에 두 번 들어가 "키프레임 시각은 중복 없이
+    오름차순" 검증이 실패하고 트랜잭션 전체가 롤백됐다 (다시 돌려도 같았다).
+
+    정답: 바디캠은 손 키프레임 시각 그대로 쓴 영상이라 깊이를 읽는 프레임이 정해진다. 3D 표본은
+    같은 가짜 깊이로 승인 트랙만 올린 결과와 같고, 흔들린 새 트랙으로 올린 결과와는 다르다. 다시
+    돌리면 같은 입력이라 건너뛴다.
+    """
+    actions = generate_action_scenario(1, n_units=2)
+    write_video(
+        tmp_path / "bodycam.mp4",
+        ((t, np.full((240, 320, 3), 90, np.uint8)) for t in actions.frame_times),
+        width=320,
+        height=240,
+    )
+    sid = f"lift-{uuid.uuid4().hex[:8]}"
+    manifest = {
+        "session_id": sid, "domain": "cleaning", "worker_id": "w01", "site_id": "site01",
+        "consent_version": "c1", "recorded_at": FIXED_TIME.isoformat(), "ontology_version": "1.0.0",
+        "streams": [{"stream_id": "bodycam", "kind": "bodycam", "path": "bodycam.mp4"}],
+    }  # fmt: skip
+    (tmp_path / "m.yaml").write_text(yaml.safe_dump(manifest), encoding="utf-8")
+    raw = S3Store.from_env("dlp-raw")
+    policy, ontology = load_policy(ROOT), load_ontology(ROOT / "config/ontology/v1")
+    hands = OraclePredictor("hands", actions.labels, ("keypoint_track",), now=FIXED_TIME)
+    hands2 = OraclePredictor(
+        "hands", actions.labels, ("keypoint_track",), jitter_px=3.0, now=FIXED_TIME
+    )
+    with pg.begin() as conn:
+        ingest_session(*load_manifest(tmp_path / "m.yaml"), raw, conn)
+        run_prelabel(conn, sid, raw, [hands], policy, ontology, FIXED_TIME)
+        [old] = get_labels(conn, sid, kinds=["keypoint_track"])
+        record_review(conn, old.label_id, VerificationState.HUMAN_APPROVED, "rev01", FIXED_TIME)
+        # 손 모델 버전이 바뀌었다: 승인된 이전 트랙은 남고 새 트랙이 같은 entity_id로 들어온다
+        run_prelabel(conn, sid, raw, [hands2], policy, ontology, FIXED_TIME)
+        tracks = current_labels(get_labels(conn, sid, kinds=["keypoint_track"]))
+    entities = {x.payload.entity_id for x in tracks if isinstance(x.payload, KeypointTrackPayload)}
+    assert len(tracks) == 2 and len(entities) == 1
+    [new] = [x for x in tracks if x.label_id != old.label_id]
+
+    lifter = _UnitLifter(policy)
+    with pg.begin() as conn:
+        summary = run_prelabel(
+            conn, sid, raw, [hands2], policy, ontology, FIXED_TIME, lifter=lifter
+        )
+        again = run_prelabel(conn, sid, raw, [hands2], policy, ontology, FIXED_TIME, lifter=lifter)
+        lifted = get_labels(conn, sid, kinds=["trajectory3d"])
+    assert summary.lifted == len(lifted) == len(policy.depth.hand_points)
+    assert again.lifted == 0
+    assert all(check_label(x, ontology) == [] for x in lifted)
+    video = tmp_path / "bodycam.mp4"
+    from_old = lift_tracks(iter_frames(video), _UnitDepth(), [old], None, policy.depth)
+    from_new = lift_tracks(iter_frames(video), _UnitDepth(), [new], None, policy.depth)
+    for x in lifted:
+        assert isinstance(x.payload, Trajectory3DPayload)
+        key = (x.payload.entity_id, x.payload.part)
+        assert list(x.payload.samples) == from_old[key] != from_new[key]
