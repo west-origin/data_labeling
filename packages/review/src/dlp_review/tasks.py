@@ -126,7 +126,9 @@ class ReviewSetup:
     정책 필드가 None이면 처음 쓸 때 저장소 루트의 YAML을 읽어 채운다 (그래서 frozen이 아니다).
     이 지연 로더는 기본 파일(`config/policies/review.yaml` 등)만 읽고 `DLP_REVIEW_POLICY_FILE`을
     보지 않는다. CLI(`dlp_cli.review_config.review_setup`)는 고른 검수 정책의 `media`·`cvat`를
-    `media`·`cvat_config`로 넘기므로 `dlp review …` 명령에서는 지연 로더가 돌지 않는다. 라이브러리를
+    `media`·`cvat_config`로 넘기므로 `dlp review …` 명령에서는 지연 로더가 돌지 않는다. 예외는 매체
+    회수 전용 설정(`review_setup(revocation_only=True)`)으로, 회수 실행기가 두 값을 쓰지 않아 정책을
+    읽지 않고 None으로 둔다 (그 설정을 작업 생성·수집에 쓰면 안 된다). 라이브러리를
     직접 쓰는 호출자도 별도 정책 파일을 쓰려면 두 필드를 채워서 넘긴다 (F-REV-01).
     """
 
@@ -141,7 +143,8 @@ class ReviewSetup:
     cvat: CvatClient | None = None
     # Label Studio 클라이언트 (없으면 Label Studio 작업을 만들지 않는다)
     label_studio: LabelStudioClient | None = None
-    # 검수 정책의 두 절. 없으면 Git의 config/policies/review.yaml을 읽는다 (CLI는 고른 정책)
+    # 검수 정책의 두 절. 없으면 Git의 config/policies/review.yaml을 읽는다
+    # (CLI는 고른 정책을 넘긴다. 회수 전용 설정만 None)
     media: MediaPolicy | None = None  # review.yaml media (워터마크·시계열 격자)
     cvat_config: CvatPolicy | None = None  # review.yaml cvat (검수자 → CVAT 계정 연결)
     privacy: PrivacyPolicy | None = None  # 없으면 config/policies/privacy.yaml (블러본 해시)

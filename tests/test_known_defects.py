@@ -3,8 +3,12 @@
 
 """확인된 미수정 결함의 재현 테스트 (docs/handover/issues.yaml).
 
-각 테스트는 **올바른 동작**을 단언하고 `xfail(strict=True)`로 표시한다. 지금은 결함 때문에 실패해야
-하며(xfail), 누군가 결함을 고쳐 테스트가 통과하면 strict 규칙에 따라 XPASS가 실패로 보고된다.
+각 테스트는 **올바른 동작**을 단언하고 `xfail(strict=True, raises=<결함이 내는 예외>)`로
+표시한다.
+`raises`가 있어 결함과 무관한 오류(없어진 함수를 패치하다 난 AttributeError 등)는 xfail이 아닌 진짜
+실패로 보고된다 — 그런 오류가 xfail로 묻혀 고친 결함을 알아채지 못한 일이 있었다(F-REV-01).
+지금은 결함 때문에 실패해야 하며(xfail), 누군가 결함을 고쳐 테스트가 통과하면 strict 규칙에 따라
+XPASS가 실패로 보고된다.
 그때 이 표시를 지우고 레지스트리 항목의 status를 fixed로 바꾼다 (`tests/test_issue_registry.py`가
 레지스트리의 repro 경로와 이 파일의 reason ID가 맞는지 검사한다).
 
@@ -14,21 +18,21 @@ reason은 `<레지스트리 ID>: <한 줄 요약>` 형식이다. 서비스(DB·�
 
 from __future__ import annotations
 
-import argparse
 import tempfile
 from datetime import UTC, datetime, timedelta, timezone
 from fractions import Fraction
 from pathlib import Path
-from unittest.mock import Mock
 
 import av
 import numpy as np
 import pytest
-import yaml
+from av.error import FFmpegError
+from pydantic import ValidationError
 
 from dlp_schema import repo_root
 from dlp_schema.ontology import Ontology, load_ontology
 from dlp_schema.testing import FIXED_TIME, action_payload, make_label
+from dlp_schema.validation import OntologyViolationError
 
 ROOT = repo_root()
 
@@ -39,34 +43,10 @@ def ontology() -> Ontology:
     return load_ontology(ROOT / "config" / "ontology" / "v1")
 
 
-@pytest.mark.xfail(strict=True, reason="F-REV-01: dlp review의 ReviewSetup이 정책 파일을 무시")
-def test_review_setup_uses_selected_policy_file(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """`DLP_REVIEW_POLICY_FILE`로 고른 정책의 CVAT 계정 연결을 작업 생성도 써야 한다.
-
-    근거: review_cmds 모듈 docstring("CLI에서는 DLP_REVIEW_POLICY_FILE로 정책 파일을 바꿀 수 있다"),
-    파일럿 안내의 `dlp review create --stage privacy --assignee pilot-privacy`.
-    """
-    from dlp_cli import review_cmds
-    from dlp_cli.review_config import load_review_policy
-
-    data = yaml.safe_load((ROOT / "config/policies/review.yaml").read_text("utf-8"))
-    data["reviewers"]["privacy"] = ["pilot-privacy"]
-    data["cvat"]["users"] = {"pilot-privacy": "cvat-privacy"}
-    path = tmp_path / "review.yaml"
-    path.write_text(yaml.safe_dump(data, allow_unicode=True), "utf-8")
-    monkeypatch.setenv("DLP_REVIEW_POLICY_FILE", str(path))
-    # 저장소·도구 클라이언트는 만들지 않는다 (정책 연결만 본다)
-    monkeypatch.setattr(review_cmds, "raw_store", Mock(return_value=Mock()))
-    monkeypatch.setattr(review_cmds, "S3Store", Mock())
-    args = argparse.Namespace(review_command="create", url=None, no_cvat=True, no_ls=True)
-    setup = review_cmds._setup(args)  # pyright: ignore[reportPrivateUsage]
-    assert setup.cvat_policy().users == load_review_policy(ROOT).cvat.users
-
-
 @pytest.mark.xfail(
-    strict=True, reason="F-REV-03: Label Studio에서 손 상태를 none으로 바꾸면 수집 실패"
+    strict=True,
+    raises=ValidationError,
+    reason="F-REV-03: Label Studio에서 손 상태를 none으로 바꾸면 수집 실패",
 )
 def test_ls_hand_state_changed_to_none_is_collectable() -> None:
     """접촉(tool) 손 상태를 화면에서 `none`으로 바꾸면 대상·파지 유형이 비워진 채 받아야 한다.
@@ -92,7 +72,11 @@ def test_ls_hand_state_changed_to_none_is_collectable() -> None:
     assert item.payload.target_id is None and item.payload.grasp_type is None
 
 
-@pytest.mark.xfail(strict=True, reason="F-REV-11: 이벤트 속성 입력란을 모두 비우면 원래 값이 남음")
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="F-REV-11: 이벤트 속성 입력란을 모두 비우면 원래 값이 남음",
+)
 def test_ls_event_attributes_cleared_are_cleared() -> None:
     """검수자가 관련 행동 ID 입력란을 비우면(perRegion 결과가 사라지면) 원래 값도 지워져야 한다.
 
@@ -113,7 +97,9 @@ def test_ls_event_attributes_cleared_are_cleared() -> None:
 
 
 @pytest.mark.xfail(
-    strict=True, reason="F-SCH-01: 양손 행동(같은 action_id)과 상위 구간이 함께 저장되지 않음"
+    strict=True,
+    raises=OntologyViolationError,
+    reason="F-SCH-01: 양손 행동(같은 action_id)과 상위 구간이 함께 저장되지 않음",
 )
 def test_bimanual_action_with_segment_is_valid(ontology: Ontology) -> None:
     """양손 행동은 두 손 레코드가 같은 action_id를 쓴다. 상위 구간이 그 행동을 가리켜도
@@ -138,7 +124,11 @@ def test_bimanual_action_with_segment_is_valid(ontology: Ontology) -> None:
     validate_session_labels(ontology, [], [right, left, seg])
 
 
-@pytest.mark.xfail(strict=True, reason="F-SCH-02: 승인 트랙의 모델 자식 삭제로 승인 라벨이 사라짐")
+@pytest.mark.xfail(
+    strict=True,
+    raises=pytest.fail.Exception,
+    reason="F-SCH-02: 승인 트랙의 모델 자식 삭제로 승인 라벨이 사라짐",
+)
 def test_retracting_model_child_of_approved_label_is_rejected(ontology: Ontology) -> None:
     """승인된 원래 트랙의 모델 자식(착용자 사본)을 모델이 지우면 승인 라벨이 운영에서
     사라진다. 막아야 한다.
@@ -185,7 +175,9 @@ def test_retracting_model_child_of_approved_label_is_rejected(ontology: Ontology
 
 
 @pytest.mark.xfail(
-    strict=True, reason="F-SCH-03: 오류 삽입 사본이 있으면 이관이 운영 라벨까지 재검수로 보냄"
+    strict=True,
+    raises=AssertionError,
+    reason="F-SCH-03: 오류 삽입 사본이 있으면 이관이 운영 라벨까지 재검수로 보냄",
 )
 def test_migration_ignores_seeded_copies(ontology: Ontology) -> None:
     """오류 삽입 사본(같은 action_id)은 운영 라벨이 아니다. 운영 라벨의 이관을 막으면 안 된다.
@@ -213,7 +205,11 @@ def test_migration_ignores_seeded_copies(ontology: Ontology) -> None:
     assert {x.label_id for x in result.migrated} >= {"act", "sk"}
 
 
-@pytest.mark.xfail(strict=True, reason="F-SCH-06: 기존 위반이 있으면 무관한 새 라벨도 저장 거부")
+@pytest.mark.xfail(
+    strict=True,
+    raises=OntologyViolationError,
+    reason="F-SCH-06: 기존 위반이 있으면 무관한 새 라벨도 저장 거부",
+)
 def test_legacy_violation_does_not_block_unrelated_label(ontology: Ontology) -> None:
     """0014 이전에 들어간 잘못된 구간이 있어도 무관한 새 블러 라벨은 저장되어야 한다.
 
@@ -244,7 +240,9 @@ def test_legacy_violation_does_not_block_unrelated_label(ontology: Ontology) -> 
 
 
 @pytest.mark.xfail(
-    strict=True, reason="F-PMS-01: 시간대가 다른 같은 recorded_at으로 재수집하면 충돌"
+    strict=True,
+    raises=AssertionError,
+    reason="F-PMS-01: 시간대가 다른 같은 recorded_at으로 재수집하면 충돌",
 )
 def test_reingest_same_instant_other_offset_is_not_conflict() -> None:
     """매니페스트의 +09:00 시각과 DB에서 읽은 UTC 시각은 같은 순간이므로 재수집 충돌이 아니다.
@@ -275,7 +273,9 @@ def _odd_video(path: Path, w: int, h: int) -> None:
 
 
 @pytest.mark.xfail(
-    strict=True, reason="F-PMS-02: 홀수 크기 영상은 수집되지만 블러본을 만들 수 없음"
+    strict=True,
+    raises=FFmpegError,
+    reason="F-PMS-02: 홀수 크기 영상은 수집되지만 블러본을 만들 수 없음",
 )
 def test_odd_size_video_renders_blurred(tmp_path: Path) -> None:
     """수집이 받은 영상(홀수 크기 포함)은 블러본도 만들 수 있어야 한다 (아니면 수집에서 거부).
@@ -298,7 +298,11 @@ def test_odd_size_video_renders_blurred(tmp_path: Path) -> None:
     )
 
 
-@pytest.mark.xfail(strict=True, reason="F-PMS-05: 반올림 ms가 같은 두 프레임이면 블러 탐지 실패")
+@pytest.mark.xfail(
+    strict=True,
+    raises=ValidationError,
+    reason="F-PMS-05: 반올림 ms가 같은 두 프레임이면 블러 탐지 실패",
+)
 def test_privacy_detect_tolerates_frames_rounding_to_same_ms(tmp_path: Path) -> None:
     """PTS가 달라도 반올림 ms가 같은 프레임(33.0·33.4 ms)이 있으면 같은 시각 키프레임을
     하나만 둬야 한다.
@@ -348,7 +352,11 @@ def test_privacy_detect_tolerates_frames_rounding_to_same_ms(tmp_path: Path) -> 
     assert result.labels
 
 
-@pytest.mark.xfail(strict=True, reason="F-PMS-07: NaN이 섞인 장갑 시각을 받아들임")
+@pytest.mark.xfail(
+    strict=True,
+    raises=pytest.fail.Exception,
+    reason="F-PMS-07: NaN이 섞인 장갑 시각을 받아들임",
+)
 def test_glove_times_with_nan_rejected() -> None:
     """시각에 NaN이 있으면 단조 증가 검사가 무력해진다. 수집 초기에 거부해야 한다.
 
@@ -361,7 +369,9 @@ def test_glove_times_with_nan_rejected() -> None:
 
 
 @pytest.mark.xfail(
-    strict=True, reason="F-PAR-07: 결과와 무관한 VLM timeout이 행동 정책 해시에 들어감"
+    strict=True,
+    raises=AssertionError,
+    reason="F-PAR-07: 결과와 무관한 VLM timeout이 행동 정책 해시에 들어감",
 )
 def test_actions_policy_digest_ignores_timeout() -> None:
     """VLM 시간 제한은 결과에 영향이 없다. 바꿔도 버전(정책 해시)이 그대로여야 한다.
@@ -377,7 +387,11 @@ def test_actions_policy_digest_ignores_timeout() -> None:
     assert p.digest == q.digest
 
 
-@pytest.mark.xfail(strict=True, reason="F-ETA-06: 액티브 러닝 수정률이 수정 후 클래스로 세어짐")
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="F-ETA-06: 액티브 러닝 수정률이 수정 후 클래스로 세어짐",
+)
 def test_correction_rate_counts_model_predicted_class() -> None:
     """모델이 cup으로 낸 10개 중 8개를 사람이 mug로 고쳤으면 cup의 수정률이 높아야 한다.
 
@@ -442,7 +456,11 @@ def test_correction_rate_counts_model_predicted_class() -> None:
     assert cup.rate > 0.5  # pyright: ignore[reportAttributeAccessIssue]
 
 
-@pytest.mark.xfail(strict=True, reason="F-ETA-08: 큐레이션이 공간 마스크를 마스터 시각처럼 변환")
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="F-ETA-08: 큐레이션이 공간 마스크를 마스터 시각처럼 변환",
+)
 def test_curation_keeps_mask_in_stream_time() -> None:
     """mask_track은 공간 라벨이라 시각이 이미 스트림 PTS다. 오프셋을 다시 빼면 안 된다.
 
