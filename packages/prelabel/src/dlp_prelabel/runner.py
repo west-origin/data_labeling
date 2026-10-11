@@ -54,7 +54,14 @@ from dlp_prelabel.policy import PrelabelPolicy
 from dlp_prelabel.wearer import match_wearer, wrist_speed
 from dlp_schema.config import repo_root
 from dlp_schema.db.repository import get_labels, get_session, insert_labels, set_lifecycle
-from dlp_schema.episode import current_labels, retractions, version_tag
+from dlp_schema.episode import (
+    current_labels,
+    is_protected,
+    pick_hand_track_labels,
+    retractions,
+    track_rank,
+    version_tag,
+)
 from dlp_schema.labels import (
     BoxTrackPayload,
     Evidence,
@@ -298,30 +305,14 @@ def _stale(labels: list[LabelRecord], prefix: str, version: str) -> list[LabelRe
     ]
 
 
-def _track_rank(x: LabelRecord) -> tuple[bool, datetime, int, str]:
-    """같은 대상 트랙이 여럿일 때 하나를 고르는 정렬 키 (튜플이 클수록 앞선다).
-
-    `pick_hand_tracks`(접촉)와 `pick_lift_tracks`(3D)가 함께 쓴다. 차례로:
-
-    1. 사람이 만들었거나 검수된 트랙 (`_protected`): 사람이 확인한 위치가 가장 믿을 만하다.
-    2. 더 새로 만든 트랙 (`created_at`): 보통 더 새 모델 버전의 출력이다.
-    3. 더 긴 구간 (`t_end_ms - t_start_ms`): 놓치는 시간이 짧다.
-    4. 라벨 ID (사전순으로 큰 것): 위가 모두 같을 때 결과를 고정하는 마지막 기준.
-
-    검수 상태가 바뀌면(승인은 라벨 ID를 바꾸지 않는다) 고르는 트랙이 바뀔 수 있다. 그래서 3D 단계의
-    입력 해시는 고른 트랙으로 만든다.
-    """
-    return (_protected(x), x.created_at, x.t_end_ms - x.t_start_ms, x.label_id)
-
-
 def pick_hand_tracks(hand_labels: list[LabelRecord]) -> dict[Hand, KeypointTrackPayload]:
     """손(왼·오른)마다 접촉 추정에 쓸 hand21 트랙 하나를 고른다.
 
     같은 손 트랙이 여럿일 수 있다 (사람이 새로 그린 트랙과 모델 트랙, 버전이 다른 모델 트랙이 함께
     현재 라벨인 경우). 예전에는 입력 순서의 마지막 것을 조용히 썼는데, 그 순서는 DB 조회 순서라
-    접촉 결과가 실행마다 달라질 수 있었다. `_track_rank`(사람·검수 → 최신 → 긴 구간 → 라벨 ID)로
-    가장 앞서는 트랙을 고른다 (병합하지 않는다: 서로 다른 트랙의 관절을 섞으면 어느 출처의 위치인지
-    알 수 없게 된다).
+    접촉 결과가 실행마다 달라질 수 있었다. 행동 단계와 같은 공용 기준
+    (`dlp_schema.episode.pick_hand_track_labels`, `track_rank`: 사람·검수 → 최신 → 긴 구간 → 라벨
+    ID)으로 가장 앞서는 트랙을 고른다 (병합하지 않는다).
 
     Args:
         hand_labels: hand21 키포인트 트랙 라벨 (`payload.hand`가 있는 것).
@@ -329,14 +320,8 @@ def pick_hand_tracks(hand_labels: list[LabelRecord]) -> dict[Hand, KeypointTrack
     Returns:
         손 → 고른 트랙의 페이로드. 트랙이 없는 손은 키가 없다.
     """
-    best: dict[Hand, LabelRecord] = {}
-    for x in hand_labels:
-        assert isinstance(x.payload, KeypointTrackPayload) and x.payload.hand is not None
-        hand = x.payload.hand
-        if hand not in best or _track_rank(x) > _track_rank(best[hand]):
-            best[hand] = x
     out: dict[Hand, KeypointTrackPayload] = {}
-    for hand, x in best.items():
+    for hand, x in pick_hand_track_labels(hand_labels).items():
         assert isinstance(x.payload, KeypointTrackPayload)
         out[hand] = x.payload
     return out
@@ -348,7 +333,8 @@ def pick_lift_tracks(current: list[LabelRecord], stream_id: str) -> list[LabelRe
     같은 entity_id 트랙이 함께 현재 라벨일 수 있다 (승인된 이전 모델 버전 + 새 버전, 사람 트랙 +
     모델 트랙). 둘 다 넘기면 같은 (개체, 부위)에 같은 시각 표본이 두 번 들어가 3D 라벨 검증이
     실패하고 프리라벨 트랜잭션 전체가 롤백됐다 (F-PAR-01). `pick_hand_tracks`와 같은 순서
-    (`_track_rank`: 사람·검수 → 최신 → 긴 구간 → 라벨 ID)로 하나를 고르고, 트랙을 섞지 않는다.
+    (`dlp_schema.episode.track_rank`: 사람·검수 → 최신 → 긴 구간 → 라벨 ID)로 하나를 고르고, 트랙을
+    섞지 않는다.
     3D로 올리지 않는 트랙(coco17 등, `lift3d.lift_key`가 None)은 빠진다.
 
     Args:
@@ -361,7 +347,7 @@ def pick_lift_tracks(current: list[LabelRecord], stream_id: str) -> list[LabelRe
     best: dict[tuple[str, str], LabelRecord] = {}
     for x in current:
         key = lift_key(x.payload) if x.stream_id == stream_id else None
-        if key is not None and (key not in best or _track_rank(x) > _track_rank(best[key])):
+        if key is not None and (key not in best or track_rank(x) > track_rank(best[key])):
             best[key] = x
     return sorted(best.values(), key=lambda x: x.label_id)
 
@@ -369,14 +355,6 @@ def pick_lift_tracks(current: list[LabelRecord], stream_id: str) -> list[LabelRe
 def _is_wearer(x: LabelRecord) -> bool:
     """착용자 매칭 단계가 만든 사본 레코드인가 (모델 버전 접두사로 판단)."""
     return (x.provenance.model_version or "").startswith(WEARER_PREFIX)
-
-
-def _protected(x: LabelRecord) -> bool:
-    """검수자가 승인·표본 검증했거나 사람이 고치거나 만든 라벨. 어떤 단계도 지우지 않는다."""
-    return (
-        x.provenance.source is Source.HUMAN
-        or x.verification.state is not VerificationState.UNREVIEWED
-    )
 
 
 def _trajectory_key(p: Trajectory3DPayload) -> tuple[str, str | None, str]:
@@ -394,7 +372,7 @@ def drop_protected_trajectories(
     kept = {
         _trajectory_key(x.payload)
         for x in current
-        if isinstance(x.payload, Trajectory3DPayload) and _protected(x)
+        if isinstance(x.payload, Trajectory3DPayload) and is_protected(x)
     }
     return [
         x
@@ -414,7 +392,7 @@ def drop_protected_contacts(
     spans = [
         (x.t_start_ms, x.t_end_ms)
         for x in current
-        if isinstance(x.payload, HandStatePayload) and x.payload.hand is hand and _protected(x)
+        if isinstance(x.payload, HandStatePayload) and x.payload.hand is hand and is_protected(x)
     ]
     return [
         (i, c)
