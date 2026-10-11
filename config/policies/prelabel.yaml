@@ -90,6 +90,9 @@ open_vocab_objects:
     a mirror: mirror
 
 # 접촉 구간 (모델이 아닌 알고리즘, dlp_prelabel.contact). 결과는 마스터 타임라인 hand_state 라벨이다.
+# 대상 종류는 온톨로지 객체 정의로 정한다 (tool 정의 → tool, surface → fixed_surface, 그 밖 → object).
+# 사람 박스(물리 유형 person, 위 coco_to_ontology person)와의 접촉은 대상자 부위(body_part, 사람 접촉에
+# 필수)를 알 수 없어 라벨을 만들지 않고 `dlp prelabel run` 출력에 개수만 센다. 검수자가 부위와 함께 그린다.
 contact:
   # 장갑 압력 합 히스테리시스 (장갑 Parquet의 압력 채널 합, 채널 선택은 sync.yaml glove.pressure_prefixes)
   glove:

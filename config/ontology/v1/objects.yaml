@@ -5,6 +5,8 @@
 # 초안(draft)에서는 새 ID를 덧붙이는 것만 같은 버전으로 허용된다 (ADR 0028).
 
 # 물리 유형 (객체의 physical_type).
+# 주의: 프리라벨 접촉 단계가 person을 코드에서 직접 쓴다 (이 유형 박스와의 접촉은 부위를 몰라 손 상태를
+# 만들지 않는다, dlp_prelabel.runner.PERSON_PHYSICAL_TYPE). 이름을 바꾸면 코드도 바꾼다.
 physical_types:
   rigid: {ko: 강체}
   articulated: {ko: 관절체}

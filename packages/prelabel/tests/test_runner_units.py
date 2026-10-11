@@ -13,12 +13,14 @@ from dlp_prelabel.contact import ContactInterval
 from dlp_prelabel.runner import (
     WEARER_PREFIX,
     _has_live_wearer,  # pyright: ignore[reportPrivateUsage]
+    contact_target_kind,
     drop_protected_contacts,
     drop_protected_trajectories,
     pick_hand_tracks,
     pick_lift_tracks,
     wearer_copy,
 )
+from dlp_schema.config import repo_root
 from dlp_schema.episode import retractions
 from dlp_schema.labels import (
     BoxKeyframe,
@@ -38,6 +40,7 @@ from dlp_schema.labels import (
     Verification,
     VerificationState,
 )
+from dlp_schema.ontology import load_ontology
 from dlp_schema.testing import FIXED_TIME, make_label
 
 MODEL: dict[str, Any] = {
@@ -229,3 +232,21 @@ def test_lift_inputs_are_one_track_per_entity() -> None:
         picked = pick_lift_tracks(order, "bodycam")
         assert [x.label_id for x in picked] == ["bucket-fix", "left-v1", "rag-v1", "right-v2"]
     assert pick_lift_tracks([body, third], "bodycam") == []
+
+
+def test_person_box_contacts_get_no_contact_kind() -> None:
+    """F-PAR-03 회귀: 물리 유형이 person인 박스(COCO person → 온톨로지 person) 접촉은 종류가 없다.
+
+    온톨로지상 사람 접촉(person)은 body_part가 필수인데 subjects.yaml body_parts에 "모름" 값이 없고
+    박스로는 부위를 알 수 없다. 예전에는 object로 기록했다. 도구·표면·그 밖의 객체와 모르는 클래스는
+    예전과 같다.
+    """
+    ontology = load_ontology(repo_root() / "config" / "ontology" / "v1")
+    assert ontology.objects["person"].physical_type == "person"
+    assert "unknown" not in ontology.body_parts  # 부위 "모름" 값이 생기면 이 처리를 다시 본다
+    assert contact_target_kind("person", ontology) is None
+    assert contact_target_kind("rag", ontology) == "tool"
+    assert contact_target_kind("sink", ontology) == "fixed_surface"
+    assert contact_target_kind("bucket", ontology) == "object"
+    assert contact_target_kind(None, ontology) == "object"  # 장갑만 잡은 접촉 (대상 모름)
+    assert contact_target_kind("not_in_ontology", ontology) == "object"
