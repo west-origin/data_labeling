@@ -902,6 +902,63 @@ def test_verification_waits_for_reissue_of_revoked_direct_tasks(
     assert direct() == []
 
 
+def test_collected_reissue_counts_even_after_a_later_revocation(
+    engine: sa.Engine,
+    stores: tuple[LocalStore, LocalStore],
+    tmp_path: Path,
+    policy: PrivacyPolicy,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """다시 만든 직접 작업을 수집한 뒤 블러가 한 번 더 바뀌어도 그 작업은 다시 만든 작업이다.
+
+    1. 열린 직접 작업 label_studio:3(labeler01)이 블러 재검수 수집(cvat:1)으로 회수된다 → 수집
+       출력이 다시 만들라고 한다.
+    2. 같은 담당자·스트림·도구로 다시 만든 label_studio:9를 수집한다.
+    3. 두 번째 블러 재검수(cvat:10)가 다른 얼굴을 더한다 → 수집한 label_studio:9에도 회수 요청이
+       남지만 상태는 collected다 (결과는 이미 이력에 있다). 수집 출력은 다시 만들라고 하지 않는다.
+    완료 판정도 수집 출력과 같은 기준이어야 한다: label_studio:3을 다시 만들라고 하면 거짓 차단이다.
+    """
+    raw, labeling = stores
+    setup, uri = _blur_setup(engine, stores, tmp_path, policy, PrivacyState.APPROVED, monkeypatch)
+    with engine.begin() as conn:
+        direct = _task("label_studio:3", ReviewTool.LABEL_STUDIO, "bodycam", ReviewStage.LABELING,
+                       uri, assignee="labeler01")  # fmt: skip
+        insert_review_task(conn, direct)
+    with engine.begin() as conn:
+        first = collect_task(conn, "cvat:1", setup, "privacy01", NOW)
+    assert first is not None
+    assert first.direct_reissue == [("labeler01", "bodycam", "label_studio")]
+    current = _current(engine, policy, "bodycam")
+    key = labeling_media_key(SID, "labeler01", "bodycam", current)
+    renewed = _task("label_studio:9", ReviewTool.LABEL_STUDIO, "bodycam", ReviewStage.LABELING,
+                    _put_media(labeling, key, tmp_path), render_hash=current,
+                    assignee="labeler01").model_copy(update={"created_at": NOW})  # fmt: skip
+    blur_again = _task("cvat:10", ReviewTool.CVAT, "bodycam", ReviewStage.PRIVACY,
+                       raw.uri(proxy_key(SID, "bodycam")), sent_label_ids=())  # fmt: skip
+    later = NOW + timedelta(minutes=5)
+    with engine.begin() as conn:
+        insert_review_task(conn, renewed)
+        mark_review_task_collected(conn, "label_studio:9", later)
+        insert_review_task(conn, blur_again)
+    other = BlurTrackPayload(
+        target="face", keyframes=(BoxKeyframe(t_ms=0, x=40.0, y=40.0, w=10.0, h=10.0),)
+    )
+    monkeypatch.setattr(
+        collect_module,
+        "from_cvat_tracks",
+        MagicMock(return_value=[ReviewedItem(None, "bodycam", 0, 100, other)]),
+    )
+    with engine.begin() as conn:
+        second = collect_task(conn, "cvat:10", setup, "privacy01", later)
+    assert second is not None and "label_studio:9" in second.revoked
+    assert second.direct_reissue == []
+    task = _status(engine, "label_studio:9")
+    assert task.status is ReviewTaskStatus.COLLECTED and task.revoke_requested_at == later
+    with engine.connect() as conn:
+        gaps = verification_gaps(conn, SID, policy)
+    assert not any(r.startswith("회수돼 다시 만들 직접 작업") for r in gaps), gaps
+
+
 def test_verification_ignores_legacy_tasks_without_hash(
     engine: sa.Engine, stores: tuple[LocalStore, LocalStore], tmp_path: Path, policy: PrivacyPolicy
 ) -> None:

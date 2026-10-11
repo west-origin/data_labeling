@@ -60,6 +60,7 @@ from dlp_review.tasks import (
     label_scale,
     object_key,
 )
+from dlp_review.verify import reissue_slot
 from dlp_schema.db.repository import (
     get_assignment,
     get_labels,
@@ -141,8 +142,11 @@ def _after_blur_change(
 def _note_revocations(outcome: ReviewOutcome, requested: list[ReviewTask]) -> None:
     """회수를 요청한 작업과 다시 만들 일을 결과에 적는다 (CLI가 출력한다).
 
-    요청 당시 열려 있던 작업만 다시 만들 대상이다. 배정이 있으면 배정 ID, 없으면
-    (담당자, 스트림, 도구). 수집한 작업은 결과가 이미 이력에 있어 다시 만들지 않는다.
+    requested는 요청 전 사본이다. 요청 당시 열려 있던 작업(요청 뒤 revoked)만 다시 만들 대상이다.
+    배정이 있으면 배정 ID, 없으면 `verify.reissue_slot`(담당자, 스트림, 도구). 수집한 작업은 결과가
+    이미 이력에 있어 다시 만들지 않는다 — 다시 만든 작업을 수집한 뒤 블러가 또 바뀐 경우도 같다.
+    완료 판정(`verify._direct_reissue`)도 같은 기준이라, 수집한 재작업은 그 뒤 회수 요청을 받아도
+    처음 회수한 작업을 다시 만든 것으로 본다.
     """
     for t in requested:
         outcome.revoked.append(t.task_key)
@@ -152,7 +156,7 @@ def _note_revocations(outcome: ReviewOutcome, requested: list[ReviewTask]) -> No
             if t.assignment_id not in outcome.reissue_assignments:
                 outcome.reissue_assignments.append(t.assignment_id)
             continue
-        direct = (t.assignee or "unassigned", t.stream_id, t.tool.value)
+        direct = reissue_slot(t)
         if direct not in outcome.direct_reissue:
             outcome.direct_reissue.append(direct)
 
