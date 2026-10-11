@@ -94,9 +94,10 @@ issues:
      files: [packages/actions/src/dlp_actions/vlm.py, packages/actions/src/dlp_actions/runner.py], source: docs/handover/audit-notes.md}
   - {id: A-09, title: reconcile 128자 초과 ID 앞부분 잘림, severity: low, status: superseded, kind: code,
      files: [packages/review/src/dlp_review/reconcile.py], source: docs/handover/audit-notes.md, see: [F-REV-05]}
-  - {id: A-10, title: lead_seconds가 취소·서비스 계정 주석 시간도 더함, severity: low, status: open, kind: code,
-     files: [packages/review/src/dlp_review/clients.py], source: docs/handover/audit-notes.md, see: [F-REV-06],
-     note: 2026-10-11 전수 검수에서 코드로 다시 확인}
+  - {id: A-10, title: "lead_seconds가 취소·서비스 계정 주석 시간도 더함", severity: low, status: fixed, kind: code,
+     files: [packages/review/src/dlp_review/clients.py], source: docs/handover/audit-notes.md,
+     see: [F-REV-06],
+     note: "F-REV-06과 함께 lead_seconds가 담당자 계정의 건너뛰지 않은 주석 lead_time만 더한다 (packages/review/tests/test_ls_accounts.py)"}
   - {id: A-11, title: timeseries rate_hz가 1000의 약수가 아니면 time_ms 비정수, severity: low, status: candidate, kind: code,
      files: [packages/review/src/dlp_review/timeseries.py], source: docs/handover/audit-notes.md}
   - {id: A-12, title: EpisodeGraph가 공간 라벨(스트림 PTS)을 마스터 구간과 비교, severity: low, status: candidate, kind: code,
@@ -125,17 +126,18 @@ issues:
      files: [packages/training/src/dlp_train/tracking.py, packages/cli/src/dlp_cli/review_cmds.py], source: docs/handover/audit-notes.md}
 
   # ── 2026-10-11 전수 검수: schema ──
-  - {id: F-SCH-01, title: 양손 행동(같은 action_id)이 있으면 상위 구간과 함께 저장되지 않음, severity: medium, status: open, kind: code,
-     files: [packages/schema/src/dlp_schema/label_graph.py, packages/schema/src/dlp_schema/label_validation.py],
-     source: docs/handover/full-review-2026-10-11.md, repro: tests/test_known_defects.py::test_bimanual_action_with_segment_is_valid}
-  - {id: F-SCH-02, title: 승인 트랙의 모델 자식(착용자 사본) 삭제로 승인 라벨이 운영에서 사라짐, severity: medium, status: open, kind: code,
+  - {id: F-SCH-01, title: "양손 행동(같은 action_id)이 있으면 상위 구간과 함께 저장되지 않음", severity: medium, status: fixed, kind: code,
+     files: [packages/schema/src/dlp_schema/label_graph.py, packages/schema/src/dlp_schema/label_validation.py], source: docs/handover/full-review-2026-10-11.md,
+     note: "label_graph가 같은 action_id·다른 손 레코드를 한 노드로 묶고 같은 손 중복·segment_id 충돌만 위반으로 본다. 양손 행동은 두 손 모두 상위 구간 안. 회귀: packages/schema/tests/test_label_graph.py"}
+  - {id: F-SCH-02, title: "승인 트랙의 모델 자식(착용자 사본) 삭제로 승인 라벨이 운영에서 사라짐", severity: medium, status: fixed, kind: code,
      files: [packages/schema/src/dlp_schema/label_validation.py], source: docs/handover/full-review-2026-10-11.md,
-     repro: tests/test_known_defects.py::test_retracting_model_child_of_approved_label_is_rejected}
-  - {id: F-SCH-03, title: 오류 삽입 사본·측정 레코드가 있으면 이관이 운영 라벨을 재검수로 보냄, severity: medium, status: open, kind: code,
+     note: "저장 검증이 사람 출처가 아닌 삭제의 조상 사슬을 보고, 보호 상태 조상이 마지막 현재 후손을 잃으면 거부한다. 회귀: packages/schema/tests/test_protected_retraction.py. 남은 일: 단계별 지울 후보 선택(prelabel _stale 등)은 바로 위 부모만 봐서 더 깊은 보호 계보에서는 조용히 건너뛰지 않고 저장 거부로 실패한다 (공용 후보 필터 결정 필요)"}
+  - {id: F-SCH-03, title: "오류 삽입 사본·측정 레코드가 있으면 이관이 운영 라벨을 재검수로 보냄", severity: medium, status: fixed, kind: code,
      files: [packages/schema/src/dlp_schema/migration.py], source: docs/handover/full-review-2026-10-11.md,
-     repro: tests/test_known_defects.py::test_migration_ignores_seeded_copies}
-  - {id: F-SCH-04, title: 0014 트리거 테스트가 PK 중복으로 통과(트리거를 검사하지 않음), severity: medium, status: open, kind: test,
-     files: [packages/schema/tests/test_ontology_boundaries.py], source: docs/handover/full-review-2026-10-11.md}
+     note: "이관이 운영 라벨·오류 삽입 배정(seed-<배정>- ID 형식)·측정 레코드(방식·검수자) 묶음마다 집합 검사를 따로 돌린다. 회귀: packages/schema/tests/test_migration_sets.py, tests/test_migration_seeded_copies.py. 재현 테스트는 결과 ID를 원래 ID와 비교하는 잘못된 단언이라 지웠다. 배정을 ID 형식에서 읽는 결합은 남는다"}
+  - {id: F-SCH-04, title: "0014 트리거 테스트가 PK 중복으로 통과(트리거를 검사하지 않음)", severity: medium, status: fixed, kind: test,
+     files: [packages/schema/tests/test_ontology_boundaries.py], source: docs/handover/full-review-2026-10-11.md,
+     note: "직접 INSERT에 새 label_id를 쓰고 SQLSTATE 23514·트리거 함수 위치를 확인한다. 트리거를 지운 대조 트랜잭션에서는 통과함을 본다 (packages/schema/tests/test_ontology_boundaries.py)"}
   - {id: F-SCH-05, title: "TRUNCATE 금지 테스트의 match가 모든 오류에 맞음", severity: low, status: open, kind: test,
      files: [packages/schema/tests/test_db.py], source: docs/handover/full-review-2026-10-11.md}
   - {id: F-SCH-06, title: 기존 위반이 하나라도 있으면 무관한 새 라벨까지 저장 거부, severity: low, status: open, kind: code,
@@ -169,25 +171,31 @@ issues:
      note: "ADR 0039 (회수 요청 outbox + 커밋 뒤 실행기 dlp review revoke). 회귀: packages/review/tests/test_revoke.py,
             packages/review/tests/test_flow.py::test_blur_change_revokes_deployed_labeling_media_end_to_end,
             tests/test_review_regressions.py::test_direct_labeling_creation_and_blur_collect_never_miss_revocation"}
-  - {id: F-REV-03, title: Label Studio에서 그릴 수 있지만 수집할 수 없는 구간이 작업 수집 전체를 멈춤, severity: medium, status: open, kind: code,
+  - {id: F-REV-03, title: "Label Studio에서 그릴 수 있지만 수집할 수 없는 구간이 작업 수집 전체를 멈춤", severity: medium, status: fixed, kind: code,
      files: [packages/review/src/dlp_review/labelstudio.py], source: docs/handover/full-review-2026-10-11.md,
-     repro: tests/test_known_defects.py::test_ls_hand_state_changed_to_none_is_collectable}
-  - {id: F-REV-04, title: CVAT에서 새로 그린 손 골격이 hand 없음 ValidationError, severity: medium, status: open, kind: code,
-     files: [packages/review/src/dlp_review/cvat.py], source: docs/handover/full-review-2026-10-11.md}
-  - {id: F-REV-05, title: reconcile _new_id 앞 자르기로 잘못된 ID가 생겨 수집 실패, severity: medium, status: open, kind: code,
-     files: [packages/review/src/dlp_review/reconcile.py], source: docs/handover/full-review-2026-10-11.md, see: [A-09]}
-  - {id: F-REV-06, title: LS 수집·웹훅이 결과 작성자를 담당자와 대조하지 않음, severity: medium, status: open, kind: code,
-     files: [packages/review/src/dlp_review/collect.py, packages/review/src/dlp_review/clients.py, packages/review/src/dlp_review/webhook.py],
-     source: docs/handover/full-review-2026-10-11.md, see: [S1, A-10]}
-  - {id: F-REV-07, title: 담당자 없는 배정에 "unassigned"를 실제 담당자로 넣음, severity: medium, status: open, kind: code,
-     files: [packages/review/src/dlp_review/ops/runner.py], source: docs/handover/full-review-2026-10-11.md}
-  - {id: F-REV-08, title: LS 작업의 서명 URL이 7일 고정이고 갱신 경로 없음, severity: medium, status: open, kind: code,
-     files: [packages/review/src/dlp_review/tasks.py], source: docs/handover/full-review-2026-10-11.md}
+     note: "손 상태 입력란(target_id·body_part)을 두고 종류 변경 시 호환되지 않는 필드를 비운다. 옮길 수 없는 구간은 영역 ID·시각·이유를 담은 TaskError. 회귀: packages/review/tests/test_units.py::test_label_studio_hand_state_inputs_and_kind_change, test_flow.py::test_unconvertible_label_studio_region_stops_collection_with_region_info. 주의: body_part 입력란이 한 번 쓰인 LS 프로젝트는 이전 설정으로 되돌릴 수 없다(LS 400)"}
+  - {id: F-REV-04, title: "CVAT에서 새로 그린 손 골격이 hand 없음 ValidationError", severity: medium, status: fixed, kind: code,
+     files: [packages/review/src/dlp_review/cvat.py], source: docs/handover/full-review-2026-10-11.md,
+     note: "손 골격 라벨을 kp_hand21_left·kp_hand21_right로 나누고 기존 프로젝트에 덧붙인다. 이전 kp_hand21로 새로 그린 골격은 CvatFormatError→TaskError (검수자 안내 필요). 회귀: packages/review/tests/test_units.py::test_cvat_new_hand_skeleton_takes_hand_from_label, test_flow.py::test_new_cvat_hand_skeleton_is_collected_with_hand_from_label"}
+  - {id: F-REV-05, title: "reconcile _new_id 앞 자르기로 잘못된 ID가 생겨 수집 실패", severity: medium, status: fixed, kind: code,
+     files: [packages/review/src/dlp_review/reconcile.py], source: docs/handover/full-review-2026-10-11.md,
+     see: [A-09],
+     note: "_new_id가 derived_id(앞부분+해시)를 쓴다. 128자 이하는 예전과 같다. 회귀: packages/review/tests/test_units.py::test_reconcile_long_ids_stay_valid_identifiers"}
+  - {id: F-REV-06, title: "LS 수집·웹훅이 결과 작성자를 담당자와 대조하지 않음", severity: medium, status: fixed, kind: code,
+     files: [packages/review/src/dlp_review/collect.py, packages/review/src/dlp_review/clients.py, packages/review/src/dlp_review/webhook.py], source: docs/handover/full-review-2026-10-11.md,
+     see: [S1, A-10],
+     note: "review.yaml label_studio.users(검수자→LS 계정) 추가. 수집·검수 시간은 그 계정이 만들고 마지막으로 고친 주석만, 웹훅은 completed_by·updated_by 대조(불일치 403). 연결 없는 담당자에게는 LS 작업을 만들지 않는다. 회귀: packages/review/tests/test_ls_accounts.py, test_flow.py::test_label_studio_collects_only_the_assignee_account_submission. 한계: LS Community에는 작업 배정이 없어 다른 구성원도 작업을 열 수 있다(제출만 거름)"}
+  - {id: F-REV-07, title: "담당자 없는 배정에 \"unassigned\"를 실제 담당자로 넣음", severity: medium, status: fixed, kind: code,
+     files: [packages/review/src/dlp_review/ops/runner.py], source: docs/handover/full-review-2026-10-11.md,
+     note: "담당자 없는 배정은 create_assignment_tasks가 거부하고 dlp review assign <배정> --assignee로 정한다(assign_reviewer가 블러 권한자·QA 선임·짝 규칙 검사). 회귀: packages/review/tests/test_ops_flow.py::test_unassigned_qa_assignment_needs_explicit_reviewer, packages/cli/tests/test_review_policy.py::test_assign_without_assignee_needs_explicit_reviewer. 이미 unassigned로 만든 작업은 revoke 후 다시 만드는 운영 정리가 필요하다"}
+  - {id: F-REV-08, title: "LS 작업의 서명 URL이 7일 고정이고 갱신 경로 없음", severity: medium, status: fixed, kind: code,
+     files: [packages/review/src/dlp_review/tasks.py], source: docs/handover/full-review-2026-10-11.md,
+     note: "서명 URL 유효 시간을 review.yaml media.signed_url_ttl_s(기본·상한 7일)로 옮기고 dlp review refresh-urls가 열린 LS 작업만 라벨러 자격 증명으로 다시 서명한다. 회귀: packages/review/tests/test_refresh.py, test_flow.py::test_label_studio_signed_urls_follow_policy_ttl_and_are_refreshed. 하루 한 번 cron 등록은 운영 몫"}
   - {id: F-REV-09, title: 이중·블라인드 측정 레코드를 배정이 아닌 (단위, 담당자)로 모음, severity: low, status: open, kind: code,
      files: [packages/review/src/dlp_review/ops/results.py], source: docs/handover/full-review-2026-10-11.md}
-  - {id: F-REV-10, title: 깨진 dlp_meta·중복 원래 ID가 TaskError가 아닌 예외로 올라감, severity: low, status: open, kind: code,
-     files: [packages/review/src/dlp_review/cvat.py, packages/review/src/dlp_review/reconcile.py, packages/review/src/dlp_review/collect.py],
-     source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-REV-10, title: "깨진 dlp_meta·중복 원래 ID가 TaskError가 아닌 예외로 올라감", severity: low, status: open, kind: code,
+     files: [packages/review/src/dlp_review/cvat.py, packages/review/src/dlp_review/reconcile.py, packages/review/src/dlp_review/collect.py], source: docs/handover/full-review-2026-10-11.md,
+     note: "일부 해소: LS 깨진 메타는 F-REV-03 변경으로 구간 정보를 담은 TaskError가 된다. 남은 일: CVAT 깨진 dlp_meta와 reconcile 중복 원래 ID의 ValueError"}
   - {id: F-REV-11, title: 이벤트 속성 입력란을 모두 비우면 원래 값이 남음, severity: low, status: open, kind: code,
      files: [packages/review/src/dlp_review/labelstudio.py], source: docs/handover/full-review-2026-10-11.md,
      repro: tests/test_known_defects.py::test_ls_event_attributes_cleared_are_cleared}
@@ -195,34 +203,44 @@ issues:
      files: [packages/review/src/dlp_review/verify.py], source: docs/handover/full-review-2026-10-11.md}
   - {id: F-REV-13, title: ops/__init__ 모듈 구성에 results 누락, severity: low, status: open, kind: comment,
      files: [packages/review/src/dlp_review/ops/__init__.py], source: docs/handover/full-review-2026-10-11.md}
-  - {id: F-REV-14, title: CVAT 담당자 검사 테스트가 LS 작업으로 돌아 CVAT 분기를 타지 않음, severity: low, status: open, kind: test,
-     files: [packages/review/tests/test_units.py], source: docs/handover/full-review-2026-10-11.md}
-  - {id: F-REV-15, title: DB 롤백으로 기록 없이 남은 고아 CVAT·LS 작업과 라벨링 버킷 사본은 회수가 찾지 못함, severity: medium, status: open, kind: code,
+  - {id: F-REV-14, title: "CVAT 담당자 검사 테스트가 LS 작업으로 돌아 CVAT 분기를 타지 않음", severity: low, status: fixed, kind: test,
+     files: [packages/review/tests/test_units.py], source: docs/handover/full-review-2026-10-11.md,
+     note: "test_units.py::test_webhook_reviewer_comes_from_task_assignee의 CVAT 검사를 실제 CVAT 작업으로 바꿨다 (F-REV-06 수정과 함께)"}
+  - {id: F-REV-15, title: "DB 롤백으로 기록 없이 남은 고아 CVAT·LS 작업과 라벨링 버킷 사본은 회수가 찾지 못함", severity: medium, status: fixed, kind: code,
      files: [packages/review/src/dlp_review/revoke.py, packages/review/src/dlp_review/tasks.py], source: docs/handover/full-review-2026-10-11.md,
-     see: [R4, F-REV-02]}
+     see: [R4, F-REV-02],
+     note: "dlp review revoke --orphans [<세션>] [--apply] (dlp_review.orphans): 이 플랫폼 이름 규칙과 DB를 대조하고 나이 하한(review.yaml orphans.min_age_s)·세션 잠금 뒤 재확인으로 경합을 피한다. 회귀: packages/review/tests/test_orphans.py, test_flow.py::test_orphans_from_rolled_back_creation_are_reported_then_deleted"}
   - {id: F-REV-16, title: 회수한 작업의 진행 중 주석은 스냅숏으로만 남고 새 작업으로 이어받지 않음, severity: low, status: open, kind: code,
      files: [packages/review/src/dlp_review/revoke.py], source: docs/handover/full-review-2026-10-11.md, see: [F-REV-02]}
-  - {id: F-REV-17, title: 사용 중지(withdraw) 세션의 검수 매체 회수가 연결되지 않음, severity: medium, status: open, kind: code,
+  - {id: F-REV-17, title: "사용 중지(withdraw) 세션의 검수 매체 회수가 연결되지 않음", severity: medium, status: fixed, kind: code,
      files: [packages/datasets/src/dlp_datasets/lineage.py, packages/review/src/dlp_review/revoke.py], source: docs/handover/full-review-2026-10-11.md,
-     see: [F-REV-02]}
-  - {id: F-REV-18, title: 승인 보류 명령이 없어 사고 대응 중에도 같은 렌더로 새 작업을 만들 수 있음, severity: medium, status: open, kind: code,
+     see: [F-REV-02],
+     note: "withdraw_session이 같은 트랜잭션에서 비프라이버시 검수 작업 회수를 요청하고 dlp dataset withdraw가 커밋 뒤 실행기를 돌린다. 사용 중지 세션에는 새 작업을 만들지 않는다. 회귀: packages/datasets/tests/test_withdraw_revocation.py, packages/review/tests/test_revoke.py::test_withdrawn_session_gets_no_new_review_tasks. 블러 검수 작업(원본 권한자만 봄) 회수 여부는 운영 결정"}
+  - {id: F-REV-18, title: "승인 보류 명령이 없어 사고 대응 중에도 같은 렌더로 새 작업을 만들 수 있음", severity: medium, status: fixed, kind: code,
      files: [packages/privacy/src/dlp_privacy/runner.py, packages/cli/src/dlp_cli/review_cmds.py], source: docs/handover/full-review-2026-10-11.md,
-     see: [F-REV-02]}
-  - {id: F-REV-19, title: 내려받은 사본·도구 내보내기·버킷 이전 버전·배포한 라벨러 자격 증명은 DB 회수로 막을 수 없음, severity: medium, status: open, kind: ops,
+     see: [F-REV-02],
+     note: "dlp privacy hold <세션> --reason [--release] (dlp_privacy.hold, ADR 0042, privacy_holds 추가 전용, Alembic 0017). 보류하면 승인 해제·렌더 무효·라벨링 작업 회수 요청, 보류 중 approve·작업 생성 거부, 해제 뒤 approve→render. 회귀: packages/privacy/tests/test_hold.py, packages/review/tests/test_revoke.py::test_held_session_refuses_labeling_tasks_but_allows_blur_review. 해제 전 블러 재검수 의무화는 운영 결정"}
+  - {id: F-REV-19, title: "내려받은 사본·도구 내보내기·버킷 이전 버전·배포한 라벨러 자격 증명은 DB 회수로 막을 수 없음", severity: medium, status: open, kind: ops,
      files: [docs/adr/0039-revoke-labeling-media-on-blur-change.md, services/docker-compose.yml], source: docs/handover/full-review-2026-10-11.md,
-     see: [F-REV-02, F-REV-08]}
+     see: [F-REV-02, F-REV-08],
+     note: "코드로 할 수 있는 점검은 반영: dlp services check --security가 라벨링 버킷 버전 관리 꺼짐과 라벨러 키 범위를 확인한다(packages/media/tests/test_storage_checks.py, tests/test_services.py::test_labeling_bucket_exposure_checks_pass_on_dev_services). 이미 내려받은 사본·도구 내보내기·새어 나간 서명 URL(유효 시간까지)·사람 손에 간 키는 문서뿐(ADR 0039 사고 대응). 라벨러 키의 List 권한 축소는 운영 결정"}
+  - {id: F-REV-20, title: "웹훅 부분 본문 시간 초과 테스트가 부하에서 가끔 실패", severity: low, status: candidate, kind: test,
+     files: [packages/review/tests/test_webhook_http.py], source: docs/handover/full-review-2026-10-11.md,
+     note: "test_partial_body_times_out_and_releases_connection이 여러 에이전트가 동시에 도는 부하에서 한 번 실패, 재실행에서 통과. 타이밍 의존"}
 
   # ── 2026-10-11 전수 검수: privacy·media·sync ──
-  - {id: F-PMS-01, title: 다른 시간대로 적은 같은 recorded_at으로 재수집하면 충돌, severity: medium, status: open, kind: code,
+  - {id: F-PMS-01, title: "다른 시간대로 적은 같은 recorded_at으로 재수집하면 충돌", severity: medium, status: fixed, kind: code,
      files: [packages/media/src/dlp_media/ingest.py], source: docs/handover/full-review-2026-10-11.md,
-     repro: tests/test_known_defects.py::test_reingest_same_instant_other_offset_is_not_conflict}
-  - {id: F-PMS-02, title: 홀수 크기 원본은 수집되지만 블러본을 만들 수 없음, severity: medium, status: open, kind: code,
+     note: "_ingest_fields가 recorded_at을 UTC로 바꾼 뒤 비교한다. 회귀: packages/media/tests/test_ingest.py::test_reingest_same_instant_other_offset_is_unchanged, ::test_reingest_offset_recorded_at_into_postgres_is_unchanged"}
+  - {id: F-PMS-02, title: "홀수 크기 원본은 수집되지만 블러본을 만들 수 없음", severity: medium, status: fixed, kind: code,
      files: [packages/privacy/src/dlp_privacy/render.py, packages/media/src/dlp_media/ingest.py], source: docs/handover/full-review-2026-10-11.md,
-     repro: tests/test_known_defects.py::test_odd_size_video_renders_blurred}
-  - {id: F-PMS-03, title: 반사면 영역 폭·높이가 1px 미만이면 YuNet 단언 실패로 탐지 중단, severity: medium, status: open, kind: code,
-     files: [packages/privacy/src/dlp_privacy/detectors/reflection.py], source: docs/handover/full-review-2026-10-11.md}
-  - {id: F-PMS-04, title: defaults.yaml이 프록시를 라벨링 버킷에 둔다고 잘못 설명, severity: medium, status: open, kind: comment,
-     files: [config/defaults.yaml], source: docs/handover/full-review-2026-10-11.md}
+     note: "dlp_media.encoding.pad_to_even으로 블러본·워터마크를 오른쪽·아래 1px 덧대 짝수로 인코딩한다(좌표·PTS·프레임 수 불변). 회귀: packages/privacy/tests/test_gate.py::test_render_pads_odd_size_keeping_pixel_coordinates_and_pts, packages/review/tests/test_units.py::test_watermark_pads_odd_size_and_keeps_pts. 덧댄 줄에 그린 박스를 원본 크기로 자를지는 미정"}
+  - {id: F-PMS-03, title: "반사면 영역 폭·높이가 1px 미만이면 YuNet 단언 실패로 탐지 중단", severity: medium, status: fixed, kind: code,
+     files: [packages/privacy/src/dlp_privacy/detectors/reflection.py], source: docs/handover/full-review-2026-10-11.md,
+     note: "reflection.crop_bounds가 영역을 프레임 안으로 자르고 바깥쪽 정수화하며 빈 crop은 건너뛴다. 회귀: packages/privacy/tests/test_gate.py::test_reflection_crops_cover_subpixel_and_fractional_regions"}
+  - {id: F-PMS-04, title: "defaults.yaml이 프록시를 라벨링 버킷에 둔다고 잘못 설명", severity: medium, status: fixed, kind: comment,
+     files: [config/defaults.yaml], source: docs/handover/full-review-2026-10-11.md,
+     note: "defaults.yaml·BucketsConfig 주석과 ADR 0001을 실제 위치(프록시는 원본 버킷)에 맞췄다. 회귀: tests/test_policy_consistency.py::test_bucket_comments_keep_proxy_in_raw_bucket"}
   - {id: F-PMS-05, title: 반올림 ms가 같은 두 프레임이면 블러 탐지가 키프레임 중복으로 실패, severity: low, status: open, kind: code,
      files: [packages/privacy/src/dlp_privacy/pipeline.py], source: docs/handover/full-review-2026-10-11.md,
      repro: tests/test_known_defects.py::test_privacy_detect_tolerates_frames_rounding_to_same_ms}
@@ -250,10 +268,12 @@ issues:
   - {id: F-PAR-02, title: 장갑 오프셋이 음수면 음수 시각 접촉 라벨로 프리라벨 전체 롤백, severity: high, status: fixed, kind: code,
      files: [packages/prelabel/src/dlp_prelabel/runner.py, packages/prelabel/src/dlp_prelabel/contact.py], source: docs/handover/full-review-2026-10-11.md,
      note: "contact.clip_to_session으로 [0, Session.duration_ms]로 자르고 잘린 조각에 최소 길이 재적용. 회귀: packages/prelabel/tests/test_algorithms.py, test_runner.py"}
-  - {id: F-PAR-03, title: 사람(person) 박스 접촉을 객체 접촉으로 기록, severity: medium, status: open, kind: code,
-     files: [packages/prelabel/src/dlp_prelabel/runner.py], source: docs/handover/full-review-2026-10-11.md}
-  - {id: F-PAR-04, title: 행동 단계의 손 트랙 선택 기준이 프리라벨 접촉 단계와 다름, severity: medium, status: open, kind: code,
-     files: [packages/actions/src/dlp_actions/runner.py], source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-PAR-03, title: "사람(person) 박스 접촉을 객체 접촉으로 기록", severity: medium, status: fixed, kind: code,
+     files: [packages/prelabel/src/dlp_prelabel/runner.py], source: docs/handover/full-review-2026-10-11.md,
+     note: "사람 박스 접촉은 body_part를 알 수 없어(온톨로지에 unknown 부위 없음) 손 상태를 만들지 않고 PrelabelSummary.person_contacts로 센다. 회귀: packages/prelabel/tests/test_runner_units.py::test_person_box_contacts_get_no_contact_kind. 남은 결정: body_parts에 unknown 추가 여부, 이미 object로 기록한 세션 재생성(contact 접두어 올림)"}
+  - {id: F-PAR-04, title: "행동 단계의 손 트랙 선택 기준이 프리라벨 접촉 단계와 다름", severity: medium, status: fixed, kind: code,
+     files: [packages/actions/src/dlp_actions/runner.py], source: docs/handover/full-review-2026-10-11.md,
+     note: "순위 규칙을 dlp_schema.episode(track_rank, pick_hand_track_labels)로 옮겨 프리라벨과 행동 단계가 함께 쓴다. 행동 입력 해시도 고른 트랙 기준. 회귀: packages/actions/tests/test_runner.py::test_same_hand_tracks_follow_the_prelabel_track_rank"}
   - {id: F-PAR-05, title: 없어진 절단 후보가 대표 경계로 골라져 두 접촉이 한 행동으로 합쳐짐, severity: low, status: open, kind: code,
      files: [packages/actions/src/dlp_actions/pipeline.py, packages/actions/src/dlp_actions/assemble.py], source: docs/handover/full-review-2026-10-11.md}
   - {id: F-PAR-06, title: 예측기 접촉 단계가 검수된 손 상태와 겹침 검사를 하지 않음, severity: low, status: open, kind: code,
@@ -275,11 +295,15 @@ issues:
      source: docs/handover/full-review-2026-10-11.md}
   - {id: F-PAR-13, title: 사람 접촉 관계 테스트가 빈 자리 검사에 닿지 않음, severity: low, status: open, kind: test,
      files: [packages/relations/tests/test_relations.py], source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-PAR-14, title: "프리라벨 접촉 단계 입력 해시가 고른 손 트랙이 아닌 전체 트랙 ID 기준", severity: low, status: open, kind: code,
+     files: [packages/prelabel/src/dlp_prelabel/runner.py], source: docs/handover/full-review-2026-10-11.md,
+     see: [F-PAR-01, F-PAR-04],
+     note: "같은 손 트랙이 여럿일 때 검수자가 다른 트랙을 승인해 고르는 트랙이 바뀌어도 contact_version이 같아 접촉을 다시 만들지 않는다. 수정안: input_digest에 pick_hand_track_labels 결과를 넣는다"}
 
   # ── 2026-10-11 전수 검수: evaluation·training·active·datasets (T1~T5·A-15 재확인 외) ──
-  - {id: F-ETA-06, title: 액티브 러닝 수정률이 모델 예측 클래스가 아닌 수정 후 클래스로 세어짐, severity: medium, status: open, kind: code,
+  - {id: F-ETA-06, title: "액티브 러닝 수정률이 모델 예측 클래스가 아닌 수정 후 클래스로 세어짐", severity: medium, status: fixed, kind: code,
      files: [packages/active/src/dlp_active/rates.py], source: docs/handover/full-review-2026-10-11.md,
-     repro: tests/test_known_defects.py::test_correction_rate_counts_model_predicted_class}
+     note: "corrected·deleted는 모델 원본(origin) 클래스로, added는 그 라벨 클래스로 센다. 회귀: packages/active/tests/test_select.py::test_class_changes_are_counted_under_the_model_predicted_class"}
   - {id: F-ETA-08, title: 큐레이션이 마스크·3D 궤적을 시간 구간처럼 시각 변환, severity: low, status: open, kind: code,
      files: [packages/active/src/dlp_active/curation.py], source: docs/handover/full-review-2026-10-11.md,
      repro: tests/test_known_defects.py::test_curation_keeps_mask_in_stream_time}
