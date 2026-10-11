@@ -29,10 +29,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from dlp_aireview.backend import JudgeBackend, JudgeReply, JudgeRequest
 from dlp_aireview.plan import PlannedUnit
@@ -67,7 +67,13 @@ _MAX_ERRORS = 50
 class JudgedUnit:
     """판정한 단위 하나 (DB 행 `AiReviewUnit`의 run_id·created_at 앞 단계).
 
-    Attributes는 `AiReviewUnit`과 같은 이름이다. `record`로 계약 객체를 만든다.
+    Attributes는 `AiReviewUnit`과 같은 이름이다. `record`로 계약 객체를 만든다. 아래 세 값은 기록에
+    넣지 않는 실행 통계다 (벤치 `bench`의 재시도율·스키마 적합률·문맥 초과 수).
+
+    Attributes:
+        retries: 위반 목록을 붙여 다시 물은 횟수.
+        context_errors: 문맥 초과로 거절된 요청 수.
+        invalid_responses: 받은 응답 중 파싱에 실패했거나 위반이 하나라도 있던 응답 수.
     """
 
     unit: PlannedUnit
@@ -86,6 +92,14 @@ class JudgedUnit:
     cached_tokens: int | None
     completion_tokens: int | None
     latency_ms: int | None
+    retries: int = 0
+    context_errors: int = 0
+    invalid_responses: int = 0
+
+    @property
+    def responses(self) -> int:
+        """받은 응답 수 (모델 호출 중 문맥 초과로 거절된 것을 뺀다)."""
+        return self.attempts - self.context_errors
 
     def record(
         self, run_id: str, created_at: datetime, blurred_sha256: str | None = None
@@ -134,6 +148,9 @@ class _Run:
     policy: AiReviewPolicy
     sensor: SensorContext
     attempts: int = 0
+    retries: int = 0
+    context_errors: int = 0
+    invalid_responses: int = 0
     errors: list[str] = field(default_factory=list[str])
     raws: list[str] = field(default_factory=list[str])
     replies: list[JudgeReply] = field(default_factory=list[JudgeReply])
@@ -182,6 +199,38 @@ def _view(
     )
 
 
+def request_for(
+    unit: PlannedUnit,
+    parts: PromptParts,
+    positions: Sequence[int],
+    *,
+    schema: Mapping[str, Any],
+    policy: AiReviewPolicy,
+    history: Sequence[tuple[str, str]] = (),
+    max_tokens: int | None = None,
+) -> JudgeRequest:
+    """프롬프트 조각 → 판정 요청 (판정·벤치가 같은 요청을 만든다).
+
+    Args:
+        unit: 단위.
+        parts: `build_parts` 결과 (이 요청의 이미지·대상).
+        positions: 이 요청이 묻는 대상의 단위 안 위치.
+        schema: 응답 스키마 (`response_schema`).
+        policy: 정책 (스키마 강제 방식, 생성 상한).
+        history: 재시도 대화 [(직전 응답, 재시도 글)].
+        max_tokens: 생성 상한을 바꿀 때 (벤치의 첫 토큰 시간 측정은 1). None이면 정책 값.
+    """
+    frame_nos = _frame_nos(parts.images)
+    return JudgeRequest(
+        unit_id=unit.unit_id, affinity=unit.window.window_key, group=unit.group, parts=parts,
+        history=tuple(history), schema=schema,
+        schema_enforcement=policy.backend.schema_enforcement,
+        max_tokens=policy.backend.max_tokens if max_tokens is None else max_tokens,
+        targets=tuple(unit.targets[p] for p in positions), entities=unit.window.entities,
+        frame_nos=frame_nos, frame_ms=tuple(unit.frame_ms[i] for i in frame_nos),
+    )  # fmt: skip
+
+
 def _ask(run: _Run, images: tuple[PromptImage, ...], positions: tuple[int, ...]) -> _Part:
     """대상 `positions`를 한 요청으로 묻는다 (재시도 포함). 문맥 초과는 호출자에게 올린다.
 
@@ -198,23 +247,20 @@ def _ask(run: _Run, images: tuple[PromptImage, ...], positions: tuple[int, ...])
     digest = parts.digest
     for attempt in range(policy.response.max_retries + 1):
         digest = request_digest(parts, history)
-        request = JudgeRequest(
-            unit_id=unit.unit_id, affinity=unit.window.window_key, group=unit.group, parts=parts,
-            history=tuple(history), schema=schema,
-            schema_enforcement=policy.backend.schema_enforcement,
-            max_tokens=policy.backend.max_tokens, targets=targets, entities=unit.window.entities,
-            frame_nos=view.frame_nos, frame_ms=tuple(unit.frame_ms[i] for i in view.frame_nos),
-        )  # fmt: skip
+        request = request_for(unit, parts, positions, schema=schema, policy=policy, history=history)
         reply = run.backend.judge(request)
         run.attempts += 1
         run.replies.append(reply)
         answer = validate_answer(reply.content, view, run.o, policy)
+        run.invalid_responses += int(not answer.parsed or bool(answer.violations))
         for v in answer.violations:
             run.note(f"시도 {attempt + 1}: {v.record}")
         if answer.parsed and (best is None or answer.invalid <= best[0].invalid):
             best = (answer, reply.content, digest)
         if not answer.retry_worthy(len(targets), policy.response.retry_invalid_ratio):
             break
+        if attempt < policy.response.max_retries:
+            run.retries += 1
         history.append((reply.content, retry_text([v.text for v in answer.violations])))
     if best is None:
         return _Part(positions, images, None, digest)
@@ -245,6 +291,7 @@ def _ask_split(
         return [_ask(run, images, positions)]
     except VlmContextError as exc:
         run.attempts += 1
+        run.context_errors += 1
         n_frames = len(_frame_nos(images))
         run.note(f"문맥 초과 (프레임 {n_frames}, 대상 {len(positions)}, HTTP {exc.status})")
         if splits_left > 0 and not halved and n_frames > 1:
@@ -378,4 +425,7 @@ def judge_unit(
         cached_tokens=_sum([r.cached_tokens for r in replies]),
         completion_tokens=_sum([r.completion_tokens for r in replies]),
         latency_ms=_sum([r.latency_ms for r in replies]),
+        retries=run.retries,
+        context_errors=run.context_errors,
+        invalid_responses=run.invalid_responses,
     )

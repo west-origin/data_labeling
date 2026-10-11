@@ -18,6 +18,8 @@
       (0009, 0010).
     - session_lifecycle_events: 수정·삭제·TRUNCATE 금지 (0011).
     - privacy_detection_runs: 0건을 포함한 탐지 완료 이력, 수정·삭제·TRUNCATE 금지 (0012).
+    - ai_review_runs, ai_review_run_events, ai_review_units, ai_review_exposures,
+      ai_review_outcomes: AI 1차 검수 기록 (라벨이 아니다), 수정·삭제·TRUNCATE 금지 (0016, ADR 0040).
 
 열 규약
     - 시각(`Ts`)은 모두 `TIMESTAMP WITH TIME ZONE`. 파이썬 쪽도 시간대 있는 datetime만 쓴다.
@@ -457,4 +459,147 @@ retention_decisions = sa.Table(
     sa.Column("reason", sa.Text(), nullable=False),
     sa.Column("decided_by", sa.String(128), nullable=False),
     sa.Column("decided_at", Ts, nullable=False),
+)
+
+
+# ---------------------------------------------------------------- AI 1차 검수 (WP17.4, ADR 0040)
+# 판정은 라벨이 아니다 (label_records 밖). 다섯 표 모두 추가만 한다: 0016이 0009의 dlp_append_only()와
+# 0010의 dlp_no_truncate() 트리거를 건다. 저장소는 `db.aireview_repository`. 시각 열은 Ts, 목록·사전은
+# 계약(`dlp_schema.aireview`)의 JSON 직렬화 형태로 Json 열에 넣는다.
+
+# 실행 세대 (`AiReviewRun`): 한 번의 `dlp aireview run`이 고정한 계획 기록. backend에는 엔드포인트
+# 이름만 남긴다 (URL·키 아님). render_hashes·blurred_sha256은 {스트림: 값}.
+ai_review_runs = sa.Table(
+    "ai_review_runs",
+    metadata,
+    sa.Column("run_id", sa.String(64), primary_key=True),
+    sa.Column(
+        "session_id",
+        sa.String(128),
+        sa.ForeignKey("sessions.session_id"),
+        nullable=False,
+        index=True,
+    ),
+    sa.Column("version", sa.Text(), nullable=False),
+    sa.Column("policy_digest", sa.String(12), nullable=False),
+    sa.Column("prompt_version", sa.Integer(), nullable=False),
+    sa.Column("backend", Json, nullable=False),
+    sa.Column("ontology_version", sa.String(32), nullable=False),
+    sa.Column("render_hashes", Json, nullable=False),
+    sa.Column("blurred_sha256", Json, nullable=False),
+    sa.Column("sensor_sha256", sa.String(64), nullable=False),
+    sa.Column("selection", Json, nullable=False),
+    sa.Column("plan_digest", sa.String(16), nullable=False),
+    sa.Column("planned_units", sa.Integer(), nullable=False),
+    sa.Column("requested_by", sa.String(128), nullable=True),
+    sa.Column("created_at", Ts, nullable=False),
+)
+
+# 실행 이벤트 (`AiRunEvent`): started·completed·interrupted·aborted·waived. waived는 실행 없이도 남는다
+# (run_id NULL, required 모드의 건너뛰기 결정).
+ai_review_run_events = sa.Table(
+    "ai_review_run_events",
+    metadata,
+    sa.Column(
+        "event_id",
+        sa.BigInteger().with_variant(sa.Integer(), "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    ),
+    sa.Column(
+        "session_id",
+        sa.String(128),
+        sa.ForeignKey("sessions.session_id"),
+        nullable=False,
+        index=True,
+    ),
+    sa.Column("run_id", sa.String(64), sa.ForeignKey("ai_review_runs.run_id"), nullable=True),
+    sa.Column("event", sa.String(16), nullable=False),
+    sa.Column("reason", sa.Text(), nullable=True),
+    sa.Column("counts", Json, nullable=False),
+    sa.Column("actor", sa.String(128), nullable=True),
+    sa.Column("at", Ts, nullable=False),
+    sa.CheckConstraint(
+        "event IN ('started', 'completed', 'interrupted', 'aborted', 'waived')", name="event"
+    ),
+)
+
+# 판정 단위 (`AiReviewUnit`): 계획 단위 하나 = 행 하나 (재개·감사의 기준). unit_id가 입력 전체의
+# 해시라 같은 단위는 한 번만 들어간다 (`insert_ai_units`의 ON CONFLICT DO NOTHING). 판정(ok 포함)은
+# verdicts JSON에 묶어 행 수를 줄인다. 응답 원문은 저장하지 않는다 (response_sha256만).
+# group은 SQL 예약어라 CHECK 식에서 따옴표로 감싼다.
+ai_review_units = sa.Table(
+    "ai_review_units",
+    metadata,
+    sa.Column("unit_id", sa.String(32), primary_key=True),
+    sa.Column("run_id", sa.String(64), sa.ForeignKey("ai_review_runs.run_id"), nullable=False),
+    sa.Column("session_id", sa.String(128), nullable=False),
+    sa.Column("version", sa.Text(), nullable=False),
+    sa.Column("group", sa.String(16), nullable=False),
+    sa.Column("stream_id", sa.String(128), nullable=False),
+    sa.Column("t_start_ms", sa.BigInteger(), nullable=False),
+    sa.Column("t_end_ms", sa.BigInteger(), nullable=False),
+    sa.Column("target_label_ids", Json, nullable=False),
+    sa.Column("context_label_ids", Json, nullable=False),
+    sa.Column("render_hash", sa.String(64), nullable=False),
+    sa.Column("blurred_sha256", sa.String(64), nullable=True),
+    sa.Column("sensor_sha256", sa.String(64), nullable=False),
+    sa.Column("ontology_version", sa.String(32), nullable=False),
+    sa.Column("frames", Json, nullable=False),
+    sa.Column("prompt_digest", sa.String(64), nullable=False),
+    sa.Column("outcome", sa.String(16), nullable=False),
+    sa.Column("attempts", sa.Integer(), nullable=False),
+    sa.Column("sub_requests", sa.Integer(), nullable=False),
+    sa.Column("errors", Json, nullable=False),
+    sa.Column("verdicts", Json, nullable=False),
+    sa.Column("findings", Json, nullable=False),
+    sa.Column("response_sha256", sa.String(64), nullable=True),
+    sa.Column("served_model", sa.Text(), nullable=True),
+    sa.Column("endpoint", sa.String(64), nullable=True),
+    sa.Column("prompt_tokens", sa.Integer(), nullable=True),
+    sa.Column("cached_tokens", sa.Integer(), nullable=True),
+    sa.Column("completion_tokens", sa.Integer(), nullable=True),
+    sa.Column("latency_ms", sa.Integer(), nullable=True),
+    sa.Column("created_at", Ts, nullable=False, index=True),
+    sa.CheckConstraint("t_start_ms <= t_end_ms", name="time_order"),
+    sa.CheckConstraint("\"group\" IN ('temporal', 'temporal_long', 'spatial')", name="group"),
+    sa.CheckConstraint("outcome IN ('answered', 'fallback')", name="outcome"),
+    sa.Index("ix_ai_review_units_session_version", "session_id", "version"),
+)
+
+# 검수 작업 노출 (`AiExposure`): 작업 생성 때 무엇을 보였는가 (작업마다 한 번, 작업 키가 기본 키).
+# shown·hidden은 {라벨 ID: 단위 ID}. 회수한 작업의 노출도 지우지 않는다 (ID만 담는다).
+ai_review_exposures = sa.Table(
+    "ai_review_exposures",
+    metadata,
+    sa.Column(
+        "task_key", sa.String(128), sa.ForeignKey("review_tasks.task_key"), primary_key=True
+    ),
+    sa.Column("session_id", sa.String(128), nullable=False, index=True),
+    sa.Column("assignment_id", sa.String(128), nullable=True),
+    sa.Column("arm", sa.String(16), nullable=False),
+    sa.Column("arm_key", sa.String(128), nullable=False),
+    sa.Column("versions", Json, nullable=False),
+    sa.Column("render_hash", sa.String(64), nullable=True),
+    sa.Column("coverage", sa.Float(), nullable=False),
+    sa.Column("shown", Json, nullable=False),
+    sa.Column("hidden", Json, nullable=False),
+    sa.Column("created_at", Ts, nullable=False, index=True),
+    sa.CheckConstraint(
+        "arm IN ('shown', 'holdout', 'no_verdicts', 'mode_excluded', 'off')", name="arm"
+    ),
+)
+
+# 사람 결과와 AI의 연결 (`AiOutcome`): 수집 때 작업마다 한 번 (작업 키가 기본 키).
+ai_review_outcomes = sa.Table(
+    "ai_review_outcomes",
+    metadata,
+    sa.Column(
+        "task_key", sa.String(128), sa.ForeignKey("review_tasks.task_key"), primary_key=True
+    ),
+    sa.Column("session_id", sa.String(128), nullable=False, index=True),
+    sa.Column("reviewer_id", sa.String(128), nullable=True),
+    sa.Column("collected_at", Ts, nullable=False, index=True),
+    sa.Column("items", Json, nullable=False),
+    sa.Column("warnings", Json, nullable=False),
 )

@@ -18,7 +18,8 @@
     - 자료형: `ChatImage`, `ChatTurn`, `ChatRequest`, `ChatReply`.
     - 순수 함수: `chat_body`(요청 본문), `parse_reply`(응답 해석), `encode_jpeg`(RGB → JPEG).
     - 재시도: `with_backoff`(장애만), `ask_validated`(응답 위반 → 위반 목록을 붙여 다시 묻기).
-    - 클라이언트: `OpenAICompatibleChat` (`/v1/chat/completions`, `/v1/models`, `/tokenize`).
+    - 클라이언트: `OpenAICompatibleChat` (`/v1/chat/completions`, `/v1/models`, `/tokenize`,
+      `/version`).
 
 주의
     - 요청 본문은 `httpx`의 `json=` 직렬화를 그대로 쓴다. 행동 단계의 요청 바이트가 리팩토링 전과
@@ -422,12 +423,40 @@ class OpenAICompatibleChat:
         Raises:
             VlmUnavailableError: 장애·형식 오류. VlmRequestError: 4xx.
         """
+        return [str(m["id"]) for m in self.model_entries()]
+
+    def model_entries(self) -> list[dict[str, Any]]:
+        """`/v1/models`의 항목 원본 (id와 서버가 주는 그 밖의 값, 예: vLLM `max_model_len`).
+
+        Raises:
+            VlmUnavailableError: 장애·형식 오류 (항목에 id가 없을 때 포함). VlmRequestError: 4xx.
+        """
         resp = self._send("GET", "/v1/models")
         try:
             data: Any = resp.json()
-            return [str(m["id"]) for m in data["data"]]
+            entries: list[dict[str, Any]] = [dict(m) for m in data["data"]]
         except (ValueError, KeyError, TypeError) as exc:
             raise VlmUnavailableError(f"/v1/models 형식 오류: {exc}") from exc
+        if not all("id" in m for m in entries):
+            raise VlmUnavailableError("/v1/models 형식 오류: id 없는 항목")
+        return entries
+
+    def server_version(self) -> str | None:
+        """서버 엔진 버전 (vLLM `GET /version`의 version). 없으면(4xx·형식 다름) None.
+
+        Raises:
+            VlmUnavailableError: 장애.
+        """
+        try:
+            resp = self._send("GET", "/version")
+        except VlmRequestError:
+            return None
+        try:
+            data: Any = resp.json()
+        except ValueError:
+            return None
+        version = _field(data, "version")
+        return version if isinstance(version, str) else None
 
     def tokenize(self, text: str) -> int | None:
         """서버 `/tokenize`(vLLM)로 글의 토큰 수를 센다. 서버에 없으면(404 등 4xx) None.

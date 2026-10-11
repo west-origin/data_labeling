@@ -10,8 +10,11 @@
   외부 백엔드(외부 API)는 쓰지 않는다 (`server.allow_external`는 false만 허용, 별도 ADR 필요).
 - CPU·CI용 stub은 `dlp_aireview.oracle.OracleJudge`.
 
-여러 엔드포인트 묶음·차단기(`EndpointPool`)와 사내 주소 검사(`check_hosts`)는 실행기와 함께
-WP17.5에서 더한다.
+- `parse_endpoints`: `--vlm-url`·`DLP_VLM_URLS`(`이름=URL,…`) → 엔드포인트 이름 → URL.
+- `check_hosts`: 주소가 사내 대역(`server.internal_hosts`) 안인지 (호스트 이름은 DNS로 풀어 모든 주소를
+  본다, I7). 벤치·점검·실행 모두 보내기 전에 부른다.
+
+여러 엔드포인트 묶음·차단기(`EndpointPool`)는 실행기와 함께 WP17.5에서 더한다.
 
 판정은 `LabelRecord`를 내지 않으므로 `dlp_schema.predictor.Predictor`가 아니다. "어댑터 + CPU stub"
 규칙은 `JudgeBackend` + `OracleJudge`로 지킨다.
@@ -19,9 +22,13 @@ WP17.5에서 더한다.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import ipaddress
+import re
+import socket
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -193,3 +200,77 @@ class OpenAICompatibleJudge:
             completion_tokens=reply.completion_tokens,
             latency_ms=reply.latency_ms,
         )
+
+
+# 엔드포인트 이름 (기록 열 endpoint VARCHAR(64), 진행률 표시용 짧은 이름)
+_ENDPOINT_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+# 주소 풀기 함수 (테스트에서 바꾼다): socket.getaddrinfo와 같은 모양
+Resolver = Callable[[str, int | None], Sequence[tuple[Any, ...]]]
+
+
+def parse_endpoints(specs: Iterable[str]) -> dict[str, str]:
+    """엔드포인트 지정 → {이름: URL} (순서 유지).
+
+    각 지정은 쉼표로 여러 개를 담을 수 있고, 항목은 `이름=URL` 또는 `URL`이다. 이름이 없으면
+    `vlm-01`, `vlm-02`, … 순번을 붙인다 (`DLP_VLM_URLS="spark-01=http://10.0.0.11:8000,…"`,
+    `--vlm-url URL`을 여러 번).
+
+    Raises:
+        ValueError: 빈 URL, http(s)가 아닌 주소, 잘못된 이름, 이름 중복.
+    """
+    out: dict[str, str] = {}
+    items = [x.strip() for spec in specs for x in spec.split(",") if x.strip()]
+    for k, item in enumerate(items, start=1):
+        name, sep, url = item.partition("=")
+        if not sep or "://" in name:
+            name, url = f"vlm-{k:02d}", item
+        name, url = name.strip(), url.strip().rstrip("/")
+        if not _ENDPOINT_NAME.match(name):
+            raise ValueError(f"엔드포인트 이름이 올바르지 않습니다: {name!r}")
+        if urlsplit(url).scheme not in ("http", "https") or not urlsplit(url).hostname:
+            raise ValueError(f"http(s) 주소가 아닙니다: {name}")
+        if name in out:
+            raise ValueError(f"엔드포인트 이름이 중복됩니다: {name}")
+        out[name] = url
+    return out
+
+
+def _addresses(host: str, resolve: Resolver) -> list[str]:
+    """호스트 → IP 주소 목록 (IP 글자면 그대로, 이름이면 DNS로 모두 푼다)."""
+    try:
+        return [str(ipaddress.ip_address(host))]
+    except ValueError:
+        pass
+    return sorted({str(info[4][0]) for info in resolve(host, None)})
+
+
+def check_hosts(
+    endpoints: Mapping[str, str],
+    internal_hosts: Sequence[str],
+    *,
+    resolve: Resolver = socket.getaddrinfo,
+) -> list[str]:
+    """사내 대역 밖 엔드포인트의 설명 목록 (비면 모두 사내). I7: 외부 서버로 보내지 않는다.
+
+    호스트 이름이면 DNS로 풀어 나온 **모든** 주소가 사내 대역 안이어야 한다 (하나라도 밖이면
+    위반). 풀리지 않는 이름도 위반이다. 설명에는 엔드포인트 이름과 주소만 넣는다 (URL의 키·경로는
+    넣지 않는다).
+
+    Args:
+        endpoints: {이름: URL}.
+        internal_hosts: 사내 대역 CIDR (`aireview.yaml server.internal_hosts`).
+        resolve: 주소 풀기 함수 (테스트용).
+    """
+    networks = [ipaddress.ip_network(n, strict=False) for n in internal_hosts]
+    problems: list[str] = []
+    for name, url in endpoints.items():
+        host = urlsplit(url).hostname or ""
+        try:
+            addresses = _addresses(host, resolve)
+        except OSError:
+            problems.append(f"{name}: 호스트 {host}의 주소를 풀 수 없습니다")
+            continue
+        outside = [a for a in addresses if not any(ipaddress.ip_address(a) in n for n in networks)]
+        if not addresses or outside:
+            problems.append(f"{name}: 사내 대역 밖 주소 {', '.join(outside) or host}")
+    return problems

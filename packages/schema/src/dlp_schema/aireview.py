@@ -15,7 +15,9 @@
       `AiHumanAction`, `AiApplyResult`.
     - 판정: `AiSuggestion`, `AiVerdict`, `AiFinding`, `AiFrameRef`.
     - 기록(표와 1:1): `AiReviewUnit`, `AiReviewRun`, `AiRunEvent`, `AiExposure`, `AiOutcomeItem`,
-      `AiOutcome`. 표·저장소는 WP17.4에서 만든다.
+      `AiOutcome`. 표는 `db.tables`의 ai_review_* (Alembic 0016, 추가 전용), 저장소는
+      `db.aireview_repository`.
+    - `AI_REVIEWER_PREFIX`: AI 판정 실행자 접두사. 이 검수자 ID로는 검수 상태를 기록할 수 없다.
     - 순수 함수: `worst`(한 라벨의 여러 판정 중 가장 나쁜 것), `valid_verdicts`(지금 유효한 판정).
 
 주의
@@ -49,6 +51,9 @@ AiLabelKind = Literal[
 ]  # fmt: skip
 # 이유 최대 글자 수 (정책 response.reason_max_chars의 상한)
 REASON_MAX = 60
+# AI 판정 실행자 표시 접두사. 이 접두사의 검수자 ID로는 검수 상태를 기록하지 않는다 (I3: AI 판정은
+# 검수가 아니다. `db.repository.record_review`·`insert_labels`가 거부한다).
+AI_REVIEWER_PREFIX = "aireview:"
 
 
 class AiVerdictValue(StrEnum):
