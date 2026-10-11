@@ -11,6 +11,9 @@
 - 매체 회수(ADR 0039)가 끝나지 않은 작업이 없고, 렌더 해시가 지금 블러본과 다른데 회수 요청이 없는
   작업도 없다 (렌더 해시가 없는 구 작업은 이 판정에서 빼 기존 세션을 갑자기 막지 않는다).
 - 열린 검수 배정(review_assignments.status=open)이 없다. 회수돼 다시 만들어야 할 배정은 따로 알린다.
+- 배정 없이 만든 직접 작업이 열린 채 회수됐으면(status=revoked) 그 뒤 같은 담당자·스트림·도구로
+  다시 만든 작업이 있다. 회수 전에는 열린 작업이 완료를 막았으므로 회수가 그 조건을 조용히 풀지
+  않게 한다.
 - 블러를 뺀 현재 운영 라벨 중 모델 라벨은 모두 사람 검수 상태다
   (human_approved, human_corrected, sample_verified). 사람이 만든 라벨은 그 자체로 검수된 것이다.
 - 블러를 뺀 현재 운영 라벨이 하나 이상 있다 (빈 세션은 완료가 아니다).
@@ -45,7 +48,7 @@ from dlp_schema.db.repository import (
 )
 from dlp_schema.episode import current_labels
 from dlp_schema.labels import Source, VerificationState
-from dlp_schema.review import AssignmentStatus, ReviewTaskStatus
+from dlp_schema.review import AssignmentStatus, ReviewAssignment, ReviewTask, ReviewTaskStatus
 from dlp_schema.session import LifecycleState, PrivacyState
 
 # 모델 라벨이 "사람이 확인했다"고 볼 수 있는 검증 상태.
@@ -96,13 +99,7 @@ def verification_gaps(
         conn, session_id, privacy_policy or load_privacy_policy(repo_root())
     )
     open_assignments = list_assignments(conn, session_id, status=AssignmentStatus.OPEN)
-    revoked = {t.task_key for t in tasks if t.status is ReviewTaskStatus.REVOKED}
-    reissue = [a.assignment_id for a in open_assignments if a.task_key in revoked]
-    if reissue:
-        reasons.append(
-            f"회수돼 다시 만들 배정 {len(reissue)}개 "
-            f"(재승인·렌더 뒤 dlp review assign {' '.join(reissue[:3])})"
-        )
+    reasons += _reissue_gaps(session_id, tasks, open_assignments)
     if open_assignments:
         reasons.append(f"열린 검수 배정 {len(open_assignments)}개")
     # 블러 라벨은 블러 승인(privacy_state)으로 따로 판정하므로 라벨 조건에서 뺀다.
@@ -117,6 +114,59 @@ def verification_gaps(
     ]
     if pending:
         reasons.append(f"검수하지 않은 모델 라벨 {len(pending)}개 (예: {pending[0]})")
+    return reasons
+
+
+def _direct_reissue(tasks: list[ReviewTask]) -> list[tuple[str, str, str]]:
+    """다시 만들어야 할 직접 작업의 (담당자, 스트림, 도구), 처음 나온 순.
+
+    배정 없이 만든 작업이 열린 채 회수됐고(status=revoked, 수집한 작업은 결과가 이미 이력에 있다),
+    회수 요청 뒤 같은 담당자·스트림·도구로 만든 회수 요청 없는 직접 작업이 없는 것.
+    수집 출력의 `direct_reissue`(`collect._note_revocations`)와 같은 기준이다.
+    """
+
+    def who(t: ReviewTask) -> tuple[str, str, str]:
+        return (t.assignee or "unassigned", t.stream_id, t.tool.value)
+
+    out: list[tuple[str, str, str]] = []
+    for t in tasks:
+        at = t.revoke_requested_at
+        if t.status is not ReviewTaskStatus.REVOKED or t.assignment_id is not None or at is None:
+            continue
+        renewed = any(
+            n.assignment_id is None
+            and n.revoke_requested_at is None
+            and n.stage is t.stage
+            and who(n) == who(t)
+            and n.created_at >= at
+            for n in tasks
+        )
+        if not renewed and who(t) not in out:
+            out.append(who(t))
+    return out
+
+
+def _reissue_gaps(
+    session_id: str, tasks: list[ReviewTask], open_assignments: list[ReviewAssignment]
+) -> list[str]:
+    """회수돼 다시 만들어야 할 일의 이유 문장: 회수한 작업에 딸린 열린 배정, 다시 만들지 않은
+    직접 작업 (ADR 0039)."""
+    reasons: list[str] = []
+    revoked = {t.task_key for t in tasks if t.status is ReviewTaskStatus.REVOKED}
+    reissue = [a.assignment_id for a in open_assignments if a.task_key in revoked]
+    if reissue:
+        reasons.append(
+            f"회수돼 다시 만들 배정 {len(reissue)}개 "
+            f"(재승인·렌더 뒤 dlp review assign {' '.join(reissue[:3])})"
+        )
+    direct = _direct_reissue(tasks)
+    if direct:
+        commands = "; ".join(
+            f"dlp review create {session_id} --stage labeling --assignee {who} --stream {stream} "
+            f"--tool {tool}"
+            for who, stream, tool in direct[:2]
+        )
+        reasons.append(f"회수돼 다시 만들 직접 작업 {len(direct)}개 (재승인·렌더 뒤 {commands})")
     return reasons
 
 

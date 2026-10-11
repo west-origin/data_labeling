@@ -30,7 +30,7 @@ from dlp_privacy.policy import load_policy as load_privacy_policy
 from dlp_privacy.runner import operational_blur, render_hash, request_media_revocation
 from dlp_review import collect as collect_module
 from dlp_review import tasks as tasks_module
-from dlp_review.clients import ToolError
+from dlp_review.clients import TaskOwner, ToolError
 from dlp_review.collect import collect_task
 from dlp_review.ops.results import finish_assignment
 from dlp_review.reconcile import ReviewedItem
@@ -39,11 +39,13 @@ from dlp_review.tasks import (
     ReviewSetup,
     TaskError,
     create_labeling_tasks,
+    labeling_media_key,
     lock_assignment,
     proxy_key,
 )
 from dlp_review.verify import verification_gaps
 from dlp_schema import load_ontology, repo_root
+from dlp_schema.db import repository
 from dlp_schema.db.repository import (
     get_assignment,
     get_labels,
@@ -194,8 +196,10 @@ def seven(
     body, third = _current(engine, policy, "bodycam"), _current(engine, policy, "third")
 
     def media(who: str, stream: str, rhash: str | None) -> str:
-        suffix = f"-{rhash[:16]}" if rhash else ""
-        return _put_media(labeling, f"{REVIEW}/{who}/{stream}{suffix}.mp4", tmp_path)
+        # 작업 생성과 같은 키 함수 (해시 글자 수를 실행기와 공유한다). 구 작업은 해시 없는 키
+        legacy = f"{REVIEW}/{who}/{stream}.mp4"
+        key = labeling_media_key(SID, who, stream, rhash) if rhash else legacy
+        return _put_media(labeling, key, tmp_path)
 
     lab, cvat, ls = ReviewStage.LABELING, ReviewTool.CVAT, ReviewTool.LABEL_STUDIO
     shared = media("labeler02", "bodycam", body)
@@ -308,6 +312,26 @@ def test_shared_media_is_requested_with_its_reason(
     assert _status(engine, "label_studio:3").revoke_reason == "manual:ops:x"
 
 
+def test_named_tasks_are_requested_alone_even_when_others_are_stale(
+    engine: sa.Engine, seven: dict[str, ReviewTask], policy: PrivacyPolicy
+) -> None:
+    """수동 선택(task_keys)은 지정한 작업(과 같은 매체 작업)만 고른다. 낡은 작업을 섞지 않는다.
+
+    낡은 작업을 함께 고르면 그 사유가 사고 대응 수동 요청(`manual:…`)으로 잘못 남는다. 낡은 작업은
+    따로 sweep으로 요청해 사유가 `sweep`으로 남는다 (`dlp review revoke`가 그렇게 부른다).
+    """
+    with engine.begin() as conn:
+        insert_labels(conn, [_face()])  # 바디캠 작업이 낡았다
+        got = request_media_revocation(
+            conn, SID, policy, NOW, reason="manual:ops:x", task_keys=("cvat:4",)
+        )
+        assert [t.task_key for t in got] == ["cvat:4"]
+        swept = request_media_revocation(conn, SID, policy, NOW, reason="sweep")
+    assert sorted(t.task_key for t in swept) == ["cvat:2", "cvat:5", "cvat:7", "label_studio:3"]
+    assert _status(engine, "cvat:4").revoke_reason == "manual:ops:x"
+    assert _status(engine, "cvat:2").revoke_reason == "sweep"
+
+
 # ── 실행기 ──
 
 
@@ -357,13 +381,34 @@ class NoDeleteStore:
         self.inner.get_file(key, dest)
 
 
+# seven 픽스처 작업의 도구 쪽 주인 (CVAT는 작업 이름 `<세션>/<스트림>/<담당자>`, LS는 스트림 없음)
+SEVEN_OWNERS: dict[str, dict[int, TaskOwner]] = {
+    "cvat": {
+        i: TaskOwner(SID, stream, who, f"{SID}/{stream}/{who}")
+        for i, stream, who in (
+            (1, "bodycam", "privacy"),
+            (2, "bodycam", "labeler01"),
+            (4, "third", "labeler01"),
+            (5, "bodycam", "labeler03"),
+            (6, "bodycam", "labeler04"),
+            (7, "bodycam", "labeler02"),
+        )
+    },
+    "ls": {3: TaskOwner(SID, None, "labeler02", "s001/labeler02")},
+}
+
+
 class FakeTool:
-    """호출을 기록하는 가짜 도구. tasks: 살아 있는 작업 ID. fail: 동작 → 남은 실패 횟수."""
+    """호출을 기록하는 가짜 도구. tasks: 살아 있는 작업 ID. fail: 동작 → 남은 실패 횟수.
+
+    owners: 작업 ID → 도구에 저장된 주인 (기본은 seven 픽스처와 같다).
+    """
 
     def __init__(self, name: str, calls: Calls, tasks: set[int]) -> None:
         self.name, self.calls, self.tasks = name, calls, tasks
         self.fail: dict[str, int] = {}
         self.undeletable: set[int] = set()
+        self.owners = dict(SEVEN_OWNERS[name])
 
     def _maybe_fail(self, op: str) -> None:
         if self.fail.get(op, 0) > 0:
@@ -372,6 +417,10 @@ class FakeTool:
 
     def task_exists(self, task_id: int) -> bool:
         return task_id in self.tasks
+
+    def task_owner(self, task_id: int) -> TaskOwner:
+        self.calls.append((self.name, "owner", str(task_id)))
+        return self.owners.get(task_id, TaskOwner(None, None, None, "?"))
 
     def task_snapshot(self, task_id: int) -> dict[str, Any]:
         self.calls.append((self.name, "snapshot", str(task_id)))
@@ -438,8 +487,8 @@ def test_executor_deletes_media_before_tools_in_order(
     assert all(c[0] == "s3" for c in calls[:first_tool]) and len(calls[:first_tool]) == 4
     for tid in ("2", "5", "6", "7"):
         mine = [c[1] for c in calls if c[0] == "cvat" and c[2] == tid]
-        assert mine == ["unassign", "snapshot", "delete"]
-    assert [c[1] for c in calls if c[0] == "ls"] == ["snapshot", "delete"]
+        assert mine == ["owner", "unassign", "snapshot", "delete"]
+    assert [c[1] for c in calls if c[0] == "ls"] == ["owner", "snapshot", "delete"]
     assert cvat.tasks == {1, 4} and ls.tasks == set()
     for t in (seven["body_a"], seven["body_ls"], seven["legacy"]):
         assert labeling.head(t.media_uri.removeprefix(labeling.uri(""))) is None
@@ -497,7 +546,8 @@ def test_snapshot_failure_still_deletes_and_lingering_task_stays_pending(
     report = _run(engine, RecordingStore(labeling, calls), cvat, ls)
     assert len(report.warnings) == 4
     assert cvat.tasks == {7} and report.pending == ["cvat:7"]
-    assert [c[1] for c in calls if c[0] == "ls"] == []  # 없는 작업은 스냅숏·삭제를 부르지 않는다
+    # 없는 작업은 주인 확인·스냅숏·삭제를 부르지 않는다
+    assert [c[1] for c in calls if c[0] == "ls"] == []
 
 
 def test_executor_refuses_to_delete_when_any_precheck_fails(
@@ -547,6 +597,42 @@ def test_executor_refuses_to_delete_when_any_precheck_fails(
     assert [c for c in calls if c[0] == "s3"] == []
     assert len([e for e in report.errors if e.startswith("[매체 노출 남음]")]) == 4
     assert len(report.pending) == 5
+
+
+def test_executor_never_deletes_a_tool_task_owned_by_another_row(
+    engine: sa.Engine,
+    seven: dict[str, ReviewTask],
+    stores: tuple[LocalStore, LocalStore],
+    policy: PrivacyPolicy,
+) -> None:
+    """도구 작업의 주인이 작업 행과 다르면 배정 해제·스냅숏·삭제를 하지 않고 대기로 남긴다.
+
+    시나리오: CVAT·LS 인스턴스를 새로 만들고 DB는 남겼다. 같은 번호 2·3이 다른 세션·라벨러의 진행
+    중 작업이다 (CVAT 이름 `s999/bodycam/labeler09`, LS data의 담당자 다름). 매체 사본은 지운다
+    (라벨링 버킷은 그대로라 그 판정은 따로다). 운영자가 원래 작업이 없어진 것을 확인해
+    `mark_tool_gone`으로 표시하면 대기가 끝난다. 주인이 같은 작업(5·6·7)은 평소처럼 지운다.
+    """
+    _, labeling = stores
+    _requested(engine, policy)
+    calls = Calls()
+    cvat = FakeTool("cvat", calls, {2, 5, 6, 7})
+    cvat.owners[2] = TaskOwner("s999", "bodycam", "labeler09", "s999/bodycam/labeler09")
+    ls = FakeTool("ls", calls, {3})
+    ls.owners[3] = TaskOwner(SID, None, "labeler77", "s001/labeler77")
+    report = _run(engine, RecordingStore(labeling, calls), cvat, ls)
+    assert [c[1] for c in calls if c[2] == "2" and c[0] == "cvat"] == ["owner"]
+    assert [c[1] for c in calls if c[0] == "ls"] == ["owner"]
+    assert cvat.tasks == {2} and ls.tasks == {3}
+    assert sorted(report.pending) == ["cvat:2", "label_studio:3"]
+    assert any("s999/bodycam/labeler09" in e and "--mark-tool-gone" in e for e in report.errors)
+    assert _status(engine, "cvat:2").media_revoked_at == NOW  # 매체는 끊었다
+    assert _status(engine, "cvat:2").tool_revoked_at is None
+    assert labeling.head(snapshot_key(seven["body_a"])) is None  # 남의 작업은 스냅숏도 없다
+    with engine.begin() as conn:
+        for key in ("cvat:2", "label_studio:3"):
+            assert mark_tool_gone(conn, key, note="CVAT·LS 재설치", actor="ops", now=NOW)
+    assert _run(engine, labeling, cvat, ls).complete
+    assert cvat.tasks == {2} and ls.tasks == {3}  # 남의 작업은 끝까지 그대로
 
 
 def test_mark_tool_gone_needs_note_and_records_actor(
@@ -693,7 +779,7 @@ def test_create_labeling_tasks_refuses_pending_revocation_before_tools(
     """
     raw, labeling = stores
     locks: list[str] = []
-    real_lock = tasks_module.lock_session
+    real_lock = repository.lock_session
 
     def spy(conn: sa.Connection, session_id: str) -> None:
         locks.append(session_id)
@@ -762,6 +848,58 @@ def test_verification_gaps_report_revocation_work(
         r.startswith("회수돼 다시 만들 배정 1개") and "dlp review assign A" in r for r in got
     )
     assert not any(r.startswith("블러가 바뀐 뒤") for r in got)
+
+
+def test_verification_waits_for_reissue_of_revoked_direct_tasks(
+    engine: sa.Engine,
+    seven: dict[str, ReviewTask],
+    stores: tuple[LocalStore, LocalStore],
+    tmp_path: Path,
+    policy: PrivacyPolicy,
+) -> None:
+    """배정 없이 만든 열린 작업이 회수되면, 같은 담당자·스트림·도구로 다시 만들 때까지 완료가
+    아니다.
+
+    회수 전에는 그 열린 작업이 완료를 막았다 (수거하지 않은 작업). 회수가 이 조건을 조용히 풀면
+    재검수 없이 검수 완료로 넘어간다. seven에서 열린 직접 작업은 label_studio:3·cvat:7
+    (labeler02)이다. 회수 요청 전에 만든 작업은 다시 만든 것으로 보지 않는다.
+    """
+    _, labeling = stores
+    _requested(engine, policy)
+
+    def direct() -> list[str]:
+        with engine.connect() as conn:
+            return [
+                r
+                for r in verification_gaps(conn, SID, policy)
+                if r.startswith("회수돼 다시 만들 직접 작업")
+            ]
+
+    [reason] = direct()
+    assert reason.startswith("회수돼 다시 만들 직접 작업 2개")
+    for tool in ("label_studio", "cvat"):
+        assert (
+            f"dlp review create {SID} --stage labeling --assignee labeler02 --stream bodycam "
+            f"--tool {tool}"
+        ) in reason
+    current = _current(engine, policy, "bodycam")
+    uri = _put_media(labeling, labeling_media_key(SID, "labeler02", "bodycam", current), tmp_path)
+
+    def renewed(key: str, tool: ReviewTool, at: Any) -> ReviewTask:
+        made = _task(key, tool, "bodycam", ReviewStage.LABELING, uri, render_hash=current,
+                     assignee="labeler02")  # fmt: skip
+        return made.model_copy(update={"created_at": at})
+
+    with engine.begin() as conn:
+        # 회수 요청(NOW)보다 먼저 만든 작업은 다시 만든 작업이 아니다
+        insert_review_task(conn, renewed("cvat:8", ReviewTool.CVAT, FIXED_TIME))
+    assert direct()[0].startswith("회수돼 다시 만들 직접 작업 2개")
+    with engine.begin() as conn:
+        insert_review_task(conn, renewed("label_studio:9", ReviewTool.LABEL_STUDIO, NOW))
+    assert direct()[0].startswith("회수돼 다시 만들 직접 작업 1개")
+    with engine.begin() as conn:
+        insert_review_task(conn, renewed("cvat:9", ReviewTool.CVAT, NOW))
+    assert direct() == []
 
 
 def test_verification_ignores_legacy_tasks_without_hash(

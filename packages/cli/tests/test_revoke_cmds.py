@@ -24,9 +24,9 @@ from dlp_cli.review_config import REVOCATION_PENDING_EXIT
 from dlp_media.storage import LocalStore, sha256_file
 from dlp_privacy.pipeline import StreamResult
 from dlp_privacy.policy import load_policy as load_privacy_policy
-from dlp_privacy.runner import render_hash
+from dlp_privacy.runner import render_hash, request_media_revocation
 from dlp_review.revoke import RevocationReport
-from dlp_review.tasks import ReviewSetup
+from dlp_review.tasks import ReviewSetup, labeling_media_key
 from dlp_schema import load_ontology, repo_root
 from dlp_schema.db.repository import (
     get_review_task,
@@ -90,14 +90,18 @@ def _labeling(tmp_path: Path) -> LocalStore:
     return LocalStore(tmp_path / "store", "dlp-labeling")
 
 
-def _media(tmp_path: Path, sid: str, name: str) -> str:
-    """라벨링 버킷에 워터마크 사본을 둔다. URI."""
+def _media_at(tmp_path: Path, key: str) -> str:
+    """라벨링 버킷의 key에 워터마크 사본을 둔다. URI."""
     store = _labeling(tmp_path)
     src = tmp_path / "m.bin"
     src.write_bytes(b"marked")
-    key = f"sessions/{sid}/review/labeler01/{name}.mp4"
     store.put_file(key, src, sha256_file(src))
     return store.uri(key)
+
+
+def _media(tmp_path: Path, sid: str, name: str) -> str:
+    """labeler01의 워터마크 사본 `sessions/<세션>/review/labeler01/<name>.mp4`. URI."""
+    return _media_at(tmp_path, f"sessions/{sid}/review/labeler01/{name}.mp4")
 
 
 def _task(key: str, sid: str, uri: str, rhash: str | None) -> ReviewTask:
@@ -107,6 +111,14 @@ def _task(key: str, sid: str, uri: str, rhash: str | None) -> ReviewTask:
         stream_id="bodycam", stage=ReviewStage.LABELING, media_uri=uri,
         label_kinds=("box_track",), created_at=FIXED_TIME, render_hash=rhash, assignee="labeler01",
     )  # fmt: skip
+
+
+def _privacy_task(key: str, sid: str, tmp_path: Path) -> ReviewTask:
+    """블러 검수 작업 (원본 프록시 URI, 회수 대상 아님)."""
+    raw = LocalStore(tmp_path / "store", "dlp-raw")
+    return _task(key, sid, raw.uri(f"sessions/{sid}/derived/bodycam.proxy.mp4"), None).model_copy(
+        update={"stage": ReviewStage.PRIVACY, "label_kinds": ("blur_track",)}
+    )
 
 
 def _face(sid: str = "s001", label_id: str = "b-new") -> Any:
@@ -164,6 +176,50 @@ def test_collect_runs_revocations_after_commit_and_exits_4_when_pending(
     assert run.call_args.args[1:] == ("s001", setup)
 
 
+def test_collect_requests_in_transaction_and_revokes_media_after_commit(
+    url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """블러 수집의 회수 요청이 커밋된 뒤 실제 실행기가 돌아 라벨링 버킷 사본을 지운다.
+
+    실행기는 별도 연결로 커밋된 요청만 본다. `run_revocations`를 수집 트랜잭션 안에서 부르면 요청이
+    아직 보이지 않아 사본이 남고(다음 cron까지 노출), 이 시험이 실패한다.
+    """
+    uri = _media(tmp_path, "s001", "bodycam")
+    with _engine(url).begin() as conn:
+        insert_review_task(conn, _privacy_task("cvat:1", "s001", tmp_path))
+        insert_review_task(conn, _task("cvat:2", "s001", uri, None))
+    policy = load_privacy_policy(repo_root())
+
+    def collect(conn: sqlalchemy.Connection, *_: Any) -> Any:
+        """블러 검수 수집 대역: 얼굴을 더하고 같은 트랜잭션에서 회수를 요청한다."""
+        insert_labels(conn, [_face()])
+        request_media_revocation(
+            conn, "s001", policy, NOW, reason="blur_changed:cvat:1", streams={"bodycam"},
+            legacy=True,
+        )  # fmt: skip
+        return None
+
+    seen: list[bool] = []
+    real_run = review_config.run_revocations
+
+    def run(engine: sqlalchemy.Engine, sid: str | None, *a: Any, **kw: Any) -> RevocationReport:
+        # 다른 엔진(다른 연결)에서 요청이 보여야 커밋 뒤다
+        with _engine(url).connect() as conn:
+            seen.append(get_review_task(conn, "cvat:2").revoke_requested_at is not None)
+        return real_run(engine, sid, *a, **kw)
+
+    monkeypatch.setattr(review_cmds, "_setup", Mock(return_value=_local_setup(tmp_path)))
+    monkeypatch.setattr(review_cmds, "collect_task", collect)
+    monkeypatch.setattr(review_cmds, "run_revocations", run)
+    args = argparse.Namespace(task_key="cvat:1", reviewer="privacy01", url=url)
+    assert review_cmds.cmd_collect(args) == REVOCATION_PENDING_EXIT  # CVAT 클라이언트 없음
+    assert seen == [True]
+    with _engine(url).connect() as conn:
+        task = get_review_task(conn, "cvat:2")
+    assert task.media_revoked_at is not None and task.tool_revoked_at is None
+    assert _labeling(tmp_path).head("sessions/s001/review/labeler01/bodycam.mp4") is None
+
+
 def test_revoke_dry_run_writes_nothing_and_estimates_legacy(
     url: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -186,6 +242,83 @@ def test_revoke_requires_reason_for_task_and_all(url: str) -> None:
     """`--task`·`--all`은 사유 없이 쓰지 않는다 (사고 대응 기록)."""
     with pytest.raises(SystemExit, match="--reason"):
         review_cmds.cmd_revoke(_revoke_args(url, session_id="s001", all=True))
+
+
+def test_revoke_dry_run_never_writes_with_pending_or_mark_tool_gone(
+    url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--pending --dry-run`은 대기만 보이고 지우지 않는다. `--mark-tool-gone`은 `--dry-run`과 함께
+    쓸 수 없다 (함께 쓰면 실제로 표시돼 노출이 남은 채 대기에서 빠질 수 있었다)."""
+    with _engine(url).begin() as conn:
+        insert_review_task(conn, _task("cvat:2", "s001", _media(tmp_path, "s001", "bodycam"), None))
+        request_task_revocation(conn, "cvat:2", reason="sweep", at=NOW)
+    no_setup = Mock(side_effect=AssertionError("미리보기는 저장소·도구 설정을 만들지 않는다"))
+    monkeypatch.setattr(review_config, "review_setup", no_setup)
+    assert review_cmds.cmd_revoke(_revoke_args(url, pending=True, dry_run=True)) == 0
+    out = capsys.readouterr().out
+    assert "cvat:2" in out and "매체·도구" in out and "회수 대기 1개 (쓰지 않음)" in out
+    gone = _revoke_args(url, mark_tool_gone="cvat:2", note="CVAT 폐기", dry_run=True)
+    with pytest.raises(SystemExit, match="--dry-run"):
+        review_cmds.cmd_revoke(gone)
+    with pytest.raises(SystemExit, match="--stream"):
+        review_cmds.cmd_revoke(_revoke_args(url, pending=True, stream=["bodycam"]))
+    with _engine(url).connect() as conn:
+        task = get_review_task(conn, "cvat:2")
+    assert task.media_revoked_at is None and task.tool_revoked_at is None
+    assert _labeling(tmp_path).head("sessions/s001/review/labeler01/bodycam.mp4") is not None
+
+
+def test_revoke_task_refuses_keys_it_cannot_request(
+    url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--task`가 다른 세션·없는 작업·블러 검수 작업이면 아무것도 쓰지 않고 거부한다.
+
+    예전에는 조용히 빠져 출력 없이 0으로 끝나, 사고 대응 운영자가 회수됐다고 오해할 수 있었다.
+    이미 회수 요청된 작업은 그렇다고 알리고 실행을 계속한다.
+    """
+    with _engine(url).begin() as conn:
+        insert_review_task(conn, _task("cvat:2", "s001", _media(tmp_path, "s001", "a"), None))
+        insert_review_task(conn, _task("cvat:3", "s002", _media(tmp_path, "s002", "a"), None))
+        insert_review_task(conn, _privacy_task("cvat:4", "s001", tmp_path))
+    bad_keys = {"cvat:3": "세션 s002의 작업", "cvat:9": "없는 작업", "cvat:4": "블러 검수"}
+    for bad, why in bad_keys.items():
+        args = _revoke_args(url, session_id="s001", task=["cvat:2", bad], reason="incident")
+        with pytest.raises(SystemExit, match=why):
+            review_cmds.cmd_revoke(args)
+        with pytest.raises(SystemExit, match=why):
+            review_cmds.cmd_revoke(argparse.Namespace(**{**vars(args), "dry_run": True}))
+    with _engine(url).connect() as conn:
+        for key in ("cvat:2", "cvat:3"):
+            assert get_review_task(conn, key).revoke_requested_at is None
+    with _engine(url).begin() as conn:
+        request_task_revocation(conn, "cvat:2", reason="sweep", at=NOW)
+    monkeypatch.setattr(review_config, "review_setup", _tolerant(tmp_path))
+    args = _revoke_args(url, session_id="s001", task=["cvat:2"], reason="incident")
+    assert review_cmds.cmd_revoke(args) == REVOCATION_PENDING_EXIT  # CVAT 클라이언트 없음
+    assert "cvat:2: 이미 회수 요청됨 (sweep" in capsys.readouterr().out
+
+
+def test_revoke_task_records_manual_reason_only_for_named_task(
+    url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--task K --reason R`는 K를 `manual:<행위자>:R`로 요청하고, 낡은 다른 작업은 sweep 사유로
+    따로 요청한다 (사고 대응 기록에 sweep 대상이 섞이지 않는다)."""
+    empty = render_hash([], load_privacy_policy(repo_root()))
+    stale = _media_at(tmp_path, labeling_media_key("s001", "labeler01", "bodycam", empty))
+    with _engine(url).begin() as conn:
+        insert_review_task(conn, _task("cvat:2", "s001", stale, empty))  # 블러가 바뀌어 낡음
+        insert_review_task(conn, _task("cvat:3", "s001", _media(tmp_path, "s001", "b"), None))
+        insert_labels(conn, [_face()])
+    monkeypatch.setenv("DLP_ACTOR", "ops")
+    monkeypatch.setattr(review_config, "review_setup", _tolerant(tmp_path))
+    args = _revoke_args(url, session_id="s001", task=["cvat:3"], reason="incident")
+    assert review_cmds.cmd_revoke(args) == REVOCATION_PENDING_EXIT
+    out = capsys.readouterr().out
+    assert "회수 요청 cvat:3 (bodycam, open, 수동)" in out
+    assert "회수 요청 cvat:2 (bodycam, open, sweep)" in out
+    with _engine(url).connect() as conn:
+        assert get_review_task(conn, "cvat:3").revoke_reason == "manual:ops:incident"
+        assert get_review_task(conn, "cvat:2").revoke_reason == "sweep"
 
 
 def test_revoke_pending_runs_every_session_and_tolerates_missing_tools(
@@ -217,7 +350,7 @@ def test_detect_requests_and_runs_revocation_even_without_tools(
     도구가 없어도 매체는 지운다.
     """
     empty = render_hash([], load_privacy_policy(repo_root()))
-    uri = _media(tmp_path, "s001", f"bodycam-{empty[:16]}")
+    uri = _media_at(tmp_path, labeling_media_key("s001", "labeler01", "bodycam", empty))
     with _engine(url).begin() as conn:
         insert_review_task(conn, _task("cvat:2", "s001", uri, empty))
     monkeypatch.setattr(review_config, "review_setup", _tolerant(tmp_path))
@@ -276,9 +409,12 @@ def test_create_passes_stream_and_tool_and_stops_on_pending(
 def test_render_backstop_requests_tasks_made_under_other_render_policy(
     url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """렌더 정책(블러 강도)을 바꾼 뒤 렌더하면 이전 정책의 블러본으로 만든 작업을 회수 요청한다.
+    """렌더 정책(여기서는 화질 crf)을 바꾼 뒤 렌더하면 이전 정책의 블러본으로 만든 작업을 회수
+    요청한다.
 
-    같은 정책으로 다시 렌더하면 해시가 같아 요청하지 않는다 (렌더 백스톱, ADR 0039).
+    렌더 해시에는 render 절 전체(모자이크 크기, 인코더 crf·encoder_rate)가 들어가 블러와 무관한
+    인코더 설정만 바꿔도 회수된다 (ADR 0039 운영상 결과). 같은 정책으로 다시 렌더하면 해시가 같아
+    요청하지 않는다 (렌더 백스톱).
     """
     from dlp_fixtures.video import write_video
 
@@ -288,11 +424,11 @@ def test_render_backstop_requests_tasks_made_under_other_render_policy(
     write_video(video, frames, width=64, height=48)
     raw.put_file("sessions/s001/raw/bodycam.mp4", video, sha256_file(video))
     policy = load_privacy_policy(repo_root())
-    stronger = policy.model_copy(
+    other_crf = policy.model_copy(
         update={"render": policy.render.model_copy(update={"crf": policy.render.crf + 1})}
     )
     old = render_hash([], policy)
-    uri = _media(tmp_path, "s001", f"bodycam-{old[:16]}")
+    uri = _media_at(tmp_path, labeling_media_key("s001", "labeler01", "bodycam", old))
     with _engine(url).begin() as conn:
         insert_review_task(conn, _task("cvat:2", "s001", uri, old))
     monkeypatch.setattr(review_config, "review_setup", _tolerant(tmp_path))
@@ -303,7 +439,7 @@ def test_render_backstop_requests_tasks_made_under_other_render_policy(
     assert privacy_cmds.cmd_render(args) == 0
     with _engine(url).connect() as conn:
         assert get_review_task(conn, "cvat:2").revoke_requested_at is None
-    monkeypatch.setattr(privacy_cmds, "load_policy", Mock(return_value=stronger))
+    monkeypatch.setattr(privacy_cmds, "load_policy", Mock(return_value=other_crf))
     assert privacy_cmds.cmd_render(args) == REVOCATION_PENDING_EXIT
     assert "렌더 해시가 바뀐 라벨링 작업 1개 회수: cvat:2" in capsys.readouterr().out
     with _engine(url).connect() as conn:

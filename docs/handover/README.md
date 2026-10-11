@@ -46,16 +46,21 @@ flowchart LR
 (CVAT 워터마크 사본, Label Studio 서명 URL)은 그 커밋에서 회수 요청되고 커밋 뒤 끊긴다
 ([ADR 0039](../adr/0039-revoke-labeling-media-on-blur-change.md)).
 
-1. 수집·탐지·렌더 출력의 회수 내용과 다시 만들 명령을 본다. 대기가 남으면 종료 코드 4다.
-   `dlp review revoke <세션>`으로 다시 실행한다 (cron: `dlp review revoke --pending`, 10분마다).
+1. 수집(웹훅 수집이면 `dlp review serve` 서버 로그)·탐지·렌더 출력의 회수 내용과 다시 만들 명령을
+   본다. 대기가 남으면 종료 코드 4다. `dlp review revoke <세션>`으로 다시 실행한다
+   (cron: `dlp review revoke --pending`, 10분마다. 미리보기는 `--pending --dry-run`).
 2. 남은 블러 검수 → `dlp privacy approve` → `dlp privacy render`.
 3. 출력된 배정마다 `dlp review assign <배정>`, 배정 없는 작업은
    `dlp review create <세션> --stage labeling --assignee <담당자> --stream <스트림> --tool <도구>`.
+   출력을 놓쳤으면 `dlp review verify <세션>`이 다시 만들 배정·직접 작업 명령을 보인다.
 4. 검수·수집 → 배정 완료 → `dlp review verify <세션>`.
 
 배포 직후에는 렌더 해시가 없는 구 작업을 `dlp review revoke <세션> --dry-run --include-legacy`로
 확인하고 필요하면 `--include-legacy`로 회수한다. 라벨러가 노출을 신고하면
-`dlp review revoke <세션> --stream <스트림> --all --reason incident`로 즉시 끊는다.
+`dlp review revoke <세션> --stream <스트림> --all --reason incident`(작업을 알면
+`--task <작업 키> --reason incident`)로 즉시 끊는다. `privacy.yaml render` 절은 화질(crf)만 바꿔도
+렌더 해시가 바뀌어 다시 렌더하는 세션의 라벨링 작업이 모두 회수되므로, 진행 중 라벨링이 없을 때
+바꾼다.
 
 ## 읽는 순서와 문서의 책임
 

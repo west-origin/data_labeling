@@ -5,14 +5,16 @@
   - `create <세션> --stage privacy|labeling --assignee [--stream S…] [--tool T]` — 세션의 검수
     작업을 CVAT(공간 라벨·블러)와 Label Studio(시간 구간)에 만든다. 블러 검수 담당자는
     `review.yaml reviewers.privacy`의 원본 접근 권한자여야 한다. 라벨링은 먼저 회수 대기를
-    실행하고, 남으면 만들지 않는다 (종료 코드 4).
+    실행하고, 세션에 대기가 하나라도 남으면(대상이 아닌 스트림 포함) 만들지 않는다 (종료 코드 4).
   - `collect <작업 키> --reviewer` — 끝난 작업의 결과를 라벨 이력으로 들여온다 (reconcile:
     승인·수정·삭제·추가 → 새 `LabelRecord` + `parent_label_id`). 이미 수집했거나 회수한 작업이면
     아무것도 하지 않는다(멱등). 블러가 바뀌면 커밋 뒤 배포 매체를 회수하고 다시 만들 명령을 보인다.
   - `serve [--port]` — CVAT·Label Studio 웹훅을 받아 끝난 작업을 자동 수집하는 HTTP 서버.
-  - `revoke [<세션>] [--stream] [--task] [--all] [--include-legacy] [--dry-run] [--pending]
-    [--mark-tool-gone KEY --note]` — 블러가 바뀐 뒤 이미 배포한 라벨링 매체를 회수한다
-    (ADR 0039). 대기가 남으면 종료 코드 4 (cron `--pending`의 경보).
+    수집 결과(회수한 작업·다시 만들 명령 포함)는 `collect`와 같이 서버 로그에 남는다.
+  - `revoke [<세션>] [--stream] [--task --reason] [--all --reason] [--include-legacy] [--dry-run]
+    [--pending] [--mark-tool-gone KEY --note]` — 블러가 바뀐 뒤 이미 배포한 라벨링 매체를
+    회수한다 (ADR 0039). 세션 경로는 늘 sweep을 하고 `--task`·`--all`은 그 위에 수동 요청을 더한다.
+    대기가 남으면 종료 코드 4 (cron `--pending`의 경보).
   - `register-webhooks <url_base>` — 검수 프로젝트에 웹훅을 등록한다.
   - `verify <세션>` — 검수가 끝난 세션을 `prelabeled → human_verified`로 옮긴다 (ADR 0029).
   - `ui-theme [--check]` — `config/review_ui.yaml`로 CVAT 테마 색 파일을 다시 만든다 (ADR 0038,
@@ -49,6 +51,7 @@ import os
 from datetime import UTC, datetime
 
 import sqlalchemy as sa
+from sqlalchemy.exc import NoResultFound
 
 from dlp_cli.review_config import (
     REVOCATION_PENDING_EXIT,
@@ -59,6 +62,7 @@ from dlp_cli.review_config import (
 from dlp_cli.review_config import load_review_policy as load_ops_policy
 from dlp_cli.schema_cmds import database_url
 from dlp_media.audit import current_actor
+from dlp_privacy.policy import PrivacyPolicy
 from dlp_privacy.policy import load_policy as load_privacy_policy
 from dlp_privacy.runner import (
     operational_blur,
@@ -96,7 +100,14 @@ from dlp_schema.db.repository import (
     pending_revocations,
 )
 from dlp_schema.db.tables import ontology_versions
-from dlp_schema.review import AssignmentStatus, ReviewTask, ReviewTaskStatus, ReviewTool
+from dlp_schema.labels import LabelRecord
+from dlp_schema.review import (
+    AssignmentStatus,
+    ReviewStage,
+    ReviewTask,
+    ReviewTaskStatus,
+    ReviewTool,
+)
 
 
 def _setup(args: argparse.Namespace) -> ReviewSetup:
@@ -145,7 +156,8 @@ def cmd_create(args: argparse.Namespace) -> int:
       승인 상태여야 한다(아니면 `TaskError`). 담당자 ID는 라벨러 워터마크에도 쓴다.
       `--stream`(반복)·`--tool`로 만들 작업을 좁힌다 (회수한 직접 작업만 다시 만들 때).
       만들기 전에 회수 대기를 실행한다 (렌더 해시가 지금과 다른 작업은 먼저 요청한다, sweep).
-      대기가 남으면 만들지 않고 `REVOCATION_PENDING_EXIT`(4)로 끝낸다.
+      세션에 대기가 하나라도 남으면 `--stream`으로 고른 스트림과 무관하게 만들지 않고
+      `REVOCATION_PENDING_EXIT`(4)로 끝낸다 (함수 `create_labeling_tasks`는 대상 스트림만 본다).
 
     반환: 0 (또는 4). 출력: 작업 키, 단계, 스트림, 미디어 URI.
     부작용: 한 트랜잭션에서 `review_tasks` 등 DB 쓰기, 검수 도구 API 호출, 라벨링 버킷 쓰기, 블러
@@ -281,7 +293,8 @@ def cmd_serve(args: argparse.Namespace) -> int:
     2. 검수자를 정한다 — 웹훅의 도구 사용자 ID가 아니라 작업 담당자다
        (`resolve_reviewer`). 담당자와 CVAT job 담당자가 맞지 않으면 수집하지 않는다.
     3. 서비스 계정(Label Studio 서비스 사용자)이 만든 주석이면 수집하지 않는다.
-    4. `collect_task`로 수집한다. 실패는 트랜잭션을 롤백하고 HTTP 경계에 전달한다.
+    4. `collect_task`로 수집한다. 실패는 트랜잭션을 롤백하고 HTTP 경계에 전달한다. 결과는
+       `collect`와 같이 출력한다 (블러가 바뀌어 회수한 작업과 다시 만들 명령 포함, 서버 로그).
     5. 커밋 뒤 그 세션의 회수 대기를 실행한다. 대기가 남으면 `RevocationIncompleteError`를 던져
        503으로 답한다 (수집·회수 요청은 이미 커밋됐다. 도구가 재전송하지 않을 수 있어 cron
        `dlp review revoke --pending`이 보완한다).
@@ -311,7 +324,9 @@ def cmd_serve(args: argparse.Namespace) -> int:
             outcome = collect_task(
                 conn, req.task_key, setup, reviewer, datetime.now(UTC), ops_policy
             )
-        print(f"{req.task_key} ← {reviewer}: {'이미 수집함' if outcome is None else '수집함'}")
+        # 서버 로그에도 수집 결과와 블러 변경으로 회수한 작업·다시 만들 명령을 남긴다
+        print(f"{req.task_key} ← {reviewer}")
+        _print_outcome(task, outcome)
         report = run_revocations(engine, task.session_id, setup)
         if print_revocations(report, task.session_id):
             raise RevocationIncompleteError(f"{task.session_id}: 회수 대기 {len(report.pending)}개")
@@ -413,8 +428,9 @@ def cmd_assign(args: argparse.Namespace) -> int:
 
     이미 만든 배정이면 기존 작업을 그대로 돌려준다 (배정 행을 `FOR UPDATE`로 잠가 동시 실행에도 한
     번만). 작업이 모두 회수된 배정이면 지금 블러본으로 다시 만든다 (ADR 0039).
-    작업 라벨 배정은 만들기 전에 그 세션의 회수 대기를 실행하고(sweep 포함), 대기가 남으면 만들지
-    않고 `REVOCATION_PENDING_EXIT`(4)로 끝낸다. 블러 배정은 원본 프록시를 쓰므로 막지 않는다.
+    작업 라벨 배정은 만들기 전에 그 세션의 회수 대기를 실행하고(sweep 포함), 세션에 대기가 하나라도
+    남으면(배정 스트림이 아니어도) 만들지 않고 `REVOCATION_PENDING_EXIT`(4)로 끝낸다. 블러 배정은
+    원본 프록시를 쓰므로 막지 않는다.
     부작용: `review_tasks` 쓰기, 검수 도구 API 호출, 블러 배정이면 원본 읽기(감사 기록).
     """
     engine = sa.create_engine(database_url(args.url))
@@ -495,41 +511,108 @@ def cmd_quality(args: argparse.Namespace) -> int:
     return 0
 
 
-def _revoke_dry_run(engine: sa.Engine, args: argparse.Namespace) -> int:
-    """`revoke --dry-run`: 쓰지 않고 고를 작업과 이유, 지금 대기를 출력한다. 0.
+def _check_revoke_args(args: argparse.Namespace) -> None:
+    """`revoke` 인자 조합을 확인한다. 일부 인자가 조용히 무시되는 조합이면 `SystemExit`.
 
-    `--include-legacy`면 구 작업(렌더 해시 없음)마다 참고용 추정을 함께 보인다: 작업을 만든
-    시각까지의 이력으로 복원한 운영 블러 집합의 렌더 해시가 지금과 같은가. 시계·경합 때문에
-    틀릴 수 있어 결정은 운영자가 한다.
+    특히 `--dry-run`은 미리보기가 있는 경로(세션, `--pending`)에서만 받는다. `--mark-tool-gone`은
+    표시만 하는 쓰기 명령이라 `--dry-run`과 함께 쓰면 실제로 표시되는 것을 막는다.
+    """
+    chosen = {
+        "--task": bool(args.task), "--all": args.all, "--stream": bool(args.stream),
+        "--include-legacy": args.include_legacy, "--reason": bool(args.reason),
+    }  # fmt: skip
+    selection = [name for name, on in chosen.items() if on]
+    if args.mark_tool_gone:
+        others = {
+            "<세션>": bool(args.session_id),
+            "--pending": args.pending,
+            "--dry-run": args.dry_run,
+        }
+        extra = selection + [name for name, on in others.items() if on]
+        if extra:
+            raise SystemExit(f"--mark-tool-gone은 {', '.join(extra)}와 함께 쓸 수 없습니다")
+        if not args.note:
+            raise SystemExit("--mark-tool-gone에는 --note(사유)가 필요합니다")
+    elif args.pending:
+        extra = selection + (["<세션>"] if args.session_id else [])
+        if extra:
+            raise SystemExit(f"--pending은 모든 세션의 대기를 실행합니다 ({', '.join(extra)} 불가)")
+    elif not args.session_id:
+        raise SystemExit("세션을 주거나 --pending을 쓰세요")
+    elif bool(args.task or args.all) != bool(args.reason):
+        raise SystemExit("--task·--all에는 --reason(사유)이 필요하고, --reason은 둘과만 씁니다")
+
+
+def _check_task_keys(conn: sa.Connection, session_id: str, keys: list[str]) -> None:
+    """`--task` 키마다 이 세션의 회수할 수 있는 작업인지 확인한다. 하나라도 아니면 `SystemExit`.
+
+    없는 키, 다른 세션의 작업, 블러 검수 작업(원본 권한자 화면, 회수 대상 아님)은 요청이 조용히
+    빠지므로 쓰기 전에 거부한다. 이미 회수 요청된 작업은 그렇다고 알리고 계속한다.
+    """
+    problems: list[str] = []
+    for key in keys:
+        try:
+            task = get_review_task(conn, key)
+        except NoResultFound:
+            problems.append(f"{key}: 없는 작업")
+            continue
+        if task.session_id != session_id:
+            problems.append(
+                f"{key}: 세션 {task.session_id}의 작업 (dlp review revoke {task.session_id} --task)"
+            )
+        elif task.stage is ReviewStage.PRIVACY:
+            problems.append(f"{key}: 블러 검수 작업이라 회수 대상이 아님 (원본 권한자 화면)")
+        elif task.revoke_requested_at is not None:
+            print(f"{key}: 이미 회수 요청됨 ({task.revoke_reason}, {task.revoke_requested_at})")
+    if problems:
+        raise SystemExit("--task 회수를 요청하지 않았습니다:\n  " + "\n  ".join(problems))
+
+
+def _legacy_note(task: ReviewTask, history: list[LabelRecord], policy: PrivacyPolicy) -> str:
+    """구 작업(렌더 해시 없음)의 참고용 추정: 작업을 만든 시각까지의 이력으로 복원한 운영 블러의
+    렌더 해시가 지금과 같은가. 시계·경합 때문에 틀릴 수 있어 결정은 운영자가 한다."""
+    then = [x for x in history if x.created_at <= task.created_at]
+    same = render_hash(operational_blur(then, task.stream_id), policy) == render_hash(
+        operational_blur(history, task.stream_id), policy
+    )
+    return f" (추정: 생성 시점 블러가 지금과 {'같음' if same else '다름'})"
+
+
+def _revoke_dry_run(engine: sa.Engine, args: argparse.Namespace) -> int:
+    """`revoke <세션> --dry-run`: 쓰지 않고 고를 작업과 이유, 지금 대기를 출력한다. 0.
+
+    실제 실행과 같이 수동 선택(`--task`·`--all`)과 sweep(해시가 다른 작업, `--include-legacy`면
+    구 작업 포함)을 따로 보인다. 구 작업에는 `_legacy_note` 추정을 붙인다.
     """
     sid = args.session_id
     policy = load_privacy_policy(repo_root())
+    streams = set(args.stream) if args.stream else None
     with engine.connect() as conn:
-        stale = stale_media_tasks(
-            conn, sid, policy, streams=set(args.stream) if args.stream else None,
-            legacy=args.include_legacy, force=args.all, task_keys=tuple(args.task),
-        )  # fmt: skip
+        _check_task_keys(conn, sid, args.task)
+        manual = (
+            stale_media_tasks(
+                conn, sid, policy, streams=streams, force=args.all, task_keys=tuple(args.task)
+            )
+            if args.task or args.all
+            else []
+        )
+        picked = {m.task.task_key for m in manual}
+        sweep = stale_media_tasks(conn, sid, policy, streams=streams, legacy=args.include_legacy)
+        swept = [m for m in sweep if m.task.task_key not in picked]
         history = get_labels(conn, sid, kinds=["blur_track"])
         pending = pending_revocations(conn, sid)
-    for item in stale:
+    for kind, item in [*(("수동", m) for m in manual), *(("sweep", m) for m in swept)]:
         t = item.task
-        note = ""
-        if item.cause == "legacy":
-            then = [x for x in history if x.created_at <= t.created_at]
-            same = render_hash(operational_blur(then, t.stream_id), policy) == render_hash(
-                operational_blur(history, t.stream_id), policy
-            )
-            note = f" (추정: 생성 시점 블러가 지금과 {'같음' if same else '다름'})"
-        head = f"{t.task_key:<20} {t.stream_id:<12} {t.status.value:<9} {item.cause:<12}"
+        note = _legacy_note(t, history, policy) if item.cause == "legacy" else ""
+        head = f"{t.task_key:<20} {t.stream_id:<12} {t.status.value:<9} {kind:<5} {item.cause:<12}"
         print(f"{head} {t.media_uri}{note}")
-    print(f"{sid}: 회수 요청 대상 {len(stale)}개, 지금 회수 대기 {len(pending)}개 (쓰지 않음)")
+    total = len(manual) + len(swept)
+    print(f"{sid}: 회수 요청 대상 {total}개, 지금 회수 대기 {len(pending)}개 (쓰지 않음)")
     return 0
 
 
 def _revoke_mark_gone(engine: sa.Engine, args: argparse.Namespace) -> int:
     """`revoke --mark-tool-gone KEY --note TEXT`: 도구 작업 수동 완료 표시. 대기가 남으면 4."""
-    if not args.note:
-        raise SystemExit("--mark-tool-gone에는 --note(사유)가 필요합니다")
     with engine.begin() as conn:
         task = get_review_task(conn, args.mark_tool_gone)
         done = mark_tool_gone(
@@ -544,48 +627,85 @@ def _revoke_mark_gone(engine: sa.Engine, args: argparse.Namespace) -> int:
     return 0
 
 
+def _revoke_pending(engine: sa.Engine, args: argparse.Namespace) -> int:
+    """`revoke --pending [--dry-run]`: 모든 세션의 회수 대기를 실행한다 (미리보기는 쓰지 않는다).
+
+    미리보기 반환: 0. 실행 반환: 대기가 남으면 `REVOCATION_PENDING_EXIT`(4).
+    """
+    if not args.dry_run:
+        return print_revocations(run_revocations(engine, None, url=args.url), None)
+    with engine.connect() as conn:
+        pending = pending_revocations(conn, None)
+    for t in pending:
+        channels = (("매체", t.media_revoked_at), ("도구", t.tool_revoked_at))
+        left = [name for name, done in channels if done is None]
+        print(
+            f"{t.task_key:<20} {t.session_id:<12} {t.stream_id:<12} 남은 채널 "
+            f"{'·'.join(left):<6} {t.revoke_reason}"
+        )
+    print(f"모든 세션: 회수 대기 {len(pending)}개 (쓰지 않음)")
+    return 0
+
+
+def _revoke_session(engine: sa.Engine, args: argparse.Namespace) -> int:
+    """`revoke <세션>`: 수동 요청(`--task`·`--all`) → sweep 요청을 한 트랜잭션에 남기고 실행한다.
+
+    수동 요청의 사유는 `manual:<행위자>:<사유>`, sweep(해시가 지금과 다른 작업, `--include-legacy`면
+    구 작업 포함)의 사유는 `sweep`이다. 둘을 따로 불러 낡은 작업이 수동 사유로 기록되지 않게 한다.
+    """
+    if args.dry_run:
+        return _revoke_dry_run(engine, args)
+    sid = args.session_id
+    policy = load_privacy_policy(repo_root())
+    streams = set(args.stream) if args.stream else None
+    now = datetime.now(UTC)
+    with engine.begin() as conn:
+        _check_task_keys(conn, sid, args.task)
+        manual: list[ReviewTask] = []
+        if args.task or args.all:
+            manual = request_media_revocation(
+                conn, sid, policy, now, reason=f"manual:{current_actor()}:{args.reason}",
+                streams=streams, force=args.all, task_keys=tuple(args.task),
+            )  # fmt: skip
+        swept = request_media_revocation(
+            conn, sid, policy, now, reason="sweep", streams=streams, legacy=args.include_legacy
+        )
+    for kind, requested in (("수동", manual), ("sweep", swept)):
+        for t in requested:
+            print(f"회수 요청 {t.task_key} ({t.stream_id}, {t.status.value}, {kind}) {t.media_uri}")
+    report = run_revocations(engine, sid, url=args.url)
+    return print_revocations(report, sid)
+
+
 def cmd_revoke(args: argparse.Namespace) -> int:
     """`dlp review revoke [<세션>] …`: 블러가 바뀐 뒤 이미 배포한 라벨링 매체를 회수한다 (ADR 0039).
 
-    - `<세션>`: 세션 잠금 트랜잭션에서 회수를 요청하고(렌더 해시가 지금과 다른 작업, 사유
-      `sweep`), 커밋 뒤 대기를 실행한다. `--stream`으로 스트림을, `--include-legacy`로 렌더 해시
-      없는 구 작업을 더한다. `--task KEY`(반복)는 그 작업을, `--all`은 해시와 무관하게 그 스트림의
-      모든 비프라이버시 작업을 요청한다 (사고 대응). 둘 다 `--reason`이 필요하고 사유는
-      `manual:<행위자>:<사유>`다.
-    - `--dry-run`: 쓰지 않고 대상과 이유를 출력한다.
+    - `<세션>`: 세션 잠금 트랜잭션에서 회수를 요청하고 커밋 뒤 대기를 실행한다. 늘 sweep을 한다:
+      렌더 해시가 지금과 다른 작업(사유 `sweep`). `--stream`으로 스트림을, `--include-legacy`로 렌더
+      해시 없는 구 작업을 sweep에 더한다. 그 위에 수동 요청을 더할 수 있다: `--task KEY`(반복)는 그
+      작업(과 같은 매체를 쓰는 작업)만, `--all`은 해시와 무관하게 그 스트림의 모든 비프라이버시
+      작업을 요청한다 (사고 대응). 수동 요청에는 `--reason`이 필요하고 사유는
+      `manual:<행위자>:<사유>`다. `--task` 키가 이 세션의 회수할 수 있는 작업이 아니면(없음, 다른
+      세션, 블러 검수 작업) 아무것도 쓰지 않고 거부한다.
+    - `--dry-run`: 쓰지 않고 대상과 이유를 출력한다 (`<세션>` 또는 `--pending`과 함께).
     - `--pending`(세션 없이): 대기가 있는 모든 세션을 실행한다 (cron, 10분마다 권장).
     - `--mark-tool-gone KEY --note TEXT`: 도구 인스턴스 폐기 등으로 확인할 수 없는 도구 작업을
-      사유와 함께 완료로 표시한다 (행위자 = `current_actor()`).
+      사유와 함께 완료로 표시한다 (행위자 = `current_actor()`). 다른 선택 인자·`--dry-run`과 함께
+      쓰지 않는다.
 
-    반환: 대기가 남으면 `REVOCATION_PENDING_EXIT`(4), 아니면 0.
+    반환: 대기가 남으면 `REVOCATION_PENDING_EXIT`(4), 아니면 0 (`--dry-run`은 늘 0). 인자 조합이
+    맞지 않거나 `--task` 키를 요청할 수 없으면 `SystemExit`.
     부작용: `review_tasks` 회수 요청·완료 표시, 라벨링 버킷 사본 삭제·스냅숏, CVAT·Label Studio
     작업 배정 해제·삭제 (되돌릴 수 없다).
     """
+    _check_revoke_args(args)
     engine = sa.create_engine(database_url(args.url))
     try:
         if args.mark_tool_gone:
             return _revoke_mark_gone(engine, args)
         if args.pending:
-            if args.session_id:
-                raise SystemExit("--pending은 세션 없이 모든 세션의 대기를 실행한다")
-            return print_revocations(run_revocations(engine, None, url=args.url), None)
-        if not args.session_id:
-            raise SystemExit("세션을 주거나 --pending을 쓰세요")
-        if (args.task or args.all) and not args.reason:
-            raise SystemExit("--task와 --all에는 --reason(사유)이 필요합니다")
-        if args.dry_run:
-            return _revoke_dry_run(engine, args)
-        reason = f"manual:{current_actor()}:{args.reason}" if args.reason else "sweep"
-        with engine.begin() as conn:
-            requested = request_media_revocation(
-                conn, args.session_id, load_privacy_policy(repo_root()), datetime.now(UTC),
-                reason=reason, streams=set(args.stream) if args.stream else None,
-                legacy=args.include_legacy, force=args.all, task_keys=tuple(args.task),
-            )  # fmt: skip
-        for t in requested:
-            print(f"회수 요청 {t.task_key} ({t.stream_id}, {t.status.value}) {t.media_uri}")
-        report = run_revocations(engine, args.session_id, url=args.url)
-        return print_revocations(report, args.session_id)
+            return _revoke_pending(engine, args)
+        return _revoke_session(engine, args)
     finally:
         engine.dispose()
 
@@ -661,13 +781,19 @@ def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
     )
     rv.add_argument("session_id", nargs="?")
     rv.add_argument("--stream", action="append", default=[], help="이 영상 스트림만 (반복)")
-    rv.add_argument("--task", action="append", default=[], help="이 작업을 요청 (반복, --reason)")
+    rv.add_argument(
+        "--task", action="append", default=[], help="이 세션의 이 작업도 요청 (반복, --reason)"
+    )
     rv.add_argument("--all", action="store_true", help="해시와 무관하게 모두 요청 (사고 대응)")
     rv.add_argument("--include-legacy", action="store_true", help="렌더 해시 없는 구 작업 포함")
-    rv.add_argument("--dry-run", action="store_true", help="쓰지 않고 대상만 출력")
+    rv.add_argument(
+        "--dry-run", action="store_true", help="쓰지 않고 대상·대기만 출력 (세션 또는 --pending)"
+    )
     rv.add_argument("--reason", help="수동 요청 사유 (--task·--all에 필수)")
     rv.add_argument("--pending", action="store_true", help="대기가 있는 모든 세션 실행 (cron)")
-    rv.add_argument("--mark-tool-gone", metavar="KEY", help="도구 작업 수동 완료 표시 (--note)")
+    rv.add_argument(
+        "--mark-tool-gone", metavar="KEY", help="도구 작업 수동 완료 표시 (--note, 단독으로)"
+    )
     rv.add_argument("--note", help="--mark-tool-gone 사유")
     rv.add_argument("--url", help="DB URL (기본: DLP_DATABASE_URL)")
     rv.set_defaults(func=cmd_revoke)

@@ -46,7 +46,14 @@ from dlp_review.ops.runner import (
 )
 from dlp_review.ops.seeding import seed_prefix
 from dlp_review.revoke import execute_media_revocations
-from dlp_review.tasks import ReviewSetup, TaskError, frame_times, lock_assignment, object_key
+from dlp_review.tasks import (
+    ReviewSetup,
+    TaskError,
+    frame_times,
+    labeling_media_key,
+    lock_assignment,
+    object_key,
+)
 from dlp_review.verify import verification_gaps
 from dlp_schema.db.migrate import upgrade
 from dlp_schema.db.repository import (
@@ -546,7 +553,9 @@ def test_revoked_assignment_is_reissued_after_reapproval(
         new_hash = expected_render_hash(conn, sid, "bodycam", policy)
         assert get_assignment(conn, unit.assignment_id).task_key == renewed.task_key
     assert renewed.task_key != first.task_key and renewed.render_hash == new_hash != old_hash
-    assert renewed.media_uri.endswith(f"-{new_hash[:16]}.mp4")
+    assert renewed.media_uri == setup.labeling.uri(
+        labeling_media_key(sid, renewed.assignee or "", "bodycam", new_hash)
+    )
     _post(ls, renewed.external_id, ls.prediction_results(int(renewed.external_id)))
     with pg.begin() as conn:
         assert collect_task(conn, renewed.task_key, setup, "r1", later) is not None

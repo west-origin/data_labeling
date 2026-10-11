@@ -62,13 +62,19 @@ def _cause(
     force: bool,
     task_keys: Collection[str],
 ) -> Cause | None:
-    """작업 하나를 고를 이유 (고르지 않으면 None). current: 대상 스트림 → 지금 렌더 해시."""
+    """작업 하나를 고를 이유 (고르지 않으면 None). current: 대상 스트림 → 지금 렌더 해시.
+
+    수동 선택(task_keys·force)이 있으면 해시·legacy 판정을 하지 않는다. 낡은 작업은 호출자가 따로
+    `sweep` 사유로 요청한다 (`dlp review revoke`). 사유 기록이 섞이지 않게 하려는 것이다.
+    """
     if task.task_key in task_keys:
         return "task"
     if task.stream_id not in current:
         return None
     if force:
         return "force"
+    if task_keys:
+        return None
     if task.render_hash is None:
         return "legacy" if legacy else None
     return "hash" if task.render_hash != current[task.stream_id] else None
@@ -86,8 +92,10 @@ def stale_media_tasks(
 ) -> list[StaleMedia]:
     """회수 요청이 아직 없는 비프라이버시 작업 중 매체가 낡은 것 (만든 순). 읽기만 한다.
 
-    다음 중 하나면 고른다: (a) task_key가 task_keys에 있다, (b) force이고 스트림이 대상이다,
-    (c) 렌더 해시가 있고 지금 운영 블러의 렌더 해시와 다르다, (d) 렌더 해시가 없고 legacy다.
+    수동 선택이 있으면(task_keys나 force) 그것만 고른다: (a) task_key가 task_keys에 있다(스트림
+    무관), (b) force이고 스트림이 대상이다. 수동 선택이 없으면 해시로 고른다: (c) 렌더 해시가 있고
+    지금 운영 블러의 렌더 해시와 다르다, (d) 렌더 해시가 없고 legacy다. 수동 요청과 해시 판정을 한
+    번에 섞으면 낡은 작업의 사유가 수동 사유로 남는다. 둘 다 하려면 따로 부른다.
     고른 작업과 같은 매체 URI를 쓰는 다른 미요청 작업도 덧붙인다 (`shared-media`).
     상태(open·collected)와 방식(표준·QA·블라인드·이중·오류 삽입)은 가리지 않는다. 모두 블러본을
     보여 주고, 수집한 CVAT 작업도 담당자가 다시 열 수 있으며 Label Studio 서명 URL도 유효하다.
@@ -97,9 +105,10 @@ def stale_media_tasks(
 
     Args:
         streams: 대상 영상 스트림 (None이면 세션의 모든 영상 스트림).
-        legacy: 렌더 해시가 없는 구 작업도 고른다 (블러가 지금 바뀐 스트림).
+        legacy: 렌더 해시가 없는 구 작업도 고른다 (블러가 지금 바뀐 스트림). 수동 선택이면 무시.
         force: 해시와 무관하게 대상 스트림의 모든 작업 (사고 대응 `--all`).
-        task_keys: 해시·스트림과 무관하게 고를 작업 키 (`--task`).
+        task_keys: 해시·스트림과 무관하게 고를 작업 키 (`--task`). 이 세션의 비프라이버시 미요청
+            작업이 아니면 조용히 빠진다 (호출자가 먼저 확인한다).
     """
     session = get_session(conn, session_id)
     video = [s.stream_id for s in session.streams if s.kind in VIDEO_KINDS]
@@ -138,7 +147,8 @@ def request_media_revocation(
     돌려준 사본의 상태로 호출자가 다시 만들 작업을 안다 (요청 당시 open이었는지, 배정이 있었는지).
     열린 작업은 revoked, 수집한 작업은 상태를 두고 요청 시각·사유만 남는다. 같은 매체를 쓰는 작업의
     사유는 `<reason>:shared-media`다. 배정(`review_assignments`)은 쓰지 않는다: `lock_assignment`가
-    회수된 작업을 "작업 없음"으로 본다.
+    회수된 작업을 "작업 없음"으로 본다. 고르는 규칙은 `stale_media_tasks`와 같다 (수동 선택이면
+    그것만).
 
     세션 잠금 아래에서 요청하므로 같은 세션의 작업 생성(`create_labeling_tasks`도 세션을 먼저
     잠근다)과 겹치지 않는다. 다시 불러도 이미 요청한 작업은 바뀌지 않는다 (멱등).

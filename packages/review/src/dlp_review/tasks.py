@@ -29,6 +29,8 @@ WP6, ADR 0006·0020·0023·0024. 진입점: `dlp review create <세션>`(직접 
 - `create_privacy_tasks`: 블러 검수 작업 (스트림별 CVAT).
 - `lock_assignment`: 배정 행 잠금 (작업 중복 생성 방지). 회수한 작업은 "작업 없음"으로 본다.
 - `create_labeling_tasks`: 작업 라벨 검수 작업 (CVAT 공간 + Label Studio 시간).
+- `MEDIA_HASH_CHARS`, `labeling_media_key`: 워터마크 사본 키 (회수 실행기가 같은 값으로 키
+  모양을 본다).
 
 저장소 키:
 - 원본 버킷: `sessions/<세션>/derived/<스트림>.proxy.mp4`(검수 프록시), 장갑·IMU 원본 Parquet.
@@ -70,7 +72,7 @@ from dlp_privacy.runner import (
     read_review_segments,
     stale_media_tasks,
 )
-from dlp_review.clients import CvatClient, LabelStudioClient
+from dlp_review.clients import CvatClient, LabelStudioClient, cvat_task_name
 from dlp_review.cvat import CvatSchema, Scale, label_spec, to_cvat_tracks
 from dlp_review.labelstudio import LS_KINDS, label_config, to_ls_results
 from dlp_review.ontology_projects import ontology_project
@@ -107,6 +109,9 @@ VIDEO_KINDS = {StreamKind.BODYCAM, StreamKind.THIRD_PERSON}
 PRIVACY_PROJECT = "dlp-privacy"
 SPATIAL_PROJECT = "dlp-labeling-spatial"
 TEMPORAL_PROJECT = "dlp-labeling-temporal"
+# 워터마크 사본 키에 넣는 렌더 해시 앞 글자 수 (내용 주소). 회수 실행기(`dlp_review.revoke`)가 이
+# 값으로 "지워도 되는 키" 모양을 만든다. 한 곳에만 두어 두 모듈이 어긋나지 않게 한다
+MEDIA_HASH_CHARS = 16
 
 
 class TaskError(RuntimeError):
@@ -172,6 +177,16 @@ class ReviewSetup:
             path = repo_root() / "config" / "policies" / "sync.yaml"
             self.glove_prefixes = load_sync_policy(path).glove.pressure_prefixes
         return self.glove_prefixes
+
+
+def labeling_media_key(session_id: str, assignee: str, stream_id: str, render_hash: str) -> str:
+    """라벨러 워터마크 사본 키 `sessions/<세션>/review/<담당자>/<스트림>-<렌더 해시 앞부분>.mp4`.
+
+    해시 글자 수는 `MEDIA_HASH_CHARS`다. 블러본이 바뀌면 렌더 해시가 바뀌어 키도 바뀐다 (회수할
+    사본과 새 사본이 섞이지 않는다, ADR 0039).
+    """
+    digest = render_hash[:MEDIA_HASH_CHARS]
+    return f"sessions/{session_id}/review/{assignee}/{stream_id}-{digest}.mp4"
 
 
 def frame_times(video: Path) -> list[int]:
@@ -412,7 +427,9 @@ def create_privacy_tasks(
             run = latest_privacy_detection(conn, session_id, stream.stream_id)
             segments = read_review_segments(setup.raw, session_id, stream.stream_id, work)
             grant(setup.raw, key, assignee)  # 원본을 검수자에게 보여 준다 (올리기 전에 기록)
-            tid = setup.cvat.create_task(f"{session_id}/{stream.stream_id}/privacy", pid, video)
+            tid = setup.cvat.create_task(
+                cvat_task_name(session_id, stream.stream_id, "privacy"), pid, video
+            )
             setup.cvat.assign(tid, cvat_user)
             # 키프레임 시각 ↔ 프록시 프레임 번호 (프록시는 원본과 같은 PTS를 유지한다고 가정)
             times = frame_times(video)
@@ -581,7 +598,7 @@ def create_labeling_tasks(
                 crf=media.watermark_crf, encoder_rate=media.encoder_rate,
             )  # fmt: skip
             # 내용 주소 키: 블러본이 바뀌면 키도 바뀌어 회수 대상 사본과 새 사본이 섞이지 않는다
-            vkey = f"sessions/{session_id}/review/{assignee}/{stream.stream_id}-{rhash[:16]}.mp4"
+            vkey = labeling_media_key(session_id, assignee, stream.stream_id, rhash)
             setup.labeling.put_file(vkey, marked, sha256_file(marked))
             media_uri = setup.labeling.uri(vkey)
 
@@ -595,8 +612,9 @@ def create_labeling_tasks(
                     setup.cvat, ontology_project(SPATIAL_PROJECT, ontology), names, setup.ui_theme()
                 )
                 cvat_user = cvat_user_id(setup.cvat, setup.cvat_policy().users, assignee)
+                # 이름은 회수 실행기가 지우기 전에 대조한다 (`CvatClient.task_owner`)
                 tid = setup.cvat.create_task(
-                    f"{session_id}/{stream.stream_id}/{assignee}", pid, marked
+                    cvat_task_name(session_id, stream.stream_id, assignee), pid, marked
                 )
                 # 작업 라벨 작업은 계정 연결이 없어도 만든다 (배정 없이 관리자가 나눠 줄 수 있다)
                 if cvat_user is not None:
@@ -632,7 +650,8 @@ def create_labeling_tasks(
                     ls.ensure_label_config(lpid, setup.ls_label_config(ontology))
                 else:
                     lpid = ls.create_project(project_name, setup.ls_label_config(ontology))
-                # 라벨러가 여는 URL은 라벨러 자격 증명(라벨링 버킷 읽기 전용)으로 서명한다
+                # 라벨러가 여는 URL은 라벨러 자격 증명(라벨링 버킷 읽기 전용)으로 서명한다.
+                # session_id·assignee는 회수 실행기가 지우기 전에 대조한다 (`task_owner`)
                 data = {
                     "video": setup.labeling_reader.presign(vkey),
                     "timeseries": setup.labeling_reader.presign(ckey),

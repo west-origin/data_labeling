@@ -38,7 +38,7 @@ from dlp_privacy.runner import (
     render_meta_key,
     render_session,
 )
-from dlp_review.clients import CvatClient, LabelStudioClient
+from dlp_review.clients import CvatClient, LabelStudioClient, TaskOwner, cvat_task_name
 from dlp_review.collect import collect_task
 from dlp_review.labelstudio import LS_KINDS
 from dlp_review.ops.policy import CvatPolicy
@@ -51,6 +51,7 @@ from dlp_review.tasks import (
     TaskError,
     create_labeling_tasks,
     create_privacy_tasks,
+    labeling_media_key,
     object_key,
     video_size,
 )
@@ -546,9 +547,18 @@ def test_blur_change_revokes_deployed_labeling_media_end_to_end(
     assert {t.tool for t in tasks} == {ReviewTool.CVAT, ReviewTool.LABEL_STUDIO}
     for t in tasks:
         assert t.render_hash == rhash
-        assert t.media_uri.endswith(f"/review/labeler01/bodycam-{rhash[:16]}.mp4")
+        assert t.media_uri == setup.labeling.uri(
+            labeling_media_key(sid, "labeler01", "bodycam", rhash)
+        )
     ls_task = next(t for t in tasks if t.tool is ReviewTool.LABEL_STUDIO)
     cvat_task = next(t for t in tasks if t.tool is ReviewTool.CVAT)
+    # 실행기가 지우기 전에 대조하는 주인을 실제 도구가 되돌려 준다
+    name = cvat_task_name(sid, "bodycam", "labeler01")
+    assert cvat.task_owner(int(cvat_task.external_id)) == TaskOwner(
+        sid, "bodycam", "labeler01", name
+    )
+    ls_owner = ls.task_owner(int(ls_task.external_id))
+    assert (ls_owner.session_id, ls_owner.assignee) == (sid, "labeler01")
     video_url = ls.http.get(f"/api/tasks/{ls_task.external_id}").json()["data"]["video"]
     assert httpx.get(video_url).status_code == 200
     labeler = cvat_as(cvat, "labeler01")
@@ -593,9 +603,8 @@ def test_blur_change_revokes_deployed_labeling_media_end_to_end(
         renewed = create_labeling_tasks(conn, sid, setup, "labeler01", later)
         nhash = expected_render_hash(conn, sid, "bodycam", policy)
     assert nhash != rhash
-    assert all(
-        t.render_hash == nhash and f"bodycam-{nhash[:16]}.mp4" in t.media_uri for t in renewed
-    )
+    new_uri = setup.labeling.uri(labeling_media_key(sid, "labeler01", "bodycam", nhash))
+    assert all(t.render_hash == nhash and t.media_uri == new_uri for t in renewed)
     assert httpx.get(video_url).status_code == 404
 
 

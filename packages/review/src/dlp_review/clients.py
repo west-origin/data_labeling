@@ -9,12 +9,17 @@ WP6, ADR 0006. `dlp_review.tasks`(작업 만들기), `dlp_review.collect`(결과
 
 공개 이름:
 - `ToolError`: 도구 API가 4xx·5xx로 답했거나 비동기 작업이 실패·시간 초과했다.
+- `TaskOwner`, `cvat_task_name`: 도구 작업이 어느 세션·스트림·담당자의 것인지 (회수 전 대조).
 - `PRELABEL_VERSION`, `PRELABEL_SETTINGS`: Label Studio 프리라벨(예측) 표시 설정.
-- `CvatClient`: CVAT REST (프로젝트·작업·주석·job 담당자·이슈·웹훅, 회수용 배정 해제·스냅숏·삭제).
-- `LabelStudioClient`: Label Studio REST (프로젝트·작업·예측·주석·웹훅, 회수용 스냅숏·삭제).
+- `CvatClient`: CVAT REST (프로젝트·작업·주석·job 담당자·이슈·웹훅, 회수용 주인 확인·배정 해제·
+  스냅숏·삭제).
+- `LabelStudioClient`: Label Studio REST (프로젝트·작업·예측·주석·웹훅, 회수용 주인 확인·스냅숏·
+  삭제).
 
 회수(ADR 0039)용 메서드는 `dlp_review.revoke`가 쓴다. 삭제·존재 확인은 404를 "없음"으로 보고
-(이미 지운 작업의 재시도가 성공한다), 그 밖의 4xx·5xx는 `ToolError`다.
+(이미 지운 작업의 재시도가 성공한다), 그 밖의 4xx·5xx는 `ToolError`다. 실행기는 지우기 전에
+`task_owner`로 도구 작업이 그 작업 행의 것인지 대조한다 (도구 인스턴스를 새로 만들면 같은 번호가
+다른 세션 작업일 수 있다).
 
 환경 변수 (개발 기본값은 `services/` compose와 맞춘다):
 - CVAT: `DLP_CVAT_PORT`(8080), `DLP_CVAT_ADMIN_USER`, `DLP_CVAT_ADMIN_PASSWORD`.
@@ -29,6 +34,7 @@ from __future__ import annotations
 
 import os
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +43,28 @@ import httpx
 
 class ToolError(RuntimeError):
     """검수 도구 API 호출 실패 (HTTP 4xx·5xx, CVAT 비동기 작업 실패·시간 초과)."""
+
+
+@dataclass(frozen=True)
+class TaskOwner:
+    """도구에 저장된 작업의 주인: 세션·스트림·담당자. 회수 실행기가 지우기 전에 작업 행과 대조한다.
+
+    알 수 없는 칸은 None이다. Label Studio 작업은 스트림을 담지 않는다(바디캠 한 스트림).
+    """
+
+    session_id: str | None
+    stream_id: str | None
+    assignee: str | None
+    # 사람이 읽는 원문 (CVAT 작업 이름, Label Studio data의 세션·담당자). 오류 메시지에 쓴다
+    label: str
+
+
+def cvat_task_name(session_id: str, stream_id: str, assignee: str) -> str:
+    """CVAT 작업 이름 `<세션>/<스트림>/<담당자>` (블러 검수 작업은 담당자 자리에 `privacy`).
+
+    `CvatClient.task_owner`가 이 모양을 되읽는다. 식별자에는 `/`가 없다 (`dlp_schema.common`).
+    """
+    return f"{session_id}/{stream_id}/{assignee}"
 
 
 PRELABEL_VERSION = (
@@ -225,6 +253,17 @@ class CvatClient:
         """작업이 있으면 True, 404면 False. 그 밖의 실패는 `ToolError`."""
         return not _gone(self.http.get(f"/api/tasks/{task_id}"))
 
+    def task_owner(self, task_id: int) -> TaskOwner:
+        """작업 이름(`cvat_task_name`)에서 세션·스트림·담당자를 읽는다. 모양이 다르면 칸이 None.
+
+        예외: 작업이 없거나(404 포함) 응답이 실패하면 `ToolError`.
+        """
+        name = str(_check(self.http.get(f"/api/tasks/{task_id}"))["name"])
+        parts = name.split("/")
+        if len(parts) != 3 or not all(parts):
+            return TaskOwner(None, None, None, name)
+        return TaskOwner(parts[0], parts[1], parts[2], name)
+
     def task_snapshot(self, task_id: int) -> dict[str, Any]:
         """지우기 전에 남길 작업 사본: 작업 메타 일부, 주석 전체, 프레임 수.
 
@@ -388,6 +427,20 @@ class LabelStudioClient:
     def task_exists(self, task_id: int) -> bool:
         """작업이 있으면 True, 404면 False. 그 밖의 실패는 `ToolError`."""
         return not _gone(self.http.get(f"/api/tasks/{task_id}/"))
+
+    def task_owner(self, task_id: int) -> TaskOwner:
+        """작업 data의 `session_id`·`assignee` (`create_labeling_tasks`가 넣는다). 스트림은 None.
+
+        서명 URL은 읽기만 하고 돌려주지 않는다. 예외: 작업이 없거나 응답이 실패하면 `ToolError`.
+        """
+        data = _check(self.http.get(f"/api/tasks/{task_id}/")).get("data") or {}
+        sid, who = data.get("session_id"), data.get("assignee")
+        return TaskOwner(
+            str(sid) if sid is not None else None,
+            None,
+            str(who) if who is not None else None,
+            f"session_id={sid}, assignee={who}",
+        )
 
     def task_snapshot(self, task_id: int) -> dict[str, Any]:
         """지우기 전에 남길 작업 사본: 제출된 주석 전체와 임시 저장(drafts, 없으면 None).

@@ -48,9 +48,12 @@
 - `packages/sync/` (`dlp_sync`) — 멀티스트림 동기화: QR 슬레이트, 두드림, 오디오·운동 상호상관, 드리프트 보정.
   `dlp sync run <세션>`, `dlp sync adjust <세션> <스트림> <ms>`. 정책은 `config/policies/sync.yaml`.
 - `packages/privacy/` (`dlp_privacy`) — 프라이버시 게이트: 탐지기(YuNet, QR·바코드, OWLv2 오픈 보캐뷸러리, 반사면, 오라클 stub), 추적·보간·유지,
-  모자이크 렌더, 검수 우선 구간, 잔여 누락 감사. `dlp privacy detect|approve|render|audit-sample`. 정책은 `config/policies/privacy.yaml`.
+  모자이크 렌더, 검수 우선 구간, 잔여 누락 감사, 블러 변경 뒤 배포 매체 회수 요청(`dlp_privacy.revocation`, ADR 0039).
+  `dlp privacy detect|approve|render|audit-sample`. 정책은 `config/policies/privacy.yaml`.
 - `packages/review/` (`dlp_review`) — 검수 도구 연동: CVAT·Label Studio 변환기(무손실 왕복), 작업 생성, reconcile(검수 결과 →
-  라벨 이력), 웹훅 수집, 라벨러 워터마크, 역할 경계. `dlp review create|collect|verify|serve|register-webhooks` (verify: 검수가 끝난 세션을 human_verified로).
+  라벨 이력), 웹훅 수집, 라벨러 워터마크, 역할 경계, 배포 매체 회수 실행기(`dlp_review.revoke`).
+  `dlp review create|collect|verify|serve|register-webhooks|revoke` (verify: 검수가 끝난 세션을 human_verified로,
+  revoke: 블러가 바뀐 뒤 이미 배포한 라벨링 매체 회수, 대기가 남으면 종료 코드 4, ADR 0039).
   운영 로직(`dlp_review.ops`): 우선순위 큐, 표본 검증, 블라인드·오류 삽입·이중·QA 배정, 품질 측정.
   `dlp review plan|assign|queue|qa|quality`. 정책은 `config/policies/review.yaml`.
   검수 화면 테마(`dlp_review.ui_theme`, `config/review_ui.yaml`, `services/review-theme/`): 색·로고·단축키·다크/화이트만

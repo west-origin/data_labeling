@@ -1,7 +1,8 @@
 """검수 도구 클라이언트의 회수용 메서드 (ADR 0039). 실제 도구 대신 httpx.MockTransport로 답한다.
 
 정답: 삭제·존재 확인은 404를 "없음"으로, 2xx를 성공으로, 그 밖은 `ToolError`로 본다. 배정 해제는
-작업과 모든 job의 담당자를 비운다. Label Studio 스냅숏에는 작업 data(서명 URL)가 없다.
+작업과 모든 job의 담당자를 비운다. Label Studio 스냅숏에는 작업 data(서명 URL)가 없다. 주인 확인은
+CVAT 작업 이름(`cvat_task_name`)과 Label Studio data의 session_id·assignee를 되읽는다.
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ from collections.abc import Callable
 import httpx
 import pytest
 
-from dlp_review.clients import CvatClient, LabelStudioClient, ToolError
+from dlp_review.clients import CvatClient, LabelStudioClient, TaskOwner, ToolError, cvat_task_name
 
 Handler = Callable[[httpx.Request], httpx.Response]
 
@@ -107,3 +108,33 @@ def test_snapshots_keep_annotations_but_not_media_urls() -> None:
     assert cvat["task"]["name"] == "s/bodycam/a"
     for snap in (ls, cvat):
         assert "X-Amz-Signature" not in json.dumps(snap)
+
+
+def test_task_owner_reads_cvat_name_and_ls_data() -> None:
+    """CVAT는 작업 이름 `<세션>/<스트림>/<담당자>`를, LS는 data의 session_id·assignee를 읽는다.
+
+    모양이 다른 이름·data는 모르는 주인(칸 None)이다. 서명 URL은 돌려주지 않는다. 없는 작업은
+    `ToolError` (실행기가 지우기 전에 404를 확인하므로 여기 오면 경합이다).
+    """
+    url = "http://s3/dlp-labeling/sessions/s/review/a/bodycam.mp4?X-Amz-Signature=x"
+    answers = {
+        "/api/tasks/4": {"id": 4, "name": cvat_task_name("s001", "bodycam", "labeler01")},
+        "/api/tasks/5": {"id": 5, "name": "imported/task"},
+        "/api/tasks/3/": {"id": 3, "data": {"video": url, "session_id": "s001",
+                                            "assignee": "labeler02"}},
+        "/api/tasks/6/": {"id": 6, "data": {"video": url}},
+    }  # fmt: skip
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        body = answers.get(req.url.path)
+        return httpx.Response(200, json=body) if body else httpx.Response(404)
+
+    cvat, ls = _cvat(handler), _ls(handler)
+    assert cvat.task_owner(4) == TaskOwner("s001", "bodycam", "labeler01", "s001/bodycam/labeler01")
+    assert cvat.task_owner(5) == TaskOwner(None, None, None, "imported/task")
+    owner = ls.task_owner(3)
+    assert (owner.session_id, owner.stream_id, owner.assignee) == ("s001", None, "labeler02")
+    assert ls.task_owner(6).session_id is None and ls.task_owner(6).assignee is None
+    assert "X-Amz-Signature" not in repr([owner, ls.task_owner(6)])
+    with pytest.raises(ToolError):
+        cvat.task_owner(9)

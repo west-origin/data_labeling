@@ -47,10 +47,21 @@ ADR 0024는 블러가 바뀌면 승인을 풀고 렌더 기록을 무효로 둬,
      승인 상태와 무관하게 부른다 (이전 승인 때 만든 작업이 AUTO_BLURRED 세션에도 남을 수 있다).
    - 재탐지(`detect_session`): 블러 레코드를 쓴 스트림만(legacy). `DetectSummary.changes`·
      `changed_streams`·`revocations`.
-   - 렌더 백스톱(`dlp privacy render`): 모든 영상 스트림, 해시가 다른 작업만. 렌더 정책(블러 강도 등)을
-     바꾸면 그 세션의 해시 있는 작업이 모두 회수된다. 블러 강도 변경은 프라이버시 변경이므로 의도한
-     동작이다.
-   - `dlp review revoke`(수동·sweep), `dlp review create|assign` 시작(sweep).
+   - 렌더 백스톱(`dlp privacy render`): 모든 영상 스트림, 해시가 다른 작업만. 렌더 해시에는
+     `privacy.yaml render` 절 전체(`min_block_px`·`blocks_per_box`와 블러와 무관한 인코더 설정
+     `encoder_rate`·`crf`)와 `render_mode`가 들어간다. 그래서 블러 강도뿐 아니라 화질(crf)이나 명목
+     프레임레이트만 바꿔도, 그 정책으로 다시 렌더하는 세션마다(그리고 create·assign sweep에서) 해시
+     있는 라벨링 작업이 모두 회수되고 도구 작업이 지워지며, 다시 만들 때까지 verify가 막힌다. 블러
+     강도 변경은 프라이버시 변경이라 의도한 동작이다. 인코더 설정은 블러 내용을 바꾸지 않지만 블러본
+     파일이 바뀌어 배포 사본과 달라지므로 같은 규칙을 둔다. 운영상 결과: render 절은 진행 중 라벨링이
+     없을 때 바꾸고, 바꾼 뒤 렌더하기 전에 `dlp review revoke <세션> --dry-run`으로 영향받을 작업을
+     확인한다.
+   - `dlp review revoke <세션>`: 늘 sweep(사유 `sweep`)을 한다. `--task KEY`·`--all`(사고 대응)은
+     그 위에 수동 요청(사유 `manual:<행위자>:<사유>`)을 더한다. 수동 선택(`task_keys`·`force`)은
+     지정한 것(과 같은 매체를 쓰는 작업)만 고르고 해시 판정을 섞지 않아, 낡은 작업이 수동 사유로
+     기록되지 않는다. `--task` 키가 없는 작업·다른 세션의 작업·블러 검수 작업이면 아무것도 쓰지
+     않고 거부한다 (조용히 빠져 운영자가 회수됐다고 오해하지 않게).
+   - `dlp review create|assign` 시작(sweep).
    - dlp_privacy가 `review_tasks`에 쓰는 근거: 블러를 바꾸는 트랜잭션(탐지·렌더)이 이 패키지에 있고
      요청은 같은 커밋에 있어야 한다. `generation`도 이미 `review_tasks`를 읽는다. 쓰기는 `dlp_schema`
      저장소 함수(`request_task_revocation`)로만 하고 패키지 의존 표는 그대로다.
@@ -58,13 +69,24 @@ ADR 0024는 블러가 바뀌면 승인을 풀고 렌더 기록을 무효로 둬,
    해제 → 스냅숏 → 삭제 → 없음 확인) → Label Studio(스냅숏 → 삭제 → 없음 확인). 채널은 서로
    독립이고 멱등이다. 404는 성공이다. 배정 해제·스냅숏 실패는 경고만 남기고 삭제한다 (노출 차단 우선).
    지우기 전 판정(라벨링 버킷 접두사, 원본 URI 아님, 워터마크 키 모양, 같은 키를 쓰는 미요청 작업 없음,
-   삭제를 지원하는 저장소, 도구 클라이언트 있음)이 하나라도 맞지 않으면 지우지 않고 대기로 남긴다.
+   삭제를 지원하는 저장소, 도구 클라이언트 있음, 도구 작업의 주인)이 하나라도 맞지 않으면 지우지 않고
+   대기로 남긴다. 주인 대조: 외부 ID 숫자만으로 지우지 않는다. CVAT 작업 이름
+   `<세션>/<스트림>/<담당자>`(`clients.cvat_task_name`)과 Label Studio data의 `session_id`·`assignee`가
+   작업 행과 같아야 한다. 도구 인스턴스를 새로 만들고 DB를 남기면 같은 번호가 다른 세션·라벨러의 진행
+   중 작업일 수 있고, 지우면 되돌릴 수 없다. 다르면 대기로 남기고 운영자가 `--mark-tool-gone`으로
+   정리한다. 워터마크 키의 해시 글자 수는 `tasks.MEDIA_HASH_CHARS` 하나로 키 생성과 키 모양 판정이
+   함께 쓴다 (한쪽만 바뀌면 새 사본이 영구 대기가 된다).
    실행기는 세션 잠금을 잡지 않고, 도구 단계만 작업 행을 `FOR UPDATE SKIP LOCKED`로 잠근다.
    스냅숏(`sessions/<세션>/revoked/<도구>-<외부 ID>.json`, 라벨링 버킷, `review/` 밖)에 진행 중이던
    주석을 남긴다. 자동으로 이어받지는 않는다. 원본 감사 저장소에는 삭제가 없다 (`DeletableStore`).
 6. **게이트와 종료 코드.** 회수가 덜 끝난 스트림에는 새 라벨링 작업을 만들지 않고
-   (`create_labeling_tasks`가 세션 잠금 뒤 `TaskError`), `dlp review verify`는 이유를 보인다(회수 미완료,
-   요청 없는 낡은 작업, 회수돼 다시 만들 배정). CLI는 대기가 남으면 종료 코드 4
+   (`create_labeling_tasks`가 세션 잠금 뒤 `TaskError`, 대상 스트림만 본다), CLI `dlp review
+   create|assign`은 실행기 뒤 세션에 대기가 하나라도 남으면 대상 스트림과 무관하게 멈춘다 (도구·S3
+   장애는 대개 세션의 모든 스트림에 함께 걸려 스트림별로 나눠도 얻는 것이 적다). `dlp review verify`는 이유를
+   보인다(회수 미완료, 요청 없는 낡은 작업, 회수돼 다시 만들 배정, 배정 없이 만든 열린 작업이 회수된 뒤
+   같은 담당자·스트림·도구로 다시 만들지 않은 것). 마지막 것은 회수 전에는 그 열린 작업이 완료를
+   막았기 때문이다. 수집 결과의 회수·다시 만들 명령은 `dlp review collect`와 웹훅 서버(`serve`, 서버
+   로그)가 같이 출력한다. CLI는 대기가 남으면 종료 코드 4
    (`REVOCATION_PENDING_EXIT`, argparse 사용 오류 2와 다르다). 웹훅 서버는 커밋 뒤 대기가 남으면 503.
    재시도 경로: 수집 재실행·웹훅·create·assign 시작·`dlp review revoke <세션>`·`--pending`(cron).
    `create_labeling_tasks`가 세션을 먼저 잠가 요청과 생성이 겹치지 않는다 (직접 생성 경로의 경합도
@@ -88,8 +110,12 @@ ADR 0024는 블러가 바뀌면 승인을 풀고 렌더 기록을 무효로 둬,
   출력된 배정마다 `dlp review assign <배정>`, 직접 작업은 `dlp review create <세션> --stage labeling
   --assignee <담당자> --stream <스트림> --tool <도구>` → 검수·수집 → 배정 완료 → `dlp review verify`.
 - 사고 대응(라벨러가 노출을 신고): `dlp review revoke <세션> --stream <스트림> --all --reason incident`.
-- 도구 인스턴스 폐기 등으로 도구 작업을 확인할 수 없으면 `dlp review revoke --mark-tool-gone <작업>
-  --note <사유>` (행위자·사유가 남는다).
+  작업을 알면 `--task <작업 키> --reason incident` (그 세션의 라벨링 작업이어야 한다).
+- 도구 인스턴스 폐기 등으로 도구 작업을 확인할 수 없으면(실행기가 "주인이 다르다"고 대기로 남긴 경우
+  포함) 원래 작업이 없어진 것을 확인한 뒤 `dlp review revoke --mark-tool-gone <작업> --note <사유>`
+  (행위자·사유가 남는다. 미리보기가 없어 `--dry-run`과 함께 쓰지 않는다).
+- 미리보기: `dlp review revoke <세션> --dry-run`(고를 작업·이유), `dlp review revoke --pending
+  --dry-run`(모든 세션의 대기와 남은 채널). 어느 것도 쓰지 않는다.
 - 0015 downgrade는 회수한 작업이나 회수 대기가 있으면 거부한다 (회수 의도를 잃으면 노출이 잊힌다).
 
 ## 한계 (범위 밖)

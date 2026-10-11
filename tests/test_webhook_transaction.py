@@ -1,7 +1,8 @@
 """CLI 콜백이 수집 예외를 삼키면 부분 변경을 커밋하므로 실제 트랜잭션으로 회귀를 검사한다.
 
 짝 시험: 수집이 커밋된 뒤 매체 회수가 덜 끝나 예외(503)를 내도 수집·회수 요청은 남는다 (ADR 0039).
-열린 작업이 아니면 검수자 확인 전에 무시한다 (회수 실행기의 CVAT 배정 해제 웹훅).
+열린 작업이 아니면 검수자 확인 전에 무시한다 (회수 실행기의 CVAT 배정 해제 웹훅). 웹훅 수집도
+`collect`와 같이 회수한 작업과 다시 만들 명령을 서버 로그에 남긴다.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ import pytest
 import sqlalchemy as sa
 
 from dlp_cli import review_cmds
+from dlp_review.reconcile import ReviewOutcome
 from dlp_review.revoke import RevocationIncompleteError, RevocationReport
 from dlp_review.tasks import TaskError
 from dlp_review.webhook import CollectRequest
@@ -144,3 +146,30 @@ def test_webhook_for_closed_task_skips_reviewer_check(
     assert review_cmds.cmd_serve(argparse.Namespace(port=0, url=url)) == 0
     resolve.assert_not_called()
     collect.assert_not_called()
+
+
+def test_webhook_collection_logs_revocations_and_reissue_commands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """웹훅으로 수집한 블러 변경이 작업을 회수하면 다시 만들 배정·직접 작업 명령을 출력한다.
+
+    운영의 주 경로가 웹훅이라, 여기서 출력하지 않으면 다시 만들라는 신호가 DB 행 말고는 없다.
+    """
+    url = f"sqlite:///{tmp_path / 'callback.db'}"
+    _serve_env(monkeypatch, ReviewTaskStatus.OPEN)
+    outcome = ReviewOutcome(
+        revoked=["cvat:7", "label_studio:8"],
+        reissue_assignments=["A"],
+        direct_reissue=[("labeler02", "bodycam", "label_studio")],
+    )
+    monkeypatch.setattr(review_cmds, "collect_task", Mock(return_value=outcome))
+    monkeypatch.setattr(review_cmds, "run_revocations", Mock(return_value=RevocationReport()))
+    assert review_cmds.cmd_serve(argparse.Namespace(port=0, url=url)) == 0
+    out = capsys.readouterr().out
+    assert "cvat:3 ← reviewer" in out
+    assert "라벨링 작업 2개 회수: cvat:7, label_studio:8" in out
+    assert "dlp review assign A" in out
+    assert (
+        "dlp review create s001 --stage labeling --assignee labeler02 --stream bodycam "
+        "--tool label_studio"
+    ) in out

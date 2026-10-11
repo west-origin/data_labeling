@@ -8,12 +8,16 @@
 순서는 "넓고 확실한 것부터"다:
 1. 매체: 서로 다른 매체 URI마다 라벨링 버킷의 워터마크 사본을 지운다. Label Studio 작업의 서명
    URL은 이 객체를 가리키므로 객체를 지우면 바로 끊긴다. 같은 키를 쓰는 작업은 함께 표시한다.
-2. CVAT: 작업 행 잠금(SKIP LOCKED) → 배정 해제(최선 노력) → 스냅숏(최선 노력, 이미 있으면 두기)
-   → 삭제(404도 성공) → 없음 확인 → 표시. CVAT는 영상을 자기 안에 올리므로 작업을 지워야 끊긴다.
-3. Label Studio: 스냅숏 → 삭제 → 없음 확인 → 표시.
+2. CVAT: 작업 행 잠금(SKIP LOCKED) → 주인 대조 → 배정 해제(최선 노력) → 스냅숏(최선 노력, 이미
+   있으면 두기) → 삭제(404도 성공) → 없음 확인 → 표시. CVAT는 영상을 자기 안에 올리므로 작업을
+   지워야 끊긴다.
+3. Label Studio: 주인 대조 → 스냅숏 → 삭제 → 없음 확인 → 표시.
 노출 차단을 우선한다: 배정 해제·스냅숏 실패는 경고만 남기고 삭제를 계속한다. 지우기 전에 판정하는
-것(버킷·접두사·키 모양·원본 URI·같은 키를 쓰는 살아 있는 작업·삭제 지원 저장소·도구 클라이언트)이
-하나라도 맞지 않으면 지우지 않고 대기로 남긴다 (실패 쪽으로 닫는다).
+것(버킷·접두사·키 모양·원본 URI·같은 키를 쓰는 살아 있는 작업·삭제 지원 저장소·도구 클라이언트·
+도구 작업의 주인)이 하나라도 맞지 않으면 지우지 않고 대기로 남긴다 (실패 쪽으로 닫는다).
+주인 대조: 도구에 저장된 세션·담당자(CVAT는 작업 이름의 스트림도)가 작업 행과 같아야 지운다. 도구
+인스턴스를 새로 만들고 DB를 남기면 같은 외부 ID가 다른 세션·라벨러의 작업일 수 있다. 다르면 대기로
+두고, 운영자가 원래 작업이 없어진 것을 확인해 `mark_tool_gone`으로 정리한다.
 
 세션 잠금은 잡지 않는다. S3 삭제와 "NULL인 열만 표시"는 멱등이고, 도구 단계만 작업 행을 잠가 같은
 작업의 스냅숏·삭제가 겹치지 않게 한다. 요청 쪽은 미요청 행만, 실행기는 요청된 행만 다루므로 서로
@@ -45,9 +49,9 @@ import httpx
 import sqlalchemy as sa
 
 from dlp_media.storage import STORE_ERRORS, DeletableStore, ObjectStore, sha256_file
-from dlp_review.clients import ToolError
+from dlp_review.clients import TaskOwner, ToolError
 from dlp_review.roles import RawAccessError, check_stage_uris
-from dlp_review.tasks import TaskError, object_key
+from dlp_review.tasks import MEDIA_HASH_CHARS, TaskError, object_key
 from dlp_schema.db.repository import (
     list_review_tasks,
     mark_task_media_revoked,
@@ -97,6 +101,10 @@ class ToolLike(Protocol):
         """작업이 있으면 True, 404면 False."""
         ...
 
+    def task_owner(self, task_id: int) -> TaskOwner:
+        """도구에 저장된 작업의 세션·스트림·담당자 (모르는 칸은 None)."""
+        ...
+
     def task_snapshot(self, task_id: int) -> dict[str, Any]:
         """지우기 전 사본 (주석 등, 매체 URL 없음)."""
         ...
@@ -123,12 +131,14 @@ def snapshot_key(task: ReviewTask) -> str:
 
 
 def _media_pattern(task: ReviewTask) -> re.Pattern[str]:
-    """지워도 되는 워터마크 사본 키 모양: `sessions/<세션>/review/<담당자>/<스트림>[-<16자>].mp4`.
+    """지워도 되는 워터마크 사본 키 모양: `sessions/<세션>/review/<담당자>/<스트림>[-<해시>].mp4`.
 
+    해시 글자 수는 키를 만드는 쪽과 같은 `tasks.MEDIA_HASH_CHARS`다 (`tasks.labeling_media_key`).
     시계열 CSV·블러본·스냅숏은 이 모양이 아니라 지우지 않는다.
     """
     sid, stream = re.escape(task.session_id), re.escape(task.stream_id)
-    return re.compile(rf"^sessions/{sid}/review/[^/]+/{stream}(-[0-9a-f]{{16}})?\.mp4$")
+    digest = rf"(-[0-9a-f]{{{MEDIA_HASH_CHARS}}})?"
+    return re.compile(rf"^sessions/{sid}/review/[^/]+/{stream}{digest}\.mp4$")
 
 
 def _media_key(labeling: ObjectStore, raw_bucket: str, task: ReviewTask) -> str:
@@ -229,6 +239,28 @@ def _locked(conn: sa.Connection, task_key: str) -> bool:
     return row is not None
 
 
+def _owner_mismatch(task: ReviewTask, owner: TaskOwner) -> str | None:
+    """도구 작업의 주인이 작업 행과 다르면 이유 문장, 같으면 None.
+
+    세션·담당자는 같아야 하고, 스트림은 도구가 담을 때만(CVAT) 비교한다. 모르는 칸(None)은 다르다고
+    본다 (실패 쪽으로 닫는다).
+    """
+    same = (
+        owner.session_id == task.session_id
+        and owner.assignee is not None
+        and owner.assignee == task.assignee
+        and owner.stream_id in (None, task.stream_id)
+    )
+    if same:
+        return None
+    mine = f"{task.session_id}/{task.stream_id}/{task.assignee}"
+    return (
+        f"{task.task_key}: 도구 작업({owner.label})이 이 작업 행({mine})의 것이 아니라 지우지 "
+        f"않습니다 (도구 인스턴스를 바꿨으면 원래 작업이 없어진 것을 확인한 뒤 "
+        f"dlp review revoke --mark-tool-gone {task.task_key} --note <사유>)"
+    )
+
+
 def _revoke_tool_task(
     engine: sa.Engine,
     task: ReviewTask,
@@ -238,12 +270,19 @@ def _revoke_tool_task(
     report: RevocationReport,
     clock: Callable[[], datetime],
 ) -> None:
-    """도구 작업 하나: 잠금 → (있으면) 배정 해제·스냅숏 → 삭제 → 없음 확인 → 표시."""
+    """도구 작업 하나: 잠금 → (있으면) 주인 대조 → 배정 해제·스냅숏 → 삭제 → 없음 확인 → 표시.
+
+    주인이 다르면 아무것도 바꾸지 않고 errors에 남긴다 (대기).
+    """
     tid = int(task.external_id)
     with engine.begin() as conn:
         if not _locked(conn, task.task_key):
             return
         if client.task_exists(tid):
+            mismatch = _owner_mismatch(task, client.task_owner(tid))
+            if mismatch is not None:
+                report.errors.append(mismatch)
+                return
             if unassign is not None:
                 try:
                     unassign(tid)
