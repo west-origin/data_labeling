@@ -49,6 +49,8 @@ flowchart LR
 1. 수집(웹훅 수집이면 `dlp review serve` 서버 로그)·탐지·렌더 출력의 회수 내용과 다시 만들 명령을
    본다. 대기가 남으면 종료 코드 4다. `dlp review revoke <세션>`으로 다시 실행한다
    (cron: `dlp review revoke --pending`, 10분마다. 미리보기는 `--pending --dry-run`).
+   Label Studio 작업의 서명 URL은 `review.yaml media.signed_url_ttl_s`(기본 7일) 뒤 만료되므로
+   `dlp review refresh-urls`도 cron으로 하루 한 번 돌린다 (열린 작업만 다시 서명, 실패하면 종료 코드 1).
 2. 남은 블러 검수 → `dlp privacy approve` → `dlp privacy render`.
 3. 출력된 배정마다 `dlp review assign <배정>`, 배정 없는 작업은
    `dlp review create <세션> --stage labeling --assignee <담당자> --stream <스트림> --tool <도구>`.

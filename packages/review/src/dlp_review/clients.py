@@ -13,8 +13,8 @@ WP6, ADR 0006. `dlp_review.tasks`(작업 만들기), `dlp_review.collect`(결과
 - `PRELABEL_VERSION`, `PRELABEL_SETTINGS`: Label Studio 프리라벨(예측) 표시 설정.
 - `CvatClient`: CVAT REST (프로젝트·작업·주석·job 담당자·이슈·웹훅, 회수용 주인 확인·배정 해제·
   스냅숏·삭제).
-- `LabelStudioClient`: Label Studio REST (프로젝트·작업·예측·주석·웹훅·사용자, 회수용 주인 확인·
-  스냅숏·삭제).
+- `LabelStudioClient`: Label Studio REST (프로젝트·작업·예측·주석·웹훅·사용자, 작업 data 갱신,
+  회수용 주인 확인·스냅숏·삭제).
 - `IgnoredAnnotation`: 수집이 받지 않은 주석의 작성자 정보 (기록·오류 메시지용).
 
 회수(ADR 0039)용 메서드는 `dlp_review.revoke`가 쓴다. 삭제·존재 확인은 404를 "없음"으로 보고
@@ -430,6 +430,13 @@ class LabelStudioClient:
             body = {"model_version": PRELABEL_VERSION}
             _check(self.http.patch(f"/api/projects/{project_id}", json=body))
         self._versioned.add(project_id)
+
+    def update_task_data(self, task_id: int, data: dict[str, Any]) -> None:
+        """작업 data를 통째로 바꾼다 (서명 URL 갱신, `dlp_review.refresh`). 주석·예측은 그대로다.
+
+        예외: 작업이 없거나(404) 응답이 실패하면 `ToolError`.
+        """
+        _check(self.http.patch(f"/api/tasks/{task_id}/", json={"data": data}))
 
     def prediction_results(self, task_id: int) -> list[dict[str, Any]]:
         """작업에 올린 프리라벨 (예측) 결과."""

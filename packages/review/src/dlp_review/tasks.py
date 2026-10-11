@@ -7,7 +7,8 @@
 - 작업 라벨 검수 (일반 라벨러): 라벨러 워터마크를 입힌 블러본.
   - CVAT: 객체·도구 박스 트랙과 키포인트 트랙
   - Label Studio: 시간 구간 라벨, 영상과 장갑·IMU 시계열 동기 재생
-  일반 라벨러 경로의 URL은 라벨러 자격 증명(라벨링 버킷 읽기 전용)으로 서명한다.
+  일반 라벨러 경로의 URL은 라벨러 자격 증명(라벨링 버킷 읽기 전용)으로 서명한다. 유효 시간은
+  `review.yaml media.signed_url_ttl_s`이고 열린 작업은 `dlp review refresh-urls`가 다시 서명한다.
 - 블러본은 지금 승인된 블러 라벨로 렌더한 것만 쓴다 (dlp_privacy.runner.assert_render_current).
   작업에는 그 블러본의 렌더 해시(`ReviewTask.render_hash`)를 남긴다. 블러가 바뀌면 이 해시로 낡은
   매체를 찾아 회수한다 (ADR 0039). 회수가 끝나지 않은 스트림에는 새 라벨링 작업을 만들지 않는다.
@@ -37,6 +38,8 @@ WP6, ADR 0006·0020·0023·0024. 진입점: `dlp review create <세션>`(직접 
 - `create_labeling_tasks`: 작업 라벨 검수 작업 (CVAT 공간 + Label Studio 시간).
 - `MEDIA_HASH_CHARS`, `labeling_media_key`: 워터마크 사본 키 (회수 실행기가 같은 값으로 키
   모양을 본다).
+- `timeseries_key`, `label_studio_task_data`: 시계열 CSV 키와 Label Studio 작업 data (서명 URL
+  유효 시간은 `review.yaml media.signed_url_ttl_s`, 다시 서명은 `dlp_review.refresh`, F-REV-08).
 
 저장소 키:
 - 원본 버킷: `sessions/<세션>/derived/<스트림>.proxy.mp4`(검수 프록시), 장갑·IMU 원본 Parquet.
@@ -223,6 +226,35 @@ def labeling_media_key(session_id: str, assignee: str, stream_id: str, render_ha
     """
     digest = render_hash[:MEDIA_HASH_CHARS]
     return f"sessions/{session_id}/review/{assignee}/{stream_id}-{digest}.mp4"
+
+
+def timeseries_key(session_id: str) -> str:
+    """세션의 검수 시계열 CSV 키 `sessions/<세션>/review/timeseries.csv` (라벨링 버킷)."""
+    return f"sessions/{session_id}/review/timeseries.csv"
+
+
+def label_studio_task_data(
+    setup: ReviewSetup, session_id: str, assignee: str, video_key: str, csv_key: str
+) -> dict[str, str]:
+    """Label Studio 작업 data: 영상·시계열 서명 URL과 주인(session_id·assignee).
+
+    URL은 라벨러 자격 증명(`setup.labeling_reader`, 라벨링 버킷 읽기 전용)으로
+    `review.yaml media.signed_url_ttl_s` 초 동안 유효하게 서명한다 (F-REV-08). 작업을 만들 때와
+    `dlp review refresh-urls`로 다시 서명할 때 같은 함수를 쓴다. session_id·assignee는 회수
+    실행기·갱신이 도구 작업의 주인을 대조하는 값이다 (`LabelStudioClient.task_owner`).
+
+    인자: video_key·csv_key는 라벨링 버킷 키 (`labeling_media_key`, `timeseries_key`).
+    예외: `RawAccessError` — 서명한 URL이 원본 버킷을 가리킨다 (`roles.check_stage_uris`).
+    """
+    ttl = setup.media_policy().signed_url_ttl_s
+    data = {
+        "video": setup.labeling_reader.presign(video_key, expires_s=ttl),
+        "timeseries": setup.labeling_reader.presign(csv_key, expires_s=ttl),
+        "session_id": session_id,
+        "assignee": assignee,
+    }
+    check_stage_uris(ReviewStage.LABELING, list(data.values()), setup.raw.bucket)
+    return data
 
 
 def frame_times(video: Path) -> list[int]:
@@ -731,7 +763,7 @@ def create_labeling_tasks(
                     session, _series(session, setup.raw, work, setup.pressure_prefixes()), csv,
                     rate_hz=media.timeseries_rate_hz,
                 )  # fmt: skip
-                ckey = f"sessions/{session_id}/review/timeseries.csv"
+                ckey = timeseries_key(session_id)
                 setup.labeling.put_file(ckey, csv, sha256_file(csv))
                 # 시간 라벨은 세션 단위 (스트림 None)
                 labels = pick(None, LS_KINDS)
@@ -745,15 +777,8 @@ def create_labeling_tasks(
                     ls.ensure_label_config(lpid, setup.ls_label_config(ontology))
                 else:
                     lpid = ls.create_project(project_name, setup.ls_label_config(ontology))
-                # 라벨러가 여는 URL은 라벨러 자격 증명(라벨링 버킷 읽기 전용)으로 서명한다.
-                # session_id·assignee는 회수 실행기가 지우기 전에 대조한다 (`task_owner`)
-                data = {
-                    "video": setup.labeling_reader.presign(vkey),
-                    "timeseries": setup.labeling_reader.presign(ckey),
-                    "session_id": session_id,
-                    "assignee": assignee,
-                }
-                check_stage_uris(ReviewStage.LABELING, [str(v) for v in data.values()], raw_bucket)
+                # 라벨러 자격 증명으로 정책 유효 시간만큼 서명한 URL (원본 버킷 검사 포함)
+                data = label_studio_task_data(setup, session_id, assignee, vkey, ckey)
                 tid = ls.create_task(lpid, data, to_ls_results(labels))
                 out.append(_task(f"label_studio:{tid}", ReviewTool.LABEL_STUDIO, tid, session_id,
                                  stream.stream_id, assignee, media_uri, LS_KINDS, now, mode,

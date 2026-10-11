@@ -27,6 +27,7 @@ import yaml
 from dlp_cli import review_cmds, review_config
 from dlp_review.ops.policy import ReviewOpsPolicy
 from dlp_review.ops.policy import load_policy as load_default_policy
+from dlp_review.refresh import RefreshReport
 from dlp_review.revoke import RevocationReport
 from dlp_review.tasks import ReviewSetup
 from dlp_review.webhook import CollectRequest, ReviewerMismatchError
@@ -303,6 +304,34 @@ def test_serve_checks_label_studio_author_against_selected_accounts(
     assert "args" not in got  # 수집하지 않았다
     on_collect(CollectRequest("label_studio:4", None, 21, 21))
     assert got["args"][3] == "pilot-labeler"
+
+
+def test_refresh_urls_uses_selected_media_policy_without_cvat(
+    selected: ReviewOpsPolicy, no_clients: dict[str, Mock], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`dlp review refresh-urls`(F-REV-08)는 고른 정책의 매체 절(서명 URL 유효 시간)로 설정을
+    만들고 CVAT에는 접속하지 않는다. 세션을 주지 않으면 열린 Label Studio 작업이 있는 모든 세션을
+    세션마다 갱신하고, 갱신하지 못한 작업이 있으면 1로 끝난다 (cron 경보)."""
+    monkeypatch.setattr(
+        review_cmds, "sessions_with_open_ls_tasks", Mock(return_value=["s001", "s002"])
+    )
+    seen: list[tuple[str, ReviewSetup]] = []
+
+    def refresh(conn: sa.Connection, sid: str, setup: ReviewSetup) -> RefreshReport:
+        seen.append((sid, setup))
+        errors = ["label_studio:9: 도구 작업의 주인이 다릅니다"] if sid == "s002" else []
+        return RefreshReport(refreshed=[f"label_studio:{sid}"], errors=errors)
+
+    monkeypatch.setattr(review_cmds, "refresh_session_urls", refresh)
+    args = _args("refresh-urls", session=[], no_cvat=True)
+    assert review_cmds.cmd_refresh_urls(args) == 1
+    assert [sid for sid, _ in seen] == ["s001", "s002"]
+    setup = seen[0][1]
+    assert setup.media_policy() == selected.media and setup.cvat is None
+    no_clients["CvatClient"].from_env.assert_not_called()
+    seen.clear()
+    assert review_cmds.cmd_refresh_urls(_args("refresh-urls", session=["s001"], no_cvat=True)) == 0
+    assert [sid for sid, _ in seen] == ["s001"]
 
 
 def test_register_webhooks_reads_selected_policy_before_tools(

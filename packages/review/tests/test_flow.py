@@ -10,12 +10,14 @@ from __future__ import annotations
 
 import copy
 import os
+import time
 import uuid
 from collections.abc import Callable, Iterator
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, cast
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pytest
@@ -44,6 +46,7 @@ from dlp_review.labelstudio import LS_KINDS
 from dlp_review.ops.policy import CvatPolicy, LabelStudioPolicy
 from dlp_review.ops.policy import load_policy as load_ops_policy
 from dlp_review.ops.runner import plan_session
+from dlp_review.refresh import refresh_session_urls, sessions_with_open_ls_tasks
 from dlp_review.revoke import RevocationReport, execute_media_revocations, snapshot_key
 from dlp_review.roles import AccessError
 from dlp_review.tasks import (
@@ -333,6 +336,61 @@ def test_label_studio_collects_only_the_assignee_account_submission(
     assert outcome is not None and outcome.retracted == 0 and not outcome.new_records
     assert sorted(outcome.approved) == sorted(x.label_id for x in temporal)
     assert [(w.reviewer, w.seconds) for w in work] == [("labeler01", 12.5)]
+
+
+def _ttl(url: str) -> float:
+    """서명 URL의 남은 유효 시간(초). SigV4는 `X-Amz-Expires`(초), SigV2는 `Expires`(만료 시각)."""
+    query = parse_qs(urlparse(url).query)
+    if "X-Amz-Expires" in query:
+        return float(query["X-Amz-Expires"][0])
+    return float(query["Expires"][0]) - time.time()
+
+
+def test_label_studio_signed_urls_follow_policy_ttl_and_are_refreshed(
+    pg: sa.Engine,
+    setup: ReviewSetup,
+    tmp_path: Path,
+    ls_as: Callable[[LabelStudioClient, str], LabelStudioClient],
+) -> None:
+    """F-REV-08: 서명 URL 유효 시간은 정책 값이고, 열린 작업의 URL은 다시 서명해 갱신한다.
+
+    시나리오: 유효 시간 120초 정책으로 Label Studio 작업 생성 → 600초 정책으로 갱신 → 실제 Label
+    Studio 작업 data와 서명 URL 확인 → 담당자가 제출·수집 → 다시 갱신해도 수집한 작업은 그대로.
+    정답 근거: 서명 URL의 유효 시간(SigV4 X-Amz-Expires 또는 SigV2 Expires - 지금)이 정책 값,
+    갱신한 URL이 라벨러 자격 증명으로 열리고(200) 원본 버킷이 없으며 session_id·assignee는 그대로,
+    수집한 작업의 data는 바뀌지 않는다.
+    """
+    sid, _ = _session(pg, setup, tmp_path)
+    short = replace(setup, media=setup.media_policy().model_copy(update={"signed_url_ttl_s": 120}))
+    with pg.begin() as conn:
+        _approve_blur(conn, sid)
+        approve_session(conn, sid)
+        render_session(conn, sid, setup.raw, setup.labeling, load_policy(ROOT))
+        [ls_task] = create_labeling_tasks(conn, sid, short, "labeler01", FIXED_TIME, tools=_LS)
+    ls = setup.label_studio
+    assert ls is not None
+    tid = int(ls_task.external_id)
+    first = ls.http.get(f"/api/tasks/{tid}/").json()["data"]
+    assert _ttl(first["video"]) == pytest.approx(120, abs=30)
+    assert _ttl(first["timeseries"]) == pytest.approx(120, abs=30)
+    longer = replace(setup, media=setup.media_policy().model_copy(update={"signed_url_ttl_s": 600}))
+    with pg.begin() as conn:
+        assert sessions_with_open_ls_tasks(conn) == [sid]
+        report = refresh_session_urls(conn, sid, longer)
+    assert report.refreshed == [ls_task.task_key] and not report.errors and not report.skipped
+    data = ls.http.get(f"/api/tasks/{tid}/").json()["data"]
+    assert (data["session_id"], data["assignee"]) == (sid, "labeler01")
+    assert data["video"] != first["video"] and _ttl(data["video"]) == pytest.approx(600, abs=30)
+    assert _ttl(data["timeseries"]) == pytest.approx(600, abs=30) and "dlp-raw" not in str(data)
+    assert httpx.get(data["video"]).status_code == 200
+    assert httpx.get(data["timeseries"]).text.startswith("time_ms,")
+
+    _submit_prelabels(ls, ls_as(ls, "labeler01"), ls_task.external_id)
+    with pg.begin() as conn:
+        assert collect_task(conn, ls_task.task_key, setup, "labeler01", FIXED_TIME) is not None
+        again = refresh_session_urls(conn, sid, short)
+    assert again.refreshed == [] and not again.errors
+    assert ls.http.get(f"/api/tasks/{tid}/").json()["data"] == data  # 수집한 작업은 그대로
 
 
 def test_privacy_review_edits_become_label_history(

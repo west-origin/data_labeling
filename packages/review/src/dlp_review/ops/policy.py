@@ -12,6 +12,7 @@ WP12, ADR 0014. `dlp review plan|assign|qa|quality|create|collect|serve`와 운�
 공개 이름:
 - `ErrorType`: 오류 삽입 종류 (boundary_shift, class_swap, blur_deletion).
 - `CVAT_KINDS`: CVAT 공간 검수 화면이 보여 주는 작업 라벨 종류 (블러 제외).
+- `SIGV4_MAX_EXPIRES_S`: 서명 URL 유효 시간 상한 (`media.signed_url_ttl_s` 검증).
 - `UnitsPolicy`·`PriorityPolicy`·`SamplingPolicy`·`SeedingPolicy`·`MeasurementPolicy`·
   `ReviewersPolicy`·`MediaPolicy`·`CvatPolicy`·`LabelStudioPolicy`·`WebhookPolicy`: review.yaml의
   절별 모델.
@@ -44,6 +45,10 @@ ErrorType = Literal["boundary_shift", "class_swap", "blur_deletion"]
 # CVAT 작업 라벨(공간) 검수 화면이 보여 주는 라벨 종류. 블러(blur_track)는 프라이버시 검수 단위라
 # 여기에 넣지 않는다. dlp_review.cvat.CVAT_KINDS(블러 포함, 변환기가 다루는 종류)와 다르다.
 CVAT_KINDS = ("box_track", "keypoint_track")
+
+# 서명 URL 유효 시간의 상한(초, 7일). 정책 값이 아니라 S3 SigV4 서명 규격의 상한이다 (boto3 기본
+# 설정의 개발 SeaweedFS는 만료 시각을 담는 SigV2 URL을 만들어 상한이 없지만 같은 상한을 둔다)
+SIGV4_MAX_EXPIRES_S = 7 * 24 * 3600
 
 
 class UnitsPolicy(Contract):
@@ -142,6 +147,9 @@ class MediaPolicy(Contract):
     encoder_rate: int = Field(gt=0, description="인코더 명목 프레임레이트 (PTS는 원본 그대로)")
     # Label Studio 시계열 CSV 격자 주파수 (Hz, 마스터 타임라인)
     timeseries_rate_hz: float = Field(gt=0)
+    # Label Studio 작업에 박는 영상·시계열 서명 URL의 유효 시간 (초, F-REV-08). S3 SigV4 서명의
+    # 상한이 7일(604800초)이다. 열린 작업은 `dlp review refresh-urls`로 이보다 자주 다시 서명한다
+    signed_url_ttl_s: int = Field(gt=0, le=SIGV4_MAX_EXPIRES_S)
 
 
 class CvatPolicy(Contract):
