@@ -162,8 +162,13 @@ issues:
   - {id: F-REV-01, title: dlp review의 ReviewSetup이 DLP_REVIEW_POLICY_FILE의 cvat·media를 무시, severity: high, status: open, kind: code,
      files: [packages/cli/src/dlp_cli/review_cmds.py, packages/review/src/dlp_review/tasks.py], source: docs/handover/full-review-2026-10-11.md,
      repro: tests/test_known_defects.py::test_review_setup_uses_selected_policy_file, note: 두 검수 영역이 독립으로 같은 결함을 재현}
-  - {id: F-REV-02, title: 승인 뒤 블러가 바뀌어도 이미 배포한 라벨링 작업 매체를 회수하지 않음, severity: high, status: open, kind: code,
-     files: [packages/review/src/dlp_review/collect.py], source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-REV-02, title: 승인 뒤 블러가 바뀌어도 이미 배포한 라벨링 작업 매체를 회수하지 않음, severity: high, status: fixed, kind: code,
+     files: [packages/review/src/dlp_review/collect.py, packages/review/src/dlp_review/revoke.py, packages/privacy/src/dlp_privacy/revocation.py,
+             packages/review/src/dlp_review/tasks.py],
+     source: docs/handover/full-review-2026-10-11.md,
+     note: "ADR 0039 (회수 요청 outbox + 커밋 뒤 실행기 dlp review revoke). 회귀: packages/review/tests/test_revoke.py,
+            packages/review/tests/test_flow.py::test_blur_change_revokes_deployed_labeling_media_end_to_end,
+            tests/test_review_regressions.py::test_direct_labeling_creation_and_blur_collect_never_miss_revocation"}
   - {id: F-REV-03, title: Label Studio에서 그릴 수 있지만 수집할 수 없는 구간이 작업 수집 전체를 멈춤, severity: medium, status: open, kind: code,
      files: [packages/review/src/dlp_review/labelstudio.py], source: docs/handover/full-review-2026-10-11.md,
      repro: tests/test_known_defects.py::test_ls_hand_state_changed_to_none_is_collectable}
@@ -192,6 +197,20 @@ issues:
      files: [packages/review/src/dlp_review/ops/__init__.py], source: docs/handover/full-review-2026-10-11.md}
   - {id: F-REV-14, title: CVAT 담당자 검사 테스트가 LS 작업으로 돌아 CVAT 분기를 타지 않음, severity: low, status: open, kind: test,
      files: [packages/review/tests/test_units.py], source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-REV-15, title: DB 롤백으로 기록 없이 남은 고아 CVAT·LS 작업과 라벨링 버킷 사본은 회수가 찾지 못함, severity: medium, status: open, kind: code,
+     files: [packages/review/src/dlp_review/revoke.py, packages/review/src/dlp_review/tasks.py], source: docs/handover/full-review-2026-10-11.md,
+     see: [R4, F-REV-02]}
+  - {id: F-REV-16, title: 회수한 작업의 진행 중 주석은 스냅숏으로만 남고 새 작업으로 이어받지 않음, severity: low, status: open, kind: code,
+     files: [packages/review/src/dlp_review/revoke.py], source: docs/handover/full-review-2026-10-11.md, see: [F-REV-02]}
+  - {id: F-REV-17, title: 사용 중지(withdraw) 세션의 검수 매체 회수가 연결되지 않음, severity: medium, status: open, kind: code,
+     files: [packages/datasets/src/dlp_datasets/lineage.py, packages/review/src/dlp_review/revoke.py], source: docs/handover/full-review-2026-10-11.md,
+     see: [F-REV-02]}
+  - {id: F-REV-18, title: 승인 보류 명령이 없어 사고 대응 중에도 같은 렌더로 새 작업을 만들 수 있음, severity: medium, status: open, kind: code,
+     files: [packages/privacy/src/dlp_privacy/runner.py, packages/cli/src/dlp_cli/review_cmds.py], source: docs/handover/full-review-2026-10-11.md,
+     see: [F-REV-02]}
+  - {id: F-REV-19, title: 내려받은 사본·도구 내보내기·버킷 이전 버전·배포한 라벨러 자격 증명은 DB 회수로 막을 수 없음, severity: medium, status: open, kind: ops,
+     files: [docs/adr/0039-revoke-labeling-media-on-blur-change.md, services/docker-compose.yml], source: docs/handover/full-review-2026-10-11.md,
+     see: [F-REV-02, F-REV-08]}
 
   # ── 2026-10-11 전수 검수: privacy·media·sync ──
   - {id: F-PMS-01, title: 다른 시간대로 적은 같은 recorded_at으로 재수집하면 충돌, severity: medium, status: open, kind: code,
@@ -220,6 +239,9 @@ issues:
      files: [packages/sync/src/dlp_sync/pipeline.py], source: docs/handover/full-review-2026-10-11.md}
   - {id: F-PMS-11, title: 오디오 정밀화 테스트 단언이 실패 사유에도 맞음, severity: low, status: open, kind: test,
      files: [packages/sync/tests/test_pipeline.py], source: docs/handover/full-review-2026-10-11.md}
+  - {id: F-PMS-12, title: 블러본 재렌더 복구 테스트가 인코더 출력 바이트 차이로 가끔 실패, severity: low, status: open, kind: test,
+     files: [packages/privacy/tests/test_render_recovery.py], source: docs/handover/full-review-2026-10-11.md,
+     note: "test_rerender_repairs_damaged_release가 바이트 동일성을 본다. 변경 전 코드에서도 6회 중 3회 실패. 결정적 인코딩 설정 또는 해시 기준 비교 필요"}
 
   # ── 2026-10-11 전수 검수: prelabel·actions·relations·models ──
   - {id: F-PAR-01, title: 같은 entity_id 손 트랙 둘이면 3D 표본 시각 중복으로 프리라벨 전체 롤백, severity: high, status: open, kind: code,

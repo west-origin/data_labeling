@@ -77,7 +77,7 @@
 | ID | 확인된 문제·관련 코드 | 완료 기준 |
 | --- | --- | --- |
 | S1 | 인증/테넌트 경계 미구현. [raw_access](../../packages/cli/src/dlp_cli/raw_access.py)의 `DLP_ACTOR`는 자기 신고 | 인증 주체와 감사 연결; 고객별 DB·객체·검수 도구 권한 경계와 다른 고객 접근 거부 검사 |
-| S2 | CVAT 원본 사본 자동 삭제 없음. [review tasks](../../packages/review/src/dlp_review/tasks.py), [ops](../../packages/ops/src/dlp_ops/) | 보관 만료·사용 중지 시 도구 사본까지 삭제, 실패 재시도·증거 기록. 파일럿은 권한자가 수동 확인 |
+| S2 | CVAT 원본 사본 자동 삭제 없음. [review tasks](../../packages/review/src/dlp_review/tasks.py), [ops](../../packages/ops/src/dlp_ops/). 삭제 수단은 ADR 0039의 `CvatClient.delete_task`·`task_snapshot`을 다시 쓸 수 있다 | 보관 만료·사용 중지 시 도구 사본까지 삭제, 실패 재시도·증거 기록. 파일럿은 권한자가 수동 확인 |
 | S3 | FiftyOne GraphQL 의존성 2건 미패치(아래 상세) | 호환 패치 후 실제 서버 import·기동·관련 보안 회귀·감사 재실행; 해결 전 해당 GUI 외부 제공 보류 |
 | S4 | `commercial: review` 모델 사용 허용은 법적 검토 완료가 아님. [모델 목록](../../config/models.yaml) | 모델별 가중치/학습 데이터 조건에 대한 상업 이용 결론을 기록하고 실제 사용할 정책에 반영 |
 | S5 | 영속 작업 큐·백업 복구·장기 부하 검증 미완료. [webhook](../../packages/review/src/dlp_review/webhook.py), 개발 Compose | 중단 재개·사건 재전달·복원·부하 목표와 실제 검증 기록. 파일럿 수동 운영과 분리 |
@@ -100,7 +100,7 @@ FiftyOne 1.22.1이 요구하는 Strawberry GraphQL 0.316.0에는
 | R1 / 반영 | [insert_labels](../../packages/schema/src/dlp_schema/db/repository.py)의 배치 전체 의미·버전·구간 검증, Alembic 0014 버전 트리거 추가 | QA 오류·삭제 이력 구분, 부분 소속 검사, 회귀 검사. 기존 데이터는 `dlp ontology audit`로 확인; 직접 SQL의 사전 의미 검증은 지원하지 않음 |
 | R2 / 반영 | [공통 DB 로더](../../packages/schema/src/dlp_schema/db/ontology_repository.py)와 [CLI 연결](../../packages/cli/src/dlp_cli/ontology_access.py) 추가 | 프리라벨·행동·관계·검수·내보내기에 세션/데이터셋 버전 적용. 검수 프로젝트는 사전 버전·내용별 분리. 오프라인 합성 파일럿은 명시적으로 v1 사용 |
 | R3 | 탐지·렌더·작업 생성에 긴 세션 잠금. [privacy](../../packages/privacy/src/dlp_privacy/), [tasks](../../packages/review/src/dlp_review/tasks.py) | 입력 세대 확인 → 트랜잭션 밖 처리 → 최종 짧은 재검사·게시. 병행 검수 보존·철회/재탐지 충돌 검사 |
-| R4 | DB 롤백과 외부 도구/저장소 부작용 불일치 | 영속 작업 상태·중복 방지·외부 결과 대조·고아 정리. 각 호출 전후 장애 주입 후 재실행해 중복/잘못된 게시 없음 |
+| R4 | DB 롤백과 외부 도구/저장소 부작용 불일치. 회수 실행기(ADR 0039)도 DB에 요청된 작업만 지운다 (고아 정리는 F-REV-15) | 영속 작업 상태·중복 방지·외부 결과 대조·고아 정리. 각 호출 전후 장애 주입 후 재실행해 중복/잘못된 게시 없음 |
 | R5 | [검수 클라이언트](../../packages/review/src/dlp_review/clients.py), [lakeFS](../../packages/datasets/src/dlp_datasets/snapshot.py)가 localhost와 포트를 조합 | 공통 URL 설정과 기존 기본값 호환. 원격 테스트 서버로 실제 요청·인증 확인. `DLP_HOST`는 현재 헬스체크 호스트만 변경 |
 | R6 | [주간 지표](../../packages/ops/src/dlp_ops/metrics.py), [세션 순위](../../packages/active/src/dlp_active/select.py), [감사 후보](../../packages/privacy/src/dlp_privacy/audit.py)의 전체 이력 조회 | 실제 규모 측정 후 집계/증분 조회. 기존 결과 일치와 데이터 증가 시 쿼리·시간·메모리 비교 |
 | R7 | CLI 정책 선택, `schema`의 계약/DB 혼합, export/training/review의 큰 실행 함수 | 공개 인터페이스·입출력·부작용 단위 분리. import 경계와 회귀 검사 보존; R3/R4의 게시 규칙 유지 |
