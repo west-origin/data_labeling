@@ -107,3 +107,14 @@ cvat:
   users: {}                           # 예: {rev01: cvat-rev01}
   # 0 이상. 0이면 이슈를 남기지 않는다.
   privacy_issue_limit: 50             # 블러 검수 작업에 이슈로 남기는 검수 우선 구간 최대 수 (우선순위 순)
+
+# Label Studio 계정 연결 (F-REV-06). 수집(dlp review collect)과 웹훅(dlp review serve)은 작업 담당자의
+# Label Studio 계정이 만들고(completed_by) 마지막으로 고친(updated_by) 주석만 받는다. 다른 사용자·서비스
+# 계정의 주석은 결과로 쓰지 않고 오류·서버 로그로만 남긴다. 검수 시간(lead_time)도 같은 주석만 더한다.
+# 담당자가 여기 없으면 Label Studio 시간 검수 작업을 만들지 않는다 (매체를 올리기 전에 멈춘다).
+# Label Studio Community는 작업을 사람에게 배정하는 API가 없어(Enterprise 기능) 조직의 다른 사용자도
+# 작업을 열 수 있다. 이 연결은 그 제출을 담당자의 검수로 기록하지 않게 할 뿐 열람을 막지는 않는다.
+# 검수자 계정은 서비스 계정(DLP_LABEL_STUDIO_TOKEN의 계정)과 다른 사람별 계정으로 만든다.
+label_studio:
+  # dlp 검수자 ID → Label Studio 사용자 이메일. 한 계정을 두 검수자에게 줄 수 없다 (로드 시 검증).
+  users: {}                           # 예: {labeler01: labeler01@example.com}

@@ -1,7 +1,8 @@
 """실제 영상 파일럿의 실행 전 검사. 상태를 승인하거나 라벨·세션을 DB에 쓰지 않는다.
 
 모델 해시/라이선스 정책, 실제 어댑터의 합성 한 프레임 추론, DB 마이그레이션,
-검수 도구 인증/계정 연결을 확인한다. --models-only는 서비스 검사를 생략한 모델 진단이다.
+검수 도구 인증/계정 연결(CVAT 일반 계정, 일반 라벨 검수자의 Label Studio 계정)을
+확인한다. --models-only는 서비스 검사를 생략한 모델 진단이다.
 --video는 로컬 입력 진단이며 저장소 감사 경로를 거치지 않는다 (media probe와 같은 용도).
 실제 영상의 정확도·사람 검수 완료·재학습 성능 향상은 이 검사로 입증되지 않는다.
 """
@@ -34,6 +35,8 @@ from dlp_prelabel.policy import load_policy as load_prelabel_policy
 from dlp_privacy.detectors import build_detectors
 from dlp_privacy.policy import load_policy as load_privacy_policy
 from dlp_review.clients import CvatClient, LabelStudioClient
+from dlp_review.ops.policy import ReviewOpsPolicy
+from dlp_review.tasks import TaskError, label_studio_user_id
 from dlp_schema import load_ontology, repo_root
 from dlp_schema.common import Contract, Identifier
 from dlp_schema.db.migrate import alembic_config
@@ -154,11 +157,22 @@ def service_checks(root: Path, url: str | None) -> list[CheckResult]:
     try:
         ls.service_user_id()
         results.append(CheckResult("label-studio-auth", True, "서비스 계정 인증 통과"))
+        results.append(_ls_account_check(ls, review, load_policy(root).labeler))
     except Exception as exc:
         results.append(CheckResult("label-studio-auth", False, type(exc).__name__))
     finally:
         ls.http.close()
     return results
+
+
+def _ls_account_check(ls: LabelStudioClient, review: ReviewOpsPolicy, labeler: str) -> CheckResult:
+    """일반 라벨 검수자의 Label Studio 계정 연결(`label_studio.users`)이 서비스 계정이 아닌 실제
+    계정을 가리키는지 본다. 없으면 Label Studio 시간 검수 작업을 만들 수 없다 (F-REV-06)."""
+    try:
+        ready = label_studio_user_id(ls, review.label_studio.users, labeler) is not None
+    except TaskError:
+        ready = False
+    return CheckResult("label-studio-account", ready, labeler + " (서비스 계정이 아닌 검수 계정)")
 
 
 def cmd_check(args: argparse.Namespace) -> int:

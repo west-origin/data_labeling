@@ -87,7 +87,9 @@ export DLP_REVIEW_POLICY_FILE="$PWD/data/local-config/review.yaml"
 ```
 
 이 파일의 `reviewers.privacy`에 승인받은 원본 검수자 ID를, `cvat.users`에 두 검수자 ID와 실제
-CVAT 사용자 이름을 연결한다. [파일럿 안내](../weekend-video-pilot.md)의 명령을 그대로 쓰려면
+CVAT 사용자 이름을, `label_studio.users`에 일반 검수자 ID와 실제 Label Studio 계정 이메일(서비스
+계정이 아닌 사람별 계정)을 연결한다. Label Studio 연결이 없으면 시간 검수 작업을 만들지 않고, 수집은
+그 계정이 낸 주석만 받는다. [파일럿 안내](../weekend-video-pilot.md)의 명령을 그대로 쓰려면
 ID는 `pilot-privacy`, `pilot-labeler`로 맞춘다. 일반 검수자 ID는 `config/policies/pilot.yaml`의
 `labeler`와 일치해야 한다. 계정 생성과 원본 열람 승인 자체는 이 YAML이 대신하지 않는다.
 
@@ -95,8 +97,8 @@ ID는 `pilot-privacy`, `pilot-labeler`로 맞춘다. 일반 검수자 ID는 `con
 uv run --no-sync dlp pilot check --profile cleaning
 ```
 
-준비 검사는 서비스 응답·DB head·모델 실행·CVAT 일반 계정·Label Studio 서비스 계정 인증을
-확인한다. 일반 라벨러의 원본 작업 접근 거부와 Label Studio 검수 계정 로그인도 별도로 확인한다.
+준비 검사는 서비스 응답·DB head·모델 실행·CVAT 일반 계정·Label Studio 서비스 계정 인증·일반
+검수자의 Label Studio 계정 연결(`label-studio-account`)을 확인한다. 일반 라벨러의 원본 작업 접근 거부와 Label Studio 검수 계정 로그인도 별도로 확인한다.
 `DLP_REVIEW_POLICY_FILE`은 검수 정책을 읽는 `dlp` CLI 명령이 모두 같은 로더
 (`dlp_cli.review_config.load_review_policy`)로 따른다: 준비 검사, 검수 명령(`dlp review create|collect|
 serve|assign|register-webhooks|plan|qa|quality`, 작업의 CVAT 계정 배정·웹훅 담당자 확인·워터마크

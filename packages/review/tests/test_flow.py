@@ -41,7 +41,7 @@ from dlp_privacy.runner import (
 from dlp_review.clients import CvatClient, LabelStudioClient, TaskOwner, cvat_task_name
 from dlp_review.collect import collect_task
 from dlp_review.labelstudio import LS_KINDS
-from dlp_review.ops.policy import CvatPolicy
+from dlp_review.ops.policy import CvatPolicy, LabelStudioPolicy
 from dlp_review.ops.policy import load_policy as load_ops_policy
 from dlp_review.ops.runner import plan_session
 from dlp_review.revoke import RevocationReport, execute_media_revocations, snapshot_key
@@ -64,6 +64,7 @@ from dlp_schema.db.repository import (
     insert_review_task,
     latest_privacy_detection,
     list_review_tasks,
+    list_review_work,
     record_review,
     register_ontology,
 )
@@ -118,9 +119,9 @@ def pg() -> Iterator[sa.Engine]:
 
 
 @pytest.fixture
-def setup(cvat_config: CvatPolicy) -> ReviewSetup:
+def setup(cvat_config: CvatPolicy, ls_config: LabelStudioPolicy) -> ReviewSetup:
     """CVAT는 이미지가 커서 CI 기본 서비스 작업에서 띄우지 않는다. 닿지 않으면 CVAT 없이 만든다
-    (CVAT가 필요한 테스트만 건너뛰고 Label Studio 테스트는 돈다)."""
+    (CVAT가 필요한 테스트만 건너뛰고 Label Studio 테스트는 돈다). 두 도구 계정 연결은 시험 계정."""
     try:
         cvat: CvatClient | None = CvatClient.from_env()
     except httpx.HTTPError:
@@ -133,6 +134,7 @@ def setup(cvat_config: CvatPolicy) -> ReviewSetup:
         cvat=cvat,
         label_studio=LabelStudioClient.from_env(),
         cvat_config=cvat_config,
+        label_studio_config=ls_config,
     )
 
 
@@ -169,10 +171,11 @@ def _revoke(pg: sa.Engine, setup: ReviewSetup, sid: str) -> RevocationReport:
     )  # fmt: skip
 
 
-def _submit_prelabels(ls: LabelStudioClient, task_id: str) -> None:
-    """Label Studio 검수자가 프리라벨(예측)을 고치지 않고 제출한다."""
+def _submit_prelabels(ls: LabelStudioClient, reviewer: LabelStudioClient, task_id: str) -> None:
+    """Label Studio 검수자가 자기 계정(reviewer)으로 프리라벨(예측)을 고치지 않고 제출한다."""
     results = ls.prediction_results(int(task_id))
-    ls.http.post(f"/api/tasks/{task_id}/annotations", json={"result": results}).raise_for_status()
+    resp = reviewer.http.post(f"/api/tasks/{task_id}/annotations", json={"result": results})
+    resp.raise_for_status()
 
 
 def _oracle_policy() -> PrivacyPolicy:
@@ -234,7 +237,10 @@ def test_unchanged_privacy_review_round_trips_losslessly_through_cvat(
 
 
 def test_unchanged_labeling_review_round_trips_losslessly_through_label_studio(
-    pg: sa.Engine, setup: ReviewSetup, tmp_path: Path
+    pg: sa.Engine,
+    setup: ReviewSetup,
+    tmp_path: Path,
+    ls_as: Callable[[LabelStudioClient, str], LabelStudioClient],
 ) -> None:
     """완료 기준 (Label Studio): 시간 라벨이 도구를 거쳐도 그대로라 고치지 않으면 승인만 된다."""
     sid, _ = _session(pg, setup, tmp_path)
@@ -252,17 +258,81 @@ def test_unchanged_labeling_review_round_trips_losslessly_through_label_studio(
     ls_task = next(t for t in tasks if t.task_key.startswith("label_studio:"))
     ls = setup.label_studio
     assert ls is not None
+    labeler = ls.find_user_id(setup.label_studio_policy().users["labeler01"])
+    assert labeler is not None
     # 회귀: 프리라벨은 예측으로 올라가 사람 주석이 아니다. 제출 전에는 수집하지 않는다
-    assert ls.latest_results(int(ls_task.external_id)) is None
+    assert ls.latest_results(int(ls_task.external_id), user=labeler) is None
     with pg.begin() as conn, pytest.raises(TaskError, match="주석이 아직"):
         collect_task(conn, ls_task.task_key, setup, "labeler01", FIXED_TIME)
-    _submit_prelabels(ls, ls_task.external_id)
+    _submit_prelabels(ls, ls_as(ls, "labeler01"), ls_task.external_id)
     with pg.begin() as conn, pytest.raises(TaskError, match="담당자"):
         collect_task(conn, ls_task.task_key, setup, "labeler02", FIXED_TIME)  # 다른 사람
     with pg.begin() as conn:
         outcome = collect_task(conn, ls_task.task_key, setup, "labeler01", FIXED_TIME)
     assert outcome is not None and not outcome.new_records
     assert sorted(outcome.approved) == sorted(x.label_id for x in temporal)
+
+
+def test_label_studio_collects_only_the_assignee_account_submission(
+    pg: sa.Engine,
+    setup: ReviewSetup,
+    tmp_path: Path,
+    ls_as: Callable[[LabelStudioClient, str], LabelStudioClient],
+) -> None:
+    """F-REV-06: 실제 Label Studio 1.23.2에서 담당자 계정의 제출만 수집한다.
+
+    시나리오: 담당자 labeler01의 시간 검수 작업 → 다른 라벨러(labeler02)가 같은 작업에서 모든 구간을
+    지워 제출 → 서비스 계정이 completed_by를 담당자 ID로 적어 지운 결과를 올림 → 수집 거부 →
+    담당자가 그대로 제출 → 수집.
+    정답 근거: 실제 응답의 completed_by·updated_by(숫자 ID)로 받지 않은 주석 두 개가 보이고(서비스
+    계정 주석은 updated_by가 서비스 계정), 결과는 담당자 제출(모두 승인)이다. 다른 사람의 삭제가
+    담당자의 검수로 기록되지 않는다. 검수 시간은 담당자 주석의 lead_time만이다.
+    """
+    sid, _ = _session(pg, setup, tmp_path)
+    with pg.begin() as conn:
+        _approve_blur(conn, sid)
+        approve_session(conn, sid)
+        render_session(conn, sid, setup.raw, setup.labeling, load_policy(ROOT))
+        temporal = [
+            x.model_copy(update={"session_id": sid, "label_id": f"{sid}-{x.label_id}"})
+            for x in generate_action_scenario(4).labels
+            if x.kind in LS_KINDS
+        ]
+        insert_labels(conn, temporal)
+        [ls_task] = create_labeling_tasks(conn, sid, setup, "labeler01", FIXED_TIME, tools=_LS)
+    ls = setup.label_studio
+    assert ls is not None
+    tid = int(ls_task.external_id)
+    accounts = setup.label_studio_policy().users
+    owner, other = ls.find_user_id(accounts["labeler01"]), ls.find_user_id(accounts["labeler02"])
+    assert owner is not None and other is not None and owner != other != ls.service_user_id()
+    wiped = ls_as(ls, "labeler02").http.post(
+        f"/api/tasks/{tid}/annotations", json={"result": [], "lead_time": 50.0}
+    )
+    wiped.raise_for_status()
+    forged = ls.http.post(
+        f"/api/tasks/{tid}/annotations",
+        json={"result": [], "completed_by": owner, "lead_time": 70.0},
+    )
+    forged.raise_for_status()
+    ignored = ls.ignored_annotations(tid, user=owner)
+    assert {(a.completed_by, a.updated_by) for a in ignored} == {
+        (other, other),
+        (owner, ls.service_user_id()),
+    }
+    with pg.begin() as conn, pytest.raises(TaskError, match="다른 사용자 주석 2개"):
+        collect_task(conn, ls_task.task_key, setup, "labeler01", FIXED_TIME)
+    mine = ls_as(ls, "labeler01").http.post(
+        f"/api/tasks/{tid}/annotations",
+        json={"result": ls.prediction_results(tid), "lead_time": 12.5},
+    )
+    mine.raise_for_status()
+    with pg.begin() as conn:
+        outcome = collect_task(conn, ls_task.task_key, setup, "labeler01", FIXED_TIME)
+        work = [w for w in list_review_work(conn) if w.task_key == ls_task.task_key]
+    assert outcome is not None and outcome.retracted == 0 and not outcome.new_records
+    assert sorted(outcome.approved) == sorted(x.label_id for x in temporal)
+    assert [(w.reviewer, w.seconds) for w in work] == [("labeler01", 12.5)]
 
 
 def test_privacy_review_edits_become_label_history(

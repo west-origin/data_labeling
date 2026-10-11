@@ -430,12 +430,13 @@ def test_webhook_parsing_and_auth() -> None:
     sig2 = "sha256=" + hmac.new(b"s3cret", in_progress, hashlib.sha256).hexdigest()
     assert parse_event("cvat", {"X-Signature-256": sig2}, in_progress, "s3cret") is None
 
+    annotation = {"completed_by": 12, "updated_by": {"id": 13}}
     ls = json.dumps({"action": "ANNOTATION_UPDATED", "task": {"id": 3},
-                     "annotation": {"completed_by": 12}}).encode()  # fmt: skip
+                     "annotation": annotation}).encode()  # fmt: skip
     req = parse_event("label_studio", {"X-DLP-Secret": "s3cret"}, ls, "s3cret")
-    # completed_by는 도구 내부 숫자 ID라 검수자로 쓰지 않는다
-    assert req is not None and (req.task_key, req.reviewer, req.user_id) == (
-        "label_studio:3", None, 12,
+    # completed_by·updated_by는 도구 내부 숫자 ID라 검수자로 쓰지 않고 담당자 계정과 대조만 한다
+    assert req is not None and (req.task_key, req.reviewer, req.user_id, req.editor_id) == (
+        "label_studio:3", None, 12, 13,
     )  # fmt: skip
     with pytest.raises(WebhookAuthError):
         parse_event("label_studio", {}, ls, "s3cret")
@@ -454,13 +455,46 @@ def test_webhook_reviewer_comes_from_task_assignee() -> None:
     """회귀: Label Studio 숫자 ID를 검수자로 쓰지 않고, 서비스 계정 주석은 무시하고,
     CVAT 작업 담당자가 다르면 받지 않는다."""
     task = _task("label_studio:3", "labeler01")
-    assert resolve_reviewer(CollectRequest("label_studio:3", None, 12), task, 1) == "labeler01"
+    accounts = {"labeler01": 12}  # 담당자의 Label Studio 사용자 ID (label_studio.users로 찾은 값)
+    assert (
+        resolve_reviewer(CollectRequest("label_studio:3", None, 12, 12), task, 1, ls_users=accounts)
+        == "labeler01"
+    )
     assert resolve_reviewer(CollectRequest("label_studio:3", None, 1), task, 1) is None
-    assert resolve_reviewer(CollectRequest("cvat:7", "labeler01"), task) == "labeler01"
+    lab = _cvat_task(ReviewStage.LABELING, "labeler01")
+    assert resolve_reviewer(CollectRequest("cvat:7", "labeler01"), lab) == "labeler01"
     with pytest.raises(ReviewerMismatchError):
-        resolve_reviewer(CollectRequest("cvat:7", "someone"), task)
+        resolve_reviewer(CollectRequest("cvat:7", "someone"), lab)
     with pytest.raises(ReviewerMismatchError):
-        resolve_reviewer(CollectRequest("label_studio:3", None, 12), _task("label_studio:3", None))
+        resolve_reviewer(
+            CollectRequest("label_studio:3", None, 12), _task("label_studio:3", None), 1,
+            ls_users=accounts,
+        )  # fmt: skip
+
+
+def test_label_studio_webhook_accepts_only_the_assignee_account() -> None:
+    """회귀(F-REV-06): 예전에는 서비스 계정만 아니면 누가 낸 주석이든 담당자의 검수로 받았다.
+
+    주석을 만든 사람(completed_by)과 마지막으로 고친 사람(updated_by, 있으면)이 모두 담당자의
+    Label Studio 계정이어야 한다. 계정 연결이 없으면 누구 것인지 확인할 수 없어 받지 않는다.
+    서비스 계정(1)이 담당자 ID(11)를 completed_by로 적어 올린 주석은 updated_by가 1이다.
+    """
+    task = _task("label_studio:3", "labeler01")
+    accounts = {"labeler01": 11, "labeler02": 12}
+    ok = CollectRequest("label_studio:3", None, 11, 11)
+    assert resolve_reviewer(ok, task, 1, ls_users=accounts) == "labeler01"
+    assert resolve_reviewer(CollectRequest("label_studio:3", None, 11), task, 1,
+                            ls_users=accounts) == "labeler01"  # fmt: skip
+    for user, editor in ((12, 12), (12, None), (11, 12), (None, 11)):
+        with pytest.raises(ReviewerMismatchError, match="labeler01"):
+            resolve_reviewer(
+                CollectRequest("label_studio:3", None, user, editor), task, 1, ls_users=accounts
+            )
+    with pytest.raises(ReviewerMismatchError, match="Label Studio 계정 연결"):
+        resolve_reviewer(ok, task, 1)
+    # 서비스 계정이 고친 주석도 사람 검수가 아니다 (completed_by가 담당자여도)
+    with pytest.raises(ReviewerMismatchError):
+        resolve_reviewer(CollectRequest("label_studio:3", None, 11, 1), task, 1, ls_users=accounts)
 
 
 # ---------------------------------------------------------------- 감사 회귀

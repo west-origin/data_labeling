@@ -43,7 +43,11 @@ Docker VFS의 이미지 복제 때문에 이 환경에서 일반 `make cvat-up`�
 로컬 `/workspace/.cloud-onboarding/data-labeling/pilot/cvat-accounts.json`에 권한 0600으로 저장했다.
 기존 계정의 비밀번호·관리자 권한은 설치 재실행으로 바꾸지 않는다. 관리자 계정으로 일반 검수하지 않는다.
 Label Studio에도 서비스 계정과 별도로 `pilot-labeler@example.invalid` 검수 계정을 준비했다.
-로그인 정보는 같은 디렉터리의 `label-studio-account.json`(권한 0600)에 있다.
+로그인 정보는 같은 디렉터리의 `label-studio-account.json`(권한 0600)에 있다. 검수 정책 파일
+(`DLP_REVIEW_POLICY_FILE`)의 `label_studio.users`에 `pilot-labeler: pilot-labeler@example.invalid`를
+연결해야 한다. 연결이 없으면 Label Studio 시간 검수 작업을 만들지 않고(`dlp pilot check`의
+`label-studio-account`도 실패), 수집은 이 계정이 제출한 주석만 받는다. 다른 계정(서비스 계정 포함)이
+같은 작업에 낸 주석은 결과로 쓰지 않는다.
 
 ## 입력 준비와 등록
 
@@ -80,8 +84,8 @@ uv run --no-sync dlp review create SESSION_ID --stage privacy --assignee pilot-p
 ```
 
 검수 명령은 준비 검사와 같은 검수 정책 파일(`DLP_REVIEW_POLICY_FILE`)을 읽는다. `create`·`assign`은
-원본 검수자와 CVAT 계정 연결을, `serve`는 CVAT 계정 연결(웹훅 담당자 확인)을, `collect`는 표본 판정
-정책을 이 파일에서 읽는다. 준비 검사를 통과한 셸에서 이어서 실행한다. 이 변수가 없는 셸에서는 Git의
+원본 검수자와 CVAT·Label Studio 계정 연결을, `serve`는 두 도구의 계정 연결(웹훅 담당자 확인)을,
+`collect`는 표본 판정 정책과 Label Studio 계정 연결을 이 파일에서 읽는다. 준비 검사를 통과한 셸에서 이어서 실행한다. 이 변수가 없는 셸에서는 Git의
 기본 정책(원본 검수자·계정 연결 없음)을 읽어 블러 검수 작업 생성이 원본 접근 권한자가 아니라는
 오류로 거부된다.
 
@@ -109,6 +113,8 @@ uv run --no-sync dlp review create SESSION_ID --stage privacy --assignee pilot-p
    작업 키를 실제 완료 후 `dlp review collect cvat:TASK_ID --reviewer pilot-labeler`로 수집한다.
    이 명령은 Label Studio 시간 검수 작업도 만든다. 위 검수 이메일 계정으로 제출하고,
    `dlp review collect label_studio:TASK_ID --reviewer pilot-labeler`로 해당 작업도 수집한다.
+   다른 계정으로 제출하면 "담당자 … 가 제출한 주석이 아직 없습니다 (다른 사용자 주석 N개는 받지 않음)"
+   오류가 난다. 담당자 계정으로 다시 제출한다.
    마지막으로 `dlp review verify SESSION_ID`를 실행한다. 미완료 사유가 있으면 종료 코드 1과 사유를
    확인해 해결한다. 빈 결과나 자동 초안을 사람 검수 완료로 취급하지 않는다.
 

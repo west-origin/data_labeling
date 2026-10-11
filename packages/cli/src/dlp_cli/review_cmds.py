@@ -10,7 +10,8 @@
     승인·수정·삭제·추가 → 새 `LabelRecord` + `parent_label_id`). 이미 수집했거나 회수한 작업이면
     아무것도 하지 않는다(멱등). 블러가 바뀌면 커밋 뒤 배포 매체를 회수하고 다시 만들 명령을 보인다.
   - `serve [--port]` — CVAT·Label Studio 웹훅을 받아 끝난 작업을 자동 수집하는 HTTP 서버.
-    수집 결과(회수한 작업·다시 만들 명령 포함)는 `collect`와 같이 서버 로그에 남는다.
+    수집 결과(회수한 작업·다시 만들 명령 포함)는 `collect`와 같이 서버 로그에 남는다. 담당자의 도구
+    계정(`cvat.users`, `label_studio.users`)이 아닌 사람의 제출은 받지 않는다 (F-REV-06).
   - `revoke [<세션>] [--stream] [--task --reason] [--all --reason] [--include-legacy] [--dry-run]
     [--pending] [--mark-tool-gone KEY --note]` — 블러가 바뀐 뒤 이미 배포한 라벨링 매체를
     회수한다 (ADR 0039). 세션 경로는 늘 sweep을 하고 `--task`·`--all`은 그 위에 수동 요청을 더한다.
@@ -31,7 +32,8 @@
 privacy` (또는 `plan --privacy`) → `collect` → `dlp privacy approve`.
 
 정책 출처: 기본은 `config/policies/review.yaml` (우선순위·표본·측정 비율, `reviewers.privacy`,
-`cvat.users`, 미디어). CLI에서는 `DLP_REVIEW_POLICY_FILE`로 정책 파일을 바꿀 수 있다. 검수 정책을
+`cvat.users`, `label_studio.users`, 미디어).
+CLI에서는 `DLP_REVIEW_POLICY_FILE`로 정책 파일을 바꿀 수 있다. 검수 정책을
 읽는 하위 명령은 모두 `review_config.load_review_policy` 하나로 읽는다. 저장소·도구 설정(`_setup`)을
 쓰는 명령(create·collect·serve·assign·register-webhooks)은 정책을 한 번 읽어 `_setup`과 자기
 몫(원본 검수자, 수집·배정 마무리, 웹훅 검수자 확인)에 같은 객체를 넘긴다. 그래서 `ReviewSetup`의
@@ -91,6 +93,7 @@ from dlp_review.tasks import (
     ReviewSetup,
     create_labeling_tasks,
     create_privacy_tasks,
+    label_studio_user_id,
 )
 from dlp_review.ui_theme import TOKENS_FILE, cvat_tokens_css, load_ui_theme
 from dlp_review.verify import verify_session
@@ -294,6 +297,22 @@ def cmd_verify(args: argparse.Namespace) -> int:
     return 0
 
 
+def _ls_users(setup: ReviewSetup, task: ReviewTask) -> dict[str, int]:
+    """Label Studio 작업 담당자의 Label Studio 사용자 ID (`resolve_reviewer`의 ls_users).
+
+    다른 도구의 작업·담당자 없는 작업·연결 없는 담당자는 빈 사전이다 (그러면 웹훅이 받지 않는다).
+    연결은 웹훅마다 다시 찾는다 (서버를 띄운 뒤 만든 계정도 받는다). 연결한 계정이 Label Studio에
+    없거나 서비스 계정이면 `TaskError` (설정 오류, 서버는 503).
+    """
+    if task.tool is not ReviewTool.LABEL_STUDIO or task.assignee is None:
+        return {}
+    if setup.label_studio is None:
+        return {}
+    users = setup.label_studio_policy().users
+    uid = label_studio_user_id(setup.label_studio, users, task.assignee)
+    return {} if uid is None else {task.assignee: uid}
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     """`dlp review serve [--port]`: 웹훅 서버를 띄워 끝난 작업을 자동 수집한다 (블로킹, Ctrl-C로
     끝냄).
@@ -302,7 +321,9 @@ def cmd_serve(args: argparse.Namespace) -> int:
     1. 작업을 조회한다. 열린 작업이 아니면(수집함·회수함) 검수자 확인 전에 무시한다 (204). 회수
        실행기의 CVAT 배정 해제가 일으킨 `update:job` 웹훅을 담당자 불일치(403)로 만들지 않는다.
     2. 검수자를 정한다 — 웹훅의 도구 사용자 ID가 아니라 작업 담당자다
-       (`resolve_reviewer`). 담당자와 CVAT job 담당자가 맞지 않으면 수집하지 않는다.
+       (`resolve_reviewer`). 담당자와 CVAT job 담당자가 맞지 않으면 수집하지 않는다. Label Studio
+       작업은 주석을 만든·고친 사용자가 담당자의 Label Studio 계정(`label_studio.users`)이 아니면
+       수집하지 않는다 (403, 경고 로그. 수집도 그 계정 주석만 받는다, F-REV-06).
     3. 서비스 계정(Label Studio 서비스 사용자)이 만든 주석이면 수집하지 않는다.
     4. `collect_task`로 수집한다. 실패는 트랜잭션을 롤백하고 HTTP 경계에 전달한다. 결과는
        `collect`와 같이 출력한다 (블러가 바뀌어 회수한 작업과 다시 만들 명령 포함, 서버 로그).
@@ -328,7 +349,9 @@ def cmd_serve(args: argparse.Namespace) -> int:
                 print(f"{req.task_key}: {task.status.value} 작업이라 수집하지 않음")
                 return
             # 검수자는 웹훅의 도구 사용자 ID가 아니라 작업 담당자다
-            reviewer = resolve_reviewer(req, task, service_user, ops_policy.cvat.users)
+            reviewer = resolve_reviewer(
+                req, task, service_user, ops_policy.cvat.users, ls_users=_ls_users(setup, task)
+            )
             if reviewer is None:
                 print(f"{req.task_key}: 서비스 계정의 주석이라 수집하지 않음")
                 return

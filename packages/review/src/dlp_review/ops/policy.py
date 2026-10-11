@@ -13,7 +13,8 @@ WP12, ADR 0014. `dlp review plan|assign|qa|quality|create|collect|serve`와 운�
 - `ErrorType`: 오류 삽입 종류 (boundary_shift, class_swap, blur_deletion).
 - `CVAT_KINDS`: CVAT 공간 검수 화면이 보여 주는 작업 라벨 종류 (블러 제외).
 - `UnitsPolicy`·`PriorityPolicy`·`SamplingPolicy`·`SeedingPolicy`·`MeasurementPolicy`·
-  `ReviewersPolicy`·`MediaPolicy`·`CvatPolicy`·`WebhookPolicy`: review.yaml의 절별 모델.
+  `ReviewersPolicy`·`MediaPolicy`·`CvatPolicy`·`LabelStudioPolicy`·`WebhookPolicy`: review.yaml의
+  절별 모델.
 - `ReviewOpsPolicy`: 전체 정책 (review.yaml + `ratios` = defaults.yaml `review`).
 - `load_policy`: 저장소 루트에서 정책을 읽어 검증한다.
 
@@ -163,6 +164,32 @@ class CvatPolicy(Contract):
         return self
 
 
+class LabelStudioPolicy(Contract):
+    """Label Studio 계정 연결 (review.yaml `label_studio`, F-REV-06).
+
+    수집·웹훅은 작업 담당자의 Label Studio 계정이 만들고 마지막으로 고친 주석만 받는다. 연결이
+    없는 담당자에게는 Label Studio 시간 검수 작업을 만들지 않는다
+    (`dlp_review.tasks.require_label_studio_user`). 절을 빼면 연결이 비어 있는 것으로 본다 (이전
+    형식의 정책 파일도 읽힌다).
+    """
+
+    users: dict[str, str] = Field(
+        default_factory=dict[str, str],
+        description="dlp 검수자 ID → Label Studio 사용자 이메일. 시간 검수 담당자는 반드시 둔다",
+    )
+
+    @model_validator(mode="after")
+    def _one_to_one(self) -> LabelStudioPolicy:
+        """값은 이메일이고, 한 계정을 두 검수자에게 줄 수 없다 (이메일 대소문자 무시)."""
+        bad = sorted(k for k, v in self.users.items() if "@" not in v)
+        if bad:
+            raise ValueError(f"label_studio.users: 이메일이 아닌 값 ({bad})")
+        emails = [v.casefold() for v in self.users.values()]
+        if len(emails) != len(set(emails)):
+            raise ValueError("label_studio.users: 한 계정을 두 검수자에게 줄 수 없습니다")
+        return self
+
+
 class WebhookPolicy(Contract):
     """웹훅 HTTP 경계. 정책값으로 메모리·연결·동시 처리량을 제한한다."""
 
@@ -186,6 +213,8 @@ class ReviewOpsPolicy(Contract):
     seeding: SeedingPolicy
     reviewers: ReviewersPolicy
     cvat: CvatPolicy
+    # 절이 없으면 연결이 비어 있다 (Label Studio 작업 생성·수집이 계정 연결 없음으로 거부된다)
+    label_studio: LabelStudioPolicy = Field(default_factory=LabelStudioPolicy)
     webhook: WebhookPolicy
     ratios: ReviewConfig  # 배정 비율 (config/defaults.yaml `review` 절)
 
