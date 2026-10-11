@@ -259,7 +259,8 @@ def report_dict(
     extra는 리포트에 함께 남길 값이다 (예: 재학습 루프가 비교한 배포 모델 버전). 키:
     golden_version, model_versions, overall, subgroups, lower_is_better, (판정이 있으면) gate,
     그리고 extra의 키 (같은 키면 extra가 덮어쓴다). 재학습 루프는 extra에 `deployed_baseline`을
-    넣고, 승인 배포(`dlp_train.loop.deploy`)가 다시 읽는다. NaN은 null이 된다.
+    넣는다. 배포(`dlp_train.loop.deploy`)는 `model_versions`(후보 ID), `gate`(통과 여부),
+    `deployed_baseline`을 다시 읽어 검사한다. NaN은 null이 된다.
     """
     data: dict[str, Any] = {
         "golden_version": report.golden_version,

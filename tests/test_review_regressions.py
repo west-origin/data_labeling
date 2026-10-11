@@ -448,11 +448,23 @@ def test_concurrent_first_deployment_rejects_stale_baseline(
     tmp_path: Path,
     status: ModelStatus,
 ) -> None:
-    """두 첫 배포는 과제 잠금 안에서 비교 기준을 다시 읽어 하나만 배포된다. 자동 배포도 같다."""
+    """두 첫 배포는 과제 잠금 안에서 비교 기준을 다시 읽어 하나만 배포된다. 자동 배포도 같다.
+
+    두 모델 모두 자기 후보 ID와 게이트 통과가 적힌 리포트를 가진다 (deploy가 검사한다, T4).
+    """
     artifacts = LocalStore(tmp_path, "artifacts")
-    report = tmp_path / "golden.json"
-    report.write_text(json.dumps({"deployed_baseline": None}))
-    artifacts.put_file("golden.json", report, sha256_file(report))
+    for n in (1, 2):
+        report = tmp_path / f"golden-{n}.json"
+        report.write_text(
+            json.dumps(
+                {
+                    "model_versions": {"objects": f"model-{n}"},
+                    "gate": {"passed": True, "tasks": {"objects": {"passed": True}}},
+                    "deployed_baseline": None,
+                }
+            )
+        )
+        artifacts.put_file(f"golden-{n}.json", report, sha256_file(report))
     with pg.begin() as conn:
         repo.insert_dataset_version(
             conn,
@@ -487,7 +499,7 @@ def test_concurrent_first_deployment_rejects_stale_baseline(
                     train_examples=1,
                     status=status,
                     created_at=FIXED_TIME,
-                    report_uri=artifacts.uri("golden.json"),
+                    report_uri=artifacts.uri(f"golden-{n}.json"),
                     decided_at=None if status is ModelStatus.CANDIDATE else FIXED_TIME,
                 ),
             )
@@ -501,7 +513,7 @@ def test_concurrent_first_deployment_rejects_stale_baseline(
                     conn,
                     f"model-{n}",
                     now=NOW,
-                    report_uri=artifacts.uri("golden.json"),
+                    report_uri=artifacts.uri(f"golden-{n}.json"),
                     artifacts=artifacts,
                 )
             return True

@@ -19,24 +19,38 @@ from dlp_datasets.build import build_dataset_version
 from dlp_datasets.lineage import session_lineage, withdraw_session
 from dlp_datasets.policy import load_policy as load_dataset_policy
 from dlp_datasets.snapshot import LocalSnapshotStore
+from dlp_eval.gate import GateDecision, TaskDecision
+from dlp_eval.harness import EvalReport
 from dlp_eval.policy import load_policy as load_eval_policy
-from dlp_media.storage import LocalStore
+from dlp_eval.runner import write_report
+from dlp_media.storage import LocalStore, sha256_file
+from dlp_schema.dataset import DatasetVersion
 from dlp_schema.db.migrate import upgrade
 from dlp_schema.db.repository import (
     get_labels,
+    insert_dataset_version,
     insert_golden_set,
     insert_labels,
+    insert_model_version,
     insert_session,
+    insert_training_run,
     list_model_versions,
     register_ontology,
 )
 from dlp_schema.labels import LabelRecord, Provenance, Source, Verification, VerificationState
-from dlp_schema.lineage import GoldenSet, ModelStatus
+from dlp_schema.lineage import GoldenSet, ModelStatus, ModelVersion, TrainingRun
 from dlp_schema.ontology import load_ontology
 from dlp_schema.session import Domain, PrivacyState, Session, Stream, StreamKind, SyncMethod
 from dlp_schema.testing import FIXED_TIME, make_label, make_session
 from dlp_train.deployed import deployed_predictors
-from dlp_train.loop import LoopResult, TrainingError, TrainingJob, deploy, run_training_job
+from dlp_train.loop import (
+    DEPLOYED_BASELINE,
+    LoopResult,
+    TrainingError,
+    TrainingJob,
+    deploy,
+    run_training_job,
+)
 from dlp_train.policy import TrainingPolicy, load_policy
 from dlp_train.tracking import MemoryTracker
 from dlp_train.trainers import LoadContext
@@ -485,3 +499,106 @@ def test_timeline_tasks_withdrawal_and_approval_baseline(engine: sa.Engine, tmp_
     with engine.connect() as conn:
         deployed = list_model_versions(conn, "contact", ModelStatus.DEPLOYED)
         assert [d.model_version for d in deployed] == [c2.model_version]
+
+
+# ---------------------------------------------------------------- 직접 배포 호출의 리포트 검사 (T4)
+
+
+def _register_model(
+    conn: sa.Connection, model_version: str, status: ModelStatus, report: str | None
+) -> None:
+    """objects 과제 모델 버전 하나와 그 학습 실행을 넣는다 (산출물은 쓰지 않는다)."""
+    run_id = f"train-{model_version}"
+    insert_training_run(
+        conn,
+        TrainingRun(
+            run_id=run_id,
+            dataset_version_id="dv1",
+            model_name="objects",
+            model_version=model_version,
+            created_at=FIXED_TIME,
+        ),
+    )
+    insert_model_version(
+        conn,
+        ModelVersion(
+            model_version=model_version,
+            task="objects",
+            run_id=run_id,
+            trainer="oracle-stub",
+            artifact_uri="local://dlp-mlflow/model",
+            sha256="a" * 64,
+            train_examples=1,
+            status=status,
+            created_at=FIXED_TIME,
+            report_uri=report,
+            decided_at=None if status is ModelStatus.CANDIDATE else FIXED_TIME,
+        ),
+    )
+
+
+def test_direct_deploy_requires_passing_report_of_same_candidate(
+    engine: sa.Engine, tmp_path: Path
+) -> None:
+    """라이브러리 `deploy()`를 직접 불러도 CLI approve와 같은 기준으로 리포트를 검사한다 (T4).
+
+    정답: 게이트 실패 리포트, 다른 후보 ID의 리포트, 게이트 판정이 없는 리포트, 리포트가 없는
+    승인 대기 모델, 저장된 리포트 대신 다른 리포트를 준 승인 대기 모델은 모두 거부되고 배포 모델이
+    생기지 않는다. 같은 후보의 통과 리포트만 배포된다.
+    """
+    artifacts = LocalStore(tmp_path / "store", "dlp-mlflow")
+
+    def put_report(name: str, model: str, *, passed: bool | None) -> str:
+        """후보 `model`의 평가 리포트를 저장소에 올린다. passed=None이면 게이트 판정을 뺀다."""
+        report = EvalReport("golden-v1", {"objects": model}, {}, {})
+        decision = (
+            None
+            if passed is None
+            else GateDecision(passed, {"objects": TaskDecision("objects", passed)})
+        )
+        path = tmp_path / name / "golden.json"
+        write_report(path, report, decision, {DEPLOYED_BASELINE: None})
+        artifacts.put_file(f"{name}/golden.json", path, sha256_file(path))
+        return artifacts.uri(f"{name}/golden.json")
+
+    failed = put_report("failed", "cand-a", passed=False)
+    other = put_report("other", "cand-b", passed=True)
+    no_gate = put_report("no-gate", "cand-a", passed=None)
+    good = put_report("good", "cand-a", passed=True)
+    with engine.begin() as conn:
+        register_ontology(conn, load_ontology(ROOT / "config/ontology/v1"))
+        insert_dataset_version(
+            conn,
+            DatasetVersion(
+                version_id="dv1",
+                ontology_version="1.0.0",
+                created_at=FIXED_TIME,
+                snapshot_uri="local-snapshot://unused/dv1",
+                splits={},
+            ),
+        )
+        _register_model(conn, "cand-a", ModelStatus.CANDIDATE, None)
+        _register_model(conn, "passed-no-report", ModelStatus.PASSED, None)
+        _register_model(
+            conn, "passed-b", ModelStatus.PASSED, put_report("b", "passed-b", passed=True)
+        )
+
+    rejected = [
+        ("cand-a", failed, "게이트"),
+        ("cand-a", other, "cand-b"),
+        ("cand-a", no_gate, "게이트"),
+        ("passed-no-report", None, "리포트가 없습니다"),
+        # 승인 대기 모델은 판정 때 저장한 리포트로만 배포한다
+        ("passed-b", other, "판정 때 저장한"),
+    ]
+    for model, report_uri, match in rejected:
+        with engine.begin() as conn, pytest.raises(TrainingError, match=match):
+            deploy(conn, model, now=FIXED_TIME, report_uri=report_uri, artifacts=artifacts)
+    with engine.connect() as conn:
+        assert not list_model_versions(conn, "objects", ModelStatus.DEPLOYED)
+
+    with engine.begin() as conn:
+        deploy(conn, "cand-a", now=FIXED_TIME, report_uri=good, artifacts=artifacts)
+    with engine.connect() as conn:
+        [deployed] = list_model_versions(conn, "objects", ModelStatus.DEPLOYED)
+        assert (deployed.model_version, deployed.report_uri) == ("cand-a", good)

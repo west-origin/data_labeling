@@ -510,23 +510,28 @@ def deploy(
 ) -> ModelVersion:
     """게이트를 통과한 모델(candidate 판정 직후 또는 passed)을 배포한다. 과제마다 배포는 하나다.
 
-    평가 리포트(report_uri, artifacts 저장소)에 적힌 비교 대상 배포 모델이 지금 배포
-    모델과 다르면 배포하지 않는다 (지금 모델과 비교하지 않았으므로 다시 평가해야 한다). 판정 시각은
-    학습 실행 시작 시각이라 비교에 쓰지 않는다. MLflow 등록은 DB 커밋 뒤에 register()로 한다.
+    루프 자동 배포·CLI 승인(`dlp train approve`)·라이브러리 직접 호출 모두 같은 리포트 검사
+    (`_verified_report`)를 거친다: 평가 리포트(report_uri, artifacts 저장소)가 이 후보의 것이고
+    (`model_versions[과제]`가 이 모델 버전) 게이트를 통과했으며(`gate.passed`와 과제 판정이
+    참), 적힌 비교 대상 배포 모델이 지금 배포 모델과 같아야 한다 (지금 모델과 비교하지 않았으면
+    다시 평가해야 한다). 판정 시각은 학습 실행 시작 시각이라 비교에 쓰지 않는다. MLflow 등록은
+    DB 커밋 뒤에 register()로 한다.
 
     Args:
         conn: DB 연결 (호출자 트랜잭션).
         model_version: 배포할 모델 버전.
         now: 상태 변경 시각 (decided_at).
         report_uri: candidate를 바로 배포할 때(루프 안) 남길 리포트 URI. candidate는 이것이 필수다.
-        artifacts: 리포트의 비교 기준을 읽을 산출물 저장소. 자동·승인 배포 모두 필수다.
+            passed 모델은 판정 때 저장한 리포트를 쓴다 (주면 그 URI와 같아야 한다).
+        artifacts: 리포트를 읽을 산출물 저장소. 자동·승인 배포 모두 필수다.
 
     Returns:
         배포 전 상태로 읽은 `ModelVersion` (status 필드는 옛 값이다).
 
     Raises:
         TrainingError: 모델 버전이 없음, 배포할 수 없는 상태, 게이트 판정 전, 리포트 저장소 없음,
-            비교한 배포 모델이 지금 배포 모델과 다름, 리포트에 비교 기준 없음.
+            리포트 없음·저장된 리포트와 다른 URI, 다른 후보의 리포트, 게이트 판정이 없거나 실패한
+            리포트, 리포트에 비교 기준 없음, 비교한 배포 모델이 지금 배포 모델과 다름.
 
     부작용: 같은 과제의 기존 deployed를 모두 retired로, 이 모델을 deployed로 바꾼다
     (model_versions).
@@ -541,10 +546,14 @@ def deploy(
         raise TrainingError(f"{model_version}은 배포할 수 없는 상태입니다: {mv.status.value}")
     if mv.status is ModelStatus.CANDIDATE and report_uri is None:
         raise TrainingError(f"{model_version}은 게이트 판정 전입니다")
+    if mv.status is ModelStatus.PASSED and report_uri not in (None, mv.report_uri):
+        raise TrainingError(
+            f"{model_version}: 판정 때 저장한 평가 리포트({mv.report_uri})와 다른 리포트입니다"
+        )
     current = list_model_versions(conn, mv.task, ModelStatus.DEPLOYED)
     if artifacts is None:
         raise TrainingError(f"{model_version}: 배포에는 평가 리포트 저장소가 필요합니다")
-    compared = _compared_with(
+    compared = _verified_report(
         artifacts, mv.model_copy(update={"report_uri": report_uri or mv.report_uri})
     )
     now_deployed = current[-1].model_version if current else None
@@ -560,12 +569,17 @@ def deploy(
     return mv
 
 
-def _compared_with(artifacts: ObjectStore, mv: ModelVersion) -> str | None:
-    """passed 모델의 평가 리포트에 적힌, 게이트에서 비교한 배포 모델 버전 (없었으면 None).
+def _verified_report(artifacts: ObjectStore, mv: ModelVersion) -> str | None:
+    """배포 전 평가 리포트 검사. 통과하면 리포트에 적힌, 게이트에서 비교한 배포 모델 버전(없었으면
+    None)을 돌려준다.
+
+    배포 경로(루프 자동 배포·CLI 승인·직접 호출)의 리포트 검사는 모두 여기서 한다. 검사 항목:
+    리포트가 있음, 리포트의 후보(`model_versions[과제]`)가 이 모델 버전, 게이트 판정(`gate`)이
+    있고 전체·이 과제 모두 통과, 비교 기준(`deployed_baseline`) 키가 있음.
 
     Raises:
-        TrainingError: 리포트 URI가 없거나 리포트에 `deployed_baseline` 키가 없을 때 (이전 형식
-            리포트).
+        TrainingError: 위 항목 중 하나라도 어긋날 때 (리포트 없음, 다른 후보의 리포트, 게이트 판정이
+            없거나 실패, 이전 형식 리포트).
     """
     if mv.report_uri is None:
         raise TrainingError(f"{mv.model_version}: 평가 리포트가 없습니다")
@@ -573,6 +587,20 @@ def _compared_with(artifacts: ObjectStore, mv: ModelVersion) -> str | None:
         path = Path(tmp) / "golden.json"
         artifacts.get_file(_key(artifacts, mv.report_uri), path)
         data: dict[str, Any] = json.loads(path.read_text("utf-8"))
+    versions: dict[str, Any] = data.get("model_versions") or {}
+    reported = versions.get(mv.task)
+    if reported != mv.model_version:
+        raise TrainingError(
+            f"{mv.model_version}: 평가 리포트({mv.report_uri})는 다른 후보 {reported}의 것입니다"
+        )
+    gate: dict[str, Any] = data.get("gate") or {}
+    gate_tasks: dict[str, Any] = gate.get("tasks") or {}
+    task_gate: dict[str, Any] = gate_tasks.get(mv.task) or {}
+    if gate.get("passed") is not True or task_gate.get("passed") is not True:
+        raise TrainingError(
+            f"{mv.model_version}: 평가 리포트의 게이트를 통과하지 못했습니다 "
+            f"(판정 {gate.get('passed', '없음')}). 게이트를 통과한 모델만 배포합니다"
+        )
     if DEPLOYED_BASELINE not in data:
         raise TrainingError(
             f"{mv.model_version}: 평가 리포트에 비교한 배포 모델이 없습니다. 다시 학습·평가하세요"

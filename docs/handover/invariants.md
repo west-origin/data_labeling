@@ -23,7 +23,7 @@
 | 정책 값(비율·허용 오차·임계값)은 `config/`에서 | 정책 모델(`Contract`, 알 수 없는 키 금지) | 하드코딩 여부는 **문서뿐** (A-18, F-ETA-10, F-COE-11) |
 | 골든·학습·검증 사이 작업자·장소 겹침 금지, 분할은 splitter로만 | `packages/datasets/tests/test_splits.py` (격리·누수 보고) | splitter 우회 여부는 **문서뿐** |
 | 학습 예제는 학습·검증 분할에서만, 후보 예측은 DB에 안 씀 | `packages/training/tests/test_extract.py`, 학습 루프 테스트 | 철회 재검사 없음 (T3) |
-| 배포는 게이트 통과 모델만 | CLI approve가 PASSED만, 게이트 테스트 | 라이브러리 `deploy()` 직접 호출은 미검사 (T4) |
+| 배포는 게이트 통과 모델만 | `deploy()`가 리포트의 후보 ID·게이트 통과·비교 기준을 검사(자동·CLI approve·직접 호출 공통) — `packages/training/tests/test_loop.py::test_direct_deploy_requires_passing_report_of_same_candidate`, 게이트 테스트 | |
 | 내보내기는 데이터셋 버전에서만, 기본은 사람이 검수한 라벨만, 블러 라벨·원본 위치·검수자 ID 금지 | `test_formats.py::test_verification_policy`, 내보내기 정책·`ExportedLabel` 검증기, `test_runner.py` | |
 | 내보내기 가명은 내보내기마다 다르다 (HMAC) | `test_formats.py::test_pseudonyms_are_per_export`, `test_ref_replaces_only_whole_session_tokens` | |
 | 비상업(`forbidden`) 가중치는 쓰지 않는다 | `make licenses`(위반 시 실패), `tests/test_model_licenses.py` | 하위 탐지기 추적 테스트가 약함 (F-COE-02) |
