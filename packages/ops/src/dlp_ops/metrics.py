@@ -236,12 +236,16 @@ class AiWeekly:
             `dlp_review.ops.ai_quality`).
         suggestion_accept_rate: 보인 제안 중 실제로 적용된 비율.
         fallback_rate: 그 주에 기록한 판정 단위 중 형식에 맞는 응답을 끝내 받지 못한 단위 비율.
-        cache_hit_ratio: 그 주 판정 단위의 접두사 캐시 적중 토큰 / 프롬프트 토큰.
+        cache_hit_ratio: 그 주 판정 단위의 접두사 캐시 적중 토큰 / 프롬프트 토큰. 서버가 적중 토큰을
+            보고하지 않은 단위(`cached_tokens` None, vLLM `--enable-prompt-tokens-details` 꺼짐)는
+            분자·분모에서 모두 뺀다 (모름을 적중 0으로 세지 않는다. bench·estimate·probe와 같다).
+            보고한 단위가 없으면 nan(모름, 경고 없음).
         device_seconds_per_video_hour: 그 주에 끝난 실행의 걸린 시간 합(초) / `video_hours`
             (세션을 함께 돌리면 장비 시간보다 크게 나온다: 상한으로 본다).
         review_minutes_per_video_hour_shown / _holdout: 집단별 영상 1시간당 검수 분.
         seeded_leak: 블라인드가 아닌 "AI 없음" 화면 작업 중 오류 삽입 작업 비율 (F-AIR-03).
-        counts: 원자료 건수 (`units`, `fallback_units`, `runs`, `outcome_rows`).
+        counts: 원자료 건수 (`units`, `fallback_units`, `cache_unreported_units`(프롬프트 토큰은
+            있는데 캐시 적중을 보고하지 않은 단위), `runs`, `outcome_rows`).
     """
 
     video_hours: float = math.nan
@@ -319,8 +323,12 @@ def ai_weekly(
     units = list_ai_units_created(conn, start, end)
     fallback = sum(1 for u in units if u.outcome == "fallback")
     out.fallback_rate = _ratio(fallback, len(units))
-    tokens = [(u.prompt_tokens, u.cached_tokens or 0) for u in units if u.prompt_tokens]
-    out.cache_hit_ratio = _ratio(sum(c for _, c in tokens), sum(p for p, _ in tokens))
+    # 캐시 적중을 보고하지 않은 단위(None)는 모름이다: 적중 0으로 분모에 넣지 않는다
+    prompted = [u for u in units if u.prompt_tokens]
+    reported = [u for u in prompted if u.cached_tokens is not None]
+    out.cache_hit_ratio = _ratio(
+        sum(u.cached_tokens or 0 for u in reported), sum(u.prompt_tokens or 0 for u in reported)
+    )
     ends = (AiRunEventKind.COMPLETED, AiRunEventKind.INTERRUPTED, AiRunEventKind.ABORTED)
     finished = [e for e in list_ai_run_events_between(conn, start, end) if e.event in ends]
     sessions = {e.session_id for e in finished}
@@ -329,7 +337,8 @@ def ai_weekly(
     out.device_seconds_per_video_hour = _ratio(seconds, out.video_hours)
     out.backlog_hours = _ai_backlog_hours(conn, end, frozenset(ai.versions))
     out.counts = {
-        "units": len(units), "fallback_units": fallback, "runs": len(finished),
+        "units": len(units), "fallback_units": fallback,
+        "cache_unreported_units": len(prompted) - len(reported), "runs": len(finished),
         "outcome_rows": len(q.rows),
     }  # fmt: skip
     return out

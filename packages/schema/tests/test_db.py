@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+import itertools
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -18,6 +20,7 @@ from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
 from sqlalchemy.exc import DBAPIError
 
+from dlp_schema import repo_root
 from dlp_schema.dataset import DatasetVersion, Split
 from dlp_schema.db.migrate import alembic_config, downgrade, upgrade
 from dlp_schema.db.repository import (
@@ -52,6 +55,108 @@ def test_migrations_have_single_head() -> None:
     0019의 down_revision을 0018로 바꾼다 — ADR 0040)."""
     heads = ScriptDirectory.from_config(alembic_config("sqlite://")).get_heads()
     assert len(heads) == 1, f"head가 여럿이다: {heads} (나중 리비전의 down_revision을 고친다)"
+
+
+# 기준 문서(ADR, 구현 계획)에서 마이그레이션의 down 리비전을 적은 표기. 읽는 값은 (리비전, down).
+# - 괄호·쉼표: "Alembic 0019(down 0018", "`0019_ai_review.py`(down 0018", "Alembic 0018, down 0017",
+#   "Alembic 0017, down_revision 0015"
+# - 바꾼 기록: "0019의 `down_revision`을 0017에서 0018로" (바꾼 뒤 값을 읽는다)
+# - 체인: "마이그레이션 체인은 0015 → 0017(설명) → 0018" (뒤 리비전의 down이 앞 리비전,
+#   괄호 설명은 뺀다)
+# 한글도 \w라 "0019다"·"down은"의 경계는 \b로 잡히지 않는다: 숫자 뒤는 (?!\d), down 앞뒤는
+# ASCII 글자로 본다.
+_DOC_DOWN = re.compile(
+    r"(?:Alembic\s+`?|(?<!\d)(?=\d{4}_\w+\.py))(?P<rev>\d{4})(?:_\w+\.py)?`?"
+    r"\s*[(,]\s*`?down(?:_revision)?`?\s*(?P<down>\d{4})(?!\d)"
+)
+_DOC_DOWN_CHANGE = re.compile(
+    r"(?<!\d)(?P<rev>\d{4})의\s*`?down(?:_revision)?`?[을를]\s*\d{4}에서\s*(?P<down>\d{4})(?!\d)"
+)
+_DOC_CHAIN = re.compile(r"체인[은는이]?\s+(?P<chain>\d{4}(?:(?:\([^)]*\))?\s*→\s*\d{4}(?!\d))+)")
+# down 리비전을 언급하는 자리: 같은 줄 뒤에 리비전 번호가 오는 down·down_revision, 번호 사이 화살표
+# (ADR 번호 사이 화살표는 뺀다). 모두 위 표기 안에 있어야 한다 (새 표기를 조용히 건너뛰지 않는다).
+_DOC_DOWN_MENTION = re.compile(
+    r"(?<![A-Za-z])down(?:_revision)?(?![A-Za-z_])(?=[^\n]*\d{4})"
+    r"|(?<!ADR )(?<!\d)\d{4}(?:\([^)]*\))?\s*→(?=\s*\d{4}(?!\d))"
+)
+
+
+def _documented_downs(text: str) -> tuple[list[tuple[str, str, int]], list[int]]:
+    """문서 본문에서 적은 down 리비전을 읽는다.
+
+    반환: ((리비전, 적은 down 리비전, 줄 번호) 목록, 위 표기로 읽지 못한 down 언급의 줄 번호 목록).
+    """
+
+    def line(pos: int) -> int:
+        return text.count("\n", 0, pos) + 1
+
+    found: list[tuple[str, str, int]] = []
+    spans: list[tuple[int, int]] = []
+    for pattern in (_DOC_DOWN, _DOC_DOWN_CHANGE):
+        for m in pattern.finditer(text):
+            found.append((m["rev"], m["down"], line(m.start())))
+            spans.append(m.span())
+    for m in _DOC_CHAIN.finditer(text):
+        revs = re.findall(r"\d{4}", re.sub(r"\([^)]*\)", "", m["chain"]))
+        found += [(rev, down, line(m.start())) for down, rev in itertools.pairwise(revs)]
+        spans.append(m.span())
+    unparsed = [
+        line(m.start())
+        for m in _DOC_DOWN_MENTION.finditer(text)
+        if not any(start <= m.start() < end for start, end in spans)
+    ]
+    return found, unparsed
+
+
+def test_documented_down_parser_reads_every_notation() -> None:
+    """괄호·쉼표·`down_revision`·바꾼 기록·체인 표기를 (리비전, down) 쌍으로 읽고, 어느 표기에도
+    맞지 않는 down 언급은 줄 번호로 낸다. ADR 번호 사이 화살표, markdown·downgrade는 언급이 아니다.
+    정답은 문자열에 적은 값이다 (7번째 줄만 읽지 못한 언급)."""
+    text = (
+        "표 5개는 Alembic 0019(down 0018, WP17.4),\n"
+        "Alembic `0019_ai_review.py`(down 0018, 5개 표)\n"
+        "열(Alembic 0018, down 0017),\n"
+        "테이블(추가 전용, Alembic 0017, down_revision 0015).\n"
+        "마이그레이션 체인은 0015 → 0017(승인 보류, ADR 0042)\n"
+        "  → 0018(골든, ADR 0041) → 0019다 (병합 때 0019의 `down_revision`을 0017에서 0018로\n"
+        "0019는 down 리비전이 0016이다.\n"
+        "ADR 0021 → 0027에서 바뀜. markdown 0001, downgrade 0002\n"
+    )
+    found, unparsed = _documented_downs(text)
+    assert sorted(found) == sorted([
+        ("0019", "0018", 1), ("0019", "0018", 2), ("0018", "0017", 3), ("0017", "0015", 4),
+        ("0017", "0015", 5), ("0018", "0017", 5), ("0019", "0018", 5), ("0019", "0018", 6),
+    ])  # fmt: skip
+    assert unparsed == [7]
+
+
+def test_documented_down_revisions_match_migrations() -> None:
+    """ADR·구현 계획에 적은 "리비전(down 이전 리비전)"이 실제 `down_revision`과 같다.
+
+    브랜치 병합으로 down_revision을 바꾸고 문서를 그대로 두면, 문서만 보고 downgrade·백포트 순서를
+    잘못 잡는다 (ADR 0040이 0019를 "down 0017"로 남긴 일). 검수 기록(docs/handover)은 과거 상태를
+    인용하므로 보지 않는다. 정답: down 리비전을 언급하는 줄은 모두 `_documented_downs`의 표기로
+    읽히고 (ADR 0041 "Alembic 0018, down 0017", ADR 0042 "Alembic 0017, down_revision 0015"처럼
+    예전 정규식이 건너뛴 꼴을 놓치지 않는다), 읽은 표기가 하나 이상 있으며, 모두 마이그레이션 파일과
+    같다.
+    """
+    script = ScriptDirectory.from_config(alembic_config("sqlite://"))
+    actual = {s.revision: s.down_revision for s in script.walk_revisions()}
+    docs = repo_root() / "docs"
+    found: list[tuple[str, int, str, str]] = []
+    unparsed: list[tuple[str, int]] = []
+    for path in [*sorted((docs / "adr").glob("*.md")), docs / "ai-implementation-plan.md"]:
+        got, missed = _documented_downs(path.read_text(encoding="utf-8"))
+        found += [(path.name, line, rev, down) for rev, down, line in got]
+        unparsed += [(path.name, line) for line in missed]
+    assert unparsed == [], f"down 리비전 언급을 읽지 못했다 (문서, 줄; 표기를 더한다): {unparsed}"
+    assert found
+    wrong = [
+        (name, line, rev, down, actual.get(rev))
+        for name, line, rev, down in found
+        if actual.get(rev) != down
+    ]
+    assert wrong == [], f"문서의 down 리비전이 다르다 (문서, 줄, 리비전, 적은 값, 실제): {wrong}"
 
 
 def test_migrations_match_table_definitions(tmp_path: Path) -> None:

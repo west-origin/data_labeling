@@ -4,7 +4,8 @@
 - `dlp dataset golden --domain <도메인> [--create 버전] [--from 버전]` — 도메인 골든셋 후보를
   제안한다. `--create`를 주면 그 이름으로 골든셋을 확정해 DB `golden_sets`에 쓰고, 그 순간의 정답
   라벨 ID를 고정한다 (사람이 확정, ADR 0041). `--from`은 기존 버전의 세션으로 정답을 다시 고정한
-  새 버전을 만든다 (정답 수정은 새 골든 버전).
+  새 버전을 만든다 (정답 수정은 새 골든 버전). `--from`이면 `--domain`은 생략할 수 있다 (원본
+  골든셋 도메인, 주면 일치 검사).
 - `dlp dataset build <버전 ID> [--golden] [--domain]` — 데이터셋 버전을 만든다.
   작업자·장소 단위 분할(골든·학습·검증·holdout) → 라벨·세션·매니페스트를 lakeFS에 커밋 →
   DB `dataset_versions`에 기록.
@@ -18,7 +19,8 @@
 완료(`dlp review verify`) → `dataset golden --from <버전> --create <새 버전>`(정답 고정) →
 `dataset build --golden <새 버전>` → `dlp train run` / `dlp eval golden` / `dlp export …`.
 라벨링 전에 고정한 버전(정답 0개)이나 고정 뒤 정답이 바뀐 버전을 `dataset build --golden`·
-`eval golden`에 주면 경고하고 다시 고정하는 명령을 안내한다.
+`eval golden`에 주면 경고하고 다시 고정하는 명령을 안내한다. 골든셋 세션이 모두 사용 중지되었으면
+`--from`이 거부되므로 새 골든셋 제안(`--domain <도메인> --create`)을 안내한다.
 빌드 후보는 프라이버시 승인 세션 전체이고, `split_assigned`로 옮기는 것은 검수 완료 세션뿐이다
 (ADR 0031).
 
@@ -63,14 +65,15 @@ def _engine(args: argparse.Namespace) -> sa.Engine:
     return sa.create_engine(database_url(args.url))
 
 
-def _sessions_from(conn: sa.Connection, version: str, domain: str) -> list[str]:
-    """기존 골든셋 버전의 세션 중 사용 중지되지 않은 것 (골든셋에 적힌 순서).
+def _sessions_from(conn: sa.Connection, version: str, domain: str | None) -> tuple[str, list[str]]:
+    """기존 골든셋 버전의 도메인과 세션 중 사용 중지되지 않은 것 (골든셋에 적힌 순서).
 
+    `domain`이 None이면 원본 골든셋 도메인을 쓴다 (`--from`이면 `--domain` 생략 가능).
     예외: 골든셋 도메인이 `domain`과 다르거나 세션이 모두 사용 중지되었으면 `SystemExit`(골든셋은
     세션이 1개 이상이어야 한다). 버전이 없으면 `NoResultFound`.
     """
     source = get_golden_set(conn, version)
-    if source.domain.value != domain:
+    if domain is not None and source.domain.value != domain:
         raise SystemExit(f"골든셋 {version}의 도메인은 {source.domain.value}입니다 (--domain)")
     withdrawn = withdrawn_session_ids(conn)
     sessions = [
@@ -84,7 +87,7 @@ def _sessions_from(conn: sa.Connection, version: str, domain: str) -> list[str]:
             f"골든셋 {version}의 세션이 모두 사용 중지되어 새 버전을 만들 수 없습니다 "
             "(`--from` 없이 새 골든셋을 제안하세요)"
         )
-    return sessions
+    return source.domain.value, sessions
 
 
 def _warn_truth_lag(conn: sa.Connection, version: str) -> None:
@@ -110,7 +113,8 @@ def cmd_golden(args: argparse.Namespace) -> int:
     """`dlp dataset golden`: 도메인 골든셋 후보를 제안하고, `--create`면 확정해 저장한다.
 
     인자:
-        args.domain: `cleaning` / `caregiving` / `nursing` (`Domain` 열거형 값).
+        args.domain: `cleaning` / `caregiving` / `nursing` (`Domain` 열거형 값). `--from`이 없으면
+            필수다. `--from`이면 생략할 수 있고(원본 골든셋 도메인), 주면 원본과 같아야 한다.
         args.count: 목표 세션 수. 없거나 0이면 정책 `golden_sessions_per_domain`.
         args.create: 확정할 골든셋 버전 이름. None이면 제안만 출력한다(DB 쓰기 없음).
         args.from_version: 주면 제안 대신 그 골든셋 버전의 세션(사용 중지 세션 제외)을 쓴다.
@@ -128,19 +132,22 @@ def cmd_golden(args: argparse.Namespace) -> int:
     """
     if args.from_version and not args.create:
         raise SystemExit("--from에는 새 골든셋 버전 이름(--create)이 필요합니다")
+    if not args.from_version and not args.domain:
+        raise SystemExit("--domain이 필요합니다 (--from이면 원본 골든셋 도메인을 쓴다)")
     policy = load_policy(repo_root())
     engine = _engine(args)
     truth: tuple[str, ...] = ()
+    domain: str = args.domain
     with engine.begin() as conn:
         if args.from_version:
-            proposed = _sessions_from(conn, args.from_version, args.domain)
+            domain, proposed = _sessions_from(conn, args.from_version, args.domain)
         else:
             # 프라이버시 승인되지 않았거나 사용 중지된 세션은 제안하지 않는다
             proposed = propose_golden_set(
                 conn,
                 policy,
                 ontology_version=args.ontology_version,
-                domain=args.domain,
+                domain=domain,
                 target=args.count or policy.golden_sessions_per_domain,
                 seed=args.seed,
             )
@@ -150,7 +157,7 @@ def cmd_golden(args: argparse.Namespace) -> int:
                 conn,
                 GoldenSet(
                     version=args.create,
-                    domain=Domain(args.domain),
+                    domain=Domain(domain),
                     session_ids=tuple(proposed),
                     created_at=datetime.now(UTC),
                     note=args.note,
@@ -159,7 +166,7 @@ def cmd_golden(args: argparse.Namespace) -> int:
             )
     engine.dispose()
     print(
-        f"{args.domain} 골든셋 {'생성 ' + args.create if args.create else '제안'}: "
+        f"{domain} 골든셋 {'생성 ' + args.create if args.create else '제안'}: "
         f"세션 {len(proposed)}개" + (f", 고정한 정답 라벨 {len(truth)}개" if args.create else "")
     )
     for sid in proposed:
@@ -300,7 +307,11 @@ def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
     dsub = ds.add_subparsers(dest="dataset_command", required=True)
 
     g = dsub.add_parser("golden", help="도메인 골든셋 제안 (--create로 확정)")
-    g.add_argument("--domain", required=True, choices=["cleaning", "caregiving", "nursing"])
+    g.add_argument(
+        "--domain",
+        choices=["cleaning", "caregiving", "nursing"],
+        help="도메인 (--from이 없으면 필수. --from이면 원본 골든셋 도메인, 주면 일치 검사)",
+    )
     g.add_argument("--count", type=int, help="목표 세션 수 (기본: 정책 값)")
     g.add_argument(
         "--create",

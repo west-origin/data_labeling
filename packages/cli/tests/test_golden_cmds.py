@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -278,3 +279,68 @@ def test_eval_builds_anchor_and_inputs_from_one_golden_read(
     assert calls == ["golden-v1"]
     report = json.loads(out.read_text("utf-8"))
     assert sorted(report["golden_truth"]["sessions"]) == sorted(SESSIONS)
+
+
+def _hint_argv(hint: str, new_version: str) -> list[str]:
+    """안내 문장의 첫 `dlp …` 명령을 argv로 바꾼다 (`<새 버전>`은 `new_version`으로)."""
+    found = re.search(r"`dlp ([^`]+)`", hint)
+    assert found is not None, hint
+    return found.group(1).replace("<새 버전>", new_version).split()
+
+
+def test_refreeze_hint_runs_as_printed(url: str) -> None:
+    """다시 고정하는 안내 명령(`refreeze_hint`)은 그대로 실행된다 (`--from`이면 `--domain` 생략).
+
+    정답 근거: 안내 명령에는 `--domain`이 없고, 실행하면 원본 골든셋(청소)의 도메인·세션으로 새
+    버전을 만든다. `--domain`을 주면 원본과 같아야 하고, `--from`이 없으면 `--domain`이 필요하다.
+    """
+    assert main(["dataset", "golden", "--domain", "cleaning", "--count", "2",
+                 "--create", "golden-v1", "--url", url]) == 0  # fmt: skip
+    argv = _hint_argv(runner.refreeze_hint("golden-v1"), "golden-v2")
+    assert "--domain" not in argv
+    assert main([*argv, "--url", url]) == 0
+    engine = sqlite_db(url, create=False)
+    with engine.connect() as conn:
+        v1, v2 = get_golden_set(conn, "golden-v1"), get_golden_set(conn, "golden-v2")
+    engine.dispose()
+    assert v2.domain is Domain.CLEANING and v2.session_ids == v1.session_ids
+    assert v2.truth_label_ids == v1.truth_label_ids
+    with pytest.raises(SystemExit, match="도메인은 cleaning"):
+        main(["dataset", "golden", "--domain", "nursing", "--from", "golden-v1",
+              "--create", "golden-x", "--url", url])  # fmt: skip
+    with pytest.raises(SystemExit, match="--domain이 필요"):
+        main(["dataset", "golden", "--count", "2", "--url", url])
+
+
+def test_withdrawn_golden_points_to_new_proposal_not_from(
+    url: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """고정한 세션이 모두 사용 중지되면 빌드·평가 경고는 "라벨링 전에 고정"이 아니라 "모두 사용
+    중지"로 알리고, 거부될 `--from` 대신 새 골든셋 제안 명령을 안내한다.
+
+    정답 근거: golden-v1은 두 세션의 정답을 고정했다. 두 세션을 사용 중지하면 `--from golden-v1`은
+    거부되고(`_sessions_from`), 경고에는 고정 정답 수와 `--domain cleaning --create` 안내가 나온다.
+    """
+    assert main(["dataset", "golden", "--domain", "cleaning", "--count", "2",
+                 "--create", "golden-v1", "--url", url]) == 0  # fmt: skip
+    for sid in SESSIONS:
+        _withdraw(url, sid)
+    # 데이터셋 버전에 넣을 골든 밖 세션 하나 (빌드는 후보 세션이 있어야 한다)
+    engine = sqlite_db(url, create=False)
+    with engine.begin() as conn:
+        insert_session(conn, make_session("t001", worker_id="w9", site_id="site9",
+                                          privacy_state=PrivacyState.APPROVED))  # fmt: skip
+    engine.dispose()
+    frozen = sum(len(_actions(sid, i)) for i, sid in enumerate(SESSIONS))
+    capsys.readouterr()
+    _evaluate(url, "golden-v1", tmp_path)
+    assert main(["dataset", "build", "dv1", "--golden", "golden-v1", "--url", url]) == 0
+    out = capsys.readouterr().out
+    for warning in [ln for ln in out.splitlines() if ln.startswith("경고")]:
+        assert "모두 사용 중지" in warning and f"고정 정답 {frozen}개" in warning
+        assert "라벨링·검수 전에 고정한 버전" not in warning
+        assert "--from golden-v1" not in warning
+    assert out.count("`dlp dataset golden --domain cleaning --create <새 버전>`") == 2
+    # 안내하지 않은 --from은 실제로 거부된다
+    with pytest.raises(SystemExit, match="모두 사용 중지"):
+        main([*_hint_argv(runner.refreeze_hint("golden-v1"), "golden-v2"), "--url", url])
