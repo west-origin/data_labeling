@@ -1,6 +1,6 @@
 # ADR 0040: AI 1차 검수(로컬 VLM)는 참고용 판정만 남기고 사람 검수를 줄이지 않는다
 
-- 상태: 채택 (단계 구현 중. WP17.0~17.6 구현(17.3은 Spark 실측 대기), WP17.7~17.9는 [구현 계획 WP17](../ai-implementation-plan.md#wp17-ai-1차-검수로컬-vlm))
+- 상태: 채택 (단계 구현 중. WP17.0~17.8 구현(17.3은 Spark 실측 대기), WP17.9 파일럿은 [구현 계획 WP17](../ai-implementation-plan.md#wp17-ai-1차-검수로컬-vlm))
 - 날짜: 2026-10-11
 - 관련: WP10(행동 VLM), WP6·WP12(검수 연동·운영), ADR 0010(상업 사용), ADR 0012(행동 2단 구조),
   ADR 0015·0019(검수된 라벨 보호, 시각 규약), ADR 0024(블러본만), ADR 0033(세대·과거 정책 복귀),
@@ -178,6 +178,53 @@
   보류 라벨을 `<배정>:ai-flagged` 재검수 배정으로 보낸다. 누락 후보(ai_missing)는 표시·우선순위 모두
   후속이다 (F-AIR-08).
 
+#### 수집·적용 구현 (WP17.7)
+
+- 제안이 라벨이 되는 길은 수집(`collect.collect_task`) 안의 검수자 명시 결정 "제안 적용" 하나다
+  (`dlp_review.ai_collect`). 결정은 Label Studio의 `ai_decision` 선택만 읽고(AI 구간에 붙은 결정은 노출
+  기록으로 원 라벨로 되돌린다), 제안 내용은 도구의 메모·메타가 아니라 노출 기록 → 판정 단위 → 판정의
+  `suggestion.payload`를 DB에서 다시 읽어 지금 세션 온톨로지로 검사한다 (I6). CVAT 1단계에는 결정 칸이
+  없다 (F-AIR-06).
+- 적용은 검수자가 그 구간을 그대로 뒀을 때만(`reconcile.same_as_sent`) 한다. set은 항목 페이로드를 제안
+  페이로드로, change_kind(action↔gap)는 원 항목을 빼고 원 라벨 없는 새 항목(새 action_id
+  `h-<손>-<시작>`)으로, delete(이벤트·공간 트랙)는 항목을 뺀다. 그 뒤는 기존 reconcile이라 결과는 HUMAN
+  출처·human_corrected·담당 검수자 레코드다. 검수자가 구간이나 값도 고쳤으면 검수자 결과가 우선
+  (conflict_edited)이고, 집단이 shown이 아니거나 그 판정이 화면에 따로 보이지 않았으면 결정을 무시한다
+  (not_shown). 이중 작업(arm=shown)도 같게 반영하고 결과는 측정 레코드다.
+- 적용본이 세션 단위 검증(상위 구간 자식 연결 등)에 걸리면 라벨 ID 순으로 하나씩 더해 보며 통과하는 적용만
+  남기고 나머지는 invalid_now로 되돌린다. 검수자 자신의 결과가 걸리면 지금과 같이 수집이 실패한다 (AI
+  적용 되돌림이 검수자 오류를 덮지 않는다). 보낸 뒤 다른 단계가 바꾼 라벨(stale)의 적용도 invalid_now다.
+- 결과 기록(`ai_review_outcomes`)은 작업마다 한 번, 배정 마무리 앞 같은 트랜잭션에 쓴다. 보낸 라벨마다
+  판정·집단·사람 결과(approved·corrected·deleted·replaced·stale·na)·결정·적용 결과·제안 일치(제안이
+  바꾸자고 한 필드 기준 exact·partial·none)·결과 레코드 ID를 남긴다. 검수자가 AI 라벨로 그린 구간은
+  무시하고 경고 수만 남긴다. `review.yaml ai_review.mode = off`로 수집하면 AI 표를 읽지 않으므로 결정을
+  반영하지 않고 결과 기록도 쓰지 않는다 (F-AIR-12).
+- 함께 바꾼 것: reconcile 이후 묶음(reconcile → stale 빼기 → 측정·오류 삽입 표시)을 `collect._outcome_for`로
+  뽑아 `collect_task`의 복잡도 기준선(`noqa: C901`)이 없어졌다. Label Studio 결과의 원래 라벨 ID 기준은
+  보낸 라벨이다 (이중 작업도 표준과 같은 화면이라 같은 입력란 규칙. 비교 기준이 빈 목록이라 결과는 여전히
+  모두 새 측정 레코드다).
+
+#### 품질·운영 구현 (WP17.8)
+
+- `dlp_review.ops.ai_quality`가 노출 기록 × 결과 기록으로 지적 정밀도·재현율, ok 놓침률(Clopper-Pearson
+  한쪽 95% 상한, `dlp_eval.metrics.proportion`), 틀림인데 승인, 제안 정확 일치, 혼동 행렬, 확신도 ECE,
+  Cohen κ, 제안 적용률·검수자 결과 우선·지금 검증 실패, 집단별 검수 시간, 짝 표준 배정 집단별 이중 일치
+  κ·블라인드 편향, 오류 삽입 누출을 낸다. **편향 없는 값은 대조군(holdout)으로만 낸다.** 분모에서 재검수
+  배정·이중(측정)·stale·판정 없는 라벨을 뺀다. ok 놓침률은 표본 층(배정 표본 라벨, 가중치 = 묶음
+  모집단/표본)과 전수 층으로 나눠 모집단 크기로 합친다 (합친 상한은 보수적 근사, F-AIR-11).
+- 보고: `dlp review quality --ai [--since --until] [--ai-thresholds P] [--json]`(`QualityReport.ai`,
+  `--ai-thresholds`는 대조군에서 목표 정밀도를 만족하는 판정별 최소 확신도를 `show_min_confidence`
+  조안으로 낸다), `dlp ops weekly`의 AI 절(`WeeklyMetrics.ai`: 판정 영상 시간·백로그·판정률, 대조군
+  지표, 제안 적용률, fallback율, 캐시 적중률, 장비 시간, 집단별 검수 시간, 오류 삽입 누출)과 경고
+  (`ops.yaml alerts.ai_ok_miss_upper95_max`·`ai_backlog_hours_max`·`ai_fallback_rate_max`·`ai_cache_hit_min`).
+- 골든 평가 `dlp aireview eval --golden <버전> [--mode perturb|history] [--gate]`(`dlp_aireview.evaluate`):
+  운영과 같은 블러본 게이트·실행기로 판정하되 기록은 메모리라 DB에 쓰지 않는다 (CLI 테스트가 쓰기 문장을
+  감시한다). perturb는 골든 정답을 메모리에서 교란(`gate.inject`), history는 사람이 검수한 과거 모델
+  레코드(승인 → ok, 수정·삭제 → wrong)다. 대상·맥락은 검수 전 자동 라벨 사본으로 넣고(맥락에 "확정"
+  표시가 붙지 않게), history의 맥락에서는 대상의 후손(사람 수정본)을 뺀다. 게이트(`gate.min_wrong_recall`·
+  `max_false_flag_rate`·`max_ok_miss_rate`)는 실패해도 경고만 한다 (`gate.block: false`, F-AIR-10). 판정
+  모델이 행동 분류 모델과 같으면 경고하고 행동 라벨 지표를 따로 보인다.
+
 ### 7. 운영 모드와 절차 (사용자 결정)
 
 - `review.yaml ai_review.mode`(WP17.6)의 **코드 기본값은 off**, 장비가 오기 전 **저장소 설정값은
@@ -211,7 +258,7 @@ AI가 모두 ok여도 사람 검수 없이는 `dlp review verify`가 실패한�
 | I3 | AI 판정은 라벨도 검수 상태도 아니다 | 정적 검사(쓰기 함수·라벨 표 이름), `record_review`의 `aireview:` 검수자 거부(WP17.4), verify 회귀 |
 | I4 | 판정·제안은 운영 라벨·학습·내보내기·스냅샷에 섞이지 않는다 | 별도 표, import 정적 검사, 격리 회귀 테스트(`tests/test_aireview_isolation.py`) |
 | I5 | AI 표는 추가만 한다 | 0019 트리거(추가 전용·TRUNCATE 금지, WP17.4) |
-| I6 | 제안은 사람이 적용할 때만 라벨이 되고, 내용은 DB에서 다시 읽어 검증한다 | `ai_collect.apply_decisions`·`settle`(WP17.7) |
+| I6 | 제안은 사람이 적용할 때만 라벨이 되고, 내용은 DB에서 다시 읽어 검증한다 | `ai_collect.apply_decisions`(노출 기록 → 단위 → 온톨로지 재검사, 구간 그대로일 때만)·`settle`(세션 검증 실패 시 AI 적용만 되돌림), 도구 메모·메타 무시(WP17.7, `packages/review/tests/test_ai_collect.py`, services `test_ai_display_flow.py`) |
 | I7 | 사내 서버만, 서버 모델 = 정책 모델 | `allow_external: false`, 사내 주소 검사(probe·bench WP17.3, run WP17.5, 밖이면 요청 0건), 전송은 프록시 환경 변수를 따르지 않고 그 주소로 직접 연결(`OpenAICompatibleChat`, `trust_env=False`), 응답 `model` 대조(종료 5), `make licenses` |
 | I8 | 재실행은 멱등이다 | 입력 전체를 담은 단위 키, 단위 안 문맥 분할, `done_unit_ids`, 세션 잠금, `ON CONFLICT DO NOTHING` |
 | I9 | AI는 사람 검수를 줄이지 않는다 | 증가 프로필은 렌더와 무관, 생략 경로 없음 |
@@ -283,9 +330,11 @@ AI가 모두 ok여도 사람 검수 없이는 `dlp review verify`가 실패한�
 
 ## 범위 밖 (후속, `docs/handover/issues.yaml` F-AIR)
 
-오류 삽입 사본 판정, 표적 QA 비율, AI 표 파티션·보관, 행동 VLM 처리량 개선(병렬·창 단위), CVAT 2단계
-(트랙 속성 결정), 경계 이동 제안 적용, 누락 발견 표시, 장갑+영상 융합 접촉의 영상 대상 판정, 사람
-생략 ADR.
+오류 삽입 사본 판정(F-AIR-03), 표적 QA 비율(F-AIR-04), AI 표 파티션·보관(F-AIR-05), 행동 VLM 처리량
+개선(병렬·창 단위, F-AIR-01), CVAT 2단계(트랙 속성 결정, F-AIR-06), 경계 이동 제안 적용(F-AIR-07),
+누락 발견 표시(F-AIR-08), 장갑+영상 융합 접촉의 영상 대상 판정(F-AIR-09), 골든 게이트 차단 여부
+(F-AIR-10), 층화 상한 방법(F-AIR-11), off 모드 수집의 결정 처리(F-AIR-12), 사람 생략 ADR. AI가 제안하고
+사람이 적용한 라벨을 내보내기·학습에서 구별하는 계약 변경은 하지 않는다 (결정: `ai_review_outcomes`에만).
 
 ## 결과
 

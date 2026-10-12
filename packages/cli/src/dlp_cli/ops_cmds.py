@@ -3,6 +3,8 @@
 등록하는 명령 (`dlp ops …`):
 - `weekly [--week] [--weeks] [--out]` — 주간 운영 지표(검수 시간, 수정률, 자동 승인율, 프리라벨
   편향, 오류 삽입 발견율, 잔여 블러 누락률, 에피소드당 원가)와 경고. 최근 N주를 한 표로 낸다.
+  `review.yaml ai_review.mode`가 off가 아니면 AI 1차 검수 절(대조군 지적 정밀도·층화 ok 놓침률
+  상한·백로그·fallback율·캐시 적중률 등, WP17.8)과 그 경고(`ops.yaml alerts.ai_*`)도 낸다.
 - `audit-report <YYYY-MM> [--fail-on-flags]` — 원본 접근(`raw_access_log`) 월간 감사 리포트.
   권한 없는 접근·업무 시간 밖 접근 같은 확인할 것(flags)을 표시한다.
 - `retention [--today] [--all]` — 원본 보관 기간 만료 알림 (기간은 `defaults.yaml`
@@ -39,7 +41,7 @@ from pathlib import Path
 import sqlalchemy as sa
 
 from dlp_cli.raw_access import raw_store
-from dlp_cli.review_config import load_review_policy
+from dlp_cli.review_config import ai_display_config, load_review_policy
 from dlp_cli.schema_cmds import database_url
 from dlp_media.audit import current_actor
 from dlp_ops import audit as audit_mod
@@ -104,9 +106,10 @@ def cmd_weekly(args: argparse.Namespace) -> int:
     last = args.week or metrics_mod.week_of(datetime.now(UTC))
     start, _ = metrics_mod.week_range(last)
     weeks = [metrics_mod.week_of(start - timedelta(weeks=i)) for i in reversed(range(args.weeks))]
+    ai = ai_display_config(review)  # AI 1차 검수 절 (review.yaml ai_review.mode = off면 없음)
     engine = _engine(args)
     with engine.connect() as conn:
-        history = [metrics_mod.weekly_metrics(conn, w, review, policy) for w in weeks]
+        history = [metrics_mod.weekly_metrics(conn, w, review, policy, ai) for w in weeks]
     engine.dispose()
     warnings = metrics_mod.alerts(history, policy)
     _write(

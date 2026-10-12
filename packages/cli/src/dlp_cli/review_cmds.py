@@ -37,6 +37,8 @@
     비워 두므로 `assign --assignee <선임>`으로 만든다.
   - `queue [--limit]` — 열린 배정을 우선순위 높은 순으로 보여 준다 (AI 지적 사유 수 포함).
   - `quality` — 오류 삽입 발견율, 이중 라벨 일치도(카파·구간 F1·경계 F1), 프리라벨 편향.
+    `--ai`면 AI 1차 검수 판정 품질(대조군 기준 지적 정밀도·재현율·층화 ok 놓침률과 상한, 제안
+    적용, 자동화 편향·오류 삽입 누출, WP17.8), `--ai-thresholds`면 표시 최소 확신도 조안.
 
 정상 순서: (프리라벨·관계·행동·`dlp aireview run` 뒤) `plan` → `assign`(또는 `create`) → 검수 →
 `collect`/`serve` → `qa` → `verify` → `dlp dataset build`. 블러 검수는 `dlp privacy detect` 뒤
@@ -69,6 +71,7 @@ CLI에서는 `DLP_REVIEW_POLICY_FILE`로 정책 파일을 바꿀 수 있다. 검
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from datetime import UTC, datetime, timedelta
 
@@ -76,6 +79,7 @@ import sqlalchemy as sa
 from sqlalchemy.exc import NoResultFound
 
 from dlp_aireview.status import prelabeled_at
+from dlp_cli.ai_quality_print import ai_quality_json, print_ai_quality, print_thresholds
 from dlp_cli.review_config import (
     REVOCATION_PENDING_EXIT,
     ai_display_config,
@@ -94,6 +98,7 @@ from dlp_privacy.runner import (
     request_media_revocation,
     stale_media_tasks,
 )
+from dlp_review.ai_collect import summary_counts
 from dlp_review.ai_display import REASONS, AiDisplayConfig, GateDecision, required_gate
 from dlp_review.collect import collect_task
 from dlp_review.ontology_projects import ontology_project
@@ -245,6 +250,22 @@ def cmd_create(args: argparse.Namespace) -> int:
     return 0
 
 
+def _print_ai_outcome(outcome: ReviewOutcome) -> None:
+    """AI 1차 검수 결과 기록이 있으면 적용·기각 수와 경고를 출력한다 (WP17.7)."""
+    if outcome.ai is None:
+        return
+    counts = summary_counts(outcome.ai)
+    others = ", ".join(
+        f"{k} {v}" for k, v in sorted(counts.items()) if k not in ("applied", "dismissed")
+    )
+    print(
+        f"  AI 제안 적용 {counts['applied']}, 기각 {counts['dismissed']}"
+        + (f", 적용 안 함({others})" if others else "")
+    )
+    for w in outcome.ai.warnings:
+        print(f"  [AI 경고] {w}")
+
+
 def _print_outcome(task: ReviewTask, outcome: ReviewOutcome | None, *, ai: bool = False) -> None:
     """수집 결과와 회수 요청·다시 만들 명령을 출력한다.
 
@@ -261,6 +282,7 @@ def _print_outcome(task: ReviewTask, outcome: ReviewOutcome | None, *, ai: bool 
         f"{task.task_key}: 승인 {len(outcome.approved)}, 수정 {outcome.corrected}, "
         f"삭제 {outcome.retracted}, 추가 {outcome.added}"
     )
+    _print_ai_outcome(outcome)
     if not outcome.revoked:
         return
     print(
@@ -627,18 +649,43 @@ def cmd_queue(args: argparse.Namespace) -> int:
     return 0
 
 
+def _ai_window(args: argparse.Namespace) -> tuple[datetime, datetime] | None:
+    """`--ai`의 기간 [since, until) (없으면 처음부터 지금까지, 시간대 없는 값은 UTC)."""
+    if not args.ai:
+        return None
+
+    def parse(text: str | None, default: datetime) -> datetime:
+        if text is None:
+            return default
+        at = datetime.fromisoformat(text)
+        return at if at.tzinfo is not None else at.replace(tzinfo=UTC)
+
+    now = datetime.now(UTC)
+    return parse(args.since, datetime(1970, 1, 1, tzinfo=UTC)), parse(
+        args.until, now + timedelta(seconds=1)
+    )
+
+
 def cmd_quality(args: argparse.Namespace) -> int:
     """`dlp review quality`: 검수 품질 측정 리포트를 출력한다. 읽기 전용.
 
     - 오류 삽입 발견율: 검수자별 (발견한 삽입 오류 수 / 삽입한 수).
     - 이중 라벨 일치도: 키별 Cohen 카파, 구간 F1, 경계 F1.
     - 프리라벨 편향: 블라인드 과제와 일반 과제 결과 차이 (양수면 검수자가 프리라벨에 끌려감).
+    - `--ai [--since ISO] [--until ISO]`: AI 1차 검수 판정 품질 (WP17.8,
+      `dlp_review.ops.ai_quality`). 편향 없는 값은 대조군(holdout)이다. `--ai-thresholds P`는 목표
+      정밀도 P를 만족하는 판정별 최소 확신도를 `review.yaml ai_review.show_min_confidence` 조안으로
+      낸다. `--json`은 AI 절을 JSON으로 낸다.
     """
     policy = load_ops_policy(repo_root())
+    window = _ai_window(args)
     engine = sa.create_engine(database_url(args.url))
     with engine.connect() as conn:
-        report = quality_report(conn, policy)
+        report = quality_report(conn, policy, ai_window=window)
     engine.dispose()
+    if args.json:
+        print(json.dumps(ai_quality_json(report.ai) if report.ai else {}, ensure_ascii=False))
+        return 0
     for d in report.detection:
         print(f"오류 삽입 발견율 {d.reviewer}: {d.detected}/{d.injected} ({d.rate:.0%})")
     for key, agr in report.double.items():
@@ -648,6 +695,10 @@ def cmd_quality(args: argparse.Namespace) -> int:
         )
     for key, bias in report.blind_bias.items():
         print(f"프리라벨 편향 {key}: {bias:+.3f} (양수면 검수자가 프리라벨에 끌려감)")
+    if report.ai is not None:
+        print_ai_quality(report.ai, policy.sampling.max_defect_ratio)
+        if args.ai_thresholds is not None:
+            print_thresholds(report.ai, args.ai_thresholds)
     return 0
 
 
@@ -1096,6 +1147,14 @@ def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
     q.set_defaults(func=cmd_queue)
 
     ql = rsub.add_parser("quality", help="오류 삽입 발견율, 이중 라벨 일치도, 프리라벨 편향")
+    ql.add_argument("--ai", action="store_true", help="AI 1차 검수 판정 품질도 낸다 (WP17.8)")
+    ql.add_argument("--since", help="--ai 기간 시작 (ISO 시각, 기본: 처음부터)")
+    ql.add_argument("--until", help="--ai 기간 끝 (ISO 시각, 기본: 지금)")
+    ql.add_argument(
+        "--ai-thresholds", type=float, metavar="PRECISION",
+        help="목표 정밀도(0~1)를 만족하는 판정별 최소 확신도 조안 (--ai와 함께)",
+    )  # fmt: skip
+    ql.add_argument("--json", action="store_true", help="AI 절을 JSON으로 (--ai와 함께)")
     ql.add_argument("--url", help="DB URL (기본: DLP_DATABASE_URL)")
     ql.set_defaults(func=cmd_quality)
 

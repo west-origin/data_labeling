@@ -154,6 +154,7 @@ class RunInput:
         frames: 프레임 공급 (`BlurredFrame`만).
         sensor: 장갑 접촉 구간 (없으면 `SensorContext.absent()`).
         flagged: flagged 모드의 우선순위 사유 구간 (CLI가 `flag_unit`으로 계산).
+        targets: 대상 지정 (골든 평가 `evaluate`만, None이면 `plan.targets(current)`).
     """
 
     session: Session
@@ -164,6 +165,7 @@ class RunInput:
     frames: FrameSource
     sensor: SensorContext = field(default_factory=SensorContext.absent)
     flagged: tuple[FlaggedSpan, ...] = ()
+    targets: tuple[LabelRecord, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -403,7 +405,7 @@ def planned_units(inp: RunInput, policy: AiReviewPolicy, options: RunOptions) ->
     """입력의 판정 단위 (`plan_session`, `options.groups` 묶음만)."""
     units = plan_session(
         inp.session, list(inp.current), policy, inp.ontology,
-        media=inp.media, sensor=inp.sensor, flagged=inp.flagged,
+        media=inp.media, sensor=inp.sensor, flagged=inp.flagged, only=inp.targets,
     )  # fmt: skip
     return [u for u in units if options.groups is None or u.group in options.groups]
 

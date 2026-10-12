@@ -16,9 +16,9 @@ Prefect 서비스가 기동된 것만으로 모든 작업이 영속 큐에서 �
 | 탐지·승인·렌더 | [privacy](../../packages/privacy/src/dlp_privacy/)의 `runner.py`, `generation.py`, `rendering.py`, `revocation.py`(블러 변경 뒤 배포 매체 회수 요청), `hold.py`(사고 대응 승인 보류, ADR 0042) | `config/policies/privacy.yaml` |
 | 자동 라벨 초안 | [prelabel runner](../../packages/prelabel/src/dlp_prelabel/runner.py), `adapters/` | `config/policies/prelabel.yaml`, `config/models.yaml` |
 | 관계·접촉·행동 | [relations](../../packages/relations/src/dlp_relations/), [actions](../../packages/actions/src/dlp_actions/) | 각 단계의 `config/policies/*.yaml` |
-| AI 1차 검수 (참고용 판정, WP17 진행 중) | [aireview](../../packages/aireview/src/dlp_aireview/)의 `plan.py`, `prompt.py`, `validate.py`, `judge.py`, 실행기 `runner.py`·블러본 경계 `media.py`·엔드포인트 묶음 `backend.py`·진행 상태 `status.py`([실행 CLI](../../packages/cli/src/dlp_cli/aireview_run_cmds.py)), 점검·벤치·추정 `probe.py`·`bench.py`·`estimate.py`([CLI](../../packages/cli/src/dlp_cli/aireview_cmds.py)), 공통 VLM 전송 [models vlm](../../packages/models/src/dlp_models/vlm.py), AI 표 저장소 [aireview_repository](../../packages/schema/src/dlp_schema/db/aireview_repository.py) | `config/policies/aireview.yaml`, `config/models.yaml` external |
-| 검수 도구·이력 수집 | [review](../../packages/review/src/dlp_review/)의 `tasks.py`, `collect.py`, `reconcile.py`, `clients.py`, `webhook.py`, `revoke.py`(회수 실행기), `orphans.py`(DB 기록 없이 남은 도구 작업·사본 정리), `ai_display.py`(AI 1차 검수 판정 표시·노출 기록·대조군·우선순위·표본 제외·required 게이트, WP17.6. 판정은 `dlp_schema.aireview`·`aireview_repository`로 읽고 허용 버전은 CLI가 넘긴다) | `config/policies/review.yaml`(`ai_review` 절), `config/review_ui.yaml`(`ai` 절) |
-| 배정·QA·품질 | [review ops](../../packages/review/src/dlp_review/ops/) | 위 검수 정책, `config/defaults.yaml` |
+| AI 1차 검수 (참고용 판정, WP17 진행 중) | [aireview](../../packages/aireview/src/dlp_aireview/)의 `plan.py`, `prompt.py`, `validate.py`, `judge.py`, 실행기 `runner.py`·블러본 경계 `media.py`·엔드포인트 묶음 `backend.py`·진행 상태 `status.py`([실행 CLI](../../packages/cli/src/dlp_cli/aireview_run_cmds.py)), 점검·벤치·추정 `probe.py`·`bench.py`·`estimate.py`([CLI](../../packages/cli/src/dlp_cli/aireview_cmds.py)), 골든 평가 `evaluate.py`([CLI](../../packages/cli/src/dlp_cli/aireview_eval_cmds.py), DB에 쓰지 않는다), 공통 VLM 전송 [models vlm](../../packages/models/src/dlp_models/vlm.py), AI 표 저장소 [aireview_repository](../../packages/schema/src/dlp_schema/db/aireview_repository.py) | `config/policies/aireview.yaml`(`gate` 절), `config/models.yaml` external |
+| 검수 도구·이력 수집 | [review](../../packages/review/src/dlp_review/)의 `tasks.py`, `collect.py`, `reconcile.py`, `clients.py`, `webhook.py`, `revoke.py`(회수 실행기), `orphans.py`(DB 기록 없이 남은 도구 작업·사본 정리), `ai_display.py`(AI 1차 검수 판정 표시·노출 기록·대조군·우선순위·표본 제외·required 게이트, WP17.6. 판정은 `dlp_schema.aireview`·`aireview_repository`로 읽고 허용 버전은 CLI가 넘긴다), `ai_collect.py`(검수자가 고른 AI 제안 적용·세션 검증 실패 시 되돌림·결과 기록, WP17.7) | `config/policies/review.yaml`(`ai_review` 절), `config/review_ui.yaml`(`ai` 절) |
+| 배정·QA·품질 | [review ops](../../packages/review/src/dlp_review/ops/)(AI 판정 품질 `ai_quality.py`, WP17.8) | 위 검수 정책, `config/defaults.yaml` |
 | 계약·온톨로지·DB | [schema](../../packages/schema/src/dlp_schema/), `db/` | `config/ontology/v1`, `schemas/`는 생성물 |
 | 데이터셋·학습·평가 | [datasets](../../packages/datasets/src/dlp_datasets/), [training](../../packages/training/src/dlp_train/), [evaluation](../../packages/evaluation/src/dlp_eval/) | `dataset.yaml`, `training.yaml`, `evaluation.yaml` |
 | 내보내기·게시 | [export runner](../../packages/export/src/dlp_export/runner.py), 같은 디렉터리의 형식별 모듈 | `config/policies/export.yaml` |
@@ -38,7 +38,7 @@ Prefect 서비스가 기동된 것만으로 모든 작업이 영속 큐에서 �
 | prelabel | media, models, schema, sync |
 | actions | media, models, privacy, schema |
 | active | media, privacy, schema |
-| aireview | media, models, privacy, schema |
+| aireview | eval, media, models, privacy, schema |
 | review | eval, media, privacy, schema, sync |
 | train | datasets, eval, media, schema |
 | export | datasets, media, privacy, schema |

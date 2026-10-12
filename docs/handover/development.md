@@ -142,6 +142,10 @@ serve|assign|register-webhooks|refresh-urls|plan|qa|quality`, 작업의 CVAT 계
 --dry-run`(블러본 게이트는 거치고, 손 상태 대상이 있으면 단위 키의 센서 해시를 위해 장갑 Parquet은
 읽는다). 실행기 테스트는 `MemorySink`·SQLite·가짜 서버로 `make test`에서,
 세션 잠금 경합·`ON CONFLICT`는 `make test-services`에서 돈다.
+판정 품질은 `dlp review quality --ai [--since ISO] [--ai-thresholds 0.7] [--json]`(대조군 기준 지표,
+DB 읽기만)과 `dlp ops weekly`의 AI 절로 본다. 판정 모델·프롬프트를 바꿀 때는 골든 평가
+`dlp aireview eval --golden <버전> [--mode perturb|history] --gate --vlm-url …`(DB에 쓰지 않는다, 보고서는
+`reports/aireview-eval/`, 게이트는 실패해도 경고만)를 전후로 돌린다.
 
 ## 검사 범위와 자원
 

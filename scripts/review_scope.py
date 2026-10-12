@@ -47,6 +47,8 @@ HIGH = (
     "packages/review/src/dlp_review/reconcile.py",
     # AI 판정 표시는 지금 렌더의 블러본 판정만(I10), 표본 제외·마무리 보호는 검수를 줄이지 않게(I9)
     "packages/review/src/dlp_review/ai_display.py",
+    # AI 제안은 사람이 명시적으로 적용할 때만 사람 레코드가 되고 내용은 DB에서 다시 검증 (I6)
+    "packages/review/src/dlp_review/ai_collect.py",
     "packages/datasets/src/dlp_datasets/splitter.py",
     "packages/datasets/src/dlp_datasets/lineage.py",
     "packages/training/src/dlp_train/loop.py",

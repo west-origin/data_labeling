@@ -809,6 +809,7 @@ version = "0.1.0"
 source = { editable = "packages/aireview" }
 dependencies = [
     { name = "av" },
+    { name = "dlp-eval" },
     { name = "dlp-media" },
     { name = "dlp-models" },
     { name = "dlp-privacy" },
@@ -823,6 +824,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "av", specifier = ">=19.0" },
+    { name = "dlp-eval", editable = "packages/evaluation" },
     { name = "dlp-media", editable = "packages/media" },
     { name = "dlp-models", editable = "packages/models" },
     { name = "dlp-privacy", editable = "packages/privacy" },

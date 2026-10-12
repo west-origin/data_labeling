@@ -11,6 +11,7 @@
 - 프리라벨 예측 결과(`labels` 컨트롤)와 작업 data는 AI 표시가 있어도 없을 때와 같다 (서명 URL은
   서명 시각만 다르고 같은 객체를 가리킨다).
 - 검수자가 AI 결과가 섞인 주석을 그대로 제출해도 수집 결과는 AI가 없을 때와 같다 (모두 승인).
+  "제안 적용"을 고른 라벨만 DB에서 다시 읽은 제안 페이로드로 사람 수정 레코드가 된다 (WP17.7).
 """
 
 from __future__ import annotations
@@ -48,8 +49,20 @@ from dlp_review.collect import collect_task
 from dlp_review.labelstudio import AI_DECISION, AI_FLAGS, AI_NOTE, AI_SUMMARY
 from dlp_review.ops.policy import AiReviewDisplayPolicy, CvatPolicy, LabelStudioPolicy
 from dlp_review.tasks import ReviewSetup, create_labeling_tasks
-from dlp_schema.aireview import AiArm, AiDecision, AiSuggestion, AiVerdict
-from dlp_schema.db.aireview_repository import get_ai_exposure, insert_ai_run, insert_ai_units
+from dlp_schema.aireview import (
+    AiApplyResult,
+    AiArm,
+    AiDecision,
+    AiHumanAction,
+    AiSuggestion,
+    AiVerdict,
+)
+from dlp_schema.db.aireview_repository import (
+    get_ai_exposure,
+    get_ai_outcome,
+    insert_ai_run,
+    insert_ai_units,
+)
 from dlp_schema.db.migrate import upgrade
 from dlp_schema.db.repository import (
     get_labels,
@@ -59,6 +72,7 @@ from dlp_schema.db.repository import (
     record_review,
     register_ontology,
 )
+from dlp_schema.episode import current_labels
 from dlp_schema.labels import LabelRecord, Provenance, Source, VerificationState
 from dlp_schema.ontology import load_ontology
 from dlp_schema.review import ReviewStage, ReviewTask, ReviewTaskStatus, ReviewTool
@@ -247,15 +261,18 @@ def _no_ids(value: Any) -> Any:
     return value
 
 
-def test_label_studio_shows_valid_verdicts_only_and_collection_is_unchanged(
+def test_label_studio_shows_valid_verdicts_and_applies_only_explicit_decisions(
     pg: sa.Engine,
     setup: ReviewSetup,
     tmp_path: Path,
     ls_as: Callable[[LabelStudioClient, str], LabelStudioClient],
 ) -> None:
     """지금 렌더의 판정만 AI 구간·메모·요약으로 보이고(맞음은 구간 없음), 프리라벨 예측·작업 data는
-    AI가 없을 때와 같다. 노출 기록이 같은 트랜잭션에 남고, 검수자가 AI 결과·결정이 섞인 주석을
-    그대로 내도 수집은 AI 없을 때처럼 모두 승인이다 (F-AIR-02, 적용은 WP17.7)."""
+    AI가 없을 때와 같다. 노출 기록이 같은 트랜잭션에 남는다 (F-AIR-02).
+
+    실제 도구 종단(WP17.7): 검수자가 AI 결과가 섞인 주석에 결정 둘(라벨 구간에서 적용, AI 구간에서
+    기각)을 골라 내면, 적용한 라벨만 DB의 제안 페이로드로 사람 수정 레코드가 되고 나머지는 승인이다.
+    결과 기록(`ai_review_outcomes`)이 라벨마다 사람 결과·결정·적용 결과·제안 일치를 남긴다."""
     sid, _ = _approved_session(pg, setup, tmp_path)
     labels = _temporal(pg, sid)
     actions = [x for x in labels if x.kind == "action"]
@@ -312,8 +329,37 @@ def test_label_studio_shows_valid_verdicts_only_and_collection_is_unchanged(
     assert warnings == []
     with pg.begin() as conn:
         outcome = collect_task(conn, shown.task_key, _on(setup), "labeler02", FIXED_TIME)
-    assert outcome is not None and not outcome.new_records
-    assert sorted(outcome.approved) == sorted(shown.sent_label_ids or ())
+    assert outcome is not None
+    [fix] = outcome.new_records
+    assert fix.parent_label_id == actions[0].label_id and fix.payload == swap
+    assert fix.provenance.source is Source.HUMAN and fix.verification.reviewer_id == "labeler02"
+    sent = set(shown.sent_label_ids or ())
+    assert sorted(outcome.approved) == sorted(sent - {actions[0].label_id})
+    with pg.connect() as conn:
+        record = get_ai_outcome(conn, shown.task_key)
+        current = {x.label_id for x in current_labels(get_labels(conn, sid))}
+    assert record is not None and record.reviewer_id == "labeler02"
+    items = {x.label_id: x for x in record.items}
+    assert set(items) == sent and {x.arm for x in items.values()} == {AiArm.SHOWN}
+    applied, dismissed = items[actions[0].label_id], items[gap.label_id]
+    assert (applied.human, applied.decision, applied.apply_result, applied.match) == (
+        AiHumanAction.CORRECTED, AiDecision.APPLY, AiApplyResult.APPLIED, "exact",
+    )  # fmt: skip
+    assert applied.result_label_ids == (fix.label_id,)
+    assert (dismissed.human, dismissed.decision, dismissed.apply_result) == (
+        AiHumanAction.APPROVED, AiDecision.DISMISS, None,
+    )  # fmt: skip
+    assert items[actions[1].label_id].verdict is not None  # 맞음 판정도 결과 기록에 남는다
+    assert fix.label_id in current and actions[0].label_id not in current
+    # 아무것도 고르지 않은 작업(AI 끔)은 결과 기록도 없고 모두 승인이다
+    ls_as(ls, "labeler01").http.post(
+        f"/api/tasks/{plain.external_id}/annotations", json={"result": base}
+    ).raise_for_status()
+    with pg.begin() as conn:
+        untouched = collect_task(conn, plain.task_key, setup, "labeler01", FIXED_TIME)
+    assert untouched is not None and not untouched.new_records and untouched.ai is None
+    with pg.connect() as conn:
+        assert get_ai_outcome(conn, plain.task_key) is None
 
 
 def test_holdout_and_missing_verdicts_show_only_the_same_empty_summary(
@@ -397,3 +443,13 @@ def test_cvat_gets_ai_issues_without_project_changes(
         exposure = get_ai_exposure(conn, task.task_key)
     assert exposure is not None and exposure.arm is AiArm.SHOWN
     assert list(exposure.shown) == [track.label_id]
+    # 수집: CVAT 1단계에는 결정 칸이 없다 → 트랙 그대로면 승인, 결과 기록은 결정 없음 (WP17.7)
+    with pg.begin() as conn:
+        outcome = collect_task(conn, task.task_key, _on(setup), "rev01", FIXED_TIME)
+        record = get_ai_outcome(conn, task.task_key)
+    assert outcome is not None and outcome.approved == [track.label_id]
+    assert record is not None
+    [item] = record.items
+    assert (item.label_id, item.human, item.decision, item.apply_result, item.match) == (
+        track.label_id, AiHumanAction.APPROVED, AiDecision.NONE, None, "none",
+    )  # fmt: skip

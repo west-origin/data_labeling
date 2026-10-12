@@ -244,3 +244,107 @@ def test_queue_shows_ai_reason_count(
     lines = capsys.readouterr().out.splitlines()
     assert any(" A " in f" {line} " and line.endswith("AI 지적 1") for line in lines)
     assert not any("B" in line.split() and "AI" in line for line in lines)
+
+
+def _holdout_outcome(engine: sqlalchemy.Engine) -> None:
+    """대조군 작업 하나: 판정 wrong(확신도 0.9)인 라벨을 사람이 고쳤다, ok(0.8)인 라벨은 승인."""
+    from dlp_schema.aireview import AiArm, AiExposure, AiHumanAction, AiOutcome, AiOutcomeItem
+    from dlp_schema.aireview import AiVerdictValue as V
+    from dlp_schema.db.aireview_repository import (
+        insert_ai_exposure,
+        insert_ai_outcome,
+        insert_ai_units,
+    )
+    from dlp_schema.db.repository import insert_review_task
+    from dlp_schema.testing import make_ai_unit, make_ai_verdict
+
+    unit = "air-" + "5" * 24
+    run = make_ai_run("s001")
+    task = ReviewTask(
+        task_key="label_studio:7", tool=ReviewTool.LABEL_STUDIO, external_id="7",
+        session_id="s001", stream_id="bodycam", stage=ReviewStage.LABELING, assignee="r1",
+        media_uri="s3://dlp-labeling/x.mp4", label_kinds=("action",), created_at=FIXED_TIME,
+        sent_label_ids=("a", "b"),
+    )  # fmt: skip
+    verdicts = [
+        make_ai_verdict("a", "wrong", confidence=0.9),
+        make_ai_verdict("b", "ok", confidence=0.8),
+    ]
+    with engine.begin() as conn:
+        insert_session(conn, make_session())
+        insert_review_task(conn, task)
+        insert_ai_run(conn, run)
+        insert_ai_units(conn, [make_ai_unit(unit, verdicts, run_id=run.run_id)])
+        insert_ai_exposure(conn, AiExposure(
+            task_key=task.task_key, session_id="s001", arm=AiArm.HOLDOUT, arm_key=task.task_key,
+            coverage=1.0, hidden={"a": unit, "b": unit}, created_at=FIXED_TIME,
+        ))  # fmt: skip
+        insert_ai_outcome(conn, AiOutcome(
+            task_key=task.task_key, session_id="s001", reviewer_id="r1", collected_at=FIXED_TIME,
+            items=(
+                AiOutcomeItem(label_id="a", unit_id=unit, verdict=V.WRONG, arm=AiArm.HOLDOUT,
+                              human=AiHumanAction.CORRECTED),
+                AiOutcomeItem(label_id="b", unit_id=unit, verdict=V.OK, arm=AiArm.HOLDOUT,
+                              human=AiHumanAction.APPROVED),
+            ),
+        ))  # fmt: skip
+
+
+def test_quality_ai_report_text_json_and_thresholds(
+    db: tuple[str, sqlalchemy.Engine], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`dlp review quality --ai`: 대조군 지표(지적 정밀도 1/1, ok 놓침 0/1), 확신도 조안(목표 0.5면
+    wrong 0.90), `--json`은 AI 절 JSON. 기간 밖(`--since`가 뒤)이면 행이 없다."""
+    import json
+
+    url, engine = db
+    _holdout_outcome(engine)
+    args = ["review", "quality", "--ai", "--ai-thresholds", "0.5", "--url", url]
+    assert main(args) == 0
+    out = capsys.readouterr().out
+    assert "대조군(holdout, 편향 없음)] 행 2: 지적 정밀도 100.0% (1/1)" in out
+    assert "ok 놓침률 0.0% (0/1), 95% 상한 95.0%" in out
+    assert "wrong: 0.90 (표본 1, 정밀도 100.0%)" in out
+    assert main(["review", "quality", "--ai", "--json", "--url", url]) == 0
+    data = json.loads(capsys.readouterr().out)
+    holdout = data["arms"]["holdout"]
+    assert holdout["flag_precision"] == {"num": 1, "den": 1, "value": 1.0, "upper95": 1.0}
+    assert data["exposure"]["tasks"] == {"holdout": 1}
+    later = (FIXED_TIME + timedelta(days=1)).isoformat()
+    assert main(["review", "quality", "--ai", "--json", "--since", later, "--url", url]) == 0
+    assert json.loads(capsys.readouterr().out)["arms"] == {}
+
+
+def test_collect_output_shows_ai_counts_and_warnings(capsys: pytest.CaptureFixture[str]) -> None:
+    """수집 출력: AI 결과 기록이 있으면 적용·기각·적용 못 함 수와 경고를 덧붙인다 (WP17.7)."""
+    from dlp_schema.aireview import (
+        AiApplyResult,
+        AiArm,
+        AiDecision,
+        AiHumanAction,
+        AiOutcome,
+        AiOutcomeItem,
+    )
+
+    task = ReviewTask(
+        task_key="label_studio:2", tool=ReviewTool.LABEL_STUDIO, external_id="2",
+        session_id="s001", stream_id="bodycam", stage=ReviewStage.LABELING,
+        media_uri="s3://dlp-labeling/p.mp4", label_kinds=("action",), created_at=FIXED_TIME,
+    )  # fmt: skip
+    items = (
+        AiOutcomeItem(label_id="a", arm=AiArm.SHOWN, human=AiHumanAction.CORRECTED,
+                      decision=AiDecision.APPLY, apply_result=AiApplyResult.APPLIED),
+        AiOutcomeItem(label_id="b", arm=AiArm.SHOWN, human=AiHumanAction.APPROVED,
+                      decision=AiDecision.APPLY, apply_result=AiApplyResult.INVALID_NOW),
+        AiOutcomeItem(label_id="c", arm=AiArm.SHOWN, human=AiHumanAction.APPROVED,
+                      decision=AiDecision.DISMISS),
+    )  # fmt: skip
+    record = AiOutcome(
+        task_key=task.task_key, session_id="s001", collected_at=FIXED_TIME, items=items,
+        warnings=("b: 제안을 적용하면 세션 검증(상위 구간 연결 등)에 걸려 적용하지 않았다",),
+    )  # fmt: skip
+    outcome = ReviewOutcome(approved=["b", "c"], ai=record)
+    review_cmds._print_outcome(task, outcome)  # pyright: ignore[reportPrivateUsage]
+    out = capsys.readouterr().out
+    assert "AI 제안 적용 1, 기각 1, 적용 안 함(invalid_now 1)" in out
+    assert "[AI 경고] b: 제안을 적용하면 세션 검증" in out

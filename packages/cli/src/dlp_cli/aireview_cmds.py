@@ -1,7 +1,8 @@
 """AI 1차 검수 하위 명령 (WP17, ADR 0040): 서버 점검·처리량 벤치·작업량 추정 (WP17.3).
 
-판정 실행·상태(`run`·`status`·`show`·`waive`, WP17.5)는 `aireview_run_cmds`에 있고 여기서 함께
-등록한다. 골든 평가(`eval`)는 WP17.8에서 더한다. 아래 세 명령은 DB에 쓰지 않는다. 절차와 기록 양식은
+판정 실행·상태(`run`·`status`·`show`·`waive`, WP17.5)는 `aireview_run_cmds`, 골든 평가(`eval`,
+WP17.8)는 `aireview_eval_cmds`에 있고 여기서 함께 등록한다. 아래 세 명령과 `eval`은 DB에 쓰지
+않는다. 절차와 기록 양식은
 `docs/handover/vlm-server.md`의 "처리량 재기와 대수 정하기"다.
 
 등록하는 명령
@@ -92,6 +93,7 @@ from dlp_cli.aireview_common import (
     vlm_api_key,
     vlm_endpoints,
 )
+from dlp_cli.aireview_eval_cmds import add_eval_command
 from dlp_cli.aireview_run_cmds import add_run_commands
 from dlp_cli.schema_cmds import database_url
 from dlp_fixtures.aireview import AiReviewScene, aireview_scene, scene_frame
@@ -633,7 +635,7 @@ def _estimate_parser(asub: Any) -> None:
 
 
 def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:  # pyright: ignore[reportPrivateUsage]
-    """`aireview probe|bench|estimate|run|status|show|waive` 하위 명령을 등록한다."""
+    """`aireview probe|bench|estimate|run|status|show|waive|eval` 하위 명령을 등록한다."""
     ai = sub.add_parser("aireview", help="AI 1차 검수 (로컬 VLM, 참고용)")
     asub = ai.add_subparsers(dest="aireview_command", required=True)
     p = asub.add_parser("probe", help="VLM 서버 점검 (모델·이미지 한도·구조화 출력·캐시)")
@@ -644,3 +646,4 @@ def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
     _bench_parser(asub)
     _estimate_parser(asub)
     add_run_commands(asub)
+    add_eval_command(asub)

@@ -9,6 +9,7 @@ WP11, ADR 0013. 모듈별 참조 정의:
 - `states` — 상태 전이 정확도 (이 프로젝트 정의, 시점 매칭은 `temporal.match_events`).
 - `classification` — macro F1·Cohen 카파 (scikit-learn과 일치 테스트), ECE (Guo et al. 2017).
 - `assign` — scipy 헝가리안 할당의 타입 래퍼.
+- `proportion` — 비율의 Clopper-Pearson 한쪽 신뢰 상한 (scipy `binomtest`와 일치 테스트).
 
 시간 인자는 모두 정수 ms다. 지표 함수는 부작용이 없고 같은 입력에 같은 결과를 낸다.
 참조 일치 테스트: packages/evaluation/tests/test_metrics_reference.py,

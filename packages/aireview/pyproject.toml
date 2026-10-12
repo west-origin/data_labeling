@@ -5,6 +5,7 @@ description = "AI 1차 검수(로컬 VLM): 블러본 프레임으로 자동 라�
 requires-python = ">=3.12,<3.14"
 dependencies = [
     "av>=19.0",
+    "dlp-eval",
     "dlp-media",
     "dlp-models",
     "dlp-privacy",

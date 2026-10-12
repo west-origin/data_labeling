@@ -41,6 +41,14 @@ class AlertPolicy(Contract):
     detection_drop: float = Field(ge=0)
     # 검수 시간과 수정률이 이 주 수 동안 줄지 않으면 정체 경고 (비교하려면 2주 이상)
     stagnation_weeks: int = Field(ge=2)
+    # AI 1차 검수 (WP17.8): 대조군 ok 놓침률 95% 상한이 이보다 높으면 경고 (비율)
+    ai_ok_miss_upper95_max: float = Field(ge=0, le=1)
+    # 판정을 기다리는 영상 시간이 이보다 많으면 경고 (시간)
+    ai_backlog_hours_max: float = Field(ge=0)
+    # 형식에 맞는 응답을 끝내 받지 못한 단위 비율이 이보다 높으면 경고 (비율)
+    ai_fallback_rate_max: float = Field(ge=0, le=1)
+    # 접두사 캐시 적중 토큰 비율이 이보다 낮으면 경고 (비율)
+    ai_cache_hit_min: float = Field(ge=0, le=1)
 
 
 class AuditPolicy(Contract):

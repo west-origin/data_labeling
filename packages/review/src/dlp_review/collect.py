@@ -16,6 +16,10 @@
 - 운영 블러 라벨이 바뀌면 프라이버시 승인을 풀어 다시 승인·렌더하게 하고, 그 스트림의 이미 배포한
   라벨링 작업 매체에 회수를 요청하고(같은 커밋, ADR 0039), 이전 블러본 렌더 기록을 무효로 둔다
   (ADR 0024). 외부 삭제(S3 사본·도구 작업)는 커밋 뒤 호출자가 `dlp_review.revoke`로 한다.
+- AI 1차 검수(WP17.7, ADR 0040): 노출 기록이 있는 작업이면 검수자가 명시적으로 고른 "제안 적용"만
+  검수 항목에 반영한다. 제안 내용은 DB의 판정 단위에서 다시 읽어 검사하고, 세션 검증에 걸리면 AI
+  적용만 되돌린다 (`ai_collect`). 사람 결과와 판정의 연결은 `ai_review_outcomes`에 작업마다 한 번
+  쓴다. 아무것도 고르지 않고 제출하면 결과는 AI가 없을 때와 같다.
 
 WP6·WP12, ADR 0006·0014·0015·0024. 진입점: `dlp review collect <작업 키>`와 웹훅 서버
 (`dlp review serve`)가 `collect_task`를 부른다.
@@ -26,7 +30,8 @@ WP6·WP12, ADR 0006·0014·0015·0024. 진입점: `dlp review collect <작업 �
 - `collect_task`: 작업 하나를 수집한다.
 
 부작용 요약 (`collect_task`): `label_records` 삽입, 검수 상태 갱신(`record_review`),
-`review_tasks` 수집 표시, `review_work` 기록(Label Studio, 잰 시간이 0보다 클 때만), 세션
+`review_tasks` 수집 표시, `review_work` 기록(Label Studio, 잰 시간이 0보다 클 때만),
+`ai_review_outcomes` 기록(AI를 켜고 노출 기록이 있는 작업만), 세션
 `privacy_state` 되돌림(승인 상태였을 때만), 블러가 바뀐 스트림의 라벨링 작업 회수 요청
 (`review_tasks`, 외부 호출 없음), 라벨링 버킷의 렌더 기록 무효화, 배정 마무리
 (`review_assignments`). 블러 검수 작업이면 원본 버킷의
@@ -39,14 +44,16 @@ from __future__ import annotations
 import hashlib
 import logging
 import tempfile
+from collections.abc import Callable
 from datetime import datetime
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import sqlalchemy as sa
 
 from dlp_privacy.runner import invalidate_render, request_media_revocation
+from dlp_review import ai_collect
 from dlp_review.cvat import (
     UNIT_SCALE,
     CvatFormatError,
@@ -67,6 +74,7 @@ from dlp_review.tasks import (
     require_label_studio_user,
 )
 from dlp_review.verify import reissue_slot
+from dlp_schema.aireview import AiDecision
 from dlp_schema.db.repository import (
     get_assignment,
     get_labels,
@@ -175,14 +183,21 @@ def _label_studio_reviewed(
     setup: ReviewSetup,
     reviewer_id: str,
     session: Session,
-    originals: list[LabelRecord],
+    sent: list[LabelRecord],
     now: datetime,
-) -> list[ReviewedItem]:
+) -> tuple[list[ReviewedItem], list[dict[str, Any]]]:
     """Label Studio 작업에서 검수자(reviewer_id) 계정의 최신 주석만 검수 결과로 읽는다 (F-REV-06).
 
     검수자 계정은 `review.yaml label_studio.users`로 찾는다. 다른 사용자·서비스 계정이
     만들었거나 마지막으로 고친 주석은 결과로 쓰지 않고 경고 로그(주석·사용자 숫자 ID)로만
     남긴다. 검수 시간도 그 계정 주석의 lead_time만 더한다 (A-10, 0보다 크면 `review_work`).
+
+    sent: 작업에 보낸 라벨. 결과 구간 id가 여기 있으면 원래 라벨로 본다 (CVAT `dlp_label_id`와
+    같은 기준. 이중 작업도 원래 ID를 지니지만 비교 기준이 빈 목록이라 reconcile이 새 측정 레코드로
+    만든다).
+
+    반환: (검수 항목, 그 주석의 결과 원본). 결과 원본은 AI 결정 읽기(`ai_collect.ls_decisions`)에
+    쓴다.
 
     예외: `TaskError` — 클라이언트 없음, 계정 연결 없음·잘못됨, 검수자 계정의 제출 주석 없음(받지
     않은 다른 주석 수를 알린다), 옮길 수 없는 구간(영역 ID·시각·이유).
@@ -209,7 +224,7 @@ def _label_studio_reviewed(
             f"아직 없습니다{extra}"
         )
     try:
-        reviewed = from_ls_results(results, {x.label_id for x in originals})
+        reviewed = from_ls_results(results, {x.label_id for x in sent})
     except LsFormatError as exc:
         # 옮길 수 없는 구간(영역 ID·시각·이유)을 알려 검수자가 고쳐 다시 제출하게 한다 (F-REV-03)
         raise TaskError(f"{task.task_key}: {exc}") from exc
@@ -225,7 +240,7 @@ def _label_studio_reviewed(
                 recorded_at=now,
             ),
         )  # fmt: skip
-    return reviewed
+    return reviewed, results
 
 
 def drop_retracted(outcome: ReviewOutcome, labels: list[LabelRecord]) -> list[str]:
@@ -261,7 +276,63 @@ def drop_retracted(outcome: ReviewOutcome, labels: list[LabelRecord]) -> list[st
     return dropped
 
 
-def collect_task(  # noqa: C901
+def _outcome_for(
+    task: ReviewTask,
+    originals: list[LabelRecord],
+    all_labels: list[LabelRecord],
+    reviewed: list[ReviewedItem],
+    *,
+    ontology_version: str,
+    reviewer_id: str,
+    now: datetime,
+    normalize: Callable[[LabelRecord], LabelRecord] | None,
+) -> ReviewOutcome:
+    """검수 항목 → 수집 결과: reconcile → 보낸 뒤 바뀐 라벨 빼기(stale) → 측정·오류 삽입 표시.
+
+    `collect_task`가 도구 결과로, AI 적용을 되돌릴 때(`ai_collect.settle`)는 다른 항목으로 다시
+    부른다 (같은 비교 기준·시각이라 같은 항목이면 같은 결과). DB에 쓰지 않는다.
+
+    인자: originals(비교 기준, 블라인드·이중은 빈 목록), all_labels(세션 이력), reviewed(검수 항목),
+    나머지는 `reconcile`과 같다.
+    """
+    outcome = reconcile(
+        originals,
+        reviewed,
+        session_id=task.session_id,
+        ontology_version=ontology_version,
+        reviewer_id=reviewer_id,
+        now=now,
+        normalize=normalize,
+    )
+    # 보낸 뒤 이미 자식이 생긴 라벨에 대한 결과는 버리고 stale로 보고한다
+    outcome.stale = drop_retracted(outcome, all_labels)
+    if task.mode is ReviewMode.BLIND or task.mode is ReviewMode.DOUBLE:
+        # 측정 레코드: current_labels가 운영 라벨에서 빼고, 품질 리포트만 쓴다
+        measurement = "blind" if task.mode is ReviewMode.BLIND else "double"
+        outcome.new_records = [
+            x.model_copy(update={"measurement": measurement}) for x in outcome.new_records
+        ]
+    elif task.mode is ReviewMode.SEEDED_ERROR:
+        # 오류 삽입 과제에서 나온 모든 레코드는 학습에서 빠진다 (새로 그린 것 포함).
+        # 새로 그린 레코드는 배정의 사본 접두사를 붙여 그 배정의 결과로만 센다.
+        aid = task.assignment_id
+        outcome.new_records = [
+            x.model_copy(
+                update={
+                    "seeded_error": True,
+                    **(
+                        {"label_id": _seeded_new_id(aid, x.label_id)}
+                        if aid is not None and x.parent_label_id is None
+                        else {}
+                    ),
+                }
+            )
+            for x in outcome.new_records
+        ]
+    return outcome
+
+
+def collect_task(
     conn: sa.Connection,
     task_key: str,
     setup: ReviewSetup,
@@ -316,9 +387,12 @@ def collect_task(  # noqa: C901
         originals = assignment_selector(conn, assignment)(stream_filter, task.label_kinds)
     else:
         originals = current_for_review(conn, task.session_id, stream_filter, task.label_kinds)
+    sent = originals  # 작업에 보낸 라벨 (AI 노출·결과 기록의 기준, 측정 작업도 같다)
     if task.mode in (ReviewMode.BLIND, ReviewMode.DOUBLE):
         # 측정용: 검수자가 낸 모든 라벨을 새 측정 레코드로 남기고 운영 라벨은 건드리지 않는다
         originals = []
+    # AI 1차 검수 (WP17.7): 끔이거나 노출 기록이 없으면 None이고 아래 AI 호출은 아무것도 하지 않는다
+    ai = ai_collect.begin(conn, task, setup.ai, sent, all_labels)
 
     if task.tool is ReviewTool.CVAT:
         if setup.cvat is None:
@@ -355,44 +429,23 @@ def collect_task(  # noqa: C901
             raise TaskError(f"{task_key}: {exc}") from exc
         # 고치지 않은 라벨의 비교 기준 = 보냈다가 그대로 받은 값 (좌표 변환·반올림 왕복)
         normalize = partial(quantize, scale=scale)
+        decisions: dict[str, AiDecision] = {}  # CVAT 1단계에는 AI 결정 칸이 없다 (F-AIR-06)
     else:
-        reviewed = _label_studio_reviewed(conn, task, setup, reviewer_id, session, originals, now)
+        # 원래 라벨 ID 기준은 보낸 라벨이다 (이중 작업도 표준과 같은 화면·입력란 규칙, AI 결정
+        # 대응). 이중·블라인드의 비교 기준(originals)은 빈 목록이라 모두 새 측정 레코드가 된다
+        reviewed, results = _label_studio_reviewed(
+            conn, task, setup, reviewer_id, session, sent, now
+        )
         normalize = None
+        decisions = ai_collect.ls_decisions(results, ai)
 
-    outcome = reconcile(
-        originals,
-        reviewed,
-        session_id=task.session_id,
-        ontology_version=session.ontology_version,
-        reviewer_id=reviewer_id,
-        now=now,
-        normalize=normalize,
-    )
-    # 보낸 뒤 이미 자식이 생긴 라벨에 대한 결과는 버리고 stale로 보고한다
-    outcome.stale = drop_retracted(outcome, all_labels)
-    if task.mode is ReviewMode.BLIND or task.mode is ReviewMode.DOUBLE:
-        # 측정 레코드: current_labels가 운영 라벨에서 빼고, 품질 리포트만 쓴다
-        measurement = "blind" if task.mode is ReviewMode.BLIND else "double"
-        outcome.new_records = [
-            x.model_copy(update={"measurement": measurement}) for x in outcome.new_records
-        ]
-    elif task.mode is ReviewMode.SEEDED_ERROR:
-        # 오류 삽입 과제에서 나온 모든 레코드는 학습에서 빠진다 (새로 그린 것 포함).
-        # 새로 그린 레코드는 배정의 사본 접두사를 붙여 그 배정의 결과로만 센다.
-        aid = task.assignment_id
-        outcome.new_records = [
-            x.model_copy(
-                update={
-                    "seeded_error": True,
-                    **(
-                        {"label_id": _seeded_new_id(aid, x.label_id)}
-                        if aid is not None and x.parent_label_id is None
-                        else {}
-                    ),
-                }
-            )
-            for x in outcome.new_records
-        ]
+    replay = partial(
+        _outcome_for, task, originals, all_labels, ontology_version=session.ontology_version,
+        reviewer_id=reviewer_id, now=now, normalize=normalize,
+    )  # fmt: skip
+    # 사람이 명시적으로 적용한 AI 제안만 반영하고(I6), 세션 검증에 걸리면 AI 적용만 되돌린다
+    applied = ai_collect.apply_decisions(ai, reviewed, decisions, normalize=normalize)
+    outcome = ai_collect.settle(ai, replay(applied), replay)
     insert_labels(conn, outcome.new_records)
     for label_id in outcome.approved:
         record_review(conn, label_id, VerificationState.HUMAN_APPROVED, reviewer_id, now)
@@ -400,6 +453,8 @@ def collect_task(  # noqa: C901
     if task.stage is ReviewStage.PRIVACY and task.mode in OPERATIONAL_MODES and outcome.new_records:
         # 블러가 바뀌었다: 승인 해제 → 배포 매체 회수 요청(같은 커밋) → 렌더 기록 무효
         _note_revocations(outcome, _after_blur_change(conn, task, session, setup, now))
+    # AI 판정과 사람 결과의 연결을 작업마다 한 번 남긴다 (배정 마무리 앞, 같은 트랜잭션)
+    ai_collect.record_outcome(conn, ai, outcome, reviewer_id, now)
     if assignment is not None:
         # 함수 안에서 불러온다 (모듈을 읽을 때 ops 계층 전체를 끌어오지 않는다).
         # 모든 작업이 수집됐으면 배정을 끝내고, 표본 배정이면 묶음 합격 판정을 적용한다.

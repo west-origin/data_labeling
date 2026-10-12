@@ -190,7 +190,7 @@ def _check_servers(members: Sequence[PoolMember]) -> int | None:
     return None
 
 
-def _open_pool(args: argparse.Namespace, policy: AiReviewPolicy) -> EndpointPool | int:
+def open_pool(args: argparse.Namespace, policy: AiReviewPolicy) -> EndpointPool | int:
     """엔드포인트 묶음 (또는 종료 코드: 2 주소 없음, 5 설정, 3 모두 장애)."""
     try:
         endpoints = vlm_endpoints(args)
@@ -538,7 +538,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     if args.dry_run:
         backend = _NoServer(policy)
     else:
-        opened = _open_pool(args, policy)
+        opened = open_pool(args, policy)
         if isinstance(opened, int):
             return opened
         backend = opened

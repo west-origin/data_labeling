@@ -6,9 +6,11 @@ Alembic 0019)만 다룬다. 다섯 표 모두 추가만 한다 (PostgreSQL 트�
 
 절별 함수
     - 실행 세대·이벤트: `insert_ai_run`, `get_ai_run`, `list_ai_runs`, `insert_ai_run_event`,
-      `list_ai_run_events`, `latest_run_state`(세션별 마지막 이벤트·완료 버전·건너뜀).
+      `list_ai_run_events`, `list_ai_run_events_between`(기간, 주간 지표),
+      `latest_run_state`(세션별 마지막 이벤트·완료 버전·건너뜀).
     - 판정 단위: `insert_ai_units`(같은 단위 ID는 무시: PostgreSQL·SQLite 모두
-      `ON CONFLICT DO NOTHING`), `done_unit_ids`(재개·멱등), `list_ai_units`, `get_ai_unit`.
+      `ON CONFLICT DO NOTHING`), `done_unit_ids`(재개·멱등), `list_ai_units`,
+      `list_ai_units_created`(기간, 주간 지표), `get_ai_unit`.
     - 노출·결과: `insert_ai_exposure`, `get_ai_exposure`, `list_ai_exposures`, `insert_ai_outcome`,
       `get_ai_outcome`, `list_ai_outcomes`.
 
@@ -16,7 +18,7 @@ Alembic 0019)만 다룬다. 다섯 표 모두 추가만 한다 (PostgreSQL 트�
     - 실행기(`dlp_aireview.runner`, WP17.5)가 실행·이벤트·단위를 쓴다. 판정 버전마다 단위가 남고,
       표시할 버전은 읽는 쪽이 고른다 (`dlp_schema.aireview.valid_verdicts`).
     - 검수 연동(`dlp_review`, WP17.6~17.7)이 노출·결과를 쓰고 단위를 읽는다. 운영 지표(WP17.8)가
-      노출·결과를 기간으로 읽는다.
+      노출·결과·단위·실행 이벤트를 기간으로 읽는다 (`dlp_review.ops.ai_quality`, `dlp_ops.metrics`).
     - 내보내기·학습·데이터셋·액티브 러닝은 이 모듈을 import하지 않는다 (정적 검사, I4).
 
 JSON 열에는 계약의 `model_dump(mode="json")` 값을, 시각 열에는 시간대 있는 datetime 객체를 넣는다.
@@ -120,6 +122,24 @@ def list_ai_run_events(conn: sa.Connection, session_id: str) -> list[AiRunEvent]
         sa.select(ai_review_run_events)
         .where(ai_review_run_events.c.session_id == session_id)
         .order_by(ai_review_run_events.c.at, ai_review_run_events.c.event_id)
+    ).mappings()
+    return [AiRunEvent.model_validate(_plain(r)) for r in rows]
+
+
+def list_ai_run_events_between(
+    conn: sa.Connection, since: datetime, until: datetime
+) -> list[AiRunEvent]:
+    """[since, until) 동안의 실행 이벤트 (모든 세션, 시각 순, 같으면 event_id 순). 주간 운영 지표
+    (장비 시간)가 쓴다.
+
+    Raises:
+        ValueError: 시간대 없는 시각.
+    """
+    c = ai_review_run_events.c
+    rows = conn.execute(
+        sa.select(ai_review_run_events)
+        .where(c.at >= _aware(since), c.at < _aware(until))
+        .order_by(c.at, c.event_id)
     ).mappings()
     return [AiRunEvent.model_validate(_plain(r)) for r in rows]
 
@@ -249,6 +269,24 @@ def list_ai_units(
         query = query.where(ai_review_units.c.version.in_(sorted(versions)))
     rows = conn.execute(
         query.order_by(ai_review_units.c.created_at, ai_review_units.c.unit_id)
+    ).mappings()
+    return [AiReviewUnit.model_validate(_plain(r)) for r in rows]
+
+
+def list_ai_units_created(
+    conn: sa.Connection, since: datetime, until: datetime
+) -> list[AiReviewUnit]:
+    """[since, until) 동안 기록한 판정 단위 (모든 세션, 만든 순, 같으면 unit_id 순). 주간 운영 지표
+    (fallback율·캐시 적중률)가 쓴다 (`created_at` 색인).
+
+    Raises:
+        ValueError: 시간대 없는 시각.
+    """
+    c = ai_review_units.c
+    rows = conn.execute(
+        sa.select(ai_review_units)
+        .where(c.created_at >= _aware(since), c.created_at < _aware(until))
+        .order_by(c.created_at, c.unit_id)
     ).mappings()
     return [AiReviewUnit.model_validate(_plain(r)) for r in rows]
 

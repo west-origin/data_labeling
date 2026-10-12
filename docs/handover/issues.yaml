@@ -353,12 +353,12 @@ issues:
   - {id: F-AIR-01, title: 행동 VLM이 후보 구간마다 직렬로 물어 장비 대수를 정할 수 있음, severity: medium, status: open, kind: code,
      files: [packages/actions/src/dlp_actions/pipeline.py, packages/actions/src/dlp_actions/clients.py], source: docs/adr/0040-ai-first-pass-review.md,
      note: "segment_hand가 후보마다 요청 하나를 직렬로 보내고 sample_frames가 요청마다 영상을 다시 연다. 병렬·창 단위 묶기·공용 프레임 추출기는 행동 버전을 바꾸므로 actions.yaml vlm.prompt_version 결정과 함께 한다. WP17.3 estimate --include-actions로 실측"}
-  - {id: F-AIR-02, title: Label Studio 수집이 결과의 from_name을 보지 않아 AI 컨트롤 결과가 섞이면 수집 실패, severity: medium, status: candidate, kind: code,
+  - {id: F-AIR-02, title: Label Studio 수집이 결과의 from_name을 보지 않아 AI 컨트롤 결과가 섞이면 수집 실패, severity: medium, status: fixed, kind: code,
      files: [packages/review/src/dlp_review/labelstudio.py], source: docs/adr/0040-ai-first-pass-review.md,
-     note: "지금 설정에는 다른 컨트롤이 없어 재현되지 않는 잠재 결함. WP17.6 첫 단계에서 from_name이 있고 labels가 아닌 결과를 건너뛰게 하고 일반 테스트로 막는다 (from_name 없는 결과는 labels로 본다)"}
+     note: "WP17.6에서 from_name이 있고 labels가 아닌 결과를 건너뛰게 했다 (from_name 없는 결과는 labels로 본다). packages/review/tests/test_units.py·test_ai_display.py, services test_ls_ai_feasibility.py·test_ai_display_flow.py(AI 결과·결정이 섞인 주석 수집)가 막는다"}
   - {id: F-AIR-03, title: 오류 삽입 작업에 AI를 보이지 않아 "AI 없음" 화면이 측정 작업 신호가 될 수 있음, severity: low, status: candidate, kind: product,
-     files: [packages/review/src/dlp_review/ops/seeding.py], source: docs/adr/0040-ai-first-pass-review.md,
-     note: "사본의 원천이 골든 단위라 판정이 없다. 누출을 WP17.8 지표로 재고, 사본 판정 여부는 후속 결정"}
+     files: [packages/review/src/dlp_review/ops/seeding.py, packages/review/src/dlp_review/ops/ai_quality.py], source: docs/adr/0040-ai-first-pass-review.md,
+     note: "사본의 원천이 골든 단위라 판정이 없다. WP17.8에서 누출을 잰다: dlp review quality --ai의 '오류 삽입 누출'(블라인드 아닌 AI 없음 화면 중 오류 삽입 비율 대 전체), dlp ops weekly AI 절 seeded_leak. 사본 판정 여부는 파일럿 값으로 정한다"}
   - {id: F-AIR-04, title: AI 충돌 기반 표적 QA 비율 미정, severity: low, status: open, kind: product,
      files: [packages/review/src/dlp_review/ops/assign.py], source: docs/adr/0040-ai-first-pass-review.md,
      note: "QA는 무작위 표본을 유지한다 (충돌 우선으로 고르면 QA 기반 품질 지표가 편향된다). 표적 QA를 따로 둘지 후속 결정"}
@@ -377,3 +377,12 @@ issues:
   - {id: F-AIR-09, title: 장갑+영상 융합 접촉의 영상 대상은 AI가 판정하지 않음, severity: low, status: open, kind: product,
      files: [packages/aireview/src/dlp_aireview/plan.py, packages/prelabel/src/dlp_prelabel/runner.py], source: docs/adr/0040-ai-first-pass-review.md,
      note: "결정(장갑 센서 출처 라벨 제외)에 따라 장갑이 관여한 접촉(증거 OBSERVED: 장갑만·융합)을 통째로 뺀다. 융합 접촉의 대상(영상 근거)만 판정할지, 프리라벨 증거 규칙을 바꾸는 다른 자동 손 상태 단계가 생길 때 표시를 어떻게 둘지는 파일럿 뒤 결정"}
+  - {id: F-AIR-10, title: 골든 게이트 실패를 차단할지 미정 (지금은 경고만), severity: low, status: open, kind: product,
+     files: [config/policies/aireview.yaml, packages/aireview/src/dlp_aireview/evaluate.py, packages/cli/src/dlp_cli/aireview_eval_cmds.py], source: docs/adr/0040-ai-first-pass-review.md,
+     note: "결정에 따라 dlp aireview eval --gate가 실패해도 종료 0이다 (gate.block false). 파일럿(WP17.9) 골든 결과를 보고 block을 true로 바꿀지(종료 1) 정한다. 평가는 장갑 원본을 읽지 않아 손 상태의 센서 대조 문제 유형을 재지 않고, MLflow에 기록하지 않는다"}
+  - {id: F-AIR-11, title: 층화 ok 놓침률의 합친 상한이 층별 상한의 가중 합(보수적 근사), severity: low, status: open, kind: product,
+     files: [packages/review/src/dlp_review/ops/ai_quality.py], source: docs/adr/0040-ai-first-pass-review.md,
+     note: "층별 한쪽 95% Clopper-Pearson 상한을 모집단 크기로 가중해 합친다. 층마다 따로 95%라 합친 값의 동시 신뢰 수준은 더 낮고 값은 보수적(크다)이다. 사람 생략 ADR(ADR 0040 8절)의 근거로 쓰기 전에 층화 구간 방법을 정한다. 검수 시간 효과도 지적 밀도 층으로 나누지 않았다"}
+  - {id: F-AIR-12, title: "AI 끔(mode off)으로 수집하면 검수자가 고른 AI 결정을 버리고 결과 기록도 남기지 않음", severity: low, status: open, kind: product,
+     files: [packages/review/src/dlp_review/ai_collect.py, config/policies/review.yaml], source: docs/adr/0040-ai-first-pass-review.md,
+     note: "off의 뜻(AI 표를 읽지 않는다)대로 동작한다. advisory로 만든 작업을 off로 바꾼 뒤 수집하면 적용 결정과 대조군 결과가 빠진다. 모드를 바꾸기 전에 열린 작업을 수집하거나, 수집만은 노출 기록을 따르게 할지 파일럿 뒤 정한다"}

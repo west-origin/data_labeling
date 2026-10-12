@@ -263,11 +263,28 @@ class EstimatePolicy(Contract):
 
 
 class GatePolicy(Contract):
-    """`gate`: 골든 게이트 (digest 제외). 실패해도 지금은 경고만 한다."""
+    """`gate`: 골든 게이트 (digest 제외, `dlp aireview eval --gate`, `dlp_aireview.evaluate`).
+
+    값은 골든 평가 지표의 기준이다: 틀린 라벨 탐지 재현율 하한, 깨끗한 라벨 오지적률 상한, 틀린
+    라벨을 ok라고 한 비율 상한. block이 false(결정)면 실패해도 경고만 하고 종료 코드 0이다. 차단
+    (종료 1)은 파일럿(WP17.9) 뒤 정한다.
+    """
 
     min_wrong_recall: float = Field(ge=0, le=1)
     max_false_flag_rate: float = Field(ge=0, le=1)
     max_ok_miss_rate: float = Field(ge=0, le=1)
+    block: bool = False
+    # perturb 방식의 기본 교란 비율 (교란 종류 → 라벨마다 적용 확률, `perturb.KINDS`).
+    # CLI `--inject`가 바꾼다. 모르는 종류는 평가 때 `perturb`가 거부한다
+    inject: dict[str, float] = Field(default_factory=dict[str, float])
+
+    @model_validator(mode="after")
+    def _rates(self) -> GatePolicy:
+        """교란 비율은 0~1."""
+        bad = sorted(k for k, v in self.inject.items() if not 0 <= v <= 1)
+        if bad:
+            raise ValueError(f"gate.inject: 0~1 밖의 비율 {bad}")
+        return self
 
 
 class ServerPolicy(Contract):

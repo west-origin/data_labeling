@@ -4,7 +4,8 @@
 렌더 해시다. 영상·DB·서버를 읽지 않는다.
 
 단계
-1. `targets`: 판정 대상 = 검수 전 자동(model) 운영 라벨 중 판정 종류. 측정·오류 삽입 레코드,
+1. `targets`: 판정 대상 = 검수 전 자동(model) 운영 라벨 중 판정 종류 (평가 경로는 `eval_targets`로
+   대상을 직접 준다: 골든·과거 라벨은 검수됐기 때문이다). 측정·오류 삽입 레코드,
    원본 접근 이벤트(raw_access), 블러 트랙, 장갑 센서에서 나온 라벨(`glove_derived`),
    `long_max_span_ms`보다 긴 상위 구간은 뺀다.
    정책 `kinds`는 대상만 고른다. 맥락·개체표·프롬프트·응답 스키마는 판정할 수 있는 종류 전체
@@ -211,6 +212,31 @@ def targets(
     """
     rule = policy.target_rule
     out = [x for x in current if is_judge_target(x, o, rule)]
+    return sorted(out, key=lambda x: (x.t_start_ms, x.label_id))
+
+
+def eval_targets(
+    only: Sequence[LabelRecord], policy: AiReviewPolicy, o: Ontology
+) -> list[LabelRecord]:
+    """평가 경로(`dlp aireview eval`, `evaluate`)가 직접 준 대상 중 판정할 수 있는 것 (시작 시각,
+    ID 순).
+
+    골든·과거 라벨은 검수된 라벨이라 `targets`의 검수 상태·출처 조건을 통과하지 못하므로 그 두
+    조건만 빼고 같은 조건을 쓴다: 정책 종류, 측정·오류 삽입 레코드·블러·원본 접근 이벤트 아님,
+    `long_max_span_ms`보다 긴 상위 구간 아님. 장갑 센서 근거 제외(`glove_derived`)는 대상을 고르는
+    쪽(평가 사례 만들기)이 정한다 (사람이 그린 골든 손 상태는 센서 출처가 아니다).
+    """
+    rule = policy.target_rule
+    out = [
+        x
+        for x in only
+        if x.kind in rule.kinds
+        and _operational(x, o)
+        and not (
+            isinstance(x.payload, SegmentPayload)
+            and x.t_end_ms - x.t_start_ms > rule.long_max_span_ms
+        )
+    ]
     return sorted(out, key=lambda x: (x.t_start_ms, x.label_id))
 
 
@@ -595,6 +621,7 @@ def plan_windows(
     o: Ontology,
     *,
     flagged: Sequence[FlaggedSpan] = (),
+    only: Sequence[LabelRecord] | None = None,
 ) -> list[PlannedWindow]:
     """세션의 요청 창 (프레임 전). 순서: temporal → temporal_long → 스트림별 spatial.
 
@@ -602,12 +629,13 @@ def plan_windows(
 
     Args:
         session: 세션 (길이, 기준 스트림, 영상 스트림).
-        current: 현재 운영 라벨 (`current_labels`).
+        current: 현재 운영 라벨 (`current_labels`). 맥락 후보다.
         policy: 정책.
         o: 세션 온톨로지.
         flagged: flagged 모드에서 쓸 우선순위 사유 구간 (CLI가 `flag_unit`으로 계산).
+        only: 대상 지정 (평가 경로, `eval_targets`로 거른다). None이면 `targets(current)`.
     """
-    found = targets(current, policy, o)
+    found = targets(current, policy, o) if only is None else eval_targets(only, policy, o)
     ctx = _Ctx(
         session=session,
         policy=policy,
@@ -674,6 +702,7 @@ def plan_session(
     media: Mapping[str, StreamMedia],
     sensor: SensorContext,
     flagged: Sequence[FlaggedSpan] = (),
+    only: Sequence[LabelRecord] | None = None,
 ) -> list[PlannedUnit]:
     """세션의 판정 단위 (`plan_windows` + 프레임 고르기 + 단위 키).
 
@@ -682,11 +711,11 @@ def plan_session(
     Args:
         media: 스트림 → 블러본 PTS 인덱스·렌더 해시 (temporal은 기준 스트림을 쓴다).
         sensor: 장갑 접촉 구간 (없으면 `SensorContext.absent()`).
-        (나머지는 `plan_windows`와 같다.)
+        only: 대상 지정 (평가 경로). (나머지는 `plan_windows`와 같다.)
     """
     version = policy.verdict_version
     out: list[PlannedUnit] = []
-    for w in plan_windows(session, current, policy, o, flagged=flagged):
+    for w in plan_windows(session, current, policy, o, flagged=flagged, only=only):
         m = media.get(w.stream_id)
         if m is None:
             continue

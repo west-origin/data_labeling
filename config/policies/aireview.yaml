@@ -129,8 +129,19 @@ estimate:
   rerun_margin: 0.2               # 재실행 여유 ρ (정책·모델·블러 변경 뒤 다시 판정)
   utilization: 0.7                # 장비 가동률 u
   decode_workers: 4               # 블러본 디코드 동시 작업 수
-# 해시 제외. 골든 게이트 (dlp aireview eval --gate). 실패해도 지금은 경고만 한다 (차단은 파일럿 뒤 결정).
-gate: {min_wrong_recall: 0.6, max_false_flag_rate: 0.1, max_ok_miss_rate: 0.05}
+# 해시 제외. 골든 게이트 (dlp aireview eval --gate, WP17.8). 판정 모델·프롬프트·프레임 설정을 바꿀 때 본다.
+# min_wrong_recall: 틀린 라벨(교란·과거 수정) 중 wrong·suspect로 잡은 비율의 하한.
+# max_false_flag_rate: 깨끗한 라벨을 wrong·suspect라 한 비율의 상한.
+# max_ok_miss_rate: 틀린 라벨을 ok라고 한 비율의 상한 (review.yaml sampling.max_defect_ratio와 같은 값).
+# block: false면 실패해도 경고만 하고 종료 0이다 (결정: 차단 여부는 파일럿 WP17.9 뒤 정한다).
+# inject: perturb 방식(--mode perturb)의 기본 교란 비율 (교란 종류 → 라벨마다 적용 확률, --inject로 바꾼다).
+gate:
+  min_wrong_recall: 0.6
+  max_false_flag_rate: 0.1
+  max_ok_miss_rate: 0.05
+  block: false
+  inject: {verb_swap: 0.1, target_swap: 0.1, tool_swap: 0.1, hand_swap: 0.1, gap_to_action: 0.1,
+           action_to_gap: 0.1, contact_target_swap: 0.1, class_swap: 0.1, false_event: 0.05}
 
 server:                           # 해시 제외 (결과에 영향 없음)
   # 사내 주소만 허용 (호스트 이름이면 DNS로 풀어 모든 주소를 검사, WP17.5)

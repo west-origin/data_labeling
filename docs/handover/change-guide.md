@@ -22,6 +22,7 @@ DB·외부 도구·내보내기 동작을 바꾸면 그 경로의 서비스/격�
 | 원본 접근/보관 | `cli/raw_access.py`, `ops`, 버킷 정책 | 감사 우회·CVAT 사본 보관. `tests/test_raw_access_audited.py`, `tests/test_raw_access_db.py`, ops 테스트 |
 | AI 1차 검수 실행 | `aireview/runner.py`, `backend.py`(`EndpointPool`), `media.py`, `status.py`, `cli/aireview_run_cmds.py`, `aireview.yaml` | 블러본 경계(I1)·판정 버전·재개·종료 코드. `packages/aireview/tests`(`test_runner*.py`, `test_pool.py`, `test_status.py`, `test_blurred_only.py`), `packages/cli/tests/test_aireview_run_cmds.py`, `tests/test_aireview_boundaries.py`, `tests/test_aireview_isolation.py`, services `test_runner_pg.py`·`test_aireview_tables.py`. 판정 버전 해시에서 빠지는 절(`selection`·`kinds`·`pending`·`server`·`gate`·`estimate`) 밖을 바꾸면 모든 단위를 다시 판정한다 (ADR 0040 4.3) |
 | AI 1차 검수 표시 | `review/ai_display.py`, `review/labelstudio.py`(AI 컨트롤), `review/tasks.py`(노출 기록), `review/ops/runner.py`·`results.py`(우선순위·표본 제외·마무리 보호), `cli/review_config.py`·`review_cmds.py`(설정·required 게이트), `review.yaml ai_review`, `review_ui.yaml ai` | 표시는 지금 렌더의 판정만(I10), 증가(표본 제외·보호·우선순위)는 렌더 무관(I9), AI 컨트롤 상시, 판정 없으면 예측·데이터 불변. `packages/review/tests/test_ai_display.py`, `packages/cli/tests/test_review_ai_cmds.py`, services `test_ls_ai_feasibility.py`·`test_ai_display_flow.py`. Label Studio·CVAT 버전을 올리면 아래 "AI 1차 검수 표시" 확인 목록 |
+| AI 1차 검수 수집·품질 | `review/ai_collect.py`, `review/collect.py`(`_outcome_for`), `review/reconcile.py`(`same_as_sent`), `review/ops/ai_quality.py`, `ops/metrics.py`(`ai_weekly`), `aireview/evaluate.py`, `cli/aireview_eval_cmds.py`·`ai_quality_print.py`, `ops.yaml alerts.ai_*`, `aireview.yaml gate` | 제안은 사람이 적용할 때만·DB에서 다시 검증(I6), 적용 실패는 수집을 막지 않음, 편향 없는 지표는 대조군만, eval은 DB에 쓰지 않음. `packages/review/tests/test_ai_collect.py`·`test_ai_quality.py`, `packages/ops/tests/test_ai_weekly.py`, `packages/aireview/tests/test_evaluate.py`, `packages/cli/tests/test_aireview_eval_cmds.py`·`test_review_ai_cmds.py`, services `test_ai_display_flow.py` |
 | 의존성·환경 | `pyproject.toml`, `uv.lock`, `services`, CI | 모듈 import 외에 실제 서버/DB 실행·의존성 감사. `make check`, 관련 서비스 검사 |
 
 계약·DB 변경에는 ADR과 필요한 이관을 함께 남긴다. 생성된 `schemas/`는 직접 편집하지 않는다.
@@ -58,6 +59,7 @@ DB·외부 도구·내보내기 동작을 바꾸면 그 경로의 서비스/격�
 | 내보내기 | 선커밋된 이력·일부 파일·내부 가명 대응표 | manifest가 최종 전달 기준. 없는 결과는 미완료로 취급하고 현재 승인·사용 중지를 다시 확인 |
 | 학습/배포 | MLflow 실행·산출물, 미승인/거절 모델 | DB 모델 상태·골든 평가·게이트 확인. 산출물 존재만으로 배포하지 않음 |
 | 디스크 부족 | 미완료 산출물·살아 있는 서비스 볼륨 | 공간과 작업 상태 확인. `make clean`/볼륨 삭제로 복구하지 않음 |
+| AI 제안 적용 수집 | 없음 (수집 한 트랜잭션: 라벨·검수 상태·결과 기록이 함께 커밋되거나 함께 롤백된다) | 수집을 다시 한다. 세션 검증에 걸린 적용은 되돌려 수집이 계속되고, 검수자 자신의 결과가 걸린 경우만 실패한다 (그 구간을 고쳐 다시 제출) |
 | AI 1차 검수 실행 | 커밋한 판정 단위(추가 전용), 실행 기록과 started 이벤트(마감 없이 끝났으면 `status`가 "중단 추정"), 실행 임시 디렉터리의 블러본(정상 종료면 지움) | 같은 명령을 다시 돌린다: 기록된 단위는 묻지 않고 남은 단위만 묻는다. `--pending`은 판정 없는 대상이 남았거나 지금 버전 최근 실행이 completed가 아닌 세션을 고르고, 최근에 실패한 세션은 뒤로 미룬다. AI 표 행을 지우거나 고치지 않는다 (아래 "AI 1차 검수 실행기") |
 
 렌더 재실행은 실제 파일을 읽어 검사하므로 정상 파일이어도 I/O 비용이 든다.
@@ -95,8 +97,9 @@ DB·외부 도구·내보내기 동작을 바꾸면 그 경로의 서비스/격�
   둔다. AI 영역이 든 주석이 있는 프로젝트에서 컨트롤을 빼면 설정 갱신이 400으로 거부되고 그 프로젝트의
   시간 작업 생성이 모두 멈춘다 (`test_ls_ai_feasibility.py`가 재현한다). 데이터 변수(`$…`)를 새로 쓰지
   않는다. 컨트롤 이름·라벨 값을 바꾸려면 새 프로젝트(온톨로지 프로젝트 이름)로 한다.
-- 수집은 라벨 컨트롤(`labels`) 결과만 라벨로 읽고(F-AIR-02), 결정은 `ls_ai_decisions`로만 읽는다 (적용은
-  WP17.7). 검수자가 AI 결과를 지우거나 AI 라벨로 구간을 그려도 수집 결과는 그대로다.
+- 수집은 라벨 컨트롤(`labels`) 결과만 라벨로 읽고(F-AIR-02), 결정은 `ai_decision` 선택만 읽는다 (적용은
+  아래 "AI 1차 검수 수집·적용"). 검수자가 AI 결과를 지우거나 AI 라벨로 구간을 그려도 라벨 결과는
+  그대로다 (그린 AI 구간은 경고 수로만 남는다).
 - 구간을 고르면 보이는 칸(AI 메모·결정, 이벤트 속성, 손 상태 입력란)은 라벨 컨트롤 구간을 골랐을 때만
   보인다 (`whenTagName="labels"`). AI 구간을 고르면 안내 한 줄만 보인다. 결정 단축키는 칸이 숨어도
   눌리므로, AI 구간을 고른 채 누른 결정은 AI 구간 id(`ai-<해시 8자>`)에 붙는다. 라벨 ID별 결정은
@@ -153,6 +156,37 @@ Playwright(전역 node playwright, `PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers`)�
 | 범례 단축키 | AI 컨트롤이 없을 때와 같다 (r·h는 자동 키 후보 밖) | 108개 라벨이 시뮬레이터 결과와 같고, 파일 순서 온톨로지의 WP17.6 전 실화면 범례와도 같다 |
 | 다크·화이트 모드 | 두 칸의 글자가 바탕에 묻히지 않는다 | 그대로 |
 | CVAT Issues 탭 | 카드와 아래 목록 칸이 두 모드 패널 색이다 | 저장소 CSS를 얹어 확인 (실행 중 이미지는 `make cvat-up` 뒤 반영) |
+
+## AI 1차 검수 수집·적용 (WP17.7, ADR 0040)
+
+- 흐름(`collect_task`): `ai_collect.begin`(노출 기록·판정 단위 읽기, AI 끔이거나 노출 기록이 없으면 None) →
+  도구 결과 → `ls_decisions`(라벨 ID별 결정) → `apply_decisions` → `_outcome_for`(reconcile → stale →
+  측정·오류 삽입 표시) → `settle` → `insert_labels`·`record_review` → `record_outcome`(배정 마무리 앞). 모든
+  AI 호출은 `ai`가 None이면 아무것도 하지 않는다 (분기 없이 부른다). 수집은 한 트랜잭션이라 실패하면
+  결과 기록도 남지 않는다.
+- 적용 표(검수자 행동 → 결과 레코드 → `AiOutcomeItem`)는 `dlp_review.ai_collect` 모듈 docstring이 기준이고
+  `test_ai_collect.py`가 행마다 지킨다. 적용 규칙을 바꾸면 그 표와 테스트를 함께 고친다.
+- 적용이 세션 검증에 걸리면 라벨 ID 순으로 하나씩 더해 보며 통과하는 것만 남긴다 (적용 수만큼 세션 검증을
+  다시 한다). 검수자 자신의 결과가 걸리면 지금처럼 `OntologyViolationError`로 수집이 실패한다.
+- 제안 일치(`match`)는 제안 페이로드가 원 라벨과 다른 필드만 본다 (exact: 모두 같음, partial: 일부).
+  "replaced"는 적용한 종류 변경, 또는 원 라벨이 지워지고 같은 스트림·구간에 다른 종류의 새 사람 레코드가
+  있을 때다 (Label Studio에서 구간 라벨만 바꾼 경우).
+- Label Studio 결과의 원래 라벨 ID 기준은 작업에 보낸 라벨이다 (이중 작업 포함). 이중·블라인드의 비교
+  기준은 빈 목록이라 결과는 모두 새 측정 레코드다.
+
+## AI 1차 검수 품질·평가 (WP17.8, ADR 0040)
+
+- `dlp review quality --ai`: 기간은 결과 기록의 수집 시각과 노출 기록의 작업 생성 시각 기준
+  [`--since`, `--until`)이다. 대조군(holdout) 줄이 편향 없는 값이고 보인 집단(shown) 줄은 자동화 편향
+  감시용이다 (같은 줄에 섞지 않는다). 분모 밖 행 수(판정 없음·재검수·stale·측정)를 함께 낸다.
+  `--ai-thresholds P`는 조안만 내고 정책을 바꾸지 않는다 (사람이 review.yaml을 고친다).
+- 주간 AI 절은 `review.yaml ai_review.mode`가 off면 없다. 백로그는 주 끝 시점의 생애주기·실행 기록으로 세고
+  프라이버시 승인 상태만 지금 값이다. 장비 시간은 끝난 실행의 걸린 시간 합이라 세션을 함께 돌리면 크게
+  나온다 (상한).
+- `dlp aireview eval`: 골든셋 세션마다 블러본 게이트(`open_blurred`)를 거치므로 승인·렌더된 세션만
+  판정한다 (아니면 건너뛴 사유를 보고서에 남긴다). 판정 버전은 지금 aireview.yaml 값이고 실행 기록·단위는
+  메모리에만 남는다. 모델·프롬프트·프레임 설정을 바꾸기 전후로 같은 `--seed`·`--inject`로 돌려 비교한다.
+  게이트 차단은 `gate.block`으로만 켠다 (지금 false, F-AIR-10).
 
 ## 웹훅과 승인 경계
 

@@ -13,6 +13,7 @@ from datetime import datetime
 import sqlalchemy as sa
 
 from dlp_review.ai_display import AiDisplayConfig, ai_flagged_spans, escalated_ids, load_ai_view
+from dlp_review.ops.ai_quality import AiQuality, ai_quality
 from dlp_review.ops.measure import Agreement, DetectionRate, agreement, as_items, prelabel_bias
 from dlp_review.ops.policy import ReviewOpsPolicy
 from dlp_review.ops.sampling import judge
@@ -172,6 +173,8 @@ class QualityReport:
     detection: list[DetectionRate] = field(default_factory=list[DetectionRate])
     double: dict[str, Agreement] = field(default_factory=dict[str, Agreement])  # 배정 → 일치도
     blind_bias: dict[str, float] = field(default_factory=dict[str, float])  # 배정 → 프리라벨 편향
+    # AI 1차 검수 판정 품질 (`dlp review quality --ai`, WP17.8). 요청하지 않으면 None
+    ai: AiQuality | None = None
 
 
 def shown_prelabels(
@@ -209,8 +212,17 @@ def shown_prelabels(
     return [shown[i] for i in sorted(shown)]
 
 
-def quality_report(conn: sa.Connection, policy: ReviewOpsPolicy) -> QualityReport:
+def quality_report(
+    conn: sa.Connection,
+    policy: ReviewOpsPolicy,
+    *,
+    ai_window: tuple[datetime, datetime] | None = None,
+) -> QualityReport:
     """끝난(done) 배정 전체로 검수 품질을 잰다. 읽기만 한다.
+
+    ai_window: [since, until)를 주면 그 기간의 AI 1차 검수 판정 품질(`ops.ai_quality.ai_quality`)도
+    낸다 (결과 기록은 수집 시각, 노출은 작업 생성 시각 기준). 이중 일치도·블라인드 편향은 짝 표준
+    배정의 노출 집단별로도 나눈다 (자동화 편향 감시).
 
     - 오류 삽입 배정: 넣은 오류마다 `seeding.detected`로 발견 여부를 담당자별로 센다.
     - 이중 배정: 짝 표준 배정이 끝났으면, 단위의 현재 운영 라벨과 이 배정의 `double` 측정 레코드의
@@ -270,4 +282,10 @@ def quality_report(conn: sa.Connection, policy: ReviewOpsPolicy) -> QualityRepor
                 mp.match_iou,
             )
     report.detection = [DetectionRate(r, total[r], found[r]) for r in sorted(total)]
+    if ai_window is not None:
+        report.ai = ai_quality(
+            conn, *ai_window, double_kappa={k: v.kappa for k, v in report.double.items()},
+            blind_bias=report.blind_bias,
+            pairs={a.assignment_id: a.pair_id for a in done if a.pair_id is not None},
+        )  # fmt: skip
     return report

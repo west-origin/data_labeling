@@ -1,6 +1,7 @@
 """참조 구현과의 일치 테스트.
 
-pycocotools(mAP), TrackEval(HOTA·IDF1·CLEAR), scikit-learn(macro F1·카파).
+pycocotools(mAP), TrackEval(HOTA·IDF1·CLEAR), scikit-learn(macro F1·카파),
+scipy(Clopper-Pearson 상한).
 
 WP11 완료 기준("가능한 지표는 기존 참조 구현과 결과 일치")의 테스트. 시드를 고정한 무작위 입력을
 우리 구현과 참조 라이브러리에 똑같이 넣고, 참조 라이브러리의 출력을 정답으로 본다. 참조
@@ -189,3 +190,30 @@ def test_classification_metrics_match_sklearn(seed: int) -> None:
     pred = [t if rng.random() < 0.7 else str(rng.choice(labels)) for t in truth]
     assert macro_f1(truth, pred) == pytest.approx(f1_score(truth, pred, average="macro"), abs=1e-12)
     assert cohen_kappa(truth, pred) == pytest.approx(cohen_kappa_score(truth, pred), abs=1e-12)
+
+
+@pytest.mark.parametrize(("k", "n"), [(0, 1), (0, 10), (1, 10), (3, 40), (12, 12), (7, 250)])
+def test_clopper_pearson_upper_matches_scipy_binomtest(k: int, n: int) -> None:
+    """한쪽 Clopper-Pearson 상한이 scipy `binomtest(alternative="less")`의 정확 구간 상한과 같다.
+    손 계산: k=0이면 1 - (1-신뢰)^(1/n) (n=10, 95% → 0.2589)."""
+    from scipy.stats import binomtest
+
+    from dlp_eval.metrics.proportion import clopper_pearson_upper
+
+    ref = binomtest(k, n, alternative="less").proportion_ci(confidence_level=0.95, method="exact")
+    assert clopper_pearson_upper(k, n) == pytest.approx(ref.high, abs=1e-12)
+    if k == 0:
+        assert clopper_pearson_upper(k, n) == pytest.approx(1 - 0.05 ** (1 / n), abs=1e-12)
+
+
+def test_clopper_pearson_upper_edges() -> None:
+    """시행이 없으면 NaN, 범위 밖 입력은 ValueError."""
+    import math
+
+    from dlp_eval.metrics.proportion import clopper_pearson_upper
+
+    assert math.isnan(clopper_pearson_upper(0, 0))
+    with pytest.raises(ValueError):
+        clopper_pearson_upper(3, 2)
+    with pytest.raises(ValueError):
+        clopper_pearson_upper(0, 3, confidence=1.0)
