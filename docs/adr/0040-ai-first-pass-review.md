@@ -1,6 +1,6 @@
 # ADR 0040: AI 1차 검수(로컬 VLM)는 참고용 판정만 남기고 사람 검수를 줄이지 않는다
 
-- 상태: 채택 (단계 구현 중. WP17.0~17.4 구현(17.3은 Spark 실측 대기), WP17.5~17.9는 [구현 계획 WP17](../ai-implementation-plan.md#wp17-ai-1차-검수로컬-vlm))
+- 상태: 채택 (단계 구현 중. WP17.0~17.5 구현(17.3은 Spark 실측 대기), WP17.6~17.9는 [구현 계획 WP17](../ai-implementation-plan.md#wp17-ai-1차-검수로컬-vlm))
 - 날짜: 2026-10-11
 - 관련: WP10(행동 VLM), WP6·WP12(검수 연동·운영), ADR 0010(상업 사용), ADR 0012(행동 2단 구조),
   ADR 0015·0019(검수된 라벨 보호, 시각 규약), ADR 0024(블러본만), ADR 0033(세대·과거 정책 복귀),
@@ -178,16 +178,16 @@ AI가 모두 ok여도 사람 검수 없이는 `dlp review verify`가 실패한�
 
 | ID | 불변 조건 | 강제 수단 |
 | --- | --- | --- |
-| I1 | AI 입력 픽셀은 지금 승인된 블러본에서만 나온다 | `open_blurred`(원본 버킷 이름 거부, 렌더 게이트, 받은 뒤 렌더 재확인, WP17.5), 픽셀 생성 위치 정적 검사 |
+| I1 | AI 입력 픽셀은 지금 승인된 블러본에서만 나온다 | `open_blurred`(원본 버킷 이름 거부, 렌더 게이트, 받은 뒤 렌더 재확인), 실행기 프레임 공급은 `BlurredFrame`만(`frames_for`), 픽셀 생성 위치·게이트 호출 정적 검사 |
 | I2 | 블러 검수 단계에 AI를 쓰지 않는다 | 정책·계약 검증기(blur_track 금지), privacy 작업에 노출 없음 |
 | I3 | AI 판정은 라벨도 검수 상태도 아니다 | 정적 검사(쓰기 함수·라벨 표 이름), `record_review`의 `aireview:` 검수자 거부(WP17.4), verify 회귀 |
-| I4 | 판정·제안은 운영 라벨·학습·내보내기·스냅샷에 섞이지 않는다 | 별도 표, import 정적 검사, 격리 회귀 테스트(WP17.5) |
+| I4 | 판정·제안은 운영 라벨·학습·내보내기·스냅샷에 섞이지 않는다 | 별도 표, import 정적 검사, 격리 회귀 테스트(`tests/test_aireview_isolation.py`) |
 | I5 | AI 표는 추가만 한다 | 0019 트리거(추가 전용·TRUNCATE 금지, WP17.4) |
 | I6 | 제안은 사람이 적용할 때만 라벨이 되고, 내용은 DB에서 다시 읽어 검증한다 | `ai_collect.apply_decisions`·`settle`(WP17.7) |
 | I7 | 사내 서버만, 서버 모델 = 정책 모델 | `allow_external: false`, 사내 주소 검사(probe·bench WP17.3, run WP17.5, 밖이면 요청 0건), 전송은 프록시 환경 변수를 따르지 않고 그 주소로 직접 연결(`OpenAICompatibleChat`, `trust_env=False`), 응답 `model` 대조(종료 5), `make licenses` |
-| I8 | 재실행은 멱등이다 | 입력 전체를 담은 단위 키, 단위 안 문맥 분할, `done_unit_ids`, `ON CONFLICT DO NOTHING` |
+| I8 | 재실행은 멱등이다 | 입력 전체를 담은 단위 키, 단위 안 문맥 분할, `done_unit_ids`, 세션 잠금, `ON CONFLICT DO NOTHING` |
 | I9 | AI는 사람 검수를 줄이지 않는다 | 증가 프로필은 렌더와 무관, 생략 경로 없음 |
-| I10 | 블러가 바뀌면 이전 블러본으로 만든 이유는 보이지 않는다 | 단위 키·표시 프로필의 렌더 해시, 실행 중 렌더 재확인, 회수 실행기 |
+| I10 | 블러가 바뀌면 이전 블러본으로 만든 이유는 보이지 않는다 | 단위 키·표시 프로필의 렌더 해시, 실행 중·마감 전 렌더 재확인(aborted:render_changed), 회수 실행기 |
 
 ## 행동 단계와 공통 전송 (WP17.1)
 
@@ -212,7 +212,8 @@ AI가 모두 ok여도 사람 검수 없이는 `dlp review verify`가 실패한�
   해시 기반 전처리·인코더 캐시가 비전 인코딩을 건너뛰어 처리량을 부풀리지 않게). 운영보다 요청당
   계산이 조금 많으므로(온톨로지 블록 캐시, 같은 창 분할 요청의 이미지 공유를 빼므로) 보수적이다. 무릎
   동시성에서 프리필 용량(생성 1토큰)과 생성 용량(길이 고정 `min_tokens`·`ignore_eos`)을 따로 잰다.
-  서버 장애는 다시 묻지 않고 오류로 센다. 실제 세션 블러본 입력은 `open_blurred`(WP17.5) 뒤에 더한다.
+  서버 장애는 다시 묻지 않고 오류로 센다. 실제 세션 블러본 입력은 `--source session:<id>`(WP17.5,
+  `open_blurred` 게이트, 장갑 문장 없음, DB·라벨링 버킷 읽기만)다.
 - `dlp aireview estimate`는 DB의 실제 세션으로 영상 1시간당 작업량을 세고, 벤치 보고서로
   `대수 = ceil(H × (1+ρ) × D / (86,400 × u))`를 낸다. T_s = 무릎 단위/s × t(벤치)/t(작업량),
   t = 새 프롬프트 토큰/프리필 용량 + 출력 토큰/생성 용량이다 (설계 초안의 `min(프리필 한계, 디코드
@@ -222,6 +223,27 @@ AI가 모두 ok여도 사람 검수 없이는 `dlp review verify`가 실패한�
   보고하지 않거나 0이면 양쪽에서 매번 계산한다고 본다. 용량 측정이 없으면 무릎 처리량을 보정 없이 쓰고
   경고한다. 행동 VLM 처리량은 벤치가 재지 않고 실측 값(`--actions-req-s`)을 받는다. 가정 값은
   `aireview.yaml estimate`(digest 제외)에 둔다.
+
+## 실행 (WP17.5)
+
+- `dlp aireview run <세션>… | --pending`(`dlp_aireview.runner`): 세션 잠금(세션 수준 advisory lock,
+  종료 7) → 세션 상태 확인(사용 중지·승인 보류·승인 전이면 종료 6) → 판정할 창이 있는 스트림만
+  `open_blurred` → 계획 → 기록된 단위 제외 → 생산자(스트림마다 순차 디코드)·작업자(엔드포인트 수 ×
+  동시성)·기록자(묶어 쓰기, 렌더 재확인) → 마감 이벤트. VLM 호출 중에는 DB 트랜잭션을 열지 않는다.
+- 장애: 요청 하나는 `backoff_s`대로 다시 묻고, 엔드포인트가 연속 장애면 차단기를 연다. 쉼 뒤
+  `/v1/models` 확인을 통과하면 시험 요청 하나로 닫을지 정한다(모델 목록만 응답하고 채팅이 실패하는
+  서버도 닫히지 않는다). 모든 엔드포인트가 `abort_after_s`보다 오래 막히면 새 요청을 멈추고
+  interrupted:unavailable(종료 3). 재시도 끝에도 장애인 단위는 기록하지 않고 넘어간다(다음 실행이 다시
+  묻는다). 설정 오류(4xx, 모델 불일치) aborted:config(종료 5), 실행 중 블러 변경
+  aborted:render_changed(종료 6), `--max-minutes` interrupted:max_minutes(종료 8).
+- 같은 계획이 이미 completed면 아무것도 쓰지 않는다. 단위는 모두 있는데 마감 이벤트가 없으면(강제
+  종료) 서버를 부르지 않고 완료 기록만 남긴다.
+- `--pending`은 prelabeled·승인·보류 아님이고, 마지막 라벨 기록 뒤 `pending.quiet_minutes`가 지났고,
+  지금 버전·렌더의 단위에 든 적 없는 대상이 남은 세션을 prelabeled 전이 순으로 고른다(맥락 변화는
+  보지 않는다). 운영 cron은 `dlp actions run S && dlp aireview run S`를 잇고 `--pending`은 따라잡기용이다.
+- 원본 접근은 장갑 Parquet뿐이고 감사 원본 저장소 용도 `aireview.run`이다(손 상태 대상이 있고 센서를
+  켰을 때만, 정적 검사). `dlp aireview status|show|waive`는 진행 상태, 단위 감사 기록, required 모드의
+  건너뛰기 결정(`waived`, 사유 `manual: …`)이다.
 
 ## 범위 밖 (후속, `docs/handover/issues.yaml` F-AIR)
 

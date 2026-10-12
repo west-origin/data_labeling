@@ -1,24 +1,27 @@
-"""AI 1차 검수 하위 명령 (WP17, ADR 0040). 이번 단계(WP17.3): 서버 점검·처리량 벤치·작업량 추정.
+"""AI 1차 검수 하위 명령 (WP17, ADR 0040): 서버 점검·처리량 벤치·작업량 추정 (WP17.3).
 
-판정 실행(`run`·`status`·`show`·`waive`)은 WP17.5, 골든 평가(`eval`)는 WP17.8에서 더한다. 세 명령
-모두 DB에 쓰지 않는다. 절차와 기록 양식은 `docs/handover/vlm-server.md`의 "처리량 재기와 대수
-정하기"다.
+판정 실행·상태(`run`·`status`·`show`·`waive`, WP17.5)는 `aireview_run_cmds`에 있고 여기서 함께
+등록한다. 골든 평가(`eval`)는 WP17.8에서 더한다. 아래 세 명령은 DB에 쓰지 않는다. 절차와 기록 양식은
+`docs/handover/vlm-server.md`의 "처리량 재기와 대수 정하기"다.
 
 등록하는 명령
 - `dlp aireview probe [--vlm-url URL …] [--ontology-version V] [--out FILE]`: 서버 점검
   (`dlp_aireview.probe`). 엔드포인트마다 점검 결과·권고를 출력한다.
   종료: 0 통과 / 2 주소 없음 / 3 서버 장애 / 5 설정 불일치(사내 주소 아님, 모델 없음·불일치, 키,
   구조화 출력 미강제, 이미지 수 한도 등). 여러 엔드포인트면 가장 심각한 코드(5 > 3).
-- `dlp aireview bench [--vlm-url URL] [--endpoint NAME] [--source synthetic] [--concurrency 1,8,…]
-  [--frames N,…] [--side PX,…] [--groups …] [--requests 200] [--warmup 10] [--ttft 10]
-  [--cache-probe] [--no-capacity] [--decode-tokens 256] [--decode] [--decode-seconds 20]
-  [--scene-units 40] [--frame-size WxH] [--seed 0] [--device NAME] [--out FILE]`: 처리량 벤치
-  (`dlp_aireview.bench`). 입력은 합성 장면(`dlp_fixtures.aireview`, 영상·사람·글자 없음)이다.
+- `dlp aireview bench [--vlm-url URL] [--endpoint NAME] [--source synthetic|session:<id>]
+  [--concurrency 1,8,…] [--frames N,…] [--side PX,…] [--groups …] [--requests 200] [--warmup 10]
+  [--ttft 10] [--cache-probe] [--no-capacity] [--decode-tokens 256] [--decode]
+  [--decode-seconds 20] [--scene-units 40] [--frame-size WxH] [--seed 0] [--device NAME]
+  [--out FILE] [--store s3] [--url]`: 처리량 벤치 (`dlp_aireview.bench`). 입력은 기본이 합성
+  장면(`dlp_fixtures.aireview`, 영상·사람·글자 없음)이고, `session:<id>`면 그 세션의 승인된
+  블러본(`open_blurred` 게이트, 장갑 문장 없음, DB·라벨링 버킷 읽기만)이다.
   `--frames`·`--side`는 지금 정책 값에 더할 후보다 (정책 값은 늘 잰다, 주지 않으면 정책 값만).
   무릎 동시성에서 프리필·생성 용량도 따로 잰다 (`--no-capacity`로 끈다). 보고서는
   `reports/aireview-bench/`(Git 제외). `--decode`는 같은 합성 장면을 MP4로 써서 CPU 순차 디코드
   fps를 잰다.
-  종료: 0 / 2 주소 없음 / 3 서버 장애(서버가 멈춰 벤치를 멈춤 포함) / 5 설정 불일치.
+  종료: 0 / 2 주소 없음 / 3 서버 장애(서버가 멈춰 벤치를 멈춤 포함) / 5 설정 불일치 /
+  6 세션 입력의 전제 실패(승인 전·보류·사용 중지·렌더 게이트).
 - `dlp aireview estimate [<세션>… | --prelabeled] [--mode all|flagged] [--bench REPORT …]
   [--hours-per-day H] [--rerun-margin R] [--utilization U] [--decode-workers N] [--include-actions]
   [--actions-req-s X] [--json] [--url]`: 작업량·장비 대수 추정 (`dlp_aireview.estimate`). DB를
@@ -38,11 +41,11 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import socket
 import tempfile
 import time
 from collections.abc import Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from fractions import Fraction
@@ -51,10 +54,11 @@ from typing import Any
 
 import numpy as np
 import sqlalchemy as sa
+from sqlalchemy.exc import NoResultFound
 
 from dlp_actions.policy import load_policy as load_actions_policy
 from dlp_actions.runner import vlm_request_count
-from dlp_aireview.backend import OpenAICompatibleJudge, check_hosts, parse_endpoints
+from dlp_aireview.backend import OpenAICompatibleJudge, check_hosts
 from dlp_aireview.bench import (
     BenchConfig,
     BenchGrid,
@@ -71,20 +75,34 @@ from dlp_aireview.estimate import (
     session_load,
     to_json,
 )
+from dlp_aireview.media import MediaBoundaryError
 from dlp_aireview.plan import VIDEO_KINDS, StreamMedia
 from dlp_aireview.policy import AiReviewPolicy, load_policy
 from dlp_aireview.probe import ProbeReport, probe_server, server_info
+from dlp_aireview.runner import SessionNotReadyError, load_input
 from dlp_aireview.sensors import SensorContext
-from dlp_cli.review_config import load_review_policy
+from dlp_cli.aireview_common import (
+    CONFIG,
+    UNAVAILABLE,
+    add_url_arg,
+    flagged_spans,
+    no_url,
+    parse_groups,
+    parse_ints,
+    vlm_api_key,
+    vlm_endpoints,
+)
+from dlp_cli.aireview_run_cmds import add_run_commands
 from dlp_cli.schema_cmds import database_url
 from dlp_fixtures.aireview import AiReviewScene, aireview_scene, scene_frame
 from dlp_fixtures.video import write_video
 from dlp_media.frames import decode_frames
 from dlp_media.pts import PtsIndex, build_pts_index
+from dlp_media.storage import store_from_spec
 from dlp_models.vlm import VlmRequestError, VlmUnavailableError
-from dlp_review.ops.priority import flag_unit, units_for
-from dlp_review.ops.runner import known_classes
-from dlp_schema import repo_root
+from dlp_privacy.errors import RenderNotCurrentError
+from dlp_privacy.policy import load_policy as load_privacy_policy
+from dlp_schema import load_config, repo_root
 from dlp_schema.aireview import AiGroup
 from dlp_schema.db.ontology_repository import get_session_ontology
 from dlp_schema.db.repository import get_labels, get_session, list_session_ids
@@ -92,61 +110,15 @@ from dlp_schema.episode import current_labels
 from dlp_schema.labels import LabelRecord
 from dlp_schema.ontology import Ontology, find_ontology_dir, load_ontology
 from dlp_schema.review import FlaggedSpan
-from dlp_schema.session import LifecycleState, Session, StreamKind
+from dlp_schema.session import LifecycleState, Session
 
 # 합성 장면의 온톨로지 버전 (dlp_fixtures 라벨이 쓰는 값)
 _SYNTHETIC_ONTOLOGY = "1.0.0"
-_NO_URL = 2
-_UNAVAILABLE = 3
-_CONFIG = 5
+# 세션 입력의 전제 실패 (dlp aireview run의 종료 6과 같다)
+_SESSION = 6
 
 
 # ---------------------------------------------------------------- 공용
-
-
-def _endpoints(args: argparse.Namespace) -> dict[str, str] | None:
-    """`--vlm-url` 또는 `DLP_VLM_URLS` → {이름: URL} (없으면 None).
-
-    Raises:
-        ValueError: 잘못된 지정.
-    """
-    specs: list[str] = list(args.vlm_url or [])
-    if not specs and os.environ.get("DLP_VLM_URLS"):
-        specs = [os.environ["DLP_VLM_URLS"]]
-    return parse_endpoints(specs) if specs else None
-
-
-def _api_key() -> str | None:
-    """서버 API 키 (출력·기록하지 않는다)."""
-    return os.environ.get("DLP_VLM_API_KEY") or None
-
-
-def _no_url() -> int:
-    """주소가 없을 때 안내 (종료 2)."""
-    print(
-        "[미연동] AI 검수 VLM 서버 주소가 없습니다 (--vlm-url 또는 DLP_VLM_URLS). "
-        "DLP_VLM_URL(행동 분류 서버)은 쓰지 않습니다."
-    )
-    return _NO_URL
-
-
-def _ints(text: str) -> tuple[int, ...]:
-    """`1,8,16` → (1, 8, 16) (argparse 형식 함수)."""
-    try:
-        values = tuple(int(x) for x in text.split(",") if x.strip())
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError(f"쉼표로 나눈 정수가 아닙니다: {text}") from exc
-    if not values or min(values) < 1:
-        raise argparse.ArgumentTypeError(f"1 이상의 정수가 필요합니다: {text}")
-    return values
-
-
-def _groups(text: str) -> tuple[AiGroup, ...]:
-    """`temporal,spatial` → 묶음 (argparse 형식 함수)."""
-    try:
-        return tuple(AiGroup(x.strip()) for x in text.split(",") if x.strip())
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError(f"모르는 묶음: {text}") from exc
 
 
 def _size(text: str) -> tuple[int, int]:
@@ -192,15 +164,15 @@ def cmd_probe(args: argparse.Namespace) -> int:
     root = repo_root()
     policy = load_policy(root)
     try:
-        endpoints = _endpoints(args)
+        endpoints = vlm_endpoints(args)
     except ValueError as exc:
         print(f"[설정 오류] {exc}")
-        return _CONFIG
+        return CONFIG
     if not endpoints:
-        return _no_url()
+        return no_url()
     ontology = load_ontology(find_ontology_dir(root / "config/ontology", args.ontology_version))
     reports = [
-        probe_server(name, url, policy, ontology, api_key=_api_key())
+        probe_server(name, url, policy, ontology, api_key=vlm_api_key())
         for name, url in endpoints.items()
     ]
     for report in reports:
@@ -208,8 +180,8 @@ def cmd_probe(args: argparse.Namespace) -> int:
     if args.out:
         _write_json(Path(args.out), [r.model_dump(mode="json") for r in reports])
     if any(r.failed for r in reports):  # 설정 불일치가 하나라도 있으면 서버 장애보다 먼저 (5 > 3)
-        return _CONFIG
-    return _UNAVAILABLE if any(r.unavailable for r in reports) else 0
+        return CONFIG
+    return UNAVAILABLE if any(r.unavailable for r in reports) else 0
 
 
 # ---------------------------------------------------------------- bench
@@ -321,29 +293,86 @@ def _grid(args: argparse.Namespace) -> BenchGrid:
 def _pick_endpoint(args: argparse.Namespace) -> tuple[str, str] | int:
     """벤치할 엔드포인트 하나 (이름, URL) 또는 종료 코드."""
     try:
-        endpoints = _endpoints(args)
+        endpoints = vlm_endpoints(args)
     except ValueError as exc:
         print(f"[설정 오류] {exc}")
-        return _CONFIG
+        return CONFIG
     if not endpoints:
-        return _no_url()
+        return no_url()
     if args.endpoint:
         if args.endpoint not in endpoints:
             print(f"[설정 오류] 엔드포인트 {args.endpoint}가 없습니다 ({', '.join(endpoints)})")
-            return _CONFIG
+            return CONFIG
         return args.endpoint, endpoints[args.endpoint]
     if len(endpoints) > 1:
         print(
             f"[설정 오류] 벤치는 장비 하나만 잽니다. --endpoint로 고르세요 ({', '.join(endpoints)})"
         )
-        return _CONFIG
+        return CONFIG
     return next(iter(endpoints.items()))
+
+
+def _session_input(
+    args: argparse.Namespace, policy: AiReviewPolicy, session_id: str, work: Path
+) -> BenchInput | int:
+    """실제 세션 블러본 입력 (`open_blurred` 게이트, 장갑 문장 없음). 전제 실패면 종료 6.
+
+    DB·라벨링 버킷을 읽기만 한다. 블러본은 `work`(벤치가 끝나면 지우는 임시 디렉터리)에 받는다.
+    """
+    root = repo_root()
+    buckets = load_config(root / "config/defaults.yaml").buckets
+    engine = sa.create_engine(database_url(args.url))
+    try:
+        inp = load_input(
+            engine, store_from_spec(args.store, buckets.labeling), session_id, policy,
+            load_privacy_policy(root), work, raw_bucket=buckets.raw,
+        )  # fmt: skip
+    except NoResultFound:
+        print(f"[전제 실패] {session_id}: 세션이 없습니다")
+        return _SESSION
+    except (SessionNotReadyError, RenderNotCurrentError) as exc:
+        print(f"[전제 실패] {session_id}: {exc}")
+        return _SESSION
+    except MediaBoundaryError as exc:
+        print(f"[설정 오류] {exc}")
+        return CONFIG
+    finally:
+        engine.dispose()
+
+    def frames(stream: str, idx: Sequence[int]) -> list[Any]:
+        return [f.rgb for f in inp.frames(stream, idx)]
+
+    return BenchInput(
+        inp.session, inp.current, inp.media, inp.ontology, inp.sensor, frames,
+        f"session:{session_id}",
+    )  # fmt: skip
+
+
+def _bench_input(
+    args: argparse.Namespace, policy: AiReviewPolicy, scene: AiReviewScene, stack: ExitStack
+) -> BenchInput | int:
+    """벤치 입력: 합성 장면(기본) 또는 `session:<id>`(실제 세션 블러본, 임시 디렉터리는 stack이
+    벤치 뒤에 지운다)."""
+    if args.source == "synthetic":
+        root = repo_root()
+        ontology = load_ontology(find_ontology_dir(root / "config/ontology", _SYNTHETIC_ONTOLOGY))
+        return _scene_input(scene, ontology)
+    work = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="aireview-bench-")))
+    return _session_input(args, policy, args.source.removeprefix("session:"), work)
+
+
+def _source(text: str) -> str:
+    """`synthetic` 또는 `session:<세션 ID>` (argparse 형식 함수)."""
+    if text == "synthetic" or (text.startswith("session:") and len(text) > len("session:")):
+        return text
+    raise argparse.ArgumentTypeError(f"synthetic 또는 session:<세션 ID>: {text}")
 
 
 def cmd_bench(args: argparse.Namespace) -> int:
     """`dlp aireview bench`: 장비 1대의 처리량 벤치 (모듈 docstring의 종료 코드).
 
-    부작용: VLM 서버에 판정 요청 (합성 입력), 보고서 JSON 파일, `--decode`면 임시 MP4.
+    부작용: VLM 서버에 판정 요청 (합성 입력 또는 세션 블러본), 보고서 JSON 파일, `--decode`면 임시
+    MP4, 세션 입력이면 라벨링 버킷 블러본 읽기(임시 디렉터리).
     """
     root = repo_root()
     policy = load_policy(root)
@@ -354,28 +383,32 @@ def cmd_bench(args: argparse.Namespace) -> int:
     outside = check_hosts({name: url}, policy.server.internal_hosts, resolve=socket.getaddrinfo)
     if outside:
         print(f"[설정 오류] 사내 대역 밖 주소에는 보내지 않습니다: {'; '.join(outside)}")
-        return _CONFIG
+        return CONFIG
     width, height = args.frame_size or policy.estimate.frame_px
     scene = aireview_scene(
         args.seed, session_id="bench", n_units=args.scene_units, width=width, height=height
     )
-    ontology = load_ontology(find_ontology_dir(root / "config/ontology", _SYNTHETIC_ONTOLOGY))
-    judge = OpenAICompatibleJudge(name, url, policy, api_key=_api_key())
-    try:
-        info = server_info(name, judge.chat, policy.served_model)
-        if policy.served_model not in info.models:
-            print(f"[설정 오류] 서버에 {policy.served_model}이 없습니다 ({', '.join(info.models)})")
-            return _CONFIG
-        report = run_bench(
-            judge, _scene_input(scene, ontology), policy, _grid(args), server=info,
-            device=args.device or name, progress=print,
-        )  # fmt: skip
-    except VlmUnavailableError as exc:
-        print(f"[VLM 서버 장애] {name}: {exc}")
-        return _UNAVAILABLE
-    except VlmRequestError as exc:
-        print(f"[VLM 설정 오류] {name}: 서버 주소·모델·키를 확인하세요 ({exc})")
-        return _CONFIG
+    judge = OpenAICompatibleJudge(name, url, policy, api_key=vlm_api_key())
+    with ExitStack() as stack:
+        data = _bench_input(args, policy, scene, stack)
+        if isinstance(data, int):
+            return data
+        try:
+            info = server_info(name, judge.chat, policy.served_model)
+            if policy.served_model not in info.models:
+                models = ", ".join(info.models)
+                print(f"[설정 오류] 서버에 {policy.served_model}이 없습니다 ({models})")
+                return CONFIG
+            report = run_bench(
+                judge, data, policy, _grid(args), server=info, device=args.device or name,
+                progress=print,
+            )  # fmt: skip
+        except VlmUnavailableError as exc:
+            print(f"[VLM 서버 장애] {name}: {exc}")
+            return UNAVAILABLE
+        except VlmRequestError as exc:
+            print(f"[VLM 설정 오류] {name}: 서버 주소·모델·키를 확인하세요 ({exc})")
+            return CONFIG
     if args.decode:
         report = report.model_copy(
             update={"decode": _measure_decode(scene, policy, args.decode_seconds)}
@@ -385,25 +418,10 @@ def cmd_bench(args: argparse.Namespace) -> int:
     )  # fmt: skip
     _write_json(out, report.model_dump(mode="json"))
     _print_bench(report, out)
-    return _UNAVAILABLE if report.server_down else 0
+    return UNAVAILABLE if report.server_down else 0
 
 
 # ---------------------------------------------------------------- estimate
-
-
-def _flagged(
-    conn: sa.Connection, session: Session, current: list[LabelRecord]
-) -> list[FlaggedSpan]:
-    """flagged 모드의 우선순위 사유 구간 (검수 운영 정책의 `flag_unit`, 검수 단위마다)."""
-    review_policy = load_review_policy(repo_root())
-    known = known_classes(conn, session.session_id)
-    glove = any(s.kind in (StreamKind.GLOVE_LEFT, StreamKind.GLOVE_RIGHT) for s in session.streams)
-    spans: list[FlaggedSpan] = []
-    for unit in units_for(session, review_policy):
-        spans += flag_unit(
-            unit.select(current), review_policy, known_classes=known, glove_session=glove
-        )
-    return spans
 
 
 def _session_ids(conn: sa.Connection, args: argparse.Namespace) -> list[str]:
@@ -444,7 +462,9 @@ def _session_inputs(args: argparse.Namespace, policy: AiReviewPolicy) -> list[_S
                     continue
                 current = current_labels(get_labels(conn, sid))
                 flagged = (
-                    _flagged(conn, session, current) if policy.selection.mode == "flagged" else []
+                    flagged_spans(conn, session, current)
+                    if policy.selection.mode == "flagged"
+                    else []
                 )
                 requests = (
                     sum(vlm_request_count(session, current, actions).values()) if actions else None
@@ -556,25 +576,23 @@ def cmd_estimate(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------- 등록
 
 
-def _url_arg(p: argparse.ArgumentParser) -> None:
-    """서버 주소 인자."""
-    p.add_argument(
-        "--vlm-url", action="append",
-        help="AI 검수 VLM 서버 (여러 번, 이름=URL 가능. 기본: DLP_VLM_URLS)",
-    )  # fmt: skip
-
-
 def _bench_parser(asub: Any) -> None:
     """`aireview bench` 인자."""
     b = asub.add_parser("bench", help="장비 1대 처리량 벤치 (합성 입력, DB에 쓰지 않음)")
-    _url_arg(b)
+    add_url_arg(b)
     b.add_argument("--endpoint", help="엔드포인트가 여럿이면 잴 이름")
-    b.add_argument("--source", choices=["synthetic"], default="synthetic",
-                   help="입력 (실제 세션 블러본 입력은 WP17.5 open_blurred 뒤)")  # fmt: skip
-    b.add_argument("--concurrency", type=_ints, default=(1, 8, 16, 32, 64))
-    b.add_argument("--frames", type=_ints, help="temporal 프레임 수 후보 (정책 값에 더한다)")
-    b.add_argument("--side", type=_ints, help="긴 변 후보 px (묶음마다 정책 값에 더한다)")
-    b.add_argument("--groups", type=_groups, default=tuple(AiGroup))
+    b.add_argument(
+        "--source", type=_source, default="synthetic",
+        help="입력: synthetic(기본) | session:<세션> (승인된 블러본)",
+    )  # fmt: skip
+    b.add_argument(
+        "--store", default="s3", help="session 입력의 라벨링 버킷 ('s3' 또는 'local:<디렉터리>')"
+    )
+    b.add_argument("--url", help="session 입력의 DB URL (기본: DLP_DATABASE_URL)")
+    b.add_argument("--concurrency", type=parse_ints, default=(1, 8, 16, 32, 64))
+    b.add_argument("--frames", type=parse_ints, help="temporal 프레임 수 후보 (정책 값에 더한다)")
+    b.add_argument("--side", type=parse_ints, help="긴 변 후보 px (묶음마다 정책 값에 더한다)")
+    b.add_argument("--groups", type=parse_groups, default=tuple(AiGroup))
     b.add_argument("--requests", type=int, default=200, help="점마다 판정할 단위 수")
     b.add_argument("--warmup", type=int, default=10)
     b.add_argument("--ttft", type=int, default=10, help="첫 토큰 시간 표본 수 (0이면 생략)")
@@ -615,13 +633,14 @@ def _estimate_parser(asub: Any) -> None:
 
 
 def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:  # pyright: ignore[reportPrivateUsage]
-    """`aireview probe|bench|estimate` 하위 명령을 등록한다."""
+    """`aireview probe|bench|estimate|run|status|show|waive` 하위 명령을 등록한다."""
     ai = sub.add_parser("aireview", help="AI 1차 검수 (로컬 VLM, 참고용)")
     asub = ai.add_subparsers(dest="aireview_command", required=True)
     p = asub.add_parser("probe", help="VLM 서버 점검 (모델·이미지 한도·구조화 출력·캐시)")
-    _url_arg(p)
+    add_url_arg(p)
     p.add_argument("--ontology-version", default=_SYNTHETIC_ONTOLOGY)
     p.add_argument("--out", help="보고서 JSON 파일")
     p.set_defaults(func=cmd_probe)
     _bench_parser(asub)
     _estimate_parser(asub)
+    add_run_commands(asub)

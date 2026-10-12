@@ -84,8 +84,8 @@ curl -s -H "Authorization: Bearer $DLP_VLM_API_KEY" http://10.0.0.11:8000/v1/mod
 
 - `dlp aireview`는 `DLP_VLM_URL`로 대신하지 않는다. 판정 모델은 행동 분류 모델과 달라(위 구성) 행동 분류
   서버로 보내면 늘 서버 모델 불일치(I7, 종료 5)가 난다. `DLP_VLM_URLS`도 `--vlm-url`도 없으면 종료 2다.
-- 주소는 `aireview.yaml server.internal_hosts`(사내 대역) 안이어야 한다 (probe·bench가 보내기 전에
-  검사한다, 판정 실행은 WP17.5). 호스트 이름이면 DNS로 풀어 모든 주소를 본다.
+- 주소는 `aireview.yaml server.internal_hosts`(사내 대역) 안이어야 한다 (probe·bench·run이 보내기
+  전에 검사한다). 호스트 이름이면 DNS로 풀어 모든 주소를 본다.
 - VLM 요청(`dlp aireview`, `dlp actions run`)은 `HTTP_PROXY`·`HTTPS_PROXY`·`ALL_PROXY` 환경 변수를
   따르지 않고 그 주소로 직접 연결한다 (프록시를 따르면 사내 주소 검사를 통과한 요청과 API 키가
   프록시로 나간다). 사내 CA 인증서는 `SSL_CERT_FILE`·`SSL_CERT_DIR`로 계속 쓸 수 있다.
@@ -104,9 +104,10 @@ FakeOpenAIServer`)로 같은 명령의 보고서 형식만 검사한다 (`packag
 
 벤치가 재는 방식 (`dlp_aireview.bench`)
 
-- 입력은 합성 장면(`dlp_fixtures.aireview`, 사람·글자 없음)이다. 프레임 크기는 `aireview.yaml
-  estimate.frame_px`(기본 1920x1080, `--frame-size`로 바꾼다). 실제 세션 블러본 입력(`--source
-  session:<id>`)은 블러본 경계(`open_blurred`, WP17.5)가 생긴 뒤 더한다.
+- 입력은 기본이 합성 장면(`dlp_fixtures.aireview`, 사람·글자 없음)이다. 프레임 크기는 `aireview.yaml
+  estimate.frame_px`(기본 1920x1080, `--frame-size`로 바꾼다). 실제 세션으로 재려면 `--source
+  session:<id> --url <DB> --store s3`: 그 세션의 승인된 블러본(블러본 경계 `open_blurred`, 장갑 문장 없음)을
+  임시 디렉터리에 받아 쓴다. DB·라벨링 버킷은 읽기만 하고, 승인 전·보류·사용 중지면 종료 6이다.
 - 요청마다 고정 블록(온톨로지) 끝에 측정 표식 한 줄을 넣어, system만 접두사 캐시에 맞고 온톨로지 뒤
   (이미지·가변 글)는 매번 새로 계산하게 한다.
 - 요청마다 새 이미지: 합성 장면의 계획 단위는 `--requests`(200)보다 적어 단위를 돌려 쓴다. 같은 이미지를
@@ -207,6 +208,28 @@ D    = Σ_s (영상 1시간당 단위_s ÷ T_s) + 행동 VLM 영상 1시간당 �
 | 행동 VLM 요청/s (실측) | |
 | VLM 밖 단계 장비 시간 (OWLv2·깊이·렌더) | |
 | D, 필요 대수, 결정 | |
+
+## 판정 실행 (WP17.5)
+
+| 명령 | 하는 일 | 종료 코드 |
+| --- | --- | --- |
+| `dlp aireview run <세션>… \| --pending [--limit N] [--parallel-sessions K]` | 판정 → AI 표 기록 (멱등·재개). `--groups`, `--mode all\|flagged`, `--max-minutes`, `--no-sensor`, `--dry-run`(계획만, 서버 불필요), `--debug-dir`(형식이 맞지 않던 응답 원문만 로컬 파일), `--json-progress` | 0 / 2 주소 없음 / 3 서버 장애 / 5 설정 / 6 세션 전제·블러 변경 / 7 처리 중 / 8 시간 |
+| `dlp aireview status [<세션>… \| --pending \| --all] [--json]` | 판정률(판정된 대상/계획 대상), 단위·fallback, 판정 분포, 마지막 이벤트(마감 없이 끝났으면 "중단 추정"), 최근 처리량 기반 남은 시간, 백로그 | 0 |
+| `dlp aireview show <unit_id> \| <세션>:<라벨>` | 감사 기록 (프레임 PTS·sha, 렌더 해시, 프롬프트 다이제스트, 판정, 응답 sha, 서버 모델, 엔드포인트 이름, 실행자) | 0 / 1 없음 |
+| `dlp aireview waive <세션> --reason` | required 모드에서 그 세션의 AI 단계를 건너뛴다 (`waived` 이벤트) | 0 / 1 없음 |
+
+- 운영 cron은 행동 단계 뒤에 잇는다: `dlp actions run S && dlp aireview run S`. 따라잡기는
+  `dlp aireview run --pending --max-minutes 50`을 매시간 (prelabeled·승인·보류 아님이고, 마지막 라벨 기록
+  뒤 `pending.quiet_minutes`(30분)가 지났고, 판정 없는 대상이 남은 세션만 고른다).
+- 작업자 수 = 엔드포인트 수 × `server.concurrency_per_endpoint`. 같은 창의 분할 요청은 같은
+  엔드포인트로, 그곳이 상한까지 바쁘면 다른 곳으로 간다. 진행 줄(표준 오류)에 엔드포인트별 상태
+  (ok·open·half-open)가 나온다.
+- 서버가 멈추면: 차단기가 그 엔드포인트를 빼고, 모두 `abort_after_s`(15분)보다 오래 막히면 완료한 단위를
+  남기고 종료 3이다. 서버가 돌아오면 같은 명령을 다시 돌린다 (남은 단위만 묻는다).
+- 시작 전에 엔드포인트마다 `/v1/models`에 정책 모델(`served_name`)이 있는지 본다. 없으면 종료 5이고
+  아무것도 쓰지 않는다.
+- 장갑 접촉 문장은 장갑 Parquet을 감사 원본 저장소(용도 `aireview.run`)로 읽어 프리라벨과 같은 함수로
+  계산한다. 선언된 장갑의 Parquet이 없으면 종료 6이고, `--no-sensor`로 센서 없이 판정할 수 있다.
 
 ## 판정 모델 바꾸기
 

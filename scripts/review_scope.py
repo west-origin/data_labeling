@@ -34,6 +34,7 @@ HIGH = (
     "packages/media/src/dlp_media/audit.py",
     "packages/media/src/dlp_media/storage.py",
     "packages/media/src/dlp_media/ingest.py",
+    "packages/aireview/src/dlp_aireview/media.py",  # AI 판정 픽셀은 승인된 블러본만 (I1)
     "packages/schema/src/dlp_schema/db/",
     "packages/schema/src/dlp_schema/label_validation.py",
     "packages/schema/src/dlp_schema/label_graph.py",

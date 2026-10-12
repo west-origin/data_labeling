@@ -27,6 +27,15 @@
 - `estimate`: 작업량·장비 대수 (`dlp aireview estimate`, 순수 함수).
 - `testing`: 가짜 OpenAI 호환 서버(`FakeOpenAIServer`, 127.0.0.1, 테스트·CI용).
 
-뒤 단계(WP17.5~): 블러본 경계(`media.open_blurred`), 실행기·재개·차단기(`runner`), 골든 평가.
-이 패키지는 라벨·검수 기록을 쓰지 않는다 (정적 검사, I3).
+모듈 (WP17.5 실행)
+- `media`: 블러본 경계 (`open_blurred`, `frames_for`, `BlurredFrame`). 이 패키지에서 픽셀을 얻는
+  유일한 길이다 (I1, 정적 검사).
+- `backend.EndpointPool`: 여러 엔드포인트 묶음·백오프·차단기 (모두 막히면 `AllEndpointsDownError`).
+- `runner`: 생산자·작업자·기록자 실행기, 재개·멱등, 렌더 재확인, 세션 잠금 (`run_session`,
+  `run_from_db`, `DbSink`, `MemorySink`).
+- `status`: 판정 범위·진행 상태와 `--pending` 세션 고르기 (DB 읽기만).
+
+뒤 단계(WP17.6~): 검수 화면 표시, 수집·적용, 품질 지표, 골든 평가.
+이 패키지는 라벨·검수 기록을 쓰지 않는다 (정적 검사, I3). AI 표 기록은 `runner`(실행·이벤트·단위)만
+쓴다.
 """

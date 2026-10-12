@@ -811,11 +811,13 @@ dependencies = [
     { name = "av" },
     { name = "dlp-media" },
     { name = "dlp-models" },
+    { name = "dlp-privacy" },
     { name = "dlp-schema" },
     { name = "httpx" },
     { name = "numpy" },
     { name = "opencv-contrib-python-headless" },
     { name = "pyyaml" },
+    { name = "sqlalchemy" },
 ]
 
 [package.metadata]
@@ -823,11 +825,13 @@ requires-dist = [
     { name = "av", specifier = ">=19.0" },
     { name = "dlp-media", editable = "packages/media" },
     { name = "dlp-models", editable = "packages/models" },
+    { name = "dlp-privacy", editable = "packages/privacy" },
     { name = "dlp-schema", editable = "packages/schema" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "numpy", specifier = ">=2.0" },
     { name = "opencv-contrib-python-headless", specifier = ">=4.10" },
     { name = "pyyaml", specifier = ">=6.0" },
+    { name = "sqlalchemy", specifier = ">=2.0" },
 ]
 
 [[package]]

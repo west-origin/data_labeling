@@ -16,7 +16,7 @@ Prefect 서비스가 기동된 것만으로 모든 작업이 영속 큐에서 �
 | 탐지·승인·렌더 | [privacy](../../packages/privacy/src/dlp_privacy/)의 `runner.py`, `generation.py`, `rendering.py`, `revocation.py`(블러 변경 뒤 배포 매체 회수 요청), `hold.py`(사고 대응 승인 보류, ADR 0042) | `config/policies/privacy.yaml` |
 | 자동 라벨 초안 | [prelabel runner](../../packages/prelabel/src/dlp_prelabel/runner.py), `adapters/` | `config/policies/prelabel.yaml`, `config/models.yaml` |
 | 관계·접촉·행동 | [relations](../../packages/relations/src/dlp_relations/), [actions](../../packages/actions/src/dlp_actions/) | 각 단계의 `config/policies/*.yaml` |
-| AI 1차 검수 (참고용 판정, WP17 진행 중) | [aireview](../../packages/aireview/src/dlp_aireview/)의 `plan.py`, `prompt.py`, `validate.py`, `judge.py`, 점검·벤치·추정 `probe.py`·`bench.py`·`estimate.py`([CLI](../../packages/cli/src/dlp_cli/aireview_cmds.py)), 공통 VLM 전송 [models vlm](../../packages/models/src/dlp_models/vlm.py), AI 표 저장소 [aireview_repository](../../packages/schema/src/dlp_schema/db/aireview_repository.py) | `config/policies/aireview.yaml`, `config/models.yaml` external |
+| AI 1차 검수 (참고용 판정, WP17 진행 중) | [aireview](../../packages/aireview/src/dlp_aireview/)의 `plan.py`, `prompt.py`, `validate.py`, `judge.py`, 실행기 `runner.py`·블러본 경계 `media.py`·엔드포인트 묶음 `backend.py`·진행 상태 `status.py`([실행 CLI](../../packages/cli/src/dlp_cli/aireview_run_cmds.py)), 점검·벤치·추정 `probe.py`·`bench.py`·`estimate.py`([CLI](../../packages/cli/src/dlp_cli/aireview_cmds.py)), 공통 VLM 전송 [models vlm](../../packages/models/src/dlp_models/vlm.py), AI 표 저장소 [aireview_repository](../../packages/schema/src/dlp_schema/db/aireview_repository.py) | `config/policies/aireview.yaml`, `config/models.yaml` external |
 | 검수 도구·이력 수집 | [review](../../packages/review/src/dlp_review/)의 `tasks.py`, `collect.py`, `reconcile.py`, `clients.py`, `webhook.py`, `revoke.py`(회수 실행기), `orphans.py`(DB 기록 없이 남은 도구 작업·사본 정리) | `config/policies/review.yaml` |
 | 배정·QA·품질 | [review ops](../../packages/review/src/dlp_review/ops/) | 위 검수 정책, `config/defaults.yaml` |
 | 계약·온톨로지·DB | [schema](../../packages/schema/src/dlp_schema/), `db/` | `config/ontology/v1`, `schemas/`는 생성물 |
@@ -38,7 +38,7 @@ Prefect 서비스가 기동된 것만으로 모든 작업이 영속 큐에서 �
 | prelabel | media, models, schema, sync |
 | actions | media, models, privacy, schema |
 | active | media, privacy, schema |
-| aireview | media, models, schema |
+| aireview | media, models, privacy, schema |
 | review | eval, media, privacy, schema, sync |
 | train | datasets, eval, media, schema |
 | export | datasets, media, privacy, schema |

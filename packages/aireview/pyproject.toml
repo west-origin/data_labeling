@@ -7,11 +7,13 @@ dependencies = [
     "av>=19.0",
     "dlp-media",
     "dlp-models",
+    "dlp-privacy",
     "dlp-schema",
     "httpx>=0.27",
     "numpy>=2.0",
     "opencv-contrib-python-headless>=4.10",
     "pyyaml>=6.0",
+    "sqlalchemy>=2.0",
 ]
 
 [build-system]

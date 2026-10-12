@@ -14,6 +14,14 @@
   - 내보내기·학습·데이터셋·액티브 러닝은 AI 판정 계약·저장소·패키지(이름에 aireview가 든 모듈이나
     이름)를 import하지 않는다 (판정이 학습·판매 데이터에 섞이지 않게).
 
+WP17.5에서 더한 검사
+- 블러본 경계 모듈(`media.py`)은 원본 버킷 이름 비교(`labeling.bucket == raw_bucket`)와 렌더 게이트
+  (`expected_render_hash`·`assert_render_current`·`check_fetched`)를 거친다 (지우면 실패).
+- 실행기(`runner.py`)는 프레임을 `media.frames_for`로만 얻고 영상 파일을 직접 열지 않는다.
+- CLI의 AI 검수 명령(`dlp_cli/aireview*.py`)은 원본 저장소를 용도 `aireview.run`으로만 만든다
+  (장갑 Parquet, 월간 감사가 이상 접근으로 표시하지 않게 `ops.yaml audit.service_purposes`에
+  등록된 값).
+
 정답은 저장소 소스 자체다. 서비스 없이 돈다.
 """
 
@@ -157,3 +165,49 @@ def test_scan_catches_bypass_forms() -> None:
     assert [(m, n) for _, m, n in nested] == [("dlp_media", ("audit",))]
     for line in ("frames = decode_frames(path, pts, idx)", "with av.open(path) as c:"):
         assert any(name in line for name in MEDIA_ONLY), line
+
+
+CLI = ROOT / "packages" / "cli" / "src" / "dlp_cli"
+
+
+def test_blurred_media_module_keeps_its_gates() -> None:
+    """`media.py`가 원본 버킷 이름 거부와 렌더 게이트 네 단계를 모두 부른다 (I1)."""
+    text = (SRC / "media.py").read_text("utf-8")
+    for needle in (
+        "labeling.bucket == raw_bucket", "expected_render_hash(", "assert_render_current(",
+        "check_fetched(", "render_hashes_now(",
+    ):  # fmt: skip
+        assert needle in text, needle
+
+
+def test_runner_gets_frames_only_through_blurred_media() -> None:
+    """실행기는 프레임을 `frames_for`(블러본 경계)로만 얻고 프레임 공급 형은 `BlurredFrame`이다."""
+    text = (SRC / "runner.py").read_text("utf-8")
+    assert "frames_for(" in text and "Iterable[BlurredFrame]" in text
+    names = {n for _, module, ns in imports_in(text) if module == "dlp_aireview.media" for n in ns}
+    assert {"frames_for", "open_blurred", "BlurredFrame"} <= names
+
+
+def _raw_store_purposes(source: str) -> list[object]:
+    """소스의 `raw_store(...)` 호출마다 세 번째 인자(용도) 값 (상수가 아니면 그 노드 이름)."""
+    out: list[object] = []
+    for node in ast.walk(ast.parse(source)):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "raw_store"
+        ):
+            arg = node.args[2] if len(node.args) > 2 else None
+            out.append(arg.value if isinstance(arg, ast.Constant) else type(arg).__name__)
+    return out
+
+
+def test_aireview_cli_reads_raw_only_for_aireview_run() -> None:
+    """AI 검수 CLI의 원본 저장소는 용도 `aireview.run` 상수로만 만든다 (ops.yaml에 등록된 용도)."""
+    purposes = [
+        p
+        for path in sorted(CLI.glob("aireview*.py"))
+        for p in _raw_store_purposes(path.read_text())
+    ]
+    assert purposes == ["aireview.run"]
+    assert _raw_store_purposes('raw_store(a, b, "x.y")\nraw_store(a, b, name)') == ["x.y", "Name"]

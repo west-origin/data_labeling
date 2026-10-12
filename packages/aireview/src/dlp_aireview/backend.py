@@ -13,8 +13,14 @@
 - `parse_endpoints`: `--vlm-url`·`DLP_VLM_URLS`(`이름=URL,…`) → 엔드포인트 이름 → URL.
 - `check_hosts`: 주소가 사내 대역(`server.internal_hosts`) 안인지 (호스트 이름은 DNS로 풀어 모든
   주소를 본다, I7). 벤치·점검·실행 모두 보내기 전에 부른다.
-
-여러 엔드포인트 묶음·차단기(`EndpointPool`)는 실행기와 함께 WP17.5에서 더한다.
+- `EndpointPool`(WP17.5): 여러 엔드포인트(장비마다 서버 하나)를 하나의 `JudgeBackend`로
+  묶는다. 같은 창의 요청은 같은 엔드포인트로(접두사·이미지 캐시), 그곳이 바쁘면 처리 중
+  요청이 가장 적은 곳으로 보낸다. 엔드포인트마다 동시 요청 상한
+  (`server.concurrency_per_endpoint`)을 지킨다. 장애는 백오프하며 다시 묻고, 연속 장애가
+  `breaker_failures`번이면 그 엔드포인트의 차단기를 연다. `breaker_cooldown_s` 뒤 반개방
+  확인(`ping`: `/v1/models`)을 통과하면 시험 요청 하나를 보내고, 그 요청이 성공하면 닫는다.
+  모든 엔드포인트가 `abort_after_s`보다 오래 열려 있으면 `AllEndpointsDownError`로 실행을
+  멈춘다 (종료 3).
 
 판정은 `LabelRecord`를 내지 않으므로 `dlp_schema.predictor.Predictor`가 아니다. "어댑터 + CPU stub"
 규칙은 `JudgeBackend` + `OracleJudge`로 지킨다.
@@ -22,9 +28,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import re
 import socket
+import threading
+import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
@@ -32,9 +41,15 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from dlp_aireview.policy import AiReviewPolicy
+from dlp_aireview.policy import AiReviewPolicy, ServerPolicy
 from dlp_aireview.prompt import PromptParts
-from dlp_models.vlm import ChatRequest, ChatTurn, OpenAICompatibleChat
+from dlp_models.vlm import (
+    ChatRequest,
+    ChatTurn,
+    OpenAICompatibleChat,
+    VlmRequestError,
+    VlmUnavailableError,
+)
 from dlp_schema.aireview import AiGroup
 from dlp_schema.labels import LabelRecord
 
@@ -192,6 +207,17 @@ class OpenAICompatibleJudge:
             transport=transport,
         )
 
+    def ping(self) -> None:
+        """서버가 정책 모델을 띄우고 있는지 `/v1/models`로 확인한다 (차단기 반개방 확인).
+
+        Raises:
+            VlmUnavailableError: 장애.
+            VlmRequestError: 4xx, 또는 서버 모델 목록에 정책 모델(`served_name`)이 없을 때.
+        """
+        models = self.chat.list_models()
+        if self.chat.model not in models:
+            raise VlmRequestError(f"{self.name}: 서버에 정책 모델 {self.chat.model}이 없습니다")
+
     def judge(self, request: JudgeRequest) -> JudgeReply:
         """요청을 보내고 응답을 받는다 (외부 서비스 호출). 오류는 `JudgeBackend.judge`와 같다."""
         reply = self.chat.chat(chat_request(request))
@@ -278,3 +304,271 @@ def check_hosts(
         if not addresses or outside:
             problems.append(f"{name}: 사내 대역 밖 주소 {', '.join(outside) or host}")
     return problems
+
+
+# ---------------------------------------------------------------- 여러 엔드포인트
+
+
+class AllEndpointsDownError(VlmUnavailableError):
+    """모든 엔드포인트의 차단기가 `server.abort_after_s`보다 오래 열려 있다 (실행 중단, 종료 3)."""
+
+
+@dataclass(frozen=True)
+class PoolMember:
+    """묶음에 넣을 엔드포인트 하나.
+
+    Attributes:
+        name: 엔드포인트 이름 (기록·진행률에 쓴다, URL·키 아님).
+        backend: 그 엔드포인트의 판정 백엔드.
+        ping: 반개방 때 시험 요청 전에 부르는 가벼운 확인 (예: `OpenAICompatibleJudge.ping`).
+            장애면 `VlmUnavailableError`, 설정 오류면 `VlmRequestError`를 낸다. None이면 시험
+            요청만으로 확인한다.
+    """
+
+    name: str
+    backend: JudgeBackend
+    ping: Callable[[], None] | None = None
+
+
+@dataclass
+class _Endpoint:
+    """엔드포인트 상태 (묶음의 잠금 안에서만 바꾼다)."""
+
+    member: PoolMember
+    in_flight: int = 0
+    failures: int = 0  # 연속 장애 수 (성공하면 0)
+    opened_at: float | None = None  # 차단기를 연 시각 (None이면 닫힘)
+    probing: bool = False  # 반개방 확인 중 (ping 또는 시험 요청)
+
+    @property
+    def state(self) -> str:
+        """ok | open | half-open."""
+        if self.opened_at is None:
+            return "ok"
+        return "half-open" if self.probing else "open"
+
+
+class EndpointPool:
+    """여러 엔드포인트를 묶은 `JudgeBackend` (모듈 docstring). 스레드 여럿이 함께 쓴다.
+
+    요청 하나의 장애 시도는 `len(backoff_s) + 1`번까지다 (차단기가 열려 기다리는 시간은
+    세지 않는다). 그래도 실패하면 마지막 `VlmUnavailableError`를 올린다 (실행기는 그 단위만
+    기록하지 않고 넘어가며, 다음 실행이 다시 묻는다). 모든 엔드포인트가 오래 막히면
+    `AllEndpointsDownError`를 올리고, 그 뒤의 요청도 모두 바로 같은 오류로 끝난다.
+
+    Attributes:
+        info: 백엔드 정보 (첫 엔드포인트의 종류·모델·fingerprint, 엔드포인트 이름 전부).
+    """
+
+    def __init__(
+        self,
+        members: Sequence[PoolMember],
+        server: ServerPolicy,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        """엔드포인트 묶음을 만든다.
+
+        Args:
+            members: 엔드포인트 (이름이 겹치면 안 된다).
+            server: 정책 `server` 절 (동시성, 백오프, 차단기, 중단 시간).
+            clock: 단조 시계 (테스트). sleep: 백오프 대기 함수 (테스트).
+
+        Raises:
+            ValueError: 엔드포인트가 없거나 이름이 겹칠 때.
+        """
+        names = [m.name for m in members]
+        if not members or len(set(names)) != len(names):
+            raise ValueError("엔드포인트가 없거나 이름이 겹칩니다")
+        first = members[0].backend.info
+        self.info = BackendInfo(
+            kind=first.kind, model=first.model, fingerprint=first.fingerprint,
+            endpoints=tuple(names), external=first.external,
+        )  # fmt: skip
+        self.server = server
+        self.clock = clock
+        self.sleep = sleep
+        self._eps = [_Endpoint(m) for m in members]
+        self._cond = threading.Condition()
+        self._all_open_since: float | None = None
+        self._dead: str | None = None
+
+    # ------------------------------------------------------------ 상태
+
+    def states(self) -> dict[str, str]:
+        """엔드포인트 이름 → ok | open | half-open (진행률 줄)."""
+        with self._cond:
+            return {e.member.name: e.state for e in self._eps}
+
+    @property
+    def in_flight(self) -> int:
+        """처리 중인 요청 수 (모든 엔드포인트 합)."""
+        with self._cond:
+            return sum(e.in_flight for e in self._eps)
+
+    # ------------------------------------------------------------ 요청
+
+    def judge(self, request: JudgeRequest) -> JudgeReply:
+        """요청 하나를 엔드포인트에 보낸다 (장애면 백오프 뒤 다시, 클래스 docstring).
+
+        Raises:
+            AllEndpointsDownError: 모든 엔드포인트가 `abort_after_s`보다 오래 막힘.
+            VlmUnavailableError: 이 요청이 재시도 상한까지 장애.
+            VlmRequestError: 설정 오류·서버 모델 불일치 (`VlmContextError` 포함, 엔드포인트 장애로
+                세지 않는다).
+        """
+        backoff = self.server.backoff_s
+        attempts = len(backoff) + 1
+        for attempt in range(attempts):
+            ep = self._acquire(request.affinity)
+            try:
+                reply = ep.member.backend.judge(request)
+            except VlmRequestError:
+                self._release(ep, ok=True)  # 서버는 응답했다 (설정 오류·문맥 초과)
+                raise
+            except VlmUnavailableError as exc:
+                self._release(ep, ok=False)
+                if attempt + 1 == attempts:
+                    raise
+                cap = max(backoff, default=0.0)
+                self.sleep(min(max(backoff[attempt], exc.retry_after_s or 0.0), cap))
+                continue
+            except BaseException:
+                self._release(ep, ok=None)
+                raise
+            self._release(ep, ok=True)
+            return reply
+        raise AssertionError("도달하지 않는다")  # pragma: no cover
+
+    def _pick(self, affinity: str) -> _Endpoint | None:
+        """닫힌 엔드포인트 중 보낼 곳 (잠금 안). 같은 창 키는 해시로 정한 곳이 여유가 있으면 그곳,
+        아니면 처리 중 요청이 가장 적은 곳 (상한 미만). 없으면 None."""
+        cap = self.server.concurrency_per_endpoint
+        free = [e for e in self._eps if e.opened_at is None and e.in_flight < cap]
+        if not free:
+            return None
+        home = self._eps[_affinity_slot(affinity, len(self._eps))]
+        if home in free:
+            return home
+        return min(free, key=lambda e: e.in_flight)
+
+    def _acquire(self, affinity: str) -> _Endpoint:
+        """보낼 엔드포인트를 정하고 처리 중 수를 올린다 (여유가 없거나 모두 막히면 기다린다).
+
+        쉼(`breaker_cooldown_s`)이 끝난 열린 엔드포인트가 있으면 먼저 반개방 확인을 하고 이 요청을
+        시험 요청으로 보낸다 (회복한 장비를 다시 돌린다). 그다음 닫힌 엔드포인트(`_pick`).
+
+        Raises:
+            AllEndpointsDownError: 모두 `abort_after_s`보다 오래 막힘.
+            VlmRequestError: 반개방 확인(`ping`)이 설정 오류.
+        """
+        with self._cond:
+            while True:
+                if self._dead is not None:
+                    raise AllEndpointsDownError(self._dead)
+                trial = self._half_open()
+                if trial is not None:
+                    return trial
+                picked = self._pick(affinity)
+                if picked is not None:
+                    picked.in_flight += 1
+                    return picked
+                self._wait_or_abort()
+
+    def _half_open(self) -> _Endpoint | None:
+        """쉼이 끝난 열린 엔드포인트의 반개방 확인 (잠금 안, 없으면 None).
+
+        ping이 있으면 잠금을 풀고 먼저 확인한다 (실패면 다시 쉬고 None). ping이 통과했거나 없으면 이
+        요청을 시험 요청으로 그 엔드포인트에 보낸다. 시험 요청 결과가 차단기를 닫거나 다시 연다
+        (`_release`). ping만 통과하고 채팅이 실패하는 서버(메모리 부족 등)도 닫히지 않는다.
+        """
+        now = self.clock()
+        cool = self.server.breaker_cooldown_s
+        due = [
+            e
+            for e in self._eps
+            if not e.probing and e.opened_at is not None and now - e.opened_at >= cool
+        ]
+        if not due:
+            return None
+        ep = due[0]
+        ep.probing = True
+        if ep.member.ping is not None:
+            self._cond.release()
+            try:
+                ping_ok = _try_ping(ep.member.ping)
+            except BaseException:
+                self._cond.acquire()
+                ep.probing, ep.opened_at = False, self.clock()
+                raise
+            self._cond.acquire()
+            if not ping_ok:
+                ep.probing, ep.opened_at = False, self.clock()
+                self._cond.notify_all()
+                return None
+        ep.in_flight += 1
+        return ep
+
+    def _wait_or_abort(self) -> None:
+        """보낼 곳이 없을 때 (잠금 안): 기다린다. 모두 막힌 지 `abort_after_s`가 지났으면 멈춘다.
+
+        Raises:
+            AllEndpointsDownError: 모두 막힌 지 `abort_after_s`가 지났을 때.
+        """
+        now = self.clock()
+        if any(e.opened_at is None for e in self._eps):
+            self._cond.wait(timeout=0.5)  # 닫힌 곳이 모두 상한까지 바쁘다
+            return
+        since = self._all_open_since if self._all_open_since is not None else now
+        self._all_open_since = since
+        abort = self.server.abort_after_s
+        if now - since > abort:
+            names = ", ".join(e.member.name for e in self._eps)
+            self._dead = f"모든 엔드포인트가 {abort:g}초 넘게 응답하지 않습니다 ({names})"
+            self._cond.notify_all()
+            raise AllEndpointsDownError(self._dead)
+        cool = self.server.breaker_cooldown_s
+        waits = [
+            e.opened_at + cool - now for e in self._eps if e.opened_at is not None and not e.probing
+        ]
+        self._cond.wait(timeout=max(0.01, min([*waits, since + abort - now, 0.5])))
+
+    def _release(self, ep: _Endpoint, *, ok: bool | None) -> None:
+        """요청이 끝났다: 처리 중 수를 내리고 차단기 상태를 바꾼다 (ok None은 상태를 바꾸지 않는다).
+
+        성공이면 연속 장애를 0으로 하고 (시험 요청이었으면) 차단기를 닫는다. 장애면 연속 장애를
+        올리고, 시험 요청이었거나 `breaker_failures`에 닿으면 차단기를 (다시) 연다.
+        """
+        with self._cond:
+            ep.in_flight -= 1
+            trial, ep.probing = ep.probing, False
+            if ok is True:
+                ep.failures, ep.opened_at = 0, None
+                self._all_open_since = None
+            elif ok is False:
+                ep.failures += 1
+                if trial or (ep.opened_at is None and ep.failures >= self.server.breaker_failures):
+                    ep.opened_at = self.clock()
+                if all(e.opened_at is not None for e in self._eps) and self._all_open_since is None:
+                    self._all_open_since = self.clock()
+            elif trial and ep.opened_at is not None:
+                ep.opened_at = self.clock()  # 시험 요청이 장애 아닌 예외로 끝남: 다시 쉰다
+            self._cond.notify_all()
+
+
+def _try_ping(ping: Callable[[], None]) -> bool:
+    """반개방 확인: 장애면 False, 성공이면 True (설정 오류는 올린다)."""
+    try:
+        ping()
+    except VlmRequestError:
+        raise
+    except VlmUnavailableError:
+        return False
+    return True
+
+
+def _affinity_slot(affinity: str, n: int) -> int:
+    """창 키 → 엔드포인트 번호 (프로세스와 무관한 해시)."""
+    digest = hashlib.sha256(affinity.encode()).digest()
+    return int.from_bytes(digest[:8], "big") % n
