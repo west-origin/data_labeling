@@ -2,8 +2,16 @@
 
 DB에서 정답·예측을 모아 지표·하위 집단·게이트 리포트를 만든다.
 
-- 정답: 골든셋 세션의 현재 라벨 중 사람이 만든 것과 사람이 승인·수정한 것.
-  (표본 검증만 된 모델 라벨은 정답으로 보지 않는다.)
+- 정답: 골든셋 버전을 만들 때 고정한 라벨 레코드(`GoldenSet.truth_label_ids`, ADR 0041). 고정할
+  때 고르는 것은 그 세션의 현재 라벨 중 사람이 만든 것과 사람이 승인·수정한 것이다
+  (`golden_truth_ids`, 표본 검증만 된 모델 라벨은 정답으로 보지 않는다). 라벨 레코드는 내용이
+  불변이고 지워지지 않으므로 같은 골든 버전은 나중에 사람이 라벨을 고쳐도 같은 정답을 읽는다.
+  정답을 고치면 새 골든 버전을 만든다. 정답을 고정하지 않은 이전 형식 골든셋(None)만 현재 라벨로
+  정답을 읽으며, `truth_anchor`가 리포트에 고정 여부와 정답 라벨 ID 해시를 남긴다. 고정한 정답이
+  비었거나 지금 정답과 다르면(라벨링 전에 고정, 고정 뒤 수정) `truth_lag`가 차이를 알려 주고
+  `refreeze_hint`가 다시 고정하는 명령을 안내한다 (경고만 하고 고정한 정답으로 평가한다).
+- 정답 근거와 평가 입력은 같은 읽기에서 만든다: `golden_sessions`를 한 번 읽어 `truth_anchor`와
+  `load_golden`·`load_golden_merged`(`sessions=`)에 함께 넘긴다.
 - 예측: 과제별로 지정한 model_version의 레코드 (삭제 레코드 제외). 나중에 검수자가 고쳤어도 모델이
   낸 원래 레코드로 평가한다. 버전이 `*`로 끝나면 그 앞부분으로 시작하는 버전의 레코드 중 새
   모델 버전이 지우지(retractions) 않은 것을 평가한다. 검수자가 지우거나 고친 모델 레코드도
@@ -21,15 +29,17 @@ WP11, ADR 0013·0015·0025. 진입점: `dlp_cli.eval_cmds`(`dlp eval golden`)와
 테이블). 원본 버킷에는 접근하지 않는다. 리포트 파일은 `write_report`가 로컬 경로에 쓴다.
 
 공개 이름: `TASK_KINDS`, `TIMELINE_TASKS`, `is_truth`, `GoldenSession`, `golden_sessions`,
+`golden_truth_ids`, `truth_anchor`, `GOLDEN_TRUTH`, `TruthLag`, `truth_lag`, `refreeze_hint`,
 `load_golden`, `load_golden_merged`, `MissingPredictionsError`, `report_dict`, `markdown`,
 `write_report`.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -47,6 +57,7 @@ from dlp_schema.db.repository import (
 )
 from dlp_schema.episode import current_labels, non_operational_ids
 from dlp_schema.labels import LabelRecord, Source, VerificationState
+from dlp_schema.lineage import GoldenSet
 from dlp_schema.session import LifecycleState, Session, StreamKind
 
 # 과제 → 평가에 쓰는 라벨 종류 (LabelRecord.kind). 손·전신은 같은 종류를 골격으로 나눈다 (하네스가
@@ -69,6 +80,8 @@ TIMELINE_TASKS: frozenset[Task] = frozenset(
 )
 # 모델 라벨이 정답이 되는 검증 상태 (표본 검증 sample_verified는 들지 않는다)
 TRUSTED = {VerificationState.HUMAN_APPROVED, VerificationState.HUMAN_CORRECTED}
+# 평가 리포트에 정답 고정 근거(`truth_anchor`)를 남기는 키
+GOLDEN_TRUTH = "golden_truth"
 
 
 def is_truth(x: LabelRecord) -> bool:
@@ -85,20 +98,40 @@ class GoldenSession:
 
     session: Session
     labels: list[LabelRecord]  # 전체 이력
-    truth: list[LabelRecord]  # 정답 (현재 라벨 중 사람이 만들거나 승인·수정한 것)
+    # 정답: 골든 버전에 고정한 레코드 (이전 형식이면 현재 라벨 중 사람이 만들거나 승인·수정한 것)
+    truth: list[LabelRecord]
     groups: dict[str, str]  # 하위 집단: {"glove": "glove"|"bare", "site": 장소 ID}
+
+
+def _current_truth(labels: list[LabelRecord]) -> list[LabelRecord]:
+    """전체 이력 → 지금의 정답 (현재 운영 라벨 중 `is_truth`)."""
+    return [x for x in current_labels(labels) if is_truth(x)]
+
+
+def golden_truth_ids(conn: sa.Connection, session_ids: Iterable[str]) -> tuple[str, ...]:
+    """세션들의 지금 정답 라벨 ID (정렬). 골든셋 버전을 만들 때 `truth_label_ids`로 고정한다.
+
+    정답 = 현재 운영 라벨(`current_labels`: 철회·오류 삽입·측정 레코드 제외) 중 사람이 만들었거나
+    사람이 승인·수정한 것. 세션마다 라벨 전체 이력을 한 번 읽는다 (읽기 전용).
+    """
+    return tuple(
+        sorted(x.label_id for sid in session_ids for x in _current_truth(get_labels(conn, sid)))
+    )
 
 
 def golden_sessions(conn: sa.Connection, golden_version: str) -> list[GoldenSession]:
     """골든셋 버전의 평가할 세션들 (골든셋에 적힌 순서).
 
-    사용 중지 기록(withdrawals)이 있거나 생애주기가 withdrawn인 세션은 뺀다. 세션마다 라벨 전체
-    이력을 한 번 읽는다 (읽기 전용).
+    정답은 골든 버전에 고정한 라벨 레코드다 (`truth_label_ids`, 전체 이력에서 ID로 고른다. 그 뒤
+    사람이 고치거나 지웠어도 고정한 레코드 그대로). 고정하지 않은 이전 형식(None)이면 현재 라벨로
+    정답을 정한다. 사용 중지 기록(withdrawals)이 있거나 생애주기가 withdrawn인 세션은 뺀다 (고정한
+    정답이어도 동의 철회가 앞선다). 세션마다 라벨 전체 이력을 한 번 읽는다 (읽기 전용).
 
     Raises:
         sqlalchemy.exc.NoResultFound: 골든셋 버전이나 세션이 DB에 없을 때 (저장소 함수가 던진다).
     """
     golden = get_golden_set(conn, golden_version)
+    frozen = None if golden.truth_label_ids is None else set(golden.truth_label_ids)
     withdrawn = withdrawn_session_ids(conn)
     out: list[GoldenSession] = []
     for sid in golden.session_ids:
@@ -108,7 +141,11 @@ def golden_sessions(conn: sa.Connection, golden_version: str) -> list[GoldenSess
         if session.lifecycle_state is LifecycleState.WITHDRAWN:
             continue
         labels = get_labels(conn, sid)
-        truth = [x for x in current_labels(labels) if is_truth(x)]
+        truth = (
+            _current_truth(labels)
+            if frozen is None
+            else [x for x in labels if x.label_id in frozen]
+        )
         # 장갑 스트림(좌·우 어느 쪽이든)이 있으면 장갑 세션 → 접촉 허용 오차가 다르다
         glove = any(
             s.kind in (StreamKind.GLOVE_LEFT, StreamKind.GLOVE_RIGHT) for s in session.streams
@@ -116,6 +153,83 @@ def golden_sessions(conn: sa.Connection, golden_version: str) -> list[GoldenSess
         groups = {"glove": "glove" if glove else "bare", "site": session.site_id}
         out.append(GoldenSession(session, labels, truth, groups))
     return out
+
+
+def truth_anchor(golden: GoldenSet, sessions: Sequence[GoldenSession]) -> dict[str, Any]:
+    """평가 리포트에 남길 정답 고정 근거 (`GOLDEN_TRUTH` 키의 값).
+
+    Args:
+        golden: 평가한 골든셋 버전.
+        sessions: 그 버전에서 실제로 평가한 세션 (`golden_sessions` 결과, 사용 중지 세션 제외).
+
+    Returns:
+        `golden_version`, `truth_frozen`(정답 ID를 고정한 버전인가), `sessions`(평가한 세션 ID),
+        `truth_labels`(쓴 정답 수), `truth_label_ids_sha256`(쓴 정답 라벨 ID를 정렬해 줄바꿈으로
+        이은 sha256). 같은 골든 버전·같은 세션이면 해시가 같다. 사용 중지로 세션이 빠지면 달라진다.
+    """
+    ids = sorted(x.label_id for g in sessions for x in g.truth)
+    return {
+        "golden_version": golden.version,
+        "truth_frozen": golden.truth_label_ids is not None,
+        "sessions": [g.session.session_id for g in sessions],
+        "truth_labels": len(ids),
+        "truth_label_ids_sha256": hashlib.sha256("\n".join(ids).encode()).hexdigest(),
+    }
+
+
+def refreeze_hint(golden_version: str) -> str:
+    """정답을 지금 라벨로 다시 고정하는 명령 안내 (CLI 경고·학습 루프 사유에 붙인다, ADR 0041)."""
+    return (
+        f"`dlp dataset golden --from {golden_version} --create <새 버전>`으로 정답을 다시 "
+        "고정하고 그 버전으로 평가하거나 데이터셋 버전을 만드세요"
+    )
+
+
+@dataclass(frozen=True)
+class TruthLag:
+    """고정한 정답과 지금 정답의 차이 (평가하는 세션 기준). `truth_lag`가 만든다."""
+
+    golden_version: str
+    frozen: int  # 고정한 정답 수
+    added: int  # 지금 정답에만 있는 라벨 수 (고정 뒤 새로 만들거나 승인·수정한 것)
+    dropped: int  # 고정한 정답 중 지금 정답이 아닌 수 (고정 뒤 고쳐지거나 지워진 것)
+
+    def message(self) -> str:
+        """사람이 읽는 경고 문장 (다시 고정하는 명령 안내 포함)."""
+        v = self.golden_version
+        if self.frozen == 0:
+            head = (
+                f"골든셋 {v}에 고정한 정답이 없습니다 (라벨링·검수 전에 고정한 버전, "
+                f"지금 정답 {self.added}개)."
+            )
+        else:
+            head = (
+                f"골든셋 {v}의 고정한 정답 {self.frozen}개가 지금 정답과 다릅니다 (고정 뒤 새 정답 "
+                f"{self.added}개, 고쳐지거나 지워진 정답 {self.dropped}개). 이 버전은 고정한 "
+                "정답으로 평가합니다."
+            )
+        return f"{head} {refreeze_hint(v)}"
+
+
+def truth_lag(golden: GoldenSet, sessions: Sequence[GoldenSession]) -> TruthLag | None:
+    """고정한 정답이 비었거나 지금 정답과 다르면 그 차이, 아니면 None.
+
+    라벨링 전에 세션만 정하며 고정한 버전(빈 정답)이나, 고정한 뒤 사람이 라벨을 더 만들거나 고친
+    버전을 알아채려고 쓴다. 평가는 그대로 고정한 정답으로 한다 (경고용, ADR 0041).
+
+    Args:
+        golden: 골든셋 버전. 정답을 고정하지 않은 이전 형식(None)이면 None을 돌려준다 (현재 라벨로
+            평가하므로 차이가 없다. 이전 형식 경고는 호출자가 따로 낸다).
+        sessions: 그 버전에서 평가하는 세션 (`golden_sessions` 결과, 사용 중지 세션 제외). 지금
+            정답은 각 세션의 전체 이력(`labels`)에서 다시 고르므로 DB를 더 읽지 않는다.
+    """
+    if golden.truth_label_ids is None:
+        return None
+    frozen = {x.label_id for g in sessions for x in g.truth}
+    current = {x.label_id for g in sessions for x in _current_truth(g.labels)}
+    if frozen and frozen == current:
+        return None
+    return TruthLag(golden.version, len(frozen), len(current - frozen), len(frozen - current))
 
 
 def _predictions(
@@ -162,7 +276,11 @@ def _predictions(
 
 
 def load_golden(
-    conn: sa.Connection, golden_version: str, models: dict[Task, str]
+    conn: sa.Connection,
+    golden_version: str,
+    models: dict[Task, str],
+    *,
+    sessions: Sequence[GoldenSession] | None = None,
 ) -> dict[Task, list[SessionData]]:
     """골든셋 세션마다 과제별 정답·예측을 모은다 (과제마다 모델 버전 하나).
 
@@ -170,13 +288,18 @@ def load_golden(
         conn: DB 연결 (읽기만 한다).
         golden_version: 골든셋 버전.
         models: 과제 → 모델 버전 (끝이 `*`이면 앞부분 고르기).
+        sessions: 이미 읽은 `golden_sessions(conn, golden_version)` 결과. 주면 DB를 다시 읽지 않고
+            이것으로 정답·예측을 만든다 (리포트의 정답 근거 `truth_anchor`와 같은 읽기를 쓰려면
+            넘긴다). None이면 여기서 읽는다.
 
     Returns:
         과제 → 세션별 `SessionData` (평가할 세션 모두, 예측이 없어도 넣는다). 정답은 과제의 라벨
         종류로만 거르고, 골격·접촉 여부는 하네스가 거른다.
     """
+    if sessions is None:
+        sessions = golden_sessions(conn, golden_version)
     out: dict[Task, list[SessionData]] = {task: [] for task in models}
-    for g in golden_sessions(conn, golden_version):
+    for g in sessions:
         sid, labels, truth, groups = g.session.session_id, g.labels, g.truth, g.groups
         # 오류 삽입 사본·측정 레코드와 그 후손은 모델 버전을 달고 있어도 예측이 아니다
         excluded = non_operational_ids(labels)
@@ -206,27 +329,31 @@ def load_golden_merged(
     models: dict[Task, list[str]],
     *,
     require_predictions: bool = False,
+    sessions: Sequence[GoldenSession] | None = None,
 ) -> dict[Task, list[SessionData]]:
     """과제마다 여러 모델 버전의 예측을 세션별로 합친다 (대신할 기본 어댑터 여럿과 비교할 때).
 
     require_predictions: 골든셋에 예측이 하나도 없는 버전이 있으면 MissingPredictionsError.
     기존(비교) 모델에 쓴다. 잘못 적은 버전은 예측이 비어 기존 지표가 0에 가까워지고 어떤 후보든
     통과하기 때문이다.
+    sessions: 이미 읽은 `golden_sessions` 결과 (`load_golden`과 같다). None이면 처음에 한 번 읽는다.
 
-    버전마다 `load_golden`을 따로 불러 골든셋을 다시 읽는다 (버전 수만큼 DB 조회). 정답·하위 집단은
-    처음 읽은 버전의 것을 쓴다 (모두 같다). 같은 레코드가 두 버전 패턴에 모두 걸리면 두 번 들어간다.
+    골든셋은 한 번만 읽고 모든 과제·버전이 같은 읽기(같은 세션·정답)를 쓴다. 같은 레코드가 두 버전
+    패턴에 모두 걸리면 두 번 들어간다.
     """
+    if sessions is None:
+        sessions = golden_sessions(conn, golden_version)
     out: dict[Task, list[SessionData]] = {}
     for task, versions in models.items():
         merged: dict[str, SessionData] = {}
         for v in versions:
-            sessions = load_golden(conn, golden_version, {task: v})[task]
-            if require_predictions and not any(s.pred for s in sessions):
+            loaded = load_golden(conn, golden_version, {task: v}, sessions=sessions)[task]
+            if require_predictions and not any(s.pred for s in loaded):
                 raise MissingPredictionsError(
                     f"{task}: 모델 버전 {v}의 예측이 골든셋 {golden_version}에 없습니다 "
                     "(버전을 확인하세요. 버전 앞부분으로 고르려면 끝에 *)"
                 )
-            for s in sessions:
+            for s in loaded:
                 if s.session_id in merged:
                     merged[s.session_id].pred.extend(s.pred)
                 else:
@@ -259,7 +386,8 @@ def report_dict(
     extra는 리포트에 함께 남길 값이다 (예: 재학습 루프가 비교한 배포 모델 버전). 키:
     golden_version, model_versions, overall, subgroups, lower_is_better, (판정이 있으면) gate,
     그리고 extra의 키 (같은 키면 extra가 덮어쓴다). 재학습 루프는 extra에 `deployed_baseline`을
-    넣고, 승인 배포(`dlp_train.loop.deploy`)가 다시 읽는다. NaN은 null이 된다.
+    넣는다. 배포(`dlp_train.loop.deploy`)는 `model_versions`(후보 ID), `gate`(통과 여부),
+    `deployed_baseline`을 다시 읽어 검사한다. NaN은 null이 된다.
     """
     data: dict[str, Any] = {
         "golden_version": report.golden_version,

@@ -12,6 +12,8 @@
 
 주의
     - 골든셋 세션은 학습에 절대 쓰지 않는다. 후보 모델의 골든셋 예측은 DB에 쓰지 않는다.
+    - 골든셋 버전은 만들 때 정답 라벨 ID를 고정한다. 같은 버전의 정답은 바뀌지 않고, 정답을
+      고치면 새 버전을 만든다 (ADR 0041).
     - 모델 배포는 게이트를 통과한 모델만 한다 (`ModelStatus` 전이는 `dlp_train`이 관리).
 """
 
@@ -27,18 +29,36 @@ from dlp_schema.session import Domain
 
 
 class GoldenSet(Contract):
-    """도메인별 골든셋 버전. 학습에 절대 쓰지 않는 평가 기준 세션 묶음."""
+    """도메인별 골든셋 버전. 학습에 절대 쓰지 않는 평가 기준 세션과 고정한 정답 라벨."""
 
     # version: 골든셋 버전 ID (최대 128자, dataset_versions.golden_set_version이 참조).
     # domain: 도메인 (골든셋은 도메인마다 따로 둔다).
     # session_ids: 골든셋에 든 세션 (1개 이상).
     # created_at: 만든 시각.
     # note: 사람이 남기는 설명 (선택).
+    # truth_label_ids: 이 버전의 정답으로 고정한 라벨 레코드 ID (만들 때 세션들의 현재 정답,
+    #   `dlp_eval.runner.golden_truth_ids`). 라벨 레코드는 내용이 불변이고 지워지지 않으므로 ID로
+    #   같은 정답을 다시 읽는다. 정답을 고치면 새 골든 버전을 만든다 (`dlp dataset golden --from`).
+    #   None이면 정답을 고정하지 않은 이전 형식이다: 평가는 현재 라벨로 정답을 읽고 리포트에
+    #   고정되지 않았다고 남기며, 재학습 루프는 쓰지 않는다 (ADR 0041). 빈 튜플은 "정답 없음"으로
+    #   고정한 것이다 (라벨링 전에 세션만 정한 버전).
     version: Identifier
     domain: Domain
     session_ids: tuple[Identifier, ...] = Field(min_length=1)
     created_at: AwareDatetime
     note: str = ""
+    truth_label_ids: tuple[Identifier, ...] | None = Field(
+        default=None,
+        description="만들 때 고정한 정답 라벨 레코드 ID. None이면 정답을 고정하지 않은 이전 형식",
+    )
+
+    @model_validator(mode="after")
+    def _unique_truth(self) -> GoldenSet:
+        """고정한 정답 라벨 ID는 중복될 수 없다."""
+        ids = self.truth_label_ids or ()
+        if len(set(ids)) != len(ids):
+            raise ValueError("truth_label_ids에 중복 ID가 있습니다")
+        return self
 
 
 # 학습 실행 하나 (데이터셋 버전 하나에서 모델 하나를 학습).

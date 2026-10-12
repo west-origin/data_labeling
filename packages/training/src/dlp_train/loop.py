@@ -9,6 +9,11 @@
    학습 실행(training_runs)과 모델 버전(model_versions, candidate)을 DB에 쓴다.
 4. 골든셋 평가: 후보와 기존 모델(배포 중인 재학습 모델, 없으면 baseline_versions의 DB 예측)을
    골든셋 세션에 메모리에서 돌려 같은 코드로 평가한다. 골든셋 세션에는 아무것도 쓰지 않는다.
+   정답은 골든 버전에 고정한 라벨이다 (정답을 고정하지 않은 이전 형식 골든셋은 거부한다, ADR
+   0041). 리포트에 정답 고정 근거(`golden_truth`: 정답 라벨 ID 해시)를 남긴다. 고정한 정답이
+   비었거나 지금 정답과 다르면 `LoopResult.warnings`로 알리고(판정은 고정한 정답으로), 과제 정답이
+   없어 건너뛸 때는 `--from`으로 다시 고정하라고 안내한다. 후보·기존 평가는 골든셋을 한 번 읽은
+   같은 결과를 쓴다.
 5. 게이트(config/policies/evaluation.yaml) 통과 → 배포(정책 deploy: auto) 또는 승인 대기(approve).
    실패 → rejected. 배포하면 이전 배포 모델은 retired가 된다.
 
@@ -47,11 +52,15 @@ from dlp_eval.gate import GateDecision, TaskDecision, decide
 from dlp_eval.harness import EvalReport, SessionData, evaluate
 from dlp_eval.policy import EvaluationPolicy, Task
 from dlp_eval.runner import (
+    GOLDEN_TRUTH,
     TIMELINE_TASKS,
     GoldenSession,
     MissingPredictionsError,
     golden_sessions,
     load_golden_merged,
+    refreeze_hint,
+    truth_anchor,
+    truth_lag,
     write_report,
 )
 from dlp_media.storage import ObjectStore, sha256_file
@@ -68,7 +77,7 @@ from dlp_schema.db.repository import (
     withdrawn_session_ids,
 )
 from dlp_schema.labels import LabelRecord
-from dlp_schema.lineage import ModelStatus, ModelVersion, TrainingRun
+from dlp_schema.lineage import GoldenSet, ModelStatus, ModelVersion, TrainingRun
 from dlp_schema.predictor import Clip, Predictor
 from dlp_schema.session import LifecycleState, Session, Stream, StreamKind
 from dlp_train.extract import load_training_data, matches
@@ -122,6 +131,8 @@ class LoopResult:
     # 배포했으면 MLflow 레지스트리에 올릴 것 (이름, 실행, 출처, 별칭). DB 커밋 뒤에 올린다
     registration: tuple[str, str, str, str] | None = None
     mlflow_run_id: str | None = None
+    # 사람이 볼 경고 (예: 골든 버전에 고정한 정답이 지금 정답과 다름, ADR 0041). 판정은 그대로다
+    warnings: list[str] = field(default_factory=list[str])
 
 
 def raw_clips(raw: ObjectStore) -> ClipSource:
@@ -251,7 +262,8 @@ def run_training_job(  # noqa: C901
         `LoopResult`. skipped면 DB·MLflow에 아무것도 쓰지 않는다.
 
     Raises:
-        TrainingError: 정책·학습기·로더가 없음, 골든셋 없는 데이터셋 버전, 골든셋 세션 누출,
+        TrainingError: 정책·학습기·로더가 없음, 골든셋 없는 데이터셋 버전, 정답을 고정하지 않은
+            이전 형식 골든셋(ADR 0041), 골든셋 세션 누출,
             replaces 과제인데 비교 버전 없음, 비교 버전의 골든 예측 없음, 배포 모델 로더 없음,
             산출물 해시 불일치.
     """
@@ -272,7 +284,8 @@ def run_training_job(  # noqa: C901
         raise TrainingError(
             f"{version.version_id}: 골든셋이 없는 데이터셋 버전은 평가할 수 없습니다"
         )
-    golden_ids = set(get_golden_set(conn, version.golden_set_version).session_ids)
+    golden_set = _frozen_golden_set(conn, version.golden_set_version)
+    golden_ids = set(golden_set.session_ids)
     data = load_training_data(
         snapshots, version, job.task, policy, excluded=withdrawn_sessions(conn, version, policy)
     )
@@ -296,9 +309,17 @@ def run_training_job(  # noqa: C901
             )
             return result
     golden = golden_sessions(conn, version.golden_set_version)
+    # 정답 고정 근거 (골든 버전에 고정한 정답 라벨 ID 해시). 리포트·MLflow에 남긴다
+    anchor = truth_anchor(golden_set, golden)
+    # 고정한 정답이 비었거나 지금 정답과 다르면 알린다 (판정은 고정한 정답으로 한다)
+    lag = truth_lag(golden_set, golden)
+    if lag is not None:
+        result.warnings.append(lag.message())
     if not any(matches(job.task, x) for g in golden for x in g.truth):
+        hint = refreeze_hint(version.golden_set_version)
         result.reason = (
-            f"골든셋 {version.golden_set_version}에 {job.task} 정답이 없어 평가할 수 없습니다"
+            f"골든셋 {version.golden_set_version}에 고정한 {job.task} 정답이 없어 평가할 수 "
+            f"없습니다. 라벨링·검수 전에 고정한 버전이면 {hint}"
         )
         return result
     has_deployed = bool(list_model_versions(conn, job.task, ModelStatus.DEPLOYED))
@@ -310,7 +331,7 @@ def run_training_job(  # noqa: C901
     # 배포 모델이 없으면 기본 어댑터의 DB 예측과 비교한다. 잘못 적은 버전은 예측이 비어 기존 지표가
     # 0에 가까워지고 어떤 후보든 통과하므로, 골든셋에 예측이 없는 버전이 하나라도 있으면 멈춘다.
     baseline_golden = (
-        _merged_golden(conn, version.golden_set_version, job)
+        _merged_golden(conn, version.golden_set_version, job, golden)
         if job.baseline_versions and not has_deployed
         else None
     )
@@ -433,12 +454,23 @@ def run_training_job(  # noqa: C901
 
             # 리포트를 산출물 버킷과 MLflow에 남긴다 (승인 배포가 deployed_baseline을 다시 읽는다)
             report = work / "report" / "golden.json"
-            write_report(report, candidate, decision, {DEPLOYED_BASELINE: compared_with})
+            write_report(
+                report,
+                candidate,
+                decision,
+                {DEPLOYED_BASELINE: compared_with, GOLDEN_TRUTH: anchor},
+            )
             report_key = f"{policy.artifact_prefix}/{job.task}/{model_version}/golden.json"
             artifacts.put_file(report_key, report, sha256_file(report))
             md = report.with_suffix(".md")
             artifacts.put_file(report_key.removesuffix(".json") + ".md", md, sha256_file(md))
-            tracker.log_params(mlflow_run, {DEPLOYED_BASELINE: compared_with or "none"})
+            tracker.log_params(
+                mlflow_run,
+                {
+                    DEPLOYED_BASELINE: compared_with or "none",
+                    "golden_truth_sha256": anchor["truth_label_ids_sha256"],
+                },
+            )
             tracker.log_artifact(mlflow_run, report, "golden")
             tracker.log_artifact(mlflow_run, md, "golden")
             metrics = candidate.overall[job.task].metrics if job.task in candidate.overall else {}
@@ -467,15 +499,39 @@ def run_training_job(  # noqa: C901
     return result
 
 
-def _merged_golden(conn: sa.Connection, golden_version: str, job: TrainingJob) -> list[SessionData]:
+def _frozen_golden_set(conn: sa.Connection, golden_version: str) -> GoldenSet:
+    """정답을 고정한 골든셋 버전을 읽는다.
+
+    Raises:
+        TrainingError: 정답을 고정하지 않은 이전 형식(`truth_label_ids` None)일 때. 현재 라벨로
+            정답을 읽으면 같은 골든 버전이라도 배포 판정을 재현할 수 없다 (ADR 0041).
+    """
+    golden_set = get_golden_set(conn, golden_version)
+    if golden_set.truth_label_ids is None:
+        raise TrainingError(
+            f"골든셋 {golden_version}은 정답을 고정하지 않은 이전 형식입니다. "
+            f"`dlp dataset golden --from {golden_version} --create <새 버전>`으로 "
+            "정답을 고정한 골든 버전을 만들고 그 버전으로 데이터셋 버전을 다시 만드세요"
+        )
+    return golden_set
+
+
+def _merged_golden(
+    conn: sa.Connection, golden_version: str, job: TrainingJob, golden: list[GoldenSession]
+) -> list[SessionData]:
     """여러 기본 어댑터 버전의 예측을 세션별로 합친다 (대신할 어댑터 모두와 비교).
 
-    골든셋에 예측이 하나도 없는 버전이 있으면 TrainingError (버전을 잘못 적었거나 골든셋에
-    프리라벨을 돌리지 않았다).
+    `golden`은 후보 평가에 쓴 `golden_sessions` 결과다. 기존 예측도 같은 읽기(같은 세션·고정
+    정답)에서 만든다. 골든셋에 예측이 하나도 없는 버전이 있으면 TrainingError (버전을 잘못 적었거나
+    골든셋에 프리라벨을 돌리지 않았다).
     """
     try:
         merged = load_golden_merged(
-            conn, golden_version, {job.task: list(job.baseline_versions)}, require_predictions=True
+            conn,
+            golden_version,
+            {job.task: list(job.baseline_versions)},
+            require_predictions=True,
+            sessions=golden,
         )
     except MissingPredictionsError as exc:
         raise TrainingError(f"{exc} (--baseline-version)") from exc
@@ -510,23 +566,28 @@ def deploy(
 ) -> ModelVersion:
     """게이트를 통과한 모델(candidate 판정 직후 또는 passed)을 배포한다. 과제마다 배포는 하나다.
 
-    평가 리포트(report_uri, artifacts 저장소)에 적힌 비교 대상 배포 모델이 지금 배포
-    모델과 다르면 배포하지 않는다 (지금 모델과 비교하지 않았으므로 다시 평가해야 한다). 판정 시각은
-    학습 실행 시작 시각이라 비교에 쓰지 않는다. MLflow 등록은 DB 커밋 뒤에 register()로 한다.
+    루프 자동 배포·CLI 승인(`dlp train approve`)·라이브러리 직접 호출 모두 같은 리포트 검사
+    (`_verified_report`)를 거친다: 평가 리포트(report_uri, artifacts 저장소)가 이 후보의 것이고
+    (`model_versions[과제]`가 이 모델 버전) 게이트를 통과했으며(`gate.passed`와 과제 판정이
+    참), 적힌 비교 대상 배포 모델이 지금 배포 모델과 같아야 한다 (지금 모델과 비교하지 않았으면
+    다시 평가해야 한다). 판정 시각은 학습 실행 시작 시각이라 비교에 쓰지 않는다. MLflow 등록은
+    DB 커밋 뒤에 register()로 한다.
 
     Args:
         conn: DB 연결 (호출자 트랜잭션).
         model_version: 배포할 모델 버전.
         now: 상태 변경 시각 (decided_at).
         report_uri: candidate를 바로 배포할 때(루프 안) 남길 리포트 URI. candidate는 이것이 필수다.
-        artifacts: 리포트의 비교 기준을 읽을 산출물 저장소. 자동·승인 배포 모두 필수다.
+            passed 모델은 판정 때 저장한 리포트를 쓴다 (주면 그 URI와 같아야 한다).
+        artifacts: 리포트를 읽을 산출물 저장소. 자동·승인 배포 모두 필수다.
 
     Returns:
         배포 전 상태로 읽은 `ModelVersion` (status 필드는 옛 값이다).
 
     Raises:
         TrainingError: 모델 버전이 없음, 배포할 수 없는 상태, 게이트 판정 전, 리포트 저장소 없음,
-            비교한 배포 모델이 지금 배포 모델과 다름, 리포트에 비교 기준 없음.
+            리포트 없음·저장된 리포트와 다른 URI, 다른 후보의 리포트, 게이트 판정이 없거나 실패한
+            리포트, 리포트에 비교 기준 없음, 비교한 배포 모델이 지금 배포 모델과 다름.
 
     부작용: 같은 과제의 기존 deployed를 모두 retired로, 이 모델을 deployed로 바꾼다
     (model_versions).
@@ -541,10 +602,14 @@ def deploy(
         raise TrainingError(f"{model_version}은 배포할 수 없는 상태입니다: {mv.status.value}")
     if mv.status is ModelStatus.CANDIDATE and report_uri is None:
         raise TrainingError(f"{model_version}은 게이트 판정 전입니다")
+    if mv.status is ModelStatus.PASSED and report_uri not in (None, mv.report_uri):
+        raise TrainingError(
+            f"{model_version}: 판정 때 저장한 평가 리포트({mv.report_uri})와 다른 리포트입니다"
+        )
     current = list_model_versions(conn, mv.task, ModelStatus.DEPLOYED)
     if artifacts is None:
         raise TrainingError(f"{model_version}: 배포에는 평가 리포트 저장소가 필요합니다")
-    compared = _compared_with(
+    compared = _verified_report(
         artifacts, mv.model_copy(update={"report_uri": report_uri or mv.report_uri})
     )
     now_deployed = current[-1].model_version if current else None
@@ -560,12 +625,17 @@ def deploy(
     return mv
 
 
-def _compared_with(artifacts: ObjectStore, mv: ModelVersion) -> str | None:
-    """passed 모델의 평가 리포트에 적힌, 게이트에서 비교한 배포 모델 버전 (없었으면 None).
+def _verified_report(artifacts: ObjectStore, mv: ModelVersion) -> str | None:
+    """배포 전 평가 리포트 검사. 통과하면 리포트에 적힌, 게이트에서 비교한 배포 모델 버전(없었으면
+    None)을 돌려준다.
+
+    배포 경로(루프 자동 배포·CLI 승인·직접 호출)의 리포트 검사는 모두 여기서 한다. 검사 항목:
+    리포트가 있음, 리포트의 후보(`model_versions[과제]`)가 이 모델 버전, 게이트 판정(`gate`)이
+    있고 전체·이 과제 모두 통과, 비교 기준(`deployed_baseline`) 키가 있음.
 
     Raises:
-        TrainingError: 리포트 URI가 없거나 리포트에 `deployed_baseline` 키가 없을 때 (이전 형식
-            리포트).
+        TrainingError: 위 항목 중 하나라도 어긋날 때 (리포트 없음, 다른 후보의 리포트, 게이트 판정이
+            없거나 실패, 이전 형식 리포트).
     """
     if mv.report_uri is None:
         raise TrainingError(f"{mv.model_version}: 평가 리포트가 없습니다")
@@ -573,6 +643,20 @@ def _compared_with(artifacts: ObjectStore, mv: ModelVersion) -> str | None:
         path = Path(tmp) / "golden.json"
         artifacts.get_file(_key(artifacts, mv.report_uri), path)
         data: dict[str, Any] = json.loads(path.read_text("utf-8"))
+    versions: dict[str, Any] = data.get("model_versions") or {}
+    reported = versions.get(mv.task)
+    if reported != mv.model_version:
+        raise TrainingError(
+            f"{mv.model_version}: 평가 리포트({mv.report_uri})는 다른 후보 {reported}의 것입니다"
+        )
+    gate: dict[str, Any] = data.get("gate") or {}
+    gate_tasks: dict[str, Any] = gate.get("tasks") or {}
+    task_gate: dict[str, Any] = gate_tasks.get(mv.task) or {}
+    if gate.get("passed") is not True or task_gate.get("passed") is not True:
+        raise TrainingError(
+            f"{mv.model_version}: 평가 리포트의 게이트를 통과하지 못했습니다 "
+            f"(판정 {gate.get('passed', '없음')}). 게이트를 통과한 모델만 배포합니다"
+        )
     if DEPLOYED_BASELINE not in data:
         raise TrainingError(
             f"{mv.model_version}: 평가 리포트에 비교한 배포 모델이 없습니다. 다시 학습·평가하세요"

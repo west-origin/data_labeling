@@ -1,8 +1,10 @@
 """데이터셋·계보 하위 명령 (WP7, ADR 0007).
 
 등록하는 명령:
-- `dlp dataset golden --domain <도메인> [--create 버전]` — 도메인 골든셋 후보를 제안한다.
-  `--create`를 주면 그 이름으로 골든셋을 확정해 DB `golden_sets`에 쓴다 (사람이 확정).
+- `dlp dataset golden --domain <도메인> [--create 버전] [--from 버전]` — 도메인 골든셋 후보를
+  제안한다. `--create`를 주면 그 이름으로 골든셋을 확정해 DB `golden_sets`에 쓰고, 그 순간의 정답
+  라벨 ID를 고정한다 (사람이 확정, ADR 0041). `--from`은 기존 버전의 세션으로 정답을 다시 고정한
+  새 버전을 만든다 (정답 수정은 새 골든 버전).
 - `dlp dataset build <버전 ID> [--golden] [--domain]` — 데이터셋 버전을 만든다.
   작업자·장소 단위 분할(골든·학습·검증·holdout) → 라벨·세션·매니페스트를 lakeFS에 커밋 →
   DB `dataset_versions`에 기록.
@@ -11,10 +13,14 @@
   매체 회수를 요청하고 커밋 뒤 회수 실행기를 돌린다 (ADR 0039, F-REV-17, 대기가 남으면 종료 코드 4).
 - `dlp lineage <세션>` — 세션 계보: 골든셋 → 데이터셋 버전 → 학습 실행 → 내보내기 (읽기 전용).
 
-순서: `dataset golden`(도메인마다 처음 한 번, 프라이버시 승인 세션에서 제안한 뒤 사람이 처음부터
-라벨링) → 검수 완료(`dlp review verify`) → `dataset build` → `dlp train run` / `dlp eval golden` /
-`dlp export …`. 빌드 후보는 프라이버시 승인 세션 전체이고, `split_assigned`로 옮기는 것은 검수
-완료 세션뿐이다 (ADR 0031).
+순서: `dataset golden --create`(도메인마다 처음 한 번, 프라이버시 승인 세션에서 제안해 세션을
+정한다. 이때 고정되는 정답은 라벨링 전이라 비어 있을 수 있다) → 사람이 처음부터 라벨링 → 검수
+완료(`dlp review verify`) → `dataset golden --from <버전> --create <새 버전>`(정답 고정) →
+`dataset build --golden <새 버전>` → `dlp train run` / `dlp eval golden` / `dlp export …`.
+라벨링 전에 고정한 버전(정답 0개)이나 고정 뒤 정답이 바뀐 버전을 `dataset build --golden`·
+`eval golden`에 주면 경고하고 다시 고정하는 명령을 안내한다.
+빌드 후보는 프라이버시 승인 세션 전체이고, `split_assigned`로 옮기는 것은 검수 완료 세션뿐이다
+(ADR 0031).
 
 정책 출처: `config/policies/dataset.yaml` (`golden_sessions_per_domain`, `eligible_privacy_state`,
 `include_label_history`, `val_ratio`, `lakefs` 절).
@@ -39,16 +45,65 @@ from dlp_datasets.build import build_dataset_version, propose_golden_set
 from dlp_datasets.lineage import session_lineage, withdraw_session
 from dlp_datasets.policy import load_policy
 from dlp_datasets.snapshot import LakeFSSnapshotStore
+from dlp_eval.runner import golden_sessions, golden_truth_ids, refreeze_hint, truth_lag
 from dlp_media.audit import current_actor
 from dlp_schema import repo_root
-from dlp_schema.db.repository import insert_golden_set
+from dlp_schema.db.repository import (
+    get_golden_set,
+    get_session,
+    insert_golden_set,
+    withdrawn_session_ids,
+)
 from dlp_schema.lineage import GoldenSet
-from dlp_schema.session import Domain
+from dlp_schema.session import Domain, LifecycleState
 
 
 def _engine(args: argparse.Namespace) -> sa.Engine:
     """`--url`(없으면 `DLP_DATABASE_URL`/기본값)로 엔진을 만든다. 호출자가 `dispose`한다."""
     return sa.create_engine(database_url(args.url))
+
+
+def _sessions_from(conn: sa.Connection, version: str, domain: str) -> list[str]:
+    """기존 골든셋 버전의 세션 중 사용 중지되지 않은 것 (골든셋에 적힌 순서).
+
+    예외: 골든셋 도메인이 `domain`과 다르거나 세션이 모두 사용 중지되었으면 `SystemExit`(골든셋은
+    세션이 1개 이상이어야 한다). 버전이 없으면 `NoResultFound`.
+    """
+    source = get_golden_set(conn, version)
+    if source.domain.value != domain:
+        raise SystemExit(f"골든셋 {version}의 도메인은 {source.domain.value}입니다 (--domain)")
+    withdrawn = withdrawn_session_ids(conn)
+    sessions = [
+        sid
+        for sid in source.session_ids
+        if sid not in withdrawn
+        and get_session(conn, sid).lifecycle_state is not LifecycleState.WITHDRAWN
+    ]
+    if not sessions:
+        raise SystemExit(
+            f"골든셋 {version}의 세션이 모두 사용 중지되어 새 버전을 만들 수 없습니다 "
+            "(`--from` 없이 새 골든셋을 제안하세요)"
+        )
+    return sessions
+
+
+def _warn_truth_lag(conn: sa.Connection, version: str) -> None:
+    """골든셋 버전의 고정한 정답이 비었거나 지금 정답과 다르면 경고를 출력한다 (읽기 전용).
+
+    라벨링 전에 세션만 정하며 고정한 버전이나 고정 뒤 고친 정답을 그대로 쓰지 않게, 다시 고정하는
+    명령을 함께 안내한다 (`dlp_eval.runner.truth_lag`, ADR 0041). 정답을 고정하지 않은 이전 형식은
+    재학습 루프가 거부하므로 그 안내를 출력한다.
+    """
+    golden = get_golden_set(conn, version)
+    if golden.truth_label_ids is None:
+        print(
+            f"경고: 골든셋 {version}은 정답을 고정하지 않은 이전 형식입니다 (재학습 루프는 이 "
+            f"버전을 쓰지 않습니다). {refreeze_hint(version)}"
+        )
+        return
+    lag = truth_lag(golden, golden_sessions(conn, version))
+    if lag is not None:
+        print(f"경고: {lag.message()}")
 
 
 def cmd_golden(args: argparse.Namespace) -> int:
@@ -58,26 +113,39 @@ def cmd_golden(args: argparse.Namespace) -> int:
         args.domain: `cleaning` / `caregiving` / `nursing` (`Domain` 열거형 값).
         args.count: 목표 세션 수. 없거나 0이면 정책 `golden_sessions_per_domain`.
         args.create: 확정할 골든셋 버전 이름. None이면 제안만 출력한다(DB 쓰기 없음).
+        args.from_version: 주면 제안 대신 그 골든셋 버전의 세션(사용 중지 세션 제외)을 쓴다.
+            정답을 고친 뒤 같은 세션으로 정답을 다시 고정한 새 버전을 만들 때 쓴다
+            (`--create` 필수).
         args.note: 확정 시 메모.
         args.ontology_version: 후보 세션을 고를 온톨로지 버전.
         args.seed: 제안 난수 시드 (같은 DB 상태·시드면 같은 제안).
 
     후보에서 빼는 세션: 프라이버시 미승인(`eligible_privacy_state`가 아님), 사용 중지.
+    확정하면 그 순간 세션들의 정답 라벨 ID(현재 라벨 중 사람이 만들거나 승인·수정한 것)를
+    골든 버전에 고정한다 (`truth_label_ids`, ADR 0041). 같은 버전의 정답은 그 뒤에 라벨을 고쳐도
+    바뀌지 않으므로, 라벨링·검수를 마친 뒤 `--from <버전> --create <새 버전>`으로 다시 고정한다.
     부작용: `--create`면 한 트랜잭션에서 `golden_sets` INSERT (같은 버전이 있으면 DB 오류).
     """
+    if args.from_version and not args.create:
+        raise SystemExit("--from에는 새 골든셋 버전 이름(--create)이 필요합니다")
     policy = load_policy(repo_root())
     engine = _engine(args)
+    truth: tuple[str, ...] = ()
     with engine.begin() as conn:
-        # 프라이버시 승인되지 않았거나 사용 중지된 세션은 제안하지 않는다
-        proposed = propose_golden_set(
-            conn,
-            policy,
-            ontology_version=args.ontology_version,
-            domain=args.domain,
-            target=args.count or policy.golden_sessions_per_domain,
-            seed=args.seed,
-        )
+        if args.from_version:
+            proposed = _sessions_from(conn, args.from_version, args.domain)
+        else:
+            # 프라이버시 승인되지 않았거나 사용 중지된 세션은 제안하지 않는다
+            proposed = propose_golden_set(
+                conn,
+                policy,
+                ontology_version=args.ontology_version,
+                domain=args.domain,
+                target=args.count or policy.golden_sessions_per_domain,
+                seed=args.seed,
+            )
         if args.create:
+            truth = golden_truth_ids(conn, proposed)
             insert_golden_set(
                 conn,
                 GoldenSet(
@@ -86,15 +154,18 @@ def cmd_golden(args: argparse.Namespace) -> int:
                     session_ids=tuple(proposed),
                     created_at=datetime.now(UTC),
                     note=args.note,
+                    truth_label_ids=truth,
                 ),
             )
     engine.dispose()
     print(
         f"{args.domain} 골든셋 {'생성 ' + args.create if args.create else '제안'}: "
-        f"세션 {len(proposed)}개"
+        f"세션 {len(proposed)}개" + (f", 고정한 정답 라벨 {len(truth)}개" if args.create else "")
     )
     for sid in proposed:
         print(f"  {sid}")
+    if args.create and not truth:
+        print(f"안내: 고정한 정답이 없습니다. 라벨링·검수를 마친 뒤 {refreeze_hint(args.create)}")
     return 0
 
 
@@ -110,6 +181,8 @@ def cmd_build(args: argparse.Namespace) -> int:
        lakeFS `datasets/<버전>`에 커밋한다.
     4. `dataset_versions` INSERT. holdout이 아닌 `human_verified` 세션은 `split_assigned`로
        전이한다.
+    5. (커밋 뒤, 읽기 전용) `--golden`의 고정한 정답이 비었거나 지금 정답과 다르거나 고정하지 않은
+       이전 형식이면 경고하고 `--from`으로 다시 고정하라고 안내한다 (빌드는 막지 않는다, ADR 0041).
 
     인자: `version_id`, `--ontology-version`, `--golden`(골든셋 버전), `--domain`, `--parent`(이전
     버전), `--seed`(분할 시드).
@@ -136,6 +209,9 @@ def cmd_build(args: argparse.Namespace) -> int:
             seed=args.seed,
             now=datetime.now(UTC),
         )
+    if args.golden:
+        with engine.connect() as conn:
+            _warn_truth_lag(conn, args.golden)
     engine.dispose()
     r = result.report
     print(f"{result.version.version_id}: {result.version.snapshot_uri}")
@@ -225,7 +301,17 @@ def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
     g = dsub.add_parser("golden", help="도메인 골든셋 제안 (--create로 확정)")
     g.add_argument("--domain", required=True, choices=["cleaning", "caregiving", "nursing"])
     g.add_argument("--count", type=int, help="목표 세션 수 (기본: 정책 값)")
-    g.add_argument("--create", metavar="VERSION", help="제안을 이 버전 이름으로 확정")
+    g.add_argument(
+        "--create",
+        metavar="VERSION",
+        help="제안을 이 버전 이름으로 확정 (그 순간의 정답 라벨 ID를 고정한다)",
+    )
+    g.add_argument(
+        "--from",
+        dest="from_version",
+        metavar="VERSION",
+        help="제안 대신 이 골든셋 버전의 세션(사용 중지 제외)으로 정답을 다시 고정 (--create 필수)",
+    )
     g.add_argument("--note", default="")
     g.add_argument("--ontology-version", default="1.0.0")
     g.add_argument("--seed", type=int, default=0)

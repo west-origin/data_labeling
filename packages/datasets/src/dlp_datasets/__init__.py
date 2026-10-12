@@ -2,7 +2,8 @@
 
 `dlp dataset golden|build|withdraw`와 `dlp lineage <세션>`(`dlp_cli.dataset_cmds`)이
 이 패키지를 쓴다. 학습(`dlp_train`)·내보내기(`dlp_export`)는 데이터셋 버전 스냅샷을 읽는다.
-골든셋 평가는 등록된 골든셋의 세션과 DB 라벨을 읽으며 데이터셋 버전 스냅샷과 구분한다.
+골든셋 평가는 등록된 골든셋의 세션과, 골든 버전에 고정한 정답 라벨 ID의 DB 레코드를 읽으며
+데이터셋 버전 스냅샷과 구분한다 (ADR 0041).
 
 모듈:
 - `policy`: 정책(config/policies/dataset.yaml) 로더.

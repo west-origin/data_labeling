@@ -6,6 +6,7 @@ test_mlflow.py가 따로 확인한다.
 
 from __future__ import annotations
 
+import json
 import os
 import uuid
 from collections.abc import Iterator
@@ -19,24 +20,38 @@ from dlp_datasets.build import build_dataset_version
 from dlp_datasets.lineage import session_lineage, withdraw_session
 from dlp_datasets.policy import load_policy as load_dataset_policy
 from dlp_datasets.snapshot import LocalSnapshotStore
+from dlp_eval.gate import GateDecision, TaskDecision
+from dlp_eval.harness import EvalReport
 from dlp_eval.policy import load_policy as load_eval_policy
-from dlp_media.storage import LocalStore
+from dlp_eval.runner import golden_truth_ids, write_report
+from dlp_media.storage import LocalStore, sha256_file
+from dlp_schema.dataset import DatasetVersion
 from dlp_schema.db.migrate import upgrade
 from dlp_schema.db.repository import (
     get_labels,
+    insert_dataset_version,
     insert_golden_set,
     insert_labels,
+    insert_model_version,
     insert_session,
+    insert_training_run,
     list_model_versions,
     register_ontology,
 )
 from dlp_schema.labels import LabelRecord, Provenance, Source, Verification, VerificationState
-from dlp_schema.lineage import GoldenSet, ModelStatus
+from dlp_schema.lineage import GoldenSet, ModelStatus, ModelVersion, TrainingRun
 from dlp_schema.ontology import load_ontology
 from dlp_schema.session import Domain, PrivacyState, Session, Stream, StreamKind, SyncMethod
 from dlp_schema.testing import FIXED_TIME, make_label, make_session
 from dlp_train.deployed import deployed_predictors
-from dlp_train.loop import LoopResult, TrainingError, TrainingJob, deploy, run_training_job
+from dlp_train.loop import (
+    DEPLOYED_BASELINE,
+    LoopResult,
+    TrainingError,
+    TrainingJob,
+    deploy,
+    run_training_job,
+)
 from dlp_train.policy import TrainingPolicy, load_policy
 from dlp_train.tracking import MemoryTracker
 from dlp_train.trainers import LoadContext
@@ -163,6 +178,7 @@ def populate(conn: sa.Connection) -> None:
             domain=Domain.CLEANING,
             session_ids=("gd0", "gd1"),
             created_at=FIXED_TIME,
+            truth_label_ids=golden_truth_ids(conn, ("gd0", "gd1")),
         ),
     )
 
@@ -221,6 +237,45 @@ def test_training_loop_gate_blocks_or_deploys(engine: sa.Engine, tmp_path: Path)
             now=FIXED_TIME,
         )
         golden_before = {sid: len(get_labels(conn, sid)) for sid in ("gd0", "gd1")}
+        # 정답을 고정하지 않은 이전 형식 골든셋과 그것을 쓰는 데이터셋 버전 (T5)
+        insert_golden_set(
+            conn,
+            GoldenSet(
+                version="golden-legacy",
+                domain=Domain.CLEANING,
+                session_ids=("gd0", "gd1"),
+                created_at=FIXED_TIME,
+            ),
+        )
+        build_dataset_version(
+            conn,
+            snapshots,
+            load_dataset_policy(ROOT),
+            version_id="dv-legacy",
+            ontology_version="1.0.0",
+            golden_set_version="golden-legacy",
+            now=FIXED_TIME,
+        )
+        # 라벨링 전에 세션만 정하며 정답 0개로 고정한 골든셋과 그것을 쓰는 데이터셋 버전
+        insert_golden_set(
+            conn,
+            GoldenSet(
+                version="golden-empty",
+                domain=Domain.CLEANING,
+                session_ids=("gd0", "gd1"),
+                created_at=FIXED_TIME,
+                truth_label_ids=(),
+            ),
+        )
+        build_dataset_version(
+            conn,
+            snapshots,
+            load_dataset_policy(ROOT),
+            version_id="dv-empty",
+            ontology_version="1.0.0",
+            golden_set_version="golden-empty",
+            now=FIXED_TIME,
+        )
 
     # 누적 부족: 기준을 올리면 학습하지 않는다
     strict = policy.tasks["objects"].model_copy(update={"min_examples": 1000})
@@ -233,6 +288,15 @@ def test_training_loop_gate_blocks_or_deploys(engine: sa.Engine, tmp_path: Path)
         )  # fmt: skip
     assert r0.status == "skipped" and "min_examples" in r0.reason
     assert not tracker.runs
+    # 정답을 고정하지 않은 골든셋은 같은 버전이어도 정답이 바뀌므로 배포 판정에 쓰지 않는다
+    with pytest.raises(TrainingError, match="고정하지 않은"):
+        run(TrainingJob("objects", "dv-legacy", baseline_versions=BASE, force=True), 1)
+    assert not tracker.runs
+    # 정답 0개로 고정한 골든셋: 평가하지 않고 건너뛰며, 다시 고정하는 명령을 사유·경고로 안내한다
+    r_empty = run(TrainingJob("objects", "dv-empty", baseline_versions=BASE, force=True), 1)
+    assert r_empty.status == "skipped" and "--from golden-empty --create" in r_empty.reason
+    assert len(r_empty.warnings) == 1 and "고정한 정답이 없습니다" in r_empty.warnings[0]
+    assert not tracker.runs
 
     # 1) 흔들림이 큰 후보: 첫 배포 기준(HOTA) 미달 → 미배포
     # 기본 어댑터(objects·tools)를 대신하는 과제라 비교할 기본 예측 버전 없이는 평가하지 않는다
@@ -244,6 +308,7 @@ def test_training_loop_gate_blocks_or_deploys(engine: sa.Engine, tmp_path: Path)
     assert not tracker.runs
     r1 = run(TrainingJob("objects", "dv1", params={"jitter_px": 200.0}, baseline_versions=BASE), 1)
     assert r1.status == "rejected", r1.reason
+    assert r1.warnings == []  # 고정한 정답 = 지금 정답
     # 학습 세션 8개마다 (승인 cup, 수정 bucket, 추가 mop). 골든 세션은 들어가지 않는다
     assert sum(r1.examples.values()) == 24
     assert {k.split("/")[1] for k in r1.examples} == {"accepted", "corrected", "added"}
@@ -293,6 +358,18 @@ def test_training_loop_gate_blocks_or_deploys(engine: sa.Engine, tmp_path: Path)
     assert {"model/oracle-stub.json", "golden/golden.json", "golden/golden.md"} <= set(
         rec.artifacts
     )
+    # 리포트에 정답 고정 근거: 골든 버전에 고정한 정답 8개(세션 2개 x 박스 3 + 블러 1)의 ID 해시
+    with engine.connect() as conn:
+        [mv2] = [
+            m for m in list_model_versions(conn, "objects") if m.model_version == r2.model_version
+        ]
+    assert mv2.report_uri is not None
+    report_path = tmp_path / "r2-golden.json"
+    artifacts.get_file(mv2.report_uri.removeprefix(artifacts.uri("")), report_path)
+    anchor = json.loads(report_path.read_text("utf-8"))["golden_truth"]
+    assert anchor["truth_frozen"] is True and anchor["golden_version"] == "golden-v1"
+    assert anchor["truth_labels"] == 8 and anchor["sessions"] == ["gd0", "gd1"]
+    assert rec.params["golden_truth_sha256"] == anchor["truth_label_ids_sha256"]
     # 레지스트리 등록은 DB 커밋 뒤에 CLI가 한다 (배포 결과가 알려 준다)
     assert r2.registration is not None and r1.registration is None and r3.registration is None
     tracker.register(*r2.registration)
@@ -426,7 +503,8 @@ def test_timeline_tasks_withdrawal_and_approval_baseline(engine: sa.Engine, tmp_
         insert_golden_set(
             conn,
             GoldenSet(version="golden-v1", domain=Domain.CLEANING, session_ids=("gd0", "gd1"),
-                      created_at=FIXED_TIME),
+                      created_at=FIXED_TIME,
+                      truth_label_ids=golden_truth_ids(conn, ("gd0", "gd1"))),
         )  # fmt: skip
         version = build_dataset_version(
             conn, snapshots, load_dataset_policy(ROOT), version_id="dv1",
@@ -485,3 +563,106 @@ def test_timeline_tasks_withdrawal_and_approval_baseline(engine: sa.Engine, tmp_
     with engine.connect() as conn:
         deployed = list_model_versions(conn, "contact", ModelStatus.DEPLOYED)
         assert [d.model_version for d in deployed] == [c2.model_version]
+
+
+# ---------------------------------------------------------------- 직접 배포 호출의 리포트 검사 (T4)
+
+
+def _register_model(
+    conn: sa.Connection, model_version: str, status: ModelStatus, report: str | None
+) -> None:
+    """objects 과제 모델 버전 하나와 그 학습 실행을 넣는다 (산출물은 쓰지 않는다)."""
+    run_id = f"train-{model_version}"
+    insert_training_run(
+        conn,
+        TrainingRun(
+            run_id=run_id,
+            dataset_version_id="dv1",
+            model_name="objects",
+            model_version=model_version,
+            created_at=FIXED_TIME,
+        ),
+    )
+    insert_model_version(
+        conn,
+        ModelVersion(
+            model_version=model_version,
+            task="objects",
+            run_id=run_id,
+            trainer="oracle-stub",
+            artifact_uri="local://dlp-mlflow/model",
+            sha256="a" * 64,
+            train_examples=1,
+            status=status,
+            created_at=FIXED_TIME,
+            report_uri=report,
+            decided_at=None if status is ModelStatus.CANDIDATE else FIXED_TIME,
+        ),
+    )
+
+
+def test_direct_deploy_requires_passing_report_of_same_candidate(
+    engine: sa.Engine, tmp_path: Path
+) -> None:
+    """라이브러리 `deploy()`를 직접 불러도 CLI approve와 같은 기준으로 리포트를 검사한다 (T4).
+
+    정답: 게이트 실패 리포트, 다른 후보 ID의 리포트, 게이트 판정이 없는 리포트, 리포트가 없는
+    승인 대기 모델, 저장된 리포트 대신 다른 리포트를 준 승인 대기 모델은 모두 거부되고 배포 모델이
+    생기지 않는다. 같은 후보의 통과 리포트만 배포된다.
+    """
+    artifacts = LocalStore(tmp_path / "store", "dlp-mlflow")
+
+    def put_report(name: str, model: str, *, passed: bool | None) -> str:
+        """후보 `model`의 평가 리포트를 저장소에 올린다. passed=None이면 게이트 판정을 뺀다."""
+        report = EvalReport("golden-v1", {"objects": model}, {}, {})
+        decision = (
+            None
+            if passed is None
+            else GateDecision(passed, {"objects": TaskDecision("objects", passed)})
+        )
+        path = tmp_path / name / "golden.json"
+        write_report(path, report, decision, {DEPLOYED_BASELINE: None})
+        artifacts.put_file(f"{name}/golden.json", path, sha256_file(path))
+        return artifacts.uri(f"{name}/golden.json")
+
+    failed = put_report("failed", "cand-a", passed=False)
+    other = put_report("other", "cand-b", passed=True)
+    no_gate = put_report("no-gate", "cand-a", passed=None)
+    good = put_report("good", "cand-a", passed=True)
+    with engine.begin() as conn:
+        register_ontology(conn, load_ontology(ROOT / "config/ontology/v1"))
+        insert_dataset_version(
+            conn,
+            DatasetVersion(
+                version_id="dv1",
+                ontology_version="1.0.0",
+                created_at=FIXED_TIME,
+                snapshot_uri="local-snapshot://unused/dv1",
+                splits={},
+            ),
+        )
+        _register_model(conn, "cand-a", ModelStatus.CANDIDATE, None)
+        _register_model(conn, "passed-no-report", ModelStatus.PASSED, None)
+        _register_model(
+            conn, "passed-b", ModelStatus.PASSED, put_report("b", "passed-b", passed=True)
+        )
+
+    rejected = [
+        ("cand-a", failed, "게이트"),
+        ("cand-a", other, "cand-b"),
+        ("cand-a", no_gate, "게이트"),
+        ("passed-no-report", None, "리포트가 없습니다"),
+        # 승인 대기 모델은 판정 때 저장한 리포트로만 배포한다
+        ("passed-b", other, "판정 때 저장한"),
+    ]
+    for model, report_uri, match in rejected:
+        with engine.begin() as conn, pytest.raises(TrainingError, match=match):
+            deploy(conn, model, now=FIXED_TIME, report_uri=report_uri, artifacts=artifacts)
+    with engine.connect() as conn:
+        assert not list_model_versions(conn, "objects", ModelStatus.DEPLOYED)
+
+    with engine.begin() as conn:
+        deploy(conn, "cand-a", now=FIXED_TIME, report_uri=good, artifacts=artifacts)
+    with engine.connect() as conn:
+        [deployed] = list_model_versions(conn, "objects", ModelStatus.DEPLOYED)
+        assert (deployed.model_version, deployed.report_uri) == ("cand-a", good)
