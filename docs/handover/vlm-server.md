@@ -215,7 +215,7 @@ D    = Σ_s (영상 1시간당 단위_s ÷ T_s) + 행동 VLM 영상 1시간당 �
 
 | 명령 | 하는 일 | 종료 코드 |
 | --- | --- | --- |
-| `dlp aireview run <세션>… \| --pending [--limit N] [--parallel-sessions K]` | 판정 → AI 표 기록 (멱등·재개). `--groups`, `--mode all\|flagged`, `--max-minutes`, `--no-sensor`, `--dry-run`(계획만, 서버 불필요. 손 상태 대상이 있으면 장갑 Parquet은 읽는다), `--debug-dir`(형식이 맞지 않던 응답 원문만 로컬 파일), `--json-progress` | 0 / 1 세션 하나의 예상하지 못한 오류(다음 세션은 계속) / 2 주소 없음 / 3 서버 장애 / 5 설정 / 6 세션 전제·블러 변경·사용 중지 / 7 처리 중 / 8 시간 / 130 Ctrl-C |
+| `dlp aireview run <세션>… \| --pending [--limit N] [--parallel-sessions K]` | 판정 → AI 표 기록 (멱등·재개). 세션과 `--pending`, `--pending` 없는 `--limit`은 거부한다. `--groups`(좁힌 실행은 `completed:partial:…`), `--mode all\|flagged`, `--max-minutes`(0보다 큼), `--no-sensor`, `--dry-run`(계획만, 서버 불필요. 손 상태 대상이 있으면 장갑 Parquet은 읽는다), `--debug-dir`(형식이 맞지 않던 응답 원문만 로컬 파일), `--json-progress` | 0 / 1 세션 하나의 예상하지 못한 오류(다음 세션은 계속) / 2 주소 없음 / 3 서버 장애 / 5 설정 / 6 세션 전제·블러 변경·사용 중지 / 7 처리 중 / 8 시간 / 130 Ctrl-C |
 | `dlp aireview status [<세션>… \| --pending \| --all] [--json]` | 판정률(판정된 대상/계획 대상), 단위·fallback, 판정 분포, 마지막 이벤트(마감 없이 끝났으면 "중단 추정"), 최근 처리량 기반 남은 시간, 백로그. 실행 중인지는 잠금을 잡지 않고 본다 | 0 / 1 없는 세션 |
 | `dlp aireview show <unit_id> \| <세션>:<라벨>` | 감사 기록 (프레임 PTS·sha, 렌더 해시, 프롬프트 다이제스트, 판정, 응답 sha, 서버 모델, 엔드포인트 이름, 실행자) | 0 / 1 없음 |
 | `dlp aireview waive <세션> --reason` | required 모드에서 그 세션의 AI 단계를 건너뛴다 (`waived` 이벤트) | 0 / 1 없음 |

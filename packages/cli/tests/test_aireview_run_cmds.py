@@ -712,3 +712,36 @@ def test_narrowed_runs_are_marked_partial() -> None:
     assert narrowed(groups=(AiGroup.TEMPORAL, AiGroup.TEMPORAL_LONG, AiGroup.SPATIAL)) is None
     assert narrowed(groups=(AiGroup.TEMPORAL,)) == "groups=temporal"
     assert narrowed(groups=(AiGroup.SPATIAL,), mode="flagged") == "groups=spatial;mode=flagged"
+
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [
+        (["run", "s1", "--pending"], "세션과 --pending"),
+        (["run", "s1", "--limit", "3"], "--limit은 --pending"),
+        (["status", "s1", "--pending"], "<세션>, --pending"),
+        (["status", "--pending", "--all"], "--pending, --all"),
+    ],
+)
+def test_run_and_status_refuse_silently_ignored_combinations(
+    world: World, extra: list[str], message: str
+) -> None:
+    """조용히 무시되던 인자 조합은 아무것도 하지 않고 알린다 (cron에 잘못 적으면 엉뚱한 세션이
+    돈다).
+
+    정답 근거: 예전에는 세션 + --pending이면 세션을 버리고 pending 전체를 돌았고, --pending 없는
+    --limit은 상한 없이 돌았다. status는 세션 > --pending > --all 순으로 하나만 썼다.
+    """
+    common = (
+        world.args if extra[0] == "run" else ["--url", world.url]
+    )  # status는 저장소를 받지 않는다
+    with pytest.raises(SystemExit, match=message):
+        main(["aireview", *extra, *common])
+
+
+@pytest.mark.parametrize("minutes", ["0", "-5"])
+def test_max_minutes_must_be_positive(world: World, minutes: str) -> None:
+    """--max-minutes 0·음수는 사용법 오류다 (예전에는 '시간 제한 없음'으로 조용히 바뀌었다)."""
+    with pytest.raises(SystemExit) as caught:
+        main(["aireview", "run", "s1", "--max-minutes", minutes, *world.args])
+    assert caught.value.code == 2

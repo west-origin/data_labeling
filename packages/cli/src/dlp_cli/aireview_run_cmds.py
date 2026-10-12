@@ -569,7 +569,9 @@ def _options(args: argparse.Namespace, policy: AiReviewPolicy, backend: JudgeBac
     return RunOptions(
         workers=endpoints * policy.server.concurrency_per_endpoint,
         groups=frozenset(args.groups) if args.groups else None,
-        deadline=time.monotonic() + args.max_minutes * 60 if args.max_minutes else None,
+        deadline=(
+            time.monotonic() + args.max_minutes * 60 if args.max_minutes is not None else None
+        ),
         dry_run=args.dry_run,
         debug_dir=Path(args.debug_dir) if args.debug_dir else None,
         actor=current_actor(),
@@ -579,6 +581,32 @@ def _options(args: argparse.Namespace, policy: AiReviewPolicy, backend: JudgeBac
         cancel=threading.Event(),
         narrowed=_narrowed(args, load_policy(repo_root())),
     )
+
+
+def _check_run_args(args: argparse.Namespace) -> None:
+    """`run` 인자 조합. 일부 인자가 조용히 무시되는 조합이면 `SystemExit`.
+
+    세션과 `--pending`은 서로 다른 방식이다 (함께 주면 예전에는 세션을 버리고 pending 전체를
+    돌았다). `--limit`은 `--pending`과만 쓴다 (예전에는 상한 없이 돌았다).
+    """
+    if args.sessions and args.pending:
+        raise SystemExit("세션과 --pending을 함께 쓸 수 없습니다 (둘 중 하나를 고르세요)")
+    if args.limit is not None and not args.pending:
+        raise SystemExit("--limit은 --pending과 함께 씁니다 (세션을 지정했으면 그 세션만 돈다)")
+
+
+def _check_status_args(args: argparse.Namespace) -> None:
+    """`status` 대상 고르기는 하나만 (세션·`--pending`·`--all`). 둘 이상이면 `SystemExit`.
+
+    예전에는 세션 > --pending > --all 순으로 하나만 쓰고 나머지를 조용히 버렸다.
+    """
+    chosen = [
+        name for name, on in (
+            ("<세션>", bool(args.sessions)), ("--pending", args.pending), ("--all", args.all),
+        ) if on
+    ]  # fmt: skip
+    if len(chosen) > 1:
+        raise SystemExit(f"{', '.join(chosen)}는 함께 쓸 수 없습니다 (하나만 고르세요)")
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -591,6 +619,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     if not args.sessions and not args.pending:
         print("[설정 오류] 세션을 주거나 --pending을 쓰세요")
         return CONFIG
+    _check_run_args(args)
     policy = _run_policy(args)
     backend: JudgeBackend
     if args.dry_run:
@@ -684,6 +713,7 @@ def _json_default(value: object) -> str:
 
 def cmd_status(args: argparse.Namespace) -> int:
     """`dlp aireview status` (모듈 docstring). 부작용: 없음 (DB 읽기, 잠금은 보기만)."""
+    _check_status_args(args)
     policy = load_policy(repo_root())
     privacy = load_privacy_policy(repo_root())
     groups = frozenset(args.groups) if args.groups else None
@@ -839,6 +869,17 @@ def cmd_waive(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------- 등록
 
 
+def _positive_minutes(text: str) -> float:
+    """0보다 큰 분 (argparse 형식 함수). 0·음수는 예전에 '시간 제한 없음'으로 조용히 바뀌었다."""
+    try:
+        value = float(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"숫자가 아닙니다: {text}") from exc
+    if not value > 0:
+        raise argparse.ArgumentTypeError(f"0보다 커야 합니다 (제한이 없으면 빼세요): {text}")
+    return value
+
+
 def _positive(text: str) -> int:
     """1 이상의 정수 (argparse 형식 함수)."""
     try:
@@ -866,7 +907,10 @@ def _run_parser(asub: Any) -> None:
     r.add_argument("--store", default="s3", help="'s3' 또는 'local:<디렉터리>'")
     r.add_argument("--groups", type=parse_groups, help="이 묶음만 (temporal,temporal_long,spatial)")
     r.add_argument("--mode", choices=["all", "flagged"], help="선택 모드 (기본: 정책)")
-    r.add_argument("--max-minutes", type=float, help="이 시간이 지나면 새 요청을 멈춘다 (종료 8)")
+    r.add_argument(
+        "--max-minutes", type=_positive_minutes,
+        help="이 시간(분, 0보다 큼)이 지나면 새 요청을 멈춘다 (종료 8)",
+    )  # fmt: skip
     r.add_argument("--no-sensor", action="store_true", help="장갑 접촉 문장 없이 판정")
     r.add_argument("--dry-run", action="store_true", help="계획만 센다 (서버 불필요)")
     r.add_argument("--debug-dir", help="형식이 맞지 않던 응답 원문을 남길 로컬 디렉터리")

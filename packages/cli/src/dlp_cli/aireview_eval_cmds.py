@@ -332,7 +332,11 @@ def add_eval_command(asub: Any) -> None:
     )  # fmt: skip
     e.add_argument("--seed", type=int, default=0, help="교란 seed (세션마다 +1)")
     e.add_argument("--groups", type=parse_groups, help="이 묶음만 (기본 전부)")
-    e.add_argument("--gate", action="store_true", help="게이트 판정을 출력한다 (실패해도 경고만)")
+    e.add_argument(
+        "--gate", action="store_true",
+        help="게이트 판정을 출력한다 (aireview.yaml gate.block이 false면 실패해도 경고만, true면 "
+        "실패가 종료 1)",
+    )  # fmt: skip
     e.add_argument("--out", help="보고서 JSON (기본 reports/aireview-eval/…)")
     e.add_argument("--store", default="s3", help="라벨링 버킷 ('s3' 또는 'local:<디렉터리>')")
     e.add_argument("--url", help="DB URL (기본: DLP_DATABASE_URL)")
