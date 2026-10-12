@@ -16,6 +16,8 @@
       - `usage`: 글 토큰 ≈ UTF-8 바이트 / 3, 이미지 토큰 = ⌈w/32⌉·⌈h/32⌉ (JPEG 크기를 읽는다).
         접두사 캐시: 앞서 본 요청과 같은 앞부분(system → 글 → 이미지 … 조각 단위)의 토큰을
         `prompt_tokens_details.cached_tokens`로 낸다 (`report_cached=False`면 빼고 낸다).
+      - vLLM 확장 `ignore_eos`(+ `min_tokens`): 참이면 생성 토큰이 정확히 `max_tokens`다 (벤치 생성
+        용량 측정). `extra_params=False`면 이런 확장 키가 든 요청을 400으로 거부한다.
     - `POST /tokenize`: 글 토큰 수 (`tokenize=False`면 404).
 
 기록: `calls`(경로·헤더·본문), 동시에 처리 중인 요청의 최대 수(`max_in_flight`).
@@ -46,6 +48,8 @@ _PATCH_PX = 32
 _TARGETS = re.compile(r"대상 #0~#(\d+)를 판정해")
 # 서버가 받지 않는 구조화 출력 키워드 (full_keywords=False일 때)
 _FULL_KEYWORDS = ("minimum", "maximum", "minLength", "maxLength", "minItems")
+# OpenAI 표준 본문 키 (extra_params=False면 이 밖의 키를 거부한다)
+_STANDARD_KEYS = frozenset({"model", "temperature", "max_tokens", "messages", "response_format"})
 
 
 @dataclass(frozen=True)
@@ -197,6 +201,8 @@ class FakeOpenAIServer:
         tokenize: bool = True,
         version: str | None = "0.0.0-fake",
         completion_chars_per_token: int = 3,
+        extra_params: bool = True,
+        honor_ignore_eos: bool = True,
     ) -> None:
         """설정만 하고 띄우지는 않는다 (`start` 또는 `with`).
 
@@ -213,6 +219,8 @@ class FakeOpenAIServer:
             tokenize: `/tokenize`를 제공하는가.
             version: `/version`의 엔진 버전 (None이면 404).
             completion_chars_per_token: 생성 토큰 근사 (답 글자 수 / 이 값).
+            extra_params: 표준 밖 본문 키(`ignore_eos`·`min_tokens` 등)를 받는가 (False면 400).
+            honor_ignore_eos: `ignore_eos`를 따르는가 (False면 받기만 하고 평소처럼 짧게 답한다).
         """
         self.model = model
         self.served_model = served_model or model
@@ -226,6 +234,8 @@ class FakeOpenAIServer:
         self.tokenize = tokenize
         self.version = version
         self.completion_chars_per_token = completion_chars_per_token
+        self.extra_params = extra_params
+        self.honor_ignore_eos = honor_ignore_eos
         self.calls: list[FakeCall] = []
         self.max_in_flight = 0
         self._answers: dict[str, str] = {}
@@ -412,6 +422,9 @@ class FakeOpenAIServer:
         """요청 검사 (이미지 상한, 스키마 키워드, 문맥 길이). 거부면 (상태, 메시지)."""
         if usage.images > self.max_images:
             return 400, f"At most {self.max_images} image(s) may be provided in one request."
+        extra = sorted(set(body) - _STANDARD_KEYS)
+        if not self.extra_params and extra:
+            return 400, f"Extra inputs are not permitted: {', '.join(extra)}"
         schema = _response_schema(body)
         if not self.full_keywords and schema and _schema_keywords(schema) & set(_FULL_KEYWORDS):
             return 400, "Unsupported JSON schema keyword in response_format"
@@ -481,6 +494,12 @@ class FakeOpenAIServer:
         content = self._content(call, body)
         max_tokens = body.get("max_tokens")
         completion = max(1, math.ceil(len(content) / self.completion_chars_per_token))
+        if self.honor_ignore_eos and body.get("ignore_eos") is True and isinstance(max_tokens, int):
+            # 끝 토큰을 무시하고 상한까지 생성 (vLLM ignore_eos)
+            content = (content + " " * max_tokens * self.completion_chars_per_token)[
+                : max_tokens * self.completion_chars_per_token
+            ]
+            completion = max_tokens
         if isinstance(max_tokens, int) and completion > max_tokens:
             content = content[: max_tokens * self.completion_chars_per_token]
             completion = max_tokens

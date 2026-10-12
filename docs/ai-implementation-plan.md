@@ -184,7 +184,7 @@ data_labeling/
 | 17.1 공통 전송 | `dlp_models.vlm`(요청 본문, 오류 분류, 백오프·재시도), 행동 단계 어댑터화, 4xx → `VlmRequestError`·종료 5 | 행동 기존 테스트 무수정 통과, **리팩토링 전 요청 본문과 바이트 동일**, 버전 문자열 불변, import 경계 표 갱신, A-08의 4xx 부분 반영 | 완료 |
 | 17.2 판정 핵심(순수) | `dlp_media.frames`, `dlp_aireview`의 policy·plan·prompt·schema·validate·suggest·judge·overlay·sensors·perturb·oracle·backend(프로토콜), `dlp_schema.aireview` 계약(DB 없음), `ReviewReason` AI 사유, `make schemas` | 계획(대상 정확히 한 번, 긴 라벨 분리, 같은 프레임 분할, 선택 결정성, 단위 키 국소성, 공간 대상마다 표식 1프레임 이상, 장갑 센서 근거 라벨 제외)·프롬프트(틀 전부를 골든 파일로 바이트 고정: system·고정 블록·응답 스키마·가변 글·재시도 글, 재시도는 끝에만, `kinds`는 요청 본문을 바꾸지 않음)·스키마(portable 키워드)·재검사(어떤 응답 값도 예외 없음, 기록 문장에 모델 값 없음)·**합성 오류 100% 탐지** 테스트, 복잡도 15 이하 | 완료 |
 | 17.3 벤치·점검·추정 + 장비 결정 | `FakeOpenAIServer`, `dlp aireview bench`·`probe`·`estimate`(DB 읽기만, `--include-actions`), 합성 벤치 입력 `dlp_fixtures.aireview`, Spark 실측 절차·기록 양식([VLM 서버](handover/vlm-server.md#spark-실측-절차)) | CI에서 가짜 서버로 보고서 생성. **Spark 1대에서** 후보 모델 2~3개의 프리필·디코드 실측, 파일럿 영상의 행동 후보 밀도·aireview 단위 수, VLM 밖 단계(OWLv2·깊이·렌더) 처리 시간 실측, 아래 공식으로 대수를 정한 기록 | 코드 완료 (가짜 서버 검사), Spark 실측 대기 |
-| 17.4 계약·DB | `tables.py` + Alembic `0019_ai_review.py`(down 0017, 5개 표, 추가 전용·TRUNCATE 금지 트리거), `aireview_repository`, `locks.try_lock_aireview`, `record_review`·`insert_labels`의 `aireview:` 검수자 거부 | 마이그레이션 일치, SQLite 저장소 테스트, 트리거 services 테스트, `make contracts` 깨끗 | 완료 |
+| 17.4 계약·DB | `tables.py` + Alembic `0019_ai_review.py`(down 0017. 0018(fix/m-trn)과 함께 메인에 들어가면 나중 쪽이 down을 0018로 바꾼다, 5개 표, 추가 전용·TRUNCATE 금지 트리거), `aireview_repository`, `locks.try_lock_aireview`, `record_review`·`insert_labels`의 `aireview:` 검수자 거부 | 마이그레이션 일치, SQLite 저장소 테스트, 트리거 services 테스트, `make contracts` 깨끗 | 완료 |
 | 17.5 실행기·CLI | `runner`(생산자·작업자·기록자, 차단기, 재개, 렌더 재확인), `EndpointPool`, `open_blurred`, 장갑 문장(프리라벨 함수), `dlp aireview run`·`status`·`show`·`waive`, `--pending`, 격리 테스트 | 재개·멱등·차단기·종료 코드 2·3·5·6·7·8, `label_records` 불변, 원본 접근이 `aireview.run` 용도로만 | 예정 |
 | 17.6 검수 화면 표시 | LS 실현 가능성 services 테스트, `ai_display`(LS 컨트롤 상시·예측·요약·단축키, CVAT 1단계 이슈), 노출 기록·arm, `review.yaml ai_review`(코드 기본 off, 저장소 advisory), 우선순위·표본 제외·마무리 보호(증가 프로필), `required` 게이트 | 단위 + LS·CVAT services 테스트, 실화면 사람 확인, 판정 없는 작업의 데이터·예측 불변 | 예정 |
 | 17.7 수집·적용 | `ai_collect.apply_decisions`·`settle`·`record_outcome`, `collect._outcome_for` 추출 | 적용 표의 모든 행, 세션 검증 실패 적용의 되돌림, 실제 도구 종단 services 테스트 | 예정 |
@@ -199,7 +199,8 @@ data_labeling/
 
 ```
 U_s  = estimate가 낸 단계 s의 영상 1시간당 요청 수   (s ∈ {aireview 묶음별, actions(--include-actions)})
-T_s  = bench가 잰 장비 1대의 단계 s 지속 처리량(req/s) = min(프리필 한계, 생성 tok/s ÷ 요청당 출력 토큰)
+T_s  = bench 무릎 처리량(req/s) × t(벤치) ÷ t(작업량),  t = 새 프롬프트 토큰 ÷ 프리필 용량 + 출력 토큰 ÷ 생성 용량
+       (프리필·생성 용량은 bench가 무릎 동시성에서 따로 잰다. 혼합 실행의 관측 tok/s를 한계로 쓰지 않는다)
 D    = Σ_s U_s / T_s                                 (영상 1시간당 장비 초)
 대수  = ceil( H × (1+ρ) × D / (86,400 × u) )          H=하루 영상 시간(164), ρ=재실행 여유(0.2), u=가동률(0.7)
 ```

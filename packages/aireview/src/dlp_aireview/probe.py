@@ -18,13 +18,16 @@
 7. `full_profile`: 숫자 범위·문자열 길이·최소 개수 키워드가 든 스키마를 받는가(400 여부)와 지연.
    정책이 full인데 받지 않으면 실패, portable이면 정보다.
 8. `cached_tokens`: 4번 요청을 다시 보내 `usage.prompt_tokens_details.cached_tokens`가 나오는가
-   (없으면 경고: 벤치가 캐시 적중률을 잴 수 없다. 0이면 접두사 캐시가 꺼졌을 수 있다).
+   (없으면 경고: 벤치가 캐시 적중률을 잴 수 없다. vLLM은 `--enable-prompt-tokens-details`를 켜야
+   준다. 0이면 접두사 캐시가 꺼졌을 수 있다).
 9. `context`: `/v1/models`의 `max_model_len`이 요청 크기 하한(고정 접두사 + 최대 이미지 토큰 +
    `max_tokens`, 가변 글 제외)보다 큰가 (경고).
 
 점검 요청의 이미지는 코드가 만든 단색·격자 시험 패턴이다 (영상·사람·글자가 없다). 판정 요청이
-아니라서 기록하지 않는다. 결과의 판정은 `ProbeReport.failed`(종료 5)와 `unavailable`(서버 장애,
-종료 3)이다. 엔드포인트는 이름과 호스트:포트만 남긴다 (URL의 키·경로는 남기지 않는다).
+아니라서 기록하지 않는다. 결과의 판정은 `ProbeReport.failed`(설정 불일치, 종료 5)와
+`unavailable`(서버 장애, 종료 3)이다. 둘 다면 5다. 점검 요청이 4xx로 거부되면 그 점검을 실패로
+남기고 다음 점검으로 간다 (보고서를 남긴다). 엔드포인트는 이름과 호스트:포트만 남긴다 (URL의
+키·경로는 남기지 않는다).
 """
 
 from __future__ import annotations
@@ -124,8 +127,11 @@ class ProbeReport(Contract):
 
     @property
     def failed(self) -> bool:
-        """실패한 점검이 있는가 (설정 불일치, 종료 5)."""
-        return any(c.status == "fail" for c in self.checks)
+        """설정 불일치로 실패한 점검이 있는가 (종료 5). 서버 장애(`unavailable` 점검)는 세지 않는다.
+
+        서버 장애로 멈추기 전에 설정 불일치가 나왔으면 장애가 있어도 True다 (CLI는 5 > 3).
+        """
+        return any(c.status == "fail" and c.name != "unavailable" for c in self.checks)
 
     def status(self, name: str) -> Status | None:
         """이름으로 점검 상태 (하지 않았으면 None)."""
@@ -139,9 +145,20 @@ def images_needed(policy: AiReviewPolicy) -> int:
 
 
 def image_tokens(width: int, height: int, max_side: int, align: int) -> int:
-    """긴 변 상한·정렬 단위로 줄인 프레임 하나의 이미지 토큰 (⌈w/align⌉·⌈h/align⌉)."""
+    """긴 변 상한·정렬 단위로 줄인 프레임 하나의 이미지 토큰 근사 (⌈w/align⌉·⌈h/align⌉).
+
+    벤치(`bench`, 실제로 보낸 이미지 크기)와 작업량 추정(`estimate`)이 같은 셈법을 쓴다.
+    """
     w, h = fit_size(width, height, max_side, align)
     return math.ceil(w / align) * math.ceil(h / align)
+
+
+def approx_text_tokens(text: str, policy: AiReviewPolicy) -> int:
+    """글 토큰 근사 (UTF-8 바이트 / `estimate.text_bytes_per_token`, 올림).
+
+    벤치와 작업량 추정이 같은 셈법을 쓴다 (서버 토크나이저와의 차이는 둘의 비율에서 지워진다).
+    """
+    return math.ceil(len(text.encode()) / policy.estimate.text_bytes_per_token)
 
 
 def context_floor(policy: AiReviewPolicy, ontology: Ontology) -> int:
@@ -151,7 +168,7 @@ def context_floor(policy: AiReviewPolicy, ontology: Ontology) -> int:
     """
     est, align = policy.estimate, policy.image.align_px
     static = max(
-        len((system_text(policy) + ontology_text(ontology, g, policy)).encode())
+        approx_text_tokens(system_text(policy) + ontology_text(ontology, g, policy), policy)
         for g in (AiGroup.TEMPORAL, AiGroup.SPATIAL)
     )
     w, h = est.frame_px
@@ -161,8 +178,7 @@ def context_floor(policy: AiReviewPolicy, ontology: Ontology) -> int:
     spatial = sp.frames * image_tokens(w, h, sp.max_side_px, align) + crops * image_tokens(
         sp.crops.side_px, sp.crops.side_px, sp.crops.side_px, align
     )
-    text = math.ceil(static / est.text_bytes_per_token)
-    return text + max(temporal, spatial) + policy.backend.max_tokens
+    return static + max(temporal, spatial) + policy.backend.max_tokens
 
 
 def _pattern(k: int, side: int, align: int) -> ChatImage:
@@ -291,9 +307,21 @@ def _enforced(content: str) -> bool:
 
 
 def _schema_checks(p: _Probe) -> None:
-    """6·7번: 구조화 출력 강제와 full 프로필 키워드."""
+    """6·7번: 구조화 출력 강제와 full 프로필 키워드.
+
+    portable 스키마 요청이 4xx로 거부되면 `schema_enforced` 실패로 남기고 full 점검은 하지 않는다
+    (서버가 `response_format` 자체를 받지 않는다).
+    """
     pol = p.policy.backend
-    portable = p.ask((_BREAK,), PROBE_SCHEMA)
+    try:
+        portable = p.ask((_BREAK,), PROBE_SCHEMA)
+    except VlmRequestError as exc:
+        p.add("schema_enforced", "fail", f"구조화 출력 요청 거부: {exc}")
+        p.recs.append(
+            "서버가 response_format json_schema를 받는지 확인 (받지 않으면 "
+            "backend.schema_enforcement: prompt)"
+        )
+        return
     if _enforced(portable.content):
         p.add("schema_enforced", "ok", "response_format json_schema를 강제한다")
     else:
@@ -319,11 +347,18 @@ def _schema_checks(p: _Probe) -> None:
 
 
 def _cache_check(p: _Probe, blocks: tuple[ChatImage | str, ...]) -> None:
-    """8번: 같은 요청을 다시 보내 cached_tokens."""
-    reply = p.ask(blocks, PROBE_SCHEMA)
+    """8번: 같은 요청을 다시 보내 cached_tokens (앞서 받은 요청이 4xx면 실패)."""
+    try:
+        reply = p.ask(blocks, PROBE_SCHEMA)
+    except VlmRequestError as exc:
+        p.add("cached_tokens", "fail", f"4번과 같은 요청을 다시 보냈는데 거부: {exc}")
+        return
     if reply.cached_tokens is None:
         p.add("cached_tokens", "warn", "usage.prompt_tokens_details.cached_tokens 없음")
-        p.recs.append("벤치 캐시 적중률을 잴 수 없다 (서버가 cached_tokens를 주지 않는다)")
+        p.recs.append(
+            "벤치 캐시 적중률을 잴 수 없다 (서버가 cached_tokens를 주지 않는다). "
+            "vLLM이면 --enable-prompt-tokens-details를 켠다"
+        )
     elif reply.cached_tokens == 0:
         p.add("cached_tokens", "warn", "같은 요청을 다시 보내도 캐시 적중 0 (접두사 캐시 꺼짐?)")
         p.recs.append("서버 접두사 캐시를 켠다 (vLLM --enable-prefix-caching)")

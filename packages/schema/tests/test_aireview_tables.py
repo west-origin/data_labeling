@@ -7,13 +7,15 @@
   교훈: match가 아무 오류에나 맞지 않게 표 이름과 트리거 문구를 함께 본다).
 - AI 기록을 써도 `label_records`는 그대로다 (판정은 라벨이 아니다).
 - 같은 단위 ID는 `ON CONFLICT DO NOTHING`으로 건너뛴다 (트리거에 걸리지 않는다).
-- 세션별 실행 잠금(`try_lock_aireview`)은 다른 연결과 경합하고, 커밋해도 유지되며, 풀거나 연결을
-  닫으면 풀린다.
+- 세션별 실행 잠금(`try_lock_aireview`)은 다른 연결과 경합하고, 커밋해도 유지되며, 풀거나 연결이
+  끊기면 풀린다. 끊긴 연결의 잠금은 서버 백엔드 프로세스가 끝날 때 비동기로 풀리므로, 백엔드가
+  사라질 때까지 기다린 뒤 확인한다.
 - 기록이 있으면 0019를 되돌리지 않는다.
 """
 
 from __future__ import annotations
 
+import time
 from datetime import timedelta
 
 import pytest
@@ -143,9 +145,31 @@ def test_same_unit_is_skipped_without_trigger(pg: sa.Engine) -> None:
     assert state.open and state.completed_versions == frozenset()
 
 
+def _wait_backend_gone(engine: sa.Engine, pid: int, timeout_s: float = 10.0) -> None:
+    """서버 백엔드 `pid`가 pg_stat_activity에서 사라질 때까지 기다린다.
+
+    매번 새 연결로 묻는다 (pg_stat_activity는 트랜잭션 안에서 처음 읽은 값을 다시 쓴다).
+
+    Raises:
+        AssertionError: `timeout_s` 안에 사라지지 않을 때.
+    """
+    query = sa.text("SELECT count(*) FROM pg_stat_activity WHERE pid = :pid")
+    deadline = time.monotonic() + timeout_s
+    while True:
+        with engine.connect() as conn:
+            if not conn.execute(query, {"pid": pid}).scalar_one():
+                return
+        assert time.monotonic() < deadline, f"백엔드 {pid}가 {timeout_s}초 안에 끝나지 않았다"
+        time.sleep(0.05)
+
+
 def test_aireview_lock_contends_across_connections(pg: sa.Engine) -> None:
     """한 연결이 쥔 세션 잠금은 다른 연결이 못 얻고, 커밋해도 유지되며, 풀거나 DB 연결이 끊기면
-    풀린다. (풀로 돌려보낸 연결은 DB 세션이 살아 있어 잠금이 남으므로 실행기는 반드시 푼다.)"""
+    풀린다. (풀로 돌려보낸 연결은 DB 세션이 살아 있어 잠금이 남으므로 실행기는 반드시 푼다.)
+
+    끊긴 연결의 잠금은 서버 백엔드 프로세스가 끝날 때 풀린다. 클라이언트 소켓을 닫은 직후에는 아직
+    남아 있을 수 있으므로(비동기) 백엔드가 사라진 뒤 확인한다.
+    """
     first, second = pg.connect(), pg.connect()
     try:
         assert try_lock_aireview(first, "s001")
@@ -155,7 +179,9 @@ def test_aireview_lock_contends_across_connections(pg: sa.Engine) -> None:
         unlock_aireview(first, "s001")
         assert try_lock_aireview(second, "s001")
         assert not try_lock_aireview(first, "s001")
+        pid = int(second.execute(sa.select(sa.func.pg_backend_pid())).scalar_one())
         second.invalidate()  # DB 연결이 끊기면(프로세스 종료 등) 풀린다
+        _wait_backend_gone(pg, pid)
         assert try_lock_aireview(first, "s001")
         unlock_aireview(first, "s001")
     finally:

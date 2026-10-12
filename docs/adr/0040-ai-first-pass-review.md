@@ -8,7 +8,9 @@
   계약 추가: `dlp_schema.aireview`(판정·단위·실행·노출·결과), `ReviewReason`의 `ai_*` 4개,
   `schemas/ai_review_unit|ai_review_run|ai_exposure|ai_outcome.schema.json`,
   `schemas/review_assignment.schema.json`(사유 열거형). DB 표 5개는 Alembic 0019(down 0017, WP17.4),
-  저장소는 `dlp_schema.db.aireview_repository`.
+  저장소는 `dlp_schema.db.aireview_repository`. 0018(골든 정답 고정, fix/m-trn)도 0017을 이으므로,
+  둘 중 나중에 메인에 병합하는 쪽이 0019의 `down_revision`을 0018로 바꾸고 이 줄과 구현 계획의 "down
+  0017"을 고친다 (head가 둘이면 `upgrade`가 실패한다. `test_migrations_have_single_head`가 잡는다).
 
 ## 배경
 
@@ -182,7 +184,7 @@ AI가 모두 ok여도 사람 검수 없이는 `dlp review verify`가 실패한�
 | I4 | 판정·제안은 운영 라벨·학습·내보내기·스냅샷에 섞이지 않는다 | 별도 표, import 정적 검사, 격리 회귀 테스트(WP17.5) |
 | I5 | AI 표는 추가만 한다 | 0019 트리거(추가 전용·TRUNCATE 금지, WP17.4) |
 | I6 | 제안은 사람이 적용할 때만 라벨이 되고, 내용은 DB에서 다시 읽어 검증한다 | `ai_collect.apply_decisions`·`settle`(WP17.7) |
-| I7 | 사내 서버만, 서버 모델 = 정책 모델 | `allow_external: false`, 사내 주소 검사(probe·bench WP17.3, run WP17.5, 밖이면 요청 0건), 응답 `model` 대조(종료 5), `make licenses` |
+| I7 | 사내 서버만, 서버 모델 = 정책 모델 | `allow_external: false`, 사내 주소 검사(probe·bench WP17.3, run WP17.5, 밖이면 요청 0건), 전송은 프록시 환경 변수를 따르지 않고 그 주소로 직접 연결(`OpenAICompatibleChat`, `trust_env=False`), 응답 `model` 대조(종료 5), `make licenses` |
 | I8 | 재실행은 멱등이다 | 입력 전체를 담은 단위 키, 단위 안 문맥 분할, `done_unit_ids`, `ON CONFLICT DO NOTHING` |
 | I9 | AI는 사람 검수를 줄이지 않는다 | 증가 프로필은 렌더와 무관, 생략 경로 없음 |
 | I10 | 블러가 바뀌면 이전 블러본으로 만든 이유는 보이지 않는다 | 단위 키·표시 프로필의 렌더 해시, 실행 중 렌더 재확인, 회수 실행기 |
@@ -204,13 +206,22 @@ AI가 모두 ok여도 사람 검수 없이는 `dlp review verify`가 실패한�
   `cached_tokens`, 문맥 길이)을 실제 요청으로 확인하고 정책 조정안을 낸다. 사내 대역 밖 주소에는 요청을
   하나도 보내지 않는다.
 - `dlp aireview bench`는 합성 장면(사람·글자 없음)을 실제 계획기·프롬프트·재검사로 판정해 장비 1대의
-  무릎 지점(장애 0, p95 < 시간 초과인 최대 처리량)을 잰다. 요청마다 고정 블록 끝에 측정 표식을 넣어
-  고정 접두사만 캐시에 맞게 한다 (운영의 이미지 공유를 빼므로 보수적). 서버 장애는 다시 묻지 않고 오류로
-  센다. 실제 세션 블러본 입력은 `open_blurred`(WP17.5) 뒤에 더한다.
+  무릎 지점(장애 0, p95 < 시간 초과인 최대 처리량)을 잰다. 격자에는 지금 정책 값(묶음별 프레임 수·긴
+  변)이 늘 들어간다. 요청마다 고정 블록 끝에 측정 표식을 넣어 system만 접두사 캐시에 맞게 하고, 계획
+  단위를 돌려 쓰더라도 이미지에 표식별 잡음 조각을 넣어 요청마다 새 이미지를 보낸다 (vLLM의 이미지
+  해시 기반 전처리·인코더 캐시가 비전 인코딩을 건너뛰어 처리량을 부풀리지 않게). 운영보다 요청당
+  계산이 조금 많으므로(온톨로지 블록 캐시, 같은 창 분할 요청의 이미지 공유를 빼므로) 보수적이다. 무릎
+  동시성에서 프리필 용량(생성 1토큰)과 생성 용량(길이 고정 `min_tokens`·`ignore_eos`)을 따로 잰다.
+  서버 장애는 다시 묻지 않고 오류로 센다. 실제 세션 블러본 입력은 `open_blurred`(WP17.5) 뒤에 더한다.
 - `dlp aireview estimate`는 DB의 실제 세션으로 영상 1시간당 작업량을 세고, 벤치 보고서로
-  `대수 = ceil(H × (1+ρ) × D / (86,400 × u))`를 낸다. T_s는 프리필·디코드 한계 중 작은 쪽이다.
-  행동 VLM 처리량은 벤치가 재지 않고 실측 값(`--actions-req-s`)을 받는다. 가정 값은 `aireview.yaml
-  estimate`(digest 제외)에 둔다.
+  `대수 = ceil(H × (1+ρ) × D / (86,400 × u))`를 낸다. T_s = 무릎 단위/s × t(벤치)/t(작업량),
+  t = 새 프롬프트 토큰/프리필 용량 + 출력 토큰/생성 용량이다 (설계 초안의 `min(프리필 한계, 디코드
+  한계)`는 혼합 실행의 관측 tok/s를 용량으로 잘못 써서, 묶이지 않은 자원이 T를 깎았다). 벤치와 추정은
+  같은 근사 셈법(이미지 ⌈w/align⌉·⌈h/align⌉ + 확대 조각, 글 바이트/`text_bytes_per_token`)을 쓰고,
+  보고서의 셈법 값이 다르면 작업량을 보고서 셈법으로 다시 센다. 고정 접두사는 서버가 캐시 적중을
+  보고하지 않거나 0이면 양쪽에서 매번 계산한다고 본다. 용량 측정이 없으면 무릎 처리량을 보정 없이 쓰고
+  경고한다. 행동 VLM 처리량은 벤치가 재지 않고 실측 값(`--actions-req-s`)을 받는다. 가정 값은
+  `aireview.yaml estimate`(digest 제외)에 둔다.
 
 ## 범위 밖 (후속, `docs/handover/issues.yaml` F-AIR)
 

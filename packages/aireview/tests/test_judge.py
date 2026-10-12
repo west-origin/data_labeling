@@ -117,6 +117,9 @@ def test_halved_frames_keep_unit_numbers_everywhere(
     assert judged.prompt_digest != full
     record = judged.record(RUN, FIXED_TIME)
     assert len(record.frames) == len(kept) and record.sub_requests == 1
+    # 실행 통계 (벤치 스키마 적합률·재시도율·문맥 초과 수의 원자료)
+    assert (judged.attempts, judged.context_errors, judged.responses) == (2, 1, 1)
+    assert (judged.retries, judged.invalid_responses) == (0, 0)
 
 
 def test_split_targets_digest_covers_each_request(
@@ -152,6 +155,7 @@ def test_retry_keeps_the_answer_with_fewest_violations(
     worse = json.dumps({"ok": [n + 3], "items": [], "missing": []})
     retried = _judge(ScriptedJudge([first, worse]), unit, policy, ontology)
     assert retried.attempts == 2
+    assert (retried.retries, retried.invalid_responses, retried.context_errors) == (1, 2, 0)
     assert retried.verdicts[0].verdict is AiVerdictValue.OK and retried.verdicts[0].answered
     assert all(not v.answered for v in retried.verdicts[1:])
     assert retried.response_sha256 == hashlib.sha256(first.encode()).hexdigest()
@@ -159,6 +163,9 @@ def test_retry_keeps_the_answer_with_fewest_violations(
     assert retried.prompt_digest == parts.digest  # 첫 요청(재시도 대화 없음)
     better = _judge(ScriptedJudge([first, _answer(n)]), unit, policy, ontology)
     assert all(v.answered for v in better.verdicts)
+    assert (better.retries, better.invalid_responses, better.responses) == (1, 1, 2)
+    clean = _judge(ScriptedJudge([_answer(n)]), unit, policy, ontology)
+    assert (clean.attempts, clean.retries, clean.invalid_responses) == (1, 0, 0)
     assert better.prompt_digest != parts.digest  # 재시도 대화가 든 요청
 
 

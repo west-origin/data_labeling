@@ -20,6 +20,7 @@
       "$ref": "#/$defs/AiArm"
     },
     "arm_key": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
       "title": "Arm Key",
       "type": "string"
     },

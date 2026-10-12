@@ -14,6 +14,10 @@ Create Date: 2026-10-11
 다섯 표 모두 추가만 한다 (I5): PostgreSQL에서 0009의 `dlp_append_only()`(행 단위 UPDATE·DELETE 거부)와
 0010의 `dlp_no_truncate()`(문장 단위 TRUNCATE 거부) 트리거를 건다. `INSERT … ON CONFLICT DO NOTHING`은
 UPDATE 트리거를 부르지 않으므로 같은 단위를 다시 써도 거부되지 않고 무시된다 (I8).
+
+리비전 순서: 0018(골든 정답 고정, fix/m-trn)도 0017을 잇는다. 둘이 메인에 함께 들어가면 나중에
+병합하는 쪽이 이 파일의 `down_revision`을 "0018"로 바꾼다 (head가 둘이면 `upgrade`가 실패한다,
+`test_migrations_have_single_head`).
 """
 
 from __future__ import annotations

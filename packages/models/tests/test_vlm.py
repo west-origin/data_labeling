@@ -9,7 +9,9 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-from collections.abc import Callable, Sequence
+import threading
+from collections.abc import Callable, Iterator, Sequence
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 import httpx
@@ -105,6 +107,18 @@ def test_chat_body_system_turns_max_tokens_and_prompt_enforcement() -> None:
     assert body["messages"][3] == {"role": "assistant", "content": "앞 응답"}
     with pytest.raises(ValueError, match="assistant"):
         ChatTurn("assistant", (ChatImage.of(b"x"),))
+
+
+def test_chat_body_extra_keys_go_last_and_cannot_override() -> None:
+    """서버 확장 키(벤치 생성 용량의 min_tokens·ignore_eos)는 본문 끝에 붙고, 기본 키는 덮어쓰지
+    못한다. 비면 본문이 그대로다 (행동 단계 요청 바이트 불변)."""
+    plain = chat_body("m", _request(max_tokens=8))
+    extra = chat_body("m", _request(max_tokens=8, extra_body={"min_tokens": 8, "ignore_eos": True}))
+    assert list(extra) == [*plain, "min_tokens", "ignore_eos"]
+    assert {k: extra[k] for k in plain} == plain
+    for key in ("model", "messages", "max_tokens", "response_format"):
+        with pytest.raises(ValueError, match="기본 키"):
+            chat_body("m", _request(extra_body={key: 1}))
 
 
 def test_chat_image_hash_and_jpeg_is_deterministic() -> None:
@@ -236,6 +250,85 @@ def test_list_models_and_tokenize() -> None:
     assert _client(lambda req: httpx.Response(404)).tokenize("x") is None
     with pytest.raises(VlmUnavailableError):
         _client(lambda req: httpx.Response(503)).list_models()
+
+
+class _Recorder(BaseHTTPRequestHandler):
+    """요청 줄을 기록하고 /v1/models 모양으로 답하는 127.0.0.1 HTTP 처리기 (서버·프록시 흉내)."""
+
+    seen: list[str]
+
+    def do_GET(self) -> None:  # http.server 규약 이름
+        self.seen.append(self.requestline)
+        payload = json.dumps({"data": [{"id": "via-" + self.server_name}]}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    @property
+    def server_name(self) -> str:
+        """처리기 이름 (서버·프록시 구분)."""
+        return type(self).__name__
+
+    def log_message(self, format: str, *args: Any) -> None:
+        """로그를 남기지 않는다."""
+
+
+def _listen(name: str) -> tuple[ThreadingHTTPServer, list[str]]:
+    """요청 줄을 기록하는 127.0.0.1 서버를 띄운다 (이름이 응답 모델 id에 들어간다)."""
+    seen: list[str] = []
+    handler = type(name, (_Recorder,), {"seen": seen})
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(
+        target=httpd.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True
+    ).start()
+    return httpd, seen
+
+
+@pytest.fixture
+def proxied_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[str, list[str], list[str]]]:
+    """프록시 환경 변수가 127.0.0.1 가짜 프록시를 가리키는 셸 (NO_PROXY 없음).
+
+    Yields:
+        (서버 URL, 서버가 받은 요청 줄, 프록시가 받은 요청 줄).
+    """
+    server, server_seen = _listen("server")
+    proxy, proxy_seen = _listen("proxy")
+    proxy_url = f"http://127.0.0.1:{proxy.server_address[1]}"
+    for name in (
+        "HTTP_PROXY",
+        "http_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ):
+        monkeypatch.setenv(name, proxy_url)
+    for name in ("NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}", server_seen, proxy_seen
+    finally:
+        for httpd in (server, proxy):
+            httpd.shutdown()
+            httpd.server_close()
+
+
+def test_client_ignores_proxy_environment(proxied_env: tuple[str, list[str], list[str]]) -> None:
+    """프록시 환경 변수가 있어도 서버 주소로 직접 연결한다 (사내 주소 검사 I7을 우회하지 않는다).
+
+    대조: 같은 환경에서 기본 httpx 클라이언트는 프록시로 보낸다 (환경이 실제로 프록시를 가리킨다).
+    """
+    url, server_seen, proxy_seen = proxied_env
+    with httpx.Client(timeout=5) as plain:
+        assert plain.get(f"{url}/v1/models").json()["data"][0]["id"] == "via-proxy"
+    assert len(proxy_seen) == 1 and url in proxy_seen[0]
+    proxy_seen.clear()
+    client = OpenAICompatibleChat(url, "m", timeout_s=5, api_key="secret")
+    assert client.list_models() == ["via-server"]
+    assert proxy_seen == []
+    assert server_seen == ["GET /v1/models HTTP/1.1"]
 
 
 def test_model_entries_and_server_version() -> None:

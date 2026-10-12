@@ -26,7 +26,7 @@ import ipaddress
 import re
 import socket
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 from urllib.parse import urlsplit
 
@@ -56,6 +56,8 @@ class JudgeRequest:
         entities: 창 개체표 (개체 ID, 클래스) (stub용).
         frame_nos: 이 요청에 보낸 프레임의 단위 프레임 번호 F# (보낸 순서, stub용).
         frame_ms: 그 프레임들의 시각 (frame_nos 순, stub용).
+        extra_body: 서버 확장 키 (벤치 생성 용량 측정의 `min_tokens`·`ignore_eos`만 쓴다. 판정
+            요청은 비운다).
     """
 
     unit_id: str
@@ -70,6 +72,7 @@ class JudgeRequest:
     entities: tuple[tuple[str, str | None], ...]
     frame_nos: tuple[int, ...]
     frame_ms: tuple[int, ...]
+    extra_body: Mapping[str, Any] = field(default_factory=dict[str, Any])
 
 
 @dataclass(frozen=True)
@@ -138,6 +141,7 @@ def chat_request(request: JudgeRequest) -> ChatRequest:
         max_tokens=request.max_tokens,
         schema_enforcement=request.schema_enforcement,
         headers={"X-DLP-Unit": request.unit_id},
+        extra_body=request.extra_body,
     )
 
 

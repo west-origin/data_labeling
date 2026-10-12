@@ -124,6 +124,7 @@ def test_cache_and_context_warnings(policy: AiReviewPolicy, ontology: Ontology) 
     assert report.status("cached_tokens") == "warn"
     assert report.status("context") == "warn"
     assert not report.failed
+    assert any("--enable-prompt-tokens-details" in r for r in report.recommendations)
 
 
 def test_unavailable_server_is_reported(policy: AiReviewPolicy, ontology: Ontology) -> None:
@@ -134,6 +135,41 @@ def test_unavailable_server_is_reported(policy: AiReviewPolicy, ontology: Ontolo
     assert report.unavailable
     assert report.status("models") == "ok"
     assert report.server.models == (MODEL,)
+
+
+def test_rejected_check_requests_are_recorded_not_raised(
+    policy: AiReviewPolicy, ontology: Ontology
+) -> None:
+    """이미지 점검 뒤 구조화 출력 요청(3번째 채팅)이나 캐시 요청(5번째)이 4xx면 그 점검을 실패로
+    남기고 보고서를 돌려준다 (예외로 끝나지 않는다, 앞선 점검 결과도 남는다)."""
+    with FakeOpenAIServer(MODEL) as server:
+        server.fail(400, times=1, after=2, body="response_format is not supported")
+        schema = _probe(server, policy, ontology)
+    assert schema.status("image_input") == "ok" and schema.status("image_limit") == "ok"
+    assert schema.status("schema_enforced") == "fail" and schema.status("full_profile") is None
+    assert schema.status("cached_tokens") == "ok"  # 다음 점검은 이어서 한다
+    assert schema.failed and not schema.unavailable
+    with FakeOpenAIServer(MODEL) as server:
+        server.fail(400, times=1, after=4)
+        cache = _probe(server, policy, ontology)
+    assert cache.status("full_profile") == "ok"
+    assert cache.status("cached_tokens") == "fail" and cache.status("context") == "ok"
+    assert cache.failed and not cache.unavailable
+
+
+def test_config_failure_before_outage_still_fails(
+    policy: AiReviewPolicy, ontology: Ontology
+) -> None:
+    """설정 불일치(구조화 출력 미강제) 뒤 서버가 멈추면 unavailable이면서 failed다 (종료 5 > 3)."""
+    with FakeOpenAIServer(MODEL, enforce_schema=False) as server:
+        server.fail(503, times=10, after=3)
+        report = _probe(server, policy, ontology)
+    assert report.status("schema_enforced") == "fail" and report.status("unavailable") == "fail"
+    assert report.unavailable and report.failed
+    with FakeOpenAIServer(MODEL) as server:
+        server.fail(503, times=10)
+        down = _probe(server, policy, ontology)
+    assert down.unavailable and not down.failed  # 장애만이면 설정 실패가 아니다
 
 
 def test_size_helpers() -> None:

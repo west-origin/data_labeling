@@ -41,6 +41,8 @@ from dlp_schema.labels import LabelPayload, LabelRecord, Source, VerificationSta
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 # 판정 단위 ID: "air-" + 해시 24자 (dlp_aireview.plan.unit_id)
 UnitId = Annotated[str, StringConstraints(pattern=r"^air-[0-9a-f]{24}$")]
+# 실행 세대 ID: "air-run-" + 해시 24자 (DB 열 VARCHAR(64))
+RunId = Annotated[str, StringConstraints(pattern=r"^air-run-[0-9a-f]{24}$")]
 # 판정 버전: "aireview-<정책 해시 12자>+vlm-<모델>"
 # (dlp_aireview.policy.AiReviewPolicy.verdict_version)
 AiVersion = Annotated[str, StringConstraints(pattern=r"^aireview-[0-9a-f]{12}\+vlm-\S+$")]
@@ -346,7 +348,7 @@ class AiReviewUnit(Contract):
     # served_model / endpoint: 서버가 보고한 모델과 엔드포인트 이름 (URL·키 아님).
 
     unit_id: UnitId
-    run_id: Identifier
+    run_id: RunId
     session_id: Identifier
     version: AiVersion
     group: AiGroup
@@ -428,7 +430,7 @@ class AiReviewRun(Contract):
     # plan_digest: 계획한 단위 ID 집합의 해시 16자. planned_units: 그 수.
     # requested_by: 실행자 (DLP_ACTOR).
 
-    run_id: Annotated[str, StringConstraints(pattern=r"^air-run-[0-9a-f]{24}$")]
+    run_id: RunId
     session_id: Identifier
     version: AiVersion
     policy_digest: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{12}$")]
@@ -454,7 +456,7 @@ class AiRunEvent(Contract):
 
     event_id: int | None = None
     session_id: Identifier
-    run_id: str | None = None
+    run_id: RunId | None = None
     event: AiRunEventKind
     reason: str | None = None
     counts: dict[str, int] = Field(default_factory=dict[str, int])
@@ -474,7 +476,7 @@ class AiExposure(Contract):
     session_id: Identifier
     assignment_id: Identifier | None = None
     arm: AiArm
-    arm_key: str
+    arm_key: Identifier  # 루트 배정 ID 또는 작업 키 (DB 열 VARCHAR(128))
     versions: tuple[str, ...] = ()
     render_hash: Sha256 | None = None
     coverage: float = Field(ge=0, le=1)

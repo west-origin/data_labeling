@@ -58,6 +58,9 @@ services:
       - --max-num-seqs=${AIREVIEW_MAX_NUM_SEQS:-32}
       - --gpu-memory-utilization=${AIREVIEW_GPU_MEMORY:-0.4}
       - --enable-prefix-caching
+      # usage에 prompt_tokens_details.cached_tokens를 넣는다 (기본은 꺼짐). 없으면 벤치 캐시 적중과
+      # 추정의 고정 접두사 캐시 판단, probe cached_tokens 점검이 "모름"이 된다
+      - --enable-prompt-tokens-details
 
   # 행동 분류 서버 (dlp actions run, actions.yaml vlm.model). 필요할 때만 (--profile actions)
   vlm-actions:
@@ -78,6 +81,7 @@ services:
       - --max-num-seqs=${ACTIONS_MAX_NUM_SEQS:-32}
       - --gpu-memory-utilization=${ACTIONS_GPU_MEMORY:-0.3}
       - --enable-prefix-caching
+      - --enable-prompt-tokens-details
 
 volumes:
   # 가중치 캐시 (Hugging Face). 저장소·개발 호스트에는 두지 않는다

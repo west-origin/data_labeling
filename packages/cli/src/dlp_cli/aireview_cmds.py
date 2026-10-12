@@ -10,17 +10,22 @@
   종료: 0 통과 / 2 주소 없음 / 3 서버 장애 / 5 설정 불일치(사내 주소 아님, 모델 없음·불일치, 키,
   구조화 출력 미강제, 이미지 수 한도 등). 여러 엔드포인트면 가장 심각한 코드(5 > 3).
 - `dlp aireview bench [--vlm-url URL] [--endpoint NAME] [--source synthetic] [--concurrency 1,8,…]
-  [--frames 8,12] [--side 336,448,672] [--groups …] [--requests 200] [--warmup 10] [--ttft 10]
-  [--cache-probe] [--decode] [--decode-seconds 20] [--scene-units 40] [--frame-size WxH] [--seed 0]
-  [--device NAME] [--out FILE]`: 처리량 벤치 (`dlp_aireview.bench`). 입력은 합성 장면
-  (`dlp_fixtures.aireview`, 영상·사람·글자 없음)이다. 보고서는 `reports/aireview-bench/`(Git 제외).
-  `--decode`는 같은 합성 장면을 MP4로 써서 CPU 순차 디코드 fps를 잰다.
+  [--frames N,…] [--side PX,…] [--groups …] [--requests 200] [--warmup 10] [--ttft 10]
+  [--cache-probe] [--no-capacity] [--decode-tokens 256] [--decode] [--decode-seconds 20]
+  [--scene-units 40] [--frame-size WxH] [--seed 0] [--device NAME] [--out FILE]`: 처리량 벤치
+  (`dlp_aireview.bench`). 입력은 합성 장면(`dlp_fixtures.aireview`, 영상·사람·글자 없음)이다.
+  `--frames`·`--side`는 지금 정책 값에 더할 후보다 (정책 값은 늘 잰다, 주지 않으면 정책 값만).
+  무릎 동시성에서 프리필·생성 용량도 따로 잰다 (`--no-capacity`로 끈다). 보고서는
+  `reports/aireview-bench/`(Git 제외). `--decode`는 같은 합성 장면을 MP4로 써서 CPU 순차 디코드
+  fps를 잰다.
   종료: 0 / 2 주소 없음 / 3 서버 장애(서버가 멈춰 벤치를 멈춤 포함) / 5 설정 불일치.
 - `dlp aireview estimate [<세션>… | --prelabeled] [--mode all|flagged] [--bench REPORT …]
   [--hours-per-day H] [--rerun-margin R] [--utilization U] [--decode-workers N] [--include-actions]
   [--actions-req-s X] [--json] [--url]`: 작업량·장비 대수 추정 (`dlp_aireview.estimate`). DB를
   읽기만 한다 (서버 불필요). 가정 값의 기본은 `aireview.yaml estimate`. flagged 모드의 우선순위
-  사유는 검수 운영 정책(`DLP_REVIEW_POLICY_FILE` 반영)의 `flag_unit`으로 계산한다.
+  사유는 검수 운영 정책(`DLP_REVIEW_POLICY_FILE` 반영)의 `flag_unit`으로 계산한다. 벤치 보고서의
+  셈법 값(align_px·text_bytes_per_token)이 지금 정책과 다르면 그 보고서용 작업량을 보고서 셈법으로
+  다시 센다 (`estimate.counting_policy`). 모델·fingerprint가 다르면 경고한다.
   종료: 0 (세션이 없어도 0).
 
 서버 주소: `--vlm-url`(여러 번, `이름=URL` 가능) 또는 `DLP_VLM_URLS`(`spark-01=http://…,…`).
@@ -38,6 +43,7 @@ import socket
 import tempfile
 import time
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from fractions import Fraction
 from pathlib import Path
@@ -49,8 +55,22 @@ import sqlalchemy as sa
 from dlp_actions.policy import load_policy as load_actions_policy
 from dlp_actions.runner import vlm_request_count
 from dlp_aireview.backend import OpenAICompatibleJudge, check_hosts, parse_endpoints
-from dlp_aireview.bench import BenchGrid, BenchInput, BenchReport, DecodeMeasure, run_bench
-from dlp_aireview.estimate import Capacity, SessionLoad, Workload, capacity, session_load, to_json
+from dlp_aireview.bench import (
+    BenchConfig,
+    BenchGrid,
+    BenchInput,
+    BenchReport,
+    DecodeMeasure,
+    run_bench,
+)
+from dlp_aireview.estimate import (
+    Capacity,
+    Workload,
+    capacity,
+    counting_policy,
+    session_load,
+    to_json,
+)
 from dlp_aireview.plan import VIDEO_KINDS, StreamMedia
 from dlp_aireview.policy import AiReviewPolicy, load_policy
 from dlp_aireview.probe import ProbeReport, probe_server, server_info
@@ -187,7 +207,7 @@ def cmd_probe(args: argparse.Namespace) -> int:
         _print_probe(report)
     if args.out:
         _write_json(Path(args.out), [r.model_dump(mode="json") for r in reports])
-    if any(r.failed and not r.unavailable for r in reports):
+    if any(r.failed for r in reports):  # 설정 불일치가 하나라도 있으면 서버 장애보다 먼저 (5 > 3)
         return _CONFIG
     return _UNAVAILABLE if any(r.unavailable for r in reports) else 0
 
@@ -246,8 +266,21 @@ def _measure_decode(scene: AiReviewScene, policy: AiReviewPolicy, seconds: float
     )
 
 
+def _capacity_text(c: BenchConfig) -> str:
+    """따로 잰 프리필·생성 용량 한 줄 조각 (없으면 빈 문자열)."""
+    pre, dec = c.prefill, c.decode
+    if pre is None or dec is None:
+        return ""
+    fresh = pre.fresh_tokens / pre.wall_s if pre.wall_s > 0 else 0.0
+    if dec.error:
+        state = f" (생성 측정 실패: {dec.error})"
+    else:
+        state = "" if dec.honored else " (생성 길이 고정 안 됨, 추정에 쓰지 않음)"
+    return f"; 용량 프리필 근사 {fresh:.0f} tok/s, 생성 {dec.decode_tok_s:.0f} tok/s{state}"
+
+
 def _print_bench(report: BenchReport, out: Path) -> None:
-    """벤치 요약 출력 (설정마다 무릎 지점)."""
+    """벤치 요약 출력 (설정마다 무릎 지점과 따로 잰 용량)."""
     print(f"[bench] {report.device} 서버 모델 {report.server.served_model} 엔진 "
           f"{report.server.engine_version or '알 수 없음'}")  # fmt: skip
     for c in report.configs:
@@ -259,8 +292,9 @@ def _print_bench(report: BenchReport, out: Path) -> None:
         cache = f"{k.cache_hit_ratio:.0%}" if k.cache_hit_ratio is not None else "모름"
         print(
             f"{head} — 동시성 {k.concurrency}: {k.units_per_s:.2f} 단위/s, "
-            f"p95 {k.latency_p95_ms} ms, 프리필 {k.prefill_tok_s:.0f} tok/s, "
-            f"생성 {k.decode_tok_s:.0f} tok/s, 캐시 {cache}, 첫 토큰 {c.ttft_p50_ms} ms"
+            f"p95 {k.latency_p95_ms} ms, 관측 프리필 {k.prefill_tok_s:.0f} tok/s, "
+            f"관측 생성 {k.decode_tok_s:.0f} tok/s, 캐시 {cache}, 첫 토큰 {c.ttft_p50_ms} ms"
+            f"{_capacity_text(c)}"
         )
     if report.decode is not None:
         print(f"  디코드(CPU): {report.decode.fps:.0f} fps ({report.decode.width}x"
@@ -272,13 +306,15 @@ def _grid(args: argparse.Namespace) -> BenchGrid:
     """CLI 인자 → 설정 격자."""
     return BenchGrid(
         concurrency=args.concurrency,
-        frames=args.frames,
-        sides=args.side,
+        frames=args.frames or (),
+        sides=args.side or (),
         groups=args.groups,
         requests=args.requests,
         warmup=args.warmup,
         ttft=args.ttft,
         cache_probe=args.cache_probe,
+        capacity=not args.no_capacity,
+        decode_tokens=args.decode_tokens,
     )
 
 
@@ -383,11 +419,22 @@ def _session_ids(conn: sa.Connection, args: argparse.Namespace) -> list[str]:
     ]
 
 
-def _load_sessions(args: argparse.Namespace, policy: AiReviewPolicy) -> list[SessionLoad]:
-    """DB에서 세션 작업량을 센다 (읽기 전용 연결)."""
+@dataclass(frozen=True)
+class _SessionInput:
+    """작업량을 셀 세션 하나의 DB 입력 (셈법 값이 다른 보고서마다 다시 센다)."""
+
+    session: Session
+    current: list[LabelRecord]
+    ontology: Ontology
+    flagged: list[FlaggedSpan]
+    actions_requests: int | None
+
+
+def _session_inputs(args: argparse.Namespace, policy: AiReviewPolicy) -> list[_SessionInput]:
+    """DB에서 세션·현재 운영 라벨·온톨로지·사유 구간·행동 요청 수를 읽는다 (읽기 전용 연결)."""
     actions = load_actions_policy(repo_root()) if args.include_actions else None
     engine = sa.create_engine(database_url(args.url))
-    loads: list[SessionLoad] = []
+    inputs: list[_SessionInput] = []
     try:
         with engine.connect() as conn:
             for sid in _session_ids(conn, args):
@@ -396,20 +443,34 @@ def _load_sessions(args: argparse.Namespace, policy: AiReviewPolicy) -> list[Ses
                     print(f"{sid}: 사용 중지된 세션이라 뺍니다")
                     continue
                 current = current_labels(get_labels(conn, sid))
-                o = get_session_ontology(conn, sid)
                 flagged = (
                     _flagged(conn, session, current) if policy.selection.mode == "flagged" else []
                 )
                 requests = (
                     sum(vlm_request_count(session, current, actions).values()) if actions else None
                 )
-                load = session_load(
-                    session, current, policy, o, flagged=flagged, actions_requests=requests
-                )
-                loads.append(load)
+                o = get_session_ontology(conn, sid)
+                inputs.append(_SessionInput(session, current, o, flagged, requests))
     finally:
         engine.dispose()
-    return loads
+    return inputs
+
+
+def _workload(inputs: Sequence[_SessionInput], policy: AiReviewPolicy) -> Workload:
+    """세션 입력 → 작업량 (`policy`의 셈법으로 센다)."""
+    return Workload(
+        tuple(
+            session_load(
+                x.session,
+                x.current,
+                policy,
+                x.ontology,
+                flagged=x.flagged,
+                actions_requests=x.actions_requests,
+            )
+            for x in inputs
+        )
+    )
 
 
 def _print_workload(w: Workload) -> None:
@@ -440,6 +501,8 @@ def _print_capacity(c: Capacity) -> None:
         print(f"  대수 없음: 측정이 없는 몫 {', '.join(c.missing)}")
     else:
         print(f"  영상 1시간당 장비초 D {c.device_s_per_hour:.0f} → 필요 대수 {c.devices}")
+    for w in c.warnings:
+        print(f"  경고: {w}")
     if c.decode_hours_per_day is not None:
         ok = "충분" if c.decode_hours_per_day <= 24 else "부족 (디코드 작업 수를 늘린다)"
         print(f"  디코드 하루 {c.decode_hours_per_day:.1f}시간 ({ok})")
@@ -457,21 +520,27 @@ def cmd_estimate(args: argparse.Namespace) -> int:
         data["selection"]["mode"] = args.mode
         policy = AiReviewPolicy.model_validate(data)
     est = policy.estimate
-    workload = Workload(tuple(_load_sessions(args, policy)))
-    reports: list[str] = list(args.bench or [])
-    capacities = [
-        capacity(
-            workload,
-            BenchReport.model_validate_json(Path(path).read_text("utf-8")),
-            policy,
-            hours_per_day=args.hours_per_day or est.hours_per_day,
-            rerun_margin=args.rerun_margin if args.rerun_margin is not None else est.rerun_margin,
-            utilization=args.utilization or est.utilization,
-            decode_workers=args.decode_workers or est.decode_workers,
-            actions_req_s=args.actions_req_s,
+    inputs = _session_inputs(args, policy)
+    workload = _workload(inputs, policy)
+    capacities: list[Capacity] = []
+    paths: list[str] = list(args.bench or [])
+    for path in paths:
+        report = BenchReport.model_validate_json(Path(path).read_text("utf-8"))
+        counted = counting_policy(policy, report)  # 보고서와 같은 셈법으로 작업량을 센다
+        capacities.append(
+            capacity(
+                workload if counted is policy else _workload(inputs, counted),
+                report,
+                counted,
+                hours_per_day=args.hours_per_day or est.hours_per_day,
+                rerun_margin=(
+                    args.rerun_margin if args.rerun_margin is not None else est.rerun_margin
+                ),
+                utilization=args.utilization or est.utilization,
+                decode_workers=args.decode_workers or est.decode_workers,
+                actions_req_s=args.actions_req_s,
+            )
         )
-        for path in reports
-    ]
     if args.json:
         data = {"workload": to_json(workload), "capacity": [to_json(c) for c in capacities]}
         print(json.dumps(data, ensure_ascii=False, indent=2))
@@ -503,13 +572,20 @@ def _bench_parser(asub: Any) -> None:
     b.add_argument("--source", choices=["synthetic"], default="synthetic",
                    help="입력 (실제 세션 블러본 입력은 WP17.5 open_blurred 뒤)")  # fmt: skip
     b.add_argument("--concurrency", type=_ints, default=(1, 8, 16, 32, 64))
-    b.add_argument("--frames", type=_ints, default=(8, 12), help="temporal 프레임 수 후보")
-    b.add_argument("--side", type=_ints, default=(336, 448, 672), help="긴 변 후보 px")
+    b.add_argument("--frames", type=_ints, help="temporal 프레임 수 후보 (정책 값에 더한다)")
+    b.add_argument("--side", type=_ints, help="긴 변 후보 px (묶음마다 정책 값에 더한다)")
     b.add_argument("--groups", type=_groups, default=tuple(AiGroup))
     b.add_argument("--requests", type=int, default=200, help="점마다 판정할 단위 수")
     b.add_argument("--warmup", type=int, default=10)
     b.add_argument("--ttft", type=int, default=10, help="첫 토큰 시간 표본 수 (0이면 생략)")
     b.add_argument("--cache-probe", action="store_true", help="캐시 적중·깨기 비교")
+    b.add_argument(
+        "--no-capacity",
+        action="store_true",
+        help="무릎 동시성의 프리필·생성 용량 측정을 건너뛴다 (추정이 보정하지 못한다)",
+    )
+    b.add_argument("--decode-tokens", type=int, default=256,
+                   help="생성 용량 측정의 요청당 생성 길이 (vLLM 확장)")  # fmt: skip
     b.add_argument("--decode", action="store_true", help="CPU 순차 디코드 fps도 잰다")
     b.add_argument("--decode-seconds", type=float, default=20.0)
     b.add_argument("--scene-units", type=int, default=40, help="합성 장면 행동 단위 수")

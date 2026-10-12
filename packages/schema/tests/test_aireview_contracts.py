@@ -11,19 +11,26 @@ from datetime import timedelta
 from typing import Any
 
 import pytest
-from pydantic import ValidationError
+import sqlalchemy as sa
+from pydantic import BaseModel, ValidationError
 
 from dlp_schema.aireview import (
     AiArm,
     AiExposure,
+    AiHumanAction,
+    AiOutcome,
+    AiOutcomeItem,
     AiProblem,
     AiReviewUnit,
+    AiRunEvent,
+    AiRunEventKind,
     AiSuggestion,
     AiVerdict,
     AiVerdictValue,
     valid_verdicts,
     worst,
 )
+from dlp_schema.db import tables
 from dlp_schema.labels import (
     GapPayload,
     Hand,
@@ -33,7 +40,14 @@ from dlp_schema.labels import (
     Verification,
     VerificationState,
 )
-from dlp_schema.testing import FIXED_TIME, action_payload, make_label
+from dlp_schema.testing import (
+    FIXED_TIME,
+    action_payload,
+    make_ai_run,
+    make_ai_unit,
+    make_ai_verdict,
+    make_label,
+)
 
 H1 = "a" * 64
 H2 = "b" * 64
@@ -258,3 +272,52 @@ def test_valid_verdicts_skip_measurement_seeded_and_human_labels() -> None:
     for render in ({"bodycam": H1}, None):
         found = valid_verdicts([unit], labels, versions=[VERSION], render_hashes=render)
         assert set(found) == {"l1"}
+
+
+def _table_examples() -> list[tuple[BaseModel, sa.Table]]:
+    """AI 표마다 유효한 계약 객체 하나."""
+    run = "air-run-" + "0" * 24
+    item = AiOutcomeItem(label_id="l1", arm=AiArm.SHOWN, human=AiHumanAction.APPROVED)
+    return [
+        (make_ai_run(), tables.ai_review_runs),
+        (
+            AiRunEvent(session_id="s001", run_id=run, event=AiRunEventKind.STARTED,
+                       reason="aborted:config", actor="ops", at=FIXED_TIME),
+            tables.ai_review_run_events,
+        ),
+        (make_ai_unit("air-" + "1" * 24, [make_ai_verdict("l1")], endpoint="spark-01"),
+         tables.ai_review_units),
+        (
+            AiExposure(task_key="label_studio:1", session_id="s001", assignment_id="as1",
+                       arm=AiArm.SHOWN, arm_key="as1", coverage=1.0, created_at=FIXED_TIME),
+            tables.ai_review_exposures,
+        ),
+        (
+            AiOutcome(task_key="label_studio:1", session_id="s001", reviewer_id="rev01",
+                      collected_at=FIXED_TIME, items=(item,)),
+            tables.ai_review_outcomes,
+        ),
+    ]  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    ("example", "table"), _table_examples(), ids=lambda v: getattr(v, "name", "")
+)
+def test_contract_rejects_values_longer_than_varchar_columns(
+    example: BaseModel, table: sa.Table
+) -> None:
+    """VARCHAR(n) 열에 들어가는 계약 필드는 n자를 넘는 값을 계약 검증에서 거부한다.
+
+    SQLite는 길이를 강제하지 않아 단위 테스트로 드러나지 않고, PostgreSQL에서야 DataError가 난다
+    (예: 노출 arm_key). 값은 식별자 문자(영숫자)만 써서 길이로만 걸리게 한다.
+    """
+    data = example.model_dump()
+    checked = 0
+    for column in table.columns:
+        length = getattr(column.type, "length", None)
+        if length is None or column.name not in data:
+            continue
+        with pytest.raises(ValidationError):
+            type(example).model_validate(data | {column.name: "a" * (length + 1)})
+        checked += 1
+    assert checked > 0

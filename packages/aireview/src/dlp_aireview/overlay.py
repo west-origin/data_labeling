@@ -7,6 +7,8 @@
 - `crop`: 작은 박스 주변을 잘라 정사각형으로 키운다 (원 해상도 프레임에서).
 - 상자·점 보간은 `dlp_aireview.tracks`(`box_at`, `points_at`)를 쓴다 (계획이 프레임을 고를 때와 같은
   규칙).
+- `crop_plan`: 확대 조각을 만들 (프레임, 대상) — 픽셀 없이 라벨 상자만으로 정한다. 작업량 추정
+  (`estimate`)도 같은 함수로 조각 수를 센다.
 - `render_unit_images`: 단위의 원 해상도 프레임 → 보낼 이미지(`PromptImage`) 목록.
 
 시간 라벨은 그리지 않는다 (VLM이 화면 글자에 끌리지 않게, 같은 창의 분할 요청끼리 이미지 캐시가
@@ -140,6 +142,43 @@ def _target_mark(
     return mark_tag(x, n), None, None, None
 
 
+def crop_plan(
+    targets: Sequence[LabelRecord],
+    frame_ms: Sequence[int],
+    src_size: tuple[int, int],
+    max_side: int,
+    policy: AiReviewPolicy,
+) -> tuple[tuple[int, int], ...]:
+    """확대 조각을 만들 (단위 프레임 번호, 대상 번호) 목록 (프레임 순, 같은 프레임은 대상 순).
+
+    박스 트랙 대상의 그 시각 상자(`box_at`)가 보낸 프레임 크기(긴 변 `max_side`, 정렬
+    `image.align_px`)에서 짧은 변 < `spatial.crops.min_box_side_px`이면 작은 박스다. 대상마다 처음
+    작게 보이는 프레임에서 하나, 요청당 `crops.max`개까지. 조각·표식이 꺼졌으면 빈 목록이다. 픽셀을
+    쓰지 않는다 (`render_unit_images`와 작업량 추정이 같은 규칙을 쓴다).
+
+    Args:
+        targets: 공간 단위 대상 (응답 번호 순). frame_ms: 단위 프레임 시각.
+        src_size: 원 프레임 (너비, 높이) px. max_side: 보낸 프레임 긴 변 상한. policy: 정책.
+    """
+    cp = policy.spatial.crops
+    if not (cp.enabled and policy.spatial.marks and cp.max > 0):
+        return ()
+    w0, h0 = src_size
+    w, h = fit_size(w0, h0, max_side, policy.image.align_px)
+    sx, sy = w / w0, h / h0
+    out: list[tuple[int, int]] = []
+    cropped: set[int] = set()
+    for k, t_ms in enumerate(frame_ms):
+        for n, x in enumerate(targets):
+            if n in cropped or len(out) >= cp.max or not isinstance(x.payload, BoxTrackPayload):
+                continue
+            raw = box_at(x.payload.keyframes, t_ms)
+            if raw is not None and min(raw[2] * sx, raw[3] * sy) < cp.min_box_side_px:
+                cropped.add(n)
+                out.append((k, n))
+    return tuple(out)
+
+
 def render_unit_images(
     unit: PlannedUnit, frames: Sequence[Image], policy: AiReviewPolicy
 ) -> tuple[PromptImage, ...]:
@@ -147,9 +186,8 @@ def render_unit_images(
 
     프레임은 긴 변 상한·정렬 단위(`image.align_px`)로 줄인다. temporal은 시각 표기만
     (`temporal.timestamp_overlay`가 켜졌을 때), spatial은 시각 표기 + 대상 표식을 그린다. 시각
-    표기의 F#는 단위 프레임 번호(`PromptImage.frame_no`)다. 작은 박스(보낸 프레임에서 짧은 변 <
-    `crops.min_box_side_px`)는 원 해상도에서 확대 조각을 만든다 (요청당 `crops.max`개, 대상마다 처음
-    보이는 프레임에서 하나).
+    표기의 F#는 단위 프레임 번호(`PromptImage.frame_no`)다. 작은 박스는 원 해상도에서 확대 조각을
+    만든다 (`crop_plan`: 요청당 `crops.max`개, 대상마다 처음 작게 보이는 프레임에서 하나).
 
     Raises:
         ValueError: 프레임 수가 단위 프레임 수와 다를 때.
@@ -160,9 +198,12 @@ def render_unit_images(
     spatial = unit.group is AiGroup.SPATIAL
     cp = policy.spatial.crops
     quality = policy.image.jpeg_quality
+    plan: tuple[tuple[int, int], ...] = ()
+    if spatial and frames:
+        h0, w0 = frames[0].shape[:2]
+        plan = crop_plan(unit.targets, unit.frame_ms, (w0, h0), unit.window.max_side_px, policy)
     images: list[PromptImage] = []
     crops: list[PromptImage] = []
-    cropped: set[int] = set()
     for k, (img, t_ms) in enumerate(zip(frames, unit.frame_ms, strict=True)):
         h0, w0 = img.shape[:2]
         w, h = fit_size(w0, h0, unit.window.max_side_px, policy.image.align_px)
@@ -171,22 +212,16 @@ def render_unit_images(
         if spatial and policy.spatial.marks:
             marks = [_target_mark(x, n, t_ms, sx, sy) for n, x in enumerate(unit.targets)]
             small = draw_marks(small, [(tag, box, pts) for tag, box, pts, _ in marks])
-            for n, (tag, box, _, raw) in enumerate(marks):
-                tiny = box is not None and min(box[2], box[3]) < cp.min_box_side_px
-                if (
-                    cp.enabled
-                    and tiny
-                    and raw is not None
-                    and n not in cropped
-                    and len(crops) < cp.max
-                ):
-                    cropped.add(n)
-                    jpeg = encode_jpeg(crop(img, raw, cp.side_px), quality)
-                    crops.append(
-                        PromptImage(
-                            jpeg, t_ms, cp.side_px, cp.side_px, k, (w0, h0), crop=True, label=tag
-                        )
+            for n in (n for kk, n in plan if kk == k):
+                tag, _, _, raw = marks[n]
+                if raw is None:  # crop_plan은 상자가 있는 박스 대상만 고른다 (형 좁히기)
+                    continue
+                jpeg = encode_jpeg(crop(img, raw, cp.side_px), quality)
+                crops.append(
+                    PromptImage(
+                        jpeg, t_ms, cp.side_px, cp.side_px, k, (w0, h0), crop=True, label=tag
                     )
+                )
         if policy.temporal.timestamp_overlay or spatial:
             small = draw_stamp(small, f"F{k} +{(t_ms - start) / 1000:.1f}s")
         images.append(PromptImage(encode_jpeg(small, quality), t_ms, w, h, k, (w0, h0)))

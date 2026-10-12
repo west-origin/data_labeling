@@ -27,12 +27,18 @@
     - 이미지는 data URI(base64)로만 보낸다. 서명 URL을 쓰지 않는다.
     - API 키는 Authorization 헤더로만 보내고 출력·기록하지 않는다. 추적용 헤더(`X-DLP-Unit` 등)는
       본문에 넣지 않으므로 서버 접두사 캐시에 영향이 없다.
+    - 프록시 환경 변수(`HTTP_PROXY`·`HTTPS_PROXY`·`ALL_PROXY`)와 `.netrc`를 따르지 않고 서버
+      주소로 직접 연결한다 (`trust_env=False`). 사내 주소 검사(`dlp_aireview.backend.check_hosts`,
+      I7)는 URL 호스트만 보므로, 프록시를 따르면 검사를 통과한 요청(블러본 이미지·API 키)이
+      프록시로 나간다. 사내 CA 인증서(`SSL_CERT_FILE`·`SSL_CERT_DIR`)는 계속 따른다
+      (`_tls_context`).
 """
 
 from __future__ import annotations
 
 import base64
 import hashlib
+import ssl
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -135,6 +141,9 @@ class ChatRequest:
         schema_enforcement: "server"면 `response_format`으로 서버가 강제한다. "prompt"면 넣지 않는다
             (스키마는 호출자가 글에 싣는다). 어느 쪽이든 응답 재검사는 호출자가 한다.
         headers: 추가 HTTP 헤더 (추적용 `X-DLP-Unit` 등). 본문에 들어가지 않는다.
+        extra_body: 본문 끝에 덧붙일 서버 확장 키 (예: 벤치 생성 용량 측정의 vLLM `min_tokens`·
+            `ignore_eos`). 기본 키(model·temperature·max_tokens·messages·response_format)와 겹치면
+            `chat_body`가 거부한다. 비면 본문이 그대로다 (행동 단계 요청 바이트 불변).
     """
 
     system: str | None
@@ -144,6 +153,7 @@ class ChatRequest:
     max_tokens: int | None = None
     schema_enforcement: Literal["server", "prompt"] = "server"
     headers: Mapping[str, str] = field(default_factory=dict[str, str])
+    extra_body: Mapping[str, Any] = field(default_factory=dict[str, Any])
 
 
 @dataclass(frozen=True)
@@ -182,8 +192,8 @@ def _message(turn: ChatTurn) -> dict[str, Any]:
 def chat_body(model: str, req: ChatRequest) -> dict[str, Any]:
     """`/v1/chat/completions` 요청 본문 (순수 함수).
 
-    키 순서: model, temperature(0), max_tokens(있으면), messages, response_format(서버 강제면).
-    행동 단계의 요청 바이트가 이 순서에 고정돼 있다 (`test_vlm_body.py`).
+    키 순서: model, temperature(0), max_tokens(있으면), messages, response_format(서버 강제면),
+    `extra_body`의 키(있으면). 행동 단계의 요청 바이트가 이 순서에 고정돼 있다 (`test_vlm_body.py`).
 
     Args:
         model: 서버에 보낼 모델 이름.
@@ -191,6 +201,9 @@ def chat_body(model: str, req: ChatRequest) -> dict[str, Any]:
 
     Returns:
         JSON으로 보낼 사전.
+
+    Raises:
+        ValueError: `extra_body`가 기본 키를 덮어쓰려 할 때.
     """
     body: dict[str, Any] = {"model": model, "temperature": 0}
     if req.max_tokens is not None:
@@ -205,6 +218,10 @@ def chat_body(model: str, req: ChatRequest) -> dict[str, Any]:
             "type": "json_schema",
             "json_schema": {"name": req.schema_name, "schema": req.schema, "strict": True},
         }
+    clash = sorted(set(req.extra_body) & {*body, "max_tokens", "response_format"})
+    if clash:
+        raise ValueError(f"extra_body가 기본 키를 덮어씁니다: {clash}")
+    body.update(req.extra_body)
     return body
 
 
@@ -353,6 +370,15 @@ def ask_validated[T](
     return None, max_retries + 1
 
 
+def _tls_context() -> ssl.SSLContext:
+    """TLS 검증 문맥: `SSL_CERT_FILE`·`SSL_CERT_DIR`(사내 CA)이 있으면 그것, 없으면 certifi.
+
+    `httpx.Client(trust_env=False)`는 프록시와 함께 이 두 변수도 무시하므로 따로 읽는다. 프록시
+    변수는 읽지 않는다.
+    """
+    return httpx.create_ssl_context(trust_env=True)
+
+
 class OpenAICompatibleChat:
     """OpenAI 호환 채팅 API 클라이언트 (vLLM·SGLang·llama.cpp 등). 동기식이며 스레드마다 쓸 수 있다.
 
@@ -382,8 +408,14 @@ class OpenAICompatibleChat:
         self.model = model
         self.expected_model = expected_model
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        # 프록시 환경 변수를 따르지 않는다 (모듈 docstring). TLS 검증은 사내 CA 환경 변수를 따른다.
         self.http = httpx.Client(
-            base_url=base_url, timeout=timeout_s, transport=transport, headers=headers
+            base_url=base_url,
+            timeout=timeout_s,
+            transport=transport,
+            headers=headers,
+            trust_env=False,
+            verify=_tls_context(),
         )
 
     def _send(self, method: str, path: str, **kw: Any) -> httpx.Response:
