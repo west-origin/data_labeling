@@ -40,13 +40,17 @@
     - 적용, 제안 없음 → no_suggestion. 지금 온톨로지 검사·세션 검증 실패 → invalid_now (적용하지
       않음). 세션 검증에는 새 레코드 ID 중복도 든다 (`insert_labels`의 원시 DB 오류 대신 되돌림).
     - 기각: 그대로 → decision=dismiss.
-    - 보낸 뒤 다른 단계가 바꾼 라벨(자식 레코드가 생김, `collect.drop_retracted`와 같은 기준): 적용
-      결정이 있어도 항목을 바꾸지 않는다 → invalid_now. 결과는 `drop_retracted`가 빼므로
-      human=stale. (종류 변경 제안을 그대로 적용하면 parent 없는 새 레코드가 drop_retracted를 지나
-      다른 단계가 지운 라벨이 다른 종류로 되살아난다.)
+    - 측정이 아닌 작업(표준·QA·오류 삽입)에서 보낸 뒤 다른 단계가 바꾼 라벨(자식 레코드가 생김,
+      `collect.drop_retracted`와 같은 기준): 적용 결정이 있어도 항목을 바꾸지 않는다 → invalid_now.
+      결과는 `drop_retracted`가 빼므로 human=stale. (종류 변경 제안을 그대로 적용하면 parent 없는
+      새 레코드가 drop_retracted를 지나 다른 단계가 지운 라벨이 다른 종류로 되살아난다.) 측정
+      작업(블라인드·이중)은 이 검사를 하지 않는다: 비교 기준이 빈 목록이라 drop_retracted가 아무것도
+      빼지 않고 결과가 parent 없는 측정 레코드라 운영 라벨을 되살리지 않는다.
     - 집단(arm)이 shown이 아니거나 그 라벨의 판정이 화면에 따로 보이지 않았으면 결정을 무시한다 →
       not_shown.
-    - 이중 작업(arm=shown): 적용은 같게 반영하고 결과는 측정 레코드가 된다 → human=na.
+    - 이중 작업(arm=shown): 적용은 같게 반영하고 결과는 측정 레코드가 된다 → human=na. 짝 표준
+      작업이 먼저 수집되어 그 라벨을 고쳤어도(자식 레코드가 생김) 적용한다 (위의 stale 검사는 측정이
+      아닌 작업만. 막으면 보인 집단의 이중 일치 κ가 AI가 지적해 고친 라벨에서 체계적으로 낮아진다).
 
 AI가 제안하고 사람이 적용했다는 사실은 라벨 계약에 넣지 않고 이 결과 표에만 남긴다 (결정: 내보내기·
 학습에서 구별하는 계약 변경은 하지 않는다). 적용 결과 레코드는 사람이 그린 것과 같은 형식이다 (출처
@@ -120,7 +124,8 @@ class AiCollect:
         warnings: 수집 출력·결과 기록에 남길 경고 문장.
         base: 도구 결과 항목 (`apply_decisions`가 채운다, 적용 전).
         superseded: 이력에서 자식 레코드가 있는 라벨 ID (보낸 뒤 다른 단계가 지웠거나 다른 작업이
-            먼저 고침. `collect.drop_retracted`와 같은 기준, `begin`이 채운다).
+            먼저 고침. `collect.drop_retracted`와 같은 기준, `begin`이 채운다). 측정 작업(블라인드·
+            이중)은 빈 집합이다 (drop_retracted가 빼는 결과가 없다).
     """
 
     task: ReviewTask
@@ -179,10 +184,17 @@ def begin(
         found = next((v for v in units[uid] if v.label_id == lid), None)
         if found is not None:
             verdicts[lid] = (found, uid)
+    # 측정 작업은 비교 기준이 빈 목록이라 drop_retracted가 아무것도 빼지 않고, 결과는 parent 없는
+    # 측정 레코드라 운영 라벨을 되살리지 않는다: stale 검사를 측정이 아닌 작업에만 둔다
+    superseded = (
+        frozenset[str]()
+        if task.mode in _MEASURED
+        else frozenset(x.parent_label_id for x in history if x.parent_label_id)
+    )
     return AiCollect(
         task=task, exposure=exposure, sent={x.label_id: x for x in sent}, verdicts=verdicts,
         ontology=get_session_ontology(conn, task.session_id), history=history,
-        superseded=frozenset(x.parent_label_id for x in history if x.parent_label_id),
+        superseded=superseded,
     )  # fmt: skip
 
 
@@ -283,7 +295,8 @@ def _apply_one(
         ai.warnings.append(f"{label_id}: 보인 판정의 단위·원 라벨을 찾지 못해 적용하지 않았다")
         return AiApplyResult.INVALID_NOW, None
     if label_id in ai.superseded:
-        # 보낸 뒤 다른 단계가 바꾼 라벨: 결과는 drop_retracted가 빼고(stale), 적용도 하지 않는다
+        # 측정이 아닌 작업에서 보낸 뒤 다른 단계가 바꾼 라벨: 결과는 drop_retracted가 빼고(stale),
+        # 적용도 하지 않는다 (측정 작업은 superseded가 비어 있다)
         ai.warnings.append(f"{label_id}: 보낸 뒤 다른 단계가 바꾼 라벨이라 제안을 적용하지 않았다")
         return AiApplyResult.INVALID_NOW, None
     s = judged[0].suggestion

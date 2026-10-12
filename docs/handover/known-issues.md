@@ -28,7 +28,9 @@ AI 충돌 기반 표적 QA(F-AIR-04), AI 표 파티션·보관 ADR(F-AIR-05), CV
 적용(F-AIR-07), 누락 발견 표시(F-AIR-08), 장갑+영상 융합 접촉 판정(F-AIR-09), 골든 게이트 차단 여부(F-AIR-10,
 지금은 경고만), 층화 ok 놓침 상한의 보수적 근사(F-AIR-11), AI 끔 수집에서 결정 무시(F-AIR-12), stale
 라벨의 종류를 Label Studio에서 직접 바꿔 붙이면 원 라벨 없는 새 레코드가 남는 기존 수집 결함(F-AIR-13, AI 적용
-경로는 막았다), 골든 평가 history 맥락에 남는 사람 추가 레코드(F-AIR-14).
+경로는 막았다. 재현은 임시로 `packages/review/tests/test_units.py`의 strict xfail이고, WP17 브랜치가 공유 재현 파일을
+고치지 않는다는 리드 결정에 따라 메인 병합 때 `tests/test_known_defects.py`로 옮긴다), 골든 평가 history 맥락에
+남는 사람 추가 레코드(F-AIR-14).
 Label Studio 수집의 `from_name` 문제(F-AIR-02)는 고쳤다.
 
 판정 품질 지표는 표본 가중이다: 계획 단계가 AI 지적 라벨을 집단과 무관하게 표본에서 빼 전수 검수하므로

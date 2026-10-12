@@ -604,6 +604,42 @@ def test_double_task_applies_into_measurement_records(engine: sa.Engine, tmp_pat
     )  # fmt: skip
 
 
+@pytest.mark.parametrize(
+    ("name", "retracted", "want"),
+    [("a1", False, "press"), ("g1", True, "push")],
+    ids=["set-after-standard-correction", "change_kind-after-retraction"],
+)
+def test_double_task_applies_even_if_label_changed_after_sending(
+    name: str, retracted: bool, want: str, engine: sa.Engine, tmp_path: Path
+) -> None:
+    """이중 작업은 보낸 뒤 자식이 생긴 라벨에도 적용한다: 짝 표준 작업이 먼저 수집되어 a1을 고쳤거나
+    다른 단계가 g1을 지웠어도, 이중 검수자가 고른 제안이 측정 레코드에 들어가고 applied다. 측정
+    레코드는 parent가 없어 운영 라벨을 되살리지 않는다 (운영 라벨은 그대로). 회귀: stale 검사가 작업
+    방식과 상관없이 돌아 측정 레코드에 원래 모델 값이 남고 invalid_now·'다른 단계가 바꾼' 경고가
+    생겨, 보인 집단의 이중 일치 κ와 제안 적용률이 체계적으로 낮게 나왔다."""
+    labels = _scene(engine, mode=ReviewMode.DOUBLE)
+    x = labels[name]
+    newer = x.model_copy(update={
+        "label_id": f"{x.label_id}-std", "parent_label_id": x.label_id, "retracted": retracted,
+        "provenance": Provenance(source=Source.HUMAN),
+    })  # fmt: skip
+    with engine.begin() as conn:
+        insert_labels(conn, [newer])
+        before = {r.label_id for r in current_labels(get_labels(conn, SID))}
+    results = _submitted(labels, _decide(x.label_id, "apply"))
+    outcome, record = _collect(engine, _setup(tmp_path, results, _ai()))
+    assert not outcome.stale and all(r.measurement == "double" for r in outcome.new_records)
+    assert all(r.parent_label_id is None for r in outcome.new_records)
+    hits = [r for r in outcome.new_records if (r.t_start_ms, r.t_end_ms) == (x.t_start_ms,
+            x.t_end_ms) and getattr(r.payload, "hand", None) == Hand.RIGHT]  # fmt: skip
+    assert [getattr(r.payload, "verb", None) for r in hits] == [want]
+    item = _items(record)[x.label_id]
+    assert (item.human, item.apply_result) == (AiHumanAction.NA, AiApplyResult.APPLIED)
+    assert record is not None and not any("다른 단계가 바꾼" in w for w in record.warnings)
+    with engine.connect() as conn:
+        assert {r.label_id for r in current_labels(get_labels(conn, SID))} == before
+
+
 def test_reviewer_own_invalid_result_still_fails_collection(
     engine: sa.Engine, tmp_path: Path
 ) -> None:
