@@ -16,40 +16,26 @@ from __future__ import annotations
 
 import json
 import os
-from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
 import httpx
-import numpy as np
 import pytest
 
 from dlp_aireview.backend import JudgeRequest, OpenAICompatibleJudge, chat_request
-from dlp_aireview.plan import PlannedUnit, StreamMedia, plan_session
+from dlp_aireview.plan import PlannedUnit, plan_session
 from dlp_aireview.policy import PROMPT_VERSION, AiReviewPolicy
 from dlp_aireview.prompt import build_parts, ontology_text, retry_text, system_text, unit_text
 from dlp_aireview.schema import response_schema
 from dlp_aireview.sensors import SensorContext, contact_text
-from dlp_media.pts import PtsIndex
 from dlp_models.vlm import VlmRequestError, chat_body
 from dlp_schema.aireview import AiGroup
 from dlp_schema.labels import (
-    ActionPayload,
-    BoxKeyframe,
-    BoxTrackPayload,
-    EventPayload,
-    Evidence,
-    GapPayload,
     Hand,
-    HandStatePayload,
-    LabelRecord,
-    Provenance,
-    Source,
 )
 from dlp_schema.ontology import Ontology
-from dlp_schema.testing import FIXED_TIME, make_session
 
-from .conftest import Scene, images_for, make_scene, with_policy
+from .conftest import Scene, golden_units, images_for, make_scene, with_policy
 
 ABSENT = SensorContext.absent()
 FORBIDDEN = {"minimum", "maximum", "minLength", "maxLength", "minItems", "exclusiveMinimum"}
@@ -244,59 +230,6 @@ def test_openai_compatible_judge_request_and_model_check(
         wrong.judge(_request(unit, policy, ontology))
 
 
-def _golden_units(policy: AiReviewPolicy, o: Ontology) -> tuple[list[PlannedUnit], SensorContext]:
-    """골든용 고정 장면의 단위: 생성기와 무관하게 손으로 만든 라벨 (바디캠 100 ms 간격 프레임).
-
-    시간 대상 4개(행동·사이 구간·이벤트·영상 접촉 손 상태), 사람이 만든 맥락 행동 하나, 박스 트랙
-    둘(개체표·공간 대상), 오른손 장갑 접촉 구간.
-    """
-    session = make_session("s900", duration_ms=12_000)
-
-    def label(label_id: str, payload: Any, start: int, end: int, **kw: Any) -> LabelRecord:
-        data: dict[str, Any] = {
-            "label_id": label_id, "session_id": "s900", "t_start_ms": start, "t_end_ms": end,
-            "ontology_version": "1.0.0", "created_at": FIXED_TIME, "payload": payload,
-            "provenance": Provenance(source=Source.MODEL, model_version="m-1"), "confidence": 0.7,
-        } | kw  # fmt: skip
-        return LabelRecord.model_validate(data)
-
-    def box(label_id: str, entity: str, cls: str, x: float) -> LabelRecord:
-        kfs = tuple(BoxKeyframe(t_ms=t, x=x, y=60, w=30, h=30) for t in range(0, 3_001, 500))
-        payload = BoxTrackPayload(entity_id=entity, class_id=cls, keyframes=kfs)
-        return label(label_id, payload, 0, 3_000, stream_id="bodycam")
-
-    grasp = ActionPayload(
-        action_id="act-1", hand=Hand.RIGHT, verb="grasp", target_id="cup_01",
-        t_approach_ms=1_000, t_contact_start_ms=1_300, t_contact_end_ms=1_800, t_end_ms=2_000,
-    )  # fmt: skip
-    push = ActionPayload(
-        action_id="act-p", hand=Hand.LEFT, verb="push", target_id="sink_01",
-        t_approach_ms=1_000, t_end_ms=2_500,
-    )  # fmt: skip
-    hand = HandStatePayload(
-        hand=Hand.RIGHT, contact_target_kind="object", target_id="cup_01", grasp_type="power",
-        role="active",
-    )  # fmt: skip
-    labels = [
-        label("a1", grasp, 1_000, 2_000),
-        label("g1", GapPayload(hand=Hand.RIGHT, gap_type="idle"), 2_000, 3_000),
-        label("e1", EventPayload(event_type="slip", severity=2), 2_500, 2_900),
-        label("h1", hand, 1_300, 1_800, evidence=Evidence.INFERRED),
-        label(
-            "p1", push, 1_000, 2_500, provenance=Provenance(source=Source.HUMAN), confidence=None
-        ),
-        box("b-cup", "cup_01", "cup", 100.0),
-        box("b-sink", "sink_01", "sink", 200.0),
-    ]
-    times = np.arange(0, 12_000, 100, dtype=np.int64)
-    pts = PtsIndex(Fraction(1, 1000), times, np.ones(len(times), dtype=bool))
-    sensor = SensorContext.of({Hand.RIGHT: [(1_300.0, 1_800.0)]})
-    units = plan_session(
-        session, labels, policy, o, media={"bodycam": StreamMedia(pts, "e" * 64)}, sensor=sensor
-    )
-    return units, sensor
-
-
 def test_prompt_templates_match_golden_files(policy: AiReviewPolicy, ontology: Ontology) -> None:
     """프롬프트 틀 전부(system, 묶음별 고정 블록, 응답 스키마, 시간·공간 가변 글, 재시도 글)를 골든
     파일과 바이트 비교한다. 판정 버전(digest)에는 정책 값만 들어가므로, 틀을 바꾸면 이 테스트가
@@ -311,7 +244,7 @@ def test_prompt_templates_match_golden_files(policy: AiReviewPolicy, ontology: O
             response_schema(ontology, group, policy), ensure_ascii=False, indent=1, sort_keys=True
         )
         _golden(f"schema_{group.value}.json", schema + "\n")
-    units, sensor = _golden_units(policy, ontology)
+    units, sensor = golden_units(policy, ontology)
     for group in (AiGroup.TEMPORAL, AiGroup.SPATIAL):
         unit = next(u for u in units if u.group is group)
         images = images_for(unit, policy)
@@ -323,7 +256,7 @@ def test_prompt_templates_match_golden_files(policy: AiReviewPolicy, ontology: O
 def test_golden_scene_covers_every_text_row(policy: AiReviewPolicy, ontology: Ontology) -> None:
     """골든 가변 글이 행 종류(행동·사이 구간·이벤트·손 상태·맥락·개체표·장갑 문장·표식)를 다
     담는다."""
-    units, sensor = _golden_units(policy, ontology)
+    units, sensor = golden_units(policy, ontology)
     temporal = next(u for u in units if u.group is AiGroup.TEMPORAL)
     text = unit_text(temporal, images_for(temporal, policy), range(4), ontology, sensor)
     for piece in ("행동 오른손", "사이 구간", "이벤트", "손 상태", "(확정)", "개체:", "장갑 압력"):

@@ -7,8 +7,16 @@
 
 from __future__ import annotations
 
-import numpy as np
+import hashlib
+import json
+import os
+from pathlib import Path
+from typing import Any
 
+import numpy as np
+import pytest
+
+from dlp_aireview import overlay as overlay_module
 from dlp_aireview.overlay import crop, draw_marks, draw_stamp
 from dlp_aireview.plan import plan_session
 from dlp_aireview.policy import AiReviewPolicy
@@ -18,7 +26,9 @@ from dlp_schema.aireview import AiGroup
 from dlp_schema.labels import BoxKeyframe
 from dlp_schema.ontology import Ontology
 
-from .conftest import Scene, images_for, with_policy
+from .conftest import Scene, golden_units, images_for, with_policy
+
+GOLDEN = Path(__file__).parent / "golden"
 
 
 def test_box_interpolation_respects_outside() -> None:
@@ -100,3 +110,48 @@ def test_unit_images_size_marks_crops_and_determinism(
         images_for(temporal, plain)[0].image.sha256 == images_for(temporal, policy)[0].image.sha256
     )
     assert images_for(spatial, plain)[0].image.sha256 != images_for(spatial, policy)[0].image.sha256
+
+
+# 판정 이미지 그리기가 바뀌었을 때 알리는 절차 (글 골든 `test_prompt.BUMP`와 같은 절차)
+OVERLAY_BUMP = (
+    "판정 이미지 그리기(dlp_aireview.overlay: 시각 도장 형식, 표식 색·선 두께·태그, 확대 조각 범위·"
+    "크기, 줄이기)가 바뀌었다. 단위 키·판정 버전에는 그리기가 들어가지 않으므로 바꿨으면 "
+    "dlp_aireview.policy.PROMPT_VERSION과 config/policies/aireview.yaml prompt_version을 함께 "
+    "올리고 DLP_UPDATE_GOLDEN=1로 골든을 다시 쓴다 (같은 버전에 다른 그림의 판정이 섞이지 않게). "
+    "정책 값(digest에 드는 절)이 바뀐 것이면 판정 버전이 이미 바뀌므로 골든만 다시 쓴다."
+)
+
+
+def test_drawn_images_match_golden_pixels(
+    policy: AiReviewPolicy, ontology: Ontology, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """골든 단위(시간·공간)에 그린 이미지 픽셀이 골든과 같다 (JPEG 압축 전 RGB 배열의 해시).
+
+    정답 근거: VLM이 보는 이미지 내용(도장 글자, set-of-marks, 확대 조각)은 overlay 코드로만
+    정해지고 판정 버전·단위 키에는 들어가지 않는다. 같은 코드 안의 결정성(`test_unit_images_…`)
+    만으로는 그리기를 바꿔도 테스트가 통과해, 이미 기록된 단위와 새 그림의 단위가 같은 버전에
+    섞인다.
+    JPEG 바이트가 아니라 압축 전 배열을 비교해 libjpeg 차이에 흔들리지 않게 한다.
+    """
+    drawn: list[str] = []
+    real = overlay_module.encode_jpeg
+
+    def capture(rgb: Any, quality: int) -> Any:
+        arr = np.ascontiguousarray(rgb)
+        drawn.append(hashlib.sha256(repr(arr.shape).encode() + arr.tobytes()).hexdigest())
+        return real(rgb, quality)
+
+    monkeypatch.setattr(overlay_module, "encode_jpeg", capture)
+    units, _ = golden_units(policy, ontology)
+    found: dict[str, list[str]] = {}
+    for group in (AiGroup.TEMPORAL, AiGroup.SPATIAL):
+        unit = next(u for u in units if u.group is group)
+        drawn.clear()
+        images_for(unit, policy)
+        found[group.value] = list(drawn)
+    assert found["spatial"] and found["temporal"]
+    text = json.dumps(found, indent=2, sort_keys=True) + "\n"
+    path = GOLDEN / "images.json"
+    if os.environ.get("DLP_UPDATE_GOLDEN") == "1":
+        path.write_text(text, "utf-8")
+    assert path.read_text("utf-8") == text, f"images.json: {OVERLAY_BUMP}"

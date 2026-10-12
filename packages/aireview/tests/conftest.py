@@ -17,16 +17,21 @@ import numpy as np
 import pytest
 
 from dlp_aireview.overlay import render_unit_images
-from dlp_aireview.plan import PlannedUnit, StreamMedia
+from dlp_aireview.plan import PlannedUnit, StreamMedia, plan_session
 from dlp_aireview.policy import AiReviewPolicy, load_policy
 from dlp_aireview.prompt import PromptImage
+from dlp_aireview.sensors import SensorContext
 from dlp_fixtures.actions import ENTITIES, generate_action_scenario
 from dlp_media.pts import PtsIndex
 from dlp_schema import repo_root
 from dlp_schema.labels import (
+    ActionPayload,
     BoxKeyframe,
     BoxTrackPayload,
+    EventPayload,
     Evidence,
+    GapPayload,
+    Hand,
     HandStatePayload,
     LabelRecord,
     Provenance,
@@ -153,3 +158,56 @@ def ontology() -> Ontology:
 def scene() -> Scene:
     """합성 장면 (세션 범위, 바꾸지 않는다)."""
     return make_scene()
+
+
+def golden_units(policy: AiReviewPolicy, o: Ontology) -> tuple[list[PlannedUnit], SensorContext]:
+    """골든용 고정 장면의 단위: 생성기와 무관하게 손으로 만든 라벨 (바디캠 100 ms 간격 프레임).
+
+    시간 대상 4개(행동·사이 구간·이벤트·영상 접촉 손 상태), 사람이 만든 맥락 행동 하나, 박스 트랙
+    둘(개체표·공간 대상), 오른손 장갑 접촉 구간.
+    """
+    session = make_session("s900", duration_ms=12_000)
+
+    def label(label_id: str, payload: Any, start: int, end: int, **kw: Any) -> LabelRecord:
+        data: dict[str, Any] = {
+            "label_id": label_id, "session_id": "s900", "t_start_ms": start, "t_end_ms": end,
+            "ontology_version": "1.0.0", "created_at": FIXED_TIME, "payload": payload,
+            "provenance": Provenance(source=Source.MODEL, model_version="m-1"), "confidence": 0.7,
+        } | kw  # fmt: skip
+        return LabelRecord.model_validate(data)
+
+    def box(label_id: str, entity: str, cls: str, x: float) -> LabelRecord:
+        kfs = tuple(BoxKeyframe(t_ms=t, x=x, y=60, w=30, h=30) for t in range(0, 3_001, 500))
+        payload = BoxTrackPayload(entity_id=entity, class_id=cls, keyframes=kfs)
+        return label(label_id, payload, 0, 3_000, stream_id="bodycam")
+
+    grasp = ActionPayload(
+        action_id="act-1", hand=Hand.RIGHT, verb="grasp", target_id="cup_01",
+        t_approach_ms=1_000, t_contact_start_ms=1_300, t_contact_end_ms=1_800, t_end_ms=2_000,
+    )  # fmt: skip
+    push = ActionPayload(
+        action_id="act-p", hand=Hand.LEFT, verb="push", target_id="sink_01",
+        t_approach_ms=1_000, t_end_ms=2_500,
+    )  # fmt: skip
+    hand = HandStatePayload(
+        hand=Hand.RIGHT, contact_target_kind="object", target_id="cup_01", grasp_type="power",
+        role="active",
+    )  # fmt: skip
+    labels = [
+        label("a1", grasp, 1_000, 2_000),
+        label("g1", GapPayload(hand=Hand.RIGHT, gap_type="idle"), 2_000, 3_000),
+        label("e1", EventPayload(event_type="slip", severity=2), 2_500, 2_900),
+        label("h1", hand, 1_300, 1_800, evidence=Evidence.INFERRED),
+        label(
+            "p1", push, 1_000, 2_500, provenance=Provenance(source=Source.HUMAN), confidence=None
+        ),
+        box("b-cup", "cup_01", "cup", 100.0),
+        box("b-sink", "sink_01", "sink", 200.0),
+    ]
+    times = np.arange(0, 12_000, 100, dtype=np.int64)
+    pts = PtsIndex(Fraction(1, 1000), times, np.ones(len(times), dtype=bool))
+    sensor = SensorContext.of({Hand.RIGHT: [(1_300.0, 1_800.0)]})
+    units = plan_session(
+        session, labels, policy, o, media={"bodycam": StreamMedia(pts, "e" * 64)}, sensor=sensor
+    )
+    return units, sensor
