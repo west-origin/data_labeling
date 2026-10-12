@@ -110,6 +110,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     if r.registration is not None:  # DB 커밋 뒤에 MLflow 레지스트리 별칭을 옮긴다
         tracker.register(*r.registration)
     print(f"학습 예제: {r.examples}")
+    for warning in r.warnings:
+        print(f"경고: {warning}")
     print(f"{args.task}: {r.status} — {r.reason}")
     if r.model_version:
         print(f"모델 버전 {r.model_version} (MLflow 실행 {r.mlflow_run_id})")

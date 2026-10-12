@@ -7,7 +7,10 @@
 
 입력 → 출력: DB `golden_sets`·`label_records` → `<out>`(JSON)과 같은 이름의 `.md` 리포트.
 정답은 골든 버전에 고정한 라벨이며, JSON 리포트의 `golden_truth`에 고정 여부와 정답 라벨 ID 해시를
-남긴다 (ADR 0041). 고정하지 않은 이전 형식 골든셋은 현재 라벨로 평가하고 경고를 출력한다.
+남긴다 (ADR 0041). 근거와 평가 입력은 골든셋을 한 번 읽은 같은 결과에서 만든다. 고정하지 않은 이전
+형식 골든셋은 현재 라벨로 평가하고 경고를 출력한다. 고정한 정답이 비었거나 지금 정답과 다르면
+(라벨링 전에 고정, 고정 뒤 수정) 고정한 정답으로 평가하되 경고하고 `--from`으로 다시 고정하라고
+안내한다.
 종료 코드: 게이트 통과 0, 실패 1. 형식 오류는 `SystemExit` 메시지.
 
 주의:
@@ -36,7 +39,9 @@ from dlp_eval.runner import (
     MissingPredictionsError,
     golden_sessions,
     load_golden_merged,
+    refreeze_hint,
     truth_anchor,
+    truth_lag,
     write_report,
 )
 from dlp_schema import repo_root
@@ -77,7 +82,8 @@ def cmd_golden(args: argparse.Namespace) -> int:
 
     흐름:
     1. `--model`·`--baseline`을 과제별 버전 목록으로 해석한다.
-    2. 읽기 전용 연결로 골든셋 정답과 예측을 세션별로 합쳐 읽는다.
+    2. 읽기 전용 연결로 골든셋 세션을 한 번 읽어(`golden_sessions`) 정답 근거(`truth_anchor`)와
+       후보·기존의 세션별 정답·예측을 모두 그 결과에서 만든다.
     3. 후보(`--model`)와 기존(`--baseline`, 있으면)을 같은 정책으로 평가한다.
     4. `decide`로 과제별 통과/실패와 이유를 정하고 리포트를 쓴다.
 
@@ -90,14 +96,19 @@ def cmd_golden(args: argparse.Namespace) -> int:
     engine = sa.create_engine(database_url(args.url))
     try:
         with engine.connect() as conn:
+            golden_set = get_golden_set(conn, args.golden)
+            # 골든셋을 한 번 읽어 정답 근거와 후보·기존 평가 입력에 함께 쓴다 (두 번 읽으면 그 사이
+            # 사용 중지·라벨 커밋으로 근거와 실제 평가한 세션·정답이 달라질 수 있다)
+            sessions = golden_sessions(conn, args.golden)
             # 정답 고정 근거 (골든 버전에 고정한 정답 라벨 ID 해시, ADR 0041)
-            anchor = truth_anchor(
-                get_golden_set(conn, args.golden), golden_sessions(conn, args.golden)
-            )
-            golden = load_golden_merged(conn, args.golden, models)
+            anchor = truth_anchor(golden_set, sessions)
+            lag = truth_lag(golden_set, sessions)
+            golden = load_golden_merged(conn, args.golden, models, sessions=sessions)
             # 기존 모델 버전을 잘못 적으면 예측이 비어 기존 지표가 0이 되고 어떤 후보든 통과한다
             old = (
-                load_golden_merged(conn, args.golden, baseline_models, require_predictions=True)
+                load_golden_merged(
+                    conn, args.golden, baseline_models, require_predictions=True, sessions=sessions
+                )
                 if baseline_models
                 else None
             )
@@ -116,9 +127,10 @@ def cmd_golden(args: argparse.Namespace) -> int:
     if not anchor["truth_frozen"]:
         print(
             f"경고: 골든셋 {args.golden}은 정답을 고정하지 않은 이전 형식이라 현재 라벨로 "
-            "평가했습니다 (같은 버전이어도 정답이 바뀔 수 있다. "
-            "`dlp dataset golden --from`으로 고정)"
+            f"평가했습니다 (같은 버전이어도 정답이 바뀔 수 있다). {refreeze_hint(args.golden)}"
         )
+    if lag is not None:
+        print(f"경고: {lag.message()}")
     for task, d in decision.tasks.items():
         print(
             f"{task}: {'통과' if d.passed else '실패'}" + "".join(f"\n  - {r}" for r in d.reasons)

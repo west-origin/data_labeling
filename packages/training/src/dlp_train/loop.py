@@ -10,7 +10,10 @@
 4. 골든셋 평가: 후보와 기존 모델(배포 중인 재학습 모델, 없으면 baseline_versions의 DB 예측)을
    골든셋 세션에 메모리에서 돌려 같은 코드로 평가한다. 골든셋 세션에는 아무것도 쓰지 않는다.
    정답은 골든 버전에 고정한 라벨이다 (정답을 고정하지 않은 이전 형식 골든셋은 거부한다, ADR
-   0041). 리포트에 정답 고정 근거(`golden_truth`: 정답 라벨 ID 해시)를 남긴다.
+   0041). 리포트에 정답 고정 근거(`golden_truth`: 정답 라벨 ID 해시)를 남긴다. 고정한 정답이
+   비었거나 지금 정답과 다르면 `LoopResult.warnings`로 알리고(판정은 고정한 정답으로), 과제 정답이
+   없어 건너뛸 때는 `--from`으로 다시 고정하라고 안내한다. 후보·기존 평가는 골든셋을 한 번 읽은
+   같은 결과를 쓴다.
 5. 게이트(config/policies/evaluation.yaml) 통과 → 배포(정책 deploy: auto) 또는 승인 대기(approve).
    실패 → rejected. 배포하면 이전 배포 모델은 retired가 된다.
 
@@ -55,7 +58,9 @@ from dlp_eval.runner import (
     MissingPredictionsError,
     golden_sessions,
     load_golden_merged,
+    refreeze_hint,
     truth_anchor,
+    truth_lag,
     write_report,
 )
 from dlp_media.storage import ObjectStore, sha256_file
@@ -126,6 +131,8 @@ class LoopResult:
     # 배포했으면 MLflow 레지스트리에 올릴 것 (이름, 실행, 출처, 별칭). DB 커밋 뒤에 올린다
     registration: tuple[str, str, str, str] | None = None
     mlflow_run_id: str | None = None
+    # 사람이 볼 경고 (예: 골든 버전에 고정한 정답이 지금 정답과 다름, ADR 0041). 판정은 그대로다
+    warnings: list[str] = field(default_factory=list[str])
 
 
 def raw_clips(raw: ObjectStore) -> ClipSource:
@@ -304,9 +311,15 @@ def run_training_job(  # noqa: C901
     golden = golden_sessions(conn, version.golden_set_version)
     # 정답 고정 근거 (골든 버전에 고정한 정답 라벨 ID 해시). 리포트·MLflow에 남긴다
     anchor = truth_anchor(golden_set, golden)
+    # 고정한 정답이 비었거나 지금 정답과 다르면 알린다 (판정은 고정한 정답으로 한다)
+    lag = truth_lag(golden_set, golden)
+    if lag is not None:
+        result.warnings.append(lag.message())
     if not any(matches(job.task, x) for g in golden for x in g.truth):
+        hint = refreeze_hint(version.golden_set_version)
         result.reason = (
-            f"골든셋 {version.golden_set_version}에 {job.task} 정답이 없어 평가할 수 없습니다"
+            f"골든셋 {version.golden_set_version}에 고정한 {job.task} 정답이 없어 평가할 수 "
+            f"없습니다. 라벨링·검수 전에 고정한 버전이면 {hint}"
         )
         return result
     has_deployed = bool(list_model_versions(conn, job.task, ModelStatus.DEPLOYED))
@@ -318,7 +331,7 @@ def run_training_job(  # noqa: C901
     # 배포 모델이 없으면 기본 어댑터의 DB 예측과 비교한다. 잘못 적은 버전은 예측이 비어 기존 지표가
     # 0에 가까워지고 어떤 후보든 통과하므로, 골든셋에 예측이 없는 버전이 하나라도 있으면 멈춘다.
     baseline_golden = (
-        _merged_golden(conn, version.golden_set_version, job)
+        _merged_golden(conn, version.golden_set_version, job, golden)
         if job.baseline_versions and not has_deployed
         else None
     )
@@ -503,15 +516,22 @@ def _frozen_golden_set(conn: sa.Connection, golden_version: str) -> GoldenSet:
     return golden_set
 
 
-def _merged_golden(conn: sa.Connection, golden_version: str, job: TrainingJob) -> list[SessionData]:
+def _merged_golden(
+    conn: sa.Connection, golden_version: str, job: TrainingJob, golden: list[GoldenSession]
+) -> list[SessionData]:
     """여러 기본 어댑터 버전의 예측을 세션별로 합친다 (대신할 어댑터 모두와 비교).
 
-    골든셋에 예측이 하나도 없는 버전이 있으면 TrainingError (버전을 잘못 적었거나 골든셋에
-    프리라벨을 돌리지 않았다).
+    `golden`은 후보 평가에 쓴 `golden_sessions` 결과다. 기존 예측도 같은 읽기(같은 세션·고정
+    정답)에서 만든다. 골든셋에 예측이 하나도 없는 버전이 있으면 TrainingError (버전을 잘못 적었거나
+    골든셋에 프리라벨을 돌리지 않았다).
     """
     try:
         merged = load_golden_merged(
-            conn, golden_version, {job.task: list(job.baseline_versions)}, require_predictions=True
+            conn,
+            golden_version,
+            {job.task: list(job.baseline_versions)},
+            require_predictions=True,
+            sessions=golden,
         )
     except MissingPredictionsError as exc:
         raise TrainingError(f"{exc} (--baseline-version)") from exc

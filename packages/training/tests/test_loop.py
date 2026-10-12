@@ -256,6 +256,26 @@ def test_training_loop_gate_blocks_or_deploys(engine: sa.Engine, tmp_path: Path)
             golden_set_version="golden-legacy",
             now=FIXED_TIME,
         )
+        # 라벨링 전에 세션만 정하며 정답 0개로 고정한 골든셋과 그것을 쓰는 데이터셋 버전
+        insert_golden_set(
+            conn,
+            GoldenSet(
+                version="golden-empty",
+                domain=Domain.CLEANING,
+                session_ids=("gd0", "gd1"),
+                created_at=FIXED_TIME,
+                truth_label_ids=(),
+            ),
+        )
+        build_dataset_version(
+            conn,
+            snapshots,
+            load_dataset_policy(ROOT),
+            version_id="dv-empty",
+            ontology_version="1.0.0",
+            golden_set_version="golden-empty",
+            now=FIXED_TIME,
+        )
 
     # 누적 부족: 기준을 올리면 학습하지 않는다
     strict = policy.tasks["objects"].model_copy(update={"min_examples": 1000})
@@ -272,6 +292,11 @@ def test_training_loop_gate_blocks_or_deploys(engine: sa.Engine, tmp_path: Path)
     with pytest.raises(TrainingError, match="고정하지 않은"):
         run(TrainingJob("objects", "dv-legacy", baseline_versions=BASE, force=True), 1)
     assert not tracker.runs
+    # 정답 0개로 고정한 골든셋: 평가하지 않고 건너뛰며, 다시 고정하는 명령을 사유·경고로 안내한다
+    r_empty = run(TrainingJob("objects", "dv-empty", baseline_versions=BASE, force=True), 1)
+    assert r_empty.status == "skipped" and "--from golden-empty --create" in r_empty.reason
+    assert len(r_empty.warnings) == 1 and "고정한 정답이 없습니다" in r_empty.warnings[0]
+    assert not tracker.runs
 
     # 1) 흔들림이 큰 후보: 첫 배포 기준(HOTA) 미달 → 미배포
     # 기본 어댑터(objects·tools)를 대신하는 과제라 비교할 기본 예측 버전 없이는 평가하지 않는다
@@ -283,6 +308,7 @@ def test_training_loop_gate_blocks_or_deploys(engine: sa.Engine, tmp_path: Path)
     assert not tracker.runs
     r1 = run(TrainingJob("objects", "dv1", params={"jitter_px": 200.0}, baseline_versions=BASE), 1)
     assert r1.status == "rejected", r1.reason
+    assert r1.warnings == []  # 고정한 정답 = 지금 정답
     # 학습 세션 8개마다 (승인 cup, 수정 bucket, 추가 mop). 골든 세션은 들어가지 않는다
     assert sum(r1.examples.values()) == 24
     assert {k.split("/")[1] for k in r1.examples} == {"accepted", "corrected", "added"}

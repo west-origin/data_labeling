@@ -4,7 +4,7 @@
 - 날짜: 2026-10-11
 - 관련: WP7(데이터셋·계보), WP11(평가), WP13(재학습), ADR 0007(골든셋 버전), ADR 0013(평가 하네스),
   ADR 0025(평가 리포트의 비교 기준), T5([학습 루프 구조 검사](../handover/training-loop-review.md)).
-  계약 변경: `GoldenSet.truth_label_ids`, `golden_sets.truth_label_ids` 열(Alembic 0023),
+  계약 변경: `GoldenSet.truth_label_ids`, `golden_sets.truth_label_ids` 열(Alembic 0018, down 0017),
   `schemas/golden_set.schema.json`.
 
 ## 배경
@@ -36,11 +36,17 @@
 4. **리포트에 근거를 남긴다.** 평가 리포트(`golden.json`, `dlp eval golden`의 JSON)의 `golden_truth`에
    골든 버전, 고정 여부(`truth_frozen`), 평가한 세션, 정답 수, 정답 라벨 ID를 정렬해 이은 sha256
    (`truth_label_ids_sha256`)을 남긴다 (`dlp_eval.runner.truth_anchor`). 재학습 루프는 같은 해시를 MLflow
-   파라미터 `golden_truth_sha256`에도 남긴다.
-5. **이전 형식(NULL).** 0023 이전 행은 고정 시점을 알 수 없어 채우지 않는다. `dlp eval golden`은 그런
+   파라미터 `golden_truth_sha256`에도 남긴다. 근거와 평가 입력은 골든셋을 한 번 읽은 같은 결과
+   (`golden_sessions`)에서 만든다 (`load_golden`·`load_golden_merged`의 `sessions=`). 따로 읽으면 그 사이
+   커밋된 사용 중지·라벨 때문에 근거와 실제로 평가한 세션·정답이 달라질 수 있다.
+5. **이전 형식(NULL).** 0018 이전 행은 고정 시점을 알 수 없어 채우지 않는다. `dlp eval golden`은 그런
    골든셋을 현재 라벨로 평가하고 경고와 `truth_frozen: false`를 남긴다. 재학습 루프(`dlp train run`)는
    배포 판정을 재현할 수 없으므로 거부하고 `--from`으로 고정한 새 버전을 쓰라고 안내한다.
-   0023 되돌리기는 고정한 골든셋이 있으면 거부한다.
+   0018 되돌리기(0017로)는 고정한 골든셋이 있으면 거부한다.
+6. **낡은 고정은 경고한다.** 고정한 정답이 비었거나(라벨링 전에 고정) 지금 정답과 다르면(고정 뒤
+   수정·추가) `dlp dataset build --golden`·`dlp eval golden`·`dlp train run`이 경고하고 `--from`으로
+   다시 고정하는 명령을 안내한다 (`dlp_eval.runner.truth_lag`·`refreeze_hint`). 판정은 그대로 고정한
+   정답으로 한다. 재학습 루프가 과제 정답이 없어 건너뛸 때의 사유에도 같은 안내를 붙인다.
 
 ## 결과
 
@@ -49,4 +55,8 @@
 - 골든 라벨을 고친 뒤 평가에 반영하려면 새 골든 버전과 그 버전을 쓰는 새 데이터셋 버전이 필요하다.
 - 남은 일: 골든 영상(미디어) 해시는 고정하지 않는다. 원본은 같은 키에 다른 내용을 올릴 수 없지만
   (`put_immutable`), 스트림 메타데이터(동기화 오프셋 등)는 세션 행에서 바뀔 수 있다. 평가 입력 전체의
-  manifest(스트림 URI·sha256·동기화 값)는 별도 과제다.
+  manifest(스트림 URI·sha256·동기화 값)는 별도 과제다. 따라서 [학습 루프 구조 검사](../handover/training-loop-review.md)
+  권장 순서 4의 완료 기준("같은 평가 입력 버전은 정답·미디어 해시가 불변") 중 이 결정이 채우는 것은
+  정답 부분뿐이다. T5를 닫을 때 미디어·동기화 값 고정은 별도 미해결 항목으로 남긴다.
+- `golden_sets` 행 갱신을 막는 DB 트리거는 두지 않았다. 정답을 바꾸는 코드 경로가 없다는 것이
+  불변의 근거다 (DB를 직접 고치면 막지 못한다).
