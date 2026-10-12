@@ -225,7 +225,7 @@ def _print_report(report: EvalReport, out: Path, gate: bool) -> None:
     for name, s in report.by_error.items():
         print(f"  {name}: {s.flagged}/{s.total} 지적, ok {s.ok}, 판단 불가 {s.unsure}, "
               f"미판정 {s.unjudged}(장애·중단), 미계획 {s.unplanned}, "
-              f"제안 일치 {s.exact}/{s.expected}")  # fmt: skip
+              f"제안 일치 {s.exact}/{s.expected} (표현 불가 {s.unattainable})")  # fmt: skip
     for kind, k in report.by_kind.items():
         print(f"  종류 {kind}: 틀린 라벨 {k.wrong_flagged}/{k.wrong} 지적 · 깨끗한 라벨 "
               f"{k.clean_flagged}/{k.clean} 지적")  # fmt: skip

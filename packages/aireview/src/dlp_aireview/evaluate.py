@@ -25,7 +25,9 @@
 
 지표 (`score`)
     - 오류 종류별·라벨 종류별: 탐지(wrong·suspect) 재현율, ok 수(틀린 라벨을 ok라 함), 제안 정확
-      일치(제안 페이로드가 정답과 같음, 삭제는 삭제 제안).
+      일치(제안으로 정할 수 있는 종류·필드가 정답과 같음, 삭제는 삭제 제안). 분모는 제안으로 표현할
+      수 있는 정답뿐이다: 행동 손 바꿈·경계만 고친 수정·삭제할 수 없는 종류의 삭제처럼 맞출 수 없는
+      것은 `unattainable`로 따로 센다 (정답을 아는 판정기의 일치율이 1이 되게).
     - 전체: 틀린 라벨 탐지 재현율(`wrong_recall`), 깨끗한 라벨 오지적률(`false_flag_rate`), **ok
       놓침률(`ok_miss_rate`) = P(틀린 라벨 | AI ok)** = 틀린 라벨의 ok 수 / 모든 ok 수 (설계 7.2와
       `dlp_review.ops.ai_quality`의 ok 놓침률 P(바뀜 | AI ok)와 같은 정의. `review.yaml
@@ -436,7 +438,9 @@ class ErrorStat(Contract):
 
     # total: 대상 수. flagged: wrong·suspect 수. ok: AI ok 수. unsure: 판단 불가 수.
     # unjudged: 계획했지만 판정이 없는 수 (장애·중단). unplanned: 계획되지 않아 판정이 없는 수
-    # (블러본 없는 스트림 등). expected / exact: 정답 제안이 있는 수와 제안이 그 정답과 같은 수.
+    # (블러본 없는 스트림 등). expected / exact: 제안으로 표현할 수 있는 정답 제안이 있는 수와
+    # 제안이 그 정답과 같은 수 (제안 키 필드로 비교, `_attainable`·`_matches`). unattainable: 정답
+    # 제안이 있지만 제안으로 표현할 수 없는 수 (손 바꿈·경계만 고침 등, expected에서 뺀다).
     total: int = 0
     flagged: int = 0
     ok: int = 0
@@ -445,6 +449,7 @@ class ErrorStat(Contract):
     unplanned: int = 0
     expected: int = 0
     exact: int = 0
+    unattainable: int = 0
 
     @property
     def recall(self) -> float | None:
@@ -503,18 +508,60 @@ class EvalReport(Contract):
     golden_truth: dict[str, Any] | None = None
 
 
+# 라벨 종류 → 제안으로 정할 수 있는 페이로드 필드 (`schema.SUGGEST_FIELDS_BY_KIND`의 제안 키를
+# 페이로드 필드 이름으로, `suggest.materialize`). 종류 변경(action↔gap)은 kind로 따로 본다. 경계·손
+# (행동)·action_id·접촉 시각 등 나머지 필드는 제안으로 정하지 못한다
+_SUGGESTABLE: dict[str, tuple[str, ...]] = {
+    "action": ("verb", "target_id", "tool_id"),
+    "gap": ("gap_type",),
+    "hand_state": ("contact_target_kind", "target_id", "grasp_type", "body_part"),
+    "event": ("event_type", "severity"),
+    "segment": ("ref_id",),
+    "object_state": ("value",),
+    "box_track": ("class_id",),
+    "keypoint_track": ("hand",),
+}
+
+
+def _view(p: LabelPayload) -> tuple[Any, ...]:
+    """제안으로 정할 수 있는 부분만 본 페이로드 (종류 + `_SUGGESTABLE` 필드 값)."""
+    return (p.kind, *(getattr(p, f, None) for f in _SUGGESTABLE.get(p.kind, ())))
+
+
+def _attainable(judged: LabelPayload, t: Truth, policy: AiReviewPolicy) -> bool:
+    """정답 제안을 제안으로 표현할 수 있는가 (정답을 아는 판정기라면 맞출 수 있는가).
+
+    삭제는 정책 `response.suggest.delete_kinds` 종류만. 종류 변경은 action↔gap이고
+    `kind_change`가 켜졌을 때만. 같은 종류면 제안 키 필드 중 하나라도 달라야 한다 (손 바꿈·경계만
+    고친 수정은 바꿀 것이 없는 제안이라 맞출 수 없다).
+    """
+    suggest = policy.response.suggest
+    if t.delete:
+        return judged.kind in suggest.delete_kinds
+    if t.expected is None:
+        return False
+    if t.expected.kind != judged.kind:
+        return suggest.kind_change and {judged.kind, t.expected.kind} == {"action", "gap"}
+    return _view(t.expected) != _view(judged)
+
+
 def _matches(v: AiVerdict, t: Truth) -> bool:
-    """제안이 정답 제안과 같은가."""
+    """제안이 정답 제안과 같은가 (삭제는 삭제 제안, 그 밖은 `_view`가 같음)."""
     s = v.suggestion
     if s is None:
         return False
     if t.delete:
         return s.op == "delete"
-    return s.payload is not None and s.payload == t.expected
+    return (
+        s.payload is not None and t.expected is not None and _view(s.payload) == _view(t.expected)
+    )
 
 
-def _add(stat: ErrorStat, v: AiVerdict | None, t: Truth, planned: bool) -> ErrorStat:
-    """집계에 대상 하나를 더한 새 값. planned: 그 대상이 계획한 단위에 들었는가."""
+def _add(
+    stat: ErrorStat, v: AiVerdict | None, t: Truth, planned: bool, attainable: bool
+) -> ErrorStat:
+    """집계에 대상 하나를 더한 새 값. planned: 그 대상이 계획한 단위에 들었는가. attainable: 정답
+    제안을 제안으로 표현할 수 있는가 (`_attainable`)."""
     data = stat.model_dump()
     data["total"] += 1
     if v is None:
@@ -524,8 +571,11 @@ def _add(stat: ErrorStat, v: AiVerdict | None, t: Truth, planned: bool) -> Error
         data["ok"] += v.verdict is AiVerdictValue.OK
         data["unsure"] += v.verdict is AiVerdictValue.UNSURE
     if t.wrong and (t.delete or t.expected is not None):
-        data["expected"] += 1
-        data["exact"] += v is not None and _matches(v, t)
+        if not attainable:
+            data["unattainable"] += 1
+        else:
+            data["expected"] += 1
+            data["exact"] += v is not None and _matches(v, t)
     return ErrorStat.model_validate(data)
 
 
@@ -588,7 +638,9 @@ def score(
             key = (sid, x.label_id)
             t, v = case.truth[x.label_id], judged.verdicts.get(key)
             planned = judged.planned is None or key in judged.planned
-            by_error[t.error] = _add(by_error.get(t.error, ErrorStat()), v, t, planned)
+            attainable = _attainable(x.payload, t, policy)
+            stat = by_error.get(t.error, ErrorStat())
+            by_error[t.error] = _add(stat, v, t, planned, attainable)
             if (
                 v is not None
                 and v.confidence is not None

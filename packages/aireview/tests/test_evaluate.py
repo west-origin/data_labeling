@@ -394,3 +394,31 @@ def test_eval_ignores_selection_mode_and_counts_only_chosen_groups(
     )  # fmt: skip
     assert "class_swap" not in only.by_error and only.wrong_recall == 1.0
     assert all(s.unjudged == 0 and s.unplanned == 0 for s in only.by_error.values())
+
+
+def test_suggestion_exact_rate_counts_only_attainable_suggestions(
+    tmp_path: Path, policy: AiReviewPolicy, ontology: Ontology
+) -> None:
+    """제안 정확 일치는 제안으로 표현할 수 있는 오류만 분모에 넣고, 제안 키 필드로 비교한다.
+
+    정답 근거: 행동↔사이 구간 제안의 새 페이로드는 action_id(`h-<손>-<시작>`)·접근 시각·접촉 시각을
+    정할 수 없고, 손(hand_swap)·경계는 제안 키가 아니다. 정답을 아는 오라클이면 표현할 수 있는
+    오류(action_to_gap·verb_swap)의 일치율은 1이고, hand_swap은 분모에서 빠진다(unattainable).
+    """
+    db = db_scene(tmp_path, n_units=3)
+    truth = [_human(x) for x in db.scene.labels]
+    rates = {"action_to_gap": 0.4, "verb_swap": 0.3, "hand_swap": 0.3}
+    case = perturb_case(db.scene.session, truth, rates, seed=4, o=ontology, policy=policy)
+    errors = {t.error for t in case.truth.values()}
+    assert {"action_to_gap", "hand_swap", "verb_swap"} <= errors, errors
+    judged = _judge(db, [case], OracleJudge(truth), policy, tmp_path)
+    report = score(
+        [case], judged, policy, mode="perturb", golden_version="g1", same_model_as_actions=False
+    )
+    gap = report.by_error["action_to_gap"]
+    assert gap.flagged == gap.total and gap.expected == gap.total and gap.exact == gap.expected
+    verb = report.by_error["verb_swap"]
+    assert verb.expected == verb.total and verb.exact == verb.expected
+    swapped = report.by_error["hand_swap"]
+    assert swapped.expected == 0 and swapped.unattainable == swapped.total
+    assert report.suggestion_exact_rate == 1.0
