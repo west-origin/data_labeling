@@ -21,6 +21,15 @@ alerts:
   # 검수 시간과 수정률이 이 주 수 동안 줄지 않으면 가이드라인·온톨로지 점검 경고
   # 최소 2. 첫 주와 마지막 주를 비교하므로 너무 짧으면 잡음에 민감하다
   stagnation_weeks: 4
+  # AI 1차 검수 (WP17.8, ADR 0040 7.3, `dlp ops weekly`의 AI 절). 마지막 주만 본다. 자료가 없으면 경고 없음.
+  # 대조군(holdout) ok 놓침률의 보수적 95% 상한이 이보다 높으면 경고. review.yaml sampling.max_defect_ratio와
+  # 같은 값으로 둔다 (AI의 맞음이 표본 허용 결함률보다 나쁘면 믿을 근거가 없다)
+  ai_ok_miss_upper95_max: 0.05
+  # 판정을 기다리는 영상 시간(prelabeled·승인, 완료 실행·건너뜀 없음)이 이보다 많으면 경고.
+  # 하루 영상 164시간 기준 이틀치
+  ai_backlog_hours_max: 328
+  ai_fallback_rate_max: 0.05        # 응답 형식 실패(fallback) 단위 비율이 이보다 높으면 경고
+  ai_cache_hit_min: 0.3             # 접두사 캐시 적중 토큰 비율이 이보다 낮으면 경고
 
 # 원본 접근 감사 (월 1회 검토)
 audit:
@@ -39,6 +48,9 @@ audit:
     - review.assign
     - review.collect
     - review.serve
+    # AI 1차 검수 (WP17.5): 장갑 접촉 문장을 프리라벨과 같은 함수로 계산하려고 장갑 Parquet만 읽는다.
+    # 영상 프레임은 원본이 아니라 라벨링 버킷의 승인된 블러본에서만 얻는다 (ADR 0040 I1).
+    - aireview.run
   # 원본을 볼 수 있는 사람 = config/policies/review.yaml reviewers.privacy + 아래
   # 원본 버킷 이름·용도 문자열이 아니라 사람 ID(DLP_ACTOR, 검수 담당자 ID)를 적는다. 예: 감사인, 보안 담당
   raw_viewers: []

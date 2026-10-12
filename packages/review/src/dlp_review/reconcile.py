@@ -11,7 +11,7 @@ WP6, ADR 0006·0002(라벨은 덮어쓰지 않는다: 수정은 새 레코드 + 
 파이프라인 위치: `dlp_review.collect.collect_task`가 도구 결과를 변환기(`cvat`·`labelstudio`)로
 `ReviewedItem`으로 바꾼 뒤 이 모듈의 `reconcile`을 부른다. 순수 함수이며 DB를 쓰지 않는다.
 
-공개 이름: `ReviewedItem`, `ReviewOutcome`, `reconcile`.
+공개 이름: `ReviewedItem`, `ReviewOutcome`, `same_as_sent`, `reconcile`.
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from dlp_schema.aireview import AiOutcome
 from dlp_schema.common import derived_id
 from dlp_schema.labels import (
     LabelPayload,
@@ -65,6 +66,8 @@ class ReviewOutcome:
     reissue_assignments: list[str] = field(default_factory=list[str])
     # 배정 없이 만든 열린 작업의 (담당자, 스트림, 도구) (`dlp review create … --stream --tool`)
     direct_reissue: list[tuple[str, str, str]] = field(default_factory=list[tuple[str, str, str]])
+    # AI 1차 검수 결과 기록 (노출 기록이 있는 작업, `ai_collect.record_outcome`이 채운다)
+    ai: AiOutcome | None = None
 
     @property
     def corrected(self) -> int:
@@ -82,10 +85,12 @@ class ReviewOutcome:
         return sum(1 for r in self.new_records if r.parent_label_id is None)
 
 
-def _same(a: LabelRecord, b: ReviewedItem) -> bool:
+def same_as_sent(a: LabelRecord, b: ReviewedItem) -> bool:
     """도구로 보낸 형태(normalize 적용 후)와 돌아온 항목이 같은가.
 
     페이로드 전체, 시작·끝 시각, 스트림이 모두 같아야 같다 (검수 상태·출처는 보지 않는다).
+    `reconcile`(승인 판정)과 AI 제안 적용(`ai_collect.apply_decisions`, 검수자가 구간을 그대로
+    둔 채 적용했는지)이 같은 기준을 쓴다.
     """
     return (
         a.payload == b.payload
@@ -184,7 +189,7 @@ def reconcile(
         if origin.label_id in seen:
             raise ValueError(f"검수 결과에 같은 원래 라벨이 두 번 나옵니다: {origin.label_id}")
         seen.add(origin.label_id)
-        if _same(sent[origin.label_id], item):
+        if same_as_sent(sent[origin.label_id], item):
             outcome.approved.append(origin.label_id)
         else:
             outcome.new_records.append(record(item, origin))

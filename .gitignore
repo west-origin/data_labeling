@@ -12,6 +12,8 @@ dist/
 
 # 로컬 환경
 .env
+# DGX Spark VLM 서버 설정 (키 포함, services/vlm/vlm.env.example에서 복사)
+services/vlm/vlm.env
 .DS_Store
 .idea/
 .vscode/

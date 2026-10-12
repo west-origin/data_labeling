@@ -1,6 +1,7 @@
 """참조 구현과의 일치 테스트.
 
-pycocotools(mAP), TrackEval(HOTA·IDF1·CLEAR), scikit-learn(macro F1·카파).
+pycocotools(mAP), TrackEval(HOTA·IDF1·CLEAR), scikit-learn(macro F1·카파),
+scipy(Clopper-Pearson 상한).
 
 WP11 완료 기준("가능한 지표는 기존 참조 구현과 결과 일치")의 테스트. 시드를 고정한 무작위 입력을
 우리 구현과 참조 라이브러리에 똑같이 넣고, 참조 라이브러리의 출력을 정답으로 본다. 참조
@@ -189,3 +190,84 @@ def test_classification_metrics_match_sklearn(seed: int) -> None:
     pred = [t if rng.random() < 0.7 else str(rng.choice(labels)) for t in truth]
     assert macro_f1(truth, pred) == pytest.approx(f1_score(truth, pred, average="macro"), abs=1e-12)
     assert cohen_kappa(truth, pred) == pytest.approx(cohen_kappa_score(truth, pred), abs=1e-12)
+
+
+@pytest.mark.parametrize("seed", range(3))
+def test_weighted_kappa_and_ece_match_references(seed: int) -> None:
+    """표본 가중 카파는 scikit-learn `cohen_kappa_score(sample_weight=…)`와 같고, 정수 가중치의
+    카파·ECE는 표본을 그만큼 반복한 값과 같다. 가중치를 주지 않으면 예전 값과 같다."""
+    from sklearn.metrics import cohen_kappa_score
+
+    from dlp_eval.metrics.classification import ece
+
+    rng = np.random.default_rng(seed)
+    a = [bool(x) for x in rng.random(120) < 0.4]
+    b = [x if rng.random() < 0.8 else not x for x in a]
+    w = [float(x) for x in rng.integers(1, 6, 120)]
+    ref = cohen_kappa_score(a, b, sample_weight=w)
+    assert cohen_kappa(a, b, w) == pytest.approx(ref, abs=1e-12)
+    rep_a = [x for x, k in zip(a, w, strict=True) for _ in range(int(k))]
+    rep_b = [x for x, k in zip(b, w, strict=True) for _ in range(int(k))]
+    assert cohen_kappa(a, b, w) == pytest.approx(cohen_kappa(rep_a, rep_b), abs=1e-12)
+    assert cohen_kappa(a, b) == pytest.approx(cohen_kappa_score(a, b), abs=1e-12)
+    conf = [float(x) for x in rng.random(120)]
+    rep_conf = [c for c, k in zip(conf, w, strict=True) for _ in range(int(k))]
+    rep_ok = [x for x, k in zip(a, w, strict=True) for _ in range(int(k))]
+    assert ece(conf, a, weights=w) == pytest.approx(ece(rep_conf, rep_ok), abs=1e-12)
+    assert ece(conf, a, weights=[1.0] * 120) == pytest.approx(ece(conf, a), abs=1e-12)
+
+
+@pytest.mark.parametrize(("k", "n", "w"), [(0, 5, 3.0), (1, 5, 20.0), (4, 9, 0.5), (7, 7, 2.0)])
+def test_weighted_upper_equals_clopper_pearson_for_equal_weights(k: int, n: int, w: float) -> None:
+    """가중치가 모두 같으면 유효 표본 수 = n이라 가중 상한이 Clopper-Pearson 상한과 같다."""
+    from dlp_eval.metrics.proportion import clopper_pearson_upper, weighted_upper
+
+    assert weighted_upper([w] * k, [w] * n) == pytest.approx(clopper_pearson_upper(k, n), abs=1e-12)
+
+
+def test_weighted_upper_hand_example() -> None:
+    """손 계산: 가중치 4인 표본 2개(사건 없음) + 가중치 20인 표본 5개(사건 1개) → 비율 20/108,
+    유효 표본 수 n* = 108²/(2·16 + 5·400) = 11664/2032, x* = (20/108)·n*. 상한 =
+    Beta(0.95; x*+1, n*-x*). 빈 표본은 NaN, 잘못된 입력은 ValueError."""
+    import math
+
+    from scipy.stats import beta
+
+    from dlp_eval.metrics.proportion import weighted_upper
+
+    n_eff = 108**2 / (2 * 16 + 5 * 400)
+    x = 20 / 108 * n_eff
+    want = float(beta.ppf(0.95, x + 1, n_eff - x))
+    assert weighted_upper([20.0], [4.0, 4.0, *[20.0] * 5]) == pytest.approx(want, abs=1e-12)
+    assert math.isnan(weighted_upper([], []))
+    with pytest.raises(ValueError):
+        weighted_upper([5.0], [1.0])
+    with pytest.raises(ValueError):
+        weighted_upper([], [-1.0])
+
+
+@pytest.mark.parametrize(("k", "n"), [(0, 1), (0, 10), (1, 10), (3, 40), (12, 12), (7, 250)])
+def test_clopper_pearson_upper_matches_scipy_binomtest(k: int, n: int) -> None:
+    """한쪽 Clopper-Pearson 상한이 scipy `binomtest(alternative="less")`의 정확 구간 상한과 같다.
+    손 계산: k=0이면 1 - (1-신뢰)^(1/n) (n=10, 95% → 0.2589)."""
+    from scipy.stats import binomtest
+
+    from dlp_eval.metrics.proportion import clopper_pearson_upper
+
+    ref = binomtest(k, n, alternative="less").proportion_ci(confidence_level=0.95, method="exact")
+    assert clopper_pearson_upper(k, n) == pytest.approx(ref.high, abs=1e-12)
+    if k == 0:
+        assert clopper_pearson_upper(k, n) == pytest.approx(1 - 0.05 ** (1 / n), abs=1e-12)
+
+
+def test_clopper_pearson_upper_edges() -> None:
+    """시행이 없으면 NaN, 범위 밖 입력은 ValueError."""
+    import math
+
+    from dlp_eval.metrics.proportion import clopper_pearson_upper
+
+    assert math.isnan(clopper_pearson_upper(0, 0))
+    with pytest.raises(ValueError):
+        clopper_pearson_upper(3, 2)
+    with pytest.raises(ValueError):
+        clopper_pearson_upper(0, 3, confidence=1.0)

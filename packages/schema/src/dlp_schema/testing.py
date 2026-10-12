@@ -9,6 +9,8 @@
     - `make_label`: 사람 출처 라벨 하나 (세션 `s001`, 온톨로지 1.0.0).
     - `action_payload`: 온톨로지 v1에서 유효한 원시 동작(grasp) 페이로드 사전.
     - `sqlite_db`: 시간대를 보존하는 SQLite 테스트 DB (서비스 없이 저장소 함수를 시험할 때).
+    - AI 1차 검수 기록(WP17): `AI_VERSION`, `AI_TARGET_RULE`, `make_ai_verdict`, `make_ai_run`,
+      `make_ai_unit`.
 
 주의
     - 기본 세션의 스트림 URI는 원본 버킷(`s3://dlp-raw/...`)을 가리킨다. 실제 저장소에 접근하지 않는
@@ -18,12 +20,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 
 import sqlalchemy as sa
 from sqlalchemy.dialects.sqlite import DATETIME as SQLITE_DATETIME
 
+from dlp_schema.aireview import AiReviewRun, AiReviewUnit, AiTargetRule, AiVerdict
 from dlp_schema.labels import LabelPayload, LabelRecord, Provenance, Source
 from dlp_schema.session import Session, StreamKind, SyncMethod
 
@@ -135,6 +139,118 @@ def action_payload(**overrides: Any) -> dict[str, Any]:
     }
     data.update(overrides)
     return data
+
+
+# 테스트용 AI 판정 버전 (`aireview-<정책 해시 12자>+vlm-<모델>` 형식)
+AI_VERSION = "aireview-0123456789ab+vlm-Qwen/Qwen3-VL-8B-Instruct"
+# 판정 대상 조건의 정책 값 (config/policies/aireview.yaml kinds·temporal.long_max_span_ms와 같은 값,
+# 검수 화면 판정률 분모 테스트용)
+AI_TARGET_RULE = AiTargetRule(
+    kinds=frozenset(
+        ("action", "gap", "hand_state", "event", "segment", "object_state", "box_track",
+         "keypoint_track")
+    ),
+    sources=frozenset({"model"}),
+    long_max_span_ms=600_000,
+)  # fmt: skip
+
+
+def make_ai_verdict(label_id: str, value: str = "ok", **overrides: Any) -> AiVerdict:
+    """AI 판정 하나 (기본: 행동 라벨, ok). wrong·suspect는 문제 wrong_verb, unsure는 not_visible.
+
+    Args:
+        label_id: 판정한 라벨.
+        value: ok | suspect | wrong | unsure.
+        **overrides: 그 밖의 `AiVerdict` 필드 (예: `kind`, `suggestion`, `answered`).
+    """
+    data: dict[str, Any] = {
+        "label_id": label_id,
+        "kind": "action",
+        "verdict": value,
+        "reason_ko": "AI: 문제 없음" if value == "ok" else "동사가 다름",
+    }
+    if value in ("wrong", "suspect"):
+        data["problems"] = ("wrong_verb",)
+    if value == "unsure":
+        data["problems"] = ("not_visible",)
+    data.update(overrides)
+    return AiVerdict.model_validate(data)
+
+
+def make_ai_run(
+    session_id: str = "s001", run_id: str = "air-run-" + "0" * 24, **overrides: Any
+) -> AiReviewRun:
+    """AI 판정 실행 세대 하나 (바디캠 렌더 해시 a…, 센서 없음, 전량 선택, 시각 FIXED_TIME).
+
+    Args:
+        session_id: 세션.
+        run_id: 실행 ID (`air-run-` + 16진수 24자).
+        **overrides: 그 밖의 `AiReviewRun` 필드.
+    """
+    data: dict[str, Any] = {
+        "run_id": run_id,
+        "session_id": session_id,
+        "version": AI_VERSION,
+        "policy_digest": "0123456789ab",
+        "prompt_version": 1,
+        "backend": {
+            "kind": "openai_compatible",
+            "model": "Qwen/Qwen3-VL-8B-Instruct",
+            "fingerprint": "vllm-bf16",
+            "endpoints": ("spark-01",),
+            "same_model_as_actions": False,
+        },
+        "ontology_version": "1.0.0",
+        "render_hashes": {"bodycam": "a" * 64},
+        "sensor_sha256": "absent",
+        "selection": {"mode": "all", "audit_ratio": 0.05},
+        "plan_digest": "0" * 16,
+        "planned_units": 1,
+        "created_at": FIXED_TIME,
+    }
+    data.update(overrides)
+    return AiReviewRun.model_validate(data)
+
+
+def make_ai_unit(
+    unit_id: str,
+    verdicts: Sequence[AiVerdict],
+    *,
+    run_id: str = "air-run-" + "0" * 24,
+    session_id: str = "s001",
+    **overrides: Any,
+) -> AiReviewUnit:
+    """AI 판정 단위 하나 (temporal, 바디캠 0~10초, 렌더 해시 a…, 대상 = 판정 순서).
+
+    Args:
+        unit_id: 단위 ID (`air-` + 16진수 24자).
+        verdicts: 대상마다 판정 하나 (대상 라벨 ID는 이 순서).
+        run_id: 처음 쓴 실행.
+        session_id: 세션.
+        **overrides: 그 밖의 `AiReviewUnit` 필드.
+    """
+    data: dict[str, Any] = {
+        "unit_id": unit_id,
+        "run_id": run_id,
+        "session_id": session_id,
+        "version": AI_VERSION,
+        "group": "temporal",
+        "stream_id": "bodycam",
+        "t_start_ms": 0,
+        "t_end_ms": 10_000,
+        "target_label_ids": tuple(v.label_id for v in verdicts),
+        "render_hash": "a" * 64,
+        "sensor_sha256": "absent",
+        "ontology_version": "1.0.0",
+        "prompt_digest": "b" * 64,
+        "outcome": "answered",
+        "attempts": 1,
+        "sub_requests": 1,
+        "verdicts": tuple(verdicts),
+        "created_at": FIXED_TIME,
+    }
+    data.update(overrides)
+    return AiReviewUnit.model_validate(data)
 
 
 class _AwareSqliteDateTime(SQLITE_DATETIME):

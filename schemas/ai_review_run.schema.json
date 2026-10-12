@@ -1,0 +1,220 @@
+{
+  "$defs": {
+    "AiBackendRecord": {
+      "additionalProperties": false,
+      "description": "실행이 쓴 판정 백엔드. 엔드포인트는 이름만 남긴다 (URL·키 아님).",
+      "properties": {
+        "endpoints": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Endpoints",
+          "type": "array"
+        },
+        "external": {
+          "const": false,
+          "default": false,
+          "title": "External",
+          "type": "boolean"
+        },
+        "fingerprint": {
+          "title": "Fingerprint",
+          "type": "string"
+        },
+        "kind": {
+          "const": "openai_compatible",
+          "title": "Kind",
+          "type": "string"
+        },
+        "model": {
+          "title": "Model",
+          "type": "string"
+        },
+        "same_model_as_actions": {
+          "title": "Same Model As Actions",
+          "type": "boolean"
+        },
+        "served_model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Served Model"
+        }
+      },
+      "required": [
+        "kind",
+        "model",
+        "fingerprint",
+        "same_model_as_actions"
+      ],
+      "title": "AiBackendRecord",
+      "type": "object"
+    },
+    "AiSelectionRecord": {
+      "additionalProperties": false,
+      "description": "실행의 단위 선택 방식 (판정 버전에는 들어가지 않는다).",
+      "properties": {
+        "audit_ratio": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Audit Ratio",
+          "type": "number"
+        },
+        "mode": {
+          "enum": [
+            "all",
+            "flagged"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "reasons": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Reasons",
+          "type": "array"
+        }
+      },
+      "required": [
+        "mode",
+        "audit_ratio"
+      ],
+      "title": "AiSelectionRecord",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "실행 세대 하나 (계획을 고정한 기록).",
+  "properties": {
+    "backend": {
+      "$ref": "#/$defs/AiBackendRecord"
+    },
+    "blurred_sha256": {
+      "patternProperties": {
+        "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "title": "Blurred Sha256",
+      "type": "object"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "ontology_version": {
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "title": "Ontology Version",
+      "type": "string"
+    },
+    "plan_digest": {
+      "pattern": "^[0-9a-f]{16}$",
+      "title": "Plan Digest",
+      "type": "string"
+    },
+    "planned_units": {
+      "minimum": 0,
+      "title": "Planned Units",
+      "type": "integer"
+    },
+    "policy_digest": {
+      "pattern": "^[0-9a-f]{12}$",
+      "title": "Policy Digest",
+      "type": "string"
+    },
+    "prompt_version": {
+      "minimum": 1,
+      "title": "Prompt Version",
+      "type": "integer"
+    },
+    "render_hashes": {
+      "patternProperties": {
+        "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        }
+      },
+      "title": "Render Hashes",
+      "type": "object"
+    },
+    "requested_by": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Requested By"
+    },
+    "run_id": {
+      "pattern": "^air-run-[0-9a-f]{24}$",
+      "title": "Run Id",
+      "type": "string"
+    },
+    "selection": {
+      "$ref": "#/$defs/AiSelectionRecord"
+    },
+    "sensor_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "const": "absent",
+          "type": "string"
+        }
+      ],
+      "title": "Sensor Sha256"
+    },
+    "session_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Session Id",
+      "type": "string"
+    },
+    "version": {
+      "pattern": "^aireview-[0-9a-f]{12}\\+vlm-\\S+$",
+      "title": "Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "run_id",
+    "session_id",
+    "version",
+    "policy_digest",
+    "prompt_version",
+    "backend",
+    "ontology_version",
+    "render_hashes",
+    "sensor_sha256",
+    "selection",
+    "plan_digest",
+    "planned_units",
+    "created_at"
+  ],
+  "title": "AiReviewRun",
+  "type": "object"
+}

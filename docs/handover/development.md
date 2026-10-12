@@ -128,6 +128,25 @@ serve|assign|register-webhooks|refresh-urls|plan|qa|quality`, 작업의 CVAT 계
 )
 ```
 
+## VLM 서버
+
+행동 분류(`dlp actions run`)와 AI 1차 검수(`dlp aireview`, WP17)는 사내 OpenAI 호환 VLM 서버가 필요하다.
+장비는 NVIDIA DGX Spark, 서빙은 vLLM으로 정했다 (ADR 0040). 띄우는 법·보안 설정·처리량 실측·Arm64
+점검표는 [VLM 서버 안내](vlm-server.md), compose는 `services/vlm/`다. 개발 호스트에는 띄우지 않는다
+(lakeFS가 8000 포트를 쓴다). CI와 단위 테스트는 서버 없이 `OracleVlm`·`OracleJudge` stub,
+`httpx.MockTransport`, 127.0.0.1에 뜨는 가짜 서버(`dlp_aireview.testing.FakeOpenAIServer`)로만 돈다.
+서버 점검·처리량 벤치·작업량 추정은 `dlp aireview probe|bench|estimate`이고(DB에 쓰지 않는다), 벤치
+보고서는 `reports/aireview-bench/`(Git 제외)에 남는다. 장비 대수를 정하는 절차는 VLM 서버 안내의
+"Spark 실측 절차"다. 판정 실행은 `dlp aireview run <세션>|--pending`(AI 표에만 쓴다, 라벨 이력은 그대로)이고
+상태는 `dlp aireview status`다. 개발 호스트에서 서버 없이 계획만 보려면 `dlp aireview run <세션>
+--dry-run`(블러본 게이트는 거치고, 손 상태 대상이 있으면 단위 키의 센서 해시를 위해 장갑 Parquet은
+읽는다). 실행기 테스트는 `MemorySink`·SQLite·가짜 서버로 `make test`에서,
+세션 잠금 경합·`ON CONFLICT`는 `make test-services`에서 돈다.
+판정 품질은 `dlp review quality --ai [--since ISO] [--ai-thresholds 0.7] [--json]`(대조군 기준 지표,
+DB 읽기만)과 `dlp ops weekly`의 AI 절로 본다. 판정 모델·프롬프트를 바꿀 때는 골든 평가
+`dlp aireview eval --golden <버전> [--mode perturb|history] --gate --vlm-url …`(DB에 쓰지 않는다, 보고서는
+`reports/aireview-eval/`, 게이트는 실패해도 경고만)를 전후로 돌린다.
+
 ## 검사 범위와 자원
 
 | 명령 | 보장하는 범위 | 별도 준비·생략 가능성 |

@@ -4,8 +4,9 @@
 Predictor를 구현하고 결과를 LabelRecord로 낸다. 각 모델에는 CPU에서 바로 도는 stub 구현을 함께
 두며, CI와 다른 모듈 개발은 stub으로 진행한다.
 프레임 단위 블러 탐지기(`dlp_privacy.detection.FrameDetector`), 행동 VLM
-(`dlp_actions.vlm.VlmClient`), 깊이 모델(`dlp_prelabel.lift3d.DepthModel`)은 단계별 인터페이스를
-따로 둔다.
+(`dlp_actions.vlm.VlmClient`), 깊이 모델(`dlp_prelabel.lift3d.DepthModel`), AI 1차 검수 판정
+백엔드(`dlp_aireview.backend.JudgeBackend`, stub `OracleJudge`)는 단계별 인터페이스를 따로 둔다.
+판정 백엔드는 라벨을 내지 않으므로(판정은 라벨이 아니다, ADR 0040) Predictor가 아니다.
 
 위치
     WP8(프리라벨 어댑터)의 공통 계약. `dlp prelabel run`이 프리라벨 어댑터를, `dlp privacy detect`가

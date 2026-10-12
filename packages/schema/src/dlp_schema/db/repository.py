@@ -25,9 +25,12 @@
     - 세션 목록·계보: `list_session_ids`, 골든셋·학습 실행·모델 버전·내보내기·사용 중지 함수,
       `dataset_versions_with_session`.
     - 운영 기록(추가만): 원본 접근·검수 시간·블러 감사·보관 결정의 insert/list.
+    - AI 1차 검수 기록(추가만, 라벨이 아니다)은 `db.aireview_repository`에 따로 둔다 (ADR 0040).
 
 주의
     - 라벨은 불변이다. `record_review` 외에 라벨 행을 바꾸는 함수는 없고, DB 트리거도 막는다.
+    - `record_review`·`insert_labels`는 AI 판정 실행자(`aireview:` 접두사) 검수자 ID를 거부한다
+      (AI 판정은 검수가 아니다, ADR 0040 I3).
     - `insert_labels`는 세션 버전의 DB 사전으로 의미 검증한다. 오류 삽입·이력 삭제는 별도 규칙이다.
       클래스·참조가 해당 온톨로지에 유효한지는 호출 경로에서 별도로 검증해야 한다.
     - 운영 기록 표와 session_lifecycle_events는 추가만 한다
@@ -46,6 +49,7 @@ from typing import Any
 
 import sqlalchemy as sa
 
+from dlp_schema.aireview import AI_REVIEWER_PREFIX
 from dlp_schema.dataset import DatasetVersion
 from dlp_schema.db.locks import lock_model_task as lock_model_task
 from dlp_schema.db.locks import lock_session as lock_session
@@ -515,6 +519,17 @@ def row_to_label(row: Mapping[Any, Any]) -> LabelRecord:
     )
 
 
+def _reject_ai_reviewer(reviewer_id: str | None) -> None:
+    """AI 판정 실행자(`aireview:` 접두사)를 검수자로 쓰면 ValueError (ADR 0040 I3).
+
+    AI 판정은 추가 전용 AI 표(`aireview_repository`)에만 남고 라벨의 검수 상태를 바꾸지 않는다.
+    """
+    if reviewer_id is not None and reviewer_id.startswith(AI_REVIEWER_PREFIX):
+        raise ValueError(
+            f"AI 판정은 검수가 아닙니다: 검수자 {reviewer_id!r}로 검수 상태를 기록할 수 없습니다"
+        )
+
+
 def insert_labels(conn: sa.Connection, labels: Iterable[LabelRecord]) -> int:
     """라벨 레코드를 한 번에 추가한다 (executemany).
 
@@ -526,8 +541,14 @@ def insert_labels(conn: sa.Connection, labels: Iterable[LabelRecord]) -> int:
 
     Returns:
         추가한 행 수.
+
+    Raises:
+        ValueError: 검수자 ID가 AI 판정 실행자(`aireview:` 접두사)인 레코드가 있을 때 (ADR 0040 I3).
     """
     batch = list(labels)
+    for x in batch:
+        # AI 판정 실행자는 검수자가 될 수 없다 (I3). 잠금·검증 전에 거부한다
+        _reject_ai_reviewer(x.verification.reviewer_id)
     if batch:
         # 내보내기 게시의 FOR SHARE 잠금과 같은 세션 행을 쓴다. 배치 잠금은 항상 ID 순서다.
         for sid in sorted({x.session_id for x in batch}):
@@ -584,11 +605,13 @@ def record_review(
         reviewed_at: 검수 시각 (시간대 필수. 이 함수는 검사하지 않으므로 호출자가 지킨다).
 
     Raises:
-        ValueError: state가 unreviewed일 때.
+        ValueError: state가 unreviewed일 때, 검수자 ID가 AI 판정 실행자(`aireview:` 접두사)일 때
+            (AI 판정은 검수가 아니다, ADR 0040 I3).
         KeyError: 라벨이 없을 때.
     """
     if state is VerificationState.UNREVIEWED:
         raise ValueError("검수 기록에는 미검수 외의 상태가 필요합니다")
+    _reject_ai_reviewer(reviewer_id)
     result = conn.execute(
         label_records.update()
         .where(label_records.c.label_id == label_id)

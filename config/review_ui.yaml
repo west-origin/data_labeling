@@ -116,8 +116,11 @@ colors:
     - "#63e6be"
     - "#e599f7"
 
-# 원시 동작 단축키 (Label Studio). 오른손은 이 키, 왼손은 shift+이 키. 키는 서로 달라야 하고,
-# 동사는 온톨로지의 원시 동작이어야 한다.
+# 원시 동작 단축키 (Label Studio). 오른손은 이 키, 왼손은 shift+이 키. 키는 서로 다른 한 글자
+# 키여야 하고, 동사는 온톨로지의 원시 동작이어야 한다. 이 표에 없는 원시 동작(pull·rotate)과 사이
+# 구간·손 상태 라벨은 Label Studio가 남는 키를 설정 순서대로 붙인다 (자동 키: 오른손 pull q·
+# rotate w, 왼손 pull e·rotate t, gap.right:idle a …, 화면 범례에 보인다). 이 표에 키를 더하거나
+# 빼면 그 자동 키가 밀리므로 검수자 안내와 change-guide의 실화면 확인을 같이 한다.
 hotkeys:
   grasp: "1"
   release: "2"
@@ -139,3 +142,23 @@ channels:
 layout:
   video_height: 360
   channel_height: 70
+
+# AI 1차 검수 표시 (Label Studio, WP17.6·ADR 0040). 판정 구간(AI:틀림·AI:의심·AI:판단불가) 색과,
+# 라벨 구간을 고른 뒤 누르는 결정 단축키(제안 적용·AI 지적 기각). 단축키는 한 글자 키이고 위 동사
+# 단축키와 겹치거나, Label Studio 자동 키 후보(1234567890qwetasdfgzxcvbyiopjklnm)·내장 한 글자
+# 단축키(u, [, ])면 로드 오류다 (dlp_review.ui_theme.LS_AUTO_HOTKEYS·LS_RESERVED_KEYS). 후보 안의
+# 키를 쓰면 위 표에 없는 라벨(pull·rotate, 사이 구간, 손 상태)이 Label Studio가 스스로 붙이는 자동
+# 키를 한 칸씩 밀려 받아, 검수자가 누르던 키가 조용히 다른 라벨(손이 바뀐 라벨 포함)을 붙인다
+# (WP17.6 검증: q·w를 쓰자 22개 라벨의 키가 바뀌었다). r·h는 후보 밖이라 자동 키가 WP17.6 전과 같다.
+# 실화면 확인 기록은 docs/handover/change-guide.md "검수 화면 AI 표시 실화면 확인" 절이다. 모양만
+# 바꾸며 AI 컨트롤 이름·라벨 값은 그대로다 (컨트롤은 review.yaml ai_review.mode와 무관하게 늘 설정에
+# 있다).
+ai:
+  colors:
+    wrong: "#ff4d5e"
+    suspect: "#ffc53d"
+    unsure: "#8b93a3"
+    missing: "#b197fc"   # 누락 후보 (표시는 후속, F-AIR-08)
+  hotkeys:
+    apply: r     # 제안 적용 (AI 메모에 "r 적용"으로 보인다)
+    dismiss: h   # AI 지적 기각

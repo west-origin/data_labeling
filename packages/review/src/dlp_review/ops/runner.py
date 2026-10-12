@@ -34,9 +34,10 @@ import sqlalchemy as sa
 
 from dlp_privacy.runner import last_detection, operational_blur
 from dlp_review import roles
+from dlp_review.ai_display import AiDisplayConfig, ai_flagged_spans, escalated_ids, load_ai_view
 from dlp_review.ops.assign import Loads, PlannedUnit, plan
 from dlp_review.ops.policy import ReviewOpsPolicy
-from dlp_review.ops.priority import Unit, flag_unit, unit_priority, units_for
+from dlp_review.ops.priority import Unit, flag_unit, merge_spans, unit_priority, units_for
 from dlp_review.ops.results import (
     FinishResult as FinishResult,
 )
@@ -154,6 +155,63 @@ def _open_loads(conn: sa.Connection, reviewers: Sequence[str]) -> Loads:
     return Loads(reviewers, Counter(open_assignment_counts(conn, reviewers)))
 
 
+def _unit_generation(
+    labels: Sequence[LabelRecord], unit: Unit, previous: Sequence[ReviewAssignment], session_id: str
+) -> str | None:
+    """작업 라벨 단위의 입력 세대 (계획하지 않을 단위면 None).
+
+    라벨이 없거나, 열린 운영 배정이 있거나, 끝난 운영 배정 뒤 새 미검수 모델 입력이 없으면 None.
+    """
+    if not labels:
+        return None  # 라벨이 없는 작업 라벨 단위는 검수할 것이 없다
+    operational = [
+        a
+        for a in previous
+        if a.session_id == session_id
+        and a.stream_id == unit.stream_id
+        and a.label_kinds == unit.kinds
+        and a.mode in (ReviewMode.STANDARD, ReviewMode.QA)
+    ]
+    # 열린 운영 배정이 있으면 먼저 끝낸다. 완료 뒤 새 미검수 모델 입력이 생기면 새 세대다.
+    # 이미 검수한 결과만 남았을 때는 human 수정본 때문에 끝없이 배정을 만들지 않는다.
+    if any(a.status is AssignmentStatus.OPEN for a in operational):
+        return None
+    pending = any(
+        x.provenance.source is Source.MODEL and x.verification.state is VerificationState.UNREVIEWED
+        for x in labels
+    )
+    if operational and not pending:
+        return None
+    digest = hashlib.sha256("|".join(sorted(x.label_id for x in labels)).encode()).hexdigest()
+    return "g" + digest[:8]
+
+
+def _sample(
+    labels: Sequence[LabelRecord], policy: ReviewOpsPolicy, seed: int, exclude: set[str]
+) -> tuple[tuple[str, ...], tuple[str, ...], list[FlaggedSpan]]:
+    """표본 검수: (표본 ID, 보류 ID, 표본 사유 구간). exclude(AI 지적)는 묶음에 넣지 않는다.
+
+    exclude 라벨은 표본·보류 어디에도 없으므로 작업에 반드시 들어간다 (AI는 검수를 늘리기만 한다).
+    """
+    by_id = {x.label_id: x for x in labels}
+    sample: tuple[str, ...] = ()
+    withheld: tuple[str, ...] = ()
+    spans: list[FlaggedSpan] = []
+    for lot in lots([x for x in labels if x.label_id not in exclude], policy.sampling):
+        picked = draw_sample(lot, policy.sampling, seed)
+        sample += picked
+        withheld += tuple(i for i in lot.label_ids if i not in picked)
+        # 표본 라벨 구간도 먼저 볼 구간으로 표시한다 (sample 사유, 가중치 없음)
+        spans += [
+            FlaggedSpan(
+                reason=ReviewReason.SAMPLE, t_start_ms=by_id[i].t_start_ms,
+                t_end_ms=by_id[i].t_end_ms, label_ids=(i,),
+            )
+            for i in picked
+        ]  # fmt: skip
+    return sample, withheld, spans
+
+
 def plan_session(
     conn: sa.Connection,
     session_id: str,
@@ -166,6 +224,7 @@ def plan_session(
     seed_sessions: Sequence[str] = (),
     seed_groups: set[str] | None = None,
     privacy: bool = False,
+    ai: AiDisplayConfig | None = None,
 ) -> list[ReviewAssignment]:
     """세션의 검수 배정을 계획하고 DB(`review_assignments`)에 넣는다. 새로 넣은 배정을 돌려준다.
 
@@ -178,6 +237,10 @@ def plan_session(
     - seed_sessions: 오류 삽입 원천 세션 (골든셋 등). 비면 오류 삽입 배정이 없다.
     - seed_groups: 오류 삽입 원천 단위 묶음을 더 좁힌다.
     - privacy: True면 블러 단위(영상 스트림별)만, False면 작업 라벨 단위만 계획한다.
+    - ai: AI 1차 검수 판정 사용 설정 (`ReviewSetup.ai`, WP17.6). 있으면 작업 라벨 계획에서 세션
+      잠금 뒤 증가 프로필(렌더 무관)의 유효한 판정으로 우선순위 사유(AI_WRONG·AI_SUSPECT·
+      AI_UNSURE, 가중치 `priority.weights`)를 더하고, `ai_review.sampling_exclude` 판정의 라벨을
+      표본 묶음에서 뺀다 (반드시 검수). 블러 계획에는 쓰지 않는다 (I2).
 
     반환: 이번에 삽입한 배정 (이미 같은 ID가 있으면 건너뛰므로 다시 부르면 빈 목록).
     예외: privacy이고 권한자가 아닌 후보가 있으면 `AccessError`.
@@ -191,64 +254,30 @@ def plan_session(
     current = current_labels(history)
     known = known_classes(conn, session_id)
     glove = any(s.kind in (StreamKind.GLOVE_LEFT, StreamKind.GLOVE_RIGHT) for s in session.streams)
+    view = load_ai_view(conn, session_id, current, None, ai) if ai and not privacy else None
+    exclude = escalated_ids(view.escalate, ai.policy) if view and ai else set[str]()
     planned: list[PlannedUnit] = []
     previous = list_assignments(conn, session_id=session_id)
     for unit in units_for(session, policy, privacy=privacy):
         labels = unit.select(current)
-        generation = ""
         if privacy:
             # 블러 단위는 탐지가 0개여도 사람이 영상 전체를 봐야 승인할 수 있다 (ADR 0023 3번).
             # 배정 ID에 세대를 붙여 재탐지·승인 취소 뒤 다시 계획하면 새 배정이 생긴다
-            generation = privacy_generation(
-                history,
-                unit.stream_id or "",
-                latest_privacy_detection(conn, session_id, unit.stream_id or ""),
-            )
-        elif not labels:
-            continue  # 라벨이 없는 작업 라벨 단위는 검수할 것이 없다
+            run = latest_privacy_detection(conn, session_id, unit.stream_id or "")
+            generation = privacy_generation(history, unit.stream_id or "", run)
         else:
-            operational = [
-                a
-                for a in previous
-                if a.session_id == session_id
-                and a.stream_id == unit.stream_id
-                and a.label_kinds == unit.kinds
-                and a.mode in (ReviewMode.STANDARD, ReviewMode.QA)
-            ]
-            # 열린 운영 배정이 있으면 먼저 끝낸다. 완료 뒤 새 미검수 모델 입력이 생기면 새 세대다.
-            # 이미 검수한 결과만 남았을 때는 human 수정본 때문에 끝없이 배정을 만들지 않는다.
-            if any(a.status is AssignmentStatus.OPEN for a in operational):
+            gen = _unit_generation(labels, unit, previous, session_id)
+            if gen is None:
                 continue
-            pending = any(
-                x.provenance.source is Source.MODEL
-                and x.verification.state is VerificationState.UNREVIEWED
-                for x in labels
-            )
-            if operational and not pending:
-                continue
-            generation = (
-                "g"
-                + hashlib.sha256("|".join(sorted(x.label_id for x in labels)).encode()).hexdigest()[
-                    :8
-                ]
-            )
+            generation = gen
         flagged = flag_unit(labels, policy, known_classes=known, glove_session=glove)
+        if view is not None and ai is not None:
+            flagged = merge_spans([*flagged, *ai_flagged_spans(view.escalate, labels, ai.policy)])
         sample: tuple[str, ...] = ()
         withheld: tuple[str, ...] = ()
         if not privacy:  # 블러는 종료 조건 전까지 전수 검수한다
-            by_id = {x.label_id: x for x in labels}
-            for lot in lots(labels, policy.sampling):
-                picked = draw_sample(lot, policy.sampling, seed)
-                sample += picked
-                withheld += tuple(i for i in lot.label_ids if i not in picked)
-                # 표본 라벨 구간도 먼저 볼 구간으로 표시한다 (sample 사유, 가중치 없음)
-                flagged += [
-                    FlaggedSpan(
-                        reason=ReviewReason.SAMPLE, t_start_ms=by_id[i].t_start_ms,
-                        t_end_ms=by_id[i].t_end_ms, label_ids=(i,),
-                    )
-                    for i in picked
-                ]  # fmt: skip
+            sample, withheld, spans = _sample(labels, policy, seed, exclude)
+            flagged += spans
         planned.append(
             PlannedUnit(
                 unit, tuple(flagged), unit_priority(flagged, policy), sample, withheld, generation

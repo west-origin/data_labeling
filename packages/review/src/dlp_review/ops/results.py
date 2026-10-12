@@ -12,6 +12,8 @@ from datetime import datetime
 
 import sqlalchemy as sa
 
+from dlp_review.ai_display import AiDisplayConfig, ai_flagged_spans, escalated_ids, load_ai_view
+from dlp_review.ops.ai_quality import AiQuality, ai_quality
 from dlp_review.ops.measure import Agreement, DetectionRate, agreement, as_items, prelabel_bias
 from dlp_review.ops.policy import ReviewOpsPolicy
 from dlp_review.ops.sampling import judge
@@ -29,6 +31,7 @@ from dlp_schema.episode import current_labels
 from dlp_schema.labels import LabelRecord, Source, VerificationState
 from dlp_schema.review import (
     AssignmentStatus,
+    FlaggedSpan,
     ReviewAssignment,
     ReviewMode,
     ReviewReason,
@@ -47,6 +50,45 @@ class FinishResult:
     sample_verified: int = 0
     # 표본 불합격으로 만든 재검수 배정 ID
     resample_assignment: str | None = None
+    # 표본 합격이지만 AI가 지적해 표본 검증하지 않고 재검수로 보낸 라벨 수와 그 배정 ID (WP17.6)
+    ai_flagged: int = 0
+    ai_flagged_assignment: str | None = None
+
+
+def _follow_up(
+    a: ReviewAssignment, suffix: str, only: tuple[str, ...], flagged: tuple[FlaggedSpan, ...],
+    now: datetime,
+) -> ReviewAssignment:  # fmt: skip
+    """보류 라벨만 다시 보는 재검수 배정 (`<배정>:<suffix>`, 우선순위 +1, 표본 없음)."""
+    return a.model_copy(
+        update={
+            "assignment_id": f"{a.assignment_id}:{suffix}", "flagged": flagged,
+            "sample_label_ids": (), "withheld_label_ids": (), "only_label_ids": only,
+            "task_key": None, "status": AssignmentStatus.OPEN, "created_at": now,
+            "completed_at": None, "priority": a.priority + 1.0,
+        }
+    )  # fmt: skip
+
+
+def _ai_protected(
+    conn: sa.Connection,
+    a: ReviewAssignment,
+    labels: list[LabelRecord],
+    to_verify: tuple[str, ...],
+    ai: AiDisplayConfig | None,
+) -> tuple[set[str], list[FlaggedSpan]]:
+    """표본 합격으로 표본 검증할 라벨 중 AI가 지적한 것 (증가 프로필, 렌더 무관)과 그 사유 구간.
+
+    표본 계획 뒤 늦게 도착한 지적이 있는 보류 라벨은 사람이 보게 한다 (I9). 세션이 다른 스트림의
+    블러 변경으로 AUTO_BLURRED여도 증가 프로필은 렌더를 보지 않아 보호가 꺼지지 않는다 (설계 C10).
+    """
+    if ai is None or not to_verify:
+        return set(), []
+    current = current_labels(labels)
+    view = load_ai_view(conn, a.session_id, current, None, ai)
+    flagged = escalated_ids(view.escalate, ai.policy) & set(to_verify)
+    rows = [x for x in current if x.label_id in flagged]
+    return flagged, ai_flagged_spans(view.escalate, rows, ai.policy)
 
 
 def finish_assignment(
@@ -54,12 +96,17 @@ def finish_assignment(
     a: ReviewAssignment,
     now: datetime,
     policy: ReviewOpsPolicy | None = None,
+    ai: AiDisplayConfig | None = None,
 ) -> FinishResult:
     """배정의 검수 작업이 모두 수집되면 마무리한다 (한 번만).
 
     표본이 있으면 묶음 합격 판정을 적용한다.
 
     policy가 없으면 저장소의 정책을 읽는다 (CLI·웹훅 서버는 넘겨 준다).
+    ai: AI 1차 검수 판정 사용 설정 (`ReviewSetup.ai`, 없으면 끔). 있으면 합격으로 표본 검증할 라벨
+    중 증가 프로필 판정이 `ai_review.sampling_exclude`인 라벨을 표본 검증하지 않고
+    `<배정>:ai-flagged` 재검수 배정(그 라벨만, 우선순위 +1)으로 보낸다. AI의 ok는 아무것도 줄이지
+    않는다 (WP17.6, ADR 0040 I9).
 
     부작용: 배정 상태 done 갱신, 합격이면 나머지 라벨에 `sample_verified` 기록(검수자 ID
     `sampling:<배정>`), 불합격이면 재검수 배정(`<배정>:resample`, 보류 라벨만, 우선순위 +1) 삽입.
@@ -96,27 +143,23 @@ def finish_assignment(
     )
     result.sample_accepted = verdict.accepted
     if verdict.accepted:
-        for label_id in verdict.to_verify:
+        protected, spans = _ai_protected(conn, a, labels, verdict.to_verify, ai)
+        verify = [i for i in verdict.to_verify if i not in protected]
+        for label_id in verify:
             record_review(
-                conn,
-                label_id,
-                VerificationState.SAMPLE_VERIFIED,
-                f"sampling:{a.assignment_id}",
+                conn, label_id, VerificationState.SAMPLE_VERIFIED, f"sampling:{a.assignment_id}",
                 now,
-            )
-        result.sample_verified = len(verdict.to_verify)
+            )  # fmt: skip
+        result.sample_verified = len(verify)
+        if protected:
+            only = tuple(i for i in verdict.to_verify if i in protected)
+            follow = _follow_up(a, "ai-flagged", only, tuple(spans), now)
+            insert_assignment(conn, follow)
+            result.ai_flagged, result.ai_flagged_assignment = len(only), follow.assignment_id
     elif verdict.accepted is False and a.withheld_label_ids:
         # 불합격: 보류했던 라벨만 다시 보는 재검수 배정 (표본 사유 구간은 뺀다)
-        follow = a.model_copy(
-            update={
-                "assignment_id": f"{a.assignment_id}:resample",
-                "flagged": tuple(s for s in a.flagged if s.reason is not ReviewReason.SAMPLE),
-                "sample_label_ids": (), "withheld_label_ids": (),
-                "only_label_ids": a.withheld_label_ids, "task_key": None,
-                "status": AssignmentStatus.OPEN, "created_at": now, "completed_at": None,
-                "priority": a.priority + 1.0,
-            }
-        )  # fmt: skip
+        kept = tuple(s for s in a.flagged if s.reason is not ReviewReason.SAMPLE)
+        follow = _follow_up(a, "resample", a.withheld_label_ids, kept, now)
         insert_assignment(conn, follow)
         result.resample_assignment = follow.assignment_id
     return result
@@ -130,6 +173,8 @@ class QualityReport:
     detection: list[DetectionRate] = field(default_factory=list[DetectionRate])
     double: dict[str, Agreement] = field(default_factory=dict[str, Agreement])  # 배정 → 일치도
     blind_bias: dict[str, float] = field(default_factory=dict[str, float])  # 배정 → 프리라벨 편향
+    # AI 1차 검수 판정 품질 (`dlp review quality --ai`, WP17.8). 요청하지 않으면 None
+    ai: AiQuality | None = None
 
 
 def shown_prelabels(
@@ -167,8 +212,17 @@ def shown_prelabels(
     return [shown[i] for i in sorted(shown)]
 
 
-def quality_report(conn: sa.Connection, policy: ReviewOpsPolicy) -> QualityReport:
+def quality_report(
+    conn: sa.Connection,
+    policy: ReviewOpsPolicy,
+    *,
+    ai_window: tuple[datetime, datetime] | None = None,
+) -> QualityReport:
     """끝난(done) 배정 전체로 검수 품질을 잰다. 읽기만 한다.
+
+    ai_window: [since, until)를 주면 그 기간의 AI 1차 검수 판정 품질(`ops.ai_quality.ai_quality`)도
+    낸다 (결과 기록은 수집 시각, 노출은 작업 생성 시각 기준). 이중 일치도·블라인드 편향은 짝 표준
+    배정의 노출 집단별로도 나눈다 (자동화 편향 감시).
 
     - 오류 삽입 배정: 넣은 오류마다 `seeding.detected`로 발견 여부를 담당자별로 센다.
     - 이중 배정: 짝 표준 배정이 끝났으면, 단위의 현재 운영 라벨과 이 배정의 `double` 측정 레코드의
@@ -228,4 +282,10 @@ def quality_report(conn: sa.Connection, policy: ReviewOpsPolicy) -> QualityRepor
                 mp.match_iou,
             )
     report.detection = [DetectionRate(r, total[r], found[r]) for r in sorted(total)]
+    if ai_window is not None:
+        report.ai = ai_quality(
+            conn, *ai_window, double_kappa={k: v.kappa for k, v in report.double.items()},
+            blind_bias=report.blind_bias,
+            pairs={a.assignment_id: a.pair_id for a in done if a.pair_id is not None},
+        )  # fmt: skip
     return report

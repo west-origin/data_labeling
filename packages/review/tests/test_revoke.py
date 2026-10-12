@@ -905,6 +905,10 @@ def test_verification_gaps_report_revocation_work(
     assert any(
         r.startswith("회수돼 다시 만들 배정 1개") and "dlp review assign A" in r for r in got
     )
+    # AI 판정을 쓰면 렌더 뒤·다시 만들기 전에 판정을 다시 돌린다 (이전 판정은 렌더 해시가 달라
+    # 보이지 않는다, ADR 0040 I10, WP17.6)
+    [reissue] = [r for r in got if r.startswith("회수돼 다시 만들 배정")]
+    assert f"렌더 → (AI 1차 검수를 쓰면) dlp aireview run {SID} 뒤 dlp review assign A" in reissue
     assert not any(r.startswith("블러가 바뀐 뒤") for r in got)
 
 
@@ -935,6 +939,7 @@ def test_verification_waits_for_reissue_of_revoked_direct_tasks(
 
     [reason] = direct()
     assert reason.startswith("회수돼 다시 만들 직접 작업 2개")
+    assert f"렌더 → (AI 1차 검수를 쓰면) dlp aireview run {SID} 뒤 dlp review create" in reason
     for tool in ("label_studio", "cvat"):
         assert (
             f"dlp review create {SID} --stage labeling --assignee labeler02 --stream bodycam "

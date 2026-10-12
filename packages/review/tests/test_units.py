@@ -299,8 +299,8 @@ def test_label_studio_event_attributes_round_trip_and_new_events(ontology: Ontol
     """
     config = label_config(ontology)
     assert 'name="severity"' in config and 'name="related_action_id"' in config
-    # 이벤트 입력란 3개 + 손 상태 접촉 대상 입력란 2개 (F-REV-03)
-    assert config.count('perRegion="true"') == 5
+    # 이벤트 입력란 3개 + 손 상태 접촉 대상 입력란 2개 (F-REV-03) + AI 메모·결정 2개 (WP17.6)
+    assert config.count('perRegion="true"') == 7
 
     # 기존 이벤트: 속성이 입력란 결과로도 나가고, 그대로 돌아온다
     slip = make_label(

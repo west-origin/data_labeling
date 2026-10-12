@@ -11,8 +11,8 @@
   포함).
 
 공개 함수:
-- `used_models(root)` — 정책 YAML(privacy·prelabel·actions)이 실제로 쓰는 모델을 "쓰는 곳 → 모델
-  이름"으로 모은다. `tests/test_model_licenses.py`도 이 함수를 쓴다.
+- `used_models(root)` — 정책 YAML(privacy·prelabel·actions·aireview)이 실제로 쓰는 모델을 "쓰는 곳 →
+  모델 이름"으로 모은다. `tests/test_model_licenses.py`도 이 함수를 쓴다.
 
 주의: 라벨링 데이터를 판매하므로 가중치가 비상업(`forbidden`)이면 쓰지 않는다 (ADR 0010). 새 모델을
 정책에 넣으면 `config/models.yaml`에 라이선스·학습 데이터·`commercial`을 함께 적어야 `licenses`가
@@ -26,6 +26,7 @@ import subprocess
 from pathlib import Path
 
 from dlp_actions.policy import load_policy as load_actions_policy
+from dlp_aireview.policy import load_policy as load_aireview_policy
 from dlp_models.registry import fetch, load_registry
 from dlp_prelabel.policy import load_policy as load_prelabel_policy
 from dlp_privacy.policy import load_policy as load_privacy_policy
@@ -51,6 +52,7 @@ def used_models(root: Path) -> dict[str, str]:
       탐지기가 다시 쓰는 하위 탐지기(`region_detector`, `face_detector`)까지 따라간다.
     - `prelabel.models.<역할>` — 프리라벨 정책의 `models` 절 전부.
     - `actions.vlm.model` — 행동 분류 VLM.
+    - `aireview.backend.model` — AI 1차 검수 판정 VLM (WP17, ADR 0040).
 
     인자:
         root: 저장소 루트 (`config/policies/*.yaml`을 읽는다).
@@ -76,6 +78,7 @@ def used_models(root: Path) -> dict[str, str]:
     for role, model in load_prelabel_policy(root).models.model_dump().items():
         used[f"prelabel.models.{role}"] = model
     used["actions.vlm.model"] = load_actions_policy(root).vlm.model
+    used["aireview.backend.model"] = load_aireview_policy(root).backend.model
     return used
 
 

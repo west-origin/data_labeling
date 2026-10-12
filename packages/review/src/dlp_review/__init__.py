@@ -1,7 +1,7 @@
 """검수 도구 연동 (WP6 검수 도구, WP12 검수 운영).
 
 관련 ADR: 0006(검수 도구 연동), 0014(검수 운영), 0015·0023·0024(감사 정정), 0020(원본 접근 감사),
-0028·0029(생애주기 기록, 검수 완료 판정), 0039(블러 변경 뒤 배포 매체 회수).
+0028·0029(생애주기 기록, 검수 완료 판정), 0039(블러 변경 뒤 배포 매체 회수), 0040(AI 1차 검수).
 
 파이프라인 위치: 자동 블러·프리라벨이 끝난 세션의 라벨을 사람이 검수하는 단계다.
 `dlp review create|collect|serve|revoke|refresh-urls|register-webhooks|plan|assign|queue|qa|quality|
@@ -30,6 +30,9 @@ verify`
 - `refresh`: 열린 Label Studio 작업의 서명 URL을 다시 서명한다 (`dlp review refresh-urls`,
   F-REV-08).
 - `ops`: 검수 운영 (우선순위·표본·배정·오류 삽입·품질 측정).
+- `ai_display`: AI 1차 검수 판정(참고용, 라벨 아님)을 검수 화면에 표시하고(Label Studio 예측·CVAT
+  이슈) 노출 기록·대조군을 정하며, 사람 검수를 늘리는 쪽(우선순위·표본 제외·마무리 보호·required
+  게이트)으로만 쓴다 (WP17.6, ADR 0040, `review.yaml ai_review`).
 
 주의점:
 - 시간: 시간 구간 라벨은 마스터 타임라인 정수 ms, 공간 라벨 키프레임은 그 스트림 영상 PTS ms다

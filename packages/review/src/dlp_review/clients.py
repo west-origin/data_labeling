@@ -500,10 +500,18 @@ class LabelStudioClient:
         """
         task = _check(self.http.post("/api/tasks", json={"project": project_id, "data": data}))
         if results:
-            body = {"task": task["id"], "result": results, "model_version": PRELABEL_VERSION}
-            _check(self.http.post("/api/predictions", json=body))
-            self._use_prelabel_version(project_id)
+            self.add_prediction(project_id, int(task["id"]), results)
         return int(task["id"])
+
+    def add_prediction(self, project_id: int, task_id: int, results: list[dict[str, Any]]) -> None:
+        """작업에 프리라벨 예측(모델 버전 `PRELABEL_VERSION`)을 올린다 (`create_task`가 쓴다).
+
+        AI 1차 검수를 얹을 때는 작업 키로 노출 집단을 정한 뒤 올리므로 작업 생성과 나눠 부른다
+        (`tasks.create_labeling_tasks`, WP17.6). 예측은 주석이 아니라 수집되지 않는다.
+        """
+        body = {"task": task_id, "result": results, "model_version": PRELABEL_VERSION}
+        _check(self.http.post("/api/predictions", json=body))
+        self._use_prelabel_version(project_id)
 
     def _use_prelabel_version(self, project_id: int) -> None:
         """프로젝트가 보여 줄 예측 버전을 프리라벨 버전으로 맞춘다 (예측이 생긴 뒤에만 가능)."""

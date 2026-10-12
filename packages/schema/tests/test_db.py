@@ -15,10 +15,11 @@ import pytest
 import sqlalchemy as sa
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
+from alembic.script import ScriptDirectory
 from sqlalchemy.exc import DBAPIError
 
 from dlp_schema.dataset import DatasetVersion, Split
-from dlp_schema.db.migrate import downgrade, upgrade
+from dlp_schema.db.migrate import alembic_config, downgrade, upgrade
 from dlp_schema.db.repository import (
     TransitionError,
     active_privacy_hold,
@@ -43,6 +44,14 @@ from dlp_schema.lineage import ModelStatus
 from dlp_schema.ontology import Ontology
 from dlp_schema.session import LifecycleState, SyncMethod
 from dlp_schema.testing import FIXED_TIME, action_payload, make_label, make_session
+
+
+def test_migrations_have_single_head() -> None:
+    """마이그레이션 head가 하나다 (같은 리비전을 잇는 두 브랜치를 병합하면 head가 둘이 되어
+    `upgrade(url)`이 실패한다. 예: 0018과 0019가 모두 0017을 이을 때, 나중에 병합하는 쪽이
+    0019의 down_revision을 0018로 바꾼다 — ADR 0040)."""
+    heads = ScriptDirectory.from_config(alembic_config("sqlite://")).get_heads()
+    assert len(heads) == 1, f"head가 여럿이다: {heads} (나중 리비전의 down_revision을 고친다)"
 
 
 def test_migrations_match_table_definitions(tmp_path: Path) -> None:

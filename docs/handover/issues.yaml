@@ -16,6 +16,7 @@
 #   note      (선택) 보충
 # 영역 코드: SCH(schema) REV(review) PMS(privacy·media·sync) PAR(prelabel·actions·relations·models)
 #            ETA(evaluation·training·active·datasets) COE(cli·export·ops·fixtures·스크립트)
+#            AIR(AI 1차 검수 WP17의 범위 밖 후속·위험, 출처 ADR 0040. 전수 검수 보고의 건수 표에는 세지 않는다)
 # 검사: tests/test_issue_registry.py (ID 형식·중복, 값, 경로, 재현 테스트, 문서 속 ID 대응).
 
 issues:
@@ -57,10 +58,16 @@ issues:
      files: [packages/training/src/dlp_train/loop.py], source: docs/handover/training-loop-review.md}
   - {id: T3, title: 학습 도중 철회된 세션의 모델이 배포될 수 있음, severity: high, status: open, kind: code,
      files: [packages/training/src/dlp_train/loop.py, packages/datasets/src/dlp_datasets/lineage.py], source: docs/handover/training-loop-review.md}
-  - {id: T4, title: 직접 deploy() 호출은 게이트 통과·후보 ID를 검사하지 않음, severity: medium, status: open, kind: code,
-     files: [packages/training/src/dlp_train/loop.py], source: docs/handover/training-loop-review.md}
-  - {id: T5, title: 같은 골든 버전이어도 정답이 현재 라벨로 바뀜, severity: medium, status: open, kind: code,
-     files: [packages/evaluation/src/dlp_eval/runner.py], source: docs/handover/training-loop-review.md}
+  - {id: T4, title: "직접 deploy() 호출은 게이트 통과·후보 ID를 검사하지 않음", severity: medium, status: fixed, kind: code,
+     files: [packages/training/src/dlp_train/loop.py], source: docs/handover/training-loop-review.md,
+     note: "deploy()가 루프 자동 배포·CLI approve·직접 호출 모두에서 _verified_report로 리포트의 후보 ID·게이트 통과·비교 기준을 확인한다. 회귀: packages/training/tests/test_loop.py"}
+  - {id: T5, title: "같은 골든 버전이어도 정답이 현재 라벨로 바뀜", severity: medium, status: fixed, kind: code,
+     files: [packages/evaluation/src/dlp_eval/runner.py], source: docs/handover/training-loop-review.md,
+     note: "골든셋 버전을 만들 때 정답 라벨 ID를 고정한다(GoldenSet.truth_label_ids, ADR 0041, Alembic 0018). 평가·재학습 게이트는 고정 ID로 정답을 읽고 리포트에 golden_truth 해시를 남기며, 정답 수정은 dlp dataset golden --from으로 새 버전. 회귀: packages/evaluation/tests/test_runner.py, packages/cli/tests/test_golden_cmds.py. 미디어·동기화 값 고정은 T6, golden_sets UPDATE 금지 트리거는 미정"}
+  - {id: T6, title: "골든 평가 입력의 미디어·동기화 값을 고정하지 않음", severity: medium, status: open, kind: code,
+     files: [packages/evaluation/src/dlp_eval/runner.py, packages/schema/src/dlp_schema/lineage.py], source: docs/handover/training-loop-review.md,
+     see: [T5],
+     note: "truth_anchor는 정답 라벨 ID 해시만 담는다. 스트림 URI·sha256·동기화 오프셋·드리프트는 세션 행에서 바뀔 수 있어 같은 골든 버전이라도 평가 입력이 달라질 수 있다 (ADR 0041 남은 일)"}
 
   # ── 온톨로지 구조 검사 (ontology-structure-review.md) ──
   - {id: O1, title: 사전 밖 동사가 저장을 통과, severity: high, status: fixed, kind: code,
@@ -91,7 +98,8 @@ issues:
   - {id: A-07, title: 끝 슬레이트 seek 직후 프레임·sync adjust 실수 ms, severity: low, status: candidate, kind: code,
      files: [packages/sync/src/dlp_sync/slate.py], source: docs/handover/audit-notes.md}
   - {id: A-08, title: "행동: VFR 프레임 수 부족, VLM 4xx를 장애로 처리, gap tool_id 미검사", severity: low, status: candidate, kind: code,
-     files: [packages/actions/src/dlp_actions/vlm.py, packages/actions/src/dlp_actions/runner.py], source: docs/handover/audit-notes.md}
+     files: [packages/actions/src/dlp_actions/vlm.py, packages/actions/src/dlp_actions/runner.py], source: docs/handover/audit-notes.md,
+     note: "4xx 부분은 WP17.1에서 해소 (dlp_models.vlm.VlmRequestError, 재시도 없이 dlp actions run 종료 5, ADR 0040). VFR 프레임 수·gap tool_id 부분은 남음 (고치면 행동 버전이 바뀌므로 actions.yaml vlm.prompt_version 결정과 함께)"}
   - {id: A-09, title: reconcile 128자 초과 ID 앞부분 잘림, severity: low, status: superseded, kind: code,
      files: [packages/review/src/dlp_review/reconcile.py], source: docs/handover/audit-notes.md, see: [F-REV-05]}
   - {id: A-10, title: "lead_seconds가 취소·서비스 계정 주석 시간도 더함", severity: low, status: fixed, kind: code,
@@ -292,7 +300,8 @@ issues:
      files: [packages/prelabel/src/dlp_prelabel/lift3d.py], source: docs/handover/full-review-2026-10-11.md}
   - {id: F-PAR-12, title: unresolved 대상 ID가 세 YAML에 있고 일치 검사 없음, severity: low, status: open, kind: comment,
      files: [packages/prelabel/src/dlp_prelabel/policy.py, config/policies/prelabel.yaml, config/policies/relations.yaml, config/policies/actions.yaml],
-     source: docs/handover/full-review-2026-10-11.md}
+     source: docs/handover/full-review-2026-10-11.md,
+     note: "WP17에서 config/policies/aireview.yaml에도 같은 값이 생겼다. aireview와 actions는 tests/test_policy_consistency.py가 대조하고 prelabel·relations는 아직 대조하지 않는다"}
   - {id: F-PAR-13, title: 사람 접촉 관계 테스트가 빈 자리 검사에 닿지 않음, severity: low, status: open, kind: test,
      files: [packages/relations/tests/test_relations.py], source: docs/handover/full-review-2026-10-11.md}
   - {id: F-PAR-14, title: "프리라벨 접촉 단계 입력 해시가 고른 손 트랙이 아닌 전체 트랙 ID 기준", severity: low, status: open, kind: code,
@@ -345,3 +354,48 @@ issues:
      files: [packages/cli/src/dlp_cli/pilot_cmds.py], source: docs/handover/full-review-2026-10-11.md}
   - {id: F-COE-12, title: ops off_hours 범위 검증 없음, severity: low, status: open, kind: code,
      files: [packages/ops/src/dlp_ops/policy.py], source: docs/handover/full-review-2026-10-11.md}
+
+  # ── WP17 AI 1차 검수: 이번 범위 밖 후속 과제와 위험 (ADR 0040 "범위 밖") ──
+  - {id: F-AIR-01, title: 행동 VLM이 후보 구간마다 직렬로 물어 장비 대수를 정할 수 있음, severity: medium, status: open, kind: code,
+     files: [packages/actions/src/dlp_actions/pipeline.py, packages/actions/src/dlp_actions/clients.py], source: docs/adr/0040-ai-first-pass-review.md,
+     note: "segment_hand가 후보마다 요청 하나를 직렬로 보내고 sample_frames가 요청마다 영상을 다시 연다. 병렬·창 단위 묶기·공용 프레임 추출기는 행동 버전을 바꾸므로 actions.yaml vlm.prompt_version 결정과 함께 한다. WP17.3 estimate --include-actions로 실측"}
+  - {id: F-AIR-02, title: Label Studio 수집이 결과의 from_name을 보지 않아 AI 컨트롤 결과가 섞이면 수집 실패, severity: medium, status: fixed, kind: code,
+     files: [packages/review/src/dlp_review/labelstudio.py], source: docs/adr/0040-ai-first-pass-review.md,
+     note: "WP17.6에서 from_name이 있고 labels가 아닌 결과를 건너뛰게 했다 (from_name 없는 결과는 labels로 본다). packages/review/tests/test_units.py·test_ai_display.py, services test_ls_ai_feasibility.py·test_ai_display_flow.py(AI 결과·결정이 섞인 주석 수집)가 막는다"}
+  - {id: F-AIR-03, title: 오류 삽입 작업에 AI를 보이지 않아 "AI 없음" 화면이 측정 작업 신호가 될 수 있음, severity: low, status: candidate, kind: product,
+     files: [packages/review/src/dlp_review/ops/seeding.py, packages/review/src/dlp_review/ops/ai_quality.py], source: docs/adr/0040-ai-first-pass-review.md,
+     note: "사본의 원천이 골든 단위라 판정이 없다. WP17.8에서 누출을 잰다: dlp review quality --ai의 '오류 삽입 누출'(블라인드 아닌 AI 없음 화면 중 오류 삽입 비율 대 전체), dlp ops weekly AI 절 seeded_leak. 사본 판정 여부는 파일럿 값으로 정한다"}
+  - {id: F-AIR-04, title: AI 충돌 기반 표적 QA 비율 미정, severity: low, status: open, kind: product,
+     files: [packages/review/src/dlp_review/ops/assign.py], source: docs/adr/0040-ai-first-pass-review.md,
+     note: "QA는 무작위 표본을 유지한다 (충돌 우선으로 고르면 QA 기반 품질 지표가 편향된다). 표적 QA를 따로 둘지 후속 결정"}
+  - {id: F-AIR-05, title: AI 판정 표의 파티션·보관 정책 없음, severity: low, status: open, kind: ops,
+     files: [packages/schema/src/dlp_schema/aireview.py], source: docs/adr/0040-ai-first-pass-review.md,
+     note: "추가 전용 표(WP17.4)라 지울 수 없고 연 수천만 판정이 단위 행 JSON에 쌓인다. 사용 중지 세션(F-REV-17)의 판정 행도 남는다. 보관 ADR 필요"}
+  - {id: F-AIR-06, title: CVAT 공간 검수의 AI 표시 2단계(트랙 속성 결정) 미정, severity: low, status: open, kind: product,
+     files: [packages/review/src/dlp_review/cvat.py], source: docs/adr/0040-ai-first-pass-review.md,
+     note: "1단계는 이슈 메모만 단다. 2단계(새 프로젝트에 dlp_ai·dlp_ai_decision 속성)는 WP17.9 파일럿 뒤 결정"}
+  - {id: F-AIR-07, title: 경계 이동 제안은 표시만 하고 적용하지 않음, severity: low, status: open, kind: product,
+     files: [packages/aireview/src/dlp_aireview/suggest.py], source: docs/adr/0040-ai-first-pass-review.md,
+     note: "기준 문서가 VLM은 경계를 정하지 않는다고 정했다. boundary_early·late 문제 유형만 남긴다"}
+  - {id: F-AIR-08, title: 누락 발견(missing) 표시 기본 끔, severity: low, status: open, kind: product,
+     files: [config/policies/aireview.yaml], source: docs/adr/0040-ai-first-pass-review.md,
+     note: "response.max_findings 0. 잡음·스키마 비용 때문에 파일럿에서 켤지 정한다. 응답 재검사(값·프레임·상자 범위, 같은 종류 라벨과 겹침 제거, 이유 안전 검사)는 구현했고 검수 화면 표시(LS AI:누락?, CVAT 이슈)는 WP17.6 뒤 후속"}
+  - {id: F-AIR-09, title: 장갑+영상 융합 접촉의 영상 대상은 AI가 판정하지 않음, severity: low, status: open, kind: product,
+     files: [packages/aireview/src/dlp_aireview/plan.py, packages/prelabel/src/dlp_prelabel/runner.py], source: docs/adr/0040-ai-first-pass-review.md,
+     note: "결정(장갑 센서 출처 라벨 제외)에 따라 장갑이 관여한 접촉(증거 OBSERVED: 장갑만·융합)을 통째로 뺀다. 융합 접촉의 대상(영상 근거)만 판정할지, 프리라벨 증거 규칙을 바꾸는 다른 자동 손 상태 단계가 생길 때 표시를 어떻게 둘지는 파일럿 뒤 결정"}
+  - {id: F-AIR-10, title: 골든 게이트 실패를 차단할지 미정 (지금은 경고만), severity: low, status: open, kind: product,
+     files: [config/policies/aireview.yaml, packages/aireview/src/dlp_aireview/evaluate.py, packages/cli/src/dlp_cli/aireview_eval_cmds.py], source: docs/adr/0040-ai-first-pass-review.md,
+     note: "결정에 따라 dlp aireview eval --gate가 실패해도 종료 0이다 (gate.block false). 파일럿(WP17.9) 골든 결과를 보고 block을 true로 바꿀지(종료 1) 정한다. 평가는 장갑 원본을 읽지 않아 손 상태의 센서 대조 문제 유형을 재지 않고, MLflow에 기록하지 않는다"}
+  - {id: F-AIR-11, title: 층화 ok 놓침률의 합친 상한이 층별 상한의 가중 합(보수적 근사), severity: low, status: open, kind: product,
+     files: [packages/review/src/dlp_review/ops/ai_quality.py], source: docs/adr/0040-ai-first-pass-review.md,
+     note: "층별 한쪽 95% 상한을 모집단 크기로 가중해 합친다. 층마다 따로 95%라 합친 값의 동시 신뢰 수준은 더 낮고 값은 보수적(크다)이다. 층 안의 비율은 행 표본 가중(배정마다 다른 가중치, 검증 지적 반영)이고 가중치가 섞인 층의 상한은 Kish 유효 표본 수로 낸 Korn-Graubard 근사다(dlp_eval.metrics.proportion.effective_upper). 사람 생략 ADR(ADR 0040 8절)의 근거로 쓰기 전에 층화 구간 방법(층 결합, 묶음 군집 분산)을 정한다. 검수 시간 효과도 지적 밀도 층으로 나누지 않았다"}
+  - {id: F-AIR-13, title: 보낸 뒤 다른 단계가 바꾼 라벨의 종류를 검수자가 Label Studio에서 바꿔 붙이면 원 라벨 없는 새 레코드가 남음, severity: medium, status: open, kind: code,
+     files: [packages/review/src/dlp_review/collect.py, packages/review/src/dlp_review/labelstudio.py], source: docs/adr/0040-ai-first-pass-review.md,
+     note: "AI와 무관한 기존 수집 경로 결함 (WP17.7 검증에서 발견). 종류를 바꿔 붙인 구간은 원 라벨 ID를 잃어(labelstudio._reviewed_item) parent 없는 새 레코드가 되고, drop_retracted는 parent가 있는 결과만 빼므로 그 레코드가 남는다. 다른 단계가 지운 라벨이 다른 종류로 되살아나거나 새 버전 라벨과 같은 손·구간에 겹친다. AI 적용 경로는 stale 라벨에 적용하지 않게 막았다(ai_collect, test_ai_collect.py::test_stale_label_apply_is_invalid_now). 새로 그린 구간과 종류 변경을 구별할 근거(원 라벨 ID 보존)가 필요하다.",
+     repro: tests/test_known_defects.py::test_relabel_of_a_retracted_label_does_not_revive_it}
+  - {id: F-AIR-14, title: 골든 평가 history 방식의 맥락에 정답으로 쓰지 않은 사람 추가 레코드가 남음, severity: low, status: open, kind: product,
+     files: [packages/aireview/src/dlp_aireview/evaluate.py], source: docs/adr/0040-ai-first-pass-review.md,
+     note: "맥락은 대상·후손·정답으로 쓴 레코드(같은 손·구간을 다른 종류로 다시 그린 레코드)를 뺀 현재 라벨이다. 검수자가 따로 새로 그린 레코드(예: 지운 행동 자리에 짧은 행동 둘)는 판정 시점에 없던 정보지만 맥락에 남아 history 지표가 약간 낙관적일 수 있다. 판정 시점의 이력(검수 전 상태)으로 맥락을 되돌리는 방법은 파일럿 뒤 정한다"}
+  - {id: F-AIR-12, title: "AI 끔(mode off)으로 수집하면 검수자가 고른 AI 결정을 버리고 결과 기록도 남기지 않음", severity: low, status: open, kind: product,
+     files: [packages/review/src/dlp_review/ai_collect.py, config/policies/review.yaml], source: docs/adr/0040-ai-first-pass-review.md,
+     note: "off의 뜻(AI 표를 읽지 않는다)대로 동작한다. advisory로 만든 작업을 off로 바꾼 뒤 수집하면 적용 결정과 대조군 결과가 빠진다. 모드를 바꾸기 전에 열린 작업을 수집하거나, 수집만은 노출 기록을 따르게 할지 파일럿 뒤 정한다"}

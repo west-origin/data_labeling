@@ -10,9 +10,11 @@ from datetime import timedelta
 from typing import Any
 
 from dlp_prelabel.contact import ContactInterval
+from dlp_prelabel.policy import load_policy
 from dlp_prelabel.runner import (
     WEARER_PREFIX,
     _has_live_wearer,  # pyright: ignore[reportPrivateUsage]
+    contact_label,
     contact_target_kind,
     drop_protected_contacts,
     drop_protected_trajectories,
@@ -26,6 +28,7 @@ from dlp_schema.labels import (
     BoxKeyframe,
     BoxTrackPayload,
     CoordinateFrame,
+    Evidence,
     Hand,
     HandStatePayload,
     Keypoint,
@@ -41,7 +44,7 @@ from dlp_schema.labels import (
     VerificationState,
 )
 from dlp_schema.ontology import load_ontology
-from dlp_schema.testing import FIXED_TIME, make_label
+from dlp_schema.testing import FIXED_TIME, make_label, make_session
 
 MODEL: dict[str, Any] = {
     "provenance": Provenance(source=Source.MODEL, model_version="m1"),
@@ -193,6 +196,35 @@ def test_hand_track_choice_is_deterministic() -> None:
         assert picked[Hand.RIGHT].keyframes[0].points[0].x == 5.0
     # 검수된 것이 없으면 더 새로 만든 트랙
     assert pick_hand_tracks([new_short, old_long])[Hand.LEFT].keyframes[0].points[0].x == 2.0
+
+
+def test_contact_label_marks_glove_evidence_observed() -> None:
+    """접촉 라벨의 증거 표시: 장갑이 관여한 접촉(장갑만·융합)은 OBSERVED, 영상만은 INFERRED.
+
+    AI 1차 검수가 이 표시로 장갑 센서에서 나온 접촉을 판정 대상에서 뺀다 (`dlp_aireview.plan.
+    glove_derived`, ADR 0040 결정 5). 장갑만 잡은 접촉은 대상을 몰라 unresolved, 신뢰도는 출처별
+    정책 값이다.
+    """
+    policy = load_policy(repo_root())
+    session = make_session("s-contact")
+    intervals = {
+        source: ContactInterval(1_000, 1_500, None if source == "glove" else "bucket_01", source)
+        for source in ("glove", "fused", "video")
+    }
+    version = "contact-heuristic-1+pX+iY"
+    made = {
+        source: contact_label(session, version, Hand.LEFT, 3, c, "object", policy, FIXED_TIME)
+        for source, c in intervals.items()
+    }
+    assert {k: v.evidence for k, v in made.items()} == {
+        "glove": Evidence.OBSERVED, "fused": Evidence.OBSERVED, "video": Evidence.INFERRED,
+    }  # fmt: skip
+    glove = made["glove"]
+    assert glove.label_id.startswith("s-contact-contact-") and glove.label_id.endswith("-left-0003")
+    assert glove.stream_id is None and glove.provenance.source is Source.MODEL
+    assert isinstance(glove.payload, HandStatePayload)
+    assert glove.payload.target_id == policy.contact.unresolved_target_id
+    assert glove.confidence == policy.contact.confidence.glove
 
 
 def _box_track(label_id: str, entity: str, x: float, **kw: Any) -> LabelRecord:

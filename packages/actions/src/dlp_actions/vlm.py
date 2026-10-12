@@ -8,6 +8,8 @@
   (vlm.unavailable_backoff_s)만큼 기다리며 다시 묻고, 끝내 실패하면 미상으로 두지 않고
   VlmUnavailableError를 올린다 (세션 실행을 멈춘다: 장애를 미상으로 쓰면 같은 버전이라 재실행이
   건너뛰어 영구히 미상으로 남는다). 모르는 구간을 대기(idle)로 처리하지 않는다.
+- 4xx(설정 오류, VlmRequestError)는 다시 물어도 같으므로 재시도 없이 바로 올린다 (WP17.1).
+  두 오류와 백오프·재시도 규칙은 공통 모듈 `dlp_models.vlm`에 있고 여기서 다시 내보낸다.
 
 주요 항목: `SegmentRequest`(구간 요청), `VlmAnswer`(응답 형식), `Classified`(결과), `VlmClient`
 (클라이언트 프로토콜), `response_schema`, `build_prompt`, `validate_answer`, `classify`.
@@ -24,6 +26,9 @@ from typing import Any, Literal, Protocol
 
 from pydantic import Field, ValidationError
 
+from dlp_models.vlm import VlmRequestError as VlmRequestError
+from dlp_models.vlm import VlmUnavailableError as VlmUnavailableError
+from dlp_models.vlm import ask_validated, with_backoff
 from dlp_schema.common import Contract
 from dlp_schema.labels import Hand
 from dlp_schema.ontology import Ontology
@@ -87,15 +92,11 @@ class Classified:
     fallback: bool = False  # 재시도 후에도 실패해 미상으로 둠
 
 
-class VlmUnavailableError(RuntimeError):
-    """VLM 서버 오류·시간 초과. classify가 백오프하며 재시도하고, 끝내 실패하면 다시 올린다."""
-
-
 class VlmClient(Protocol):
     """프롬프트·스키마를 받아 원문 응답(JSON 문자열)을 돌려준다.
 
     `version`은 모델 버전 문자열에 들어간다 (바뀌면 다시 만든다). `complete`는 서버 오류·시간 초과면
-    `VlmUnavailableError`를 내야 한다 (응답 내용 위반과 구분).
+    `VlmUnavailableError`, 설정 오류(4xx)면 `VlmRequestError`를 내야 한다 (응답 내용 위반과 구분).
     """
 
     version: str
@@ -110,6 +111,7 @@ class VlmClient(Protocol):
 
         Raises:
             VlmUnavailableError: 서버 오류·시간 초과.
+            VlmRequestError: 설정 오류 (4xx). 재시도하지 않는다.
         """
         ...
 
@@ -210,31 +212,6 @@ def validate_answer(
 UNKNOWN = VlmAnswer(label="gap", gap_type="unknown", description=None)
 
 
-def _complete(
-    client: VlmClient,
-    request: SegmentRequest,
-    prompt: str,
-    schema: dict[str, Any],
-    backoff_s: Sequence[float],
-    sleep: Callable[[float], None],
-    errors: list[str],
-) -> str:
-    """서버 오류·시간 초과면 backoff_s의 대기마다 다시 묻는다. 끝내 실패하면 그 오류를 올린다.
-
-    시도 횟수 = len(backoff_s) + 1. 실패할 때마다 `errors`에 기록하고 `sleep(대기 초)`.
-
-    Raises:
-        VlmUnavailableError: 마지막 시도도 실패했을 때.
-    """
-    for wait in backoff_s:
-        try:
-            return client.complete(request, prompt, schema)
-        except VlmUnavailableError as exc:
-            errors.append(f"VLM 서버 오류: {exc}")
-            sleep(wait)
-    return client.complete(request, prompt, schema)
-
-
 def classify(
     client: VlmClient,
     request: SegmentRequest,
@@ -246,7 +223,8 @@ def classify(
     """후보 구간 하나를 VLM에 물어 검증된 분류를 얻는다.
 
     응답 위반은 max_retries번까지 다시 묻고, 서버 오류는 backoff_s로 따로 다시 묻는다. 서버가 끝내
-    응답하지 않으면 VlmUnavailableError를 올린다 (미상으로 두지 않는다).
+    응답하지 않으면 VlmUnavailableError를 올린다 (미상으로 두지 않는다). 설정 오류(4xx)는 다시 묻지
+    않고 VlmRequestError를 올린다.
 
     Args:
         client: VLM 클라이언트.
@@ -260,19 +238,29 @@ def classify(
         `Classified`. 끝까지 위반이면 `UNKNOWN`(gap unknown)과 fallback=True.
     """
     schema = response_schema(ontology, request.entities)
-    prompt = build_prompt(request, ontology)
+    base = build_prompt(request, ontology)
     errors: list[str] = []
-    for attempt in range(1, max_retries + 2):
-        raw = _complete(client, request, prompt, schema, backoff_s, sleep, errors)
-        answer, problems = validate_answer(raw, ontology, request)
-        if answer is not None:
-            return Classified(request, answer, attempt, errors)
-        errors += problems
-        # 다음 시도: 같은 프롬프트에 이번 위반 내용을 붙여 다시 묻는다
-        prompt = (
-            build_prompt(request, ontology)
-            + "\n\n앞 응답이 규칙을 어겼다: "
-            + "; ".join(problems)
-            + "\n목록 안의 값으로 JSON 하나만 다시 출력한다."
+
+    def ask(problems: Sequence[str]) -> str:
+        """위반이 있으면 같은 프롬프트에 직전 위반 내용을 붙여, 장애는 백오프하며 묻는다."""
+        prompt = base
+        if problems:
+            prompt = (
+                base
+                + "\n\n앞 응답이 규칙을 어겼다: "
+                + "; ".join(problems)
+                + "\n목록 안의 값으로 JSON 하나만 다시 출력한다."
+            )
+        return with_backoff(
+            lambda: client.complete(request, prompt, schema),
+            backoff_s,
+            sleep,
+            on_error=lambda exc: errors.append(f"VLM 서버 오류: {exc}"),
         )
-    return Classified(request, UNKNOWN, max_retries + 1, errors, fallback=True)
+
+    answer, attempts = ask_validated(
+        ask, lambda raw: validate_answer(raw, ontology, request), max_retries, errors
+    )
+    if answer is not None:
+        return Classified(request, answer, attempts, errors)
+    return Classified(request, UNKNOWN, attempts, errors, fallback=True)

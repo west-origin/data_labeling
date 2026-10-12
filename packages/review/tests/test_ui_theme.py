@@ -21,6 +21,7 @@ from dlp_review.cvat import label_spec
 from dlp_review.labelstudio import FROM_NAME, label_config, label_names
 from dlp_review.tasks import PRIVACY_PROJECT, SPATIAL_PROJECT
 from dlp_review.ui_theme import (
+    LS_AUTO_HOTKEYS,
     TOKENS_FILE,
     UiTheme,
     cvat_label_color,
@@ -127,6 +128,17 @@ def test_duplicate_or_combo_hotkeys_rejected(theme: UiTheme) -> None:
     data["modes"]["dark"]["bg"] = "black"
     with pytest.raises(ValidationError):
         UiTheme.model_validate(data)
+
+
+def test_hotkey_notes_point_to_existing_check_record() -> None:
+    """review_ui.yaml과 `ui_theme`의 단축키 설명이 가리키는 실화면 확인 기록 절이 change-guide에
+    있다 (절 이름을 바꾸면 같이 고친다). 자동 키 후보 값은 테마 설명과 코드 상수가 같다."""
+    heading = "검수 화면 AI 표시 실화면 확인"
+    guide = (ROOT / "docs" / "handover" / "change-guide.md").read_text("utf-8")
+    assert f"### {heading}" in guide
+    config = (ROOT / "config" / "review_ui.yaml").read_text("utf-8")
+    assert heading in config and LS_AUTO_HOTKEYS in config
+    assert heading in (ROOT / "packages/review/src/dlp_review/ui_theme.py").read_text("utf-8")
 
 
 def test_cvat_label_colors(theme: UiTheme) -> None:

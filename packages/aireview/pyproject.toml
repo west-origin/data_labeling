@@ -1,0 +1,25 @@
+[project]
+name = "dlp-aireview"
+version = "0.1.0"
+description = "AI 1차 검수(로컬 VLM): 블러본 프레임으로 자동 라벨 판정·수정 제안 (참고용, 사람 검수 아님)"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "av>=19.0",
+    "dlp-eval",
+    "dlp-media",
+    "dlp-models",
+    "dlp-privacy",
+    "dlp-schema",
+    "httpx>=0.27",
+    "numpy>=2.0",
+    "opencv-contrib-python-headless>=4.10",
+    "pyyaml>=6.0",
+    "sqlalchemy>=2.0",
+]
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dlp_aireview"]

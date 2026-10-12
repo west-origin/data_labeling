@@ -75,6 +75,11 @@ class ReviewReason(StrEnum):
     CONTACT_MISMATCH = "contact_mismatch"  # 장갑 센서 접촉과 영상 기반 접촉이 다름
     SAMPLE = "sample"  # 높은 신뢰도 묶음의 표본 검수
     ROUTINE = "routine"  # 사유 없는 일반 검수
+    # AI 1차 검수 판정이 지적한 구간 (참고용, 사람 검수를 늘리는 쪽으로만 쓴다. WP17, ADR 0040)
+    AI_WRONG = "ai_wrong"  # AI 판정: 틀림
+    AI_SUSPECT = "ai_suspect"  # AI 판정: 의심
+    AI_UNSURE = "ai_unsure"  # AI 판정: 판단 불가
+    AI_MISSING = "ai_missing"  # AI 누락 후보 (v1 기본 끔)
 
 
 class FlaggedSpan(Contract):

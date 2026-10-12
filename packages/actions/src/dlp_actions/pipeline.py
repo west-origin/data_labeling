@@ -38,6 +38,29 @@ class HandResult:
         return sum(c.fallback for c in self.classified)
 
 
+def hand_candidates(
+    track: KeypointTrackPayload, contacts: list[tuple[int, int]], policy: ActionsPolicy
+) -> list[Candidate]:
+    """한 손의 경계 후보 (손목 속도·접촉, `boundaries.boundary_candidates`)."""
+    times, xy, scale = wrist_series(track)
+    return boundary_candidates(times, xy, scale, contacts, policy.boundaries)
+
+
+def segment_count(
+    track: KeypointTrackPayload,
+    contacts: list[tuple[int, int]],
+    start_ms: int,
+    end_ms: int,
+    policy: ActionsPolicy,
+) -> int:
+    """한 손의 후보 구간 수 = `segment_hand`가 VLM에 묻는 요청 수 (재시도 제외). 영상·서버 없음.
+
+    AI 1차 검수 작업량 추정(`dlp aireview estimate --include-actions`)이 행동 VLM 몫을 셀 때 쓴다.
+    """
+    candidates = hand_candidates(track, contacts, policy)
+    return len(segments(candidates, start_ms, end_ms, policy.boundaries.min_segment_ms))
+
+
 def segment_hand(
     *,
     session_id: str,
@@ -79,8 +102,7 @@ def segment_hand(
     Raises:
         VlmUnavailableError: VLM 서버가 백오프 후에도 응답하지 않을 때.
     """
-    times, xy, scale = wrist_series(track)
-    candidates = boundary_candidates(times, xy, scale, contacts, policy.boundaries)
+    candidates = hand_candidates(track, contacts, policy)
     classified: list[Classified] = []
     for s, e in segments(candidates, start_ms, end_ms, policy.boundaries.min_segment_ms):
         request = SegmentRequest(

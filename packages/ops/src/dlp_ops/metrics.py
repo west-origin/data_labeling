@@ -17,6 +17,10 @@
   (verified_at: 운영 라벨 항목마다 처음 검수한 시각 중 가장 늦은 것, ADR 0027).
   블러(프라이버시 검수)는 따로 센다.
   생산원가 = 검수 시간 * 인건비 / 그 수.
+- AI 1차 검수 (WP17.8, ADR 0040 7.3, `AiWeekly`): 판정 영상 시간·백로그·판정률, 대조군 기준 지적
+  정밀도·재현율·층화 ok 놓침률과 상한, 제안 적용률, fallback율, 캐시 적중률, 장비 시간, 집단별 검수
+  시간, 오류 삽입 누출. 그 주에 수집한 작업(결과 기록)·만든 작업(노출)·기록한 단위·끝난 실행으로
+  센다.
 
 값이 없는 지표(분모 0)는 `math.nan`이고, JSON(`as_dict`)에서는 null, Markdown에서는 `-`다.
 
@@ -24,9 +28,10 @@
 - `week_range(week)` / `week_of(t)` — ISO 주 문자열 ↔ UTC 구간.
 - `work_source(task_key)` — 손으로 기록한 검수 시간의 출처 (작업 키 접두사의 도구, 없으면 manual).
 - `verified_time(conn, …)` / `verified_at(history)` — 세션의 검증 완료 시각.
-- `weekly_metrics(conn, week, review_policy, policy)` — 한 주의 `WeeklyMetrics` (읽기 전용).
+- `weekly_metrics(conn, week, review_policy, policy, ai)` — 한 주의 `WeeklyMetrics` (읽기 전용).
+- `ai_weekly(conn, start, end, ai)` — 한 주의 AI 1차 검수 지표 `AiWeekly` (WP17.8, AI 끔이면 None).
 - `alerts(history, policy)` — 여러 주 추이에서 경고 문장.
-- `markdown(history, warnings, currency)` — 주별 열의 Markdown 표.
+- `markdown(history, warnings, currency)` — 주별 열의 Markdown 표 (AI 지표가 있으면 AI 절).
 
 성능 주의: `weekly_metrics`는 주마다 모든 세션의 라벨 이력을 다시 읽는다 (주 수 * 세션 수).
 """
@@ -40,11 +45,20 @@ from typing import Any, Literal
 
 import sqlalchemy as sa
 
-from dlp_ops.policy import OpsPolicy
+from dlp_ops.policy import AlertPolicy, OpsPolicy
 from dlp_privacy.audit import AuditResult, residual_miss_rate
+from dlp_review.ai_display import AiDisplayConfig
+from dlp_review.ops.ai_quality import ai_quality
 from dlp_review.ops.policy import ReviewOpsPolicy
 from dlp_review.ops.runner import quality_report
 from dlp_review.ops.seeding import detected
+from dlp_schema.aireview import AiRunEventKind
+from dlp_schema.db.aireview_repository import (
+    list_ai_run_events,
+    list_ai_run_events_between,
+    list_ai_runs,
+    list_ai_units_created,
+)
 from dlp_schema.db.repository import (
     get_labels,
     get_session,
@@ -60,7 +74,7 @@ from dlp_schema.episode import current_labels, non_operational_ids
 from dlp_schema.history import review_changes
 from dlp_schema.labels import LabelRecord, Source, VerificationState
 from dlp_schema.review import AssignmentStatus, ReviewMode, ReviewTool
-from dlp_schema.session import LifecycleState
+from dlp_schema.session import LifecycleState, PrivacyState
 
 # 개별 검수로 보는 상태 (수정률·자동 승인율 계산). 표본 검증은 개별로 본 것이 아니라 뺀다
 REVIEWED = (VerificationState.HUMAN_APPROVED, VerificationState.HUMAN_CORRECTED)
@@ -198,6 +212,126 @@ def _ratio(a: float, b: float) -> float:
     return a / b if b else math.nan
 
 
+def _clean(value: Any) -> Any:
+    """JSON용: NaN은 None, 사전은 안까지."""
+    if isinstance(value, float) and math.isnan(value):
+        return None
+    if isinstance(value, dict):
+        return {k: _clean(v) for k, v in value.items()}  # pyright: ignore[reportUnknownVariableType]
+    return value
+
+
+@dataclass
+class AiWeekly:
+    """한 주의 AI 1차 검수 운영 지표 (WP17.8, ADR 0040 7.3). `math.nan`은 자료 없음.
+
+    필드:
+        video_hours: 그 주에 판정 실행이 끝난(완료·중단·실패) 세션의 영상 시간 합(시간).
+        backlog_hours: 주 끝 시점에 prelabeled이고 승인됐는데 허용 판정 버전의 완료 실행도 건너뜀
+            기록도 없는 세션의 영상 시간 합 (사용 중지 제외).
+        coverage: 그 주에 만든 작업의 판정률 평균 (제외 집단 빼고).
+        flag_precision / flag_recall / ok_miss_rate / ok_miss_upper95: 그 주에 수집한 작업의
+            대조군(holdout) 지적 정밀도·재현율, 층화 ok 놓침률과 보수적 95% 상한 (표본 가중,
+            `dlp_review.ops.ai_quality`).
+        suggestion_accept_rate: 보인 제안 중 실제로 적용된 비율.
+        fallback_rate: 그 주에 기록한 판정 단위 중 형식에 맞는 응답을 끝내 받지 못한 단위 비율.
+        cache_hit_ratio: 그 주 판정 단위의 접두사 캐시 적중 토큰 / 프롬프트 토큰.
+        device_seconds_per_video_hour: 그 주에 끝난 실행의 걸린 시간 합(초) / `video_hours`
+            (세션을 함께 돌리면 장비 시간보다 크게 나온다: 상한으로 본다).
+        review_minutes_per_video_hour_shown / _holdout: 집단별 영상 1시간당 검수 분.
+        seeded_leak: 블라인드가 아닌 "AI 없음" 화면 작업 중 오류 삽입 작업 비율 (F-AIR-03).
+        counts: 원자료 건수 (`units`, `fallback_units`, `runs`, `outcome_rows`).
+    """
+
+    video_hours: float = math.nan
+    backlog_hours: float = math.nan
+    coverage: float = math.nan
+    flag_precision: float = math.nan
+    flag_recall: float = math.nan
+    ok_miss_rate: float = math.nan
+    ok_miss_upper95: float = math.nan
+    suggestion_accept_rate: float = math.nan
+    fallback_rate: float = math.nan
+    cache_hit_ratio: float = math.nan
+    device_seconds_per_video_hour: float = math.nan
+    review_minutes_per_video_hour_shown: float = math.nan
+    review_minutes_per_video_hour_holdout: float = math.nan
+    seeded_leak: float = math.nan
+    counts: dict[str, int] = field(default_factory=dict[str, int])
+
+
+def _ai_backlog_hours(conn: sa.Connection, end: datetime, versions: frozenset[str]) -> float:
+    """주 끝(end) 시점의 AI 판정 백로그(영상 시간). 생애주기·실행 기록을 end 앞까지만 본다.
+
+    프라이버시 승인 상태는 지금 값이다 (승인 이력은 따로 남지 않는다).
+    """
+    withdrawn = withdrawn_session_ids(conn)
+    total_ms = 0
+    for sid in list_session_ids(conn):
+        if sid in withdrawn:
+            continue
+        events = [e for e in list_lifecycle_events(conn, sid) if e.at < end]
+        if not events or events[-1].to_state is not LifecycleState.PRELABELED:
+            continue
+        session = get_session(conn, sid)
+        if session.privacy_state is not PrivacyState.APPROVED:
+            continue
+        runs = {r.run_id: r.version for r in list_ai_runs(conn, sid)}
+        done = any(
+            e.at < end
+            and (
+                e.event is AiRunEventKind.WAIVED
+                or (e.event is AiRunEventKind.COMPLETED and runs.get(e.run_id or "") in versions)
+            )
+            for e in list_ai_run_events(conn, sid)
+        )
+        if not done:
+            total_ms += session.duration_ms
+    return total_ms / 3_600_000
+
+
+def ai_weekly(
+    conn: sa.Connection, start: datetime, end: datetime, ai: AiDisplayConfig | None
+) -> AiWeekly | None:
+    """한 주 [start, end)의 AI 지표 (AI 끔이면 None). 읽기 전용.
+
+    ai: `ReviewSetup.ai`와 같은 설정 (허용 판정 버전 → 백로그). CLI가
+    `review_config.ai_display_config`로 만든다.
+    """
+    if ai is None:
+        return None
+    q = ai_quality(conn, start, end)
+    out = AiWeekly()
+    holdout = q.agreement.arms.get("holdout")
+    if holdout is not None:
+        out.flag_precision = holdout.flag_precision.value
+        out.flag_recall = holdout.flag_recall.value
+    out.ok_miss_rate, out.ok_miss_upper95 = q.agreement.ok_miss_rate, q.agreement.ok_miss_upper95
+    if q.agreement.apply is not None:
+        out.suggestion_accept_rate = q.agreement.apply.accept_rate.value
+    out.coverage = q.exposure.coverage
+    out.seeded_leak = q.exposure.seeded_share_no_ai.value
+    out.review_minutes_per_video_hour_shown = q.review_minutes.get("shown", math.nan)
+    out.review_minutes_per_video_hour_holdout = q.review_minutes.get("holdout", math.nan)
+    units = list_ai_units_created(conn, start, end)
+    fallback = sum(1 for u in units if u.outcome == "fallback")
+    out.fallback_rate = _ratio(fallback, len(units))
+    tokens = [(u.prompt_tokens, u.cached_tokens or 0) for u in units if u.prompt_tokens]
+    out.cache_hit_ratio = _ratio(sum(c for _, c in tokens), sum(p for p, _ in tokens))
+    ends = (AiRunEventKind.COMPLETED, AiRunEventKind.INTERRUPTED, AiRunEventKind.ABORTED)
+    finished = [e for e in list_ai_run_events_between(conn, start, end) if e.event in ends]
+    sessions = {e.session_id for e in finished}
+    out.video_hours = sum(get_session(conn, sid).duration_ms for sid in sessions) / 3_600_000
+    seconds = sum(e.counts.get("elapsed_s", 0) for e in finished)
+    out.device_seconds_per_video_hour = _ratio(seconds, out.video_hours)
+    out.backlog_hours = _ai_backlog_hours(conn, end, frozenset(ai.versions))
+    out.counts = {
+        "units": len(units), "fallback_units": fallback, "runs": len(finished),
+        "outcome_rows": len(q.rows),
+    }  # fmt: skip
+    return out
+
+
 @dataclass
 class WeeklyMetrics:
     """한 주의 운영 지표. `math.nan`은 "그 주에 계산할 자료가 없음"이다.
@@ -218,6 +352,7 @@ class WeeklyMetrics:
             nan).
         counts: 원자료 건수 (`accepted`, `corrected`, `deleted`, `added`, `seeded_errors`,
             `seeded_found`, `privacy_audits`).
+        ai: AI 1차 검수 지표 (`ai_weekly`, AI 끔이면 None).
     """
 
     week: str
@@ -232,17 +367,19 @@ class WeeklyMetrics:
     review_hours: float = 0.0
     cost_per_episode: float = math.nan
     counts: dict[str, int] = field(default_factory=dict[str, int])
+    ai: AiWeekly | None = None
 
     def as_dict(self) -> dict[str, Any]:
-        """JSON용 사전. `nan`은 `None`(null)으로 바꾼다 (JSON 표준에 NaN이 없다)."""
-        return {
-            k: (None if isinstance(v, float) and math.isnan(v) else v)
-            for k, v in asdict(self).items()
-        }
+        """JSON용 사전. `nan`은 `None`(null)으로 바꾼다 (JSON 표준에 NaN이 없다, AI 절 안까지)."""
+        return {k: _clean(v) for k, v in asdict(self).items()}
 
 
 def weekly_metrics(  # noqa: C901
-    conn: sa.Connection, week: str, review_policy: ReviewOpsPolicy, policy: OpsPolicy
+    conn: sa.Connection,
+    week: str,
+    review_policy: ReviewOpsPolicy,
+    policy: OpsPolicy,
+    ai: AiDisplayConfig | None = None,
 ) -> WeeklyMetrics:
     """한 주의 운영 지표를 DB에서 계산한다. 읽기 전용.
 
@@ -253,9 +390,10 @@ def weekly_metrics(  # noqa: C901
             `seeding.detect_tolerance_ms`,
             `seeding.blur_overlap`, 블라인드 편향 계산).
         policy: `ops.yaml` (인건비).
+        ai: AI 1차 검수 판정 사용 설정 (`review_config.ai_display_config`, None이면 AI 절 없음).
 
     읽는 테이블: `review_work`, `sessions`, `label_records`, `golden_sets`, `withdrawals`,
-    `review_assignments`, `privacy_audits`, `session_lifecycle_events`.
+    `review_assignments`, `privacy_audits`, `session_lifecycle_events`, (AI) `ai_review_*`.
     """
     start, end = week_range(week)
     m = WeeklyMetrics(week)
@@ -345,7 +483,38 @@ def weekly_metrics(  # noqa: C901
 
     if policy.cost.hourly_cost is not None and m.verified_episodes:
         m.cost_per_episode = m.review_hours * policy.cost.hourly_cost / m.verified_episodes
+    m.ai = ai_weekly(conn, start, end, ai)  # 분기 없이 합친다 (AI 끔이면 None)
     return m
+
+
+def _ai_alerts(cur: WeeklyMetrics, ap: AlertPolicy) -> list[str]:
+    """AI 1차 검수 경고 (마지막 주, `ops.yaml alerts.ai_*`). nan이면 내지 않는다."""
+    ai = cur.ai
+    if ai is None:
+        return []
+    out: list[str] = []
+    if ai.ok_miss_upper95 > ap.ai_ok_miss_upper95_max:
+        out.append(
+            f"{cur.week}: AI ok 놓침률 95% 상한(대조군) {ai.ok_miss_upper95:.1%}이 기준 "
+            f"{ap.ai_ok_miss_upper95_max:.1%}보다 높다 — AI의 맞음을 믿을 근거가 없다 (줄이는 데 "
+            "쓰지 않는다, 판정 모델·프롬프트 점검)"
+        )
+    if ai.backlog_hours > ap.ai_backlog_hours_max:
+        out.append(
+            f"{cur.week}: AI 판정 백로그 {ai.backlog_hours:.0f}시간이 기준 "
+            f"{ap.ai_backlog_hours_max:g}시간보다 많다 (장비·dlp aireview run --pending 확인)"
+        )
+    if ai.fallback_rate > ap.ai_fallback_rate_max:
+        out.append(
+            f"{cur.week}: AI 응답 형식 실패(fallback) {ai.fallback_rate:.1%}가 기준 "
+            f"{ap.ai_fallback_rate_max:.1%}보다 높다 (dlp aireview probe로 구조화 출력 확인)"
+        )
+    if ai.cache_hit_ratio < ap.ai_cache_hit_min:
+        out.append(
+            f"{cur.week}: AI 접두사 캐시 적중 {ai.cache_hit_ratio:.1%}가 기준 "
+            f"{ap.ai_cache_hit_min:.1%}보다 낮다 (서버 접두사 캐시 설정 확인)"
+        )
+    return out
 
 
 def alerts(history: list[WeeklyMetrics], policy: OpsPolicy) -> list[str]:
@@ -357,7 +526,9 @@ def alerts(history: list[WeeklyMetrics], policy: OpsPolicy) -> list[str]:
        `detection_drop` 이상 떨어지면 "검수 품질 저하" 경고.
     3. 최근 `stagnation_weeks`주의 처음과 끝을 비교해 검수 시간과 수정률이 둘 다 줄지 않았으면
        "가이드라인·온톨로지 점검" 경고.
-    `nan`과의 비교는 항상 거짓이라 자료가 없는 주는 2·3번 경고를 내지 않는다.
+    4. AI 1차 검수(마지막 주, `ai_*`): ok 놓침률 95% 상한 초과, 백로그 시간 초과, fallback율 초과,
+       캐시 적중률 미달 (`_ai_alerts`).
+    `nan`과의 비교는 항상 거짓이라 자료가 없는 주는 2·3·4번 경고를 내지 않는다.
     반환: 경고 문장 목록 (없으면 빈 목록).
     """
     out: list[str] = []
@@ -379,6 +550,8 @@ def alerts(history: list[WeeklyMetrics], policy: OpsPolicy) -> list[str]:
                 f"{cur.week}: 자동 승인율이 {rise:+.1%} 올랐는데 오류 삽입 발견율이 {-drop:+.1%} "
                 "떨어졌다 — 모델 개선이 아니라 검수 품질 저하로 본다"
             )
+    if history:
+        out += _ai_alerts(history[-1], ap)
     n = ap.stagnation_weeks
     if len(history) >= n:
         first, last = history[-n], history[-1]
@@ -414,6 +587,42 @@ def markdown(history: list[WeeklyMetrics], warnings: list[str], currency: str) -
             v = getattr(m, key)
             cells.append("-" if isinstance(v, float) and math.isnan(v) else fmt.format(v))
         lines.append(f"| {name} | " + " | ".join(cells) + " |")
+    lines += _ai_markdown(history)
     if warnings:
         lines += ["", "## 경고", ""] + [f"- {w}" for w in warnings]
     return "\n".join(lines) + "\n"
+
+
+# AI 1차 검수 절의 행 (이름, AiWeekly 필드, 형식)
+_AI_ROWS = (
+    ("판정한 영상 시간", "video_hours", "{:.1f}"),
+    ("판정 백로그 (영상 시간)", "backlog_hours", "{:.1f}"),
+    ("판정률", "coverage", "{:.1%}"),
+    ("지적 정밀도 (대조군)", "flag_precision", "{:.1%}"),
+    ("지적 재현율 (대조군)", "flag_recall", "{:.1%}"),
+    ("ok 놓침률 (대조군, 층화)", "ok_miss_rate", "{:.1%}"),
+    ("ok 놓침률 95% 상한", "ok_miss_upper95", "{:.1%}"),
+    ("제안 적용률", "suggestion_accept_rate", "{:.1%}"),
+    ("fallback율", "fallback_rate", "{:.1%}"),
+    ("캐시 적중률", "cache_hit_ratio", "{:.1%}"),
+    ("장비 초 / 영상 1시간", "device_seconds_per_video_hour", "{:.0f}"),
+    ("검수 분 / 영상 1시간 (AI 보임)", "review_minutes_per_video_hour_shown", "{:.1f}"),
+    ("검수 분 / 영상 1시간 (대조군)", "review_minutes_per_video_hour_holdout", "{:.1f}"),
+    ("오류 삽입 누출 (AI 없음 화면)", "seeded_leak", "{:.1%}"),
+)
+
+
+def _ai_markdown(history: list[WeeklyMetrics]) -> list[str]:
+    """AI 1차 검수 절 (어느 주에도 AI 지표가 없으면 빈 목록)."""
+    if all(m.ai is None for m in history):
+        return []
+    lines = ["", "## AI 1차 검수 (참고용 판정, 대조군 기준)", ""]
+    lines.append("| 지표 | " + " | ".join(m.week for m in history) + " |")
+    lines.append("| --- | " + " | ".join("---" for _ in history) + " |")
+    for name, key, fmt in _AI_ROWS:
+        cells: list[str] = []
+        for m in history:
+            v = getattr(m.ai, key) if m.ai is not None else math.nan
+            cells.append("-" if isinstance(v, float) and math.isnan(v) else fmt.format(v))
+        lines.append(f"| {name} | " + " | ".join(cells) + " |")
+    return lines

@@ -58,6 +58,10 @@
   `dlp review plan|assign|queue|qa|quality`. 정책은 `config/policies/review.yaml`.
   검수 화면 테마(`dlp_review.ui_theme`, `config/review_ui.yaml`, `services/review-theme/`): 색·로고·단축키·다크/화이트만
   도구 밖에서 덧씌우고 라벨 형식은 바꾸지 않는다 (ADR 0038).
+  AI 1차 검수 표시·수집(ADR 0040): `dlp_review.ai_display`(판정 → 검수 화면 표시·우선순위·표본 제외, 노출 기록·대조군),
+  `dlp_review.ai_collect`(검수자가 고른 제안 적용·세션 검증·결과 기록 `ai_review_outcomes`),
+  `dlp_review.ops.ai_quality`(대조군만으로, 표본 가중 지적 정밀도·재현율·ok 놓침률 95% 상한·ECE·κ). `dlp review quality --ai`.
+  설정은 `review.yaml ai_review`(코드 기본 off).
 - `packages/datasets/` (`dlp_datasets`) — 데이터셋 버전(lakeFS 커밋), 작업자·장소 단위 분할(holdout 포함), 골든셋 제안,
   사용 중지 전파, 계보 조회. `dlp dataset golden|build|withdraw`, `dlp lineage <세션>`. 정책은 `config/policies/dataset.yaml`.
 - `packages/models/` (`dlp_models`) — 모델 레지스트리(`config/models.yaml`, 해시 확인)와 공용 ONNX 런타임(OWLv2, 메트릭 깊이).
@@ -68,6 +72,11 @@
 - `packages/actions/` (`dlp_actions`) — 행동 구간 2단 구조: 손목 속도·접촉으로 경계 후보 → VLM이 온톨로지 안에서 분류·설명
   (JSON Schema 강제, 재시도 후 미상) → 병합·채우기(공백 0). `dlp actions run <세션> --vlm-url`. CPU·CI는 `OracleVlm` stub.
   정책은 `config/policies/actions.yaml`.
+- `packages/aireview/` (`dlp_aireview`) — AI 1차 검수 판정(ADR 0040): 사내 vLLM(OpenAI 호환, 기본 Qwen3-VL-8B)이 블러본
+  프레임과 라벨 맥락으로 라벨마다 ok·suspect·wrong·unsure와 이유·제안을 낸다. 참고용 판정만 추가 전용 `ai_review_*` 표에
+  쓴다(멱등·재개, 세션 잠금). CPU·CI는 `OracleJudge`·`FakeOpenAIServer`. 골든셋 평가(`evaluate`: 교란·이력, DB에 쓰지 않음,
+  게이트 실패는 기본 경고만). `dlp aireview run|status|show|waive|estimate|bench|probe|eval`.
+  정책은 `config/policies/aireview.yaml`.
 - `packages/evaluation/` (`dlp_eval`) — 지표 라이브러리(mAP·HOTA·IDF1·PCK·접촉·구간 F1·temporal mAP·ECE 등, 참조 구현과 일치 테스트),
   골든셋 평가 하네스, 하위 집단 리포트, 배포 게이트. `dlp eval golden <골든셋> --model <과제>=<버전>`. 정책은 `config/policies/evaluation.yaml`.
 - `packages/training/` (`dlp_train`) — 재학습 루프: 데이터셋 버전에서 과제별 학습 예제 추출(자동 원본과 수정본 차이),
@@ -82,7 +91,8 @@
   manifest에 파일 목록과 sha256을 넣는다 (ADR 0027). `dlp export coco|intervals|lerobot`. 정책은 `config/policies/export.yaml`.
   LeRobot은 격리된 일회용 환경(`scripts/lerobot_write.py`, `scripts/lerobot_check.py`)에서 공식 API로 쓰고 읽는다.
 - `packages/ops/` (`dlp_ops`) — 운영 대시보드와 보안: 주간 운영 지표(검수 시간·수정률·자동 승인율·편향·발견율·
-  잔여 블러 누락·원가)와 경고, 원본 접근 월간 감사 리포트, 원본 보관 만료 알림·결정.
+  잔여 블러 누락·원가, AI 1차 검수 절: 백로그·fallback·캐시 적중·장비 시간·ok 놓침 상한)와 경고, 원본 접근 월간 감사
+  리포트, 원본 보관 만료 알림·결정.
   `dlp ops weekly|audit-report|retention|retention-decide|log-work|privacy-audit`. 정책은 `config/policies/ops.yaml`.
 - `config/` — 온톨로지·정책·기본값 YAML. 코드에 값을 하드코딩하지 않는다.
 - `schemas/` — 생성된 JSON Schema. 직접 편집하지 않는다 (`make schemas`).
@@ -126,6 +136,11 @@
   `raw_store_offline`, 기록은 로컬 JSON Lines). 모든 원본 접근은 `raw_access_log`에 남고, 운영·감사 기록은 추가만
   한다 (ADR 0020, 0021). 정적 검사 테스트가 우회(`buckets.raw`, `raw_bucket()`)를 막는다.
 - 블러(원본 영상) 검수는 `review.yaml reviewers.privacy`의 원본 접근 권한자에게만 배정한다.
+- AI 1차 검수 판정은 라벨도 검수 상태도 아니다 (ADR 0040). 판정은 추가 전용 `ai_review_*` 표에만 쓰고 `label_records`·
+  `record_review`에 쓰지 않는다. 판정 입력 픽셀은 `dlp_aireview.media.open_blurred`(지금 승인된 블러본)로만 받는다.
+  AI 제안은 검수자가 명시적으로 적용할 때만 사람 라벨이 되며, 제안 내용은 DB에서 다시 읽어 검증한다 (`dlp_review.ai_collect`).
+  AI의 ok는 사람 검수·표본을 줄이지 않는다. 판정 서버는 사내 서버만(외부 API 금지). Label Studio 설정의 AI 컨트롤은
+  모드와 무관하게 늘 둔다.
 - 테스트는 정답을 아는 합성 픽스처(WP2)로 작성한다. 실제 영상·개인정보를 저장소에 넣지 않는다.
 - 함수 복잡도 상한은 15다 (ruff C901). 상한을 넘는 기존 함수의 `# noqa: C901`은 분해 대상 기준선이며 새로 달지 않는다.
 - 새로 찾은 문제는 `docs/handover/issues.yaml`에 넣는다. 확정 결함은 `tests/test_known_defects.py`에

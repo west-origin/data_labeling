@@ -15,6 +15,8 @@ VLM에는 블러본만 보낸다 (라벨링 버킷에서 읽고 원본 버킷에
 - 2: VLM 서버 주소가 없음 (`--vlm-url`/`DLP_VLM_URL`). 모든 구간을 미상으로 채우면 검수 부담만
   늘어서 아무것도 만들지 않는다.
 - 3: VLM 서버 장애. 트랜잭션이 되돌려져 아무것도 쓰지 않았으므로 서버 복구 뒤 다시 실행한다.
+- 5: VLM 설정 오류 (4xx: 인증 실패, 없는 모델, 잘못된 요청 등. 다시 물어도 같아 재시도하지 않는다).
+  트랜잭션이 되돌려져 아무것도 쓰지 않았다. 서버 주소·모델·키를 고친 뒤 다시 실행한다 (WP17.1).
 
 정책 출처: `config/policies/actions.yaml` (`vlm` 절: 모델, 구간당 프레임 수, 최대 변 px, 제한 시간).
 CI·CPU 테스트는 `OracleVlm` stub을 직접 쓴다 (이 명령은 실제 서버용).
@@ -31,7 +33,7 @@ import sqlalchemy as sa
 from dlp_actions.clients import OpenAICompatibleVlm
 from dlp_actions.policy import load_policy
 from dlp_actions.runner import run_actions
-from dlp_actions.vlm import VlmUnavailableError
+from dlp_actions.vlm import VlmRequestError, VlmUnavailableError
 from dlp_cli.ontology_access import session_ontology
 from dlp_cli.schema_cmds import database_url
 from dlp_media.storage import store_from_spec
@@ -43,10 +45,11 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     인자:
         args.vlm_url: OpenAI 호환 VLM 서버 기본 URL. 없으면 환경 변수 `DLP_VLM_URL`.
+            서버 API 키는 환경 변수 `DLP_VLM_API_KEY`(있을 때만 Authorization 헤더).
         args.store: 라벨링 버킷 저장소 지정 (`s3` 또는 `local:<디렉터리>`), 블러본을 읽는다.
         args.url: DB URL.
 
-    반환: 0 성공 / 2 VLM 주소 없음 / 3 VLM 장애 (모듈 docstring 참고).
+    반환: 0 성공 / 2 VLM 주소 없음 / 3 VLM 장애 / 5 VLM 설정 오류 (모듈 docstring 참고).
     부작용: 한 트랜잭션에서 `label_records`에 action·gap·description 레코드와 이전 버전 철회
     레코드 INSERT, VLM 서버 HTTP 호출, 라벨링 버킷 읽기.
     온톨로지는 세션 버전의 DB 등록 사전을 읽는다.
@@ -70,6 +73,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         frames=vlm.frames_per_segment,
         max_side=vlm.max_side_px,
         timeout_s=vlm.timeout_s,
+        # 서버 API 키 (services/vlm, docs/handover/vlm-server.md). 출력·기록하지 않는다
+        api_key=os.environ.get("DLP_VLM_API_KEY") or None,
     )
     ontology = session_ontology(args.url, args.session_id)
     # 블러본만 읽는다 (라벨링 버킷)
@@ -87,6 +92,13 @@ def cmd_run(args: argparse.Namespace) -> int:
             f"[VLM 서버 장애] {args.session_id}: 아무것도 쓰지 않았습니다. 다시 실행하세요 ({exc})"
         )
         return 3
+    except VlmRequestError as exc:
+        # 4xx 설정 오류: 다시 물어도 같다. 트랜잭션이 되돌려져 아무것도 쓰지 않았다
+        print(
+            f"[VLM 설정 오류] {args.session_id}: 아무것도 쓰지 않았습니다. "
+            f"서버 주소·모델·키를 확인하세요 ({exc})"
+        )
+        return 5
     finally:
         engine.dispose()
     for hand, counts in s.hands.items():

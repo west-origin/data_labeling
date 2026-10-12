@@ -1,0 +1,200 @@
+{
+  "$defs": {
+    "AiApplyResult": {
+      "description": "제안 적용 결정의 처리 결과.",
+      "enum": [
+        "applied",
+        "conflict_edited",
+        "no_suggestion",
+        "invalid_now",
+        "not_shown"
+      ],
+      "title": "AiApplyResult",
+      "type": "string"
+    },
+    "AiArm": {
+      "description": "검수 작업에 판정을 보였는지 (대조군 holdout은 편향 없는 품질 측정에 쓴다).",
+      "enum": [
+        "shown",
+        "holdout",
+        "no_verdicts",
+        "mode_excluded",
+        "off"
+      ],
+      "title": "AiArm",
+      "type": "string"
+    },
+    "AiDecision": {
+      "description": "검수자가 AI 지적에 대해 명시적으로 한 결정.",
+      "enum": [
+        "apply",
+        "dismiss",
+        "none"
+      ],
+      "title": "AiDecision",
+      "type": "string"
+    },
+    "AiHumanAction": {
+      "description": "사람 검수 결과 (원 라벨 기준).",
+      "enum": [
+        "approved",
+        "corrected",
+        "deleted",
+        "replaced",
+        "stale",
+        "na"
+      ],
+      "title": "AiHumanAction",
+      "type": "string"
+    },
+    "AiOutcomeItem": {
+      "additionalProperties": false,
+      "description": "작업 안 라벨 하나의 사람 결과와 AI 판정의 연결.",
+      "properties": {
+        "apply_result": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AiApplyResult"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "arm": {
+          "$ref": "#/$defs/AiArm"
+        },
+        "decision": {
+          "$ref": "#/$defs/AiDecision",
+          "default": "none"
+        },
+        "human": {
+          "$ref": "#/$defs/AiHumanAction"
+        },
+        "label_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "title": "Label Id",
+          "type": "string"
+        },
+        "match": {
+          "default": "na",
+          "enum": [
+            "exact",
+            "partial",
+            "none",
+            "na"
+          ],
+          "title": "Match",
+          "type": "string"
+        },
+        "result_label_ids": {
+          "default": [],
+          "items": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+            "type": "string"
+          },
+          "title": "Result Label Ids",
+          "type": "array"
+        },
+        "unit_id": {
+          "anyOf": [
+            {
+              "pattern": "^air-[0-9a-f]{24}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unit Id"
+        },
+        "verdict": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AiVerdictValue"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "label_id",
+        "arm",
+        "human"
+      ],
+      "title": "AiOutcomeItem",
+      "type": "object"
+    },
+    "AiVerdictValue": {
+      "description": "판정 값. unsure는 맞음이 아니다 (가려짐·화면 밖·블러·프레임 부족).",
+      "enum": [
+        "ok",
+        "suspect",
+        "wrong",
+        "unsure"
+      ],
+      "title": "AiVerdictValue",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "검수 작업 하나의 수집 결과와 AI 판정의 연결 (작업마다 한 번 쓴다).",
+  "properties": {
+    "collected_at": {
+      "format": "date-time",
+      "title": "Collected At",
+      "type": "string"
+    },
+    "items": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/AiOutcomeItem"
+      },
+      "title": "Items",
+      "type": "array"
+    },
+    "reviewer_id": {
+      "anyOf": [
+        {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Reviewer Id"
+    },
+    "session_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Session Id",
+      "type": "string"
+    },
+    "task_key": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Task Key",
+      "type": "string"
+    },
+    "warnings": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Warnings",
+      "type": "array"
+    }
+  },
+  "required": [
+    "task_key",
+    "session_id",
+    "collected_at"
+  ],
+  "title": "AiOutcome",
+  "type": "object"
+}
