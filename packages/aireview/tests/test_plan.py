@@ -254,6 +254,40 @@ def test_unit_ids_change_only_where_inputs_change(
     assert not {u.unit_id for u in again} & {u.unit_id for u in base}
 
 
+def test_context_review_state_is_outside_the_unit_key(
+    scene: Scene, policy: AiReviewPolicy, ontology: Ontology
+) -> None:
+    """맥락 라벨을 승인해 검수 상태만 바뀌면 단위 키는 그대로다 (결정, ADR 0040 4절).
+
+    정답 근거: 승인은 같은 label_id 행의 검수 상태만 바꾼다. 키는 맥락 ID만 담으므로, 검수가
+    진행될 때마다 재판정이 늘지 않는다. 프롬프트 맥락 표에는 "(확정)"이 붙어 같은 키의 단위가
+    다른 글로 판정될 수 있다 (보낸 요청은 단위의 prompt_digest가 남긴다). 키에 검수 상태를 넣기로
+    바꾸면 이 테스트와 문서(ADR 0040 4절, invariants I8)를 함께 고친다.
+    """
+    base = plan_session(
+        scene.session, scene.labels, policy, ontology, media=scene.media, sensor=ABSENT
+    )
+    unit = next(u for u in base if u.group is AiGroup.TEMPORAL and u.window.context)
+    ctx = next(x for x in unit.window.context if x.provenance.source is not Source.HUMAN)
+    approved = ctx.model_copy(
+        update={
+            "verification": Verification(
+                state=VerificationState.HUMAN_APPROVED, reviewer_id="r1", reviewed_at=FIXED_TIME
+            )
+        }
+    )
+    labels = [approved if x.label_id == ctx.label_id else x for x in scene.labels]
+    after = plan_session(scene.session, labels, policy, ontology, media=scene.media, sensor=ABSENT)
+    # 승인한 라벨이 대상이던 단위는 대상 집합이 바뀌어 키가 바뀐다. 맥락으로만 든 이 단위는 그대로다
+    same = next(u for u in after if u.unit_id == unit.unit_id)
+    assert ctx.label_id in {x.label_id for x in same.window.context}
+    images = images_for(unit, policy)
+    before_text = unit_text(unit, images, range(len(unit.targets)), ontology, ABSENT)
+    after_text = unit_text(same, images, range(len(same.targets)), ontology, ABSENT)
+    changed = set(after_text.splitlines()) - set(before_text.splitlines())
+    assert changed and all("(확정)" in line for line in changed)
+
+
 def test_excluded_labels_never_targets_and_measurements_never_context(
     scene: Scene, policy: AiReviewPolicy, ontology: Ontology
 ) -> None:

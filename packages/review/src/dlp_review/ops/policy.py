@@ -274,7 +274,8 @@ class AiReviewDisplayPolicy(Contract):
         "suspect",
         "unsure",
     )
-    # 맥락 라벨까지 지금도 현재여야 판정을 유효로 본다 (결정: false)
+    # 맥락 라벨까지 지금도 현재여야 판정을 유효로 본다 (결정: false). ID가 현재인지만 보므로 맥락
+    # 라벨의 승인(같은 ID의 검수 상태 변화)은 true여도 무효로 만들지 않는다
     strict_context: bool = False
 
 
