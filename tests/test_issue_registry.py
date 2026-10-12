@@ -142,13 +142,29 @@ def test_open_defect_repros_are_strict_xfail(issues: list[dict[str, Any]]) -> No
     assert pointed == set(reasons)
 
 
-def test_registry_counts_in_report_match(issues: list[dict[str, Any]]) -> None:
-    """전수 검수 보고의 심각도별 건수 표가 레지스트리(보고 영역의 F-*)와 같다 (F-AIR 제외)."""
-    text = (ROOT / "docs/handover/full-review-2026-10-11.md").read_text("utf-8")
+# 심각도별 건수 표가 있는 전수 검수 보고와 그 보고에서 센 ID 접두사
+REPORTS = {
+    "docs/handover/full-review-2026-10-11.md": REPORT_AREAS,
+    "docs/handover/full-review-2026-10-12.md": (*REPORT_AREAS, "F-AIR-"),
+}
+
+
+@pytest.mark.parametrize("report", sorted(REPORTS))
+def test_registry_counts_in_report_match(issues: list[dict[str, Any]], report: str) -> None:
+    """전수 검수 보고의 심각도별 건수 표가 레지스트리(그 보고가 출처인 F-*)와 같다.
+
+    2026-10-11 보고는 F-AIR(WP17 후속 과제)를 세지 않는다. 보고에 나온 F-* ID는 모두 레지스트리에
+    있다.
+    """
+    text = (ROOT / report).read_text("utf-8")
+    mine = [i for i in issues if i["id"].startswith(REPORTS[report]) and i["source"] == report]
     label = {"high": "상", "medium": "중", "low": "하"}
     for sev, ko in label.items():
-        n = sum(1 for i in issues if i["id"].startswith(REPORT_AREAS) and i["severity"] == sev)
-        assert re.search(rf"^\| {ko} \| {n} \|", text, re.M), f"보고서의 {ko} 건수가 {n}이 아님"
+        n = sum(1 for i in mine if i["severity"] == sev)
+        assert re.search(rf"^\| {ko} \| {n} \|", text, re.M), f"{report}의 {ko} 건수가 {n}이 아님"
+    known = {i["id"] for i in issues}
+    found = set(re.findall(r"\bF-[A-Z]{3}-\d{2}\b", text))
+    assert found <= known, f"보고서에만 있는 ID {sorted(found - known)}"
 
 
 def test_registry_paths_use_repo_layout() -> None:

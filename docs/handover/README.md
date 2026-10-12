@@ -87,6 +87,7 @@ flowchart LR
 | 알려진 문제 전체(ID·상태·심각도·관련 파일·재현 테스트) | [레지스트리](issues.yaml), 재현은 `tests/test_known_defects.py` |
 | 작업 규칙마다 실제로 막는 수단(트리거·테스트)과 문서뿐인 규칙 | [불변 조건과 강제 수단](invariants.md) |
 | 2026-10-11 전 파일 전수 검수 결과 | [전수 검수 결과](full-review-2026-10-11.md) |
+| 2026-10-12 최종 검수 결과 (중간 등급 수정·T4/T5·AI 1차 검수) | [최종 검수 결과](full-review-2026-10-12.md) |
 | 코드를 어디서 읽을지, 상태·시간·원본 경계 | [구조 지도](architecture.md) |
 | 새 개발 환경 재현, 현재 클라우드와의 차이 | [환경 준비](development.md) |
 | VLM 서버(DGX Spark·vLLM) 띄우기, 처리량 실측·대수 결정, Arm64 점검 | [VLM 서버](vlm-server.md) |
