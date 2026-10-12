@@ -52,7 +52,7 @@ from dlp_review.ops.ai_quality import ai_quality
 from dlp_review.ops.policy import ReviewOpsPolicy
 from dlp_review.ops.runner import quality_report
 from dlp_review.ops.seeding import detected
-from dlp_schema.aireview import AiRunEventKind
+from dlp_schema.aireview import AiRunEventKind, is_full_completion
 from dlp_schema.db.aireview_repository import (
     list_ai_run_events,
     list_ai_run_events_between,
@@ -227,8 +227,9 @@ class AiWeekly:
 
     필드:
         video_hours: 그 주에 판정 실행이 끝난(완료·중단·실패) 세션의 영상 시간 합(시간).
-        backlog_hours: 주 끝 시점에 prelabeled이고 승인됐는데 허용 판정 버전의 완료 실행도 건너뜀
-            기록도 없는 세션의 영상 시간 합 (사용 중지 제외).
+        backlog_hours: 주 끝 시점에 prelabeled이고 승인됐는데 허용 판정 버전의 전체 완료 실행도
+            건너뜀 기록도 없는 세션의 영상 시간 합 (사용 중지 제외, 좁힌 실행의 `partial:` 완료만
+            있으면 백로그다).
         coverage: 그 주에 만든 작업의 판정률 평균 (제외 집단 빼고).
         flag_precision / flag_recall / ok_miss_rate / ok_miss_upper95: 그 주에 수집한 작업의
             대조군(holdout) 지적 정밀도·재현율, 층화 ok 놓침률과 보수적 95% 상한 (표본 가중,
@@ -263,7 +264,9 @@ class AiWeekly:
 def _ai_backlog_hours(conn: sa.Connection, end: datetime, versions: frozenset[str]) -> float:
     """주 끝(end) 시점의 AI 판정 백로그(영상 시간). 생애주기·실행 기록을 end 앞까지만 본다.
 
-    프라이버시 승인 상태는 지금 값이다 (승인 이력은 따로 남지 않는다).
+    완료는 허용 버전 실행의 전체 완료(`is_full_completion`: 좁힌 실행의 `partial:` 마감은 아니다,
+    required 게이트의 완료 버전과 같은 기준) 또는 건너뛰기(waived)다. 프라이버시 승인 상태는 지금
+    값이다 (승인 이력은 따로 남지 않는다).
     """
     withdrawn = withdrawn_session_ids(conn)
     total_ms = 0
@@ -281,7 +284,7 @@ def _ai_backlog_hours(conn: sa.Connection, end: datetime, versions: frozenset[st
             e.at < end
             and (
                 e.event is AiRunEventKind.WAIVED
-                or (e.event is AiRunEventKind.COMPLETED and runs.get(e.run_id or "") in versions)
+                or (is_full_completion(e) and runs.get(e.run_id or "") in versions)
             )
             for e in list_ai_run_events(conn, sid)
         )
