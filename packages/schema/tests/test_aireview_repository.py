@@ -28,6 +28,7 @@ from dlp_schema.aireview import (
     AiRunEvent,
     AiRunEventKind,
     AiSuggestion,
+    AiVerdictValue,
 )
 from dlp_schema.db.aireview_repository import (
     done_unit_ids,
@@ -56,7 +57,7 @@ from dlp_schema.db.repository import (
     register_ontology,
 )
 from dlp_schema.db.tables import ai_review_units
-from dlp_schema.labels import Verification, VerificationState
+from dlp_schema.labels import ActionPayload, Verification, VerificationState
 from dlp_schema.ontology import load_ontology
 from dlp_schema.testing import (
     AI_VERSION,
@@ -101,7 +102,9 @@ def _suggested_unit() -> AiReviewUnit:
         confidence=0.8,
         evidence_t_ms=1_200,
         suggestion=AiSuggestion(
-            op="set", fields=("verb",), payload=action_payload(action_id="l1", verb="lift")
+            op="set",
+            fields=("verb",),
+            payload=ActionPayload.model_validate(action_payload(action_id="l1", verb="lift")),
         ),
     )
     return make_ai_unit(uid(1), [wrong, make_ai_verdict("l2")], context_label_ids=("l9",))
@@ -219,7 +222,8 @@ def _exposure(task_key: str, at: datetime) -> AiExposure:
 def _outcome(task_key: str, at: datetime) -> AiOutcome:
     """판정 있는 항목과 없는 항목 하나씩."""
     items = (
-        AiOutcomeItem(label_id="l1", unit_id=uid(1), verdict="wrong", arm=AiArm.SHOWN,
+        AiOutcomeItem(label_id="l1", unit_id=uid(1), verdict=AiVerdictValue.WRONG,
+                      arm=AiArm.SHOWN,
                       human=AiHumanAction.CORRECTED, match="exact", result_label_ids=("l1-h",)),
         AiOutcomeItem(label_id="l3", arm=AiArm.SHOWN, human=AiHumanAction.APPROVED),
     )  # fmt: skip

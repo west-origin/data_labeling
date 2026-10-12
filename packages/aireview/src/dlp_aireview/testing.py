@@ -1,7 +1,8 @@
 """가짜 OpenAI 호환 VLM 서버 (테스트·CI용, WP17.3). 실제 모델을 부르지 않는다.
 
-`FakeOpenAIServer`는 127.0.0.1의 임의 포트에 `ThreadingHTTPServer`를 띄우고, vLLM이 내는 모양의 응답을
-흉내 낸다. 벤치(`bench`)·점검(`probe`)·실행기(WP17.5) 테스트와 CLI 종단 테스트가 실제 서버 대신 쓴다.
+`FakeOpenAIServer`는 127.0.0.1의 임의 포트에 `ThreadingHTTPServer`를 띄우고, vLLM이 내는 모양의
+응답을 흉내 낸다. 벤치(`bench`)·점검(`probe`)·실행기(WP17.5) 테스트와 CLI 종단 테스트가 실제 서버
+대신 쓴다.
 
 흉내 내는 것
     - `GET /v1/models`: 모델 id와 `max_model_len`. `GET /version`: 엔진 버전.
@@ -34,12 +35,12 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import TracebackType
-from typing import Any
+from typing import Any, cast
 
 import cv2
 import numpy as np
 
-# 이미지 한 장의 토큰을 셀 때의 화소 단위 (Qwen3-VL patch 16 × merge 2)
+# 이미지 한 장의 토큰을 셀 때의 화소 단위 (Qwen3-VL patch 16, merge 2)
 _PATCH_PX = 32
 # 기본 판정 요청 알아보기: 가변 글 끝 문장 "대상 #0~#N를 판정해 …" (dlp_aireview.prompt.unit_text)
 _TARGETS = re.compile(r"대상 #0~#(\d+)를 판정해")
@@ -107,17 +108,27 @@ def _image_tokens(url: str) -> int:
     return math.ceil(w / _PATCH_PX) * math.ceil(h / _PATCH_PX)
 
 
+def _obj(value: Any) -> dict[str, Any]:
+    """JSON 값 → 객체 (객체가 아니면 빈 사전)."""
+    return cast(dict[str, Any], value) if isinstance(value, dict) else {}
+
+
+def _arr(value: Any) -> list[Any]:
+    """JSON 값 → 배열 (배열이 아니면 빈 목록)."""
+    return cast(list[Any], value) if isinstance(value, list) else []
+
+
 def _pieces(body: Mapping[str, Any]) -> list[tuple[str, int, bool]]:
     """요청 메시지 → (조각 해시 입력, 토큰 수, 이미지인가) 목록 (보낸 순서)."""
     out: list[tuple[str, int, bool]] = []
-    for msg in body.get("messages", []):
+    for msg in map(_obj, _arr(body.get("messages"))):
         content = msg.get("content")
         if isinstance(content, str):
             out.append((f"{msg.get('role')}:{content}", text_tokens(content), False))
             continue
-        for part in content or []:
+        for part in map(_obj, _arr(content)):
             if part.get("type") == "image_url":
-                url = str(part["image_url"]["url"])
+                url = str(_obj(part.get("image_url")).get("url", ""))
                 out.append((url, _image_tokens(url), True))
             else:
                 text = str(part.get("text", ""))
@@ -125,18 +136,25 @@ def _pieces(body: Mapping[str, Any]) -> list[tuple[str, int, bool]]:
     return out
 
 
+def _response_schema(body: Mapping[str, Any]) -> dict[str, Any] | None:
+    """요청의 구조화 출력 스키마 (`response_format.json_schema.schema`, 없으면 None)."""
+    schema = _obj(_obj(body.get("response_format")).get("json_schema")).get("schema")
+    return _obj(schema) if schema is not None else None
+
+
 def minimal_instance(schema: Mapping[str, Any]) -> Any:
     """JSON Schema(이 패키지가 쓰는 부분집합)를 만족하는 최소 값 (가짜 서버의 구조화 출력 흉내)."""
     if "enum" in schema:
-        return schema["enum"][0]
+        return _arr(schema["enum"])[0]
     if "anyOf" in schema:
-        return minimal_instance(schema["anyOf"][0])
-    kind = schema.get("type")
+        return minimal_instance(_obj(_arr(schema["anyOf"])[0]))
+    kind: Any = schema.get("type")
     if isinstance(kind, list):
-        kind = "null" if "null" in kind else kind[0]
+        kinds = _arr(kind)
+        kind = "null" if "null" in kinds else kinds[0]
     if kind == "object":
-        props: Mapping[str, Any] = schema.get("properties", {})
-        return {k: minimal_instance(props[k]) for k in schema.get("required", [])}
+        props = _obj(schema.get("properties"))
+        return {str(k): minimal_instance(_obj(props[k])) for k in _arr(schema.get("required"))}
     defaults: dict[str, Any] = {
         "array": [], "string": "", "integer": 0, "number": 0, "boolean": False, "null": None,
     }  # fmt: skip
@@ -227,13 +245,13 @@ class FakeOpenAIServer:
         server = self
 
         class Handler(BaseHTTPRequestHandler):
-            def do_GET(self) -> None:  # noqa: N802 (http.server 규약)
+            def do_GET(self) -> None:  # http.server 규약 이름
                 server.handle(self, "GET")
 
-            def do_POST(self) -> None:  # noqa: N802
+            def do_POST(self) -> None:
                 server.handle(self, "POST")
 
-            def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+            def log_message(self, format: str, *args: Any) -> None:
                 """요청 로그를 남기지 않는다 (이미지 base64가 섞이지 않게)."""
 
         self._httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -283,7 +301,7 @@ class FakeOpenAIServer:
         body: str = "fake failure",
         retry_after: str | None = None,
     ) -> None:
-        """앞으로 채팅 요청이 `after`번 성공한 뒤 `times`번 `status`로 답한다 (예약은 차례로 쓴다)."""
+        """앞으로 채팅 요청이 `after`번 성공한 뒤 `times`번 `status`로 답한다 (예약은 차례로)."""
         with self._lock:
             self._failures.append(_Failure(status, times, after, body, retry_after))
 
@@ -355,7 +373,7 @@ class FakeOpenAIServer:
         if not self.tokenize:
             self._send(h, 404, {"error": {"message": "not found"}})
             return
-        prompt = str((call.body or {}).get("prompt", ""))
+        prompt = str(_obj(call.body).get("prompt", ""))
         self._send(h, 200, {"count": text_tokens(prompt), "max_model_len": self.context_tokens})
 
     def _chat_entry(self, h: BaseHTTPRequestHandler, call: FakeCall) -> None:
@@ -387,8 +405,7 @@ class FakeOpenAIServer:
         """요청 검사 (이미지 상한, 스키마 키워드, 문맥 길이). 거부면 (상태, 메시지)."""
         if usage.images > self.max_images:
             return 400, f"At most {self.max_images} image(s) may be provided in one request."
-        fmt = body.get("response_format") or {}
-        schema = (fmt.get("json_schema") or {}).get("schema")
+        schema = _response_schema(body)
         if not self.full_keywords and schema and _schema_keywords(schema) & set(_FULL_KEYWORDS):
             return 400, "Unsupported JSON schema keyword in response_format"
         need = usage.prompt + int(body.get("max_tokens") or 0)
@@ -426,16 +443,14 @@ class FakeOpenAIServer:
             return self._responder(call)
         texts = [
             str(p.get("text", ""))
-            for m in body.get("messages", [])
-            if isinstance(m.get("content"), list)
-            for p in m["content"]
+            for m in map(_obj, _arr(body.get("messages")))
+            for p in map(_obj, _arr(m.get("content")))
         ]
         match = _TARGETS.search(texts[-1]) if texts else None
         if match:
             n = int(match.group(1)) + 1
             return json.dumps({"ok": list(range(n)), "items": [], "missing": []})
-        fmt = body.get("response_format") or {}
-        schema = (fmt.get("json_schema") or {}).get("schema")
+        schema = _response_schema(body)
         if schema and self.enforce_schema:
             return json.dumps(minimal_instance(schema), ensure_ascii=False)
         return "모름"
@@ -449,7 +464,7 @@ class FakeOpenAIServer:
             extra = {"Retry-After": failure.retry_after} if failure.retry_after else None
             self._send(h, failure.status, {"error": {"message": failure.body}}, extra)
             return
-        body: Mapping[str, Any] = call.body if isinstance(call.body, dict) else {}
+        body = _obj(call.body)
         with self._lock:
             usage = self._usage(body)
         rejected = self._reject(body, usage)

@@ -18,9 +18,10 @@
       (0009, 0010).
     - session_lifecycle_events: 수정·삭제·TRUNCATE 금지 (0011).
     - privacy_detection_runs: 0건을 포함한 탐지 완료 이력, 수정·삭제·TRUNCATE 금지 (0012).
-    - ai_review_runs, ai_review_run_events, ai_review_units, ai_review_exposures,
-      ai_review_outcomes: AI 1차 검수 기록 (라벨이 아니다), 수정·삭제·TRUNCATE 금지 (0019, ADR 0040).
     - privacy_holds: 사고 대응 승인 보류·해제 기록, 수정·삭제·TRUNCATE 금지 (0017, ADR 0042).
+    - ai_review_runs, ai_review_run_events, ai_review_units, ai_review_exposures,
+      ai_review_outcomes: AI 1차 검수 기록 (라벨이 아니다), 수정·삭제·TRUNCATE 금지
+      (0019, ADR 0040).
 
 열 규약
     - 시각(`Ts`)은 모두 `TIMESTAMP WITH TIME ZONE`. 파이썬 쪽도 시간대 있는 datetime만 쓴다.
@@ -488,9 +489,9 @@ retention_decisions = sa.Table(
 
 
 # ---------------------------------------------------------------- AI 1차 검수 (WP17.4, ADR 0040)
-# 판정은 라벨이 아니다 (label_records 밖). 다섯 표 모두 추가만 한다: 0019가 0009의 dlp_append_only()와
-# 0010의 dlp_no_truncate() 트리거를 건다. 저장소는 `db.aireview_repository`. 시각 열은 Ts, 목록·사전은
-# 계약(`dlp_schema.aireview`)의 JSON 직렬화 형태로 Json 열에 넣는다.
+# 판정은 라벨이 아니다 (label_records 밖). 다섯 표 모두 추가만 한다: 0019가 0009의
+# dlp_append_only()와 0010의 dlp_no_truncate() 트리거를 건다. 저장소는 `db.aireview_repository`.
+# 시각 열은 Ts, 목록·사전은 계약(`dlp_schema.aireview`)의 JSON 직렬화 형태로 Json 열에 넣는다.
 
 # 실행 세대 (`AiReviewRun`): 한 번의 `dlp aireview run`이 고정한 계획 기록. backend에는 엔드포인트
 # 이름만 남긴다 (URL·키 아님). render_hashes·blurred_sha256은 {스트림: 값}.
@@ -520,8 +521,8 @@ ai_review_runs = sa.Table(
     sa.Column("created_at", Ts, nullable=False),
 )
 
-# 실행 이벤트 (`AiRunEvent`): started·completed·interrupted·aborted·waived. waived는 실행 없이도 남는다
-# (run_id NULL, required 모드의 건너뛰기 결정).
+# 실행 이벤트 (`AiRunEvent`): started·completed·interrupted·aborted·waived. waived는 실행 없이도
+# 남는다 (run_id NULL, required 모드의 건너뛰기 결정).
 ai_review_run_events = sa.Table(
     "ai_review_run_events",
     metadata,
@@ -597,9 +598,7 @@ ai_review_units = sa.Table(
 ai_review_exposures = sa.Table(
     "ai_review_exposures",
     metadata,
-    sa.Column(
-        "task_key", sa.String(128), sa.ForeignKey("review_tasks.task_key"), primary_key=True
-    ),
+    sa.Column("task_key", sa.String(128), sa.ForeignKey("review_tasks.task_key"), primary_key=True),
     sa.Column("session_id", sa.String(128), nullable=False, index=True),
     sa.Column("assignment_id", sa.String(128), nullable=True),
     sa.Column("arm", sa.String(16), nullable=False),
@@ -619,9 +618,7 @@ ai_review_exposures = sa.Table(
 ai_review_outcomes = sa.Table(
     "ai_review_outcomes",
     metadata,
-    sa.Column(
-        "task_key", sa.String(128), sa.ForeignKey("review_tasks.task_key"), primary_key=True
-    ),
+    sa.Column("task_key", sa.String(128), sa.ForeignKey("review_tasks.task_key"), primary_key=True),
     sa.Column("session_id", sa.String(128), nullable=False, index=True),
     sa.Column("reviewer_id", sa.String(128), nullable=True),
     sa.Column("collected_at", Ts, nullable=False, index=True),

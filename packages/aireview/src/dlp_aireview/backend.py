@@ -11,8 +11,8 @@
 - CPU·CI용 stub은 `dlp_aireview.oracle.OracleJudge`.
 
 - `parse_endpoints`: `--vlm-url`·`DLP_VLM_URLS`(`이름=URL,…`) → 엔드포인트 이름 → URL.
-- `check_hosts`: 주소가 사내 대역(`server.internal_hosts`) 안인지 (호스트 이름은 DNS로 풀어 모든 주소를
-  본다, I7). 벤치·점검·실행 모두 보내기 전에 부른다.
+- `check_hosts`: 주소가 사내 대역(`server.internal_hosts`) 안인지 (호스트 이름은 DNS로 풀어 모든
+  주소를 본다, I7). 벤치·점검·실행 모두 보내기 전에 부른다.
 
 여러 엔드포인트 묶음·차단기(`EndpointPool`)는 실행기와 함께 WP17.5에서 더한다.
 

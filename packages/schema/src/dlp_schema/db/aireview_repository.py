@@ -1,8 +1,8 @@
 """AI 1차 검수 기록 저장소 (WP17.4, ADR 0040). 연결·트랜잭션·커밋은 호출자가 관리한다.
 
-판정은 라벨이 아니다. 이 모듈은 `label_records`를 읽거나 쓰지 않고, AI 표(`ai_review_*`, Alembic
-0019)만 다룬다. 다섯 표 모두 추가만 한다 (PostgreSQL 트리거가 UPDATE·DELETE·TRUNCATE를 막는다). 그래서
-이 모듈에는 수정·삭제 함수가 없다.
+판정은 라벨이 아니다. 이 모듈은 `label_records`를 읽거나 쓰지 않고, AI 표(`ai_review_*`,
+Alembic 0019)만 다룬다. 다섯 표 모두 추가만 한다 (PostgreSQL 트리거가 UPDATE·DELETE·TRUNCATE를
+막는다). 그래서 이 모듈에는 수정·삭제 함수가 없다.
 
 절별 함수
     - 실행 세대·이벤트: `insert_ai_run`, `get_ai_run`, `list_ai_runs`, `insert_ai_run_event`,
@@ -13,8 +13,8 @@
       `get_ai_outcome`, `list_ai_outcomes`.
 
 누가 쓰나
-    - 실행기(`dlp_aireview.runner`, WP17.5)가 실행·이벤트·단위를 쓴다. 판정 버전마다 단위가 남고, 표시할
-      버전은 읽는 쪽이 고른다 (`dlp_schema.aireview.valid_verdicts`).
+    - 실행기(`dlp_aireview.runner`, WP17.5)가 실행·이벤트·단위를 쓴다. 판정 버전마다 단위가 남고,
+      표시할 버전은 읽는 쪽이 고른다 (`dlp_schema.aireview.valid_verdicts`).
     - 검수 연동(`dlp_review`, WP17.6~17.7)이 노출·결과를 쓰고 단위를 읽는다. 운영 지표(WP17.8)가
       노출·결과를 기간으로 읽는다.
     - 내보내기·학습·데이터셋·액티브 러닝은 이 모듈을 import하지 않는다 (정적 검사, I4).
@@ -65,7 +65,7 @@ def _row(obj: Contract, times: Iterable[str]) -> dict[str, Any]:
     return data
 
 
-def _plain(row: Mapping[str, Any]) -> dict[str, Any]:
+def _plain(row: Mapping[Any, Any]) -> dict[str, Any]:
     """행 → 계약 검증용 사전."""
     return dict(row)
 
@@ -74,7 +74,10 @@ def _plain(row: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def insert_ai_run(conn: sa.Connection, run: AiReviewRun) -> None:
-    """실행 세대 1행을 추가한다. 같은 run_id가 있으면 IntegrityError (세션은 sessions에 있어야 한다)."""
+    """실행 세대 1행을 추가한다.
+
+    같은 run_id가 있으면 IntegrityError다. 세션은 sessions 표에 있어야 한다 (FK).
+    """
     conn.execute(ai_review_runs.insert().values(**_row(run, ("created_at",))))
 
 
@@ -123,7 +126,7 @@ def list_ai_run_events(conn: sa.Connection, session_id: str) -> list[AiRunEvent]
 
 @dataclass(frozen=True)
 class AiRunState:
-    """세션 하나의 AI 판정 실행 상태 (`latest_run_state`, `dlp aireview status`와 required 게이트용).
+    """세션 하나의 AI 판정 실행 상태 (`latest_run_state`, `dlp aireview status`·required 게이트).
 
     Attributes:
         session_id: 세션.
@@ -199,9 +202,7 @@ def _state(sid: str, events: list[AiRunEvent], runs: list[AiReviewRun]) -> AiRun
 def _insert_ignore(conn: sa.Connection) -> Any:
     """방언별 `INSERT … ON CONFLICT (unit_id) DO NOTHING` 문 (PostgreSQL·SQLite)."""
     if conn.dialect.name == "postgresql":
-        return postgresql.insert(ai_review_units).on_conflict_do_nothing(
-            index_elements=["unit_id"]
-        )
+        return postgresql.insert(ai_review_units).on_conflict_do_nothing(index_elements=["unit_id"])
     if conn.dialect.name == "sqlite":
         return sqlite.insert(ai_review_units).on_conflict_do_nothing(index_elements=["unit_id"])
     raise NotImplementedError(f"지원하지 않는 DB 방언: {conn.dialect.name}")

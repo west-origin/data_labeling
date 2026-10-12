@@ -2,7 +2,8 @@
 
 - `lock_session`: 세션 행 FOR UPDATE (트랜잭션 잠금).
 - `lock_model_task`: 과제별 배포 직렬화 (트랜잭션 advisory lock).
-- `try_lock_aireview`·`unlock_aireview`: 세션별 AI 판정 실행기 하나 (세션 수준 advisory lock, WP17.4).
+- `try_lock_aireview`·`unlock_aireview`: 세션별 AI 판정 실행기 하나 (세션 수준 advisory lock,
+  WP17.4).
 """
 
 import hashlib
@@ -54,7 +55,7 @@ def lock_model_task(conn: sa.Connection, task: str) -> None:
 
 
 def _aireview_key(session_id: str) -> int:
-    """AI 판정 실행 잠금 키 (다른 용도 잠금과 구분하는 접두사 `dlp:aireview:` + SHA-256 앞 64비트)."""
+    """AI 판정 실행 잠금 키 (다른 잠금과 구분하는 접두사 `dlp:aireview:` + SHA-256 앞 64비트)."""
     return int.from_bytes(
         hashlib.sha256(f"dlp:aireview:{session_id}".encode()).digest()[:8], signed=True
     )

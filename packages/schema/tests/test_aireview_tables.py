@@ -1,6 +1,7 @@
 """AI 1차 검수 표의 PostgreSQL 성질 (services, WP17.4, ADR 0040 I5·I8).
 
-`make up` 뒤 `make test-services`로 돈다 (`pg` 픽스처: 마이그레이션된 일회용 DB, 온톨로지 v1, 세션 s001).
+`make up` 뒤 `make test-services`로 돈다 (`pg` 픽스처: 마이그레이션된 일회용 DB, 온톨로지 v1,
+세션 s001).
 
 - 다섯 표 모두 UPDATE·DELETE·TRUNCATE를 트리거가 거부한다. 오류 메시지까지 확인한다 (F-SCH-05의
   교훈: match가 아무 오류에나 맞지 않게 표 이름과 트리거 문구를 함께 본다).
@@ -100,9 +101,11 @@ def test_ai_tables_are_append_only(pg: sa.Engine, table: str) -> None:
         f"UPDATE {table} SET session_id = 's001' WHERE {where}",
         f"DELETE FROM {table} WHERE {where}",
     ):
-        with pytest.raises(DBAPIError, match=f"{table} 기록은 추가만 할 수 있습니다"):
-            with pg.begin() as conn:
-                conn.execute(sa.text(statement))
+        with (
+            pytest.raises(DBAPIError, match=f"{table} 기록은 추가만 할 수 있습니다"),
+            pg.begin() as conn,
+        ):
+            conn.execute(sa.text(statement))
     with pytest.raises(DBAPIError, match=f"{table} 기록은 비울 수 없습니다"), pg.begin() as conn:
         conn.execute(sa.text(f"TRUNCATE {table} CASCADE"))
     with pg.connect() as conn:
@@ -127,9 +130,7 @@ def test_ai_records_leave_labels_untouched(pg: sa.Engine) -> None:
 def test_same_unit_is_skipped_without_trigger(pg: sa.Engine) -> None:
     """같은 단위 ID는 ON CONFLICT DO NOTHING으로 건너뛴다 (UPDATE 트리거에 걸리지 않는다, I8)."""
     _fill(pg)
-    again = make_ai_unit(
-        UNIT, [make_ai_verdict("a1")], created_at=FIXED_TIME + timedelta(hours=1)
-    )
+    again = make_ai_unit(UNIT, [make_ai_verdict("a1")], created_at=FIXED_TIME + timedelta(hours=1))
     with pg.begin() as conn:
         assert insert_ai_units(conn, [again]) == 0
     with pg.connect() as conn:

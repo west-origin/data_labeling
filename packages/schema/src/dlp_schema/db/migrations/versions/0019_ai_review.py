@@ -18,6 +18,8 @@ UPDATE 트리거를 부르지 않으므로 같은 단위를 다시 써도 거부
 
 from __future__ import annotations
 
+from typing import Any
+
 import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
@@ -37,7 +39,7 @@ TABLES = (
 )
 
 
-def _json() -> sa.types.TypeEngine[object]:
+def _json() -> sa.types.TypeEngine[Any]:
     """JSON 열 타입 (PostgreSQL JSONB, 그 밖 JSON). tables.Json과 같다."""
     return sa.JSON().with_variant(postgresql.JSONB(), "postgresql")
 
@@ -241,8 +243,7 @@ def downgrade() -> None:
     """
     bind = op.get_bind()
     rows = sum(
-        int(bind.execute(sa.text(f"SELECT count(*) FROM {table}")).scalar_one())
-        for table in TABLES
+        int(bind.execute(sa.text(f"SELECT count(*) FROM {table}")).scalar_one()) for table in TABLES
     )
     if rows:
         raise RuntimeError(
