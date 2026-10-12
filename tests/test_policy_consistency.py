@@ -42,6 +42,21 @@ def test_aireview_policy_matches_neighbours() -> None:
     assert "aireview.run" in load_ops(ROOT).audit.service_purposes
 
 
+def test_ok_miss_thresholds_match_sampling_defect_ratio() -> None:
+    """AI ok 놓침률 기준 세 곳은 같은 값이다 (각 정책 주석의 "같은 값으로 둔다", WP17.8).
+
+    - `ops.yaml alerts.ai_ok_miss_upper95_max`: 주간 경고 (대조군 ok 놓침률 95% 상한).
+    - `aireview.yaml gate.max_ok_miss_rate`: 골든 게이트 (`dlp aireview eval --gate`).
+    - `review.yaml sampling.max_defect_ratio`: 표본 합격 묶음의 결함 비율 상한 (`dlp review quality
+      --ai`가 기준으로 보인다).
+    AI의 맞음이 표본 허용 결함률보다 나쁘면 믿을 근거가 없다. 한 값만 바꾸면 경고·게이트·품질 보고의
+    기준이 서로 달라진다.
+    """
+    defect = load_review(ROOT).sampling.max_defect_ratio
+    assert load_ops(ROOT).alerts.ai_ok_miss_upper95_max == defect
+    assert load_aireview(ROOT).gate.max_ok_miss_rate == defect
+
+
 def _key_comment(text: str, key: str) -> str:
     """YAML 텍스트에서 `  <key>: 값  # 주석` 줄의 주석 부분 (그 키 줄이 정확히 하나여야 한다)."""
     lines = [ln for ln in text.splitlines() if ln.startswith(f"  {key}: ")]
