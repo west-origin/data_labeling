@@ -16,7 +16,8 @@ WP12, ADR 0014·0015·0023(블러 배정·세대). 이 모듈은 순수 로직(`
 - `check_privacy_reviewers`: 정책의 원본 접근 권한자로 블러 담당자 검사.
 - `plan_session`: 세션 하나의 배정 계획을 세우고 DB에 넣는다.
 - `privacy_generation`: 블러 단위 입력 세대 해시.
-- `assign_reviewer`: 담당자 없는 배정에 담당자를 정한다 (작업을 만들기 전에만).
+- `assign_reviewer`, `ReviewerRuleError`: 담당자 없는 배정에 담당자를 정한다 (작업을 만들기 전에만).
+  배정 규칙(QA 선임, 짝 배정과 다른 사람) 거부는 `ReviewerRuleError`다.
 - `create_assignment_tasks`: 배정의 도구 작업을 만든다 (멱등, 담당자 없는 배정은 거부).
 - `FinishResult`, `finish_assignment`: 배정 마무리와 표본 판정.
 - `QualityReport`, `quality_report`: 발견율·이중 일치도·프리라벨 편향.
@@ -355,6 +356,14 @@ def _prepare_seeded(
     return a.model_copy(update={"injected": tuple(task.injected)})
 
 
+class ReviewerRuleError(TaskError):
+    """정한 담당자가 배정 규칙(QA는 선임, 짝 배정과 다른 사람)에 맞지 않는다 (`assign_reviewer`).
+
+    정책(`reviewers.senior`)을 고치거나 다른 담당자를 고르면 풀린다. 배정 상태 때문인 거부(이미
+    담당자·작업이 있음)는 그냥 `TaskError`라 구분한다 (CLI는 이 예외에만 정책 안내를 붙인다).
+    """
+
+
 def assign_reviewer(
     conn: sa.Connection, a: ReviewAssignment, reviewer: str, policy: ReviewOpsPolicy
 ) -> ReviewAssignment:
@@ -370,8 +379,9 @@ def assign_reviewer(
 
     세션 → 배정 순으로 잠근다 (`create_assignment_tasks`와 같은 순서).
     부작용: `review_assignments.assignee` 갱신.
-    예외: 이미 다른 담당자가 있거나 작업이 있는 배정, 선임이 아닌 QA 담당자, 짝 배정과 같은
-    담당자면 `TaskError`. 블러 배정의 권한자가 아니면 `AccessError`.
+    예외: 이미 다른 담당자가 있거나 작업이 있는 배정이면 `TaskError`, 선임이 아닌 QA 담당자·짝
+    배정과 같은 담당자면 `ReviewerRuleError`(`TaskError`의 하위 클래스). 블러 배정의 권한자가
+    아니면 `AccessError`.
     """
     lock_session(conn, a.session_id)
     live = lock_assignment(conn, a.assignment_id)
@@ -387,7 +397,7 @@ def assign_reviewer(
     if current.label_kinds == ("blur_track",):
         check_privacy_reviewers([reviewer], policy)
     if current.mode is ReviewMode.QA and reviewer not in policy.reviewers.senior:
-        raise TaskError(
+        raise ReviewerRuleError(
             f"{a.assignment_id}: QA 배정은 선임 검수자(검수 정책 reviewers.senior)에게만 줍니다: "
             f"{reviewer}"
         )
@@ -399,7 +409,7 @@ def assign_reviewer(
             and current.pair_id in (x.assignment_id, x.pair_id)
         }
         if reviewer in paired:
-            raise TaskError(
+            raise ReviewerRuleError(
                 f"{a.assignment_id}: 짝 배정({current.pair_id})과 같은 담당자 {reviewer}에게는 "
                 "줄 수 없습니다 (측정·재검수는 다른 사람이 한다)"
             )

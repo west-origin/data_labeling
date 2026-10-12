@@ -27,6 +27,7 @@ import yaml
 from dlp_cli import review_cmds, review_config
 from dlp_review.ops.policy import ReviewOpsPolicy
 from dlp_review.ops.policy import load_policy as load_default_policy
+from dlp_review.ops.runner import ReviewerRuleError
 from dlp_review.refresh import RefreshReport
 from dlp_review.revoke import RevocationReport
 from dlp_review.tasks import ReviewSetup, TaskError
@@ -261,7 +262,9 @@ def test_assign_refused_reviewer_reports_fix_without_traceback(
     """QA 담당자가 선임이 아니거나 짝 배정과 같으면 traceback 대신 이유·고칠 곳과 종료 코드 1.
 
     정답 근거: `plan_qa`가 담당자를 비우는 경우(선임 없음, 선임이 원래 담당자뿐)는 같은 정책으로는
-    어떤 `--assignee`도 받아들여지지 않으므로, 안내는 `reviewers.senior`를 먼저 고치라고 해야 한다.
+    어떤 `--assignee`도 받아들여지지 않으므로, 안내는 `reviewers.senior`를 먼저 고치라고 해야 한다
+    (배정 규칙 거부 `ReviewerRuleError`). 이미 담당자·작업이 있어 거부한 것(배정 상태, 그냥
+    `TaskError`)은 정책을 고쳐도 풀리지 않으므로 그 안내를 붙이지 않는다.
     """
     planned = SimpleNamespace(
         label_kinds=("action",), session_id="s001", assignee=None, mode=ReviewMode.QA
@@ -270,12 +273,22 @@ def test_assign_refused_reviewer_reports_fix_without_traceback(
     monkeypatch.setattr(review_cmds, "run_revocations", Mock(return_value=RevocationReport()))
     created = Mock(return_value=[])
     monkeypatch.setattr(review_cmds, "create_assignment_tasks", created)
-    refused = Mock(side_effect=TaskError("a1:qa: QA 배정은 선임 검수자에게만 줍니다: r1"))
-    monkeypatch.setattr(review_cmds, "assign_reviewer", refused)
-    args = _args("assign", assignment_id="a1:qa", assignee="r1")
-    assert review_cmds.cmd_assign(args) == review_cmds.NO_ASSIGNEE_EXIT
-    out = capsys.readouterr().out
-    assert "QA 배정은 선임" in out and "reviewers.senior에 원래 담당자가 아닌 선임" in out
+    hint = "reviewers.senior에 원래 담당자가 아닌 선임"
+    for why in ("QA 배정은 선임 검수자에게만 줍니다: r1", "짝 배정(a1)과 같은 담당자 r1에게는"):
+        refused = Mock(side_effect=ReviewerRuleError(f"a1:qa: {why}"))
+        monkeypatch.setattr(review_cmds, "assign_reviewer", refused)
+        args = _args("assign", assignment_id="a1:qa", assignee="r1")
+        assert review_cmds.cmd_assign(args) == review_cmds.NO_ASSIGNEE_EXIT
+        out = capsys.readouterr().out
+        assert why in out and hint in out
+    for why in ("이미 담당자(s1)가 있는 배정은 바꾸지 않습니다",
+                "이미 작업이 있는 배정의 담당자는 정하지 않습니다"):  # fmt: skip
+        refused = Mock(side_effect=TaskError(f"a1:qa: {why}"))
+        monkeypatch.setattr(review_cmds, "assign_reviewer", refused)
+        args = _args("assign", assignment_id="a1:qa", assignee="s2")
+        assert review_cmds.cmd_assign(args) == review_cmds.NO_ASSIGNEE_EXIT
+        out = capsys.readouterr().out
+        assert why in out and hint not in out and "reviewers.senior" not in out
     assert not created.called
 
 

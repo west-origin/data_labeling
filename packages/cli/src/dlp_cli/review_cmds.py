@@ -114,6 +114,7 @@ from dlp_review.ontology_projects import ontology_project
 from dlp_review.ops.assign import plan_qa
 from dlp_review.ops.policy import ReviewOpsPolicy
 from dlp_review.ops.runner import (
+    ReviewerRuleError,
     assign_reviewer,
     create_assignment_tasks,
     plan_session,
@@ -589,7 +590,9 @@ def cmd_assign(args: argparse.Namespace) -> int:
     만든다 (`ops.runner.assign_reviewer`: 블러는 원본 접근 권한자, QA는 선임, 짝 배정과 다른 사람).
     없으면 아무것도 하지 않고 `NO_ASSIGNEE_EXIT`(1)로 끝낸다. 정한 담당자가 배정 규칙에 맞지
     않으면(선임이 아닌 QA 담당자, 짝 배정과 같은 담당자, 권한 없는 블러 담당자) 담당자를 바꾸지도
-    작업을 만들지도 않고 이유와 고칠 곳을 출력해 같은 종료 코드로 끝낸다 (traceback 없음).
+    작업을 만들지도 않고 이유와 고칠 곳을 출력해 같은 종료 코드로 끝낸다 (traceback 없음). QA
+    배정의 규칙 거부(`ReviewerRuleError`)에만 `reviewers.senior`를 고치라는 안내를 붙인다: 이미
+    담당자·작업이 있어 거부한 것은 정책을 고쳐도 풀리지 않는다.
     담당자가 이미 있는 배정의 담당자는 바꾸지 않는다 (F-REV-07, 회귀: 예전에는 "unassigned"를
     실제 담당자로 넣어 워터마크·라벨링 버킷 경로·검수자 ID가 모두 그 문자열이 됐다).
     작업 라벨 배정은 만들기 전에 그 세션의 회수 대기를 실행하고(sweep 포함), 세션에 대기가 하나라도
@@ -617,6 +620,7 @@ def cmd_assign(args: argparse.Namespace) -> int:
             print(f"{args.assignment_id}: 매체 회수가 끝나지 않아 작업을 만들지 않습니다")
             return REVOCATION_PENDING_EXIT
     refused: str | None = None
+    hint = ""
     tasks: list[ReviewTask] = []
     with engine.begin() as conn:
         a = get_assignment(conn, args.assignment_id)
@@ -625,14 +629,17 @@ def cmd_assign(args: argparse.Namespace) -> int:
                 a = assign_reviewer(conn, a, args.assignee, policy)
         except (TaskError, AccessError) as exc:
             refused = str(exc)  # 쓰기 전에 거부됐다 (담당자 갱신 없음)
+            # 정책 안내는 QA 배정 규칙 거부(선임 아님·짝과 같음)에만: 이미 담당자·작업이 있어 거부한
+            # 것은 정책을 고쳐도 풀리지 않는다
+            if isinstance(exc, ReviewerRuleError) and a.mode is ReviewMode.QA:
+                hint = (
+                    " — review.yaml reviewers.senior에 원래 담당자가 아닌 선임을 넣은 뒤 그 "
+                    "선임으로 다시 실행하세요"
+                )
         else:
             tasks = create_assignment_tasks(conn, a, setup, policy, datetime.now(UTC))
     engine.dispose()
     if refused is not None:
-        hint = (
-            " — review.yaml reviewers.senior에 원래 담당자가 아닌 선임을 넣은 뒤 그 선임으로 다시 "
-            "실행하세요" if a.mode is ReviewMode.QA else ""
-        )  # fmt: skip
         print(f"{args.assignment_id}: 담당자를 정하지 못했습니다: {refused}{hint}")
         return NO_ASSIGNEE_EXIT
     for t in tasks:
