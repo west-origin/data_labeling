@@ -117,3 +117,45 @@ def test_labeler_scope_fails_on_write_and_other_bucket_and_cleans_probe(
     assert "거부가 아닌 오류" in got["labeler-no-delete:dlp-labeling"].detail
     assert not got["labeler-no-list:dlp-datasets"].ok
     assert "labeler-no-read:dlp-datasets" not in got
+
+
+def test_versioning_suspended_reads_every_page() -> None:
+    """일시 중지 버킷의 버전 목록이 여러 쪽이면 다음 쪽까지 읽는다 (최대 1000개씩).
+
+    정답 근거: 첫 쪽은 최신 버전 1000개뿐이고(IsTruncated), 회수로 지운 사본의 비현재 버전과
+    삭제 표시는 키 순서상 둘째 쪽에 있다. 둘째 쪽을 읽지 않으면 '남은 이전 버전 없음'으로 틀리게
+    통과한다.
+    끝 쪽까지 깨끗하면 통과이고, 쪽마다 다음 표시(KeyMarker·VersionIdMarker)로 이어 읽는다.
+    """
+    service = _store()
+    params = {"Bucket": LABELING}
+    first_q = {"Bucket": LABELING, "Prefix": "sessions/"}
+    next_q = {**first_q, "KeyMarker": "sessions/a0999/x", "VersionIdMarker": "v999"}
+    latest = [
+        {"Key": f"sessions/a{i:04d}/x", "VersionId": f"v{i}", "IsLatest": True} for i in range(1000)
+    ]
+    first = {
+        "Versions": latest,
+        "IsTruncated": True,
+        "NextKeyMarker": "sessions/a0999/x",
+        "NextVersionIdMarker": "v999",
+    }
+    revoked = "sessions/z/review/w/bodycam-x.mp4"
+    second = {
+        "Versions": [{"Key": revoked, "VersionId": "old", "IsLatest": False}],
+        "DeleteMarkers": [{"Key": revoked, "VersionId": "dm", "IsLatest": True}],
+        "IsTruncated": False,
+    }
+    clean = {"Versions": latest[:1], "IsTruncated": False}
+    with Stubber(service.client) as stub:
+        stub.add_response("get_bucket_versioning", {"Status": "Suspended"}, params)
+        stub.add_response("list_object_versions", first, first_q)
+        stub.add_response("list_object_versions", second, next_q)
+        stub.add_response("get_bucket_versioning", {"Status": "Suspended"}, params)
+        stub.add_response("list_object_versions", first, first_q)
+        stub.add_response("list_object_versions", clean, next_q)
+        found = check_versioning_off(service)
+        passed = check_versioning_off(service)
+        stub.assert_no_pending_responses()
+    assert not found.ok and "이전 버전 1개" in found.detail and "삭제 표시 1개" in found.detail
+    assert passed.ok and "남은 이전 버전 없음" in passed.detail
