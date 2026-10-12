@@ -438,19 +438,36 @@ def _apply_event_inputs(meta: dict[str, Any], region: dict[str, Any], new: bool)
             meta.pop(field, None)
 
 
-def _fit_hand_fields(meta: dict[str, Any], previous: str | None) -> None:
+# 대상 개체 ID가 필수인 접촉 대상 종류 (`HandStatePayload._check`). 이 종류 사이 변경은
+# 대상 ID·파지 유형을 둔다
+_TARGET_KINDS = frozenset({"object", "tool", "fixed_surface"})
+
+
+def _fit_hand_fields(meta: dict[str, Any], previous: str | None, filled: set[str]) -> None:
     """접촉 대상 종류에 둘 수 없는 손 상태 필드를 비운다 (`HandStatePayload._check`, hand.yaml).
 
+    filled는 이번 결과에서 검수자가 채운 입력란 필드다 (`HAND_FIELDS` 중).
     - none: 대상 ID·대상자 부위·파지 유형을 늘 비운다 (화면 입력란에 남은 값 포함).
     - 종류를 바꿨고(previous와 다름) 새 종류가 person이 아니면 대상자 부위를 비운다.
-    대상 ID·파지 유형은 none이 아닌 종류 사이에서 그대로 둔다 (입력란에서 보고 고친다).
+    - 종류를 바꿨고 새 종류가 대상 개체 종류(object·tool·fixed_surface)가 아니면(self·person 등)
+      이전 대상의 파지 유형과, 입력란을 채우지 않은 대상 ID를 비운다. 비운 입력란은 원래 값
+      유지이고 파지 유형에는 입력란이 없어, 남기면 검수자가 지울 방법이 없다.
+    대상 개체 종류 사이(tool → object 등)는 대상 ID·파지 유형을 그대로 둔다 (입력란에서 보고
+    고친다).
     """
     kind = meta["contact_target_kind"]
     if kind == "none":
         for field in ("target_id", "body_part", "grasp_type"):
             meta.pop(field, None)
-    elif previous is not None and previous != kind and kind != "person":
+        return
+    if previous is None or previous == kind:
+        return
+    if kind != "person":
         meta.pop("body_part", None)
+    if kind not in _TARGET_KINDS:
+        meta.pop("grasp_type", None)
+        if HAND_TARGET not in filled:
+            meta.pop("target_id", None)
 
 
 # 라벨 이름 머리("<종류>" 또는 "<종류>.<손>"의 종류 부분) → LabelRecord.kind
@@ -577,8 +594,9 @@ def _reviewed_item(
     elif meta["kind"] == "hand_state":
         # 채운 입력란만 덮어쓴다 (비운 입력란 = 원래 값 유지).
         # 그 뒤 새 접촉 대상 종류에 둘 수 없는 필드를 비운다
-        meta |= {f: region[f] for f in HAND_FIELDS if f in region}
-        _fit_hand_fields(meta, previous)
+        filled = {f for f in HAND_FIELDS if f in region}
+        meta |= {f: region[f] for f in filled}
+        _fit_hand_fields(meta, previous, filled)
     elif meta["kind"] == "action":
         # 구간을 옮겼으면 접근 시작·종료를 맞추고 접촉 시각은 새 구간 안으로 넣는다
         meta |= {"t_approach_ms": start, "t_end_ms": end}

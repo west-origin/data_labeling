@@ -792,6 +792,43 @@ def test_label_studio_hand_state_inputs_and_kind_change(ontology: Ontology) -> N
         assert check_label(drawn, ontology) == []
 
 
+def test_label_studio_hand_kind_change_to_self_or_person_drops_old_target(
+    ontology: Ontology,
+) -> None:
+    """도구 접촉을 자기 몸(self)·대상자(person)로 바꾸면 이전 도구의 대상 ID·파지 유형을 비운다.
+
+    정답 근거: 비운 입력란은 원래 값 유지라 검수자는 이전 target_id를 지울 수 없고, 파지 유형에는
+    입력란이 없다. self·person에는 이전 도구(tool1, tool_grip)가 맞지 않는다. 대상 ID 입력란을
+    채우면 그 값을 쓴다. 대상이 있는 종류 사이(tool → object)는 대상 ID·파지를 그대로 둔다.
+    """
+    tool = HandStatePayload(
+        hand=Hand.RIGHT, contact_target_kind="tool", target_id="tool1", grasp_type="tool_grip",
+        role="active",
+    )  # fmt: skip
+    [region] = to_ls_results([make_label(tool, label_id="hs1")])
+    region["value"]["timeserieslabels"] = ["hand.right:self"]
+    [own] = from_ls_results([region], {"hs1"})
+    assert own.payload == tool.model_copy(
+        update={"contact_target_kind": "self", "target_id": None, "grasp_type": None}
+    )
+    region["value"]["timeserieslabels"] = ["hand.right:person"]
+    [person] = from_ls_results([region, *_hand_inputs("hs1", part="left_forearm")], {"hs1"})
+    assert person.payload == tool.model_copy(
+        update={
+            "contact_target_kind": "person", "body_part": "left_forearm", "target_id": None,
+            "grasp_type": None,
+        }
+    )  # fmt: skip
+    inputs = _hand_inputs("hs1", target="subject_01", part="left_forearm")
+    [named] = from_ls_results([region, *inputs], {"hs1"})
+    assert isinstance(named.payload, HandStatePayload) and named.payload.target_id == "subject_01"
+    region["value"]["timeserieslabels"] = ["hand.right:object"]
+    [obj] = from_ls_results([region], {"hs1"})
+    assert obj.payload == tool.model_copy(update={"contact_target_kind": "object"})
+    for i, item in enumerate((own, person, named, obj)):
+        assert check_label(make_label(item.payload, label_id=f"hk{i}"), ontology) == []
+
+
 def test_label_studio_unconvertible_regions_name_each_region() -> None:
     """F-REV-03 회귀: 옮길 수 없는 구간은 영역 ID·시각·이유를 모두 담은 `LsFormatError`로 멈춘다.
 
