@@ -9,8 +9,13 @@ Label Studio 작업 data에는 라벨링 버킷 워터마크 영상·시계열 C
 갱신하지 않는 작업 (서명 URL이 만료되며 노출이 줄어드는 쪽으로 둔다):
 - Label Studio 작업 라벨(labeling) 작업이 아닌 것 (CVAT 작업은 영상을 CVAT에 올려 URL이 없다).
 - 수집한 작업, 회수한(revoked) 작업, 회수 요청이 있는 작업.
+- 세션이 사용 중지(withdrawn)됐거나, 승인 보류 중이거나, 프라이버시 승인 상태(APPROVED)가 아니다.
+  사용 중지 회수 요청이 없는 세션(F-REV-17 이전 사용 중지)을 cron이 다시 서명하면 동의를 철회한
+  영상이 계속 열리고, 승인이 풀린 세션은 블러가 맞는지 모른다. 회수 명령을 안내한다
+  (`dlp review revoke <세션> --all --reason withdrawn` 등).
 - 매체가 낡은 작업: 렌더 해시가 지금 운영 블러와 다르다 (`dlp_privacy.runner.stale_media_tasks`).
   다시 서명하면 블러가 덜 된 영상의 노출을 늘리므로 건너뛰고 `dlp review revoke <세션>`을 안내한다.
+- 렌더 해시가 없는 구 작업(0015 이전): 블러 상태를 몰라 건너뛰고 `--include-legacy` 회수를 안내한다.
 갱신해야 하는데 못 한 작업은 오류로 남기고 다른 작업은 계속한다 (실패 쪽으로 닫는다: data를 바꾸지
 않는다):
 - 도구에 그 작업이 없거나 응답이 실패한다.
@@ -49,9 +54,15 @@ from dlp_review.tasks import (
     object_key,
     timeseries_key,
 )
-from dlp_schema.db.repository import list_review_tasks, lock_session
+from dlp_schema.db.repository import (
+    active_privacy_hold,
+    get_session,
+    list_review_tasks,
+    lock_session,
+)
 from dlp_schema.db.tables import review_tasks
 from dlp_schema.review import ReviewStage, ReviewTask, ReviewTaskStatus, ReviewTool
+from dlp_schema.session import LifecycleState, PrivacyState
 
 # 작업 하나의 갱신 실패로 보는 예외 (도구 응답·연결, 전제 조건, 원본 URI, 저장소)
 _TASK_ERRORS = (ToolError, httpx.HTTPError, TaskError, RawAccessError, *STORE_ERRORS)
@@ -93,6 +104,28 @@ def sessions_with_open_ls_tasks(conn: sa.Connection) -> list[str]:
     return [str(sid) for sid in conn.execute(query).scalars()]
 
 
+def _session_block(conn: sa.Connection, session_id: str) -> str | None:
+    """세션 단위로 갱신하지 않는 이유 (사용 중지·승인 보류·승인 아님). 갱신해도 되면 None."""
+    session = get_session(conn, session_id)
+    if session.lifecycle_state is LifecycleState.WITHDRAWN:
+        return (
+            "사용 중지한 세션 — 갱신하지 않고 회수한다 "
+            f"(dlp review revoke {session_id} --all --reason withdrawn)"
+        )
+    held = active_privacy_hold(conn, session_id)
+    if held is not None:
+        return (
+            f"승인 보류 중 ({held.actor}: {held.reason}) — 갱신하지 않는다 "
+            f"(dlp review revoke {session_id})"
+        )
+    if session.privacy_state is not PrivacyState.APPROVED:
+        return (
+            f"프라이버시 승인 상태가 아님 ({session.privacy_state.value}) — 갱신하지 않는다 "
+            f"(승인·렌더 뒤 dlp review revoke {session_id})"
+        )
+    return None
+
+
 def _refresh_one(ls: LabelStudioClient, task: ReviewTask, setup: ReviewSetup) -> None:
     """작업 하나를 다시 서명해 도구 작업 data를 바꾼다. 못 하면 `_TASK_ERRORS`의 예외."""
     if task.assignee is None:
@@ -128,10 +161,20 @@ def refresh_session_urls(conn: sa.Connection, session_id: str, setup: ReviewSetu
     candidates = [t for t in list_review_tasks(conn, session_id) if _open_ls_labeling(t)]
     if not candidates:
         return report
+    blocked = _session_block(conn, session_id)
     stale = {m.task.task_key for m in stale_media_tasks(conn, session_id, setup.privacy_policy())}
     for task in candidates:
         if task.revoke_requested_at is not None:
             report.skipped.append(f"{task.task_key}: 회수 요청됨 (dlp review revoke {session_id})")
+            continue
+        if blocked is not None:
+            report.skipped.append(f"{task.task_key}: {blocked}")
+            continue
+        if task.render_hash is None:
+            report.skipped.append(
+                f"{task.task_key}: 렌더 해시 없는 구 작업 — 블러 상태를 몰라 갱신하지 않는다 "
+                f"(dlp review revoke {session_id} --include-legacy)"
+            )
             continue
         if task.task_key in stale:
             report.skipped.append(

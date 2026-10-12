@@ -24,6 +24,7 @@ import sqlalchemy as sa
 from pydantic import ValidationError
 
 from dlp_media.storage import LocalStore, S3Store
+from dlp_privacy.hold import hold_session
 from dlp_privacy.policy import PrivacyPolicy
 from dlp_privacy.policy import load_policy as load_privacy_policy
 from dlp_privacy.runner import operational_blur, render_hash
@@ -32,9 +33,15 @@ from dlp_review.ops.policy import MediaPolicy, load_policy
 from dlp_review.refresh import refresh_session_urls, sessions_with_open_ls_tasks
 from dlp_review.tasks import ReviewSetup, label_studio_task_data, timeseries_key
 from dlp_schema import load_ontology, repo_root
-from dlp_schema.db.repository import insert_review_task, insert_session, register_ontology
+from dlp_schema.db.repository import (
+    insert_review_task,
+    insert_session,
+    register_ontology,
+    set_lifecycle,
+)
+from dlp_schema.db.tables import review_tasks
 from dlp_schema.review import ReviewStage, ReviewTask, ReviewTaskStatus, ReviewTool
-from dlp_schema.session import PrivacyState
+from dlp_schema.session import LifecycleState, PrivacyState
 from dlp_schema.testing import FIXED_TIME, make_session, sqlite_db
 
 SID = "s001"
@@ -225,3 +232,63 @@ def test_refresh_without_label_studio_client_is_an_error(engine: sa.Engine, tmp_
     with engine.begin() as conn:
         report = refresh_session_urls(conn, SID, _setup(tmp_path, None, FakeSigner()))
     assert report.refreshed == [] and len(report.errors) == 1
+
+
+@pytest.mark.parametrize(
+    ("case", "hint"),
+    [
+        ("withdrawn", "--all --reason withdrawn"),
+        ("unapproved", "승인"),
+        ("held", "보류"),
+        ("legacy", "--include-legacy"),
+    ],
+)
+def test_refresh_skips_withdrawn_unapproved_held_or_hashless_tasks(
+    engine: sa.Engine, tmp_path: Path, case: str, hint: str
+) -> None:
+    """사용 중지·승인 아님·승인 보류 세션의 작업과 렌더 해시 없는 구 작업은 다시 서명하지 않는다.
+
+    정답 근거: 다시 서명하지 않으면 URL은 유효 시간이 지나 끊긴다 (노출이 줄어드는 쪽). 회수 요청
+    없이 사용 중지된 세션(F-REV-17 이전)을 cron이 7일씩 다시 서명하면 동의를 철회한 영상이 계속
+    열린다. 승인이 풀린 세션과 해시 없는 구 작업은 블러가 맞는지 모른다. 건너뛴 작업에는 회수
+    명령을 안내한다.
+    """
+    signer = FakeSigner()
+    privacy = load_privacy_policy(repo_root())
+    labeling = LocalStore(tmp_path, "dlp-labeling")
+    current = _current_hash(privacy)
+    video = f"sessions/{SID}/review/labeler01/bodycam-{current[:16]}.mp4"
+    media = tmp_path / "m.mp4"
+    media.write_bytes(b"video")
+    for key in (video, timeseries_key(SID)):
+        labeling.put_file(key, media, "0" * 64)
+    state = PrivacyState.AUTO_BLURRED if case == "unapproved" else PrivacyState.APPROVED
+    row = _ls_task("label_studio:1", labeling.uri(video), current)
+    if case == "legacy":
+        row = row.model_copy(update={"render_hash": None})
+    with engine.begin() as conn:
+        insert_session(conn, make_session(SID, privacy_state=state))
+        insert_review_task(conn, row)
+        if case == "withdrawn":
+            set_lifecycle(conn, SID, LifecycleState.WITHDRAWN, at=FIXED_TIME, actor="dpo01")
+        if case == "held":
+            # 보류는 회수도 요청하므로, 요청이 남지 않은 작업을 흉내 내려 요청만 되돌린다
+            # (보류 이유가 승인 상태보다 먼저 안내된다)
+            hold_session(
+                conn, SID, privacy, FIXED_TIME, reason="얼굴 누락 의심", actor="dpo01",
+                labeling=None,
+            )  # fmt: skip
+            conn.execute(
+                sa.update(review_tasks).values(
+                    revoke_requested_at=None, revoke_reason=None, status="open"
+                )
+            )
+    old = {"video": "https://s3.test/old?X-Amz-Expires=1", "session_id": SID,
+           "assignee": "labeler01"}  # fmt: skip
+    fake = FakeLabelStudio({1: {"data": dict(old)}})
+    with engine.begin() as conn:
+        report = refresh_session_urls(conn, SID, _setup(tmp_path, fake.client(), signer))
+    assert report.refreshed == [] and report.errors == []
+    [skipped] = report.skipped
+    assert skipped.startswith("label_studio:1:") and hint in skipped
+    assert fake.patches == [] and signer.calls == []

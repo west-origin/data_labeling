@@ -1046,9 +1046,9 @@ def cmd_refresh_urls(args: argparse.Namespace) -> int:
 
     Label Studio 작업 data의 영상·시계열 URL은 `review.yaml media.signed_url_ttl_s`(기본 7일) 뒤
     만료된다. 이 명령을 그보다 짧은 주기(cron, 하루 한 번 권장)로 돌려 열린 작업만 라벨러 자격
-    증명으로 다시 서명한다 (F-REV-08, `dlp_review.refresh`). 수집·회수한 작업과 매체가 지금 블러와
-    다른 작업은 갱신하지 않는다 (뒤쪽은 `dlp review revoke <세션>`을 안내한다). CVAT에는 접속하지
-    않는다.
+    증명으로 다시 서명한다 (F-REV-08, `dlp_review.refresh`). 수집·회수한 작업, 매체가 지금 블러와
+    다른 작업, 렌더 해시 없는 구 작업, 사용 중지·승인 보류·승인 아님 세션의 작업은 갱신하지 않는다
+    (건너뜀에 `dlp review revoke <세션> …`을 안내한다). CVAT에는 접속하지 않는다.
 
     인자: args.session — 이 세션만 (반복). 없으면 열린 Label Studio 작업이 있는 모든 세션.
     반환: 0, 갱신하지 못한 작업이 있으면 1 (cron 경보).
