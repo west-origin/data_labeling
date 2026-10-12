@@ -28,6 +28,7 @@ from dlp_review.ops.policy import load_policy as load_ops_policy
 from dlp_review.reconcile import ReviewOutcome
 from dlp_schema import repo_root
 from dlp_schema.aireview import AiRunEvent, AiRunEventKind
+from dlp_schema.db import aireview_repository, locks
 from dlp_schema.db.aireview_repository import (
     insert_ai_run,
     insert_ai_run_event,
@@ -188,6 +189,41 @@ def test_required_mode_defers_plan_until_judged_waived_or_timed_out(
     assert _plan(url, "adv") == 0 and _assignments(engine, "adv")
 
 
+def test_required_timeout_locks_session_before_reading_run_state(
+    db: tuple[str, sqlalchemy.Engine],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """required 시간 초과 경로는 실행 상태를 읽고 waived를 쓰기 전에 세션 행을 잠근다.
+
+    정답 근거: waived INSERT(세션 FK → FOR KEY SHARE)가 잠금보다 먼저면, 같은 세션을 동시에
+    계획한 둘이 서로의 KEY SHARE를 기다리며 FOR UPDATE로 올리다 교착한다 (PostgreSQL). 잠금이
+    먼저면 뒤 계획은 앞 계획이 커밋한 waived를 읽고 다시 쓰지 않는다.
+    """
+    url, engine = db
+    monkeypatch.setenv("DLP_REVIEW_POLICY_FILE", str(_policy_file(tmp_path, mode="required")))
+    _session(engine, "old", datetime.now(UTC) - timedelta(hours=30))
+    order: list[str] = []
+
+    def lock(conn: sqlalchemy.Connection, session_id: str) -> None:
+        order.append(f"lock:{session_id}")
+        locks.lock_session(conn, session_id)
+
+    def state(conn: sqlalchemy.Connection, ids: list[str]) -> Any:
+        order.append("state")
+        return aireview_repository.latest_run_state(conn, ids)
+
+    def event(conn: sqlalchemy.Connection, ev: AiRunEvent) -> Any:
+        order.append(f"event:{ev.event.value}")
+        return aireview_repository.insert_ai_run_event(conn, ev)
+
+    monkeypatch.setattr(review_cmds, "lock_session", lock)
+    monkeypatch.setattr(review_cmds, "latest_run_state", state)
+    monkeypatch.setattr(review_cmds, "insert_ai_run_event", event)
+    assert _plan(url, "old") == 0 and _assignments(engine, "old")
+    assert order[:3] == ["lock:old", "state", "event:waived"]
+
+
 def test_plan_without_required_mode_does_not_read_ai_tables(
     db: tuple[str, sqlalchemy.Engine], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -294,7 +330,8 @@ def test_quality_ai_report_text_json_and_thresholds(
     db: tuple[str, sqlalchemy.Engine], capsys: pytest.CaptureFixture[str]
 ) -> None:
     """`dlp review quality --ai`: 대조군 지표(지적 정밀도 1/1, ok 놓침 0/1), 확신도 조안(목표 0.5면
-    wrong 0.90), `--json`은 AI 절 JSON. 기간 밖(`--since`가 뒤)이면 행이 없다."""
+    wrong 0.90), `--json`은 AI 절 JSON(`--ai-thresholds`면 조안 포함). 기간 밖(`--since`가
+    뒤)이면 행이 없다."""
     import json
 
     url, engine = db
@@ -312,6 +349,13 @@ def test_quality_ai_report_text_json_and_thresholds(
         "num": 1, "den": 1, "value": 1.0, "upper95": 1.0, "weighted": False, "n_eff": None,
     }  # fmt: skip
     assert data["exposure"]["tasks"] == {"holdout": 1}
+    # --json과 --ai-thresholds를 함께 주면 조안을 JSON에 넣는다 (예전: 조용히 버렸다)
+    both = ["review", "quality", "--ai", "--json", "--ai-thresholds", "0.5", "--url", url]
+    assert main(both) == 0
+    floors = json.loads(capsys.readouterr().out)["thresholds"]
+    assert floors == {
+        "target_precision": 0.5, "floors": {"wrong": {"floor": 0.9, "n": 1, "precision": 1.0}},
+    }  # fmt: skip
     later = (FIXED_TIME + timedelta(days=1)).isoformat()
     assert main(["review", "quality", "--ai", "--json", "--since", later, "--url", url]) == 0
     assert json.loads(capsys.readouterr().out)["arms"] == {}

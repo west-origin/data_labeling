@@ -199,7 +199,8 @@ Playwright(전역 node playwright, `PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers`)�
   제안 적용 비율은 개수 그대로다. 표본 정책(`sampling`)이나 AI 표본 제외(`ai_review.sampling_exclude`)를
   바꾸면 가중치 계산(`ops/ai_quality._stratum`)이 그 설계와 맞는지 본다.
 - 주간 AI 절은 `review.yaml ai_review.mode`가 off면 없다. 백로그는 주 끝 시점의 생애주기·실행 기록으로 세고
-  프라이버시 승인 상태만 지금 값이다. 장비 시간은 끝난 실행의 걸린 시간 합이라 세션을 함께 돌리면 크게
+  프라이버시 승인 상태만 지금 값이다. 완료는 required 게이트와 같이 전체 완료(`is_full_completion`)만 센다
+  (좁힌 실행의 `partial:` 완료만 있으면 백로그다). 장비 시간은 끝난 실행의 걸린 시간 합이라 세션을 함께 돌리면 크게
   나온다 (상한).
 - `dlp aireview eval`: 골든셋 세션마다 블러본 게이트(`open_blurred`)를 거치므로 승인·렌더된 세션만
   판정한다 (아니면 건너뛴 사유를 보고서에 남긴다). 판정 버전은 지금 aireview.yaml 값이고 실행 기록·단위는

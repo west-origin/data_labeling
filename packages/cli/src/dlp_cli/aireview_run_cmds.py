@@ -83,6 +83,7 @@ from dlp_aireview.backend import (
 from dlp_aireview.media import MediaBoundaryError
 from dlp_aireview.policy import AiReviewPolicy, load_policy
 from dlp_aireview.runner import (
+    InputError,
     RunOptions,
     RunSummary,
     SessionNotReadyError,
@@ -130,7 +131,7 @@ from dlp_schema.db.locks import aireview_lock_held
 from dlp_schema.db.repository import get_labels, get_session, list_session_ids
 from dlp_schema.episode import current_labels
 from dlp_schema.labels import Hand
-from dlp_schema.session import LifecycleState, Session, StreamKind, SyncMethod
+from dlp_schema.session import LifecycleState, Session, Stream, StreamKind, SyncMethod
 from dlp_sync.policy import load_policy as load_sync_policy
 from dlp_sync.signals import glove_series
 
@@ -214,6 +215,32 @@ def open_pool(args: argparse.Namespace, policy: AiReviewPolicy) -> EndpointPool 
 # ---------------------------------------------------------------- 장갑 문장
 
 
+def _synced_gloves(session: Session) -> dict[Hand, Stream]:
+    """손 → 동기화된 장갑 스트림 (동기화되지 않은 장갑은 쓰지 않는다)."""
+    return {
+        _GLOVES[s.kind]: s
+        for s in session.streams
+        if s.kind in _GLOVES and s.sync_method is not SyncMethod.UNSYNCED
+    }
+
+
+def check_gloves(session: Session, raw: ObjectStore) -> None:
+    """동기화된 장갑 스트림의 Parquet이 원본 버킷에 모두 있는지 (HEAD만, 내용은 읽지 않는다).
+
+    `load_input`이 큰 블러본을 받기 전에 부른다 (`sensor_check`). HEAD는 원본 접근 감사에 남지
+    않는다 (`dlp_media.audit.AuditedStore.head`).
+
+    Raises:
+        SessionNotReadyError: 선언된 장갑 스트림의 Parquet이 없을 때.
+    """
+    for stream in (s for _, s in sorted(_synced_gloves(session).items())):
+        if raw.head(stream.uri.removeprefix(raw.uri(""))) is None:
+            raise SessionNotReadyError(
+                f"{session.session_id}: 장갑 Parquet이 없습니다 ({stream.stream_id}). "
+                "센서 없이 판정하려면 --no-sensor"
+            )
+
+
 def glove_context(
     session: Session,
     raw: AuditedStore,
@@ -229,22 +256,14 @@ def glove_context(
     Raises:
         SessionNotReadyError: 선언된 장갑 스트림의 Parquet이 원본 버킷에 없을 때.
     """
-    gloves = {
-        _GLOVES[s.kind]: s
-        for s in session.streams
-        if s.kind in _GLOVES and s.sync_method is not SyncMethod.UNSYNCED
-    }
+    gloves = _synced_gloves(session)
     if not gloves:
         return SensorContext.absent()
+    check_gloves(session, raw)
     spans: dict[Hand, list[tuple[float, float]]] = {}
     with tempfile.TemporaryDirectory(prefix="aireview-glove-") as tmp:
         for hand, stream in sorted(gloves.items()):
             key = stream.uri.removeprefix(raw.uri(""))
-            if raw.head(key) is None:
-                raise SessionNotReadyError(
-                    f"{session.session_id}: 장갑 Parquet이 없습니다 ({stream.stream_id}). "
-                    "센서 없이 판정하려면 --no-sensor"
-                )
             path = Path(tmp) / f"{stream.stream_id}.parquet"
             raw.get_file(key, path)
             series = glove_series(path, pressure_prefixes)
@@ -254,8 +273,16 @@ def glove_context(
     return SensorContext.of(spans)
 
 
-def _sensor_source(args: argparse.Namespace) -> Callable[[Session], SensorContext] | None:
-    """장갑 문장 계산 함수 (`--no-sensor`면 None: 센서 없이 판정)."""
+@dataclass(frozen=True)
+class _Sensor:
+    """장갑 문장 계산(`compute`)과 블러본을 받기 전의 존재 확인(`check`)."""
+
+    compute: Callable[[Session], SensorContext]
+    check: Callable[[Session], None]
+
+
+def _sensor_source(args: argparse.Namespace) -> _Sensor | None:
+    """장갑 문장 계산·존재 확인 (`--no-sensor`면 None: 센서 없이 판정)."""
     if args.no_sensor:
         return None
     root = repo_root()
@@ -266,7 +293,10 @@ def _sensor_source(args: argparse.Namespace) -> Callable[[Session], SensorContex
     def compute(session: Session) -> SensorContext:
         return glove_context(session, raw, glove, prefixes)
 
-    return compute
+    def check(session: Session) -> None:
+        check_gloves(session, raw)
+
+    return _Sensor(compute, check)
 
 
 # ---------------------------------------------------------------- run
@@ -282,7 +312,7 @@ class _RunCtx:
     backend: JudgeBackend
     policy: AiReviewPolicy
     options: RunOptions
-    sensor_for: Callable[[Session], SensorContext] | None
+    sensor: _Sensor | None
 
 
 def _progress(line: str) -> None:
@@ -300,39 +330,49 @@ def _print_summary(s: RunSummary) -> None:
     print(json.dumps(s.to_json(), ensure_ascii=False))
 
 
-def _run_one(sid: str, ctx: _RunCtx) -> int:
-    """세션 하나 (모듈 docstring의 종료 코드). 부작용: AI 표 기록, VLM 호출, 라벨링 버킷 읽기.
+def _run_one(sid: str, ctx: _RunCtx) -> tuple[int, bool]:
+    """세션 하나 (모듈 docstring의 종료 코드)와 실제로 실행했는가 (`--limit`에 세는가).
 
-    예상하지 못한 오류(버그·DB 오류)는 알리고 1로 센다 (실행기는 aborted:error를 남겼다). 다음
-    세션은 계속한다. Ctrl-C(KeyboardInterrupt)는 올린다.
+    부작용: AI 표 기록, VLM 호출, 라벨링 버킷 읽기.
+    예상하지 못한 오류(버그·DB 오류)는 알리고 1로 센다 (실행 중이면 실행기가 aborted:error를
+    남겼다). 다음 세션은 계속한다. 실행 기록 전 입력 단계에서 난 오류(`InputError`: 손상된 장갑
+    Parquet·블러본, 저장소 오류)도 1이지만 실행하지 않은 것으로 센다: 기록이 없어 `--pending`의 실패
+    정렬이 이 세션을 뒤로 보내지 못하므로, 세면 늘 실패하는 세션이 `--limit` 자리를 매번 차지한다.
+    전제 실패(6)·처리 중(7)도 실행하지 않은 것이다. Ctrl-C(KeyboardInterrupt)는 올린다.
     """
     try:
         summary = run_from_db(
             ctx.engine, ctx.labeling, sid, ctx.backend, ctx.policy,
             load_privacy_policy(repo_root()), raw_bucket=ctx.raw_bucket, options=ctx.options,
-            flagged_for=flagged_spans, sensor_for=ctx.sensor_for, progress=_progress,
+            flagged_for=flagged_spans, progress=_progress,
+            sensor_for=ctx.sensor.compute if ctx.sensor else None,
+            sensor_check=ctx.sensor.check if ctx.sensor else None,
         )  # fmt: skip
     except NoResultFound:
         print(f"[전제 실패] {sid}: 세션이 없습니다")
-        return SESSION
+        return SESSION, False
     except SessionNotReadyError as exc:
         print(f"[전제 실패] {exc}")
-        return SESSION
+        return SESSION, False
     except RenderNotCurrentError as exc:
         print(f"[블러본 게이트] {sid}: {exc}")
-        return SESSION
+        return SESSION, False
     except MediaBoundaryError as exc:
         print(f"[설정 오류] {exc}")
-        return CONFIG
+        return CONFIG, True
+    except InputError as exc:
+        print(f"[입력 오류] {sid}: 판정 입력을 만들지 못했습니다 (아무것도 쓰지 않음): {exc}")
+        traceback.print_exc(file=sys.stderr)
+        return ERROR, False
     except Exception as exc:
         print(f"[실행 오류] {sid}: {type(exc).__name__}: {exc}")
         traceback.print_exc(file=sys.stderr)
-        return ERROR
+        return ERROR, True
     if summary is None:
         print(f"[처리 중] {sid}: 다른 실행기가 이 세션을 처리하고 있습니다")
-        return LOCKED
+        return LOCKED, False
     _print_summary(summary)
-    return summary.exit_code
+    return summary.exit_code, True
 
 
 def _worst(codes: Sequence[int], pending: bool) -> int:
@@ -352,12 +392,14 @@ def _stops(code: int, backend: JudgeBackend) -> bool:
 class _Picker:
     """돌릴 세션을 차례로 내준다 (여러 작업 스레드가 함께 쓴다).
 
-    - `limit`(`--pending --limit`): 실제로 실행한 세션(6·7이 아닌 것)과 실행 중인 세션의 합이
-      이만큼이면 더 내주지 않는다. 실행 중인 세션이 6·7로 끝나 자리가 나면 다음 세션을 내준다.
+    - `limit`(`--pending --limit`): 실제로 실행한 세션(6·7·실행 기록 전 입력 오류가 아닌 것)과
+      실행 중인 세션의 합이 이만큼이면 더 내주지 않는다. 실행 중인 세션이 실행하지 않은 것으로 끝나
+      자리가 나면 다음 세션을 내준다.
     - 멈춤: `_stops`인 코드가 나오거나 `halt`(Ctrl-C)면 남은 세션을 내주지 않는다.
 
     Attributes:
-        left: 아직 내주지 않은 세션. ran: 실행한 세션. not_run: 6·7로 끝난 세션.
+        left: 아직 내주지 않은 세션. ran: 실행한 세션. not_run: 실행하지 않고 끝난 세션
+            (6·7, 실행 기록 전 입력 오류).
         codes: 끝난 세션의 종료 코드 (끝난 순서). stopped: 멈췄는가.
     """
 
@@ -385,12 +427,12 @@ class _Picker:
                     return None
                 self._cond.wait()
 
-    def done(self, sid: str, code: int, stop: bool) -> None:
-        """세션 하나가 끝났다."""
+    def done(self, sid: str, code: int, stop: bool, ran: bool = True) -> None:
+        """세션 하나가 끝났다. ran: 실제로 실행했는가 (아니면 `--limit`에 세지 않는다)."""
         with self._cond:
             self._running -= 1
             self.codes.append(code)
-            (self.not_run if code in _NOT_RUN else self.ran).append(sid)
+            (self.ran if ran and code not in _NOT_RUN else self.not_run).append(sid)
             self.stopped = self.stopped or stop
             self._cond.notify_all()
 
@@ -404,11 +446,11 @@ class _Picker:
 def _work(picker: _Picker, ctx: _RunCtx) -> None:
     """작업 스레드 하나: 세션을 받아 끝날 때까지 돌린다."""
     while (sid := picker.next()) is not None:
-        code = ERROR
+        code, ran = ERROR, True
         try:
-            code = _run_one(sid, ctx)
+            code, ran = _run_one(sid, ctx)
         finally:
-            picker.done(sid, code, _stops(code, ctx.backend))
+            picker.done(sid, code, _stops(code, ctx.backend), ran)
 
 
 def _run_all(
@@ -455,6 +497,21 @@ def _names(ids: Sequence[str] | deque[str], most: int = 20) -> str:
     """세션 이름 목록 (많으면 앞 `most`개와 나머지 수)."""
     head = ", ".join(list(ids)[:most])
     return head + (f" 외 {len(ids) - most}개" if len(ids) > most else "")
+
+
+def _narrowed(args: argparse.Namespace, base: AiReviewPolicy) -> str | None:
+    """정책 기본 계획보다 좁힌 실행의 설명 (`RunOptions.narrowed`, 좁히지 않았으면 None).
+
+    `--groups`가 모든 묶음이 아니거나, `--mode flagged`가 정책 기본(all)보다 좁을 때다 (`--mode
+    all`은 넓히는 쪽이라 좁힌 것이 아니다). 좁힌 실행의 completed는 `partial:`로 마감해
+    `--pending`과 required 게이트가 전체 완료로 보지 않는다.
+    """
+    parts: list[str] = []
+    if args.groups and set(args.groups) != set(AiGroup):
+        parts.append("groups=" + ",".join(sorted(g.value for g in set(args.groups))))
+    if args.mode == "flagged" and base.selection.mode != "flagged":
+        parts.append("mode=flagged")
+    return ";".join(parts) or None
 
 
 def _run_policy(args: argparse.Namespace) -> AiReviewPolicy:
@@ -512,7 +569,9 @@ def _options(args: argparse.Namespace, policy: AiReviewPolicy, backend: JudgeBac
     return RunOptions(
         workers=endpoints * policy.server.concurrency_per_endpoint,
         groups=frozenset(args.groups) if args.groups else None,
-        deadline=time.monotonic() + args.max_minutes * 60 if args.max_minutes else None,
+        deadline=(
+            time.monotonic() + args.max_minutes * 60 if args.max_minutes is not None else None
+        ),
         dry_run=args.dry_run,
         debug_dir=Path(args.debug_dir) if args.debug_dir else None,
         actor=current_actor(),
@@ -520,7 +579,34 @@ def _options(args: argparse.Namespace, policy: AiReviewPolicy, backend: JudgeBac
         json_progress=args.json_progress,
         endpoint_states=states,
         cancel=threading.Event(),
+        narrowed=_narrowed(args, load_policy(repo_root())),
     )
+
+
+def _check_run_args(args: argparse.Namespace) -> None:
+    """`run` 인자 조합. 일부 인자가 조용히 무시되는 조합이면 `SystemExit`.
+
+    세션과 `--pending`은 서로 다른 방식이다 (함께 주면 예전에는 세션을 버리고 pending 전체를
+    돌았다). `--limit`은 `--pending`과만 쓴다 (예전에는 상한 없이 돌았다).
+    """
+    if args.sessions and args.pending:
+        raise SystemExit("세션과 --pending을 함께 쓸 수 없습니다 (둘 중 하나를 고르세요)")
+    if args.limit is not None and not args.pending:
+        raise SystemExit("--limit은 --pending과 함께 씁니다 (세션을 지정했으면 그 세션만 돈다)")
+
+
+def _check_status_args(args: argparse.Namespace) -> None:
+    """`status` 대상 고르기는 하나만 (세션·`--pending`·`--all`). 둘 이상이면 `SystemExit`.
+
+    예전에는 세션 > --pending > --all 순으로 하나만 쓰고 나머지를 조용히 버렸다.
+    """
+    chosen = [
+        name for name, on in (
+            ("<세션>", bool(args.sessions)), ("--pending", args.pending), ("--all", args.all),
+        ) if on
+    ]  # fmt: skip
+    if len(chosen) > 1:
+        raise SystemExit(f"{', '.join(chosen)}는 함께 쓸 수 없습니다 (하나만 고르세요)")
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -533,6 +619,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     if not args.sessions and not args.pending:
         print("[설정 오류] 세션을 주거나 --pending을 쓰세요")
         return CONFIG
+    _check_run_args(args)
     policy = _run_policy(args)
     backend: JudgeBackend
     if args.dry_run:
@@ -551,7 +638,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         ctx = _RunCtx(
             engine=engine, labeling=store_from_spec(args.store, buckets.labeling),
             raw_bucket=buckets.raw, backend=backend, policy=policy, options=options,
-            sensor_for=_sensor_source(args),
+            sensor=_sensor_source(args),
         )  # fmt: skip
         limit = args.limit if args.pending else None
         picker = _run_all(sessions, ctx, args.parallel_sessions, limit)
@@ -626,6 +713,7 @@ def _json_default(value: object) -> str:
 
 def cmd_status(args: argparse.Namespace) -> int:
     """`dlp aireview status` (모듈 docstring). 부작용: 없음 (DB 읽기, 잠금은 보기만)."""
+    _check_status_args(args)
     policy = load_policy(repo_root())
     privacy = load_privacy_policy(repo_root())
     groups = frozenset(args.groups) if args.groups else None
@@ -781,6 +869,17 @@ def cmd_waive(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------- 등록
 
 
+def _positive_minutes(text: str) -> float:
+    """0보다 큰 분 (argparse 형식 함수). 0·음수는 예전에 '시간 제한 없음'으로 조용히 바뀌었다."""
+    try:
+        value = float(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"숫자가 아닙니다: {text}") from exc
+    if not value > 0:
+        raise argparse.ArgumentTypeError(f"0보다 커야 합니다 (제한이 없으면 빼세요): {text}")
+    return value
+
+
 def _positive(text: str) -> int:
     """1 이상의 정수 (argparse 형식 함수)."""
     try:
@@ -808,7 +907,10 @@ def _run_parser(asub: Any) -> None:
     r.add_argument("--store", default="s3", help="'s3' 또는 'local:<디렉터리>'")
     r.add_argument("--groups", type=parse_groups, help="이 묶음만 (temporal,temporal_long,spatial)")
     r.add_argument("--mode", choices=["all", "flagged"], help="선택 모드 (기본: 정책)")
-    r.add_argument("--max-minutes", type=float, help="이 시간이 지나면 새 요청을 멈춘다 (종료 8)")
+    r.add_argument(
+        "--max-minutes", type=_positive_minutes,
+        help="이 시간(분, 0보다 큼)이 지나면 새 요청을 멈춘다 (종료 8)",
+    )  # fmt: skip
     r.add_argument("--no-sensor", action="store_true", help="장갑 접촉 문장 없이 판정")
     r.add_argument("--dry-run", action="store_true", help="계획만 센다 (서버 불필요)")
     r.add_argument("--debug-dir", help="형식이 맞지 않던 응답 원문을 남길 로컬 디렉터리")

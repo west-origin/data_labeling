@@ -5,7 +5,7 @@
 표본 가중 비율이다: 가중치가 섞이면 `12.3% (가중 20.0/108.0, 유효 n 5.7)`처럼 가중치 합과 유효 표본
 수를 보이고, 혼동 행렬은 행 수 그대로다.
 
-공개 이름: `print_ai_quality`, `ai_quality_json`, `print_thresholds`.
+공개 이름: `print_ai_quality`, `ai_quality_json`, `print_thresholds`, `thresholds_json`.
 """
 
 from __future__ import annotations
@@ -114,6 +114,19 @@ def print_thresholds(q: AiQuality, target: float) -> None:
     for verdict, (floor, n, precision) in sorted(floors.items()):
         shown = f"{floor:.2f}" if floor is not None else "목표에 닿지 않음 (지금 값 유지)"
         print(f"  {verdict}: {shown} (표본 {n}, 정밀도 {precision:.1%})")
+
+
+def thresholds_json(q: AiQuality, target: float) -> dict[str, Any]:
+    """`--json --ai-thresholds P`의 조안 절 (`print_thresholds`와 같은 값, 목표에 닿지 않으면
+    floor가 null)."""
+    floors = confidence_floors(q.rows, target)
+    return {
+        "target_precision": target,
+        "floors": {
+            verdict: {"floor": floor, "n": n, "precision": precision}
+            for verdict, (floor, n, precision) in sorted(floors.items())
+        },
+    }
 
 
 def _rate_json(r: Rate) -> dict[str, Any]:

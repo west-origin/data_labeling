@@ -563,7 +563,7 @@ class _BlindSink(MemorySink):
             return set()
         return super().done_unit_ids(session_id, version)
 
-    def is_complete(self, session_id: str, version: str, plan_digest: str) -> bool:
+    def is_complete(self, session_id: str, version: str, plan_digest: str, *, full: bool) -> bool:
         return False
 
 

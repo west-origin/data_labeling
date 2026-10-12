@@ -12,7 +12,13 @@ from datetime import datetime
 
 import sqlalchemy as sa
 
-from dlp_review.ai_display import AiDisplayConfig, ai_flagged_spans, escalated_ids, load_ai_view
+from dlp_review.ai_display import (
+    REASONS,
+    AiDisplayConfig,
+    ai_flagged_spans,
+    escalated_ids,
+    load_ai_view,
+)
 from dlp_review.ops.ai_quality import AiQuality, ai_quality
 from dlp_review.ops.measure import Agreement, DetectionRate, agreement, as_items, prelabel_bias
 from dlp_review.ops.policy import ReviewOpsPolicy
@@ -53,6 +59,8 @@ class FinishResult:
     # 표본 합격이지만 AI가 지적해 표본 검증하지 않고 재검수로 보낸 라벨 수와 그 배정 ID (WP17.6)
     ai_flagged: int = 0
     ai_flagged_assignment: str | None = None
+    # 계획에서 AI 지적으로 표본 묶음에서 뺀 라벨 중 사람이 고치거나 지운 수 (하나라도 있으면 불합격)
+    ai_excluded_defects: int = 0
 
 
 def _follow_up(
@@ -91,6 +99,41 @@ def _ai_protected(
     return flagged, ai_flagged_spans(view.escalate, rows, ai.policy)
 
 
+def _ai_excluded(
+    a: ReviewAssignment,
+    labels: list[LabelRecord],
+    policy: ReviewOpsPolicy,
+    ai: AiDisplayConfig | None,
+) -> tuple[str, ...]:
+    """계획이 AI 지적으로 표본 묶음에서 뺀 라벨 (배정의 AI 사유 구간에서 되읽는다).
+
+    계획(`runner._sample`)은 증가 프로필 판정이 `sampling_exclude`인 라벨을 묶음에서 빼고, 같은
+    판정의 AI 사유 구간(AI_WRONG·AI_SUSPECT·AI_UNSURE)을 배정 flagged에 남긴다. 그중 계획 때 묶음
+    후보였던 라벨(`sampling.lots` 조건: 모델 출처, high_confidence 이상, 계획 때 미검수 = 지금
+    미검수이거나 배정을 만든 뒤 검수됨)만 고른다. ai가 없으면(지금 끔) 모든 AI 사유를 본다 (계획
+    때 켜져 있었을 수 있다, 보수적).
+    """
+    keep = set(ai.policy.sampling_exclude) if ai is not None else {v.value for v in REASONS}
+    reasons = {r for v, r in REASONS.items() if v.value in keep}
+    by_id = {x.label_id: x for x in labels}
+    out: list[str] = []
+    for span in a.flagged:
+        if span.reason not in reasons:
+            continue
+        for i in span.label_ids:
+            x = by_id.get(i)
+            if x is None or x.provenance.source is not Source.MODEL:
+                continue
+            if x.confidence is None or x.confidence < policy.sampling.high_confidence:
+                continue
+            seen = x.verification.reviewed_at
+            if x.verification.state is VerificationState.UNREVIEWED or (
+                seen is not None and seen >= a.created_at
+            ):
+                out.append(i)
+    return tuple(sorted(set(out)))
+
+
 def finish_assignment(
     conn: sa.Connection,
     a: ReviewAssignment,
@@ -100,7 +143,9 @@ def finish_assignment(
 ) -> FinishResult:
     """배정의 검수 작업이 모두 수집되면 마무리한다 (한 번만).
 
-    표본이 있으면 묶음 합격 판정을 적용한다.
+    표본이 있으면 묶음 합격 판정을 적용한다. 계획에서 AI 지적으로 묶음에서 뺀 라벨(`_ai_excluded`,
+    반드시 검수)이 하나라도 결함(사람이 고치거나 지움)이면 표본 비율과 무관하게 불합격이다 (AI가
+    맞게 지적할수록 남은 묶음이 깨끗해져 사람이 보는 라벨이 줄지 않게, ADR 0040 I9).
 
     policy가 없으면 저장소의 정책을 읽는다 (CLI·웹훅 서버는 넘겨 준다).
     ai: AI 1차 검수 판정 사용 설정 (`ReviewSetup.ai`, 없으면 끔). 있으면 합격으로 표본 검증할 라벨
@@ -139,9 +184,11 @@ def finish_assignment(
         policy = load_policy(repo_root())
     labels = get_labels(conn, a.session_id)
     verdict = judge(
-        (*a.sample_label_ids, *a.withheld_label_ids), a.sample_label_ids, labels, policy.sampling
-    )
+        (*a.sample_label_ids, *a.withheld_label_ids), a.sample_label_ids, labels, policy.sampling,
+        forced=_ai_excluded(a, labels, policy, ai),
+    )  # fmt: skip
     result.sample_accepted = verdict.accepted
+    result.ai_excluded_defects = verdict.forced_defects
     if verdict.accepted:
         protected, spans = _ai_protected(conn, a, labels, verdict.to_verify, ai)
         verify = [i for i in verdict.to_verify if i not in protected]

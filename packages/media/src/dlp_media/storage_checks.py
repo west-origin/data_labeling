@@ -66,17 +66,34 @@ def check_versioning_off(service: S3Store) -> StorageCheck:
             )  # fmt: skip
         if status != "Suspended":
             return StorageCheck(name, True, "버전 관리 꺼짐 (켠 적 없음)")
-        listed = service.client.list_object_versions(Bucket=service.bucket, Prefix="sessions/")
+        old, marks, more = _leftover_versions(service)
     except (ClientError, BotoCoreError) as exc:
         return StorageCheck(name, False, f"버전 관리 상태를 확인할 수 없습니다 ({exc})")
-    old = [v for v in listed.get("Versions", []) if not v.get("IsLatest", True)]
-    marks = listed.get("DeleteMarkers", [])
     if old or marks:
+        tail = " 이상" if more else ""
         return StorageCheck(
-            name, False, f"버전 관리는 일시 중지지만 이전 버전 {len(old)}개·삭제 표시 "
-            f"{len(marks)}개가 남아 있습니다 (비현재 버전을 지우세요)",
+            name, False, f"버전 관리는 일시 중지지만 이전 버전 {old}개·삭제 표시 "
+            f"{marks}개{tail}가 남아 있습니다 (비현재 버전을 지우세요)",
         )  # fmt: skip
     return StorageCheck(name, True, "버전 관리 일시 중지, 남은 이전 버전 없음")
+
+
+def _leftover_versions(service: S3Store) -> tuple[int, int, bool]:
+    """`sessions/` 아래 비현재 버전·삭제 표시 수와 '세지 않은 쪽이 남았는가'.
+
+    S3는 한 번에 최대 1000개만 돌려주므로 IsTruncated면 다음 표시(KeyMarker·VersionIdMarker)로
+    이어 읽는다. 키 순서상 뒤쪽에 남은 이전 버전을 놓치지 않게 끝 쪽까지 보되, 하나라도 찾은 쪽에서
+    멈춘다 (점검은 있고 없음만 가리면 된다).
+    """
+    pages = service.client.get_paginator("list_object_versions").paginate(
+        Bucket=service.bucket, Prefix="sessions/"
+    )
+    for page in pages:
+        old = sum(1 for v in page.get("Versions", []) if not v.get("IsLatest", True))
+        marks = len(page.get("DeleteMarkers", []))
+        if old or marks:
+            return old, marks, bool(page.get("IsTruncated"))
+    return 0, 0, False
 
 
 def _expect_denied(name: str, call: str, attempt: Callable[[], object]) -> StorageCheck:

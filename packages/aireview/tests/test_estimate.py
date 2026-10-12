@@ -258,6 +258,34 @@ def test_uncached_static_prefix_counts_on_both_sides(policy: AiReviewPolicy) -> 
     assert cached is not None and cached.units_per_s == pytest.approx(1.03 / 0.53)
 
 
+def test_unknown_cache_ratio_takes_the_conservative_bound(policy: AiReviewPolicy) -> None:
+    """서버가 cached_tokens를 보고하지 않으면 캐시 비율 0과 1로 각각 보정해 작은 T를 쓰고 경고한다.
+
+    정답 근거(검수 지적 재현): 벤치 단위 새 토큰 1200, 작업량 2400, 고정 접두사 3000 중 2000이
+    캐시에 맞는 서버. 보고하면 f = 2/3로 참값 T를 낸다. 예전에는 보고하지 않으면 f = 0으로 세어 T를
+    약 19% 크게(장비 대수를 적게) 냈다. T는 f에 대해 단조라 f ∈ {0, 1} 중 작은 쪽은 참값 이하다.
+    """
+    heavy = _load(image=2000, text=400)
+    known = _report((_config(T, policy, _point(1.0, cached=2000), prefill_tok_s=1200.0),))
+    unknown = _report((_config(T, policy, _point(1.0, cached=None), prefill_tok_s=1200.0),))
+    true = group_throughput(known, policy, T, heavy)
+    guess = group_throughput(unknown, policy, T, heavy)
+    assert true is not None and guess is not None
+    assert true.cache_known and true.static_cached == pytest.approx(2 / 3)
+    assert not guess.cache_known and guess.units_per_s <= true.units_per_s
+    work = _workload(heavy)
+    sure = capacity(
+        work, known, policy, hours_per_day=8.0, rerun_margin=0.1, utilization=0.7, decode_workers=4
+    )
+    safe = capacity(
+        work, unknown, policy, hours_per_day=8.0, rerun_margin=0.1, utilization=0.7,
+        decode_workers=4,
+    )  # fmt: skip
+    assert sure.devices is not None and safe.devices is not None and safe.devices >= sure.devices
+    assert any("cached_tokens" in w for w in safe.warnings)
+    assert not any("cached_tokens" in w for w in sure.warnings)
+
+
 def test_without_capacity_runs_the_knee_is_used_and_flagged(policy: AiReviewPolicy) -> None:
     """용량 측정이 없거나 생성 길이 고정이 지켜지지 않았으면 보정 없이 무릎 단위/s (경고)."""
     point = _point(2.0)

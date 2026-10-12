@@ -27,9 +27,12 @@
 시각: temporal 묶음은 마스터 ms이고 기준 스트림(바디캠, offset 0·배율 1)의 PTS ms와 같다.
 spatial은 그 스트림 PTS ms다 (ADR 0019). 프레임 번호와 간격의 곱으로 시각을 계산하지 않는다.
 
-단위 키(`unit_id`)는 판정 입력 전체의 해시다. 라벨 하나를 고치면 그 창만, 렌더 해시가 바뀌면 그
-스트림만 다시 판정한다. 선택 방식은 키에 들어가지 않는다 (all↔flagged 전환이 다시 판정을 부르지
-않게).
+단위 키(`unit_id`)는 판정 입력(대상·맥락 라벨 ID·프레임·렌더·센서·온톨로지)의 해시다. 라벨 하나를
+고치면 그 창만, 렌더 해시가 바뀌면 그 스트림만 다시 판정한다. 선택 방식은 키에 들어가지 않는다
+(all↔flagged 전환이 다시 판정을 부르지 않게). 맥락 라벨의 검수 상태(프롬프트 맥락 표의 "(확정)"
+표시, `prompt._confirmed`)도 키 밖이다: 승인은 같은 label_id 행의 검수 상태만 바꾸므로, 승인만으로는
+다시 판정하지 않는다 (검수가 진행될 때마다 재판정이 늘지 않게 한 결정, ADR 0040 4절). 같은 키의
+단위가 "(확정)" 표시만 다른 프롬프트로 판정될 수 있고, 실제로 보낸 요청은 `prompt_digest`가 남긴다.
 """
 
 from __future__ import annotations
@@ -625,7 +628,9 @@ def plan_windows(
 ) -> list[PlannedWindow]:
     """세션의 요청 창 (프레임 전). 순서: temporal → temporal_long → 스트림별 spatial.
 
-    선택 모드(`selection.mode`)를 적용한 결과다.
+    선택 모드(`selection.mode`)를 적용한 결과다. 평가 경로(only가 있음)는 선택 모드를 쓰지 않는다:
+    지정한 대상을 모두 판정해야 지표 분모가 맞고, 평가에는 우선순위 사유 구간이 없어 flagged면 감사
+    표본 창만 남는다 (selection은 판정 버전 밖이라 보고서로 구별할 수 없다).
 
     Args:
         session: 세션 (길이, 기준 스트림, 영상 스트림).
@@ -650,7 +655,7 @@ def plan_windows(
     for stream in session.streams:
         if stream.kind in VIDEO_KINDS:
             windows += _spatial_windows(ctx, spatial, stream.stream_id)
-    return _select(windows, policy, flagged)
+    return windows if only is not None else _select(windows, policy, flagged)
 
 
 # ---------------------------------------------------------------- 단위

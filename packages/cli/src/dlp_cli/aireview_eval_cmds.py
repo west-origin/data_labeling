@@ -9,6 +9,9 @@
       `aireview.yaml gate.inject`) 또는 `history_case`(사람이 검수한 과거 모델 레코드)로 만든다.
     - 프레임은 운영과 같은 블러본 게이트(`open_blurred`)로만 얻고 판정은 실행기(`run_session`)로
       하되 기록은 메모리다 (AI 표·라벨 이력에 쓰지 않는다). 장갑 원본은 읽지 않는다.
+    - 선택 모드(`aireview.yaml selection.mode`)는 쓰지 않는다 (대상을 모두 판정). `--groups`면 그
+      묶음 창에 든 대상만 분모에 넣는다 (`evaluate.restrict_groups`). 판정이 없는 대상은 미판정
+      (계획했지만 장애·중단)과 미계획으로 나눠 센다.
     - 보고서는 `reports/aireview-eval/<골든>-<방식>-<시각>.json`(Git 제외, `--out`으로 바꾼다).
       MLflow 기록은 하지 않는다 (후속: 실측 단계에서 필요하면 더한다).
     - 게이트(`--gate`, `aireview.yaml gate`): 실패하면 경고를 출력한다. `gate.block`이 false(결정)라
@@ -17,6 +20,9 @@
       따로 보인다 (자기 검수 상관 오류).
     - ok 놓침률은 P(틀린 라벨 | AI ok)다 (품질 보고와 같은 정의, `evaluate` docstring). 틀린 라벨을
       ok라 한 비율 P(AI ok | 틀린 라벨)은 참고로 함께 보인다.
+    - 정답 근거(ADR 0041): 보고서에 `truth_source`와 `golden_truth`(`dlp_eval.runner.truth_anchor`,
+      perturb만)를 남긴다. 정답을 고정하지 않은 이전 형식 골든셋이면 `dlp eval golden`처럼 경고하고
+      다시 고정하는 명령을 안내한다. history는 사람 검수 사슬의 지금 상태가 정답이라고 알린다.
     종료: 0 완료(게이트 경고 포함) / 1 게이트 실패(block이 true일 때만) / 2 서버 주소 없음, 또는
     인자 오류(`--inject`의 모르는 교란 종류·형식 오류 등, argparse 사용법 오류) / 3 서버 장애로 일부
     미판정 / 5 설정 불일치(4xx·모델 불일치·사내 주소 아님·원본 버킷 저장소) / 6 골든셋 없음·판정할
@@ -30,6 +36,7 @@ import argparse
 import json
 import tempfile
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -42,10 +49,12 @@ from dlp_aireview.backend import EndpointPool, JudgeBackend
 from dlp_aireview.evaluate import (
     EvalCase,
     EvalReport,
+    TruthSource,
     eval_input,
     history_case,
     judge_cases,
     perturb_case,
+    restrict_groups,
     score,
 )
 from dlp_aireview.media import MediaBoundaryError
@@ -55,13 +64,21 @@ from dlp_aireview.runner import RunInput, RunOptions, SessionNotReadyError
 from dlp_cli.aireview_common import CONFIG, UNAVAILABLE, add_url_arg, parse_groups
 from dlp_cli.aireview_run_cmds import open_pool
 from dlp_cli.schema_cmds import database_url
-from dlp_eval.runner import golden_sessions
+from dlp_eval.runner import (
+    GoldenSession,
+    golden_sessions,
+    refreeze_hint,
+    truth_anchor,
+    truth_lag,
+)
 from dlp_media.audit import current_actor
 from dlp_media.storage import store_from_spec
 from dlp_privacy.errors import RenderNotCurrentError
 from dlp_privacy.policy import load_policy as load_privacy_policy
 from dlp_schema import load_config, repo_root
 from dlp_schema.db.ontology_repository import get_session_ontology
+from dlp_schema.db.repository import get_golden_set
+from dlp_schema.lineage import GoldenSet
 
 # 골든셋이 없거나 판정할 세션이 없음 (dlp aireview run의 전제 실패 코드와 같다)
 _NOTHING = 6
@@ -86,18 +103,60 @@ def parse_inject(text: str) -> dict[str, float]:
     return out
 
 
+@dataclass(frozen=True)
+class _Truth:
+    """평가 정답 근거 (보고서 `truth_source`·`golden_truth`)."""
+
+    source: TruthSource
+    anchor: dict[str, Any] | None
+
+
+def _truth_basis(
+    args: argparse.Namespace, golden: GoldenSet, sessions: Sequence[GoldenSession]
+) -> _Truth:
+    """정답 근거를 정하고 경고를 출력한다 (`dlp eval golden`과 같은 경고, ADR 0041).
+
+    perturb는 골든 정답을 교란하므로 고정 근거(`truth_anchor`)를 남긴다. 고정하지 않은 이전 형식이면
+    현재 라벨로 정답을 정했다고 경고하고 다시 고정하는 명령을 안내한다. 고정한 정답이 지금 정답과
+    다르면 차이를 경고한다 (평가는 고정한 정답으로 한다). history는 설계상 사람 검수 사슬의 지금
+    상태를 정답으로 쓴다 (골든 정답을 쓰지 않는다).
+    """
+    if args.mode == "history":
+        print(
+            f"참고: history 방식은 사람 검수 결과의 지금 상태를 정답으로 씁니다 (골든셋 "
+            f"{args.golden}의 고정 정답과 무관, 검수가 진행되면 같은 버전이어도 정답이 바뀐다)"
+        )
+        return _Truth("history_current", None)
+    anchor = truth_anchor(golden, sessions)
+    if not anchor["truth_frozen"]:
+        print(
+            f"경고: 골든셋 {args.golden}은 정답을 고정하지 않은 이전 형식이라 현재 라벨로 "
+            f"평가합니다 (같은 버전이어도 정답이 바뀔 수 있다). {refreeze_hint(args.golden)}"
+        )
+        return _Truth("current_labels", anchor)
+    lag = truth_lag(golden, sessions)
+    if lag is not None:
+        print(f"경고: {lag.message()}")
+    return _Truth("golden_frozen", anchor)
+
+
 def _cases(
     args: argparse.Namespace, engine: sa.Engine, policy: AiReviewPolicy
-) -> list[EvalCase] | int:
-    """골든 세션 → 평가 사례 (읽기 전용). 골든셋이 없으면 종료 6."""
+) -> tuple[list[EvalCase], _Truth] | int:
+    """골든 세션 → 평가 사례와 정답 근거 (읽기 전용). 골든셋이 없으면 종료 6.
+
+    골든셋과 세션을 한 연결에서 한 번 읽어 정답 근거와 사례에 함께 쓴다 (`dlp eval golden`과 같다).
+    """
     rates = args.inject if args.inject is not None else dict(policy.gate.inject)
     out: list[EvalCase] = []
     with engine.connect() as conn:
         try:
+            golden = get_golden_set(conn, args.golden)
             sessions = golden_sessions(conn, args.golden)
         except NoResultFound:
             print(f"[전제 실패] 골든셋 {args.golden}이 없습니다")
             return _NOTHING
+        basis = _truth_basis(args, golden, sessions)
         for i, g in enumerate(sessions):
             o = get_session_ontology(conn, g.session.session_id)
             if args.mode == "history":
@@ -106,7 +165,7 @@ def _cases(
                 out.append(
                     perturb_case(g.session, g.truth, rates, seed=args.seed + i, o=o, policy=policy)
                 )
-    return out
+    return out, basis
 
 
 def _inputs(
@@ -129,8 +188,12 @@ def _inputs(
     skipped: dict[str, str] = {}
     for case in cases:
         sid = case.session.session_id
+        if args.groups:
+            # 다른 묶음 대상을 분모에 남기지 않는다 (판정되지 않은 채 재현율·오지적률을 틀어지게
+            # 한다)
+            case = restrict_groups(case, policy, set(args.groups))
         if not case.targets:
-            skipped[sid] = "판정할 대상 없음"
+            skipped[sid] = "판정할 대상 없음" + (" (고른 묶음)" if args.groups else "")
             continue
         try:
             inp = eval_input(engine, labeling, case, policy, privacy, work, raw_bucket=buckets.raw)
@@ -161,7 +224,8 @@ def _print_report(report: EvalReport, out: Path, gate: bool) -> None:
     )
     for name, s in report.by_error.items():
         print(f"  {name}: {s.flagged}/{s.total} 지적, ok {s.ok}, 판단 불가 {s.unsure}, "
-              f"미판정 {s.unjudged}, 제안 일치 {s.exact}/{s.expected}")  # fmt: skip
+              f"미판정 {s.unjudged}(장애·중단), 미계획 {s.unplanned}, "
+              f"제안 일치 {s.exact}/{s.expected} (표현 불가 {s.unattainable})")  # fmt: skip
     for kind, k in report.by_kind.items():
         print(f"  종류 {kind}: 틀린 라벨 {k.wrong_flagged}/{k.wrong} 지적 · 깨끗한 라벨 "
               f"{k.clean_flagged}/{k.clean} 지적")  # fmt: skip
@@ -203,9 +267,10 @@ def _evaluate(
     args: argparse.Namespace, engine: sa.Engine, policy: AiReviewPolicy, backend: JudgeBackend
 ) -> tuple[EvalReport, int] | int:
     """사례 → 입력 → 판정 → 보고서. (보고서, 실행 종료 코드) 또는 바로 끝낼 종료 코드."""
-    cases = _cases(args, engine, policy)
-    if isinstance(cases, int):
-        return cases
+    found = _cases(args, engine, policy)
+    if isinstance(found, int):
+        return found
+    cases, basis = found
     options = _options(policy, backend, args)
     with tempfile.TemporaryDirectory(prefix="aireview-eval-") as tmp:
         try:
@@ -222,6 +287,7 @@ def _evaluate(
     report = score(
         kept, judged, policy, mode=args.mode, golden_version=args.golden,
         same_model_as_actions=options.same_model_as_actions, skipped=skipped,
+        truth_source=basis.source, golden_truth=basis.anchor,
     )  # fmt: skip
     return report, _code([s.reason for s in judged.summaries])
 
@@ -266,7 +332,11 @@ def add_eval_command(asub: Any) -> None:
     )  # fmt: skip
     e.add_argument("--seed", type=int, default=0, help="교란 seed (세션마다 +1)")
     e.add_argument("--groups", type=parse_groups, help="이 묶음만 (기본 전부)")
-    e.add_argument("--gate", action="store_true", help="게이트 판정을 출력한다 (실패해도 경고만)")
+    e.add_argument(
+        "--gate", action="store_true",
+        help="게이트 판정을 출력한다 (aireview.yaml gate.block이 false면 실패해도 경고만, true면 "
+        "실패가 종료 1)",
+    )  # fmt: skip
     e.add_argument("--out", help="보고서 JSON (기본 reports/aireview-eval/…)")
     e.add_argument("--store", default="s3", help="라벨링 버킷 ('s3' 또는 'local:<디렉터리>')")
     e.add_argument("--url", help="DB URL (기본: DLP_DATABASE_URL)")

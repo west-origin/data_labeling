@@ -17,7 +17,8 @@
 - VLM 호출 중에는 DB 트랜잭션을 열지 않는다. 기록자는 자기 연결로 짧게 쓴다 (`DbSink`).
 - 같은 세션에는 실행기 하나만 돈다: 실행 내내 `session_lock`(세션 수준 advisory lock, 전용
   연결)을 쥔다. 잠금이 뚫려도 단위 기록은 `ON CONFLICT DO NOTHING`이라 중복 행이 생기지 않는다.
-- 재개·멱등 (I8): 단위 키가 입력 전체의 해시라, 기록된 단위는 다시 묻지 않는다. 같은 버전·입력이면
+- 재개·멱등 (I8): 단위 키가 판정 입력(대상·맥락 ID·프레임·렌더·센서·온톨로지)의 해시라, 기록된
+  단위는 다시 묻지 않는다 (맥락 라벨의 검수 상태는 키 밖, `plan` 모듈 설명). 같은 버전·입력이면
   서버 호출이 0번이다. 판정은 라벨이 아니라 `retractions()`를 쓰지 않는다.
 - 장애 분류 (5.3)
   - 모든 엔드포인트가 오래 막힘(`AllEndpointsDownError`): 새 요청을 멈추고 진행 중 요청을 끝낸 뒤
@@ -62,6 +63,7 @@ from typing import Any, Literal, Protocol
 import numpy as np
 import sqlalchemy as sa
 from numpy.typing import NDArray
+from sqlalchemy.exc import NoResultFound
 
 from dlp_aireview.backend import (
     AllEndpointsDownError,
@@ -72,7 +74,14 @@ from dlp_aireview.backend import (
     JudgeRequest,
 )
 from dlp_aireview.judge import JudgedUnit, judge_unit
-from dlp_aireview.media import BlurredFrame, frames_for, open_blurred, render_hashes_now
+from dlp_aireview.media import (
+    BlurredFrame,
+    MediaBoundaryError,
+    check_blurred,
+    frames_for,
+    open_blurred,
+    render_hashes_now,
+)
 from dlp_aireview.overlay import render_unit_images
 from dlp_aireview.plan import (
     PlannedUnit,
@@ -89,6 +98,7 @@ from dlp_models.vlm import VlmRequestError, VlmUnavailableError
 from dlp_privacy.errors import RenderNotCurrentError
 from dlp_privacy.policy import PrivacyPolicy
 from dlp_schema.aireview import (
+    PARTIAL_COMPLETION,
     AiBackendRecord,
     AiGroup,
     AiReviewRun,
@@ -96,6 +106,7 @@ from dlp_schema.aireview import (
     AiRunEvent,
     AiRunEventKind,
     AiSelectionRecord,
+    is_full_completion,
 )
 from dlp_schema.db.aireview_repository import (
     AiRunState,
@@ -138,6 +149,15 @@ _POLL_S = 0.1
 
 class SessionNotReadyError(RuntimeError):
     """세션 전제 실패: 사용 중지, 승인 보류, 프라이버시 승인 전, 장갑 Parquet 없음 (종료 6)."""
+
+
+class InputError(RuntimeError):
+    """판정 입력을 만들다 예상하지 못한 오류가 났다 (실행 기록 전: 아무것도 쓰지 않았다).
+
+    손상된 장갑 Parquet·블러본, 저장소 오류처럼 매번 같은 오류가 날 수 있다. 실행 기록·이벤트가 없어
+    `--pending`의 실패 정렬이 작동하지 않으므로, CLI는 이 세션을 `--limit` 자리로 세지 않는다
+    (늘 실패하는 세션이 뒤 세션을 막지 않게). 원래 예외는 `__cause__`에 있다.
+    """
 
 
 # ---------------------------------------------------------------- 입력·설정·결과
@@ -184,6 +204,9 @@ class RunOptions:
         endpoint_states: 엔드포인트 이름 → 상태 (진행 줄, `EndpointPool.states`).
         cancel: 바깥 멈춤 신호 (CLI가 여러 세션에 함께 준다). 켜지면 interrupted:signal로 멈춘다
             (여러 세션을 스레드로 돌릴 때 Ctrl-C는 주 스레드에만 오므로 이 신호로 알린다).
+        narrowed: 정책 기본 계획보다 좁힌 실행의 설명 (예: `groups=temporal`, CLI가 정한다). 있으면
+            completed 마감 사유를 `partial:<설명>`으로 남긴다 (`dlp_schema.aireview.
+            PARTIAL_COMPLETION`: `--pending`·required 게이트는 이 완료를 전체 완료로 보지 않는다).
     """
 
     workers: int = 1
@@ -196,6 +219,7 @@ class RunOptions:
     json_progress: bool = False
     endpoint_states: Callable[[], Mapping[str, str]] | None = None
     cancel: threading.Event | None = None
+    narrowed: str | None = None
 
 
 @dataclass(frozen=True)
@@ -266,9 +290,10 @@ class UnitSink(Protocol):
         """이미 기록한 단위 ID."""
         ...
 
-    def is_complete(self, session_id: str, version: str, plan_digest: str) -> bool:
+    def is_complete(self, session_id: str, version: str, plan_digest: str, *, full: bool) -> bool:
         """가장 최근 실행이 이 버전·이 계획으로 completed인가 (같은 계획의 재실행은 아무것도
-        쓰지 않는다)."""
+        쓰지 않는다). full(좁히지 않은 실행)이면 좁힌 실행의 `partial:` 마감은 완료가 아니다
+        (`_completed`)."""
         ...
 
     def start(self, run: AiReviewRun, event: AiRunEvent) -> None:
@@ -284,13 +309,21 @@ class UnitSink(Protocol):
         ...
 
 
-def _completed(state: AiRunState | None, version: str, plan_digest: str) -> bool:
-    """가장 최근 이벤트가 가장 최근 실행의 completed이고 그 실행이 이 버전·계획인가."""
+def _completed(state: AiRunState | None, version: str, plan_digest: str, *, full: bool) -> bool:
+    """가장 최근 이벤트가 가장 최근 실행의 completed이고 그 실행이 이 버전·계획인가.
+
+    full(좁히지 않은 실행)이면 그 completed가 전체 완료여야 한다 (`is_full_completion`). 좁힌
+    실행(`--groups`·`--mode flagged`)의 계획이 전체 계획과 같은 단위 집합이어도 그 마감은
+    `partial:`이라 완료 버전(`latest_run_state.completed_versions`)에 들지 않으므로, 뒤이은 전체
+    실행이 할 일 없음으로 끝나면 전체 완료 기록이 영영 생기지 않는다 (required 게이트가
+    `max_wait_h` 뒤 waived:timeout으로 열린다). 그때는 새 단위 없이 실행·마감만 남긴다.
+    """
     if state is None or state.last_run is None:
         return False
     run, last = state.last_run, state.last_event
+    finished = is_full_completion(last) if full else last.event is AiRunEventKind.COMPLETED
     return (
-        last.event is AiRunEventKind.COMPLETED
+        finished
         and last.run_id == run.run_id
         and run.version == version
         and run.plan_digest == plan_digest
@@ -309,11 +342,11 @@ class DbSink:
         with self.engine.connect() as conn:
             return done_unit_ids(conn, session_id, version)
 
-    def is_complete(self, session_id: str, version: str, plan_digest: str) -> bool:
+    def is_complete(self, session_id: str, version: str, plan_digest: str, *, full: bool) -> bool:
         """`UnitSink.is_complete` (실행 상태 `latest_run_state`로 본다)."""
         with self.engine.connect() as conn:
             state = latest_run_state(conn, [session_id]).get(session_id)
-        return _completed(state, version, plan_digest)
+        return _completed(state, version, plan_digest, full=full)
 
     def start(self, run: AiReviewRun, event: AiRunEvent) -> None:
         """실행 기록 + started 이벤트 (한 트랜잭션)."""
@@ -356,7 +389,7 @@ class MemorySink:
                 if u.session_id == session_id and u.version == version
             }
 
-    def is_complete(self, session_id: str, version: str, plan_digest: str) -> bool:
+    def is_complete(self, session_id: str, version: str, plan_digest: str, *, full: bool) -> bool:
         """`UnitSink.is_complete`."""
         with self._lock:
             events = [e for e in self.events if e.session_id == session_id]
@@ -364,7 +397,7 @@ class MemorySink:
         if not events or not runs:
             return False
         state = AiRunState(session_id, events[-1], runs[-1], frozenset(), None)
-        return _completed(state, version, plan_digest)
+        return _completed(state, version, plan_digest, full=full)
 
     def start(self, run: AiReviewRun, event: AiRunEvent) -> None:
         """실행과 started 이벤트를 남긴다."""
@@ -942,8 +975,11 @@ def _finish(ex: _Execution, run: AiReviewRun, base: RunSummary, plan_ids: set[st
         prompt_tokens=s.prompt_tokens, cached_tokens=s.cached_tokens,
         completion_tokens=s.completion_tokens, elapsed_s=ex.clock() - ex.started,
     )  # fmt: skip
+    narrowed = ex.options.narrowed
+    partial = kind is AiRunEventKind.COMPLETED and narrowed
+    recorded = f"{PARTIAL_COMPLETION}{narrowed}" if partial else reason
     ex.sink.event(
-        _event(run, run.session_id, kind, ex.now(), reason=reason, counts=_counts(summary),
+        _event(run, run.session_id, kind, ex.now(), reason=recorded, counts=_counts(summary),
                actor=ex.options.actor)
     )  # fmt: skip
     return summary
@@ -992,7 +1028,8 @@ def run_session(
     )
     if opts.dry_run:
         return base
-    if not todo and sink.is_complete(sid, version, plan_digest(units)):
+    full = opts.narrowed is None  # 좁힌 실행의 partial 완료는 전체 실행의 완료가 아니다
+    if not todo and sink.is_complete(sid, version, plan_digest(units), full=full):
         return replace(base, status="nothing_to_do", elapsed_s=clock() - start)
     if opts.cancel is not None and opts.cancel.is_set():
         detail = "시작하기 전에 멈췄습니다 (아무것도 쓰지 않았습니다)"
@@ -1084,6 +1121,7 @@ def load_input(
     flagged_for: Callable[[sa.Connection, Session, list[LabelRecord]], Sequence[FlaggedSpan]]
     | None = None,
     sensor_for: Callable[[Session], SensorContext] | None = None,
+    sensor_check: Callable[[Session], None] | None = None,
 ) -> RunInput:
     """DB와 라벨링 버킷에서 판정 입력을 만든다.
 
@@ -1101,6 +1139,9 @@ def load_input(
         groups: 이 묶음만.
         flagged_for: flagged 모드의 우선순위 사유 구간 계산 (CLI, 같은 읽기 트랜잭션).
         sensor_for: 장갑 접촉 구간 계산 (CLI, 감사 원본 저장소 `aireview.run`).
+        sensor_check: 장갑이 필요할 때 큰 블러본을 받기 전에 부르는 전제 확인 (장갑 Parquet 존재,
+            내용은 읽지 않는다). 블러본 게이트(받기 전 확인)를 모두 통과한 뒤에 부른다: 장갑이
+            없어 거부될 세션이 cron마다 블러본(GB 단위)을 받았다 버리지 않게.
 
     Raises:
         SessionNotReadyError: 사용 중지·승인 보류·승인 전 (또는 `sensor_for`가 낸 것).
@@ -1124,16 +1165,21 @@ def load_input(
         for w in plan_windows(session, current, policy, ontology, flagged=flagged)
         if groups is None or w.group in groups
     ]
+    streams = sorted({w.stream_id for w in windows})
+    sensing = sensor_for is not None and needs_sensor(windows, policy)
+    if sensing and sensor_check is not None:
+        # 게이트(받기 전 확인) → 장갑 존재 확인 → 받기 순서: 원본은 게이트 통과 뒤에만 본다
+        for s in streams:
+            check_blurred(engine, labeling, session_id, s, privacy_policy, raw_bucket=raw_bucket)
+        sensor_check(session)
     medias = {
         s: open_blurred(
             engine, labeling, session_id, s, privacy_policy, work, raw_bucket=raw_bucket
         )
-        for s in sorted({w.stream_id for w in windows})
+        for s in streams
     }
     sensor = (  # 블러본 게이트를 모두 통과한 뒤에만 원본(장갑)을 읽는다
-        sensor_for(session)
-        if sensor_for is not None and needs_sensor(windows, policy)
-        else SensorContext.absent()
+        sensor_for(session) if sensor_for is not None and sensing else SensorContext.absent()
     )
 
     def frames(stream: str, idx: Sequence[int]) -> Iterator[BlurredFrame]:
@@ -1145,6 +1191,15 @@ def load_input(
         blurred_sha256={s: m.blurred_sha256 for s, m in medias.items()},
         frames=frames, sensor=sensor, flagged=flagged,
     )  # fmt: skip
+
+
+# 입력 단계의 예상한 거부 (CLI가 종료 코드로 나눈다). 그 밖의 예외는 `InputError`로 감싼다
+_EXPECTED_INPUT_ERRORS = (
+    SessionNotReadyError,
+    MediaBoundaryError,
+    RenderNotCurrentError,
+    NoResultFound,
+)
 
 
 def run_from_db(
@@ -1162,6 +1217,7 @@ def run_from_db(
     sensor_for: Callable[[Session], SensorContext] | None = None,
     progress: Callable[[str], None] | None = None,
     clock: Callable[[], float] = time.monotonic,
+    sensor_check: Callable[[Session], None] | None = None,
 ) -> RunSummary | None:
     """세션 잠금 → 입력(`load_input`) → `run_session`(`DbSink`, 렌더 재확인). 블러본은 실행 임시
     디렉터리에 받고 끝나면 지운다.
@@ -1175,17 +1231,24 @@ def run_from_db(
 
     Raises:
         SessionNotReadyError, MediaBoundaryError, RenderNotCurrentError: `load_input`과 같다.
+        sqlalchemy.exc.NoResultFound: 세션이 없을 때.
+        InputError: 입력을 만들다 그 밖의 예외가 났다 (실행 기록 전).
     """
     opts = options or RunOptions()
     with session_lock(engine, session_id) as locked:
         if not locked:
             return None
         with tempfile.TemporaryDirectory(prefix="aireview-") as tmp:
-            inp = load_input(
-                engine, labeling, session_id, policy, privacy_policy, Path(tmp),
-                raw_bucket=raw_bucket, groups=opts.groups, flagged_for=flagged_for,
-                sensor_for=sensor_for,
-            )  # fmt: skip
+            try:
+                inp = load_input(
+                    engine, labeling, session_id, policy, privacy_policy, Path(tmp),
+                    raw_bucket=raw_bucket, groups=opts.groups, flagged_for=flagged_for,
+                    sensor_for=sensor_for, sensor_check=sensor_check,
+                )  # fmt: skip
+            except _EXPECTED_INPUT_ERRORS:
+                raise
+            except Exception as exc:
+                raise InputError(f"{type(exc).__name__}: {exc}") from exc
             streams = list(inp.media)
 
             def check() -> Mapping[str, str]:

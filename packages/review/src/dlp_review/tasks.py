@@ -46,7 +46,9 @@ WP6, ADR 0006·0020·0023·0024. 진입점: `dlp review create <세션>`(직접 
 - 원본 버킷: `sessions/<세션>/derived/<스트림>.proxy.mp4`(검수 프록시), 장갑·IMU 원본 Parquet.
 - 라벨링 버킷: `sessions/<세션>/review/<담당자>/<스트림>-<렌더 해시 앞 16자>.mp4`
   (워터마크 영상, 내용 주소: 블러본이 바뀌면 키도 바뀐다. 회수 실행기가 지운다),
-  `sessions/<세션>/review/timeseries.csv`(시계열, 얼굴이 없어 회수하지 않는다).
+  `sessions/<세션>/review/timeseries.csv`(시계열, 얼굴이 없어 블러 변경으로는 회수하지 않는다.
+  사용 중지 세션이면 회수 실행기가 회수 대기 유무와 무관하게 확인해 지운다: 동의를 철회한 작업자의
+  센서 값이다. `revoke.timeseries_sessions`).
   구 작업은 `<담당자>/<스트림>.mp4` 키를 쓴다.
 원본 접근은 `setup.raw`가 감사 저장소(`dlp_cli.raw_access.raw_store`)일 때 기록된다 (ADR 0020).
 

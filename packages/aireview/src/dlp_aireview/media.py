@@ -108,6 +108,32 @@ def render_hashes_now(
         return {s: expected_render_hash(conn, session_id, s, policy) for s in sorted(stream_ids)}
 
 
+def check_blurred(
+    engine: sa.Engine,
+    labeling: ObjectStore,
+    session_id: str,
+    stream_id: str,
+    privacy_policy: PrivacyPolicy,
+    *,
+    raw_bucket: str,
+) -> None:
+    """블러본을 받지 않고 게이트만 본다 (`open_blurred`의 받기 전 확인: 버킷·승인·렌더 기록).
+
+    큰 블러본을 받기 전에 다른 전제(장갑 Parquet 존재)를 확인하는 순서를 지키려고 쓴다. 통과해도
+    `open_blurred`가 받으면서 다시 확인한다 (받는 사이 렌더 변경).
+
+    Raises:
+        MediaBoundaryError, RenderNotCurrentError: `open_blurred`와 같다 (받은 파일 해시 확인 제외).
+    """
+    if labeling.bucket == raw_bucket:
+        raise MediaBoundaryError(
+            f"{session_id}/{stream_id}: 판정 프레임은 라벨링 버킷의 블러본에서만 얻습니다 "
+            "(원본 버킷 저장소를 받았습니다)"
+        )
+    with engine.connect() as conn:
+        assert_render_current(conn, labeling, session_id, stream_id, privacy_policy)
+
+
 def open_blurred(
     engine: sa.Engine,
     labeling: ObjectStore,

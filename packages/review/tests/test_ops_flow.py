@@ -40,6 +40,7 @@ from dlp_review.ops.policy import load_policy as load_ops_policy
 from dlp_review.ops.runner import (
     AccessError,
     FinishResult,
+    ReviewerRuleError,
     assign_reviewer,
     create_assignment_tasks,
     finish_assignment,
@@ -620,9 +621,9 @@ def test_unassigned_qa_assignment_needs_explicit_reviewer(
     seniors = ops.model_copy(
         update={"reviewers": ops.reviewers.model_copy(update={"senior": ("s1", "r1")})}
     )
-    with pg.begin() as conn, pytest.raises(TaskError, match="선임"):
+    with pg.begin() as conn, pytest.raises(ReviewerRuleError, match="선임"):
         assign_reviewer(conn, qa, "r2", seniors)  # 선임이 아니다
-    with pg.begin() as conn, pytest.raises(TaskError, match="짝"):
+    with pg.begin() as conn, pytest.raises(ReviewerRuleError, match="짝"):
         assign_reviewer(conn, qa, "r1", seniors)  # 원래 담당자는 자기 검수를 QA하지 않는다
     with pg.begin() as conn:
         assigned = assign_reviewer(conn, qa, "s1", seniors)
@@ -630,5 +631,6 @@ def test_unassigned_qa_assignment_needs_explicit_reviewer(
         assert get_assignment(conn, qa.assignment_id).assignee == "s1"
     assert task.assignee == "s1" and "/review/s1/" in task.media_uri
     assert "unassigned" not in task.media_uri
-    with pg.begin() as conn, pytest.raises(TaskError, match="이미"):
+    with pg.begin() as conn, pytest.raises(TaskError, match="이미") as state:
         assign_reviewer(conn, assigned, "r1", seniors)
+    assert not isinstance(state.value, ReviewerRuleError)  # 배정 상태 거부: 정책 안내 대상 아님

@@ -24,8 +24,8 @@
     T_s = 무릎 단위/s * t(벤치) / t(작업량)        (묶음 s, `group_throughput`)
       t(x) = P_x / C_p + O_x / C_d   (단위 하나의 장비 시간 모형)
       P: 단위당 새로 계산할 프롬프트 근사 토큰 = 이미지 + 가변 글 + (1 - f) * 고정 접두사
-         (f = 고정 접두사가 캐시에 맞은 비율, `static_cached_fraction`. 서버가 cached_tokens를 주지
-         않거나 0이면 f = 0)
+         (f = 고정 접두사가 캐시에 맞은 비율, `static_cached_fraction`. 0이면 f = 0. 서버가
+         cached_tokens를 주지 않으면 f를 모르므로 f = 0과 1 중 T_s가 작은 쪽을 쓰고 경고한다)
       O: 단위당 출력 토큰 (벤치는 무릎 지점 실측, 작업량은 예상 출력)
       C_p, C_d: 벤치가 무릎 동시성에서 따로 잰 프리필 용량(근사 토큰/s, `PrefillRun`)과 생성 용량
          (생성 토큰/s, `DecodeRun`, 서버가 길이 고정을 따른 측정만)
@@ -270,7 +270,9 @@ class Throughput:
             보정하지 않았으면 knee. knee_units_per_s: 벤치 무릎 지점의 단위/s. concurrency: 무릎
             동시성. prefill_tok_s, decode_tok_s: 따로 잰 프리필 용량(근사 토큰/s)·생성 용량
             (생성 토큰/s), 없으면 None. mix: t(벤치) / t(작업량) (T = 무릎 * mix), 없으면 None.
-        static_cached: 고정 접두사가 캐시에 맞은 비율 추정 (0~1).
+        static_cached: 고정 접두사가 캐시에 맞은 비율 추정 (0~1, 모르면 고른 쪽 값).
+        cache_known: 서버가 cached_tokens를 보고했는가. 모르면 캐시 비율 0과 1로 각각 보정해
+            처리량이 작은 쪽(보수적)을 쓴다 (`group_throughput`).
     """
 
     units_per_s: float
@@ -281,6 +283,7 @@ class Throughput:
     decode_tok_s: float | None = None
     mix: float | None = None
     static_cached: float = 0.0
+    cache_known: bool = True
 
 
 def static_cached_fraction(point: BenchPoint, approx: ApproxLoad) -> float:
@@ -319,6 +322,10 @@ def group_throughput(
 
     측정이 없으면 None. 용량 측정(`prefill`·`decode`)이나 근사 토큰(`approx`)이 없으면 보정 없이
     무릎 단위/s (limit "knee").
+
+    서버가 cached_tokens를 보고하지 않으면(vLLM 기본) 고정 접두사 캐시 비율 f를 모른다. f = 0으로만
+    세면 작업량 단위의 새 토큰이 벤치보다 많을 때 T를 크게(대수를 적게) 낸다. T는 f에 대해 단조라서
+    f = 0과 f = 1로 각각 보정해 작은 쪽을 쓴다 (보수적, `cache_known` 거짓, 장비 대수 경고).
     """
     frames, side = group_settings(policy, group)
     config = report.config(group, frames, side)
@@ -329,10 +336,21 @@ def group_throughput(
     approx = config.approx
     if approx is None or not point.ok or not load.units:
         return base
-    cached = static_cached_fraction(point, approx)
+    known = point.cache_hit_ratio is not None
+    guesses = (static_cached_fraction(point, approx),) if known else (0.0, 1.0)
+    found = [t for f in guesses if (t := _corrected(config, point, approx, load, f)) is not None]
+    if not found:
+        return replace(base, static_cached=guesses[0], cache_known=known)
+    return replace(min(found, key=lambda t: t.units_per_s), cache_known=known)
+
+
+def _corrected(
+    config: BenchConfig, point: BenchPoint, approx: ApproxLoad, load: GroupLoad, cached: float
+) -> Throughput | None:
+    """고정 접두사 캐시 비율 cached로 무릎을 작업량 구성에 맞춘 T (용량 측정이 없으면 None)."""
     caps = _capacities(config, cached)
     if caps is None:
-        return replace(base, static_cached=cached)
+        return None
     c_p, c_d = caps
     p_bench = approx.image + approx.text + (1 - cached) * approx.static
     t_bench = p_bench / c_p + (point.completion_tokens / point.ok) / c_d
@@ -470,6 +488,12 @@ def capacity(
             warnings.append(
                 f"{group.value}: 프리필·생성 용량 측정이 없어 무릎 처리량을 작업량 구성으로 "
                 "보정하지 않았다 (벤치와 작업량의 단위당 토큰이 다르면 틀린다)"
+            )
+        elif tp is not None and not tp.cache_known:
+            warnings.append(
+                f"{group.value}: 서버가 cached_tokens를 보고하지 않아 고정 접두사 캐시 비율을 "
+                "모른다. 0과 1로 보정한 값 중 처리량이 작은 쪽(대수가 많은 쪽)을 썼다 (서버를 "
+                "--enable-prompt-tokens-details로 띄워 다시 벤치하면 정확해진다)"
             )
     actions = workload.actions_requests
     if actions:

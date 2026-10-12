@@ -776,6 +776,46 @@ def test_finish_without_ai_verifies_everything(twelve: sa.Engine, ops: ReviewOps
     assert result.sample_verified == len(a.withheld_label_ids) and result.ai_flagged == 0
 
 
+@pytest.mark.parametrize("ai_right", [True, False])
+def test_finish_rejects_lot_when_an_excluded_ai_flag_was_a_real_defect(
+    twelve: sa.Engine, ops: ReviewOpsPolicy, ai_right: bool
+) -> None:
+    """표본이 모두 승인돼도, AI 지적으로 묶음에서 뺀 라벨(l03 틀림, l07 의심) 중 하나라도 사람이
+    고쳤으면 묶음은 불합격이고 보류 라벨 전부가 `:resample` 재검수로 간다 (ADR 0040 I9).
+
+    정답 근거: 지적을 빼고 남은 묶음만 판정하면 AI가 맞게 지적할수록 합격이 쉬워져 사람이 보는
+    라벨이 준다. 지적이 틀렸으면(사람이 모두 승인) 평소처럼 남은 묶음 표본으로 판정해 합격한다.
+    """
+    a = _plan(twelve, ops, _cfg())
+    with twelve.begin() as conn:
+        for lid in (*a.sample_label_ids, "l07"):
+            record_review(conn, lid, VerificationState.HUMAN_APPROVED, "labeler01", FIXED_TIME)
+        if ai_right:  # 검수자가 l03을 고쳤다 (AI 지적이 맞았다)
+            fixed = _action("l03-fix", 3_000, 3_900).model_copy(
+                update={
+                    "parent_label_id": "l03", "provenance": Provenance(source=Source.HUMAN),
+                    "confidence": None,
+                }
+            )  # fmt: skip
+            insert_labels(conn, [fixed])
+        else:
+            record_review(conn, "l03", VerificationState.HUMAN_APPROVED, "labeler01", FIXED_TIME)
+        _collected_task(conn, a, (*a.sample_label_ids, "l03", "l07"))
+        result = finish_assignment(conn, a, FIXED_TIME, ops, ai=_cfg())
+        follow = {x.assignment_id: x for x in list_assignments(conn, session_id="s001")}
+        states = {x.label_id: x.verification.state for x in get_labels(conn, "s001")}
+    withheld = a.withheld_label_ids
+    if ai_right:
+        assert result.sample_accepted is False and result.ai_excluded_defects == 1
+        assert result.sample_verified == 0
+        assert follow[f"{a.assignment_id}:resample"].only_label_ids == withheld
+        assert all(states[i] is VerificationState.UNREVIEWED for i in withheld)
+    else:
+        assert result.sample_accepted is True and result.ai_excluded_defects == 0
+        assert result.sample_verified == len(withheld)
+        assert f"{a.assignment_id}:resample" not in follow
+
+
 def _state(**kw: Any) -> AiRunState:
     """실행 상태 (기본: 마지막 이벤트 started, 완료 버전 없음)."""
     event = AiRunEvent(session_id="s001", event=AiRunEventKind.STARTED, at=FIXED_TIME)

@@ -25,7 +25,9 @@
 
 지표 (`score`)
     - 오류 종류별·라벨 종류별: 탐지(wrong·suspect) 재현율, ok 수(틀린 라벨을 ok라 함), 제안 정확
-      일치(제안 페이로드가 정답과 같음, 삭제는 삭제 제안).
+      일치(제안으로 정할 수 있는 종류·필드가 정답과 같음, 삭제는 삭제 제안). 분모는 제안으로 표현할
+      수 있는 정답뿐이다: 행동 손 바꿈·경계만 고친 수정·삭제할 수 없는 종류의 삭제처럼 맞출 수 없는
+      것은 `unattainable`로 따로 센다 (정답을 아는 판정기의 일치율이 1이 되게).
     - 전체: 틀린 라벨 탐지 재현율(`wrong_recall`), 깨끗한 라벨 오지적률(`false_flag_rate`), **ok
       놓침률(`ok_miss_rate`) = P(틀린 라벨 | AI ok)** = 틀린 라벨의 ok 수 / 모든 ok 수 (설계 7.2와
       `dlp_review.ops.ai_quality`의 ok 놓침률 P(바뀜 | AI ok)와 같은 정의. `review.yaml
@@ -39,18 +41,22 @@
     - 판정 모델이 행동 분류 모델과 같으면(`same_model_as_actions`) 행동 라벨 판정에 상관 오류가 생길
       수 있으므로 라벨 종류별 표(`by_kind["action"]`)를 따로 본다.
 
-공개 이름: `Truth`, `EvalCase`, `ErrorStat`, `KindStat`, `GateResult`, `EvalReport`,
-`perturb_case`, `history_case`, `eval_input`, `judge_cases`, `score`, `gate_result`.
+평가 범위: 선택 모드(`selection.mode`)는 쓰지 않는다 (`plan.plan_windows`의 평가 경로, 대상을 모두
+판정한다). `--groups`면 `restrict_groups`로 그 묶음 창의 대상만 분모에 넣는다.
+
+공개 이름: `Truth`, `EvalCase`, `LabelKey`, `Judged`, `ErrorStat`, `KindStat`, `GateResult`,
+`EvalReport`, `perturb_case`, `history_case`, `restrict_groups`, `eval_input`, `judge_cases`,
+`score`, `gate_result`.
 """
 
 from __future__ import annotations
 
 import math
 import time
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import sqlalchemy as sa
 from pydantic import Field
@@ -66,13 +72,21 @@ from dlp_aireview.runner import (
     RunOptions,
     RunSummary,
     SessionNotReadyError,
+    planned_units,
     run_session,
     session_problem,
 )
 from dlp_eval.metrics.classification import ece
 from dlp_media.storage import ObjectStore
 from dlp_privacy.policy import PrivacyPolicy
-from dlp_schema.aireview import AiReviewUnit, AiVerdict, AiVerdictValue, glove_derived, worst
+from dlp_schema.aireview import (
+    AiGroup,
+    AiReviewUnit,
+    AiVerdict,
+    AiVerdictValue,
+    glove_derived,
+    worst,
+)
 from dlp_schema.common import Contract
 from dlp_schema.db.repository import get_session
 from dlp_schema.episode import current_labels
@@ -86,6 +100,10 @@ _EVAL_MODEL = "golden-eval"
 # 지적 (사람 확인이 필요하다고 본 판정)
 _FLAGS = (AiVerdictValue.WRONG, AiVerdictValue.SUSPECT)
 Mode = Literal["history", "perturb"]
+# 정답의 출처 (보고서 `truth_source`): 골든 버전에 고정한 정답(perturb, 고정한 버전), 지금
+# 라벨로 정한 정답(perturb, 정답을 고정하지 않은 이전 형식 골든셋 — 사람이 고치면 같은 버전이어도
+# 바뀐다), 사람 검수 사슬의 지금 상태(history, 설계상 늘 지금 상태)
+TruthSource = Literal["golden_frozen", "current_labels", "history_current"]
 
 
 @dataclass(frozen=True)
@@ -295,6 +313,21 @@ def history_case(
     )
 
 
+def restrict_groups(
+    case: EvalCase, policy: AiReviewPolicy, groups: Collection[AiGroup]
+) -> EvalCase:
+    """`--groups`: 그 묶음의 창에 드는 대상만 남긴 사례 (정답도 같이 줄인다).
+
+    다른 묶음 대상을 남기면 판정되지 않은 채 재현율·오지적률 분모에 들어간다 (판정 버전이 같아
+    보고서로 구별할 수 없다). 창은 평가 경로와 같은 `plan_windows(only=…)`로 고른다.
+    """
+    windows = plan_windows(case.session, case.labels, policy, case.ontology, only=case.targets)
+    keep = {x.label_id for w in windows if w.group in groups for x in w.targets}
+    targets = tuple(x for x in case.targets if x.label_id in keep)
+    truth = {i: t for i, t in case.truth.items() if i in keep}
+    return EvalCase(case.session, case.ontology, case.labels, targets, truth)
+
+
 def eval_input(
     engine: sa.Engine,
     labeling: ObjectStore,
@@ -335,14 +368,24 @@ def eval_input(
     )  # fmt: skip
 
 
+# 판정을 모으는 키: (세션 ID, 라벨 ID). 여러 골든 세션의 메모리 라벨(교란 사본의 거짓 이벤트 등)이
+# 같은 ID를 써도 판정이 섞이지 않게 세션까지 넣는다
+LabelKey = tuple[str, str]
+
+
 @dataclass(frozen=True)
 class Judged:
-    """`judge_cases` 결과: 라벨 ID → 가장 나쁜 판정, 단위 기록, 세션별 실행 요약, 걸린 초."""
+    """`judge_cases` 결과: (세션, 라벨 ID) → 가장 나쁜 판정, 단위 기록, 세션별 실행 요약, 초.
 
-    verdicts: dict[str, AiVerdict]
+    planned는 계획한 단위에 든 대상 (판정이 없으면 장애·중단 = 미판정, 계획에 없으면 미계획).
+    None이면 모른다 (판정 없는 대상을 모두 미판정으로 센다).
+    """
+
+    verdicts: dict[LabelKey, AiVerdict]
     units: tuple[AiReviewUnit, ...]
     summaries: tuple[RunSummary, ...]
     elapsed_s: float
+    planned: frozenset[LabelKey] | None = None
 
 
 def judge_cases(
@@ -361,18 +404,25 @@ def judge_cases(
     start = clock()
     sink = MemorySink()
     summaries: list[RunSummary] = []
+    opts = options or RunOptions()
+    planned = frozenset(
+        (inp.session.session_id, x.label_id)
+        for inp in inputs
+        for u in planned_units(inp, policy, opts)
+        for x in u.window.targets
+    )
     for inp in inputs:
         summary = run_session(inp, backend, sink, policy, options=options, progress=progress)
         summaries.append(summary)
         if summary.reason in ("config", "signal"):
             break
     units = tuple(sink.units.values())
-    found: dict[str, list[tuple[AiVerdict, AiReviewUnit]]] = {}
+    found: dict[LabelKey, list[tuple[AiVerdict, AiReviewUnit]]] = {}
     for u in units:
         for v in u.verdicts:
-            found.setdefault(v.label_id, []).append((v, u))
-    verdicts = {lid: worst(c)[0] for lid, c in found.items()}
-    return Judged(verdicts, units, tuple(summaries), clock() - start)
+            found.setdefault((u.session_id, v.label_id), []).append((v, u))
+    verdicts = {key: worst(c)[0] for key, c in found.items()}
+    return Judged(verdicts, units, tuple(summaries), clock() - start, planned)
 
 
 # ---------------------------------------------------------------- 지표
@@ -387,15 +437,19 @@ class ErrorStat(Contract):
     """오류 종류 하나(또는 깨끗한 라벨)의 집계."""
 
     # total: 대상 수. flagged: wrong·suspect 수. ok: AI ok 수. unsure: 판단 불가 수.
-    # unjudged: 판정이 없는 수 (계획되지 않음·장애). expected / exact: 정답 제안이 있는 수와 제안이
-    # 그 정답과 같은 수.
+    # unjudged: 계획했지만 판정이 없는 수 (장애·중단). unplanned: 계획되지 않아 판정이 없는 수
+    # (블러본 없는 스트림 등). expected / exact: 제안으로 표현할 수 있는 정답 제안이 있는 수와
+    # 제안이 그 정답과 같은 수 (제안 키 필드로 비교, `_attainable`·`_matches`). unattainable: 정답
+    # 제안이 있지만 제안으로 표현할 수 없는 수 (손 바꿈·경계만 고침 등, expected에서 뺀다).
     total: int = 0
     flagged: int = 0
     ok: int = 0
     unsure: int = 0
     unjudged: int = 0
+    unplanned: int = 0
     expected: int = 0
     exact: int = 0
+    unattainable: int = 0
 
     @property
     def recall(self) -> float | None:
@@ -447,40 +501,93 @@ class EvalReport(Contract):
     suggestion_exact_rate: float | None
     ece: float | None
     gate: GateResult
+    # 정답 근거: 출처와 골든 정답 고정 근거(`dlp_eval.runner.truth_anchor`, `dlp eval golden`의
+    # golden_truth와 같은 모양. history 방식은 골든 정답을 쓰지 않아 None). 같은 골든 버전으로
+    # 다시 잰 두 보고서의 정답이 같았는지 해시로 확인한다 (ADR 0041)
+    truth_source: TruthSource | None = None
+    golden_truth: dict[str, Any] | None = None
+
+
+# 라벨 종류 → 제안으로 정할 수 있는 페이로드 필드 (`schema.SUGGEST_FIELDS_BY_KIND`의 제안 키를
+# 페이로드 필드 이름으로, `suggest.materialize`). 종류 변경(action↔gap)은 kind로 따로 본다. 경계·손
+# (행동)·action_id·접촉 시각 등 나머지 필드는 제안으로 정하지 못한다
+_SUGGESTABLE: dict[str, tuple[str, ...]] = {
+    "action": ("verb", "target_id", "tool_id"),
+    "gap": ("gap_type",),
+    "hand_state": ("contact_target_kind", "target_id", "grasp_type", "body_part"),
+    "event": ("event_type", "severity"),
+    "segment": ("ref_id",),
+    "object_state": ("value",),
+    "box_track": ("class_id",),
+    "keypoint_track": ("hand",),
+}
+
+
+def _view(p: LabelPayload) -> tuple[Any, ...]:
+    """제안으로 정할 수 있는 부분만 본 페이로드 (종류 + `_SUGGESTABLE` 필드 값)."""
+    return (p.kind, *(getattr(p, f, None) for f in _SUGGESTABLE.get(p.kind, ())))
+
+
+def _attainable(judged: LabelPayload, t: Truth, policy: AiReviewPolicy) -> bool:
+    """정답 제안을 제안으로 표현할 수 있는가 (정답을 아는 판정기라면 맞출 수 있는가).
+
+    삭제는 정책 `response.suggest.delete_kinds` 종류만. 종류 변경은 action↔gap이고
+    `kind_change`가 켜졌을 때만. 같은 종류면 제안 키 필드 중 하나라도 달라야 한다 (손 바꿈·경계만
+    고친 수정은 바꿀 것이 없는 제안이라 맞출 수 없다).
+    """
+    suggest = policy.response.suggest
+    if t.delete:
+        return judged.kind in suggest.delete_kinds
+    if t.expected is None:
+        return False
+    if t.expected.kind != judged.kind:
+        return suggest.kind_change and {judged.kind, t.expected.kind} == {"action", "gap"}
+    return _view(t.expected) != _view(judged)
 
 
 def _matches(v: AiVerdict, t: Truth) -> bool:
-    """제안이 정답 제안과 같은가."""
+    """제안이 정답 제안과 같은가 (삭제는 삭제 제안, 그 밖은 `_view`가 같음)."""
     s = v.suggestion
     if s is None:
         return False
     if t.delete:
         return s.op == "delete"
-    return s.payload is not None and s.payload == t.expected
+    return (
+        s.payload is not None and t.expected is not None and _view(s.payload) == _view(t.expected)
+    )
 
 
-def _add(stat: ErrorStat, v: AiVerdict | None, t: Truth) -> ErrorStat:
-    """집계에 대상 하나를 더한 새 값."""
+def _add(
+    stat: ErrorStat, v: AiVerdict | None, t: Truth, planned: bool, attainable: bool
+) -> ErrorStat:
+    """집계에 대상 하나를 더한 새 값. planned: 그 대상이 계획한 단위에 들었는가. attainable: 정답
+    제안을 제안으로 표현할 수 있는가 (`_attainable`)."""
     data = stat.model_dump()
     data["total"] += 1
     if v is None:
-        data["unjudged"] += 1
+        data["unjudged" if planned else "unplanned"] += 1
     else:
         data["flagged"] += v.verdict in _FLAGS
         data["ok"] += v.verdict is AiVerdictValue.OK
         data["unsure"] += v.verdict is AiVerdictValue.UNSURE
     if t.wrong and (t.delete or t.expected is not None):
-        data["expected"] += 1
-        data["exact"] += v is not None and _matches(v, t)
+        if not attainable:
+            data["unattainable"] += 1
+        else:
+            data["expected"] += 1
+            data["exact"] += v is not None and _matches(v, t)
     return ErrorStat.model_validate(data)
 
 
-def _kinds(cases: Sequence[EvalCase], verdicts: Mapping[str, AiVerdict]) -> dict[str, KindStat]:
+def _kinds(
+    cases: Sequence[EvalCase], verdicts: Mapping[LabelKey, AiVerdict]
+) -> dict[str, KindStat]:
     """라벨 종류별 집계."""
     out: dict[str, dict[str, int]] = {}
     for case in cases:
+        sid = case.session.session_id
         for x in case.targets:
-            t, v = case.truth[x.label_id], verdicts.get(x.label_id)
+            t, v = case.truth[x.label_id], verdicts.get((sid, x.label_id))
             flagged = v is not None and v.verdict in _FLAGS
             cell = out.setdefault(x.kind, KindStat().model_dump())
             key = "wrong" if t.wrong else "clean"
@@ -515,15 +622,25 @@ def score(
     golden_version: str,
     same_model_as_actions: bool,
     skipped: Mapping[str, str] | None = None,
+    truth_source: TruthSource | None = None,
+    golden_truth: Mapping[str, Any] | None = None,
 ) -> EvalReport:
-    """판정 결과 → 평가 보고서 (모듈 docstring 지표). 순수 함수."""
+    """판정 결과 → 평가 보고서 (모듈 docstring 지표). 순수 함수.
+
+    truth_source·golden_truth: 정답 근거 (보고서에 그대로 남긴다, `EvalReport`).
+    """
     by_error: dict[str, ErrorStat] = {}
     conf: list[float] = []
     correct: list[bool] = []
     for case in cases:
+        sid = case.session.session_id
         for x in case.targets:
-            t, v = case.truth[x.label_id], judged.verdicts.get(x.label_id)
-            by_error[t.error] = _add(by_error.get(t.error, ErrorStat()), v, t)
+            key = (sid, x.label_id)
+            t, v = case.truth[x.label_id], judged.verdicts.get(key)
+            planned = judged.planned is None or key in judged.planned
+            attainable = _attainable(x.payload, t, policy)
+            stat = by_error.get(t.error, ErrorStat())
+            by_error[t.error] = _add(stat, v, t, planned, attainable)
             if (
                 v is not None
                 and v.confidence is not None
@@ -552,6 +669,7 @@ def score(
         wrong_called_ok_rate=_ratio(sum(s.ok for s in wrong), n_wrong),
         suggestion_exact_rate=_ratio(sum(s.exact for s in wrong), sum(s.expected for s in wrong)),
         ece=None if not conf or math.isnan(e := ece(conf, correct)) else e,
-        gate=GateResult(passed=False),
+        gate=GateResult(passed=False), truth_source=truth_source,
+        golden_truth=dict(golden_truth) if golden_truth is not None else None,
     )  # fmt: skip
     return report.model_copy(update={"gate": gate_result(report, policy.gate)})

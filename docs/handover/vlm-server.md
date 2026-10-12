@@ -62,7 +62,9 @@ curl -s -H "Authorization: Bearer $DLP_VLM_API_KEY" http://10.0.0.11:8000/v1/mod
   조각 6장). `--max-model-len 16384`, `--enable-prefix-caching`(고정 접두사 = 시스템 + 온톨로지 블록).
 - `--enable-prompt-tokens-details`: 응답 usage에 `prompt_tokens_details.cached_tokens`를 넣는다 (vLLM
   기본은 꺼짐). 없으면 벤치 캐시 적중, 추정의 고정 접두사 캐시 판단, probe `cached_tokens` 점검이
-  "모름"이 된다 (추정은 그때 고정 접두사도 매번 계산한다고 보수적으로 센다).
+  "모름"이 된다. 추정은 그때 캐시 비율을 0과 1로 각각 보정해 처리량이 작은 쪽(장비 대수가 많은 쪽)을
+  쓰고 경고한다 (0으로만 세면 작업량 단위의 새 토큰이 벤치보다 많을 때 대수를 적게 낸다). 벤치 전에
+  이 옵션을 켠다.
 - `--max-num-seqs 32~64`(연속 배칭), `--gpu-memory-utilization 0.4`(판정) / `0.3`(행동).
 - 이미지 크기: 클라이언트가 긴 변(`max_side_px`)과 32px 배수(`image.align_px`, Qwen3-VL patch 16 ×
   merge 2)로 맞춰 보낸다. 서버가 다시 줄이지 않게 `--mm-processor-kwargs`의 최대 픽셀을 그보다 크게 둔다.
@@ -213,7 +215,7 @@ D    = Σ_s (영상 1시간당 단위_s ÷ T_s) + 행동 VLM 영상 1시간당 �
 
 | 명령 | 하는 일 | 종료 코드 |
 | --- | --- | --- |
-| `dlp aireview run <세션>… \| --pending [--limit N] [--parallel-sessions K]` | 판정 → AI 표 기록 (멱등·재개). `--groups`, `--mode all\|flagged`, `--max-minutes`, `--no-sensor`, `--dry-run`(계획만, 서버 불필요. 손 상태 대상이 있으면 장갑 Parquet은 읽는다), `--debug-dir`(형식이 맞지 않던 응답 원문만 로컬 파일), `--json-progress` | 0 / 1 세션 하나의 예상하지 못한 오류(다음 세션은 계속) / 2 주소 없음 / 3 서버 장애 / 5 설정 / 6 세션 전제·블러 변경·사용 중지 / 7 처리 중 / 8 시간 / 130 Ctrl-C |
+| `dlp aireview run <세션>… \| --pending [--limit N] [--parallel-sessions K]` | 판정 → AI 표 기록 (멱등·재개). 세션과 `--pending`, `--pending` 없는 `--limit`은 거부한다. `--groups`(좁힌 실행은 `completed:partial:…`), `--mode all\|flagged`, `--max-minutes`(0보다 큼), `--no-sensor`, `--dry-run`(계획만, 서버 불필요. 손 상태 대상이 있으면 장갑 Parquet은 읽는다), `--debug-dir`(형식이 맞지 않던 응답 원문만 로컬 파일), `--json-progress` | 0 / 1 세션 하나의 예상하지 못한 오류(다음 세션은 계속) / 2 주소 없음 / 3 서버 장애 / 5 설정 / 6 세션 전제·블러 변경·사용 중지 / 7 처리 중 / 8 시간 / 130 Ctrl-C |
 | `dlp aireview status [<세션>… \| --pending \| --all] [--json]` | 판정률(판정된 대상/계획 대상), 단위·fallback, 판정 분포, 마지막 이벤트(마감 없이 끝났으면 "중단 추정"), 최근 처리량 기반 남은 시간, 백로그. 실행 중인지는 잠금을 잡지 않고 본다 | 0 / 1 없는 세션 |
 | `dlp aireview show <unit_id> \| <세션>:<라벨>` | 감사 기록 (프레임 PTS·sha, 렌더 해시, 프롬프트 다이제스트, 판정, 응답 sha, 서버 모델, 엔드포인트 이름, 실행자) | 0 / 1 없음 |
 | `dlp aireview waive <세션> --reason` | required 모드에서 그 세션의 AI 단계를 건너뛴다 (`waived` 이벤트) | 0 / 1 없음 |
@@ -223,7 +225,8 @@ D    = Σ_s (영상 1시간당 단위_s ÷ T_s) + 행동 VLM 영상 1시간당 �
   뒤 `pending.quiet_minutes`(30분)가 지났고, 판정 없는 대상이 남았거나 지금 버전 최근 실행이 completed가
   아닌 세션만 고른다. 최근 시도가 장애·멈춤으로 끝난 세션은 뒤로 미룬다). 한 세션의 단위 몇 개만
   장애이거나 예상하지 못한 오류가 나도 다음 세션을 계속하고, `--limit N`은 실제로 실행한 세션만 센다
-  (블러본 게이트에서 거부되는 세션이 자리를 차지하지 않는다).
+  (블러본 게이트에서 거부되는 세션, 실행 기록 전 입력 단계 오류(`[입력 오류]`, 손상된 장갑 Parquet·
+  블러본 등, 종료 코드는 1)로 끝난 세션이 자리를 차지하지 않는다).
 - `--parallel-sessions K`: 세션마다 DB 연결을 최대 2개 쥐므로 연결 풀을 K에 맞춰 키운다. K는
   PostgreSQL `max_connections`의 절반보다 작게 둔다. Ctrl-C는 함께 돌던 세션 모두를 진행 중 요청만
   끝내고 interrupted:signal로 닫는다.

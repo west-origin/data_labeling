@@ -41,6 +41,7 @@ from dlp_schema.aireview import (
     AiReviewUnit,
     AiRunEvent,
     AiRunEventKind,
+    is_full_completion,
 )
 from dlp_schema.common import Contract
 from dlp_schema.db.tables import (
@@ -152,7 +153,8 @@ class AiRunState:
         session_id: 세션.
         last_event: 가장 최근 이벤트 (시각, event_id 순).
         last_run: 가장 최근 실행 세대 (만든 순). 실행 없이 건너뛰기만 있으면 None.
-        completed_versions: completed 이벤트가 있는 실행들의 판정 버전.
+        completed_versions: 정책 기본 계획을 끝낸 completed 이벤트가 있는 실행들의 판정 버전
+            (좁힌 실행의 `partial:` 마감은 넣지 않는다, `dlp_schema.aireview.is_full_completion`).
         waived_at: 가장 최근 waived 이벤트 시각 (없으면 None).
     """
 
@@ -201,10 +203,9 @@ def latest_run_state(conn: sa.Connection, session_ids: Iterable[str]) -> dict[st
 def _state(sid: str, events: list[AiRunEvent], runs: list[AiReviewRun]) -> AiRunState:
     """한 세션의 이벤트(시각 순)·실행(만든 순) → 상태."""
     version = {r.run_id: r.version for r in runs}
+    # 좁힌 실행(`partial:` 마감)의 completed는 정책 기본 계획의 완료가 아니다 (required 게이트)
     completed = frozenset(
-        version[e.run_id]
-        for e in events
-        if e.event is AiRunEventKind.COMPLETED and e.run_id in version
+        version[e.run_id] for e in events if is_full_completion(e) and e.run_id in version
     )
     waived = [e.at for e in events if e.event is AiRunEventKind.WAIVED]
     return AiRunState(

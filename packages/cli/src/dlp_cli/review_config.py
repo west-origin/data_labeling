@@ -35,7 +35,7 @@ from dlp_privacy.runner import request_media_revocation
 from dlp_review.ai_display import AiDisplayConfig
 from dlp_review.clients import CvatClient, LabelStudioClient, ToolError
 from dlp_review.ops.policy import ReviewOpsPolicy, load_policy
-from dlp_review.revoke import RevocationReport, execute_media_revocations
+from dlp_review.revoke import RevocationReport, execute_media_revocations, timeseries_sessions
 from dlp_review.tasks import ReviewSetup
 from dlp_schema import load_config, repo_root
 from dlp_schema.db.repository import pending_revocations
@@ -157,11 +157,15 @@ def run_revocations(
 
     1. sweep이고 세션이 있으면 짧은 트랜잭션에서 렌더 해시가 지금과 다른 작업에 회수를 요청한다
        (`reason="sweep"`, 구 작업 제외). 알려지지 않은 경로로 블러본이 바뀐 경우의 백스톱이다.
-    2. 대기가 없으면 빈 보고서를 돌려준다 (도구 클라이언트를 만들지 않는다).
+    2. 대기도 시계열 CSV를 확인할 사용 중지 세션(`revoke.timeseries_sessions`: Label Studio 작업이
+       있던 사용 중지 세션)도 없으면 빈 보고서를 돌려준다 (설정을 만들지 않는다). 사용 중지 전에
+       모든 작업의 회수가 끝났으면 대기는 없지만 CSV는 남아 있을 수 있어 실행기를 돌린다.
     3. setup이 없으면 `review_setup(revocation_only=True)`로 만든다. CVAT에 접속하지 못해도 매체
        삭제는 하고, 검수 정책 파일은 읽지 않는다 (회수는 정책 값을 쓰지 않는다. 파일이 없거나
-       깨져도 `dlp privacy detect|render` 뒤 회수와 `dlp review revoke [--pending]`이 돈다).
-    4. `execute_media_revocations`로 매체 → CVAT → Label Studio 순으로 끊는다.
+       깨져도 `dlp privacy detect|render` 뒤 회수와 `dlp review revoke [--pending]`이 돈다). 작업
+       대기가 없으면(CSV만 확인) 도구 클라이언트를 만들지 않는다.
+    4. `execute_media_revocations`로 매체(사본, 사용 중지 세션 CSV) → CVAT → Label Studio 순으로
+       끊는다.
 
     인자: session_id가 None이면 모든 세션의 대기 (`--pending`). url: 설정을 만들 때의 DB URL.
     반환: `RevocationReport` (setup을 만들며 생긴 경고는 warnings 앞에 붙는다).
@@ -173,11 +177,14 @@ def run_revocations(
                 conn, session_id, policy, datetime.now(UTC), reason="sweep", legacy=False
             )
     with engine.connect() as conn:
-        if not pending_revocations(conn, session_id):
+        pending = bool(pending_revocations(conn, session_id))
+        if not pending and not timeseries_sessions(conn, session_id):
             return RevocationReport()
     warnings: list[str] = []
     if setup is None:
-        setup, warnings = review_setup(purpose, url, revocation_only=True)
+        setup, warnings = review_setup(
+            purpose, url, revocation_only=True, cvat=pending, label_studio=pending
+        )
     report = execute_media_revocations(
         engine,
         session_id,
@@ -193,7 +200,9 @@ def run_revocations(
 def print_revocations(report: RevocationReport, session_id: str | None) -> int:
     """회수 실행 보고를 출력하고 종료 코드를 돌려준다 (대기가 남으면 `REVOCATION_PENDING_EXIT`).
 
-    실패가 먼저 나온다. 매체 실패(`[매체 노출 남음]`)는 Label Studio 영상이 계속 열린다는 뜻이다.
+    실패가 먼저 나온다. 매체 실패(`[매체 노출 남음]`)는 Label Studio 영상·시계열이 계속 열린다는
+    뜻이다. 대기는 작업 키와 지우지 못한 사용 중지 세션 시계열 CSV 키다
+    (`RevocationReport.remaining`).
     """
     for line in report.errors:
         print(f"  ! {line}")
@@ -204,11 +213,9 @@ def print_revocations(report: RevocationReport, session_id: str | None) -> int:
         )
     for line in report.warnings:
         print(f"  경고: {line}")
-    if not report.pending:
+    if report.complete:
         return 0
     target = session_id or "--pending"
-    print(
-        f"  회수 대기 {len(report.pending)}개: {', '.join(report.pending[:5])} "
-        f"(dlp review revoke {target})"
-    )
+    left = report.remaining
+    print(f"  회수 대기 {len(left)}개: {', '.join(left[:5])} (dlp review revoke {target})")
     return REVOCATION_PENDING_EXIT

@@ -114,7 +114,7 @@ seeding:
 # privacy 목록은 원본 접근 감사(dlp ops audit-report)의 권한자 명단에도 쓰인다. 사람을 더할 때는
 # 원본 접근 권한 승인 절차를 먼저 밟는다.
 reviewers:
-  senior: []                          # 비어 있으면 QA 배정의 담당자를 비워 둔다 (작업은 dlp review assign <배정> --assignee <선임>으로 만든다)
+  senior: []                          # 비어 있거나 원래 담당자뿐이면 QA 배정의 담당자를 비워 둔다 (여기에 원래 담당자가 아닌 선임을 넣은 뒤 dlp review assign <배정> --assignee <그 선임>으로 만든다)
   privacy: []                         # 원본 접근 권한자
 
 # CVAT 계정 연결 (ADR 0024). 작업을 만들면 담당자의 CVAT 계정에 작업(job)을 배정하고, 웹훅은 job 담당자가
@@ -179,6 +179,8 @@ ai_review:
   # 표본 검수 묶음에서 빼고 반드시 검수하는 판정 (wrong·suspect·unsure 중). 표본 합격 뒤 늦게 도착한
   # 같은 판정의 보류 라벨은 sample_verified로 두지 않고 `<배정>:ai-flagged` 재검수 배정으로 보낸다.
   sampling_exclude: [wrong, suspect, unsure]
-  # true면 맥락 라벨까지 지금도 현재여야 판정을 유효로 본다. false(결정): 사람 검수가 진행될 때마다
-  # 판정이 무효가 되어 재판정만 늘지 않게 한다 (표시는 참고용, 증가는 안전한 쪽).
+  # true면 맥락 라벨까지 지금도 현재여야 판정을 유효로 본다 (맥락 라벨이 고쳐지거나 지워져 ID가 현재가
+  # 아니면 무효). 맥락 라벨의 승인처럼 같은 ID의 검수 상태만 바뀐 것은 true여도 잡지 않는다.
+  # false(결정): 사람 수정이 쌓일 때마다 판정이 무효가 되어 재판정만 늘지 않게 한다 (표시는 참고용,
+  # 증가는 안전한 쪽).
   strict_context: false

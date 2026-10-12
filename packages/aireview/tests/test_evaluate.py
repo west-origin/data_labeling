@@ -26,17 +26,19 @@ import sqlalchemy as sa
 from dlp_aireview.evaluate import (
     EvalCase,
     Judged,
+    LabelKey,
     Truth,
     eval_input,
     history_case,
     judge_cases,
     perturb_case,
+    restrict_groups,
     score,
 )
 from dlp_aireview.oracle import OracleJudge
 from dlp_aireview.policy import AiReviewPolicy
 from dlp_aireview.runner import RunOptions
-from dlp_schema.aireview import AiVerdict
+from dlp_schema.aireview import AiGroup, AiVerdict
 from dlp_schema.db.repository import get_labels, insert_labels, record_review
 from dlp_schema.db.tables import metadata
 from dlp_schema.labels import (
@@ -54,7 +56,7 @@ from dlp_schema.ontology import Ontology
 from dlp_schema.testing import FIXED_TIME, make_ai_verdict
 
 from .blurred import RAW, DbScene, db_scene
-from .conftest import SID, make_scene
+from .conftest import SID, make_scene, with_policy
 
 
 def _counts(engine: sa.Engine) -> dict[str, int]:
@@ -280,10 +282,12 @@ def test_score_and_gate_hand_calculation(policy: AiReviewPolicy, ontology: Ontol
     실패이고, block이 false라 차단하지 않는다. ECE: 확신도 0.9 판정 10개, 맞음 8개 → |0.8 - 0.9|."""
     case = _case(4, 6, ontology)
     values = ["wrong", "wrong", "suspect", "ok", "suspect", "ok", "ok", "ok", "ok", "ok"]
-    verdicts: dict[str, AiVerdict] = {}
+    verdicts: dict[LabelKey, AiVerdict] = {}
     for x, v in zip(case.targets, values, strict=True):
         extra = {"problems": ("wrong_verb",)} if v in ("wrong", "suspect") else {}
-        verdicts[x.label_id] = make_ai_verdict(x.label_id, v, kind=x.kind, confidence=0.9, **extra)
+        verdicts[(SID, x.label_id)] = make_ai_verdict(
+            x.label_id, v, kind=x.kind, confidence=0.9, **extra
+        )
     judged = Judged(verdicts, (), (), 2.0)
     report = score(
         [case], judged, policy, mode="perturb", golden_version="g1", same_model_as_actions=False
@@ -304,3 +308,117 @@ def test_score_and_gate_hand_calculation(policy: AiReviewPolicy, ontology: Ontol
     assert empty.wrong_recall == 0.0 and empty.by_error["verb_swap"].unjudged == 4
     assert empty.ok_miss_rate is None  # AI ok가 없으면 분모 0 (자료 없음 → 게이트 실패)
     assert not empty.gate.passed and empty.units_per_s is None
+
+
+def test_false_events_of_two_golden_sessions_are_scored_separately(
+    policy: AiReviewPolicy, ontology: Ontology
+) -> None:
+    """골든 세션 둘의 거짓 이벤트는 ID가 다르고, 판정도 세션별로 따로 센다.
+
+    정답 근거: 판정기가 g1의 거짓 이벤트는 모두 wrong(삭제 제안), g2의 것은 모두 ok라 하면
+    false_event 지적은 g1 수, ok는 g2 수다. 예전에는 ID가 세션과 무관하게 `pert-ev-0000…`이고 판정을
+    라벨 ID로만 모아, g2에서 놓친 거짓 이벤트가 g1의 wrong으로 '잡힌' 것이 되고 재현율이 부풀었다.
+    """
+    scene = make_scene()
+    truth = [_human(x) for x in scene.labels]
+    other = scene.session.model_copy(update={"session_id": "g2"})
+    truth2 = [
+        x.model_copy(update={"session_id": "g2", "label_id": f"g2-{x.label_id}"}) for x in truth
+    ]
+    rates = {"false_event": 0.5}
+    cases = [
+        perturb_case(scene.session, truth, rates, seed=1, o=ontology, policy=policy),
+        perturb_case(other, truth2, rates, seed=1, o=ontology, policy=policy),
+    ]
+    fakes = [[x for x in c.targets if c.truth[x.label_id].error == "false_event"] for c in cases]
+    assert fakes[0] and fakes[1]
+    assert not {x.label_id for x in fakes[0]} & {x.label_id for x in fakes[1]}
+    verdicts: dict[LabelKey, AiVerdict] = {}
+    for case, fake, value in zip(cases, fakes, ("wrong", "ok"), strict=True):
+        sid = case.session.session_id
+        for x in case.targets:
+            v = value if x in fake else "ok"
+            extra = {"problems": ("false_event",)} if v == "wrong" else {}
+            verdicts[(sid, x.label_id)] = make_ai_verdict(x.label_id, v, kind=x.kind, **extra)
+    report = score(
+        cases, Judged(verdicts, (), (), 1.0), policy, mode="perturb", golden_version="g",
+        same_model_as_actions=False,
+    )  # fmt: skip
+    stat = report.by_error["false_event"]
+    assert (stat.total, stat.flagged, stat.ok) == (
+        len(fakes[0]) + len(fakes[1]), len(fakes[0]), len(fakes[1]),
+    )  # fmt: skip
+    assert report.wrong_recall == pytest.approx(len(fakes[0]) / stat.total)
+
+
+def test_eval_ignores_selection_mode_and_counts_only_chosen_groups(
+    tmp_path: Path, policy: AiReviewPolicy, ontology: Ontology
+) -> None:
+    """평가는 선택 모드(flagged)를 쓰지 않고, --groups면 그 묶음 창에 든 대상만 센다.
+
+    정답 근거: selection은 판정 버전(digest) 밖이라 같은 버전인데, 평가 경로에는 우선순위 사유
+    구간이 없어 flagged면 감사 표본 창만 남는다 (예전: 단위 0개, 모든 대상 미판정, 재현율 0).
+    대상은 모두 판정해야 분모가 맞다. --groups temporal이면 공간 대상(박스)은 분모에서 빠진다
+    (예전: 미판정으로 남아 재현율이 1.0에서 떨어지고 오지적률 분모도 커졌다). 오라클이면 탐지
+    재현율 1, 미판정 0이다.
+    """
+    db = db_scene(tmp_path, n_units=3)
+    truth = [_human(x) for x in db.scene.labels]
+    rates = {"verb_swap": 0.5, "class_swap": 0.5}
+    flagged = with_policy(policy, selection={"mode": "flagged", "audit_ratio": 0.0})
+    assert flagged.verdict_version == policy.verdict_version
+    case = perturb_case(db.scene.session, truth, rates, seed=3, o=ontology, policy=flagged)
+    assert {t.error for t in case.truth.values()} >= {"verb_swap", "class_swap"}
+    judged = _judge(db, [case], OracleJudge(truth), flagged, tmp_path)
+    report = score(
+        [case], judged, flagged, mode="perturb", golden_version="g1", same_model_as_actions=False
+    )
+    assert report.units > 0 and report.wrong_recall == 1.0
+    assert all(s.unjudged == 0 and s.unplanned == 0 for s in report.by_error.values())
+
+    temporal = restrict_groups(case, policy, {AiGroup.TEMPORAL, AiGroup.TEMPORAL_LONG})
+    kinds = {x.kind for x in temporal.targets}
+    assert (
+        temporal.targets
+        and "box_track" not in kinds
+        and set(temporal.truth) == {x.label_id for x in temporal.targets}
+    )
+    options = RunOptions(workers=2, groups=frozenset({AiGroup.TEMPORAL, AiGroup.TEMPORAL_LONG}))
+    work = tmp_path / "work-temporal"
+    work.mkdir()
+    inp = eval_input(db.engine, db.labeling, temporal, policy, db.privacy, work, raw_bucket=RAW)
+    narrowed = judge_cases([inp], OracleJudge(truth), policy, options=options)
+    only = score(
+        [temporal], narrowed, policy, mode="perturb", golden_version="g1",
+        same_model_as_actions=False,
+    )  # fmt: skip
+    assert "class_swap" not in only.by_error and only.wrong_recall == 1.0
+    assert all(s.unjudged == 0 and s.unplanned == 0 for s in only.by_error.values())
+
+
+def test_suggestion_exact_rate_counts_only_attainable_suggestions(
+    tmp_path: Path, policy: AiReviewPolicy, ontology: Ontology
+) -> None:
+    """제안 정확 일치는 제안으로 표현할 수 있는 오류만 분모에 넣고, 제안 키 필드로 비교한다.
+
+    정답 근거: 행동↔사이 구간 제안의 새 페이로드는 action_id(`h-<손>-<시작>`)·접근 시각·접촉 시각을
+    정할 수 없고, 손(hand_swap)·경계는 제안 키가 아니다. 정답을 아는 오라클이면 표현할 수 있는
+    오류(action_to_gap·verb_swap)의 일치율은 1이고, hand_swap은 분모에서 빠진다(unattainable).
+    """
+    db = db_scene(tmp_path, n_units=3)
+    truth = [_human(x) for x in db.scene.labels]
+    rates = {"action_to_gap": 0.4, "verb_swap": 0.3, "hand_swap": 0.3}
+    case = perturb_case(db.scene.session, truth, rates, seed=4, o=ontology, policy=policy)
+    errors = {t.error for t in case.truth.values()}
+    assert {"action_to_gap", "hand_swap", "verb_swap"} <= errors, errors
+    judged = _judge(db, [case], OracleJudge(truth), policy, tmp_path)
+    report = score(
+        [case], judged, policy, mode="perturb", golden_version="g1", same_model_as_actions=False
+    )
+    gap = report.by_error["action_to_gap"]
+    assert gap.flagged == gap.total and gap.expected == gap.total and gap.exact == gap.expected
+    verb = report.by_error["verb_swap"]
+    assert verb.expected == verb.total and verb.exact == verb.expected
+    swapped = report.by_error["hand_swap"]
+    assert swapped.expected == 0 and swapped.unattainable == swapped.total
+    assert report.suggestion_exact_rate == 1.0

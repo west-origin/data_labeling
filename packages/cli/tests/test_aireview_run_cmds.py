@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import _thread
+import argparse
 import json
 import socket
 import threading
@@ -25,6 +26,7 @@ import pytest
 import sqlalchemy
 
 from dlp_aireview import backend as backend_module
+from dlp_aireview import runner as runner_module
 from dlp_aireview.backend import JudgeReply, JudgeRequest, OpenAICompatibleJudge
 from dlp_aireview.media import frames_for as media_frames_for
 from dlp_aireview.policy import AiReviewPolicy, load_policy
@@ -43,6 +45,7 @@ from dlp_prelabel.policy import load_policy as load_prelabel_policy
 from dlp_privacy.policy import load_policy as load_privacy_policy
 from dlp_privacy.rendering import RenderMeta, expected_render_hash, write_render_meta
 from dlp_schema import load_config, repo_root
+from dlp_schema.aireview import AiGroup
 from dlp_schema.db.aireview_repository import (
     list_ai_run_events,
     list_ai_runs,
@@ -397,6 +400,59 @@ def test_pending_limit_counts_only_sessions_that_ran(
     assert world.units("a-old") == 0 and world.units("b-new") > 0
 
 
+def test_pending_limit_skips_session_whose_input_always_fails(
+    world: World, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """실행 기록 전(입력 단계) 예외가 늘 나는 세션은 --limit 자리를 차지하지 않는다.
+
+    정답 근거: 손상된 장갑 Parquet처럼 load_input이 매번 실패하면 실행 기록·이벤트가 없어
+    --pending의 실패 정렬이 뒤로 보내지 못한다. 그 세션을 세면 `--limit 1` cron이 매번 같은 세션만
+    시도하고 뒤 세션은 영영 판정되지 않았다. 종료 코드는 여전히 1(오류)이다.
+    """
+    world.add("a-bad")
+    world.add("b-good")
+    original = runner_module.load_input
+
+    def broken(engine: Any, labeling: Any, session_id: str, *args: Any, **kw: Any) -> Any:
+        if session_id == "a-bad":
+            raise ValueError("손상된 장갑 Parquet")
+        return original(engine, labeling, session_id, *args, **kw)
+
+    monkeypatch.setattr(runner_module, "load_input", broken)
+    with FakeOpenAIServer(MODEL) as server:
+        run = ["aireview", "run", "--pending", "--limit", "1", "--vlm-url", server.url]
+        assert main([*run, *world.args]) == 1
+    out = capsys.readouterr().out
+    assert "[입력 오류] a-bad" in out and "미룬 세션" not in out
+    assert world.units("a-bad") == 0 and world.units("b-good") > 0
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_missing_glove_parquet_is_refused_before_downloading_blurred_videos(
+    world: World, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], dry_run: bool
+) -> None:
+    """장갑 Parquet이 없어 종료 6으로 거부될 세션은 블러본을 하나도 받지 않는다.
+
+    정답 근거: 예전에는 판정할 창의 블러본(바디캠·3인칭, 실영상이면 GB 단위)을 모두 받은 뒤에야
+    장갑 존재를 확인해, --pending cron마다 받았다 버렸다. 순서는 블러본 게이트(받기 전 확인) → 장갑
+    HEAD → 받기다 (원본은 게이트 통과 뒤에만 본다, HEAD는 원본 감사에 남지 않는다).
+    """
+    world.add("g2", glove=True, upload_glove=False)
+    fetched: list[str] = []
+    original = runner_module.open_blurred
+
+    def spy(*args: Any, **kw: Any) -> Any:
+        fetched.append(str(args[3]))
+        return original(*args, **kw)
+
+    monkeypatch.setattr(runner_module, "open_blurred", spy)
+    extra = ["--dry-run"] if dry_run else []
+    with FakeOpenAIServer(MODEL) as server:
+        code = main(["aireview", "run", "g2", *extra, "--vlm-url", server.url, *world.args])
+    assert code == 6 and "장갑 Parquet이 없습니다" in capsys.readouterr().out
+    assert fetched == [] and world.raw_reads() == set()
+
+
 def test_unit_outage_or_error_in_one_session_does_not_block_others(
     world: World, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -637,3 +693,55 @@ def test_bench_session_source_uses_blurred_gate(
     assert report["source"] == "session:b1"
     assert report["configs"][0]["planned_units"] > 0
     assert world.units("b1") == 0  # 벤치는 DB에 쓰지 않는다
+
+
+def test_narrowed_runs_are_marked_partial() -> None:
+    """`--groups`(모든 묶음이 아님)·`--mode flagged`(정책 기본이 all일 때)는 좁힌 실행이다.
+
+    정답 근거: 좁힌 실행의 completed는 `partial:<설명>`으로 마감해야 `--pending`과 required 게이트가
+    앞선 전체 실행의 미완료를 완료로 보지 않는다. 모든 묶음·`--mode all`은 좁힌 것이 아니다.
+    """
+    base = load_aireview_policy(repo_root())
+    assert base.selection.mode == "all"
+
+    def narrowed(**kw: Any) -> str | None:
+        args = argparse.Namespace(**({"groups": None, "mode": None} | kw))
+        return aireview_run_cmds._narrowed(args, base)  # pyright: ignore[reportPrivateUsage]
+
+    assert narrowed() is None and narrowed(mode="all") is None
+    assert narrowed(groups=(AiGroup.TEMPORAL, AiGroup.TEMPORAL_LONG, AiGroup.SPATIAL)) is None
+    assert narrowed(groups=(AiGroup.TEMPORAL,)) == "groups=temporal"
+    assert narrowed(groups=(AiGroup.SPATIAL,), mode="flagged") == "groups=spatial;mode=flagged"
+
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [
+        (["run", "s1", "--pending"], "세션과 --pending"),
+        (["run", "s1", "--limit", "3"], "--limit은 --pending"),
+        (["status", "s1", "--pending"], "<세션>, --pending"),
+        (["status", "--pending", "--all"], "--pending, --all"),
+    ],
+)
+def test_run_and_status_refuse_silently_ignored_combinations(
+    world: World, extra: list[str], message: str
+) -> None:
+    """조용히 무시되던 인자 조합은 아무것도 하지 않고 알린다 (cron에 잘못 적으면 엉뚱한 세션이
+    돈다).
+
+    정답 근거: 예전에는 세션 + --pending이면 세션을 버리고 pending 전체를 돌았고, --pending 없는
+    --limit은 상한 없이 돌았다. status는 세션 > --pending > --all 순으로 하나만 썼다.
+    """
+    common = (
+        world.args if extra[0] == "run" else ["--url", world.url]
+    )  # status는 저장소를 받지 않는다
+    with pytest.raises(SystemExit, match=message):
+        main(["aireview", *extra, *common])
+
+
+@pytest.mark.parametrize("minutes", ["0", "-5"])
+def test_max_minutes_must_be_positive(world: World, minutes: str) -> None:
+    """--max-minutes 0·음수는 사용법 오류다 (예전에는 '시간 제한 없음'으로 조용히 바뀌었다)."""
+    with pytest.raises(SystemExit) as caught:
+        main(["aireview", "run", "s1", "--max-minutes", minutes, *world.args])
+    assert caught.value.code == 2

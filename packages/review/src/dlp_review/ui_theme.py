@@ -23,6 +23,8 @@
 - `cvat_label_color`: CVAT 라벨 이름 → 색.
 - `logo_data_uri`: 로고 파일 → data URI (Label Studio CSS에 넣는다).
 - `ls_style`: Label Studio 화면 CSS.
+- `AI_NOTE_EMPTY`: AI 지적 없는 구간의 메모 안내 (Label Studio 입력란 자리 글과 CSS 안내가 같이
+  쓴다).
 - `cvat_tokens_css`: CVAT 테마 색 CSS (생성 파일 내용).
 """
 
@@ -58,6 +60,10 @@ LS_AUTO_HOTKEYS = "1234567890qwetasdfgzxcvbyiopjklnm"
 # Label Studio 1.23.2 내장 한 글자 단축키 (u: 구간 선택 해제, [·]: 도구 크기). 시간 라벨
 # 화면의 나머지 내장 단축키는 조합키·화살표·Enter·Esc·Backspace라 한 글자 키와 겹치지 않는다.
 LS_RESERVED_KEYS = frozenset({"u", "[", "]"})
+# AI 지적이 없는 라벨 구간의 메모 안내. `labelstudio._ai_controls`의 입력란 자리 글(테마 없는
+# 화면)과 `ls_style`이 입력란을 숨기고 대신 보이는 글(테마 화면)이 이 한 문장을 쓴다. 결정 칸은
+# 지적 없는 구간에서도 보이고 눌리므로, 반영되지 않는다는 뒷부분을 빼면 안 된다.
+AI_NOTE_EMPTY = "이 구간에는 AI 지적이 없다 (결정을 골라도 반영되지 않는다)"
 
 
 class ModeColors(Contract):
@@ -351,8 +357,14 @@ def ls_style(theme: UiTheme, logo_uri: str) -> str:
         ".dlp-ai [data-testid=textarea-control]:has([data-testid=textarea-form])::before"
         "{content:'AI 1차 검수: 없음'}"
         ".dlp-ai-region [data-testid=textarea-control]:has([data-testid=textarea-form])::before"
-        "{content:'이 구간에는 AI 지적이 없다'}"
+        f"{{content:{_css_string(AI_NOTE_EMPTY)}}}"
     )
+
+
+def _css_string(text: str) -> str:
+    """CSS 문자열 값 (작은따옴표로 감싸고 역슬래시·따옴표·줄바꿈을 이스케이프한다)."""
+    escaped = text.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\a ")
+    return f"'{escaped}'"
 
 
 def cvat_tokens_css(theme: UiTheme) -> str:

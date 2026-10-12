@@ -502,3 +502,59 @@ def test_blur_deletion_credit_is_scoped_to_assignment_and_stream(
     labels = [*truth, *task.labels, other_assignment, other_stream]
     assert not detected(err, labels, "r1", 200, 0.5)
     assert detected(err, [*labels, drawn(f"{seed_prefix('g:b')}new-3", "bodycam")], "r1", 200, 0.5)
+
+
+def _reviewed(
+    labels: list[LabelRecord],
+    fixed: set[str],
+    excluded: set[str],
+    sp: Any,
+    seed: int,
+) -> tuple[int, int]:
+    """묶음 하나를 계획·판정한 뒤 사람이 본 라벨 수와 표본 검증된 결함 수.
+
+    excluded는 AI 지적으로 묶음에서 빼고 반드시 본 라벨 (계획 `runner._sample`과 같은 규칙).
+    fixed는 결함(사람이 보면 고친다) 라벨이다.
+    """
+    [lot] = lots([x for x in labels if x.label_id not in excluded], sp)
+    sample = draw_sample(lot, sp, seed)
+    shown = set(sample) | excluded
+    ok = Verification(
+        state=VerificationState.HUMAN_APPROVED, reviewer_id="r", reviewed_at=FIXED_TIME
+    )
+    after = [
+        x.model_copy(update={"verification": ok}) if x.label_id in shown - fixed else x
+        for x in labels
+    ] + [box(f"{i}-fix", "bucket", 0, parent_label_id=i) for i in sorted(shown & fixed)]
+    verdict = judge(lot.label_ids, sample, after, sp, forced=tuple(sorted(excluded)))
+    withheld = [i for i in lot.label_ids if i not in sample]
+    if verdict.accepted:
+        return len(shown), sum(i in fixed for i in verdict.to_verify)
+    return len(shown) + len(withheld), 0
+
+
+@pytest.mark.parametrize("ai_right", [True, False])
+def test_ai_exclusion_never_reduces_human_review_versus_no_ai(
+    policy: ReviewOpsPolicy, ai_right: bool
+) -> None:
+    """AI 지적 제외가 AI 없을 때보다 사람이 보는 라벨 수를 줄이지 않는다 (ADR 0040 I9).
+
+    시나리오(저장소 sampling 정책, seed 200개): 높은 신뢰도 모델 라벨 100개 한 묶음, 결함 10개.
+    AI가 결함 8개를 지적(ai_right)하거나 깨끗한 라벨 8개를 잘못 지적한다. 정답 근거: 지적 라벨의
+    결함을 판정에 넣지 않으면 AI가 맞을수록 남은 묶음이 깨끗해져 합격하기 쉬워지고, 사람이 본 라벨이
+    평균 약 71개 → 37개로 준다 (이 도우미로 잰 값, 검수 지적 재현과 같은 방향). 결함인 지적이 있으면
+    불합격이므로 지적 제외는 검수를 늘리기만 하고, 표본 검증으로 넘어가는 결함도 늘지 않는다.
+    """
+    sp = policy.sampling
+    labels = [model(box(f"l{i:03d}", "cup", float(i)), "det-1", 0.95) for i in range(100)]
+    fixed = {f"l{i:03d}" for i in range(0, 100, 10)}
+    clean = sorted({x.label_id for x in labels} - fixed)
+    excluded = set(sorted(fixed)[:8]) if ai_right else set(clean[:8])
+    plain = [_reviewed(labels, fixed, set(), sp, seed) for seed in range(200)]
+    with_ai = [_reviewed(labels, fixed, excluded, sp, seed) for seed in range(200)]
+    seen_plain = sum(n for n, _ in plain) / len(plain)
+    seen_ai = sum(n for n, _ in with_ai) / len(with_ai)
+    assert seen_ai >= seen_plain
+    assert sum(d for _, d in with_ai) <= sum(d for _, d in plain)
+    if ai_right:  # 맞는 지적이 있으면 늘 불합격 → 전수
+        assert all(n == 100 for n, _ in with_ai)

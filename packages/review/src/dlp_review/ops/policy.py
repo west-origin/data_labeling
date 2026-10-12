@@ -134,8 +134,10 @@ class MeasurementPolicy(Contract):
 class ReviewersPolicy(Contract):
     """검수자 역할 (review.yaml `reviewers`)."""
 
-    # 선임 검수자 (QA 배정 대상). 비어 있으면 QA 배정 담당자가 None이 된다. 담당자 없는 배정은
-    # 작업을 만들지 않고 `dlp review assign <배정> --assignee <선임>`으로 정한다 (F-REV-07)
+    # 선임 검수자 (QA 배정 대상). 비어 있거나 원래 담당자뿐이면 QA 배정 담당자가 None이 된다.
+    # 담당자 없는 배정은 작업을 만들지 않는다. 여기에 원래 담당자가 아닌 선임을 넣은 뒤
+    # `dlp review assign <배정> --assignee <그 선임>`으로 정한다 (F-REV-07, QA 담당자는 이 목록에
+    # 있고 짝 배정 담당자가 아니어야 해서, 목록을 고치지 않으면 assign이 거부된다)
     senior: tuple[str, ...] = ()
     privacy: tuple[str, ...] = Field(default=(), description="원본 접근 권한자 (블러 검수)")
 
@@ -180,8 +182,10 @@ class LabelStudioPolicy(Contract):
 
     수집·웹훅은 작업 담당자의 Label Studio 계정이 만들고 마지막으로 고친 주석만 받는다. 연결이
     없는 담당자에게는 Label Studio 시간 검수 작업을 만들지 않는다
-    (`dlp_review.tasks.require_label_studio_user`). 절을 빼면 연결이 비어 있는 것으로 본다 (이전
-    형식의 정책 파일도 읽힌다).
+    (`dlp_review.tasks.require_label_studio_user`). 절을 빼면 연결이 비어 있는 것으로 본다. 이 절만
+    선택이다: 이전에 복사한 정책 파일은 그 뒤 더한 필수 키(`orphans.min_age_s`,
+    `media.signed_url_ttl_s`)가 없으면 정책을 읽는 모든 명령에서 실패하므로 기본 review.yaml 값을
+    옮겨 적는다.
     """
 
     users: dict[str, str] = Field(
@@ -270,7 +274,8 @@ class AiReviewDisplayPolicy(Contract):
         "suspect",
         "unsure",
     )
-    # 맥락 라벨까지 지금도 현재여야 판정을 유효로 본다 (결정: false)
+    # 맥락 라벨까지 지금도 현재여야 판정을 유효로 본다 (결정: false). ID가 현재인지만 보므로 맥락
+    # 라벨의 승인(같은 ID의 검수 상태 변화)은 true여도 무효로 만들지 않는다
     strict_context: bool = False
 
 

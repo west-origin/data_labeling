@@ -183,6 +183,28 @@ def test_ai_weekly_matches_hand_calculation(engine: sa.Engine) -> None:
     assert allowed is not None and allowed.backlog_hours == pytest.approx(1 / 60)
 
 
+def test_ai_backlog_keeps_sessions_with_only_a_partial_completion(engine: sa.Engine) -> None:
+    """좁힌 실행(`partial:` 마감)의 completed만 있는 세션은 백로그에 남는다.
+
+    정답 근거: s007·s008 모두 prelabeled·승인 60초 세션이고 허용 버전의 실행이 하나씩 있다. s007의
+    실행은 `partial:groups=temporal`로 마감했다(`dlp aireview run --groups`, 정책 기본 계획의 완료가
+    아니다, `dlp_schema.aireview.is_full_completion`) → 백로그. s008은 전체 완료 → 백로그 아님.
+    백로그 = s007 = 1/60시간 (required 게이트의 완료 버전과 같은 기준).
+    """
+    with engine.begin() as conn:
+        for i, (sid, reason) in enumerate((("s007", "partial:groups=temporal"), ("s008", None))):
+            run = f"air-run-{i + 6}" + "0" * 23
+            _session(conn, sid, PrivacyState.APPROVED)
+            insert_ai_run(conn, make_ai_run(sid, run, created_at=IN))
+            insert_ai_run_event(conn, AiRunEvent(
+                session_id=sid, run_id=run, event=AiRunEventKind.COMPLETED, reason=reason, at=IN,
+            ))  # fmt: skip
+    start, end = week_range(WEEK)
+    with engine.connect() as conn:
+        ai = ai_weekly(conn, start, end, AI)
+    assert ai is not None and ai.backlog_hours == pytest.approx(1 / 60)
+
+
 def test_ai_alerts_and_markdown(policy: OpsPolicy) -> None:
     """`ops.yaml alerts.ai_*`: ok 놓침 상한 > 0.05, 백로그 > 328시간, fallback > 0.05, 캐시 < 0.3
     이면 경고 (마지막 주만). 자료가 없는(NaN) 지표는 경고하지 않는다. Markdown에 AI 절이 붙는다."""

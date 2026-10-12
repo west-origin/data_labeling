@@ -38,6 +38,8 @@ from dlp_schema.db.repository import (
     insert_review_task,
     insert_session,
     mark_review_task_collected,
+    mark_task_media_revoked,
+    mark_task_tool_revoked,
     register_ontology,
     request_task_revocation,
 )
@@ -549,6 +551,63 @@ def test_dataset_withdraw_requests_and_runs_revocation_after_commit(
     monkeypatch.setattr(review_config, "review_setup", no_setup)
     args = argparse.Namespace(session_id="s002", reason="동의 철회", actor="dpo01", url=url)
     assert dataset_cmds.cmd_withdraw(args) == 0
+
+
+def test_dataset_withdraw_deletes_timeseries_csv_after_all_tasks_were_already_revoked(
+    url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """사용 중지 전에 모든 작업의 회수가 이미 끝났어도 `dlp dataset withdraw`가 시계열 CSV를 지운다.
+
+    정답 근거: s001의 Label Studio 작업은 블러 변경으로 매체·도구 회수가 모두 끝났다. 사용 중지는
+    새로 요청할 작업이 없어 회수 대기가 비지만, CSV(동의를 철회한 작업자의 센서 값, 서명 URL이
+    가리킨다)는 남아 있다. 회수 실행기를 돌려(도구 클라이언트 없이) CSV를 지우고 0이다. 다시 돌리면
+    지울 것이 없어 0이다. 회수 대기도 Label Studio 작업도 없는 사용 중지 세션은 설정을 만들지
+    않는다.
+    """
+    csv = "sessions/s001/review/timeseries.csv"
+    _media_at(tmp_path, csv)
+    ls = ReviewTask(
+        task_key="label_studio:3", tool=ReviewTool.LABEL_STUDIO, external_id="3",
+        session_id="s001", stream_id="bodycam", stage=ReviewStage.LABELING,
+        media_uri=_media(tmp_path, "s001", "bodycam"), label_kinds=("action",),
+        created_at=FIXED_TIME, render_hash=None, assignee="labeler01",
+    )  # fmt: skip
+    with _engine(url).begin() as conn:
+        insert_review_task(conn, ls)
+        assert request_task_revocation(conn, ls.task_key, reason="blur_changed:cvat:1", at=NOW)
+        mark_task_media_revoked(conn, "s001", ls.media_uri, NOW)
+        assert mark_task_tool_revoked(conn, ls.task_key, NOW)
+    seen: list[dict[str, Any]] = []
+
+    def fake(purpose: str, url: str | None, **kw: Any) -> tuple[ReviewSetup, list[str]]:
+        seen.append(kw)
+        return _local_setup(tmp_path), []
+
+    monkeypatch.setattr(dataset_cmds, "sa", _AwareSqlalchemy())
+    monkeypatch.setattr(review_config, "review_setup", fake)
+    args = argparse.Namespace(session_id="s001", reason="동의 철회", actor="dpo01", url=url)
+    assert dataset_cmds.cmd_withdraw(args) == 0
+    assert "회수: 매체 1개" in capsys.readouterr().out
+    assert _labeling(tmp_path).head(csv) is None
+    assert seen == [{"revocation_only": True, "cvat": False, "label_studio": False}]
+    assert dataset_cmds.cmd_withdraw(args) == 0  # 멱등: 지울 것이 없다
+    no_setup = Mock(side_effect=AssertionError("CSV를 확인할 세션이 없으면 설정을 만들지 않는다"))
+    monkeypatch.setattr(review_config, "review_setup", no_setup)
+    args = argparse.Namespace(session_id="s002", reason="동의 철회", actor="dpo01", url=url)
+    assert dataset_cmds.cmd_withdraw(args) == 0
+
+
+def test_print_revocations_counts_a_left_timeseries_csv_as_pending(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """지우지 못한 사용 중지 세션 CSV만 남아도 대기(종료 코드 4)다: 작업 행 표시가 없어 pending에
+    들지 않지만 서명 URL이 계속 열린다."""
+    csv = "sessions/s001/review/timeseries.csv"
+    errors = [f"[매체 노출 남음] {csv}: 디스크 오류"]
+    report = RevocationReport(errors=errors, timeseries_left=[csv])
+    assert not report.complete and report.remaining == [csv]
+    assert review_config.print_revocations(report, "s001") == REVOCATION_PENDING_EXIT
+    assert f"회수 대기 1개: {csv} (dlp review revoke s001)" in capsys.readouterr().out
 
 
 def test_privacy_hold_revokes_current_tasks_and_release_needs_reapproval(

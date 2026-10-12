@@ -7,8 +7,8 @@
   블록·응답 스키마·맥락은 `kinds`가 아니라 판정할 수 있는 종류 전체(`TEMPORAL_KINDS`,
   `SPATIAL_KINDS`) 기준이고, 결과를 바꾸는 문맥 초과 분할 횟수는
   `response.max_context_splits`(해시)에 둔다. 프롬프트 틀 문장은 정책 값이 아니라
-  `PROMPT_VERSION`으로 버전에 들어간다 (틀을 바꾸면 올린다, `packages/aireview/tests/golden/`의
-  골든 파일이 틀 바이트를 고정한다).
+  `PROMPT_VERSION`으로 버전에 들어간다 (틀·이미지 그리기를 바꾸면 올린다,
+  `packages/aireview/tests/golden/`의 골든 파일이 틀 바이트와 그린 이미지 픽셀을 고정한다).
 - 절별 모델: `BackendPolicy`, `KindsPolicy`, `SelectionPolicy`, `PendingPolicy`, `TemporalPolicy`,
   `SpatialPolicy`, `CropPolicy`, `SensorPolicy`, `ImagePolicy`, `ResponsePolicy`, `SuggestPolicy`,
   `EstimatePolicy`, `GatePolicy`, `ServerPolicy`.
@@ -34,8 +34,9 @@ from dlp_schema.aireview import REASON_MAX, AiTargetRule
 from dlp_schema.common import Contract
 from dlp_schema.review import ReviewReason
 
-# 프롬프트 틀 버전. dlp_aireview.prompt·schema의 고정 문장·스키마 모양을 바꾸면 올리고 aireview.yaml
-# prompt_version도 같이 올린다 (값이 digest에 들어가 판정 버전이 바뀐다). 틀 바이트는
+# 프롬프트 틀 버전. dlp_aireview.prompt·schema의 고정 문장·스키마 모양이나 dlp_aireview.overlay의
+# 이미지 그리기(도장·표식·확대 조각)를 바꾸면 올리고 aireview.yaml prompt_version도 같이 올린다
+# (값이 digest에 들어가 판정 버전이 바뀐다). 틀 바이트와 그린 이미지 픽셀(images.json)은
 # packages/aireview/tests/golden/의 골든 파일이 고정한다 (바뀌면 테스트가 이 절차를 알린다).
 PROMPT_VERSION = 1
 # 판정할 수 있는 종류 (검수 도구 화면이 있는 종류). 블러 트랙은 넣을 수 없다 (I2).

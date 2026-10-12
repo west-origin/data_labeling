@@ -110,7 +110,7 @@ class _Forgetful(DbSink):
         self.calls += 1
         return set() if self.calls == 1 else super().done_unit_ids(session_id, version)
 
-    def is_complete(self, session_id: str, version: str, plan_digest: str) -> bool:
+    def is_complete(self, session_id: str, version: str, plan_digest: str, *, full: bool) -> bool:
         return False
 
 

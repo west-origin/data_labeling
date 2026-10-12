@@ -11,6 +11,7 @@ block을 true로 바꾸면 종료 1이다. 평가 내내 DB에 INSERT·UPDATE·D
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,7 @@ from dlp_privacy.policy import load_policy as load_privacy_policy
 from dlp_privacy.rendering import RenderMeta, expected_render_hash, write_render_meta
 from dlp_schema import load_config, repo_root
 from dlp_schema.db.repository import (
+    get_golden_set,
     insert_golden_set,
     insert_labels,
     insert_session,
@@ -68,7 +70,8 @@ class _Watched:
 
 @pytest.fixture
 def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[list[str], _Watched]:
-    """골든셋 g1(세션 s1: 승인·렌더, 사람이 만든 정답 라벨) + CLI 공통 인자."""
+    """골든셋 g1(이전 형식, 정답 고정 없음)·g2(정답 고정)(세션 s1: 승인·렌더, 사람이 만든 정답
+    라벨) + CLI 공통 인자."""
     for name in ("DLP_VLM_URLS", "DLP_VLM_URL", "DLP_VLM_API_KEY"):
         monkeypatch.delenv(name, raising=False)
     url = f"sqlite:///{tmp_path / 'cli.db'}"
@@ -92,6 +95,11 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[list[str], _
         insert_labels(conn, truth)
         insert_golden_set(conn, GoldenSet(
             version="g1", domain=Domain.CLEANING, session_ids=("s1",), created_at=FIXED_TIME,
+        ))  # fmt: skip
+        # 같은 세션, 정답 ID를 고정한 버전 (ADR 0041)
+        insert_golden_set(conn, GoldenSet(
+            version="g2", domain=Domain.CLEANING, session_ids=("s1",), created_at=FIXED_TIME,
+            truth_label_ids=tuple(sorted(x.label_id for x in truth)),
         ))  # fmt: skip
     privacy = load_privacy_policy(repo_root())
     for stream in ("bodycam", "tp1"):
@@ -136,6 +144,87 @@ def test_eval_writes_nothing_and_gate_only_warns(
     assert report["false_flag_rate"] == 0.0 and report["units"] == calls
     assert report["gate"]["passed"] is False and report["gate"]["block"] is False
     assert set(report["by_error"]) >= {"clean", "verb_swap"}
+
+
+def test_eval_groups_count_only_targets_of_chosen_groups(
+    world: tuple[list[str], _Watched], tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--groups temporal`이면 공간 대상(박스)은 분모에 들지 않고, 미판정·미계획이 0이다.
+
+    정답 근거: 예전에는 다른 묶음 대상이 판정되지 않은 채 분모에 남아 재현율이 떨어지고 오지적률
+    분모가 커졌다 (판정 버전이 같아 보고서로 구별할 수 없다).
+    """
+    args, _ = world
+    reports: dict[str, Any] = {}
+    with FakeOpenAIServer(MODEL) as server:
+        for name, extra in (("all", []), ("temporal", ["--groups", "temporal,temporal_long"])):
+            out = tmp_path / f"{name}.json"
+            code = main([
+                "aireview", "eval", "--golden", "g1", "--seed", "3", "--out", str(out),
+                "--inject", "verb_swap=0.5,class_swap=0.5", "--vlm-url", f"spark-01={server.url}",
+                *extra, *args,
+            ])  # fmt: skip
+            assert code == 0, capsys.readouterr().out
+            reports[name] = json.loads(out.read_text("utf-8"))
+    full, narrowed = reports["all"], reports["temporal"]
+    assert "box_track" in full["by_kind"] and "box_track" not in narrowed["by_kind"]
+    assert "class_swap" not in narrowed["by_error"] and 0 < narrowed["targets"] < full["targets"]
+    for report in (full, narrowed):
+        assert all(v["unjudged"] == 0 and v["unplanned"] == 0 for v in report["by_error"].values())
+
+
+def test_eval_report_records_truth_basis_and_warns_on_legacy_golden(
+    world: tuple[list[str], _Watched], tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """보고서에 정답 근거(`truth_source`, `golden_truth`)를 남기고, 이전 형식 골든셋은 경고한다.
+
+    정답 근거(ADR 0041): 정답을 고정하지 않은 g1은 현재 라벨로 평가하므로 `dlp eval golden`처럼
+    경고하고 다시 고정하는 명령을 안내한다. 고정한 g2는 경고가 없고 고정 근거의 해시가 같은
+    정답 ID 집합의 sha256이다. history 방식은 사람 검수 사슬의 지금 상태가 정답이라고 알린다
+    (이 골든 세션에는 사람이 검수한 모델 레코드가 없어 판정할 대상이 없다 → 6).
+    """
+    args, _ = world
+    reports: dict[str, Any] = {}
+    texts: dict[str, str] = {}
+    with FakeOpenAIServer(MODEL) as server:
+        for name, extra in (
+            ("g1", ["--golden", "g1"]),
+            ("g2", ["--golden", "g2"]),
+            ("history", ["--golden", "g2", "--mode", "history"]),
+        ):
+            out = tmp_path / f"{name}.json"
+            code = main([
+                "aireview", "eval", *extra, "--out", str(out), "--vlm-url",
+                f"spark-01={server.url}", *args,
+            ])  # fmt: skip
+            texts[name] = capsys.readouterr().out
+            assert code == (6 if name == "history" else 0), texts[name]
+            if out.exists():
+                reports[name] = json.loads(out.read_text("utf-8"))
+    legacy, frozen = reports["g1"], reports["g2"]
+    assert legacy["truth_source"] == "current_labels"
+    assert legacy["golden_truth"]["truth_frozen"] is False
+    assert "이전 형식" in texts["g1"] and "dlp dataset golden --from g1" in texts["g1"]
+    assert frozen["truth_source"] == "golden_frozen" and "이전 형식" not in texts["g2"]
+    truth = frozen["golden_truth"]
+    assert truth["truth_frozen"] is True and truth["sessions"] == ["s1"]
+    assert truth["truth_label_ids_sha256"] == legacy["golden_truth"]["truth_label_ids_sha256"]
+    assert (
+        truth["truth_label_ids_sha256"]
+        == hashlib.sha256("\n".join(sorted(_truth_ids(world))).encode()).hexdigest()
+    )
+    assert "지금 상태를 정답" in texts["history"] and "history" not in reports
+
+
+def _truth_ids(world: tuple[list[str], _Watched]) -> list[str]:
+    """골든셋 g2에 고정한 정답 라벨 ID (DB에서 읽는다)."""
+    url = world[0][1]
+    engine = sqlite_db(url, create=False)
+    try:
+        with engine.connect() as conn:
+            return list(get_golden_set(conn, "g2").truth_label_ids or ())
+    finally:
+        engine.dispose()
 
 
 def test_eval_gate_blocks_only_when_policy_says_so(

@@ -347,3 +347,27 @@ def test_estimate_flagged_mode_uses_review_flags(
         assert picked[group.value]["units"] == want
     units = sum(g["units"] for g in picked.values())
     assert 0 < units < sum(g["units"] for g in full.values())
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--utilization", "1.5"],
+        ["--utilization", "0"],
+        ["--hours-per-day", "-10"],
+        ["--rerun-margin", "-0.9"],
+        ["--decode-workers", "0"],
+    ],
+)
+def test_estimate_assumption_args_are_validated_like_policy(
+    extra: list[str], db_url: str, tmp_path: Path
+) -> None:
+    """가정 값 인자는 정책(`EstimatePolicy`)과 같은 범위로 검증한다.
+
+    정답 근거: 예전에는 1.5·음수가 그대로 공식에 들어가 대수를 틀리게 냈고(가동률 1.5 → 7대가 3대),
+    0은 `or` 때문에 조용히 정책 값이 됐다. 장비 구매 판단에 쓰는 값이라 대수를 내지 않고 알린다.
+    """
+    bench = _bench_file(tmp_path)
+    args = ["aireview", "estimate", "--prelabeled", "--url", db_url, "--bench", str(bench), *extra]
+    with pytest.raises(SystemExit, match=f"추정 가정 값 오류: {extra[0]}"):
+        main(args)

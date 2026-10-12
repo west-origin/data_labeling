@@ -6,6 +6,11 @@
 "표본 검증"으로 둔다. 넘으면(또는 검수 전에 표본이 모두 지워져 판정할 표본이 없으면) 묶음
 전체를 다시 검수한다.
 
+AI 1차 검수(WP17.6)가 지적해 묶음에서 뺀 라벨(반드시 검수, `judge`의 forced)은 표본 비율에 섞지
+않고 따로 본다: 하나라도 결함이면 표본 비율과 무관하게 불합격이다. 지적이 맞을수록 남은 묶음이
+깨끗해져 합격하기 쉬워지면, AI가 사람이 보는 라벨 수를 줄인다 (ADR 0040 I9 위반). 이 규칙이면
+지적 제외는 AI 없을 때보다 검수를 늘리기만 한다 (지적 라벨은 늘 보고, 지적이 맞으면 나머지도 본다).
+
 WP12, ADR 0014. 정책은 `config/policies/review.yaml` `sampling` 절.
 
 흐름:
@@ -97,6 +102,8 @@ class SamplingVerdict:
     pending: int  # 아직 검수하지 않은 표본
     accepted: bool | None  # None: 표본 검수가 끝나지 않음
     to_verify: tuple[str, ...]  # 합격이면 표본 검증으로 둘 라벨
+    # 표본 밖에서 반드시 검수한 묶음 후보(forced, AI 지적) 중 사람이 고치거나 지운 수
+    forced_defects: int = 0
 
 
 def judge(
@@ -104,6 +111,7 @@ def judge(
     sample_ids: tuple[str, ...],
     labels: list[LabelRecord],
     policy: SamplingPolicy,
+    forced: tuple[str, ...] = (),
 ) -> SamplingVerdict:
     """labels: 세션의 모든 레코드 (이력 포함).
 
@@ -111,6 +119,8 @@ def judge(
     - lot_ids: 묶음 전체 라벨 ID (표본 + 보류).
     - sample_ids: 표본 라벨 ID.
     - policy: `max_defect_ratio`를 쓴다.
+    - forced: 묶음 후보였지만 AI 지적으로 묶음에서 빼고 반드시 검수한 라벨 (표본·보류 밖). 표본
+      비율에는 넣지 않는다 (무작위가 아니다). 하나라도 결함이면 불합격이다.
 
     판정:
     - 결함 = 표본을 parent로 하는 사람 레코드(측정 레코드 제외)가 있다 (수정 또는 삭제).
@@ -139,11 +149,12 @@ def judge(
         if i not in corrected
     )
     pending = len(kept) - defects - approved
+    forced_defects = sum(i in corrected for i in forced)
     if pending:
-        return SamplingVerdict(len(kept), defects, pending, None, ())
+        return SamplingVerdict(len(kept), defects, pending, None, (), forced_defects)
     # 회귀: 표본이 모두 사라졌을 때(kept가 빔) 분모를 1로 두어 결함 0 → 합격으로 봐서, 사람이 한
     # 건도 보지 않은 나머지 라벨이 sample_verified가 됐다. 이제는 불합격(전수 재검수)이다.
-    accepted = bool(kept) and defects / len(kept) <= policy.max_defect_ratio
+    accepted = bool(kept) and defects / len(kept) <= policy.max_defect_ratio and forced_defects == 0
     rest = tuple(
         i
         for i in lot_ids
@@ -153,4 +164,5 @@ def judge(
         and i in current
         and by_id[i].verification.state is VerificationState.UNREVIEWED
     )
-    return SamplingVerdict(len(kept), defects, 0, accepted, rest if accepted else ())
+    verified = rest if accepted else ()
+    return SamplingVerdict(len(kept), defects, 0, accepted, verified, forced_defects)

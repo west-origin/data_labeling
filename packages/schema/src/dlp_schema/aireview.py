@@ -18,6 +18,7 @@
       `AiOutcome`. 표는 `db.tables`의 ai_review_* (Alembic 0019, 추가 전용), 저장소는
       `db.aireview_repository`.
     - `AI_REVIEWER_PREFIX`: AI 판정 실행자 접두사. 이 검수자 ID로는 검수 상태를 기록할 수 없다.
+    - `PARTIAL_COMPLETION`, `is_full_completion`: 좁힌 실행의 completed 마감 표시와 판별.
     - 순수 함수: `worst`(한 라벨의 여러 판정 중 가장 나쁜 것), `valid_verdicts`(지금 유효한 판정).
     - 판정 대상 조건(판정 실행과 검수 화면 판정률이 같이 쓴다): `AiTargetRule`(정책에서 오는 값),
       `is_judge_target`, `glove_derived`(장갑 센서에서 나온 라벨), `raw_access_event`(원본 접근
@@ -164,6 +165,20 @@ class AiRunEventKind(StrEnum):
     INTERRUPTED = "interrupted"
     ABORTED = "aborted"
     WAIVED = "waived"
+
+
+# 좁힌 실행(`dlp aireview run --groups`, 정책보다 좁은 선택 모드)의 completed 마감 사유 머리
+# (`partial:<좁힌 내용>`). 그 계획은 끝났지만 정책 기본 계획(모든 묶음, 정책 선택 모드)의 완료가
+# 아니므로 `--pending`의 미완료 판정(`dlp_aireview.status.unfinished_run`)과 required 게이트의 완료
+# 버전(`db.aireview_repository.latest_run_state`)에 넣지 않는다.
+PARTIAL_COMPLETION = "partial:"
+
+
+def is_full_completion(event: AiRunEvent) -> bool:
+    """정책 기본 계획을 끝낸 completed 이벤트인가 (좁힌 실행의 `partial:` 마감은 아니다)."""
+    return event.event is AiRunEventKind.COMPLETED and not (event.reason or "").startswith(
+        PARTIAL_COMPLETION
+    )
 
 
 class AiArm(StrEnum):
