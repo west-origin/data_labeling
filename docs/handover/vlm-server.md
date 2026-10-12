@@ -10,6 +10,8 @@ AI 1차 검수(`dlp aireview`, WP17)와 행동 분류(`dlp actions run`, WP10)�
 
 > 상태: 장비 도착 전. `services/vlm/`의 compose는 실제 Spark에서 아직 띄워 보지 않았다
 > (`TODO(real-model)`). 이미지 태그와 vLLM 플래그 이름은 버전마다 달라서 도착 뒤 확인해 고정한다.
+> 점검·벤치·추정 명령(`dlp aireview probe|bench|estimate`, WP17.3)은 구현했고 가짜 서버로만
+> 검사했다. 실측 기록은 아래 "실측 기록" 표에 채운다.
 
 ## 구성
 
@@ -74,26 +76,97 @@ curl -s -H "Authorization: Bearer $DLP_VLM_API_KEY" http://10.0.0.11:8000/v1/mod
 | 변수 | 쓰는 곳 | 예 |
 | --- | --- | --- |
 | `DLP_VLM_URL` | `dlp actions run`만 (행동 분류 서버) | `http://10.0.0.11:8001` |
-| `DLP_VLM_URLS` | `dlp aireview run`·`bench`·`probe`의 판정 서버 (하나여도 이 변수, WP17.5) | `spark-01=http://10.0.0.11:8000,spark-02=http://10.0.0.12:8000` |
+| `DLP_VLM_URLS` | `dlp aireview probe`·`bench`(WP17.3)·`run`(WP17.5)의 판정 서버 (하나여도 이 변수) | `spark-01=http://10.0.0.11:8000,spark-02=http://10.0.0.12:8000` |
 | `DLP_VLM_API_KEY` | 두 명령의 서버 API 키 | (출력·기록 금지) |
 
 - `dlp aireview`는 `DLP_VLM_URL`로 대신하지 않는다. 판정 모델은 행동 분류 모델과 달라(위 구성) 행동 분류
   서버로 보내면 늘 서버 모델 불일치(I7, 종료 5)가 난다. `DLP_VLM_URLS`도 `--vlm-url`도 없으면 종료 2다.
-- 주소는 `aireview.yaml server.internal_hosts`(사내 대역) 안이어야 한다 (WP17.5에서 검사).
+- 주소는 `aireview.yaml server.internal_hosts`(사내 대역) 안이어야 한다 (probe·bench가 보내기 전에
+  검사한다, 판정 실행은 WP17.5). 호스트 이름이면 DNS로 풀어 모든 주소를 본다.
 
 ## 처리량 재기와 대수 정하기 (WP17.3)
 
-먼저 1대를 사서 잰다. 공식과 가정은 [구현 계획 WP17](../ai-implementation-plan.md#wp17-ai-1차-검수로컬-vlm)이다.
+먼저 1대를 사서 잰다. 명령 세 개는 모두 DB에 쓰지 않는다. CI는 가짜 서버(`dlp_aireview.testing.
+FakeOpenAIServer`)로 같은 명령의 보고서 형식만 검사한다 (`packages/cli/tests/test_aireview_cmds.py`).
+실측 값은 Spark에서만 나온다.
 
-1. `dlp aireview probe --vlm-url …`: 모델 이름, 이미지 수 한도, `json_schema` 강제 여부, `full` 스키마
-   프로필 지원, `cached_tokens` 제공, `/tokenize` 유무. 강제하지 않으면 `schema_enforcement: prompt`.
-2. `dlp aireview bench --vlm-url … --concurrency 1,8,16,32,64 --frames 8,12 --side 336,448,672`:
-   후보 모델 2~3개(`config/models.yaml external`의 AI 1차 검수 후보)의 프리필 tok/s와 생성 tok/s를
-   **따로**, p50·p95 지연, 캐시 적중률, 스키마 적합률. `--decode`로 블러본 디코드 fps도 잰다.
-3. `dlp aireview estimate --include-actions`: 실제 파일럿 영상의 aireview 단위 수와 행동 VLM 후보 밀도.
-   행동 VLM은 후보 구간마다 직렬로 물어 대수를 정할 수 있다 (F-AIR-01).
-4. 같은 Spark에서 VLM 밖 단계(OWLv2·깊이·블러 렌더) 처리 시간도 잰다.
-5. 공식으로 대수를 정하고 이 문서 아래에 기록한다 (장비, 엔진 버전, 모델·revision, 수치, 결정).
+| 명령 | 하는 일 | 종료 코드 |
+| --- | --- | --- |
+| `dlp aireview probe` | 서버 점검: 사내 주소, 모델 목록, 엔진 버전, `/tokenize`, 이미지 입력·응답 모델 대조, 요청당 이미지 수 한도, `json_schema` 강제 여부(어기기 쉬운 지시로 시험), `full` 프로필 키워드, `cached_tokens`, 문맥 길이. 정책 조정안(권고)을 출력한다 | 0 통과 / 2 주소 없음 / 3 서버 장애 / 5 설정 불일치 |
+| `dlp aireview bench` | 장비 1대 처리량: 합성 장면을 실제 계획기·프롬프트·스키마·재검사로 판정한다. 묶음(temporal·temporal_long·spatial) × 프레임 수(temporal) × 긴 변 설정마다 동시성 단계별 단위/s, p50·p95, 프리필·생성 tok/s, 캐시 적중, 스키마 적합률, 재시도·fallback율, 첫 토큰 시간. `--cache-probe`, `--decode`(CPU 순차 디코드 fps) | 0 / 2 / 3 서버 장애·서버 멈춤 / 5 |
+| `dlp aireview estimate` | DB의 실제 세션으로 영상 1시간당 단위·대상·프레임·이미지·글·예상 출력 토큰을 센다. `--include-actions`면 행동 VLM 요청(후보 구간) 수도. `--bench 보고서`를 주면 공식으로 장비 대수를 낸다 | 0 |
+
+벤치가 재는 방식 (`dlp_aireview.bench`)
+
+- 입력은 합성 장면(`dlp_fixtures.aireview`, 사람·글자 없음)이다. 프레임 크기는 `aireview.yaml
+  estimate.frame_px`(기본 1920x1080, `--frame-size`로 바꾼다). 실제 세션 블러본 입력(`--source
+  session:<id>`)은 블러본 경계(`open_blurred`, WP17.5)가 생긴 뒤 더한다.
+- 요청마다 고정 블록(온톨로지) 끝에 측정 표식 한 줄을 넣어, 고정 접두사는 캐시에 맞고 이미지·가변 글은
+  매번 새로 계산하게 한다. 운영에서는 같은 창의 분할 요청이 이미지를 공유하므로 벤치 값은 보수적이다.
+- 서버 장애(과부하 503 포함)는 다시 묻지 않고 그 점의 오류로 센다. 무릎 지점 = 장애 0이고 p95가
+  `server.timeout_s`보다 작은 점 중 단위/s가 가장 큰 점(같으면 낮은 동시성). 그 동시성이
+  `server.concurrency_per_endpoint` 후보다.
+- 보고서: `reports/aireview-bench/<장비>-<UTC 시각>.json` (Git 제외). 서버 모델 목록, 엔진 버전, 정책
+  판정 버전·fingerprint·스키마 방식, 격자, 설정별 측정값, 디코드 fps를 담는다.
+
+### Spark 실측 절차
+
+1. 서버를 띄우고(위 "띄우기") 파이프라인 호스트에서 점검한다. 실패 항목은 권고대로 서버 플래그나
+   `aireview.yaml backend`를 고치고 다시 돌린다.
+
+   ```bash
+   export DLP_VLM_URLS="spark-01=http://10.0.0.11:8000" DLP_VLM_API_KEY=...   # 키는 셸 기록에 남기지 않는다
+   dlp aireview probe --out reports/aireview-probe/spark-01.json
+   ```
+
+2. 후보 모델마다(`config/models.yaml external`의 AI 1차 검수 후보 2~3개, 기본 Qwen3-VL-8B) 서버를
+   그 모델로 다시 띄우고 벤치를 돈다. 모델을 바꾸면 `aireview.yaml backend.model`·`fingerprint`·
+   `image.align_px`도 그 모델에 맞춘다 (판정 버전이 바뀐다).
+
+   ```bash
+   dlp aireview bench --concurrency 1,8,16,32,64 --frames 8,12 --side 336,448,672 \
+       --requests 200 --warmup 10 --cache-probe --decode --device spark-01
+   ```
+
+   기본 격자에는 지금 정책 값(temporal 8장·448, temporal_long 336, spatial 672)이 들어 있다. 추정은
+   정책 값과 같은 설정의 측정만 쓰므로 격자를 줄일 때도 정책 값은 남긴다.
+3. 실제 파일럿 세션(프리라벨·관계·행동까지 끝난 것)으로 작업량을 센다. 행동 VLM 처리량은 벤치가
+   재지 않는다. 같은 Spark에서 파일럿 세션 하나에 `dlp actions run`을 돌린 시간과 출력의
+   `segments` 합으로 요청/s를 구해 `--actions-req-s`로 준다 (손마다 직렬이라 세션 여러 개를 동시에
+   돌린 값이 장비 처리량이다).
+
+   ```bash
+   dlp aireview estimate --prelabeled --include-actions \
+       --bench reports/aireview-bench/spark-01-<시각>.json --actions-req-s <실측>
+   ```
+
+4. 같은 Spark에서 VLM 밖 단계(OWLv2·깊이 `dlp prelabel run`, 블러 렌더 `dlp privacy render`) 처리
+   시간도 파일럿 세션으로 잰다 (영상 1시간당 장비 시간). 대수 공식의 D에 더해 함께 판단한다.
+5. 아래 기록 양식을 채워 이 문서에 남기고, 대수와 다음 구매를 결정한다. 지적 비율(`estimate.flag_ratio`)
+   등 가정 값은 파일럿 판정 결과(WP17.9)로 바꾼 뒤 다시 계산한다.
+
+공식 (`dlp_aireview.estimate`, 가정 값은 `aireview.yaml estimate`)
+
+```
+T_s  = min(프리필 tok/s ÷ 단위당 새 프롬프트 토큰, 생성 tok/s ÷ 단위당 예상 출력 토큰)   (묶음 s, 무릎 지점)
+D    = Σ_s (영상 1시간당 단위_s ÷ T_s) + 행동 VLM 영상 1시간당 요청 ÷ actions_req_s
+대수  = ceil(H × (1+ρ) × D / (86,400 × u))        H 164, ρ 0.2, u 0.7
+디코드 = H × video_fps × 영상 스트림 수 ÷ (디코드 fps × decode_workers) ≤ 24시간
+```
+
+### 실측 기록 (장비 도착 뒤 채운다)
+
+| 항목 | 값 |
+| --- | --- |
+| 날짜·장비·엔진 버전(probe) | |
+| 모델·revision·fingerprint | |
+| probe 결과 (실패·권고) | |
+| 묶음별 무릎 지점 (동시성, 단위/s, p95, 프리필·생성 tok/s, 캐시 적중) | |
+| 디코드 fps (CPU) | |
+| 파일럿 세션 수·영상 시간, 영상 1시간당 단위(묶음별)·행동 요청 | |
+| 행동 VLM 요청/s (실측) | |
+| VLM 밖 단계 장비 시간 (OWLv2·깊이·렌더) | |
+| D, 필요 대수, 결정 | |
 
 ## 판정 모델 바꾸기
 

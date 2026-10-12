@@ -257,7 +257,9 @@ class FakeOpenAIServer:
         self._httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self._httpd.daemon_threads = True
         self.url = f"http://127.0.0.1:{self._httpd.server_address[1]}"
-        self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
+        self._thread = threading.Thread(
+            target=self._httpd.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True
+        )
         self._thread.start()
         return self
 
@@ -377,15 +379,20 @@ class FakeOpenAIServer:
         self._send(h, 200, {"count": text_tokens(prompt), "max_model_len": self.context_tokens})
 
     def _chat_entry(self, h: BaseHTTPRequestHandler, call: FakeCall) -> None:
-        """채팅 요청 (처리 중 요청 수를 센다)."""
+        """채팅 요청 (처리 중 요청 수를 센다).
+
+        응답을 보내기 **전에** 처리 중 수를 줄인다. 보낸 뒤에 줄이면 응답을 받은 클라이언트가 다음
+        요청을 먼저 보내 최대 수가 동시성보다 커 보일 수 있다.
+        """
         with self._lock:
             self._in_flight += 1
             self.max_in_flight = max(self.max_in_flight, self._in_flight)
         try:
-            self._chat(h, call)
+            status, data, headers = self._chat(call)
         finally:
             with self._lock:
                 self._in_flight -= 1
+        self._send(h, status, data, headers)
 
     def _scheduled_failure(self) -> _Failure | None:
         """이번 요청에 쓸 예약 실패 (없으면 None, 성공 횟수를 센다)."""
@@ -455,22 +462,20 @@ class FakeOpenAIServer:
             return json.dumps(minimal_instance(schema), ensure_ascii=False)
         return "모름"
 
-    def _chat(self, h: BaseHTTPRequestHandler, call: FakeCall) -> None:
-        """채팅 응답 (지연·실패·검사·usage)."""
+    def _chat(self, call: FakeCall) -> tuple[int, Any, Mapping[str, str] | None]:
+        """채팅 응답 (지연·실패·검사·usage) → (상태, 본문, 추가 헤더)."""
         if self.latency_s:
             time.sleep(self.latency_s)
         failure = self._scheduled_failure()
         if failure is not None:
             extra = {"Retry-After": failure.retry_after} if failure.retry_after else None
-            self._send(h, failure.status, {"error": {"message": failure.body}}, extra)
-            return
+            return failure.status, {"error": {"message": failure.body}}, extra
         body = _obj(call.body)
         with self._lock:
             usage = self._usage(body)
         rejected = self._reject(body, usage)
         if rejected is not None:
-            self._send(h, rejected[0], {"error": {"message": rejected[1]}})
-            return
+            return rejected[0], {"error": {"message": rejected[1]}}, None
         with self._lock:
             self._seen.update(usage.keys)
         content = self._content(call, body)
@@ -488,4 +493,4 @@ class FakeOpenAIServer:
                       "total_tokens": usage.prompt + completion,
                       **(details if self.report_cached else {})},
         }  # fmt: skip
-        self._send(h, 200, data)
+        return 200, data, None

@@ -1,6 +1,6 @@
 # AI 1차 검수(로컬 VLM) 정책 (WP17, ADR 0040).
 # 읽는 곳: dlp_aireview.policy.load_policy (Pydantic AiReviewPolicy, 알 수 없는 키는 오류).
-# 쓰는 명령: dlp aireview run|status|show|estimate|bench|probe|eval (WP17.3~17.8에서 연결).
+# 쓰는 명령: dlp aireview probe|bench|estimate (WP17.3), run|status|show|waive (WP17.5), eval (WP17.8).
 #
 # 판정 버전 = aireview-<digest>+vlm-<backend.model>.
 # digest는 selection·kinds·pending·server·gate·estimate를 뺀 파싱값의 sha256 앞 12자다.
@@ -115,7 +115,20 @@ response:
   # 결과를 바꾸므로 해시에 들어간다
   max_context_splits: 2
 
-estimate: {ok_tokens: 2, item_tokens: 60}   # 해시 제외. 예상 출력 토큰 (ok 번호, 지적 항목)
+# 해시 제외. 작업량·장비 대수 추정의 가정 값 (dlp aireview estimate·probe, WP17.3). 모두 가정이며
+# 파일럿 실측(벤치 보고서, 지적 비율)으로 바꾼다. 대수 = ceil(H × (1+ρ) × D / (86400 × u)),
+# D = Σ 묶음 (영상 1시간당 단위 ÷ 장비 1대 지속 단위/s) (docs/handover/vlm-server.md).
+estimate:
+  ok_tokens: 2                    # 맞는 대상 하나의 출력 토큰 (ok 목록 번호)
+  item_tokens: 60                 # 지적 항목 하나의 출력 토큰
+  flag_ratio: 0.15                # 지적(wrong·suspect·unsure) 비율 가정
+  text_bytes_per_token: 3         # 글 토큰 근사 = UTF-8 바이트 / 이 값 (한글 한 글자 ≈ 1토큰)
+  frame_px: [1920, 1080]          # 세션 캘리브레이션에 영상 크기가 없을 때의 프레임 크기 (벤치 합성 프레임도)
+  video_fps: 30                   # 블러본 프레임레이트 (순차 디코드가 지나는 프레임 수)
+  hours_per_day: 164              # 하루 영상 시간 H
+  rerun_margin: 0.2               # 재실행 여유 ρ (정책·모델·블러 변경 뒤 다시 판정)
+  utilization: 0.7                # 장비 가동률 u
+  decode_workers: 4               # 블러본 디코드 동시 작업 수
 # 해시 제외. 골든 게이트 (dlp aireview eval --gate). 실패해도 지금은 경고만 한다 (차단은 파일럿 뒤 결정).
 gate: {min_wrong_recall: 0.6, max_false_flag_rate: 0.1, max_ok_miss_rate: 0.05}
 

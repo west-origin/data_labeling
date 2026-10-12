@@ -133,8 +133,11 @@ serve|assign|register-webhooks|refresh-urls|plan|qa|quality`, 작업의 CVAT 계
 행동 분류(`dlp actions run`)와 AI 1차 검수(`dlp aireview`, WP17)는 사내 OpenAI 호환 VLM 서버가 필요하다.
 장비는 NVIDIA DGX Spark, 서빙은 vLLM으로 정했다 (ADR 0040). 띄우는 법·보안 설정·처리량 실측·Arm64
 점검표는 [VLM 서버 안내](vlm-server.md), compose는 `services/vlm/`다. 개발 호스트에는 띄우지 않는다
-(lakeFS가 8000 포트를 쓴다). CI와 단위 테스트는 서버 없이 `OracleVlm`·`OracleJudge` stub과
-`httpx.MockTransport`로만 돈다.
+(lakeFS가 8000 포트를 쓴다). CI와 단위 테스트는 서버 없이 `OracleVlm`·`OracleJudge` stub,
+`httpx.MockTransport`, 127.0.0.1에 뜨는 가짜 서버(`dlp_aireview.testing.FakeOpenAIServer`)로만 돈다.
+서버 점검·처리량 벤치·작업량 추정은 `dlp aireview probe|bench|estimate`이고(DB에 쓰지 않는다), 벤치
+보고서는 `reports/aireview-bench/`(Git 제외)에 남는다. 장비 대수를 정하는 절차는 VLM 서버 안내의
+"Spark 실측 절차"다.
 
 ## 검사 범위와 자원
 

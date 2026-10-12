@@ -234,10 +234,31 @@ class ResponsePolicy(Contract):
 
 
 class EstimatePolicy(Contract):
-    """`estimate`: 예상 출력 토큰 (digest 제외)."""
+    """`estimate`: 작업량·장비 대수 추정 가정 값 (digest 제외, `dlp aireview estimate`·`probe`).
 
+    모두 가정 값이다. 파일럿 실측(벤치·지적 비율)으로 바꾼다. 요청 본문·결과를 바꾸지 않는다.
+    """
+
+    # 맞는 대상 하나의 출력 토큰 (ok 목록 번호)
     ok_tokens: int = Field(ge=0)
+    # 지적 항목 하나의 출력 토큰
     item_tokens: int = Field(ge=0)
+    # 지적(wrong·suspect·unsure) 비율 가정. 예상 출력 = 대상 수 * (ok_tokens + 비율 * item_tokens)
+    flag_ratio: float = Field(ge=0, le=1)
+    # 글 토큰 근사 = UTF-8 바이트 / 이 값 (서버 토크나이저 없이 셀 때)
+    text_bytes_per_token: float = Field(gt=0)
+    # 세션 캘리브레이션에 영상 크기가 없을 때 가정하는 프레임 크기 (너비, 높이) px
+    frame_px: tuple[int, int]
+    # 블러본 프레임레이트 가정 (순차 디코드가 지나는 프레임 수)
+    video_fps: float = Field(gt=0)
+    # 하루 영상 시간 H (시간)
+    hours_per_day: float = Field(gt=0)
+    # 재실행 여유 (정책·모델 변경, 블러 변경 뒤 다시 판정)
+    rerun_margin: float = Field(ge=0)
+    # 장비 가동률 u (0~1]
+    utilization: float = Field(gt=0, le=1)
+    # 디코드 동시 작업 수 (블러본 순차 디코드)
+    decode_workers: int = Field(ge=1)
 
 
 class GatePolicy(Contract):

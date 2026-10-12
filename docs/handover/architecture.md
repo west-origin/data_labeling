@@ -16,7 +16,7 @@ Prefect 서비스가 기동된 것만으로 모든 작업이 영속 큐에서 �
 | 탐지·승인·렌더 | [privacy](../../packages/privacy/src/dlp_privacy/)의 `runner.py`, `generation.py`, `rendering.py`, `revocation.py`(블러 변경 뒤 배포 매체 회수 요청), `hold.py`(사고 대응 승인 보류, ADR 0042) | `config/policies/privacy.yaml` |
 | 자동 라벨 초안 | [prelabel runner](../../packages/prelabel/src/dlp_prelabel/runner.py), `adapters/` | `config/policies/prelabel.yaml`, `config/models.yaml` |
 | 관계·접촉·행동 | [relations](../../packages/relations/src/dlp_relations/), [actions](../../packages/actions/src/dlp_actions/) | 각 단계의 `config/policies/*.yaml` |
-| AI 1차 검수 (참고용 판정, WP17 진행 중) | [aireview](../../packages/aireview/src/dlp_aireview/)의 `plan.py`, `prompt.py`, `validate.py`, `judge.py`, 공통 VLM 전송 [models vlm](../../packages/models/src/dlp_models/vlm.py) | `config/policies/aireview.yaml`, `config/models.yaml` external |
+| AI 1차 검수 (참고용 판정, WP17 진행 중) | [aireview](../../packages/aireview/src/dlp_aireview/)의 `plan.py`, `prompt.py`, `validate.py`, `judge.py`, 점검·벤치·추정 `probe.py`·`bench.py`·`estimate.py`([CLI](../../packages/cli/src/dlp_cli/aireview_cmds.py)), 공통 VLM 전송 [models vlm](../../packages/models/src/dlp_models/vlm.py), AI 표 저장소 [aireview_repository](../../packages/schema/src/dlp_schema/db/aireview_repository.py) | `config/policies/aireview.yaml`, `config/models.yaml` external |
 | 검수 도구·이력 수집 | [review](../../packages/review/src/dlp_review/)의 `tasks.py`, `collect.py`, `reconcile.py`, `clients.py`, `webhook.py`, `revoke.py`(회수 실행기), `orphans.py`(DB 기록 없이 남은 도구 작업·사본 정리) | `config/policies/review.yaml` |
 | 배정·QA·품질 | [review ops](../../packages/review/src/dlp_review/ops/) | 위 검수 정책, `config/defaults.yaml` |
 | 계약·온톨로지·DB | [schema](../../packages/schema/src/dlp_schema/), `db/` | `config/ontology/v1`, `schemas/`는 생성물 |
@@ -68,7 +68,7 @@ Prefect 서비스가 기동된 것만으로 모든 작업이 영속 큐에서 �
 
 | 저장 위치 | 내용·접근 |
 | --- | --- |
-| PostgreSQL | 세션·라벨 이력·탐지 세대·검수 작업·배포·내보내기 이력·감사 |
+| PostgreSQL | 세션·라벨 이력·탐지 세대·검수 작업·배포·내보내기 이력·감사, AI 1차 검수 기록(`ai_review_*` 5개 표, 추가 전용, 라벨이 아니다, ADR 0040) |
 | 원본 버킷 | 영상·프록시·PTS·센서 파생물. CLI는 [raw_store](../../packages/cli/src/dlp_cli/raw_access.py) 감사 경로 사용 |
 | 라벨링 버킷 | 승인된 블러본·렌더 기록·워터마크 검수 영상·시계열 CSV |
 | 데이터셋 버킷/lakeFS | 버전 스냅샷·내보내기·내부 가명 대응표(구매자 공개 금지) |

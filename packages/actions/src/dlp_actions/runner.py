@@ -19,6 +19,8 @@ track_rank`: 사람·검수 → 최신 → 긴 구간 → 라벨 ID)로 하나�
   미상(unknown) 공백으로 채운다 (타임라인 공백 0 유지, ADR 0015).
 
 입력은 `current_labels()`(운영 라벨)에서 고르고, 다시 돌릴지는 전체 이력(`get_labels`)으로 정한다.
+작업량 추정용 `vlm_request_count`(손마다 후보 구간 수, 순수 함수)는 같은 트랙·접촉 선택
+(`hand_track_labels`, `hand_contacts`)을 쓴다 (`dlp aireview estimate --include-actions`).
 DB: `label_records` 테이블 읽기·쓰기(추가만).
 저장소: 라벨링 버킷의 블러본 읽기(원본 버킷은 읽지 않는다).
 트랜잭션은 호출자(CLI)가 연다.
@@ -28,13 +30,14 @@ from __future__ import annotations
 
 import hashlib
 import tempfile
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
 import sqlalchemy as sa
 
-from dlp_actions.pipeline import segment_hand
+from dlp_actions.pipeline import segment_count, segment_hand
 from dlp_actions.policy import ActionsPolicy
 from dlp_actions.vlm import VlmClient
 from dlp_media.storage import ObjectStore, blurred_key
@@ -58,6 +61,7 @@ from dlp_schema.labels import (
     VerificationState,
 )
 from dlp_schema.ontology import Ontology
+from dlp_schema.session import Session
 
 # 이 단계 모델 버전의 접두사 (`_ours` 판별)
 PREFIX = "actions-"
@@ -200,6 +204,59 @@ def keep_protected(
     return out
 
 
+def hand_track_labels(current: Sequence[LabelRecord], stream_id: str) -> dict[Hand, LabelRecord]:
+    """기준 스트림의 손마다 hand21 트랙 라벨 하나.
+
+    같은 손 트랙이 여럿이면 프리라벨 접촉·3D 단계와 같은 공용 순위(`track_rank`: 사람·검수 →
+    최신 → 긴 구간 → 라벨 ID)로 고른다 (F-PAR-04).
+    """
+    return pick_hand_track_labels(
+        [
+            x
+            for x in current
+            if x.stream_id == stream_id
+            and isinstance(x.payload, KeypointTrackPayload)
+            and x.payload.skeleton == "hand21"
+            and x.payload.hand is not None
+        ]
+    )
+
+
+def _track(x: LabelRecord) -> KeypointTrackPayload:
+    """손 트랙 라벨의 페이로드 (`hand_track_labels`가 고른 라벨)."""
+    assert isinstance(x.payload, KeypointTrackPayload)
+    return x.payload
+
+
+def hand_contacts(current: Sequence[LabelRecord], hand: Hand) -> list[tuple[int, int]]:
+    """그 손의 접촉 구간 = 접촉 대상이 있는 손 상태 라벨 (프리라벨·검수 결과), 시각 순."""
+    return sorted(
+        (x.t_start_ms, x.t_end_ms)
+        for x in current
+        if isinstance(x.payload, HandStatePayload)
+        and x.payload.hand is hand
+        and x.payload.contact_target_kind != "none"
+    )
+
+
+def vlm_request_count(
+    session: Session, current: Sequence[LabelRecord], policy: ActionsPolicy
+) -> dict[Hand, int]:
+    """손마다 행동 VLM 요청 수 (= 후보 구간 수, `run_actions`와 같은 트랙·접촉 선택). 순수 함수.
+
+    같은 버전 결과가 있어 건너뛸 손도 센다 (작업량 추정은 세션 전체를 처음 처리하는 양을 본다).
+    `dlp aireview estimate --include-actions`가 쓴다 (ADR 0040 8.3, F-AIR-01).
+
+    Args:
+        session: 세션 (기준 스트림, 길이). current: 현재 운영 라벨. policy: 행동 정책.
+    """
+    picked = hand_track_labels(current, session.reference_stream.stream_id)
+    return {
+        hand: segment_count(_track(x), hand_contacts(current, hand), 0, session.duration_ms, policy)
+        for hand, x in sorted(picked.items())
+    }
+
+
 def run_actions(
     conn: sa.Connection,
     session_id: str,
@@ -237,21 +294,8 @@ def run_actions(
     # 입력은 운영 라벨(current)에서, 재실행 판단은 전체 이력(labels)으로 한다
     current = current_labels(labels)
     body = session.reference_stream
-    track_labels = [
-        x
-        for x in current
-        if x.stream_id == body.stream_id
-        and isinstance(x.payload, KeypointTrackPayload)
-        and x.payload.skeleton == "hand21"
-        and x.payload.hand is not None
-    ]
-    # 손마다 트랙 하나. 같은 손 트랙이 여럿이면 프리라벨 접촉·3D 단계와 같은 공용 순위
-    # (`track_rank`: 사람·검수 → 최신 → 긴 구간 → 라벨 ID)로 고른다 (F-PAR-04)
-    picked = pick_hand_track_labels(track_labels)
-    tracks: dict[Hand, KeypointTrackPayload] = {}
-    for hand, x in picked.items():
-        assert isinstance(x.payload, KeypointTrackPayload)
-        tracks[hand] = x.payload
+    picked = hand_track_labels(current, body.stream_id)
+    tracks = {hand: _track(x) for hand, x in picked.items()}
     object_labels = [
         x for x in current if isinstance(x.payload, BoxTrackPayload | MaskTrackPayload)
     ]
@@ -364,14 +408,7 @@ def run_actions(
                 summary.skipped.append(hand.value)
                 continue
             stale = with_descriptions(mine)
-            # 그 손의 접촉 구간 = 접촉 대상이 있는 손 상태 라벨 (프리라벨·검수 결과)
-            contacts = sorted(
-                (x.t_start_ms, x.t_end_ms)
-                for x in current
-                if isinstance(x.payload, HandStatePayload)
-                and x.payload.hand is hand
-                and x.payload.contact_target_kind != "none"
-            )
+            contacts = hand_contacts(current, hand)
             result = segment_hand(
                 session_id=session_id,
                 stream_id=body.stream_id,

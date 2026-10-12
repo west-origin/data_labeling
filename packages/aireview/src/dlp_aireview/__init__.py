@@ -22,6 +22,11 @@
 - `backend`: `JudgeBackend` 프로토콜, 사내 OpenAI 호환 서버(`OpenAICompatibleJudge`).
 - `oracle`: CPU·CI용 정답 stub(`OracleJudge`). `perturb`: 통제된 오류 9종.
 
-뒤 단계(WP17.3~): 블러본 경계(`media.open_blurred`), 실행기·재개·차단기(`runner`), 벤치·추정·점검,
-골든 평가. 이 패키지는 라벨·검수 기록을 쓰지 않는다 (정적 검사, I3).
+모듈 (WP17.3 점검·벤치·추정, DB에 쓰지 않는다)
+- `probe`: 서버 점검 (`dlp aireview probe`). `bench`: 장비 1대 처리량 (`dlp aireview bench`).
+- `estimate`: 작업량·장비 대수 (`dlp aireview estimate`, 순수 함수).
+- `testing`: 가짜 OpenAI 호환 서버(`FakeOpenAIServer`, 127.0.0.1, 테스트·CI용).
+
+뒤 단계(WP17.5~): 블러본 경계(`media.open_blurred`), 실행기·재개·차단기(`runner`), 골든 평가.
+이 패키지는 라벨·검수 기록을 쓰지 않는다 (정적 검사, I3).
 """

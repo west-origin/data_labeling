@@ -21,6 +21,7 @@ from dlp_actions.boundaries import boundary_candidates, segments, wrist_series
 from dlp_actions.clients import OpenAICompatibleVlm, OracleVlm
 from dlp_actions.pipeline import HandResult, segment_hand
 from dlp_actions.policy import ActionsPolicy, load_policy
+from dlp_actions.runner import vlm_request_count
 from dlp_actions.vlm import (
     SegmentRequest,
     VlmUnavailableError,
@@ -41,7 +42,7 @@ from dlp_schema.labels import (
     LabelRecord,
 )
 from dlp_schema.ontology import Ontology, load_ontology
-from dlp_schema.testing import FIXED_TIME
+from dlp_schema.testing import FIXED_TIME, make_session
 from dlp_schema.validation import check_label
 
 # 저장소 루트 (packages/actions/tests/test_actions.py에서 세 단계 위)
@@ -359,3 +360,19 @@ def test_backoff_is_not_part_of_the_policy_digest(policy: ActionsPolicy) -> None
         update={"vlm": policy.vlm.model_copy(update={"unavailable_backoff_s": (60.0,)})}
     )
     assert slower.digest == policy.digest and policy.vlm.unavailable_backoff_s
+
+
+@pytest.mark.parametrize("seed", [0, 3])
+def test_vlm_request_count_matches_segment_hand(
+    seed: int, ontology: Ontology, policy: ActionsPolicy
+) -> None:
+    """작업량 추정의 행동 VLM 요청 수 = `segment_hand`가 실제로 묻는 후보 구간 수 (재시도 제외).
+
+    정답 근거: 같은 시나리오를 `OracleVlm`으로 돌린 분류 결과 수. 세션 길이·기준 스트림은
+    `make_session`, 라벨은 시나리오 정답(사람 출처, 현재 운영 라벨)이다.
+    """
+    sc = generate_action_scenario(seed, n_units=6)
+    session = make_session(sc.session_id, duration_ms=sc.duration_ms)
+    counts = vlm_request_count(session, sc.labels, policy)
+    assert counts == {sc.hand: len(_run(sc, ontology, policy).classified)}
+    assert vlm_request_count(session, [], policy) == {}

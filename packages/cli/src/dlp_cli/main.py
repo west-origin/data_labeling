@@ -26,6 +26,7 @@ from dlp_cli import (
     __version__,
     actions_cmds,
     active_cmds,
+    aireview_cmds,
     dataset_cmds,
     eval_cmds,
     export_cmds,
@@ -127,6 +128,7 @@ def build_parser() -> argparse.ArgumentParser:
     prelabel_cmds.add_commands(sub)  # dlp prelabel run — 자동 프리라벨 (WP8)
     relations_cmds.add_commands(sub)  # dlp relations run — 관계 도출 (WP9)
     actions_cmds.add_commands(sub)  # dlp actions run — 행동 구간 (WP10)
+    aireview_cmds.add_commands(sub)  # dlp aireview probe|bench|estimate — AI 1차 검수 (WP17)
     eval_cmds.add_commands(sub)  # dlp eval golden — 골든셋 평가 (WP11)
     train_cmds.add_commands(sub)  # dlp train run|models|approve — 재학습 (WP13)
     active_cmds.add_commands(sub)  # dlp active rank|fiftyone — 액티브 러닝 (WP14)

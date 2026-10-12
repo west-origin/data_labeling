@@ -238,6 +238,28 @@ def test_list_models_and_tokenize() -> None:
         _client(lambda req: httpx.Response(503)).list_models()
 
 
+def test_model_entries_and_server_version() -> None:
+    """/v1/models 항목 원본(max_model_len 등), /version의 엔진 버전 (없거나 형식이 다르면 None)."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/v1/models":
+            return httpx.Response(200, json={"data": [{"id": "a", "max_model_len": 16384}]})
+        if req.url.path == "/version":
+            return httpx.Response(200, json={"version": "0.11.0"})
+        return httpx.Response(404)
+
+    client = _client(handler)
+    assert client.model_entries() == [{"id": "a", "max_model_len": 16384}]
+    assert client.server_version() == "0.11.0"
+    assert _client(lambda req: httpx.Response(404)).server_version() is None
+    assert _client(lambda req: httpx.Response(200, json=[1])).server_version() is None
+    assert _client(lambda req: httpx.Response(200, text="x")).server_version() is None
+    with pytest.raises(VlmUnavailableError, match="id 없는"):
+        _client(lambda req: httpx.Response(200, json={"data": [{"x": 1}]})).model_entries()
+    with pytest.raises(VlmUnavailableError):
+        _client(lambda req: httpx.Response(503)).server_version()
+
+
 def test_with_backoff_retries_only_unavailable() -> None:
     """장애만 backoff 대기마다 다시 부른다 (시도 = len + 1). Retry-After가 더 길면 그만큼 기다리되
     backoff 최댓값을 넘지 않는다 (큰 Retry-After에 오래 멈추지 않게). 설정 오류(4xx)는 즉시

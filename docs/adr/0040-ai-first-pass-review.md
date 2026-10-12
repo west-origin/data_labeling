@@ -1,13 +1,14 @@
 # ADR 0040: AI 1차 검수(로컬 VLM)는 참고용 판정만 남기고 사람 검수를 줄이지 않는다
 
-- 상태: 채택 (단계 구현 중. WP17.0~17.2 구현, WP17.3~17.9는 [구현 계획 WP17](../ai-implementation-plan.md#wp17-ai-1차-검수로컬-vlm))
+- 상태: 채택 (단계 구현 중. WP17.0~17.4 구현(17.3은 Spark 실측 대기), WP17.5~17.9는 [구현 계획 WP17](../ai-implementation-plan.md#wp17-ai-1차-검수로컬-vlm))
 - 날짜: 2026-10-11
 - 관련: WP10(행동 VLM), WP6·WP12(검수 연동·운영), ADR 0010(상업 사용), ADR 0012(행동 2단 구조),
   ADR 0015·0019(검수된 라벨 보호, 시각 규약), ADR 0024(블러본만), ADR 0033(세대·과거 정책 복귀),
   ADR 0039(블러 변경 시 매체 회수).
   계약 추가: `dlp_schema.aireview`(판정·단위·실행·노출·결과), `ReviewReason`의 `ai_*` 4개,
   `schemas/ai_review_unit|ai_review_run|ai_exposure|ai_outcome.schema.json`,
-  `schemas/review_assignment.schema.json`(사유 열거형). DB 표·Alembic 0019는 WP17.4에서 더한다.
+  `schemas/review_assignment.schema.json`(사유 열거형). DB 표 5개는 Alembic 0019(down 0017, WP17.4),
+  저장소는 `dlp_schema.db.aireview_repository`.
 
 ## 배경
 
@@ -181,7 +182,7 @@ AI가 모두 ok여도 사람 검수 없이는 `dlp review verify`가 실패한�
 | I4 | 판정·제안은 운영 라벨·학습·내보내기·스냅샷에 섞이지 않는다 | 별도 표, import 정적 검사, 격리 회귀 테스트(WP17.5) |
 | I5 | AI 표는 추가만 한다 | 0019 트리거(추가 전용·TRUNCATE 금지, WP17.4) |
 | I6 | 제안은 사람이 적용할 때만 라벨이 되고, 내용은 DB에서 다시 읽어 검증한다 | `ai_collect.apply_decisions`·`settle`(WP17.7) |
-| I7 | 사내 서버만, 서버 모델 = 정책 모델 | `allow_external: false`, 사내 주소 검사(WP17.5), 응답 `model` 대조(종료 5), `make licenses` |
+| I7 | 사내 서버만, 서버 모델 = 정책 모델 | `allow_external: false`, 사내 주소 검사(probe·bench WP17.3, run WP17.5, 밖이면 요청 0건), 응답 `model` 대조(종료 5), `make licenses` |
 | I8 | 재실행은 멱등이다 | 입력 전체를 담은 단위 키, 단위 안 문맥 분할, `done_unit_ids`, `ON CONFLICT DO NOTHING` |
 | I9 | AI는 사람 검수를 줄이지 않는다 | 증가 프로필은 렌더와 무관, 생략 경로 없음 |
 | I10 | 블러가 바뀌면 이전 블러본으로 만든 이유는 보이지 않는다 | 단위 키·표시 프로필의 렌더 해시, 실행 중 렌더 재확인, 회수 실행기 |
@@ -196,6 +197,20 @@ AI가 모두 ok여도 사람 검수 없이는 `dlp review verify`가 실패한�
   끝난다 (A-08의 4xx 부분). 트랜잭션이 되돌려져 결과는 그대로다.
 - 하지 않은 것: 행동 단계의 메시지 순서 변경, 공용 프레임 추출기 적용, F-PAR-07. 셋 다 행동 버전을
   바꿔 검수 전 결과를 다시 만들게 하므로 `actions.yaml vlm.prompt_version` 같은 별도 결정이 필요하다.
+
+## 점검·벤치·추정 (WP17.3)
+
+- `dlp aireview probe`는 서버 성질(모델, 이미지 수 한도, `json_schema` 강제, 범위·길이 키워드,
+  `cached_tokens`, 문맥 길이)을 실제 요청으로 확인하고 정책 조정안을 낸다. 사내 대역 밖 주소에는 요청을
+  하나도 보내지 않는다.
+- `dlp aireview bench`는 합성 장면(사람·글자 없음)을 실제 계획기·프롬프트·재검사로 판정해 장비 1대의
+  무릎 지점(장애 0, p95 < 시간 초과인 최대 처리량)을 잰다. 요청마다 고정 블록 끝에 측정 표식을 넣어
+  고정 접두사만 캐시에 맞게 한다 (운영의 이미지 공유를 빼므로 보수적). 서버 장애는 다시 묻지 않고 오류로
+  센다. 실제 세션 블러본 입력은 `open_blurred`(WP17.5) 뒤에 더한다.
+- `dlp aireview estimate`는 DB의 실제 세션으로 영상 1시간당 작업량을 세고, 벤치 보고서로
+  `대수 = ceil(H × (1+ρ) × D / (86,400 × u))`를 낸다. T_s는 프리필·디코드 한계 중 작은 쪽이다.
+  행동 VLM 처리량은 벤치가 재지 않고 실측 값(`--actions-req-s`)을 받는다. 가정 값은 `aireview.yaml
+  estimate`(digest 제외)에 둔다.
 
 ## 범위 밖 (후속, `docs/handover/issues.yaml` F-AIR)
 
