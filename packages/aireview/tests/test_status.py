@@ -20,6 +20,7 @@ from dlp_schema.db.aireview_repository import (
     insert_ai_run,
     insert_ai_run_event,
     latest_run_state,
+    list_ai_run_events,
 )
 from dlp_schema.db.repository import insert_labels, record_privacy_hold
 from dlp_schema.labels import LabelRecord, Provenance, Source
@@ -255,3 +256,52 @@ def test_narrowed_completed_run_does_not_hide_an_interrupted_full_run(
     assert unfinished == "interrupted:unavailable" and p.verdict_version not in done
     _run(db, p)
     assert state() == (None, frozenset({p.verdict_version}))
+
+
+def test_full_run_after_narrowed_run_with_the_same_plan_records_full_completion(
+    tmp_path: Path, policy: AiReviewPolicy
+) -> None:
+    """좁힌 실행의 계획이 전체 계획과 같은 단위 집합이어도, 뒤이은 전체 실행은 할 일 없음으로 끝나지
+    않고 전체 완료(completed, `partial:` 아님)를 남긴다.
+
+    정답 근거: 공간 묶음 종류를 비운 정책이라 계획에는 시간 묶음 단위만 있다. `--groups temporal,
+    temporal_long`으로 좁힌 실행은 이 단위를 모두 쓰고 completed:partial로 마감한다(완료 버전에
+    들지 않는다). 같은 계획의 전체 실행은 쓸 단위가 없어 서버에 묻지 않지만 전체 완료를 남겨야
+    required 게이트의 완료 버전에 지금 버전이 든다 (전에는 nothing_to_do로 끝나 게이트가
+    max_wait_h 뒤 waived:timeout으로 열렸다). 그 뒤 같은 계획을 다시 돌리면 할 일 없음이다.
+    """
+    p = with_policy(policy, kinds={"spatial": []})
+    db = db_scene(tmp_path, n_units=4)
+    work = tmp_path / "w"
+    work.mkdir()
+    inp = load_input(db.engine, db.labeling, db.session_id, p, db.privacy, work, raw_bucket=RAW)
+    temporal = frozenset({AiGroup.TEMPORAL, AiGroup.TEMPORAL_LONG})
+    assert {u.group for u in planned_units(inp, p, RunOptions())} <= temporal
+    judge = OracleJudge(list(db.scene.labels))
+
+    def run(options: RunOptions) -> RunSummary:
+        summary = run_from_db(
+            db.engine, db.labeling, db.session_id, judge, p, db.privacy, raw_bucket=RAW,
+            options=options,
+        )  # fmt: skip
+        assert summary is not None
+        return summary
+
+    def done() -> frozenset[str]:
+        with db.engine.connect() as conn:
+            return latest_run_state(conn, [db.session_id])[db.session_id].completed_versions
+
+    narrowed = run(RunOptions(workers=2, groups=temporal, narrowed="groups=temporal,temporal_long"))
+    assert narrowed.status == "completed" and narrowed.written == narrowed.planned > 0
+    assert p.verdict_version not in done()
+    calls = judge.calls
+    full = run(RunOptions(workers=2))
+    assert (full.status, full.reason, full.todo, full.written) == ("completed", None, 0, 0)
+    assert judge.calls == calls  # 쓸 단위가 없으니 서버에 묻지 않는다
+    assert p.verdict_version in done()
+    with db.engine.connect() as conn:
+        last = list_ai_run_events(conn, db.session_id)[-1]
+    assert last.event is AiRunEventKind.COMPLETED and last.reason is None
+    assert run(RunOptions(workers=2)).status == "nothing_to_do"
+    again = run(RunOptions(workers=2, groups=temporal, narrowed="groups=temporal,temporal_long"))
+    assert again.status == "nothing_to_do"  # 전체 완료는 좁힌 실행에도 완료다

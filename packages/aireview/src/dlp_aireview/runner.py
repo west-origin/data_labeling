@@ -106,6 +106,7 @@ from dlp_schema.aireview import (
     AiRunEvent,
     AiRunEventKind,
     AiSelectionRecord,
+    is_full_completion,
 )
 from dlp_schema.db.aireview_repository import (
     AiRunState,
@@ -289,9 +290,10 @@ class UnitSink(Protocol):
         """이미 기록한 단위 ID."""
         ...
 
-    def is_complete(self, session_id: str, version: str, plan_digest: str) -> bool:
+    def is_complete(self, session_id: str, version: str, plan_digest: str, *, full: bool) -> bool:
         """가장 최근 실행이 이 버전·이 계획으로 completed인가 (같은 계획의 재실행은 아무것도
-        쓰지 않는다)."""
+        쓰지 않는다). full(좁히지 않은 실행)이면 좁힌 실행의 `partial:` 마감은 완료가 아니다
+        (`_completed`)."""
         ...
 
     def start(self, run: AiReviewRun, event: AiRunEvent) -> None:
@@ -307,13 +309,21 @@ class UnitSink(Protocol):
         ...
 
 
-def _completed(state: AiRunState | None, version: str, plan_digest: str) -> bool:
-    """가장 최근 이벤트가 가장 최근 실행의 completed이고 그 실행이 이 버전·계획인가."""
+def _completed(state: AiRunState | None, version: str, plan_digest: str, *, full: bool) -> bool:
+    """가장 최근 이벤트가 가장 최근 실행의 completed이고 그 실행이 이 버전·계획인가.
+
+    full(좁히지 않은 실행)이면 그 completed가 전체 완료여야 한다 (`is_full_completion`). 좁힌
+    실행(`--groups`·`--mode flagged`)의 계획이 전체 계획과 같은 단위 집합이어도 그 마감은
+    `partial:`이라 완료 버전(`latest_run_state.completed_versions`)에 들지 않으므로, 뒤이은 전체
+    실행이 할 일 없음으로 끝나면 전체 완료 기록이 영영 생기지 않는다 (required 게이트가
+    `max_wait_h` 뒤 waived:timeout으로 열린다). 그때는 새 단위 없이 실행·마감만 남긴다.
+    """
     if state is None or state.last_run is None:
         return False
     run, last = state.last_run, state.last_event
+    finished = is_full_completion(last) if full else last.event is AiRunEventKind.COMPLETED
     return (
-        last.event is AiRunEventKind.COMPLETED
+        finished
         and last.run_id == run.run_id
         and run.version == version
         and run.plan_digest == plan_digest
@@ -332,11 +342,11 @@ class DbSink:
         with self.engine.connect() as conn:
             return done_unit_ids(conn, session_id, version)
 
-    def is_complete(self, session_id: str, version: str, plan_digest: str) -> bool:
+    def is_complete(self, session_id: str, version: str, plan_digest: str, *, full: bool) -> bool:
         """`UnitSink.is_complete` (실행 상태 `latest_run_state`로 본다)."""
         with self.engine.connect() as conn:
             state = latest_run_state(conn, [session_id]).get(session_id)
-        return _completed(state, version, plan_digest)
+        return _completed(state, version, plan_digest, full=full)
 
     def start(self, run: AiReviewRun, event: AiRunEvent) -> None:
         """실행 기록 + started 이벤트 (한 트랜잭션)."""
@@ -379,7 +389,7 @@ class MemorySink:
                 if u.session_id == session_id and u.version == version
             }
 
-    def is_complete(self, session_id: str, version: str, plan_digest: str) -> bool:
+    def is_complete(self, session_id: str, version: str, plan_digest: str, *, full: bool) -> bool:
         """`UnitSink.is_complete`."""
         with self._lock:
             events = [e for e in self.events if e.session_id == session_id]
@@ -387,7 +397,7 @@ class MemorySink:
         if not events or not runs:
             return False
         state = AiRunState(session_id, events[-1], runs[-1], frozenset(), None)
-        return _completed(state, version, plan_digest)
+        return _completed(state, version, plan_digest, full=full)
 
     def start(self, run: AiReviewRun, event: AiRunEvent) -> None:
         """실행과 started 이벤트를 남긴다."""
@@ -1018,7 +1028,8 @@ def run_session(
     )
     if opts.dry_run:
         return base
-    if not todo and sink.is_complete(sid, version, plan_digest(units)):
+    full = opts.narrowed is None  # 좁힌 실행의 partial 완료는 전체 실행의 완료가 아니다
+    if not todo and sink.is_complete(sid, version, plan_digest(units), full=full):
         return replace(base, status="nothing_to_do", elapsed_s=clock() - start)
     if opts.cancel is not None and opts.cancel.is_set():
         detail = "시작하기 전에 멈췄습니다 (아무것도 쓰지 않았습니다)"
