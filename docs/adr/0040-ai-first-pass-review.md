@@ -235,15 +235,23 @@ AI가 모두 ok여도 사람 검수 없이는 `dlp review verify`가 실패한�
   서버도 닫히지 않는다). 모든 엔드포인트가 `abort_after_s`보다 오래 막히면 새 요청을 멈추고
   interrupted:unavailable(종료 3). 재시도 끝에도 장애인 단위는 기록하지 않고 넘어간다(다음 실행이 다시
   묻는다). 설정 오류(4xx, 모델 불일치) aborted:config(종료 5), 실행 중 블러 변경
-  aborted:render_changed(종료 6), `--max-minutes` interrupted:max_minutes(종료 8).
+  aborted:render_changed(종료 6), 실행 중 사용 중지·승인 보류 aborted:session_not_ready(종료 6, 주기
+  확인이 렌더 해시와 함께 세션 상태도 본다), `--max-minutes` interrupted:max_minutes(종료 8), Ctrl-C
+  interrupted:signal(130), 버그 aborted:error(1). 멈춘 뒤에는 묶음에서 보낼 곳을 기다리거나 백오프하던
+  요청도 보내지 않는다(멈춤 신호). 여러 세션 중 하나의 단위 몇 개만 장애이거나 버그면 다음 세션을
+  계속하고, 설정·시간·Ctrl-C·묶음 전체 장애면 남은 세션을 시작하지 않는다.
 - 같은 계획이 이미 completed면 아무것도 쓰지 않는다. 단위는 모두 있는데 마감 이벤트가 없으면(강제
   종료) 서버를 부르지 않고 완료 기록만 남긴다.
 - `--pending`은 prelabeled·승인·보류 아님이고, 마지막 라벨 기록 뒤 `pending.quiet_minutes`가 지났고,
-  지금 버전·렌더의 단위에 든 적 없는 대상이 남은 세션을 prelabeled 전이 순으로 고른다(맥락 변화는
-  보지 않는다). 운영 cron은 `dlp actions run S && dlp aireview run S`를 잇고 `--pending`은 따라잡기용이다.
+  지금 버전·렌더의 단위에 든 적 없는 대상이 남았거나 지금 버전의 최근 실행이 completed가 아닌 세션을
+  고른다(맥락 변화는 보지 않는다. 공간 트랙처럼 여러 창에 드는 대상은 한 창만 판정돼도 "판정됨"이라,
+  중단된 실행은 실행 상태로 다시 고른다). 순서는 최근 시도가 실패하지 않은 세션 먼저, 그 안에서
+  prelabeled 전이 순이다. `--limit`은 실제로 실행한 세션만 센다(전제 실패·처리 중은 세지 않는다).
+  운영 cron은 `dlp actions run S && dlp aireview run S`를 잇고 `--pending`은 따라잡기용이다.
 - 원본 접근은 장갑 Parquet뿐이고 감사 원본 저장소 용도 `aireview.run`이다(손 상태 대상이 있고 센서를
-  켰을 때만, 정적 검사). `dlp aireview status|show|waive`는 진행 상태, 단위 감사 기록, required 모드의
-  건너뛰기 결정(`waived`, 사유 `manual: …`)이다.
+  켰을 때만, 블러본 게이트를 모두 통과한 뒤, 정적 검사). `dlp aireview status|show|waive`는 진행 상태
+  (실행 중인지는 잠금을 잡지 않고 `pg_locks`로 본다), 단위 감사 기록, required 모드의 건너뛰기
+  결정(`waived`, 사유 `manual: …`)이다.
 
 ## 범위 밖 (후속, `docs/handover/issues.yaml` F-AIR)
 

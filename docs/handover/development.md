@@ -139,7 +139,8 @@ serve|assign|register-webhooks|refresh-urls|plan|qa|quality`, 작업의 CVAT 계
 보고서는 `reports/aireview-bench/`(Git 제외)에 남는다. 장비 대수를 정하는 절차는 VLM 서버 안내의
 "Spark 실측 절차"다. 판정 실행은 `dlp aireview run <세션>|--pending`(AI 표에만 쓴다, 라벨 이력은 그대로)이고
 상태는 `dlp aireview status`다. 개발 호스트에서 서버 없이 계획만 보려면 `dlp aireview run <세션>
---dry-run`(블러본 게이트는 거친다). 실행기 테스트는 `MemorySink`·SQLite·가짜 서버로 `make test`에서,
+--dry-run`(블러본 게이트는 거치고, 손 상태 대상이 있으면 단위 키의 센서 해시를 위해 장갑 Parquet은
+읽는다). 실행기 테스트는 `MemorySink`·SQLite·가짜 서버로 `make test`에서,
 세션 잠금 경합·`ON CONFLICT`는 `make test-services`에서 돈다.
 
 ## 검사 범위와 자원

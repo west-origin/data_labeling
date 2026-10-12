@@ -10,11 +10,14 @@
 from __future__ import annotations
 
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 import pytest
 import sqlalchemy as sa
 
+from dlp_aireview.backend import JudgeReply, JudgeRequest
 from dlp_aireview.oracle import OracleJudge
 from dlp_aireview.policy import AiReviewPolicy
 from dlp_aireview.runner import (
@@ -33,7 +36,7 @@ from dlp_schema.db.aireview_repository import (
     list_ai_runs,
     list_ai_units,
 )
-from dlp_schema.db.repository import get_labels, record_privacy_hold
+from dlp_schema.db.repository import get_labels, record_privacy_hold, set_lifecycle
 from dlp_schema.db.tables import label_records
 from dlp_schema.episode import current_labels
 from dlp_schema.labels import Hand, LabelRecord
@@ -173,3 +176,53 @@ def test_dry_run_downloads_but_writes_nothing(tmp_path: Path, policy: AiReviewPo
     assert judge.calls == 0
     with db.engine.connect() as conn:
         assert list_ai_runs(conn, db.session_id) == []
+
+
+class _ChangeOnFirst:
+    """첫 판정 요청 때 세션 상태를 바꾸고(사용 중지 또는 승인 보류 기록만) 요청마다 조금 기다리는
+    백엔드 감싸기 (실행 중 다른 명령이 세션을 바꾼 상황)."""
+
+    def __init__(self, inner: OracleJudge, db: DbScene, change: str) -> None:
+        self.inner, self.db, self.change, self.info = inner, db, change, inner.info
+        self.calls = 0
+        self._lock = threading.Lock()
+
+    def judge(self, request: JudgeRequest) -> JudgeReply:
+        with self._lock:
+            self.calls += 1
+            first = self.calls == 1
+        if first:
+            with self.db.engine.begin() as conn:
+                if self.change == "withdrawn":
+                    set_lifecycle(conn, self.db.session_id, LifecycleState.WITHDRAWN, actor="t")
+                else:
+                    record_privacy_hold(
+                        conn, self.db.session_id, "hold", reason="노출 신고", actor="ops",
+                        at=FIXED_TIME,
+                    )  # fmt: skip
+        time.sleep(0.1)
+        return self.inner.judge(request)
+
+
+@pytest.mark.parametrize("change", ["withdrawn", "held"])
+def test_session_change_during_run_aborts(
+    tmp_path: Path, policy: AiReviewPolicy, change: str
+) -> None:
+    """실행 중 세션이 사용 중지되거나 승인 보류 기록이 생기면 (렌더 기록·승인 상태는 그대로라 렌더
+    해시만 보면 놓친다) 주기 확인에서 aborted:session_not_ready (종료 6)로 멈추고 남은 단위를 묻지
+    않는다."""
+    db = db_scene(tmp_path)
+    p = with_policy(policy, server={"render_check_interval_s": 0.05, "commit_interval_s": 0.05})
+    judge = _ChangeOnFirst(OracleJudge(list(db.scene.labels)), db, change)
+    summary = run_from_db(
+        db.engine, db.labeling, db.session_id, judge, p, db.privacy, raw_bucket=RAW,
+        options=RunOptions(workers=1),
+    )  # fmt: skip
+    assert summary is not None
+    assert (summary.status, summary.reason, summary.exit_code) == (
+        "aborted", "session_not_ready", 6,
+    )  # fmt: skip
+    assert judge.calls < summary.planned
+    with db.engine.connect() as conn:
+        last = list_ai_run_events(conn, db.session_id)[-1]
+    assert (last.event.value, last.reason) == ("aborted", "session_not_ready")

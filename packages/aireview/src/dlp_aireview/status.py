@@ -8,8 +8,12 @@
   1. 생애주기 prelabeled, 프라이버시 승인, 승인 보류 아님 (사용 중지 세션은 prelabeled가 아니다).
   2. 조용한 시간: 마지막 라벨 기록(`created_at`)이 `pending.quiet_minutes`보다 오래됐다
      (프리라벨 뒤 relations·actions가 쓰는 중에 판정하지 않게).
-  3. 판정 없는 현재 대상이 남았다.
-  4. 순서: prelabeled 전이 시각 순 (같으면 세션 ID).
+  3. 다음 중 하나: 판정 없는 현재 대상이 남았다, 또는 지금 판정 버전의 가장 최근 실행이 completed로
+     끝나지 않았다 (`unfinished_run`: 중단·멈춤·마감 없음). 둘째 조건이 없으면 공간 트랙처럼 여러
+     창에 드는 대상은 한 창만 판정돼도 "판정됨"이라, 중단된 실행의 남은 창이 다시 골라지지 않는다.
+  4. 순서: 최근 시도가 실패하지 않은 세션 먼저(실패 = 지금 버전 최근 실행이 장애·멈춤·마감 없음으로
+     끝남, 시간·Ctrl-C 중단은 실패가 아니다), 그 안에서 prelabeled 전이 시각 순 (같으면 세션 ID).
+     늘 실패하는 세션이 앞자리를 차지해 뒤 세션이 판정되지 않는 일을 막는다.
 - `session_status`: `dlp aireview status`의 세션 한 줄 (판정률, 단위, fallback, 판정 분포, 마지막
   이벤트, 최근 처리량 기반 남은 시간, 백로그).
 """
@@ -29,7 +33,7 @@ from dlp_privacy.errors import RenderNotCurrentError
 from dlp_privacy.policy import PrivacyPolicy
 from dlp_privacy.rendering import expected_render_hash
 from dlp_schema.aireview import AiGroup, AiReviewUnit, AiRunEvent, AiRunEventKind, valid_verdicts
-from dlp_schema.db.aireview_repository import list_ai_run_events, list_ai_units
+from dlp_schema.db.aireview_repository import list_ai_run_events, list_ai_runs, list_ai_units
 from dlp_schema.db.ontology_repository import get_session_ontology
 from dlp_schema.db.repository import (
     active_privacy_hold,
@@ -124,6 +128,7 @@ class PendingSession:
         session_id: 세션. prelabeled_at: prelabeled로 전이한 시각 (기록이 없으면 None).
         uncovered: 판정되지 않은 대상 수. duration_ms: 영상 길이 (백로그 시간).
         last_label_at: 마지막 라벨 기록 시각.
+        unfinished: 지금 버전 최근 실행의 마지막 이벤트 (`이벤트:사유`, completed면 None).
     """
 
     session_id: str
@@ -131,6 +136,29 @@ class PendingSession:
     uncovered: int
     duration_ms: int
     last_label_at: datetime | None
+    unfinished: str | None = None
+
+    @property
+    def failed(self) -> bool:
+        """최근 시도가 실패했는가 (장애·멈춤·마감 없음. 시간·Ctrl-C 중단은 실패가 아니다)."""
+        return self.unfinished is not None and self.unfinished not in _NOT_FAILED
+
+
+# 끝나지 않았지만 실패는 아닌 마감 (다음 실행이 이어서 하면 된다)
+_NOT_FAILED = frozenset({"interrupted:max_minutes", "interrupted:signal"})
+
+
+def unfinished_run(conn: sa.Connection, session_id: str, version: str) -> str | None:
+    """이 판정 버전의 가장 최근 실행이 completed로 끝나지 않았으면 그 마지막 이벤트(`이벤트:사유`,
+    마감 이벤트가 없으면 started), 끝났거나 실행이 없으면 None."""
+    runs = [r for r in list_ai_runs(conn, session_id) if r.version == version]
+    if not runs:
+        return None
+    last = runs[-1].run_id
+    events = [e for e in list_ai_run_events(conn, session_id) if e.run_id == last]
+    if events and events[-1].event is AiRunEventKind.COMPLETED:
+        return None
+    return _event_text(events[-1]) if events else AiRunEventKind.STARTED.value
 
 
 def prelabeled_at(conn: sa.Connection, session_id: str) -> datetime | None:
@@ -168,11 +196,13 @@ def _pending_one(
         conn, session, current_labels(history), policy, privacy_policy,
         groups=groups, flagged_for=flagged_for,
     )  # fmt: skip
-    if not cov.uncovered:
+    unfinished = unfinished_run(conn, session_id, policy.verdict_version)
+    if not cov.uncovered and unfinished is None:
         return None
     return PendingSession(
-        session_id, prelabeled_at(conn, session_id), len(cov.uncovered), session.duration_ms, last
-    )
+        session_id, prelabeled_at(conn, session_id), len(cov.uncovered), session.duration_ms, last,
+        unfinished,
+    )  # fmt: skip
 
 
 def pending_sessions(
@@ -197,7 +227,7 @@ def pending_sessions(
         if (p := _pending_one(conn, sid, policy, privacy_policy, now, groups, flagged_for))
     ]
     far = datetime.max.replace(tzinfo=now.tzinfo)
-    return sorted(found, key=lambda p: (p.prelabeled_at or far, p.session_id))
+    return sorted(found, key=lambda p: (p.failed, p.prelabeled_at or far, p.session_id))
 
 
 # ---------------------------------------------------------------- status

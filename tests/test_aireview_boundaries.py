@@ -15,12 +15,22 @@
     이름)를 import하지 않는다 (판정이 학습·판매 데이터에 섞이지 않게).
 
 WP17.5에서 더한 검사
-- 블러본 경계 모듈(`media.py`)은 원본 버킷 이름 비교(`labeling.bucket == raw_bucket`)와 렌더 게이트
-  (`expected_render_hash`·`assert_render_current`·`check_fetched`)를 거친다 (지우면 실패).
+- 블러본 경계 함수(`media.open_blurred`)의 본문이 원본 버킷 이름 비교(`labeling.bucket ==
+  raw_bucket`) → 렌더 게이트(`expected_render_hash` → `assert_render_current`) → 받기(`get_file`) →
+  파일 해시(`check_fetched`) → PTS 인덱스 → 받은 뒤 렌더 해시 재확인(`render_hashes_now`) 순서로
+  부른다 (ast로 그 함수 안의 호출만 본다: 하나라도 지우거나 순서를 바꾸면 실패).
 - 실행기(`runner.py`)는 프레임을 `media.frames_for`로만 얻고 영상 파일을 직접 열지 않는다.
-- CLI의 AI 검수 명령(`dlp_cli/aireview*.py`)은 원본 저장소를 용도 `aireview.run`으로만 만든다
-  (장갑 Parquet, 월간 감사가 이상 접근으로 표시하지 않게 `ops.yaml audit.service_purposes`에
-  등록된 값).
+- CLI의 AI 검수 명령(`dlp_cli/aireview*.py`, 판정·벤치 입력을 조립하는 층)도 픽셀 출처를 지킨다
+  (함수별 호출을 ast로 본다).
+  - 판정 프레임 객체(`BlurredFrame`)·실행 입력(`RunInput`)을 직접 만들지 않는다 (`load_input`이
+    `open_blurred`·`frames_for`로 만든다).
+  - 벤치 입력(`BenchInput`)은 합성 장면(`_scene_input`, `scene_frame`)과 세션 블러본
+    (`_session_input`, `load_input`)에서만 만든다.
+  - 저장소 파일 받기(`get_file`)는 장갑 Parquet을 읽는 `glove_context` 하나뿐이고, 영상 디코드
+    (`decode_frames`)는 합성 MP4를 쓰고 재는 `_measure_decode` 하나뿐이다.
+  - 프록시·원본 버킷 리터럴(`proxy_key`, `"dlp-raw"`)을 쓰지 않는다.
+  - 원본 저장소는 용도 `aireview.run`으로만 만든다 (장갑 Parquet, 월간 감사가 이상 접근으로
+    표시하지 않게 `ops.yaml audit.service_purposes`에 등록된 값).
 
 정답은 저장소 소스 자체다. 서비스 없이 돈다.
 """
@@ -170,14 +180,104 @@ def test_scan_catches_bypass_forms() -> None:
 CLI = ROOT / "packages" / "cli" / "src" / "dlp_cli"
 
 
+def _call_name(node: ast.Call) -> str:
+    """호출 이름: `f(…)`의 f, `a.b(…)`의 b (그 밖은 빈 문자열)."""
+    if isinstance(node.func, ast.Name):
+        return node.func.id
+    if isinstance(node.func, ast.Attribute):
+        return node.func.attr
+    return ""
+
+
+def calls_by_function(source: str) -> dict[str, list[tuple[int, str]]]:
+    """최상위 함수·클래스 메서드마다 그 안의 호출 (줄 번호, 이름), 줄 순서. 안쪽 함수의 호출은 바깥
+    함수에 센다. 함수 밖(모듈 수준) 호출은 `<module>`에 모은다."""
+    out: dict[str, list[tuple[int, str]]] = {}
+    for node in ast.parse(source).body:
+        if isinstance(node, ast.ClassDef):
+            members = [n for n in node.body if isinstance(n, ast.FunctionDef)]
+        elif isinstance(node, ast.FunctionDef):
+            members = [node]
+        else:
+            members = []
+        for fn in members:
+            calls = [(c.lineno, _call_name(c)) for c in ast.walk(fn) if isinstance(c, ast.Call)]
+            out[fn.name] = sorted(calls)
+        if not members:
+            calls = [(c.lineno, _call_name(c)) for c in ast.walk(node) if isinstance(c, ast.Call)]
+            out.setdefault("<module>", []).extend(sorted(calls))
+    return out
+
+
+def _functions_calling(source: str, name: str) -> set[str]:
+    """`name(…)`을 부르는 함수 이름들."""
+    return {
+        fn for fn, calls in calls_by_function(source).items() if any(n == name for _, n in calls)
+    }
+
+
+def _open_blurred_order(source: str) -> list[str]:
+    """`open_blurred` 본문의 게이트 단계를 처음 나온 줄 순서로 (원본 버킷 이름 비교는
+    `bucket==`)."""
+    fn = next(
+        n for n in ast.walk(ast.parse(source))
+        if isinstance(n, ast.FunctionDef) and n.name == "open_blurred"
+    )  # fmt: skip
+    steps = {
+        "expected_render_hash", "assert_render_current", "get_file", "check_fetched",
+        "build_pts_index", "render_hashes_now",
+    }  # fmt: skip
+    seen: dict[str, int] = {}
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Call) and _call_name(node) in steps:
+            name = _call_name(node)
+            seen[name] = min(seen.get(name, node.lineno), node.lineno)
+        if (
+            isinstance(node, ast.Compare)
+            and isinstance(node.left, ast.Attribute)
+            and node.left.attr == "bucket"
+            and isinstance(node.ops[0], ast.Eq)
+            and any(isinstance(c, ast.Name) and c.id == "raw_bucket" for c in node.comparators)
+        ):
+            seen["bucket=="] = node.lineno
+    return sorted(seen, key=lambda k: seen[k])
+
+
+GATE_ORDER = [
+    "bucket==", "expected_render_hash", "assert_render_current", "get_file", "check_fetched",
+    "build_pts_index", "render_hashes_now",
+]  # fmt: skip
+
+
 def test_blurred_media_module_keeps_its_gates() -> None:
-    """`media.py`가 원본 버킷 이름 거부와 렌더 게이트 네 단계를 모두 부른다 (I1)."""
+    """`open_blurred` 본문이 원본 버킷 이름 거부 → 렌더 게이트 → 받기·파일 해시 → PTS → 받은 뒤 렌더
+    재확인을 이 순서로 모두 부른다 (I1). 재확인 함수는 렌더 해시를 다시 계산하고, 프레임 객체는
+    `frames_for`만 만든다."""
     text = (SRC / "media.py").read_text("utf-8")
-    for needle in (
-        "labeling.bucket == raw_bucket", "expected_render_hash(", "assert_render_current(",
-        "check_fetched(", "render_hashes_now(",
-    ):  # fmt: skip
-        assert needle in text, needle
+    assert _open_blurred_order(text) == GATE_ORDER
+    calls = calls_by_function(text)
+    assert "expected_render_hash" in {n for _, n in calls["render_hashes_now"]}
+    assert _functions_calling(text, "BlurredFrame") == {"frames_for"}
+    assert _functions_calling(text, "decode_frames") == {"frames_for"}
+
+
+def test_gate_order_check_catches_removed_or_moved_gates() -> None:
+    """검사의 회귀 테스트: 받은 뒤 재확인을 지우거나(`now = rhash`) 받기를 게이트 앞으로 옮기면
+    순서가 달라진다."""
+    text = (SRC / "media.py").read_text("utf-8")
+    dropped = text.replace(
+        "now = render_hashes_now(engine, session_id, [stream_id], privacy_policy)[stream_id]",
+        "now = rhash",
+    )
+    assert dropped != text and _open_blurred_order(dropped) != GATE_ORDER
+    moved = (
+        "def open_blurred(labeling, raw_bucket):\n"
+        "    labeling.get_file(k, p)\n"
+        "    if labeling.bucket == raw_bucket:\n        raise E\n"
+        "    expected_render_hash(c)\n    assert_render_current(c)\n    check_fetched(p)\n"
+        "    build_pts_index(p)\n    render_hashes_now(e)\n"
+    )
+    assert _open_blurred_order(moved) != GATE_ORDER
 
 
 def test_runner_gets_frames_only_through_blurred_media() -> None:
@@ -200,6 +300,61 @@ def _raw_store_purposes(source: str) -> list[object]:
             arg = node.args[2] if len(node.args) > 2 else None
             out.append(arg.value if isinstance(arg, ast.Constant) else type(arg).__name__)
     return out
+
+
+def cli_pixel_problems(sources: dict[str, str]) -> list[str]:
+    """AI 검수 CLI 소스({파일 이름: 소스})의 픽셀 출처 위반 (모듈 docstring의 CLI 규칙)."""
+    problems: list[str] = []
+    allowed = {
+        "BenchInput": {"_scene_input", "_session_input"},
+        "get_file": {"glove_context"},
+        "decode_frames": {"_measure_decode"},
+        "BlurredFrame": set[str](),
+        "RunInput": set[str](),
+    }
+    for name, source in sources.items():
+        calls = calls_by_function(source)
+        for call, ok in allowed.items():
+            bad = _functions_calling(source, call) - ok
+            problems += [f"{name}: {fn}에서 {call}(…)" for fn in sorted(bad)]
+        needs = {
+            "_session_input": "load_input", "_scene_input": "scene_frame",
+            "_measure_decode": "write_video",
+        }  # fmt: skip
+        for fn, need in needs.items():
+            if fn in calls and need not in {n for _, n in calls[fn]}:
+                problems.append(f"{name}: {fn}이 {need}(…)를 거치지 않는다")
+        problems += [
+            f"{name}:{n}: {line.strip()}"
+            for n, line in enumerate(source.splitlines(), start=1)
+            if "proxy_key" in line or '"dlp-raw"' in line
+        ]
+    return problems
+
+
+def test_aireview_cli_builds_pixels_only_from_blurred_or_synthetic() -> None:
+    """AI 검수 CLI는 판정·벤치 입력의 픽셀을 `load_input`(블러본 경계)이나 합성 장면에서만 얻는다.
+    파일 받기는 장갑 Parquet 하나, 영상 디코드는 합성 MP4 측정 하나뿐이다."""
+    sources = {p.name: p.read_text("utf-8") for p in sorted(CLI.glob("aireview*.py"))}
+    assert {"aireview_cmds.py", "aireview_run_cmds.py"} <= set(sources)
+    assert cli_pixel_problems(sources) == []
+    session_input = calls_by_function(sources["aireview_cmds.py"])["_session_input"]
+    assert "frames" in {n for _, n in session_input}  # 프레임은 load_input 결과의 공급에서만
+
+
+def test_cli_pixel_check_catches_bypasses() -> None:
+    """검사의 회귀 테스트: CLI가 프레임 객체·실행 입력을 직접 만들거나, 다른 곳에서 파일을 받거나,
+    세션 벤치 입력이 `load_input`을 거치지 않으면 잡는다."""
+    bad = {
+        "a.py": "def f(x):\n    return BlurredFrame('s', 0, 0, x)\n",
+        "b.py": "def g(store):\n    store.get_file('k', 'p')\n    return RunInput()\n",
+        "c.py": "def _session_input(a):\n    return BenchInput(a)\n",
+        "d.py": "k = proxy_key('s', 'bodycam')\n",
+    }
+    found = cli_pixel_problems(bad)
+    assert any("BlurredFrame" in p for p in found) and any("RunInput" in p for p in found)
+    assert any("get_file" in p for p in found) and any("load_input" in p for p in found)
+    assert any("proxy_key" in p for p in found)
 
 
 def test_aireview_cli_reads_raw_only_for_aireview_run() -> None:

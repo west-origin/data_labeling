@@ -5,13 +5,17 @@
 해시로 렌더 기록을 쓴 것이다 (서비스 불필요).
 
 정답 근거: 종료 코드 표(모듈 docstring), AI 표 행 수, 판정 전후 라벨 이력, 가짜 서버가 받은 요청,
-프리라벨과 같은 함수(`glove_contact_intervals`)로 직접 계산한 장갑 접촉 해시, 원본 접근 감사 기록.
+프리라벨과 같은 함수(`glove_contact_intervals`)에 같은 입력(장갑 시각을 그 스트림의 `to_master_ms`로
+바꾼 것)을 넣어 직접 계산한 장갑 접촉 해시, 원본 접근 감사 기록.
 """
 
 from __future__ import annotations
 
+import _thread
 import json
 import socket
+import threading
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -20,7 +24,9 @@ import numpy as np
 import pytest
 import sqlalchemy
 
-from dlp_aireview.policy import load_policy
+from dlp_aireview import backend as backend_module
+from dlp_aireview.backend import JudgeReply, JudgeRequest, OpenAICompatibleJudge
+from dlp_aireview.policy import AiReviewPolicy, load_policy
 from dlp_aireview.sensors import SensorContext
 from dlp_aireview.testing import FakeOpenAIServer
 from dlp_cli import aireview_cmds, aireview_run_cmds
@@ -29,6 +35,7 @@ from dlp_fixtures.actions import generate_action_scenario
 from dlp_fixtures.aireview import aireview_scene, scene_frame
 from dlp_fixtures.video import write_video
 from dlp_media.storage import LocalStore, blurred_key, sha256_file
+from dlp_models.vlm import VlmUnavailableError
 from dlp_prelabel.contact import glove_contact_intervals
 from dlp_prelabel.policy import load_policy as load_prelabel_policy
 from dlp_privacy.policy import load_policy as load_privacy_policy
@@ -57,13 +64,17 @@ MODEL = "Qwen/Qwen3-VL-8B-Instruct"
 
 
 class _AwareSqlalchemy:
-    """CLI 모듈의 `sa`를 대신한다: create_engine만 시간대 보존 SQLite 엔진으로 바꾼다."""
+    """CLI 모듈의 `sa`를 대신한다: create_engine만 시간대 보존 SQLite 엔진으로 바꾼다 (넘긴 연결 풀
+    인자는 `engine_kwargs`에 남긴다)."""
+
+    def __init__(self) -> None:
+        self.engine_kwargs: list[dict[str, Any]] = []
 
     def __getattr__(self, name: str) -> Any:
         return getattr(sqlalchemy, name)
 
-    @staticmethod
-    def create_engine(url: Any, **_: Any) -> sqlalchemy.Engine:
+    def create_engine(self, url: Any, **kwargs: Any) -> sqlalchemy.Engine:
+        self.engine_kwargs.append(kwargs)
         return sqlite_db(str(url), create=False)
 
 
@@ -94,9 +105,13 @@ class World:
         privacy: PrivacyState = PrivacyState.APPROVED,
         glove: bool = False,
         upload_glove: bool = True,
+        glove_sync: SyncMethod = SyncMethod.SHARED_CLOCK,
+        glove_offset_ms: float = 0.0,
+        glove_scale: float = 1.0,
         publish: bool = True,
     ) -> Session:
-        """합성 세션 하나 (장갑이면 오른손 장갑 스트림과 원본 버킷 Parquet)."""
+        """합성 세션 하나 (장갑이면 오른손 장갑 스트림과 원본 버킷 Parquet. 장갑 동기화 방법·
+        오프셋·시계 배율을 정할 수 있다)."""
         scene = aireview_scene(0, session_id=sid, n_units=2)
         streams: list[dict[str, Any]] = [s.model_dump() for s in scene.session.streams]
         if glove:
@@ -108,7 +123,8 @@ class World:
                 self.raw.put_file(key, path, sha256_file(path))
             streams.append({
                 "stream_id": "glove_r", "kind": StreamKind.GLOVE_RIGHT, "uri": self.raw.uri(key),
-                "sample_rate_hz": 100.0, "sync_method": SyncMethod.SHARED_CLOCK,
+                "sample_rate_hz": 100.0, "sync_method": glove_sync, "offset_ms": glove_offset_ms,
+                "clock_scale": glove_scale,
             })  # fmt: skip
         session = Session.model_validate(
             scene.session.model_dump()
@@ -145,6 +161,20 @@ class World:
         with self.engine.connect() as conn:
             return len(list_ai_units(conn, sid))
 
+    def events(self, sid: str) -> list[str]:
+        """실행 이벤트 (`이벤트:사유`)."""
+        with self.engine.connect() as conn:
+            return [
+                f"{e.event.value}:{e.reason}" if e.reason else e.event.value
+                for e in list_ai_run_events(conn, sid)
+            ]
+
+    def raw_reads(self) -> set[tuple[str, str, str]]:
+        """원본 접근 감사 기록 (용도, 동작, 키)."""
+        with self.engine.connect() as conn:
+            rows = conn.execute(sqlalchemy.select(raw_access_log)).mappings()
+            return {(r["purpose"], r["action"], r["key"]) for r in rows}
+
 
 @pytest.fixture
 def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
@@ -154,6 +184,23 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
     monkeypatch.setattr(aireview_run_cmds, "sa", _AwareSqlalchemy())
     monkeypatch.setattr(aireview_cmds, "sa", _AwareSqlalchemy())
     return World(tmp_path)
+
+
+def tune(monkeypatch: pytest.MonkeyPatch, **server: object) -> None:
+    """`dlp aireview run`이 읽는 정책의 server 절을 바꾼다 (백오프·동시성 등, 판정 버전 그대로)."""
+    original = aireview_run_cmds.load_policy
+
+    def load(root: Path) -> AiReviewPolicy:
+        data = original(root).model_dump()
+        data["server"].update(server)
+        return AiReviewPolicy.model_validate(data)
+
+    monkeypatch.setattr(aireview_run_cmds, "load_policy", load)
+
+
+def pending_line(out: str) -> str:
+    """`[pending]`이 고른 세션 줄."""
+    return next(line for line in out.splitlines() if line.startswith("[pending] 판정할"))
 
 
 def _summaries(out: str) -> list[dict[str, Any]]:
@@ -248,7 +295,11 @@ def test_session_preconditions_exit_6_and_pending_skips_them(
         out = capsys.readouterr().out
         assert "사용 중지" in out and "승인 보류" in out and "승인 전" in out and "렌더" in out
         assert main(["aireview", "run", "--pending", *url, *world.args]) == 0
-        assert "[블러본 게이트] unrendered" in capsys.readouterr().out
+        out = capsys.readouterr().out
+        # 승인 전·사용 중지·승인 보류는 고르지 않는다. 렌더 기록이 없는 세션은 DB 상태로는 골라지고
+        # 블러본 게이트에서 거부된다 (종료 6이지만 --pending은 0으로 센다)
+        assert pending_line(out) == "[pending] 판정할 세션 1개: unrendered"
+        assert "[블러본 게이트] unrendered" in out
         assert server.chat_calls == []
 
 
@@ -256,9 +307,12 @@ def test_glove_sensor_reads_raw_only_for_aireview_run(
     world: World, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """장갑 Parquet은 감사 원본 저장소로 용도 `aireview.run`만 읽고, 접촉 해시는 프리라벨과 같은
-    함수·입력으로 직접 계산한 값과 같다. Parquet이 없으면 6, --no-sensor면 센서 없이 진행한다."""
-    world.add("g1", glove=True)
+    함수에 같은 입력(장갑 시각을 그 스트림의 오프셋·시계 배율로 마스터 ms로 바꾼 것)을 넣어 직접
+    계산한 값과 같다. 동기화되지 않은 장갑은 쓰지 않고(센서 없음, 원본도 읽지 않음), Parquet이
+    없으면 6, --no-sensor면 센서 없이 진행한다."""
+    session = world.add("g1", glove=True, glove_offset_ms=137.5, glove_scale=1.002)
     world.add("g2", glove=True, upload_glove=False)
+    world.add("g3", glove=True, glove_sync=SyncMethod.UNSYNCED)
     with FakeOpenAIServer(MODEL) as server:
         assert main(["aireview", "run", "g1", "--vlm-url", server.url, *world.args]) == 0
         assert main(["aireview", "run", "g2", "--vlm-url", server.url, *world.args]) == 6
@@ -267,22 +321,27 @@ def test_glove_sensor_reads_raw_only_for_aireview_run(
             main(["aireview", "run", "g2", "--no-sensor", "--vlm-url", server.url, *world.args])
             == 0
         )
+        assert main(["aireview", "run", "g3", "--vlm-url", server.url, *world.args]) == 0
     path = world.store / BUCKETS.raw / "sessions/g1/glove_right.parquet"
     series = glove_series(path, ["pressure"])
     glove = load_prelabel_policy(repo_root()).contact.glove
-    found = glove_contact_intervals(np.asarray(series.t_ms, dtype=float), series.values, glove)
+    stream = next(s for s in session.streams if s.stream_id == "glove_r")
+    master = np.asarray([stream.to_master_ms(float(t)) for t in series.t_ms])
+    found = glove_contact_intervals(master, series.values, glove)
     want = SensorContext.of({Hand.RIGHT: [(c.start_ms, c.end_ms) for c in found]})
+    raw_time = glove_contact_intervals(np.asarray(series.t_ms, dtype=float), series.values, glove)
+    unshifted = SensorContext.of({Hand.RIGHT: [(c.start_ms, c.end_ms) for c in raw_time]})
+    assert want.sha256 != unshifted.sha256  # 오프셋을 무시하면 다른 해시 (마스터 변환을 검사한다)
     with world.engine.connect() as conn:
         [run1] = list_ai_runs(conn, "g1")
         [run2] = list_ai_runs(conn, "g2")
+        [run3] = list_ai_runs(conn, "g3")
         units = list_ai_units(conn, "g1")
-        access = [dict(r) for r in conn.execute(sqlalchemy.select(raw_access_log)).mappings()]
-    assert run1.sensor_sha256 == want.sha256 and run2.sensor_sha256 == "absent"
+    assert run1.sensor_sha256 == want.sha256
+    assert run2.sensor_sha256 == run3.sensor_sha256 == "absent"
     hand_units = [u for u in units if u.sensor_sha256 != "absent"]
     assert hand_units and all(u.sensor_sha256 == want.sha256 for u in hand_units)
-    assert access and {(a["purpose"], a["action"], a["key"]) for a in access} == {
-        ("aireview.run", "read", "sessions/g1/glove_right.parquet")
-    }
+    assert world.raw_reads() == {("aireview.run", "read", "sessions/g1/glove_right.parquet")}
     labels = {x.label_id: x for x in aireview_scene(0, session_id="g1", n_units=2).labels}
     assert all(
         any(isinstance(labels[i].payload, HandStatePayload) for i in u.target_label_ids)
@@ -309,13 +368,154 @@ def test_pending_selects_quiet_uncovered_sessions(
         url = ["--vlm-url", server.url]
         assert main(["aireview", "run", "--pending", "--limit", "1", *url, *world.args]) == 0
         out = capsys.readouterr().out
-        assert "판정할 세션 2개 중 1개: p1" in out
+        assert pending_line(out) == "[pending] 판정할 세션 2개 (실행 상한 1개): p1, p2"
+        assert "다음 실행으로 미룬 세션 1개: p2" in out
         assert world.units("p1") > 0 and world.units("p2") == 0
         assert main(["aireview", "run", "--pending", *url, *world.args]) == 0
-        assert "판정할 세션 1개 중 1개: p2" in capsys.readouterr().out
+        assert pending_line(capsys.readouterr().out) == "[pending] 판정할 세션 1개: p2"
         assert main(["aireview", "status", "--pending", "--url", world.url]) == 0
         assert "볼 세션이 없습니다" in capsys.readouterr().out
     assert world.units("raw") == world.units("busy") == 0
+
+
+def test_pending_limit_counts_only_sessions_that_ran(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--limit은 실제로 실행한 세션만 센다: 렌더 기록이 없는 세션(블러본 게이트, 6)이 앞자리에
+    있어도 뒤 세션이 판정된다 (늘 거부되는 세션이 상한을 차지해 뒤 세션이 영영 판정되지 않는 일이
+    없다)."""
+    world.add("a-old", publish=False)
+    world.add("b-new")
+    with FakeOpenAIServer(MODEL) as server:
+        run = ["aireview", "run", "--pending", "--limit", "1", "--vlm-url", server.url]
+        assert main([*run, *world.args]) == 0
+    out = capsys.readouterr().out
+    assert pending_line(out) == "[pending] 판정할 세션 2개 (실행 상한 1개): a-old, b-new"
+    assert "[블러본 게이트] a-old" in out and "미룬 세션" not in out
+    assert world.units("a-old") == 0 and world.units("b-new") > 0
+
+
+def test_unit_outage_or_error_in_one_session_does_not_block_others(
+    world: World, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """한 세션의 단위 하나가 재시도 끝에도 장애여도(엔드포인트는 건강) 뒤 세션은 판정된다 (종료 3은
+    남는다). 다음 --pending은 그 세션을 다시 골라 남은 단위만 묻는다. 한 세션의 예상하지 못한 오류
+    (종료 1, aborted:error)도 다음 세션을 막지 않는다."""
+    tune(monkeypatch, backoff_s=[0.0])
+    world.add("p1")
+    world.add("p2")
+    real = OpenAICompatibleJudge.judge
+    bad: list[str] = []
+    healed = threading.Event()
+
+    def judge(self: OpenAICompatibleJudge, request: JudgeRequest) -> JudgeReply:
+        if not bad:
+            bad.append(request.unit_id)  # 처음 묻는 단위 (p1의 단위)
+        if request.unit_id == bad[0] and not healed.is_set():
+            raise VlmUnavailableError("이 단위만 장애 (시험)")
+        return real(self, request)
+
+    monkeypatch.setattr(backend_module.OpenAICompatibleJudge, "judge", judge)
+    with FakeOpenAIServer(MODEL) as server:
+        url = ["--vlm-url", server.url]
+        assert main(["aireview", "run", "--pending", *url, *world.args]) == 3
+        out = capsys.readouterr().out
+        assert "[건너뜀]" not in out
+        assert world.events("p1")[-1] == "interrupted:unavailable"
+        assert world.events("p2")[-1] == "completed" and world.units("p2") > 0
+        healed.set()
+        asked = len(server.chat_calls)
+        assert main(["aireview", "run", "--pending", *url, *world.args]) == 0
+        assert pending_line(capsys.readouterr().out) == "[pending] 판정할 세션 1개: p1"
+        assert [c.unit_id for c in server.chat_calls[asked:]] == bad
+    assert world.events("p1")[-1] == "completed"
+
+    from dlp_aireview import runner
+
+    world.add("e1")
+    world.add("e2")
+    frames_for = runner.frames_for
+
+    def broken(media: Any, idx: Any) -> Any:
+        if media.session_id == "e1":
+            raise ValueError("영상 손상 (시험)")
+        return frames_for(media, idx)
+
+    monkeypatch.setattr(runner, "frames_for", broken)
+    with FakeOpenAIServer(MODEL) as server:
+        assert main(["aireview", "run", "e1", "e2", "--vlm-url", server.url, *world.args]) == 1
+    assert "[실행 오류] e1: ValueError" in capsys.readouterr().out
+    assert world.events("e1")[-1] == "aborted:error"
+    assert world.events("e2")[-1] == "completed" and world.units("e2") > 0
+
+
+def test_parallel_ctrl_c_closes_running_sessions(
+    world: World, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--parallel-sessions 2에서 Ctrl-C(주 스레드): 함께 돌던 두 세션 모두 진행 중 요청만 끝내고
+    interrupted:signal로 닫힌 뒤 KeyboardInterrupt가 올라온다 (남은 단위를 다 묻을 때까지 기다리지
+    않는다). 엔드포인트 동시성 1이라 한 세션의 작업자는 묶음에서 기다리다 멈춤 신호를 본다."""
+    tune(monkeypatch, concurrency_per_endpoint=1)
+    world.add("c1")
+    world.add("c2")
+    assert main(["aireview", "run", "c1", "c2", "--dry-run", *world.args]) == 0
+    planned = sum(s["planned"] for s in _summaries(capsys.readouterr().out))
+    with FakeOpenAIServer(MODEL, latency_s=0.4) as server:
+
+        def interrupt() -> None:
+            while len(server.chat_calls) < 2:
+                time.sleep(0.01)
+            _thread.interrupt_main()
+
+        threading.Thread(target=interrupt, daemon=True).start()
+        with pytest.raises(KeyboardInterrupt):
+            main(
+                ["aireview", "run", "c1", "c2", "--parallel-sessions", "2",
+                 "--vlm-url", server.url, *world.args]
+            )  # fmt: skip
+        asked = len(server.chat_calls)
+    # 두 세션 모두 마감 이벤트를 쓴 뒤에 명령이 끝났다. 남은 단위는 묻지 않았고 물은 것은 모두 기록
+    assert world.events("c1")[-1] == world.events("c2")[-1] == "interrupted:signal"
+    assert asked < planned and world.units("c1") + world.units("c2") == asked
+
+
+def test_unrendered_glove_session_reads_no_raw(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """블러본 게이트에서 거부되는 세션은 장갑 원본을 읽지 않는다 (--pending이 매번 다시 골라도 원본
+    접근 기록이 쌓이지 않는다). --dry-run도 게이트를 먼저 거치고, 게이트를 통과하면 손 상태 대상의
+    센서 해시를 위해 장갑을 읽는다 (용도 aireview.run)."""
+    world.add("u1", glove=True, publish=False)
+    with FakeOpenAIServer(MODEL) as server:
+        for _ in range(2):
+            assert main(["aireview", "run", "--pending", "--vlm-url", server.url, *world.args]) == 0
+        assert main(["aireview", "run", "u1", "--dry-run", *world.args]) == 6
+        assert server.chat_calls == []
+    assert "[블러본 게이트] u1" in capsys.readouterr().out
+    assert world.raw_reads() == set()
+    world.add("d1", glove=True)
+    assert main(["aireview", "run", "d1", "--dry-run", *world.args]) == 0
+    assert world.raw_reads() == {("aireview.run", "read", "sessions/d1/glove_right.parquet")}
+    assert world.units("d1") == 0
+
+
+def test_parallel_sessions_size_the_connection_pool(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--parallel-sessions K면 연결 풀을 세션마다 연결 2개(실행 잠금 + 기록자)에 맞춰 키운다 (기본
+    5 + 넘침 10이면 K가 8 이상일 때 연결을 기다리다 실패한다). K는 1 이상이어야 한다."""
+    world.add("s1")
+    dry = ["aireview", "run", "s1", "--dry-run"]
+    assert main([*dry, "--parallel-sessions", "16", *world.args]) == 0
+    module: Any = aireview_run_cmds  # sa를 _AwareSqlalchemy로 바꿔 둔 모듈 (world 픽스처)
+    fake = module.sa
+    assert isinstance(fake, _AwareSqlalchemy)
+    [kwargs] = fake.engine_kwargs
+    assert kwargs == aireview_run_cmds.engine_options(16)
+    assert kwargs["pool_size"] >= 2 * 16 + 1
+    with pytest.raises(SystemExit):
+        main(["aireview", "run", "s1", "--parallel-sessions", "0", *world.args])
+    capsys.readouterr()
 
 
 def test_status_show_and_waive(world: World, capsys: pytest.CaptureFixture[str]) -> None:
@@ -346,6 +546,8 @@ def test_status_show_and_waive(world: World, capsys: pytest.CaptureFixture[str])
     assert main(["aireview", "show", "air-" + "f" * 24, "--url", world.url]) == 1
     assert main(["aireview", "waive", "s1", "--reason", "서버 점검", "--url", world.url]) == 0
     assert main(["aireview", "waive", "nope", "--reason", "x", "--url", world.url]) == 1
+    assert main(["aireview", "status", "nope", "--url", world.url]) == 1
+    assert "세션이 없습니다: nope" in capsys.readouterr().out
     with world.engine.connect() as conn:
         last = list_ai_run_events(conn, "s1")[-1]
     assert last.event.value == "waived" and last.reason == "manual: 서버 점검" and last.actor

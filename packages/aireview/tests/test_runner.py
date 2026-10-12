@@ -437,7 +437,7 @@ def test_summary_json_and_exit_codes() -> None:
     assert base.exit_code == 0 and base.to_json()["exit_code"] == 0
     codes = {
         "unavailable": 3, "max_minutes": 8, "config": 5, "render_changed": 6, "error": 1,
-        "signal": 130,
+        "signal": 130, "session_not_ready": 6,
     }  # fmt: skip
     for reason, code in codes.items():
         assert RunSummary("s001", "v", "aborted", reason=reason).exit_code == code
@@ -455,3 +455,130 @@ def test_event_counts_record_written_and_verdicts(
     assert done.counts["verdict_ok"] == sum(summary.verdicts.values())
     assert sink.runs[0].backend.endpoints == ("oracle",)
     assert sink.runs[0].render_hashes == RENDER
+
+
+class _Trip:
+    """n번째 판정 요청이 끝나면 바깥 멈춤 신호를 켜는 백엔드 감싸기 (CLI의 Ctrl-C 신호 흉내)."""
+
+    def __init__(self, inner: JudgeBackend, cancel: threading.Event, after: int) -> None:
+        self.inner, self.cancel, self.after, self.info = inner, cancel, after, inner.info
+        self.calls = 0
+        self._lock = threading.Lock()
+
+    def judge(self, request: JudgeRequest) -> JudgeReply:
+        reply = self.inner.judge(request)
+        with self._lock:
+            self.calls += 1
+            if self.calls >= self.after:
+                self.cancel.set()
+        return reply
+
+
+def test_external_cancel_closes_with_signal(
+    scene: Scene, policy: AiReviewPolicy, ontology: Ontology
+) -> None:
+    """바깥 멈춤 신호(CLI가 여러 세션에 함께 주는 Ctrl-C 신호)가 실행 중 켜지면 새 단위를 묻지 않고
+    interrupted:signal (종료 130). 이미 받은 판정은 기록한다. 시작 전에 이미 켜져 있으면 아무것도
+    쓰지 않는다. 마지막 단위를 판정한 뒤에 켜졌으면 계획 단위가 모두 있으므로 completed다."""
+    cancel = threading.Event()
+    trip = _Trip(OracleJudge(scene.labels), cancel, after=2)
+    sink = MemorySink()
+    opts = RunOptions(workers=1, cancel=cancel)
+    summary = run_session(run_input(scene, ontology), trip, sink, fast(policy), options=opts)
+    assert (summary.status, summary.reason, summary.exit_code) == ("interrupted", "signal", 130)
+    assert trip.calls == 2 and len(sink.units) == 2 < summary.planned
+    assert events(sink)[-1] == ("interrupted", "signal")
+    fresh, judge = MemorySink(), OracleJudge(scene.labels)
+    before = run_session(run_input(scene, ontology), judge, fresh, fast(policy), options=opts)
+    assert (before.status, before.reason) == ("interrupted", "signal")
+    assert judge.calls == 0 and fresh.runs == [] and fresh.events == [] and fresh.units == {}
+    planned = len(planned_units(run_input(scene, ontology), policy, RunOptions()))
+    late = threading.Event()
+    last = _Trip(OracleJudge(scene.labels), late, after=planned)
+    done = MemorySink()
+    summary = run_session(
+        run_input(scene, ontology), last, done, fast(policy),
+        options=RunOptions(workers=1, cancel=late),
+    )  # fmt: skip
+    assert summary.status == "completed" and late.is_set() and len(done.units) == planned
+
+
+def test_deadline_stops_workers_waiting_on_open_endpoints(
+    scene: Scene, policy: AiReviewPolicy, ontology: Ontology
+) -> None:
+    """모든 엔드포인트가 열려 작업자가 보낼 곳을 기다리는 중에 --max-minutes 마감이 지나면
+    abort_after_s(60초)를 기다리지 않고 interrupted:max_minutes로 곧 끝난다. 마감 뒤에는 요청을
+    보내지 않는다 (기록자가 마감을 보고 멈추면 묶음에서 기다리던 요청도 멈춤 신호를 본다)."""
+    p = fast(policy, breaker_failures=1, breaker_cooldown_s=60, abort_after_s=60, backoff_s=(0.0,))
+    with FakeOpenAIServer() as server:
+        server.fail(503, times=10**6)
+        pool = judge_pool(p, server)
+        start = time.monotonic()
+        summary = run_session(
+            run_input(scene, ontology), pool, MemorySink(), p,
+            options=RunOptions(workers=2, deadline=time.monotonic() + 0.5),
+        )  # fmt: skip
+        took = time.monotonic() - start
+        asked = len(server.chat_calls)
+    assert (summary.status, summary.reason, summary.exit_code) == ("interrupted", "max_minutes", 8)
+    assert took < 5 and asked <= 2 and not pool.dead
+
+
+def test_debug_dir_write_failure_does_not_kill_workers(
+    tmp_path: Path, scene: Scene, policy: AiReviewPolicy, ontology: Ontology
+) -> None:
+    """--debug-dir에 쓸 수 없어도(디렉터리 자리에 파일) 작업자가 죽지 않는다: 경고 한 번을 내고 더
+    남기지 않으며 실행은 끝까지 가 completed다 (작업자가 모두 조용히 죽으면 생산자가 가득 찬 큐
+    앞에서 영영 기다리고 실행이 세션 잠금을 쥔 채 멈춘다)."""
+    blocker = tmp_path / "file"
+    blocker.write_text("x")
+    judge = OracleJudge(scene.labels, faults=("not_json",) * 1000)
+    sink, lines = MemorySink(), list[str]()
+    result: dict[str, RunSummary] = {}
+
+    def go() -> None:
+        result["s"] = run_session(
+            run_input(scene, ontology), judge, sink, fast(policy),
+            options=RunOptions(workers=1, debug_dir=blocker), progress=lines.append,
+        )  # fmt: skip
+
+    t = threading.Thread(target=go, daemon=True)
+    t.start()
+    t.join(timeout=60)
+    assert not t.is_alive(), "실행이 멈추지 않았다"
+    summary = result["s"]
+    assert summary.status == "completed" and len(sink.units) == summary.planned
+    assert sum("디버그 응답을 남기지 못해" in line for line in lines) == 1
+
+
+class _BlindSink(MemorySink):
+    """잠금이 뚫린 경쟁 실행 흉내: 계획할 때만 이미 쓴 단위를 모르는 것처럼 답한다 (그사이 다른
+    실행이 같은 단위를 썼다. 쓰기·마감 확인은 같은 규칙)."""
+
+    planned = False
+
+    def done_unit_ids(self, session_id: str, version: str) -> set[str]:
+        if not self.planned:
+            self.planned = True
+            return set()
+        return super().done_unit_ids(session_id, version)
+
+    def is_complete(self, session_id: str, version: str, plan_digest: str) -> bool:
+        return False
+
+
+def test_written_counts_judged_units_inserted_counts_new_rows(
+    scene: Scene, policy: AiReviewPolicy, ontology: Ontology
+) -> None:
+    """written은 판정해 기록 대상에 넘긴 단위 수, inserted는 실제로 새로 들어간 행 수다. 다른
+    실행이 같은 단위를 먼저 썼으면(`ON CONFLICT DO NOTHING`) inserted는 0이고 마감 이벤트에도
+    그대로 남는다."""
+    sink = MemorySink()
+    first = run_session(run_input(scene, ontology), OracleJudge(scene.labels), sink, fast(policy))
+    assert first.inserted == first.written == first.planned
+    blind = _BlindSink()
+    blind.units = dict(sink.units)
+    again = run_session(run_input(scene, ontology), OracleJudge(scene.labels), blind, fast(policy))
+    assert again.status == "completed" and again.written == again.planned and again.inserted == 0
+    assert blind.events[-1].counts["written"] == again.planned
+    assert blind.events[-1].counts["inserted"] == 0 and again.to_json()["inserted"] == 0

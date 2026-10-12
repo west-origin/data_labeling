@@ -20,7 +20,10 @@
   `breaker_failures`번이면 그 엔드포인트의 차단기를 연다. `breaker_cooldown_s` 뒤 반개방
   확인(`ping`: `/v1/models`)을 통과하면 시험 요청 하나를 보내고, 그 요청이 성공하면 닫는다.
   모든 엔드포인트가 `abort_after_s`보다 오래 열려 있으면 `AllEndpointsDownError`로 실행을
-  멈춘다 (종료 3).
+  멈춘다 (종료 3). 실행기가 주는 멈춤 신호(`judge(request, cancel=…)`)가 켜지면 보낼 곳을
+  기다리거나 백오프하던 요청은 보내지 않고 `JudgeCancelledError`로 끝난다 (실행기 멈춤·
+  `--max-minutes`·Ctrl-C 뒤에 새 요청을 보내지 않게). 실행기는 `CancellableBackend`로 감싸 이
+  신호를 넘긴다.
 
 판정은 `LabelRecord`를 내지 않으므로 `dlp_schema.predictor.Predictor`가 아니다. "어댑터 + CPU stub"
 규칙은 `JudgeBackend` + `OracleJudge`로 지킨다.
@@ -313,6 +316,11 @@ class AllEndpointsDownError(VlmUnavailableError):
     """모든 엔드포인트의 차단기가 `server.abort_after_s`보다 오래 열려 있다 (실행 중단, 종료 3)."""
 
 
+class JudgeCancelledError(RuntimeError):
+    """실행이 멈춰(멈춤 신호) 이 요청을 보내지 않았다. 장애가 아니고, 그 단위는 기록하지 않는다
+    (다음 실행이 묻는다)."""
+
+
 @dataclass(frozen=True)
 class PoolMember:
     """묶음에 넣을 엔드포인트 하나.
@@ -407,12 +415,25 @@ class EndpointPool:
         with self._cond:
             return sum(e.in_flight for e in self._eps)
 
+    @property
+    def dead(self) -> bool:
+        """모든 엔드포인트가 `abort_after_s`보다 오래 막혀 묶음을 멈췄는가 (그 뒤 요청은 모두
+        `AllEndpointsDownError`, CLI가 남은 세션을 시작하지 않는다)."""
+        with self._cond:
+            return self._dead is not None
+
     # ------------------------------------------------------------ 요청
 
-    def judge(self, request: JudgeRequest) -> JudgeReply:
+    def judge(self, request: JudgeRequest, *, cancel: threading.Event | None = None) -> JudgeReply:
         """요청 하나를 엔드포인트에 보낸다 (장애면 백오프 뒤 다시, 클래스 docstring).
 
+        Args:
+            request: 판정 요청.
+            cancel: 실행기 멈춤 신호. 켜지면 보낼 곳을 기다리거나 백오프하던 이 요청을 보내지 않는다
+                (이미 보낸 요청은 끝까지 기다린다). None이면 보지 않는다.
+
         Raises:
+            JudgeCancelledError: 보내기 전에 멈춤 신호가 켜졌다.
             AllEndpointsDownError: 모든 엔드포인트가 `abort_after_s`보다 오래 막힘.
             VlmUnavailableError: 이 요청이 재시도 상한까지 장애.
             VlmRequestError: 설정 오류·서버 모델 불일치 (`VlmContextError` 포함, 엔드포인트 장애로
@@ -421,7 +442,7 @@ class EndpointPool:
         backoff = self.server.backoff_s
         attempts = len(backoff) + 1
         for attempt in range(attempts):
-            ep = self._acquire(request.affinity)
+            ep = self._acquire(request.affinity, cancel)
             try:
                 reply = ep.member.backend.judge(request)
             except VlmRequestError:
@@ -432,7 +453,7 @@ class EndpointPool:
                 if attempt + 1 == attempts:
                     raise
                 cap = max(backoff, default=0.0)
-                self.sleep(min(max(backoff[attempt], exc.retry_after_s or 0.0), cap))
+                self._pause(min(max(backoff[attempt], exc.retry_after_s or 0.0), cap), cancel)
                 continue
             except BaseException:
                 self._release(ep, ok=None)
@@ -453,18 +474,29 @@ class EndpointPool:
             return home
         return min(free, key=lambda e: e.in_flight)
 
-    def _acquire(self, affinity: str) -> _Endpoint:
+    def _pause(self, seconds: float, cancel: threading.Event | None) -> None:
+        """백오프 대기. 멈춤 신호가 있으면 그 신호로 기다리고 켜지면 `JudgeCancelledError`."""
+        if cancel is None:
+            self.sleep(seconds)
+        elif cancel.wait(seconds):
+            raise JudgeCancelledError("실행이 멈춰 다시 묻지 않습니다")
+
+    def _acquire(self, affinity: str, cancel: threading.Event | None = None) -> _Endpoint:
         """보낼 엔드포인트를 정하고 처리 중 수를 올린다 (여유가 없거나 모두 막히면 기다린다).
 
         쉼(`breaker_cooldown_s`)이 끝난 열린 엔드포인트가 있으면 먼저 반개방 확인을 하고 이 요청을
-        시험 요청으로 보낸다 (회복한 장비를 다시 돌린다). 그다음 닫힌 엔드포인트(`_pick`).
+        시험 요청으로 보낸다 (회복한 장비를 다시 돌린다). 그다음 닫힌 엔드포인트(`_pick`). 기다림은
+        최대 0.5초씩이라 멈춤 신호(`cancel`)를 그 간격으로 본다.
 
         Raises:
+            JudgeCancelledError: 멈춤 신호가 켜졌다 (보내지 않는다).
             AllEndpointsDownError: 모두 `abort_after_s`보다 오래 막힘.
             VlmRequestError: 반개방 확인(`ping`)이 설정 오류.
         """
         with self._cond:
             while True:
+                if cancel is not None and cancel.is_set():
+                    raise JudgeCancelledError("실행이 멈춰 새 요청을 보내지 않습니다")
                 if self._dead is not None:
                     raise AllEndpointsDownError(self._dead)
                 trial = self._half_open()
@@ -555,6 +587,30 @@ class EndpointPool:
             elif trial and ep.opened_at is not None:
                 ep.opened_at = self.clock()  # 시험 요청이 장애 아닌 예외로 끝남: 다시 쉰다
             self._cond.notify_all()
+
+
+class CancellableBackend:
+    """멈춤 신호를 보는 백엔드 감싸기 (실행기가 실행마다 하나 만든다, `JudgeBackend` 구현).
+
+    신호가 이미 켜졌으면 보내지 않고 `JudgeCancelledError`를 낸다. 안쪽이 `EndpointPool`이면 보낼
+    곳을 기다리거나 백오프하는 동안에도 신호를 본다 (`EndpointPool.judge(cancel=…)`). 이미 보낸
+    요청은 끝까지 기다린다. 묶음은 여러 세션 실행이 함께 쓰므로 신호는 요청마다 넘긴다 (한 세션이
+    멈춰도 다른 세션의 요청은 그대로다).
+    """
+
+    def __init__(self, inner: JudgeBackend, cancel: threading.Event) -> None:
+        """inner: 실제 백엔드. cancel: 실행기 멈춤 신호."""
+        self.inner = inner
+        self.cancel = cancel
+        self.info = inner.info
+
+    def judge(self, request: JudgeRequest) -> JudgeReply:
+        """신호를 보며 묻는다 (클래스 docstring). 오류는 `EndpointPool.judge`와 같다."""
+        if self.cancel.is_set():
+            raise JudgeCancelledError("실행이 멈춰 새 요청을 보내지 않습니다")
+        if isinstance(self.inner, EndpointPool):
+            return self.inner.judge(request, cancel=self.cancel)
+        return self.inner.judge(request)
 
 
 def _try_ping(ping: Callable[[], None]) -> bool:

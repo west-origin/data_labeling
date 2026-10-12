@@ -20,6 +20,7 @@ DB·외부 도구·내보내기 동작을 바꾸면 그 경로의 서비스/격�
 | 데이터셋/내보내기 | `datasets`, `export/runner.py`, 형식별 모듈 | 분할·사용 중지·프라이버시·가명·게시 순서. datasets/export 테스트, `make test-isolated` |
 | 검수 화면 테마 | `config/review_ui.yaml`, `review/ui_theme.py`, `services/review-theme/`, `cvat.sh` | 색·로고·단축키·모드 전환만. 라벨 이름·왕복 불변. `packages/review/tests/test_ui_theme.py`, `make contracts`(생성 파일 일치). CVAT·Label Studio 버전을 올리면 두 모드 화면을 열어 확인 (ADR 0038) |
 | 원본 접근/보관 | `cli/raw_access.py`, `ops`, 버킷 정책 | 감사 우회·CVAT 사본 보관. `tests/test_raw_access_audited.py`, `tests/test_raw_access_db.py`, ops 테스트 |
+| AI 1차 검수 실행 | `aireview/runner.py`, `backend.py`(`EndpointPool`), `media.py`, `status.py`, `cli/aireview_run_cmds.py`, `aireview.yaml` | 블러본 경계(I1)·판정 버전·재개·종료 코드. `packages/aireview/tests`(`test_runner*.py`, `test_pool.py`, `test_status.py`, `test_blurred_only.py`), `packages/cli/tests/test_aireview_run_cmds.py`, `tests/test_aireview_boundaries.py`, `tests/test_aireview_isolation.py`, services `test_runner_pg.py`·`test_aireview_tables.py`. 판정 버전 해시에서 빠지는 절(`selection`·`kinds`·`pending`·`server`·`gate`·`estimate`) 밖을 바꾸면 모든 단위를 다시 판정한다 (ADR 0040 4.3) |
 | 의존성·환경 | `pyproject.toml`, `uv.lock`, `services`, CI | 모듈 import 외에 실제 서버/DB 실행·의존성 감사. `make check`, 관련 서비스 검사 |
 
 계약·DB 변경에는 ADR과 필요한 이관을 함께 남긴다. 생성된 `schemas/`는 직접 편집하지 않는다.
@@ -56,10 +57,32 @@ DB·외부 도구·내보내기 동작을 바꾸면 그 경로의 서비스/격�
 | 내보내기 | 선커밋된 이력·일부 파일·내부 가명 대응표 | manifest가 최종 전달 기준. 없는 결과는 미완료로 취급하고 현재 승인·사용 중지를 다시 확인 |
 | 학습/배포 | MLflow 실행·산출물, 미승인/거절 모델 | DB 모델 상태·골든 평가·게이트 확인. 산출물 존재만으로 배포하지 않음 |
 | 디스크 부족 | 미완료 산출물·살아 있는 서비스 볼륨 | 공간과 작업 상태 확인. `make clean`/볼륨 삭제로 복구하지 않음 |
+| AI 1차 검수 실행 | 커밋한 판정 단위(추가 전용), 실행 기록과 started 이벤트(마감 없이 끝났으면 `status`가 "중단 추정"), 실행 임시 디렉터리의 블러본(정상 종료면 지움) | 같은 명령을 다시 돌린다: 기록된 단위는 묻지 않고 남은 단위만 묻는다. `--pending`은 판정 없는 대상이 남았거나 지금 버전 최근 실행이 completed가 아닌 세션을 고르고, 최근에 실패한 세션은 뒤로 미룬다. AI 표 행을 지우거나 고치지 않는다 (아래 "AI 1차 검수 실행기") |
 
 렌더 재실행은 실제 파일을 읽어 검사하므로 정상 파일이어도 I/O 비용이 든다.
 내보내기는 이력 선커밋 → 파일 업로드 → 최종 상태 재검사 → manifest 게시 순서를 보존한다.
 분산 트랜잭션이 없으므로 모든 외부 실패가 자동 복구된다고 약속할 수 없다.
+
+## AI 1차 검수 실행기 (WP17.5, ADR 0040)
+
+- 재개: 단위 키는 판정 버전·대상·맥락·프레임 시각·렌더 해시·센서 해시의 해시라, 같은 입력이면 다시
+  묻지 않는다. 판정은 라벨이 아니라 `retractions()`를 쓰지 않는다. 같은 세션에는 실행기 하나만
+  돈다(세션 수준 advisory lock, 연결이 끊기면 풀린다). 상태 조회는 잠금을 잡지 않고 `pg_locks`만 본다.
+- 차단기: 엔드포인트마다 연속 장애 `breaker_failures`번이면 열고, `breaker_cooldown_s` 뒤
+  `/v1/models` 확인과 시험 요청 하나로 닫는다. 모두 `abort_after_s`보다 오래 막히면 묶음이 멈춘다
+  (`EndpointPool.dead`, 종료 3, CLI가 남은 세션을 시작하지 않는다). 요청 하나만 재시도 끝에도
+  장애면 그 단위만 남기고 다음 세션을 계속한다.
+- 멈춤: `--max-minutes`·Ctrl-C·설정 오류·렌더 변경·사용 중지·승인 보류·버그는 새 요청을 멈춘다.
+  묶음에서 보낼 곳을 기다리거나 백오프하던 요청도 멈춤 신호를 본다. 이미 보낸 요청은 받아 기록한다.
+  `--parallel-sessions`의 Ctrl-C는 공유 신호로 모든 세션에 알리고 세션마다 interrupted:signal을 쓴
+  뒤 끝난다. 작업자 스레드의 예외는 aborted:error로 멈춘다 (스레드가 조용히 죽지 않는다).
+- 종료 코드(가장 심각한 것): 5 설정 > 3 장애 > 130 Ctrl-C > 1 버그 > 6 세션 전제·블러 변경·사용
+  중지 > 7 처리 중 > 8 시간. `--pending`은 6·7을 0으로 세고, `--limit`은 실제로 실행한 세션만 센다.
+  4는 회수 대기의 코드라 쓰지 않는다.
+- 원본 접근은 장갑 Parquet 하나(감사 저장소, 용도 `aireview.run`)이고 블러본 게이트를 모두 통과한
+  뒤에만 읽는다. `--dry-run`도 손 상태 대상이 있으면 읽는다 (단위 키에 센서 해시가 든다).
+- DB 연결: 세션 하나가 최대 2개(실행 잠금 + 기록자)라 `--parallel-sessions K`면 연결 풀을
+  `2K+1`(+넘침 10)로 잡는다. K는 PostgreSQL `max_connections`의 절반보다 작게 둔다.
 
 ## 웹훅과 승인 경계
 

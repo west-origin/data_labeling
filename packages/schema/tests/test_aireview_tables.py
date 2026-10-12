@@ -10,11 +10,15 @@
 - 세션별 실행 잠금(`try_lock_aireview`)은 다른 연결과 경합하고, 커밋해도 유지되며, 풀거나 연결이
   끊기면 풀린다. 끊긴 연결의 잠금은 서버 백엔드 프로세스가 끝날 때 비동기로 풀리므로, 백엔드가
   사라질 때까지 기다린 뒤 확인한다.
+- 잠금 보기(`aireview_lock_held`, 상태 조회)는 잠금을 잡지 않고 `pg_locks`만 읽는다: 쥔 연결이
+  있으면 True, 풀리면 False이고, 보는 동안 다른 연결이 잠금을 얻을 수 있다. 키 상위 비트가 1인
+  (음수 bigint) 세션도 맞게 본다.
 - 기록이 있으면 0019를 되돌리지 않는다.
 """
 
 from __future__ import annotations
 
+import hashlib
 import time
 from datetime import timedelta
 
@@ -34,7 +38,7 @@ from dlp_schema.db.aireview_repository import (
     latest_run_state,
     list_ai_units,
 )
-from dlp_schema.db.locks import try_lock_aireview, unlock_aireview
+from dlp_schema.db.locks import aireview_lock_held, try_lock_aireview, unlock_aireview
 from dlp_schema.db.migrate import downgrade
 from dlp_schema.db.repository import get_labels, insert_labels, insert_review_task
 from dlp_schema.labels import Provenance, Source
@@ -187,6 +191,38 @@ def test_aireview_lock_contends_across_connections(pg: sa.Engine) -> None:
     finally:
         first.close()
         second.close()
+
+
+def test_lock_held_is_seen_without_taking_it(pg: sa.Engine) -> None:
+    """`aireview_lock_held`는 잠금을 잡지 않고 누가 쥐었는지만 본다 (상태 조회가 막 시작한 실행기의
+    잠금을 빼앗아 종료 7을 내지 않게). 키의 부호(상위 비트)와 무관하게 맞다."""
+    sids = [f"s{k:03d}" for k in range(40)]
+    signs = {
+        int.from_bytes(hashlib.sha256(f"dlp:aireview:{s}".encode()).digest()[:8], signed=True) < 0
+        for s in sids
+    }
+    assert signs == {True, False}  # 음수·양수 키를 모두 본다
+    holder, viewer, other = pg.connect(), pg.connect(), pg.connect()
+    try:
+        assert not any(aireview_lock_held(viewer, s) for s in sids)
+        for s in sids:
+            assert try_lock_aireview(holder, s)
+        holder.commit()
+        assert all(aireview_lock_held(viewer, s) for s in sids)
+        assert all(aireview_lock_held(holder, s) for s in sids)
+        assert not aireview_lock_held(viewer, "s999")
+        unlock_aireview(holder, sids[0])
+        assert not aireview_lock_held(viewer, sids[0])
+        assert try_lock_aireview(other, sids[0])  # 보는 쪽이 잡고 있지 않다
+        assert aireview_lock_held(viewer, sids[0])
+        unlock_aireview(other, sids[0])
+        for s in sids[1:]:
+            unlock_aireview(holder, s)
+        assert not any(aireview_lock_held(viewer, s) for s in sids)
+    finally:
+        holder.close()
+        viewer.close()
+        other.close()
 
 
 def test_downgrade_refuses_with_ai_records(pg_url: str, pg: sa.Engine) -> None:

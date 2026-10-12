@@ -3,7 +3,7 @@
 - `lock_session`: 세션 행 FOR UPDATE (트랜잭션 잠금).
 - `lock_model_task`: 과제별 배포 직렬화 (트랜잭션 advisory lock).
 - `try_lock_aireview`·`unlock_aireview`: 세션별 AI 판정 실행기 하나 (세션 수준 advisory lock,
-  WP17.4).
+  WP17.4). `aireview_lock_held`: 잠금을 잡지 않고 누가 쥐고 있는지만 본다 (상태 조회).
 """
 
 import hashlib
@@ -87,3 +87,25 @@ def unlock_aireview(conn: sa.Connection, session_id: str) -> None:
     """`try_lock_aireview`로 얻은 잠금을 푼다 (같은 연결에서). 쥐고 있지 않으면 아무 일도 없다."""
     if conn.dialect.name == "postgresql":
         conn.execute(sa.select(sa.func.pg_advisory_unlock(_aireview_key(session_id))))
+
+
+def aireview_lock_held(conn: sa.Connection, session_id: str) -> bool | None:
+    """어떤 연결이 이 세션의 AI 판정 실행 잠금을 쥐고 있는가 (잠금을 잡지 않고 `pg_locks`만 읽는다).
+
+    상태 조회(`dlp aireview status`)가 잠금을 잠깐 잡아 확인하면 그 순간 시작한 실행기가 잠금을 못
+    얻는다. bigint 키 advisory lock은 `pg_locks`에 classid(상위 32비트)·objid(하위 32비트)·
+    objsubid 1로 보인다 (같은 DB만 본다).
+
+    Returns:
+        쥐고 있으면 True, 아니면 False. SQLite(잠금 없음)는 None (모른다).
+    """
+    if conn.dialect.name != "postgresql":
+        return None
+    key = _aireview_key(session_id)
+    query = sa.text(
+        "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND granted"
+        " AND database = (SELECT oid FROM pg_database WHERE datname = current_database())"
+        " AND classid::bigint = :hi AND objid::bigint = :lo AND objsubid = 1)"
+    )
+    held = conn.execute(query, {"hi": (key >> 32) & 0xFFFFFFFF, "lo": key & 0xFFFFFFFF})
+    return bool(held.scalar_one())

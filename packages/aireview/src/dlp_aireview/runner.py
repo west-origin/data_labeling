@@ -26,9 +26,17 @@
     interrupted:unavailable이고 다음 실행이 다시 묻는다. 장애를 unsure로 기록하지 않는다.
   - 설정 오류(4xx, 서버 모델 불일치): aborted:config (종료 5).
   - 렌더 변경: aborted:render_changed (종료 6). 이미 쓴 단위는 표시 프로필에서 빠진다.
+  - 실행 중 세션 사용 중지·승인 보류: aborted:session_not_ready (종료 6, 주기 확인).
   - `options.deadline`(--max-minutes): interrupted:max_minutes (종료 8).
+  - `options.cancel`(CLI 공유 신호, 여러 세션을 함께 돌리다 Ctrl-C) 또는 이 스레드의 Ctrl-C:
+    interrupted:signal (종료 130).
+  - 버그(예외): aborted:error (종료 1). 어느 스레드의 예외든 멈춤 사유를 남기고 멈춘다 (스레드가
+    조용히 죽어 다른 스레드가 영영 기다리지 않게).
+  시간·Ctrl-C로 멈춰도 계획 단위가 모두 기록됐으면 completed다. 멈춘 뒤에는 새 요청을 보내지 않는다:
+  엔드포인트 묶음에서 보낼 곳을 기다리거나 백오프하던 요청도 멈춤 신호를 보고 그만둔다
+  (`CancellableBackend`). 이미 보낸 요청은 끝까지 받아 기록한다.
 - 응답 원문은 DB에 쓰지 않는다 (sha256만). `options.debug_dir`가 있으면 형식이 맞지 않던 응답만
-  로컬 파일로 남긴다.
+  로컬 파일로 남긴다 (쓰지 못하면 경고하고 그만 남긴다).
 
 `UnitSink`(기록 대상) 구현은 `DbSink`(AI 표)와 `MemorySink`(테스트) 두 가지다. 프레임 공급
 (`RunInput.frames`)은 `BlurredFrame`만 낸다 (실제 경로는 `media.frames_for`, 블러본 경계 I1).
@@ -57,7 +65,9 @@ from numpy.typing import NDArray
 
 from dlp_aireview.backend import (
     AllEndpointsDownError,
+    CancellableBackend,
     JudgeBackend,
+    JudgeCancelledError,
     JudgeReply,
     JudgeRequest,
 )
@@ -106,7 +116,8 @@ from dlp_schema.session import LifecycleState, PrivacyState, Session
 
 # 프레임 공급: (스트림, 프레임 번호들) → 승인된 블러본 프레임 (번호 오름차순)
 FrameSource = Callable[[str, Sequence[int]], Iterable[BlurredFrame]]
-# 렌더 재확인: 스트림 → 지금 렌더 해시 (승인 상태가 아니면 RenderNotCurrentError)
+# 렌더 재확인: 스트림 → 지금 렌더 해시 (승인 상태가 아니면 RenderNotCurrentError, 세션이 사용
+# 중지·승인 보류면 SessionNotReadyError)
 RenderCheck = Callable[[], Mapping[str, str]]
 Status = Literal["dry_run", "nothing_to_do", "completed", "interrupted", "aborted"]
 # 사유 → (마감 이벤트, 종료 코드)
@@ -116,8 +127,11 @@ _REASONS: dict[str, tuple[AiRunEventKind, int]] = {
     "signal": (AiRunEventKind.INTERRUPTED, 130),
     "config": (AiRunEventKind.ABORTED, 5),
     "render_changed": (AiRunEventKind.ABORTED, 6),
+    "session_not_ready": (AiRunEventKind.ABORTED, 6),
     "error": (AiRunEventKind.ABORTED, 1),
 }
+# 시간·Ctrl-C 멈춤: 계획 단위가 모두 기록됐으면 완료로 본다. 더 심각한 사유가 오면 그것으로 바꾼다
+_SOFT = frozenset({"max_minutes", "signal"})
 # 큐에서 기다릴 때 멈춤 신호를 보는 간격 (초)
 _POLL_S = 0.1
 
@@ -166,6 +180,8 @@ class RunOptions:
         same_model_as_actions: 판정 모델이 행동 분류 VLM과 같은가 (실행 기록에 남긴다).
         json_progress: 진행 줄을 JSON으로 낸다.
         endpoint_states: 엔드포인트 이름 → 상태 (진행 줄, `EndpointPool.states`).
+        cancel: 바깥 멈춤 신호 (CLI가 여러 세션에 함께 준다). 켜지면 interrupted:signal로 멈춘다
+            (여러 세션을 스레드로 돌릴 때 Ctrl-C는 주 스레드에만 오므로 이 신호로 알린다).
     """
 
     workers: int = 1
@@ -177,6 +193,7 @@ class RunOptions:
     same_model_as_actions: bool = False
     json_progress: bool = False
     endpoint_states: Callable[[], Mapping[str, str]] | None = None
+    cancel: threading.Event | None = None
 
 
 @dataclass(frozen=True)
@@ -185,9 +202,13 @@ class RunSummary:
 
     Attributes:
         status: dry_run | nothing_to_do | completed | interrupted | aborted.
-        reason: interrupted면 unavailable·max_minutes·signal, aborted면 config·render_changed·error.
+        reason: interrupted면 unavailable·max_minutes·signal, aborted면 config·render_changed·
+            session_not_ready·error.
         detail: 운영자에게 보일 설명 (DB에 쓰지 않는다: 서버 오류 본문·주소가 섞일 수 있다).
-        planned: 계획 단위 수. todo: 그중 기록되지 않았던 단위 수. written: 이번에 기록한 단위 수.
+        planned: 계획 단위 수. todo: 그중 기록되지 않았던 단위 수.
+        written: 이번에 판정해 기록 대상에 넘긴 단위 수. inserted: 그중 실제로 새로 들어간 행 수
+            (잠금이 뚫려 다른 실행이 먼저 쓴 단위는 `ON CONFLICT DO NOTHING`으로 빠져 written보다
+            작다).
         skipped: 장애로 이번에 기록하지 못한 단위 수. fallback: 형식에 맞는 응답이 없던 단위 수.
         groups: 묶음 → 계획 단위 수. verdicts: 이번 판정 분포. elapsed_s: 걸린 초.
     """
@@ -201,6 +222,7 @@ class RunSummary:
     planned: int = 0
     todo: int = 0
     written: int = 0
+    inserted: int = 0
     skipped: int = 0
     fallback: int = 0
     groups: dict[str, int] = field(default_factory=dict[str, int])
@@ -212,7 +234,8 @@ class RunSummary:
 
     @property
     def exit_code(self) -> int:
-        """종료 코드: 0 완료·할 일 없음·계획만 / 3 장애 / 5 설정 / 6 렌더 변경 / 8 시간 / 1 버그."""
+        """종료 코드: 0 완료·할 일 없음·계획만 / 3 장애 / 5 설정 / 6 렌더 변경·세션 사용 중지·보류 /
+        8 시간 / 130 Ctrl-C / 1 버그."""
         if self.reason is None:
             return 0
         return _REASONS[self.reason][1]
@@ -223,7 +246,8 @@ class RunSummary:
             "session_id": self.session_id, "version": self.version, "status": self.status,
             "reason": self.reason, "detail": self.detail, "run_id": self.run_id,
             "planned": self.planned, "todo": self.todo, "written": self.written,
-            "skipped": self.skipped, "fallback": self.fallback, "groups": self.groups,
+            "inserted": self.inserted, "skipped": self.skipped, "fallback": self.fallback,
+            "groups": self.groups,
             "verdicts": self.verdicts, "prompt_tokens": self.prompt_tokens,
             "cached_tokens": self.cached_tokens, "completion_tokens": self.completion_tokens,
             "elapsed_s": round(self.elapsed_s, 3), "exit_code": self.exit_code,
@@ -456,15 +480,22 @@ class _Execution:
         now: Callable[[], datetime],
         progress: Callable[[str], None] | None,
     ) -> None:
-        """공유 상태를 만든다 (스레드는 `run`이 띄운다)."""
-        self.inp, self.backend, self.sink, self.policy = inp, backend, sink, policy
+        """공유 상태를 만든다 (스레드는 `run`이 띄운다).
+
+        작업자는 백엔드를 `CancellableBackend`(이 실행의 멈춤 신호 `stop`)로 감싸 쓴다: 멈춘 뒤에는
+        엔드포인트 묶음에서 기다리던 요청도 보내지 않는다.
+        """
+        self.stop = threading.Event()
+        self.inp, self.sink, self.policy = inp, sink, policy
+        self.backend: JudgeBackend = CancellableBackend(backend, self.stop)
         self.options, self.render_check = options, render_check
         self.clock, self.now, self.progress = clock, now, progress
         self.jobs: queue.Queue[_Job | None] = queue.Queue(maxsize=max(2, 2 * options.workers))
         self.results: queue.Queue[tuple[JudgedUnit, float] | None] = queue.Queue()
-        self.stop = threading.Event()
         self.stats = _Stats()
+        self.inserted = 0
         self.skipped = 0
+        self.debug_failed = False
         self.reason: str | None = None
         self.detail: str | None = None
         self.error: BaseException | None = None
@@ -477,11 +508,22 @@ class _Execution:
     def halt(
         self, reason: str, detail: str | None = None, error: BaseException | None = None
     ) -> None:
-        """멈춤 사유를 남기고 (처음 것만) 새 작업을 멈춘다."""
+        """멈춤 사유를 남기고 새 작업을 멈춘다. 처음 사유를 남기되, 시간·Ctrl-C 사유(`_SOFT`) 뒤에
+        더 심각한 사유(설정·장애·렌더·세션·버그)가 오면 그것으로 바꾼다."""
         with self._lock:
-            if self.reason is None:
+            if self.reason is None or (self.reason in _SOFT and reason not in _SOFT):
                 self.reason, self.detail, self.error = reason, detail, error
         self.stop.set()
+
+    def poll(self) -> None:
+        """바깥 멈춤 신호(`options.cancel`)와 마감 시각(`options.deadline`)을 본다. 작업자가 다음
+        작업을 받기 전에, 기록자가 `_POLL_S`마다 부른다 (작업자가 모두 엔드포인트를 기다리고 있어도
+        멈춘다)."""
+        cancel, deadline = self.options.cancel, self.options.deadline
+        if cancel is not None and cancel.is_set():
+            self.halt("signal")
+        if deadline is not None and self.clock() >= deadline:
+            self.halt("max_minutes")
 
     # ------------------------------------------------------------ 생산자
 
@@ -537,11 +579,10 @@ class _Execution:
     # ------------------------------------------------------------ 작업자
 
     def _next(self) -> _Job | None:
-        """다음 작업 (멈췄거나 마감 시각이 지났거나 끝이면 None)."""
+        """다음 작업 (멈췄거나 마감 시각이 지났거나 바깥 멈춤 신호가 켜졌거나 끝이면 None)."""
         while not self.stop.is_set():
-            deadline = self.options.deadline
-            if deadline is not None and self.clock() >= deadline:
-                self.halt("max_minutes")
+            self.poll()
+            if self.stop.is_set():
                 return None
             try:
                 return self.jobs.get(timeout=_POLL_S)
@@ -550,48 +591,70 @@ class _Execution:
         return None
 
     def work(self) -> None:
-        """작업자: 단위를 판정해 기록자에게 넘긴다 (모듈 docstring의 장애 분류)."""
-        while (job := self._next()) is not None:
-            start = self.clock()
-            backend: JudgeBackend = (
-                _Recorder(self.backend) if self.options.debug_dir else self.backend
-            )
-            try:
-                judged = judge_unit(
-                    backend, job.unit, job.images, ontology=self.inp.ontology,
-                    policy=self.policy, sensor=self.inp.sensor,
-                )  # fmt: skip
-            except AllEndpointsDownError as exc:
-                self.halt("unavailable", str(exc))
-                return
-            except VlmRequestError as exc:
-                self.halt("config", str(exc))
-                return
-            except VlmUnavailableError as exc:
-                with self._lock:
-                    self.skipped += 1
-                    self.detail = self.detail or str(exc)
-                continue
-            except BaseException as exc:
-                self.halt("error", f"{type(exc).__name__}: {exc}", exc)
-                return
-            self.results.put((judged, self.clock() - start))
-            if isinstance(backend, _Recorder):
-                self._debug(judged, backend)
+        """작업자: 단위를 판정해 기록자에게 넘긴다 (모듈 docstring의 장애 분류).
+
+        어떤 예외도 멈춤 사유 없이 이 스레드를 끝내지 않는다 (작업자가 모두 조용히 죽으면 생산자가
+        가득 찬 큐 앞에서 영영 기다리고 실행이 세션 잠금을 쥔 채 멈춘다).
+        """
+        try:
+            while (job := self._next()) is not None:
+                if not self._judge(job):
+                    return
+        except BaseException as exc:
+            self.halt("error", f"{type(exc).__name__}: {exc}", exc)
+
+    def _judge(self, job: _Job) -> bool:
+        """단위 하나를 판정해 기록자에게 넘긴다. 이 작업자가 그만둬야 하면 False."""
+        start = self.clock()
+        rec = _Recorder(self.backend) if self.options.debug_dir else None
+        try:
+            judged = judge_unit(
+                rec or self.backend, job.unit, job.images, ontology=self.inp.ontology,
+                policy=self.policy, sensor=self.inp.sensor,
+            )  # fmt: skip
+        except JudgeCancelledError:
+            return False  # 이미 멈췄다 (사유는 멈춘 쪽이 남겼다). 이 단위는 다음 실행이 묻는다
+        except AllEndpointsDownError as exc:
+            self.halt("unavailable", str(exc))
+            return False
+        except VlmRequestError as exc:
+            self.halt("config", str(exc))
+            return False
+        except VlmUnavailableError as exc:
+            with self._lock:
+                self.skipped += 1
+                self.detail = self.detail or str(exc)
+            return True
+        self.results.put((judged, self.clock() - start))
+        if rec is not None:
+            self._debug(judged, rec)
+        return True
 
     def _debug(self, judged: JudgedUnit, rec: _Recorder) -> None:
-        """형식이 맞지 않던 응답이 있으면 원문을 로컬 파일로 남긴다 (DB에는 쓰지 않는다)."""
+        """형식이 맞지 않던 응답이 있으면 원문을 로컬 파일로 남긴다 (DB에는 쓰지 않는다).
+
+        디버그 기록은 판정 결과가 아니므로, 쓰지 못하면(디렉터리가 파일, 권한, 디스크) 한 번
+        경고하고 이 실행에서는 더 남기지 않는다 (실행은 계속한다).
+        """
         folder = self.options.debug_dir
-        if folder is None or not (judged.outcome == "fallback" or judged.invalid_responses):
+        if folder is None or self.debug_failed:
+            return
+        if not (judged.outcome == "fallback" or judged.invalid_responses):
             return
         path = folder / self.inp.session.session_id / f"{judged.unit.unit_id}.json"
-        path.parent.mkdir(parents=True, exist_ok=True)
         data = {
             "unit_id": judged.unit.unit_id, "outcome": judged.outcome,
             "errors": list(judged.errors),
             "responses": [{"endpoint": r.endpoint, "content": r.content} for r in rec.replies],
         }  # fmt: skip
-        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        except OSError as exc:
+            with self._lock:
+                first, self.debug_failed = not self.debug_failed, True
+            if first and self.progress is not None:
+                self.progress(f"[경고] 디버그 응답을 남기지 못해 더 남기지 않습니다: {exc}")
 
     # ------------------------------------------------------------ 기록자
 
@@ -610,6 +673,7 @@ class _Execution:
                     if item is None:
                         break
                     buf.append(self._record(*item))
+                self.poll()
                 now = self.clock()
                 if len(buf) >= server.commit_every or (
                     buf and now - last["commit"] >= server.commit_interval_s
@@ -634,17 +698,21 @@ class _Execution:
         return judged.record(self.run_id, self.now(), self.inp.blurred_sha256.get(stream))
 
     def _flush(self, buf: list[AiReviewUnit]) -> None:
-        """모은 단위를 쓰고 비운다."""
+        """모은 단위를 쓰고 비운다 (새로 들어간 행 수를 센다)."""
         if buf:
-            self.sink.write(list(buf))
+            self.inserted += self.sink.write(list(buf))
             buf.clear()
 
     def check_render(self) -> bool:
-        """렌더 해시가 계획 때와 같은가. 다르거나 승인이 풀렸으면 멈추고 False."""
+        """렌더 해시가 계획 때와 같고 세션이 판정할 수 있는 상태인가. 렌더가 바뀌었거나 승인이
+        풀렸으면 render_changed, 세션이 사용 중지·승인 보류면 session_not_ready로 멈추고 False."""
         if self.render_check is None:
             return True
         try:
             now = self.render_check()
+        except SessionNotReadyError as exc:
+            self.halt("session_not_ready", str(exc))
+            return False
         except RenderNotCurrentError as exc:
             self.halt("render_changed", str(exc))
             return False
@@ -696,35 +764,48 @@ class _Execution:
         streams: dict[str, list[PlannedUnit]] = {}
         for u in todo:
             streams.setdefault(u.stream_id, []).append(u)
-        producers = [
-            threading.Thread(target=self.produce, args=(s, us), daemon=True)
-            for s, us in streams.items()
-        ]
-        workers = [
-            threading.Thread(target=self.work, daemon=True) for _ in range(self.options.workers)
-        ]
-        writer = threading.Thread(target=self.write_loop, daemon=True)
-        for t in (*producers, *workers, writer):
-            t.start()
+        writer = start_thread(self.write_loop)
+        workers = [start_thread(self.work) for _ in range(self.options.workers)]
+        producers = [start_thread(self.produce, s, us) for s, us in streams.items()]
         try:
-            _join(producers)
+            wait_all(producers)
             for _ in workers:
                 self._put(None)
-            _join(workers)
+            wait_all(workers)
         except KeyboardInterrupt:
             self.halt("signal")
-            _join(workers)
+            wait_all(workers)
             raise
         finally:
             self.results.put(None)
-            _join([writer])
+            wait_all([writer])
 
 
-def _join(threads: Sequence[threading.Thread]) -> None:
-    """스레드가 끝나기를 기다린다 (Ctrl-C를 받을 수 있게 짧게 나눠 기다린다)."""
-    for t in threads:
-        while t.is_alive():
-            t.join(timeout=0.5)
+def start_thread(target: Callable[..., None], *args: Any) -> threading.Event:
+    """데몬 스레드를 띄우고, 그 스레드가 끝나면 켜지는 신호를 돌려준다 (`wait_all`로 기다린다).
+
+    `Thread.join`으로 기다리지 않는 이유: Ctrl-C(KeyboardInterrupt)가 join을 끊으면 CPython이 아직
+    살아 있는 스레드를 끝난 것으로 표시할 수 있다 (`is_alive()`가 False). 그러면 Ctrl-C 뒤 다시
+    기다릴 때 기다리지 않고 지나가, 세션이 마감 이벤트를 쓰기 전에 명령이 끝난다.
+    """
+    finished = threading.Event()
+
+    def body() -> None:
+        try:
+            target(*args)
+        finally:
+            finished.set()
+
+    threading.Thread(target=body, daemon=True).start()
+    return finished
+
+
+def wait_all(finished: Sequence[threading.Event]) -> None:
+    """`start_thread`로 띄운 스레드가 모두 끝나기를 기다린다 (Ctrl-C를 받을 수 있게 짧게 나눠
+    기다린다)."""
+    for done in finished:
+        while not done.wait(timeout=0.5):
+            pass
 
 
 def progress_line(snap: Mapping[str, Any]) -> str:
@@ -758,7 +839,7 @@ def _counts(summary: RunSummary) -> dict[str, int]:
     """마감 이벤트의 정수 집계."""
     return {
         "planned": summary.planned, "todo": summary.todo, "written": summary.written,
-        "skipped": summary.skipped, "fallback": summary.fallback,
+        "inserted": summary.inserted, "skipped": summary.skipped, "fallback": summary.fallback,
         **{f"verdict_{k}": v for k, v in sorted(summary.verdicts.items())},
         "prompt_tokens": summary.prompt_tokens, "cached_tokens": summary.cached_tokens,
         "completion_tokens": summary.completion_tokens, "elapsed_s": round(summary.elapsed_s),
@@ -817,21 +898,25 @@ def _event(
 
 
 def _final_reason(ex: _Execution, run: AiReviewRun, plan_ids: set[str]) -> str | None:
-    """마감 사유: 멈춤 사유 → 장애로 건너뛴 단위 → 마지막 렌더 확인 → 기록 누락 (없으면 None)."""
-    if ex.reason is not None:
+    """마감 사유: 멈춤 사유 → 장애로 건너뛴 단위 → 마지막 확인(렌더·세션) → 기록 누락 (없으면 None).
+
+    시간(`max_minutes`)·Ctrl-C(`signal`)로 멈췄어도 마지막 확인을 통과하고 계획 단위가 모두
+    기록됐으면 완료다 (마지막 단위를 쓴 직후에 멈춘 경우).
+    """
+    if ex.reason is not None and ex.reason not in _SOFT:
         return ex.reason
     if ex.skipped:
-        return "unavailable"
+        return ex.reason or "unavailable"
     try:
         if not ex.check_render():
-            return "render_changed"
+            return ex.reason  # check_render가 render_changed·session_not_ready로 바꿨다
         missing = plan_ids - ex.sink.done_unit_ids(run.session_id, run.version)
     except Exception as exc:  # 마지막 확인의 DB 오류
         ex.halt("error", f"마감 확인 실패: {type(exc).__name__}: {exc}", exc)
         return "error"
     if missing:
         ex.detail = ex.detail or f"기록되지 않은 계획 단위 {len(missing)}개가 남았습니다"
-        return "unavailable"
+        return ex.reason or "unavailable"
     return None
 
 
@@ -850,7 +935,8 @@ def _finish(ex: _Execution, run: AiReviewRun, base: RunSummary, plan_ids: set[st
     summary = replace(
         base,
         status=status, reason=reason, detail=ex.detail if reason else None, run_id=run.run_id,
-        written=s.written, skipped=ex.skipped, fallback=s.fallback, verdicts=dict(s.verdicts),
+        written=s.written, inserted=ex.inserted, skipped=ex.skipped, fallback=s.fallback,
+        verdicts=dict(s.verdicts),
         prompt_tokens=s.prompt_tokens, cached_tokens=s.cached_tokens,
         completion_tokens=s.completion_tokens, elapsed_s=ex.clock() - ex.started,
     )  # fmt: skip
@@ -885,6 +971,9 @@ def run_session(
         clock, now: 단조 시계·기록 시각 (테스트).
         progress: 진행 한 줄 출력 (None이면 내지 않는다).
 
+    바깥 멈춤 신호(`options.cancel`)가 시작 전에 이미 켜졌으면 아무것도 쓰지 않고
+    interrupted:signal 요약을 돌려준다.
+
     Raises:
         BaseException: 버그·DB 오류는 마감 이벤트(aborted:error)를 쓴 뒤 다시 올린다.
         KeyboardInterrupt: Ctrl-C (interrupted:signal을 쓴 뒤).
@@ -903,6 +992,9 @@ def run_session(
         return base
     if not todo and sink.is_complete(sid, version, plan_digest(units)):
         return replace(base, status="nothing_to_do", elapsed_s=clock() - start)
+    if opts.cancel is not None and opts.cancel.is_set():
+        detail = "시작하기 전에 멈췄습니다 (아무것도 쓰지 않았습니다)"
+        return replace(base, status="interrupted", reason="signal", detail=detail)
     started_at = now()
     run = _run_record(inp, backend, policy, opts, units, started_at)
     sink.start(run, _event(run, sid, AiRunEventKind.STARTED, started_at, actor=opts.actor,
@@ -924,15 +1016,20 @@ def run_session(
 # ---------------------------------------------------------------- DB 경로
 
 
-def session_problem(conn: sa.Connection, session: Session) -> str | None:
-    """판정을 거부할 세션 상태의 설명 (괜찮으면 None): 사용 중지, 승인 보류, 승인 전."""
+def session_problem(conn: sa.Connection, session: Session, *, approval: bool = True) -> str | None:
+    """판정을 거부할 세션 상태의 설명 (괜찮으면 None): 사용 중지, 승인 보류, 승인 전.
+
+    Args:
+        approval: 승인 상태도 보는가. 실행 중 확인은 False다 (승인이 풀린 것은 렌더 확인이
+            render_changed로 알린다: 블러 변경은 세션을 승인 전으로 되돌린다).
+    """
     sid = session.session_id
     if session.lifecycle_state is LifecycleState.WITHDRAWN:
         return f"{sid}: 사용 중지된 세션은 판정하지 않습니다"
     held = active_privacy_hold(conn, sid)
     if held is not None:
         return f"{sid}: 승인 보류 중입니다 ({held.actor}: {held.reason})"
-    if session.privacy_state is not PrivacyState.APPROVED:
+    if approval and session.privacy_state is not PrivacyState.APPROVED:
         return f"{sid}: 프라이버시 승인 전입니다 ({session.privacy_state.value})"
     return None
 
@@ -989,8 +1086,10 @@ def load_input(
     """DB와 라벨링 버킷에서 판정 입력을 만든다.
 
     짧은 읽기 트랜잭션으로 세션·현재 운영 라벨·세션 온톨로지를 읽고(세션 상태를 확인하고),
-    판정할 창이 있는 스트림만 `open_blurred`로 받는다. 손 상태 대상이 있을 때만 `sensor_for`를
-    부른다 (장갑 Parquet 원본 접근을 줄인다).
+    판정할 창이 있는 스트림만 `open_blurred`로 받는다. 장갑 문장(`sensor_for`, 장갑 Parquet 원본
+    접근)은 모든 블러본 게이트를 통과한 뒤, 손 상태 대상이 있을 때만 부른다: 게이트에서 거부될 세션
+    (렌더 기록 없음·낡음 등)에 원본을 읽지 않는다. 계획만 하는 실행(`--dry-run`)도 단위 키에 센서
+    해시가 들어가므로 같은 조건이면 장갑을 읽는다.
 
     Args:
         engine: DB 엔진. labeling: 라벨링 버킷 저장소. session_id: 세션.
@@ -1023,17 +1122,17 @@ def load_input(
         for w in plan_windows(session, current, policy, ontology, flagged=flagged)
         if groups is None or w.group in groups
     ]
-    sensor = (
-        sensor_for(session)
-        if sensor_for is not None and needs_sensor(windows, policy)
-        else SensorContext.absent()
-    )
     medias = {
         s: open_blurred(
             engine, labeling, session_id, s, privacy_policy, work, raw_bucket=raw_bucket
         )
         for s in sorted({w.stream_id for w in windows})
     }
+    sensor = (  # 블러본 게이트를 모두 통과한 뒤에만 원본(장갑)을 읽는다
+        sensor_for(session)
+        if sensor_for is not None and needs_sensor(windows, policy)
+        else SensorContext.absent()
+    )
 
     def frames(stream: str, idx: Sequence[int]) -> Iterator[BlurredFrame]:
         return frames_for(medias[stream], idx)
@@ -1065,6 +1164,10 @@ def run_from_db(
     """세션 잠금 → 입력(`load_input`) → `run_session`(`DbSink`, 렌더 재확인). 블러본은 실행 임시
     디렉터리에 받고 끝나면 지운다.
 
+    주기 확인(`render_check_interval_s`)과 마감 확인은 렌더 해시와 함께 세션 상태(`session_problem`:
+    사용 중지·승인 보류)도 다시 본다 (aborted:session_not_ready). 실행 중 사용 중지(`dlp dataset
+    withdraw`)는 생애주기만 바꾸고 승인·렌더 기록은 그대로라, 렌더 해시만 보면 놓친다.
+
     Returns:
         실행 결과. 다른 실행기가 이 세션을 처리 중이면 None (종료 7).
 
@@ -1084,6 +1187,11 @@ def run_from_db(
             streams = list(inp.media)
 
             def check() -> Mapping[str, str]:
+                with engine.connect() as conn:
+                    session = get_session(conn, session_id)
+                    problem = session_problem(conn, session, approval=False)
+                if problem is not None:
+                    raise SessionNotReadyError(problem)
                 return render_hashes_now(engine, session_id, streams, privacy_policy)
 
             return run_session(

@@ -18,7 +18,9 @@ import pytest
 from dlp_aireview.backend import (
     AllEndpointsDownError,
     BackendInfo,
+    CancellableBackend,
     EndpointPool,
+    JudgeCancelledError,
     JudgeReply,
     JudgeRequest,
     PoolMember,
@@ -210,3 +212,80 @@ def test_pool_rejects_duplicate_names(policy: AiReviewPolicy) -> None:
         EndpointPool([PoolMember("a", Stub("a")), PoolMember("a", Stub("a"))], policy.server)
     with pytest.raises(ValueError):
         EndpointPool([], policy.server)
+
+
+def _judge_in_thread(
+    p: EndpointPool, cancel: threading.Event, affinity: str = "x"
+) -> tuple[threading.Thread, list[BaseException]]:
+    """다른 스레드에서 `judge(cancel=…)`를 부르고 올라온 예외를 모은다."""
+    raised: list[BaseException] = []
+
+    def go() -> None:
+        try:
+            p.judge(request(affinity), cancel=cancel)
+        except BaseException as exc:
+            raised.append(exc)
+
+    t = threading.Thread(target=go, daemon=True)
+    t.start()
+    return t, raised
+
+
+def test_cancel_stops_a_request_waiting_for_an_open_breaker(policy: AiReviewPolicy) -> None:
+    """모든 엔드포인트가 열려 보낼 곳을 기다리던 요청은 멈춤 신호가 켜지면 abort_after_s를 기다리지
+    않고 보내지 않은 채 `JudgeCancelledError`로 끝난다 (실행 멈춤·--max-minutes 뒤 새 요청 없음)."""
+    a = Stub("a", ("down", "down"))
+    p, _ = pool(fast(policy, backoff_s=(0.0,), breaker_cooldown_s=60, abort_after_s=60), a)
+    with pytest.raises(VlmUnavailableError):
+        p.judge(request())  # 2번 장애 → 차단기 열림 (60초 쉼)
+    assert p.states() == {"a": "open"}
+    cancel = threading.Event()
+    t, raised = _judge_in_thread(p, cancel)
+    time.sleep(0.2)
+    assert t.is_alive() and len(a.calls) == 2  # 보낼 곳을 기다린다
+    start = time.monotonic()
+    cancel.set()
+    t.join(timeout=5)
+    assert not t.is_alive() and time.monotonic() - start < 2
+    assert [type(e) for e in raised] == [JudgeCancelledError] and len(a.calls) == 2
+    assert not p.dead
+
+
+def test_cancel_stops_backoff_and_busy_wait(policy: AiReviewPolicy) -> None:
+    """백오프 대기 중 멈춤 신호가 켜지면 다시 묻지 않는다. 동시성 상한으로 기다리던 요청도 같다.
+    이미 켜진 신호면 `CancellableBackend`는 묶음에 닿기 전에 멈춘다."""
+    a = Stub("a", ("down",))
+    p = EndpointPool([PoolMember("a", a)], fast(policy, backoff_s=(30.0,)).server)
+    cancel = threading.Event()
+    t, raised = _judge_in_thread(p, cancel)
+    time.sleep(0.2)
+    cancel.set()
+    t.join(timeout=5)
+    assert not t.is_alive() and [type(e) for e in raised] == [JudgeCancelledError]
+    assert len(a.calls) == 1  # 백오프 뒤 다시 묻지 않았다
+    slow = Stub("s", delay=0.5)
+    busy = EndpointPool([PoolMember("s", slow)], fast(policy, concurrency_per_endpoint=1).server)
+    first = threading.Thread(target=busy.judge, args=(request("k0"),), daemon=True)
+    first.start()
+    time.sleep(0.1)
+    cancel2 = threading.Event()
+    t2, raised2 = _judge_in_thread(busy, cancel2, "k1")
+    cancel2.set()
+    t2.join(timeout=5)
+    first.join(timeout=5)
+    assert [type(e) for e in raised2] == [JudgeCancelledError] and slow.calls == ["k0"]
+    stopped = threading.Event()
+    stopped.set()
+    with pytest.raises(JudgeCancelledError):
+        CancellableBackend(busy, stopped).judge(request("k2"))
+    assert slow.calls == ["k0"]
+
+
+def test_dead_pool_is_reported(policy: AiReviewPolicy) -> None:
+    """모두 막힌 지 abort_after_s가 지나 묶음이 멈추면 `dead` (CLI가 남은 세션을 멈추는 기준)."""
+    a = Stub("a", rest="down")
+    p, _ = pool(fast(policy, backoff_s=(0.0,) * 50), a)
+    assert not p.dead
+    with pytest.raises(AllEndpointsDownError):
+        p.judge(request())
+    assert p.dead
