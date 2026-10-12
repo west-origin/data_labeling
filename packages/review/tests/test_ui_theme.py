@@ -18,9 +18,10 @@ import pytest
 from pydantic import ValidationError
 
 from dlp_review.cvat import label_spec
-from dlp_review.labelstudio import FROM_NAME, label_config, label_names
+from dlp_review.labelstudio import AI_NOTE, FROM_NAME, label_config, label_names
 from dlp_review.tasks import PRIVACY_PROJECT, SPATIAL_PROJECT
 from dlp_review.ui_theme import (
+    AI_NOTE_EMPTY,
     LS_AUTO_HOTKEYS,
     TOKENS_FILE,
     UiTheme,
@@ -102,6 +103,24 @@ def test_themed_label_config_keeps_names_and_adds_colors_hotkeys(
     assert style is not None and style.text is not None
     assert "data-color-scheme=dark" in style.text and "data-color-scheme=light" in style.text
     assert "data:image/png;base64," in style.text
+
+
+def test_ai_note_hint_is_the_same_with_and_without_theme(
+    ontology: Ontology, theme: UiTheme
+) -> None:
+    """AI 지적 없는 구간의 메모 안내는 테마 화면(CSS 안내)과 테마 없는 화면(자리 글)이 같다.
+
+    정답 근거: 테마는 메모 입력란을 숨기고 CSS ::before 글만 보인다. 결정 칸은 지적 없는
+    구간에서도 눌리지만 수집은 not_shown으로만 기록하므로, '반영되지 않는다'는 뒷부분이 테마
+    화면에서도 보여야 한다.
+    """
+    assert "반영되지 않는다" in AI_NOTE_EMPTY
+    for config in (label_config(ontology), label_config(ontology, theme, logo_uri="")):
+        note = ET.fromstring(config).find(f".//TextArea[@name='{AI_NOTE}']")
+        assert note is not None and note.get("placeholder") == AI_NOTE_EMPTY
+    themed = ET.fromstring(label_config(ontology, theme, logo_uri="")).find("Style")
+    assert themed is not None and themed.text is not None
+    assert f"{{content:'{AI_NOTE_EMPTY}'}}" in themed.text
 
 
 def test_hotkeys_cover_only_primitive_verbs(ontology: Ontology, theme: UiTheme) -> None:

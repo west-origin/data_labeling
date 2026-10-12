@@ -57,7 +57,7 @@ from xml.sax.saxutils import quoteattr
 from pydantic import TypeAdapter, ValidationError
 
 from dlp_review.reconcile import ReviewedItem
-from dlp_review.ui_theme import UiTheme, ls_hotkey, ls_label_color, ls_style
+from dlp_review.ui_theme import AI_NOTE_EMPTY, UiTheme, ls_hotkey, ls_label_color, ls_style
 from dlp_schema.aireview import AiDecision
 from dlp_schema.labels import (
     ActionPayload,
@@ -284,7 +284,7 @@ def _ai_controls(theme: UiTheme | None) -> tuple[str, str]:
     region = f"""  <View {when}"{FROM_NAME}" className="dlp-ai-region">
     <Header value="AI 1차 검수 메모 · 참고용 · 사람 검수 아님"/>
     <TextArea name="{AI_NOTE}" toName="{TO_NAME}" perRegion="true" maxSubmissions="1" rows="2"
-              placeholder="이 구간에는 AI 지적이 없다 (결정을 골라도 반영되지 않는다)"/>
+              placeholder={quoteattr(AI_NOTE_EMPTY)}/>
     <Choices name="{AI_DECISION}" toName="{TO_NAME}" perRegion="true" choice="single"
              showInline="true">
 {choices}
