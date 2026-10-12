@@ -29,7 +29,7 @@ from dlp_review.ops.policy import ReviewOpsPolicy
 from dlp_review.ops.policy import load_policy as load_default_policy
 from dlp_review.refresh import RefreshReport
 from dlp_review.revoke import RevocationReport
-from dlp_review.tasks import ReviewSetup
+from dlp_review.tasks import ReviewSetup, TaskError
 from dlp_review.webhook import CollectRequest, ReviewerMismatchError
 from dlp_schema import load_ontology, repo_root
 from dlp_schema.db.repository import (
@@ -38,7 +38,7 @@ from dlp_schema.db.repository import (
     register_ontology,
     request_task_revocation,
 )
-from dlp_schema.review import ReviewStage, ReviewTask, ReviewTaskStatus, ReviewTool
+from dlp_schema.review import ReviewMode, ReviewStage, ReviewTask, ReviewTaskStatus, ReviewTool
 from dlp_schema.testing import FIXED_TIME, make_session, sqlite_db
 
 # 시험이 고른 정책 파일에 적는 값 (Git 기본 정책과 다르다)
@@ -253,6 +253,30 @@ def test_assign_without_assignee_needs_explicit_reviewer(
     _, a, reviewer, policy = picked["args"]
     assert (a, reviewer) == (planned, "s1") and policy == selected
     assert got["args"][1] is assigned
+
+
+def test_assign_refused_reviewer_reports_fix_without_traceback(
+    selected: ReviewOpsPolicy, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """QA 담당자가 선임이 아니거나 짝 배정과 같으면 traceback 대신 이유·고칠 곳과 종료 코드 1.
+
+    정답 근거: `plan_qa`가 담당자를 비우는 경우(선임 없음, 선임이 원래 담당자뿐)는 같은 정책으로는
+    어떤 `--assignee`도 받아들여지지 않으므로, 안내는 `reviewers.senior`를 먼저 고치라고 해야 한다.
+    """
+    planned = SimpleNamespace(
+        label_kinds=("action",), session_id="s001", assignee=None, mode=ReviewMode.QA
+    )
+    monkeypatch.setattr(review_cmds, "get_assignment", Mock(return_value=planned))
+    monkeypatch.setattr(review_cmds, "run_revocations", Mock(return_value=RevocationReport()))
+    created = Mock(return_value=[])
+    monkeypatch.setattr(review_cmds, "create_assignment_tasks", created)
+    refused = Mock(side_effect=TaskError("a1:qa: QA 배정은 선임 검수자에게만 줍니다: r1"))
+    monkeypatch.setattr(review_cmds, "assign_reviewer", refused)
+    args = _args("assign", assignment_id="a1:qa", assignee="r1")
+    assert review_cmds.cmd_assign(args) == review_cmds.NO_ASSIGNEE_EXIT
+    out = capsys.readouterr().out
+    assert "QA 배정은 선임" in out and "reviewers.senior에 원래 담당자가 아닌 선임" in out
+    assert not created.called
 
 
 def test_collect_passes_one_policy_to_setup_and_collector(

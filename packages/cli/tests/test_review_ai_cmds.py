@@ -330,7 +330,8 @@ def test_quality_ai_report_text_json_and_thresholds(
     db: tuple[str, sqlalchemy.Engine], capsys: pytest.CaptureFixture[str]
 ) -> None:
     """`dlp review quality --ai`: 대조군 지표(지적 정밀도 1/1, ok 놓침 0/1), 확신도 조안(목표 0.5면
-    wrong 0.90), `--json`은 AI 절 JSON. 기간 밖(`--since`가 뒤)이면 행이 없다."""
+    wrong 0.90), `--json`은 AI 절 JSON(`--ai-thresholds`면 조안 포함). 기간 밖(`--since`가
+    뒤)이면 행이 없다."""
     import json
 
     url, engine = db
@@ -348,6 +349,13 @@ def test_quality_ai_report_text_json_and_thresholds(
         "num": 1, "den": 1, "value": 1.0, "upper95": 1.0, "weighted": False, "n_eff": None,
     }  # fmt: skip
     assert data["exposure"]["tasks"] == {"holdout": 1}
+    # --json과 --ai-thresholds를 함께 주면 조안을 JSON에 넣는다 (예전: 조용히 버렸다)
+    both = ["review", "quality", "--ai", "--json", "--ai-thresholds", "0.5", "--url", url]
+    assert main(both) == 0
+    floors = json.loads(capsys.readouterr().out)["thresholds"]
+    assert floors == {
+        "target_precision": 0.5, "floors": {"wrong": {"floor": 0.9, "n": 1, "precision": 1.0}},
+    }  # fmt: skip
     later = (FIXED_TIME + timedelta(days=1)).isoformat()
     assert main(["review", "quality", "--ai", "--json", "--since", later, "--url", url]) == 0
     assert json.loads(capsys.readouterr().out)["arms"] == {}

@@ -33,8 +33,10 @@
     표본 묶음에서 뺀다. required면 판정이 끝나지 않은 세션의 배정을 미룬다 (`AI_PENDING_EXIT` 6).
   - `assign <배정 ID> [--assignee]` — 배정 하나의 검수 도구 작업을 만든다 (멱등). 담당자 없는
     배정은 `--assignee`로 담당자를 정해야 만든다 (없으면 종료 코드 1, F-REV-07).
-  - `qa` — 끝난 표준 배정에서 QA 재검수 배정을 뽑는다. 선임(`reviewers.senior`)이 없으면 담당자를
-    비워 두므로 `assign --assignee <선임>`으로 만든다.
+  - `qa` — 끝난 표준 배정에서 QA 재검수 배정을 뽑는다. 선임(`reviewers.senior`)이 없거나 원래
+    담당자뿐이면 담당자를 비워 둔다. 그 배정은 `reviewers.senior`에 원래 담당자가 아닌 선임을 넣은
+    뒤 `assign --assignee <그 선임>`으로 만든다 (QA 담당자는 선임이고 짝 배정 담당자가 아니어야
+    한다).
   - `queue [--limit]` — 열린 배정을 우선순위 높은 순으로 보여 준다 (AI 지적 사유 수 포함).
   - `quality` — 오류 삽입 발견율, 이중 라벨 일치도(카파·구간 F1·경계 F1), 프리라벨 편향.
     `--ai`면 AI 1차 검수 판정 품질(대조군 기준 지적 정밀도·재현율·층화 ok 놓침률과 상한, 제안
@@ -79,7 +81,12 @@ import sqlalchemy as sa
 from sqlalchemy.exc import NoResultFound
 
 from dlp_aireview.status import prelabeled_at
-from dlp_cli.ai_quality_print import ai_quality_json, print_ai_quality, print_thresholds
+from dlp_cli.ai_quality_print import (
+    ai_quality_json,
+    print_ai_quality,
+    print_thresholds,
+    thresholds_json,
+)
 from dlp_cli.review_config import (
     REVOCATION_PENDING_EXIT,
     ai_display_config,
@@ -114,11 +121,13 @@ from dlp_review.orphans import OrphanReport, delete_orphans, find_orphans
 from dlp_review.reconcile import ReviewOutcome
 from dlp_review.refresh import refresh_session_urls, sessions_with_open_ls_tasks
 from dlp_review.revoke import RevocationIncompleteError, mark_tool_gone
+from dlp_review.roles import AccessError
 from dlp_review.tasks import (
     PRIVACY_PROJECT,
     SPATIAL_PROJECT,
     TEMPORAL_PROJECT,
     ReviewSetup,
+    TaskError,
     create_labeling_tasks,
     create_privacy_tasks,
     label_studio_user_id,
@@ -145,6 +154,7 @@ from dlp_schema.db.tables import ontology_versions
 from dlp_schema.labels import LabelRecord
 from dlp_schema.review import (
     AssignmentStatus,
+    ReviewMode,
     ReviewReason,
     ReviewStage,
     ReviewTask,
@@ -574,9 +584,11 @@ def cmd_assign(args: argparse.Namespace) -> int:
     번만). 작업이 모두 회수된 배정이면 지금 블러본으로 다시 만든다 (ADR 0039).
     담당자 없는 배정(선임이 없어 담당자를 비워 둔 QA 배정 등)은 `--assignee`로 담당자를 정해야
     만든다 (`ops.runner.assign_reviewer`: 블러는 원본 접근 권한자, QA는 선임, 짝 배정과 다른 사람).
-    없으면 아무것도 하지 않고 `NO_ASSIGNEE_EXIT`(1)로 끝낸다. 담당자가 이미 있는 배정의 담당자는
-    바꾸지 않는다 (F-REV-07, 회귀: 예전에는 "unassigned"를 실제 담당자로 넣어 워터마크·라벨링 버킷
-    경로·검수자 ID가 모두 그 문자열이 됐다).
+    없으면 아무것도 하지 않고 `NO_ASSIGNEE_EXIT`(1)로 끝낸다. 정한 담당자가 배정 규칙에 맞지
+    않으면(선임이 아닌 QA 담당자, 짝 배정과 같은 담당자, 권한 없는 블러 담당자) 담당자를 바꾸지도
+    작업을 만들지도 않고 이유와 고칠 곳을 출력해 같은 종료 코드로 끝낸다 (traceback 없음).
+    담당자가 이미 있는 배정의 담당자는 바꾸지 않는다 (F-REV-07, 회귀: 예전에는 "unassigned"를
+    실제 담당자로 넣어 워터마크·라벨링 버킷 경로·검수자 ID가 모두 그 문자열이 됐다).
     작업 라벨 배정은 만들기 전에 그 세션의 회수 대기를 실행하고(sweep 포함), 세션에 대기가 하나라도
     남으면(배정 스트림이 아니어도) 만들지 않고 `REVOCATION_PENDING_EXIT`(4)로 끝낸다. 블러 배정은
     원본 프록시를 쓰므로 막지 않는다.
@@ -601,12 +613,25 @@ def cmd_assign(args: argparse.Namespace) -> int:
             engine.dispose()
             print(f"{args.assignment_id}: 매체 회수가 끝나지 않아 작업을 만들지 않습니다")
             return REVOCATION_PENDING_EXIT
+    refused: str | None = None
+    tasks: list[ReviewTask] = []
     with engine.begin() as conn:
         a = get_assignment(conn, args.assignment_id)
-        if args.assignee:
-            a = assign_reviewer(conn, a, args.assignee, policy)
-        tasks = create_assignment_tasks(conn, a, setup, policy, datetime.now(UTC))
+        try:
+            if args.assignee:
+                a = assign_reviewer(conn, a, args.assignee, policy)
+        except (TaskError, AccessError) as exc:
+            refused = str(exc)  # 쓰기 전에 거부됐다 (담당자 갱신 없음)
+        else:
+            tasks = create_assignment_tasks(conn, a, setup, policy, datetime.now(UTC))
     engine.dispose()
+    if refused is not None:
+        hint = (
+            " — review.yaml reviewers.senior에 원래 담당자가 아닌 선임을 넣은 뒤 그 선임으로 다시 "
+            "실행하세요" if a.mode is ReviewMode.QA else ""
+        )  # fmt: skip
+        print(f"{args.assignment_id}: 담당자를 정하지 못했습니다: {refused}{hint}")
+        return NO_ASSIGNEE_EXIT
     for t in tasks:
         print(f"{t.task_key} ({t.mode.value}, {t.assignee}) {t.media_uri}")
     return 0
@@ -616,8 +641,9 @@ def cmd_qa(args: argparse.Namespace) -> int:
     """`dlp review qa [--seed]`: 끝난(DONE) 표준 배정 중 정책 비율만큼 QA 재검수 배정을 뽑는다.
 
     이미 있는 배정 ID는 다시 넣지 않는다 (`plan_qa`가 결정적 ID를 만들므로 재실행해도 중복 없음).
-    선임(`reviewers.senior`)이 없거나 원래 담당자뿐이면 담당자 없이 넣고, 그 배정들을
-    `dlp review assign <배정> --assignee <선임>`으로 만들라고 출력한다 (F-REV-07).
+    선임(`reviewers.senior`)이 없거나 원래 담당자뿐이면 담당자 없이 넣고, 그 배정들은
+    `reviewers.senior`에 원래 담당자가 아닌 선임을 넣은 뒤 `dlp review assign <배정> --assignee
+    <그 선임>`으로 만들라고 출력한다 (F-REV-07, 같은 정책으로는 assign이 거부된다).
     부작용: 한 트랜잭션에서 `review_assignments` INSERT.
     """
     policy = load_ops_policy(repo_root())
@@ -635,8 +661,9 @@ def cmd_qa(args: argparse.Namespace) -> int:
     print(f"QA 배정 {len(created)}개")
     for a in created:
         if a.assignee is None:
-            print(f"  {a.assignment_id}: 담당자 없음 → dlp review assign {a.assignment_id} "
-                  "--assignee <선임>")  # fmt: skip
+            print(f"  {a.assignment_id}: 담당자 없음 → review.yaml reviewers.senior에 원래 "
+                  "담당자가 아닌 선임을 넣은 뒤 dlp review assign "
+                  f"{a.assignment_id} --assignee <그 선임>")  # fmt: skip
     return 0
 
 
@@ -706,7 +733,8 @@ def cmd_quality(args: argparse.Namespace) -> int:
     - `--ai [--since ISO] [--until ISO]`: AI 1차 검수 판정 품질 (WP17.8,
       `dlp_review.ops.ai_quality`). 편향 없는 값은 대조군(holdout)이다. `--ai-thresholds P`는 목표
       정밀도 P를 만족하는 판정별 최소 확신도를 `review.yaml ai_review.show_min_confidence` 조안으로
-      낸다. `--json`은 AI 절을 JSON으로 낸다. `--json`·`--ai-thresholds`·`--since`·`--until`은
+      낸다. `--json`은 AI 절을 JSON으로 낸다 (`--ai-thresholds`를 함께 주면 조안을 `thresholds`
+      키에 넣는다). `--json`·`--ai-thresholds`·`--since`·`--until`은
       `--ai`가 필요하다 (없으면 종료 1과 안내, 잘못된 시각·정밀도는 사용법 오류 종료 2).
     """
     policy = load_ops_policy(repo_root())
@@ -716,7 +744,10 @@ def cmd_quality(args: argparse.Namespace) -> int:
         report = quality_report(conn, policy, ai_window=window)
     engine.dispose()
     if args.json:
-        print(json.dumps(ai_quality_json(report.ai) if report.ai else {}, ensure_ascii=False))
+        data = ai_quality_json(report.ai) if report.ai else {}
+        if report.ai is not None and args.ai_thresholds is not None:
+            data["thresholds"] = thresholds_json(report.ai, args.ai_thresholds)
+        print(json.dumps(data, ensure_ascii=False))
         return 0
     for d in report.detection:
         print(f"오류 삽입 발견율 {d.reviewer}: {d.detected}/{d.injected} ({d.rate:.0%})")
@@ -989,8 +1020,10 @@ def cmd_revoke(args: argparse.Namespace) -> int:
       `--apply`면 세션을 잠근 뒤 다시 확인해 지운다 (`dlp_review.orphans`, F-REV-15). 고아가 남거나
       확인하지 못한 채널·작업 생성 중이라 건너뛴 세션이 있으면 4.
 
-    반환: 대기가 남으면 `REVOCATION_PENDING_EXIT`(4), 아니면 0 (`--dry-run`은 늘 0). 인자 조합이
-    맞지 않거나 `--task` 키를 요청할 수 없으면 `SystemExit`.
+    반환: 대기가 남으면 `REVOCATION_PENDING_EXIT`(4), 아니면 0. `<세션>`·`--pending`의
+    `--dry-run`은 늘 0이다. `--orphans`(기본 보고만, `--dry-run`을 붙여도 같다)는 고아가 남으면
+    보고만이어도 4다 (cron 경보용). 인자 조합이 맞지 않거나 `--task` 키를 요청할 수 없으면
+    `SystemExit`.
     부작용: `review_tasks` 회수 요청·완료 표시, 라벨링 버킷 사본 삭제·스냅숏, CVAT·Label Studio
     작업 배정 해제·삭제 (되돌릴 수 없다).
     """
