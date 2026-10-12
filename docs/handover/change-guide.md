@@ -97,21 +97,62 @@ DB·외부 도구·내보내기 동작을 바꾸면 그 경로의 서비스/격�
   않는다. 컨트롤 이름·라벨 값을 바꾸려면 새 프로젝트(온톨로지 프로젝트 이름)로 한다.
 - 수집은 라벨 컨트롤(`labels`) 결과만 라벨로 읽고(F-AIR-02), 결정은 `ls_ai_decisions`로만 읽는다 (적용은
   WP17.7). 검수자가 AI 결과를 지우거나 AI 라벨로 구간을 그려도 수집 결과는 그대로다.
+- 구간을 고르면 보이는 칸(AI 메모·결정, 이벤트 속성, 손 상태 입력란)은 라벨 컨트롤 구간을 골랐을 때만
+  보인다 (`whenTagName="labels"`). AI 구간을 고르면 안내 한 줄만 보인다. 결정 단축키는 칸이 숨어도
+  눌리므로, AI 구간을 고른 채 누른 결정은 AI 구간 id(`ai-<해시 8자>`)에 붙는다. 라벨 ID별 결정은
+  `ai_display.ls_label_decisions(results, exposure, sent_ids)`로 얻는다: 노출 기록의 보인 판정으로 AI 구간
+  id를 원 라벨로 되돌리고, 작업 라벨이 아닌 구간의 결정과 한 라벨의 서로 다른 결정은 경고로 남기고
+  버린다. WP17.7 적용은 이 함수를 쓴다 (`ls_ai_decisions`의 id를 라벨 ID로 쓰지 않는다).
+- 판정률(`coverage`, 요약의 "판정률")의 분모는 판정 실행과 같은 대상 조건
+  (`dlp_schema.aireview.is_judge_target`, 정책 값은 aireview.yaml에서 CLI가 `AiDisplayConfig.targets`로
+  넘긴다)이다. 장갑 근거 손 상태·센서 출처 라벨·긴 상위 구간·원본 접근 이벤트는 세지 않는다. 대상 조건을
+  바꿀 때는 이 함수 하나를 고친다.
 - 노출 기록(`ai_review_exposures`)은 작업 행과 같은 트랜잭션이라 생성이 롤백되면 함께 없어진다. 도구에
   남은 예측·이슈는 고아 작업 정리(`dlp review revoke --orphans`) 범위다. 이미 만든 작업에는 나중에 판정을
   붙이지 않는다 (노출 기록과 어긋나므로). 블러가 바뀌면 회수 뒤 `dlp aireview run <세션>`을 먼저 돌린다.
 - required 게이트: `dlp review plan`이 종료 6으로 미루면 `dlp aireview run <세션>`을 돌리거나 서버 장애면
   `dlp aireview waive <세션> --reason …`. prelabeled 뒤 `max_wait_h`가 지나면 계획이 waived:timeout을 남기고
   진행한다. 블러 계획(`--privacy`)은 막지 않는다.
+- 단축키: Label Studio는 단축키 없는 라벨(review_ui.yaml `hotkeys`에 없는 원시 동작 pull·rotate, 사이
+  구간, 손 상태, skill 앞쪽)에 자동 키 후보 `1234567890qwetasdfgzxcvbyiopjklnm`에서 남는 키를 설정
+  순서대로 붙인다 (`ui_theme.LS_AUTO_HOTKEYS`). 명시 단축키를 이 후보 안의 키로 새로 주면 그 뒤 라벨의
+  자동 키가 한 칸씩 밀려, 검수자가 누르던 키가 조용히 다른 라벨(손이 바뀐 라벨 포함)을 붙인다. WP17.6
+  처음 값(q·w)이 그랬다 (22개 라벨, 오른손 pull q→e 등). 그래서 AI 결정 키는 후보 밖의 r(적용)·h(기각)이고
+  테마 로더가 후보·내장 한 글자 단축키(u, [, ])를 거부한다. 지금 자동 키는 WP17.6 전과 같다 (오른손 pull q·
+  rotate w, 왼손 pull e·rotate t, gap.right:idle a …). 동사 단축키 표(`hotkeys`)에 키를 더하거나 빼면 같은
+  이유로 자동 키가 밀리므로 검수자에게 알린다. 자동 키 규칙은
+  `test_ai_display.py::test_ai_controls_do_not_shift_label_studio_auto_hotkeys`가 시뮬레이터로 지키며, 이
+  시뮬레이터는 실화면 범례와 같다 (아래 확인 기록). 범례 순서는 설정을 만든 온톨로지의 사전 순서이고, 작업
+  생성은 DB에 등록한 온톨로지(PostgreSQL JSONB 키 순서: 짧은 이름 먼저)를 쓰므로 파일에서 읽은 온톨로지와
+  자동 키 배치가 다를 수 있다 (같은 DB 온톨로지면 늘 같다).
 - Label Studio(지금 1.23.2)를 올릴 때 확인할 것: 같은 TimeSeries에 라벨 컨트롤 두 개, 예측 결과의
-  `readonly`(구간 목록에 잠금 표시, Backspace로 지워지지 않음), 구간별 결정 Choice의 단축키(q·w, 동사
-  단축키 1~9·shift와 겹치지 않음), 작업 단위 TextArea 예측, 테마 CSS의 선택자(`data-testid=textarea-form`·
-  `htx-textbox-actions`, `.lsf-label`). Label Studio는 단축키가 없는 라벨에 남는 글자 키를 스스로 붙이는데
-  AI 결정 키(q·w)는 그 후보에서 빠진다 (동사가 아닌 라벨의 자동 키가 WP17.6 전과 달라질 수 있다).
-  services 테스트 두 파일과 실화면(구간 고르기 → q·w → 메모·요약 가독성, 두 모드)을 확인한다.
+  `readonly`(구간 목록에 잠금 표시, Backspace로 지워지지 않음), 구간별 결정 Choice의 단축키(r·h), 자동 키
+  후보(`makeComb`)와 내장 단축키 표가 `ui_theme.LS_AUTO_HOTKEYS`·`LS_RESERVED_KEYS`와 같은지, `View
+  whenTagName`(고른 구간의 라벨 컨트롤 이름과 비교), 작업 단위 TextArea 예측, 테마 CSS의 선택자
+  (`data-testid=textarea-form`·`htx-textbox-actions`, `.lsf-label`). services 테스트 두 파일과 아래 실화면
+  확인을 다시 한다.
 - CVAT(지금 v2.78.0)를 올릴 때: 이슈 API(`/api/issues`, 메시지는 `/api/comments`)와 테마 CSS의 이슈
-  선택자(`cvat-objects-sidebar-issue-item`, `cvat-issue-dialog-*`, `cvat-hidden-issue-label`). CVAT 테마
-  CSS를 바꾸면 `make cvat-up`으로 테마 이미지를 다시 빌드해야 화면에 반영된다.
+  선택자(`cvat-objects-sidebar-issue-item`, `cvat-objects-sidebar-issues-list`, `cvat-issue-dialog-*`,
+  `cvat-hidden-issue-label`). CVAT 테마 CSS를 바꾸면 `make cvat-up`으로 테마 이미지를 다시 빌드해야 화면에
+  반영된다.
+
+### 검수 화면 AI 표시 실화면 확인
+
+Playwright(전역 node playwright, `PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers`)로 개발 서비스의 실화면을
+띄워 확인한다. 화면 데이터는 합성 세션(`test_ai_display_flow.py`와 같은 절차: 합성 블러 영상·장갑 세션
+승인·렌더 → 모델 출처 행동·사이 구간 → 판정 단위 → `create_labeling_tasks`)이고 실제 사용자·개인정보는
+쓰지 않는다. 스크린샷 파일은 저장소에 넣지 않는다 (확인한 사람이 따로 보관한다).
+
+| 확인 항목 | 기대 | 2026-10-12 결과 (LS 1.23.2, CVAT v2.78.0) |
+| --- | --- | --- |
+| 라벨 구간(지적 있음)을 고름 | AI 메모·결정 칸, 이벤트·손 상태 입력란이 보인다 | 그대로 |
+| 그 구간에서 r | "제안 적용" 체크, 결정이 라벨 구간 id에 붙는다 | 그대로 |
+| AI 구간(AI:의심)을 고름 | 메모·결정·입력란이 숨고 안내 한 줄만 보인다 | 그대로 |
+| AI 구간에서 h | 결정이 AI 구간 id에 붙고(Info 칸에 Choices 표시) `ls_label_decisions`가 원 라벨로 되돌린다 | 제출 뒤 API 결과로 확인, 경고 0 |
+| 구간을 고르지 않고 r·h | 아무것도 바뀌지 않는다 | 라벨 결과 그대로 |
+| 범례 단축키 | AI 컨트롤이 없을 때와 같다 (r·h는 자동 키 후보 밖) | 108개 라벨이 시뮬레이터 결과와 같고, 파일 순서 온톨로지의 WP17.6 전 실화면 범례와도 같다 |
+| 다크·화이트 모드 | 두 칸의 글자가 바탕에 묻히지 않는다 | 그대로 |
+| CVAT Issues 탭 | 카드와 아래 목록 칸이 두 모드 패널 색이다 | 저장소 CSS를 얹어 확인 (실행 중 이미지는 `make cvat-up` 뒤 반영) |
 
 ## 웹훅과 승인 경계
 

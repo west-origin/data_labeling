@@ -26,7 +26,6 @@ from dlp_aireview.plan import (
     PlannedWindow,
     StreamMedia,
     estimate_units,
-    glove_derived,
     plan_session,
     plan_windows,
     targets,
@@ -42,7 +41,7 @@ from dlp_media.pts import PtsIndex
 from dlp_prelabel.contact import ContactInterval
 from dlp_prelabel.policy import load_policy as load_prelabel_policy
 from dlp_prelabel.runner import contact_label
-from dlp_schema.aireview import AiGroup
+from dlp_schema.aireview import AiGroup, glove_derived
 from dlp_schema.labels import (
     ActionPayload,
     BlurTrackPayload,

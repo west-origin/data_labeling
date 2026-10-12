@@ -42,13 +42,13 @@ from dlp_privacy.runner import (
     expected_render_hash,
     render_session,
 )
-from dlp_review.ai_display import AiDisplayConfig
+from dlp_review.ai_display import AiDisplayConfig, flag_region_id, ls_label_decisions
 from dlp_review.clients import CvatClient, LabelStudioClient
 from dlp_review.collect import collect_task
 from dlp_review.labelstudio import AI_DECISION, AI_FLAGS, AI_NOTE, AI_SUMMARY
 from dlp_review.ops.policy import AiReviewDisplayPolicy, CvatPolicy, LabelStudioPolicy
 from dlp_review.tasks import ReviewSetup, create_labeling_tasks
-from dlp_schema.aireview import AiArm, AiSuggestion, AiVerdict
+from dlp_schema.aireview import AiArm, AiDecision, AiSuggestion, AiVerdict
 from dlp_schema.db.aireview_repository import get_ai_exposure, insert_ai_run, insert_ai_units
 from dlp_schema.db.migrate import upgrade
 from dlp_schema.db.repository import (
@@ -63,6 +63,7 @@ from dlp_schema.labels import LabelRecord, Provenance, Source, VerificationState
 from dlp_schema.ontology import load_ontology
 from dlp_schema.review import ReviewStage, ReviewTask, ReviewTaskStatus, ReviewTool
 from dlp_schema.testing import (
+    AI_TARGET_RULE,
     AI_VERSION,
     FIXED_TIME,
     make_ai_run,
@@ -125,7 +126,7 @@ def setup(cvat_config: CvatPolicy, ls_config: LabelStudioPolicy) -> ReviewSetup:
 def _on(setup: ReviewSetup, **policy: Any) -> ReviewSetup:
     """AI 표시를 켠 설정 (advisory, 대조군 없음, 허용 버전 `AI_VERSION`)."""
     data: dict[str, Any] = {"mode": "advisory", "holdout_ratio": 0.0} | policy
-    cfg = AiDisplayConfig(AiReviewDisplayPolicy.model_validate(data), (AI_VERSION,))
+    cfg = AiDisplayConfig(AiReviewDisplayPolicy.model_validate(data), (AI_VERSION,), AI_TARGET_RULE)
     return replace(setup, ai=cfg)
 
 
@@ -290,15 +291,25 @@ def test_label_studio_shows_valid_verdicts_only_and_collection_is_unchanged(
     assert set(exposure.hidden) == {actions[1].label_id}
     assert exposure.render_hash == shown.render_hash and exposure.arm_key == shown.task_key
 
-    # 검수자가 예측(AI 결과 포함)을 그대로 내고 AI 결정 하나를 고른다
+    # 검수자가 예측(AI 결과 포함)을 그대로 내고 AI 결정 둘을 고른다: 라벨 구간에서 적용, 빨간 AI
+    # 구간을 고른 채 기각 단축키 (실화면에서 결정이 AI 구간 id에 붙는 모양, WP17.6 검증)
     ls = setup.label_studio
     assert ls is not None
-    decision = {"id": actions[0].label_id, "from_name": AI_DECISION, "to_name": "ts",
-                "type": "choices", "value": {"choices": ["apply"]}}  # fmt: skip
+    gap_flag = flag_region_id(exposure.shown[gap.label_id], gap.label_id)
+    assert gap_flag in {r["id"] for r in flags}
+    decisions = [
+        {"id": rid, "from_name": AI_DECISION, "to_name": "ts", "type": "choices",
+         "value": {"choices": [choice]}}
+        for rid, choice in ((actions[0].label_id, "apply"), (gap_flag, "dismiss"))
+    ]  # fmt: skip
     resp = ls_as(ls, "labeler02").http.post(
-        f"/api/tasks/{shown.external_id}/annotations", json={"result": [*with_ai, decision]}
+        f"/api/tasks/{shown.external_id}/annotations", json={"result": [*with_ai, *decisions]}
     )
     resp.raise_for_status()
+    stored: list[dict[str, Any]] = resp.json()["result"]
+    by_label, warnings = ls_label_decisions(stored, exposure, set(shown.sent_label_ids or ()))
+    assert by_label == {actions[0].label_id: AiDecision.APPLY, gap.label_id: AiDecision.DISMISS}
+    assert warnings == []
     with pg.begin() as conn:
         outcome = collect_task(conn, shown.task_key, _on(setup), "labeler02", FIXED_TIME)
     assert outcome is not None and not outcome.new_records
@@ -317,7 +328,7 @@ def test_holdout_and_missing_verdicts_show_only_the_same_empty_summary(
     held = _ls_task(pg, _on(setup, holdout_ratio=1.0), sid, "labeler01")
     none = _ls_task(pg, replace(_on(setup), ai=AiDisplayConfig(
         AiReviewDisplayPolicy(mode="advisory", holdout_ratio=0.0),
-        ("aireview-ffffffffffff+vlm-other",),
+        ("aireview-ffffffffffff+vlm-other",), AI_TARGET_RULE,
     )), sid, "labeler02")  # fmt: skip
     for task in (held, none):
         ai = [r for r in _predictions(setup, task) if r["from_name"] in {AI_FLAGS, AI_NOTE}]

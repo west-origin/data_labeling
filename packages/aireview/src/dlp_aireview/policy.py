@@ -29,7 +29,7 @@ from typing import Any, Literal
 import yaml
 from pydantic import Field, model_validator
 
-from dlp_schema.aireview import REASON_MAX
+from dlp_schema.aireview import REASON_MAX, AiTargetRule
 from dlp_schema.common import Contract
 from dlp_schema.review import ReviewReason
 
@@ -86,7 +86,8 @@ class KindsPolicy(Contract):
     temporal: tuple[str, ...]
     spatial: tuple[str, ...]
     # 판정 대상 출처. 사람 라벨은 판정하지 않는다. 장갑 센서에서 나온 라벨(센서 출처, 그리고 자동
-    # 손 상태 중 장갑 근거 OBSERVED)은 이 값과 별개로 늘 뺀다 (결정, `plan.glove_derived`, ADR 0040)
+    # 손 상태 중 장갑 근거 OBSERVED)은 이 값과 별개로 늘 뺀다
+    # (결정, `dlp_schema.aireview.glove_derived`, ADR 0040)
     sources: tuple[Literal["model"], ...] = Field(min_length=1)
 
     @model_validator(mode="after")
@@ -334,6 +335,19 @@ class AiReviewPolicy(Contract):
         `version`(정책 형식 버전, 정수)과 다르다.
         """
         return f"aireview-{self.digest}+vlm-{self.backend.model}"
+
+    @property
+    def target_rule(self) -> AiTargetRule:
+        """판정 대상 조건의 정책 값 (`dlp_schema.aireview.is_judge_target`).
+
+        판정 실행(`plan.targets`)과 검수 화면 판정률 분모(CLI가 `AiDisplayConfig.targets`로
+        넘긴다)가 같은 값을 쓴다.
+        """
+        return AiTargetRule(
+            kinds=frozenset((*self.kinds.temporal, *self.kinds.spatial)),
+            sources=frozenset(self.kinds.sources),
+            long_max_span_ms=self.temporal.long_max_span_ms,
+        )
 
     @property
     def served_model(self) -> str:

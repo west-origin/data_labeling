@@ -340,7 +340,12 @@
 :root[data-dlp-mode] * { scrollbar-color: var(--dlp-line) transparent; }
 
 /* 이슈: 블러 검수 우선 구간과 AI 1차 검수 지적(WP17.6, 메시지 "[AI 틀림·참고] …")을 이슈로 단다. 오른쪽
-   Issues 목록 카드와 캔버스의 이슈 대화 상자 글자가 바탕에 묻히지 않게 두 모드 색을 쓴다. */
+   Issues 목록 카드와 캔버스의 이슈 대화 상자 글자가 바탕에 묻히지 않게 두 모드 색을 쓴다. 카드 아래
+   목록 칸(.cvat-objects-sidebar-issues-list, CVAT 기본 #f1f1f1)도 패널 색으로 칠한다 (다크 모드에서
+   흰 바탕으로 남던 것, WP17.6 검증). */
+:root[data-dlp-mode] .cvat-objects-sidebar-issues-list {
+  background: var(--dlp-panel) !important;
+}
 :root[data-dlp-mode] .cvat-objects-sidebar-issue-item {
   background: var(--dlp-panel2) !important;
   border-color: var(--dlp-line) !important;

@@ -16,6 +16,8 @@
 - `ModeColors`·`ModesTheme`·`BrandTheme`·`LabelColors`·`LayoutTheme`·`AiColors`·`AiHotkeys`·
   `AiTheme`·`UiTheme`: review_ui.yaml 절별 모델 (`ai`: AI 1차 검수 판정 색·결정 단축키, WP17.6).
 - `TOKENS_FILE`: CVAT 테마 색 생성 파일 경로 (저장소 루트 기준).
+- `LS_AUTO_HOTKEYS`·`LS_RESERVED_KEYS`: Label Studio(고정 1.23.2)가 단축키 없는 라벨에 스스로 붙이는
+  키 후보와 내장 한 글자 단축키 (단축키 검증에 쓴다).
 - `load_ui_theme`: 저장소 루트에서 테마를 읽어 검증한다.
 - `ls_label_color`·`ls_hotkey`: Label Studio 라벨 이름 → 색·단축키.
 - `cvat_label_color`: CVAT 라벨 이름 → 색.
@@ -45,6 +47,17 @@ HexColor = Annotated[str, StringConstraints(pattern=r"^#[0-9a-fA-F]{6}$")]
 
 # CVAT 테마 색 생성 파일 (저장소 루트 기준). `make ui-theme`이 쓰고 테스트가 내용 일치를 검사한다.
 TOKENS_FILE = "services/review-theme/cvat/dlp-tokens.css"
+
+# Label Studio 1.23.2 화면이 단축키 없는 컨트롤(라벨·선택지·시계열)에 설정 순서대로 붙이는
+# 키 후보 (프런트엔드 `Hotkey.makeComb`). 명시 단축키로 이미 쓴 키는 건너뛴다. 그래서 명시
+# 단축키를 이 후보 안의 키로 새로 주면 그 뒤 라벨들의 자동 키가 한 칸씩 밀린다 (원시 동작
+# pull·rotate, 사이 구간, 손 상태는 자동 키에 기댄다). AI 결정 단축키는 이 후보 밖의 키만
+# 받는다 (WP17.6 검증: q·w를 쓰자 22개 라벨의 자동 키가 바뀌었다). Label Studio를 올리면 이
+# 값과 실화면 범례를 다시 확인한다 (change-guide).
+LS_AUTO_HOTKEYS = "1234567890qwetasdfgzxcvbyiopjklnm"
+# Label Studio 1.23.2 내장 한 글자 단축키 (u: 구간 선택 해제, [·]: 도구 크기). 시간 라벨
+# 화면의 나머지 내장 단축키는 조합키·화살표·Enter·Esc·Backspace라 한 글자 키와 겹치지 않는다.
+LS_RESERVED_KEYS = frozenset({"u", "[", "]"})
 
 
 class ModeColors(Contract):
@@ -111,7 +124,10 @@ class AiColors(Contract):
 
 
 class AiHotkeys(Contract):
-    """AI 지적 결정 단축키 (구간을 고른 뒤 누른다, 한 글자 키, 조합키 금지)."""
+    """AI 지적 결정 단축키 (라벨 구간을 고른 뒤 누른다, 한 글자 키, 조합키 금지).
+
+    Label Studio 자동 키 후보(`LS_AUTO_HOTKEYS`) 밖의 키여야 한다 (`UiTheme._check_hotkeys`).
+    """
 
     apply: str = Field(min_length=1, description="제안 적용")
     dismiss: str = Field(min_length=1, description="AI 지적 기각")
@@ -139,25 +155,37 @@ class UiTheme(Contract):
 
     @model_validator(mode="after")
     def _check_hotkeys(self) -> UiTheme:
-        """단축키는 비어 있지 않고 서로 달라야 하며, 조합키(+)를 직접 쓰지 않는다.
+        """단축키는 한 글자 키이고 서로 달라야 하며, Label Studio 내장 한 글자 단축키가 아니다.
 
-        왼손 단축키는 `ls_hotkey`가 shift+를 붙여 만든다. AI 결정 단축키(`ai.hotkeys`)도 같은
-        규칙이고, 동사 단축키·그 shift 조합과 겹치면 안 된다 (한 화면에서 같은 키가 두 일을 하지
-        않게). Label Studio 내장 단축키와의 충돌은 고정 버전 실화면에서 확인한다
-        (`packages/review/tests/test_ls_ai_feasibility.py`).
+        - 동사 단축키(`hotkeys`): 오른손 키. 왼손은 `ls_hotkey`가 shift+를 붙여 만든다 (그래서
+          조합키를 직접 쓰지 않는다).
+        - AI 결정 단축키(`ai.hotkeys`): 서로 다르고 동사 단축키와 겹치지 않으며, Label Studio
+          자동 키 후보(`LS_AUTO_HOTKEYS`) 밖이어야 한다. 후보 안의 키를 쓰면 단축키 없는
+          라벨(pull·rotate, 사이 구간, 손 상태)의 자동 키가 한 칸씩 밀려, 검수자가 누르던 키가
+          조용히 다른 라벨을 붙인다.
+        대소문자는 같은 키로 본다 (Label Studio 단축키 처리와 같다). 실화면 확인 기록은
+        `docs/handover/change-guide.md` "검수 화면 AI 표시 실화면 확인" 절이다.
         """
-        keys = list(self.hotkeys.values())
-        if any(not k or "+" in k for k in keys):
-            raise ValueError("hotkeys: 키는 비어 있지 않은 한 글자 키여야 합니다 (조합키 + 금지)")
+        keys = [k.lower() for k in self.hotkeys.values()]
+        if any(len(k) != 1 or k == "+" for k in keys):
+            raise ValueError("hotkeys: 키는 한 글자 키여야 합니다 (조합키 금지)")
         if len(keys) != len(set(keys)):
             raise ValueError("hotkeys: 두 동사에 같은 키를 줄 수 없습니다")
-        ai_keys = [self.ai.hotkeys.apply, self.ai.hotkeys.dismiss]
-        if any("+" in k for k in ai_keys) or ai_keys[0] == ai_keys[1]:
-            raise ValueError("ai.hotkeys: 서로 다른 한 글자 키여야 합니다 (조합키 + 금지)")
-        taken = {*keys, *(f"shift+{k}" for k in keys)}
-        clash = sorted(k for k in ai_keys if k in taken or k.lower() in taken)
+        reserved = sorted(set(keys) & LS_RESERVED_KEYS)
+        if reserved:
+            raise ValueError(f"hotkeys: Label Studio 내장 단축키입니다 {reserved}")
+        ai_keys = [self.ai.hotkeys.apply.lower(), self.ai.hotkeys.dismiss.lower()]
+        if any(len(k) != 1 or k == "+" for k in ai_keys) or ai_keys[0] == ai_keys[1]:
+            raise ValueError("ai.hotkeys: 서로 다른 한 글자 키여야 합니다 (조합키 금지)")
+        clash = sorted(k for k in ai_keys if k in keys)
         if clash:
             raise ValueError(f"ai.hotkeys: 동사 단축키와 겹칩니다 {clash}")
+        auto = sorted(k for k in ai_keys if k in LS_AUTO_HOTKEYS or k in LS_RESERVED_KEYS)
+        if auto:
+            raise ValueError(
+                f"ai.hotkeys: Label Studio 자동 키 후보·내장 단축키입니다 {auto} (후보 안의 키는 "
+                "단축키 없는 라벨의 자동 키를 밀어낸다)"
+            )
         return self
 
     def mode(self, name: Mode) -> ModeColors:

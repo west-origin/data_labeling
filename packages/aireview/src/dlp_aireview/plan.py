@@ -46,20 +46,22 @@ from dlp_aireview.sensors import ABSENT, SensorContext
 from dlp_aireview.tracks import Timeline
 from dlp_media.frames import frame_ms, pick_frames
 from dlp_media.pts import PtsIndex
-from dlp_schema.aireview import AiGroup, AiReviewUnit
+from dlp_schema.aireview import (
+    AiGroup,
+    AiReviewUnit,
+    is_judge_target,
+    raw_access_event,
+)
 from dlp_schema.episode import entity_refs
 from dlp_schema.labels import (
     BoxTrackPayload,
     EventPayload,
-    Evidence,
     GapPayload,
     HandStatePayload,
     LabelRecord,
     MaskTrackPayload,
     ObjectStatePayload,
     SegmentPayload,
-    Source,
-    VerificationState,
 )
 from dlp_schema.ontology import Ontology
 from dlp_schema.review import FlaggedSpan, ReviewReason
@@ -184,15 +186,6 @@ class UnitEstimate:
 # ---------------------------------------------------------------- 대상·맥락
 
 
-def _raw_access_event(label: LabelRecord, o: Ontology) -> bool:
-    """원본 접근 권한자만 기록하는 이벤트(표정 등)인가 (블러본으로 판정할 수 없다)."""
-    p = label.payload
-    if not isinstance(p, EventPayload):
-        return False
-    term = o.events.get(p.event_type)
-    return term is not None and term.raw_access
-
-
 def _operational(label: LabelRecord, o: Ontology) -> bool:
     """대상·맥락 공통 조건: 측정·오류 삽입 레코드, 블러, 원본 접근 이벤트가 아니다.
 
@@ -202,29 +195,7 @@ def _operational(label: LabelRecord, o: Ontology) -> bool:
         not label.seeded_error
         and label.measurement is None
         and label.kind != "blur_track"
-        and not _raw_access_event(label, o)
-    )
-
-
-def glove_derived(label: LabelRecord) -> bool:
-    """장갑 압력 센서에서 나온 라벨인가 (판정 대상에서 뺀다, 사용자 결정·ADR 0040 결정 5).
-
-    - 출처가 센서(`Source.SENSOR`)인 라벨.
-    - 자동(모델 출처) 손 상태 중 증거가 관찰(OBSERVED)인 라벨. 프리라벨 접촉 단계
-      (`dlp_prelabel.runner.contact_label`)는 장갑만 잡은 접촉(대상 미상 `unresolved`)과 장갑 시각 +
-      영상 대상 융합 접촉을 OBSERVED로, 영상만 잡은 접촉을 INFERRED로 쓴다. 융합 접촉도 접촉의 있고
-      없음과 경계가 장갑 압력에서 나오므로 함께 뺀다. 영상만 잡은 접촉은 대상이다 (장갑 문장과
-      대조).
-
-    손 상태를 만드는 다른 자동 단계가 생기면 영상 근거 라벨은 INFERRED로 써야 판정 대상이 된다
-    (계약 기본값이 OBSERVED라 표시를 빠뜨리면 판정에서 빠지는 쪽으로 틀린다).
-    """
-    if label.provenance.source is Source.SENSOR:
-        return True
-    return (
-        label.provenance.source is Source.MODEL
-        and isinstance(label.payload, HandStatePayload)
-        and label.evidence is Evidence.OBSERVED
+        and not raw_access_event(label, o)
     )
 
 
@@ -233,24 +204,13 @@ def targets(
 ) -> list[LabelRecord]:
     """판정 대상: 검수 전 자동 운영 라벨 중 정책 종류·출처 (시작 시각, ID 순).
 
-    장갑 센서에서 나온 라벨(`glove_derived`)과 `long_max_span_ms`보다 긴 상위 구간은 뺀다. 모델
-    버전·신뢰도·검수자·우선순위 사유는 판정 입력에 넣지 않는다 (자동 라벨의 자신감에 끌리지 않게).
+    조건은 `dlp_schema.aireview.is_judge_target`(정책 값은 `policy.target_rule`)이다. 장갑 센서에서
+    나온 라벨(`glove_derived`)과 `long_max_span_ms`보다 긴 상위 구간은 뺀다. 검수 화면의 판정률
+    분모(`dlp_review.ai_display.exposure_for`)도 같은 함수를 쓴다. 모델 버전·신뢰도·검수자·우선순위
+    사유는 판정 입력에 넣지 않는다 (자동 라벨의 자신감에 끌리지 않게).
     """
-    kinds = set(policy.kinds.temporal) | set(policy.kinds.spatial)
-    sources = set(policy.kinds.sources)
-    out = [
-        x
-        for x in current
-        if x.kind in kinds
-        and x.provenance.source.value in sources
-        and not glove_derived(x)
-        and x.verification.state is VerificationState.UNREVIEWED
-        and _operational(x, o)
-        and not (
-            isinstance(x.payload, SegmentPayload)
-            and x.t_end_ms - x.t_start_ms > policy.temporal.long_max_span_ms
-        )
-    ]
+    rule = policy.target_rule
+    out = [x for x in current if is_judge_target(x, o, rule)]
     return sorted(out, key=lambda x: (x.t_start_ms, x.label_id))
 
 

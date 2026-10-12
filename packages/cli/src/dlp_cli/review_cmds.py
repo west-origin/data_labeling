@@ -461,13 +461,17 @@ def cmd_register(args: argparse.Namespace) -> int:
 def _ai_gate(conn: sa.Connection, session_id: str, ai: AiDisplayConfig | None) -> GateDecision:
     """required 모드의 배정 게이트 (`ai_display.required_gate`). 시간 초과면 waived 이벤트를 남긴다.
 
+    required가 아니면(끔·advisory, 블러 계획) AI 표와 생애주기 기록을 읽지 않고 바로 진행한다
+    (review.yaml `ai_review.mode` 설명: off는 AI 표를 읽지 않는다).
     부작용: 시간 초과로 진행할 때 `ai_review_run_events`에 waived 1행 (사유 `timeout: …`, 계획과
     같은 트랜잭션).
     """
+    if ai is None or ai.policy.mode != "required":
+        return required_gate(None, None, datetime.now(UTC), ai)
     states = latest_run_state(conn, [session_id])
     now = datetime.now(UTC)
     decision = required_gate(states.get(session_id), prelabeled_at(conn, session_id), now, ai)
-    if decision.waive_timeout and ai is not None:
+    if decision.waive_timeout:
         insert_ai_run_event(
             conn,
             AiRunEvent(

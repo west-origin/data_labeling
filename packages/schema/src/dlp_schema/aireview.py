@@ -19,6 +19,9 @@
       `db.aireview_repository`.
     - `AI_REVIEWER_PREFIX`: AI 판정 실행자 접두사. 이 검수자 ID로는 검수 상태를 기록할 수 없다.
     - 순수 함수: `worst`(한 라벨의 여러 판정 중 가장 나쁜 것), `valid_verdicts`(지금 유효한 판정).
+    - 판정 대상 조건(판정 실행과 검수 화면 판정률이 같이 쓴다): `AiTargetRule`(정책에서 오는 값),
+      `is_judge_target`, `glove_derived`(장갑 센서에서 나온 라벨), `raw_access_event`(원본 접근
+      이벤트).
 
 주의
     - 클래스 docstring·Field description은 `schemas/ai_*.schema.json`에 들어간다 (`make schemas`).
@@ -29,13 +32,24 @@
 from __future__ import annotations
 
 from collections.abc import Collection, Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Annotated, Literal
 
 from pydantic import AwareDatetime, Field, StringConstraints, model_validator
 
 from dlp_schema.common import Confidence, Contract, Identifier, Ms, OntologyId, SemVer
-from dlp_schema.labels import LabelPayload, LabelRecord, Source, VerificationState
+from dlp_schema.labels import (
+    EventPayload,
+    Evidence,
+    HandStatePayload,
+    LabelPayload,
+    LabelRecord,
+    SegmentPayload,
+    Source,
+    VerificationState,
+)
+from dlp_schema.ontology import Ontology
 
 # sha256 16진수 64자
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
@@ -544,6 +558,81 @@ def worst(candidates: Iterable[tuple[AiVerdict, AiReviewUnit]]) -> tuple[AiVerdi
     if not items:
         raise ValueError("판정 후보가 없습니다")
     return max(items, key=lambda c: (VERDICT_RANK[c[0].verdict], c[1].created_at, c[1].unit_id))
+
+
+@dataclass(frozen=True)
+class AiTargetRule:
+    """판정 대상 조건 중 판정 정책(`config/policies/aireview.yaml`)에서 오는 값.
+
+    `dlp_aireview.policy.AiReviewPolicy.target_rule`이 만든다. 판정 실행
+    (`dlp_aireview.plan.targets`)과 검수 화면 판정률의 분모(`dlp_review.ai_display.exposure_for`)가
+    같은 조건(`is_judge_target`)을 쓰도록 계약 패키지에 둔다 (검수 패키지는 판정 정책을 읽지
+    않으므로 CLI가 넘긴다).
+
+    Attributes:
+        kinds: 판정할 라벨 종류 (`kinds.temporal`과 `kinds.spatial`의 합).
+        sources: 판정할 출처 값 (`kinds.sources`, 지금은 model만).
+        long_max_span_ms: 이보다 긴 상위 구간은 판정하지 않는다 (`temporal.long_max_span_ms`).
+    """
+
+    kinds: frozenset[str]
+    sources: frozenset[str]
+    long_max_span_ms: int
+
+
+def raw_access_event(label: LabelRecord, o: Ontology) -> bool:
+    """원본 접근 권한자만 기록하는 이벤트(표정 등)인가 (블러본으로 판정할 수 없다)."""
+    p = label.payload
+    if not isinstance(p, EventPayload):
+        return False
+    term = o.events.get(p.event_type)
+    return term is not None and term.raw_access
+
+
+def glove_derived(label: LabelRecord) -> bool:
+    """장갑 압력 센서에서 나온 라벨인가 (판정 대상에서 뺀다, 사용자 결정·ADR 0040 결정 5).
+
+    - 출처가 센서(`Source.SENSOR`)인 라벨.
+    - 자동(모델 출처) 손 상태 중 증거가 관찰(OBSERVED)인 라벨. 프리라벨 접촉 단계
+      (`dlp_prelabel.runner.contact_label`)는 장갑만 잡은 접촉(대상 미상 `unresolved`)과 장갑 시각 +
+      영상 대상 융합 접촉을 OBSERVED로, 영상만 잡은 접촉을 INFERRED로 쓴다. 융합 접촉도 접촉의 있고
+      없음과 경계가 장갑 압력에서 나오므로 함께 뺀다. 영상만 잡은 접촉은 대상이다 (장갑 문장과
+      대조).
+
+    손 상태를 만드는 다른 자동 단계가 생기면 영상 근거 라벨은 INFERRED로 써야 판정 대상이 된다
+    (계약 기본값이 OBSERVED라 표시를 빠뜨리면 판정에서 빠지는 쪽으로 틀린다).
+    """
+    if label.provenance.source is Source.SENSOR:
+        return True
+    return (
+        label.provenance.source is Source.MODEL
+        and isinstance(label.payload, HandStatePayload)
+        and label.evidence is Evidence.OBSERVED
+    )
+
+
+def is_judge_target(label: LabelRecord, o: Ontology, rule: AiTargetRule) -> bool:
+    """판정 대상인가: 검수 전 자동 운영 라벨 중 정책 종류·출처 (ADR 0040 2.1).
+
+    측정·오류 삽입 레코드, 블러 트랙, 원본 접근 이벤트, 장갑 센서에서 나온 라벨(`glove_derived`),
+    `rule.long_max_span_ms`보다 긴 상위 구간은 아니다. `dlp_aireview.plan.targets`(무엇을 묻나)와
+    검수 화면의 판정률 분모(`dlp_review.ai_display`)가 같은 함수를 써서, 판정할 수 있는 라벨을 모두
+    판정하면 판정률이 100%가 된다.
+    """
+    return (
+        label.kind in rule.kinds
+        and label.provenance.source.value in rule.sources
+        and label.verification.state is VerificationState.UNREVIEWED
+        and not label.seeded_error
+        and label.measurement is None
+        and label.kind != "blur_track"
+        and not raw_access_event(label, o)
+        and not glove_derived(label)
+        and not (
+            isinstance(label.payload, SegmentPayload)
+            and label.t_end_ms - label.t_start_ms > rule.long_max_span_ms
+        )
+    )
 
 
 def _is_open_target(label: LabelRecord) -> bool:

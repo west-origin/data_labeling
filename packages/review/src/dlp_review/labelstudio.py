@@ -30,8 +30,11 @@ WP6, ADR 0006(무손실 왕복). 사용처: `tasks.create_labeling_tasks`(보내
 `EVENT_TEXT_FIELDS`, `HAND_TARGET`, `HAND_BODY_PART`, `HAND_FIELDS`, `label_names`, `label_config`,
 `to_ls_results`, `NAME_KINDS`, `LsFormatError`, `from_ls_results`.
 AI 1차 검수(WP17.6, ADR 0040): `AI_FLAGS`, `AI_SUMMARY`, `AI_NOTE`, `AI_DECISION`, `AI_LABELS`,
-`AI_CHOICES`, `AI_BANNER`, `ls_ai_decisions`. AI 컨트롤은 설정에 늘 있고(모드와 무관), 예측 결과는
-`dlp_review.ai_display.ls_ai_results`가 만든다. 수집(`from_ls_results`)은 라벨 컨트롤 결과만 읽는다.
+`AI_CHOICES`, `AI_BANNER`, `AI_REGION_HINT`, `ls_ai_decisions`. AI 컨트롤은 설정에 늘 있고(모드와
+무관), 예측 결과는 `dlp_review.ai_display.ls_ai_results`가 만든다. 수집(`from_ls_results`)은 라벨
+컨트롤 결과만 읽는다. 구간을 고르면 보이는 입력란(AI 메모·결정, 이벤트 속성, 손 상태 접촉 대상)은
+라벨 컨트롤(`labels`) 구간을 골랐을 때만 보인다 (`whenTagName`). AI 구간을 고르면 안내 한 줄만
+보인다.
 
 이벤트 속성(심각도, 관련 행동·개체 ID)은 구간에 딸린 입력란(perRegion)으로 주고받는다. 온톨로지가
 요구하는 속성을 화면에서 채울 수 없으면 새로 그린 이벤트가 저장 검증에서 거부되고 작업 수집 전체가
@@ -108,6 +111,12 @@ AI_LABELS = {
 AI_CHOICES = (("제안 적용", AiDecision.APPLY), ("AI 지적 기각", AiDecision.DISMISS))
 # 화면 안내 문구 (참고용·사람 검수 아님·표시 없는 구간도 확인, ADR 0040 6절)
 AI_BANNER = "AI 1차 검수 · 참고용 · 사람 검수 아님 · 표시 없는 구간도 모두 확인"
+# AI 구간을 골랐을 때의 안내. 메모와 결정은 라벨 구간에 붙는다 (결정 단축키는 어느 구간에서나
+# 눌리고, AI 구간에서 누른 결정은 수집이 원 라벨로 되돌린다: `ai_display.ls_label_decisions`)
+AI_REGION_HINT = (
+    "AI 표시 구간 · 참고용 · 고칠 수 없음 — 메모와 결정 칸은 같은 시각의 라벨 구간을 고르면 "
+    "보인다 (여기서 누른 결정 단축키도 그 라벨의 결정이 된다)"
+)
 
 
 # 손별 라벨 이름에 쓰는 손 값 (Hand enum 값)
@@ -212,7 +221,7 @@ def label_config(o: Ontology, theme: UiTheme | None = None, *, logo_uri: str = "
   </TimeSeriesLabels>
 {ai_summary}
 {ai_region}
-  <View visibleWhen="region-selected"{event_class}>
+  <View visibleWhen="region-selected" whenTagName="{FROM_NAME}"{event_class}>
     <Header value="이벤트 속성 (이벤트 종류가 요구할 때만 채운다)"/>
     <Choices name="{EVENT_SEVERITY}" toName="{TO_NAME}" perRegion="true" choice="single">
       <Choice value="1"/>
@@ -224,7 +233,7 @@ def label_config(o: Ontology, theme: UiTheme | None = None, *, logo_uri: str = "
     <TextArea name="related_entity_id" toName="{TO_NAME}" perRegion="true" maxSubmissions="1"
               placeholder="관련 개체 ID (related_entity_id)"/>
   </View>
-  <View visibleWhen="region-selected"{hand_class}>
+  <View visibleWhen="region-selected" whenTagName="{FROM_NAME}"{hand_class}>
     <Header value="손 상태 접촉 대상 (object·tool·fixed_surface: 대상 ID, person: 부위)"/>
     <TextArea name="{HAND_TARGET}" toName="{TO_NAME}" perRegion="true" maxSubmissions="1"
               placeholder="접촉 대상 개체 ID (target_id)"/>
@@ -238,10 +247,16 @@ def label_config(o: Ontology, theme: UiTheme | None = None, *, logo_uri: str = "
 
 
 def _ai_controls(theme: UiTheme | None) -> tuple[str, str]:
-    """AI 1차 검수 컨트롤 XML 두 덩어리: (작업 요약·판정 구간 범례, 구간을 고르면 보이는 메모·결정).
+    """AI 1차 검수 컨트롤 XML 두 덩어리: (작업 요약·판정 구간 범례, 구간을 고르면 보이는 칸).
 
     모드와 무관하게 늘 같은 컨트롤 이름·라벨 값이다 (모듈 상수 설명). theme이 있으면 판정 구간
     색(`ai.colors`)과 결정 단축키(`ai.hotkeys`)를 넣는다 (모양만).
+
+    구간을 고르면 보이는 칸은 고른 구간의 컨트롤로 가른다 (Label Studio `whenTagName`은 고른 구간의
+    라벨 컨트롤 이름과 비교한다): 라벨 구간(`labels`)이면 AI 메모와 결정, AI 구간(`ai_flags`)이면
+    안내 한 줄(`AI_REGION_HINT`). AI 구간에 메모·결정 칸을 보이면 "지적 없음" 자리 글이 보이고
+    결정이 AI 구간 id에 붙어 헷갈린다 (WP17.6 검증). 단축키는 칸이 숨어도 눌리므로, AI 구간에서 누른
+    결정은 수집이 원 라벨로 되돌린다 (`ai_display.ls_label_decisions`).
     """
     colors = theme.ai.colors.model_dump() if theme is not None else {}
     keys = theme.ai.hotkeys.model_dump() if theme is not None else {}
@@ -265,20 +280,29 @@ def _ai_controls(theme: UiTheme | None) -> tuple[str, str]:
 {flags}
     </TimeSeriesLabels>
   </View>"""
-    region = f"""  <View visibleWhen="region-selected" className="dlp-ai-region">
+    when = 'visibleWhen="region-selected" whenTagName='
+    region = f"""  <View {when}"{FROM_NAME}" className="dlp-ai-region">
     <Header value="AI 1차 검수 메모 · 참고용 · 사람 검수 아님"/>
     <TextArea name="{AI_NOTE}" toName="{TO_NAME}" perRegion="true" maxSubmissions="1" rows="2"
-              placeholder="이 구간에는 AI 지적이 없다"/>
+              placeholder="이 구간에는 AI 지적이 없다 (결정을 골라도 반영되지 않는다)"/>
     <Choices name="{AI_DECISION}" toName="{TO_NAME}" perRegion="true" choice="single"
              showInline="true">
 {choices}
     </Choices>
+  </View>
+  <View {when}"{AI_FLAGS}" className="dlp-ai-region">
+    <Header value={quoteattr(AI_REGION_HINT)} size="6"/>
   </View>"""
     return summary, region
 
 
 def ls_ai_decisions(results: list[dict[str, Any]]) -> dict[str, AiDecision]:
-    """검수자 결과 → 라벨 구간 id별 AI 결정 (`ai_decision` 선택만 읽는다).
+    """검수자 결과 → 구간 id별 AI 결정 (`ai_decision` 선택만 읽는다, id는 결과 그대로).
+
+    id는 결정을 고를 때 골라 둔 구간의 id다. 보통 라벨 구간 id(= 원 라벨 ID)지만, 검수자가 AI 구간을
+    고른 채 결정 단축키를 누르면 AI 구간 id(`ai-<해시 8자>`)다. 라벨 ID별 결정이 필요하면
+    `ai_display.ls_label_decisions`(노출 기록으로 AI 구간 id를 원 라벨로 되돌리고, 작업 라벨이 아닌
+    구간의 결정·서로 다른 결정을 경고로 남긴다)를 쓴다.
 
     선택 값은 별칭(apply·dismiss)과 화면 값(제안 적용·AI 지적 기각) 둘 다 받는다 (Label Studio는
     별칭이 있으면 결과에 별칭을 쓴다). 알 수 없는 값·빈 선택은 결정 없음으로 본다. AI 메모·요약·

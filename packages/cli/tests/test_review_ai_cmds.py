@@ -131,6 +131,8 @@ def test_ai_display_config_follows_mode_and_versions() -> None:
     cfg = ai_display_config(policy)
     assert cfg is not None
     assert cfg.versions == (load_aireview_policy(ROOT).verdict_version,)
+    # 판정률 분모는 판정 실행과 같은 대상 조건 (aireview.yaml 종류·출처·긴 상위 구간 상한)
+    assert cfg.targets == load_aireview_policy(ROOT).target_rule
     off = policy.model_copy(
         update={"ai_review": policy.ai_review.model_copy(update={"mode": "off"})}
     )
@@ -184,6 +186,25 @@ def test_required_mode_defers_plan_until_judged_waived_or_timed_out(
     monkeypatch.setenv("DLP_REVIEW_POLICY_FILE", str(_policy_file(tmp_path, mode="advisory")))
     _session(engine, "adv", now - timedelta(hours=1))
     assert _plan(url, "adv") == 0 and _assignments(engine, "adv")
+
+
+def test_plan_without_required_mode_does_not_read_ai_tables(
+    db: tuple[str, sqlalchemy.Engine], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """off·advisory의 계획은 AI 실행 기록·생애주기 기록을 읽지 않는다 (review.yaml: off는 AI 표를
+    읽지 않는다). 읽으면 실패하도록 저장소 함수를 바꿔 끼운다."""
+    url, engine = db
+
+    def boom(*_: Any, **__: Any) -> Any:
+        raise AssertionError("required가 아닌데 AI 게이트 기록을 읽었다")
+
+    monkeypatch.setattr(review_cmds, "latest_run_state", boom)
+    monkeypatch.setattr(review_cmds, "prelabeled_at", boom)
+    now = datetime.now(UTC)
+    for mode in ("off", "advisory"):
+        monkeypatch.setenv("DLP_REVIEW_POLICY_FILE", str(_policy_file(tmp_path, mode=mode)))
+        _session(engine, mode, now - timedelta(hours=1))
+        assert _plan(url, mode) == 0 and _assignments(engine, mode)
 
 
 def test_reissue_hint_includes_aireview_step(capsys: pytest.CaptureFixture[str]) -> None:

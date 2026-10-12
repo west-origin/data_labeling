@@ -22,13 +22,17 @@
     - 작업 라벨에 유효한 표시 판정이 없으면 no_verdicts, 있으면 shown. shown이어도 맞음(ok), 최소
       확신도 미만, 10분당 상한·CVAT 이슈 상한을 넘은 판정은 따로 표시하지 않는다 (hidden).
     - 화면 요약은 holdout·no_verdicts·mode_excluded 모두 "AI 1차 검수: 없음"으로 같다.
+    - 판정률(coverage) = 작업 라벨 중 판정 대상(`dlp_schema.aireview.is_judge_target`, 판정 실행과
+      같은 조건·같은 정책 값 `AiDisplayConfig.targets`)에서 유효한 표시 판정이 있는 비율. 장갑 센서
+      출처 라벨·너무 긴 상위 구간·원본 접근 이벤트처럼 판정하지 않는 라벨은 분모에 들지 않는다.
 
 공개 이름
-    - `AiDisplayConfig`, `AiView`, `load_ai_view`, `render_hashes_now`.
+    - `AiDisplayConfig`, `AiView`, `load_ai_view`.
     - `root_assignment_id`, `arm_key`, `is_holdout`, `exposure_for`.
     - 글·범위: `summary_text`, `suggestion_text`, `note_text`, `master_clock`, `flag_range`,
       `flag_region_id`. 상수 `VERDICT_KO`, `PROBLEM_KO`, `FIELD_KO`, `REASONS`(판정 → 사유).
-    - Label Studio: `ls_ai_results`.
+    - Label Studio: `ls_ai_results`(예측), `ls_label_decisions`(검수자 결정 → 라벨 ID별, AI 구간에
+      붙은 결정을 원 라벨로 되돌린다).
     - CVAT(1단계, 프로젝트 변경 없음): `issue_text`, `issue_frame`, `issue_position`,
       `cvat_ai_issues`.
     - 운영: `ai_flagged_spans`(우선순위 사유), `escalated_ids`(표본 제외·마무리 보호 대상),
@@ -42,24 +46,32 @@ from __future__ import annotations
 
 import bisect
 import hashlib
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
 import sqlalchemy as sa
 
-from dlp_privacy.policy import PrivacyPolicy
-from dlp_privacy.runner import RenderNotCurrentError, expected_render_hash
 from dlp_review.clients import CvatClient
-from dlp_review.labelstudio import AI_FLAGS, AI_LABELS, AI_NOTE, AI_SUMMARY, TO_NAME
+from dlp_review.labelstudio import (
+    AI_FLAGS,
+    AI_LABELS,
+    AI_NOTE,
+    AI_SUMMARY,
+    TO_NAME,
+    ls_ai_decisions,
+)
 from dlp_review.ops.policy import AiReviewDisplayPolicy
 from dlp_schema.aireview import (
     AiArm,
+    AiDecision,
     AiExposure,
     AiProblem,
+    AiTargetRule,
     AiVerdict,
     AiVerdictValue,
+    is_judge_target,
     valid_verdicts,
 )
 from dlp_schema.db.aireview_repository import AiRunState, list_ai_units
@@ -68,8 +80,6 @@ from dlp_schema.labels import (
     KeypointTrackPayload,
     LabelPayload,
     LabelRecord,
-    Source,
-    VerificationState,
 )
 from dlp_schema.ontology import Ontology
 from dlp_schema.review import FlaggedSpan, ReviewAssignment, ReviewMode, ReviewReason, ReviewTask
@@ -133,15 +143,19 @@ class AiDisplayConfig:
     """검수에 AI 판정을 쓰는 설정 (`ReviewSetup.ai`). None이면 끔(off)이다.
 
     CLI(`dlp_cli.review_config.ai_display_config`)가 고른 검수 정책의 `ai_review`와 허용 판정 버전
-    (정책 `versions`, 비면 aireview.yaml 지금 버전)으로 만든다. mode=off면 만들지 않는다.
+    (정책 `versions`, 비면 aireview.yaml 지금 버전), 판정 대상 조건의 정책 값(aireview.yaml)으로
+    만든다. mode=off면 만들지 않는다.
 
     Attributes:
         policy: review.yaml `ai_review`.
         versions: 허용 판정 버전 (비어 있으면 판정을 하나도 쓰지 않는다).
+        targets: 판정 대상 조건의 정책 값 (`AiReviewPolicy.target_rule`). 판정률의 분모를 판정
+            실행과 같은 조건(`is_judge_target`)으로 센다.
     """
 
     policy: AiReviewDisplayPolicy
     versions: tuple[str, ...]
+    targets: AiTargetRule
 
 
 @dataclass(frozen=True)
@@ -187,16 +201,6 @@ def load_ai_view(
     return AiView(display=display, escalate=escalate)
 
 
-def render_hashes_now(
-    conn: sa.Connection, session_id: str, streams: Iterable[str], policy: PrivacyPolicy
-) -> dict[str, str] | None:
-    """스트림마다 지금 렌더 해시. 세션이 승인 상태가 아니면 None (표시 프로필을 비운다)."""
-    try:
-        return {s: expected_render_hash(conn, session_id, s, policy) for s in streams}
-    except RenderNotCurrentError:
-        return None
-
-
 # ---------------------------------------------------------------- 노출 집단
 
 
@@ -221,17 +225,6 @@ def is_holdout(key: str, policy: AiReviewDisplayPolicy) -> bool:
     """sha256(`<키>|<seed>`) 앞 8바이트 / 2^64 < holdout_ratio (같은 키는 늘 같은 결과)."""
     digest = hashlib.sha256(f"{key}|{policy.holdout_seed}".encode()).digest()
     return int.from_bytes(digest[:8], "big") / 2**64 < policy.holdout_ratio
-
-
-def _open_target(label: LabelRecord) -> bool:
-    """판정 대상이 될 수 있는 라벨 (검수 전 자동 운영 라벨, 블러 아님): 판정률의 분모."""
-    return (
-        label.provenance.source is not Source.HUMAN
-        and label.verification.state is VerificationState.UNREVIEWED
-        and not label.seeded_error
-        and label.measurement is None
-        and label.kind != "blur_track"
-    )
 
 
 def _floor_ok(verdict: AiVerdict, policy: AiReviewDisplayPolicy) -> bool:
@@ -280,6 +273,7 @@ def exposure_for(
     view: AiView,
     sent: Sequence[LabelRecord],
     cfg: AiDisplayConfig,
+    o: Ontology,
     *,
     limit: int | None = None,
 ) -> AiExposure:
@@ -290,12 +284,15 @@ def exposure_for(
         assignment: 작업의 배정 (직접 작업이면 None).
         view: 작업 매체 렌더 해시로 계산한 판정 (`load_ai_view`).
         sent: 작업에 보낸 라벨.
+        o: 세션 온톨로지 (판정률 분모의 원본 접근 이벤트 판별).
         limit: 따로 표시할 판정 수 상한 (CVAT 이슈 상한, Label Studio는 None).
     """
     policy = cfg.policy
     labels = {x.label_id: x for x in sent}
     valid = {lid: view.display[lid] for lid in labels if lid in view.display}
-    candidates = sum(1 for x in sent if _open_target(x))
+    # 판정률: 판정 실행과 같은 대상 조건의 라벨 중 유효한 표시 판정이 있는 비율
+    candidates = {x.label_id for x in sent if is_judge_target(x, o, cfg.targets)}
+    judged = len(candidates & set(valid))
     key = arm_key(task, assignment)
     shown: dict[str, str] = {}
     if task.mode.value not in policy.show_modes:
@@ -310,7 +307,7 @@ def exposure_for(
     return AiExposure(
         task_key=task.task_key, session_id=task.session_id, assignment_id=task.assignment_id,
         arm=arm, arm_key=key, versions=cfg.versions, render_hash=task.render_hash,
-        coverage=min(1.0, len(valid) / candidates) if candidates else 0.0,
+        coverage=judged / len(candidates) if candidates else 0.0,
         shown=shown, hidden={lid: uid for lid, (_, uid) in valid.items() if lid not in shown},
         created_at=task.created_at,
     )  # fmt: skip
@@ -402,7 +399,7 @@ def master_clock(ms: int) -> str:
 def note_text(
     label: LabelRecord, verdict: AiVerdict, o: Ontology, hotkeys: Mapping[str, str] | None
 ) -> str:
-    """라벨 구간 메모: `[틀림 · 참고] <제안·문제> · <이유> · 근거 mm:ss.s · q 적용 / w 기각`.
+    """라벨 구간 메모: `[틀림 · 참고] <제안·문제> · <이유> · 근거 mm:ss.s · r 적용 / h 기각`.
 
     hotkeys: 결정 단축키 (`review_ui.yaml ai.hotkeys`, 없으면 단축키 안내를 뺀다). 제안이 없으면
     적용 안내도 뺀다.
@@ -468,6 +465,53 @@ def ls_ai_results(
             "value": {"text": [note_text(label, verdict, o, hotkeys)]},
         })  # fmt: skip
     return out
+
+
+def ls_label_decisions(
+    results: list[dict[str, Any]], exposure: AiExposure, known_ids: Collection[str]
+) -> tuple[dict[str, AiDecision], list[str]]:
+    """Label Studio 검수자 결과의 AI 결정(`labelstudio.ls_ai_decisions`, 구간 id별) → 라벨 ID별.
+
+    결정은 화면에서 라벨 구간을 고른 뒤 고르지만, 결정 단축키는 어느 구간을 골랐든 눌린다. 검수자가
+    빨간 AI 구간(`ai_flags`)을 고른 채 단축키를 누르면 결정이 AI 구간 id(`flag_region_id`)에
+    붙는다. 그 결정은 노출 기록의 보인 판정(`exposure.shown` {라벨 ID: 단위 ID})으로 AI 구간 id를
+    다시 계산해 원 라벨로 되돌린다 (검수자가 그 지적을 보고 누른 결정이다).
+
+    Args:
+        results: 검수자가 제출한 최신 주석의 결과.
+        exposure: 그 작업의 노출 기록 (`ai_review_exposures`).
+        known_ids: 작업에 보낸 라벨 ID (`ReviewTask.sent_label_ids`).
+
+    Returns:
+        (라벨 ID → 결정, 경고 문장 목록). 버리는 경우는 경고로 남긴다:
+        - 작업 라벨도 이 작업의 AI 구간도 아닌 구간의 결정 (새로 그린 구간 등).
+        - 한 라벨에 라벨 구간과 AI 구간의 결정이 서로 다름 (어느 쪽인지 알 수 없어 결정 없음).
+        보인 지적이 없는 라벨의 결정은 그대로 돌려준다 (적용 단계가 no_suggestion·not_shown으로
+        기록한다, WP17.7).
+    """
+    flags = {flag_region_id(uid, lid): lid for lid, uid in exposure.shown.items()}
+    known = set(known_ids)
+    found: dict[str, set[AiDecision]] = {}
+    unknown = 0
+    for rid, decision in ls_ai_decisions(results).items():
+        lid = rid if rid in known else flags.get(rid)
+        if lid is None:
+            unknown += 1
+            continue
+        found.setdefault(lid, set()).add(decision)
+    out = {lid: next(iter(ds)) for lid, ds in found.items() if len(ds) == 1}
+    warnings: list[str] = []
+    if unknown:
+        warnings.append(
+            f"작업 라벨이 아닌 구간의 AI 결정 {unknown}개를 무시했다 (새로 그린 구간 등)"
+        )
+    conflicts = sorted(lid for lid, ds in found.items() if len(ds) > 1)
+    if conflicts:
+        warnings.append(
+            f"라벨 구간과 AI 구간의 결정이 서로 다른 라벨 {len(conflicts)}개는 결정 없음으로 본다 "
+            f"(예: {conflicts[0]})"
+        )
+    return out, warnings
 
 
 # ---------------------------------------------------------------- CVAT (1단계: 이슈 메모)

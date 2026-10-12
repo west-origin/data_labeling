@@ -23,6 +23,9 @@
    로고)을 넣는다. 다크/화이트 전환은 Label Studio 1.23에 내장된 Theme 설정
    (`<html data-color-scheme>`, 사용자 메뉴)을 그대로 쓴다. 기존 프로젝트는 `dlp review create` 때
    `ensure_label_config`로 갱신된다. 단축키: 오른손 원시 동작은 숫자, 왼손은 shift+숫자.
+   (추가 기록, WP17.6) 표에 없는 라벨은 Label Studio가 자동 키 후보에서 남는 키를 설정 순서대로
+   붙인다. 그래서 새 명시 단축키는 후보 밖의 키로 주고(AI 결정 r·h), 동사 표를 바꾸면 자동 키가 밀림을
+   검수자에게 알린다 (`ui_theme.LS_AUTO_HOTKEYS`, change-guide).
 4. CVAT: 공식 `cvat/ui` 이미지 위에 테마 파일(`/dlp/` 아래 CSS·JS·로고)을 얹은 `dlp-cvat-ui:<버전>`
    이미지를 `services/cvat/cvat.sh up`이 빌드해 쓴다. 스크립트는 다크/화이트 전환 버튼(브라우저에 기억),
    회사 로고, 작업 화면의 검수 단계 배지(블러 검수=원본 영상·권한자 전용, 공간 검수=블러본)를 넣는다.

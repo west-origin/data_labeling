@@ -62,15 +62,18 @@ def ai_display_config(policy: ReviewOpsPolicy) -> AiDisplayConfig | None:
     """검수 정책의 `ai_review`로 AI 1차 검수 판정 사용 설정을 만든다 (끔이면 None, WP17.6).
 
     허용 판정 버전은 정책 `ai_review.versions`, 비면 `config/policies/aireview.yaml`의 지금 판정
-    버전(`AiReviewPolicy.verdict_version`) 하나다. 검수 패키지는 판정 정책을 읽지 않으므로 CLI가
+    버전(`AiReviewPolicy.verdict_version`) 하나다. 판정 대상 조건의 정책 값
+    (`AiReviewPolicy.target_rule`: 종류·출처·긴 상위 구간 상한)도 같은 파일에서 넘겨, 검수 화면
+    판정률의 분모를 판정 실행과 같은 조건으로 센다. 검수 패키지는 판정 정책을 읽지 않으므로 CLI가
     계산해 넘긴다 (의존 표, 설계 C11·C23). 예외: 판정 정책 파일이 없거나 깨졌으면 OSError·
     ValidationError (끔이면 읽지 않는다).
     """
     ai = policy.ai_review
     if ai.mode == "off":
         return None
-    versions = ai.versions or (load_aireview_policy(repo_root()).verdict_version,)
-    return AiDisplayConfig(policy=ai, versions=tuple(versions))
+    judge = load_aireview_policy(repo_root())
+    versions = ai.versions or (judge.verdict_version,)
+    return AiDisplayConfig(policy=ai, versions=tuple(versions), targets=judge.target_rule)
 
 
 def review_setup(

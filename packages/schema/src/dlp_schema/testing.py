@@ -9,7 +9,8 @@
     - `make_label`: 사람 출처 라벨 하나 (세션 `s001`, 온톨로지 1.0.0).
     - `action_payload`: 온톨로지 v1에서 유효한 원시 동작(grasp) 페이로드 사전.
     - `sqlite_db`: 시간대를 보존하는 SQLite 테스트 DB (서비스 없이 저장소 함수를 시험할 때).
-    - AI 1차 검수 기록(WP17): `AI_VERSION`, `make_ai_verdict`, `make_ai_run`, `make_ai_unit`.
+    - AI 1차 검수 기록(WP17): `AI_VERSION`, `AI_TARGET_RULE`, `make_ai_verdict`, `make_ai_run`,
+      `make_ai_unit`.
 
 주의
     - 기본 세션의 스트림 URI는 원본 버킷(`s3://dlp-raw/...`)을 가리킨다. 실제 저장소에 접근하지 않는
@@ -26,7 +27,7 @@ from typing import Any
 import sqlalchemy as sa
 from sqlalchemy.dialects.sqlite import DATETIME as SQLITE_DATETIME
 
-from dlp_schema.aireview import AiReviewRun, AiReviewUnit, AiVerdict
+from dlp_schema.aireview import AiReviewRun, AiReviewUnit, AiTargetRule, AiVerdict
 from dlp_schema.labels import LabelPayload, LabelRecord, Provenance, Source
 from dlp_schema.session import Session, StreamKind, SyncMethod
 
@@ -142,6 +143,16 @@ def action_payload(**overrides: Any) -> dict[str, Any]:
 
 # 테스트용 AI 판정 버전 (`aireview-<정책 해시 12자>+vlm-<모델>` 형식)
 AI_VERSION = "aireview-0123456789ab+vlm-Qwen/Qwen3-VL-8B-Instruct"
+# 판정 대상 조건의 정책 값 (config/policies/aireview.yaml kinds·temporal.long_max_span_ms와 같은 값,
+# 검수 화면 판정률 분모 테스트용)
+AI_TARGET_RULE = AiTargetRule(
+    kinds=frozenset(
+        ("action", "gap", "hand_state", "event", "segment", "object_state", "box_track",
+         "keypoint_track")
+    ),
+    sources=frozenset({"model"}),
+    long_max_span_ms=600_000,
+)  # fmt: skip
 
 
 def make_ai_verdict(label_id: str, value: str = "ok", **overrides: Any) -> AiVerdict:

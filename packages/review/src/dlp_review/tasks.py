@@ -742,7 +742,9 @@ class _AiTasks:
         self, task: ReviewTask, sent: Sequence[LabelRecord], view: AiView, limit: int | None = None
     ) -> AiExposure:
         """작업 하나의 노출을 정하고 기록할 목록에 넣는다."""
-        exposure = exposure_for(task, self.assignment, view, sent, self.cfg, limit=limit)
+        exposure = exposure_for(
+            task, self.assignment, view, sent, self.cfg, self.ontology, limit=limit
+        )
         self.exposures.append(exposure)
         return exposure
 

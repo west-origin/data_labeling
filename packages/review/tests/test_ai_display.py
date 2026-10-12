@@ -32,11 +32,13 @@ from dlp_review.ai_display import (
     escalated_ids,
     exposure_for,
     flag_range,
+    flag_region_id,
     is_holdout,
     issue_frame,
     issue_position,
     load_ai_view,
     ls_ai_results,
+    ls_label_decisions,
     master_clock,
     note_text,
     required_gate,
@@ -59,9 +61,16 @@ from dlp_review.labelstudio import (
 from dlp_review.ops.policy import AiReviewDisplayPolicy, ReviewOpsPolicy, load_policy
 from dlp_review.ops.runner import finish_assignment, plan_session
 from dlp_review.tasks import ReviewSetup
-from dlp_review.ui_theme import UiTheme, load_ui_theme
+from dlp_review.ui_theme import LS_AUTO_HOTKEYS, UiTheme, load_ui_theme
 from dlp_schema import repo_root
-from dlp_schema.aireview import AiArm, AiDecision, AiRunEvent, AiRunEventKind, AiSuggestion
+from dlp_schema.aireview import (
+    AiArm,
+    AiDecision,
+    AiExposure,
+    AiRunEvent,
+    AiRunEventKind,
+    AiSuggestion,
+)
 from dlp_schema.db.aireview_repository import (
     AiRunState,
     insert_ai_run,
@@ -80,6 +89,7 @@ from dlp_schema.db.repository import (
 )
 from dlp_schema.labels import (
     ActionPayload,
+    Evidence,
     GapPayload,
     LabelRecord,
     Provenance,
@@ -98,6 +108,7 @@ from dlp_schema.review import (
 )
 from dlp_schema.session import PrivacyState
 from dlp_schema.testing import (
+    AI_TARGET_RULE,
     AI_VERSION,
     FIXED_TIME,
     action_payload,
@@ -135,7 +146,8 @@ def ops() -> ReviewOpsPolicy:
 def _cfg(**policy: Any) -> AiDisplayConfig:
     """advisory, 대조군 없음(시험을 결정적으로), 허용 버전 `AI_VERSION`."""
     data: dict[str, Any] = {"mode": "advisory", "holdout_ratio": 0.0} | policy
-    return AiDisplayConfig(AiReviewDisplayPolicy.model_validate(data), (AI_VERSION,))
+    policy_ = AiReviewDisplayPolicy.model_validate(data)
+    return AiDisplayConfig(policy_, (AI_VERSION,), AI_TARGET_RULE)
 
 
 def _action(
@@ -210,6 +222,64 @@ def test_collection_skips_ai_controls_and_reads_decisions(ontology: Ontology) ->
     assert ls_ai_decisions([ra, rb, *extra]) == {"a1": AiDecision.APPLY, "b1": AiDecision.DISMISS}
 
 
+def test_ls_label_decisions_map_ai_region_ids_back_to_labels() -> None:
+    """검수자가 AI 구간을 고른 채 결정 단축키를 누르면 결정이 AI 구간 id에 붙는다 (실제 LS 1.23.2
+    화면에서 확인한 모양, WP17.6 검증). 노출 기록의 보인 판정으로 그 id를 원 라벨 ID로 되돌린다.
+    라벨 구간의 결정은 그대로, 작업 라벨도 이 작업의 AI 구간도 아닌 구간의 결정은 버리고 경고,
+    한 라벨에 서로 다른 결정이면 결정 없음 + 경고."""
+    uid = "air-" + "8" * 24
+    exposure = _shown_exposure({"a1": uid, "b1": uid, "c1": uid})
+    rid = {lid: flag_region_id(uid, lid) for lid in ("a1", "b1", "c1")}
+
+    def pick(region: str, choice: str) -> dict[str, Any]:
+        """화면에서 고른 결정 결과 (실제 LS 1.23.2 제출 모양: 구간 시각·origin이 함께 온다)."""
+        value = {"start": 0, "end": 763, "instant": False, "choices": [choice]}
+        return {"id": region, "from_name": AI_DECISION, "to_name": "ts", "type": "choices",
+                "origin": "prediction", "value": value}  # fmt: skip
+
+    results = [
+        pick(rid["a1"], "apply"),  # AI 구간에서 누름 → a1
+        pick("b1", "dismiss"), pick(rid["b1"], "dismiss"),  # 같은 결정 둘 → 하나
+        pick("c1", "apply"), pick(rid["c1"], "dismiss"),  # 서로 다름 → 결정 없음
+        pick("d1", "apply"),  # 보인 지적 없는 작업 라벨 → 그대로 (적용 단계가 no_suggestion)
+        pick("ai-deadbeef", "apply"), pick("xYz12", "apply"),  # 모르는 구간 → 버림
+    ]  # fmt: skip
+    decisions, warnings = ls_label_decisions(results, exposure, {"a1", "b1", "c1", "d1"})
+    assert decisions == {
+        "a1": AiDecision.APPLY, "b1": AiDecision.DISMISS, "d1": AiDecision.APPLY,
+    }  # fmt: skip
+    assert len(warnings) == 2
+    assert "2개를 무시" in warnings[0] and "1개는 결정 없음" in warnings[1] and "c1" in warnings[1]
+    assert ls_label_decisions([], exposure, {"a1"}) == ({}, [])
+
+
+def _shown_exposure(shown: dict[str, str]) -> AiExposure:
+    """보인 판정만 정한 노출 기록 (shown 집단)."""
+    return AiExposure(
+        task_key="label_studio:7", session_id="s001", arm=AiArm.SHOWN, arm_key="label_studio:7",
+        versions=(AI_VERSION,), coverage=1.0, shown=shown, created_at=FIXED_TIME,
+    )  # fmt: skip
+
+
+def test_region_panels_follow_selected_control(ontology: Ontology, theme: UiTheme) -> None:
+    """구간을 고르면 보이는 칸은 고른 구간의 컨트롤로 가른다 (`whenTagName` = 라벨 컨트롤 이름):
+    라벨 구간이면 AI 메모·결정·이벤트 속성·손 상태 입력란, AI 구간이면 안내 한 줄뿐이다 (AI 구간에
+    결정 칸이 보이면 결정이 AI 구간 id에 붙고 "지적 없음" 자리 글이 보였다, WP17.6 검증)."""
+    for config in (label_config(ontology), label_config(ontology, theme)):
+        root = ET.fromstring(config)
+        panels = [v for v in root.iter("View") if v.get("visibleWhen") == "region-selected"]
+        by_tag: dict[str, list[ET.Element]] = {}
+        for v in panels:
+            by_tag.setdefault(v.get("whenTagName") or "", []).append(v)
+        assert set(by_tag) == {FROM_NAME, AI_FLAGS}
+        names = {c.get("name") for v in by_tag[FROM_NAME] for c in v if c.get("name")}
+        assert {AI_NOTE, AI_DECISION, "severity", "target_id", "body_part"} <= names
+        [hint] = by_tag[AI_FLAGS]
+        assert [c.tag for c in hint] == ["Header"] and "라벨 구간을 고르면" in str(
+            hint[0].get("value")
+        )
+
+
 def test_label_config_always_has_ai_controls(ontology: Ontology, theme: UiTheme) -> None:
     """AI 컨트롤은 테마·모드와 무관하게 늘 있고(설계 C7), 새 데이터 변수가 없다(C6). 테마는 판정
     색과 결정 단축키만 더한다. 기존 라벨 컨트롤은 그대로다."""
@@ -243,12 +313,85 @@ def test_label_config_always_has_ai_controls(ontology: Ontology, theme: UiTheme)
 
 
 def test_ai_hotkeys_must_not_clash(theme: UiTheme) -> None:
-    """결정 단축키는 동사 단축키·그 shift 조합과 겹치거나 조합키·같은 키면 로드 오류."""
+    """결정 단축키는 서로 다른 한 글자 키이고, 동사 단축키·Label Studio 자동 키 후보·내장 한 글자
+    단축키가 아니어야 한다 (후보 안의 키는 단축키 없는 라벨의 자동 키를 밀어낸다, WP17.6 검증)."""
     data = theme.model_dump()
-    for apply, dismiss in (("1", "w"), ("q", "shift+q"), ("q", "q"), ("shift+1", "w")):
+    bad_pairs = (
+        ("1", "h"), ("r", "shift+h"), ("r", "r"), ("R", "r"), ("shift+1", "h"), ("rr", "h"),
+        ("q", "w"), ("r", "a"), ("u", "h"), ("r", "["), ("", "h"),
+    )  # fmt: skip
+    for apply, dismiss in bad_pairs:
         bad = data | {"ai": {**data["ai"], "hotkeys": {"apply": apply, "dismiss": dismiss}}}
         with pytest.raises(ValidationError, match=r"ai\.hotkeys"):
             UiTheme.model_validate(bad)
+    keys = theme.ai.hotkeys.model_dump().values()
+    assert not set(keys) & set(LS_AUTO_HOTKEYS) and theme.ai.hotkeys.model_dump() == {
+        "apply": "r", "dismiss": "h",
+    }  # fmt: skip
+    for verbs in ({"grasp": "11"}, {"grasp": "u"}, {"grasp": "1", "release": "1"}):
+        with pytest.raises(ValidationError, match=r"hotkeys"):
+            UiTheme.model_validate(data | {"hotkeys": verbs})
+
+
+# Label Studio 1.23.2 화면이 단축키 없는 컨트롤에 자동 키를 붙이는 규칙 (프런트엔드
+# `setupHotKeys`·`makeComb`): 명시 단축키를 모두 먼저 묶고, 설정 순서대로 단축키 없는 컨트롤
+# (라벨 Label, 선택지 Choice, 시계열 TimeSeries)에 후보 중 남은 첫 키를 붙인다.
+_AUTO_TAGS = ("TimeSeries", "Label", "Choice")
+
+
+def _ls_auto_keys(root: ET.Element) -> dict[str, str]:
+    """설정 XML → `labels` 컨트롤 라벨 값별 화면 단축키 (명시 또는 자동, 없으면 "-")."""
+    taken = {e.get("hotkey", "").lower() for e in root.iter() if e.get("hotkey")}
+    keys: dict[int, str] = {}
+    for e in root.iter():
+        if e.tag in _AUTO_TAGS and not e.get("hotkey"):
+            free = next((k for k in LS_AUTO_HOTKEYS if k not in taken), None)
+            if free is not None:
+                taken.add(free)
+                keys[id(e)] = free
+    labels = root.find(f".//TimeSeriesLabels[@name='{FROM_NAME}']")
+    assert labels is not None
+    return {
+        str(x.get("value")): x.get("hotkey") or keys.get(id(x), "-") for x in labels.iter("Label")
+    }
+
+
+def _drop_ai(root: ET.Element) -> ET.Element:
+    """AI 컨트롤 덩어리(className dlp-ai*)를 뺀 설정 (WP17.6 이전 프로젝트)."""
+    for view in list(root):
+        if (view.get("className") or "").startswith("dlp-ai"):
+            root.remove(view)
+    return root
+
+
+def test_ai_controls_do_not_shift_label_studio_auto_hotkeys(
+    ontology: Ontology, theme: UiTheme
+) -> None:
+    """AI 결정 단축키를 더해도 라벨 컨트롤의 화면 단축키(명시 + 자동)가 WP17.6 전과 같다.
+
+    정답 근거: WP17.6 전 설정(파일에서 읽은 온톨로지 v1)을 실제 Label Studio 1.23.2에 띄워 범례에서
+    읽은 자동 키(Playwright, change-guide "검수 화면 AI 표시 실화면 확인"): 오른손 pull q·rotate w,
+    왼손 pull e·rotate t, gap.right:idle a, hand.left:self n, skill:open m, skill:close 없음. q·w를
+    결정 키로 쓰자 이 키들이 한 칸씩 밀렸다 (22개 라벨). 이 시뮬레이터는 DB 온톨로지로 만든 지금
+    설정(r·h)의 실화면 범례 108개와도 같았다.
+    """
+    config = label_config(ontology, theme)
+    now = _ls_auto_keys(ET.fromstring(config))
+    before = _ls_auto_keys(_drop_ai(ET.fromstring(config)))
+    assert now == before
+    recorded = {
+        "action.right:pull": "q", "action.right:rotate": "w", "action.left:pull": "e",
+        "action.left:rotate": "t", "gap.right:idle": "a", "hand.left:self": "n",
+        "skill:open": "m", "skill:close": "-", "action.right:grasp": "1",
+        "action.left:grasp": "shift+1",
+    }  # fmt: skip
+    assert {k: now[k] for k in recorded} == recorded
+    # 자동 키 후보 안의 키를 결정 키로 쓰면 밀린다 (시뮬레이터가 그 변화를 잡는다)
+    shifted = ET.fromstring(config)
+    for c in shifted.iter("Choice"):
+        if c.get("alias") == "apply":
+            c.set("hotkey", "q")
+    assert _ls_auto_keys(shifted)["action.right:pull"] != "q"
 
 
 # ---------------------------------------------------------------- 노출 집단
@@ -280,7 +423,7 @@ def test_holdout_is_deterministic_and_matches_ratio() -> None:
     assert all(is_holdout(k, policy.model_copy(update={"holdout_ratio": 1.0})) for k in keys[:50])
 
 
-def test_exposure_arms_and_shown_hidden_split() -> None:
+def test_exposure_arms_and_shown_hidden_split(ontology: Ontology) -> None:
     """블라인드·오류 삽입·QA·show_modes 밖은 mode_excluded, 판정 없음은 no_verdicts, 대조군은 숨김.
     shown이면 틀림·의심·판단 불가 중 최소 확신도 이상만 보이고 맞음은 hidden이다."""
     labels = [_action(f"l{i}", i * 1_000, i * 1_000 + 900) for i in range(5)]
@@ -292,23 +435,23 @@ def test_exposure_arms_and_shown_hidden_split() -> None:
     }
     view = _view(display)
     cfg = _cfg(show_min_confidence={"suspect": 0.5})
-    e = exposure_for(_task(), None, view, labels, cfg)
+    e = exposure_for(_task(), None, view, labels, cfg, ontology)
     assert e.arm is AiArm.SHOWN and e.arm_key == "label_studio:7"
     assert list(e.shown) == ["l0", "l2"] and set(e.hidden) == {"l1", "l3"}
     assert e.coverage == pytest.approx(4 / 5) and e.versions == (AI_VERSION,)
     for mode in (ReviewMode.BLIND, ReviewMode.SEEDED_ERROR, ReviewMode.QA):
-        ex = exposure_for(_task(mode), None, view, labels, cfg)
+        ex = exposure_for(_task(mode), None, view, labels, cfg, ontology)
         assert ex.arm is AiArm.MODE_EXCLUDED and not ex.shown
     only_std = _cfg(show_modes=["standard"])
-    assert exposure_for(_task(ReviewMode.DOUBLE), None, view, labels, only_std).arm is (
+    assert exposure_for(_task(ReviewMode.DOUBLE), None, view, labels, only_std, ontology).arm is (
         AiArm.MODE_EXCLUDED
     )
-    assert exposure_for(_task(), None, _view({}), labels, cfg).arm is AiArm.NO_VERDICTS
-    held = exposure_for(_task(), None, view, labels, _cfg(holdout_ratio=1.0))
+    assert exposure_for(_task(), None, _view({}), labels, cfg, ontology).arm is AiArm.NO_VERDICTS
+    held = exposure_for(_task(), None, view, labels, _cfg(holdout_ratio=1.0), ontology)
     assert held.arm is AiArm.HOLDOUT and not held.shown and set(held.hidden) == set(display)
 
 
-def test_exposure_caps_per_ten_minutes_and_task_limit() -> None:
+def test_exposure_caps_per_ten_minutes_and_task_limit(ontology: Ontology) -> None:
     """10분당 상한은 나쁜 판정부터 채우고, 작업 상한(CVAT 이슈)은 전체를 자른다."""
     labels = [_action(f"l{i}", i * 1_000, i * 1_000 + 500) for i in range(4)]
     labels.append(_action("late", 700_000, 700_500))  # 다른 10분 묶음
@@ -316,11 +459,49 @@ def test_exposure_caps_per_ten_minutes_and_task_limit() -> None:
         x.label_id: (make_ai_verdict(x.label_id, v), "air-" + "2" * 24)
         for x, v in zip(labels, ["unsure", "wrong", "suspect", "wrong", "unsure"], strict=True)
     }
-    e = exposure_for(_task(), None, _view(display), labels, _cfg(max_flags_per_10min=2))
+    e = exposure_for(_task(), None, _view(display), labels, _cfg(max_flags_per_10min=2), ontology)
     assert list(e.shown) == ["l1", "l3", "late"]
-    capped = exposure_for(_task(), None, _view(display), labels, _cfg(), limit=2)
+    capped = exposure_for(_task(), None, _view(display), labels, _cfg(), ontology, limit=2)
     assert list(capped.shown) == ["l1", "l3"]
     assert set(capped.hidden) == {"l0", "l2", "late"}
+
+
+def test_coverage_counts_only_judgeable_labels(ontology: Ontology) -> None:
+    """판정률의 분모는 판정 실행과 같은 대상 조건이다: 장갑 근거 손 상태(OBSERVED)·센서 출처 라벨,
+    `long_max_span_ms`보다 긴 상위 구간, 원본 접근 이벤트, 사람·검수된 라벨은 세지 않는다. 판정할 수
+    있는 라벨을 모두 판정하면 100%다 (WP17.6 검증: 장갑 손 상태가 분모에 들어 50%로 보였다).
+
+    정답 근거: 판정 대상 = 모델 행동 a1, 영상만 잡은 손 상태 h_video(INFERRED) 둘. a1만 판정 → 50%,
+    둘 다 판정 → 100%.
+    """
+    model = Provenance(source=Source.MODEL, model_version="contact-1")
+    hand = {"kind": "hand_state", "hand": "right", "contact_target_kind": "tool",
+            "target_id": "t1", "role": "active"}  # fmt: skip
+    glove = make_label(hand, label_id="h_glove", confidence=0.9, provenance=model,
+                       evidence=Evidence.OBSERVED)  # fmt: skip
+    video = make_label(hand, label_id="h_video", confidence=0.9, provenance=model,
+                       evidence=Evidence.INFERRED)  # fmt: skip
+    by_sensor = Provenance(source=Source.SENSOR, sensor_id="glove_right")
+    sensor = make_label(hand, label_id="h_sensor", confidence=0.9, evidence=Evidence.INFERRED,
+                        provenance=by_sensor)  # fmt: skip
+    long_seg = make_label(
+        {"kind": "segment", "segment_id": "sg", "level": "task", "ref_id": "floor_sweep_mop"},
+        label_id="sg", t_start_ms=0, t_end_ms=700_000, confidence=0.9, provenance=model,
+    )  # fmt: skip
+    raw_event = make_label(
+        {"kind": "event", "event_type": "discomfort", "severity": 1}, label_id="ev",
+        confidence=0.9, provenance=model,
+    )  # fmt: skip
+    human = _action("hu").model_copy(update={"provenance": Provenance(source=Source.HUMAN)})
+    sent = [_action("a1"), glove, video, sensor, long_seg, raw_event, human]
+    one: dict[str, Judged] = {"a1": (make_ai_verdict("a1", "ok"), "air-" + "7" * 24)}
+    e = exposure_for(_task(), None, _view(one), sent, _cfg(), ontology)
+    assert e.coverage == pytest.approx(0.5)
+    assert summary_text(e, _view(one)).endswith("맞음 1 · 판정률 50%")
+    both = one | {"h_video": (make_ai_verdict("h_video", "wrong"), "air-" + "7" * 24)}
+    e2 = exposure_for(_task(), None, _view(both), sent, _cfg(), ontology)
+    assert e2.coverage == pytest.approx(1.0)
+    assert summary_text(e2, _view(both)).endswith("판정률 100%")
 
 
 def _sqlite(*, privacy: PrivacyState = PrivacyState.APPROVED) -> sa.Engine:
@@ -371,7 +552,7 @@ def test_ls_results_only_add_ai_and_keep_prelabels(ontology: Ontology, theme: Ui
     }  # fmt: skip
     labels = [short, long_]
     cfg = _cfg()
-    e = exposure_for(_task(), None, _view(display), labels, cfg)
+    e = exposure_for(_task(), None, _view(display), labels, cfg, ontology)
     hotkeys = theme.ai.hotkeys.model_dump()
     ai = ls_ai_results(e, _view(display), labels, ontology, cfg.policy, hotkeys)
     prelabels = to_ls_results(labels)
@@ -391,16 +572,16 @@ def test_ls_results_only_add_ai_and_keep_prelabels(ontology: Ontology, theme: Ui
     notes = {r["id"]: r["value"]["text"][0] for r in ai if r["from_name"] == AI_NOTE}
     assert (
         notes["s1"]
-        == "[틀림 · 참고] 동사 잡다→밀다 제안 · 동사가 다름 · 근거 00:01.5 · q 적용 / w 기각"
+        == "[틀림 · 참고] 동사 잡다→밀다 제안 · 동사가 다름 · 근거 00:01.5 · r 적용 / h 기각"
     )
-    assert notes["g1"].endswith("근거 00:25.0 · w 기각")  # 제안이 없으면 적용 안내도 없다
-    none = exposure_for(_task(), None, _view({}), labels, cfg)
+    assert notes["g1"].endswith("근거 00:25.0 · h 기각")  # 제안이 없으면 적용 안내도 없다
+    none = exposure_for(_task(), None, _view({}), labels, cfg, ontology)
     assert ls_ai_results(none, _view({}), labels, ontology, cfg.policy) == [
         {"id": "ai-summary", "from_name": AI_SUMMARY, "to_name": "ts", "type": "textarea",
          "value": {"text": ["AI 1차 검수: 없음"]}},
     ]  # fmt: skip
     assert summary_text(exposure_for(_task(), None, _view(display), labels, _cfg(
-        holdout_ratio=1.0)), _view(display)) == "AI 1차 검수: 없음"  # fmt: skip
+        holdout_ratio=1.0), ontology), _view(display)) == "AI 1차 검수: 없음"  # fmt: skip
 
 
 def test_note_texts_for_kind_change_delete_and_clock(ontology: Ontology) -> None:
@@ -456,7 +637,7 @@ def test_cvat_issues_frame_position_order(ontology: Ontology) -> None:
     }  # fmt: skip
     task = _task(task_key="cvat:9", tool=ReviewTool.CVAT, external_id="9",
                  label_kinds=("box_track", "keypoint_track"))  # fmt: skip
-    e = exposure_for(task, None, _view(display), [a, b], _cfg(), limit=10)
+    e = exposure_for(task, None, _view(display), [a, b], _cfg(), ontology, limit=10)
     cvat = MagicMock()
     cvat.jobs.return_value = [{"id": 1, "start_frame": 0, "stop_frame": 4},
                               {"id": 2, "start_frame": 5, "stop_frame": 9}]  # fmt: skip

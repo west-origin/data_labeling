@@ -2,9 +2,9 @@
 
 정답을 아는 합성 행동 시나리오(`dlp_fixtures.actions.generate_action_scenario`)의 라벨을 모델 출처
 (검수 전 자동 라벨)로 바꾸고 (손 상태는 영상만 잡은 접촉처럼 증거 INFERRED로 둔다. 장갑 근거 접촉
-(OBSERVED)은 판정 대상이 아니다, `plan.glove_derived`), 장면 개체마다 바디캠 박스 트랙을, 3인칭
-스트림에는 박스 트랙 하나를 더한다. 블러본 PTS 인덱스는 시나리오 프레임 시각(바디캠, 정수 ms)으로
-만든다. 영상·DB·서버는 쓰지 않는다 (이미지는 단색 합성 프레임).
+(OBSERVED)은 판정 대상이 아니다, `dlp_schema.aireview.glove_derived`), 장면 개체마다 바디캠 박스
+트랙을, 3인칭 스트림에는 박스 트랙 하나를 더한다. 블러본 PTS 인덱스는 시나리오 프레임 시각(바디캠,
+정수 ms)으로 만든다. 영상·DB·서버는 쓰지 않는다 (이미지는 단색 합성 프레임).
 """
 
 from __future__ import annotations

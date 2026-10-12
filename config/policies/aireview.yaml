@@ -47,7 +47,7 @@ kinds:
   temporal: [action, gap, hand_state, event, segment, object_state]   # Label Studio로 검수하는 종류
   spatial: [box_track, keypoint_track]                                 # CVAT로 검수하는 종류
   # 판정 대상 출처 (model만 허용). 장갑 센서에서 나온 라벨은 이 값과 별개로 늘 뺀다 (사용자 결정,
-  # ADR 0040 결정 5, dlp_aireview.plan.glove_derived): 센서 출처 라벨, 그리고 프리라벨 접촉 단계의
+  # ADR 0040 결정 5, dlp_schema.aireview.glove_derived): 센서 출처 라벨, 그리고 프리라벨 접촉 단계의
   # 장갑만·장갑+영상 융합 접촉(자동 손 상태 중 증거 OBSERVED). 영상만 잡은 접촉(INFERRED)은 판정한다.
   sources: [model]
 

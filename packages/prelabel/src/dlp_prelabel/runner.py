@@ -602,7 +602,7 @@ def contact_label(
 
     ID는 `<세션>-contact-<version_tag>-<손>-<순번 4자리>`, 신뢰도는 `contact.confidence.<출처>`다.
     증거는 영상만 잡은 접촉이면 INFERRED, 장갑이 관여한 접촉(장갑만·융합)이면 OBSERVED다. AI 1차
-    검수(`dlp_aireview.plan.glove_derived`)는 이 표시로 장갑 센서에서 나온 접촉을 판정 대상에서
+    검수(`dlp_schema.aireview.glove_derived`)는 이 표시로 장갑 센서에서 나온 접촉을 판정 대상에서
     뺀다. 장갑만 잡은 접촉은 대상을 몰라 `contact.unresolved_target_id`를 쓴다 (관계·행동 단계가
     버린다).
 

@@ -9,18 +9,23 @@ Choice, 작업 단위 요약 TextArea 예측)을 실제 Label Studio로 확인�
 - AI 영역이 든 주석이 있는 프로젝트에서도 같은 설정 갱신은 통과한다. 설정은 `review.yaml
   ai_review.mode`와 무관하게 같은 XML이라 모드를 바꿔도 갱신이 실패하지 않는다.
 - AI 컨트롤을 빼는 갱신은 Label Studio가 거부한다 (400). 그래서 컨트롤을 늘 둔다 (설계 C7).
-- 수집 경계: 라벨 컨트롤 결과만 라벨로 읽고(F-AIR-02), 결정은 별칭으로 읽는다.
+- 수집 경계: 라벨 컨트롤 결과만 라벨로 읽고(F-AIR-02), 결정은 별칭으로 읽는다. AI 구간 id에 붙은
+  결정은 노출 기록으로 원 라벨로 되돌린다 (`ai_display.ls_label_decisions`,
+  `test_ai_display_flow.py`).
 
-화면 확인(구간 목록의 잠금 표시와 Backspace로 지워지지 않음, 구간을 고르면 AI 메모·결정이 보임,
-결정 단축키 q·w가 동사·내장 단축키와 겹치지 않고 선택됨)은 Playwright로 실화면을 띄워 확인했다
-(WP17.6 기록, 스크린샷은 인수인계 문서의 검수 화면 절). 실제 사용자·개인정보는 쓰지 않는다.
+이 파일은 API로만 확인한다 (화면 동작·단축키는 보지 않는다). 화면 확인(구간 목록의 잠금 표시와
+Backspace로 지워지지 않음, 라벨 구간을 고르면 AI 메모·결정이 보이고 AI 구간을 고르면 안내만 보임,
+결정 단축키 r·h가 선택되고 다른 라벨의 자동 단축키를 밀지 않음)은 Playwright로 실화면을 띄워 했고,
+확인 항목·절차는 `docs/handover/change-guide.md` "검수 화면 AI 표시 실화면 확인" 절에 있다. 스크린샷
+파일은 저장소에 넣지 않는다. 자동 단축키가 밀리지 않는다는 규칙은 services 표시 없는
+`test_ai_display.py::test_ai_controls_do_not_shift_label_studio_auto_hotkeys`가 지킨다.
+실제 사용자·개인정보는 쓰지 않는다.
 """
 
 from __future__ import annotations
 
 import uuid
 from collections.abc import Iterator
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -71,9 +76,10 @@ def ls() -> Iterator[LabelStudioClient]:
 
 
 def _without_ai(config: str) -> str:
-    """AI 컨트롤 두 덩어리를 뺀 설정 (WP17.6 이전 프로젝트의 설정)."""
+    """AI 컨트롤 덩어리를 뺀 설정 (WP17.6 이전 프로젝트의 설정)."""
     start = config.index('  <View className="dlp-ai">')
-    end = config.index('  <View visibleWhen="region-selected" className="dlp-event">')
+    end = config.index('className="dlp-event">')
+    end = config.rindex("  <View ", 0, end)
     return config[:start] + config[end:]
 
 
@@ -164,9 +170,3 @@ def test_collection_reads_only_label_regions_and_ai_decisions(
                                                      AI_DECISION}  # fmt: skip
     finally:
         ls.http.delete(f"/api/projects/{pid}/")
-
-
-def test_feasibility_record_names_this_file() -> None:
-    """테마의 단축키 설명이 이 파일을 실화면 확인 기록으로 가리킨다 (경로가 바뀌면 같이 고친다)."""
-    text = (ROOT / "config" / "review_ui.yaml").read_text("utf-8")
-    assert Path(__file__).relative_to(ROOT).as_posix() in text
