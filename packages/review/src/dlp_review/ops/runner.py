@@ -191,7 +191,10 @@ def _sample(
 ) -> tuple[tuple[str, ...], tuple[str, ...], list[FlaggedSpan]]:
     """표본 검수: (표본 ID, 보류 ID, 표본 사유 구간). exclude(AI 지적)는 묶음에 넣지 않는다.
 
-    exclude 라벨은 표본·보류 어디에도 없으므로 작업에 반드시 들어간다 (AI는 검수를 늘리기만 한다).
+    exclude 라벨은 표본·보류 어디에도 없으므로 작업에 반드시 들어간다. 마무리 판정은 그중 결함이
+    하나라도 있으면 묶음을 불합격으로 본다 (`results._ai_excluded`, `sampling.judge`의 forced).
+    그래야 AI가 맞게 지적할수록 남은 묶음이 합격하기 쉬워지지 않는다 (AI는 검수를 늘리기만 한다,
+    I9).
     """
     by_id = {x.label_id: x for x in labels}
     sample: tuple[str, ...] = ()
