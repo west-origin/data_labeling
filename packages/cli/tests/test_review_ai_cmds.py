@@ -28,6 +28,7 @@ from dlp_review.ops.policy import load_policy as load_ops_policy
 from dlp_review.reconcile import ReviewOutcome
 from dlp_schema import repo_root
 from dlp_schema.aireview import AiRunEvent, AiRunEventKind
+from dlp_schema.db import aireview_repository, locks
 from dlp_schema.db.aireview_repository import (
     insert_ai_run,
     insert_ai_run_event,
@@ -186,6 +187,41 @@ def test_required_mode_defers_plan_until_judged_waived_or_timed_out(
     monkeypatch.setenv("DLP_REVIEW_POLICY_FILE", str(_policy_file(tmp_path, mode="advisory")))
     _session(engine, "adv", now - timedelta(hours=1))
     assert _plan(url, "adv") == 0 and _assignments(engine, "adv")
+
+
+def test_required_timeout_locks_session_before_reading_run_state(
+    db: tuple[str, sqlalchemy.Engine],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """required 시간 초과 경로는 실행 상태를 읽고 waived를 쓰기 전에 세션 행을 잠근다.
+
+    정답 근거: waived INSERT(세션 FK → FOR KEY SHARE)가 잠금보다 먼저면, 같은 세션을 동시에
+    계획한 둘이 서로의 KEY SHARE를 기다리며 FOR UPDATE로 올리다 교착한다 (PostgreSQL). 잠금이
+    먼저면 뒤 계획은 앞 계획이 커밋한 waived를 읽고 다시 쓰지 않는다.
+    """
+    url, engine = db
+    monkeypatch.setenv("DLP_REVIEW_POLICY_FILE", str(_policy_file(tmp_path, mode="required")))
+    _session(engine, "old", datetime.now(UTC) - timedelta(hours=30))
+    order: list[str] = []
+
+    def lock(conn: sqlalchemy.Connection, session_id: str) -> None:
+        order.append(f"lock:{session_id}")
+        locks.lock_session(conn, session_id)
+
+    def state(conn: sqlalchemy.Connection, ids: list[str]) -> Any:
+        order.append("state")
+        return aireview_repository.latest_run_state(conn, ids)
+
+    def event(conn: sqlalchemy.Connection, ev: AiRunEvent) -> Any:
+        order.append(f"event:{ev.event.value}")
+        return aireview_repository.insert_ai_run_event(conn, ev)
+
+    monkeypatch.setattr(review_cmds, "lock_session", lock)
+    monkeypatch.setattr(review_cmds, "latest_run_state", state)
+    monkeypatch.setattr(review_cmds, "insert_ai_run_event", event)
+    assert _plan(url, "old") == 0 and _assignments(engine, "old")
+    assert order[:3] == ["lock:old", "state", "event:waived"]
 
 
 def test_plan_without_required_mode_does_not_read_ai_tables(

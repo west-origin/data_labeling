@@ -138,6 +138,7 @@ from dlp_schema.db.repository import (
     get_session_ontology,
     insert_assignment,
     list_assignments,
+    lock_session,
     pending_revocations,
 )
 from dlp_schema.db.tables import ontology_versions
@@ -485,11 +486,16 @@ def _ai_gate(conn: sa.Connection, session_id: str, ai: AiDisplayConfig | None) -
 
     required가 아니면(끔·advisory, 블러 계획) AI 표와 생애주기 기록을 읽지 않고 바로 진행한다
     (review.yaml `ai_review.mode` 설명: off는 AI 표를 읽지 않는다).
+    required면 실행 상태를 읽기 전에 세션 행을 잠근다(`lock_session`, 계획과 같은 순서). waived
+    INSERT가 세션 FK로 FOR KEY SHARE를 먼저 잡고 계획이 FOR UPDATE로 올리면, 같은 세션의 두 계획이
+    서로를 기다려 교착이 난다. 먼저 잠그면 뒤 계획은 앞 계획이 커밋한 waived를 읽어 다시 쓰지
+    않는다.
     부작용: 시간 초과로 진행할 때 `ai_review_run_events`에 waived 1행 (사유 `timeout: …`, 계획과
     같은 트랜잭션).
     """
     if ai is None or ai.policy.mode != "required":
         return required_gate(None, None, datetime.now(UTC), ai)
+    lock_session(conn, session_id)
     states = latest_run_state(conn, [session_id])
     now = datetime.now(UTC)
     decision = required_gate(states.get(session_id), prelabeled_at(conn, session_id), now, ai)
