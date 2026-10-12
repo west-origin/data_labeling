@@ -3,12 +3,14 @@
 시간대 보존 SQLite 파일 DB와 LocalStore로 돈다 (서비스 없음).
 
 정답 근거: 회수 실행은 수집·탐지 커밋 뒤에 돌고, 대기가 남으면 종료 코드 4다. `--dry-run`은 쓰지
-않는다. `--pending`은 모든 세션의 대기를 실행한다. 도구 설정이 실패해도(tolerant) 매체 삭제는 한다.
+않는다. `--pending`은 모든 세션의 대기를 실행한다. CVAT 접속이 실패해도(회수 전용 설정) 매체
+삭제는 한다.
 """
 
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,18 +20,20 @@ from unittest.mock import Mock, patch
 import numpy as np
 import pytest
 import sqlalchemy
+import yaml
 
-from dlp_cli import privacy_cmds, review_cmds, review_config
+from dlp_cli import dataset_cmds, privacy_cmds, review_cmds, review_config
 from dlp_cli.review_config import REVOCATION_PENDING_EXIT
 from dlp_media.storage import LocalStore, sha256_file
 from dlp_privacy.pipeline import StreamResult
 from dlp_privacy.policy import load_policy as load_privacy_policy
-from dlp_privacy.runner import render_hash, request_media_revocation
+from dlp_privacy.runner import PrivacyGateError, render_hash, request_media_revocation
 from dlp_review.revoke import RevocationReport
 from dlp_review.tasks import ReviewSetup, labeling_media_key
 from dlp_schema import load_ontology, repo_root
 from dlp_schema.db.repository import (
     get_review_task,
+    get_session,
     insert_labels,
     insert_review_task,
     insert_session,
@@ -140,11 +144,11 @@ def _local_setup(tmp_path: Path) -> ReviewSetup:
     )  # fmt: skip
 
 
-def _tolerant(tmp_path: Path) -> Any:
-    """`review_setup` 대역: tolerant 설정만 받고 CVAT 접속 실패 경고를 돌려준다."""
+def _revocation_only(tmp_path: Path) -> Any:
+    """`review_setup` 대역: 회수 전용(`revocation_only`) 설정만 받고 CVAT 접속 실패 경고를 낸다."""
 
     def fake(purpose: str, url: str | None, **kw: Any) -> tuple[ReviewSetup, list[str]]:
-        assert kw.get("tolerant") is True
+        assert kw.get("revocation_only") is True
         return _local_setup(tmp_path), ["CVAT에 접속하지 못했습니다 (ConnectError)"]
 
     return fake
@@ -154,7 +158,8 @@ def _revoke_args(url: str, **kw: Any) -> argparse.Namespace:
     """`dlp review revoke` 인자 (기본값)."""
     values: dict[str, Any] = dict(
         session_id=None, stream=[], task=[], all=False, include_legacy=False, dry_run=False,
-        reason=None, pending=False, mark_tool_gone=None, note=None, url=url,
+        reason=None, pending=False, mark_tool_gone=None, note=None, url=url, orphans=False,
+        apply=False,
     )  # fmt: skip
     values.update(kw)
     return argparse.Namespace(**values)
@@ -292,7 +297,7 @@ def test_revoke_task_refuses_keys_it_cannot_request(
             assert get_review_task(conn, key).revoke_requested_at is None
     with _engine(url).begin() as conn:
         request_task_revocation(conn, "cvat:2", reason="sweep", at=NOW)
-    monkeypatch.setattr(review_config, "review_setup", _tolerant(tmp_path))
+    monkeypatch.setattr(review_config, "review_setup", _revocation_only(tmp_path))
     args = _revoke_args(url, session_id="s001", task=["cvat:2"], reason="incident")
     assert review_cmds.cmd_revoke(args) == REVOCATION_PENDING_EXIT  # CVAT 클라이언트 없음
     assert "cvat:2: 이미 회수 요청됨 (sweep" in capsys.readouterr().out
@@ -310,7 +315,7 @@ def test_revoke_task_records_manual_reason_only_for_named_task(
         insert_review_task(conn, _task("cvat:3", "s001", _media(tmp_path, "s001", "b"), None))
         insert_labels(conn, [_face()])
     monkeypatch.setenv("DLP_ACTOR", "ops")
-    monkeypatch.setattr(review_config, "review_setup", _tolerant(tmp_path))
+    monkeypatch.setattr(review_config, "review_setup", _revocation_only(tmp_path))
     args = _revoke_args(url, session_id="s001", task=["cvat:3"], reason="incident")
     assert review_cmds.cmd_revoke(args) == REVOCATION_PENDING_EXIT
     out = capsys.readouterr().out
@@ -330,7 +335,7 @@ def test_revoke_pending_runs_every_session_and_tolerates_missing_tools(
         for sid, key in keys.items():
             insert_review_task(conn, _task(key, sid, _media(tmp_path, sid, "bodycam"), None))
             request_task_revocation(conn, key, reason="sweep", at=NOW)
-    monkeypatch.setattr(review_config, "review_setup", _tolerant(tmp_path))
+    monkeypatch.setattr(review_config, "review_setup", _revocation_only(tmp_path))
     assert review_cmds.cmd_revoke(_revoke_args(url, pending=True)) == REVOCATION_PENDING_EXIT
     out = capsys.readouterr().out
     assert "CVAT에 접속하지 못했습니다" in out and "회수 대기 2개" in out
@@ -353,7 +358,7 @@ def test_detect_requests_and_runs_revocation_even_without_tools(
     uri = _media_at(tmp_path, labeling_media_key("s001", "labeler01", "bodycam", empty))
     with _engine(url).begin() as conn:
         insert_review_task(conn, _task("cvat:2", "s001", uri, empty))
-    monkeypatch.setattr(review_config, "review_setup", _tolerant(tmp_path))
+    monkeypatch.setattr(review_config, "review_setup", _revocation_only(tmp_path))
     model = Provenance(source=Source.MODEL, model_version="m1")
     found = [_face().model_copy(update={"provenance": model, "confidence": 0.9})]
     args = argparse.Namespace(session_id="s001", store="unused", url=url)
@@ -431,7 +436,7 @@ def test_render_backstop_requests_tasks_made_under_other_render_policy(
     uri = _media_at(tmp_path, labeling_media_key("s001", "labeler01", "bodycam", old))
     with _engine(url).begin() as conn:
         insert_review_task(conn, _task("cvat:2", "s001", uri, old))
-    monkeypatch.setattr(review_config, "review_setup", _tolerant(tmp_path))
+    monkeypatch.setattr(review_config, "review_setup", _revocation_only(tmp_path))
     monkeypatch.setattr(privacy_cmds, "raw_store", Mock(return_value=raw))
     monkeypatch.setattr(privacy_cmds, "store_from_spec", Mock(return_value=_labeling(tmp_path)))
     args = argparse.Namespace(session_id="s001", store="unused", url=url)
@@ -446,3 +451,137 @@ def test_render_backstop_requests_tasks_made_under_other_render_policy(
         task = get_review_task(conn, "cvat:2")
     assert task.status is ReviewTaskStatus.REVOKED and task.revoke_reason == "render"
     assert task.media_revoked_at is not None
+
+
+def _orphan_policy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, min_age_s: int) -> None:
+    """기본 review.yaml에서 `orphans.min_age_s`만 바꾼 파일을 `DLP_REVIEW_POLICY_FILE`로 고른다."""
+    data = yaml.safe_load((repo_root() / "config/policies/review.yaml").read_text("utf-8"))
+    data["orphans"]["min_age_s"] = min_age_s
+    path = tmp_path / "review-orphans.yaml"
+    path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+    monkeypatch.setenv("DLP_REVIEW_POLICY_FILE", str(path))
+
+
+def test_revoke_orphans_reports_by_default_and_deletes_only_with_apply(
+    url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """F-REV-15: `--orphans`는 기본이 보고만(종료 코드 4)이고 `--apply`일 때만 지운다 (그 뒤 0).
+
+    DB 행이 있는 사본과 시계열 CSV는 그대로다. 나이 하한은 고른 정책 파일에서 읽는다 (하한을
+    늘리면 막 만든 사본은 보지 않아 0). 도구가 없으면 그 채널은 확인하지 못함으로 4다.
+    """
+    live = _media(tmp_path, "s001", "bodycam")
+    orphan_key = "sessions/s001/review/labeler02/bodycam.mp4"
+    _media_at(tmp_path, orphan_key)
+    _media_at(tmp_path, "sessions/s001/review/timeseries.csv")
+    with _engine(url).begin() as conn:
+        insert_review_task(conn, _task("cvat:2", "s001", live, None))
+    setup = _local_setup(tmp_path)
+    no_tools = Mock(return_value=(setup, []))
+    monkeypatch.setattr(review_cmds, "review_setup", no_tools)
+    _orphan_policy(tmp_path, monkeypatch, 0)
+    args = _revoke_args(url, orphans=True)
+    assert review_cmds.cmd_revoke(args) == REVOCATION_PENDING_EXIT
+    out = capsys.readouterr().out
+    assert f"남음 media        {orphan_key} (s001, no_db_row" in out
+    assert "보고만" in out and "확인하지 못함: cvat: 클라이언트 없음" in out
+    assert no_tools.call_args.kwargs["revocation_only"] is True
+    assert _labeling(tmp_path).head(orphan_key) is not None
+    assert review_cmds.cmd_revoke(_revoke_args(url, orphans=True, apply=True)) == 4
+    assert f"지움 media        {orphan_key}" in capsys.readouterr().out
+    assert _labeling(tmp_path).head(orphan_key) is None
+    assert _labeling(tmp_path).head("sessions/s001/review/labeler01/bodycam.mp4") is not None
+    assert _labeling(tmp_path).head("sessions/s001/review/timeseries.csv") is not None
+
+    _media_at(tmp_path, orphan_key)
+    cvat, ls = Mock(), Mock()
+    cvat.list_tasks.return_value = []
+    ls.list_tasks.return_value = []
+    with_tools = replace(setup, cvat=cvat, label_studio=ls)
+    monkeypatch.setattr(review_cmds, "review_setup", Mock(return_value=(with_tools, [])))
+    _orphan_policy(tmp_path, monkeypatch, 3600)
+    assert review_cmds.cmd_revoke(_revoke_args(url, orphans=True, apply=True)) == 0
+    assert "어려 보지 않음 1개" in capsys.readouterr().out
+    assert _labeling(tmp_path).head(orphan_key) is not None
+    _orphan_policy(tmp_path, monkeypatch, 0)
+    assert review_cmds.cmd_revoke(_revoke_args(url, orphans=True, apply=True)) == 0
+    assert _labeling(tmp_path).head(orphan_key) is None
+
+
+def test_revoke_orphans_argument_rules(url: str) -> None:
+    """`--apply`는 `--orphans`와만, `--orphans`는 회수 선택 인자·`--pending`과 함께 쓰지 않는다."""
+    bad = {
+        "--apply는 --orphans와만": {"session_id": "s001", "apply": True},
+        "--apply와 --dry-run": {"orphans": True, "apply": True, "dry_run": True},
+        "--orphans는 --all, --reason, --pending": {
+            "orphans": True, "all": True, "reason": "x", "pending": True,
+        },
+    }  # fmt: skip
+    for why, kw in bad.items():
+        with pytest.raises(SystemExit, match=why):
+            review_cmds.cmd_revoke(_revoke_args(url, **kw))
+
+
+def test_dataset_withdraw_requests_and_runs_revocation_after_commit(
+    url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """F-REV-17: `dlp dataset withdraw`는 사용 중지와 같은 커밋에 배포된 작업 회수를 요청하고, 커밋
+    뒤 실행기를 돌려 라벨링 버킷 사본을 지운다. 도구가 없으면 도구 작업은 대기로 남아 종료 코드 4다.
+
+    블러 검수 작업은 회수 대상이 아니다. 회수할 작업이 없는 세션은 실행기 설정을 만들지 않고 0이다.
+    """
+    uri = _media(tmp_path, "s001", "bodycam")
+    with _engine(url).begin() as conn:
+        insert_review_task(conn, _task("cvat:2", "s001", uri, None))
+        insert_review_task(conn, _privacy_task("cvat:1", "s001", tmp_path))
+    monkeypatch.setattr(dataset_cmds, "sa", _AwareSqlalchemy())
+    monkeypatch.setattr(review_config, "review_setup", _revocation_only(tmp_path))
+    args = argparse.Namespace(session_id="s001", reason="동의 철회", actor="dpo01", url=url)
+    assert dataset_cmds.cmd_withdraw(args) == REVOCATION_PENDING_EXIT
+    out = capsys.readouterr().out
+    assert "검수 작업 1개 회수 요청: cvat:2" in out and "회수 대기 1개" in out
+    with _engine(url).connect() as conn:
+        task = get_review_task(conn, "cvat:2")
+        assert task.revoke_reason == "withdrawn:dpo01" and task.media_revoked_at is not None
+        assert get_review_task(conn, "cvat:1").revoke_requested_at is None
+    assert _labeling(tmp_path).head("sessions/s001/review/labeler01/bodycam.mp4") is None
+    no_setup = Mock(side_effect=AssertionError("회수할 작업이 없으면 설정을 만들지 않는다"))
+    monkeypatch.setattr(review_config, "review_setup", no_setup)
+    args = argparse.Namespace(session_id="s002", reason="동의 철회", actor="dpo01", url=url)
+    assert dataset_cmds.cmd_withdraw(args) == 0
+
+
+def test_privacy_hold_revokes_current_tasks_and_release_needs_reapproval(
+    url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """F-REV-18: `dlp privacy hold`는 렌더 해시가 지금과 같은 작업도 회수 요청하고 커밋 뒤 사본을
+    지운다 (도구가 없으면 4). 보류 중에는 승인이 거부된다. `--release`는 기록만 남기고 승인은 풀린
+    채다. 보류 중이 아니면 해제를 거부한다."""
+    current = render_hash([], load_privacy_policy(repo_root()))
+    uri = _media_at(tmp_path, labeling_media_key("s001", "labeler01", "bodycam", current))
+    with _engine(url).begin() as conn:
+        insert_review_task(conn, _task("cvat:2", "s001", uri, current))
+    monkeypatch.setattr(review_config, "review_setup", _revocation_only(tmp_path))
+    monkeypatch.setattr(privacy_cmds, "store_from_spec", Mock(return_value=_labeling(tmp_path)))
+    hold = argparse.Namespace(
+        session_id="s001", reason="labeler report", release=False, actor="ops01", url=url,
+        store="unused",
+    )  # fmt: skip
+    assert privacy_cmds.cmd_hold(hold) == REVOCATION_PENDING_EXIT
+    out = capsys.readouterr().out
+    assert "승인 보류 (새 보류, ops01: labeler report" in out and "회수: cvat:2" in out
+    with _engine(url).connect() as conn:
+        task = get_review_task(conn, "cvat:2")
+        assert task.revoke_reason == "hold:ops01:labeler report"
+        assert task.media_revoked_at is not None
+        assert get_session(conn, "s001").privacy_state is PrivacyState.AUTO_BLURRED
+    approve = argparse.Namespace(session_id="s001", url=url)
+    with pytest.raises(PrivacyGateError, match="승인 보류 중"):
+        privacy_cmds.cmd_approve(approve)
+    release = argparse.Namespace(**{**vars(hold), "release": True, "reason": "re-reviewed"})
+    assert privacy_cmds.cmd_hold(release) == 0
+    assert "재승인" in capsys.readouterr().out
+    with _engine(url).connect() as conn:
+        assert get_session(conn, "s001").privacy_state is PrivacyState.AUTO_BLURRED
+    with pytest.raises(PrivacyGateError, match="보류 중이 아닙니다"):
+        privacy_cmds.cmd_hold(release)

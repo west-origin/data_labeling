@@ -18,6 +18,7 @@ import pytest
 
 from dlp_fixtures.sync import SyncScenario
 from dlp_fixtures.video import BlurScenario
+from dlp_media.encoding import even_size, pad_to_even
 from dlp_media.probe import probe
 from dlp_media.proxy import make_proxy
 from dlp_media.pts import PtsIndex, build_pts_index
@@ -131,3 +132,18 @@ def test_proxy_max_height_must_be_even() -> None:
     """프록시 높이 상한은 짝수여야 한다 (설정 검증, ProxyConfig)."""
     with pytest.raises(ValueError, match="multiple"):
         ProxyConfig(max_height=121, crf=28, keyframe_ms=500)
+
+
+def test_pad_to_even_keeps_pixel_coordinates() -> None:
+    """홀수 크기 이미지는 오른쪽·아래에 검은 화소를 덧대 짝수로 만들고 원본 화소는 같은 좌표에 둔다.
+
+    정답 근거: 101x75 이미지의 모든 화소를 서로 다른 값으로 채우면, 덧댄 102x76의 [:75, :101]이
+    원본과 같고 덧댄 열·행은 0이다. 짝수 크기는 같은 배열을 그대로 돌려준다 (F-PMS-02).
+    """
+    img = (np.arange(75 * 101 * 3) % 251).astype(np.uint8).reshape(75, 101, 3)
+    padded = pad_to_even(img)
+    assert padded.shape == (76, 102, 3) and even_size(101, 75) == (102, 76)
+    assert np.array_equal(padded[:75, :101], img)
+    assert not padded[:, 101].any() and not padded[75, :].any()
+    even = np.zeros((4, 6, 3), dtype=np.uint8)
+    assert pad_to_even(even) is even and even_size(6, 4) == (6, 4)

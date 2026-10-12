@@ -46,11 +46,12 @@ DB·외부 도구·내보내기 동작을 바꾸면 그 경로의 서비스/격�
 | --- | --- | --- |
 | 입력 정규화 | 원본, 실패 변환의 임시 산출물 | `media prepare` 오류와 PTS/방향 확인. 검수한 세션의 파일 교체 금지 |
 | 탐지/블러 검수 | 이전 완료 세대 또는 생성된 외부 작업 | 현재 완료 세대와 작업의 `privacy_detection_id` 확인. 승인 우회 금지 |
+| 승인 보류(사고 대응) | `privacy_holds`의 hold 기록, auto_blurred 상태, 회수 대기 | `dlp privacy hold <세션> --reason`은 다시 실행해도 기록을 더하지 않고 회수 요청·렌더 무효만 다시 한다. 해제는 `--release --reason` 뒤 `approve` → `render`. 보류 기록을 DB에서 지우거나 privacy_state를 직접 고치지 않는다 (ADR 0042) |
 | 세대 변경 | 이전 작업 완료 기록 | 새 세대 작업 생성 → 실제 전수 검수 → collect → approve → render. 옛 작업 재수집으로 승인하지 않음 |
 | 블러 렌더 | 승인 상태, 누락/손상된 블러 파일·렌더 기록 | `privacy render` 재실행은 파일 해시/기록을 대조해 손상 산출물을 복구. 접근·네트워크 오류는 원인 해결 |
-| CVAT/Label Studio 생성 | DB 롤백과 별개로 도구 작업/원본 사본 | 세션·담당자·도구 작업 ID 대조 후 고아/중복 처리. 확인 없이 create 반복 금지 |
+| CVAT/Label Studio 생성 | DB 롤백과 별개로 도구 작업/라벨링 버킷 사본 (고아) | `dlp review revoke --orphans [<세션>]`로 이름 규칙·DB 대조 결과를 보고, 확인 뒤 `--apply`로 지운다 (나이 하한 `review.yaml orphans.min_age_s`, 작업 생성 중인 세션은 건너뜀, F-REV-15). 확인 없이 create 반복 금지 |
 | 웹훅 수집 | 미수집 작업, 또는 일부 이벤트 전달 실패 | 담당자 확인 후 `review collect <작업 키> --reviewer <ID>`. 도구 재시도만으로 전달 보장되지 않음 |
-| 배포 매체 회수 | 커밋된 회수 요청과 남은 S3 사본·도구 작업 (회수 대기) | `dlp review revoke <세션>` 또는 `--pending` (미리보기는 `--dry-run`). 대기 중에는 그 세션의 verify가, CLI `dlp review create --stage labeling`·`assign`은 세션에 대기가 하나라도 있으면 대상 스트림과 무관하게 막힌다 (함수 `create_labeling_tasks`는 대상 스트림의 대기만 본다). 도구 인스턴스 폐기, 또는 실행기가 "도구 작업의 주인이 다르다"고 남긴 대기는 원래 작업이 없어진 것을 확인한 뒤 `--mark-tool-gone <작업> --note <사유>`. 대기 행을 DB에서 직접 지우지 않는다 |
+| 배포 매체 회수 | 커밋된 회수 요청과 남은 S3 사본·도구 작업 (회수 대기). 블러 변경 외에 사용 중지(`dlp dataset withdraw`)도 요청한다 | `dlp review revoke <세션>` 또는 `--pending` (미리보기는 `--dry-run`). 대기 중에는 그 세션의 verify가, CLI `dlp review create --stage labeling`·`assign`은 세션에 대기가 하나라도 있으면 대상 스트림과 무관하게 막힌다 (함수 `create_labeling_tasks`는 대상 스트림의 대기만 본다). 도구 인스턴스 폐기, 또는 실행기가 "도구 작업의 주인이 다르다"고 남긴 대기는 원래 작업이 없어진 것을 확인한 뒤 `--mark-tool-gone <작업> --note <사유>`. 대기 행을 DB에서 직접 지우지 않는다 |
 | lakeFS 빌드 | 미커밋 객체 또는 DB에 없는 커밋 | 브랜치 차이·커밋과 DB 버전 대조. 실패 잔여 객체가 다음 스냅샷에 섞이지 않도록 정리 |
 | 내보내기 | 선커밋된 이력·일부 파일·내부 가명 대응표 | manifest가 최종 전달 기준. 없는 결과는 미완료로 취급하고 현재 승인·사용 중지를 다시 확인 |
 | 학습/배포 | MLflow 실행·산출물, 미승인/거절 모델 | DB 모델 상태·골든 평가·게이트 확인. 산출물 존재만으로 배포하지 않음 |

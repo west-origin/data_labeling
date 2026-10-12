@@ -1,4 +1,5 @@
-"""`dlp_prelabel.lift3d` 단위 테스트: 깊이 역투영, 추론 간격, 내부 파라미터 비례 조정.
+"""`dlp_prelabel.lift3d` 단위 테스트: 깊이 역투영, 추론 간격, 내부 파라미터 비례 조정, 같은 개체
+트랙이 여럿일 때의 입력 고르기(F-PAR-01).
 
 실제 깊이 모델 대신 왼쪽 절반 1 m·오른쪽 절반 2 m인 가짜 깊이(`PlaneDepth`)를 써서 3D 좌표 정답을
 손으로 계산할 수 있게 한다. DB·서비스 불필요.
@@ -13,10 +14,12 @@ import numpy as np
 import pytest
 from numpy.typing import NDArray
 
+from dlp_fixtures.video import write_video
 from dlp_models.depth import Intrinsics
 from dlp_prelabel.common import Image, model_label
-from dlp_prelabel.lift3d import intrinsics_for, lift_tracks
-from dlp_prelabel.policy import load_policy
+from dlp_prelabel.lift3d import DepthLifter, intrinsics_for, lift_tracks
+from dlp_prelabel.policy import PrelabelPolicy, load_policy
+from dlp_prelabel.runner import pick_lift_tracks
 from dlp_schema.labels import (
     BoxKeyframe,
     BoxTrackPayload,
@@ -25,6 +28,9 @@ from dlp_schema.labels import (
     KeypointFrame,
     KeypointTrackPayload,
     LabelRecord,
+    Trajectory3DPayload,
+    Verification,
+    VerificationState,
 )
 from dlp_schema.session import CameraIntrinsics
 
@@ -115,3 +121,97 @@ def test_intrinsics_scale_with_resolution_or_fall_back_to_hfov() -> None:
     assert intrinsics_for(calib, 960, 540, 90) == Intrinsics(500, 500, 480, 270)
     approx = intrinsics_for(None, 640, 480, 90)
     assert approx.fx == pytest.approx(320) and (approx.cx, approx.cy) == (320, 240)
+
+
+class PlaneLifter(DepthLifter):
+    """가중치 파일 없이 `PlaneDepth`로 도는 깊이 3D 단계 (가중치 확인·ONNX 세션을 건너뛴다)."""
+
+    def __init__(self, policy: PrelabelPolicy) -> None:  # pyright: ignore[reportMissingSuperCall]
+        """`DepthLifter.__init__`의 가중치 확인 대신 가짜 모델과 버전을 직접 둔다."""
+        self.path = Path("unused.onnx")
+        self.version = f"depth3d-plane+p{policy.digest('depth')}"
+        self.policy, self.now = policy, NOW
+        self.model = PlaneDepth()
+
+
+def _left_hand(label_id: str, x: float, **kw: object) -> LabelRecord:
+    """왼손 hand21 모델 트랙 (모든 관절이 (x, 120), 0~900 ms 100 ms 간격). kw로 검수 상태 등."""
+    points = tuple(Keypoint(x=x, y=120.0, visibility=2) for _ in range(21))
+    payload = KeypointTrackPayload(
+        entity_id="left_hand",
+        skeleton="hand21",
+        hand=Hand.LEFT,
+        keyframes=tuple(KeypointFrame(t_ms=t, points=points) for t in range(0, 1_000, 100)),
+    )
+    label = model_label(
+        label_id=label_id,
+        session_id="s",
+        stream_id="bodycam",
+        t_start_ms=0,
+        t_end_ms=900,
+        ontology_version="1.0.0",
+        model_version=label_id,
+        confidence=0.9,
+        payload=payload,
+        now=NOW,
+    )
+    return label.model_copy(update=kw)
+
+
+def test_tracks_sharing_an_entity_are_rejected() -> None:
+    """같은 (개체, 트랙 종류) 트랙이 둘이면 표본을 섞지 않고 ValueError로 알린다.
+
+    F-PAR-01: 예전에는 두 트랙의 같은 시각 표본을 한 궤적에 두 번 넣어, 라벨을 만들 때 "키프레임
+    시각은 중복 없이 오름차순" 검증이 실패했다. 러너는 `pick_lift_tracks`로 하나만 넘긴다.
+    """
+    policy = load_policy(ROOT).depth
+    frames = [(0, np.zeros((H, W, 3), dtype=np.uint8))]
+    tracks = [_left_hand("a", 80.0), _left_hand("b", 240.0)]
+    with pytest.raises(ValueError, match="left_hand"):
+        lift_tracks(frames, PlaneDepth(), tracks, None, policy)
+
+
+def test_repeated_frame_times_give_one_sample() -> None:
+    """PTS 반올림으로 같은 ms 프레임이 이어져도 (frame_stride_ms=0) 표본은 시각마다 하나다."""
+    policy = load_policy(ROOT).depth.model_copy(update={"frame_stride_ms": 0})
+    img = np.zeros((H, W, 3), dtype=np.uint8)
+    frames = [(0, img), (0, img), (100, img), (100, img)]
+    out = lift_tracks(frames, PlaneDepth(), [_left_hand("a", 80.0)], None, policy)
+    assert [s.t_ms for s in out[("left_hand", "wrist")]] == [0, 100]
+
+
+def test_coexisting_hand_versions_lift_from_the_reviewed_track(tmp_path: Path) -> None:
+    """F-PAR-01 회귀: 승인된 이전 버전 왼손 트랙과 새 버전 왼손 트랙이 함께 현재 라벨이어도 3D
+    라벨이 만들어지고, 승인 트랙의 위치로 올린다.
+
+    정답 근거: 승인 트랙 관절 (80, 120)은 왼쪽 절반이라 z=1 → x=(80-160)*1/160=-0.5. 새 트랙
+    (240, 120)이 골렸다면 z=2 → x=1.0이 된다. stride 200 ms → 0, 200, ..., 800 다섯 표본.
+    """
+    video = tmp_path / "bodycam.mp4"
+    write_video(
+        video,
+        ((t, np.zeros((H, W, 3), dtype=np.uint8)) for t in range(0, 1_000, 100)),
+        width=W,
+        height=H,
+    )
+    approved = Verification(
+        state=VerificationState.HUMAN_APPROVED, reviewer_id="rev01", reviewed_at=NOW
+    )
+    reviewed = _left_hand("left-v1", 80.0, verification=approved)
+    newer = _left_hand("left-v2", 240.0, created_at=NOW.replace(day=8))
+    policy = load_policy(ROOT)
+    lifter = PlaneLifter(policy)
+    calib = CameraIntrinsics(width=W, height=H, fx=160, fy=160, cx=160, cy=120)
+    labels = lifter.run(
+        video,
+        session_id="s",
+        stream_id="bodycam",
+        tracks=pick_lift_tracks([newer, reviewed], "bodycam"),
+        calib=calib,
+        ontology_version="1.0.0",
+    )
+    assert len(labels) == len(policy.depth.hand_points)
+    for x in labels:
+        assert isinstance(x.payload, Trajectory3DPayload)
+        assert [s.t_ms for s in x.payload.samples] == [0, 200, 400, 600, 800]
+        assert {(s.x, s.z) for s in x.payload.samples} == {(-0.5, 1.0)}

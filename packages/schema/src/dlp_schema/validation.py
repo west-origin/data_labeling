@@ -248,8 +248,9 @@ def check_label_set(
             for x in labels
             if isinstance(p := x.payload, (BoxTrackPayload, MaskTrackPayload, ObjectStatePayload))
         }
-    # 평가용 여러 모델의 예측은 같은 action_id를 쓸 수 있다. 상위 구간이 있는 경우에만
-    # 그 ID의 유일성을 요구해 자식 참조의 모호성을 막는다. EpisodeGraph는 항상 검사한다.
+    # 평가용 여러 모델의 예측은 같은 손에 같은 action_id를 쓸 수 있다. 상위 구간이 있는
+    # 경우에만 노드 ID의 유일성을 요구해 자식 참조의 모호성을 막는다. 양손 행동(같은
+    # action_id·다른 손)은 한 노드라 위반이 아니다 (F-SCH-01). EpisodeGraph는 항상 검사한다.
     problems = (
         check_segment_links(labels)
         if any(isinstance(x.payload, SegmentPayload) for x in labels)

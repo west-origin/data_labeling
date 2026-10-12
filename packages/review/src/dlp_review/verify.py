@@ -13,7 +13,9 @@
 - 열린 검수 배정(review_assignments.status=open)이 없다. 회수돼 다시 만들어야 할 배정은 따로 알린다.
 - 배정 없이 만든 직접 작업이 열린 채 회수됐으면(status=revoked) 그 뒤 같은 담당자·스트림·도구로
   다시 만든 작업이 있다. 회수 전에는 열린 작업이 완료를 막았으므로 회수가 그 조건을 조용히 풀지
-  않게 한다.
+  않게 한다. 다시 만든 작업은 열린 채 회수되지 않은 것(open 또는 collected)이다. 수집한 재작업은
+  그 뒤 블러가 또 바뀌어 회수 요청이 와도 결과가 이미 이력에 있으므로 다시 만든 작업으로 인정한다
+  (수집 출력 `collect._note_revocations`와 같은 기준).
 - 블러를 뺀 현재 운영 라벨 중 모델 라벨은 모두 사람 검수 상태다
   (human_approved, human_corrected, sample_verified). 사람이 만든 라벨은 그 자체로 검수된 것이다.
 - 블러를 뺀 현재 운영 라벨이 하나 이상 있다 (빈 세션은 완료가 아니다).
@@ -23,6 +25,7 @@
 공개 이름:
 - `VERIFIED_STATES`: 모델 라벨을 "사람이 확인했다"고 보는 검증 상태.
 - `VerifyResult`: 판정 결과.
+- `reissue_slot`: 회수된 직접 작업을 다시 만드는 단위 (담당자, 스트림, 도구). 수집 출력과 공유한다.
 - `verification_gaps`: 완료를 막는 이유 목록 (읽기만).
 - `verify_session`: 조건을 보고 생애주기를 옮긴다 (DB 쓰기, 멱등).
 """
@@ -117,17 +120,27 @@ def verification_gaps(
     return reasons
 
 
+def reissue_slot(task: ReviewTask) -> tuple[str, str, str]:
+    """직접 작업을 다시 만드는 단위 (담당자, 스트림, 도구 값). 담당자가 없으면 "unassigned".
+
+    수집 출력의 `direct_reissue`(`collect._note_revocations`)와 완료 판정(`_direct_reissue`)이
+    같은 단위를 쓴다. `dlp review create --assignee --stream --tool` 인자와 대응한다.
+    """
+    return (task.assignee or "unassigned", task.stream_id, task.tool.value)
+
+
 def _direct_reissue(tasks: list[ReviewTask]) -> list[tuple[str, str, str]]:
     """다시 만들어야 할 직접 작업의 (담당자, 스트림, 도구), 처음 나온 순.
 
-    배정 없이 만든 작업이 열린 채 회수됐고(status=revoked, 수집한 작업은 결과가 이미 이력에 있다),
-    회수 요청 뒤 같은 담당자·스트림·도구로 만든 회수 요청 없는 직접 작업이 없는 것.
-    수집 출력의 `direct_reissue`(`collect._note_revocations`)와 같은 기준이다.
+    기준 (수집 출력의 `direct_reissue`, `collect._note_revocations`와 같다):
+    - 다시 만들 대상: 배정 없이 만든 작업이 열린 채 회수됐다 (status=revoked). 수집한 뒤 회수 요청을
+      받은 작업은 상태가 collected로 남고 결과가 이미 이력에 있어 대상이 아니다.
+    - 다시 만든 작업: 회수 요청 뒤 같은 단계·담당자·스트림·도구로 만든 직접 작업 중 열린 채 회수되지
+      않은 것 (open 또는 collected). 수집한 재작업은 그 뒤 블러가 또 바뀌어 회수 요청을 받아도
+      (collected + `revoke_requested_at`) 다시 만든 작업으로 인정한다. 회수 요청이 없는 작업만
+      인정하면 수집 출력은 다시 만들라고 하지 않는데 완료 판정은 처음 작업을 다시 만들라고 막는다.
+    열린 재작업은 "수거하지 않은 검수 작업"으로 따로 완료를 막는다.
     """
-
-    def who(t: ReviewTask) -> tuple[str, str, str]:
-        return (t.assignee or "unassigned", t.stream_id, t.tool.value)
-
     out: list[tuple[str, str, str]] = []
     for t in tasks:
         at = t.revoke_requested_at
@@ -135,14 +148,14 @@ def _direct_reissue(tasks: list[ReviewTask]) -> list[tuple[str, str, str]]:
             continue
         renewed = any(
             n.assignment_id is None
-            and n.revoke_requested_at is None
+            and n.status is not ReviewTaskStatus.REVOKED
             and n.stage is t.stage
-            and who(n) == who(t)
+            and reissue_slot(n) == reissue_slot(t)
             and n.created_at >= at
             for n in tasks
         )
-        if not renewed and who(t) not in out:
-            out.append(who(t))
+        if not renewed and reissue_slot(t) not in out:
+            out.append(reissue_slot(t))
     return out
 
 

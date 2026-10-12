@@ -161,6 +161,12 @@ def cmd_run(args: argparse.Namespace) -> int:
     for key in s.skipped:
         print(f"{key}: 같은 모델 버전 결과가 있어 건너뜀")
     print(f"3D 궤적 {s.lifted}개, 접촉 구간 {s.contacts}개, 3인칭 착용자 {s.wearer or '-'}")
+    if s.person_contacts:
+        # 사람 박스 접촉은 부위(body_part)를 몰라 손 상태 라벨을 만들지 않았다 (F-PAR-03)
+        print(
+            f"사람 접촉 {s.person_contacts}개: 대상자 부위를 알 수 없어 라벨을 만들지 않았습니다 "
+            "(검수에서 부위와 함께 그린다)"
+        )
     return 0
 
 

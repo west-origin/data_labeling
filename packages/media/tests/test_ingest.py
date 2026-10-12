@@ -1,8 +1,8 @@
 """세션 수집 테스트 (dlp_media.ingest, WP3, ADR 0003).
 
-로컬 저장소 테스트는 CI에서 돈다. 마지막 테스트는 SeaweedFS·PostgreSQL이 필요하다
-(`@pytest.mark.services`). 정답 근거: 동기화 픽스처는 12초, 10 fps 바디캠(프레임 120개),
-100 Hz 장갑, 200 Hz IMU를 만든다.
+로컬 저장소·SQLite 테스트는 CI에서 돈다. 마지막 두 테스트는 PostgreSQL이 필요하고 그중
+첫 번째는 SeaweedFS도 쓴다 (`@pytest.mark.services`). 정답 근거: 동기화 픽스처는 12초,
+10 fps 바디캠(프레임 120개), 100 Hz 장갑, 200 Hz IMU를 만든다.
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import uuid
 from collections.abc import Callable, Iterator
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
@@ -31,7 +32,7 @@ from dlp_schema.db.repository import (
     update_stream_sync,
 )
 from dlp_schema.session import LifecycleState, PrivacyState, StreamKind, SyncMethod
-from dlp_schema.testing import FIXED_TIME
+from dlp_schema.testing import FIXED_TIME, sqlite_db
 
 ManifestWriter = Callable[..., Path]
 
@@ -93,6 +94,35 @@ def test_changed_raw_file_is_rejected(
     glove.write_bytes(glove.read_bytes() + b"\x00")
     with pytest.raises(ImmutableObjectError):
         ingest_session(manifest, base, store)
+
+
+def test_reingest_same_instant_other_offset_is_unchanged(
+    sync: tuple[SyncScenario, Path], tmp_path: Path, write_manifest: ManifestWriter
+) -> None:
+    """DB에 UTC로 있는 recorded_at과 같은 순간을 +09:00으로 적은 매니페스트는 재수집 충돌이 아니다.
+
+    PostgreSQL timestamptz는 오프셋을 보존하지 않아 +09:00으로 등록해도 UTC로 읽힌다 (F-PMS-01).
+    SQLite 테스트 DB는 오프셋을 보존하므로 UTC 매니페스트로 먼저 등록해 같은 상태를 만든다.
+    정답: 같은 순간이면 unchanged, 1초라도 다르면 SessionConflictError.
+    """
+    store = LocalStore(tmp_path / "store", "dlp-raw")
+    streams = [{"stream_id": "bodycam", "kind": "bodycam", "path": str(sync[1] / "bodycam.mp4")}]
+    engine = sqlite_db()
+    kst = timezone(timedelta(hours=9))
+
+    def run(recorded_at: datetime) -> str:
+        manifest, base = load_manifest(
+            write_manifest(tmp_path, sync[1], streams=streams, recorded_at=recorded_at.isoformat())
+        )
+        with engine.begin() as conn:
+            return ingest_session(manifest, base, store, conn).db
+
+    assert run(FIXED_TIME) == "inserted"
+    assert run(FIXED_TIME.astimezone(kst)) == "unchanged"
+    with engine.connect() as conn:
+        assert get_session(conn, "ing-s001").recorded_at == FIXED_TIME
+    with pytest.raises(SessionConflictError):
+        run(FIXED_TIME.astimezone(kst) + timedelta(seconds=1))
 
 
 def test_recorded_at_required_when_container_has_none(
@@ -245,3 +275,35 @@ def test_ingest_into_seaweedfs_and_postgres(
     changed, _ = load_manifest(write_manifest(tmp_path, sync[1], session_id=sid, worker_id="w99"))
     with pytest.raises(SessionConflictError), pg.begin() as conn:
         ingest_session(changed, base, store, conn)
+
+
+@pytest.mark.services
+def test_reingest_offset_recorded_at_into_postgres_is_unchanged(
+    sync: tuple[SyncScenario, Path],
+    tmp_path: Path,
+    pg: sa.Engine,
+    write_manifest: ManifestWriter,
+) -> None:
+    """+09:00 recorded_at을 PostgreSQL에 등록하고 같은 매니페스트로 다시 수집하면 unchanged.
+
+    PostgreSQL timestamptz는 오프셋을 보존하지 않아 같은 순간이 UTC로 읽힌다 (F-PMS-01).
+    """
+    store = LocalStore(tmp_path / "store", "dlp-raw")
+    sid = f"ing-{uuid.uuid4().hex[:8]}"
+    kst = timezone(timedelta(hours=9))
+    streams = [{"stream_id": "bodycam", "kind": "bodycam", "path": str(sync[1] / "bodycam.mp4")}]
+    manifest, base = load_manifest(
+        write_manifest(
+            tmp_path,
+            sync[1],
+            session_id=sid,
+            streams=streams,
+            recorded_at=FIXED_TIME.astimezone(kst).isoformat(),
+        )
+    )
+    with pg.begin() as conn:
+        assert ingest_session(manifest, base, store, conn).db == "inserted"
+    with pg.connect() as conn:
+        assert get_session(conn, sid).recorded_at.utcoffset() == timedelta(0)
+    with pg.begin() as conn:
+        assert ingest_session(manifest, base, store, conn).db == "unchanged"

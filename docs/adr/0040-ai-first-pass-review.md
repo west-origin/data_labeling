@@ -7,7 +7,7 @@
   ADR 0039(블러 변경 시 매체 회수).
   계약 추가: `dlp_schema.aireview`(판정·단위·실행·노출·결과), `ReviewReason`의 `ai_*` 4개,
   `schemas/ai_review_unit|ai_review_run|ai_exposure|ai_outcome.schema.json`,
-  `schemas/review_assignment.schema.json`(사유 열거형). DB 표·Alembic 0016은 WP17.4에서 더한다.
+  `schemas/review_assignment.schema.json`(사유 열거형). DB 표·Alembic 0019는 WP17.4에서 더한다.
 
 ## 배경
 
@@ -179,7 +179,7 @@ AI가 모두 ok여도 사람 검수 없이는 `dlp review verify`가 실패한�
 | I2 | 블러 검수 단계에 AI를 쓰지 않는다 | 정책·계약 검증기(blur_track 금지), privacy 작업에 노출 없음 |
 | I3 | AI 판정은 라벨도 검수 상태도 아니다 | 정적 검사(쓰기 함수·라벨 표 이름), `record_review`의 `aireview:` 검수자 거부(WP17.4), verify 회귀 |
 | I4 | 판정·제안은 운영 라벨·학습·내보내기·스냅샷에 섞이지 않는다 | 별도 표, import 정적 검사, 격리 회귀 테스트(WP17.5) |
-| I5 | AI 표는 추가만 한다 | 0016 트리거(추가 전용·TRUNCATE 금지, WP17.4) |
+| I5 | AI 표는 추가만 한다 | 0019 트리거(추가 전용·TRUNCATE 금지, WP17.4) |
 | I6 | 제안은 사람이 적용할 때만 라벨이 되고, 내용은 DB에서 다시 읽어 검증한다 | `ai_collect.apply_decisions`·`settle`(WP17.7) |
 | I7 | 사내 서버만, 서버 모델 = 정책 모델 | `allow_external: false`, 사내 주소 검사(WP17.5), 응답 `model` 대조(종료 5), `make licenses` |
 | I8 | 재실행은 멱등이다 | 입력 전체를 담은 단위 키, 단위 안 문맥 분할, `done_unit_ids`, `ON CONFLICT DO NOTHING` |

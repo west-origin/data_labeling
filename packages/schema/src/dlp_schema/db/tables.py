@@ -19,7 +19,8 @@
     - session_lifecycle_events: 수정·삭제·TRUNCATE 금지 (0011).
     - privacy_detection_runs: 0건을 포함한 탐지 완료 이력, 수정·삭제·TRUNCATE 금지 (0012).
     - ai_review_runs, ai_review_run_events, ai_review_units, ai_review_exposures,
-      ai_review_outcomes: AI 1차 검수 기록 (라벨이 아니다), 수정·삭제·TRUNCATE 금지 (0016, ADR 0040).
+      ai_review_outcomes: AI 1차 검수 기록 (라벨이 아니다), 수정·삭제·TRUNCATE 금지 (0019, ADR 0040).
+    - privacy_holds: 사고 대응 승인 보류·해제 기록, 수정·삭제·TRUNCATE 금지 (0017, ADR 0042).
 
 열 규약
     - 시각(`Ts`)은 모두 `TIMESTAMP WITH TIME ZONE`. 파이썬 쪽도 시간대 있는 datetime만 쓴다.
@@ -156,6 +157,30 @@ privacy_detection_runs = sa.Table(
     ),
     sa.UniqueConstraint("event_id", "session_id", "stream_id"),
     sa.Index("ix_privacy_detection_runs_session_stream", "session_id", "stream_id"),
+)
+
+# 프라이버시 승인 보류·해제 기록 (`PrivacyHoldEvent`, ADR 0042). 추가만 한다 (0017 트리거).
+# 세션의 마지막 기록(event_id 순)이 hold면 보류 중이다. action은 hold|release.
+privacy_holds = sa.Table(
+    "privacy_holds",
+    metadata,
+    sa.Column(
+        "event_id",
+        sa.BigInteger().with_variant(sa.Integer(), "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    ),
+    sa.Column(
+        "session_id",
+        sa.String(128),
+        sa.ForeignKey("sessions.session_id"),
+        nullable=False,
+        index=True,
+    ),
+    sa.Column("action", sa.String(16), nullable=False),
+    sa.Column("reason", sa.Text(), nullable=False),
+    sa.Column("actor", sa.Text(), nullable=False),
+    sa.Column("at", Ts, nullable=False),
 )
 
 # 라벨 레코드 (`LabelRecord`, 변환은 `label_to_row`/`row_to_label`).
@@ -463,7 +488,7 @@ retention_decisions = sa.Table(
 
 
 # ---------------------------------------------------------------- AI 1차 검수 (WP17.4, ADR 0040)
-# 판정은 라벨이 아니다 (label_records 밖). 다섯 표 모두 추가만 한다: 0016이 0009의 dlp_append_only()와
+# 판정은 라벨이 아니다 (label_records 밖). 다섯 표 모두 추가만 한다: 0019가 0009의 dlp_append_only()와
 # 0010의 dlp_no_truncate() 트리거를 건다. 저장소는 `db.aireview_repository`. 시각 열은 Ts, 목록·사전은
 # 계약(`dlp_schema.aireview`)의 JSON 직렬화 형태로 Json 열에 넣는다.
 

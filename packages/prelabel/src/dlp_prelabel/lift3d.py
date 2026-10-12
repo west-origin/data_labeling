@@ -4,10 +4,11 @@ frame_stride_ms마다 깊이 맵을 만들고, 그 프레임에 있는 손 키�
 중심의 깊이(주변 패치 중앙값)를 읽어 카메라 내부 파라미터로 역투영한다. 좌표계는 카메라 (광축 Z 앞,
 X 오른쪽, Y 아래, 미터)다. 월드 좌표는 카메라 자세(SLAM)가 생긴 뒤에 만든다.
 
-파이프라인 위치: `runner._lift`가 바디캠의 현재 손·박스 트랙을 넘겨 부른다. 결과는 trajectory3d
-라벨 (frame=camera, source_3d=mono_depth)이고, 관계 단계(`dlp_relations`)의 도구-표면 접촉이
-쓴다. 정책: `prelabel.yaml depth`, 모델: `config/models.yaml depth_metric_indoor_small` (ADR
-0010: review). 시간: 3D 샘플 시각은 바디캠 스트림 PTS ms다 (공간 라벨 규약, ADR 0019).
+파이프라인 위치: `runner._lift`가 바디캠의 현재 hand21 손·박스 트랙을 (개체, 트랙 종류)마다 하나씩
+골라(`runner.pick_lift_tracks`) 넘겨 부른다. 결과는 trajectory3d 라벨 (frame=camera,
+source_3d=mono_depth)이고, 관계 단계(`dlp_relations`)의 도구-표면 접촉이 쓴다. 정책:
+`prelabel.yaml depth`, 모델: `config/models.yaml depth_metric_indoor_small` (ADR 0010: review).
+시간: 3D 샘플 시각은 바디캠 스트림 PTS ms다 (공간 라벨 규약, ADR 0019).
 """
 
 from __future__ import annotations
@@ -30,6 +31,7 @@ from dlp_schema.labels import (
     BoxTrackPayload,
     CoordinateFrame,
     KeypointTrackPayload,
+    LabelPayload,
     LabelRecord,
     Source3D,
     Trajectory3DPayload,
@@ -67,35 +69,42 @@ def intrinsics_for(
     return Intrinsics(calib.fx * sx, calib.fy * sy, calib.cx * sx, calib.cy * sy)
 
 
-def lift_tracks(
-    frames: Iterable[tuple[int, Image]],
-    depth: DepthModel,
-    tracks: list[LabelRecord],
-    calib: CameraIntrinsics | None,
-    policy: DepthPolicy,
-) -> dict[tuple[str, str | None], list[Trajectory3DSample]]:
-    """(entity_id, part) → 3D 샘플. tracks는 hand21 키포인트 트랙과 박스 트랙.
+def lift_key(payload: LabelPayload) -> tuple[str, str] | None:
+    """3D로 올리는 트랙이면 (entity_id, 트랙 종류), 아니면 None.
 
-    hand21 트랙은 `policy.hand_points` 관절마다 part=관절 이름(예: "wrist"), 박스 트랙은 화면 밖이
-    아닌 키프레임의 박스 중심을 part=None으로 올린다. 깊이는 키프레임 시각과 PTS가 정확히 같은
-    프레임에서만 읽고, 마지막으로 깊이를 만든 프레임에서 frame_stride_ms가 지나기 전 프레임은
-    건너뛴다. 깊이가 nan(화면 밖)이거나 [min_depth_m, max_depth_m] 밖이면 그 점은 버린다.
-
-    Args:
-        frames: (스트림 PTS ms, RGB 프레임) 순회 (`common.iter_frames`).
-        depth: 깊이 추론기 (프레임마다 미터 깊이 맵).
-        tracks: 바디캠 현재 라벨 중 키포인트·박스 트랙 (다른 종류는 무시).
-        calib: 세션 카메라 내부 파라미터 (None이면 화각 근사). 첫 처리 프레임 크기로 한 번 정한다.
-        policy: `prelabel.yaml depth`.
-
-    Returns:
-        (entity_id, part) → 시각 순 `Trajectory3DSample` (카메라 좌표 m, 소수 넷째 자리).
+    hand21 키포인트 트랙(관절마다 part=관절 이름)과 박스 트랙(중심, part=None)만 올린다. 같은 키의
+    트랙은 `lift_tracks`에 하나만 넘긴다 (둘이면 같은 (개체, 부위)에 표본이 두 번 들어간다).
     """
-    # 1단계: 스트림 PTS ms → 그 시각에 올릴 점 (개체, 부위, u, v 픽셀) 목록
+    if isinstance(payload, KeypointTrackPayload) and payload.skeleton == "hand21":
+        return (payload.entity_id, payload.kind)
+    if isinstance(payload, BoxTrackPayload):
+        return (payload.entity_id, payload.kind)
+    return None
+
+
+def _points_by_time(
+    tracks: list[LabelRecord], policy: DepthPolicy
+) -> dict[int, list[tuple[str, str | None, float, float]]]:
+    """스트림 PTS ms → 그 시각에 올릴 점 (개체, 부위, u, v 픽셀) 목록 (`lift_tracks` 1단계).
+
+    Raises:
+        ValueError: 같은 (개체, 트랙 종류) 트랙이 둘 이상일 때 (F-PAR-01). 두 트랙의 표본을 한
+            궤적에 섞지 않는다. 러너는 `runner.pick_lift_tracks`로 하나만 고른다.
+    """
+    seen: dict[tuple[str, str], str] = {}
     points: dict[int, list[tuple[str, str | None, float, float]]] = {}
     for label in tracks:
         p = label.payload
-        if isinstance(p, KeypointTrackPayload) and p.skeleton == "hand21":
+        key = lift_key(p)
+        if key is None:
+            continue
+        if key in seen:
+            raise ValueError(
+                f"{key[0]}: 같은 개체의 {key[1]} 트랙이 둘입니다 ({seen[key]}, {label.label_id}). "
+                "개체마다 트랙 하나만 넘깁니다 (`runner.pick_lift_tracks`)"
+            )
+        seen[key] = label.label_id
+        if isinstance(p, KeypointTrackPayload):
             for f in p.keyframes:
                 for i in policy.hand_points:
                     kp = f.points[i]
@@ -109,12 +118,49 @@ def lift_tracks(
                     # 박스는 중심 한 점만 올린다 (part=None)
                     cx, cy = k.x + k.w / 2, k.y + k.h / 2
                     points.setdefault(k.t_ms, []).append((p.entity_id, None, cx, cy))
+    return points
+
+
+def lift_tracks(
+    frames: Iterable[tuple[int, Image]],
+    depth: DepthModel,
+    tracks: list[LabelRecord],
+    calib: CameraIntrinsics | None,
+    policy: DepthPolicy,
+) -> dict[tuple[str, str | None], list[Trajectory3DSample]]:
+    """(entity_id, part) → 3D 샘플. tracks는 hand21 키포인트 트랙과 박스 트랙.
+
+    hand21 트랙은 `policy.hand_points` 관절마다 part=관절 이름(예: "wrist"), 박스 트랙은 화면 밖이
+    아닌 키프레임의 박스 중심을 part=None으로 올린다. 깊이는 키프레임 시각과 PTS가 정확히 같은
+    프레임에서만 읽고, 마지막으로 깊이를 만든 프레임에서 frame_stride_ms가 지나기 전 프레임은
+    건너뛴다 (0이어도 마지막 프레임보다 늦은 프레임만 쓴다: PTS 반올림으로 같은 ms 프레임이 이어져도
+    표본은 시각마다 하나). 깊이가 nan(화면 밖)이거나 [min_depth_m, max_depth_m] 밖이면 그 점은
+    버린다.
+
+    Args:
+        frames: (스트림 PTS ms, RGB 프레임) 순회 (`common.iter_frames`).
+        depth: 깊이 추론기 (프레임마다 미터 깊이 맵).
+        tracks: 바디캠 현재 라벨 중 키포인트·박스 트랙 (`lift_key`가 None인 것은 무시).
+            (개체, 트랙 종류)마다 하나여야 한다 (러너는 `runner.pick_lift_tracks`로 고른다).
+        calib: 세션 카메라 내부 파라미터 (None이면 화각 근사). 첫 처리 프레임 크기로 한 번 정한다.
+        policy: `prelabel.yaml depth`.
+
+    Returns:
+        (entity_id, part) → 시각 순(중복 없음) `Trajectory3DSample` (카메라 좌표 m, 소수 넷째 자리).
+
+    Raises:
+        ValueError: 같은 (개체, 트랙 종류) 트랙이 둘 이상일 때 (F-PAR-01).
+    """
+    # 1단계: 스트림 PTS ms → 그 시각에 올릴 점 (개체, 부위, u, v 픽셀) 목록
+    points = _points_by_time(tracks, policy)
+    # 깊이를 만드는 프레임 사이 최소 간격. 0이어도 1 ms로 두어 같은 시각을 두 번 쓰지 않는다
+    min_gap = max(policy.frame_stride_ms, 1)
     out: dict[tuple[str, str | None], list[Trajectory3DSample]] = {}
     last: int | None = None
     intr: Intrinsics | None = None
     for t, img in frames:
         # 2단계: 점이 있는 프레임 중 frame_stride_ms 간격으로만 깊이를 만든다 (CPU 비용)
-        if t not in points or (last is not None and t - last < policy.frame_stride_ms):
+        if t not in points or (last is not None and t - last < min_gap):
             continue
         last = t
         if intr is None:
@@ -171,7 +217,7 @@ class DepthLifter:
         Args:
             video: 바디캠 영상 로컬 경로.
             session_id, stream_id: 라벨의 세션·스트림 (바디캠).
-            tracks: 올릴 손·박스 트랙 (`lift_tracks` 참고).
+            tracks: 올릴 손·박스 트랙. (개체, 트랙 종류)마다 하나 (`lift_tracks` 참고).
             calib: 세션 카메라 내부 파라미터.
             ontology_version: 라벨에 넣을 온톨로지 버전.
             version: 라벨에 쓸 모델 버전 (기본: `self.version`). 러너는 입력 해시를 붙여 넘긴다.
@@ -180,6 +226,9 @@ class DepthLifter:
             (개체, 부위)마다 trajectory3d 라벨 하나. ID는
             `<세션>-<스트림>-3d-<version_tag>-<개체>-<부위|center>`. 신뢰도는 `depth.confidence`
             고정. DB에는 쓰지 않는다 (러너가 쓴다).
+
+        Raises:
+            ValueError: tracks에 같은 (개체, 트랙 종류) 트랙이 둘 이상일 때 (`lift_tracks`).
         """
         # 러너는 입력 해시를 붙인 버전을 넘긴다 (라벨 ID의 version_tag도 이 버전으로 만든다)
         model_version = version or self.version

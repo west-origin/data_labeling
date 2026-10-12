@@ -51,7 +51,7 @@ def issues() -> list[dict[str, Any]]:
 
 
 def _xfail_reasons() -> dict[str, str]:
-    """test_known_defects.py의 테스트 함수 이름 → xfail reason (strict=True만)."""
+    """test_known_defects.py의 테스트 함수 이름 → xfail reason (strict=True·raises 지정 필수)."""
     tree = ast.parse(DEFECTS.read_text("utf-8"))
     out: dict[str, str] = {}
     for node in tree.body:
@@ -65,6 +65,9 @@ def _xfail_reasons() -> dict[str, str]:
             reason = kw.get("reason")
             assert isinstance(strict, ast.Constant) and strict.value is True, node.name
             assert isinstance(reason, ast.Constant) and isinstance(reason.value, str), node.name
+            # 결함이 내는 예외만 xfail로 인정한다. 없으면 무관한 오류(패치 대상이 사라진
+            # AttributeError 등)도 xfail로 묻혀, 결함을 고쳐도 XPASS가 나지 않는다 (F-REV-01).
+            assert "raises" in kw, f"{node.name}: xfail에 raises=<결함이 내는 예외>를 지정한다"
             out[node.name] = reason.value
     return out
 

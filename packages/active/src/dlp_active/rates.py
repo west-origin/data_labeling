@@ -4,6 +4,12 @@
 승인·수정)된 모델 라벨, 사람이 지운 모델 라벨, 사람이 추가한 라벨만 센다 (표본 검증·센서 라벨은
 세지 않는다). 검수 수가 적은 클래스는 전체 수정률 쪽으로 당긴다 (베이즈 평활).
 
+어느 클래스로 세는가: 모델이 낸 것(승인·수정·삭제)은 모델 원본(`ReviewChange.origin`, 수정 사슬의
+맨 처음 모델 레코드)의 클래스, 사람이 추가한 것(원본 없음)은 그 라벨의 클래스다. 모델이 cup으로 낸
+것을 사람이 mug로 고치면 cup의 수정으로 센다 (F-ETA-06: 예전에는 고친 뒤 클래스 mug로 세어 cup
+수정률이 0이었다). 점수(`terms.CorrectionRateTerm`)가 검수 대기 모델 라벨의 예측 클래스로 수정률을
+찾으므로 같은 기준이어야 한다.
+
 수식 (active.yaml `correction`):
 - 검수 수 n_c = 그 클래스의 accepted + corrected + deleted (+ added, `count_added`면)
 - 바뀐 수 k_c = n_c - accepted
@@ -59,6 +65,9 @@ class RateTable:
 def correction_rates(histories: Iterable[list[LabelRecord]], policy: ActivePolicy) -> RateTable:
     """세션별 라벨 이력들 → 클래스별 수정률.
 
+    검수 결과(`review_changes`)마다 모델 원본(origin, 없으면 그 라벨)의 클래스 키에 검수 1을 더하고,
+    accepted가 아니면 바뀜 1을 더한다.
+
     Args:
         histories: 세션마다 전체 라벨 이력 (`get_labels`). 골든셋 세션은 호출자가 빼야 한다
             (사람이 처음부터 만든 정답이 "추가"로 세어져 수정률이 부풀려진다).
@@ -68,11 +77,13 @@ def correction_rates(histories: Iterable[list[LabelRecord]], policy: ActivePolic
     changed: Counter[str] = Counter()
     for history in histories:
         for c in review_changes(history, REVIEWED):
-            if c.label.kind in policy.excluded_kinds:
+            # 모델 원본의 클래스로 센다 (사람이 추가한 것은 원본이 없어 그 라벨로, F-ETA-06)
+            counted = c.origin or c.label
+            if counted.kind in policy.excluded_kinds:
                 continue
             if c.change == "added" and not policy.correction.count_added:
                 continue
-            key = class_key(c.label)
+            key = class_key(counted)
             reviewed[key] += 1
             changed[key] += c.change != "accepted"
     total = sum(reviewed.values())

@@ -23,6 +23,9 @@ WP3·WP16, ADR 0003·0020. 모든 단계가 이 프로토콜(`ObjectStore`)로 �
 - `store_from_spec`: CLI `--store` 값('s3' | 'local:<디렉터리>')으로 저장소를 만든다.
 - `put_immutable`: 불변 업로드 (원본 수집용). `sha256_file`: 파일 해시.
 - `DeletableStore`: 삭제할 수 있는 저장소 (`LocalStore`, `S3Store`). 회수 실행기만 쓴다.
+- `ListableStore`, `ListedObject`: 접두사로 객체를 나열할 수 있는 저장소와 그 결과
+  (`LocalStore`, `S3Store`). DB 기록 없이 남은 라벨링 버킷 사본(고아)을 찾는 `dlp_review.orphans`만
+  쓴다 (F-REV-15). 원본 감사 저장소는 나열이 없다.
 - `STORE_ERRORS`: 저장소 호출 실패로 볼 예외 묶음.
 """
 
@@ -32,6 +35,7 @@ import hashlib
 import os
 import shutil
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
@@ -93,6 +97,27 @@ class DeletableStore(ObjectStore, Protocol):
 
     def delete(self, key: str) -> None:
         """키의 객체를 지운다. 없어도 성공이다 (멱등). 그 밖의 오류는 예외."""
+        ...
+
+
+@dataclass(frozen=True)
+class ListedObject:
+    """`list_objects` 결과 하나: 키, 바이트 수, 마지막 수정 시각(UTC, 시간대 있음)."""
+
+    key: str
+    size: int
+    modified_at: datetime
+
+
+@runtime_checkable
+class ListableStore(ObjectStore, Protocol):
+    """접두사로 객체를 나열할 수 있는 저장소. 라벨링 버킷의 고아 사본 찾기(F-REV-15)에만 쓴다.
+
+    원본 감사 저장소는 이 프로토콜을 만족하지 않는다 (원본 목록은 감사 경로 밖으로 내지 않는다).
+    """
+
+    def list_objects(self, prefix: str) -> list[ListedObject]:
+        """키가 prefix로 시작하는 객체 (키 순). 없으면 빈 목록. 그 밖의 오류는 예외."""
         ...
 
 
@@ -182,6 +207,25 @@ class LocalStore:
         path.unlink(missing_ok=True)
         path.with_name(path.name + ".sha256").unlink(missing_ok=True)
 
+    def list_objects(self, prefix: str) -> list[ListedObject]:
+        """키가 prefix로 시작하는 파일 (키 순). 해시 옆 파일(`<객체>.sha256`)은 객체가 아니라 뺀다.
+
+        수정 시각은 파일 mtime(UTC)이다.
+        """
+        if not self.root.is_dir():
+            return []
+        out: list[ListedObject] = []
+        for path in self.root.rglob("*"):
+            key = path.relative_to(self.root).as_posix()
+            sidecar = path.suffix == ".sha256" and path.with_name(path.stem).is_file()
+            if not path.is_file() or sidecar or not key.startswith(prefix):
+                continue
+            stat = path.stat()
+            out.append(
+                ListedObject(key, stat.st_size, datetime.fromtimestamp(stat.st_mtime, tz=UTC))
+            )
+        return sorted(out, key=lambda o: o.key)
+
 
 class S3Store:
     """S3 호환 저장소 (SeaweedFS). sha256은 객체 메타데이터에 둔다."""
@@ -216,16 +260,18 @@ class S3Store:
         )
 
     @classmethod
-    def labeler_from_env(cls, bucket: str) -> S3Store:
+    def labeler_from_env(cls, bucket: str, *, public: bool = True) -> S3Store:
         """일반 라벨러 자격 증명 (라벨링 버킷 읽기 전용). 검수 화면용 서명 URL을 만들 때 쓴다.
 
-        엔드포인트는 브라우저가 닿는 주소(DLP_S3_PUBLIC_ENDPOINT)를 먼저 쓴다. 이 자격 증명은
-        원본 버킷을 읽을 수 없으므로, 실수로 원본 키를 서명해도 그 URL은 열리지 않는다.
+        엔드포인트는 브라우저가 닿는 주소(DLP_S3_PUBLIC_ENDPOINT)를 먼저 쓴다. public이 False면
+        서버가 닿는 주소(DLP_S3_ENDPOINT)만 쓴다 (권한 범위 점검 `dlp services check --security`).
+        이 자격 증명은 원본 버킷을 읽을 수 없으므로, 실수로 원본 키를 서명해도 그 URL은 열리지
+        않는다 (그 범위는 `dlp_media.storage_checks.check_labeler_scope`로 점검한다).
         """
+        public_url = os.environ.get("DLP_S3_PUBLIC_ENDPOINT") if public else None
         return cls(
             bucket,
-            endpoint_url=os.environ.get("DLP_S3_PUBLIC_ENDPOINT")
-            or os.environ.get("DLP_S3_ENDPOINT", "http://localhost:8333"),
+            endpoint_url=public_url or os.environ.get("DLP_S3_ENDPOINT", "http://localhost:8333"),
             access_key=os.environ.get("DLP_S3_LABELER_ACCESS_KEY", "dlp-dev-labeler"),
             secret_key=os.environ.get("DLP_S3_LABELER_SECRET_KEY", "dlp-dev-labeler-secret"),
         )
@@ -266,6 +312,22 @@ class S3Store:
     def delete(self, key: str) -> None:
         """DELETE 요청. S3는 없는 키도 성공으로 답한다 (멱등). 권한·연결 오류는 ClientError."""
         self.client.delete_object(Bucket=self.bucket, Key=key)
+
+    def list_objects(self, prefix: str) -> list[ListedObject]:
+        """ListObjectsV2를 끝까지 넘겨 읽는다 (키 순). 권한·연결 오류는 ClientError.
+
+        수정 시각은 S3 LastModified(시간대 있음)다.
+        """
+        out: list[ListedObject] = []
+        pages = self.client.get_paginator("list_objects_v2").paginate(
+            Bucket=self.bucket, Prefix=prefix
+        )
+        for page in pages:
+            for obj in page.get("Contents", []):
+                key, size, at = obj.get("Key"), obj.get("Size"), obj.get("LastModified")
+                if key is not None and size is not None and at is not None:
+                    out.append(ListedObject(key, size, at))
+        return sorted(out, key=lambda o: o.key)
 
 
 def store_from_spec(spec: str, bucket: str) -> ObjectStore:

@@ -18,15 +18,17 @@ from dlp_fixtures.actions import ENTITIES, ActionScenario, generate_action_scena
 from dlp_prelabel.contact import (
     ContactInterval,
     box_at,
+    clip_to_session,
     fuse_contacts,
     glove_contact_intervals,
     video_contact_intervals,
 )
-from dlp_prelabel.policy import PrelabelPolicy, load_policy
+from dlp_prelabel.policy import ContactPolicy, PrelabelPolicy, load_policy
 from dlp_prelabel.wearer import match_wearer, wrist_speed
 from dlp_schema.labels import (
     BoxKeyframe,
     BoxTrackPayload,
+    Hand,
     HandStatePayload,
     Keypoint,
     KeypointFrame,
@@ -180,6 +182,109 @@ def test_fusion_keeps_video_contacts_the_glove_missed() -> None:
         ContactInterval(1000, 2000, "bucket_01", "fused"),
         ContactInterval(3000, 3500, "sink_01", "video"),
     ]
+
+
+def _min_durations(policy: PrelabelPolicy, glove_ms: float, video_ms: float) -> ContactPolicy:
+    """저장소 접촉 정책에서 최소 길이만 바꾼 사본 (테스트 정답이 YAML 값에 묶이지 않게)."""
+    c = policy.contact
+    return c.model_copy(
+        update={
+            "glove": c.glove.model_copy(update={"min_duration_ms": glove_ms}),
+            "video": c.video.model_copy(update={"min_duration_ms": video_ms}),
+        }
+    )
+
+
+def test_contacts_are_clipped_to_the_session(policy: PrelabelPolicy) -> None:
+    """F-PAR-02 회귀: 마스터 시각 접촉 구간을 세션 [0, 길이]로 자르고, 세션과 겹치지 않거나 잘린 뒤
+    길이가 0이 된 구간은 버린다.
+
+    장갑을 바디캠보다 2초 먼저 켜면(offset -2000 ms) 장갑 시계 0.5~1.2 s 접촉은 마스터
+    -1500~-800 ms로 세션 앞이다. 예전에는 그대로 손 상태 라벨이 되어 Ms(ge=0) 검증이 실패하고
+    프리라벨 전체가 롤백됐다. 세션 길이 3000 ms 기준 정답을 손으로 적었다 (최소 길이 장갑 60 ms,
+    영상 100 ms: 아래 잘린 구간은 모두 그보다 길게 남는다).
+    """
+    contact = _min_durations(policy, glove_ms=60, video_ms=100)
+    intervals = [
+        ContactInterval(-1_500, -800, None, "glove"),  # 세션 앞: 버린다
+        ContactInterval(-400, 600, "bucket_01", "fused"),  # 0에 걸침: 0~600
+        ContactInterval(-300, 0, None, "glove"),  # 0에서 끝남: 길이 0이 되어 버린다
+        ContactInterval(1_000, 2_000, None, "glove"),  # 세션 안: 그대로
+        ContactInterval(2_500, 3_800, None, "glove"),  # 끝에 걸침: 2500~3000
+        ContactInterval(3_000, 3_500, "sink_01", "video"),  # 끝에서 시작: 버린다
+        ContactInterval(4_000, 4_500, None, "glove"),  # 세션 뒤: 버린다
+    ]
+    assert clip_to_session(intervals, 3_000, contact) == [
+        ContactInterval(0, 600, "bucket_01", "fused"),
+        ContactInterval(1_000, 2_000, None, "glove"),
+        ContactInterval(2_500, 3_000, None, "glove"),
+    ]
+    assert clip_to_session(intervals, 0, contact) == []
+
+
+def test_clipped_contacts_keep_the_policy_minimum_duration(policy: PrelabelPolicy) -> None:
+    """세션 경계에서 잘려 출처의 최소 길이보다 짧아진 구간은 버린다 (검증 지적: 5 ms·10 ms 조각이
+    남아 prelabel.yaml의 "이보다 짧은 접촉은 버린다"와 맞지 않았다).
+
+    최소 길이는 장갑 시각을 쓰는 glove·fused가 `contact.glove.min_duration_ms`(여기서 60 ms),
+    영상 시각인 video가 `contact.video.min_duration_ms`(100 ms)다. 최소 길이와 같으면 남긴다.
+    세션 길이 3000 ms 기준 정답을 손으로 적었다.
+    """
+    contact = _min_durations(policy, glove_ms=60, video_ms=100)
+    intervals = [
+        ContactInterval(-1_000, 5, None, "glove"),  # 0~5: 5 < 60 → 버린다
+        ContactInterval(-1_000, 60, None, "glove"),  # 0~60: 최소 길이와 같다 → 남긴다
+        ContactInterval(-500, 59, "bucket_01", "fused"),  # 0~59: 융합도 장갑 최소 길이 → 버린다
+        ContactInterval(-500, 80, "bucket_01", "video"),  # 0~80: 80 < 100 → 버린다
+        ContactInterval(2_920, 3_400, "sink_01", "video"),  # 2920~3000: 80 < 100 → 버린다
+        ContactInterval(2_900, 3_400, "sink_01", "video"),  # 2900~3000: 최소 길이 → 남긴다
+        ContactInterval(2_920, 3_400, "sink_01", "fused"),  # 2920~3000: 80 ≥ 60 → 남긴다
+        ContactInterval(2_990, 4_000, None, "glove"),  # 2990~3000: 10 < 60 → 버린다
+    ]
+    assert clip_to_session(intervals, 3_000, contact) == [
+        ContactInterval(0, 60, None, "glove"),
+        ContactInterval(2_900, 3_000, "sink_01", "video"),
+        ContactInterval(2_920, 3_000, "sink_01", "fused"),
+    ]
+
+
+def _hand_touching(t_ms: int, x: float) -> KeypointTrackPayload:
+    """키프레임 하나(t_ms)뿐인 왼손 hand21 트랙. 모든 점이 (x, 0)에 있다."""
+    points = tuple(Keypoint(x=x, y=0.0, visibility=2) for _ in range(21))
+    return KeypointTrackPayload(
+        entity_id="left_hand",
+        skeleton="hand21",
+        hand=Hand.LEFT,
+        keyframes=(KeypointFrame(t_ms=t_ms, points=points),),
+    )
+
+
+def test_zero_length_contacts_inside_the_session_are_kept(policy: PrelabelPolicy) -> None:
+    """정책 최소 길이가 0이면 한 프레임 영상 접촉 (t, t)도 유효한 손 상태 구간이다 (LabelRecord는
+    t_start == t_end를 허용한다). 세션 안 구간은 자르지 않으므로 그대로 남는다 (검증 지적: 예전
+    구현은 잘리지 않은 길이 0 구간도 버렸다). 세션 경계에서 잘려 길이 0이 된 구간(0에서 끝나거나
+    세션 끝에서 시작)은 세션 안 접촉이 아니라 버린다.
+
+    정답: 500 ms 한 프레임만 버킷 박스(0~20 px) 안에 손가락 끝이 있으므로 영상 접촉은 (500, 500)
+    하나다. 세션 길이 3000 ms.
+    """
+    contact = _min_durations(policy, glove_ms=0, video_ms=0)
+    box = BoxTrackPayload(
+        entity_id="bucket_01",
+        class_id="bucket",
+        keyframes=tuple(BoxKeyframe(t_ms=t, x=0, y=0, w=20, h=20) for t in (0, 500, 1_000)),
+    )
+    [point] = video_contact_intervals(_hand_touching(500, 10.0), [box], contact.video)
+    assert point == ContactInterval(500, 500, "bucket_01", "video")
+    edges = [
+        ContactInterval(0, 0, "bucket_01", "video"),  # 세션 첫 시각의 한 프레임: 남긴다
+        ContactInterval(3_000, 3_000, "bucket_01", "video"),  # 세션 끝 시각: 남긴다
+        ContactInterval(-300, 0, None, "glove"),  # 잘려서 길이 0: 버린다
+        ContactInterval(3_000, 3_500, None, "glove"),  # 잘려서 길이 0: 버린다
+        ContactInterval(-200, -200, "bucket_01", "video"),  # 세션 앞 한 점: 버린다
+        ContactInterval(3_200, 3_200, "bucket_01", "video"),  # 세션 뒤 한 점: 버린다
+    ]
+    assert clip_to_session([point, *edges], 3_000, contact) == [point, *edges[:2]]
 
 
 def _person(

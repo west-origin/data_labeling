@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import re
 import xml.etree.ElementTree as ET
 from functools import partial
 from pathlib import Path
@@ -22,16 +23,18 @@ import numpy as np
 import pytest
 
 from dlp_fixtures.actions import generate_action_scenario
-from dlp_fixtures.video import TARGET_COLORS, generate_blur_scenario
+from dlp_fixtures.video import TARGET_COLORS, generate_blur_scenario, write_video
 from dlp_media.proxy import make_proxy
 from dlp_media.pts import build_pts_index
 from dlp_media.storage import LocalStore, sha256_file
 from dlp_privacy.render import blur_tracks
 from dlp_review.collect import drop_retracted
 from dlp_review.cvat import (
+    KEYPOINT_LABELS,
     CvatFormatError,
     CvatSchema,
     annotation_tracks,
+    cvat_label_name,
     from_cvat_tracks,
     label_spec,
     quantize,
@@ -39,6 +42,7 @@ from dlp_review.cvat import (
 )
 from dlp_review.labelstudio import (
     LS_KINDS,
+    LsFormatError,
     from_ls_results,
     label_config,
     label_names,
@@ -66,6 +70,8 @@ from dlp_schema.labels import (
     BoxTrackPayload,
     EventPayload,
     GapPayload,
+    Hand,
+    HandStatePayload,
     KeypointTrackPayload,
     VerificationState,
 )
@@ -177,6 +183,82 @@ def test_cvat_new_track_and_bad_frame_time() -> None:
         to_cvat_tracks(blur.labels[:1], [t + 1 for t in blur.frame_times], schema)
 
 
+def test_cvat_new_hand_skeleton_takes_hand_from_label() -> None:
+    """F-REV-04 회귀: CVAT에서 새로 그린 손 골격은 hand가 없어 ValidationError로 수집이 멈췄다.
+
+    손 골격 라벨을 손별(`kp_hand21_left`·`kp_hand21_right`)로 나눠, 새로 그린 트랙·점 모양도 라벨
+    이름으로 손을 안다. 정답 근거: 행동 시나리오의 손 키포인트 트랙(21점, hand 있음)과 프레임 시각.
+    """
+    actions = generate_action_scenario(2)
+    kp = next(x for x in actions.labels if x.kind == "keypoint_track")
+    assert isinstance(kp.payload, KeypointTrackPayload) and kp.payload.hand is not None
+    hand = kp.payload.hand.value
+    other = "left" if hand == "right" else "right"
+    times = actions.frame_times
+    assert "kp_hand21" not in KEYPOINT_LABELS
+    assert {"kp_hand21_left", "kp_hand21_right"} <= set(KEYPOINT_LABELS)
+    schema = fake_schema(list(KEYPOINT_LABELS))
+
+    # 보낼 때는 손별 라벨, 고치지 않으면 무손실 왕복
+    [track] = to_cvat_tracks([kp], times, schema)
+    assert cvat_label_name(kp) == f"kp_hand21_{hand}"
+    assert track["label_id"] == schema.label_ids[f"kp_hand21_{hand}"]
+    [same] = from_cvat_tracks([track], times, schema, "bodycam", new_box_kind="box_track")
+    assert same.payload == quantize(kp).payload and same.origin_label_id == kp.label_id
+
+    # 검수자가 라벨을 다른 손으로 바꿨다: 화면의 라벨이 메타(원래 손)보다 우선한다
+    [swapped] = from_cvat_tracks(
+        [{**track, "label_id": schema.label_ids[f"kp_hand21_{other}"]}], times, schema, "bodycam",
+        new_box_kind="box_track",
+    )  # fmt: skip
+    assert isinstance(swapped.payload, KeypointTrackPayload)
+    assert swapped.payload.hand is not None and swapped.payload.hand.value == other
+
+    # 새로 그린 트랙 (dlp_label_id·dlp_meta 없음)과 모양 모드 점 21개
+    new_track: dict[str, Any] = {
+        **track,
+        "label_id": schema.label_ids["kp_hand21_left"],
+        "attributes": [],
+    }
+    points = [float(c) for i in range(21) for c in (10 + i, 20 + i)]
+    shape = _shape(schema.label_ids["kp_hand21_right"], 2, "points", points=points)
+    tracks = annotation_tracks({"tracks": [new_track], "shapes": [shape]}, len(times), schema)
+    drawn = from_cvat_tracks(tracks, times, schema, "bodycam", new_box_kind="box_track")
+    assert [(d.origin_label_id, d.payload.hand.value) for d in drawn  # type: ignore[union-attr]
+            ] == [(None, "left"), (None, "right")]  # fmt: skip
+    for d in drawn:
+        assert isinstance(d.payload, KeypointTrackPayload) and d.payload.skeleton == "hand21"
+
+
+def test_cvat_legacy_hand_label_without_hand_is_a_format_error() -> None:
+    """F-REV-04: 손별 라벨 이전에 만든 프로젝트(`kp_hand21` 하나)와 호환한다.
+
+    기존 트랙은 메타의 손으로 그대로 왕복하고, 그 라벨로 새로 그린 골격은 손을 알 수 없어
+    ValidationError가 아니라 `CvatFormatError`(→ 수집에서 TaskError)로 멈춘다. 점 수가 골격과
+    맞지 않는 새 골격도 같다.
+    """
+    actions = generate_action_scenario(2)
+    kp = next(x for x in actions.labels if x.kind == "keypoint_track")
+    times = actions.frame_times
+    legacy = fake_schema(["kp_hand21", "kp_coco17"])
+    [track] = to_cvat_tracks([kp], times, legacy)
+    assert track["label_id"] == legacy.label_ids["kp_hand21"]
+    [same] = from_cvat_tracks([track], times, legacy, "bodycam", new_box_kind="box_track")
+    assert same.payload == quantize(kp).payload
+
+    new_track: dict[str, Any] = {**track, "attributes": []}
+    with pytest.raises(CvatFormatError, match="kp_hand21_left"):
+        from_cvat_tracks([new_track], times, legacy, "bodycam", new_box_kind="box_track")
+
+    split = fake_schema(list(KEYPOINT_LABELS))
+    short = _shape(split.label_ids["kp_hand21_left"], 2, "points", points=[1.0, 2.0, 3.0, 4.0])
+    with pytest.raises(CvatFormatError, match="kp_hand21_left"):
+        from_cvat_tracks(
+            annotation_tracks({"shapes": [short]}, len(times), split), times, split, "bodycam",
+            new_box_kind="box_track",
+        )  # fmt: skip
+
+
 def test_label_studio_roundtrip_offline_and_new_regions(ontology: Ontology) -> None:
     """시간 라벨의 Label Studio 왕복과 화면에서 새로 그린 구간을 본다.
 
@@ -217,7 +299,8 @@ def test_label_studio_event_attributes_round_trip_and_new_events(ontology: Ontol
     """
     config = label_config(ontology)
     assert 'name="severity"' in config and 'name="related_action_id"' in config
-    assert config.count('perRegion="true"') == 3
+    # 이벤트 입력란 3개 + 손 상태 접촉 대상 입력란 2개 (F-REV-03)
+    assert config.count('perRegion="true"') == 5
 
     # 기존 이벤트: 속성이 입력란 결과로도 나가고, 그대로 돌아온다
     slip = make_label(
@@ -318,6 +401,45 @@ def test_reconcile_approves_corrects_retracts_and_adds() -> None:
     assert [r.label_id for r in again.new_records] == [r.label_id for r in out.new_records]
 
 
+@pytest.mark.parametrize("n", [100, 113, 114, 115, 116, 127, 128])
+def test_reconcile_long_ids_stay_valid_identifiers(n: int) -> None:
+    """F-REV-05 회귀: 긴 원래 ID의 새 레코드 ID를 `[-128:]`로 뒤만 남겨 `-`·`:`로 시작하는 잘못된
+    ID가 생겨 수집이 ValidationError로 멈췄다(A-09).
+
+    정답 근거: `Identifier` 규칙(영숫자로 시작, 128자 이하). 원래 ID·세션 ID를 경계 길이(n) 근처의
+    `a-:-:…` 꼴로 두면, 수정·삭제·추가 레코드 ID가 모두 규칙을 지키고, 같은 입력은 같은 ID(멱등),
+    앞부분이 같은 서로 다른 원래 ID는 다른 ID가 된다. 짧은 ID는 예전과 같은 `<원래>:r<해시>`다.
+    """
+    pattern = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+    body = ("-:" * 64)[: n - 1]
+    first, second = (make_label(action_payload(action_id=f"a{i}"), label_id=f"{c}{body}")
+                     for i, c in ((1, "a"), (2, "b")))  # fmt: skip
+    # 앞부분이 같고 끝만 다른 원래 ID도 새 ID가 달라야 한다
+    third = make_label(action_payload(action_id="a3"), label_id=f"a{body[:-1]}x")
+    moved = ActionPayload.model_validate(action_payload(action_id="a1", t_contact_start_ms=300))
+    reviewed = [
+        ReviewedItem(first.label_id, None, 0, 1000, moved),
+        ReviewedItem(third.label_id, None, 0, 1000,
+                     moved.model_copy(update={"action_id": "a3"})),
+        ReviewedItem(None, None, 0, 1000, moved.model_copy(update={"action_id": "n1"})),
+    ]  # fmt: skip
+    session = f"S{body}"
+
+    def run() -> list[str]:
+        out = reconcile([first, second, third], reviewed, session_id=session,
+                        ontology_version="1.0.0", reviewer_id="rev1", now=FIXED_TIME)  # fmt: skip
+        assert (out.corrected, out.retracted, out.added) == (2, 1, 1)
+        return [r.label_id for r in out.new_records]
+
+    ids = run()
+    assert all(pattern.match(i) for i in ids), ids
+    assert len(set(ids)) == len(ids) and run() == ids
+
+    short = reconcile([make_label(action_payload(), label_id="x1")], [], session_id="s001",
+                      ontology_version="1.0.0", reviewer_id="rev1", now=FIXED_TIME)  # fmt: skip
+    assert re.fullmatch(r"x1:r[0-9a-f]{12}", short.new_records[0].label_id)
+
+
 def test_reconcile_compares_against_normalized_originals() -> None:
     """좌표 반올림 왕복 값과 비교하므로 미세한 차이는 승인으로 보는지 본다.
 
@@ -390,6 +512,22 @@ def test_watermark_marks_frames_and_keeps_pts(tmp_path: Path) -> None:
     assert 0.01 < changed < 0.4  # 글씨가 화면 곳곳에 있지만 화면을 덮지는 않는다
 
 
+def test_watermark_pads_odd_size_and_keeps_pts(tmp_path: Path) -> None:
+    """회귀(F-PMS-02): 홀수 크기(101x75) 입력도 워터마크를 입힌다.
+
+    정답 근거: libx264 yuv420p 요구대로 오른쪽·아래에 1픽셀을 덧대 102x76이 되고(늘이지 않으므로
+    원본 좌표 유지), 프레임 수·PTS(VFR)는 입력과 같다.
+    """
+    w, h = 101, 75
+    times = [0, 40, 70, 130, 200]
+    src, dst = tmp_path / "odd.mkv", tmp_path / "b.mp4"
+    img = np.full((h, w, 3), 60, dtype=np.uint8)
+    write_video(src, ((t, img) for t in times), width=w, height=h, codec="ffv1", pix_fmt="yuv444p")
+    burn_watermark(src, dst, "labeler-07 s1", opacity=0.3, crf=20, encoder_rate=30)
+    assert build_pts_index(dst).ms.tolist() == build_pts_index(src).ms.tolist()
+    assert video_size(dst) == (w + 1, h + 1)
+
+
 def test_stage_uri_guard() -> None:
     """원본 버킷 URI 차단 검사를 본다 (CLAUDE.md 원본 노출 금지 규칙).
 
@@ -430,12 +568,13 @@ def test_webhook_parsing_and_auth() -> None:
     sig2 = "sha256=" + hmac.new(b"s3cret", in_progress, hashlib.sha256).hexdigest()
     assert parse_event("cvat", {"X-Signature-256": sig2}, in_progress, "s3cret") is None
 
+    annotation = {"completed_by": 12, "updated_by": {"id": 13}}
     ls = json.dumps({"action": "ANNOTATION_UPDATED", "task": {"id": 3},
-                     "annotation": {"completed_by": 12}}).encode()  # fmt: skip
+                     "annotation": annotation}).encode()  # fmt: skip
     req = parse_event("label_studio", {"X-DLP-Secret": "s3cret"}, ls, "s3cret")
-    # completed_by는 도구 내부 숫자 ID라 검수자로 쓰지 않는다
-    assert req is not None and (req.task_key, req.reviewer, req.user_id) == (
-        "label_studio:3", None, 12,
+    # completed_by·updated_by는 도구 내부 숫자 ID라 검수자로 쓰지 않고 담당자 계정과 대조만 한다
+    assert req is not None and (req.task_key, req.reviewer, req.user_id, req.editor_id) == (
+        "label_studio:3", None, 12, 13,
     )  # fmt: skip
     with pytest.raises(WebhookAuthError):
         parse_event("label_studio", {}, ls, "s3cret")
@@ -454,13 +593,46 @@ def test_webhook_reviewer_comes_from_task_assignee() -> None:
     """회귀: Label Studio 숫자 ID를 검수자로 쓰지 않고, 서비스 계정 주석은 무시하고,
     CVAT 작업 담당자가 다르면 받지 않는다."""
     task = _task("label_studio:3", "labeler01")
-    assert resolve_reviewer(CollectRequest("label_studio:3", None, 12), task, 1) == "labeler01"
+    accounts = {"labeler01": 12}  # 담당자의 Label Studio 사용자 ID (label_studio.users로 찾은 값)
+    assert (
+        resolve_reviewer(CollectRequest("label_studio:3", None, 12, 12), task, 1, ls_users=accounts)
+        == "labeler01"
+    )
     assert resolve_reviewer(CollectRequest("label_studio:3", None, 1), task, 1) is None
-    assert resolve_reviewer(CollectRequest("cvat:7", "labeler01"), task) == "labeler01"
+    lab = _cvat_task(ReviewStage.LABELING, "labeler01")
+    assert resolve_reviewer(CollectRequest("cvat:7", "labeler01"), lab) == "labeler01"
     with pytest.raises(ReviewerMismatchError):
-        resolve_reviewer(CollectRequest("cvat:7", "someone"), task)
+        resolve_reviewer(CollectRequest("cvat:7", "someone"), lab)
     with pytest.raises(ReviewerMismatchError):
-        resolve_reviewer(CollectRequest("label_studio:3", None, 12), _task("label_studio:3", None))
+        resolve_reviewer(
+            CollectRequest("label_studio:3", None, 12), _task("label_studio:3", None), 1,
+            ls_users=accounts,
+        )  # fmt: skip
+
+
+def test_label_studio_webhook_accepts_only_the_assignee_account() -> None:
+    """회귀(F-REV-06): 예전에는 서비스 계정만 아니면 누가 낸 주석이든 담당자의 검수로 받았다.
+
+    주석을 만든 사람(completed_by)과 마지막으로 고친 사람(updated_by, 있으면)이 모두 담당자의
+    Label Studio 계정이어야 한다. 계정 연결이 없으면 누구 것인지 확인할 수 없어 받지 않는다.
+    서비스 계정(1)이 담당자 ID(11)를 completed_by로 적어 올린 주석은 updated_by가 1이다.
+    """
+    task = _task("label_studio:3", "labeler01")
+    accounts = {"labeler01": 11, "labeler02": 12}
+    ok = CollectRequest("label_studio:3", None, 11, 11)
+    assert resolve_reviewer(ok, task, 1, ls_users=accounts) == "labeler01"
+    assert resolve_reviewer(CollectRequest("label_studio:3", None, 11), task, 1,
+                            ls_users=accounts) == "labeler01"  # fmt: skip
+    for user, editor in ((12, 12), (12, None), (11, 12), (None, 11)):
+        with pytest.raises(ReviewerMismatchError, match="labeler01"):
+            resolve_reviewer(
+                CollectRequest("label_studio:3", None, user, editor), task, 1, ls_users=accounts
+            )
+    with pytest.raises(ReviewerMismatchError, match="Label Studio 계정 연결"):
+        resolve_reviewer(ok, task, 1)
+    # 서비스 계정이 고친 주석도 사람 검수가 아니다 (completed_by가 담당자여도)
+    with pytest.raises(ReviewerMismatchError):
+        resolve_reviewer(CollectRequest("label_studio:3", None, 11, 1), task, 1, ls_users=accounts)
 
 
 # ---------------------------------------------------------------- 감사 회귀
@@ -529,6 +701,116 @@ def test_new_cvat_box_kind_follows_task_stage() -> None:
         [track], blur.frame_times, schema, "bodycam", new_box_kind="blur_track"
     )
     assert isinstance(priv.payload, BlurTrackPayload)
+
+
+def _hand_inputs(rid: str, target: str | None = None, part: str | None = None) -> list[Any]:
+    """손 상태 구간에 딸린 입력란 결과 (Label Studio가 보내는 perRegion 결과 형식)."""
+    out: list[dict[str, Any]] = []
+    if target is not None:
+        out.append({"id": rid, "from_name": "target_id", "to_name": "ts", "type": "textarea",
+                    "value": {"text": [target]}})  # fmt: skip
+    if part is not None:
+        out.append({"id": rid, "from_name": "body_part", "to_name": "ts", "type": "choices",
+                    "value": {"choices": [part]}})  # fmt: skip
+    return out
+
+
+def _drawn(rid: str, name: str, start: int = 200, end: int = 700) -> dict[str, Any]:
+    """화면에서 새로 그린 시계열 구간 하나 (원래 라벨 메타 없음)."""
+    value = {"start": float(start), "end": float(end), "timeserieslabels": [name]}
+    return {"id": rid, "from_name": "labels", "to_name": "ts", "type": "timeserieslabels",
+            "value": value}  # fmt: skip
+
+
+def test_label_studio_hand_state_inputs_and_kind_change(ontology: Ontology) -> None:
+    """F-REV-03 회귀: 손 상태 접촉 대상을 바꾸거나 새로 그린 구간도 수집할 수 있다.
+
+    정답 근거: hand.yaml·`HandStatePayload` — none이면 target_id·body_part·grasp_type을 비우고,
+    object·tool·fixed_surface는 target_id, person은 body_part가 필수다. 대상 ID는 입력란(TextArea),
+    부위는 온톨로지 body_parts 26개 중 고르는 입력란(Choices)으로 받는다.
+    """
+    root = ET.fromstring(label_config(ontology))
+    target = root.find(".//TextArea[@name='target_id']")
+    part = root.find(".//Choices[@name='body_part']")
+    assert target is not None and target.get("perRegion") == "true"
+    assert part is not None and part.get("perRegion") == "true"
+    assert [c.get("value") for c in part.iter("Choice")] == list(ontology.body_parts)
+
+    # 기존 도구 접촉: 입력란은 미리 채우지 않고(현재 값은 메타), 고치지 않으면 그대로 돌아온다
+    tool = HandStatePayload(
+        hand=Hand.RIGHT, contact_target_kind="tool", target_id="mop_01", grasp_type="power",
+        role="active",
+    )  # fmt: skip
+    [region] = to_ls_results([make_label(tool, label_id="hs1")])
+    assert json.loads(region["meta"]["text"][0])["target_id"] == "mop_01"
+    [same] = from_ls_results([region], {"hs1"})
+    assert same.payload == tool and same.origin_label_id == "hs1"
+
+    # 접촉 → none: 대상 ID·파지 유형을 비운다. 입력란에 대상 ID를 남겨 둬도 비운다 (역할은 그대로)
+    region["value"]["timeserieslabels"] = ["hand.right:none"]
+    none_payload = tool.model_copy(
+        update={"contact_target_kind": "none", "target_id": None, "grasp_type": None}
+    )
+    for extra in ([], _hand_inputs("hs1", target="mop_01")):
+        [none] = from_ls_results([region, *extra], {"hs1"})
+        assert none.payload == none_payload and none.origin_label_id == "hs1"
+
+    # 도구 접촉의 대상만 바꾼다: 채운 입력란이 원래 값을 덮어쓰고 나머지 필드는 그대로
+    region["value"]["timeserieslabels"] = ["hand.right:tool"]
+    [retarget] = from_ls_results([region, *_hand_inputs("hs1", target="towel_01")], {"hs1"})
+    assert retarget.payload == tool.model_copy(update={"target_id": "towel_01"})
+
+    # 대상자 접촉 → 도구 접촉: 대상자 부위는 (입력란에 남아 있어도) 비우고
+    # 대상 ID는 입력란에서 받는다
+    person = HandStatePayload(
+        hand=Hand.LEFT, contact_target_kind="person", body_part="left_forearm", role="assist"
+    )
+    [r] = to_ls_results([make_label(person, label_id="hs2")])
+    # 대상자 접촉에 대상 ID만 채우면 부위는 원래 값을 유지한다 (비운 입력란 = 원래 값)
+    [kept] = from_ls_results([r, *_hand_inputs("hs2", target="subject_01")], {"hs2"})
+    assert kept.payload == person.model_copy(update={"target_id": "subject_01"})
+    r["value"]["timeserieslabels"] = ["hand.left:tool"]
+    inputs = _hand_inputs("hs2", target="towel_01", part="left_forearm")
+    [moved] = from_ls_results([r, *inputs], {"hs2"})
+    assert isinstance(moved.payload, HandStatePayload)
+    assert (moved.payload.target_id, moved.payload.body_part) == ("towel_01", None)
+
+    # 화면에서 새로 그린 도구·대상자 접촉: 입력란 값으로 필수 필드를 채운다
+    [new_tool, new_person] = from_ls_results(
+        [
+            _drawn("n1", "hand.right:tool"), *_hand_inputs("n1", target=" spray_bottle_01 "),
+            _drawn("n2", "hand.left:person"), *_hand_inputs("n2", part="left_forearm"),
+        ],
+        set(),
+    )  # fmt: skip
+    assert isinstance(new_tool.payload, HandStatePayload)
+    assert (new_tool.payload.target_id, new_tool.payload.role) == ("spray_bottle_01", "active")
+    assert isinstance(new_person.payload, HandStatePayload)
+    assert new_person.payload.body_part == "left_forearm"
+    for i, item in enumerate((new_tool, new_person)):
+        drawn = make_label(item.payload, label_id=f"hn{i}", t_start_ms=200, t_end_ms=700)
+        assert check_label(drawn, ontology) == []
+
+
+def test_label_studio_unconvertible_regions_name_each_region() -> None:
+    """F-REV-03 회귀: 옮길 수 없는 구간은 영역 ID·시각·이유를 모두 담은 `LsFormatError`로 멈춘다.
+
+    전에는 첫 구간의 pydantic ValidationError·ValueError가 그대로 올라가 수집이 어느 구간 때문에
+    멈췄는지 알 수 없었다. 정답 근거: 새 객체 상태 구간은 개체를 알 수 없어 받지 않고, 대상 ID 없는
+    새 도구 접촉은 `HandStatePayload` 검증에 걸린다. 멀쩡한 구간은 오류에 넣지 않는다.
+    """
+    results = [
+        _drawn("ok1", "action.left:press", 0, 100),
+        _drawn("st1", "state:wetness=wet", 100, 900),
+        _drawn("hs9", "hand.right:tool", 1200, 1500),
+    ]
+    with pytest.raises(LsFormatError) as caught:
+        from_ls_results(results, set())
+    message = str(caught.value)
+    assert "구간 2개" in message and "ok1" not in message
+    assert "st1 (100~900 ms, state:wetness=wet)" in message and "객체 상태" in message
+    assert "hs9 (1200~1500 ms, hand.right:tool)" in message and "target_id" in message
+    assert isinstance(caught.value, ValueError)  # 기존 호출자의 ValueError 처리와 호환
 
 
 def test_label_studio_relabel_to_another_kind_is_delete_and_add() -> None:

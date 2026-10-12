@@ -18,6 +18,7 @@ from dlp_media.imu import read_imu_table
 from dlp_media.storage import (
     DeletableStore,
     ImmutableObjectError,
+    ListableStore,
     LocalStore,
     put_immutable,
     sha256_file,
@@ -140,3 +141,31 @@ def test_local_store_delete_is_idempotent_and_raw_audit_store_cannot_delete(tmp_
         LocalStore(tmp_path / "store", "dlp-raw"), MemorySink(), actor="t", purpose="test"
     )
     assert not isinstance(audited, DeletableStore)
+
+
+def test_local_store_lists_objects_by_prefix_without_sidecars(tmp_path: Path) -> None:
+    """고아 사본 찾기(F-REV-15)용 나열: 접두사로 고르고 키 순, 해시 옆 파일은 객체가 아니다.
+
+    원본 감사 저장소(`AuditedStore`)는 나열이 없어 `ListableStore`가 아니다 (원본 목록을 감사 경로
+    밖으로 내지 않는다). 버킷이 비었으면 빈 목록이다.
+    """
+    store = LocalStore(tmp_path / "store", "dlp-labeling")
+    assert store.list_objects("sessions/") == []
+    src = tmp_path / "v.mp4"
+    src.write_bytes(b"video")
+    keys = [
+        "sessions/s2/review/a/bodycam.mp4",
+        "sessions/s1/review/b/bodycam.mp4",
+        "sessions/s1/blurred/bodycam.mp4",
+    ]
+    for key in keys:
+        store.put_file(key, src, sha256_file(src))
+    assert isinstance(store, ListableStore)
+    got = store.list_objects("sessions/s1/review/")
+    assert [o.key for o in got] == ["sessions/s1/review/b/bodycam.mp4"]
+    assert got[0].size == 5 and got[0].modified_at.utcoffset() is not None
+    assert [o.key for o in store.list_objects("sessions/")] == sorted(keys)
+    audited = AuditedStore(
+        LocalStore(tmp_path / "store", "dlp-raw"), MemorySink(), actor="t", purpose="test"
+    )
+    assert not isinstance(audited, ListableStore)

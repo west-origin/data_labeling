@@ -15,6 +15,7 @@
 파일 확인·저장소 접근은 다시 수행할 수 있고, 감사 저장소를 통한 접근 기록은 새로 남을 수 있다.
 이미 등록된 세션과는 매니페스트·미디어에서 나온 필드만 비교한다. 동기화 결과, 프라이버시·생애주기
 상태, 온톨로지 이관처럼 수집 뒤 단계가 바꾸는 필드는 다시 수집해도 충돌로 보지 않는다.
+recorded_at은 순간으로 비교한다 (같은 순간을 다른 시간대 오프셋으로 적어도 충돌이 아니다).
 
 프록시 인코딩 설정은 config/defaults.yaml media.proxy에서 읽는다.
 
@@ -39,6 +40,7 @@ from __future__ import annotations
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import UTC
 from pathlib import Path
 from typing import Any
 
@@ -341,8 +343,15 @@ _SYNC_FIELDS = {
 
 
 def _ingest_fields(session: Session) -> dict[str, Any]:
-    """매니페스트와 미디어에서 나온 필드만 (재수집 충돌 판단용)."""
-    data = session.model_dump(mode="json", exclude=_LATER_SESSION_FIELDS)
+    """매니페스트와 미디어에서 나온 필드만 (재수집 충돌 판단용).
+
+    recorded_at은 UTC로 바꾼 뒤 직렬화한다. PostgreSQL timestamptz는 오프셋을 보존하지 않아,
+    매니페스트에 +09:00으로 적은 시각이 DB에서는 같은 순간의 UTC로 읽힌다. ISO 문자열을 그대로
+    비교하면 같은 순간을 충돌로 판정한다 (F-PMS-01). 나머지 필드는 문자열·정수·열거형 값이거나
+    DB에 그대로 왕복하는 실수(배정밀도 열, JSONB 숫자)라 직렬화 값 비교가 곧 값 비교다.
+    """
+    utc = session.model_copy(update={"recorded_at": session.recorded_at.astimezone(UTC)})
+    data = utc.model_dump(mode="json", exclude=_LATER_SESSION_FIELDS)
     data["streams"] = [
         {k: v for k, v in s.items() if k not in _SYNC_FIELDS} for s in data["streams"]
     ]

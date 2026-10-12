@@ -89,5 +89,6 @@ def check_privacy_reviewers(reviewers: Iterable[str | None], allowed: Iterable[s
     if denied:
         raise AccessError(
             f"원본 접근 권한자가 아닌 검수자에게 블러 검수를 배정할 수 없습니다: {denied} "
-            "(config/policies/review.yaml reviewers.privacy)"
+            "(검수 정책 reviewers.privacy: DLP_REVIEW_POLICY_FILE 또는 "
+            "config/policies/review.yaml)"
         )

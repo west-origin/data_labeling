@@ -25,6 +25,7 @@ import sqlalchemy as sa
 
 from dlp_fixtures.video import generate_blur_scenario
 from dlp_media.storage import LocalStore, ObjectStore, StoredObject, sha256_file
+from dlp_privacy.hold import hold_session
 from dlp_privacy.policy import PrivacyPolicy
 from dlp_privacy.policy import load_policy as load_privacy_policy
 from dlp_privacy.runner import operational_blur, render_hash, request_media_revocation
@@ -39,6 +40,7 @@ from dlp_review.tasks import (
     ReviewSetup,
     TaskError,
     create_labeling_tasks,
+    create_privacy_tasks,
     labeling_media_key,
     lock_assignment,
     proxy_key,
@@ -69,7 +71,7 @@ from dlp_schema.review import (
     ReviewTaskStatus,
     ReviewTool,
 )
-from dlp_schema.session import PrivacyState, Session
+from dlp_schema.session import LifecycleState, PrivacyState, Session
 from dlp_schema.testing import FIXED_TIME, make_label, make_session, sqlite_db
 
 NOW = FIXED_TIME + timedelta(hours=1)
@@ -802,6 +804,62 @@ def test_create_labeling_tasks_refuses_pending_revocation_before_tools(
     assert cvat.mock_calls == [] and ls.mock_calls == []
 
 
+def test_withdrawn_session_gets_no_new_review_tasks(
+    engine: sa.Engine,
+    seven: dict[str, ReviewTask],
+    stores: tuple[LocalStore, LocalStore],
+    policy: PrivacyPolicy,
+) -> None:
+    """F-REV-17: 사용 중지한 세션에는 블러 검수·라벨링 작업을 새로 만들지 않는다 (도구 호출 전).
+
+    사용 중지가 배포된 작업을 회수한 뒤 다시 만들면(회수 뒤 다시 만들기 안내, 배정 재생성) 동의를
+    철회한 영상이 다시 배포된다.
+    """
+    raw, labeling = stores
+    cvat, ls = MagicMock(), MagicMock()
+    setup = ReviewSetup(
+        raw=raw, labeling=labeling, labeling_reader=MagicMock(), ontology=None, cvat=cvat,
+        label_studio=ls, privacy=policy,
+    )  # fmt: skip
+    with engine.begin() as conn:
+        repository.set_lifecycle(conn, SID, LifecycleState.WITHDRAWN, at=NOW, actor="dpo01")
+    with pytest.raises(TaskError, match="사용 중지"), engine.begin() as conn:
+        create_labeling_tasks(conn, SID, setup, "labeler09", NOW)
+    with pytest.raises(TaskError, match="사용 중지"), engine.begin() as conn:
+        create_privacy_tasks(conn, SID, setup, NOW, assignee="rev01", privacy_reviewers=("rev01",))
+    assert cvat.mock_calls == [] and ls.mock_calls == []
+
+
+def test_held_session_refuses_labeling_tasks_but_allows_blur_review(
+    engine: sa.Engine,
+    seven: dict[str, ReviewTask],
+    stores: tuple[LocalStore, LocalStore],
+    policy: PrivacyPolicy,
+) -> None:
+    """F-REV-18: 승인 보류 중에는 라벨링 작업을 도구 호출 전에 거부하고, 배포된 작업은 회수
+    요청된다 (해시가 지금과 같아도). 블러 검수 작업은 보류 중에도 만들 수 있다 (보류 중에 블러를
+    고친다)."""
+    raw, labeling = stores
+    cvat, ls = MagicMock(), MagicMock()
+    setup = ReviewSetup(
+        raw=raw, labeling=labeling, labeling_reader=MagicMock(), ontology=None, cvat=cvat,
+        label_studio=ls, privacy=policy,
+    )  # fmt: skip
+    with engine.begin() as conn:
+        result = hold_session(
+            conn, SID, policy, NOW, reason="labeler report", actor="ops01", labeling=labeling
+        )
+    assert sorted(t.task_key for t in result.revocations) == [
+        "cvat:2", "cvat:4", "cvat:5", "cvat:6", "cvat:7", "label_studio:3",
+    ]  # fmt: skip
+    with pytest.raises(TaskError, match="승인 보류 중"), engine.begin() as conn:
+        create_labeling_tasks(conn, SID, setup, "labeler09", NOW)
+    assert cvat.mock_calls == [] and ls.mock_calls == []
+    # 블러 검수 작업 생성은 보류로 막지 않는다 (계정 연결이 없어 그 다음 단계에서 멈춘다)
+    with pytest.raises(TaskError, match="CVAT 계정"), engine.begin() as conn:
+        create_privacy_tasks(conn, SID, setup, NOW, assignee="rev01", privacy_reviewers=("rev01",))
+
+
 def test_finish_assignment_ignores_revoked_tasks(
     engine: sa.Engine, stores: tuple[LocalStore, LocalStore], tmp_path: Path
 ) -> None:
@@ -900,6 +958,63 @@ def test_verification_waits_for_reissue_of_revoked_direct_tasks(
     with engine.begin() as conn:
         insert_review_task(conn, renewed("cvat:9", ReviewTool.CVAT, NOW))
     assert direct() == []
+
+
+def test_collected_reissue_counts_even_after_a_later_revocation(
+    engine: sa.Engine,
+    stores: tuple[LocalStore, LocalStore],
+    tmp_path: Path,
+    policy: PrivacyPolicy,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """다시 만든 직접 작업을 수집한 뒤 블러가 한 번 더 바뀌어도 그 작업은 다시 만든 작업이다.
+
+    1. 열린 직접 작업 label_studio:3(labeler01)이 블러 재검수 수집(cvat:1)으로 회수된다 → 수집
+       출력이 다시 만들라고 한다.
+    2. 같은 담당자·스트림·도구로 다시 만든 label_studio:9를 수집한다.
+    3. 두 번째 블러 재검수(cvat:10)가 다른 얼굴을 더한다 → 수집한 label_studio:9에도 회수 요청이
+       남지만 상태는 collected다 (결과는 이미 이력에 있다). 수집 출력은 다시 만들라고 하지 않는다.
+    완료 판정도 수집 출력과 같은 기준이어야 한다: label_studio:3을 다시 만들라고 하면 거짓 차단이다.
+    """
+    raw, labeling = stores
+    setup, uri = _blur_setup(engine, stores, tmp_path, policy, PrivacyState.APPROVED, monkeypatch)
+    with engine.begin() as conn:
+        direct = _task("label_studio:3", ReviewTool.LABEL_STUDIO, "bodycam", ReviewStage.LABELING,
+                       uri, assignee="labeler01")  # fmt: skip
+        insert_review_task(conn, direct)
+    with engine.begin() as conn:
+        first = collect_task(conn, "cvat:1", setup, "privacy01", NOW)
+    assert first is not None
+    assert first.direct_reissue == [("labeler01", "bodycam", "label_studio")]
+    current = _current(engine, policy, "bodycam")
+    key = labeling_media_key(SID, "labeler01", "bodycam", current)
+    renewed = _task("label_studio:9", ReviewTool.LABEL_STUDIO, "bodycam", ReviewStage.LABELING,
+                    _put_media(labeling, key, tmp_path), render_hash=current,
+                    assignee="labeler01").model_copy(update={"created_at": NOW})  # fmt: skip
+    blur_again = _task("cvat:10", ReviewTool.CVAT, "bodycam", ReviewStage.PRIVACY,
+                       raw.uri(proxy_key(SID, "bodycam")), sent_label_ids=())  # fmt: skip
+    later = NOW + timedelta(minutes=5)
+    with engine.begin() as conn:
+        insert_review_task(conn, renewed)
+        mark_review_task_collected(conn, "label_studio:9", later)
+        insert_review_task(conn, blur_again)
+    other = BlurTrackPayload(
+        target="face", keyframes=(BoxKeyframe(t_ms=0, x=40.0, y=40.0, w=10.0, h=10.0),)
+    )
+    monkeypatch.setattr(
+        collect_module,
+        "from_cvat_tracks",
+        MagicMock(return_value=[ReviewedItem(None, "bodycam", 0, 100, other)]),
+    )
+    with engine.begin() as conn:
+        second = collect_task(conn, "cvat:10", setup, "privacy01", later)
+    assert second is not None and "label_studio:9" in second.revoked
+    assert second.direct_reissue == []
+    task = _status(engine, "label_studio:9")
+    assert task.status is ReviewTaskStatus.COLLECTED and task.revoke_requested_at == later
+    with engine.connect() as conn:
+        gaps = verification_gaps(conn, SID, policy)
+    assert not any(r.startswith("회수돼 다시 만들 직접 작업") for r in gaps), gaps
 
 
 def test_verification_ignores_legacy_tasks_without_hash(

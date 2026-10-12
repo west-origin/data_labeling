@@ -1,7 +1,8 @@
 """검수 운영 실행: 세션 배정 계획, 배정별 검수 작업 만들기, 배정 마무리(표본 판정), 품질 리포트.
 
 - `dlp review plan <세션> --reviewer …`: 배정(review_assignments)을 만든다 (같은 배정 ID는 건너뜀).
-- `dlp review assign <배정>`: 검수 도구 작업을 만든다.
+- `dlp review assign <배정> [--assignee <검수자>]`: 검수 도구 작업을 만든다. 담당자 없는 배정(선임이
+  없어 담당자를 비워 둔 QA 배정 등)은 `--assignee`로 담당자를 정해야 만든다 (F-REV-07).
 - 결과 수집(`dlp review collect`)이 끝나면 배정을 마무리한다. 표본 검수 배정이면 묶음 합격 여부에
   따라 나머지를 표본 검증으로 두거나 재검수 배정을 만든다.
 
@@ -15,7 +16,8 @@ WP12, ADR 0014·0015·0023(블러 배정·세대). 이 모듈은 순수 로직(`
 - `check_privacy_reviewers`: 정책의 원본 접근 권한자로 블러 담당자 검사.
 - `plan_session`: 세션 하나의 배정 계획을 세우고 DB에 넣는다.
 - `privacy_generation`: 블러 단위 입력 세대 해시.
-- `create_assignment_tasks`: 배정의 도구 작업을 만든다 (멱등).
+- `assign_reviewer`: 담당자 없는 배정에 담당자를 정한다 (작업을 만들기 전에만).
+- `create_assignment_tasks`: 배정의 도구 작업을 만든다 (멱등, 담당자 없는 배정은 거부).
 - `FinishResult`, `finish_assignment`: 배정 마무리와 표본 판정.
 - `QualityReport`, `quality_report`: 발견율·이중 일치도·프리라벨 편향.
 - `shown_prelabels`: 표준 검수자에게 실제로 보낸 모델 프리라벨 (블라인드 편향의 기준).
@@ -56,11 +58,13 @@ from dlp_review.ops.selection import assignment_selector
 from dlp_review.roles import AccessError as AccessError  # 이전 위치에서 쓰던 이름 (재수출)
 from dlp_review.tasks import (
     ReviewSetup,
+    TaskError,
     create_labeling_tasks,
     create_privacy_tasks,
     lock_assignment,
 )
 from dlp_schema.db.repository import (
+    get_assignment,
     get_labels,
     get_session,
     insert_assignment,
@@ -319,6 +323,58 @@ def _prepare_seeded(
     return a.model_copy(update={"injected": tuple(task.injected)})
 
 
+def assign_reviewer(
+    conn: sa.Connection, a: ReviewAssignment, reviewer: str, policy: ReviewOpsPolicy
+) -> ReviewAssignment:
+    """담당자 없는 배정에 담당자를 정하고, 담당자를 넣은 배정을 돌려준다 (F-REV-07).
+
+    담당자는 작업의 워터마크·라벨링 버킷 경로·검수자 ID가 되므로 작업을 만들기 전에만 정한다.
+    계획(`plan_session`·`plan_qa`)이 지키는 배정 규칙을 사람이 정할 때도 지킨다.
+    - 블러 배정: 원본 접근 권한자(`reviewers.privacy`)만 (`AccessError`).
+    - QA 배정: 선임(`reviewers.senior`)만.
+    - 짝이 있는 배정(블라인드·이중·QA): 짝 배정(표준)과 같은 짝의 다른 측정 배정 담당자는 안 된다
+      (같은 사람이 자기 검수를 측정·재검수하지 않는다).
+    같은 담당자를 다시 정하면 그대로 돌려준다 (멱등).
+
+    세션 → 배정 순으로 잠근다 (`create_assignment_tasks`와 같은 순서).
+    부작용: `review_assignments.assignee` 갱신.
+    예외: 이미 다른 담당자가 있거나 작업이 있는 배정, 선임이 아닌 QA 담당자, 짝 배정과 같은
+    담당자면 `TaskError`. 블러 배정의 권한자가 아니면 `AccessError`.
+    """
+    lock_session(conn, a.session_id)
+    live = lock_assignment(conn, a.assignment_id)
+    current = get_assignment(conn, a.assignment_id)
+    if current.assignee == reviewer:
+        return current
+    if current.assignee is not None:
+        raise TaskError(
+            f"{a.assignment_id}: 이미 담당자({current.assignee})가 있는 배정은 바꾸지 않습니다"
+        )
+    if live is not None:
+        raise TaskError(f"{a.assignment_id}: 이미 작업이 있는 배정의 담당자는 정하지 않습니다")
+    if current.label_kinds == ("blur_track",):
+        check_privacy_reviewers([reviewer], policy)
+    if current.mode is ReviewMode.QA and reviewer not in policy.reviewers.senior:
+        raise TaskError(
+            f"{a.assignment_id}: QA 배정은 선임 검수자(검수 정책 reviewers.senior)에게만 줍니다: "
+            f"{reviewer}"
+        )
+    if current.pair_id is not None:
+        paired = {
+            x.assignee
+            for x in list_assignments(conn, session_id=current.session_id)
+            if x.assignment_id != current.assignment_id
+            and current.pair_id in (x.assignment_id, x.pair_id)
+        }
+        if reviewer in paired:
+            raise TaskError(
+                f"{a.assignment_id}: 짝 배정({current.pair_id})과 같은 담당자 {reviewer}에게는 "
+                "줄 수 없습니다 (측정·재검수는 다른 사람이 한다)"
+            )
+    update_assignment(conn, current.assignment_id, assignee=reviewer)
+    return current.model_copy(update={"assignee": reviewer})
+
+
 def create_assignment_tasks(
     conn: sa.Connection,
     a: ReviewAssignment,
@@ -334,22 +390,30 @@ def create_assignment_tasks(
 
     도구 선택: 블러 배정 → CVAT 프라이버시 작업, 스트림 있는 작업 라벨 배정 → CVAT,
     세션 단위(시간 라벨) 배정 → Label Studio (세션의 기준 스트림 영상으로 연다).
+    담당자 없는 배정은 만들지 않는다: 담당자가 워터마크·라벨링 버킷 경로·검수자 ID가 되므로 자리
+    표시 문자열로 대신하지 않는다 (F-REV-07, 회귀: 예전에는 "unassigned"를 실제 담당자로 넣었다).
+    먼저 `assign_reviewer`(`dlp review assign <배정> --assignee <검수자>`)로 정한다.
     부작용: 작업 생성(`tasks` 함수의 부작용 전부), 배정의 `task_key` 갱신(첫 작업).
-    예외: 블러 배정의 담당자가 권한자가 아니면 `AccessError`, 그 밖은 `tasks`의 예외.
+    예외: 담당자 없는 배정이면 `TaskError`, 블러 배정의 담당자가 권한자가 아니면 `AccessError`,
+    그 밖은 `tasks`의 예외.
     """
     # 수집과 일관된 세션 → 배정 순서. 프라이버시 작업 생성도 세션을 잠근다.
     lock_session(conn, a.session_id)
     existing = lock_assignment(conn, a.assignment_id)
     if existing is not None:
         return existing
+    assignee = a.assignee
+    if assignee is None:
+        raise TaskError(
+            f"{a.assignment_id}: 담당자가 없는 배정은 작업을 만들지 않습니다 "
+            f"(dlp review assign {a.assignment_id} --assignee <검수자>로 담당자를 정한다)"
+        )
     # 수집 때도 같은 선택 함수를 쓴다 (collect가 sent_label_ids가 없는 예전 작업에 쓴다)
     select = assignment_selector(conn, a)
-    assignee = a.assignee or "unassigned"
     if a.label_kinds == ("blur_track",):
-        check_privacy_reviewers([a.assignee], policy)  # 블러 검수는 원본 영상을 연다
-        assert a.assignee is not None
+        check_privacy_reviewers([assignee], policy)  # 블러 검수는 원본 영상을 연다
         tasks = create_privacy_tasks(
-            conn, a.session_id, setup, now, assignee=a.assignee,
+            conn, a.session_id, setup, now, assignee=assignee,
             privacy_reviewers=policy.reviewers.privacy, select=select, mode=a.mode,
             assignment_id=a.assignment_id, streams={a.stream_id} if a.stream_id else None,
         )  # fmt: skip

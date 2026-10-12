@@ -8,7 +8,7 @@
 - 같은 단위 ID는 `ON CONFLICT DO NOTHING`으로 건너뛴다 (트리거에 걸리지 않는다).
 - 세션별 실행 잠금(`try_lock_aireview`)은 다른 연결과 경합하고, 커밋해도 유지되며, 풀거나 연결을
   닫으면 풀린다.
-- 기록이 있으면 0016을 되돌리지 않는다.
+- 기록이 있으면 0019를 되돌리지 않는다.
 """
 
 from __future__ import annotations
@@ -163,9 +163,9 @@ def test_aireview_lock_contends_across_connections(pg: sa.Engine) -> None:
 
 
 def test_downgrade_refuses_with_ai_records(pg_url: str, pg: sa.Engine) -> None:
-    """AI 기록이 있으면 0016을 되돌리지 않는다 (추가 전용 감사 기록 보존)."""
+    """AI 기록이 있으면 0019를 되돌리지 않는다 (추가 전용 감사 기록 보존)."""
     _fill(pg)
-    with pytest.raises(RuntimeError, match="0016을 되돌릴 수 없습니다"):
+    with pytest.raises(RuntimeError, match="0019를 되돌릴 수 없습니다"):
         downgrade(pg_url, "0015")
     with pg.connect() as conn:
         assert conn.execute(sa.text("SELECT count(*) FROM ai_review_units")).scalar_one() == 1

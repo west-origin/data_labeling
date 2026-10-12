@@ -44,8 +44,9 @@ class InfrastructureConfig(Contract):
 
 
 # defaults.yaml `buckets`: 객체 저장소 버킷 이름.
-#   raw: 원본(블러 전). 원본 권한자·학습 서버만 접근, 모든 접근은 감사 기록 (ADR 0020).
-#   labeling: 블러본·프록시 (일반 라벨러 읽기 전용).
+#   raw: 원본(블러 전)과 그 파생물(PTS 인덱스, 검수용 프록시 영상, 정규화 Parquet). 프록시도 블러 전
+#     영상이다. 원본 권한자·학습 서버만 접근, 모든 접근은 감사 기록 (ADR 0003·0020).
+#   labeling: 승인된 블러본·렌더 기록·워터마크 검수 영상·시계열 CSV (일반 라벨러 읽기 전용).
 #   datasets: 데이터셋 버전·내보내기. mlflow: 학습 산출물.
 class BucketsConfig(Contract):
     raw: str

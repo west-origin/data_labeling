@@ -15,7 +15,7 @@
       `AiHumanAction`, `AiApplyResult`.
     - 판정: `AiSuggestion`, `AiVerdict`, `AiFinding`, `AiFrameRef`.
     - 기록(표와 1:1): `AiReviewUnit`, `AiReviewRun`, `AiRunEvent`, `AiExposure`, `AiOutcomeItem`,
-      `AiOutcome`. 표는 `db.tables`의 ai_review_* (Alembic 0016, 추가 전용), 저장소는
+      `AiOutcome`. 표는 `db.tables`의 ai_review_* (Alembic 0019, 추가 전용), 저장소는
       `db.aireview_repository`.
     - `AI_REVIEWER_PREFIX`: AI 판정 실행자 접두사. 이 검수자 ID로는 검수 상태를 기록할 수 없다.
     - 순수 함수: `worst`(한 라벨의 여러 판정 중 가장 나쁜 것), `valid_verdicts`(지금 유효한 판정).

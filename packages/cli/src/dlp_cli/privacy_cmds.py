@@ -11,6 +11,9 @@
    렌더한다. 이후 단계(프리라벨 검수 화면, 내보내기)는 이 블러본만 쓴다.
 - `dlp privacy audit-sample [--week]` — 매주 승인된 블러본에서 잔여 누락 감사 표본을 뽑고, 최근 주
   누락률로 블러 검수 방식(전수/표본)을 판정한다. 감사 결과 입력은 `dlp ops privacy-audit`.
+- `dlp privacy hold <세션> --reason [--actor]` — 사고 대응(노출 신고) 중 승인을 보류한다: 승인 해제,
+  렌더 기록 무효, 배포된 라벨링 작업 전부 회수 요청(커밋 뒤 실행). 보류 중에는 승인이 거부된다.
+  `--release`는 해제 기록만 남기고, 재승인(approve → render)을 다시 거친다 (ADR 0042, F-REV-18).
 
 정책 출처: `config/policies/privacy.yaml`(탐지기·대상·렌더), `config/defaults.yaml`의
 `privacy.full_review_exit`(표본 감사 비율, 연속 주 수)와
@@ -43,6 +46,7 @@ import sqlalchemy as sa
 from dlp_cli.raw_access import raw_store
 from dlp_cli.review_config import print_revocations, run_revocations
 from dlp_cli.schema_cmds import database_url
+from dlp_media.audit import current_actor
 from dlp_media.storage import ObjectStore, store_from_spec
 from dlp_privacy.audit import (
     AuditResult,
@@ -56,6 +60,7 @@ from dlp_privacy.audit import (
     weekly_miss_rates,
 )
 from dlp_privacy.detectors import build_detectors
+from dlp_privacy.hold import hold_session, release_hold
 from dlp_privacy.policy import load_policy
 from dlp_privacy.runner import (
     approve_session,
@@ -98,7 +103,8 @@ def cmd_detect(args: argparse.Namespace) -> int:
     철회), 세션 프라이버시 상태 갱신, 블러가 바뀐 스트림의 라벨링 작업 회수 요청(ADR 0039),
     라벨링 버킷의 이전 블러본 렌더 기록 무효화(ADR 0024), 원본 버킷 읽기와 쓰기(검수 우선 구간
     JSON, 결과 0개 버전의 탐지 표시; 감사 기록 `privacy.detect`). 커밋 뒤 회수 대기 실행
-    (검수 도구 설정에 실패해도 매체 삭제는 하고 도구 작업은 대기로 남긴다).
+    (CVAT에 접속하지 못해도 매체 삭제는 하고 도구 작업은 대기로 남긴다. 검수 정책 파일
+    `DLP_REVIEW_POLICY_FILE`은 읽지 않으므로 그 파일 오류도 매체 삭제를 막지 않는다).
     """
     root = repo_root()
     policy = load_policy(root)
@@ -170,7 +176,8 @@ def cmd_render(args: argparse.Namespace) -> int:
     렌더한 트랜잭션에서 렌더 해시가 지금 블러본과 다른 라벨링 작업에 회수를 요청한다 (백스톱,
     ADR 0039). 렌더 해시에는 `privacy.yaml render` 절 전체가 들어가므로 블러 강도뿐 아니라 블러와
     무관한 인코더 설정(crf, encoder_rate)만 바꿔도 그 세션의 해시 있는 라벨링 작업이 모두 회수되고
-    도구 작업이 지워진다. 커밋 뒤 회수 대기를 실행하고, 남으면 `REVOCATION_PENDING_EXIT`(4).
+    도구 작업이 지워진다. 커밋 뒤 회수 대기를 실행하고(`detect`와 같이 검수 정책 파일은 읽지
+    않는다), 남으면 `REVOCATION_PENDING_EXIT`(4).
 
     예외: 승인 전 세션, 라벨링 버킷이 원본 버킷과 같을 때, 오디오를 남기는 정책이면
     `PrivacyGateError`.
@@ -195,6 +202,56 @@ def cmd_render(args: argparse.Namespace) -> int:
     if requested:
         keys = ", ".join(t.task_key for t in requested)
         print(f"렌더 해시가 바뀐 라벨링 작업 {len(requested)}개 회수: {keys}")
+    return print_revocations(report, args.session_id)
+
+
+def cmd_hold(args: argparse.Namespace) -> int:
+    """`dlp privacy hold <세션> --reason R [--release] [--actor A]`: 승인 보류·해제 (ADR 0042).
+
+    보류: 한 트랜잭션에서 보류 기록(추가만), 승인 해제(AUTO_BLURRED), 모든 영상 스트림의 배포된
+    라벨링 작업 회수 요청(사유 `hold:<행위자>:<사유>`), 렌더 기록 무효(`--store`의 라벨링 버킷).
+    커밋 뒤 회수 실행기를 돌린다 (검수 정책 파일은 읽지 않는다). 보류 중에는 블러본 열기·렌더·
+    라벨링 작업 생성·승인이 거부된다. 블러 검수 작업은 만들 수 있다. 다시 보류하면 기록은 더하지
+    않고 회수 요청·무효화만 다시 한다.
+    해제(`--release`): 해제 기록만 남긴다. 승인은 풀린 채라 재승인 절차를 다시 거친다.
+
+    행위자는 `--actor`, 없으면 `DLP_ACTOR`, 그것도 없으면 OS 사용자다.
+    반환: 0, 보류 뒤 회수 대기가 남으면 `REVOCATION_PENDING_EXIT`(4).
+    예외: 보류 중이 아닌데 해제하면 `PrivacyGateError`, 사유가 비면 ValueError.
+    """
+    actor = args.actor or current_actor()
+    now = datetime.now(UTC)
+    engine = _engine(args)
+    if args.release:
+        with engine.begin() as conn:
+            event = release_hold(conn, args.session_id, now, reason=args.reason, actor=actor)
+        engine.dispose()
+        print(f"{args.session_id}: 승인 보류 해제 ({event.actor}: {event.reason})")
+        print(
+            "  승인은 풀린 채입니다. 재승인: (필요하면 블러 검수 → dlp review collect) → "
+            f"dlp privacy approve {args.session_id} → dlp privacy render {args.session_id} → "
+            f"다시 만들기 (dlp review verify {args.session_id}가 명령을 보인다)"
+        )
+        return 0
+    root = repo_root()
+    buckets = load_config(root / "config" / "defaults.yaml").buckets
+    labeling = store_from_spec(args.store, buckets.labeling)
+    with engine.begin() as conn:
+        result = hold_session(
+            conn, args.session_id, load_policy(root), now, reason=args.reason, actor=actor,
+            labeling=labeling,
+        )  # fmt: skip
+    # 회수 요청은 위 커밋에 있다. 외부 채널은 커밋 뒤에 끊는다
+    report = run_revocations(engine, args.session_id, url=args.url, purpose="privacy.hold")
+    engine.dispose()
+    held = result.held_since
+    state = "새 보류" if result.event is not None else "이미 보류 중"
+    print(f"{args.session_id}: 승인 보류 ({state}, {held.actor}: {held.reason}, {held.at})")
+    print(f"  이전 프라이버시 상태 {result.previous_state.value} → 승인 해제, 렌더 기록 무효 "
+          f"{result.invalidated or '-'}")  # fmt: skip
+    if result.revocations:
+        keys = ", ".join(t.task_key for t in result.revocations)
+        print(f"  라벨링 작업 {len(result.revocations)}개 회수: {keys}")
     return print_revocations(report, args.session_id)
 
 
@@ -261,7 +318,7 @@ def cmd_audit_sample(args: argparse.Namespace) -> int:
 
 
 def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:  # pyright: ignore[reportPrivateUsage]
-    """`privacy detect|approve|render|audit-sample` 하위 명령을 등록한다.
+    """`privacy detect|approve|render|audit-sample|hold` 하위 명령을 등록한다.
 
     `approve`는 원본·라벨링 저장소를 쓰지 않으므로 `--store` 인자가 없다.
     """
@@ -286,3 +343,13 @@ def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
     # 3인칭 등 바디캠이 아닌 스트림의 길이를 PTS 인덱스(원본 버킷)에서 읽는다
     audit.add_argument("--store", default="s3", help="'s3' 또는 'local:<디렉터리>'")
     audit.set_defaults(func=cmd_audit_sample)
+    hold = psub.add_parser(
+        "hold", help="사고 대응 승인 보류 (배포된 라벨링 작업 회수, --release로 해제 기록)"
+    )
+    hold.add_argument("session_id")
+    hold.add_argument("--reason", required=True, help="보류·해제 사유 (감사 기록)")
+    hold.add_argument("--release", action="store_true", help="보류 해제 (재승인은 따로 한다)")
+    hold.add_argument("--actor", help="보류·해제한 사람 (기본: DLP_ACTOR 또는 OS 사용자)")
+    hold.add_argument("--url", help="DB URL (기본: DLP_DATABASE_URL)")
+    hold.add_argument("--store", default="s3", help="'s3' 또는 'local:<디렉터리>' (렌더 기록 무효)")
+    hold.set_defaults(func=cmd_hold)

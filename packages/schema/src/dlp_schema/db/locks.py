@@ -25,6 +25,21 @@ def lock_session(conn: sa.Connection, session_id: str) -> None:
     ).scalar_one()
 
 
+def try_lock_session(conn: sa.Connection, session_id: str) -> bool:
+    """세션 행을 FOR UPDATE SKIP LOCKED로 잠근다. 잠갔으면 True (트랜잭션 끝까지).
+
+    다른 트랜잭션이 이미 잡고 있거나(예: 검수 작업 생성 중) 세션이 없으면 False이고 기다리지 않는다.
+    고아 정리(`dlp_review.orphans`)가 작업 생성과 겹치지 않게 쓴다. SQLite는 행 잠금이 없어 세션이
+    있으면 늘 True다.
+    """
+    row = conn.execute(
+        sa.select(sessions.c.session_id)
+        .where(sessions.c.session_id == session_id)
+        .with_for_update(skip_locked=True)
+    ).first()
+    return row is not None
+
+
 def lock_model_task(conn: sa.Connection, task: str) -> None:
     """과제별 배포를 PostgreSQL 트랜잭션 advisory lock으로 직렬화한다 (첫 배포 포함).
 

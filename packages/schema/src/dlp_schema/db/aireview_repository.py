@@ -1,7 +1,7 @@
 """AI 1차 검수 기록 저장소 (WP17.4, ADR 0040). 연결·트랜잭션·커밋은 호출자가 관리한다.
 
 판정은 라벨이 아니다. 이 모듈은 `label_records`를 읽거나 쓰지 않고, AI 표(`ai_review_*`, Alembic
-0016)만 다룬다. 다섯 표 모두 추가만 한다 (PostgreSQL 트리거가 UPDATE·DELETE·TRUNCATE를 막는다). 그래서
+0019)만 다룬다. 다섯 표 모두 추가만 한다 (PostgreSQL 트리거가 UPDATE·DELETE·TRUNCATE를 막는다). 그래서
 이 모듈에는 수정·삭제 함수가 없다.
 
 절별 함수

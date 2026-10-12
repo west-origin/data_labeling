@@ -20,10 +20,14 @@ infrastructure:
 
 # 객체 저장소 버킷 이름. 바꾸면 services/ compose의 버킷 생성과 자격 증명 정책도 함께 바꾼다.
 buckets:
-  # 원본 영상·오디오 (원본 권한자, 학습 서버만). 모든 접근은 감사 저장소(dlp_cli.raw_access.raw_store)로만 하고
-  # raw_access_log에 남는다 (ADR 0020). 이 버킷 URI를 일반 라벨러 경로(블러본·검수 작업·내보내기)에 노출하지 않는다.
-  raw: dlp-raw                     # 원본 영상·오디오 (원본 권한자, 학습 서버만)
-  labeling: dlp-labeling           # 블러본·프록시 (일반 라벨러, 읽기 전용 자격 증명으로 서명)
+  # 원본 버킷: 블러 전 원본 영상·오디오·센서 파일(sessions/<세션>/raw/)과 그 파생물(sessions/<세션>/derived/:
+  # PTS 인덱스, 검수용 프록시 영상, 정규화 Parquet, 검수 우선 구간). 프록시는 원본을 줄인 블러 전 영상이라
+  # 원본과 같은 취급이다 (dlp_media.ingest, ADR 0003). 원본 권한자·학습 서버만 접근하고, 모든 접근은
+  # 감사 저장소(dlp_cli.raw_access.raw_store)로만 하며 raw_access_log에 남는다 (ADR 0020).
+  # 이 버킷 URI를 일반 라벨러 경로(블러본·검수 작업·내보내기)에 노출하지 않는다.
+  raw: dlp-raw                     # 원본·프록시·PTS 인덱스·센서 파생물 (원본 권한자, 학습 서버만)
+  # 라벨링 버킷: 승인된 블러본·렌더 기록, 라벨러 워터마크 검수 영상, 시계열 CSV. 블러 전 영상은 두지 않는다.
+  labeling: dlp-labeling           # 블러본·워터마크 사본 (일반 라벨러, 읽기 전용 자격 증명으로 서명)
   datasets: dlp-datasets           # 데이터셋 버전·내보내기
   mlflow: dlp-mlflow               # 학습 산출물 (재학습 가중치·리포트)
 

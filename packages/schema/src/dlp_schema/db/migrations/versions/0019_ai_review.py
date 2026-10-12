@@ -1,7 +1,7 @@
 """AI 1차 검수 기록 표 다섯 개 (추가 전용, ADR 0040).
 
-Revision ID: 0016
-Revises: 0015
+Revision ID: 0019
+Revises: 0017
 Create Date: 2026-10-11
 
 판정은 라벨이 아니다. `label_records` 밖의 표에만 쓴다 (ADR 0040 결정 1, I3·I4):
@@ -22,8 +22,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0016"
-down_revision: str | None = "0015"
+revision: str = "0019"
+down_revision: str | None = "0017"
 branch_labels: str | None = None
 depends_on: str | None = None
 
@@ -246,7 +246,7 @@ def downgrade() -> None:
     )
     if rows:
         raise RuntimeError(
-            f"AI 1차 검수 기록 {rows}행이 있어 0016을 되돌릴 수 없습니다 "
+            f"AI 1차 검수 기록 {rows}행이 있어 0019를 되돌릴 수 없습니다 "
             "(추가 전용 감사 기록. 백업 뒤 운영자가 직접 정리한다)"
         )
     if bind.dialect.name == "postgresql":

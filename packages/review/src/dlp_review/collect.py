@@ -5,10 +5,14 @@
 같은 세션의 이력을 직렬로 읽어 같은 부모를 두 번 수정하지 않는다).
 
 - 수집하는 검수자는 작업 담당자여야 한다 (웹훅의 도구 사용자 ID가 아니라 작업의 담당자로 기록).
+- Label Studio는 그 검수자 계정(review.yaml label_studio.users)이 만들고 마지막으로 고친 주석만
+  결과·검수 시간으로 쓴다. 다른 사용자·서비스 계정의 주석은 받지 않고 경고 로그만 남긴다 (F-REV-06).
 - 작업을 보낸 뒤 다른 단계가 지웠거나(retracted) 다른 작업이 먼저 고친(자식 레코드가 생긴) 라벨은
   검수 결과로 되살리거나 두 갈래 이력을 만들지 않는다.
 - CVAT는 트랙과 모양(Shape 모드, CVAT 기본) 주석을 모두 받는다. 옮길 수 없는 주석(태그, 다각형 등)이
   있으면 수집하지 않는다 (TaskError).
+- Label Studio 결과에 라벨로 옮길 수 없는 구간(새로 그린 객체 상태, 필수 입력이 빠진 손 상태 등)이
+  있으면 그 구간들의 영역 ID·시각·이유를 담은 TaskError로 수집하지 않는다 (F-REV-03).
 - 운영 블러 라벨이 바뀌면 프라이버시 승인을 풀어 다시 승인·렌더하게 하고, 그 스트림의 이미 배포한
   라벨링 작업 매체에 회수를 요청하고(같은 커밋, ADR 0039), 이전 블러본 렌더 기록을 무효로 둔다
   (ADR 0024). 외부 삭제(S3 사본·도구 작업)는 커밋 뒤 호출자가 `dlp_review.revoke`로 한다.
@@ -33,6 +37,7 @@ WP6·WP12, ADR 0006·0014·0015·0024. 진입점: `dlp review collect <작업 �
 from __future__ import annotations
 
 import hashlib
+import logging
 import tempfile
 from datetime import datetime
 from functools import partial
@@ -50,8 +55,8 @@ from dlp_review.cvat import (
     from_cvat_tracks,
     quantize,
 )
-from dlp_review.labelstudio import from_ls_results
-from dlp_review.reconcile import ReviewOutcome, reconcile
+from dlp_review.labelstudio import LsFormatError, from_ls_results
+from dlp_review.reconcile import ReviewedItem, ReviewOutcome, reconcile
 from dlp_review.tasks import (
     ReviewSetup,
     TaskError,
@@ -59,7 +64,9 @@ from dlp_review.tasks import (
     frame_times,
     label_scale,
     object_key,
+    require_label_studio_user,
 )
+from dlp_review.verify import reissue_slot
 from dlp_schema.db.repository import (
     get_assignment,
     get_labels,
@@ -80,6 +87,8 @@ from dlp_schema.session import PrivacyState, Session
 
 if TYPE_CHECKING:
     from dlp_review.ops.policy import ReviewOpsPolicy
+
+logger = logging.getLogger(__name__)
 
 # 결과가 운영 라벨에 반영되는 배정 방식. 블라인드·이중은 측정 레코드, 오류 삽입은 seeded_error라서
 # 운영 블러가 바뀌지 않으므로 프라이버시 승인을 풀 필요가 없다.
@@ -141,8 +150,11 @@ def _after_blur_change(
 def _note_revocations(outcome: ReviewOutcome, requested: list[ReviewTask]) -> None:
     """회수를 요청한 작업과 다시 만들 일을 결과에 적는다 (CLI가 출력한다).
 
-    요청 당시 열려 있던 작업만 다시 만들 대상이다. 배정이 있으면 배정 ID, 없으면
-    (담당자, 스트림, 도구). 수집한 작업은 결과가 이미 이력에 있어 다시 만들지 않는다.
+    requested는 요청 전 사본이다. 요청 당시 열려 있던 작업(요청 뒤 revoked)만 다시 만들 대상이다.
+    배정이 있으면 배정 ID, 없으면 `verify.reissue_slot`(담당자, 스트림, 도구). 수집한 작업은 결과가
+    이미 이력에 있어 다시 만들지 않는다 — 다시 만든 작업을 수집한 뒤 블러가 또 바뀐 경우도 같다.
+    완료 판정(`verify._direct_reissue`)도 같은 기준이라, 수집한 재작업은 그 뒤 회수 요청을 받아도
+    처음 회수한 작업을 다시 만든 것으로 본다.
     """
     for t in requested:
         outcome.revoked.append(t.task_key)
@@ -152,9 +164,68 @@ def _note_revocations(outcome: ReviewOutcome, requested: list[ReviewTask]) -> No
             if t.assignment_id not in outcome.reissue_assignments:
                 outcome.reissue_assignments.append(t.assignment_id)
             continue
-        direct = (t.assignee or "unassigned", t.stream_id, t.tool.value)
+        direct = reissue_slot(t)
         if direct not in outcome.direct_reissue:
             outcome.direct_reissue.append(direct)
+
+
+def _label_studio_reviewed(
+    conn: sa.Connection,
+    task: ReviewTask,
+    setup: ReviewSetup,
+    reviewer_id: str,
+    session: Session,
+    originals: list[LabelRecord],
+    now: datetime,
+) -> list[ReviewedItem]:
+    """Label Studio 작업에서 검수자(reviewer_id) 계정의 최신 주석만 검수 결과로 읽는다 (F-REV-06).
+
+    검수자 계정은 `review.yaml label_studio.users`로 찾는다. 다른 사용자·서비스 계정이
+    만들었거나 마지막으로 고친 주석은 결과로 쓰지 않고 경고 로그(주석·사용자 숫자 ID)로만
+    남긴다. 검수 시간도 그 계정 주석의 lead_time만 더한다 (A-10, 0보다 크면 `review_work`).
+
+    예외: `TaskError` — 클라이언트 없음, 계정 연결 없음·잘못됨, 검수자 계정의 제출 주석 없음(받지
+    않은 다른 주석 수를 알린다), 옮길 수 없는 구간(영역 ID·시각·이유).
+    """
+    ls = setup.label_studio
+    if ls is None:
+        raise TaskError("Label Studio 클라이언트가 없습니다")
+    user = require_label_studio_user(ls, setup, reviewer_id)
+    tid = int(task.external_id)
+    ignored = ls.ignored_annotations(tid, user=user)
+    if ignored:
+        logger.warning(
+            "%s: 담당자 %s(Label Studio 사용자 %s)가 아닌 주석은 받지 않음: %s",
+            task.task_key, reviewer_id, user,
+            ", ".join(f"#{a.annotation_id}(만든 {a.completed_by}, 고친 {a.updated_by})"
+                      for a in ignored),
+        )  # fmt: skip
+    results = ls.latest_results(tid, user=user)
+    if results is None:
+        # 프리라벨은 예측(prediction)으로 보내므로 사람이 제출한 주석이 없으면 결과가 없다
+        extra = f" (다른 사용자 주석 {len(ignored)}개는 받지 않음)" if ignored else ""
+        raise TaskError(
+            f"{task.task_key}: 담당자 {reviewer_id}(Label Studio 사용자 {user})가 제출한 주석이 "
+            f"아직 없습니다{extra}"
+        )
+    try:
+        reviewed = from_ls_results(results, {x.label_id for x in originals})
+    except LsFormatError as exc:
+        # 옮길 수 없는 구간(영역 ID·시각·이유)을 알려 검수자가 고쳐 다시 제출하게 한다 (F-REV-03)
+        raise TaskError(f"{task.task_key}: {exc}") from exc
+    # 검수 시간 (운영 지표, WP16). CVAT는 작업 시간을 재지 않아 dlp ops log-work로 기록한다
+    seconds = ls.lead_seconds(tid, user=user)
+    if seconds > 0:
+        insert_review_work(
+            conn,
+            ReviewWork(
+                work_id=f"{task.task_key}:work", task_key=task.task_key,
+                session_id=task.session_id, reviewer=reviewer_id, stage=task.stage.value,
+                seconds=seconds, video_ms=session.duration_ms, source="label_studio",
+                recorded_at=now,
+            ),
+        )  # fmt: skip
+    return reviewed
 
 
 def drop_retracted(outcome: ReviewOutcome, labels: list[LabelRecord]) -> list[str]:
@@ -213,7 +284,8 @@ def collect_task(  # noqa: C901
     - now: 수집 시각 (시간대 필수). 새 레코드 `created_at`·검수 시각이 된다.
 
     예외: `TaskError` — 담당자가 아님, 세션 온톨로지 버전 없음, 도구 클라이언트 없음, 옮길 수 없는
-    CVAT 주석, Label Studio에 제출된 주석 없음. 도구 API 오류는 `clients.ToolError`.
+    CVAT 주석·Label Studio 구간, 검수자의 Label Studio 계정 연결 없음·잘못됨, 그 계정이 제출한 주석
+    없음. 도구 API 오류는 `clients.ToolError`.
     """
     # 같은 부모를 보낸 서로 다른 작업도 직렬화한다. 작업 행만 잠그면 stale 이력으로 둘 다
     # 수정본을 추가할 수 있다. 세션 → 작업 순으로 잠근 뒤에 이력을 읽는다 (ADR 0032).
@@ -284,31 +356,8 @@ def collect_task(  # noqa: C901
         # 고치지 않은 라벨의 비교 기준 = 보냈다가 그대로 받은 값 (좌표 변환·반올림 왕복)
         normalize = partial(quantize, scale=scale)
     else:
-        if setup.label_studio is None:
-            raise TaskError("Label Studio 클라이언트가 없습니다")
-        results = setup.label_studio.latest_results(int(task.external_id))
-        if results is None:
-            # 프리라벨은 예측(prediction)으로 보내므로 사람이 제출한 주석이 없으면 결과가 없다
-            raise TaskError(f"{task_key}: 검수자가 제출한 주석이 아직 없습니다")
-        reviewed = from_ls_results(results, {x.label_id for x in originals})
+        reviewed = _label_studio_reviewed(conn, task, setup, reviewer_id, session, originals, now)
         normalize = None
-        # 검수 시간 (운영 지표, WP16). CVAT는 작업 시간을 재지 않아 dlp ops log-work로 기록한다
-        seconds = setup.label_studio.lead_seconds(int(task.external_id))
-        if seconds > 0:
-            insert_review_work(
-                conn,
-                ReviewWork(
-                    work_id=f"{task_key}:work",
-                    task_key=task_key,
-                    session_id=task.session_id,
-                    reviewer=reviewer_id,
-                    stage=task.stage.value,
-                    seconds=seconds,
-                    video_ms=session.duration_ms,
-                    source="label_studio",
-                    recorded_at=now,
-                ),
-            )
 
     outcome = reconcile(
         originals,

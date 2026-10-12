@@ -7,7 +7,9 @@
        도우미를 둔다 (WP1, 기준 문서 "에피소드 그래프").
     2) 라벨 이력 공용 함수: 모든 단계가 다른 단계의 입력을 고를 때 쓰는 `current_labels`, 운영
        라벨이 아닌 레코드를 찾는 `non_operational_ids`, 모델 버전 교체 때 쓰는
-       `version_tag`·`retractions`.
+       `version_tag`·`retractions`, 검수된 결과 판별 `is_protected`, 같은 대상 트랙이 여럿일 때
+       하나를 고르는 `track_rank`·`pick_hand_track_labels` (프리라벨 접촉·3D 단계와 행동 단계가
+       같은 기준을 쓴다, F-PAR-04).
 
 주요 이름
     - `EntityKind`, `Entity`, `StateTransition`, `EpisodeGraph`
@@ -17,6 +19,9 @@
       (CLAUDE.md: 다른 단계 입력은 이것으로).
     - `version_tag(model_version)`: 모델 출처 라벨 ID에 넣는 8자 해시.
     - `retractions(stale, model_version, now)`: 이전 버전 모델 라벨을 지우는 삭제 레코드.
+    - `is_protected(label)`: 사람이 만들었거나 고친, 또는 검수(승인·표본 검증)된 라벨.
+    - `track_rank(label)`: 같은 대상 트랙 중 하나를 고르는 정렬 키.
+    - `pick_hand_track_labels(labels)`: 손마다 hand21 트랙 하나 (`track_rank` 기준).
 
 멱등·불변 (ADR 0015, 0019)
     라벨은 덮어쓰지 않는다. 각 단계는 다시 돌지 여부를 현재 라벨이 아니라 전체 이력
@@ -43,6 +48,7 @@ from dlp_schema.labels import (
     CoveragePayload,
     EventPayload,
     GapPayload,
+    Hand,
     HandStatePayload,
     KeypointTrackPayload,
     LabelRecord,
@@ -54,6 +60,7 @@ from dlp_schema.labels import (
     Source,
     Trajectory3DPayload,
     Verification,
+    VerificationState,
 )
 
 
@@ -318,3 +325,58 @@ def retractions(
         )
         for x in stale
     ]
+
+
+def is_protected(x: LabelRecord) -> bool:
+    """사람이 만들었거나 고친 라벨(출처 HUMAN), 또는 검수자가 승인·표본 검증한 라벨인가.
+
+    어떤 단계도 이런 라벨을 지우지 않고(ADR 0015), 같은 대상 트랙이 여럿이면 먼저 고른다
+    (`track_rank`). 미검수(UNREVIEWED)가 아닌 검증 상태(표본 검증, 승인, 사람 수정)는 모두 검수된
+    것으로 본다.
+    """
+    return (
+        x.provenance.source is Source.HUMAN
+        or x.verification.state is not VerificationState.UNREVIEWED
+    )
+
+
+def track_rank(x: LabelRecord) -> tuple[bool, datetime, int, str]:
+    """같은 대상 트랙이 여럿일 때 하나를 고르는 정렬 키 (튜플이 클수록 앞선다).
+
+    같은 대상 트랙이 함께 현재 라벨일 수 있다 (사람이 새로 그린 트랙과 모델 트랙, 승인된 이전 모델
+    버전과 새 버전). 프리라벨 접촉(`dlp_prelabel.runner.pick_hand_tracks`)·3D(`pick_lift_tracks`)
+    단계와 행동 단계(`dlp_actions.runner.run_actions`)가 함께 쓴다 (F-PAR-04: 행동 단계만 조회
+    순서상 마지막 트랙을 써 기준이 달랐다). 차례로:
+
+    1. 사람이 만들었거나 검수된 트랙 (`is_protected`): 사람이 확인한 위치가 가장 믿을 만하다.
+    2. 더 새로 만든 트랙 (`created_at`): 보통 더 새 모델 버전의 출력이다.
+    3. 더 긴 구간 (`t_end_ms - t_start_ms`): 놓치는 시간이 짧다.
+    4. 라벨 ID (사전순으로 큰 것): 위가 모두 같을 때 결과를 고정하는 마지막 기준.
+
+    검수 상태가 바뀌면(승인은 라벨 ID를 바꾸지 않는다) 고르는 트랙이 바뀔 수 있다. 그래서 고른
+    트랙을 쓰는 단계는 입력 해시를 고른 트랙의 라벨 ID로 만든다.
+    """
+    return (is_protected(x), x.created_at, x.t_end_ms - x.t_start_ms, x.label_id)
+
+
+def pick_hand_track_labels(labels: Iterable[LabelRecord]) -> dict[Hand, LabelRecord]:
+    """손(왼·오른)마다 키포인트 트랙 하나를 고른다 (`track_rank`가 가장 앞서는 것).
+
+    병합하지 않는다: 서로 다른 트랙의 관절을 섞으면 어느 출처의 위치인지 알 수 없게 된다. 결과는
+    입력 순서와 상관없다.
+
+    Args:
+        labels: 호출자가 스트림(보통 기준 스트림 바디캠)과 골격(hand21)으로 거른 현재 키포인트 트랙.
+            손이 정해지지 않은 트랙(`payload.hand`가 None)과 키포인트 트랙이 아닌 라벨은 무시한다.
+
+    Returns:
+        손 → 고른 트랙 레코드. 트랙이 없는 손은 키가 없다.
+    """
+    best: dict[Hand, LabelRecord] = {}
+    for x in labels:
+        if not isinstance(x.payload, KeypointTrackPayload) or x.payload.hand is None:
+            continue
+        hand = x.payload.hand
+        if hand not in best or track_rank(x) > track_rank(best[hand]):
+            best[hand] = x
+    return best

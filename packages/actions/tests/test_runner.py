@@ -11,6 +11,7 @@ import itertools
 import os
 import uuid
 from collections.abc import Iterator
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +43,7 @@ from dlp_schema.labels import (
     DescriptionPayload,
     GapPayload,
     HandStatePayload,
+    KeypointTrackPayload,
     LabelRecord,
     Provenance,
     Source,
@@ -356,3 +358,62 @@ def test_vlm_refuses_blurred_video_not_rendered_from_current_approval(
         with pytest.raises(RenderNotCurrentError, match="렌더 기록"):
             run_actions(conn, SID, OracleVlm(truth), ontology, policy, FIXED_TIME, labeling)
         assert not current_labels(get_labels(conn, SID, kinds=["action"]))
+
+
+def test_same_hand_tracks_follow_the_prelabel_track_rank(pg: sa.Engine) -> None:
+    """F-PAR-04 회귀: 같은 손 hand21 트랙이 여럿이면 프리라벨 접촉 단계와 같은 순위
+    (`dlp_schema.episode.track_rank`: 사람·검수 → 최신 → 긴 구간 → 라벨 ID)로 하나를 고른다.
+
+    시나리오: 정답 손 트랙(사람 출처)을 지우고, 같은 오른손 모델 트랙 둘을 넣는다. A는 정답과 같은
+    움직임(hands-v1), B는 손이 첫 프레임 자리에 멈춘 미끼(hands-v2, 하루 늦게 만듦, 라벨 ID가 뒤).
+    1) 검수가 없으면 더 새로 만든 B를 쓴다. 2) 검수자가 A를 승인(HUMAN_APPROVED, 라벨 ID는
+    그대로)하면 고르는 트랙이 A로 바뀌므로 입력 해시(모델 버전)도 바뀌어 다시 돌고, 정답 움직임으로
+    행동을 모두 찾는다. 3) 다시 돌리면 건너뛴다.
+    예전에는 조회 순서(시작 시각, 라벨 ID)상 마지막 트랙(B)을 쓰고, 입력 해시가 모든 트랙의 ID라
+    승인해도 다시 돌지 않았다.
+    """
+    ontology = load_ontology(ROOT / "config/ontology/v1")
+    policy = load_policy(ROOT)
+    truth = [x for x in SCENARIO.labels if isinstance(x.payload, ActionPayload | GapPayload)]
+    [track] = [x for x in SCENARIO.labels if isinstance(x.payload, KeypointTrackPayload)]
+    assert isinstance(track.payload, KeypointTrackPayload)
+    first_points = track.payload.keyframes[0].points
+    still = track.payload.model_copy(
+        update={
+            "keyframes": tuple(
+                f.model_copy(update={"points": first_points}) for f in track.payload.keyframes
+            )
+        }
+    )
+    a = track.model_copy(
+        update={
+            "label_id": f"{SID}-bodycam-hands-a",
+            "provenance": Provenance(source=Source.MODEL, model_version="hands-v1"),
+            "confidence": 0.9,
+        }
+    )
+    b = track.model_copy(
+        update={
+            "label_id": f"{SID}-bodycam-hands-b",
+            "provenance": Provenance(source=Source.MODEL, model_version="hands-v2"),
+            "confidence": 0.9,
+            "created_at": FIXED_TIME + timedelta(days=1),
+            "payload": still,
+        }
+    )
+    with pg.begin() as conn:
+        insert_labels(conn, [*retractions([track], "hands-v1", FIXED_TIME), a, b])
+        first = run_actions(conn, SID, OracleVlm(truth), ontology, policy, FIXED_TIME)
+        record_review(conn, a.label_id, VerificationState.HUMAN_APPROVED, "r1", FIXED_TIME)
+        second = run_actions(conn, SID, OracleVlm(truth), ontology, policy, FIXED_TIME)
+        third = run_actions(conn, SID, OracleVlm(truth), ontology, policy, FIXED_TIME)
+        timeline = _timeline(conn)
+    # 1) 승인 전: 미끼(B)를 써서 손목 속도 경계가 없다 (정답 행동을 모두 찾지 못한다)
+    assert first.hands["right"]["actions"] != len(SCENARIO.actions)
+    # 2) 승인 후: 고른 트랙이 바뀌어 버전이 바뀌고, 승인된 A의 움직임으로 다시 만든다
+    assert second.version != first.version and not second.skipped
+    assert second.hands["right"]["actions"] == len(SCENARIO.actions)
+    assert second.hands["right"]["unknown_fallbacks"] == 0
+    assert {x.provenance.model_version for x in timeline} == {second.version}
+    # 3) 같은 입력이면 건너뛴다
+    assert third.skipped == ["right"] and third.version == second.version

@@ -1,7 +1,8 @@
 # 검수 운영 정책 (WP12). 배정 비율(QA·이중·블라인드·오류 삽입)은 config/defaults.yaml review를 따른다.
 #
 # 읽는 곳: dlp_review.ops.policy.load_policy (Pydantic ReviewOpsPolicy로 검증, 알 수 없는 키는 오류).
-# 쓰는 명령: dlp review create|collect|serve|plan|assign|qa|quality, dlp ops weekly(운영 지표)·audit-report.
+# 쓰는 명령: dlp review create|collect|serve|plan|assign|qa|quality, dlp review revoke --orphans(orphans 절),
+# dlp ops weekly(운영 지표)·audit-report.
 # 이 파일은 파싱한 값으로만 쓰고 텍스트 해시를 만들지 않으므로 주석을 고쳐도 동작이 바뀌지 않는다.
 # 키를 더하거나 이름을 바꾸면 dlp_review/ops/policy.py 모델도 함께 바꿔야 한다.
 
@@ -16,6 +17,14 @@ webhook:
   max_workers: 16                      # 연결 처리 스레드 상한 (초과 요청은 503)
   retry_after_s: 30                    # 일시 실패·과부하의 Retry-After (초)
 
+# DB 기록 없이 남은 도구 작업·라벨링 버킷 사본(고아) 정리 (dlp review revoke --orphans, F-REV-15).
+# 작업 생성은 CVAT·Label Studio 작업과 워터마크 사본을 먼저 만들고 DB에 나중에 커밋한다. 막 만든 것을
+# 고아로 지우지 않게 생성 시각에서 이만큼 지난 것만 본다 (세션 잠금으로 진행 중 생성도 건너뛴다).
+orphans:
+  # 0 이상 정수(초). 줄이면 고아가 빨리 지워지지만, 오래 걸리는 작업 생성(큰 영상 업로드)보다 짧으면
+  # 세션 잠금만으로 경합을 막는다. 늘리면 롤백으로 남은 노출이 그만큼 오래 남는다.
+  min_age_s: 3600
+
 # 검수 화면용 매체 (dlp_review.watermark, dlp_review.timeseries)
 media:
   # 범위 (0, 1]. 높이면 유출 추적은 쉬워지지만 검수자가 화면을 보기 어려워진다.
@@ -27,6 +36,10 @@ media:
   # Hz > 0. 격자 간격 = 1000 / 값 (ms). 1000의 약수가 아니면 time_ms 열에 소수가 생긴다.
   # 높이면 CSV가 커지고 Label Studio 화면이 느려진다.
   timeseries_rate_hz: 50              # 장갑·IMU 시계열 CSV 격자 (마스터 타임라인)
+  # 초, 범위 (0, 604800] (S3 SigV4 서명 상한 7일). Label Studio 작업에 박는 영상·시계열 서명 URL의
+  # 유효 시간이다 (라벨러 자격 증명으로 서명). 줄이면 새어 나간 URL이 빨리 끊기지만 열린 작업을 그만큼
+  # 자주 다시 서명해야 한다: `dlp review refresh-urls`를 이 값보다 짧은 주기로 돌린다 (F-REV-08).
+  signed_url_ttl_s: 604800            # 7일
 
 # 검수 단위: 세션 × 스트림 × 라벨 종류 묶음. 묶음마다 검수 도구가 다르다.
 # 도구가 보여 주는 종류만 쓴다 (보여 주지 않는 종류를 표본으로 뽑으면 판정이 끝나지 않는다).
@@ -95,7 +108,7 @@ seeding:
 # privacy 목록은 원본 접근 감사(dlp ops audit-report)의 권한자 명단에도 쓰인다. 사람을 더할 때는
 # 원본 접근 권한 승인 절차를 먼저 밟는다.
 reviewers:
-  senior: []                          # 비어 있으면 QA 배정의 담당자를 비워 둔다
+  senior: []                          # 비어 있으면 QA 배정의 담당자를 비워 둔다 (작업은 dlp review assign <배정> --assignee <선임>으로 만든다)
   privacy: []                         # 원본 접근 권한자
 
 # CVAT 계정 연결 (ADR 0024). 작업을 만들면 담당자의 CVAT 계정에 작업(job)을 배정하고, 웹훅은 job 담당자가
@@ -107,3 +120,14 @@ cvat:
   users: {}                           # 예: {rev01: cvat-rev01}
   # 0 이상. 0이면 이슈를 남기지 않는다.
   privacy_issue_limit: 50             # 블러 검수 작업에 이슈로 남기는 검수 우선 구간 최대 수 (우선순위 순)
+
+# Label Studio 계정 연결 (F-REV-06). 수집(dlp review collect)과 웹훅(dlp review serve)은 작업 담당자의
+# Label Studio 계정이 만들고(completed_by) 마지막으로 고친(updated_by) 주석만 받는다. 다른 사용자·서비스
+# 계정의 주석은 결과로 쓰지 않고 오류·서버 로그로만 남긴다. 검수 시간(lead_time)도 같은 주석만 더한다.
+# 담당자가 여기 없으면 Label Studio 시간 검수 작업을 만들지 않는다 (매체를 올리기 전에 멈춘다).
+# Label Studio Community는 작업을 사람에게 배정하는 API가 없어(Enterprise 기능) 조직의 다른 사용자도
+# 작업을 열 수 있다. 이 연결은 그 제출을 담당자의 검수로 기록하지 않게 할 뿐 열람을 막지는 않는다.
+# 검수자 계정은 서비스 계정(DLP_LABEL_STUDIO_TOKEN의 계정)과 다른 사람별 계정으로 만든다.
+label_studio:
+  # dlp 검수자 ID → Label Studio 사용자 이메일. 한 계정을 두 검수자에게 줄 수 없다 (로드 시 검증).
+  users: {}                           # 예: {labeler01: labeler01@example.com}

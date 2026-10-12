@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
@@ -34,11 +34,13 @@ from dlp_review.clients import CvatClient, LabelStudioClient, ToolError
 from dlp_review.collect import collect_task
 from dlp_review.cvat import CvatSchema, to_cvat_tracks
 from dlp_review.labelstudio import LS_KINDS, to_ls_results
-from dlp_review.ops.policy import CvatPolicy
+from dlp_review.ops.assign import plan_qa
+from dlp_review.ops.policy import CvatPolicy, LabelStudioPolicy
 from dlp_review.ops.policy import load_policy as load_ops_policy
 from dlp_review.ops.runner import (
     AccessError,
     FinishResult,
+    assign_reviewer,
     create_assignment_tasks,
     finish_assignment,
     plan_session,
@@ -120,8 +122,8 @@ def pg() -> Iterator[sa.Engine]:
 
 
 @pytest.fixture
-def setup(cvat_config: CvatPolicy) -> ReviewSetup:
-    """개발 서비스(S3·Label Studio)와 시험용 CVAT 계정 연결로 만든 `ReviewSetup`.
+def setup(cvat_config: CvatPolicy, ls_config: LabelStudioPolicy) -> ReviewSetup:
+    """개발 서비스(S3·Label Studio)와 시험용 CVAT·Label Studio 계정 연결로 만든 `ReviewSetup`.
 
     CVAT 클라이언트는 넣지 않는다 (CVAT 테스트는 따로 붙인다)."""
     return ReviewSetup(
@@ -131,6 +133,7 @@ def setup(cvat_config: CvatPolicy) -> ReviewSetup:
         ontology=load_ontology(ROOT / "config" / "ontology" / "v1"),
         label_studio=LabelStudioClient.from_env(),
         cvat_config=cvat_config,
+        label_studio_config=ls_config,
     )
 
 
@@ -205,14 +208,20 @@ def _session(
     return temporal
 
 
-def _post(ls: LabelStudioClient, task_id: str, results: list[dict[str, Any]]) -> None:
-    """Label Studio 작업에 사람 주석(results)을 제출한다 (검수자 제출 흉내)."""
-    resp = ls.http.post(f"/api/tasks/{task_id}/annotations", json={"result": results})
+def _post(reviewer: LabelStudioClient, task_id: str, results: list[dict[str, Any]]) -> None:
+    """Label Studio 작업에 검수자 계정(reviewer)으로 사람 주석(results)을 제출한다.
+
+    수집은 담당자 계정의 주석만 받으므로 서비스 계정으로 내지 않는다 (F-REV-06).
+    """
+    resp = reviewer.http.post(f"/api/tasks/{task_id}/annotations", json={"result": results})
     resp.raise_for_status()
 
 
 def test_blind_and_seeded_tasks_through_label_studio(
-    pg: sa.Engine, setup: ReviewSetup, tmp_path: Path
+    pg: sa.Engine,
+    setup: ReviewSetup,
+    tmp_path: Path,
+    ls_as: Callable[[LabelStudioClient, str], LabelStudioClient],
 ) -> None:
     """Label Studio로 표준·블라인드·오류 삽입 배정을 끝까지 돌리고 품질 리포트를 본다.
 
@@ -299,7 +308,10 @@ def test_blind_and_seeded_tasks_through_label_studio(
         assert create_assignment_tasks(conn, standard, setup, ops, FIXED_TIME) == [t_std]
         assert len(list_review_tasks(conn, work_sid)) == before
     assert ls.prediction_results(int(t_blind.external_id)) == []  # 블라인드: 프리라벨 없음
-    assert ls.latest_results(int(t_std.external_id)) is None  # 프리라벨은 사람 주석이 아니다
+    std_user = ls.find_user_id(setup.label_studio_policy().users[standard.assignee or ""])
+    assert std_user is not None
+    # 프리라벨은 사람 주석이 아니다
+    assert ls.latest_results(int(t_std.external_id), user=std_user) is None
     sent = ls.prediction_results(int(t_seed.external_id))
     assert all(r["id"].startswith("seed-") for r in sent)
 
@@ -307,7 +319,7 @@ def test_blind_and_seeded_tasks_through_label_studio(
     blind_results = to_ls_results(work[::2])
     for i, r in enumerate(blind_results):
         r["id"] = f"b{i}"
-    _post(ls, t_blind.external_id, blind_results)
+    _post(ls_as(ls, blind.assignee or ""), t_blind.external_id, blind_results)
     # 오류 삽입 검수자: 넣은 오류를 모두 되돌린다
     gold = {x.label_id: x for x in get_labels_sync(pg, gold_sid) if not x.seeded_error}
     fixed: list[dict[str, Any]] = []
@@ -317,9 +329,13 @@ def test_blind_and_seeded_tasks_through_label_studio(
             original = gold[err.original_label_id]
             r = to_ls_results([original])[0] | {"id": r["id"]}
         fixed.append(r)
-    _post(ls, t_seed.external_id, fixed)
+    _post(ls_as(ls, seeded.assignee or ""), t_seed.external_id, fixed)
     # 표준 검수자: 프리라벨을 고치지 않고 제출한다
-    _post(ls, t_std.external_id, ls.prediction_results(int(t_std.external_id)))
+    _post(
+        ls_as(ls, standard.assignee or ""),
+        t_std.external_id,
+        ls.prediction_results(int(t_std.external_id)),
+    )
 
     with pg.begin() as conn:
         collect_task(conn, t_std.task_key, setup, standard.assignee or "r1", FIXED_TIME)
@@ -468,7 +484,10 @@ class _FlakyLs:
 
 
 def test_revoked_assignment_is_reissued_after_reapproval(
-    pg: sa.Engine, setup: ReviewSetup, tmp_path: Path
+    pg: sa.Engine,
+    setup: ReviewSetup,
+    tmp_path: Path,
+    ls_as: Callable[[LabelStudioClient, str], LabelStudioClient],
 ) -> None:
     """F-REV-02(ADR 0039): 배정의 LS 작업이 블러 변경으로 회수되면 재승인·렌더 뒤 다시 만든다.
 
@@ -556,8 +575,60 @@ def test_revoked_assignment_is_reissued_after_reapproval(
     assert renewed.media_uri == setup.labeling.uri(
         labeling_media_key(sid, renewed.assignee or "", "bodycam", new_hash)
     )
-    _post(ls, renewed.external_id, ls.prediction_results(int(renewed.external_id)))
+    _post(ls_as(ls, "r1"), renewed.external_id, ls.prediction_results(int(renewed.external_id)))
     with pg.begin() as conn:
         assert collect_task(conn, renewed.task_key, setup, "r1", later) is not None
         assert get_assignment(conn, unit.assignment_id).status is AssignmentStatus.DONE
         assert not any("회수" in g for g in verification_gaps(conn, sid, policy))
+
+
+def test_unassigned_qa_assignment_needs_explicit_reviewer(
+    pg: sa.Engine, setup: ReviewSetup, tmp_path: Path
+) -> None:
+    """F-REV-07 회귀: 담당자 없는 배정에 문자열 "unassigned"를 실제 담당자로 넣어 워터마크·라벨링
+    버킷 경로·검수자 ID가 모두 그 문자열이 됐다.
+
+    시나리오: 선임(reviewers.senior)이 없어 QA 배정의 담당자가 None (기본 review.yaml과 같다).
+    정답 근거: 담당자 없는 배정은 작업을 만들지 않고(TaskError, 작업·사본 없음), 담당자를 정할 때는
+    선임만, 원래 담당자(짝 배정)는 안 되며, 정한 뒤 만든 작업의 담당자·매체 경로가 그 선임이다.
+    이미 담당자가 있는 배정은 다른 사람으로 바꾸지 않는다.
+    """
+    sid = f"qa-{uuid.uuid4().hex[:6]}"
+    _session(pg, setup, tmp_path / "work", sid, human=False)
+    ops = load_ops_policy(ROOT)
+    no_measure = {"blind_task_ratio": 0.0, "seeded_error_task_ratio": 0.0,
+                  "double_annotation_ratio": 0.0, "qa_sample_ratio": 1.0}  # fmt: skip
+    ops = ops.model_copy(update={"ratios": ops.ratios.model_copy(update=no_measure)})
+    ontology = load_ontology(ROOT / "config" / "ontology" / "v1")
+    with pg.begin() as conn:
+        [standard] = plan_session(conn, sid, ["r1"], ops, ontology, seed=1, now=FIXED_TIME)
+        done = standard.model_copy(
+            update={"status": AssignmentStatus.DONE, "completed_at": FIXED_TIME}
+        )
+        [qa] = plan_qa([done], ops, seed=1, now=FIXED_TIME)  # 선임이 없다
+        insert_assignment(conn, qa)
+    assert qa.mode is ReviewMode.QA and qa.assignee is None and qa.pair_id == standard.assignment_id
+
+    with pg.begin() as conn, pytest.raises(TaskError, match="담당자"):
+        create_assignment_tasks(conn, qa, setup, ops, FIXED_TIME)
+    with pg.connect() as conn:
+        assert all(t.stage is ReviewStage.PRIVACY for t in list_review_tasks(conn, sid))
+        rhash = expected_render_hash(conn, sid, "bodycam", load_policy(ROOT))
+    # 예전에는 이 경로에 "unassigned" 워터마크 사본을 올렸다
+    assert setup.labeling.head(labeling_media_key(sid, "unassigned", "bodycam", rhash)) is None
+
+    seniors = ops.model_copy(
+        update={"reviewers": ops.reviewers.model_copy(update={"senior": ("s1", "r1")})}
+    )
+    with pg.begin() as conn, pytest.raises(TaskError, match="선임"):
+        assign_reviewer(conn, qa, "r2", seniors)  # 선임이 아니다
+    with pg.begin() as conn, pytest.raises(TaskError, match="짝"):
+        assign_reviewer(conn, qa, "r1", seniors)  # 원래 담당자는 자기 검수를 QA하지 않는다
+    with pg.begin() as conn:
+        assigned = assign_reviewer(conn, qa, "s1", seniors)
+        [task] = create_assignment_tasks(conn, assigned, setup, seniors, FIXED_TIME)
+        assert get_assignment(conn, qa.assignment_id).assignee == "s1"
+    assert task.assignee == "s1" and "/review/s1/" in task.media_uri
+    assert "unassigned" not in task.media_uri
+    with pg.begin() as conn, pytest.raises(TaskError, match="이미"):
+        assign_reviewer(conn, assigned, "r1", seniors)
