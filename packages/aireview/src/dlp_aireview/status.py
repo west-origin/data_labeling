@@ -11,6 +11,8 @@
   3. 다음 중 하나: 판정 없는 현재 대상이 남았다, 또는 지금 판정 버전의 가장 최근 실행이 completed로
      끝나지 않았다 (`unfinished_run`: 중단·멈춤·마감 없음). 둘째 조건이 없으면 공간 트랙처럼 여러
      창에 드는 대상은 한 창만 판정돼도 "판정됨"이라, 중단된 실행의 남은 창이 다시 골라지지 않는다.
+     좁힌 실행(`--groups`, 정책보다 좁은 선택 모드)의 completed는 `partial:`로 마감해 이 판정에서
+     건너뛴다 (좁힌 실행이 앞선 전체 실행의 미완료를 덮지 않게).
   4. 순서: 최근 시도가 실패하지 않은 세션 먼저(실패 = 지금 버전 최근 실행이 장애·멈춤·마감 없음으로
      끝남, 시간·Ctrl-C 중단은 실패가 아니다), 그 안에서 prelabeled 전이 시각 순 (같으면 세션 ID).
      늘 실패하는 세션이 앞자리를 차지해 뒤 세션이 판정되지 않는 일을 막는다.
@@ -32,7 +34,14 @@ from dlp_aireview.policy import AiReviewPolicy
 from dlp_privacy.errors import RenderNotCurrentError
 from dlp_privacy.policy import PrivacyPolicy
 from dlp_privacy.rendering import expected_render_hash
-from dlp_schema.aireview import AiGroup, AiReviewUnit, AiRunEvent, AiRunEventKind, valid_verdicts
+from dlp_schema.aireview import (
+    AiGroup,
+    AiReviewUnit,
+    AiRunEvent,
+    AiRunEventKind,
+    is_full_completion,
+    valid_verdicts,
+)
 from dlp_schema.db.aireview_repository import list_ai_run_events, list_ai_runs, list_ai_units
 from dlp_schema.db.ontology_repository import get_session_ontology
 from dlp_schema.db.repository import (
@@ -150,15 +159,23 @@ _NOT_FAILED = frozenset({"interrupted:max_minutes", "interrupted:signal"})
 
 def unfinished_run(conn: sa.Connection, session_id: str, version: str) -> str | None:
     """이 판정 버전의 가장 최근 실행이 completed로 끝나지 않았으면 그 마지막 이벤트(`이벤트:사유`,
-    마감 이벤트가 없으면 started), 끝났거나 실행이 없으면 None."""
+    마감 이벤트가 없으면 started), 끝났거나 실행이 없으면 None.
+
+    좁힌 실행(`--groups` 등, completed:partial 마감)은 건너뛰고 그 앞 실행을 본다: 좁힌 계획이
+    끝났어도 앞선 전체 실행이 남긴 다른 묶음 단위는 판정되지 않았다 (공간 트랙처럼 여러 창에 드는
+    대상은 판정 범위만으로는 알 수 없다).
+    """
     runs = [r for r in list_ai_runs(conn, session_id) if r.version == version]
-    if not runs:
-        return None
-    last = runs[-1].run_id
-    events = [e for e in list_ai_run_events(conn, session_id) if e.run_id == last]
-    if events and events[-1].event is AiRunEventKind.COMPLETED:
-        return None
-    return _event_text(events[-1]) if events else AiRunEventKind.STARTED.value
+    events = list_ai_run_events(conn, session_id)
+    for run in reversed(runs):
+        mine = [e for e in events if e.run_id == run.run_id]
+        if not mine:
+            return AiRunEventKind.STARTED.value
+        last = mine[-1]
+        if last.event is AiRunEventKind.COMPLETED and not is_full_completion(last):
+            continue  # 좁힌 실행의 완료: 그 앞 실행을 본다
+        return None if last.event is AiRunEventKind.COMPLETED else _event_text(last)
+    return None
 
 
 def prelabeled_at(conn: sa.Connection, session_id: str) -> datetime | None:

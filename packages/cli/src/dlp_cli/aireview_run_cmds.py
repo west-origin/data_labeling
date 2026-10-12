@@ -457,6 +457,21 @@ def _names(ids: Sequence[str] | deque[str], most: int = 20) -> str:
     return head + (f" 외 {len(ids) - most}개" if len(ids) > most else "")
 
 
+def _narrowed(args: argparse.Namespace, base: AiReviewPolicy) -> str | None:
+    """정책 기본 계획보다 좁힌 실행의 설명 (`RunOptions.narrowed`, 좁히지 않았으면 None).
+
+    `--groups`가 모든 묶음이 아니거나, `--mode flagged`가 정책 기본(all)보다 좁을 때다 (`--mode
+    all`은 넓히는 쪽이라 좁힌 것이 아니다). 좁힌 실행의 completed는 `partial:`로 마감해
+    `--pending`과 required 게이트가 전체 완료로 보지 않는다.
+    """
+    parts: list[str] = []
+    if args.groups and set(args.groups) != set(AiGroup):
+        parts.append("groups=" + ",".join(sorted(g.value for g in set(args.groups))))
+    if args.mode == "flagged" and base.selection.mode != "flagged":
+        parts.append("mode=flagged")
+    return ";".join(parts) or None
+
+
 def _run_policy(args: argparse.Namespace) -> AiReviewPolicy:
     """정책 (`--mode`면 선택 모드만 바꾼 사본, 판정 버전은 그대로)."""
     policy = load_policy(repo_root())
@@ -520,6 +535,7 @@ def _options(args: argparse.Namespace, policy: AiReviewPolicy, backend: JudgeBac
         json_progress=args.json_progress,
         endpoint_states=states,
         cancel=threading.Event(),
+        narrowed=_narrowed(args, load_policy(repo_root())),
     )
 
 

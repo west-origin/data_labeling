@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import _thread
+import argparse
 import json
 import socket
 import threading
@@ -43,6 +44,7 @@ from dlp_prelabel.policy import load_policy as load_prelabel_policy
 from dlp_privacy.policy import load_policy as load_privacy_policy
 from dlp_privacy.rendering import RenderMeta, expected_render_hash, write_render_meta
 from dlp_schema import load_config, repo_root
+from dlp_schema.aireview import AiGroup
 from dlp_schema.db.aireview_repository import (
     list_ai_run_events,
     list_ai_runs,
@@ -637,3 +639,22 @@ def test_bench_session_source_uses_blurred_gate(
     assert report["source"] == "session:b1"
     assert report["configs"][0]["planned_units"] > 0
     assert world.units("b1") == 0  # 벤치는 DB에 쓰지 않는다
+
+
+def test_narrowed_runs_are_marked_partial() -> None:
+    """`--groups`(모든 묶음이 아님)·`--mode flagged`(정책 기본이 all일 때)는 좁힌 실행이다.
+
+    정답 근거: 좁힌 실행의 completed는 `partial:<설명>`으로 마감해야 `--pending`과 required 게이트가
+    앞선 전체 실행의 미완료를 완료로 보지 않는다. 모든 묶음·`--mode all`은 좁힌 것이 아니다.
+    """
+    base = load_aireview_policy(repo_root())
+    assert base.selection.mode == "all"
+
+    def narrowed(**kw: Any) -> str | None:
+        args = argparse.Namespace(**({"groups": None, "mode": None} | kw))
+        return aireview_run_cmds._narrowed(args, base)  # pyright: ignore[reportPrivateUsage]
+
+    assert narrowed() is None and narrowed(mode="all") is None
+    assert narrowed(groups=(AiGroup.TEMPORAL, AiGroup.TEMPORAL_LONG, AiGroup.SPATIAL)) is None
+    assert narrowed(groups=(AiGroup.TEMPORAL,)) == "groups=temporal"
+    assert narrowed(groups=(AiGroup.SPATIAL,), mode="flagged") == "groups=spatial;mode=flagged"

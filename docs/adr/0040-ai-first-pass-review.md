@@ -341,8 +341,12 @@ AI가 모두 ok여도 사람 검수 없이는 `dlp review verify`가 실패한�
 - `--pending`은 prelabeled·승인·보류 아님이고, 마지막 라벨 기록 뒤 `pending.quiet_minutes`가 지났고,
   지금 버전·렌더의 단위에 든 적 없는 대상이 남았거나 지금 버전의 최근 실행이 completed가 아닌 세션을
   고른다(맥락 변화는 보지 않는다. 공간 트랙처럼 여러 창에 드는 대상은 한 창만 판정돼도 "판정됨"이라,
-  중단된 실행은 실행 상태로 다시 고른다). 순서는 최근 시도가 실패하지 않은 세션 먼저, 그 안에서
-  prelabeled 전이 순이다. `--limit`은 실제로 실행한 세션만 센다(전제 실패·처리 중은 세지 않는다).
+  중단된 실행은 실행 상태로 다시 고른다). 좁힌 실행(`--groups`가 모든 묶음이 아니거나 정책 기본보다
+  좁은 `--mode flagged`)의 completed는 `partial:<좁힌 내용>`으로 마감한다: `--pending`의 미완료
+  판정은 이 실행을 건너뛰어 그 앞 전체 실행을 보고, required 게이트의 완료 버전에도 넣지 않는다
+  (`dlp_schema.aireview.is_full_completion`, 검수 지적: 좁힌 실행이 앞선 미완료를 덮었다). 순서는
+  최근 시도가 실패하지 않은 세션 먼저, 그 안에서 prelabeled 전이 순이다. `--limit`은 실제로 실행한
+  세션만 센다(전제 실패·처리 중은 세지 않는다).
   운영 cron은 `dlp actions run S && dlp aireview run S`를 잇고 `--pending`은 따라잡기용이다.
 - 원본 접근은 장갑 Parquet뿐이고 감사 원본 저장소 용도 `aireview.run`이다(손 상태 대상이 있고 센서를
   켰을 때만, 블러본 게이트를 모두 통과한 뒤, 정적 검사). `dlp aireview status|show|waive`는 진행 상태

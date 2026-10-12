@@ -12,11 +12,15 @@ from pathlib import Path
 from dlp_aireview.backend import BackendInfo, JudgeBackend, JudgeReply, JudgeRequest
 from dlp_aireview.oracle import OracleJudge
 from dlp_aireview.policy import AiReviewPolicy
-from dlp_aireview.runner import RunOptions, load_input, planned_units, run_from_db
+from dlp_aireview.runner import RunOptions, RunSummary, load_input, planned_units, run_from_db
 from dlp_aireview.status import pending_sessions, session_status
 from dlp_models.vlm import VlmUnavailableError
-from dlp_schema.aireview import AiRunEvent, AiRunEventKind
-from dlp_schema.db.aireview_repository import insert_ai_run, insert_ai_run_event
+from dlp_schema.aireview import AiGroup, AiRunEvent, AiRunEventKind
+from dlp_schema.db.aireview_repository import (
+    insert_ai_run,
+    insert_ai_run_event,
+    latest_run_state,
+)
 from dlp_schema.db.repository import insert_labels, record_privacy_hold
 from dlp_schema.labels import LabelRecord, Provenance, Source
 from dlp_schema.session import PrivacyState
@@ -205,3 +209,49 @@ def test_pending_puts_failed_sessions_after_fresh_ones(
     assert [(f.session_id, f.failed) for f in found] == [
         ("b1", False), ("c1", False), ("a1", True),
     ]  # fmt: skip
+
+
+def test_narrowed_completed_run_does_not_hide_an_interrupted_full_run(
+    tmp_path: Path, policy: AiReviewPolicy
+) -> None:
+    """좁힌 실행(`--groups temporal`)의 completed는 앞선 전체 실행의 미완료를 덮지 않는다.
+
+    정답 근거: 전체 실행이 공간 단위 하나를 장애로 남기고 interrupted:unavailable로 끝났다.
+    이어서 시간 묶음만 돈 실행은 할 일이 없어도 completed로 끝나지만 `partial:` 마감이라,
+    --pending은 여전히 그 세션을 고르고 required 게이트의 완료 버전에도 들지 않는다. 전체 실행이
+    남은 단위를 끝내야 완료다.
+    """
+    p = with_policy(policy, spatial={"stride_ms": 2000, "snapshot_ms": 500})
+    db = db_scene(tmp_path, n_units=6)
+    work = tmp_path / "w"
+    work.mkdir()
+    inp = load_input(db.engine, db.labeling, db.session_id, p, db.privacy, work, raw_bucket=RAW)
+    spatial = [u for u in planned_units(inp, p, RunOptions()) if u.group is AiGroup.SPATIAL]
+    judge = _DownFor(OracleJudge(list(db.scene.labels)), {spatial[0].unit_id})
+
+    def run(j: JudgeBackend, options: RunOptions) -> RunSummary:
+        summary = run_from_db(
+            db.engine, db.labeling, db.session_id, j, p, db.privacy, raw_bucket=RAW,
+            options=options,
+        )  # fmt: skip
+        assert summary is not None
+        return summary
+
+    def state() -> tuple[str | None, frozenset[str]]:
+        with db.engine.connect() as conn:
+            found = pending_sessions(conn, p, db.privacy, NOW)
+            done = latest_run_state(conn, [db.session_id])[db.session_id].completed_versions
+        return (found[0].unfinished if found else None), done
+
+    first = run(judge, RunOptions(workers=2))
+    assert (first.status, first.reason) == ("interrupted", "unavailable")
+    temporal = frozenset({AiGroup.TEMPORAL, AiGroup.TEMPORAL_LONG})
+    narrowed = run(
+        OracleJudge(list(db.scene.labels)),
+        RunOptions(workers=2, groups=temporal, narrowed="groups=temporal,temporal_long"),
+    )
+    assert narrowed.status == "completed"
+    unfinished, done = state()
+    assert unfinished == "interrupted:unavailable" and p.verdict_version not in done
+    _run(db, p)
+    assert state() == (None, frozenset({p.verdict_version}))

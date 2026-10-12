@@ -89,6 +89,7 @@ from dlp_models.vlm import VlmRequestError, VlmUnavailableError
 from dlp_privacy.errors import RenderNotCurrentError
 from dlp_privacy.policy import PrivacyPolicy
 from dlp_schema.aireview import (
+    PARTIAL_COMPLETION,
     AiBackendRecord,
     AiGroup,
     AiReviewRun,
@@ -184,6 +185,9 @@ class RunOptions:
         endpoint_states: 엔드포인트 이름 → 상태 (진행 줄, `EndpointPool.states`).
         cancel: 바깥 멈춤 신호 (CLI가 여러 세션에 함께 준다). 켜지면 interrupted:signal로 멈춘다
             (여러 세션을 스레드로 돌릴 때 Ctrl-C는 주 스레드에만 오므로 이 신호로 알린다).
+        narrowed: 정책 기본 계획보다 좁힌 실행의 설명 (예: `groups=temporal`, CLI가 정한다). 있으면
+            completed 마감 사유를 `partial:<설명>`으로 남긴다 (`dlp_schema.aireview.
+            PARTIAL_COMPLETION`: `--pending`·required 게이트는 이 완료를 전체 완료로 보지 않는다).
     """
 
     workers: int = 1
@@ -196,6 +200,7 @@ class RunOptions:
     json_progress: bool = False
     endpoint_states: Callable[[], Mapping[str, str]] | None = None
     cancel: threading.Event | None = None
+    narrowed: str | None = None
 
 
 @dataclass(frozen=True)
@@ -942,8 +947,11 @@ def _finish(ex: _Execution, run: AiReviewRun, base: RunSummary, plan_ids: set[st
         prompt_tokens=s.prompt_tokens, cached_tokens=s.cached_tokens,
         completion_tokens=s.completion_tokens, elapsed_s=ex.clock() - ex.started,
     )  # fmt: skip
+    narrowed = ex.options.narrowed
+    partial = kind is AiRunEventKind.COMPLETED and narrowed
+    recorded = f"{PARTIAL_COMPLETION}{narrowed}" if partial else reason
     ex.sink.event(
-        _event(run, run.session_id, kind, ex.now(), reason=reason, counts=_counts(summary),
+        _event(run, run.session_id, kind, ex.now(), reason=recorded, counts=_counts(summary),
                actor=ex.options.actor)
     )  # fmt: skip
     return summary
