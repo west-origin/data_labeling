@@ -6,7 +6,8 @@
 장면 (2026-W41, 모든 세션 60초 = 1/60시간)
 - s001: prelabeled·승인, 판정 실행 없음 → 백로그.
 - s002: prelabeled·승인, 허용 버전 completed 실행(걸린 시간 120초) → 백로그 아님. 그 주 단위 4개
-  (fallback 1개, 프롬프트 1,000토큰씩, 캐시 400토큰 둘) → fallback 25%, 캐시 800/4,000 = 20%.
+  (fallback 1개, 프롬프트 1,000토큰씩, 캐시 400토큰 둘, 나머지 둘은 서버가 캐시 적중을 보고하지
+  않음) → fallback 25%, 캐시 800/2,000 = 40% (보고하지 않은 단위는 모름이라 분모에서 뺀다).
   대조군 작업 하나(ok·승인) → ok 놓침 0/1, 95% 상한 = CP(0,1) = 0.95.
 - s003: prelabeled·승인, 건너뜀(waived) → 백로그 아님. s004: prelabeled, 승인 전 → 백로그 아님.
 - s005: prelabeled·승인, 허용되지 않은 판정 버전의 completed 실행만 있음 → 백로그.
@@ -164,13 +165,15 @@ def test_ai_weekly_matches_hand_calculation(engine: sa.Engine) -> None:
     # s001 + s005 (허용되지 않은 버전의 완료 실행은 판정이 끝난 것이 아니다). s006은 사용 중지
     assert ai.backlog_hours == pytest.approx(2 / 60)
     assert ai.fallback_rate == pytest.approx(0.25)  # 1/4
-    assert ai.cache_hit_ratio == pytest.approx(0.2)  # 800/4000
+    assert ai.cache_hit_ratio == pytest.approx(0.4)  # 800/2000 (보고 없는 두 단위 제외)
     assert ai.video_hours == pytest.approx(2 / 60)  # s002·s005 실행
     assert ai.device_seconds_per_video_hour == pytest.approx(150 * 30)  # 150초 / (2/60시간)
     assert ai.coverage == pytest.approx(1.0)
     assert ai.ok_miss_rate == 0.0 and ai.ok_miss_upper95 == pytest.approx(0.95)
     assert math.isnan(ai.flag_precision)  # 대조군 지적 없음
-    assert ai.counts == {"units": 4, "fallback_units": 1, "runs": 2, "outcome_rows": 1}
+    assert ai.counts == {
+        "units": 4, "fallback_units": 1, "cache_unreported_units": 2, "runs": 2, "outcome_rows": 1,
+    }  # fmt: skip
     # 다음 주에는 그 주 자료가 없다 (백로그는 주 끝 시점: 아직 s001·s005가 남는다)
     with engine.connect() as conn:
         later = ai_weekly(conn, end, end + timedelta(days=7), AI)
@@ -181,6 +184,43 @@ def test_ai_weekly_matches_hand_calculation(engine: sa.Engine) -> None:
     with engine.connect() as conn:
         allowed = ai_weekly(conn, start, end, both)
     assert allowed is not None and allowed.backlog_hours == pytest.approx(1 / 60)
+
+
+def test_unreported_cache_hits_are_unknown_not_zero(engine: sa.Engine, policy: OpsPolicy) -> None:
+    """서버가 캐시 적중 토큰을 보고하지 않은 단위(`cached_tokens` None)는 적중 0이 아니라 모름이다.
+
+    장면: s002에 그 주 판정 단위 4개, 프롬프트 1,000토큰씩, 모두 캐시 적중 보고 없음 (vLLM 기본,
+    `--enable-prompt-tokens-details` 꺼짐). 정답: 캐시 적중률 nan(모름)이고 캐시 경고가 없다.
+    한 단위만 400토큰 적중을 보고하면 400/1,000 = 40%다 (보고 없는 셋이 희석하지 않는다).
+    """
+    run = "air-run-" + "6" * 24
+    units = [
+        make_ai_unit(
+            f"air-{i:024x}", [make_ai_verdict(f"s002-a{i}", "ok")], run_id=run,
+            session_id="s002", created_at=IN, prompt_tokens=1000,
+        )
+        for i in range(4)
+    ]  # fmt: skip
+    with engine.begin() as conn:
+        _session(conn, "s002", PrivacyState.APPROVED)
+        insert_ai_run(conn, make_ai_run("s002", run, created_at=IN))
+        insert_ai_units(conn, units)
+    start, end = week_range(WEEK)
+    with engine.connect() as conn:
+        ai = ai_weekly(conn, start, end, AI)
+    assert ai is not None and math.isnan(ai.cache_hit_ratio)
+    assert ai.counts["cache_unreported_units"] == 4
+    assert not any("캐시" in w for w in alerts([WeeklyMetrics(WEEK, ai=ai)], policy))
+    one = make_ai_unit(
+        "air-" + "e" * 24, [make_ai_verdict("s002-a8", "ok")], run_id=run, session_id="s002",
+        created_at=IN, prompt_tokens=1000, cached_tokens=400,
+    )  # fmt: skip
+    with engine.begin() as conn:
+        insert_ai_units(conn, [one])
+    with engine.connect() as conn:
+        mixed = ai_weekly(conn, start, end, AI)
+    assert mixed is not None and mixed.cache_hit_ratio == pytest.approx(0.4)  # 400/1000
+    assert mixed.counts["cache_unreported_units"] == 4
 
 
 def test_ai_alerts_and_markdown(policy: OpsPolicy) -> None:

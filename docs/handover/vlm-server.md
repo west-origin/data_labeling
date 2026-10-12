@@ -61,8 +61,10 @@ curl -s -H "Authorization: Bearer $DLP_VLM_API_KEY" http://10.0.0.11:8000/v1/mod
 - `--limit-mm-per-prompt '{"image":16}'`: 요청당 이미지 상한 (temporal 최대 12장, spatial 4장 + 확대
   조각 6장). `--max-model-len 16384`, `--enable-prefix-caching`(고정 접두사 = 시스템 + 온톨로지 블록).
 - `--enable-prompt-tokens-details`: 응답 usage에 `prompt_tokens_details.cached_tokens`를 넣는다 (vLLM
-  기본은 꺼짐). 없으면 벤치 캐시 적중, 추정의 고정 접두사 캐시 판단, probe `cached_tokens` 점검이
-  "모름"이 된다 (추정은 그때 고정 접두사도 매번 계산한다고 보수적으로 센다).
+  기본은 꺼짐). 없으면 벤치 캐시 적중, 추정의 고정 접두사 캐시 판단, probe `cached_tokens` 점검,
+  주간 운영 지표(`dlp ops weekly` AI 절)의 캐시 적중률이 "모름"이 된다 (추정은 그때 고정 접두사도 매번
+  계산한다고 보수적으로 센다. 주간 지표는 보고하지 않은 단위를 분자·분모에서 빼고 그 수를
+  `counts.cache_unreported_units`에 남기며, 보고한 단위가 없으면 캐시 경고를 내지 않는다).
 - `--max-num-seqs 32~64`(연속 배칭), `--gpu-memory-utilization 0.4`(판정) / `0.3`(행동).
 - 이미지 크기: 클라이언트가 긴 변(`max_side_px`)과 32px 배수(`image.align_px`, Qwen3-VL patch 16 ×
   merge 2)로 맞춰 보낸다. 서버가 다시 줄이지 않게 `--mm-processor-kwargs`의 최대 픽셀을 그보다 크게 둔다.
