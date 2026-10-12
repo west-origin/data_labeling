@@ -29,6 +29,7 @@ from dlp_aireview import backend as backend_module
 from dlp_aireview import runner as runner_module
 from dlp_aireview.backend import JudgeReply, JudgeRequest, OpenAICompatibleJudge
 from dlp_aireview.media import frames_for as media_frames_for
+from dlp_aireview.media import open_blurred as media_open_blurred
 from dlp_aireview.policy import AiReviewPolicy, load_policy
 from dlp_aireview.policy import load_policy as load_aireview_policy
 from dlp_aireview.sensors import SensorContext
@@ -439,7 +440,7 @@ def test_missing_glove_parquet_is_refused_before_downloading_blurred_videos(
     """
     world.add("g2", glove=True, upload_glove=False)
     fetched: list[str] = []
-    original = runner_module.open_blurred
+    original = media_open_blurred
 
     def spy(*args: Any, **kw: Any) -> Any:
         fetched.append(str(args[3]))

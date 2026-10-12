@@ -115,4 +115,9 @@
 
 ## 검증 기록
 
-병합 뒤 결과는 아래 "병합 후 검사" 절에 적는다.
+두 수정 브랜치를 병합한 뒤 다음을 돌렸다.
+
+| 명령 | 결과 |
+| --- | --- |
+| `make check` (ruff·포맷·pyright strict·단위 테스트·계약·라이선스) | 1154 passed, 165 deselected, 7 xfailed (알려진 결함 재현) |
+| `make test-services` (PostgreSQL·S3·lakeFS·MLflow·CVAT·Label Studio) | 162 passed, 1 skipped (MongoDB URI 없음) |

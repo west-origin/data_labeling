@@ -22,6 +22,7 @@ from dlp_aireview.plan import plan_session
 from dlp_aireview.policy import AiReviewPolicy
 from dlp_aireview.sensors import SensorContext
 from dlp_aireview.tracks import box_at
+from dlp_models.vlm import encode_jpeg
 from dlp_schema.aireview import AiGroup
 from dlp_schema.labels import BoxKeyframe
 from dlp_schema.ontology import Ontology
@@ -134,7 +135,7 @@ def test_drawn_images_match_golden_pixels(
     JPEG 바이트가 아니라 압축 전 배열을 비교해 libjpeg 차이에 흔들리지 않게 한다.
     """
     drawn: list[str] = []
-    real = overlay_module.encode_jpeg
+    real = encode_jpeg
 
     def capture(rgb: Any, quality: int) -> Any:
         arr = np.ascontiguousarray(rgb)
