@@ -14,7 +14,8 @@
 
 공개 이름:
 - `REVOCATION_PENDING_EXIT`: 회수 대기가 남았을 때의 종료 코드 (4, argparse 사용 오류 2와 다르다).
-- `load_review_policy`, `review_setup`, `run_revocations`, `print_revocations`.
+- `load_review_policy`, `ai_display_config`(AI 1차 검수 판정 사용 설정, WP17.6), `review_setup`,
+  `run_revocations`, `print_revocations`.
 """
 
 from __future__ import annotations
@@ -26,10 +27,12 @@ from pathlib import Path
 import httpx
 import sqlalchemy as sa
 
+from dlp_aireview.policy import load_policy as load_aireview_policy
 from dlp_cli.raw_access import raw_store
 from dlp_media.storage import S3Store
 from dlp_privacy.policy import load_policy as load_privacy_policy
 from dlp_privacy.runner import request_media_revocation
+from dlp_review.ai_display import AiDisplayConfig
 from dlp_review.clients import CvatClient, LabelStudioClient, ToolError
 from dlp_review.ops.policy import ReviewOpsPolicy, load_policy
 from dlp_review.revoke import RevocationReport, execute_media_revocations
@@ -53,6 +56,21 @@ def load_review_policy(root: Path) -> ReviewOpsPolicy:
     """
     selected = os.environ.get("DLP_REVIEW_POLICY_FILE")
     return load_policy(root, Path(selected) if selected else None)
+
+
+def ai_display_config(policy: ReviewOpsPolicy) -> AiDisplayConfig | None:
+    """검수 정책의 `ai_review`로 AI 1차 검수 판정 사용 설정을 만든다 (끔이면 None, WP17.6).
+
+    허용 판정 버전은 정책 `ai_review.versions`, 비면 `config/policies/aireview.yaml`의 지금 판정
+    버전(`AiReviewPolicy.verdict_version`) 하나다. 검수 패키지는 판정 정책을 읽지 않으므로 CLI가
+    계산해 넘긴다 (의존 표, 설계 C11·C23). 예외: 판정 정책 파일이 없거나 깨졌으면 OSError·
+    ValidationError (끔이면 읽지 않는다).
+    """
+    ai = policy.ai_review
+    if ai.mode == "off":
+        return None
+    versions = ai.versions or (load_aireview_policy(repo_root()).verdict_version,)
+    return AiDisplayConfig(policy=ai, versions=tuple(versions))
 
 
 def review_setup(
@@ -87,6 +105,8 @@ def review_setup(
     - `ontology`: None. 작업 생성 시 DB에서 각 세션 버전의 사전을 읽는다.
     - `cvat_config`·`label_studio_config`·`media`: 고른 정책의 `cvat`·`label_studio`·`media`
       (라이브러리 지연 로더를 쓰지 않는다). `revocation_only`이고 `policy`가 없으면 None.
+    - `ai`: 고른 정책의 `ai_review`로 만든 AI 1차 검수 판정 사용 설정 (`ai_display_config`, 끔이거나
+      `revocation_only`면 None).
     부작용: 설정 파일을 읽고 저장소·HTTP 클라이언트를 만든다. 정책은 클라이언트보다 먼저 읽어
     파일 오류면 도구에 접속하지 않고 실패한다 (`revocation_only`면 읽지 않는다). CVAT 클라이언트는
     생성 중 로그인 API를 호출한다. `revocation_only`가 아니면 로그인 실패·통신 오류는 호출자에게
@@ -116,6 +136,7 @@ def review_setup(
         media=selected.media if selected is not None else None,
         cvat_config=selected.cvat if selected is not None else None,
         label_studio_config=selected.label_studio if selected is not None else None,
+        ai=ai_display_config(selected) if selected is not None and not revocation_only else None,
     )
     return setup, warnings
 

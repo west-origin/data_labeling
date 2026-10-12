@@ -120,6 +120,12 @@ def verification_gaps(
     return reasons
 
 
+# 회수 뒤 다시 만들기 안내에 넣는 AI 1차 검수 단계 (WP17.6). 블러가 바뀌면 이전 판정은 렌더 해시가
+# 달라 표시되지 않으므로, AI 판정을 쓰는 운영(review.yaml ai_review.mode가 off가 아님)에서는 다시
+# 만들기 전에 판정을 다시 돌린다. 완료 판정은 검수 정책을 읽지 않아 조건부 문구로 둔다
+AI_RERUN = " → (AI 1차 검수를 쓰면) dlp aireview run {session}"
+
+
 def reissue_slot(task: ReviewTask) -> tuple[str, str, str]:
     """직접 작업을 다시 만드는 단위 (담당자, 스트림, 도구 값). 담당자가 없으면 "unassigned".
 
@@ -170,7 +176,8 @@ def _reissue_gaps(
     if reissue:
         reasons.append(
             f"회수돼 다시 만들 배정 {len(reissue)}개 "
-            f"(재승인·렌더 뒤 dlp review assign {' '.join(reissue[:3])})"
+            f"(재승인·렌더{AI_RERUN.format(session=session_id)} 뒤 "
+            f"dlp review assign {' '.join(reissue[:3])})"
         )
     direct = _direct_reissue(tasks)
     if direct:
@@ -179,7 +186,10 @@ def _reissue_gaps(
             f"--tool {tool}"
             for who, stream, tool in direct[:2]
         )
-        reasons.append(f"회수돼 다시 만들 직접 작업 {len(direct)}개 (재승인·렌더 뒤 {commands})")
+        rerun = AI_RERUN.format(session=session_id)
+        reasons.append(
+            f"회수돼 다시 만들 직접 작업 {len(direct)}개 (재승인·렌더{rerun} 뒤 {commands})"
+        )
     return reasons
 
 

@@ -1,0 +1,225 @@
+"""`dlp review`의 AI 1차 검수 연결: 판정 사용 설정, required 배정 게이트, 회수 뒤 안내, 큐 표시
+(WP17.6, ADR 0040).
+
+서비스 없이 시간대 보존 SQLite(CLI 엔진을 바꿔 끼운다)와 임시 검수 정책 파일
+(`DLP_REVIEW_POLICY_FILE`)로 돈다.
+
+정답 근거
+- 허용 판정 버전이 비면 `config/policies/aireview.yaml`의 지금 판정 버전 하나다.
+- required: 허용 버전 completed 실행 → 진행, waived → 진행, prelabeled 뒤 max_wait_h(24시간) 초과 →
+  waived:timeout을 남기고 진행, 그 밖은 배정 0개·종료 6.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
+
+import pytest
+import sqlalchemy
+import yaml
+
+from dlp_aireview.policy import load_policy as load_aireview_policy
+from dlp_cli import aireview_run_cmds, review_cmds
+from dlp_cli.main import main
+from dlp_cli.review_config import ai_display_config
+from dlp_review.ops.policy import load_policy as load_ops_policy
+from dlp_review.reconcile import ReviewOutcome
+from dlp_schema import repo_root
+from dlp_schema.aireview import AiRunEvent, AiRunEventKind
+from dlp_schema.db.aireview_repository import (
+    insert_ai_run,
+    insert_ai_run_event,
+    list_ai_run_events,
+)
+from dlp_schema.db.repository import (
+    insert_assignment,
+    insert_labels,
+    insert_session,
+    list_assignments,
+    register_ontology,
+    set_lifecycle,
+)
+from dlp_schema.labels import Provenance, Source
+from dlp_schema.ontology import load_ontology
+from dlp_schema.review import (
+    FlaggedSpan,
+    ReviewAssignment,
+    ReviewMode,
+    ReviewReason,
+    ReviewStage,
+    ReviewTask,
+    ReviewTool,
+)
+from dlp_schema.session import LifecycleState, PrivacyState
+from dlp_schema.testing import (
+    FIXED_TIME,
+    action_payload,
+    make_ai_run,
+    make_label,
+    make_session,
+    sqlite_db,
+)
+
+ROOT = repo_root()
+
+
+class _AwareSqlalchemy:
+    """CLI 모듈의 `sa`를 대신한다: create_engine만 시간대 보존 SQLite 엔진으로 바꾼다."""
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(sqlalchemy, name)
+
+    def create_engine(self, url: Any, **kwargs: Any) -> sqlalchemy.Engine:
+        return sqlite_db(str(url), create=False)
+
+
+def _policy_file(tmp_path: Path, **ai: Any) -> Path:
+    """저장소 review.yaml에서 ai_review만 바꾼 정책 파일."""
+    data = yaml.safe_load((ROOT / "config/policies/review.yaml").read_text("utf-8"))
+    data["ai_review"] |= ai
+    path = tmp_path / "review.yaml"
+    path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+    return path
+
+
+@pytest.fixture
+def db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[str, sqlalchemy.Engine]:
+    """SQLite 파일 DB (온톨로지 v1). CLI 엔진은 시간대 보존 SQLite로 바꾼다."""
+    url = f"sqlite:///{tmp_path / 'cli.db'}"
+    engine = sqlite_db(url)
+    with engine.begin() as conn:
+        register_ontology(conn, load_ontology(ROOT / "config/ontology/v1"))
+    monkeypatch.setattr(review_cmds, "sa", _AwareSqlalchemy())
+    monkeypatch.setattr(aireview_run_cmds, "sa", _AwareSqlalchemy())
+    return url, engine
+
+
+def _session(engine: sqlalchemy.Engine, sid: str, prelabeled_at: datetime) -> None:
+    """privacy_approved로 등록하고 prelabeled_at에 prelabeled로 옮긴 세션 + 모델 행동 둘."""
+    session = make_session(
+        sid, privacy_state=PrivacyState.APPROVED, lifecycle_state=LifecycleState.PRIVACY_APPROVED
+    )
+    labels = [
+        make_label(
+            action_payload(action_id=f"{sid}-a{i}"), label_id=f"{sid}-a{i}", session_id=sid,
+            confidence=0.5, provenance=Provenance(source=Source.MODEL, model_version="m"),
+        )
+        for i in range(2)
+    ]  # fmt: skip
+    with engine.begin() as conn:
+        insert_session(conn, session, at=prelabeled_at - timedelta(hours=1))
+        set_lifecycle(conn, sid, LifecycleState.PRELABELED, at=prelabeled_at, actor="prelabel")
+        insert_labels(conn, labels)
+
+
+def _plan(url: str, sid: str) -> int:
+    """`dlp review plan <세션> --reviewer r1 --reviewer r2`."""
+    return main(["review", "plan", sid, "--reviewer", "r1", "--reviewer", "r2", "--url", url])
+
+
+def _assignments(engine: sqlalchemy.Engine, sid: str) -> list[ReviewAssignment]:
+    with engine.connect() as conn:
+        return list_assignments(conn, session_id=sid)
+
+
+def test_ai_display_config_follows_mode_and_versions() -> None:
+    """끔이면 None, 버전이 비면 aireview.yaml 지금 버전 하나, 적으면 그 목록."""
+    policy = load_ops_policy(ROOT)
+    assert policy.ai_review.mode == "advisory"  # 저장소 값 (장비 도착 전)
+    cfg = ai_display_config(policy)
+    assert cfg is not None
+    assert cfg.versions == (load_aireview_policy(ROOT).verdict_version,)
+    off = policy.model_copy(
+        update={"ai_review": policy.ai_review.model_copy(update={"mode": "off"})}
+    )
+    assert ai_display_config(off) is None
+    pinned = ("aireview-0123456789ab+vlm-a", "aireview-ba9876543210+vlm-b")
+    explicit = policy.model_copy(
+        update={"ai_review": policy.ai_review.model_copy(update={"versions": pinned})}
+    )
+    cfg2 = ai_display_config(explicit)
+    assert cfg2 is not None and cfg2.versions == pinned
+
+
+def test_required_mode_defers_plan_until_judged_waived_or_timed_out(
+    db: tuple[str, sqlalchemy.Engine],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """required: 판정 완료 기록이 없으면 배정 0개·종료 6. 지금 버전 completed가 생기면 계획한다.
+    prelabeled 뒤 24시간이 지난 세션은 waived:timeout을 남기고 계획하고, 수동 건너뜀(waive)도
+    진행시킨다. advisory는 막지 않는다."""
+    url, engine = db
+    monkeypatch.setenv("DLP_REVIEW_POLICY_FILE", str(_policy_file(tmp_path, mode="required")))
+    now = datetime.now(UTC)
+    _session(engine, "fresh", now - timedelta(hours=2))
+    _session(engine, "old", now - timedelta(hours=30))
+    _session(engine, "skip", now - timedelta(hours=2))
+
+    assert _plan(url, "fresh") == review_cmds.AI_PENDING_EXIT
+    out = capsys.readouterr().out
+    assert "dlp aireview run fresh" in out and "dlp aireview waive fresh" in out
+    assert _assignments(engine, "fresh") == []
+    version = load_aireview_policy(ROOT).verdict_version
+    run = make_ai_run("fresh", version=version, created_at=now)
+    with engine.begin() as conn:
+        insert_ai_run(conn, run)
+        insert_ai_run_event(conn, AiRunEvent(
+            session_id="fresh", run_id=run.run_id, event=AiRunEventKind.COMPLETED, at=now,
+        ))  # fmt: skip
+    assert _plan(url, "fresh") == 0 and _assignments(engine, "fresh")
+
+    assert _plan(url, "old") == 0 and _assignments(engine, "old")
+    assert "waived:timeout" in capsys.readouterr().out
+    with engine.connect() as conn:
+        [event] = list_ai_run_events(conn, "old")
+    assert event.event is AiRunEventKind.WAIVED and (event.reason or "").startswith("timeout")
+
+    assert main(["aireview", "waive", "skip", "--reason", "서버 점검", "--url", url]) == 0
+    assert _plan(url, "skip") == 0 and _assignments(engine, "skip")
+
+    monkeypatch.setenv("DLP_REVIEW_POLICY_FILE", str(_policy_file(tmp_path, mode="advisory")))
+    _session(engine, "adv", now - timedelta(hours=1))
+    assert _plan(url, "adv") == 0 and _assignments(engine, "adv")
+
+
+def test_reissue_hint_includes_aireview_step(capsys: pytest.CaptureFixture[str]) -> None:
+    """블러 변경으로 회수한 작업의 다시 만들기 안내: AI 판정을 쓰면 `dlp aireview run <세션>`을
+    렌더 뒤에 넣는다 (이전 판정은 렌더 해시가 달라 보이지 않는다, I10)."""
+    task = ReviewTask(
+        task_key="cvat:1", tool=ReviewTool.CVAT, external_id="1", session_id="s001",
+        stream_id="bodycam", stage=ReviewStage.PRIVACY, media_uri="s3://dlp-raw/p.mp4",
+        label_kinds=("blur_track",), created_at=FIXED_TIME,
+    )  # fmt: skip
+    outcome = ReviewOutcome(revoked=["label_studio:2"], reissue_assignments=["A"])
+    review_cmds._print_outcome(task, outcome, ai=True)  # pyright: ignore[reportPrivateUsage]
+    with_ai = capsys.readouterr().out
+    assert "dlp privacy render → dlp aireview run s001 뒤" in with_ai
+    review_cmds._print_outcome(task, outcome, ai=False)  # pyright: ignore[reportPrivateUsage]
+    assert "dlp aireview run" not in capsys.readouterr().out
+
+
+def test_queue_shows_ai_reason_count(
+    db: tuple[str, sqlalchemy.Engine], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """열린 배정 큐에 AI 사유 구간 수를 덧붙인다 (사유가 없으면 붙이지 않는다)."""
+    url, engine = db
+    with engine.begin() as conn:
+        insert_session(conn, make_session())
+        for aid, reasons in (
+            ("A", [ReviewReason.AI_WRONG, ReviewReason.LOW_CONFIDENCE]),
+            ("B", []),
+        ):
+            insert_assignment(conn, ReviewAssignment(
+                assignment_id=aid, session_id="s001", label_kinds=("action",),
+                mode=ReviewMode.STANDARD, priority=1.0, created_at=FIXED_TIME,
+                flagged=tuple(FlaggedSpan(reason=r, t_start_ms=0, t_end_ms=1, label_ids=("l",))
+                              for r in reasons),
+            ))  # fmt: skip
+    assert main(["review", "queue", "--url", url]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert any(" A " in f" {line} " and line.endswith("AI 지적 1") for line in lines)
+    assert not any("B" in line.split() and "AI" in line for line in lines)

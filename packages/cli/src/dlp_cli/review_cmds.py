@@ -29,16 +29,18 @@
     `make ui-theme`). `--check`는 파일을 쓰지 않고 다르면 1로 끝난다.
 - 운영 로직 (WP12, `dlp_review.ops`)
   - `plan <세션> --reviewer …` — 우선순위·표본 검증·블라인드·이중·오류 삽입 배정을 계획해 DB에 쓴다.
+    AI 1차 검수(`review.yaml ai_review`, WP17.6)가 켜져 있으면 판정 지적을 우선순위 사유로 더하고
+    표본 묶음에서 뺀다. required면 판정이 끝나지 않은 세션의 배정을 미룬다 (`AI_PENDING_EXIT` 6).
   - `assign <배정 ID> [--assignee]` — 배정 하나의 검수 도구 작업을 만든다 (멱등). 담당자 없는
     배정은 `--assignee`로 담당자를 정해야 만든다 (없으면 종료 코드 1, F-REV-07).
   - `qa` — 끝난 표준 배정에서 QA 재검수 배정을 뽑는다. 선임(`reviewers.senior`)이 없으면 담당자를
     비워 두므로 `assign --assignee <선임>`으로 만든다.
-  - `queue [--limit]` — 열린 배정을 우선순위 높은 순으로 보여 준다.
+  - `queue [--limit]` — 열린 배정을 우선순위 높은 순으로 보여 준다 (AI 지적 사유 수 포함).
   - `quality` — 오류 삽입 발견율, 이중 라벨 일치도(카파·구간 F1·경계 F1), 프리라벨 편향.
 
-정상 순서: (프리라벨·관계·행동 뒤) `plan` → `assign`(또는 `create`) → 검수 → `collect`/`serve`
-→ `qa` → `verify` → `dlp dataset build`. 블러 검수는 `dlp privacy detect` 뒤 `create --stage
-privacy` (또는 `plan --privacy`) → `collect` → `dlp privacy approve`.
+정상 순서: (프리라벨·관계·행동·`dlp aireview run` 뒤) `plan` → `assign`(또는 `create`) → 검수 →
+`collect`/`serve` → `qa` → `verify` → `dlp dataset build`. 블러 검수는 `dlp privacy detect` 뒤
+`create --stage privacy` (또는 `plan --privacy`) → `collect` → `dlp privacy approve`.
 
 정책 출처: 기본은 `config/policies/review.yaml` (우선순위·표본·측정 비율, `reviewers.privacy`,
 `cvat.users`, `label_studio.users`, 미디어).
@@ -73,8 +75,10 @@ from datetime import UTC, datetime, timedelta
 import sqlalchemy as sa
 from sqlalchemy.exc import NoResultFound
 
+from dlp_aireview.status import prelabeled_at
 from dlp_cli.review_config import (
     REVOCATION_PENDING_EXIT,
+    ai_display_config,
     print_revocations,
     review_setup,
     run_revocations,
@@ -90,6 +94,7 @@ from dlp_privacy.runner import (
     request_media_revocation,
     stale_media_tasks,
 )
+from dlp_review.ai_display import REASONS, AiDisplayConfig, GateDecision, required_gate
 from dlp_review.collect import collect_task
 from dlp_review.ontology_projects import ontology_project
 from dlp_review.ops.assign import plan_qa
@@ -117,6 +122,8 @@ from dlp_review.ui_theme import TOKENS_FILE, cvat_tokens_css, load_ui_theme
 from dlp_review.verify import verify_session
 from dlp_review.webhook import CollectRequest, resolve_reviewer, serve
 from dlp_schema import repo_root
+from dlp_schema.aireview import AiRunEvent, AiRunEventKind
+from dlp_schema.db.aireview_repository import insert_ai_run_event, latest_run_state
 from dlp_schema.db.repository import (
     get_assignment,
     get_golden_set,
@@ -132,6 +139,7 @@ from dlp_schema.db.tables import ontology_versions
 from dlp_schema.labels import LabelRecord
 from dlp_schema.review import (
     AssignmentStatus,
+    ReviewReason,
     ReviewStage,
     ReviewTask,
     ReviewTaskStatus,
@@ -140,6 +148,9 @@ from dlp_schema.review import (
 
 # `dlp review assign`: 담당자 없는 배정에 `--assignee`를 주지 않아 작업을 만들지 않았다 (F-REV-07)
 NO_ASSIGNEE_EXIT = 1
+# `dlp review plan`: review.yaml ai_review.mode=required인데 AI 1차 검수가 끝나지 않아 배정을 미뤘다
+# (WP17.6). 회수 대기(4)·담당자 없음(1)과 구별한다 (cron이 `dlp aireview run`을 먼저 돌리게)
+AI_PENDING_EXIT = 6
 
 
 def _setup(args: argparse.Namespace, policy: ReviewOpsPolicy | None = None) -> ReviewSetup:
@@ -234,8 +245,12 @@ def cmd_create(args: argparse.Namespace) -> int:
     return 0
 
 
-def _print_outcome(task: ReviewTask, outcome: ReviewOutcome | None) -> None:
-    """수집 결과와 회수 요청·다시 만들 명령을 출력한다."""
+def _print_outcome(task: ReviewTask, outcome: ReviewOutcome | None, *, ai: bool = False) -> None:
+    """수집 결과와 회수 요청·다시 만들 명령을 출력한다.
+
+    ai: AI 1차 검수 판정을 쓰는가 (`ReviewSetup.ai`). 블러가 바뀌면 이전 판정이 표시 프로필에서
+    빠지므로 다시 만들기 전에 `dlp aireview run <세션>`을 안내한다 (WP17.6, ADR 0040 I10).
+    """
     if outcome is None:
         if task.status is ReviewTaskStatus.REVOKED:
             print(f"{task.task_key}: 회수한 작업이라 수집하지 않음 (결과는 회수 스냅숏에 남는다)")
@@ -251,7 +266,8 @@ def _print_outcome(task: ReviewTask, outcome: ReviewOutcome | None) -> None:
     print(
         f"  블러가 바뀌어 라벨링 작업 {len(outcome.revoked)}개 회수: {', '.join(outcome.revoked)}"
     )
-    print("  다시 만들기 (남은 블러 검수 → dlp privacy approve → dlp privacy render 뒤):")
+    rerun = f" → dlp aireview run {task.session_id}" if ai else ""
+    print(f"  다시 만들기 (남은 블러 검수 → dlp privacy approve → dlp privacy render{rerun} 뒤):")
     for aid in outcome.reissue_assignments:
         print(f"    dlp review assign {aid}")
     for assignee, stream, tool in outcome.direct_reissue:
@@ -285,7 +301,7 @@ def cmd_collect(args: argparse.Namespace) -> int:
     # 수집·회수 요청이 커밋된 뒤에 외부 채널을 끊는다 (도구·S3 장애가 수집을 되돌리지 않는다)
     report = run_revocations(engine, task.session_id, setup)
     engine.dispose()
-    _print_outcome(task, outcome)
+    _print_outcome(task, outcome, ai=setup.ai is not None)
     return print_revocations(report, task.session_id)
 
 
@@ -381,7 +397,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
             )
         # 서버 로그에도 수집 결과와 블러 변경으로 회수한 작업·다시 만들 명령을 남긴다
         print(f"{req.task_key} ← {reviewer}")
-        _print_outcome(task, outcome)
+        _print_outcome(task, outcome, ai=setup.ai is not None)
         report = run_revocations(engine, task.session_id, setup)
         if print_revocations(report, task.session_id):
             raise RevocationIncompleteError(f"{task.session_id}: 회수 대기 {len(report.pending)}개")
@@ -442,6 +458,27 @@ def cmd_register(args: argparse.Namespace) -> int:
     return 0
 
 
+def _ai_gate(conn: sa.Connection, session_id: str, ai: AiDisplayConfig | None) -> GateDecision:
+    """required 모드의 배정 게이트 (`ai_display.required_gate`). 시간 초과면 waived 이벤트를 남긴다.
+
+    부작용: 시간 초과로 진행할 때 `ai_review_run_events`에 waived 1행 (사유 `timeout: …`, 계획과
+    같은 트랜잭션).
+    """
+    states = latest_run_state(conn, [session_id])
+    now = datetime.now(UTC)
+    decision = required_gate(states.get(session_id), prelabeled_at(conn, session_id), now, ai)
+    if decision.waive_timeout and ai is not None:
+        insert_ai_run_event(
+            conn,
+            AiRunEvent(
+                session_id=session_id, event=AiRunEventKind.WAIVED,
+                reason=f"timeout: prelabeled 뒤 max_wait_h={ai.policy.max_wait_h:g}시간",
+                actor=current_actor(), at=now,
+            ),
+        )  # fmt: skip
+    return decision
+
+
 def cmd_plan(args: argparse.Namespace) -> int:
     """`dlp review plan <세션> --reviewer A --reviewer B …`: 세션의 검수 배정을 계획한다 (WP12).
 
@@ -452,21 +489,41 @@ def cmd_plan(args: argparse.Namespace) -> int:
         args.privacy: 참이면 블러 검수 단위(스트림 전체, 전수)로 계획한다.
         args.seed: 표본 추출·배정 난수 시드 (같은 시드면 같은 계획, 결정적).
 
-    반환: 0. 이미 계획된 단위는 새로 만들지 않는다(멱등) — 이때 "새 배정이 없습니다".
-    부작용: 한 트랜잭션에서 `review_assignments`에 새 배정 INSERT.
-    온톨로지는 세션 버전의 DB 등록 사전을 읽는다.
+    AI 1차 검수 (WP17.6, `review.yaml ai_review`): 작업 라벨 계획에서 끔이 아니면 증가 프로필의
+    유효한 판정으로 우선순위 사유(AI_*)를 더하고 지적된 라벨을 표본 묶음에서 뺀다. required면 계획
+    전에 게이트를 본다: 허용 버전의 완료된 판정 실행(`dlp aireview run`)이 없고 건너뜀 기록도 없고
+    prelabeled 뒤 `max_wait_h`도 지나지 않았으면 배정하지 않고 `AI_PENDING_EXIT`(6)로 끝낸다. 시간이
+    지났으면 waived:timeout을 남기고 계획한다. 블러 계획(`--privacy`)에는 쓰지 않는다.
+
+    반환: 0. 이미 계획된 단위는 새로 만들지 않는다(멱등) — 이때 "새 배정이 없습니다". required
+    게이트로 미루면 6.
+    부작용: 한 트랜잭션에서 `review_assignments`에 새 배정 INSERT (required 시간 초과면 waived
+    이벤트도). 온톨로지는 세션 버전의 DB 등록 사전을 읽는다.
     """
     root = repo_root()
     policy = load_ops_policy(root)
+    ai = None if args.privacy else ai_display_config(policy)
     engine = sa.create_engine(database_url(args.url))
     with engine.begin() as conn:
+        gate = _ai_gate(conn, args.session_id, ai)
+        if not gate.proceed:
+            engine.dispose()
+            print(
+                f"{args.session_id}: AI 1차 검수(required)를 기다리며 배정을 미룹니다 — "
+                f"{gate.reason}. dlp aireview run {args.session_id} 또는 dlp aireview waive "
+                f"{args.session_id} --reason <사유> (prelabeled 뒤 {policy.ai_review.max_wait_h:g}"
+                "시간이 지나면 자동으로 진행)"
+            )
+            return AI_PENDING_EXIT
+        if gate.waive_timeout:
+            print(f"{args.session_id}: {gate.reason} → AI 단계 건너뜀(waived:timeout) 기록")
         ontology = get_session_ontology(conn, args.session_id)
         pool: list[str] = []
         for version in args.seed_golden:
             pool += list(get_golden_set(conn, version).session_ids)
         created = plan_session(
             conn, args.session_id, args.reviewer, policy, ontology, seed=args.seed,
-            now=datetime.now(UTC), seed_sessions=pool, privacy=args.privacy,
+            now=datetime.now(UTC), seed_sessions=pool, privacy=args.privacy, ai=ai,
         )  # fmt: skip
     engine.dispose()
     for a in created:
@@ -553,13 +610,16 @@ def cmd_qa(args: argparse.Namespace) -> int:
 
 def cmd_queue(args: argparse.Namespace) -> int:
     """`dlp review queue [--limit]`: 열린(OPEN) 배정을 우선순위 높은 순(같으면 만든 순)으로
-    출력한다. 읽기 전용."""
+    출력한다. AI 1차 검수 사유(AI_*) 구간이 있으면 그 수를 덧붙인다 (WP17.6). 읽기 전용."""
     engine = sa.create_engine(database_url(args.url))
     with engine.connect() as conn:
         queue = list_assignments(conn, status=AssignmentStatus.OPEN)
     engine.dispose()
+    ai_reasons = {r.value for r in REASONS.values()} | {ReviewReason.AI_MISSING.value}
     for a in queue[: args.limit]:
-        print(f"{a.priority:8.2f}  {a.assignment_id}  {a.mode.value}  {a.assignee or '-'}")
+        ai = sum(1 for f in a.flagged if f.reason.value in ai_reasons)
+        note = f"  AI 지적 {ai}" if ai else ""
+        print(f"{a.priority:8.2f}  {a.assignment_id}  {a.mode.value}  {a.assignee or '-'}{note}")
     return 0
 
 

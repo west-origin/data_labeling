@@ -405,5 +405,6 @@ def collect_task(  # noqa: C901
         # 모든 작업이 수집됐으면 배정을 끝내고, 표본 배정이면 묶음 합격 판정을 적용한다.
         from dlp_review.ops.runner import finish_assignment
 
-        finish_assignment(conn, assignment, now, ops_policy)
+        # AI 판정 사용이 켜져 있으면 표본 합격 뒤 늦게 도착한 지적의 보류 라벨을 재검수로 보낸다
+        finish_assignment(conn, assignment, now, ops_policy, ai=setup.ai)
     return outcome

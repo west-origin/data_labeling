@@ -14,7 +14,8 @@ WP12, ADR 0014. `dlp review plan|assign|qa|quality|create|collect|serve`와 운�
 - `CVAT_KINDS`: CVAT 공간 검수 화면이 보여 주는 작업 라벨 종류 (블러 제외).
 - `SIGV4_MAX_EXPIRES_S`: 서명 URL 유효 시간 상한 (`media.signed_url_ttl_s` 검증).
 - `UnitsPolicy`·`PriorityPolicy`·`SamplingPolicy`·`SeedingPolicy`·`MeasurementPolicy`·
-  `ReviewersPolicy`·`MediaPolicy`·`CvatPolicy`·`LabelStudioPolicy`·`WebhookPolicy`·`OrphanPolicy`:
+  `ReviewersPolicy`·`MediaPolicy`·`CvatPolicy`·`LabelStudioPolicy`·`WebhookPolicy`·`OrphanPolicy`·
+  `AiConfidenceFloor`·`AiReviewDisplayPolicy`(AI 1차 검수 판정 사용 방식, WP17.6):
   review.yaml의 절별 모델.
 - `ReviewOpsPolicy`: 전체 정책 (review.yaml + `ratios` = defaults.yaml `review`).
 - `load_policy`: 저장소 루트에서 정책을 읽어 검증한다.
@@ -35,6 +36,7 @@ from typing import Any, Literal
 import yaml
 from pydantic import Field, model_validator
 
+from dlp_schema.aireview import AiVersion
 from dlp_schema.common import Contract
 from dlp_schema.config import ReviewConfig, load_config
 
@@ -220,6 +222,58 @@ class OrphanPolicy(Contract):
     min_age_s: int = Field(ge=0)
 
 
+class AiConfidenceFloor(Contract):
+    """판정 값별 최소 확신도. 이보다 낮은(또는 확신도가 없는데 0보다 큰) 판정은 화면에 따로
+    표시하지 않는다 (노출 기록 `hidden`). ok는 구간으로 표시하지 않으므로 없다."""
+
+    wrong: float = Field(default=0.0, ge=0, le=1)
+    suspect: float = Field(default=0.0, ge=0, le=1)
+    unsure: float = Field(default=0.0, ge=0, le=1)
+
+
+class AiReviewDisplayPolicy(Contract):
+    """AI 1차 검수 판정을 검수 운영에 쓰는 방식 (review.yaml `ai_review`, WP17.6, ADR 0040).
+
+    판정은 참고용이고 사람 검수를 늘리는 쪽(우선순위, 표본 제외, 늦은 지적의 재검수)으로만 쓴다.
+    `dlp_review.ai_display`가 읽는다. 절이 없으면 끔(off)이다 (코드 기본값. 저장소 설정은 장비 도착
+    전 advisory, 파일럿 WP17.9 뒤 required로 바꾼다).
+    """
+
+    # off: AI 표를 읽지 않는다 (검수 화면의 AI 컨트롤은 그대로 두고 채우지 않는다).
+    # advisory: 작업을 만들 때의 유효한 판정만 얹는다. required: advisory + `dlp review plan`이 지금
+    # 버전의 완료된 판정 실행이 없는 세션의 배정을 미룬다 (건너뜀 기록·max_wait_h 뒤 진행).
+    mode: Literal["off", "advisory", "required"] = "off"
+    # required: prelabeled 전이 뒤 이 시간(시)이 지나면 waived:timeout을 남기고 배정한다
+    max_wait_h: float = Field(default=24.0, gt=0)
+    # 표시·증가에 쓸 판정 버전 (`aireview-<digest>+vlm-<model>`). 비면 aireview.yaml 지금 버전만
+    # (CLI가 계산해 넘긴다, 검수 패키지는 판정 정책을 읽지 않는다)
+    versions: tuple[AiVersion, ...] = ()
+    # 판정을 보일 배정 방식. 블라인드·오류 삽입·QA는 넣을 수 없다 (측정 편향, ADR 0040 6절).
+    # double은 짝 표준 배정의 대조군 결정을 따른다
+    show_modes: tuple[Literal["standard", "double"], ...] = ("standard", "double")
+    # 대조군(holdout) 비율: 판정을 숨겨 편향 없는 품질 측정에 쓴다 (결정 0.1)
+    holdout_ratio: float = Field(default=0.1, ge=0, le=1)
+    holdout_seed: int = 0
+    show_min_confidence: AiConfidenceFloor = Field(default_factory=AiConfidenceFloor)
+    # 같은 10분(라벨 시각 기준) 안에 따로 표시하는 판정 수 상한 (잡음 상한)
+    max_flags_per_10min: int = Field(default=30, ge=0)
+    # 긴 라벨의 표시·우선순위 구간 상한 (ms): 이보다 긴 라벨은 근거 시각 주변만 표시한다
+    span_cap_ms: int = Field(default=10_000, gt=0)
+    # 긴 라벨의 Label Studio AI 구간 폭 (ms, 근거 시각 ±절반)
+    evidence_window_ms: int = Field(default=2_000, gt=0)
+    # CVAT 작업 하나에 다는 AI 이슈 상한 (나머지는 노출 기록 hidden)
+    cvat_issue_limit: int = Field(default=200, ge=0)
+    # 표본 검수 묶음에서 빼고 반드시 검수에 넣을 판정 (마무리 보호도 같은 값). ok는 넣을 수 없다
+    # (AI의 ok는 아무것도 줄이지 않는다, I9)
+    sampling_exclude: tuple[Literal["wrong", "suspect", "unsure"], ...] = (
+        "wrong",
+        "suspect",
+        "unsure",
+    )
+    # 맥락 라벨까지 지금도 현재여야 판정을 유효로 본다 (결정: false)
+    strict_context: bool = False
+
+
 class ReviewOpsPolicy(Contract):
     """검수 운영 정책 전체. `load_policy`가 만든다."""
 
@@ -237,6 +291,8 @@ class ReviewOpsPolicy(Contract):
     label_studio: LabelStudioPolicy = Field(default_factory=LabelStudioPolicy)
     webhook: WebhookPolicy
     orphans: OrphanPolicy
+    # 절이 없으면 끔 (AI 1차 검수 판정을 읽지 않는다, WP17.6)
+    ai_review: AiReviewDisplayPolicy = Field(default_factory=AiReviewDisplayPolicy)
     ratios: ReviewConfig  # 배정 비율 (config/defaults.yaml `review` 절)
 
 

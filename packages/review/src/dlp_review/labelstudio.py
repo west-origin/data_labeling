@@ -29,6 +29,9 @@ WP6, ADR 0006(무손실 왕복). 사용처: `tasks.create_labeling_tasks`(보내
 공개 이름: `LS_KINDS`, `FROM_NAME`, `TO_NAME`, `CHANNELS`, `HANDS`, `EVENT_SEVERITY`,
 `EVENT_TEXT_FIELDS`, `HAND_TARGET`, `HAND_BODY_PART`, `HAND_FIELDS`, `label_names`, `label_config`,
 `to_ls_results`, `NAME_KINDS`, `LsFormatError`, `from_ls_results`.
+AI 1차 검수(WP17.6, ADR 0040): `AI_FLAGS`, `AI_SUMMARY`, `AI_NOTE`, `AI_DECISION`, `AI_LABELS`,
+`AI_CHOICES`, `AI_BANNER`, `ls_ai_decisions`. AI 컨트롤은 설정에 늘 있고(모드와 무관), 예측 결과는
+`dlp_review.ai_display.ls_ai_results`가 만든다. 수집(`from_ls_results`)은 라벨 컨트롤 결과만 읽는다.
 
 이벤트 속성(심각도, 관련 행동·개체 ID)은 구간에 딸린 입력란(perRegion)으로 주고받는다. 온톨로지가
 요구하는 속성을 화면에서 채울 수 없으면 새로 그린 이벤트가 저장 검증에서 거부되고 작업 수집 전체가
@@ -52,6 +55,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from dlp_review.reconcile import ReviewedItem
 from dlp_review.ui_theme import UiTheme, ls_hotkey, ls_label_color, ls_style
+from dlp_schema.aireview import AiDecision
 from dlp_schema.labels import (
     ActionPayload,
     EventPayload,
@@ -84,6 +88,26 @@ HAND_BODY_PART = "body_part"
 HAND_FIELDS = (HAND_TARGET, HAND_BODY_PART)
 # 시계열 CSV 열 = 화면 채널 (timeseries.write_timeseries_csv와 같아야 한다)
 CHANNELS = ("glove_left", "glove_right", "imu_acc")
+
+# AI 1차 검수 컨트롤 (WP17.6, ADR 0040). `review.yaml ai_review.mode`와 무관하게 설정에 늘 둔다:
+# 제출된 주석에 AI 영역이 남은 프로젝트에서 컨트롤을 빼면 Label Studio가 설정 갱신을 거부하고(400),
+# 그러면 그 프로젝트의 시간 작업 생성이 모두 멈춘다. 모드는 예측을 채울지만 정한다.
+# - AI_FLAGS: 판정 구간 (예측으로만 채운다, readonly). 수집은 읽지 않는다.
+# - AI_SUMMARY: 작업 단위 요약 글 (예측). 수집은 읽지 않는다.
+# - AI_NOTE: 라벨 구간에 딸린 AI 메모 (예측, 구간 id = 원 라벨 ID). 수집은 읽지 않는다.
+# - AI_DECISION: 검수자가 그 라벨 구간에 고른 결정 (제안 적용·AI 지적 기각). 수집이 읽는
+#   유일한 AI 컨트롤이다 (`ls_ai_decisions`, 적용은 WP17.7).
+# 데이터 변수(`$…`)는 쓰지 않는다: 그 키가 없는 기존 작업이 있는 프로젝트에서 설정 갱신이
+# 거부될 수 있다.
+AI_FLAGS, AI_SUMMARY, AI_NOTE, AI_DECISION = "ai_flags", "ai_summary", "ai_note", "ai_decision"
+# 판정 값 → AI 구간 라벨 값 (ok는 구간으로 표시하지 않는다. missing은 누락 후보, 표시는 후속)
+AI_LABELS = {
+    "wrong": "AI:틀림", "suspect": "AI:의심", "unsure": "AI:판단불가", "missing": "AI:누락?",
+}  # fmt: skip
+# 결정 선택지 (화면 값, 결과 별칭). Label Studio는 별칭이 있으면 결과에 별칭을 쓴다
+AI_CHOICES = (("제안 적용", AiDecision.APPLY), ("AI 지적 기각", AiDecision.DISMISS))
+# 화면 안내 문구 (참고용·사람 검수 아님·표시 없는 구간도 확인, ADR 0040 6절)
+AI_BANNER = "AI 1차 검수 · 참고용 · 사람 검수 아님 · 표시 없는 구간도 모두 확인"
 
 
 # 손별 라벨 이름에 쓰는 손 값 (Hand enum 값)
@@ -175,6 +199,7 @@ def label_config(o: Ontology, theme: UiTheme | None = None, *, logo_uri: str = "
         style = f"  <Style>{xml_escape(ls_style(theme, logo_uri))}</Style>\n"
         event_class = ' className="dlp-event"'
         hand_class = ' className="dlp-hand"'
+    ai_summary, ai_region = _ai_controls(theme)
     return f"""<View>
 {style}{head}
 {video}
@@ -185,6 +210,8 @@ def label_config(o: Ontology, theme: UiTheme | None = None, *, logo_uri: str = "
   <TimeSeriesLabels name="{FROM_NAME}" toName="{TO_NAME}">
 {labels}
   </TimeSeriesLabels>
+{ai_summary}
+{ai_region}
   <View visibleWhen="region-selected"{event_class}>
     <Header value="이벤트 속성 (이벤트 종류가 요구할 때만 채운다)"/>
     <Choices name="{EVENT_SEVERITY}" toName="{TO_NAME}" perRegion="true" choice="single">
@@ -208,6 +235,64 @@ def label_config(o: Ontology, theme: UiTheme | None = None, *, logo_uri: str = "
   </View>
 </View>
 """
+
+
+def _ai_controls(theme: UiTheme | None) -> tuple[str, str]:
+    """AI 1차 검수 컨트롤 XML 두 덩어리: (작업 요약·판정 구간 범례, 구간을 고르면 보이는 메모·결정).
+
+    모드와 무관하게 늘 같은 컨트롤 이름·라벨 값이다 (모듈 상수 설명). theme이 있으면 판정 구간
+    색(`ai.colors`)과 결정 단축키(`ai.hotkeys`)를 넣는다 (모양만).
+    """
+    colors = theme.ai.colors.model_dump() if theme is not None else {}
+    keys = theme.ai.hotkeys.model_dump() if theme is not None else {}
+    flags = "\n".join(
+        f"      <Label value={quoteattr(value)}"
+        + (f' background="{colors[verdict]}"' if verdict in colors else "")
+        + "/>"
+        for verdict, value in AI_LABELS.items()
+    )
+    choices = "\n".join(
+        f'      <Choice value={quoteattr(value)} alias="{alias.value}"'
+        + (f' hotkey="{keys[alias.value]}"' if alias.value in keys else "")
+        + "/>"
+        for value, alias in AI_CHOICES
+    )
+    summary = f"""  <View className="dlp-ai">
+    <Header value={quoteattr(AI_BANNER)} size="6"/>
+    <TextArea name="{AI_SUMMARY}" toName="{TO_NAME}" maxSubmissions="1" rows="1"
+              placeholder="AI 1차 검수 요약 (자동으로 채운다)"/>
+    <TimeSeriesLabels name="{AI_FLAGS}" toName="{TO_NAME}">
+{flags}
+    </TimeSeriesLabels>
+  </View>"""
+    region = f"""  <View visibleWhen="region-selected" className="dlp-ai-region">
+    <Header value="AI 1차 검수 메모 · 참고용 · 사람 검수 아님"/>
+    <TextArea name="{AI_NOTE}" toName="{TO_NAME}" perRegion="true" maxSubmissions="1" rows="2"
+              placeholder="이 구간에는 AI 지적이 없다"/>
+    <Choices name="{AI_DECISION}" toName="{TO_NAME}" perRegion="true" choice="single"
+             showInline="true">
+{choices}
+    </Choices>
+  </View>"""
+    return summary, region
+
+
+def ls_ai_decisions(results: list[dict[str, Any]]) -> dict[str, AiDecision]:
+    """검수자 결과 → 라벨 구간 id별 AI 결정 (`ai_decision` 선택만 읽는다).
+
+    선택 값은 별칭(apply·dismiss)과 화면 값(제안 적용·AI 지적 기각) 둘 다 받는다 (Label Studio는
+    별칭이 있으면 결과에 별칭을 쓴다). 알 수 없는 값·빈 선택은 결정 없음으로 본다. AI 메모·요약·
+    판정 구간은 읽지 않는다 (제안 내용은 수집이 DB에서 다시 읽는다, WP17.7).
+    """
+    known = {v: d for value, d in AI_CHOICES for v in (value, d.value)}
+    out: dict[str, AiDecision] = {}
+    for r in results:
+        if r.get("from_name") != AI_DECISION or r.get("type") != "choices" or r.get("id") is None:
+            continue
+        picked = [known[c] for c in (r.get("value") or {}).get("choices") or [] if c in known]
+        if picked:
+            out[str(r["id"])] = picked[0]
+    return out
 
 
 def _name_and_meta(label: LabelRecord) -> tuple[str, dict[str, Any]]:
@@ -487,7 +572,9 @@ def from_ls_results(results: list[dict[str, Any]], known_ids: set[str]) -> list[
     - known_ids: 작업에 보낸 원래 라벨 ID. 결과 id가 여기 있어야 원래 라벨로 본다
       (아니면 새로 그린 것).
 
-    반환: `ReviewedItem` 목록. timeserieslabels가 아닌 결과는 건너뛴다.
+    반환: `ReviewedItem` 목록. timeserieslabels가 아닌 결과는 건너뛴다. 라벨 컨트롤(`FROM_NAME`)이
+    아닌 구간 결과(from_name이 있고 `labels`가 아닌 것: AI 판정 구간 `ai_flags` 등)도 건너뛴다
+    (F-AIR-02). from_name이 없는 결과는 이전 형식으로 보고 라벨 구간으로 읽는다.
     예외: 옮길 수 없는 구간(새로 그린 객체 상태, 알 수 없는 라벨 이름, 페이로드 검증 실패 — 예: 대상
     ID 없는 도구 접촉, 깨진 메타 JSON)이 하나라도 있으면 그 구간을 모두 적은 `LsFormatError`.
     """
@@ -497,7 +584,7 @@ def from_ls_results(results: list[dict[str, Any]], known_ids: set[str]) -> list[
     items: list[ReviewedItem] = []
     problems: list[str] = []
     for r in results:
-        if r.get("type") != "timeserieslabels":
+        if r.get("type") != "timeserieslabels" or (r.get("from_name") or FROM_NAME) != FROM_NAME:
             continue
         try:
             items.append(_reviewed_item(r, inputs, known_ids, adapter))

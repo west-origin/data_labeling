@@ -85,6 +85,14 @@ from dlp_privacy.runner import (
     read_review_segments,
     stale_media_tasks,
 )
+from dlp_review.ai_display import (
+    AiDisplayConfig,
+    AiView,
+    cvat_ai_issues,
+    exposure_for,
+    load_ai_view,
+    ls_ai_results,
+)
 from dlp_review.clients import CvatClient, LabelStudioClient, cvat_task_name
 from dlp_review.cvat import KEYPOINT_LABELS, CvatSchema, Scale, label_spec, to_cvat_tracks
 from dlp_review.labelstudio import LS_KINDS, label_config, to_ls_results
@@ -96,6 +104,8 @@ from dlp_review.timeseries import write_timeseries_csv
 from dlp_review.ui_theme import UiTheme, cvat_label_color, load_ui_theme, logo_data_uri
 from dlp_review.watermark import burn_watermark
 from dlp_schema import repo_root
+from dlp_schema.aireview import AiExposure
+from dlp_schema.db.aireview_repository import insert_ai_exposure
 from dlp_schema.db.repository import (
     active_privacy_hold,
     get_assignment,
@@ -112,7 +122,14 @@ from dlp_schema.db.tables import review_assignments
 from dlp_schema.episode import current_labels
 from dlp_schema.labels import LabelRecord
 from dlp_schema.ontology import Ontology
-from dlp_schema.review import ReviewMode, ReviewStage, ReviewTask, ReviewTaskStatus, ReviewTool
+from dlp_schema.review import (
+    ReviewAssignment,
+    ReviewMode,
+    ReviewStage,
+    ReviewTask,
+    ReviewTaskStatus,
+    ReviewTool,
+)
 from dlp_schema.session import LifecycleState, PrivacyState, Session, Stream, StreamKind
 from dlp_sync.policy import load_policy as load_sync_policy
 from dlp_sync.signals import Series, glove_series, imu_series
@@ -166,6 +183,10 @@ class ReviewSetup:
     privacy: PrivacyPolicy | None = None  # 없으면 config/policies/privacy.yaml (블러본 해시)
     glove_prefixes: tuple[str, ...] | None = None  # 없으면 config/policies/sync.yaml glove
     ui: UiTheme | None = None  # 없으면 config/review_ui.yaml (검수 화면 색·단축키·로고)
+    # AI 1차 검수 판정 사용 (review.yaml ai_review + 허용 판정 버전, WP17.6). None이면 끔(off):
+    # AI 표를 읽지 않는다. 지연 로더가 없다 (판정 버전은 aireview.yaml에서 CLI가 계산해 넘긴다,
+    # `dlp_cli.review_config.ai_display_config`). 작업 생성·수집(배정 마무리 보호)·웹훅이 쓴다.
+    ai: AiDisplayConfig | None = None
 
     def media_policy(self) -> MediaPolicy:
         """검수 화면 매체 정책 (`review.yaml media`).
@@ -695,6 +716,179 @@ def _series(
     return out
 
 
+@dataclass
+class _AiTasks:
+    """작업 생성 중 AI 1차 검수 표시 준비 (`ReviewSetup.ai`가 있을 때만, WP17.6, ADR 0040).
+
+    세션 잠금 뒤의 운영 라벨과 배정으로 작업마다 노출 집단을 정하고(`ai_display.exposure_for`),
+    표시 프로필(작업 매체의 렌더 해시)의 판정만 보인다. 노출 기록은 작업 행 삽입 뒤 같은
+    트랜잭션에서 쓴다 (`exposures`).
+    """
+
+    conn: sa.Connection
+    session_id: str
+    cfg: AiDisplayConfig
+    current: list[LabelRecord]
+    assignment: ReviewAssignment | None
+    ontology: Ontology
+    hotkeys: dict[str, str]
+    exposures: list[AiExposure]
+
+    def view(self, stream_id: str, rhash: str) -> AiView:
+        """그 스트림 블러본(렌더 해시 rhash)으로 만든 판정만 표시 프로필에 든다."""
+        return load_ai_view(self.conn, self.session_id, self.current, {stream_id: rhash}, self.cfg)
+
+    def expose(
+        self, task: ReviewTask, sent: Sequence[LabelRecord], view: AiView, limit: int | None = None
+    ) -> AiExposure:
+        """작업 하나의 노출을 정하고 기록할 목록에 넣는다."""
+        exposure = exposure_for(task, self.assignment, view, sent, self.cfg, limit=limit)
+        self.exposures.append(exposure)
+        return exposure
+
+
+def _ai_tasks(
+    conn: sa.Connection,
+    session_id: str,
+    setup: ReviewSetup,
+    assignment_id: str | None,
+    ontology: Ontology,
+) -> _AiTasks | None:
+    """AI 표시 준비 (끔이면 None). 세션 잠금 뒤에 부른다 (운영 라벨을 그 시점으로 고정)."""
+    if setup.ai is None:
+        return None
+    return _AiTasks(
+        conn=conn, session_id=session_id, cfg=setup.ai,
+        current=current_labels(get_labels(conn, session_id)),
+        assignment=get_assignment(conn, assignment_id) if assignment_id else None,
+        ontology=ontology, hotkeys=setup.ui_theme().ai.hotkeys.model_dump(), exposures=[],
+    )  # fmt: skip
+
+
+@dataclass
+class _LabelingRun:
+    """`create_labeling_tasks` 한 번의 공통 값 (스트림·도구별 함수가 나눠 쓴다)."""
+
+    conn: sa.Connection
+    setup: ReviewSetup
+    session: Session
+    ontology: Ontology
+    assignee: str
+    now: datetime
+    mode: ReviewMode
+    assignment_id: str | None
+    pick: Selector
+    work: Path
+    ai: _AiTasks | None
+
+    def media(self, stream: Stream) -> tuple[str, Path, str]:
+        """블러본 받기·확인 → 담당자 워터마크 → 라벨링 버킷. (렌더 해시, 워터마크 파일, 키).
+
+        지금 승인된 블러 라벨로 렌더한 블러본만 쓴다 (승인 취소·재승인 뒤 이전 블러본 금지).
+        예외: 블러본이 현재 블러 라벨과 다르거나 무효면 `TaskError`.
+        """
+        sid, policy = self.session.session_id, self.setup.privacy_policy()
+        blurred = self.work / f"{stream.stream_id}-blurred.mp4"
+        try:
+            rendered = assert_render_current(
+                self.conn, self.setup.labeling, sid, stream.stream_id, policy
+            )
+            self.setup.labeling.get_file(blurred_key(sid, stream.stream_id), blurred)
+            # 받은 파일이 렌더 기록의 해시와 같은지 확인한다 (그 사이 바뀐 파일 금지)
+            check_fetched(blurred, rendered, sid, stream.stream_id)
+            # 작업에 남길 렌더 해시 (블러가 바뀌면 이 값이 달라져 낡은 매체로 판정된다)
+            rhash = expected_render_hash(self.conn, sid, stream.stream_id, policy)
+        except RenderNotCurrentError as exc:
+            raise TaskError(str(exc)) from exc
+        media = self.setup.media_policy()
+        marked = self.work / f"{stream.stream_id}-{self.assignee}.mp4"
+        burn_watermark(
+            blurred, marked, f"{self.assignee} {sid}", opacity=media.watermark_opacity,
+            crf=media.watermark_crf, encoder_rate=media.encoder_rate,
+        )  # fmt: skip
+        # 내용 주소 키: 블러본이 바뀌면 키도 바뀌어 회수 대상 사본과 새 사본이 섞이지 않는다
+        vkey = labeling_media_key(sid, self.assignee, stream.stream_id, rhash)
+        self.setup.labeling.put_file(vkey, marked, sha256_file(marked))
+        return rhash, marked, vkey
+
+    def cvat(self, stream: Stream, marked: Path, vkey: str, rhash: str) -> ReviewTask:
+        """CVAT 공간 작업 (박스·키포인트 트랙). AI가 켜져 있으면 보인 판정을 이슈로 단다."""
+        cvat, sid = self.setup.cvat, self.session.session_id
+        assert cvat is not None
+        spatial = ("box_track", "keypoint_track")
+        labels = self.pick(stream.stream_id, spatial)
+        # 프로젝트 라벨: 온톨로지 객체 클래스 + 키포인트 골격
+        # (kp_<골격>, 손 골격은 손별 kp_hand21_<손>, cvat.cvat_label_name)
+        names = [*self.ontology.objects, *KEYPOINT_LABELS]
+        pid, schema = _cvat_project(
+            cvat, ontology_project(SPATIAL_PROJECT, self.ontology), names, self.setup.ui_theme()
+        )
+        cvat_user = cvat_user_id(cvat, self.setup.cvat_policy().users, self.assignee)
+        # 이름은 회수 실행기가 지우기 전에 대조한다 (`CvatClient.task_owner`)
+        tid = cvat.create_task(cvat_task_name(sid, stream.stream_id, self.assignee), pid, marked)
+        # 작업 라벨 작업은 계정 연결이 없어도 만든다 (배정 없이 관리자가 나눠 줄 수 있다)
+        if cvat_user is not None:
+            cvat.assign(tid, cvat_user)
+        # 워터마크 영상은 블러본의 PTS·해상도를 유지하므로 라벨 좌표를 그대로(UNIT_SCALE) 보낸다
+        times = frame_times(marked)
+        cvat.put_tracks(tid, to_cvat_tracks(labels, times, schema))
+        task = _task(
+            f"cvat:{tid}", ReviewTool.CVAT, tid, sid, stream.stream_id, self.assignee,
+            self.setup.labeling.uri(vkey), spatial, self.now, self.mode, self.assignment_id,
+            labels, render_hash=rhash,
+        )  # fmt: skip
+        if self.ai is not None:
+            # 1단계: 프로젝트를 바꾸지 않고 이슈 메모만 단다 (수집은 주석만 읽어 결과에 영향 없음)
+            view = self.ai.view(stream.stream_id, rhash)
+            limit = self.ai.cfg.policy.cvat_issue_limit
+            exposure = self.ai.expose(task, labels, view, limit=limit)
+            cvat_ai_issues(cvat, tid, exposure, view, labels, times, self.ontology)
+        return task
+
+    def label_studio(self, stream: Stream, vkey: str, rhash: str) -> ReviewTask:
+        """Label Studio 시간 작업 (시계열 CSV 포함). 예측 = 프리라벨 결과 (+ AI 요약·구간·메모)."""
+        ls, sid, session = self.setup.label_studio, self.session.session_id, self.session
+        assert ls is not None
+        csv = self.work / "timeseries.csv"
+        write_timeseries_csv(
+            session, _series(session, self.setup.raw, self.work, self.setup.pressure_prefixes()),
+            csv, rate_hz=self.setup.media_policy().timeseries_rate_hz,
+        )  # fmt: skip
+        ckey = timeseries_key(sid)
+        self.setup.labeling.put_file(ckey, csv, sha256_file(csv))
+        # 시간 라벨은 세션 단위 (스트림 None)
+        labels = self.pick(None, LS_KINDS)
+        project_name = ontology_project(TEMPORAL_PROJECT, self.ontology)
+        project = ls.find_project(project_name)
+        # 설정 XML은 AI 모드와 무관하게 같다 (AI 컨트롤 상시, labelstudio 모듈 상수 설명)
+        config = self.setup.ls_label_config(self.ontology)
+        if project:
+            lpid = int(project["id"])
+            ls.ensure_prelabel_settings(lpid)  # 예측 방식 이전에 만든 프로젝트
+            # 이벤트 속성 입력란·AI 컨트롤처럼 설정이 바뀌었으면 기존 프로젝트에도 반영한다
+            ls.ensure_label_config(lpid, config)
+        else:
+            lpid = ls.create_project(project_name, config)
+        # 라벨러 자격 증명으로 정책 유효 시간만큼 서명한 URL (원본 버킷 검사 포함)
+        data = label_studio_task_data(self.setup, sid, self.assignee, vkey, ckey)
+        # 작업을 먼저 만들고 예측을 올린다 (직접 작업의 대조군 키가 작업 키라서)
+        tid = ls.create_task(lpid, data, [])
+        task = _task(
+            f"label_studio:{tid}", ReviewTool.LABEL_STUDIO, tid, sid, stream.stream_id,
+            self.assignee, self.setup.labeling.uri(vkey), LS_KINDS, self.now, self.mode,
+            self.assignment_id, labels, render_hash=rhash,
+        )  # fmt: skip
+        results = to_ls_results(labels)
+        if self.ai is not None:
+            view = self.ai.view(stream.stream_id, rhash)
+            exposure = self.ai.expose(task, labels, view)
+            policy = self.ai.cfg.policy
+            results += ls_ai_results(exposure, view, labels, self.ontology, policy, self.ai.hotkeys)
+        if results:
+            ls.add_prediction(lpid, tid, results)
+        return task
+
+
 def create_labeling_tasks(
     conn: sa.Connection,
     session_id: str,
@@ -731,6 +925,10 @@ def create_labeling_tasks(
     스트림에 회수 대기(또는 요청 없는 낡은 작업)가 있으면 `TaskError` (도구·매체 작업 전).
     계정(F-REV-06): Label Studio 작업을 만들 바디캠 스트림이 있으면 그다음에 담당자의 Label Studio
     계정 연결을 확인한다 (역시 도구·매체 작업 전).
+    AI 1차 검수(WP17.6, ADR 0040): `setup.ai`가 있으면 작업마다 노출 집단을 정하고(대조군 포함)
+    보인 판정을 Label Studio 예측(요약·AI 구간·메모)과 CVAT 이슈로 얹는다. 프리라벨 결과·트랙과
+    `sent_label_ids`는 그대로다. 노출 기록(`ai_review_exposures`)은 작업 행 뒤 같은 트랜잭션에
+    쓴다.
     """
     # 회수 요청과 같은 세션 잠금. 없으면 수집이 대상을 고른 뒤 이전 렌더로 만든 작업이 커밋될
     # 수 있다 (READ COMMITTED)
@@ -741,112 +939,40 @@ def create_labeling_tasks(
     session = get_session(conn, session_id)
     _check_not_withdrawn(session)
     _check_not_held(conn, session_id)
-    media = setup.media_policy()
     ontology = get_session_ontology(conn, session_id)
     if session.privacy_state is not PrivacyState.APPROVED:
         raise TaskError(f"{session_id}: 프라이버시 승인 전에는 작업 라벨 검수를 만들 수 없습니다")
-    videos = [s.stream_id for s in session.streams if s.kind in VIDEO_KINDS]
+    targets = [
+        s for s in session.streams
+        if s.kind in VIDEO_KINDS and (streams is None or s.stream_id in streams)
+    ]  # fmt: skip
     _check_no_pending_revocation(
-        conn,
-        session_id,
-        [s for s in videos if streams is None or s in streams],
-        setup.privacy_policy(),
+        conn, session_id, [s.stream_id for s in targets], setup.privacy_policy()
     )
     if use_ls:
         _check_ls_account(setup, session, assignee, streams)
-    raw_bucket = setup.raw.bucket
+    ai = _ai_tasks(conn, session_id, setup, assignment_id, ontology)
     out: list[ReviewTask] = []
     with tempfile.TemporaryDirectory() as tmp:
-        work = Path(tmp)
-        for stream in (s for s in session.streams if s.kind in VIDEO_KINDS):
-            if streams is not None and stream.stream_id not in streams:
-                continue
+        run = _LabelingRun(
+            conn, setup, session, ontology, assignee, now, mode, assignment_id, pick, Path(tmp), ai
+        )
+        for stream in targets:
+            ls_here = use_ls and stream.kind is StreamKind.BODYCAM
             # 이 스트림에 만들 작업이 없으면 블러본도 받지 않는다 (Label Studio는 바디캠만)
-            if not use_cvat and not (use_ls and stream.kind is StreamKind.BODYCAM):
+            if not use_cvat and not ls_here:
                 continue
-            blurred = work / f"{stream.stream_id}-blurred.mp4"
-            # 지금 승인된 블러 라벨로 렌더한 블러본만 쓴다 (승인 취소·재승인 뒤 이전 블러본 금지)
-            try:
-                rendered = assert_render_current(
-                    conn, setup.labeling, session_id, stream.stream_id, setup.privacy_policy()
-                )
-                setup.labeling.get_file(blurred_key(session_id, stream.stream_id), blurred)
-                # 받은 파일이 렌더 기록의 해시와 같은지 확인한다 (그 사이 바뀐 파일 금지)
-                check_fetched(blurred, rendered, session_id, stream.stream_id)
-                # 작업에 남길 렌더 해시 (블러가 바뀌면 이 값이 달라져 낡은 매체로 판정된다)
-                rhash = expected_render_hash(
-                    conn, session_id, stream.stream_id, setup.privacy_policy()
-                )
-            except RenderNotCurrentError as exc:
-                raise TaskError(str(exc)) from exc
-            marked = work / f"{stream.stream_id}-{assignee}.mp4"
-            burn_watermark(
-                blurred, marked, f"{assignee} {session_id}", opacity=media.watermark_opacity,
-                crf=media.watermark_crf, encoder_rate=media.encoder_rate,
-            )  # fmt: skip
-            # 내용 주소 키: 블러본이 바뀌면 키도 바뀌어 회수 대상 사본과 새 사본이 섞이지 않는다
-            vkey = labeling_media_key(session_id, assignee, stream.stream_id, rhash)
-            setup.labeling.put_file(vkey, marked, sha256_file(marked))
-            media_uri = setup.labeling.uri(vkey)
-
+            rhash, marked, vkey = run.media(stream)
             if use_cvat:
-                assert setup.cvat is not None
-                labels = pick(stream.stream_id, ("box_track", "keypoint_track"))
-                # 프로젝트 라벨: 온톨로지 객체 클래스 + 키포인트 골격
-                # (kp_<골격>, 손 골격은 손별 kp_hand21_<손>, cvat.cvat_label_name)
-                names = [*ontology.objects, *KEYPOINT_LABELS]
-                pid, schema = _cvat_project(
-                    setup.cvat, ontology_project(SPATIAL_PROJECT, ontology), names, setup.ui_theme()
-                )
-                cvat_user = cvat_user_id(setup.cvat, setup.cvat_policy().users, assignee)
-                # 이름은 회수 실행기가 지우기 전에 대조한다 (`CvatClient.task_owner`)
-                tid = setup.cvat.create_task(
-                    cvat_task_name(session_id, stream.stream_id, assignee), pid, marked
-                )
-                # 작업 라벨 작업은 계정 연결이 없어도 만든다 (배정 없이 관리자가 나눠 줄 수 있다)
-                if cvat_user is not None:
-                    setup.cvat.assign(tid, cvat_user)
-                # 워터마크 영상은 블러본의 PTS·해상도를 유지하므로
-                # 라벨 좌표를 그대로(UNIT_SCALE) 보낸다
-                setup.cvat.put_tracks(tid, to_cvat_tracks(labels, frame_times(marked), schema))
-                spatial = ("box_track", "keypoint_track")
-                out.append(
-                    _task(f"cvat:{tid}", ReviewTool.CVAT, tid, session_id, stream.stream_id,
-                          assignee, media_uri, spatial, now, mode, assignment_id, labels,
-                          render_hash=rhash)
-                )  # fmt: skip
-
-            if use_ls and stream.kind is StreamKind.BODYCAM:
-                assert setup.label_studio is not None
-                csv = work / "timeseries.csv"
-                write_timeseries_csv(
-                    session, _series(session, setup.raw, work, setup.pressure_prefixes()), csv,
-                    rate_hz=media.timeseries_rate_hz,
-                )  # fmt: skip
-                ckey = timeseries_key(session_id)
-                setup.labeling.put_file(ckey, csv, sha256_file(csv))
-                # 시간 라벨은 세션 단위 (스트림 None)
-                labels = pick(None, LS_KINDS)
-                ls = setup.label_studio
-                project_name = ontology_project(TEMPORAL_PROJECT, ontology)
-                project = ls.find_project(project_name)
-                if project:
-                    lpid = int(project["id"])
-                    ls.ensure_prelabel_settings(lpid)  # 예측 방식 이전에 만든 프로젝트
-                    # 이벤트 속성 입력란처럼 설정이 바뀌었으면 기존 프로젝트에도 반영한다
-                    ls.ensure_label_config(lpid, setup.ls_label_config(ontology))
-                else:
-                    lpid = ls.create_project(project_name, setup.ls_label_config(ontology))
-                # 라벨러 자격 증명으로 정책 유효 시간만큼 서명한 URL (원본 버킷 검사 포함)
-                data = label_studio_task_data(setup, session_id, assignee, vkey, ckey)
-                tid = ls.create_task(lpid, data, to_ls_results(labels))
-                out.append(_task(f"label_studio:{tid}", ReviewTool.LABEL_STUDIO, tid, session_id,
-                                 stream.stream_id, assignee, media_uri, LS_KINDS, now, mode,
-                                 assignment_id, labels, render_hash=rhash))  # fmt: skip
+                out.append(run.cvat(stream, marked, vkey, rhash))
+            if ls_here:
+                out.append(run.label_studio(stream, vkey, rhash))
     # 마지막 방어선: 일반 라벨러 작업의 매체 URI에 원본 버킷이 없어야 한다
-    check_stage_uris(ReviewStage.LABELING, [t.media_uri for t in out], raw_bucket)
+    check_stage_uris(ReviewStage.LABELING, [t.media_uri for t in out], setup.raw.bucket)
     for task in out:
         insert_review_task(conn, task)
+    for exposure in ai.exposures if ai is not None else []:
+        insert_ai_exposure(conn, exposure)
     return out
 
 

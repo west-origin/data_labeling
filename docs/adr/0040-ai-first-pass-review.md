@@ -1,6 +1,6 @@
 # ADR 0040: AI 1차 검수(로컬 VLM)는 참고용 판정만 남기고 사람 검수를 줄이지 않는다
 
-- 상태: 채택 (단계 구현 중. WP17.0~17.5 구현(17.3은 Spark 실측 대기), WP17.6~17.9는 [구현 계획 WP17](../ai-implementation-plan.md#wp17-ai-1차-검수로컬-vlm))
+- 상태: 채택 (단계 구현 중. WP17.0~17.6 구현(17.3은 Spark 실측 대기), WP17.7~17.9는 [구현 계획 WP17](../ai-implementation-plan.md#wp17-ai-1차-검수로컬-vlm))
 - 날짜: 2026-10-11
 - 관련: WP10(행동 VLM), WP6·WP12(검수 연동·운영), ADR 0010(상업 사용), ADR 0012(행동 2단 구조),
   ADR 0015·0019(검수된 라벨 보호, 시각 규약), ADR 0024(블러본만), ADR 0033(세대·과거 정책 복귀),
@@ -150,6 +150,28 @@
    `strict_context` 기본값은 **false**다 (결정): 맥락 변화로 낡을 수 있는 판정도 참고 표시와 검수
    증가에만 쓰여 해가 작고, true면 사람 검수가 진행될 때마다 재판정만 는다.
 
+#### 검수 화면 표시 구현 (WP17.6)
+
+- 실현 가능성: Label Studio 1.23.2에서 같은 TimeSeries에 라벨 컨트롤 두 개(`labels`, `ai_flags`),
+  예측 결과의 `readonly`(구간 목록에 잠금, Backspace로 지워지지 않음), 구간별 결정 Choice와 단축키,
+  작업 단위 TextArea 예측이 모두 동작하고, 기존 주석이 있는 프로젝트에 컨트롤을 더하는 설정 갱신은
+  통과하며 빼는 갱신은 400으로 거부됨을 확인했다 (`packages/review/tests/test_ls_ai_feasibility.py`,
+  실화면). 그래서 대안(같은 컨트롤의 `ai:` 접두사 라벨)은 쓰지 않는다.
+- Label Studio: 예측은 프리라벨 결과 그대로 + 작업 요약(`ai_summary`) + 보인 판정마다 readonly AI 구간
+  (라벨이 `span_cap_ms` 이하이면 라벨 구간 전체, 길면 근거 시각 ±`evidence_window_ms`/2)과 라벨 구간 메모
+  (`ai_note`: 판정·제안·이유·근거 시각 mm:ss.s·단축키). 결정은 구간을 고른 뒤 `review_ui.yaml ai.hotkeys`
+  (q 적용, w 기각). 화면에는 늘 "참고용 · 사람 검수 아님 · 표시 없는 구간도 모두 확인"을 둔다. 판정이
+  없거나 대조군·제외 집단이면 요약 "AI 1차 검수: 없음"만 더한다.
+- CVAT 1단계: 프로젝트를 바꾸지 않고 보인 판정만 근거 시각(스트림 PTS)에 떠 있는 프레임의 이슈로 단다
+  (위치는 그 시각의 박스, `cvat_issue_limit`). 2단계(트랙 속성)는 파일럿 뒤 결정 (F-AIR-06).
+- 노출: 작업 생성 트랜잭션에서 `ai_review_exposures`에 집단·키·보인/숨긴 판정을 고정한다. 따로 보이는
+  것은 틀림·의심·판단 불가 중 최소 확신도 이상이고 10분당 상한 안의 것이다. 맞음은 요약 개수로만 보이고
+  hidden에 남는다 (품질 지표가 쓴다).
+- 증가 쪽 사용: 계획(`dlp review plan`)이 증가 프로필 판정으로 우선순위 사유(ai_wrong 5.0·ai_suspect
+  2.5·ai_unsure 0.5)를 더하고 지적 라벨을 표본 묶음에서 뺀다. 배정 마무리는 표본 합격 뒤 늦게 온 지적의
+  보류 라벨을 `<배정>:ai-flagged` 재검수 배정으로 보낸다. 누락 후보(ai_missing)는 표시·우선순위 모두
+  후속이다 (F-AIR-08).
+
 ### 7. 운영 모드와 절차 (사용자 결정)
 
 - `review.yaml ai_review.mode`(WP17.6)의 **코드 기본값은 off**, 장비가 오기 전 **저장소 설정값은
@@ -158,8 +180,8 @@
 - 파일럿(WP17.9: 실세션 10개 이상, holdout 포함) 뒤 **required**로 바꾸는 절차:
   1. 파일럿 지표(지적 정밀도, holdout 기준 층별 ok 놓침률 상한, 검수 시간 비교)를 이 ADR 후속 절과
      인수인계 상태표에 기록한다.
-  2. `review.yaml ai_review.mode: required`, `max_wait_h: 24`로 바꾼다. 그러면 `dlp review plan`이 지금
-     버전 completed 실행이 없는 세션의 배정을 미룬다.
+  2. `review.yaml ai_review.mode: required`, `max_wait_h: 24`로 바꾼다. 그러면 `dlp review plan`이 허용
+     버전(`ai_review.versions`, 비면 지금 버전) completed 실행이 없는 세션의 배정을 미룬다 (종료 6).
   3. prelabeled 뒤 24시간이 지나면 `waived:timeout`을 남기고 진행한다. 운영자는
      `dlp aireview waive <세션> --reason`으로 즉시 건너뛸 수 있다. 서버가 없거나 고장이어도 검수가
      영구히 멈추지 않는다.

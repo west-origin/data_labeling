@@ -13,8 +13,8 @@
 
 공개 이름:
 - `Mode`: 화면 모드 (dark, light).
-- `ModeColors`·`ModesTheme`·`BrandTheme`·`LabelColors`·`LayoutTheme`·`UiTheme`:
-  review_ui.yaml 절별 모델.
+- `ModeColors`·`ModesTheme`·`BrandTheme`·`LabelColors`·`LayoutTheme`·`AiColors`·`AiHotkeys`·
+  `AiTheme`·`UiTheme`: review_ui.yaml 절별 모델 (`ai`: AI 1차 검수 판정 색·결정 단축키, WP17.6).
 - `TOKENS_FILE`: CVAT 테마 색 생성 파일 경로 (저장소 루트 기준).
 - `load_ui_theme`: 저장소 루트에서 테마를 읽어 검증한다.
 - `ls_label_color`·`ls_hotkey`: Label Studio 라벨 이름 → 색·단축키.
@@ -101,6 +101,30 @@ class LayoutTheme(Contract):
     channel_height: int = Field(ge=30, le=400)
 
 
+class AiColors(Contract):
+    """AI 1차 검수 판정 표시 색 (Label Studio `AI:…` 구간, WP17.6)."""
+
+    wrong: HexColor = Field(description="틀림")
+    suspect: HexColor = Field(description="의심")
+    unsure: HexColor = Field(description="판단 불가")
+    missing: HexColor = Field(description="누락 후보 (표시는 후속, F-AIR-08)")
+
+
+class AiHotkeys(Contract):
+    """AI 지적 결정 단축키 (구간을 고른 뒤 누른다, 한 글자 키, 조합키 금지)."""
+
+    apply: str = Field(min_length=1, description="제안 적용")
+    dismiss: str = Field(min_length=1, description="AI 지적 기각")
+
+
+class AiTheme(Contract):
+    """AI 1차 검수 표시 모양 (review_ui.yaml `ai`, ADR 0040). 모양만 정하고 판정·적용 규칙은
+    바꾸지 않는다."""
+
+    colors: AiColors
+    hotkeys: AiHotkeys
+
+
 class UiTheme(Contract):
     """검수 화면 테마 전체 (review_ui.yaml)."""
 
@@ -111,18 +135,29 @@ class UiTheme(Contract):
     hotkeys: dict[str, str] = Field(description="원시 동작 ID → 오른손 단축키 (왼손은 shift+키)")
     channels: dict[str, HexColor] = Field(description="시계열 채널 이름 → 선 색")
     layout: LayoutTheme
+    ai: AiTheme
 
     @model_validator(mode="after")
     def _check_hotkeys(self) -> UiTheme:
         """단축키는 비어 있지 않고 서로 달라야 하며, 조합키(+)를 직접 쓰지 않는다.
 
-        왼손 단축키는 `ls_hotkey`가 shift+를 붙여 만든다.
+        왼손 단축키는 `ls_hotkey`가 shift+를 붙여 만든다. AI 결정 단축키(`ai.hotkeys`)도 같은
+        규칙이고, 동사 단축키·그 shift 조합과 겹치면 안 된다 (한 화면에서 같은 키가 두 일을 하지
+        않게). Label Studio 내장 단축키와의 충돌은 고정 버전 실화면에서 확인한다
+        (`packages/review/tests/test_ls_ai_feasibility.py`).
         """
         keys = list(self.hotkeys.values())
         if any(not k or "+" in k for k in keys):
             raise ValueError("hotkeys: 키는 비어 있지 않은 한 글자 키여야 합니다 (조합키 + 금지)")
         if len(keys) != len(set(keys)):
             raise ValueError("hotkeys: 두 동사에 같은 키를 줄 수 없습니다")
+        ai_keys = [self.ai.hotkeys.apply, self.ai.hotkeys.dismiss]
+        if any("+" in k for k in ai_keys) or ai_keys[0] == ai_keys[1]:
+            raise ValueError("ai.hotkeys: 서로 다른 한 글자 키여야 합니다 (조합키 + 금지)")
+        taken = {*keys, *(f"shift+{k}" for k in keys)}
+        clash = sorted(k for k in ai_keys if k in taken or k.lower() in taken)
+        if clash:
+            raise ValueError(f"ai.hotkeys: 동사 단축키와 겹칩니다 {clash}")
         return self
 
     def mode(self, name: Mode) -> ModeColors:
@@ -269,6 +304,26 @@ def ls_style(theme: UiTheme, logo_uri: str) -> str:
         "overflow:hidden;text-overflow:ellipsis}"
         ".dlp-event,.dlp-hand{margin-top:10px;padding:10px 12px;border-radius:10px;"
         "border:1px solid var(--color-neutral-border);background:var(--color-neutral-surface)}"
+        # AI 1차 검수 (WP17.6): 참고용 칸은 왼쪽 띠로 구별하고, 판정 구간 범례는 누를 수 없게 해
+        # 검수자가 AI 라벨로 구간을 그리지 않게 한다. AI 글(요약·메모)의 지우기 단추는 숨긴다
+        # (지워도 수집에 영향은 없다)
+        ".dlp-ai,.dlp-ai-region{margin-top:10px;padding:10px 12px;border-radius:10px;"
+        "border:1px solid var(--color-neutral-border);background:var(--color-neutral-surface);"
+        f"border-left:4px solid {theme.ai.colors.suspect}}}"
+        ".dlp-ai .lsf-label{pointer-events:none;cursor:default}"
+        ".dlp-ai [data-testid=htx-textbox-actions],"
+        ".dlp-ai-region [data-testid=htx-textbox-actions]{display:none}"
+        # AI 글 입력란은 숨기고(검수자가 쓸 칸이 아니다, 써도 수집하지 않는다) 비었으면 안내만
+        # 보인다. 선택자는 Label Studio 1.23 DOM 기준 (업그레이드 때 확인 목록, change-guide)
+        ".dlp-ai [data-testid=textarea-form],"
+        ".dlp-ai-region [data-testid=textarea-form]{display:none}"
+        ".dlp-ai [data-testid=textarea-control]:has([data-testid=textarea-form])::before,"
+        ".dlp-ai-region [data-testid=textarea-control]:has([data-testid=textarea-form])::before"
+        "{display:block;padding:6px 0;color:var(--color-neutral-content-subtle)}"
+        ".dlp-ai [data-testid=textarea-control]:has([data-testid=textarea-form])::before"
+        "{content:'AI 1차 검수: 없음'}"
+        ".dlp-ai-region [data-testid=textarea-control]:has([data-testid=textarea-form])::before"
+        "{content:'이 구간에는 AI 지적이 없다'}"
     )
 
 

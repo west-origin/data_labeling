@@ -13,7 +13,8 @@ flowchart LR
     C --> D[권한자의 원본 전수 검수]
     D --> E[승인 / 블러 렌더]
     E --> F[손·객체·도구 초안]
-    F --> G[일반 검수자의 수정 / 수집]
+    F --> F2[AI 1차 검수: 블러본, 참고용]
+    F2 --> G[일반 검수자의 수정 / 수집]
     G --> H[검수 완료 판정]
     H --> I[데이터셋 버전 / 내보내기]
     I -. 학습 인터페이스 연결 .-> J[평가 / 모델 배포]
@@ -33,7 +34,7 @@ flowchart LR
 | 전신·깊이·3D 관계 | 모델/규칙 경로 일부 구현, 합성 테스트 | 깊이 모델은 이번 검사에서 생략; 실제 공간 보정과 품질 미입증 |
 | 사람 검수 | CVAT·Label Studio 수집, 이력, 완료 판정 | 실제 검수 사용성; 고객별 권한 체계 |
 | 행동 분류 | 경계 후보와 외부 VLM 어댑터(공통 전송 `dlp_models.vlm`, 4xx는 종료 5), 모의 테스트 | 실제 VLM 서버; 배포된 행동 모델을 읽는 경로 |
-| AI 1차 검수 (WP17) | 결정(ADR 0040)·정책·후보 모델 라이선스 확인, 판정 핵심(계획·프롬프트·응답 재검사·제안·합성 오류 탐지 stub), 서버 점검·처리량 벤치·작업량 추정(`dlp aireview probe\|bench\|estimate`), 추가 전용 AI 표 5개·저장소(Alembic 0019), 실행기·블러본 경계·엔드포인트 묶음·차단기(`dlp aireview run\|status\|show\|waive`, `--pending`). 실제 서버 없이 가짜 서버·stub으로만 검사 | 검수 화면 표시·수집 적용·품질 지표(WP17.6~17.8), DGX Spark 실측과 대수 결정([VLM 서버](vlm-server.md)) |
+| AI 1차 검수 (WP17) | 결정(ADR 0040)·정책·후보 모델 라이선스 확인, 판정 핵심(계획·프롬프트·응답 재검사·제안·합성 오류 탐지 stub), 서버 점검·처리량 벤치·작업량 추정(`dlp aireview probe\|bench\|estimate`), 추가 전용 AI 표 5개·저장소(Alembic 0019), 실행기·블러본 경계·엔드포인트 묶음·차단기(`dlp aireview run\|status\|show\|waive`, `--pending`), 검수 화면 표시(Label Studio AI 구간·메모·요약·결정 단축키, CVAT 이슈, 노출 기록·대조군 0.1, `review.yaml ai_review` 저장소 값 advisory), 우선순위·표본 제외·표본 합격 뒤 재검수 보호, required 배정 게이트(`dlp review plan` 종료 6). 실제 서버 없이 가짜 서버·stub으로, 화면은 Label Studio 1.23.2·CVAT v2.78.0 실화면으로 검사 | 제안 적용·품질 지표(WP17.7~17.8), DGX Spark 실측과 대수 결정([VLM 서버](vlm-server.md)), 파일럿 뒤 required 전환 |
 | 학습·배포 | 예제 추출·MLflow·평가 게이트·배포 흐름 | 학습기는 `oracle-stub`만 등록; 사람 수정 후 성능 향상 미입증 |
 | 내보내기 | COCO·구간 JSON·LeRobot 경로, 게시 전 재검사 | 이번 LeRobot 격리 환경 검사 미실행; 고객 전달 샘플 |
 | SaaS 운영 | 개발 서비스·감사·보관 명령 | 인증·테넌트 격리·영속 작업 큐·복구·부하 검증 |
@@ -53,7 +54,9 @@ flowchart LR
    Label Studio 작업의 서명 URL은 `review.yaml media.signed_url_ttl_s`(기본 7일) 뒤 만료되므로
    `dlp review refresh-urls`도 cron으로 하루 한 번 돌린다 (열린 작업만 다시 서명, 실패하면 종료 코드 1).
 2. 남은 블러 검수 → `dlp privacy approve` → `dlp privacy render`.
-3. 출력된 배정마다 `dlp review assign <배정>`, 배정 없는 작업은
+3. AI 1차 검수를 쓰면(`review.yaml ai_review.mode`가 off가 아님) 먼저 `dlp aireview run <세션>`: 이전
+   판정은 렌더 해시가 달라 새 작업에 보이지 않는다 (ADR 0040 I10, 수집 출력의 안내에도 들어간다).
+   그다음 출력된 배정마다 `dlp review assign <배정>`, 배정 없는 작업은
    `dlp review create <세션> --stage labeling --assignee <담당자> --stream <스트림> --tool <도구>`.
    출력을 놓쳤으면 `dlp review verify <세션>`이 다시 만들 배정·직접 작업 명령을 보인다.
 4. 검수·수집 → 배정 완료 → `dlp review verify <세션>`.

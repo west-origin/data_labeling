@@ -139,3 +139,18 @@ channels:
 layout:
   video_height: 360
   channel_height: 70
+
+# AI 1차 검수 표시 (Label Studio, WP17.6·ADR 0040). 판정 구간(AI:틀림·AI:의심·AI:판단불가) 색과,
+# 구간을 고른 뒤 누르는 결정 단축키(제안 적용·AI 지적 기각). 단축키는 한 글자 키이고 위 동사 단축키와
+# 그 shift 조합과 겹치면 로드 오류다. Label Studio 내장 단축키와 겹치지 않는지는 고정 버전(1.23.2)
+# 실화면에서 확인했다 (packages/review/tests/test_ls_ai_feasibility.py). 모양만 바꾸며 AI 컨트롤
+# 이름·라벨 값은 그대로다 (컨트롤은 review.yaml ai_review.mode와 무관하게 늘 설정에 있다).
+ai:
+  colors:
+    wrong: "#ff4d5e"
+    suspect: "#ffc53d"
+    unsure: "#8b93a3"
+    missing: "#b197fc"   # 누락 후보 (표시는 후속, F-AIR-08)
+  hotkeys:
+    apply: q
+    dismiss: w

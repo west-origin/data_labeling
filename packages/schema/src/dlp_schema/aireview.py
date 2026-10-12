@@ -469,8 +469,11 @@ class AiExposure(Contract):
 
     # task_key: 검수 작업. arm / arm_key: 노출 집단과 그 판정에 쓴 루트 키.
     # versions: 허용한 판정 버전. render_hash: 작업 매체의 렌더 해시.
-    # coverage: 작업 대상 라벨 중 유효한 판정이 있는 비율.
-    # shown: 화면에 보인 판정 {라벨 ID: 단위 ID}. hidden: 대조군·표시 상한으로 숨긴 판정.
+    # coverage: 작업 대상 라벨(검수 전 자동 라벨) 중 유효한 판정이 있는 비율.
+    # shown: 화면에 따로 보인 판정 {라벨 ID: 단위 ID} (Label Studio AI 구간·메모, CVAT 이슈).
+    # hidden: 작업 라벨의 유효한 판정 중 따로 보이지 않은 것 — 대조군·제외 집단의 판정 전부,
+    #   shown 집단의 맞음(ok, 요약 개수로만 보인다)·최소 확신도 미만·표시 상한 초과
+    #   (dlp_review.ai_display).
 
     task_key: Identifier
     session_id: Identifier

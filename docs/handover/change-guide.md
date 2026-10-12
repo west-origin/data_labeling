@@ -21,6 +21,7 @@ DB·외부 도구·내보내기 동작을 바꾸면 그 경로의 서비스/격�
 | 검수 화면 테마 | `config/review_ui.yaml`, `review/ui_theme.py`, `services/review-theme/`, `cvat.sh` | 색·로고·단축키·모드 전환만. 라벨 이름·왕복 불변. `packages/review/tests/test_ui_theme.py`, `make contracts`(생성 파일 일치). CVAT·Label Studio 버전을 올리면 두 모드 화면을 열어 확인 (ADR 0038) |
 | 원본 접근/보관 | `cli/raw_access.py`, `ops`, 버킷 정책 | 감사 우회·CVAT 사본 보관. `tests/test_raw_access_audited.py`, `tests/test_raw_access_db.py`, ops 테스트 |
 | AI 1차 검수 실행 | `aireview/runner.py`, `backend.py`(`EndpointPool`), `media.py`, `status.py`, `cli/aireview_run_cmds.py`, `aireview.yaml` | 블러본 경계(I1)·판정 버전·재개·종료 코드. `packages/aireview/tests`(`test_runner*.py`, `test_pool.py`, `test_status.py`, `test_blurred_only.py`), `packages/cli/tests/test_aireview_run_cmds.py`, `tests/test_aireview_boundaries.py`, `tests/test_aireview_isolation.py`, services `test_runner_pg.py`·`test_aireview_tables.py`. 판정 버전 해시에서 빠지는 절(`selection`·`kinds`·`pending`·`server`·`gate`·`estimate`) 밖을 바꾸면 모든 단위를 다시 판정한다 (ADR 0040 4.3) |
+| AI 1차 검수 표시 | `review/ai_display.py`, `review/labelstudio.py`(AI 컨트롤), `review/tasks.py`(노출 기록), `review/ops/runner.py`·`results.py`(우선순위·표본 제외·마무리 보호), `cli/review_config.py`·`review_cmds.py`(설정·required 게이트), `review.yaml ai_review`, `review_ui.yaml ai` | 표시는 지금 렌더의 판정만(I10), 증가(표본 제외·보호·우선순위)는 렌더 무관(I9), AI 컨트롤 상시, 판정 없으면 예측·데이터 불변. `packages/review/tests/test_ai_display.py`, `packages/cli/tests/test_review_ai_cmds.py`, services `test_ls_ai_feasibility.py`·`test_ai_display_flow.py`. Label Studio·CVAT 버전을 올리면 아래 "AI 1차 검수 표시" 확인 목록 |
 | 의존성·환경 | `pyproject.toml`, `uv.lock`, `services`, CI | 모듈 import 외에 실제 서버/DB 실행·의존성 감사. `make check`, 관련 서비스 검사 |
 
 계약·DB 변경에는 ADR과 필요한 이관을 함께 남긴다. 생성된 `schemas/`는 직접 편집하지 않는다.
@@ -83,6 +84,34 @@ DB·외부 도구·내보내기 동작을 바꾸면 그 경로의 서비스/격�
   뒤에만 읽는다. `--dry-run`도 손 상태 대상이 있으면 읽는다 (단위 키에 센서 해시가 든다).
 - DB 연결: 세션 하나가 최대 2개(실행 잠금 + 기록자)라 `--parallel-sessions K`면 연결 풀을
   `2K+1`(+넘침 10)로 잡는다. K는 PostgreSQL `max_connections`의 절반보다 작게 둔다.
+
+## AI 1차 검수 표시 (WP17.6, ADR 0040)
+
+- 설정: `review.yaml ai_review.mode`가 off면 AI 표를 읽지 않는다(`ReviewSetup.ai`가 None). 허용 판정 버전은
+  `ai_review.versions`, 비면 aireview.yaml 지금 버전이고 CLI(`review_config.ai_display_config`)가 계산해
+  넘긴다. 정책·모델을 바꿔 재판정하는 동안 이전 버전도 보이려면 두 버전을 함께 적는다. 웹훅 서버
+  (`dlp review serve`)는 띄울 때 이 설정을 읽으므로 두 정책 파일을 바꾸면 다시 띄운다.
+- Label Studio 설정의 AI 컨트롤(`ai_flags`·`ai_summary`·`ai_note`·`ai_decision`)은 모드와 무관하게 **늘**
+  둔다. AI 영역이 든 주석이 있는 프로젝트에서 컨트롤을 빼면 설정 갱신이 400으로 거부되고 그 프로젝트의
+  시간 작업 생성이 모두 멈춘다 (`test_ls_ai_feasibility.py`가 재현한다). 데이터 변수(`$…`)를 새로 쓰지
+  않는다. 컨트롤 이름·라벨 값을 바꾸려면 새 프로젝트(온톨로지 프로젝트 이름)로 한다.
+- 수집은 라벨 컨트롤(`labels`) 결과만 라벨로 읽고(F-AIR-02), 결정은 `ls_ai_decisions`로만 읽는다 (적용은
+  WP17.7). 검수자가 AI 결과를 지우거나 AI 라벨로 구간을 그려도 수집 결과는 그대로다.
+- 노출 기록(`ai_review_exposures`)은 작업 행과 같은 트랜잭션이라 생성이 롤백되면 함께 없어진다. 도구에
+  남은 예측·이슈는 고아 작업 정리(`dlp review revoke --orphans`) 범위다. 이미 만든 작업에는 나중에 판정을
+  붙이지 않는다 (노출 기록과 어긋나므로). 블러가 바뀌면 회수 뒤 `dlp aireview run <세션>`을 먼저 돌린다.
+- required 게이트: `dlp review plan`이 종료 6으로 미루면 `dlp aireview run <세션>`을 돌리거나 서버 장애면
+  `dlp aireview waive <세션> --reason …`. prelabeled 뒤 `max_wait_h`가 지나면 계획이 waived:timeout을 남기고
+  진행한다. 블러 계획(`--privacy`)은 막지 않는다.
+- Label Studio(지금 1.23.2)를 올릴 때 확인할 것: 같은 TimeSeries에 라벨 컨트롤 두 개, 예측 결과의
+  `readonly`(구간 목록에 잠금 표시, Backspace로 지워지지 않음), 구간별 결정 Choice의 단축키(q·w, 동사
+  단축키 1~9·shift와 겹치지 않음), 작업 단위 TextArea 예측, 테마 CSS의 선택자(`data-testid=textarea-form`·
+  `htx-textbox-actions`, `.lsf-label`). Label Studio는 단축키가 없는 라벨에 남는 글자 키를 스스로 붙이는데
+  AI 결정 키(q·w)는 그 후보에서 빠진다 (동사가 아닌 라벨의 자동 키가 WP17.6 전과 달라질 수 있다).
+  services 테스트 두 파일과 실화면(구간 고르기 → q·w → 메모·요약 가독성, 두 모드)을 확인한다.
+- CVAT(지금 v2.78.0)를 올릴 때: 이슈 API(`/api/issues`, 메시지는 `/api/comments`)와 테마 CSS의 이슈
+  선택자(`cvat-objects-sidebar-issue-item`, `cvat-issue-dialog-*`, `cvat-hidden-issue-label`). CVAT 테마
+  CSS를 바꾸면 `make cvat-up`으로 테마 이미지를 다시 빌드해야 화면에 반영된다.
 
 ## 웹훅과 승인 경계
 

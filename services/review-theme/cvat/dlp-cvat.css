@@ -338,3 +338,43 @@
 
 /* 스크롤 막대 */
 :root[data-dlp-mode] * { scrollbar-color: var(--dlp-line) transparent; }
+
+/* 이슈: 블러 검수 우선 구간과 AI 1차 검수 지적(WP17.6, 메시지 "[AI 틀림·참고] …")을 이슈로 단다. 오른쪽
+   Issues 목록 카드와 캔버스의 이슈 대화 상자 글자가 바탕에 묻히지 않게 두 모드 색을 쓴다. */
+:root[data-dlp-mode] .cvat-objects-sidebar-issue-item {
+  background: var(--dlp-panel2) !important;
+  border-color: var(--dlp-line) !important;
+}
+:root[data-dlp-mode] .cvat-objects-sidebar-issue-item,
+:root[data-dlp-mode] .cvat-objects-sidebar-issue-item * {
+  color: var(--dlp-text) !important;
+}
+:root[data-dlp-mode] .cvat-objects-sidebar-issues-list-header,
+:root[data-dlp-mode] .cvat-objects-sidebar-issues-toolbar {
+  background: var(--dlp-panel) !important;
+  color: var(--dlp-text) !important;
+}
+:root[data-dlp-mode] .cvat-objects-sidebar-issues-toolbar .anticon {
+  color: var(--dlp-text) !important;
+}
+:root[data-dlp-mode] .cvat-issue-dialog {
+  background: var(--dlp-panel) !important;
+  border: 1px solid var(--dlp-line);
+}
+:root[data-dlp-mode] .cvat-issue-dialog-header,
+:root[data-dlp-mode] .cvat-issue-dialog-header *,
+:root[data-dlp-mode] .cvat-issue-dialog-chat,
+:root[data-dlp-mode] .cvat-issue-dialog-chat * {
+  color: var(--dlp-text) !important;
+}
+:root[data-dlp-mode] .cvat-issue-dialog-chat {
+  background: var(--dlp-panel2) !important;
+}
+:root[data-dlp-mode] .cvat-issue-dialog-chat * {
+  background: transparent !important;
+}
+:root[data-dlp-mode] .cvat-hidden-issue-label {
+  background: var(--dlp-panel) !important;
+  color: var(--dlp-text) !important;
+  border-color: var(--dlp-warn) !important;
+}
