@@ -223,6 +223,38 @@ def test_unreported_cache_hits_are_unknown_not_zero(engine: sa.Engine, policy: O
     assert mixed.counts["cache_unreported_units"] == 4
 
 
+def test_reported_zero_cache_hits_count_as_miss(engine: sa.Engine, policy: OpsPolicy) -> None:
+    """서버가 보고한 `cached_tokens=0`은 모름이 아니라 적중 0이다 (분모에 남는다).
+
+    `None`(보고 없음)만 모름으로 빼야 한다. 0을 거짓으로 보아 함께 빼면 캐시가 전혀 맞지 않는
+    서버가 nan(모름)으로 숨어 경고가 사라진다.
+    장면: s002에 그 주 판정 단위 3개, 프롬프트 1,000토큰씩. 둘은 적중 0을 보고했고 하나는 보고 없음.
+    정답: 적중률 0/2,000 = 0.0(nan 아님), 미보고 단위 1개(0을 보고한 둘은 세지 않는다),
+    경고 "캐시 적중 0.0%"(기준 `ops.yaml alerts.ai_cache_hit_min` 30%보다 낮음)가 나온다.
+    """
+    run = "air-run-" + "7" * 24
+    units = [
+        make_ai_unit(
+            f"air-{i:024x}", [make_ai_verdict(f"s002-a{i}", "ok")], run_id=run,
+            session_id="s002", created_at=IN, prompt_tokens=1000,
+            cached_tokens=0 if i < 2 else None,
+        )
+        for i in range(3)
+    ]  # fmt: skip
+    with engine.begin() as conn:
+        _session(conn, "s002", PrivacyState.APPROVED)
+        insert_ai_run(conn, make_ai_run("s002", run, created_at=IN))
+        insert_ai_units(conn, units)
+    start, end = week_range(WEEK)
+    with engine.connect() as conn:
+        ai = ai_weekly(conn, start, end, AI)
+    assert ai is not None and not math.isnan(ai.cache_hit_ratio)
+    assert ai.cache_hit_ratio == 0.0  # 0/2000 (보고 없는 한 단위만 제외)
+    assert ai.counts["units"] == 3 and ai.counts["cache_unreported_units"] == 1
+    cache = [w for w in alerts([WeeklyMetrics(WEEK, ai=ai)], policy) if "캐시" in w]
+    assert len(cache) == 1 and "캐시 적중 0.0%" in cache[0]
+
+
 def test_ai_alerts_and_markdown(policy: OpsPolicy) -> None:
     """`ops.yaml alerts.ai_*`: ok 놓침 상한 > 0.05, 백로그 > 328시간, fallback > 0.05, 캐시 < 0.3
     이면 경고 (마지막 주만). 자료가 없는(NaN) 지표는 경고하지 않는다. Markdown에 AI 절이 붙는다."""
