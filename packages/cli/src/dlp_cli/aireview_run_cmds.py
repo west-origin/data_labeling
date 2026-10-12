@@ -83,6 +83,7 @@ from dlp_aireview.backend import (
 from dlp_aireview.media import MediaBoundaryError
 from dlp_aireview.policy import AiReviewPolicy, load_policy
 from dlp_aireview.runner import (
+    InputError,
     RunOptions,
     RunSummary,
     SessionNotReadyError,
@@ -300,11 +301,15 @@ def _print_summary(s: RunSummary) -> None:
     print(json.dumps(s.to_json(), ensure_ascii=False))
 
 
-def _run_one(sid: str, ctx: _RunCtx) -> int:
-    """세션 하나 (모듈 docstring의 종료 코드). 부작용: AI 표 기록, VLM 호출, 라벨링 버킷 읽기.
+def _run_one(sid: str, ctx: _RunCtx) -> tuple[int, bool]:
+    """세션 하나 (모듈 docstring의 종료 코드)와 실제로 실행했는가 (`--limit`에 세는가).
 
-    예상하지 못한 오류(버그·DB 오류)는 알리고 1로 센다 (실행기는 aborted:error를 남겼다). 다음
-    세션은 계속한다. Ctrl-C(KeyboardInterrupt)는 올린다.
+    부작용: AI 표 기록, VLM 호출, 라벨링 버킷 읽기.
+    예상하지 못한 오류(버그·DB 오류)는 알리고 1로 센다 (실행 중이면 실행기가 aborted:error를
+    남겼다). 다음 세션은 계속한다. 실행 기록 전 입력 단계에서 난 오류(`InputError`: 손상된 장갑
+    Parquet·블러본, 저장소 오류)도 1이지만 실행하지 않은 것으로 센다: 기록이 없어 `--pending`의 실패
+    정렬이 이 세션을 뒤로 보내지 못하므로, 세면 늘 실패하는 세션이 `--limit` 자리를 매번 차지한다.
+    전제 실패(6)·처리 중(7)도 실행하지 않은 것이다. Ctrl-C(KeyboardInterrupt)는 올린다.
     """
     try:
         summary = run_from_db(
@@ -314,25 +319,29 @@ def _run_one(sid: str, ctx: _RunCtx) -> int:
         )  # fmt: skip
     except NoResultFound:
         print(f"[전제 실패] {sid}: 세션이 없습니다")
-        return SESSION
+        return SESSION, False
     except SessionNotReadyError as exc:
         print(f"[전제 실패] {exc}")
-        return SESSION
+        return SESSION, False
     except RenderNotCurrentError as exc:
         print(f"[블러본 게이트] {sid}: {exc}")
-        return SESSION
+        return SESSION, False
     except MediaBoundaryError as exc:
         print(f"[설정 오류] {exc}")
-        return CONFIG
+        return CONFIG, True
+    except InputError as exc:
+        print(f"[입력 오류] {sid}: 판정 입력을 만들지 못했습니다 (아무것도 쓰지 않음): {exc}")
+        traceback.print_exc(file=sys.stderr)
+        return ERROR, False
     except Exception as exc:
         print(f"[실행 오류] {sid}: {type(exc).__name__}: {exc}")
         traceback.print_exc(file=sys.stderr)
-        return ERROR
+        return ERROR, True
     if summary is None:
         print(f"[처리 중] {sid}: 다른 실행기가 이 세션을 처리하고 있습니다")
-        return LOCKED
+        return LOCKED, False
     _print_summary(summary)
-    return summary.exit_code
+    return summary.exit_code, True
 
 
 def _worst(codes: Sequence[int], pending: bool) -> int:
@@ -352,12 +361,14 @@ def _stops(code: int, backend: JudgeBackend) -> bool:
 class _Picker:
     """돌릴 세션을 차례로 내준다 (여러 작업 스레드가 함께 쓴다).
 
-    - `limit`(`--pending --limit`): 실제로 실행한 세션(6·7이 아닌 것)과 실행 중인 세션의 합이
-      이만큼이면 더 내주지 않는다. 실행 중인 세션이 6·7로 끝나 자리가 나면 다음 세션을 내준다.
+    - `limit`(`--pending --limit`): 실제로 실행한 세션(6·7·실행 기록 전 입력 오류가 아닌 것)과
+      실행 중인 세션의 합이 이만큼이면 더 내주지 않는다. 실행 중인 세션이 실행하지 않은 것으로 끝나
+      자리가 나면 다음 세션을 내준다.
     - 멈춤: `_stops`인 코드가 나오거나 `halt`(Ctrl-C)면 남은 세션을 내주지 않는다.
 
     Attributes:
-        left: 아직 내주지 않은 세션. ran: 실행한 세션. not_run: 6·7로 끝난 세션.
+        left: 아직 내주지 않은 세션. ran: 실행한 세션. not_run: 실행하지 않고 끝난 세션
+            (6·7, 실행 기록 전 입력 오류).
         codes: 끝난 세션의 종료 코드 (끝난 순서). stopped: 멈췄는가.
     """
 
@@ -385,12 +396,12 @@ class _Picker:
                     return None
                 self._cond.wait()
 
-    def done(self, sid: str, code: int, stop: bool) -> None:
-        """세션 하나가 끝났다."""
+    def done(self, sid: str, code: int, stop: bool, ran: bool = True) -> None:
+        """세션 하나가 끝났다. ran: 실제로 실행했는가 (아니면 `--limit`에 세지 않는다)."""
         with self._cond:
             self._running -= 1
             self.codes.append(code)
-            (self.not_run if code in _NOT_RUN else self.ran).append(sid)
+            (self.ran if ran and code not in _NOT_RUN else self.not_run).append(sid)
             self.stopped = self.stopped or stop
             self._cond.notify_all()
 
@@ -404,11 +415,11 @@ class _Picker:
 def _work(picker: _Picker, ctx: _RunCtx) -> None:
     """작업 스레드 하나: 세션을 받아 끝날 때까지 돌린다."""
     while (sid := picker.next()) is not None:
-        code = ERROR
+        code, ran = ERROR, True
         try:
-            code = _run_one(sid, ctx)
+            code, ran = _run_one(sid, ctx)
         finally:
-            picker.done(sid, code, _stops(code, ctx.backend))
+            picker.done(sid, code, _stops(code, ctx.backend), ran)
 
 
 def _run_all(

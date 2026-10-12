@@ -26,6 +26,7 @@ import pytest
 import sqlalchemy
 
 from dlp_aireview import backend as backend_module
+from dlp_aireview import runner as runner_module
 from dlp_aireview.backend import JudgeReply, JudgeRequest, OpenAICompatibleJudge
 from dlp_aireview.media import frames_for as media_frames_for
 from dlp_aireview.policy import AiReviewPolicy, load_policy
@@ -397,6 +398,33 @@ def test_pending_limit_counts_only_sessions_that_ran(
     assert pending_line(out) == "[pending] 판정할 세션 2개 (실행 상한 1개): a-old, b-new"
     assert "[블러본 게이트] a-old" in out and "미룬 세션" not in out
     assert world.units("a-old") == 0 and world.units("b-new") > 0
+
+
+def test_pending_limit_skips_session_whose_input_always_fails(
+    world: World, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """실행 기록 전(입력 단계) 예외가 늘 나는 세션은 --limit 자리를 차지하지 않는다.
+
+    정답 근거: 손상된 장갑 Parquet처럼 load_input이 매번 실패하면 실행 기록·이벤트가 없어
+    --pending의 실패 정렬이 뒤로 보내지 못한다. 그 세션을 세면 `--limit 1` cron이 매번 같은 세션만
+    시도하고 뒤 세션은 영영 판정되지 않았다. 종료 코드는 여전히 1(오류)이다.
+    """
+    world.add("a-bad")
+    world.add("b-good")
+    original = runner_module.load_input
+
+    def broken(engine: Any, labeling: Any, session_id: str, *args: Any, **kw: Any) -> Any:
+        if session_id == "a-bad":
+            raise ValueError("손상된 장갑 Parquet")
+        return original(engine, labeling, session_id, *args, **kw)
+
+    monkeypatch.setattr(runner_module, "load_input", broken)
+    with FakeOpenAIServer(MODEL) as server:
+        run = ["aireview", "run", "--pending", "--limit", "1", "--vlm-url", server.url]
+        assert main([*run, *world.args]) == 1
+    out = capsys.readouterr().out
+    assert "[입력 오류] a-bad" in out and "미룬 세션" not in out
+    assert world.units("a-bad") == 0 and world.units("b-good") > 0
 
 
 def test_unit_outage_or_error_in_one_session_does_not_block_others(

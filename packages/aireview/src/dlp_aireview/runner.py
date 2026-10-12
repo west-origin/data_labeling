@@ -62,6 +62,7 @@ from typing import Any, Literal, Protocol
 import numpy as np
 import sqlalchemy as sa
 from numpy.typing import NDArray
+from sqlalchemy.exc import NoResultFound
 
 from dlp_aireview.backend import (
     AllEndpointsDownError,
@@ -72,7 +73,13 @@ from dlp_aireview.backend import (
     JudgeRequest,
 )
 from dlp_aireview.judge import JudgedUnit, judge_unit
-from dlp_aireview.media import BlurredFrame, frames_for, open_blurred, render_hashes_now
+from dlp_aireview.media import (
+    BlurredFrame,
+    MediaBoundaryError,
+    frames_for,
+    open_blurred,
+    render_hashes_now,
+)
 from dlp_aireview.overlay import render_unit_images
 from dlp_aireview.plan import (
     PlannedUnit,
@@ -139,6 +146,15 @@ _POLL_S = 0.1
 
 class SessionNotReadyError(RuntimeError):
     """세션 전제 실패: 사용 중지, 승인 보류, 프라이버시 승인 전, 장갑 Parquet 없음 (종료 6)."""
+
+
+class InputError(RuntimeError):
+    """판정 입력을 만들다 예상하지 못한 오류가 났다 (실행 기록 전: 아무것도 쓰지 않았다).
+
+    손상된 장갑 Parquet·블러본, 저장소 오류처럼 매번 같은 오류가 날 수 있다. 실행 기록·이벤트가 없어
+    `--pending`의 실패 정렬이 작동하지 않으므로, CLI는 이 세션을 `--limit` 자리로 세지 않는다
+    (늘 실패하는 세션이 뒤 세션을 막지 않게). 원래 예외는 `__cause__`에 있다.
+    """
 
 
 # ---------------------------------------------------------------- 입력·설정·결과
@@ -1155,6 +1171,15 @@ def load_input(
     )  # fmt: skip
 
 
+# 입력 단계의 예상한 거부 (CLI가 종료 코드로 나눈다). 그 밖의 예외는 `InputError`로 감싼다
+_EXPECTED_INPUT_ERRORS = (
+    SessionNotReadyError,
+    MediaBoundaryError,
+    RenderNotCurrentError,
+    NoResultFound,
+)
+
+
 def run_from_db(
     engine: sa.Engine,
     labeling: ObjectStore,
@@ -1183,17 +1208,24 @@ def run_from_db(
 
     Raises:
         SessionNotReadyError, MediaBoundaryError, RenderNotCurrentError: `load_input`과 같다.
+        sqlalchemy.exc.NoResultFound: 세션이 없을 때.
+        InputError: 입력을 만들다 그 밖의 예외가 났다 (실행 기록 전).
     """
     opts = options or RunOptions()
     with session_lock(engine, session_id) as locked:
         if not locked:
             return None
         with tempfile.TemporaryDirectory(prefix="aireview-") as tmp:
-            inp = load_input(
-                engine, labeling, session_id, policy, privacy_policy, Path(tmp),
-                raw_bucket=raw_bucket, groups=opts.groups, flagged_for=flagged_for,
-                sensor_for=sensor_for,
-            )  # fmt: skip
+            try:
+                inp = load_input(
+                    engine, labeling, session_id, policy, privacy_policy, Path(tmp),
+                    raw_bucket=raw_bucket, groups=opts.groups, flagged_for=flagged_for,
+                    sensor_for=sensor_for,
+                )  # fmt: skip
+            except _EXPECTED_INPUT_ERRORS:
+                raise
+            except Exception as exc:
+                raise InputError(f"{type(exc).__name__}: {exc}") from exc
             streams = list(inp.media)
 
             def check() -> Mapping[str, str]:
