@@ -20,6 +20,7 @@ import sqlalchemy
 from sqlalchemy import event
 
 from dlp_aireview.policy import AiReviewPolicy
+from dlp_aireview.policy import load_policy as load_aireview_policy
 from dlp_aireview.testing import FakeOpenAIServer
 from dlp_cli import aireview_eval_cmds
 from dlp_cli.main import main
@@ -145,7 +146,7 @@ def test_eval_gate_blocks_only_when_policy_says_so(
 ) -> None:
     """`gate.block: true`면 게이트 실패가 종료 1이다 (파일럿 뒤 결정을 바꿀 때의 동작)."""
     args, _ = world
-    original = aireview_eval_cmds.load_policy
+    original = load_aireview_policy
 
     def blocking(root: Path) -> AiReviewPolicy:
         data = original(root).model_dump()

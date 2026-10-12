@@ -249,17 +249,14 @@ def test_relabel_of_a_retracted_label_does_not_revive_it() -> None:
     """F-AIR-13 재현 (기존 수집 경로, AI와 무관). 작업을 보낸 뒤 다른 단계가 사이 구간 g를 지웠는데
     검수자가 Label Studio에서 그 구간의 라벨을 행동(push)으로 바꿔 붙였다.
 
-    올바른 동작(바로 위 테스트와 같은 규칙): 보낸 뒤 바뀐 라벨에 대한 결과는 stale로 빠지고, 지운
-    라벨 자리에 다른 종류 레코드가 운영 라벨로 되살아나지 않는다. 지금: 종류를 바꿔 붙인 구간은 원
-    라벨 ID를 잃어(`labelstudio._reviewed_item`) parent 없는 새 레코드가 되고, `drop_retracted`는
-    parent가 있는 결과만 빼므로 그 행동이 현재 라벨로 남는다.
-
-    임시 위치: 이 작업 브랜치(WP17)는 공유 재현 파일 `tests/test_known_defects.py`를 고치지 않는다
-    (다른 작업 브랜치와의 병합 충돌 방지, 리드 결정). 메인 병합 때 이 테스트를 그 파일로 옮기고
-    `docs/handover/issues.yaml` F-AIR-13에 repro를 적는다. 공개 API만 써서 그대로 옮길 수 있다.
+    올바른 동작(`packages/review/tests/test_units.py::
+    test_correction_of_a_retracted_label_does_not_revive_it`와 같은 규칙): 보낸 뒤 바뀐 라벨에 대한
+    결과는 stale로 빠지고, 지운 라벨 자리에 다른 종류 레코드가 운영 라벨로 되살아나지 않는다.
+    지금: 종류를 바꿔 붙인 구간은 원 라벨 ID를 잃어(`labelstudio._reviewed_item`) parent 없는 새
+    레코드가 되고, `drop_retracted`는 parent가 있는 결과만 빼므로 그 행동이 현재 라벨로 남는다.
     """
-    from dlp_review.labelstudio import from_ls_results, to_ls_results
     from dlp_review.collect import drop_retracted
+    from dlp_review.labelstudio import from_ls_results, to_ls_results
     from dlp_review.reconcile import reconcile
     from dlp_schema.episode import current_labels
 

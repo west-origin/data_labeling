@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import numpy as np
 
-from dlp_aireview.overlay import box_at, crop, draw_marks, draw_stamp
+from dlp_aireview.overlay import crop, draw_marks, draw_stamp
 from dlp_aireview.plan import plan_session
 from dlp_aireview.policy import AiReviewPolicy
 from dlp_aireview.sensors import SensorContext
+from dlp_aireview.tracks import box_at
 from dlp_schema.aireview import AiGroup
 from dlp_schema.labels import BoxKeyframe
 from dlp_schema.ontology import Ontology

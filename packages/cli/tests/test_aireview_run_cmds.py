@@ -26,7 +26,9 @@ import sqlalchemy
 
 from dlp_aireview import backend as backend_module
 from dlp_aireview.backend import JudgeReply, JudgeRequest, OpenAICompatibleJudge
+from dlp_aireview.media import frames_for as media_frames_for
 from dlp_aireview.policy import AiReviewPolicy, load_policy
+from dlp_aireview.policy import load_policy as load_aireview_policy
 from dlp_aireview.sensors import SensorContext
 from dlp_aireview.testing import FakeOpenAIServer
 from dlp_cli import aireview_cmds, aireview_run_cmds
@@ -188,7 +190,7 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
 
 def tune(monkeypatch: pytest.MonkeyPatch, **server: object) -> None:
     """`dlp aireview run`이 읽는 정책의 server 절을 바꾼다 (백오프·동시성 등, 판정 버전 그대로)."""
-    original = aireview_run_cmds.load_policy
+    original = load_aireview_policy
 
     def load(root: Path) -> AiReviewPolicy:
         data = original(root).model_dump()
@@ -434,7 +436,7 @@ def test_unit_outage_or_error_in_one_session_does_not_block_others(
 
     world.add("e1")
     world.add("e2")
-    frames_for = runner.frames_for
+    frames_for = media_frames_for
 
     def broken(media: Any, idx: Any) -> Any:
         if media.session_id == "e1":

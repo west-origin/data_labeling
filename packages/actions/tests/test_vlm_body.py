@@ -160,7 +160,7 @@ def test_cli_exits_5_on_config_error(monkeypatch: pytest.MonkeyPatch, tmp_path: 
         return "sqlite://"
 
     monkeypatch.setattr(actions_cmds, "session_ontology", nothing)
-    monkeypatch.setattr(actions_cmds.sa, "create_engine", engine)
+    monkeypatch.setattr("dlp_cli.actions_cmds.sa.create_engine", engine)
     monkeypatch.setattr(actions_cmds, "database_url", url)
     args = argparse.Namespace(
         session_id="s001", vlm_url="http://vlm", store=f"local:{tmp_path}", url=None
