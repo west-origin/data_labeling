@@ -55,6 +55,7 @@ from typing import Any
 
 import numpy as np
 import sqlalchemy as sa
+from pydantic import ValidationError
 from sqlalchemy.exc import NoResultFound
 
 from dlp_actions.policy import load_policy as load_actions_policy
@@ -78,7 +79,7 @@ from dlp_aireview.estimate import (
 )
 from dlp_aireview.media import MediaBoundaryError
 from dlp_aireview.plan import VIDEO_KINDS, StreamMedia
-from dlp_aireview.policy import AiReviewPolicy, load_policy
+from dlp_aireview.policy import AiReviewPolicy, EstimatePolicy, load_policy
 from dlp_aireview.probe import ProbeReport, probe_server, server_info
 from dlp_aireview.runner import SessionNotReadyError, load_input
 from dlp_aireview.sensors import SensorContext
@@ -541,7 +542,7 @@ def cmd_estimate(args: argparse.Namespace) -> int:
         data = policy.model_dump()
         data["selection"]["mode"] = args.mode
         policy = AiReviewPolicy.model_validate(data)
-    est = policy.estimate
+    est = _assumptions(args, policy.estimate)
     inputs = _session_inputs(args, policy)
     workload = _workload(inputs, policy)
     capacities: list[Capacity] = []
@@ -554,12 +555,10 @@ def cmd_estimate(args: argparse.Namespace) -> int:
                 workload if counted is policy else _workload(inputs, counted),
                 report,
                 counted,
-                hours_per_day=args.hours_per_day or est.hours_per_day,
-                rerun_margin=(
-                    args.rerun_margin if args.rerun_margin is not None else est.rerun_margin
-                ),
-                utilization=args.utilization or est.utilization,
-                decode_workers=args.decode_workers or est.decode_workers,
+                hours_per_day=est.hours_per_day,
+                rerun_margin=est.rerun_margin,
+                utilization=est.utilization,
+                decode_workers=est.decode_workers,
                 actions_req_s=args.actions_req_s,
             )
         )
@@ -614,6 +613,25 @@ def _bench_parser(asub: Any) -> None:
     b.add_argument("--device", help="장비 이름 (기본: 엔드포인트 이름)")
     b.add_argument("--out", help="보고서 JSON (기본 reports/aireview-bench/<장비>-<시각>.json)")
     b.set_defaults(func=cmd_bench)
+
+
+# 인자로 덮어쓸 수 있는 추정 가정 값 (`aireview.yaml estimate`의 필드 이름)
+_ASSUMPTIONS = ("hours_per_day", "rerun_margin", "utilization", "decode_workers")
+
+
+def _assumptions(args: argparse.Namespace, est: EstimatePolicy) -> EstimatePolicy:
+    """인자로 덮어쓴 가정 값 (정책과 같은 범위로 다시 검증한다).
+
+    준 값만 바꾼다 (`is not None`: 0도 준 값이다. 예전에는 `or`라 0이 조용히 정책 값이 됐다).
+    범위(가동률 (0, 1], 하루 시간 > 0, 재실행 여유 ≥ 0, 디코드 작업 ≥ 1)를 벗어나면 대수를 내지
+    않고 `SystemExit`로 알린다.
+    """
+    given = {k: getattr(args, k) for k in _ASSUMPTIONS if getattr(args, k) is not None}
+    try:
+        return EstimatePolicy.model_validate(est.model_dump() | given)
+    except ValidationError as exc:
+        bad = "; ".join(f"--{str(e['loc'][0]).replace('_', '-')}: {e['msg']}" for e in exc.errors())
+        raise SystemExit(f"추정 가정 값 오류: {bad}") from exc
 
 
 def _estimate_parser(asub: Any) -> None:
