@@ -818,3 +818,85 @@ def test_glove_started_before_the_bodycam_keeps_only_contacts_inside_the_session
     }
     assert summary.contacts == len(contacts)
     assert all(check_label(x, ontology) == [] for x in contacts)
+
+
+def test_person_box_contacts_are_left_for_review(pg: sa.Engine, tmp_path: Path) -> None:
+    """F-PAR-03 회귀: 바디캠 사람 박스(온톨로지 person)와의 접촉은 object 손 상태로 쓰지 않는다.
+
+    `test_prelabel_session_with_glove_contacts`와 같은 장갑 세션에서 버킷 자리 박스를 COCO person
+    박스(entity person_01, class person)로 바꾼다. 사람 접촉은 person + body_part가 필수인데
+    박스로는 부위를 알 수 없어(온톨로지에 "모름" 부위가 없다) 접촉 라벨을 만들지 않고 요약에 센다.
+    예전에는 contact_target_kind=object, target_id=person_01로 기록했다.
+
+    정답: 버킷 대상 접촉 수만큼 `person_contacts`로 빠지고, 나머지 접촉은 그대로이며, 남은 손 상태는
+    모두 온톨로지 검증을 통과한다.
+    """
+    actions = generate_action_scenario(1, n_units=10)
+    _write_bodycam(tmp_path / "bodycam.mp4", actions)
+    write_parquet(
+        tmp_path / "glove_right.parquet",
+        {"t_ms": actions.glove_t_ms, "pressure_0": actions.glove_pressure},
+    )
+    sid = f"psn-{uuid.uuid4().hex[:8]}"
+    manifest = {
+        "session_id": sid, "domain": "cleaning", "worker_id": "w01", "site_id": "site01",
+        "consent_version": "c1", "recorded_at": FIXED_TIME.isoformat(), "ontology_version": "1.0.0",
+        "streams": [
+            {"stream_id": "bodycam", "kind": "bodycam", "path": "bodycam.mp4"},
+            {"stream_id": "glove_right", "kind": "glove_right", "path": "glove_right.parquet"},
+        ],
+    }  # fmt: skip
+    (tmp_path / "m.yaml").write_text(yaml.safe_dump(manifest), encoding="utf-8")
+    raw = S3Store.from_env("dlp-raw")
+    with pg.begin() as conn:
+        session = ingest_session(*load_manifest(tmp_path / "m.yaml"), raw, conn).session
+        glove = session.stream("glove_right").model_copy(
+            update={"sync_method": SyncMethod.TAP_EVENT}
+        )
+        update_stream_sync(conn, sid, glove)
+    # 버킷 자리에 사람 박스를 둔다 (서랍·세면대는 그대로)
+    renamed = {"bucket_01": ("person_01", "person")}
+    boxes = [
+        make_label(
+            BoxTrackPayload(
+                entity_id=renamed.get(eid, (eid, cls))[0],
+                class_id=renamed.get(eid, (eid, cls))[1],
+                keyframes=tuple(
+                    BoxKeyframe(t_ms=t, x=p[0] - 15, y=p[1] - 15, w=30, h=30)
+                    for t in actions.frame_times
+                ),
+            ),
+            label_id=f"gt-{eid}",
+            session_id=sid,
+            stream_id="bodycam",
+            t_start_ms=actions.frame_times[0],
+            t_end_ms=actions.frame_times[-1],
+        )
+        for eid, cls, _, p, _ in ENTITIES
+        if eid in {"drawer_01", "bucket_01", "sink_01"}
+    ]
+    predictors: list[Predictor] = [
+        OraclePredictor("hands", actions.labels, ("keypoint_track",), now=FIXED_TIME),
+        OraclePredictor("objects", boxes, ("box_track",), now=FIXED_TIME),
+    ]
+    policy, ontology = load_policy(ROOT), load_ontology(ROOT / "config/ontology/v1")
+    with pg.begin() as conn:
+        summary = run_prelabel(conn, sid, raw, predictors, policy, ontology, FIXED_TIME)
+        contacts = _builtin_contacts(current_labels(get_labels(conn, sid, kinds=["hand_state"])))
+    truth = [
+        x.payload
+        for x in actions.labels
+        if isinstance(x.payload, HandStatePayload) and x.payload.contact_target_kind != "none"
+    ]
+    on_person = sum(p.target_id == "bucket_01" for p in truth)
+    assert on_person > 0  # 시나리오에 버킷(지금은 사람) 접촉이 있어야 회귀를 본다
+    for x in contacts:
+        assert isinstance(x.payload, HandStatePayload)
+        assert x.payload.target_id != "person_01"
+        assert check_label(x, ontology) == []
+    assert summary.contacts == len(contacts) == len(truth) - on_person
+    assert summary.person_contacts == on_person
+    # 재실행은 같은 버전이라 아무것도 하지 않는다 (사람 접촉도 다시 세지 않는다)
+    with pg.begin() as conn:
+        again = run_prelabel(conn, sid, raw, predictors, policy, ontology, FIXED_TIME)
+    assert again.contacts == 0 and again.person_contacts == 0

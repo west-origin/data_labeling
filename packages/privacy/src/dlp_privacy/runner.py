@@ -7,7 +7,8 @@ WP5, ADR 0005·0019·0023·0024. CLI `dlp_cli.privacy_cmds`가 DB 연결과 저�
   검수 우선 구간·탐지 표시(원본 버킷 JSON). 세션 `privacy_state`가 PENDING이거나, APPROVED인데
   새 탐지를 실행하거나 블러가 바뀌었으면 AUTO_BLURRED로 (0건 재탐지도 포함).
 - (사람 검수: `dlp review create --stage privacy` → CVAT → `dlp review collect`. dlp_review 담당)
-- `approve_session` (`dlp privacy approve`): 승인 조건을 확인하고 APPROVED로.
+- `approve_session` (`dlp privacy approve`): 승인 조건을 확인하고 APPROVED로. 승인 보류 중이면
+  거부한다 (`dlp_privacy.hold`, `dlp privacy hold`, ADR 0042).
 - `render_session` (`dlp privacy render`): 승인된 세션의 블러본과 렌더 기록을 라벨링 버킷에 쓴다.
 - `assert_render_current` / `check_fetched`: 블러본 소비자(검수 작업 생성, 행동 VLM, 큐레이션,
   내보내기)가 쓰기 전에 부르는 확인 (ADR 0024).
@@ -113,6 +114,7 @@ from dlp_privacy.revocation import (
 )
 from dlp_schema.common import derived_id
 from dlp_schema.db.repository import (
+    active_privacy_hold,
     get_labels,
     get_session,
     insert_labels,
@@ -493,6 +495,7 @@ def approve_session(conn: sa.Connection, session_id: str) -> Session:
     수집했을 때만 프라이버시 승인한다. 완료 이력 이전 데이터는 시각 규약을 사용한다.
 
     조건:
+    0. 승인 보류 중이 아니다 (`dlp privacy hold`, 마지막 보류 기록이 hold가 아님, ADR 0042).
     1. 자동 탐지를 한 번 이상 돌렸다 (privacy_state가 PENDING이 아니다).
     2. 영상 스트림마다 `missing_privacy_reviews` 조건을 만족한다.
     3. 운영 블러 라벨 중 UNREVIEWED·SAMPLE_VERIFIED가 없다 (블러는 표본 검증으로 승인하지 않는다:
@@ -512,6 +515,13 @@ def approve_session(conn: sa.Connection, session_id: str) -> Session:
     """
     lock_session(conn, session_id)
     session = get_session(conn, session_id)
+    held = active_privacy_hold(conn, session_id)
+    if held is not None:
+        raise PrivacyGateError(
+            f"{session_id}: 승인 보류 중입니다 ({held.actor}: {held.reason}, "
+            f"{held.at.isoformat()}). 사고 처리 뒤 dlp privacy hold {session_id} --release "
+            "--reason <사유>"
+        )
     if session.privacy_state is PrivacyState.PENDING:
         raise PrivacyGateError(f"{session_id}: 자동 탐지가 아직 실행되지 않았습니다")
     missing = missing_privacy_reviews(conn, session)

@@ -73,6 +73,9 @@ uv run --no-sync dlp services check --include-cvat
 
 관리자 생성은 최초 한 번이며 이미 있으면 실패한다. 관리자는 설정에만 사용하고, 실제 검수는
 CVAT의 일반 user/worker 계정으로 한다. 원본 권한자와 일반 라벨러를 분리한다.
+실제 라벨러에게 작업을 열기 전에 `dlp services check --security`로 라벨링 버킷 버전 관리가 꺼져
+있고 라벨러 키가 라벨링 버킷 읽기만 하는지 확인한다 (라벨러 키로 쓰기·삭제를 시도해 403을 본다.
+허용되면 써진 빈 점검 객체를 서비스 키로 지운다, F-REV-19).
 Label Studio에도 서비스 계정과 별개의 실제 검수 계정을 준비한다.
 
 기본 검수 정책은 권한자 목록이 비어 있다. 실제 계정 연결을 Git의 기본 정책에 넣지 않고,
@@ -87,24 +90,31 @@ export DLP_REVIEW_POLICY_FILE="$PWD/data/local-config/review.yaml"
 ```
 
 이 파일의 `reviewers.privacy`에 승인받은 원본 검수자 ID를, `cvat.users`에 두 검수자 ID와 실제
-CVAT 사용자 이름을 연결한다. [파일럿 안내](../weekend-video-pilot.md)의 명령을 그대로 쓰려면
+CVAT 사용자 이름을, `label_studio.users`에 일반 검수자 ID와 실제 Label Studio 계정 이메일(서비스
+계정이 아닌 사람별 계정)을 연결한다. Label Studio 연결이 없으면 시간 검수 작업을 만들지 않고, 수집은
+그 계정이 낸 주석만 받는다. [파일럿 안내](../weekend-video-pilot.md)의 명령을 그대로 쓰려면
 ID는 `pilot-privacy`, `pilot-labeler`로 맞춘다. 일반 검수자 ID는 `config/policies/pilot.yaml`의
 `labeler`와 일치해야 한다. 계정 생성과 원본 열람 승인 자체는 이 YAML이 대신하지 않는다.
+이미 복사해 둔 파일은 위 명령이 덮어쓰지 않는다. 기본 정책에 필수 키가 생기면(예: `media.signed_url_ttl_s`,
+F-REV-08) 그 파일로는 정책 로드가 실패하므로 기본 파일의 새 키를 옮겨 적는다.
 
 ```bash
 uv run --no-sync dlp pilot check --profile cleaning
 ```
 
-준비 검사는 서비스 응답·DB head·모델 실행·CVAT 일반 계정·Label Studio 서비스 계정 인증을
-확인한다. 일반 라벨러의 원본 작업 접근 거부와 Label Studio 검수 계정 로그인도 별도로 확인한다.
+준비 검사는 서비스 응답·DB head·모델 실행·CVAT 일반 계정·Label Studio 서비스 계정 인증·일반
+검수자의 Label Studio 계정 연결(`label-studio-account`)을 확인한다. 일반 라벨러의 원본 작업 접근
+거부와 Label Studio 검수 계정 로그인도 별도로 확인한다.
 `DLP_REVIEW_POLICY_FILE`은 검수 정책을 읽는 `dlp` CLI 명령이 모두 같은 로더
 (`dlp_cli.review_config.load_review_policy`)로 따른다: 준비 검사, 검수 명령(`dlp review create|collect|
-serve|assign|register-webhooks|plan|qa|quality`, 작업의 CVAT 계정 배정·웹훅 담당자 확인·워터마크
-매체 설정·표본 판정 포함), 운영 명령(`dlp ops …`). 고른 파일이 없거나 깨졌으면 기본 정책으로
+serve|assign|register-webhooks|refresh-urls|plan|qa|quality`, 작업의 CVAT 계정 배정·두 도구의 웹훅
+담당자 확인·워터마크 매체 설정·서명 URL 유효 시간·표본 판정 포함), 운영 명령(`dlp ops …`). 고른 파일이 없거나 깨졌으면 기본 정책으로
 되돌리지 않고 실패한다. 한 명령 안에서는 정책을 한 번 읽어 `ReviewSetup`과 명령이 같은 값을 본다.
 매체 회수(`dlp review revoke`, cron `revoke --pending`, `dlp privacy detect|render`와 검수 명령의 커밋
 뒤 회수)는 검수 정책 값을 쓰지 않는다. 회수가 스스로 만드는 설정은 이 파일을 읽지 않으므로 파일이
-깨져도 낡은 라벨링 매체는 지운다 (ADR 0039). 반면 라이브러리 기본 로더(`dlp_review.ops.policy.load_policy(root)`,
+깨져도 낡은 라벨링 매체는 지운다 (ADR 0039). 예외로 고아 정리(`dlp review revoke --orphans`)는 나이
+하한(`orphans.min_age_s`)을 이 파일에서 엄격히 읽는다. 이 키는 필수라 별도 정책 파일에도 넣어야 한다.
+반면 라이브러리 기본 로더(`dlp_review.ops.policy.load_policy(root)`,
 정책을 넘기지 않은 `ReviewSetup`의 지연 로더)는 이 변수를 보지 않고 Git의 기본 `review.yaml`을 읽는다.
 그래서 라이브러리 함수를 직접 부르는 테스트는 기본 정책을, CLI 명령 함수를 부르는 테스트는 이 변수를 따른다.
 테스트에서는 파일럿 권한 설정이 테스트 픽스처를 덮어쓰지 않도록 서브셸 안에서만 해제한다.

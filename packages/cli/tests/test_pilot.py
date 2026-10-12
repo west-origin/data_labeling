@@ -5,16 +5,18 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 import yaml
 
+from dlp_cli import pilot_cmds
 from dlp_cli.models_cmds import cmd_fetch, used_models
 from dlp_cli.pilot_cmds import cmd_check
 from dlp_cli.review_config import load_review_policy
 from dlp_privacy.detectors import build_detectors
 from dlp_privacy.policy import load_policy as privacy_policy
+from dlp_review.ops.policy import LabelStudioPolicy
 from dlp_review.ops.policy import load_policy as review_policy
 from dlp_schema import load_ontology, repo_root
 from dlp_schema.predictor import ModelUnavailableError
@@ -93,7 +95,27 @@ def test_missing_selected_prelabel_model_requires_explicit_partial_run(
         hands.name = "hands"
         hands.side_effect = ModelUnavailableError("weights missing")
         run.return_value = SimpleNamespace(
-            produced={}, skipped=[], lifted=0, contacts=0, wearer=None
+            produced={}, skipped=[], lifted=0, contacts=0, person_contacts=0, wearer=None
         )
         assert cmd_run(args) == (0 if allow_partial else 1)
     assert run.call_count == int(allow_partial)
+
+
+def test_pilot_check_requires_labeler_label_studio_account() -> None:
+    """준비 검사는 일반 검수자의 Label Studio 계정 연결이 서비스 계정이 아닌 실제 계정인지 본다.
+
+    연결이 없거나, 연결한 이메일이 Label Studio에 없거나, 서비스 계정이면 실패다 (F-REV-06: 수집은
+    담당자 계정의 주석만 받으므로 연결 없이는 시간 검수를 수집할 수 없다).
+    """
+    ls = Mock()
+    ls.service_user_id.return_value = 1
+    ls.find_user_id.side_effect = {"lab@example.com": 7, "admin@example.com": 1}.get
+    base = review_policy(repo_root())
+    check = pilot_cmds._ls_account_check  # pyright: ignore[reportPrivateUsage]
+    cases = {"lab@example.com": True, "ghost@example.com": False, "admin@example.com": False}
+    for email, ready in cases.items():
+        accounts = LabelStudioPolicy(users={"pilot-labeler": email})
+        review = base.model_copy(update={"label_studio": accounts})
+        result = check(ls, review, "pilot-labeler")
+        assert (result.name, result.ok) == ("label-studio-account", ready)
+    assert not check(ls, base, "pilot-labeler").ok  # 기본 정책: 연결 없음

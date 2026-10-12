@@ -54,6 +54,7 @@ from dlp_privacy.runner import (
 from dlp_review.clients import LabelStudioClient
 from dlp_review.collect import collect_task
 from dlp_review.labelstudio import to_ls_results
+from dlp_review.ops.policy import LabelStudioPolicy
 from dlp_review.ops.policy import load_policy as review_policy
 from dlp_review.ops.runner import plan_session
 from dlp_review.tasks import ReviewSetup
@@ -395,7 +396,8 @@ def test_distinct_review_tasks_do_not_fork_parent(pg: sa.Engine, tmp_path: Path)
     entered, release, second_started = threading.Event(), threading.Event(), threading.Event()
     pids: list[int] = []
 
-    def latest_results(n: int):
+    def latest_results(n: int, *, user: int):
+        assert user == 11  # 담당자 reviewer의 Label Studio 계정 주석만 본다 (F-REV-06)
         items = to_ls_results([origin])
         items[0]["value"]["end"] = 0.8 + n / 100
         if n == 1:
@@ -406,12 +408,15 @@ def test_distinct_review_tasks_do_not_fork_parent(pg: sa.Engine, tmp_path: Path)
     ls = Mock(spec=LabelStudioClient)
     ls.latest_results.side_effect = latest_results
     ls.lead_seconds.return_value = 0
+    ls.find_user_id.return_value, ls.service_user_id.return_value = 11, 1
+    ls.ignored_annotations.return_value = []
     setup = ReviewSetup(
         raw=LocalStore(tmp_path, "raw"),
         labeling=LocalStore(tmp_path, "labeling"),
         labeling_reader=Mock(spec=S3Store),
         ontology=load_ontology(ROOT / "config/ontology/v1"),
         label_studio=ls,
+        label_studio_config=LabelStudioPolicy(users={"reviewer": "reviewer@example.com"}),
     )
 
     def collect(n: int):
@@ -1078,7 +1083,7 @@ def test_cli_partial_requested_evaluation_fails(pg: sa.Engine, tmp_path: Path) -
     result = json.loads(out.read_text())
     assert code == 1 and not result["gate"]["passed"]
     assert result["overall"]["objects"]["metrics"]["hota"] == 1.0
-    # 정답을 고정하지 않은 이전 형식 골든셋은 리포트에 그렇게 남는다 (ADR 0047)
+    # 정답을 고정하지 않은 이전 형식 골든셋은 리포트에 그렇게 남는다 (ADR 0041)
     assert result["golden_truth"]["truth_frozen"] is False
     assert result["gate"]["tasks"]["objects"]["passed"]
     assert not result["gate"]["tasks"]["hands"]["passed"]

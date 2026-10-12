@@ -10,19 +10,29 @@
     승인·수정·삭제·추가 → 새 `LabelRecord` + `parent_label_id`). 이미 수집했거나 회수한 작업이면
     아무것도 하지 않는다(멱등). 블러가 바뀌면 커밋 뒤 배포 매체를 회수하고 다시 만들 명령을 보인다.
   - `serve [--port]` — CVAT·Label Studio 웹훅을 받아 끝난 작업을 자동 수집하는 HTTP 서버.
-    수집 결과(회수한 작업·다시 만들 명령 포함)는 `collect`와 같이 서버 로그에 남는다.
+    수집 결과(회수한 작업·다시 만들 명령 포함)는 `collect`와 같이 서버 로그에 남는다. 담당자의 도구
+    계정(`cvat.users`, `label_studio.users`)이 아닌 사람의 제출은 받지 않는다 (F-REV-06).
   - `revoke [<세션>] [--stream] [--task --reason] [--all --reason] [--include-legacy] [--dry-run]
     [--pending] [--mark-tool-gone KEY --note]` — 블러가 바뀐 뒤 이미 배포한 라벨링 매체를
     회수한다 (ADR 0039). 세션 경로는 늘 sweep을 하고 `--task`·`--all`은 그 위에 수동 요청을 더한다.
     대기가 남으면 종료 코드 4 (cron `--pending`의 경보).
+    `revoke --orphans [<세션>] [--apply]` — DB 롤백으로 기록 없이 남은 도구 작업·라벨링 버킷 사본
+    (고아)을 이름 규칙과 DB로 찾는다 (`dlp_review.orphans`, F-REV-15). 기본은 보고만 하고
+    `--apply`일 때만 지운다. 나이 하한은 `review.yaml orphans.min_age_s`. 고아가 남거나 확인하지
+    못한 채널이 있으면 종료 코드 4.
   - `register-webhooks <url_base>` — 검수 프로젝트에 웹훅을 등록한다.
+  - `refresh-urls [--session S…]` — 열린 Label Studio 작업의 영상·시계열 서명 URL을 정책 유효 시간
+    (`media.signed_url_ttl_s`)으로 다시 서명한다 (F-REV-08, cron으로 유효 시간보다 짧은 주기).
+    수집·회수한 작업과 매체가 낡은 작업은 갱신하지 않는다. 갱신하지 못한 작업이 있으면 종료 코드 1.
   - `verify <세션>` — 검수가 끝난 세션을 `prelabeled → human_verified`로 옮긴다 (ADR 0029).
   - `ui-theme [--check]` — `config/review_ui.yaml`로 CVAT 테마 색 파일을 다시 만든다 (ADR 0038,
     `make ui-theme`). `--check`는 파일을 쓰지 않고 다르면 1로 끝난다.
 - 운영 로직 (WP12, `dlp_review.ops`)
   - `plan <세션> --reviewer …` — 우선순위·표본 검증·블라인드·이중·오류 삽입 배정을 계획해 DB에 쓴다.
-  - `assign <배정 ID>` — 배정 하나의 검수 도구 작업을 만든다 (멱등).
-  - `qa` — 끝난 표준 배정에서 QA 재검수 배정을 뽑는다.
+  - `assign <배정 ID> [--assignee]` — 배정 하나의 검수 도구 작업을 만든다 (멱등). 담당자 없는
+    배정은 `--assignee`로 담당자를 정해야 만든다 (없으면 종료 코드 1, F-REV-07).
+  - `qa` — 끝난 표준 배정에서 QA 재검수 배정을 뽑는다. 선임(`reviewers.senior`)이 없으면 담당자를
+    비워 두므로 `assign --assignee <선임>`으로 만든다.
   - `queue [--limit]` — 열린 배정을 우선순위 높은 순으로 보여 준다.
   - `quality` — 오류 삽입 발견율, 이중 라벨 일치도(카파·구간 F1·경계 F1), 프리라벨 편향.
 
@@ -31,14 +41,17 @@
 privacy` (또는 `plan --privacy`) → `collect` → `dlp privacy approve`.
 
 정책 출처: 기본은 `config/policies/review.yaml` (우선순위·표본·측정 비율, `reviewers.privacy`,
-`cvat.users`, 미디어). CLI에서는 `DLP_REVIEW_POLICY_FILE`로 정책 파일을 바꿀 수 있다. 검수 정책을
+`cvat.users`, `label_studio.users`, 미디어).
+CLI에서는 `DLP_REVIEW_POLICY_FILE`로 정책 파일을 바꿀 수 있다. 검수 정책을
 읽는 하위 명령은 모두 `review_config.load_review_policy` 하나로 읽는다. 저장소·도구 설정(`_setup`)을
-쓰는 명령(create·collect·serve·assign·register-webhooks)은 정책을 한 번 읽어 `_setup`과 자기
-몫(원본 검수자, 수집·배정 마무리, 웹훅 검수자 확인)에 같은 객체를 넘긴다. 그래서 `ReviewSetup`의
-CVAT 계정 연결(`cvat_policy`)·매체(`media_policy`)도 고른 파일의 값이다 (라이브러리 지연 로더의
-Git 기본값이 아니다, F-REV-01). `plan`·`qa`·`quality`는 같은 로더로 정책만 읽고, `queue`·`verify`는
+쓰는 명령(create·collect·serve·assign·register-webhooks·refresh-urls)은 정책을 한 번 읽어
+`_setup`과 자기 몫(원본 검수자, 수집·배정 마무리, 웹훅 검수자 확인, 서명 URL 유효 시간 출력)에 같은
+객체를 넘긴다. 그래서 `ReviewSetup`의 CVAT·Label Studio 계정 연결(`cvat_policy`,
+`label_studio_policy`)·매체(`media_policy`)도 고른 파일의 값이다 (라이브러리 지연 로더의 Git
+기본값이 아니다, F-REV-01). `plan`·`qa`·`quality`는 같은 로더로 정책만 읽고, `queue`·`verify`는
 검수 정책을 쓰지 않는다. 매체 회수만 하는 `revoke`도 검수 정책을 읽지 않는다 (회수 실행기는 정책
-값을 쓰지 않는다. 정책 파일이 깨져도 낡은 라벨링 매체를 지운다).
+값을 쓰지 않는다. 정책 파일이 깨져도 낡은 라벨링 매체를 지운다). 예외는 `revoke --orphans`로, 나이
+하한(`orphans.min_age_s`)을 고른 정책 파일에서 엄격히 읽는다.
 
 주의:
 - `_setup`(`review_config.review_setup`)이 원본 저장소를 `raw_store("s3", …, "review.<명령>")` 감사
@@ -55,7 +68,7 @@ from __future__ import annotations
 
 import argparse
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import sqlalchemy as sa
 from sqlalchemy.exc import NoResultFound
@@ -81,8 +94,15 @@ from dlp_review.collect import collect_task
 from dlp_review.ontology_projects import ontology_project
 from dlp_review.ops.assign import plan_qa
 from dlp_review.ops.policy import ReviewOpsPolicy
-from dlp_review.ops.runner import create_assignment_tasks, plan_session, quality_report
+from dlp_review.ops.runner import (
+    assign_reviewer,
+    create_assignment_tasks,
+    plan_session,
+    quality_report,
+)
+from dlp_review.orphans import OrphanReport, delete_orphans, find_orphans
 from dlp_review.reconcile import ReviewOutcome
+from dlp_review.refresh import refresh_session_urls, sessions_with_open_ls_tasks
 from dlp_review.revoke import RevocationIncompleteError, mark_tool_gone
 from dlp_review.tasks import (
     PRIVACY_PROJECT,
@@ -91,6 +111,7 @@ from dlp_review.tasks import (
     ReviewSetup,
     create_labeling_tasks,
     create_privacy_tasks,
+    label_studio_user_id,
 )
 from dlp_review.ui_theme import TOKENS_FILE, cvat_tokens_css, load_ui_theme
 from dlp_review.verify import verify_session
@@ -116,6 +137,9 @@ from dlp_schema.review import (
     ReviewTaskStatus,
     ReviewTool,
 )
+
+# `dlp review assign`: 담당자 없는 배정에 `--assignee`를 주지 않아 작업을 만들지 않았다 (F-REV-07)
+NO_ASSIGNEE_EXIT = 1
 
 
 def _setup(args: argparse.Namespace, policy: ReviewOpsPolicy | None = None) -> ReviewSetup:
@@ -294,6 +318,22 @@ def cmd_verify(args: argparse.Namespace) -> int:
     return 0
 
 
+def _ls_users(setup: ReviewSetup, task: ReviewTask) -> dict[str, int]:
+    """Label Studio 작업 담당자의 Label Studio 사용자 ID (`resolve_reviewer`의 ls_users).
+
+    다른 도구의 작업·담당자 없는 작업·연결 없는 담당자는 빈 사전이다 (그러면 웹훅이 받지 않는다).
+    연결은 웹훅마다 다시 찾는다 (서버를 띄운 뒤 만든 계정도 받는다). 연결한 계정이 Label Studio에
+    없거나 서비스 계정이면 `TaskError` (설정 오류, 서버는 503).
+    """
+    if task.tool is not ReviewTool.LABEL_STUDIO or task.assignee is None:
+        return {}
+    if setup.label_studio is None:
+        return {}
+    users = setup.label_studio_policy().users
+    uid = label_studio_user_id(setup.label_studio, users, task.assignee)
+    return {} if uid is None else {task.assignee: uid}
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     """`dlp review serve [--port]`: 웹훅 서버를 띄워 끝난 작업을 자동 수집한다 (블로킹, Ctrl-C로
     끝냄).
@@ -302,7 +342,9 @@ def cmd_serve(args: argparse.Namespace) -> int:
     1. 작업을 조회한다. 열린 작업이 아니면(수집함·회수함) 검수자 확인 전에 무시한다 (204). 회수
        실행기의 CVAT 배정 해제가 일으킨 `update:job` 웹훅을 담당자 불일치(403)로 만들지 않는다.
     2. 검수자를 정한다 — 웹훅의 도구 사용자 ID가 아니라 작업 담당자다
-       (`resolve_reviewer`). 담당자와 CVAT job 담당자가 맞지 않으면 수집하지 않는다.
+       (`resolve_reviewer`). 담당자와 CVAT job 담당자가 맞지 않으면 수집하지 않는다. Label Studio
+       작업은 주석을 만든·고친 사용자가 담당자의 Label Studio 계정(`label_studio.users`)이 아니면
+       수집하지 않는다 (403, 경고 로그. 수집도 그 계정 주석만 받는다, F-REV-06).
     3. 서비스 계정(Label Studio 서비스 사용자)이 만든 주석이면 수집하지 않는다.
     4. `collect_task`로 수집한다. 실패는 트랜잭션을 롤백하고 HTTP 경계에 전달한다. 결과는
        `collect`와 같이 출력한다 (블러가 바뀌어 회수한 작업과 다시 만들 명령 포함, 서버 로그).
@@ -328,7 +370,9 @@ def cmd_serve(args: argparse.Namespace) -> int:
                 print(f"{req.task_key}: {task.status.value} 작업이라 수집하지 않음")
                 return
             # 검수자는 웹훅의 도구 사용자 ID가 아니라 작업 담당자다
-            reviewer = resolve_reviewer(req, task, service_user, ops_policy.cvat.users)
+            reviewer = resolve_reviewer(
+                req, task, service_user, ops_policy.cvat.users, ls_users=_ls_users(setup, task)
+            )
             if reviewer is None:
                 print(f"{req.task_key}: 서비스 계정의 주석이라 수집하지 않음")
                 return
@@ -435,20 +479,33 @@ def cmd_plan(args: argparse.Namespace) -> int:
 
 
 def cmd_assign(args: argparse.Namespace) -> int:
-    """`dlp review assign <배정 ID>`: 배정의 검수 도구 작업을 만든다.
+    """`dlp review assign <배정 ID> [--assignee <검수자>]`: 배정의 검수 도구 작업을 만든다.
 
     이미 만든 배정이면 기존 작업을 그대로 돌려준다 (배정 행을 `FOR UPDATE`로 잠가 동시 실행에도 한
     번만). 작업이 모두 회수된 배정이면 지금 블러본으로 다시 만든다 (ADR 0039).
+    담당자 없는 배정(선임이 없어 담당자를 비워 둔 QA 배정 등)은 `--assignee`로 담당자를 정해야
+    만든다 (`ops.runner.assign_reviewer`: 블러는 원본 접근 권한자, QA는 선임, 짝 배정과 다른 사람).
+    없으면 아무것도 하지 않고 `NO_ASSIGNEE_EXIT`(1)로 끝낸다. 담당자가 이미 있는 배정의 담당자는
+    바꾸지 않는다 (F-REV-07, 회귀: 예전에는 "unassigned"를 실제 담당자로 넣어 워터마크·라벨링 버킷
+    경로·검수자 ID가 모두 그 문자열이 됐다).
     작업 라벨 배정은 만들기 전에 그 세션의 회수 대기를 실행하고(sweep 포함), 세션에 대기가 하나라도
     남으면(배정 스트림이 아니어도) 만들지 않고 `REVOCATION_PENDING_EXIT`(4)로 끝낸다. 블러 배정은
     원본 프록시를 쓰므로 막지 않는다.
-    부작용: `review_tasks` 쓰기, 검수 도구 API 호출, 블러 배정이면 원본 읽기(감사 기록).
+    부작용: `review_tasks` 쓰기, 검수 도구 API 호출, 블러 배정이면 원본 읽기(감사 기록),
+    `--assignee`면 배정 담당자 갱신(작업 생성과 같은 트랜잭션).
     """
     policy = load_ops_policy(repo_root())
     setup = _setup(args, policy)
     engine = sa.create_engine(database_url(args.url))
     with engine.connect() as conn:
         planned = get_assignment(conn, args.assignment_id)
+    if planned.assignee is None and not args.assignee:
+        engine.dispose()
+        print(
+            f"{args.assignment_id}: 담당자가 없는 배정입니다. "
+            "--assignee <검수자>로 담당자를 정해야 작업을 만듭니다"
+        )
+        return NO_ASSIGNEE_EXIT
     if planned.label_kinds != ("blur_track",):
         report = run_revocations(engine, planned.session_id, setup, sweep=True)
         if print_revocations(report, planned.session_id):
@@ -457,6 +514,8 @@ def cmd_assign(args: argparse.Namespace) -> int:
             return REVOCATION_PENDING_EXIT
     with engine.begin() as conn:
         a = get_assignment(conn, args.assignment_id)
+        if args.assignee:
+            a = assign_reviewer(conn, a, args.assignee, policy)
         tasks = create_assignment_tasks(conn, a, setup, policy, datetime.now(UTC))
     engine.dispose()
     for t in tasks:
@@ -468,6 +527,8 @@ def cmd_qa(args: argparse.Namespace) -> int:
     """`dlp review qa [--seed]`: 끝난(DONE) 표준 배정 중 정책 비율만큼 QA 재검수 배정을 뽑는다.
 
     이미 있는 배정 ID는 다시 넣지 않는다 (`plan_qa`가 결정적 ID를 만들므로 재실행해도 중복 없음).
+    선임(`reviewers.senior`)이 없거나 원래 담당자뿐이면 담당자 없이 넣고, 그 배정들을
+    `dlp review assign <배정> --assignee <선임>`으로 만들라고 출력한다 (F-REV-07).
     부작용: 한 트랜잭션에서 `review_assignments` INSERT.
     """
     policy = load_ops_policy(repo_root())
@@ -483,6 +544,10 @@ def cmd_qa(args: argparse.Namespace) -> int:
             insert_assignment(conn, a)
     engine.dispose()
     print(f"QA 배정 {len(created)}개")
+    for a in created:
+        if a.assignee is None:
+            print(f"  {a.assignment_id}: 담당자 없음 → dlp review assign {a.assignment_id} "
+                  "--assignee <선임>")  # fmt: skip
     return 0
 
 
@@ -522,18 +587,38 @@ def cmd_quality(args: argparse.Namespace) -> int:
     return 0
 
 
+def _check_orphan_args(args: argparse.Namespace, selection: list[str]) -> None:
+    """`revoke --orphans [--apply]` 인자 조합. 맞지 않으면 `SystemExit`."""
+    if not args.orphans:
+        raise SystemExit("--apply는 --orphans와만 씁니다")
+    if args.apply and args.dry_run:
+        raise SystemExit("--apply와 --dry-run을 함께 쓸 수 없습니다 (--orphans는 기본이 보고만)")
+    others = {
+        "--pending": args.pending,
+        "--mark-tool-gone": bool(args.mark_tool_gone),
+        "--note": bool(args.note),
+    }
+    extra = selection + [name for name, on in others.items() if on]
+    if extra:
+        raise SystemExit(f"--orphans는 {', '.join(extra)}와 함께 쓸 수 없습니다")
+
+
 def _check_revoke_args(args: argparse.Namespace) -> None:
     """`revoke` 인자 조합을 확인한다. 일부 인자가 조용히 무시되는 조합이면 `SystemExit`.
 
-    특히 `--dry-run`은 미리보기가 있는 경로(세션, `--pending`)에서만 받는다. `--mark-tool-gone`은
-    표시만 하는 쓰기 명령이라 `--dry-run`과 함께 쓰면 실제로 표시되는 것을 막는다.
+    특히 `--dry-run`은 미리보기가 있는 경로(세션, `--pending`, `--orphans`)에서만 받는다.
+    `--mark-tool-gone`은 표시만 하는 쓰기 명령이라 `--dry-run`과 함께 쓰면 실제로 표시되는 것을
+    막는다. `--orphans`는 기본이 보고만이고 `--apply`일 때만 지운다 (`--apply`와 `--dry-run`을 함께
+    쓰면 거부한다). 세션은 고를 수 있고 다른 선택 인자와는 쓰지 않는다.
     """
     chosen = {
         "--task": bool(args.task), "--all": args.all, "--stream": bool(args.stream),
         "--include-legacy": args.include_legacy, "--reason": bool(args.reason),
     }  # fmt: skip
     selection = [name for name, on in chosen.items() if on]
-    if args.mark_tool_gone:
+    if args.apply or args.orphans:
+        _check_orphan_args(args, selection)
+    elif args.mark_tool_gone:
         others = {
             "<세션>": bool(args.session_id),
             "--pending": args.pending,
@@ -658,6 +743,56 @@ def _revoke_pending(engine: sa.Engine, args: argparse.Namespace) -> int:
     return 0
 
 
+def _print_orphans(report: OrphanReport, *, applied: bool, min_age_s: int) -> int:
+    """고아 찾기·지우기 결과를 출력한다. 깨끗하면 0, 아니면 `REVOCATION_PENDING_EXIT`(4).
+
+    실패와 확인하지 못한 채널이 먼저 나온다.
+    """
+    for line in report.errors:
+        print(f"  ! {line}")
+    for line in report.unscanned:
+        print(f"  ! 확인하지 못함: {line}")
+    done = set(report.deleted)
+    for o in report.found:
+        mark = "지움" if o.ref in done else "남음"
+        when = o.created_at.isoformat() if o.created_at else "?"
+        print(f"{mark} {o.channel:<12} {o.ref} ({o.session_id}, {o.reason}, {when}) {o.label}")
+    for line in report.warnings:
+        print(f"  경고: {line}")
+    print(
+        f"고아 {len(report.found)}개, 지움 {len(report.deleted)}개, 스냅숏 "
+        f"{len(report.snapshots)}개, 나이 하한({min_age_s}초)보다 어려 보지 않음 "
+        f"{len(report.young)}개"
+    )
+    if report.busy:
+        print(f"  작업 생성 중이라 건너뜀 {len(report.busy)}개 (다시 실행하세요)")
+    if report.remaining and not applied:
+        print("  지우지 않았습니다 (보고만). 지우려면 dlp review revoke --orphans --apply")
+    return 0 if report.clean else REVOCATION_PENDING_EXIT
+
+
+def _revoke_orphans(engine: sa.Engine, args: argparse.Namespace) -> int:
+    """`revoke --orphans [<세션>] [--apply]`: 고아 도구 작업·라벨링 버킷 사본을 찾고(지운다).
+
+    나이 하한은 고른 검수 정책(`DLP_REVIEW_POLICY_FILE` 또는 review.yaml)의 `orphans.min_age_s`다.
+    도구 클라이언트는 회수 전용 설정으로 만든다 (CVAT 로그인 실패는 경고, 그 채널은 확인하지 못함).
+    """
+    policy = load_ops_policy(repo_root())
+    setup, warnings = review_setup("review.revoke", args.url, revocation_only=True, policy=policy)
+    now = datetime.now(UTC)
+    report = find_orphans(
+        engine, labeling=setup.labeling, cvat=setup.cvat, label_studio=setup.label_studio,
+        min_age=timedelta(seconds=policy.orphans.min_age_s), now=now, session_id=args.session_id,
+    )  # fmt: skip
+    report.warnings[:0] = warnings
+    if args.apply:
+        delete_orphans(
+            engine, report, labeling=setup.labeling, raw_bucket=setup.raw.bucket, cvat=setup.cvat,
+            label_studio=setup.label_studio, now=now,
+        )  # fmt: skip
+    return _print_orphans(report, applied=args.apply, min_age_s=policy.orphans.min_age_s)
+
+
 def _revoke_session(engine: sa.Engine, args: argparse.Namespace) -> int:
     """`revoke <세션>`: 수동 요청(`--task`·`--all`) → sweep 요청을 한 트랜잭션에 남기고 실행한다.
 
@@ -703,6 +838,9 @@ def cmd_revoke(args: argparse.Namespace) -> int:
     - `--mark-tool-gone KEY --note TEXT`: 도구 인스턴스 폐기 등으로 확인할 수 없는 도구 작업을
       사유와 함께 완료로 표시한다 (행위자 = `current_actor()`). 다른 선택 인자·`--dry-run`과 함께
       쓰지 않는다.
+    - `--orphans [<세션>] [--apply]`: DB 기록 없이 남은 도구 작업·라벨링 버킷 사본(고아)을 보고하고,
+      `--apply`면 세션을 잠근 뒤 다시 확인해 지운다 (`dlp_review.orphans`, F-REV-15). 고아가 남거나
+      확인하지 못한 채널·작업 생성 중이라 건너뛴 세션이 있으면 4.
 
     반환: 대기가 남으면 `REVOCATION_PENDING_EXIT`(4), 아니면 0 (`--dry-run`은 늘 0). 인자 조합이
     맞지 않거나 `--task` 키를 요청할 수 없으면 `SystemExit`.
@@ -712,6 +850,8 @@ def cmd_revoke(args: argparse.Namespace) -> int:
     _check_revoke_args(args)
     engine = sa.create_engine(database_url(args.url))
     try:
+        if args.orphans:
+            return _revoke_orphans(engine, args)
         if args.mark_tool_gone:
             return _revoke_mark_gone(engine, args)
         if args.pending:
@@ -719,6 +859,43 @@ def cmd_revoke(args: argparse.Namespace) -> int:
         return _revoke_session(engine, args)
     finally:
         engine.dispose()
+
+
+def cmd_refresh_urls(args: argparse.Namespace) -> int:
+    """`dlp review refresh-urls [--session S …]`: 열린 Label Studio 작업의 서명 URL을 다시 서명한다.
+
+    Label Studio 작업 data의 영상·시계열 URL은 `review.yaml media.signed_url_ttl_s`(기본 7일) 뒤
+    만료된다. 이 명령을 그보다 짧은 주기(cron, 하루 한 번 권장)로 돌려 열린 작업만 라벨러 자격
+    증명으로 다시 서명한다 (F-REV-08, `dlp_review.refresh`). 수집·회수한 작업과 매체가 지금 블러와
+    다른 작업은 갱신하지 않는다 (뒤쪽은 `dlp review revoke <세션>`을 안내한다). CVAT에는 접속하지
+    않는다.
+
+    인자: args.session — 이 세션만 (반복). 없으면 열린 Label Studio 작업이 있는 모든 세션.
+    반환: 0, 갱신하지 못한 작업이 있으면 1 (cron 경보).
+    부작용: 세션마다 짧은 트랜잭션에서 세션 행을 잠그고 Label Studio 작업 data를 바꾼다 (DB 쓰기
+    없음, 원본 버킷 읽기 없음).
+    """
+    policy = load_ops_policy(repo_root())
+    setup = _setup(args, policy)
+    engine = sa.create_engine(database_url(args.url))
+    failed = 0
+    try:
+        with engine.connect() as conn:
+            sessions = list(args.session) or sessions_with_open_ls_tasks(conn)
+        for sid in sessions:
+            with engine.begin() as conn:
+                report = refresh_session_urls(conn, sid, setup)
+            for key in report.refreshed:
+                print(f"{key}: 서명 URL 갱신 ({policy.media.signed_url_ttl_s}초)")
+            for line in report.skipped:
+                print(f"  건너뜀 {line}")
+            for line in report.errors:
+                print(f"  ! {line}")
+            failed += len(report.errors)
+    finally:
+        engine.dispose()
+    print(f"세션 {len(sessions)}개, 갱신하지 못한 작업 {failed}개")
+    return 1 if failed else 0
 
 
 def cmd_ui_theme(args: argparse.Namespace) -> int:
@@ -745,7 +922,7 @@ def cmd_ui_theme(args: argparse.Namespace) -> int:
 
 
 def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:  # pyright: ignore[reportPrivateUsage]
-    """`review` 하위 명령 묶음을 등록한다 (도구 연동 6개 + 운영 5개 + 화면 테마 1개)."""
+    """`review` 하위 명령 묶음을 등록한다 (도구 연동 7개 + 운영 5개 + 화면 테마 1개)."""
     review = sub.add_parser("review", help="검수 도구 연동")
     rsub = review.add_subparsers(dest="review_command", required=True)
 
@@ -806,8 +983,20 @@ def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
         "--mark-tool-gone", metavar="KEY", help="도구 작업 수동 완료 표시 (--note, 단독으로)"
     )
     rv.add_argument("--note", help="--mark-tool-gone 사유")
+    rv.add_argument(
+        "--orphans", action="store_true",
+        help="DB 기록 없이 남은 도구 작업·라벨링 버킷 사본 보고 (기본 보고만, --apply면 지움)",
+    )  # fmt: skip
+    rv.add_argument("--apply", action="store_true", help="--orphans가 찾은 고아를 지운다")
     rv.add_argument("--url", help="DB URL (기본: DLP_DATABASE_URL)")
     rv.set_defaults(func=cmd_revoke)
+
+    ru = rsub.add_parser(
+        "refresh-urls", help="열린 Label Studio 작업의 서명 URL 다시 서명 (cron, 하루 한 번)"
+    )
+    ru.add_argument("--session", action="append", default=[], help="이 세션만 (반복)")
+    ru.add_argument("--url", help="DB URL (기본: DLP_DATABASE_URL)")
+    ru.set_defaults(func=cmd_refresh_urls, no_cvat=True)
 
     reg = rsub.add_parser("register-webhooks", help="검수 프로젝트에 웹훅 등록")
     reg.add_argument("url_base", help="도구에서 닿는 웹훅 서버 주소 (예: http://host:8765)")
@@ -824,6 +1013,11 @@ def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
 
     asg = rsub.add_parser("assign", help="배정의 검수 도구 작업 생성")
     asg.add_argument("assignment_id")
+    asg.add_argument(
+        "--assignee",
+        help="담당자 없는 배정에 정할 담당자 (블러: 원본 접근 권한자, QA: 선임, 짝 배정과 다른 "
+        "사람)",
+    )
     asg.add_argument("--url", help="DB URL (기본: DLP_DATABASE_URL)")
     asg.set_defaults(func=cmd_assign)
 

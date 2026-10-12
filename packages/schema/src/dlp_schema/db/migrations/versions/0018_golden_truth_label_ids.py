@@ -1,7 +1,7 @@
-"""골든셋 버전의 정답 라벨 ID 고정 열 (ADR 0047).
+"""골든셋 버전의 정답 라벨 ID 고정 열 (ADR 0041).
 
-Revision ID: 0023
-Revises: 0015
+Revision ID: 0018
+Revises: 0017
 Create Date: 2026-10-11
 
 `golden_sets`에 만들 때 고정한 정답 라벨 ID 목록(`truth_label_ids`, JSON)을 더한다. 기존 행은
@@ -13,8 +13,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0023"
-down_revision: str | None = "0015"
+revision: str = "0018"
+down_revision: str | None = "0017"
 branch_labels: str | None = None
 depends_on: str | None = None
 
@@ -44,7 +44,7 @@ def downgrade() -> None:
     )
     if frozen:
         raise RuntimeError(
-            f"정답을 고정한 골든셋 {frozen}개가 있어 0023을 되돌릴 수 없습니다 "
+            f"정답을 고정한 골든셋 {frozen}개가 있어 0018을 되돌릴 수 없습니다 "
             "(되돌리면 같은 골든 버전의 정답이 현재 라벨로 바뀐다)"
         )
     with op.batch_alter_table("golden_sets") as batch:

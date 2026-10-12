@@ -1,4 +1,4 @@
-"""골든셋 CLI의 정답 고정 (`dlp dataset golden --create|--from`, `dlp eval golden`, ADR 0047).
+"""골든셋 CLI의 정답 고정 (`dlp dataset golden --create|--from`, `dlp eval golden`, ADR 0041).
 
 시간대 보존 SQLite 파일 DB로 돈다 (서비스 없음). 정답은 합성 행동 시나리오
 (`dlp_fixtures.actions.generate_action_scenario`)의 사람 행동 라벨이다.

@@ -48,22 +48,25 @@ def write_video(
     audio: NDArray[np.float32] | None = None,
     audio_rate: int = 16_000,
     codec: str = "libx264",
+    pix_fmt: str = "yuv420p",
 ) -> None:
     """프레임마다 PTS(ms)를 그대로 기록한다. 오디오가 있으면 AAC로 함께 넣는다.
 
     Args:
-        path: 출력 MP4.
+        path: 출력 영상 (컨테이너는 확장자로 정한다. 보통 MP4).
         frames: (PTS ms, RGB uint8 영상 (height, width, 3)) 반복자. PTS는 증가해야 한다.
-        width, height: 영상 크기 픽셀 (yuv420p라 짝수여야 한다).
+        width, height: 영상 크기 픽셀 (기본 yuv420p는 짝수여야 한다).
         audio: 모노 float32 샘플 (-1~1). None이면 오디오 트랙 없음.
         audio_rate: 오디오 샘플레이트 Hz.
         codec: 영상 코덱 (기본 libx264, crf 18).
+        pix_fmt: 화소 형식. 홀수 크기 원본을 흉내 낼 때는 홀수를 받는 조합(예: codec="ffv1",
+            pix_fmt="yuv444p", 확장자 .mkv)을 쓴다.
     """
     with av.open(str(path), "w") as container:
         # 모든 스트림을 첫 mux 전에 추가해야 한다 (헤더가 그때 쓰인다).
         vs = container.add_stream(codec, rate=30)
         assert isinstance(vs, av.VideoStream)
-        vs.width, vs.height, vs.pix_fmt = width, height, "yuv420p"
+        vs.width, vs.height, vs.pix_fmt = width, height, pix_fmt
         vs.time_base = MS
         vs.codec_context.time_base = MS
         vs.options = {"crf": "18", "preset": "veryfast"} if codec == "libx264" else {}

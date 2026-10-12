@@ -5,6 +5,8 @@ WP0 완료 기준(서비스 기동·헬스체크)과 서비스 사이 연결을 
 - MLflow 산출물이 SeaweedFS S3를 거쳐 왕복된다.
 - Prefect 서버가 자기 DB(PostgreSQL)에 닿는다.
 - 모든 버킷에 실제로 쓸 수 있다 (버킷별 볼륨 회귀 방지).
+- 라벨링 버킷 버전 관리가 꺼져 있고 라벨러 키는 라벨링 버킷 읽기만 한다 (F-REV-19,
+  `dlp services check --security`와 같은 점검).
 호스트·포트는 `DLP_HOST`, `DLP_MLFLOW_PORT`, `DLP_PREFECT_PORT` 환경 변수로 바꾼다.
 """
 
@@ -21,6 +23,7 @@ import pytest
 
 from dlp_cli.health import default_checks, run_checks
 from dlp_media.storage import S3Store, put_immutable
+from dlp_media.storage_checks import check_labeler_scope, check_versioning_off
 
 pytestmark = pytest.mark.services
 
@@ -81,3 +84,16 @@ def test_every_bucket_accepts_writes(bucket: str, tmp_path: Path) -> None:
     assert put_immutable(store, key, src)
     assert store.head(key) is not None
     store.client.delete_object(Bucket=bucket, Key=key)
+
+
+def test_labeling_bucket_exposure_checks_pass_on_dev_services() -> None:
+    """F-REV-19: 개발 SeaweedFS의 라벨링 버킷은 버전 관리가 꺼져 있고, 라벨러 키는 라벨링 버킷
+    읽기만 한다 (쓰기·삭제·원본·데이터셋·MLflow 버킷은 403). `services/seaweedfs/entrypoint.sh`의
+    권한 설정이 바뀌면 이 시험이 실패한다."""
+    service = S3Store.from_env("dlp-labeling")
+    labeler = S3Store.labeler_from_env("dlp-labeling", public=False)
+    checks = [
+        check_versioning_off(service),
+        *check_labeler_scope(labeler, service, ("dlp-raw", "dlp-datasets", "dlp-mlflow")),
+    ]
+    assert all(c.ok for c in checks), [c for c in checks if not c.ok]

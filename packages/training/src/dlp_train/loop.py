@@ -10,7 +10,7 @@
 4. 골든셋 평가: 후보와 기존 모델(배포 중인 재학습 모델, 없으면 baseline_versions의 DB 예측)을
    골든셋 세션에 메모리에서 돌려 같은 코드로 평가한다. 골든셋 세션에는 아무것도 쓰지 않는다.
    정답은 골든 버전에 고정한 라벨이다 (정답을 고정하지 않은 이전 형식 골든셋은 거부한다, ADR
-   0047). 리포트에 정답 고정 근거(`golden_truth`: 정답 라벨 ID 해시)를 남긴다.
+   0041). 리포트에 정답 고정 근거(`golden_truth`: 정답 라벨 ID 해시)를 남긴다.
 5. 게이트(config/policies/evaluation.yaml) 통과 → 배포(정책 deploy: auto) 또는 승인 대기(approve).
    실패 → rejected. 배포하면 이전 배포 모델은 retired가 된다.
 
@@ -256,7 +256,7 @@ def run_training_job(  # noqa: C901
 
     Raises:
         TrainingError: 정책·학습기·로더가 없음, 골든셋 없는 데이터셋 버전, 정답을 고정하지 않은
-            이전 형식 골든셋(ADR 0047), 골든셋 세션 누출,
+            이전 형식 골든셋(ADR 0041), 골든셋 세션 누출,
             replaces 과제인데 비교 버전 없음, 비교 버전의 골든 예측 없음, 배포 모델 로더 없음,
             산출물 해시 불일치.
     """
@@ -491,7 +491,7 @@ def _frozen_golden_set(conn: sa.Connection, golden_version: str) -> GoldenSet:
 
     Raises:
         TrainingError: 정답을 고정하지 않은 이전 형식(`truth_label_ids` None)일 때. 현재 라벨로
-            정답을 읽으면 같은 골든 버전이라도 배포 판정을 재현할 수 없다 (ADR 0047).
+            정답을 읽으면 같은 골든 버전이라도 배포 판정을 재현할 수 없다 (ADR 0041).
     """
     golden_set = get_golden_set(conn, golden_version)
     if golden_set.truth_label_ids is None:

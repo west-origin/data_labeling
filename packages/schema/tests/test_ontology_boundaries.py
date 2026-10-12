@@ -2,6 +2,7 @@
 
 from argparse import Namespace
 
+import psycopg
 import pytest
 import sqlalchemy as sa
 from pydantic import ValidationError
@@ -208,8 +209,15 @@ def test_storage_rejects_invalid_batch_before_any_insert(pg: sa.Engine):
 
 @pytest.mark.services
 def test_storage_uses_session_version_and_db_guard(pg: sa.Engine, ontology: Ontology):
+    """공통 저장 함수와 0014 INSERT 트리거가 각각 세션·라벨 버전 불일치를 막는다.
+
+    직접 SQL 검사는 앞 단계에서 저장한 라벨(l001)과 다른 label_id를 써야 한다. 같은 ID면 트리거가
+    없어도 PK 중복으로 실패해 트리거를 검사하지 못한다 (F-SCH-04). 그래서 트리거 함수가 낸 오류
+    (SQLSTATE 23514, 오류 위치 `dlp_label_ontology_version()`)인지 확인하고, 대조로 트리거를 지운
+    트랜잭션에서는 같은 INSERT가 통과함을 본다 (롤백하므로 DB에 남지 않는다).
+    """
     v2 = Ontology.model_validate(ontology.model_dump() | {"version": "2.0.0"})
-    wrong = make_label(action_payload(), ontology_version="2.0.0")
+    wrong = make_label(action_payload(), label_id="direct-wrong-version", ontology_version="2.0.0")
     with pg.begin() as conn:
         register_ontology(conn, v2)
         insert_session(conn, make_session("s002", ontology_version="2.0.0"))
@@ -219,10 +227,22 @@ def test_storage_uses_session_version_and_db_guard(pg: sa.Engine, ontology: Onto
         insert_labels(
             conn, [make_label(action_payload(), session_id="s002", ontology_version="2.0.0")]
         )
-    with pytest.raises(DBAPIError), pg.begin() as conn:
+    with pytest.raises(DBAPIError) as caught, pg.begin() as conn:
         conn.execute(label_records.insert(), label_to_row(wrong))
-    with pg.connect() as conn, pytest.raises(NoResultFound):
-        get_ontology(conn, "9.9.9")
+    error = caught.value.orig
+    assert isinstance(error, psycopg.Error)
+    assert error.sqlstate == "23514"  # 트리거의 RAISE ... USING ERRCODE (PK 중복이면 23505)
+    assert "dlp_label_ontology_version()" in (error.diag.context or "")
+    # 대조: 트리거만 지우면 같은 행이 들어간다 (실패 원인이 트리거뿐임을 고정한다)
+    with pg.connect() as conn:
+        control = conn.begin()
+        conn.execute(sa.text("DROP TRIGGER label_ontology_version ON label_records"))
+        conn.execute(label_records.insert(), label_to_row(wrong))
+        control.rollback()
+    with pg.connect() as conn:
+        assert "direct-wrong-version" not in {x.label_id for x in get_labels(conn, "s001")}
+        with pytest.raises(NoResultFound):
+            get_ontology(conn, "9.9.9")
 
 
 @pytest.mark.services

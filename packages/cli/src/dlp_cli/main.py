@@ -42,7 +42,27 @@ from dlp_cli import (
     sync_cmds,
     train_cmds,
 )
-from dlp_cli.health import default_checks, run_checks
+from dlp_cli.health import CheckResult, default_checks, run_checks
+
+
+def _security_checks() -> list[CheckResult]:
+    """라벨링 버킷 노출 경로 점검 (F-REV-19): 버전 관리 꺼짐, 라벨러 자격 증명 범위.
+
+    버킷 이름은 `config/defaults.yaml buckets`(라벨링 밖의 버킷은 모두 라벨러 거부 대상), 자격
+    증명은 `.env`(`DLP_S3_*`)다. 라벨러 키는 서버가 닿는 엔드포인트로 점검한다. boto3를 쓰는
+    점검이라 `--security`일 때만 함수 안에서 불러온다 (헬스체크는 표준 라이브러리만으로 돈다).
+    """
+    from dlp_media.storage import S3Store
+    from dlp_media.storage_checks import check_labeler_scope, check_versioning_off
+    from dlp_schema import load_config, repo_root
+
+    buckets = load_config(repo_root() / "config" / "defaults.yaml").buckets
+    service = S3Store.from_env(buckets.labeling)
+    labeler = S3Store.labeler_from_env(buckets.labeling, public=False)
+    # 라벨링 밖의 모든 버킷 (원본·데이터셋·MLflow, 버킷이 늘면 함께 본다). 이름만 넘긴다
+    others = tuple(b for b in buckets.model_dump().values() if b != buckets.labeling)
+    checks = [check_versioning_off(service), *check_labeler_scope(labeler, service, others)]
+    return [CheckResult(c.name, c.ok, c.detail) for c in checks]
 
 
 def _cmd_services_check(args: argparse.Namespace) -> int:
@@ -51,11 +71,18 @@ def _cmd_services_check(args: argparse.Namespace) -> int:
     인자:
         args.include_cvat: 참이면 CVAT(`make cvat-up`으로 따로 띄움)도 점검한다.
         args.timeout: 서비스별 연결 제한 시간(초).
+        args.security: 참이면 라벨링 버킷 노출 경로도 점검한다 (`_security_checks`: 버전 관리
+            꺼짐, 라벨러 자격 증명이 라벨링 버킷 읽기만 하는지, F-REV-19). 운영 배포 전·월간 감사
+            때 돌린다.
 
     반환: 모든 점검이 성공하면 0, 하나라도 실패하면 1.
-    부작용: 표준 출력에 서비스마다 `[OK  ]`/`[FAIL]` 한 줄. 외부 서비스에 TCP·HTTP 요청만 한다.
+    부작용: 표준 출력에 점검마다 `[OK  ]`/`[FAIL]` 한 줄. 외부 서비스에 TCP·HTTP 요청만 한다.
+    `--security`는 S3에 버전 관리 조회·목록·HEAD와, 라벨러 키로 쓰기·삭제 시도(거부돼야 한다)를
+    한다. 쓰기가 허용되면 써진 빈 점검 객체를 서비스 키로 바로 지운다.
     """
     results = run_checks(default_checks(include_cvat=args.include_cvat), timeout=args.timeout)
+    if args.security:
+        results += _security_checks()
     for r in results:
         mark = "OK  " if r.ok else "FAIL"
         print(f"[{mark}] {r.name:<14} {r.detail}")
@@ -78,6 +105,10 @@ def build_parser() -> argparse.ArgumentParser:
     check = services_sub.add_parser("check", help="docker compose 서비스 헬스체크")
     check.add_argument("--include-cvat", action="store_true", help="CVAT도 점검")
     check.add_argument("--timeout", type=float, default=3.0, help="서비스별 제한 시간(초)")
+    check.add_argument(
+        "--security", action="store_true",
+        help="라벨링 버킷 버전 관리 꺼짐·라벨러 자격 증명 범위(라벨링 버킷 읽기만)도 점검",
+    )  # fmt: skip
     check.set_defaults(func=_cmd_services_check)
 
     # 단계별 하위 명령. 대략 파이프라인 순서로 나열한다 (도움말 출력 순서에만 영향).

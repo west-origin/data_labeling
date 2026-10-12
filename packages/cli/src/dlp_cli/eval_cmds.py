@@ -7,7 +7,7 @@
 
 입력 → 출력: DB `golden_sets`·`label_records` → `<out>`(JSON)과 같은 이름의 `.md` 리포트.
 정답은 골든 버전에 고정한 라벨이며, JSON 리포트의 `golden_truth`에 고정 여부와 정답 라벨 ID 해시를
-남긴다 (ADR 0047). 고정하지 않은 이전 형식 골든셋은 현재 라벨로 평가하고 경고를 출력한다.
+남긴다 (ADR 0041). 고정하지 않은 이전 형식 골든셋은 현재 라벨로 평가하고 경고를 출력한다.
 종료 코드: 게이트 통과 0, 실패 1. 형식 오류는 `SystemExit` 메시지.
 
 주의:
@@ -90,7 +90,7 @@ def cmd_golden(args: argparse.Namespace) -> int:
     engine = sa.create_engine(database_url(args.url))
     try:
         with engine.connect() as conn:
-            # 정답 고정 근거 (골든 버전에 고정한 정답 라벨 ID 해시, ADR 0047)
+            # 정답 고정 근거 (골든 버전에 고정한 정답 라벨 ID 해시, ADR 0041)
             anchor = truth_anchor(
                 get_golden_set(conn, args.golden), golden_sessions(conn, args.golden)
             )

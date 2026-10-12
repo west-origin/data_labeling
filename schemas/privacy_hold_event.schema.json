@@ -1,0 +1,54 @@
+{
+  "additionalProperties": false,
+  "description": "프라이버시 승인 보류·해제 기록 하나 (DB privacy_holds, 추가만 한다. ADR 0042).\n\n사고 대응(라벨러의 노출 신고 등) 중 승인을 보류한다. 세션의 마지막 기록이 hold면 보류 중이고,\n그동안 승인(`dlp privacy approve`)이 거부된다. 해제(release)는 승인을 돌려놓지 않는다: 재승인\n절차(승인 조건 확인 → 렌더)를 다시 거친다.",
+  "properties": {
+    "action": {
+      "enum": [
+        "hold",
+        "release"
+      ],
+      "title": "Action",
+      "type": "string"
+    },
+    "actor": {
+      "description": "보류·해제한 사람 (DLP_ACTOR 등)",
+      "minLength": 1,
+      "pattern": "\\S",
+      "title": "Actor",
+      "type": "string"
+    },
+    "at": {
+      "format": "date-time",
+      "title": "At",
+      "type": "string"
+    },
+    "event_id": {
+      "description": "DB가 매기는 일련번호 (같은 세션 안에서 시간 순)",
+      "minimum": 1,
+      "title": "Event Id",
+      "type": "integer"
+    },
+    "reason": {
+      "description": "보류·해제 사유 (공백만은 안 된다)",
+      "minLength": 1,
+      "pattern": "\\S",
+      "title": "Reason",
+      "type": "string"
+    },
+    "session_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Session Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "event_id",
+    "session_id",
+    "action",
+    "reason",
+    "actor",
+    "at"
+  ],
+  "title": "PrivacyHoldEvent",
+  "type": "object"
+}

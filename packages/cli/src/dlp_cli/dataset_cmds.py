@@ -3,13 +3,14 @@
 등록하는 명령:
 - `dlp dataset golden --domain <도메인> [--create 버전] [--from 버전]` — 도메인 골든셋 후보를
   제안한다. `--create`를 주면 그 이름으로 골든셋을 확정해 DB `golden_sets`에 쓰고, 그 순간의 정답
-  라벨 ID를 고정한다 (사람이 확정, ADR 0047). `--from`은 기존 버전의 세션으로 정답을 다시 고정한
+  라벨 ID를 고정한다 (사람이 확정, ADR 0041). `--from`은 기존 버전의 세션으로 정답을 다시 고정한
   새 버전을 만든다 (정답 수정은 새 골든 버전).
 - `dlp dataset build <버전 ID> [--golden] [--domain]` — 데이터셋 버전을 만든다.
   작업자·장소 단위 분할(골든·학습·검증·holdout) → 라벨·세션·매니페스트를 lakeFS에 커밋 →
   DB `dataset_versions`에 기록.
 - `dlp dataset withdraw <세션> --reason` — 세션 사용 중지(동의 철회·삭제 요청).
-  이후 버전·내보내기에서 자동 제외되고, 이미 들어간 곳을 출력한다.
+  이후 버전·내보내기에서 자동 제외되고, 이미 들어간 곳을 출력한다. 같은 커밋에서 배포된 검수 작업
+  매체 회수를 요청하고 커밋 뒤 회수 실행기를 돌린다 (ADR 0039, F-REV-17, 대기가 남으면 종료 코드 4).
 - `dlp lineage <세션>` — 세션 계보: 골든셋 → 데이터셋 버전 → 학습 실행 → 내보내기 (읽기 전용).
 
 순서: `dataset golden --create`(도메인마다 처음 한 번, 프라이버시 승인 세션에서 제안해 세션을
@@ -36,6 +37,7 @@ from datetime import UTC, datetime
 
 import sqlalchemy as sa
 
+from dlp_cli.review_config import print_revocations, run_revocations
 from dlp_cli.schema_cmds import database_url
 from dlp_datasets.build import build_dataset_version, propose_golden_set
 from dlp_datasets.lineage import session_lineage, withdraw_session
@@ -92,7 +94,7 @@ def cmd_golden(args: argparse.Namespace) -> int:
 
     후보에서 빼는 세션: 프라이버시 미승인(`eligible_privacy_state`가 아님), 사용 중지.
     확정하면 그 순간 세션들의 정답 라벨 ID(현재 라벨 중 사람이 만들거나 승인·수정한 것)를
-    골든 버전에 고정한다 (`truth_label_ids`, ADR 0047). 같은 버전의 정답은 그 뒤에 라벨을 고쳐도
+    골든 버전에 고정한다 (`truth_label_ids`, ADR 0041). 같은 버전의 정답은 그 뒤에 라벨을 고쳐도
     바뀌지 않으므로, 라벨링·검수를 마친 뒤 `--from <버전> --create <새 버전>`으로 다시 고정한다.
     부작용: `--create`면 한 트랜잭션에서 `golden_sets` INSERT (같은 버전이 있으면 DB 오류).
     """
@@ -190,9 +192,15 @@ def cmd_withdraw(args: argparse.Namespace) -> int:
     """`dlp dataset withdraw <세션> --reason`: 세션을 사용 중지한다.
 
     부작용: 한 트랜잭션에서 세션 생애주기를 `withdrawn`으로 바꾸고, 아직 기록이 없으면 `withdrawals`
-    INSERT (다시 실행해도 기록은 하나, 멱등). 이미 만든 스냅샷·내보내기는 바꾸지 않으며(불변),
-    그 목록을 "이미 들어간 곳"으로 출력해 사람이 후속 조치(재학습·회수)를 판단하게 한다.
+    INSERT (다시 실행해도 기록은 하나, 멱등), 그 세션의 배포된 검수 작업(블러 검수 제외)에 매체 회수
+    요청(사유 `withdrawn:<행위자>`). 커밋 뒤 회수 실행기(`review_config.run_revocations`)로 라벨링
+    버킷 사본 → CVAT → Label Studio 작업을 지운다 (도구에 닿지 않으면 대기로 남는다). 이미 만든
+    스냅샷·내보내기는 바꾸지 않으며(불변), 그 목록을 "이미 들어간 곳"으로 출력해 사람이 후속
+    조치(재학습·구매자 삭제 요청)를 판단하게 한다.
     생애주기 기록의 실행자는 `--actor`, 없으면 `DLP_ACTOR`, 그것도 없으면 OS 사용자다.
+
+    반환: 0, 회수 대기가 남으면 `REVOCATION_PENDING_EXIT`(4, 사용 중지는 이미 커밋됐다.
+    `dlp review revoke <세션>` 또는 cron `--pending`이 이어서 지운다).
     """
     actor = args.actor or current_actor()
     engine = _engine(args)
@@ -200,6 +208,8 @@ def cmd_withdraw(args: argparse.Namespace) -> int:
         lineage = withdraw_session(
             conn, args.session_id, args.reason, datetime.now(UTC), actor=actor
         )
+    # 회수 요청은 위 커밋에 있다. 외부 채널(사본·도구 작업)은 커밋 뒤에 끊는다
+    report = run_revocations(engine, args.session_id, url=args.url, purpose="dataset.withdraw")
     engine.dispose()
     print(f"{args.session_id}: 사용 중지. 이후 버전·내보내기에서 자동 제외")
     _print_lineage(
@@ -209,7 +219,10 @@ def cmd_withdraw(args: argparse.Namespace) -> int:
         "이미 들어간 곳",
         lineage.golden_sets,
     )
-    return 0
+    if lineage.revocations:
+        keys = ", ".join(lineage.revocations)
+        print(f"검수 작업 {len(lineage.revocations)}개 회수 요청: {keys}")
+    return print_revocations(report, args.session_id)
 
 
 def cmd_lineage(args: argparse.Namespace) -> int:

@@ -17,6 +17,13 @@ CVAT는 프레임 번호로 주석을 저장하므로 PTS 인덱스의 프레임
 키포인트 트랙이다. 직사각형·점이 아닌 모양(다각형·마스크·스켈레톤 등), 회전한 직사각형, 프레임
 태그는 우리 라벨로 옮길 수 없으므로 수집을 멈춘다 (CvatFormatError, 조용히 버리지 않는다).
 
+손 골격(hand21)은 손별 라벨(`kp_hand21_left`·`kp_hand21_right`)로 그린다. 검수자가 새로 그린 손
+골격도 라벨 이름으로 손을 알 수 있고, 손을 바꾸려면 라벨을 바꾼다 (라벨 이름이 dlp_meta의 손보다
+우선한다).
+손별 라벨 이전에 만든 프로젝트는 `kp_hand21` 하나뿐이라 작업을 만들 때 빠진 라벨을 덧붙이고
+(`tasks._cvat_project`), 덧붙이기 전 작업의 `kp_hand21` 트랙은 dlp_meta의 손으로 그대로 왕복한다.
+`kp_hand21`로 새로 그려 손을 알 수 없는 골격은 CvatFormatError다 (F-REV-04).
+
 좌표: 라벨은 원본(라벨이 가리키는 영상) 화소 좌표다. 검수 화면 영상이 다른 해상도(예: 프라이버시
 검수의 480p 프록시)이면 scale = (화면 영상 너비 / 원본 너비, 화면 영상 높이 / 원본 높이)로 보내고
 돌아올 때 나눈다. 둘 다 PRECISION 자리로 반올림하므로, 고치지 않은 라벨의 비교 기준은
@@ -27,8 +34,8 @@ WP6, ADR 0006(무손실 왕복), ADR 0019(키프레임 시각 = 스트림 PTS ms
 `collect`(받기: `annotation_tracks`, `from_cvat_tracks`, `quantize`).
 
 공개 이름: `CVAT_KINDS`, `TRACK_ATTRS`, `SHAPE_ATTRS`, `PRECISION`, `Scale`, `UNIT_SCALE`,
-`NewBoxKind`, `label_spec`, `CvatSchema`, `CvatFormatError`, `annotation_tracks`, `quantize`,
-`cvat_label_name`, `to_cvat_tracks`, `from_cvat_tracks`.
+`NewBoxKind`, `KEYPOINT_LABELS`, `LEGACY_HAND_LABEL`, `label_spec`, `CvatSchema`, `CvatFormatError`,
+`annotation_tracks`, `quantize`, `cvat_label_name`, `to_cvat_tracks`, `from_cvat_tracks`.
 """
 
 from __future__ import annotations
@@ -37,6 +44,8 @@ import json
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
+
+from pydantic import ValidationError
 
 from dlp_review.reconcile import ReviewedItem
 from dlp_schema.labels import (
@@ -63,6 +72,11 @@ Scale = tuple[float, float]  # (가로, 세로) 화면 영상 화소 / 라벨 �
 UNIT_SCALE: Scale = (1.0, 1.0)
 # 검수자가 새로 그린 직사각형 트랙의 라벨 종류 (dlp_meta가 비어 있을 때). 작업 단계로 정한다.
 NewBoxKind = Literal["blur_track", "box_track"]
+# 작업 라벨 프로젝트의 키포인트 골격 라벨 (`kp_<골격>`, 손 골격은 `kp_hand21_<손>`).
+# 손을 라벨 이름에 넣어 검수자가 새로 그린 손 골격도 어느 손인지 알 수 있게 한다 (F-REV-04).
+KEYPOINT_LABELS = ("kp_hand21_left", "kp_hand21_right", "kp_coco17", "kp_wholebody133")
+# 손별 라벨 이전의 손 골격 라벨. 그때 만든 프로젝트·작업의 트랙만 쓴다 (손은 dlp_meta에 있다).
+LEGACY_HAND_LABEL = "kp_hand21"
 
 
 def label_spec(
@@ -70,7 +84,7 @@ def label_spec(
 ) -> list[dict[str, Any]]:
     """CVAT 프로젝트 라벨 정의.
 
-    names: CVAT 라벨 이름 (블러 대상 종류, 객체 클래스, `kp_<골격>`).
+    names: CVAT 라벨 이름 (블러 대상 종류, 객체 클래스, `KEYPOINT_LABELS`).
     colors: 라벨 이름 → 화면 색(#rrggbb, `ui_theme.cvat_label_color`). 없거나 이름이 빠지면 CVAT가
     색을 고른다. 색은 화면 모양일 뿐 수집·왕복에 쓰지 않는다.
     라벨마다 텍스트 속성 `dlp_label_id`·`dlp_meta`(트랙, 고정)와 `dlp_visibility`(모양, 변경 가능)를
@@ -302,7 +316,8 @@ def quantize(label: LabelRecord, scale: Scale = UNIT_SCALE) -> LabelRecord:
 
 
 def cvat_label_name(label: LabelRecord) -> str:
-    """라벨 → CVAT 라벨 이름 (블러: 대상 종류, 박스: 클래스, 키포인트: `kp_<골격>`).
+    """라벨 → CVAT 라벨 이름 (블러: 대상 종류, 박스: 클래스, 키포인트: `kp_<골격>`,
+    손이 있는 키포인트: `kp_<골격>_<손>`, 예: `kp_hand21_left`).
 
     예외: CVAT로 보낼 수 없는 종류면 ValueError.
     """
@@ -312,8 +327,31 @@ def cvat_label_name(label: LabelRecord) -> str:
     if isinstance(p, BoxTrackPayload):
         return p.class_id
     if isinstance(p, KeypointTrackPayload):
-        return f"kp_{p.skeleton}"
+        return f"kp_{p.skeleton}" + (f"_{p.hand.value}" if p.hand is not None else "")
     raise ValueError(f"CVAT로 보낼 수 없는 라벨 종류: {label.kind}")
+
+
+def _project_label(name: str, schema: CvatSchema) -> str:
+    """프로젝트에 있는 라벨 이름. 손별 손 골격 라벨이 없는(이전에 만든) 프로젝트면 `kp_hand21`.
+
+    손은 dlp_meta에 실리므로 이전 라벨로 보내도 왕복한다.
+    """
+    if name not in schema.label_ids and name.startswith(f"{LEGACY_HAND_LABEL}_"):
+        return LEGACY_HAND_LABEL
+    return name
+
+
+def _keypoint_label(name: str) -> tuple[str, str | None]:
+    """키포인트 라벨 이름 → (골격, 이름에 든 손 또는 None).
+
+    예: `kp_hand21_left` → (hand21, left), `kp_hand21` → (hand21, None),
+    `kp_coco17` → (coco17, None).
+    """
+    body = name.removeprefix("kp_")
+    skeleton, _, hand = body.rpartition("_")
+    if skeleton and hand in ("left", "right"):
+        return skeleton, hand
+    return body, None
 
 
 def to_cvat_tracks(
@@ -326,7 +364,8 @@ def to_cvat_tracks(
     """frame_times: 화면 영상의 프레임 시각. scale: 화면 영상 화소 / 라벨 화소.
 
     반환: CVAT 트랙 목록 (`CvatClient.put_tracks`에 넘긴다). 키프레임 시각은 frame_times에서
-    정확히 같은 값을 찾아 프레임 번호로 바꾼다 (보간·근사하지 않는다).
+    정확히 같은 값을 찾아 프레임 번호로 바꾼다 (보간·근사하지 않는다). 손 골격은 손별 라벨
+    (`kp_hand21_<손>`)로 보내고, 그 라벨이 없는 이전 프로젝트면 `kp_hand21`로 보낸다.
     예외: 키프레임 시각이 화면 영상 프레임 시각에 없으면 ValueError (`_shape`), 프로젝트에
     라벨·속성이 없으면 KeyError.
     """
@@ -335,7 +374,7 @@ def to_cvat_tracks(
     tracks: list[dict[str, Any]] = []
     for label in labels:
         p = label.payload
-        name = cvat_label_name(label)
+        name = _project_label(cvat_label_name(label), schema)
         meta: dict[str, Any] = {"kind": label.kind}
         shapes: list[dict[str, Any]] = []
         if isinstance(p, BoxTrackPayload | BlurTrackPayload):
@@ -410,9 +449,10 @@ def from_cvat_tracks(
 
     반환: `ReviewedItem` 목록 (트랙 순서). 구간은 첫·마지막 모양의 프레임 시각이다.
     새로 그린 박스·키포인트 트랙의 개체 ID는 `<라벨 이름>_h<트랙 순번>`이다.
-    키포인트 가시성 속성이 없으면 모든 점을 2(보임)로 둔다.
-    예외: 모양 없는 트랙, 지원하지 않는 모양, 영상 밖 프레임, 모르는 라벨·속성 ID면
-    `CvatFormatError`.
+    키포인트 가시성 속성이 없으면 모든 점을 2(보임)로 둔다. 키포인트의 골격·손은 라벨 이름
+    (`kp_<골격>[_<손>]`)에서 읽고, 이름에 손이 없으면 dlp_meta의 손을 쓴다.
+    예외: 모양 없는 트랙, 지원하지 않는 모양, 영상 밖 프레임, 모르는 라벨·속성 ID, 손을 알 수
+    없는 손 골격(`kp_hand21`로 새로 그림), 골격과 맞지 않는 점 수면 `CvatFormatError`.
     """
     sx, sy = scale
     items: list[ReviewedItem] = []
@@ -445,6 +485,15 @@ def from_cvat_tracks(
                 payload = BoxTrackPayload(entity_id=entity, class_id=name, keyframes=kfs)
         else:
             frames: list[KeypointFrame] = []
+            skeleton, hand = _keypoint_label(name)
+            # 라벨 이름의 손이 메타(원래 손)보다 우선한다 (검수자가 라벨을 바꿔 손을 고친다)
+            hand = hand or meta.get("hand")
+            if skeleton == "hand21" and hand is None:
+                frames_span = f"{shapes[0]['frame']}~{shapes[-1]['frame']}"
+                raise CvatFormatError(
+                    f"라벨 {name}의 손 골격 트랙 (프레임 {frames_span})에 손(left/right)이 "
+                    "없습니다. kp_hand21_left 또는 kp_hand21_right로 그려야 합니다"
+                )
             for t, s in zip(times, shapes, strict=True):
                 vis_attr = {
                     schema.attr_name(a["spec_id"]): a["value"] for a in s.get("attributes", [])
@@ -465,11 +514,19 @@ def from_cvat_tracks(
                         ),
                     )
                 )
-            payload = KeypointTrackPayload(
-                entity_id=meta.get("entity_id") or f"{name}_h{n}",
-                skeleton=meta.get("skeleton") or name.removeprefix("kp_"),  # type: ignore[arg-type]
-                hand=meta.get("hand"),
-                keyframes=tuple(frames),
-            )
+            try:
+                payload = KeypointTrackPayload(
+                    entity_id=meta.get("entity_id") or f"{name}_h{n}",
+                    skeleton=skeleton,  # type: ignore[arg-type]
+                    hand=hand,  # type: ignore[arg-type]
+                    keyframes=tuple(frames),
+                )
+            except ValidationError as e:
+                # 예: 새로 그린 골격의 점 수가 골격과 다름. 내부 오류가 아니라 고칠 수 있는 주석이다
+                raise CvatFormatError(
+                    f"라벨 {name}의 키포인트 트랙 (프레임 {shapes[0]['frame']}~"
+                    f"{shapes[-1]['frame']})을 옮길 수 없습니다: "
+                    + "; ".join(str(x["msg"]) for x in e.errors())
+                ) from e
         items.append(ReviewedItem(origin, stream_id, times[0], times[-1], payload))
     return items

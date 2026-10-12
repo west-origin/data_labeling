@@ -14,6 +14,8 @@
 주의점:
 - 프레임 PTS와 time_base를 원본 그대로 두므로 공간 라벨 키프레임 시각(스트림 PTS ms, ADR 0019)이
   워터마크 영상에서도 같은 프레임을 가리킨다. 테스트가 PTS 일치를 검사한다.
+- 입력이 홀수 크기면 오른쪽·아래에 검은 화소 1줄을 덧대 짝수로 쓴다 (`dlp_media.encoding`,
+  libx264 yuv420p 요구). 늘이지 않으므로 화소 좌표가 입력과 같다. 블러본은 렌더 때 이미 짝수다.
 - 불투명도·화질·명목 프레임레이트는 `config/policies/review.yaml` `media` 절에서 온다.
 """
 
@@ -29,6 +31,7 @@ import cv2
 import numpy as np
 from numpy.typing import NDArray
 
+from dlp_media.encoding import even_size, pad_to_even
 from dlp_media.probe import to_fraction
 
 
@@ -78,7 +81,8 @@ def burn_watermark(
     with av.open(str(src)) as inp, av.open(str(dst), "w") as out:
         vin = inp.streams.video[0]
         tb = to_fraction(vin.time_base)
-        w, h = vin.codec_context.width, vin.codec_context.height
+        # 홀수 크기 입력은 오른쪽·아래를 덧대 짝수로 쓴다 (yuv420p 요구, 좌표 유지, F-PMS-02)
+        w, h = even_size(vin.codec_context.width, vin.codec_context.height)
         # 알파 마스크 (h, w, 1), 0~opacity. RGB 세 채널에 같은 값으로 퍼진다
         mask = watermark_layer(text, w, h).astype(np.float32)[:, :, None] / 255 * opacity
         vout = out.add_stream("libx264", rate=encoder_rate)
@@ -91,7 +95,8 @@ def burn_watermark(
         for frame in inp.decode(vin):
             if frame.pts is None:
                 continue
-            img = np.asarray(frame.to_ndarray(format="rgb24"), dtype=np.float32)
+            rgb = pad_to_even(np.asarray(frame.to_ndarray(format="rgb24"), dtype=np.uint8))
+            img = rgb.astype(np.float32)
             # 알파 합성: 글씨 자리를 흰색(255) 쪽으로 opacity만큼 섞는다
             marked = (img * (1 - mask) + 255 * mask).astype(np.uint8)
             new = av.VideoFrame.from_ndarray(marked, format="rgb24")

@@ -22,6 +22,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from dlp_schema.common import derived_id
 from dlp_schema.labels import (
     LabelPayload,
     LabelRecord,
@@ -95,14 +96,19 @@ def _same(a: LabelRecord, b: ReviewedItem) -> bool:
 
 
 def _new_id(base: str, reviewer: str, now: datetime, content: str) -> str:
-    """새 사람 레코드 ID `"<base>:r<해시 12자>"` (128자를 넘으면 뒤쪽 128자만 남긴다).
+    """새 사람 레코드 ID `"<base>:r<해시 12자>"`.
 
-    base: 원래 라벨 ID(수정·삭제) 또는 `"<세션>-h"`(새로 그린 것). 해시 입력이 검수자·시각·내용이라
-    base·검수자·시각·내용이 모두 같아야 같은 ID가 나온다. 수집 시각이 달라지면 ID도 달라진다.
+    base: 원래 라벨 ID(수정·삭제) 또는 `"<세션>-h"`(새로 그린 것). 해시 입력이 base·검수자·시각·
+    내용이라 넷이 모두 같아야 같은 ID가 나온다(멱등). 수집 시각이 달라지면 ID도 달라진다.
     수집 재시도의 중복 방지는 이 함수가 아니라 저장된 작업의 COLLECTED 상태로 처리한다.
+
+    128자(`Identifier` 최대)를 넘으면 `dlp_schema.common.derived_id`처럼 base 앞부분 + base 해시로
+    줄인다: `<base 앞부분>:h<sha256 16자>:r<해시 12자>`. base가 영숫자로 시작하므로 결과도
+    `Identifier` 규칙을 지킨다. 회귀(F-REV-05, A-09): 예전에는 뒤쪽 128자만 남겨 `-`·`:`로 시작하는
+    잘못된 ID가 생겨 수집이 ValidationError로 멈췄다. 128자 이하이면 예전과 같은 ID다.
     """
     digest = hashlib.sha256(f"{base}|{reviewer}|{now.isoformat()}|{content}".encode()).hexdigest()
-    return f"{base}:r{digest[:12]}"[-128:]
+    return derived_id(base, f"r{digest[:12]}")
 
 
 def reconcile(

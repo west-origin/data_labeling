@@ -46,4 +46,5 @@ ADR은 결정 당시의 이유와 이관 조건을 기록한다. 후속 ADR이 �
 | 0037 | [ADR 0037: 온톨로지 로딩·저장·계층·이관 검증 경계](0037-ontology-validation-boundaries.md) |
 | 0038 | [ADR 0038: 검수 화면 테마를 도구 밖에서 덧씌운다](0038-review-ui-theme-overlay.md) |
 | 0039 | [ADR 0039: 블러가 바뀌면 이미 배포한 라벨링 작업 매체를 회수한다](0039-revoke-labeling-media-on-blur-change.md) |
-| 0047 | [ADR 0047: 골든셋 버전은 만들 때 정답 라벨 ID를 고정한다](0047-golden-truth-freeze.md) |
+| 0041 | [ADR 0041: 골든셋 버전은 만들 때 정답 라벨 ID를 고정한다](0041-golden-truth-freeze.md) |
+| 0042 | [ADR 0042: 사고 대응 중 프라이버시 승인을 보류한다](0042-privacy-approval-hold.md) |

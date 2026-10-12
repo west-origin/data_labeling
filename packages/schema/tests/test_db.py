@@ -21,6 +21,7 @@ from dlp_schema.dataset import DatasetVersion, Split
 from dlp_schema.db.migrate import downgrade, upgrade
 from dlp_schema.db.repository import (
     TransitionError,
+    active_privacy_hold,
     get_dataset_version,
     get_labels,
     get_session,
@@ -28,6 +29,8 @@ from dlp_schema.db.repository import (
     insert_labels,
     insert_session,
     list_lifecycle_events,
+    list_privacy_holds,
+    record_privacy_hold,
     record_review,
     register_ontology,
     set_lifecycle,
@@ -115,10 +118,10 @@ def test_labels_are_immutable_except_review(pg: sa.Engine) -> None:
             conn.execute(sa.text(statement))
 
 
-# TRUNCATE를 막아야 하는 추가 전용 테이블 (0010~0012)
+# TRUNCATE를 막아야 하는 추가 전용 테이블 (0010~0012, 0017)
 APPEND_ONLY_TABLES = (
     "label_records", "raw_access_log", "review_work", "privacy_audits", "retention_decisions",
-    "session_lifecycle_events", "privacy_detection_runs",
+    "session_lifecycle_events", "privacy_detection_runs", "privacy_holds",
 )  # fmt: skip
 
 
@@ -357,3 +360,27 @@ def test_update_stream_sync_changes_only_sync_fields(pg: sa.Engine) -> None:
         assert get_session(conn, "s001").stream("imu") == synced
     with pytest.raises(KeyError), pg.begin() as conn:
         update_stream_sync(conn, "s001", synced.model_copy(update={"stream_id": "nope"}))
+
+
+@pytest.mark.services
+def test_privacy_holds_are_append_only_and_block_downgrade(pg: sa.Engine) -> None:
+    """승인 보류 기록(0017, ADR 0042)은 수정·삭제할 수 없고, 기록이 있으면 0017을 되돌리지 않는다.
+
+    마지막 기록이 hold면 보류 중, release면 아니다 (일련번호 순, 같은 시각이어도).
+    """
+    with pg.begin() as conn:
+        record_privacy_hold(conn, "s001", "hold", reason="report", actor="ops01", at=FIXED_TIME)
+        assert active_privacy_hold(conn, "s001") is not None
+        record_privacy_hold(conn, "s001", "release", reason="ok", actor="ops02", at=FIXED_TIME)
+        assert active_privacy_hold(conn, "s001") is None
+        assert [h.action for h in list_privacy_holds(conn, "s001")] == ["hold", "release"]
+    for statement in (
+        "UPDATE privacy_holds SET action = 'release'",
+        "DELETE FROM privacy_holds",
+    ):
+        with pytest.raises(DBAPIError, match="privacy_holds"), pg.begin() as conn:
+            conn.execute(sa.text(statement))
+    url = pg.url.render_as_string(hide_password=False)
+    pg.dispose()
+    with pytest.raises(RuntimeError, match="0017"):
+        downgrade(url, "0015")

@@ -234,7 +234,7 @@ def test_prefix_predictions_keep_reviewer_deleted_records_and_skip_withdrawn(
 
 
 def test_frozen_golden_truth_is_unchanged_by_later_human_correction(pg: sa.Engine) -> None:
-    """같은 골든 버전은 정답이 고정된다 (T5, ADR 0047).
+    """같은 골든 버전은 정답이 고정된다 (T5, ADR 0041).
 
     시나리오: 골든 세션 하나에 사람 행동 라벨(정답)과 미검수 모델 라벨. 만들 때의 정답 ID를 고정해
     golden-v1을 만든다. 뒤에 사람이 정답 하나를 고치고(새 레코드 + parent) 모델 라벨을 승인한다.

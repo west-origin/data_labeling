@@ -279,3 +279,40 @@ def test_per_minute_normalization(policy: ActivePolicy) -> None:
     ]
     assert [s.session_id for s in score_sessions(sessions, rates, policy)] == ["long", "short"]
     assert [s.session_id for s in score_sessions(sessions, rates, per_min)] == ["short", "long"]
+
+
+def test_class_changes_are_counted_under_the_model_predicted_class(policy: ActivePolicy) -> None:
+    """F-ETA-06 회귀: 수정·삭제는 사람이 고친 뒤 클래스가 아니라 모델 원본(origin) 클래스로 센다.
+
+    시나리오 (평활 없음, prior_weight 0): 모델이 cup으로 낸 10개 중 6개를 사람이 mug로 고치고,
+    1개는 mug로 고친 뒤 지우고(삭제), 3개는 승인했다. 사람이 추가한 mug 하나는 그 클래스(mug)다.
+    정답: cup은 검수 10·바뀜 7(수정 6 + 삭제 1), mug는 추가 1(검수 1·바뀜 1). 예전에는 수정 6이
+    mug로 세어져 cup 수정률이 1/4(삭제만)이었다. 검수 대기 cup 예측의 점수(`CorrectionRateTerm`)는
+    cup 수정률로 찾으므로 모델 예측 클래스 기준이어야 맞다.
+    """
+    flat = policy.model_copy(
+        update={"correction": policy.correction.model_copy(update={"prior_weight": 0})}
+    )
+    sid = "r1"
+
+    def human_mug(lid: str, **kw: Any) -> LabelRecord:
+        """검수자가 만든 mug 박스 레코드 (kw로 parent·삭제 표시)."""
+        corrected = reviewed(VerificationState.HUMAN_CORRECTED)
+        return make_label(box("mug"), label_id=f"{sid}-{lid}", session_id=sid,
+                          verification=corrected, **kw)  # fmt: skip
+
+    history: list[LabelRecord] = []
+    for i in range(10):
+        state = reviewed(VerificationState.HUMAN_APPROVED) if i >= 7 else Verification()
+        history.append(model(sid, f"m{i}", PAYLOADS["cup"], verification=state))
+        if i < 7:
+            history.append(human_mug(f"h{i}", parent_label_id=f"{sid}-m{i}"))
+    # 고친 것 하나(h6)를 다시 지운다: 모델 원본은 cup이다
+    history.append(human_mug("h6-del", parent_label_id=f"{sid}-h6", retracted=True))
+    # 모델이 놓친 mug를 사람이 추가했다 (원본 없음: 그 라벨의 클래스로 센다)
+    history.append(human_mug("add"))
+    rates = correction_rates([history], flat)
+    cup, mug = rates.classes["box_track/cup"], rates.classes["box_track/mug"]
+    assert (cup.reviewed, cup.changed) == (10, 7)
+    assert (mug.reviewed, mug.changed) == (1, 1)
+    assert cup.rate == pytest.approx(0.7) and rates.overall == pytest.approx(8 / 11)

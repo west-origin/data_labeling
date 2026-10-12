@@ -18,6 +18,7 @@
       (0009, 0010).
     - session_lifecycle_events: 수정·삭제·TRUNCATE 금지 (0011).
     - privacy_detection_runs: 0건을 포함한 탐지 완료 이력, 수정·삭제·TRUNCATE 금지 (0012).
+    - privacy_holds: 사고 대응 승인 보류·해제 기록, 수정·삭제·TRUNCATE 금지 (0017, ADR 0042).
 
 열 규약
     - 시각(`Ts`)은 모두 `TIMESTAMP WITH TIME ZONE`. 파이썬 쪽도 시간대 있는 datetime만 쓴다.
@@ -156,6 +157,30 @@ privacy_detection_runs = sa.Table(
     sa.Index("ix_privacy_detection_runs_session_stream", "session_id", "stream_id"),
 )
 
+# 프라이버시 승인 보류·해제 기록 (`PrivacyHoldEvent`, ADR 0042). 추가만 한다 (0017 트리거).
+# 세션의 마지막 기록(event_id 순)이 hold면 보류 중이다. action은 hold|release.
+privacy_holds = sa.Table(
+    "privacy_holds",
+    metadata,
+    sa.Column(
+        "event_id",
+        sa.BigInteger().with_variant(sa.Integer(), "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    ),
+    sa.Column(
+        "session_id",
+        sa.String(128),
+        sa.ForeignKey("sessions.session_id"),
+        nullable=False,
+        index=True,
+    ),
+    sa.Column("action", sa.String(16), nullable=False),
+    sa.Column("reason", sa.Text(), nullable=False),
+    sa.Column("actor", sa.Text(), nullable=False),
+    sa.Column("at", Ts, nullable=False),
+)
+
 # 라벨 레코드 (`LabelRecord`, 변환은 `label_to_row`/`row_to_label`).
 # 출처·검수 정보는 평탄화해 열로 두고(source, model_version, sensor_id, verification_state,
 # reviewer_id, reviewed_at), 페이로드는 JSON으로 둔다.
@@ -270,7 +295,7 @@ review_assignments = sa.Table(
 )
 
 # 골든셋 버전 (`GoldenSet`). session_ids는 JSON 목록. truth_label_ids는 만들 때 고정한 정답 라벨 ID
-# JSON 목록이며, NULL이면 정답을 고정하지 않은 이전 형식 행이다 (0023, ADR 0047).
+# JSON 목록이며, NULL이면 정답을 고정하지 않은 이전 형식 행이다 (0018, ADR 0041).
 golden_sets = sa.Table(
     "golden_sets",
     metadata,

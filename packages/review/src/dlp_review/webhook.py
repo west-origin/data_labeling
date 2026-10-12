@@ -23,7 +23,8 @@
 
 보안 주의: 비밀 비교는 `hmac.compare_digest`(상수 시간)로 한다. 웹훅 사용자 정보는 작업 담당자
 검사에만 쓰고, 담당자가 있는 작업이면 기록되는 검수자는 늘 그 담당자다 (담당자가 없는 작업만 CVAT가
-알려 준 사용자 이름을 쓴다).
+알려 준 사용자 이름을 쓴다). Label Studio 웹훅은 주석을 만든·고친 사용자가 담당자의 Label Studio
+계정(review.yaml label_studio.users)이 아니면 403으로 받지 않고 경고 로그만 남긴다 (F-REV-06).
 """
 
 from __future__ import annotations
@@ -46,17 +47,42 @@ from dlp_schema.review import ReviewStage, ReviewTask, ReviewTool
 @dataclass(frozen=True)
 class CollectRequest:
     """reviewer: 도구가 알려 준 사용자 이름 (CVAT 작업 담당자). Label Studio는 숫자 ID만 주므로
-    user_id에 싣고 reviewer는 비운다. 실제 검수자는 resolve_reviewer로 작업 담당자에서 정한다."""
+    user_id·editor_id에 싣고 reviewer는 비운다. 실제 검수자는 resolve_reviewer로 작업 담당자에서
+    정한다."""
 
     # 작업 키 `"<도구>:<도구 작업 ID>"` (예: `cvat:7`, `label_studio:3`) = review_tasks.task_key
     task_key: str
     reviewer: str | None
-    # Label Studio 주석을 만든 사용자의 도구 내부 숫자 ID (서비스 계정 주석을 거르는 데만 쓴다)
+    # Label Studio 주석을 만든 사용자의 도구 내부 숫자 ID (`completed_by`). 서비스 계정 주석을
+    # 거르고 담당자의 Label Studio 계정과 대조한다 (검수자 ID로 쓰지 않는다)
     user_id: int | None = None
+    # Label Studio 주석을 마지막으로 고친 사용자의 숫자 ID (`updated_by`, 없으면 None). 담당자
+    # 계정과 대조한다: 다른 사람이 담당자 주석을 고치거나 담당자 ID로 올린 주석을 거른다 (F-REV-06)
+    editor_id: int | None = None
 
 
 class ReviewerMismatchError(PermissionError):
     """웹훅의 도구 사용자와 작업 담당자(또는 그 CVAT 계정)가 맞지 않아 수집하지 않는다."""
+
+
+def _label_studio_reviewer(
+    request: CollectRequest, task: ReviewTask, ls_users: Mapping[str, int]
+) -> str:
+    """Label Studio 웹훅: 주석을 만든 사람과 (알려 주면) 마지막으로 고친 사람이 모두 담당자의
+    Label Studio 계정이어야 그 담당자를 돌려준다 (F-REV-06). 아니면 `ReviewerMismatchError`."""
+    if task.assignee is None:
+        raise ReviewerMismatchError(f"{task.task_key}: 담당자가 없고 검수자를 알 수 없습니다")
+    expected = ls_users.get(task.assignee)
+    if expected is None:
+        raise ReviewerMismatchError(
+            f"{task.task_key}: 담당자 {task.assignee}의 Label Studio 계정 연결이 없습니다"
+        )
+    if request.user_id != expected or request.editor_id not in (None, expected):
+        raise ReviewerMismatchError(
+            f"{task.task_key}: 주석 작성자(Label Studio 사용자 {request.user_id}, 고친 사용자 "
+            f"{request.editor_id})가 담당자 {task.assignee}의 계정({expected})이 아닙니다"
+        )
+    return task.assignee
 
 
 def resolve_reviewer(
@@ -64,19 +90,26 @@ def resolve_reviewer(
     task: ReviewTask,
     service_user_id: int | None = None,
     cvat_users: Mapping[str, str] | None = None,
+    *,
+    ls_users: Mapping[str, int] | None = None,
 ) -> str | None:
     """웹훅 요청의 검수자. None이면 수집하지 않는다 (서비스 계정이 만든 주석).
 
     - 작업에 담당자가 있으면 그 담당자다. 도구가 사용자 이름을 알려 주면(CVAT) 담당자와 같아야 한다.
     - CVAT 작업은 담당자의 CVAT 계정(review.yaml cvat.users)과 job 담당자를 맞춘다. 연결이 있으면
       job 담당자가 없거나 다르면 받지 않는다. 블러 검수는 연결이 없어도 받지 않는다 (ADR 0024).
-    - Label Studio의 completed_by는 도구 내부 숫자 ID라 검수자 ID로 쓰지 않는다.
+    - Label Studio의 completed_by·updated_by는 도구 내부 숫자 ID라 검수자 ID로 쓰지 않고, 담당자의
+      Label Studio 계정(ls_users)과 같아야 받는다. 연결이 없으면 받지 않는다 (F-REV-06). 이 검사는
+      웹훅을 받는 첫 관문이고, 수집(`collect_task`)이 도구에서 주석을 다시 읽어 담당자 계정의 주석만
+      쓴다 (웹훅이 고친 사람을 알려 주지 않아도 수집은 받지 않는다).
 
     인자:
     - request: `parse_event` 결과.
     - task: DB의 검수 작업 (`review_tasks`).
     - service_user_id: 우리 서비스 계정의 Label Studio 사용자 ID. 이 사용자의 주석은 무시한다.
     - cvat_users: dlp 검수자 ID → CVAT 사용자 이름 (`review.yaml cvat.users`).
+    - ls_users: dlp 검수자 ID → Label Studio 사용자 숫자 ID (`review.yaml label_studio.users`의
+      이메일을 `tasks.label_studio_user_id`로 찾은 값). 담당자 몫만 있어도 된다.
 
     반환: 기록할 검수자 ID (dlp 검수자 ID), 또는 None(수집하지 않음).
     예외: `ReviewerMismatchError` — 담당자·계정이 맞지 않거나 검수자를 알 수 없을 때.
@@ -84,6 +117,8 @@ def resolve_reviewer(
     # 서비스 계정(우리가 올린 주석)이 일으킨 웹훅은 사람 검수가 아니다
     if service_user_id is not None and request.user_id == service_user_id:
         return None
+    if task.tool is ReviewTool.LABEL_STUDIO:
+        return _label_studio_reviewer(request, task, ls_users or {})
     if task.tool is ReviewTool.CVAT and task.assignee is not None:
         expected = (cvat_users or {}).get(task.assignee)
         if expected is None and task.stage is ReviewStage.PRIVACY:
@@ -151,15 +186,24 @@ def parse_event(
         event = _object(json.loads(body))
         if event.get("action") not in ("ANNOTATION_CREATED", "ANNOTATION_UPDATED"):
             return None
-        # completed_by는 숫자 ID 또는 사용자 객체({"id": …})로 온다
-        user = _object(event.get("annotation") or {}).get("completed_by")
-        if isinstance(user, dict):
-            user = user.get("id")
-        user_id = int(user) if isinstance(user, int | str) and str(user).isdigit() else None
+        # completed_by·updated_by는 숫자 ID 또는 사용자 객체({"id": …})로 온다
+        annotation = _object(event.get("annotation") or {})
         return CollectRequest(
-            f"label_studio:{_task_id(_object(event['task'])['id'])}", None, user_id
+            f"label_studio:{_task_id(_object(event['task'])['id'])}",
+            None,
+            _ls_user(annotation.get("completed_by")),
+            _ls_user(annotation.get("updated_by")),
         )
     raise ValueError(f"알 수 없는 도구: {tool}")
+
+
+def _ls_user(value: Any) -> int | None:
+    """Label Studio 사용자 칸(숫자 ID 또는 `{"id": …}`) → 숫자 ID. 모양이 다르면 None."""
+    if isinstance(value, dict):
+        value = value.get("id")
+    if isinstance(value, bool) or not isinstance(value, int | str):
+        return None
+    return int(value) if str(value).isascii() and str(value).isdigit() else None
 
 
 def _object(value: Any) -> dict[str, Any]:

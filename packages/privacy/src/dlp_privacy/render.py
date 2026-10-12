@@ -14,6 +14,7 @@
 
 WP5. `runner.render_session`(`dlp privacy render`)이 승인된 세션의 운영 블러 라벨로 부른다.
 입력은 로컬 원본 영상, 출력은 로컬 블러본 파일이다 (라벨링 버킷 업로드는 runner가 한다).
+홀수 크기 원본은 오른쪽·아래를 검은 화소로 덧대 짝수 크기로 쓴다 (좌표 유지, F-PMS-02).
 정책 값: privacy.yaml `render`(min_block_px, blocks_per_box, encoder_rate, crf),
 defaults.yaml `privacy.render_mode`. 이 값과 라벨 집합이 `runner.render_hash`를 정한다.
 
@@ -36,6 +37,7 @@ from typing import Literal
 import av
 import numpy as np
 
+from dlp_media.encoding import even_size, pad_to_even
 from dlp_media.probe import to_fraction
 from dlp_media.pts import build_pts_index
 from dlp_privacy.detection import Image
@@ -184,6 +186,9 @@ def render_blurred(
     원본의 첫 비디오 트랙만 libx264(yuv420p)로 다시 인코딩한다. 각 프레임의 PTS·time_base는 원본
     그대로 두어 VFR과 마스터 타임라인이 유지된다. 오디오·데이터 트랙은 쓰지 않는다
     (defaults.yaml `privacy.strip_audio_in_release`, runner가 확인).
+    원본 가로·세로가 홀수면 블러를 입힌 뒤 오른쪽·아래에 검은 화소 1줄을 덧대 짝수로 쓴다
+    (`dlp_media.encoding.pad_to_even`, yuv420p 요구, F-PMS-02). 늘이거나 자르지 않으므로 원본 화소
+    좌표(블러 박스·공간 라벨)가 블러본에서도 같은 자리이고, 블러본은 원본보다 최대 1픽셀 크다.
 
     Args:
         src: 로컬 원본 영상.
@@ -204,7 +209,8 @@ def render_blurred(
         tb = to_fraction(vin.time_base)
         vout = out.add_stream("libx264", rate=encoder_rate)
         assert isinstance(vout, av.VideoStream)
-        vout.width, vout.height = vin.codec_context.width, vin.codec_context.height
+        # 홀수 크기는 짝수로 덧댄다 (프레임도 아래에서 같은 크기로 덧대므로 인코더가 늘이지 않는다)
+        vout.width, vout.height = even_size(vin.codec_context.width, vin.codec_context.height)
         vout.pix_fmt = "yuv420p"
         # 출력 time_base를 원본과 같게 두어 PTS 값을 그대로 옮긴다
         vout.time_base = tb
@@ -220,7 +226,8 @@ def render_blurred(
                 if box is not None:
                     apply_blur(img, box, mode, min_block_px, blocks_per_box)
                     applied += 1
-            new = av.VideoFrame.from_ndarray(img, format="rgb24")
+            # 블러를 원본 크기에 입힌 뒤 덧댄다 (덧댄 줄은 원본 내용이 없는 검정)
+            new = av.VideoFrame.from_ndarray(pad_to_even(img), format="rgb24")
             new.pts, new.time_base = frame.pts, tb
             out.mux(vout.encode(new))
         out.mux(vout.encode(None))  # 인코더에 남은 프레임을 비운다

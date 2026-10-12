@@ -18,17 +18,25 @@ meta.text[0]에 JSON으로 싣는다. 수정 불가능한 보안 필드는 아�
 화면에서 새로 그린 객체 상태 구간은 어느 개체인지 알 수 없어 받지 않는다.
 기존 객체 상태 라벨은 메타데이터의 개체 참조를 보존해 왕복한다.
 
+라벨로 옮길 수 없는 구간(새로 그린 객체 상태, 필수 입력이 빠진 구간 등)이 있으면 그 구간들의
+영역 ID·시각·라벨 이름·이유를 모두 담은 `LsFormatError` 하나로 멈춘다. `collect.collect_task`가
+이것을 `TaskError`로 바꾸므로 검수자가 그 구간을 고쳐 다시 제출하면 된다 (F-REV-03).
+
 WP6, ADR 0006(무손실 왕복). 사용처: `tasks.create_labeling_tasks`(보내기: `label_config`,
 `to_ls_results`), `collect.collect_task`(받기: `from_ls_results`), `timeseries`(`CHANNELS`),
 `ops.policy.UnitsPolicy`(`LS_KINDS` 검사).
 
 공개 이름: `LS_KINDS`, `FROM_NAME`, `TO_NAME`, `CHANNELS`, `HANDS`, `EVENT_SEVERITY`,
-`EVENT_TEXT_FIELDS`, `label_names`, `label_config`, `to_ls_results`, `NAME_KINDS`,
-`from_ls_results`.
+`EVENT_TEXT_FIELDS`, `HAND_TARGET`, `HAND_BODY_PART`, `HAND_FIELDS`, `label_names`, `label_config`,
+`to_ls_results`, `NAME_KINDS`, `LsFormatError`, `from_ls_results`.
 
 이벤트 속성(심각도, 관련 행동·개체 ID)은 구간에 딸린 입력란(perRegion)으로 주고받는다. 온톨로지가
 요구하는 속성을 화면에서 채울 수 없으면 새로 그린 이벤트가 저장 검증에서 거부되고 작업 수집 전체가
-롤백되므로(Codex 수정본 검수, 2026-10-11) 입력란을 둔다.
+롤백되므로(Codex 수정본 검수, 2026-10-11) 입력란을 둔다. 손 상태의 접촉 대상 ID·대상자 부위도 같은
+이유로 입력란을 둔다 (F-REV-03): 새로 그린 도구·객체·대상자 접촉, 접촉 대상 종류를 바꾼 구간.
+손 상태 입력란은 프리라벨로 미리 채우지 않는다 (현재 값은 구간 메타 JSON에 보인다). 채운 입력란만
+원래 값을 덮어쓰고, 비어 있으면 원래 값을 둔다. 접촉 대상 종류를 바꾸면 새 종류에 둘 수 없는 필드를
+비운다 (none: 대상 ID·부위·파지 유형, person이 아닌 종류: 부위).
 
 시간 단위: 결과의 start·end는 마스터 타임라인 ms(ADR 0019). 받을 때 반올림해 정수 ms로 만든다.
 """
@@ -39,6 +47,8 @@ import json
 from typing import Any
 from xml.sax.saxutils import escape as xml_escape
 from xml.sax.saxutils import quoteattr
+
+from pydantic import TypeAdapter, ValidationError
 
 from dlp_review.reconcile import ReviewedItem
 from dlp_review.ui_theme import UiTheme, ls_hotkey, ls_label_color, ls_style
@@ -63,6 +73,15 @@ FROM_NAME, TO_NAME = "labels", "ts"
 # 그린 이벤트도 이 값을 채울 수 있어야 저장 검증(`insert_labels`)을 통과한다.
 EVENT_SEVERITY = "severity"
 EVENT_TEXT_FIELDS = ("related_action_id", "related_entity_id")
+# 손 상태 구간마다 붙는 입력란 (perRegion 컨트롤 이름 = HandStatePayload 필드 이름).
+# object·tool·fixed_surface 접촉은 target_id, person 접촉은 body_part가 필수라(hand.yaml), 검수자가
+# 새로 그리거나 접촉 대상 종류를 바꾼 구간도 이 값을 채울 수 있어야 수집된다 (F-REV-03).
+# 대상 ID는 글 입력(TextArea), 부위는 온톨로지 body_parts 중 하나를 고른다(Choices).
+# 프리라벨로 미리 채우지 않는다: 현재 값은 구간 메타 JSON에 있고, 비어 있는 입력란은 원래 값을
+# 유지한다 (입력란이 생기기 전에 만든 작업과 같은 규칙, 고치지 않은 검수의 결과 모양도 그대로).
+HAND_TARGET = "target_id"
+HAND_BODY_PART = "body_part"
+HAND_FIELDS = (HAND_TARGET, HAND_BODY_PART)
 # 시계열 CSV 열 = 화면 채널 (timeseries.write_timeseries_csv와 같아야 한다)
 CHANNELS = ("glove_left", "glove_right", "imu_acc")
 
@@ -94,8 +113,8 @@ def label_config(o: Ontology, theme: UiTheme | None = None, *, logo_uri: str = "
 
     영상(`$video`)과 시계열(`$timeseries`, CSV URL)을 sync="v" 그룹으로 함께 재생하고,
     시계열 위에 구간 라벨(TimeSeriesLabels)을 그린다. 시간 열은 `time_ms`(마스터 타임라인 ms).
-    구간을 고르면 이벤트 속성 입력란(심각도 Choices, 관련 행동·개체 ID TextArea, perRegion)이
-    보인다.
+    구간을 고르면 이벤트 속성 입력란(심각도 Choices, 관련 행동·개체 ID TextArea)과 손 상태 접촉 대상
+    입력란(대상 ID TextArea, 대상자 부위 Choices = 온톨로지 body_parts)이 보인다 (모두 perRegion).
     결과는 구간과 같은 id의 별도 결과(type choices·textarea)로 오며 `from_ls_results`가 합친다.
     라벨 값은 `quoteattr`로 XML 속성 이스케이프한다.
 
@@ -129,6 +148,7 @@ def label_config(o: Ontology, theme: UiTheme | None = None, *, logo_uri: str = "
         else ["#1f77b4", "#d62728", "#2ca02c"]
     )
     height = f' height="{theme.layout.channel_height}"' if theme is not None else ""
+    body_parts = "\n".join(f"      <Choice value={quoteattr(b)}/>" for b in o.body_parts)
     channels = "\n".join(
         f'      <Channel column="{c}" legend="{c}" strokeColor="{color}"{height}/>'
         for c, color in zip(CHANNELS, colors, strict=True)
@@ -137,7 +157,7 @@ def label_config(o: Ontology, theme: UiTheme | None = None, *, logo_uri: str = "
         head = f'  <Header value="온톨로지 v{o.version}: 손별 원시 동작과 사이 구간으로 빈틈없이"/>'
         video = '  <Video name="video" value="$video" sync="v"/>'
         style = ""
-        event_class = ""
+        event_class = hand_class = ""
     else:
         title = quoteattr(f"행동 구간 검수 · 블러본(원본 아님) · 온톨로지 v{o.version}")
         hint = quoteattr(
@@ -154,6 +174,7 @@ def label_config(o: Ontology, theme: UiTheme | None = None, *, logo_uri: str = "
         )
         style = f"  <Style>{xml_escape(ls_style(theme, logo_uri))}</Style>\n"
         event_class = ' className="dlp-event"'
+        hand_class = ' className="dlp-hand"'
     return f"""<View>
 {style}{head}
 {video}
@@ -175,6 +196,15 @@ def label_config(o: Ontology, theme: UiTheme | None = None, *, logo_uri: str = "
               placeholder="관련 행동 ID (related_action_id)"/>
     <TextArea name="related_entity_id" toName="{TO_NAME}" perRegion="true" maxSubmissions="1"
               placeholder="관련 개체 ID (related_entity_id)"/>
+  </View>
+  <View visibleWhen="region-selected"{hand_class}>
+    <Header value="손 상태 접촉 대상 (object·tool·fixed_surface: 대상 ID, person: 부위)"/>
+    <TextArea name="{HAND_TARGET}" toName="{TO_NAME}" perRegion="true" maxSubmissions="1"
+              placeholder="접촉 대상 개체 ID (target_id)"/>
+    <Choices name="{HAND_BODY_PART}" toName="{TO_NAME}" perRegion="true" choice="single"
+             layout="select">
+{body_parts}
+    </Choices>
   </View>
 </View>
 """
@@ -261,25 +291,57 @@ def _region_result(region_id: str, name: str, kind: str, values: list[str]) -> d
     }  # fmt: skip
 
 
-def _event_attributes(results: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """perRegion 결과 → 구간 id별 이벤트 속성 (severity는 정수, ID는 앞뒤 공백 제거).
+def _region_inputs(results: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """perRegion 결과 → 구간 id별 입력란 값 (이벤트 속성과 손 상태 접촉 대상).
 
+    severity는 정수, 부위는 고른 값 그대로, 글 입력(ID)은 앞뒤 공백을 뗀 마지막 값이다.
     빈 문자열·선택 없음은 값 없음으로 본다. 알 수 없는 컨트롤은 무시한다.
     """
-    attrs: dict[str, dict[str, Any]] = {}
+    inputs: dict[str, dict[str, Any]] = {}
     for r in results:
         name, rid, value = r.get("from_name"), r.get("id"), r.get("value") or {}
         if rid is None:
             continue
-        if name == EVENT_SEVERITY and r.get("type") == "choices":
+        if name in (EVENT_SEVERITY, HAND_BODY_PART) and r.get("type") == "choices":
             picked = value.get("choices") or []
             if picked:
-                attrs.setdefault(rid, {})[EVENT_SEVERITY] = int(picked[0])
-        elif name in EVENT_TEXT_FIELDS and r.get("type") == "textarea":
+                choice = int(picked[0]) if name == EVENT_SEVERITY else picked[0]
+                inputs.setdefault(str(rid), {})[name] = choice
+        elif name in (*EVENT_TEXT_FIELDS, HAND_TARGET) and r.get("type") == "textarea":
             texts = [t.strip() for t in value.get("text") or [] if t and t.strip()]
             if texts:
-                attrs.setdefault(rid, {})[name] = texts[-1]
-    return attrs
+                inputs.setdefault(str(rid), {})[name] = texts[-1]
+    return inputs
+
+
+def _apply_event_inputs(meta: dict[str, Any], region: dict[str, Any], new: bool) -> None:
+    """이벤트 입력란 값(region)을 메타에 덮어쓴다. 화면 입력란의 값이 메타(원래 값)보다 우선한다.
+
+    이벤트 입력란 결과가 하나라도 있거나 새로 그린 구간(new)이면, 결과가 없는 필드는 지운다
+    (입력란을 비웠다고 본다). 이벤트 입력란 결과가 하나도 없는 원래 구간은 메타 값을 그대로 둔다.
+    """
+    fields = (EVENT_SEVERITY, *EVENT_TEXT_FIELDS)
+    clear = new or any(f in region for f in fields)
+    for field in fields:
+        if field in region:
+            meta[field] = region[field]
+        elif clear:
+            meta.pop(field, None)
+
+
+def _fit_hand_fields(meta: dict[str, Any], previous: str | None) -> None:
+    """접촉 대상 종류에 둘 수 없는 손 상태 필드를 비운다 (`HandStatePayload._check`, hand.yaml).
+
+    - none: 대상 ID·대상자 부위·파지 유형을 늘 비운다 (화면 입력란에 남은 값 포함).
+    - 종류를 바꿨고(previous와 다름) 새 종류가 person이 아니면 대상자 부위를 비운다.
+    대상 ID·파지 유형은 none이 아닌 종류 사이에서 그대로 둔다 (입력란에서 보고 고친다).
+    """
+    kind = meta["contact_target_kind"]
+    if kind == "none":
+        for field in ("target_id", "body_part", "grasp_type"):
+            meta.pop(field, None)
+    elif previous is not None and previous != kind and kind != "person":
+        meta.pop("body_part", None)
 
 
 # 라벨 이름 머리("<종류>" 또는 "<종류>.<손>"의 종류 부분) → LabelRecord.kind
@@ -306,8 +368,10 @@ def _apply_name(name: str, meta: dict[str, Any], start: int, end: int) -> dict[s
     인자: name(화면 라벨 이름), meta(원래 페이로드 JSON 또는 빈 dict), start·end(구간 ms).
     반환: 페이로드 검증 직전 dict (제자리에서 고친 meta).
     새로 그린 구간의 ID: 행동 `h-<손>-<시작 ms>`, 상위 구간 `h-<수준>-<시작 ms>`.
-    새로 그린 손 상태의 역할: 접촉이 있으면 active, 없으면(none) inactive.
-    예외: 새로 그린 객체 상태 구간, 알 수 없는 라벨 이름이면 ValueError.
+    새로 그린 손 상태의 역할: 접촉이 있으면 active, 없으면(none) inactive. 손 상태의 대상 ID·부위는
+    여기서 정하지 않는다 (호출자가 입력란 값을 넣은 뒤 `_fit_hand_fields`로 맞춘다).
+    예외: 새로 그린 객체 상태 구간, 알 수 없는 라벨 이름이면 ValueError (호출자가 구간 정보를 붙여
+    `LsFormatError`로 바꾼다).
     """
     head, _, key = name.partition(":")
     kind, _, hand = head.partition(".")
@@ -332,13 +396,87 @@ def _apply_name(name: str, meta: dict[str, Any], start: int, end: int) -> dict[s
     elif kind == "state":
         if new:
             raise ValueError(
-                f"화면에서 새로 그린 객체 상태 구간은 받지 않습니다 ({start}~{end} ms)"
+                "화면에서 새로 그린 객체 상태 구간은 어느 개체인지 알 수 없어 받지 않습니다 "
+                "(지우거나 기존 객체 상태 구간을 고친다)"
             )
         attribute, _, value = key.partition("=")
         meta |= {"kind": "object_state", "attribute": attribute, "value": value}
     else:
         raise ValueError(f"알 수 없는 Label Studio 라벨: {name}")
     return meta
+
+
+class LsFormatError(ValueError):
+    """Label Studio 결과를 우리 라벨로 옮길 수 없다. 옮길 수 없는 구간마다 영역 ID·시각·라벨 이름·
+    이유를 담는다. 수집하지 않는다 (`collect.collect_task`가 `TaskError`로 바꾼다).
+
+    ValueError의 하위 클래스라 예전처럼 ValueError를 잡는 호출자와도 호환된다.
+    """
+
+
+def _describe(r: dict[str, Any]) -> str:
+    """오류 메시지용 구간 설명 `구간 <영역 ID> (<시작>~<끝> ms, <라벨 이름>)`."""
+    value = r.get("value") or {}
+    names = value.get("timeserieslabels") or ["?"]
+    try:
+        span = f"{round(float(value['start']))}~{round(float(value['end']))} ms"
+    except (KeyError, TypeError, ValueError):
+        span = "시각 없음"
+    return f"구간 {r.get('id')} ({span}, {names[0]})"
+
+
+def _reason(exc: Exception) -> str:
+    """변환 실패 이유 (pydantic 검증 오류는 위치와 메시지만 짧게)."""
+    if isinstance(exc, ValidationError):
+        return "; ".join(
+            f"{'.'.join(str(x) for x in e['loc'])}: {e['msg']}" if e["loc"] else e["msg"]
+            for e in exc.errors()
+        )
+    if isinstance(exc, KeyError):
+        return f"결과에 필드가 없습니다: {exc}"
+    return str(exc)
+
+
+def _reviewed_item(
+    r: dict[str, Any],
+    inputs: dict[str, dict[str, Any]],
+    known_ids: set[str],
+    adapter: TypeAdapter[LabelPayload],
+) -> ReviewedItem:
+    """timeserieslabels 결과 하나 → 검수 항목.
+
+    예외: 옮길 수 없으면 ValueError(pydantic ValidationError·JSON 오류 포함)·KeyError·IndexError.
+    """
+    value = r["value"]
+    # 화면에서 옮긴 경계는 소수 ms일 수 있어 정수 ms로 반올림한다
+    start, end = round(float(value["start"])), round(float(value["end"]))
+    texts = (r.get("meta") or {}).get("text") or []
+    meta: dict[str, Any] = json.loads(texts[0]) if texts else {}
+    stream_id = meta.pop("_stream_id", None)
+    # 한 구간에 라벨 하나만 쓴다 (여러 개 고르면 첫 번째)
+    name = value["timeserieslabels"][0]
+    origin = r.get("id") if r.get("id") in known_ids else None
+    if "kind" in meta and meta["kind"] != _kind_of(name):
+        # 다른 종류로 바꿔 붙였다 (예: 행동 → 사이 구간): 남은 필드가 새 종류와 맞지 않으므로
+        # 원래 라벨을 지우고 새로 그린 것으로 본다
+        meta, origin = {}, None
+    previous = meta.get("contact_target_kind")  # 손 상태의 원래 접촉 대상 종류
+    meta = _apply_name(name, meta, start, end)
+    region = inputs.get(str(r.get("id")), {})
+    if meta["kind"] == "event":
+        _apply_event_inputs(meta, region, origin is None)
+    elif meta["kind"] == "hand_state":
+        # 채운 입력란만 덮어쓴다 (비운 입력란 = 원래 값 유지).
+        # 그 뒤 새 접촉 대상 종류에 둘 수 없는 필드를 비운다
+        meta |= {f: region[f] for f in HAND_FIELDS if f in region}
+        _fit_hand_fields(meta, previous)
+    elif meta["kind"] == "action":
+        # 구간을 옮겼으면 접근 시작·종료를 맞추고 접촉 시각은 새 구간 안으로 넣는다
+        meta |= {"t_approach_ms": start, "t_end_ms": end}
+        for k in ("t_contact_start_ms", "t_contact_end_ms"):
+            if meta.get(k) is not None:
+                meta[k] = min(max(meta[k], start), end)
+    return ReviewedItem(origin, stream_id, start, end, adapter.validate_python(meta))
 
 
 def from_ls_results(results: list[dict[str, Any]], known_ids: set[str]) -> list[ReviewedItem]:
@@ -350,46 +488,25 @@ def from_ls_results(results: list[dict[str, Any]], known_ids: set[str]) -> list[
       (아니면 새로 그린 것).
 
     반환: `ReviewedItem` 목록. timeserieslabels가 아닌 결과는 건너뛴다.
-    예외: 새로 그린 객체 상태 구간·알 수 없는 라벨 이름이면 ValueError, 페이로드 검증 실패면
-    pydantic ValidationError.
+    예외: 옮길 수 없는 구간(새로 그린 객체 상태, 알 수 없는 라벨 이름, 페이로드 검증 실패 — 예: 대상
+    ID 없는 도구 접촉, 깨진 메타 JSON)이 하나라도 있으면 그 구간을 모두 적은 `LsFormatError`.
     """
-    # 지연 import (변환이 필요할 때만 TypeAdapter를 만든다)
-    from pydantic import TypeAdapter
-
     adapter: TypeAdapter[LabelPayload] = TypeAdapter(LabelPayload)
-    # 이벤트 속성 입력란(perRegion)은 구간과 같은 id의 별도 결과로 온다
-    attributes = _event_attributes(results)
+    # 입력란(perRegion)은 구간과 같은 id의 별도 결과로 온다
+    inputs = _region_inputs(results)
     items: list[ReviewedItem] = []
+    problems: list[str] = []
     for r in results:
         if r.get("type") != "timeserieslabels":
             continue
-        value = r["value"]
-        # 화면에서 옮긴 경계는 소수 ms일 수 있어 정수 ms로 반올림한다
-        start, end = round(float(value["start"])), round(float(value["end"]))
-        texts = (r.get("meta") or {}).get("text") or []
-        meta: dict[str, Any] = json.loads(texts[0]) if texts else {}
-        stream_id = meta.pop("_stream_id", None)
-        # 한 구간에 라벨 하나만 쓴다 (여러 개 고르면 첫 번째)
-        name = value["timeserieslabels"][0]
-        origin = r.get("id") if r.get("id") in known_ids else None
-        if "kind" in meta and meta["kind"] != _kind_of(name):
-            # 다른 종류로 바꿔 붙였다 (예: 행동 → 사이 구간): 남은 필드가 새 종류와 맞지 않으므로
-            # 원래 라벨을 지우고 새로 그린 것으로 본다
-            meta, origin = {}, None
-        meta = _apply_name(name, meta, start, end)
-        if meta["kind"] == "event":
-            # 화면 입력란의 값이 메타(원래 값)보다 우선한다. 입력란을 비우면 원래 값을 지운다
-            region = attributes.get(str(r.get("id")), {})
-            for field in (EVENT_SEVERITY, *EVENT_TEXT_FIELDS):
-                if field in region:
-                    meta[field] = region[field]
-                elif r.get("id") in attributes or origin is None:
-                    meta.pop(field, None)
-        if meta["kind"] == "action":
-            # 구간을 옮겼으면 접근 시작·종료를 맞추고 접촉 시각은 새 구간 안으로 넣는다
-            meta |= {"t_approach_ms": start, "t_end_ms": end}
-            for k in ("t_contact_start_ms", "t_contact_end_ms"):
-                if meta.get(k) is not None:
-                    meta[k] = min(max(meta[k], start), end)
-        items.append(ReviewedItem(origin, stream_id, start, end, adapter.validate_python(meta)))
+        try:
+            items.append(_reviewed_item(r, inputs, known_ids, adapter))
+        except (ValueError, KeyError, IndexError) as exc:  # ValidationError도 ValueError다
+            # 첫 구간에서 멈추지 않고 모두 모아, 검수자가 한 번에 고칠 수 있게 한다
+            problems.append(f"{_describe(r)}: {_reason(exc)}")
+    if problems:
+        raise LsFormatError(
+            f"라벨로 옮길 수 없는 구간 {len(problems)}개 (화면에서 고친 뒤 다시 제출한다): "
+            + " | ".join(problems)
+        )
     return items

@@ -10,12 +10,14 @@ from __future__ import annotations
 
 import copy
 import os
+import time
 import uuid
 from collections.abc import Callable, Iterator
 from dataclasses import replace
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pytest
@@ -41,9 +43,11 @@ from dlp_privacy.runner import (
 from dlp_review.clients import CvatClient, LabelStudioClient, TaskOwner, cvat_task_name
 from dlp_review.collect import collect_task
 from dlp_review.labelstudio import LS_KINDS
-from dlp_review.ops.policy import CvatPolicy
+from dlp_review.ops.policy import CvatPolicy, LabelStudioPolicy
 from dlp_review.ops.policy import load_policy as load_ops_policy
 from dlp_review.ops.runner import plan_session
+from dlp_review.orphans import OrphanReport, delete_orphans, find_orphans
+from dlp_review.refresh import refresh_session_urls, sessions_with_open_ls_tasks
 from dlp_review.revoke import RevocationReport, execute_media_revocations, snapshot_key
 from dlp_review.roles import AccessError
 from dlp_review.tasks import (
@@ -64,12 +68,18 @@ from dlp_schema.db.repository import (
     insert_review_task,
     latest_privacy_detection,
     list_review_tasks,
+    list_review_work,
     record_review,
     register_ontology,
 )
 from dlp_schema.episode import current_labels
 from dlp_schema.labels import (
     BlurTrackPayload,
+    Hand,
+    HandStatePayload,
+    Keypoint,
+    KeypointFrame,
+    KeypointTrackPayload,
     LabelRecord,
     Provenance,
     Source,
@@ -79,7 +89,7 @@ from dlp_schema.labels import (
 from dlp_schema.ontology import load_ontology
 from dlp_schema.review import ReviewMode, ReviewStage, ReviewTask, ReviewTaskStatus, ReviewTool
 from dlp_schema.session import PrivacyState
-from dlp_schema.testing import FIXED_TIME
+from dlp_schema.testing import FIXED_TIME, make_label
 
 pytestmark = pytest.mark.services
 ROOT = Path(__file__).resolve().parents[3]
@@ -118,9 +128,9 @@ def pg() -> Iterator[sa.Engine]:
 
 
 @pytest.fixture
-def setup(cvat_config: CvatPolicy) -> ReviewSetup:
+def setup(cvat_config: CvatPolicy, ls_config: LabelStudioPolicy) -> ReviewSetup:
     """CVAT는 이미지가 커서 CI 기본 서비스 작업에서 띄우지 않는다. 닿지 않으면 CVAT 없이 만든다
-    (CVAT가 필요한 테스트만 건너뛰고 Label Studio 테스트는 돈다)."""
+    (CVAT가 필요한 테스트만 건너뛰고 Label Studio 테스트는 돈다). 두 도구 계정 연결은 시험 계정."""
     try:
         cvat: CvatClient | None = CvatClient.from_env()
     except httpx.HTTPError:
@@ -133,6 +143,7 @@ def setup(cvat_config: CvatPolicy) -> ReviewSetup:
         cvat=cvat,
         label_studio=LabelStudioClient.from_env(),
         cvat_config=cvat_config,
+        label_studio_config=ls_config,
     )
 
 
@@ -169,10 +180,11 @@ def _revoke(pg: sa.Engine, setup: ReviewSetup, sid: str) -> RevocationReport:
     )  # fmt: skip
 
 
-def _submit_prelabels(ls: LabelStudioClient, task_id: str) -> None:
-    """Label Studio 검수자가 프리라벨(예측)을 고치지 않고 제출한다."""
+def _submit_prelabels(ls: LabelStudioClient, reviewer: LabelStudioClient, task_id: str) -> None:
+    """Label Studio 검수자가 자기 계정(reviewer)으로 프리라벨(예측)을 고치지 않고 제출한다."""
     results = ls.prediction_results(int(task_id))
-    ls.http.post(f"/api/tasks/{task_id}/annotations", json={"result": results}).raise_for_status()
+    resp = reviewer.http.post(f"/api/tasks/{task_id}/annotations", json={"result": results})
+    resp.raise_for_status()
 
 
 def _oracle_policy() -> PrivacyPolicy:
@@ -234,7 +246,10 @@ def test_unchanged_privacy_review_round_trips_losslessly_through_cvat(
 
 
 def test_unchanged_labeling_review_round_trips_losslessly_through_label_studio(
-    pg: sa.Engine, setup: ReviewSetup, tmp_path: Path
+    pg: sa.Engine,
+    setup: ReviewSetup,
+    tmp_path: Path,
+    ls_as: Callable[[LabelStudioClient, str], LabelStudioClient],
 ) -> None:
     """완료 기준 (Label Studio): 시간 라벨이 도구를 거쳐도 그대로라 고치지 않으면 승인만 된다."""
     sid, _ = _session(pg, setup, tmp_path)
@@ -252,17 +267,199 @@ def test_unchanged_labeling_review_round_trips_losslessly_through_label_studio(
     ls_task = next(t for t in tasks if t.task_key.startswith("label_studio:"))
     ls = setup.label_studio
     assert ls is not None
+    labeler = ls.find_user_id(setup.label_studio_policy().users["labeler01"])
+    assert labeler is not None
     # 회귀: 프리라벨은 예측으로 올라가 사람 주석이 아니다. 제출 전에는 수집하지 않는다
-    assert ls.latest_results(int(ls_task.external_id)) is None
+    assert ls.latest_results(int(ls_task.external_id), user=labeler) is None
     with pg.begin() as conn, pytest.raises(TaskError, match="주석이 아직"):
         collect_task(conn, ls_task.task_key, setup, "labeler01", FIXED_TIME)
-    _submit_prelabels(ls, ls_task.external_id)
+    _submit_prelabels(ls, ls_as(ls, "labeler01"), ls_task.external_id)
     with pg.begin() as conn, pytest.raises(TaskError, match="담당자"):
         collect_task(conn, ls_task.task_key, setup, "labeler02", FIXED_TIME)  # 다른 사람
     with pg.begin() as conn:
         outcome = collect_task(conn, ls_task.task_key, setup, "labeler01", FIXED_TIME)
     assert outcome is not None and not outcome.new_records
     assert sorted(outcome.approved) == sorted(x.label_id for x in temporal)
+
+
+def test_unconvertible_label_studio_region_stops_collection_with_region_info(
+    pg: sa.Engine,
+    setup: ReviewSetup,
+    tmp_path: Path,
+    ls_as: Callable[[LabelStudioClient, str], LabelStudioClient],
+) -> None:
+    """F-REV-03 회귀: 옮길 수 없는 구간은 영역 ID·시각을 담은 TaskError로 멈추고(아무것도 쓰지
+    않음), 그 구간을 고쳐 다시 제출하면 접촉 → none 수정까지 수집된다.
+
+    정답 근거: 합성 행동 시나리오의 접촉 손 상태(target_id·grasp_type 있음)를 화면에서 none으로
+    바꾸면 두 필드를 비운 수정 레코드가 된다 (hand.yaml). 새로 그린 객체 상태 구간은 개체를 알 수
+    없다.
+    """
+    sid, _ = _session(pg, setup, tmp_path)
+    with pg.begin() as conn:
+        _approve_blur(conn, sid)
+        approve_session(conn, sid)
+        render_session(conn, sid, setup.raw, setup.labeling, load_policy(ROOT))
+        temporal = [
+            x.model_copy(update={"session_id": sid, "label_id": f"{sid}-{x.label_id}"})
+            for x in generate_action_scenario(4).labels
+            if x.kind in LS_KINDS
+        ]
+        insert_labels(conn, temporal)
+        [ls_task] = create_labeling_tasks(conn, sid, setup, "labeler01", FIXED_TIME, tools=_LS)
+        before = len(get_labels(conn, sid))
+    ls = setup.label_studio
+    assert ls is not None
+    contact = next(
+        x for x in temporal
+        if isinstance(x.payload, HandStatePayload) and x.payload.contact_target_kind != "none"
+    )  # fmt: skip
+    assert isinstance(contact.payload, HandStatePayload)
+    results = ls.prediction_results(int(ls_task.external_id))
+    for r in results:
+        if r["id"] == contact.label_id:
+            r["value"]["timeserieslabels"] = [f"hand.{contact.payload.hand.value}:none"]
+    state = {
+        "id": "drawn-state", "from_name": "labels", "to_name": "ts", "type": "timeserieslabels",
+        "value": {"start": 100, "end": 400, "instant": False,
+                  "timeserieslabels": ["state:wetness=wet"]},
+    }  # fmt: skip
+    url = f"/api/tasks/{ls_task.external_id}/annotations"
+    mine = ls_as(ls, "labeler01")  # 담당자 계정의 제출만 수집한다 (F-REV-06)
+    mine.http.post(url, json={"result": [*results, state]}).raise_for_status()
+    with pg.begin() as conn, pytest.raises(TaskError, match=r"drawn-state \(100~400 ms"):
+        collect_task(conn, ls_task.task_key, setup, "labeler01", FIXED_TIME)
+    with pg.connect() as conn:
+        assert get_review_task(conn, ls_task.task_key).status is ReviewTaskStatus.OPEN
+        assert len(get_labels(conn, sid)) == before
+
+    # 검수자가 그 구간을 지우고 다시 제출했다 (최신 주석을 읽는다)
+    mine.http.post(url, json={"result": results}).raise_for_status()
+    with pg.begin() as conn:
+        outcome = collect_task(conn, ls_task.task_key, setup, "labeler01", FIXED_TIME)
+    assert outcome is not None and outcome.corrected == 1
+    [fixed] = outcome.new_records
+    assert fixed.parent_label_id == contact.label_id
+    assert isinstance(fixed.payload, HandStatePayload)
+    assert fixed.payload.contact_target_kind == "none"
+    assert (fixed.payload.target_id, fixed.payload.grasp_type) == (None, None)
+
+
+def test_label_studio_collects_only_the_assignee_account_submission(
+    pg: sa.Engine,
+    setup: ReviewSetup,
+    tmp_path: Path,
+    ls_as: Callable[[LabelStudioClient, str], LabelStudioClient],
+) -> None:
+    """F-REV-06: 실제 Label Studio 1.23.2에서 담당자 계정의 제출만 수집한다.
+
+    시나리오: 담당자 labeler01의 시간 검수 작업 → 다른 라벨러(labeler02)가 같은 작업에서 모든 구간을
+    지워 제출 → 서비스 계정이 completed_by를 담당자 ID로 적어 지운 결과를 올림 → 수집 거부 →
+    담당자가 그대로 제출 → 수집.
+    정답 근거: 실제 응답의 completed_by·updated_by(숫자 ID)로 받지 않은 주석 두 개가 보이고(서비스
+    계정 주석은 updated_by가 서비스 계정), 결과는 담당자 제출(모두 승인)이다. 다른 사람의 삭제가
+    담당자의 검수로 기록되지 않는다. 검수 시간은 담당자 주석의 lead_time만이다.
+    """
+    sid, _ = _session(pg, setup, tmp_path)
+    with pg.begin() as conn:
+        _approve_blur(conn, sid)
+        approve_session(conn, sid)
+        render_session(conn, sid, setup.raw, setup.labeling, load_policy(ROOT))
+        temporal = [
+            x.model_copy(update={"session_id": sid, "label_id": f"{sid}-{x.label_id}"})
+            for x in generate_action_scenario(4).labels
+            if x.kind in LS_KINDS
+        ]
+        insert_labels(conn, temporal)
+        [ls_task] = create_labeling_tasks(conn, sid, setup, "labeler01", FIXED_TIME, tools=_LS)
+    ls = setup.label_studio
+    assert ls is not None
+    tid = int(ls_task.external_id)
+    accounts = setup.label_studio_policy().users
+    owner, other = ls.find_user_id(accounts["labeler01"]), ls.find_user_id(accounts["labeler02"])
+    assert owner is not None and other is not None and owner != other != ls.service_user_id()
+    wiped = ls_as(ls, "labeler02").http.post(
+        f"/api/tasks/{tid}/annotations", json={"result": [], "lead_time": 50.0}
+    )
+    wiped.raise_for_status()
+    forged = ls.http.post(
+        f"/api/tasks/{tid}/annotations",
+        json={"result": [], "completed_by": owner, "lead_time": 70.0},
+    )
+    forged.raise_for_status()
+    ignored = ls.ignored_annotations(tid, user=owner)
+    assert {(a.completed_by, a.updated_by) for a in ignored} == {
+        (other, other),
+        (owner, ls.service_user_id()),
+    }
+    with pg.begin() as conn, pytest.raises(TaskError, match="다른 사용자 주석 2개"):
+        collect_task(conn, ls_task.task_key, setup, "labeler01", FIXED_TIME)
+    mine = ls_as(ls, "labeler01").http.post(
+        f"/api/tasks/{tid}/annotations",
+        json={"result": ls.prediction_results(tid), "lead_time": 12.5},
+    )
+    mine.raise_for_status()
+    with pg.begin() as conn:
+        outcome = collect_task(conn, ls_task.task_key, setup, "labeler01", FIXED_TIME)
+        work = [w for w in list_review_work(conn) if w.task_key == ls_task.task_key]
+    assert outcome is not None and outcome.retracted == 0 and not outcome.new_records
+    assert sorted(outcome.approved) == sorted(x.label_id for x in temporal)
+    assert [(w.reviewer, w.seconds) for w in work] == [("labeler01", 12.5)]
+
+
+def _ttl(url: str) -> float:
+    """서명 URL의 남은 유효 시간(초). SigV4는 `X-Amz-Expires`(초), SigV2는 `Expires`(만료 시각)."""
+    query = parse_qs(urlparse(url).query)
+    if "X-Amz-Expires" in query:
+        return float(query["X-Amz-Expires"][0])
+    return float(query["Expires"][0]) - time.time()
+
+
+def test_label_studio_signed_urls_follow_policy_ttl_and_are_refreshed(
+    pg: sa.Engine,
+    setup: ReviewSetup,
+    tmp_path: Path,
+    ls_as: Callable[[LabelStudioClient, str], LabelStudioClient],
+) -> None:
+    """F-REV-08: 서명 URL 유효 시간은 정책 값이고, 열린 작업의 URL은 다시 서명해 갱신한다.
+
+    시나리오: 유효 시간 120초 정책으로 Label Studio 작업 생성 → 600초 정책으로 갱신 → 실제 Label
+    Studio 작업 data와 서명 URL 확인 → 담당자가 제출·수집 → 다시 갱신해도 수집한 작업은 그대로.
+    정답 근거: 서명 URL의 유효 시간(SigV4 X-Amz-Expires 또는 SigV2 Expires - 지금)이 정책 값,
+    갱신한 URL이 라벨러 자격 증명으로 열리고(200) 원본 버킷이 없으며 session_id·assignee는 그대로,
+    수집한 작업의 data는 바뀌지 않는다.
+    """
+    sid, _ = _session(pg, setup, tmp_path)
+    short = replace(setup, media=setup.media_policy().model_copy(update={"signed_url_ttl_s": 120}))
+    with pg.begin() as conn:
+        _approve_blur(conn, sid)
+        approve_session(conn, sid)
+        render_session(conn, sid, setup.raw, setup.labeling, load_policy(ROOT))
+        [ls_task] = create_labeling_tasks(conn, sid, short, "labeler01", FIXED_TIME, tools=_LS)
+    ls = setup.label_studio
+    assert ls is not None
+    tid = int(ls_task.external_id)
+    first = ls.http.get(f"/api/tasks/{tid}/").json()["data"]
+    assert _ttl(first["video"]) == pytest.approx(120, abs=30)
+    assert _ttl(first["timeseries"]) == pytest.approx(120, abs=30)
+    longer = replace(setup, media=setup.media_policy().model_copy(update={"signed_url_ttl_s": 600}))
+    with pg.begin() as conn:
+        assert sessions_with_open_ls_tasks(conn) == [sid]
+        report = refresh_session_urls(conn, sid, longer)
+    assert report.refreshed == [ls_task.task_key] and not report.errors and not report.skipped
+    data = ls.http.get(f"/api/tasks/{tid}/").json()["data"]
+    assert (data["session_id"], data["assignee"]) == (sid, "labeler01")
+    assert data["video"] != first["video"] and _ttl(data["video"]) == pytest.approx(600, abs=30)
+    assert _ttl(data["timeseries"]) == pytest.approx(600, abs=30) and "dlp-raw" not in str(data)
+    assert httpx.get(data["video"]).status_code == 200
+    assert httpx.get(data["timeseries"]).text.startswith("time_ms,")
+
+    _submit_prelabels(ls, ls_as(ls, "labeler01"), ls_task.external_id)
+    with pg.begin() as conn:
+        assert collect_task(conn, ls_task.task_key, setup, "labeler01", FIXED_TIME) is not None
+        again = refresh_session_urls(conn, sid, short)
+    assert again.refreshed == [] and not again.errors
+    assert ls.http.get(f"/api/tasks/{tid}/").json()["data"] == data  # 수집한 작업은 그대로
 
 
 def test_privacy_review_edits_become_label_history(
@@ -608,6 +805,86 @@ def test_blur_change_revokes_deployed_labeling_media_end_to_end(
     assert httpx.get(video_url).status_code == 404
 
 
+def test_orphans_from_rolled_back_creation_are_reported_then_deleted(
+    pg: sa.Engine, setup: ReviewSetup, tmp_path: Path
+) -> None:
+    """F-REV-15: 작업 생성 트랜잭션이 롤백되면 CVAT·LS 작업과 워터마크 사본이 DB 기록 없이 남는다.
+
+    시나리오: 승인·렌더 → labeler01 작업(커밋) → labeler02 작업(롤백) → 고아 찾기(나이 하한
+    1시간이면 어림, 0이면 고아) → 보고만(아무것도 지우지 않음) → 지우기.
+    정답 근거: 고아는 롤백한 CVAT·LS 작업과 그 사본 셋뿐이고 이유는 no_db_row. 지운 뒤 셋 다 404·
+    없음이고, 커밋한 labeler01 작업·사본과 시계열 CSV는 그대로다.
+    """
+    cvat = _need_cvat(setup)
+    ls = setup.label_studio
+    assert ls is not None
+    policy = load_policy(ROOT)
+    sid, _ = _session(pg, setup, tmp_path)
+    with pg.begin() as conn:
+        [first] = create_privacy_tasks(conn, sid, setup, FIXED_TIME, **PRIVACY)
+        collect_task(conn, first.task_key, setup, "rev01", FIXED_TIME)
+        approve_session(conn, sid)
+        render_session(conn, sid, setup.raw, setup.labeling, policy)
+        kept = create_labeling_tasks(conn, sid, setup, "labeler01", FIXED_TIME)
+
+    class RollbackError(Exception):
+        """작업 생성 뒤 커밋 전 실패."""
+
+    made: list[ReviewTask] = []
+    with pytest.raises(RollbackError), pg.begin() as conn:
+        made = create_labeling_tasks(conn, sid, setup, "labeler02", FIXED_TIME)
+        raise RollbackError
+    assert {t.tool for t in made} == {ReviewTool.CVAT, ReviewTool.LABEL_STUDIO}
+    with pg.connect() as conn:
+        assert {t.task_key for t in list_review_tasks(conn, sid)}.isdisjoint(
+            t.task_key for t in made
+        )
+    media = object_key(setup.labeling, made[0].media_uri)
+    expected = {media, *(t.task_key for t in made)}
+    now = datetime.now(UTC) + timedelta(minutes=1)
+
+    def find(min_age: timedelta) -> OrphanReport:
+        return find_orphans(
+            pg, labeling=setup.labeling, cvat=cvat, label_studio=ls, min_age=min_age, now=now,
+            session_id=sid,
+        )  # fmt: skip
+
+    young = find(timedelta(hours=1))
+    assert young.found == [] and {o.ref for o in young.young} == expected
+    report = find(timedelta(0))
+    assert {o.ref: o.reason for o in report.found} == dict.fromkeys(expected, "no_db_row")
+    assert not report.unscanned and not report.clean
+    # 보고만: 아무것도 지우지 않았다
+    for t in made:
+        tool = cvat if t.tool is ReviewTool.CVAT else ls
+        assert tool.task_exists(int(t.external_id))
+    assert setup.labeling.head(media) is not None
+
+    delete_orphans(
+        pg, report, labeling=setup.labeling, raw_bucket=setup.raw.bucket, cvat=cvat,
+        label_studio=ls, now=now,
+    )  # fmt: skip
+    assert report.clean, (report.errors, report.busy)
+    assert sorted(report.deleted) == sorted(expected)
+    assert (
+        cvat.http.get(
+            f"/api/tasks/{next(t for t in made if t.tool is ReviewTool.CVAT).external_id}"
+        ).status_code
+        == 404
+    )
+    assert not ls.task_exists(
+        int(next(t for t in made if t.tool is ReviewTool.LABEL_STUDIO).external_id)
+    )
+    assert setup.labeling.head(media) is None
+    # 커밋한 작업은 그대로다
+    for t in kept:
+        tool = cvat if t.tool is ReviewTool.CVAT else ls
+        assert tool.task_exists(int(t.external_id))
+        assert setup.labeling.head(object_key(setup.labeling, t.media_uri)) is not None
+    assert setup.labeling.head(f"sessions/{sid}/review/timeseries.csv") is not None
+    assert find(timedelta(0)).found == []
+
+
 def test_unsupported_cvat_annotation_stops_collection(
     pg: sa.Engine, setup: ReviewSetup, tmp_path: Path
 ) -> None:
@@ -627,6 +904,57 @@ def test_unsupported_cvat_annotation_stops_collection(
     r.raise_for_status()
     with pg.begin() as conn, pytest.raises(TaskError, match="polygon"):
         collect_task(conn, task.task_key, setup, "rev01", FIXED_TIME)
+
+
+def test_new_cvat_hand_skeleton_is_collected_with_hand_from_label(
+    pg: sa.Engine, setup: ReviewSetup, tmp_path: Path
+) -> None:
+    """F-REV-04 회귀: CVAT에서 새로 그린 손 골격은 hand가 없어 ValidationError로 수집이 멈췄다.
+
+    작업 라벨 프로젝트에 손별 손 골격 라벨(`kp_hand21_left`·`kp_hand21_right`)이 있고(이전에 만든
+    프로젝트면 덧붙는다), 기존 오른손 트랙은 오른손 라벨로 가서 그대로 승인되며, 검수자가 왼손
+    라벨로 새로 그린 점 21개는 왼손 골격 레코드가 된다. 정답 근거: 블러 시나리오 영상의 프레임 시각.
+    """
+    cvat = _need_cvat(setup)
+    sid, _ = _session(pg, setup, tmp_path)
+    times = generate_blur_scenario(5).frame_times  # _session이 만든 영상과 같은 시드
+    points = tuple(Keypoint(x=10.0 + i, y=20.0 + i, visibility=2) for i in range(21))
+    right = KeypointTrackPayload(
+        entity_id="right_hand", skeleton="hand21", hand=Hand.RIGHT,
+        keyframes=tuple(KeypointFrame(t_ms=t, points=points) for t in times[:2]),
+    )  # fmt: skip
+    kp = make_label(
+        right, label_id=f"{sid}-kp", session_id=sid, stream_id="bodycam", t_start_ms=times[0],
+        t_end_ms=times[1],
+    )  # fmt: skip
+    with pg.begin() as conn:
+        _approve_blur(conn, sid)
+        approve_session(conn, sid)
+        render_session(conn, sid, setup.raw, setup.labeling, load_policy(ROOT))
+        insert_labels(conn, [kp])
+        [task] = create_labeling_tasks(
+            conn, sid, setup, "labeler01", FIXED_TIME, tools={ReviewTool.CVAT}
+        )
+    tid = int(task.external_id)
+    project = cvat.http.get(f"/api/tasks/{tid}").json()["project_id"]
+    names = {lb["name"]: lb["id"] for lb in cvat.project_labels(int(project))}
+    assert {"kp_hand21_left", "kp_hand21_right"} <= set(names)
+    [track] = cvat.get_tracks(tid)
+    assert track["label_id"] == names["kp_hand21_right"]
+    body = {"version": 0, "tags": [], "tracks": [], "shapes": [{
+        "type": "points", "frame": 2, "label_id": names["kp_hand21_left"],
+        "points": [float(c) for i in range(21) for c in (30 + i, 40 + i)], "occluded": False,
+        "outside": False, "z_order": 0, "rotation": 0.0, "attributes": [], "group": 0,
+        "source": "manual",
+    }]}  # fmt: skip
+    r = cvat.http.patch(f"/api/tasks/{tid}/annotations", params={"action": "create"}, json=body)
+    r.raise_for_status()
+    with pg.begin() as conn:
+        out = collect_task(conn, task.task_key, setup, "labeler01", FIXED_TIME)
+    assert out is not None and out.approved == [kp.label_id] and out.added == 1
+    [new] = out.new_records
+    assert isinstance(new.payload, KeypointTrackPayload) and new.payload.skeleton == "hand21"
+    assert new.payload.hand is Hand.LEFT and new.t_start_ms == times[2]
 
 
 def test_privacy_task_needs_cvat_account_of_assignee(

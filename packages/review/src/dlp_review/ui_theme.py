@@ -267,7 +267,7 @@ def ls_style(theme: UiTheme, logo_uri: str) -> str:
         "{margin:0;white-space:nowrap}"
         ".dlp-brand>:last-child{color:var(--color-neutral-content-subtle);font-weight:400;"
         "overflow:hidden;text-overflow:ellipsis}"
-        ".dlp-event{margin-top:10px;padding:10px 12px;border-radius:10px;"
+        ".dlp-event,.dlp-hand{margin-top:10px;padding:10px 12px;border-radius:10px;"
         "border:1px solid var(--color-neutral-border);background:var(--color-neutral-surface)}"
     )
 
