@@ -57,7 +57,9 @@ CLI에서는 `DLP_REVIEW_POLICY_FILE`로 정책 파일을 바꿀 수 있다. 검
 기본값이 아니다, F-REV-01). `plan`·`qa`·`quality`는 같은 로더로 정책만 읽고, `queue`·`verify`는
 검수 정책을 쓰지 않는다. 매체 회수만 하는 `revoke`도 검수 정책을 읽지 않는다 (회수 실행기는 정책
 값을 쓰지 않는다. 정책 파일이 깨져도 낡은 라벨링 매체를 지운다). 예외는 `revoke --orphans`로, 나이
-하한(`orphans.min_age_s`)을 고른 정책 파일에서 엄격히 읽는다.
+하한(`orphans.min_age_s`)을 고른 정책 파일에서 엄격히 읽는다. 정책을 읽는 명령에서는
+`orphans.min_age_s`·`media.signed_url_ttl_s`가 모두 필수 키다 (이전에 복사한 정책 파일에 없으면 그
+명령들이 `Field required`로 멈춘다. 기본 review.yaml 값을 옮겨 적는다).
 
 주의:
 - `_setup`(`review_config.review_setup`)이 원본 저장소를 `raw_store("s3", …, "review.<명령>")` 감사

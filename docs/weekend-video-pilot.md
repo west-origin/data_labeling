@@ -122,8 +122,9 @@ Label Studio 작업의 영상·시계열 URL은 검수 정책의 `media.signed_u
 검수가 그보다 길어질 수 있으면 다음 명령을 cron으로 하루 한 번(유효 시간보다 짧은 주기) 돌린다.
 열린 작업만 라벨러 자격 증명으로 다시 서명하고, 수집·회수한 작업과 블러가 바뀐 작업은 갱신하지 않는다
 (뒤쪽은 `dlp review revoke SESSION_ID`를 안내한다). 갱신하지 못한 작업이 있으면 종료 코드 1이다.
-검수 정책 파일(`DLP_REVIEW_POLICY_FILE`)에 `media.signed_url_ttl_s`가 없으면 정책 로드가 실패하므로
-기본 `config/policies/review.yaml`의 값을 옮겨 적는다.
+검수 정책 파일(`DLP_REVIEW_POLICY_FILE`)에 `media.signed_url_ttl_s`나 `orphans.min_age_s`가 없으면
+정책을 읽는 모든 명령(`dlp pilot check`, `dlp review create|collect|plan|quality|refresh-urls` 등)이
+`Field required`로 실패하므로 기본 `config/policies/review.yaml`의 두 값을 함께 옮겨 적는다.
 
 ```bash
 uv run --no-sync dlp review refresh-urls            # 열린 Label Studio 작업이 있는 모든 세션

@@ -182,8 +182,10 @@ class LabelStudioPolicy(Contract):
 
     수집·웹훅은 작업 담당자의 Label Studio 계정이 만들고 마지막으로 고친 주석만 받는다. 연결이
     없는 담당자에게는 Label Studio 시간 검수 작업을 만들지 않는다
-    (`dlp_review.tasks.require_label_studio_user`). 절을 빼면 연결이 비어 있는 것으로 본다 (이전
-    형식의 정책 파일도 읽힌다).
+    (`dlp_review.tasks.require_label_studio_user`). 절을 빼면 연결이 비어 있는 것으로 본다. 이 절만
+    선택이다: 이전에 복사한 정책 파일은 그 뒤 더한 필수 키(`orphans.min_age_s`,
+    `media.signed_url_ttl_s`)가 없으면 정책을 읽는 모든 명령에서 실패하므로 기본 review.yaml 값을
+    옮겨 적는다.
     """
 
     users: dict[str, str] = Field(
