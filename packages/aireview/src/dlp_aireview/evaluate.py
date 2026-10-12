@@ -39,8 +39,8 @@
     - 판정 모델이 행동 분류 모델과 같으면(`same_model_as_actions`) 행동 라벨 판정에 상관 오류가 생길
       수 있으므로 라벨 종류별 표(`by_kind["action"]`)를 따로 본다.
 
-공개 이름: `Truth`, `EvalCase`, `ErrorStat`, `KindStat`, `GateResult`, `EvalReport`,
-`perturb_case`, `history_case`, `eval_input`, `judge_cases`, `score`, `gate_result`.
+공개 이름: `Truth`, `EvalCase`, `LabelKey`, `Judged`, `ErrorStat`, `KindStat`, `GateResult`,
+`EvalReport`, `perturb_case`, `history_case`, `eval_input`, `judge_cases`, `score`, `gate_result`.
 """
 
 from __future__ import annotations
@@ -335,11 +335,16 @@ def eval_input(
     )  # fmt: skip
 
 
+# 판정을 모으는 키: (세션 ID, 라벨 ID). 여러 골든 세션의 메모리 라벨(교란 사본의 거짓 이벤트 등)이
+# 같은 ID를 써도 판정이 섞이지 않게 세션까지 넣는다
+LabelKey = tuple[str, str]
+
+
 @dataclass(frozen=True)
 class Judged:
-    """`judge_cases` 결과: 라벨 ID → 가장 나쁜 판정, 단위 기록, 세션별 실행 요약, 걸린 초."""
+    """`judge_cases` 결과: (세션, 라벨 ID) → 가장 나쁜 판정, 단위 기록, 세션별 실행 요약, 초."""
 
-    verdicts: dict[str, AiVerdict]
+    verdicts: dict[LabelKey, AiVerdict]
     units: tuple[AiReviewUnit, ...]
     summaries: tuple[RunSummary, ...]
     elapsed_s: float
@@ -367,11 +372,11 @@ def judge_cases(
         if summary.reason in ("config", "signal"):
             break
     units = tuple(sink.units.values())
-    found: dict[str, list[tuple[AiVerdict, AiReviewUnit]]] = {}
+    found: dict[LabelKey, list[tuple[AiVerdict, AiReviewUnit]]] = {}
     for u in units:
         for v in u.verdicts:
-            found.setdefault(v.label_id, []).append((v, u))
-    verdicts = {lid: worst(c)[0] for lid, c in found.items()}
+            found.setdefault((u.session_id, v.label_id), []).append((v, u))
+    verdicts = {key: worst(c)[0] for key, c in found.items()}
     return Judged(verdicts, units, tuple(summaries), clock() - start)
 
 
@@ -475,12 +480,15 @@ def _add(stat: ErrorStat, v: AiVerdict | None, t: Truth) -> ErrorStat:
     return ErrorStat.model_validate(data)
 
 
-def _kinds(cases: Sequence[EvalCase], verdicts: Mapping[str, AiVerdict]) -> dict[str, KindStat]:
+def _kinds(
+    cases: Sequence[EvalCase], verdicts: Mapping[LabelKey, AiVerdict]
+) -> dict[str, KindStat]:
     """라벨 종류별 집계."""
     out: dict[str, dict[str, int]] = {}
     for case in cases:
+        sid = case.session.session_id
         for x in case.targets:
-            t, v = case.truth[x.label_id], verdicts.get(x.label_id)
+            t, v = case.truth[x.label_id], verdicts.get((sid, x.label_id))
             flagged = v is not None and v.verdict in _FLAGS
             cell = out.setdefault(x.kind, KindStat().model_dump())
             key = "wrong" if t.wrong else "clean"
@@ -521,8 +529,9 @@ def score(
     conf: list[float] = []
     correct: list[bool] = []
     for case in cases:
+        sid = case.session.session_id
         for x in case.targets:
-            t, v = case.truth[x.label_id], judged.verdicts.get(x.label_id)
+            t, v = case.truth[x.label_id], judged.verdicts.get((sid, x.label_id))
             by_error[t.error] = _add(by_error.get(t.error, ErrorStat()), v, t)
             if (
                 v is not None

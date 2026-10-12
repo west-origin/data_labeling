@@ -2,8 +2,9 @@
 
 골든 평가(`dlp aireview eval --mode perturb`, WP17.8)와 합성 오류 탐지 테스트가 쓴다. 라벨을
 메모리에서만 바꾸고 DB에 쓰지 않는다. 바꾼 라벨은 ID를 그대로 두고(정답과 대조하려고) 페이로드만
-바꾼다. 거짓 이벤트는 새 ID(`pert-ev-NNNN`)로 더한다. 교란한 라벨도 `check_label`을 통과하는 값만
-고른다.
+바꾼다. 거짓 이벤트는 새 ID(`pert-ev-NNNN-<세션>`, 128자에서 자름)로 더한다. 세션을 넣어 여러 골든
+세션의 거짓 이벤트가 같은 ID가 되지 않게 한다 (평가가 판정을 라벨 ID로 모으던 때 다른 세션의
+판정이 합쳐졌다). 교란한 라벨도 `check_label`을 통과하는 값만 고른다.
 
 교란 종류
     - verb_swap: 행동 동사 (같은 비접촉 여부 안에서)
@@ -159,7 +160,7 @@ def _false_event(
     return label.model_validate(
         label.model_dump()
         | {
-            "label_id": f"pert-ev-{n:04d}",
+            "label_id": f"pert-ev-{n:04d}-{label.session_id}"[:128],
             "t_start_ms": t,
             "t_end_ms": t,
             "payload": event.model_dump(),

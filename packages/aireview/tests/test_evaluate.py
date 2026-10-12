@@ -26,6 +26,7 @@ import sqlalchemy as sa
 from dlp_aireview.evaluate import (
     EvalCase,
     Judged,
+    LabelKey,
     Truth,
     eval_input,
     history_case,
@@ -280,10 +281,12 @@ def test_score_and_gate_hand_calculation(policy: AiReviewPolicy, ontology: Ontol
     실패이고, block이 false라 차단하지 않는다. ECE: 확신도 0.9 판정 10개, 맞음 8개 → |0.8 - 0.9|."""
     case = _case(4, 6, ontology)
     values = ["wrong", "wrong", "suspect", "ok", "suspect", "ok", "ok", "ok", "ok", "ok"]
-    verdicts: dict[str, AiVerdict] = {}
+    verdicts: dict[LabelKey, AiVerdict] = {}
     for x, v in zip(case.targets, values, strict=True):
         extra = {"problems": ("wrong_verb",)} if v in ("wrong", "suspect") else {}
-        verdicts[x.label_id] = make_ai_verdict(x.label_id, v, kind=x.kind, confidence=0.9, **extra)
+        verdicts[(SID, x.label_id)] = make_ai_verdict(
+            x.label_id, v, kind=x.kind, confidence=0.9, **extra
+        )
     judged = Judged(verdicts, (), (), 2.0)
     report = score(
         [case], judged, policy, mode="perturb", golden_version="g1", same_model_as_actions=False
@@ -304,3 +307,44 @@ def test_score_and_gate_hand_calculation(policy: AiReviewPolicy, ontology: Ontol
     assert empty.wrong_recall == 0.0 and empty.by_error["verb_swap"].unjudged == 4
     assert empty.ok_miss_rate is None  # AI ok가 없으면 분모 0 (자료 없음 → 게이트 실패)
     assert not empty.gate.passed and empty.units_per_s is None
+
+
+def test_false_events_of_two_golden_sessions_are_scored_separately(
+    policy: AiReviewPolicy, ontology: Ontology
+) -> None:
+    """골든 세션 둘의 거짓 이벤트는 ID가 다르고, 판정도 세션별로 따로 센다.
+
+    정답 근거: 판정기가 g1의 거짓 이벤트는 모두 wrong(삭제 제안), g2의 것은 모두 ok라 하면
+    false_event 지적은 g1 수, ok는 g2 수다. 예전에는 ID가 세션과 무관하게 `pert-ev-0000…`이고 판정을
+    라벨 ID로만 모아, g2에서 놓친 거짓 이벤트가 g1의 wrong으로 '잡힌' 것이 되고 재현율이 부풀었다.
+    """
+    scene = make_scene()
+    truth = [_human(x) for x in scene.labels]
+    other = scene.session.model_copy(update={"session_id": "g2"})
+    truth2 = [
+        x.model_copy(update={"session_id": "g2", "label_id": f"g2-{x.label_id}"}) for x in truth
+    ]
+    rates = {"false_event": 0.5}
+    cases = [
+        perturb_case(scene.session, truth, rates, seed=1, o=ontology, policy=policy),
+        perturb_case(other, truth2, rates, seed=1, o=ontology, policy=policy),
+    ]
+    fakes = [[x for x in c.targets if c.truth[x.label_id].error == "false_event"] for c in cases]
+    assert fakes[0] and fakes[1]
+    assert not {x.label_id for x in fakes[0]} & {x.label_id for x in fakes[1]}
+    verdicts: dict[LabelKey, AiVerdict] = {}
+    for case, fake, value in zip(cases, fakes, ("wrong", "ok"), strict=True):
+        sid = case.session.session_id
+        for x in case.targets:
+            v = value if x in fake else "ok"
+            extra = {"problems": ("false_event",)} if v == "wrong" else {}
+            verdicts[(sid, x.label_id)] = make_ai_verdict(x.label_id, v, kind=x.kind, **extra)
+    report = score(
+        cases, Judged(verdicts, (), (), 1.0), policy, mode="perturb", golden_version="g",
+        same_model_as_actions=False,
+    )  # fmt: skip
+    stat = report.by_error["false_event"]
+    assert (stat.total, stat.flagged, stat.ok) == (
+        len(fakes[0]) + len(fakes[1]), len(fakes[0]), len(fakes[1]),
+    )  # fmt: skip
+    assert report.wrong_recall == pytest.approx(len(fakes[0]) / stat.total)
