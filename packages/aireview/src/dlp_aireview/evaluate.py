@@ -54,7 +54,7 @@ import time
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import sqlalchemy as sa
 from pydantic import Field
@@ -98,6 +98,10 @@ _EVAL_MODEL = "golden-eval"
 # 지적 (사람 확인이 필요하다고 본 판정)
 _FLAGS = (AiVerdictValue.WRONG, AiVerdictValue.SUSPECT)
 Mode = Literal["history", "perturb"]
+# 정답의 출처 (보고서 `truth_source`): 골든 버전에 고정한 정답(perturb, 고정한 버전), 지금
+# 라벨로 정한 정답(perturb, 정답을 고정하지 않은 이전 형식 골든셋 — 사람이 고치면 같은 버전이어도
+# 바뀐다), 사람 검수 사슬의 지금 상태(history, 설계상 늘 지금 상태)
+TruthSource = Literal["golden_frozen", "current_labels", "history_current"]
 
 
 @dataclass(frozen=True)
@@ -492,6 +496,11 @@ class EvalReport(Contract):
     suggestion_exact_rate: float | None
     ece: float | None
     gate: GateResult
+    # 정답 근거: 출처와 골든 정답 고정 근거(`dlp_eval.runner.truth_anchor`, `dlp eval golden`의
+    # golden_truth와 같은 모양. history 방식은 골든 정답을 쓰지 않아 None). 같은 골든 버전으로
+    # 다시 잰 두 보고서의 정답이 같았는지 해시로 확인한다 (ADR 0041)
+    truth_source: TruthSource | None = None
+    golden_truth: dict[str, Any] | None = None
 
 
 def _matches(v: AiVerdict, t: Truth) -> bool:
@@ -563,8 +572,13 @@ def score(
     golden_version: str,
     same_model_as_actions: bool,
     skipped: Mapping[str, str] | None = None,
+    truth_source: TruthSource | None = None,
+    golden_truth: Mapping[str, Any] | None = None,
 ) -> EvalReport:
-    """판정 결과 → 평가 보고서 (모듈 docstring 지표). 순수 함수."""
+    """판정 결과 → 평가 보고서 (모듈 docstring 지표). 순수 함수.
+
+    truth_source·golden_truth: 정답 근거 (보고서에 그대로 남긴다, `EvalReport`).
+    """
     by_error: dict[str, ErrorStat] = {}
     conf: list[float] = []
     correct: list[bool] = []
@@ -603,6 +617,7 @@ def score(
         wrong_called_ok_rate=_ratio(sum(s.ok for s in wrong), n_wrong),
         suggestion_exact_rate=_ratio(sum(s.exact for s in wrong), sum(s.expected for s in wrong)),
         ece=None if not conf or math.isnan(e := ece(conf, correct)) else e,
-        gate=GateResult(passed=False),
+        gate=GateResult(passed=False), truth_source=truth_source,
+        golden_truth=dict(golden_truth) if golden_truth is not None else None,
     )  # fmt: skip
     return report.model_copy(update={"gate": gate_result(report, policy.gate)})
