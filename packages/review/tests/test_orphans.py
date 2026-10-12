@@ -386,3 +386,40 @@ def test_reason_rules_and_platform_names() -> None:
         f"sessions/{SID}/review/a/b/bodycam.mp4",
     ):
         assert parse_labeling_media_key(key) is None
+
+
+def test_privacy_review_orphan_leaves_no_snapshot_in_labeling_bucket(
+    engine: sa.Engine, tmp_path: Path
+) -> None:
+    """블러 검수(원본 프록시) 고아 CVAT 작업은 지우되 라벨링 버킷에 스냅숏을 쓰지 않는다.
+
+    정답 근거: 블러 검수 작업의 스냅숏에는 원본 위에 그린 블러 트랙(대상 클래스·좌표)과 원본 접근
+    권한자의 계정이 든다. 같은 성격의 검수 우선 구간은 원본 버킷에 두고, 라벨링 버킷은 라벨러
+    자격 증명이 통째로 읽는 곳이다 (ADR 0039 한계). 같은 고아라도 공간 라벨링 작업은 스냅숏을
+    남긴다.
+    """
+    calls = Calls()
+    labeling = RecordingStore(tmp_path / "store", "dlp-labeling", calls)
+    cvat = FakeTool(
+        "cvat",
+        calls,
+        [_cvat(40, f"{SID}/bodycam/privacy", PRIVACY), _cvat(41, f"{SID}/bodycam/labeler02")],
+    )
+    report = find_orphans(
+        engine, labeling=labeling, cvat=cvat, label_studio=None, min_age=MIN_AGE, now=NOW
+    )
+    assert {o.ref: o.reason for o in report.found} == {
+        "cvat:40": "no_db_row",
+        "cvat:41": "no_db_row",
+    }
+    delete_orphans(
+        engine, report, labeling=labeling, raw_bucket="dlp-raw", cvat=cvat, label_studio=None,
+        now=NOW,
+    )  # fmt: skip
+    assert sorted(report.deleted) == ["cvat:40", "cvat:41"] and cvat.alive == set()
+    assert [c for c in calls if c[2] == "40"] == [
+        ("cvat", "unassign", "40"),
+        ("cvat", "delete", "40"),
+    ]
+    assert labeling.head(orphan_snapshot_key(SID, "cvat", 40)) is None
+    assert report.snapshots == [orphan_snapshot_key(SID, "cvat", 41)]

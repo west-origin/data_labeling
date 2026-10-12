@@ -34,8 +34,10 @@
 
 삭제는 실행기와 같은 순서·방식이다: 매체(삭제 → 없음 확인) → CVAT(배정 해제·스냅숏은 최선 노력 →
 삭제 → 없음 확인) → Label Studio(스냅숏 → 삭제 → 없음 확인). 스냅숏은 라벨링 버킷
-`sessions/<세션>/revoked/orphan-<도구>-<ID>.json`(이미 있으면 두기)이다. DB에는 쓰지 않는다 (지울
-행이 없다). 지운 것은 되돌릴 수 없다.
+`sessions/<세션>/revoked/orphan-<도구>-<ID>.json`(이미 있으면 두기)이다. 블러 검수(`dlp-privacy`,
+원본 프록시) 작업은 스냅숏을 남기지 않는다: 원본 위에 그린 블러 트랙(대상 클래스·좌표)과 원본 접근
+권한자의 계정이 들어, 라벨러 자격 증명이 읽는 라벨링 버킷에 둘 수 없다 (검수 우선 구간처럼 원본
+내용이다). DB에는 쓰지 않는다 (지울 행이 없다). 지운 것은 되돌릴 수 없다.
 
 공개 이름:
 - `Reason`, `Orphan`, `OrphanReport`: 판정, 고아 하나, 찾기·지우기 결과.
@@ -108,6 +110,8 @@ class Orphan:
     label: str
     # 도구 작업의 주인 (지우기 전 다시 판정할 때 쓴다). 매체는 None
     owner: TaskOwner | None = None
+    # 블러 검수 프로젝트(원본 프록시)의 작업이면 True: 스냅숏을 라벨링 버킷에 쓰지 않는다
+    privacy: bool = False
 
 
 @dataclass
@@ -284,7 +288,10 @@ def _scan_tool(
         key = f"{channel}:{t.task_id}"
         reason = tool_reason(by_key.get(key), t.owner)
         if reason is not None:
-            out.append(Orphan(channel, key, sid, reason, t.created_at, t.owner.label, t.owner))
+            privacy = channel == "cvat" and is_ontology_project(t.project, PRIVACY_PROJECT)
+            out.append(
+                Orphan(channel, key, sid, reason, t.created_at, t.owner.label, t.owner, privacy)
+            )
     if foreign:
         report.warnings.append(
             f"{channel}: 이 DB에 없는 세션의 작업 {foreign}개는 다른 배포의 것일 수 있어 보지 "
@@ -383,7 +390,10 @@ def _delete_tool(
     report: OrphanReport,
     now: datetime,
 ) -> None:
-    """도구 작업 하나: (있으면) 배정 해제·스냅숏(최선 노력) → 삭제 → 없음 확인."""
+    """도구 작업 하나: (있으면) 배정 해제·스냅숏(최선 노력) → 삭제 → 없음 확인.
+
+    블러 검수 작업(o.privacy)은 스냅숏을 쓰지 않는다 (원본 내용, 모듈 설명).
+    """
     tid = int(o.ref.split(":", 1)[1])
     if not client.task_exists(tid):
         return
@@ -392,12 +402,13 @@ def _delete_tool(
             unassign(tid)
         except _TOOL_ERRORS as exc:
             report.warnings.append(f"{o.ref}: 배정 해제 실패 ({exc})")
-    try:
-        written = _snapshot(labeling, o, client, tid, now)
-    except (*_TOOL_ERRORS, *STORE_ERRORS) as exc:
-        report.warnings.append(f"{o.ref}: 스냅숏 실패, 삭제는 계속 ({exc})")
-    else:
-        report.snapshots += [written] if written else []
+    if not o.privacy:
+        try:
+            written = _snapshot(labeling, o, client, tid, now)
+        except (*_TOOL_ERRORS, *STORE_ERRORS) as exc:
+            report.warnings.append(f"{o.ref}: 스냅숏 실패, 삭제는 계속 ({exc})")
+        else:
+            report.snapshots += [written] if written else []
     client.delete_task(tid)
     if client.task_exists(tid):
         raise OrphanError(f"{o.ref}: 지운 뒤에도 도구 작업이 남아 있습니다")
