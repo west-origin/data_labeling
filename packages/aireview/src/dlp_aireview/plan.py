@@ -625,7 +625,9 @@ def plan_windows(
 ) -> list[PlannedWindow]:
     """세션의 요청 창 (프레임 전). 순서: temporal → temporal_long → 스트림별 spatial.
 
-    선택 모드(`selection.mode`)를 적용한 결과다.
+    선택 모드(`selection.mode`)를 적용한 결과다. 평가 경로(only가 있음)는 선택 모드를 쓰지 않는다:
+    지정한 대상을 모두 판정해야 지표 분모가 맞고, 평가에는 우선순위 사유 구간이 없어 flagged면 감사
+    표본 창만 남는다 (selection은 판정 버전 밖이라 보고서로 구별할 수 없다).
 
     Args:
         session: 세션 (길이, 기준 스트림, 영상 스트림).
@@ -650,7 +652,7 @@ def plan_windows(
     for stream in session.streams:
         if stream.kind in VIDEO_KINDS:
             windows += _spatial_windows(ctx, spatial, stream.stream_id)
-    return _select(windows, policy, flagged)
+    return windows if only is not None else _select(windows, policy, flagged)
 
 
 # ---------------------------------------------------------------- 단위

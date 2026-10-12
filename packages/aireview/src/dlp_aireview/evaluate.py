@@ -39,15 +39,19 @@
     - 판정 모델이 행동 분류 모델과 같으면(`same_model_as_actions`) 행동 라벨 판정에 상관 오류가 생길
       수 있으므로 라벨 종류별 표(`by_kind["action"]`)를 따로 본다.
 
+평가 범위: 선택 모드(`selection.mode`)는 쓰지 않는다 (`plan.plan_windows`의 평가 경로, 대상을 모두
+판정한다). `--groups`면 `restrict_groups`로 그 묶음 창의 대상만 분모에 넣는다.
+
 공개 이름: `Truth`, `EvalCase`, `LabelKey`, `Judged`, `ErrorStat`, `KindStat`, `GateResult`,
-`EvalReport`, `perturb_case`, `history_case`, `eval_input`, `judge_cases`, `score`, `gate_result`.
+`EvalReport`, `perturb_case`, `history_case`, `restrict_groups`, `eval_input`, `judge_cases`,
+`score`, `gate_result`.
 """
 
 from __future__ import annotations
 
 import math
 import time
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -66,13 +70,21 @@ from dlp_aireview.runner import (
     RunOptions,
     RunSummary,
     SessionNotReadyError,
+    planned_units,
     run_session,
     session_problem,
 )
 from dlp_eval.metrics.classification import ece
 from dlp_media.storage import ObjectStore
 from dlp_privacy.policy import PrivacyPolicy
-from dlp_schema.aireview import AiReviewUnit, AiVerdict, AiVerdictValue, glove_derived, worst
+from dlp_schema.aireview import (
+    AiGroup,
+    AiReviewUnit,
+    AiVerdict,
+    AiVerdictValue,
+    glove_derived,
+    worst,
+)
 from dlp_schema.common import Contract
 from dlp_schema.db.repository import get_session
 from dlp_schema.episode import current_labels
@@ -295,6 +307,21 @@ def history_case(
     )
 
 
+def restrict_groups(
+    case: EvalCase, policy: AiReviewPolicy, groups: Collection[AiGroup]
+) -> EvalCase:
+    """`--groups`: 그 묶음의 창에 드는 대상만 남긴 사례 (정답도 같이 줄인다).
+
+    다른 묶음 대상을 남기면 판정되지 않은 채 재현율·오지적률 분모에 들어간다 (판정 버전이 같아
+    보고서로 구별할 수 없다). 창은 평가 경로와 같은 `plan_windows(only=…)`로 고른다.
+    """
+    windows = plan_windows(case.session, case.labels, policy, case.ontology, only=case.targets)
+    keep = {x.label_id for w in windows if w.group in groups for x in w.targets}
+    targets = tuple(x for x in case.targets if x.label_id in keep)
+    truth = {i: t for i, t in case.truth.items() if i in keep}
+    return EvalCase(case.session, case.ontology, case.labels, targets, truth)
+
+
 def eval_input(
     engine: sa.Engine,
     labeling: ObjectStore,
@@ -342,12 +369,17 @@ LabelKey = tuple[str, str]
 
 @dataclass(frozen=True)
 class Judged:
-    """`judge_cases` 결과: (세션, 라벨 ID) → 가장 나쁜 판정, 단위 기록, 세션별 실행 요약, 초."""
+    """`judge_cases` 결과: (세션, 라벨 ID) → 가장 나쁜 판정, 단위 기록, 세션별 실행 요약, 초.
+
+    planned는 계획한 단위에 든 대상 (판정이 없으면 장애·중단 = 미판정, 계획에 없으면 미계획).
+    None이면 모른다 (판정 없는 대상을 모두 미판정으로 센다).
+    """
 
     verdicts: dict[LabelKey, AiVerdict]
     units: tuple[AiReviewUnit, ...]
     summaries: tuple[RunSummary, ...]
     elapsed_s: float
+    planned: frozenset[LabelKey] | None = None
 
 
 def judge_cases(
@@ -366,6 +398,13 @@ def judge_cases(
     start = clock()
     sink = MemorySink()
     summaries: list[RunSummary] = []
+    opts = options or RunOptions()
+    planned = frozenset(
+        (inp.session.session_id, x.label_id)
+        for inp in inputs
+        for u in planned_units(inp, policy, opts)
+        for x in u.window.targets
+    )
     for inp in inputs:
         summary = run_session(inp, backend, sink, policy, options=options, progress=progress)
         summaries.append(summary)
@@ -377,7 +416,7 @@ def judge_cases(
         for v in u.verdicts:
             found.setdefault((u.session_id, v.label_id), []).append((v, u))
     verdicts = {key: worst(c)[0] for key, c in found.items()}
-    return Judged(verdicts, units, tuple(summaries), clock() - start)
+    return Judged(verdicts, units, tuple(summaries), clock() - start, planned)
 
 
 # ---------------------------------------------------------------- 지표
@@ -392,13 +431,14 @@ class ErrorStat(Contract):
     """오류 종류 하나(또는 깨끗한 라벨)의 집계."""
 
     # total: 대상 수. flagged: wrong·suspect 수. ok: AI ok 수. unsure: 판단 불가 수.
-    # unjudged: 판정이 없는 수 (계획되지 않음·장애). expected / exact: 정답 제안이 있는 수와 제안이
-    # 그 정답과 같은 수.
+    # unjudged: 계획했지만 판정이 없는 수 (장애·중단). unplanned: 계획되지 않아 판정이 없는 수
+    # (블러본 없는 스트림 등). expected / exact: 정답 제안이 있는 수와 제안이 그 정답과 같은 수.
     total: int = 0
     flagged: int = 0
     ok: int = 0
     unsure: int = 0
     unjudged: int = 0
+    unplanned: int = 0
     expected: int = 0
     exact: int = 0
 
@@ -464,12 +504,12 @@ def _matches(v: AiVerdict, t: Truth) -> bool:
     return s.payload is not None and s.payload == t.expected
 
 
-def _add(stat: ErrorStat, v: AiVerdict | None, t: Truth) -> ErrorStat:
-    """집계에 대상 하나를 더한 새 값."""
+def _add(stat: ErrorStat, v: AiVerdict | None, t: Truth, planned: bool) -> ErrorStat:
+    """집계에 대상 하나를 더한 새 값. planned: 그 대상이 계획한 단위에 들었는가."""
     data = stat.model_dump()
     data["total"] += 1
     if v is None:
-        data["unjudged"] += 1
+        data["unjudged" if planned else "unplanned"] += 1
     else:
         data["flagged"] += v.verdict in _FLAGS
         data["ok"] += v.verdict is AiVerdictValue.OK
@@ -531,8 +571,10 @@ def score(
     for case in cases:
         sid = case.session.session_id
         for x in case.targets:
-            t, v = case.truth[x.label_id], judged.verdicts.get((sid, x.label_id))
-            by_error[t.error] = _add(by_error.get(t.error, ErrorStat()), v, t)
+            key = (sid, x.label_id)
+            t, v = case.truth[x.label_id], judged.verdicts.get(key)
+            planned = judged.planned is None or key in judged.planned
+            by_error[t.error] = _add(by_error.get(t.error, ErrorStat()), v, t, planned)
             if (
                 v is not None
                 and v.confidence is not None

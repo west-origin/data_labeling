@@ -32,12 +32,13 @@ from dlp_aireview.evaluate import (
     history_case,
     judge_cases,
     perturb_case,
+    restrict_groups,
     score,
 )
 from dlp_aireview.oracle import OracleJudge
 from dlp_aireview.policy import AiReviewPolicy
 from dlp_aireview.runner import RunOptions
-from dlp_schema.aireview import AiVerdict
+from dlp_schema.aireview import AiGroup, AiVerdict
 from dlp_schema.db.repository import get_labels, insert_labels, record_review
 from dlp_schema.db.tables import metadata
 from dlp_schema.labels import (
@@ -55,7 +56,7 @@ from dlp_schema.ontology import Ontology
 from dlp_schema.testing import FIXED_TIME, make_ai_verdict
 
 from .blurred import RAW, DbScene, db_scene
-from .conftest import SID, make_scene
+from .conftest import SID, make_scene, with_policy
 
 
 def _counts(engine: sa.Engine) -> dict[str, int]:
@@ -348,3 +349,48 @@ def test_false_events_of_two_golden_sessions_are_scored_separately(
         len(fakes[0]) + len(fakes[1]), len(fakes[0]), len(fakes[1]),
     )  # fmt: skip
     assert report.wrong_recall == pytest.approx(len(fakes[0]) / stat.total)
+
+
+def test_eval_ignores_selection_mode_and_counts_only_chosen_groups(
+    tmp_path: Path, policy: AiReviewPolicy, ontology: Ontology
+) -> None:
+    """평가는 선택 모드(flagged)를 쓰지 않고, --groups면 그 묶음 창에 든 대상만 센다.
+
+    정답 근거: selection은 판정 버전(digest) 밖이라 같은 버전인데, 평가 경로에는 우선순위 사유
+    구간이 없어 flagged면 감사 표본 창만 남는다 (예전: 단위 0개, 모든 대상 미판정, 재현율 0).
+    대상은 모두 판정해야 분모가 맞다. --groups temporal이면 공간 대상(박스)은 분모에서 빠진다
+    (예전: 미판정으로 남아 재현율이 1.0에서 떨어지고 오지적률 분모도 커졌다). 오라클이면 탐지
+    재현율 1, 미판정 0이다.
+    """
+    db = db_scene(tmp_path, n_units=3)
+    truth = [_human(x) for x in db.scene.labels]
+    rates = {"verb_swap": 0.5, "class_swap": 0.5}
+    flagged = with_policy(policy, selection={"mode": "flagged", "audit_ratio": 0.0})
+    assert flagged.verdict_version == policy.verdict_version
+    case = perturb_case(db.scene.session, truth, rates, seed=3, o=ontology, policy=flagged)
+    assert {t.error for t in case.truth.values()} >= {"verb_swap", "class_swap"}
+    judged = _judge(db, [case], OracleJudge(truth), flagged, tmp_path)
+    report = score(
+        [case], judged, flagged, mode="perturb", golden_version="g1", same_model_as_actions=False
+    )
+    assert report.units > 0 and report.wrong_recall == 1.0
+    assert all(s.unjudged == 0 and s.unplanned == 0 for s in report.by_error.values())
+
+    temporal = restrict_groups(case, policy, {AiGroup.TEMPORAL, AiGroup.TEMPORAL_LONG})
+    kinds = {x.kind for x in temporal.targets}
+    assert (
+        temporal.targets
+        and "box_track" not in kinds
+        and set(temporal.truth) == {x.label_id for x in temporal.targets}
+    )
+    options = RunOptions(workers=2, groups=frozenset({AiGroup.TEMPORAL, AiGroup.TEMPORAL_LONG}))
+    work = tmp_path / "work-temporal"
+    work.mkdir()
+    inp = eval_input(db.engine, db.labeling, temporal, policy, db.privacy, work, raw_bucket=RAW)
+    narrowed = judge_cases([inp], OracleJudge(truth), policy, options=options)
+    only = score(
+        [temporal], narrowed, policy, mode="perturb", golden_version="g1",
+        same_model_as_actions=False,
+    )  # fmt: skip
+    assert "class_swap" not in only.by_error and only.wrong_recall == 1.0
+    assert all(s.unjudged == 0 and s.unplanned == 0 for s in only.by_error.values())

@@ -9,6 +9,9 @@
       `aireview.yaml gate.inject`) 또는 `history_case`(사람이 검수한 과거 모델 레코드)로 만든다.
     - 프레임은 운영과 같은 블러본 게이트(`open_blurred`)로만 얻고 판정은 실행기(`run_session`)로
       하되 기록은 메모리다 (AI 표·라벨 이력에 쓰지 않는다). 장갑 원본은 읽지 않는다.
+    - 선택 모드(`aireview.yaml selection.mode`)는 쓰지 않는다 (대상을 모두 판정). `--groups`면 그
+      묶음 창에 든 대상만 분모에 넣는다 (`evaluate.restrict_groups`). 판정이 없는 대상은 미판정
+      (계획했지만 장애·중단)과 미계획으로 나눠 센다.
     - 보고서는 `reports/aireview-eval/<골든>-<방식>-<시각>.json`(Git 제외, `--out`으로 바꾼다).
       MLflow 기록은 하지 않는다 (후속: 실측 단계에서 필요하면 더한다).
     - 게이트(`--gate`, `aireview.yaml gate`): 실패하면 경고를 출력한다. `gate.block`이 false(결정)라
@@ -46,6 +49,7 @@ from dlp_aireview.evaluate import (
     history_case,
     judge_cases,
     perturb_case,
+    restrict_groups,
     score,
 )
 from dlp_aireview.media import MediaBoundaryError
@@ -129,8 +133,12 @@ def _inputs(
     skipped: dict[str, str] = {}
     for case in cases:
         sid = case.session.session_id
+        if args.groups:
+            # 다른 묶음 대상을 분모에 남기지 않는다 (판정되지 않은 채 재현율·오지적률을 틀어지게
+            # 한다)
+            case = restrict_groups(case, policy, set(args.groups))
         if not case.targets:
-            skipped[sid] = "판정할 대상 없음"
+            skipped[sid] = "판정할 대상 없음" + (" (고른 묶음)" if args.groups else "")
             continue
         try:
             inp = eval_input(engine, labeling, case, policy, privacy, work, raw_bucket=buckets.raw)
@@ -161,7 +169,8 @@ def _print_report(report: EvalReport, out: Path, gate: bool) -> None:
     )
     for name, s in report.by_error.items():
         print(f"  {name}: {s.flagged}/{s.total} 지적, ok {s.ok}, 판단 불가 {s.unsure}, "
-              f"미판정 {s.unjudged}, 제안 일치 {s.exact}/{s.expected}")  # fmt: skip
+              f"미판정 {s.unjudged}(장애·중단), 미계획 {s.unplanned}, "
+              f"제안 일치 {s.exact}/{s.expected}")  # fmt: skip
     for kind, k in report.by_kind.items():
         print(f"  종류 {kind}: 틀린 라벨 {k.wrong_flagged}/{k.wrong} 지적 · 깨끗한 라벨 "
               f"{k.clean_flagged}/{k.clean} 지적")  # fmt: skip

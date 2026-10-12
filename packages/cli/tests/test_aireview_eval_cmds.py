@@ -138,6 +138,33 @@ def test_eval_writes_nothing_and_gate_only_warns(
     assert set(report["by_error"]) >= {"clean", "verb_swap"}
 
 
+def test_eval_groups_count_only_targets_of_chosen_groups(
+    world: tuple[list[str], _Watched], tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--groups temporal`이면 공간 대상(박스)은 분모에 들지 않고, 미판정·미계획이 0이다.
+
+    정답 근거: 예전에는 다른 묶음 대상이 판정되지 않은 채 분모에 남아 재현율이 떨어지고 오지적률
+    분모가 커졌다 (판정 버전이 같아 보고서로 구별할 수 없다).
+    """
+    args, _ = world
+    reports = {}
+    with FakeOpenAIServer(MODEL) as server:
+        for name, extra in (("all", []), ("temporal", ["--groups", "temporal,temporal_long"])):
+            out = tmp_path / f"{name}.json"
+            code = main([
+                "aireview", "eval", "--golden", "g1", "--seed", "3", "--out", str(out),
+                "--inject", "verb_swap=0.5,class_swap=0.5", "--vlm-url", f"spark-01={server.url}",
+                *extra, *args,
+            ])  # fmt: skip
+            assert code == 0, capsys.readouterr().out
+            reports[name] = json.loads(out.read_text("utf-8"))
+    full, narrowed = reports["all"], reports["temporal"]
+    assert "box_track" in full["by_kind"] and "box_track" not in narrowed["by_kind"]
+    assert "class_swap" not in narrowed["by_error"] and 0 < narrowed["targets"] < full["targets"]
+    for report in (full, narrowed):
+        assert all(v["unjudged"] == 0 and v["unplanned"] == 0 for v in report["by_error"].values())
+
+
 def test_eval_gate_blocks_only_when_policy_says_so(
     world: tuple[list[str], _Watched],
     tmp_path: Path,
