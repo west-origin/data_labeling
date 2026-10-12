@@ -76,6 +76,7 @@ from dlp_aireview.judge import JudgedUnit, judge_unit
 from dlp_aireview.media import (
     BlurredFrame,
     MediaBoundaryError,
+    check_blurred,
     frames_for,
     open_blurred,
     render_hashes_now,
@@ -1108,6 +1109,7 @@ def load_input(
     flagged_for: Callable[[sa.Connection, Session, list[LabelRecord]], Sequence[FlaggedSpan]]
     | None = None,
     sensor_for: Callable[[Session], SensorContext] | None = None,
+    sensor_check: Callable[[Session], None] | None = None,
 ) -> RunInput:
     """DB와 라벨링 버킷에서 판정 입력을 만든다.
 
@@ -1125,6 +1127,9 @@ def load_input(
         groups: 이 묶음만.
         flagged_for: flagged 모드의 우선순위 사유 구간 계산 (CLI, 같은 읽기 트랜잭션).
         sensor_for: 장갑 접촉 구간 계산 (CLI, 감사 원본 저장소 `aireview.run`).
+        sensor_check: 장갑이 필요할 때 큰 블러본을 받기 전에 부르는 전제 확인 (장갑 Parquet 존재,
+            내용은 읽지 않는다). 블러본 게이트(받기 전 확인)를 모두 통과한 뒤에 부른다: 장갑이
+            없어 거부될 세션이 cron마다 블러본(GB 단위)을 받았다 버리지 않게.
 
     Raises:
         SessionNotReadyError: 사용 중지·승인 보류·승인 전 (또는 `sensor_for`가 낸 것).
@@ -1148,16 +1153,21 @@ def load_input(
         for w in plan_windows(session, current, policy, ontology, flagged=flagged)
         if groups is None or w.group in groups
     ]
+    streams = sorted({w.stream_id for w in windows})
+    sensing = sensor_for is not None and needs_sensor(windows, policy)
+    if sensing and sensor_check is not None:
+        # 게이트(받기 전 확인) → 장갑 존재 확인 → 받기 순서: 원본은 게이트 통과 뒤에만 본다
+        for s in streams:
+            check_blurred(engine, labeling, session_id, s, privacy_policy, raw_bucket=raw_bucket)
+        sensor_check(session)
     medias = {
         s: open_blurred(
             engine, labeling, session_id, s, privacy_policy, work, raw_bucket=raw_bucket
         )
-        for s in sorted({w.stream_id for w in windows})
+        for s in streams
     }
     sensor = (  # 블러본 게이트를 모두 통과한 뒤에만 원본(장갑)을 읽는다
-        sensor_for(session)
-        if sensor_for is not None and needs_sensor(windows, policy)
-        else SensorContext.absent()
+        sensor_for(session) if sensor_for is not None and sensing else SensorContext.absent()
     )
 
     def frames(stream: str, idx: Sequence[int]) -> Iterator[BlurredFrame]:
@@ -1195,6 +1205,7 @@ def run_from_db(
     sensor_for: Callable[[Session], SensorContext] | None = None,
     progress: Callable[[str], None] | None = None,
     clock: Callable[[], float] = time.monotonic,
+    sensor_check: Callable[[Session], None] | None = None,
 ) -> RunSummary | None:
     """세션 잠금 → 입력(`load_input`) → `run_session`(`DbSink`, 렌더 재확인). 블러본은 실행 임시
     디렉터리에 받고 끝나면 지운다.
@@ -1220,7 +1231,7 @@ def run_from_db(
                 inp = load_input(
                     engine, labeling, session_id, policy, privacy_policy, Path(tmp),
                     raw_bucket=raw_bucket, groups=opts.groups, flagged_for=flagged_for,
-                    sensor_for=sensor_for,
+                    sensor_for=sensor_for, sensor_check=sensor_check,
                 )  # fmt: skip
             except _EXPECTED_INPUT_ERRORS:
                 raise

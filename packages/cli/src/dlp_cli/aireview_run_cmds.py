@@ -131,7 +131,7 @@ from dlp_schema.db.locks import aireview_lock_held
 from dlp_schema.db.repository import get_labels, get_session, list_session_ids
 from dlp_schema.episode import current_labels
 from dlp_schema.labels import Hand
-from dlp_schema.session import LifecycleState, Session, StreamKind, SyncMethod
+from dlp_schema.session import LifecycleState, Session, Stream, StreamKind, SyncMethod
 from dlp_sync.policy import load_policy as load_sync_policy
 from dlp_sync.signals import glove_series
 
@@ -215,6 +215,32 @@ def open_pool(args: argparse.Namespace, policy: AiReviewPolicy) -> EndpointPool 
 # ---------------------------------------------------------------- 장갑 문장
 
 
+def _synced_gloves(session: Session) -> dict[Hand, Stream]:
+    """손 → 동기화된 장갑 스트림 (동기화되지 않은 장갑은 쓰지 않는다)."""
+    return {
+        _GLOVES[s.kind]: s
+        for s in session.streams
+        if s.kind in _GLOVES and s.sync_method is not SyncMethod.UNSYNCED
+    }
+
+
+def check_gloves(session: Session, raw: ObjectStore) -> None:
+    """동기화된 장갑 스트림의 Parquet이 원본 버킷에 모두 있는지 (HEAD만, 내용은 읽지 않는다).
+
+    `load_input`이 큰 블러본을 받기 전에 부른다 (`sensor_check`). HEAD는 원본 접근 감사에 남지
+    않는다 (`dlp_media.audit.AuditedStore.head`).
+
+    Raises:
+        SessionNotReadyError: 선언된 장갑 스트림의 Parquet이 없을 때.
+    """
+    for stream in (s for _, s in sorted(_synced_gloves(session).items())):
+        if raw.head(stream.uri.removeprefix(raw.uri(""))) is None:
+            raise SessionNotReadyError(
+                f"{session.session_id}: 장갑 Parquet이 없습니다 ({stream.stream_id}). "
+                "센서 없이 판정하려면 --no-sensor"
+            )
+
+
 def glove_context(
     session: Session,
     raw: AuditedStore,
@@ -230,22 +256,14 @@ def glove_context(
     Raises:
         SessionNotReadyError: 선언된 장갑 스트림의 Parquet이 원본 버킷에 없을 때.
     """
-    gloves = {
-        _GLOVES[s.kind]: s
-        for s in session.streams
-        if s.kind in _GLOVES and s.sync_method is not SyncMethod.UNSYNCED
-    }
+    gloves = _synced_gloves(session)
     if not gloves:
         return SensorContext.absent()
+    check_gloves(session, raw)
     spans: dict[Hand, list[tuple[float, float]]] = {}
     with tempfile.TemporaryDirectory(prefix="aireview-glove-") as tmp:
         for hand, stream in sorted(gloves.items()):
             key = stream.uri.removeprefix(raw.uri(""))
-            if raw.head(key) is None:
-                raise SessionNotReadyError(
-                    f"{session.session_id}: 장갑 Parquet이 없습니다 ({stream.stream_id}). "
-                    "센서 없이 판정하려면 --no-sensor"
-                )
             path = Path(tmp) / f"{stream.stream_id}.parquet"
             raw.get_file(key, path)
             series = glove_series(path, pressure_prefixes)
@@ -255,8 +273,16 @@ def glove_context(
     return SensorContext.of(spans)
 
 
-def _sensor_source(args: argparse.Namespace) -> Callable[[Session], SensorContext] | None:
-    """장갑 문장 계산 함수 (`--no-sensor`면 None: 센서 없이 판정)."""
+@dataclass(frozen=True)
+class _Sensor:
+    """장갑 문장 계산(`compute`)과 블러본을 받기 전의 존재 확인(`check`)."""
+
+    compute: Callable[[Session], SensorContext]
+    check: Callable[[Session], None]
+
+
+def _sensor_source(args: argparse.Namespace) -> _Sensor | None:
+    """장갑 문장 계산·존재 확인 (`--no-sensor`면 None: 센서 없이 판정)."""
     if args.no_sensor:
         return None
     root = repo_root()
@@ -267,7 +293,10 @@ def _sensor_source(args: argparse.Namespace) -> Callable[[Session], SensorContex
     def compute(session: Session) -> SensorContext:
         return glove_context(session, raw, glove, prefixes)
 
-    return compute
+    def check(session: Session) -> None:
+        check_gloves(session, raw)
+
+    return _Sensor(compute, check)
 
 
 # ---------------------------------------------------------------- run
@@ -283,7 +312,7 @@ class _RunCtx:
     backend: JudgeBackend
     policy: AiReviewPolicy
     options: RunOptions
-    sensor_for: Callable[[Session], SensorContext] | None
+    sensor: _Sensor | None
 
 
 def _progress(line: str) -> None:
@@ -315,7 +344,9 @@ def _run_one(sid: str, ctx: _RunCtx) -> tuple[int, bool]:
         summary = run_from_db(
             ctx.engine, ctx.labeling, sid, ctx.backend, ctx.policy,
             load_privacy_policy(repo_root()), raw_bucket=ctx.raw_bucket, options=ctx.options,
-            flagged_for=flagged_spans, sensor_for=ctx.sensor_for, progress=_progress,
+            flagged_for=flagged_spans, progress=_progress,
+            sensor_for=ctx.sensor.compute if ctx.sensor else None,
+            sensor_check=ctx.sensor.check if ctx.sensor else None,
         )  # fmt: skip
     except NoResultFound:
         print(f"[전제 실패] {sid}: 세션이 없습니다")
@@ -578,7 +609,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         ctx = _RunCtx(
             engine=engine, labeling=store_from_spec(args.store, buckets.labeling),
             raw_bucket=buckets.raw, backend=backend, policy=policy, options=options,
-            sensor_for=_sensor_source(args),
+            sensor=_sensor_source(args),
         )  # fmt: skip
         limit = args.limit if args.pending else None
         picker = _run_all(sessions, ctx, args.parallel_sessions, limit)

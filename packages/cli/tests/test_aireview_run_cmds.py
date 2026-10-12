@@ -427,6 +427,32 @@ def test_pending_limit_skips_session_whose_input_always_fails(
     assert world.units("a-bad") == 0 and world.units("b-good") > 0
 
 
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_missing_glove_parquet_is_refused_before_downloading_blurred_videos(
+    world: World, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], dry_run: bool
+) -> None:
+    """장갑 Parquet이 없어 종료 6으로 거부될 세션은 블러본을 하나도 받지 않는다.
+
+    정답 근거: 예전에는 판정할 창의 블러본(바디캠·3인칭, 실영상이면 GB 단위)을 모두 받은 뒤에야
+    장갑 존재를 확인해, --pending cron마다 받았다 버렸다. 순서는 블러본 게이트(받기 전 확인) → 장갑
+    HEAD → 받기다 (원본은 게이트 통과 뒤에만 본다, HEAD는 원본 감사에 남지 않는다).
+    """
+    world.add("g2", glove=True, upload_glove=False)
+    fetched: list[str] = []
+    original = runner_module.open_blurred
+
+    def spy(*args: Any, **kw: Any) -> Any:
+        fetched.append(str(args[3]))
+        return original(*args, **kw)
+
+    monkeypatch.setattr(runner_module, "open_blurred", spy)
+    extra = ["--dry-run"] if dry_run else []
+    with FakeOpenAIServer(MODEL) as server:
+        code = main(["aireview", "run", "g2", *extra, "--vlm-url", server.url, *world.args])
+    assert code == 6 and "장갑 Parquet이 없습니다" in capsys.readouterr().out
+    assert fetched == [] and world.raw_reads() == set()
+
+
 def test_unit_outage_or_error_in_one_session_does_not_block_others(
     world: World, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
