@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
 from sqlalchemy.exc import DBAPIError
 
+from dlp_schema import repo_root
 from dlp_schema.dataset import DatasetVersion, Split
 from dlp_schema.db.migrate import alembic_config, downgrade, upgrade
 from dlp_schema.db.repository import (
@@ -52,6 +54,33 @@ def test_migrations_have_single_head() -> None:
     0019의 down_revision을 0018로 바꾼다 — ADR 0040)."""
     heads = ScriptDirectory.from_config(alembic_config("sqlite://")).get_heads()
     assert len(heads) == 1, f"head가 여럿이다: {heads} (나중 리비전의 down_revision을 고친다)"
+
+
+# 기준 문서(ADR, 구현 계획)에서 마이그레이션의 down 리비전을 적은 표기:
+# "Alembic 0019(down 0018" 또는 "`0019_ai_review.py`(down 0018"
+_DOC_DOWN = re.compile(r"(?:Alembic (\d{4})|\b(\d{4})_\w+\.py`?)\(down (\d{4})")
+
+
+def test_documented_down_revisions_match_migrations() -> None:
+    """ADR·구현 계획에 적은 "리비전(down 이전 리비전)"이 실제 `down_revision`과 같다.
+
+    브랜치 병합으로 down_revision을 바꾸고 문서를 그대로 두면, 문서만 보고 downgrade·백포트 순서를
+    잘못 잡는다 (ADR 0040이 0019를 "down 0017"로 남긴 일). 검수 기록(docs/handover)은 과거 상태를
+    인용하므로 보지 않는다. 정답: 표기가 하나 이상 있고, 모두 마이그레이션 파일과 같다.
+    """
+    script = ScriptDirectory.from_config(alembic_config("sqlite://"))
+    docs = repo_root() / "docs"
+    found: list[tuple[str, str, str]] = []
+    for path in [*sorted((docs / "adr").glob("*.md")), docs / "ai-implementation-plan.md"]:
+        for m in _DOC_DOWN.finditer(path.read_text(encoding="utf-8")):
+            found.append((path.name, m.group(1) or m.group(2), m.group(3)))
+    assert found
+    wrong = [
+        (name, rev, down, script.get_revision(rev).down_revision)
+        for name, rev, down in found
+        if script.get_revision(rev).down_revision != down
+    ]
+    assert wrong == [], f"문서의 down 리비전이 다르다 (문서, 리비전, 적은 값, 실제): {wrong}"
 
 
 def test_migrations_match_table_definitions(tmp_path: Path) -> None:

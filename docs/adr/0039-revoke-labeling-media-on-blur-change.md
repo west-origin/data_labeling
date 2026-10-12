@@ -161,8 +161,10 @@ DB 회수는 라벨링 버킷 객체와 도구 작업만 끊는다. 다음은 �
 1. 라벨러 자격 증명 교체: `DLP_S3_LABELER_ACCESS_KEY`·`DLP_S3_LABELER_SECRET_KEY`를 새 값으로
    바꾸고 S3 신원 설정(개발은 `services/seaweedfs/entrypoint.sh`가 만드는 `labeler` 신원)을 다시
    적용한다. 이전 키로 서명한 URL(Label Studio 작업에 박힌 것 포함)은 모두 끊긴다. 남은 라벨링
-   작업의 영상은 새 키로 다시 서명해야 열린다 (Label Studio 작업 재생성, F-REV-08과 함께 정한다).
-   교체 뒤 `dlp services check --security`로 범위를 다시 확인한다.
+   작업의 영상은 새 키로 다시 서명해야 열린다: 키를 바꾼 환경에서 `dlp review refresh-urls`를 돌리면
+   열린 Label Studio 작업만 새 라벨러 키로 다시 서명한다 (F-REV-08, 수집·회수한 작업과 매체가 지금
+   블러와 다른 작업은 건너뛴다. CVAT 작업은 영상을 CVAT에 올려 URL이 없다). 교체 뒤
+   `dlp services check --security`로 범위를 다시 확인한다.
 2. CVAT·Label Studio 내보내기 기록 확인: CVAT는 서버 요청 기록(`/api/requests`, 서버 로그의 dataset
    export·backup 요청)과 작업 담당자, Label Studio는 프로젝트 내보내기 기록(`/api/projects/<ID>/exports`)
    을 사고 기간에 대해 확인하고, 내보낸 사람·파일을 회수 대상 목록에 올린다. 라벨러 계정은 관리자가

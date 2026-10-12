@@ -7,10 +7,11 @@
   ADR 0039(블러 변경 시 매체 회수).
   계약 추가: `dlp_schema.aireview`(판정·단위·실행·노출·결과), `ReviewReason`의 `ai_*` 4개,
   `schemas/ai_review_unit|ai_review_run|ai_exposure|ai_outcome.schema.json`,
-  `schemas/review_assignment.schema.json`(사유 열거형). DB 표 5개는 Alembic 0019(down 0017, WP17.4),
-  저장소는 `dlp_schema.db.aireview_repository`. 0018(골든 정답 고정, fix/m-trn)도 0017을 이으므로,
-  둘 중 나중에 메인에 병합하는 쪽이 0019의 `down_revision`을 0018로 바꾸고 이 줄과 구현 계획의 "down
-  0017"을 고친다 (head가 둘이면 `upgrade`가 실패한다. `test_migrations_have_single_head`가 잡는다).
+  `schemas/review_assignment.schema.json`(사유 열거형). DB 표 5개는 Alembic 0019(down 0018, WP17.4),
+  저장소는 `dlp_schema.db.aireview_repository`. 마이그레이션 체인은 0015 → 0017(승인 보류, ADR 0042)
+  → 0018(골든 정답 고정, ADR 0041) → 0019다 (병합 때 0019의 `down_revision`을 0017에서 0018로
+  바꿨다. head는 하나: `test_migrations_have_single_head`, 문서의 down 리비전 대조:
+  `test_documented_down_revisions_match_migrations`).
 
 ## 배경
 

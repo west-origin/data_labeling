@@ -119,7 +119,7 @@ def build_parser() -> argparse.ArgumentParser:
     pilot_cmds.add_commands(sub)  # dlp pilot check — 실제 영상 실행 전 준비 검사
     media_cmds.add_commands(sub)  # dlp ingest — 세션 수집 (WP3)
     sync_cmds.add_commands(sub)  # dlp sync run|adjust — 멀티스트림 동기화 (WP4)
-    # 프라이버시 게이트: dlp privacy detect|approve|render|audit-sample (WP5)
+    # 프라이버시 게이트: dlp privacy detect|approve|render|audit-sample|hold (WP5, hold는 ADR 0042)
     privacy_cmds.add_commands(sub)
     # 모델 가중치 받기·변환과 라이선스 검사: dlp models fetch|export|licenses (ADR 0009·0010)
     models_cmds.add_commands(sub)
@@ -128,7 +128,8 @@ def build_parser() -> argparse.ArgumentParser:
     prelabel_cmds.add_commands(sub)  # dlp prelabel run — 자동 프리라벨 (WP8)
     relations_cmds.add_commands(sub)  # dlp relations run — 관계 도출 (WP9)
     actions_cmds.add_commands(sub)  # dlp actions run — 행동 구간 (WP10)
-    aireview_cmds.add_commands(sub)  # dlp aireview probe|bench|estimate — AI 1차 검수 (WP17)
+    # AI 1차 검수: dlp aireview probe|bench|estimate|run|status|show|waive|eval (WP17)
+    aireview_cmds.add_commands(sub)
     eval_cmds.add_commands(sub)  # dlp eval golden — 골든셋 평가 (WP11)
     train_cmds.add_commands(sub)  # dlp train run|models|approve — 재학습 (WP13)
     active_cmds.add_commands(sub)  # dlp active rank|fiftyone — 액티브 러닝 (WP14)
