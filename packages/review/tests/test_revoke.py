@@ -44,6 +44,7 @@ from dlp_review.tasks import (
     labeling_media_key,
     lock_assignment,
     proxy_key,
+    timeseries_key,
 )
 from dlp_review.verify import verification_gaps
 from dlp_schema import load_ontology, repo_root
@@ -550,6 +551,53 @@ def test_snapshot_failure_still_deletes_and_lingering_task_stays_pending(
     assert cvat.tasks == {7} and report.pending == ["cvat:7"]
     # 없는 작업은 주인 확인·스냅숏·삭제를 부르지 않는다
     assert [c[1] for c in calls if c[0] == "ls"] == []
+
+
+def test_withdrawn_session_revocation_also_deletes_timeseries_csv(
+    engine: sa.Engine,
+    seven: dict[str, ReviewTask],
+    stores: tuple[LocalStore, LocalStore],
+    policy: PrivacyPolicy,
+    tmp_path: Path,
+) -> None:
+    """사용 중지 회수는 세션의 검수 시계열 CSV도 지운다. 블러 변경 회수는 CSV를 둔다.
+
+    정답 근거: CSV는 동의를 철회한 작업자의 장갑·IMU 값이고 이미 발급한 Label Studio 서명 URL이
+    가리킨다 (ADR 0039: 회수는 매체 객체 삭제로 끊는다). 블러 변경은 얼굴이 없는 CSV를 회수하지
+    않는다. 사용 중지 전에 블러 변경으로 바디캠 작업이 이미 회수됐어도, 남은 3인칭 작업의 사용
+    중지 회수가 CSV를 지운다. CSV를 지우지 못하면 그 매체는 대기로 남고 다시 돌리면 끝난다.
+    """
+    _, labeling = stores
+    csv = timeseries_key(SID)
+    _put_media(labeling, csv, tmp_path)
+    _requested(engine, policy)  # 블러 변경: 바디캠 작업만
+    calls = Calls()
+    cvat, ls = FakeTool("cvat", calls, {2, 4, 5, 6, 7}), FakeTool("ls", calls, {3})
+    assert _run(engine, labeling, cvat, ls).complete
+    assert labeling.head(csv) is not None  # 블러 변경은 CSV를 두었다
+
+    class FailingCsv(RecordingStore):
+        """시계열 CSV 삭제를 한 번 실패시킨다."""
+
+        failed = False
+
+        def delete(self, key: str) -> None:
+            if key == csv and not self.failed:
+                self.failed = True
+                raise OSError("디스크 오류")
+            super().delete(key)
+
+    with engine.begin() as conn:
+        repository.set_lifecycle(conn, SID, LifecycleState.WITHDRAWN, at=NOW, actor="dpo01")
+        assert request_task_revocation(conn, "cvat:4", reason="withdrawn:dpo01", at=NOW)
+    store = FailingCsv(labeling, calls)
+    first = _run(engine, store, cvat, ls)
+    assert first.pending == ["cvat:4"] and labeling.head(csv) is not None
+    assert _status(engine, "cvat:4").media_revoked_at is None
+    again = _run(engine, store, cvat, ls)
+    assert again.complete and csv in again.media_done
+    assert labeling.head(csv) is None
+    assert labeling.head(seven["third"].media_uri.removeprefix(labeling.uri(""))) is None
 
 
 def test_executor_refuses_to_delete_when_any_precheck_fails(

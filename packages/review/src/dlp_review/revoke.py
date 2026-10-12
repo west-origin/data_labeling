@@ -8,6 +8,9 @@
 순서는 "넓고 확실한 것부터"다:
 1. 매체: 서로 다른 매체 URI마다 라벨링 버킷의 워터마크 사본을 지운다. Label Studio 작업의 서명
    URL은 이 객체를 가리키므로 객체를 지우면 바로 끊긴다. 같은 키를 쓰는 작업은 함께 표시한다.
+   세션이 사용 중지(withdrawn)면 세션의 검수 시계열 CSV(`tasks.timeseries_key`)도 함께 지운다:
+   동의를 철회한 작업자의 장갑·IMU 값이고, 이미 발급한 Label Studio 서명 URL이 가리킨다. 블러
+   변경 회수는 CSV를 두고(얼굴이 없다), CSV를 지우지 못하면 그 매체도 대기로 남아 다시 한다.
 2. CVAT: 작업 행 잠금(SKIP LOCKED) → 주인 대조 → 배정 해제(최선 노력) → 스냅숏(최선 노력, 이미
    있으면 두기) → 삭제(404도 성공) → 없음 확인 → 표시. CVAT는 영상을 자기 안에 올리므로 작업을
    지워야 끊긴다.
@@ -51,8 +54,9 @@ import sqlalchemy as sa
 from dlp_media.storage import STORE_ERRORS, DeletableStore, ObjectStore, sha256_file
 from dlp_review.clients import TaskOwner, ToolError
 from dlp_review.roles import RawAccessError, check_stage_uris
-from dlp_review.tasks import MEDIA_HASH_CHARS, TaskError, object_key
+from dlp_review.tasks import MEDIA_HASH_CHARS, TaskError, object_key, timeseries_key
 from dlp_schema.db.repository import (
+    get_session,
     list_review_tasks,
     mark_task_media_revoked,
     mark_task_tool_revoked,
@@ -60,6 +64,7 @@ from dlp_schema.db.repository import (
 )
 from dlp_schema.db.tables import review_tasks
 from dlp_schema.review import ReviewStage, ReviewTask, ReviewTool
+from dlp_schema.session import LifecycleState
 
 # 도구 호출 실패로 보는 예외 (응답 4xx·5xx, 연결·시간 초과)
 _TOOL_ERRORS = (ToolError, httpx.HTTPError)
@@ -156,8 +161,11 @@ def _delete_media(
     raw_bucket: str,
     group: list[ReviewTask],
     clock: Callable[[], datetime],
-) -> str:
+) -> list[str]:
     """같은 매체 URI를 쓰는 대기 작업 묶음의 사본을 지우고 표시한다. 지운 키.
+
+    사용 중지 세션이면 시계열 CSV도 지운다(있을 때만, 지운 키에 넣는다). 사본·CSV를 모두 지운 뒤에만
+    완료를 표시한다 (CSV 삭제가 실패하면 다음 실행이 멱등 삭제부터 다시 한다).
 
     Raises:
         TaskError, RawAccessError: 지우기 전 판정 실패 (살아 있는 작업이 같은 키를 씀 등).
@@ -171,16 +179,24 @@ def _delete_media(
             for t in list_review_tasks(conn, first.session_id)
             if t.media_uri == first.media_uri and t.revoke_requested_at is None
         ]
+        withdrawn = get_session(conn, first.session_id).lifecycle_state is LifecycleState.WITHDRAWN
     if live:
         raise TaskError(f"{key}: 회수 요청 없는 작업 {live}이 같은 사본을 써서 지우지 않습니다")
     if not isinstance(labeling, DeletableStore):
         raise TaskError(f"{type(labeling).__name__}는 삭제를 지원하지 않습니다")
+    done = [key]
     labeling.delete(key)
     if labeling.head(key) is not None:
         raise TaskError(f"{key}: 지운 뒤에도 객체가 남아 있습니다")
+    csv = timeseries_key(first.session_id)
+    if withdrawn and labeling.head(csv) is not None:
+        labeling.delete(csv)
+        if labeling.head(csv) is not None:
+            raise TaskError(f"{csv}: 사용 중지 세션의 시계열을 지운 뒤에도 남아 있습니다")
+        done.append(csv)
     with engine.begin() as conn:
         mark_task_media_revoked(conn, first.session_id, first.media_uri, clock())
-    return key
+    return done
 
 
 def _media_phase(
@@ -198,7 +214,7 @@ def _media_phase(
             groups.setdefault((t.session_id, t.media_uri), []).append(t)
     for group in groups.values():
         try:
-            report.media_done.append(_delete_media(engine, labeling, raw_bucket, group, clock))
+            report.media_done += _delete_media(engine, labeling, raw_bucket, group, clock)
         except (TaskError, RawAccessError, *_STORE_ERRORS) as exc:
             keys = ", ".join(t.task_key for t in group)
             report.errors.append(f"[매체 노출 남음] {keys}: {exc}")

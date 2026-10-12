@@ -73,6 +73,8 @@ ADR 0024는 블러가 바뀌면 승인을 풀고 렌더 기록을 무효로 둬,
      사용 중지한 세션에는 블러 검수·라벨링 작업을 새로 만들지 않는다 (`tasks._check_not_withdrawn`,
      도구 호출 전). 이 변경 전에 사용 중지한 세션은 `dlp review revoke <세션> --all --reason
      withdrawn`으로 회수한다. 블러 검수 작업(원본 권한자 CVAT 작업)은 회수 대상이 아니라 남는다.
+     사용 중지 세션의 매체를 지울 때 실행기는 세션의 검수 시계열 CSV(`review/timeseries.csv`,
+     작업자의 장갑·IMU 값, Label Studio 서명 URL이 가리킨다)도 지운다. 블러 변경 회수는 CSV를 둔다.
    - dlp_privacy가 `review_tasks`에 쓰는 근거: 블러를 바꾸는 트랜잭션(탐지·렌더)이 이 패키지에 있고
      요청은 같은 커밋에 있어야 한다. `generation`도 이미 `review_tasks`를 읽는다. 쓰기는 `dlp_schema`
      저장소 함수(`request_task_revocation`)로만 하고 패키지 의존 표는 그대로다.
