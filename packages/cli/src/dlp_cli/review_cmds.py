@@ -435,7 +435,8 @@ def cmd_serve(args: argparse.Namespace) -> int:
         _print_outcome(task, outcome, ai=setup.ai is not None)
         report = run_revocations(engine, task.session_id, setup)
         if print_revocations(report, task.session_id):
-            raise RevocationIncompleteError(f"{task.session_id}: 회수 대기 {len(report.pending)}개")
+            left = len(report.remaining)
+            raise RevocationIncompleteError(f"{task.session_id}: 회수 대기 {left}개")
 
     server = serve(args.port, _secret(), on_collect, policy=ops_policy.webhook)
     print(

@@ -35,7 +35,12 @@ from dlp_review.clients import TaskOwner, ToolError
 from dlp_review.collect import collect_task
 from dlp_review.ops.results import finish_assignment
 from dlp_review.reconcile import ReviewedItem
-from dlp_review.revoke import execute_media_revocations, mark_tool_gone, snapshot_key
+from dlp_review.revoke import (
+    execute_media_revocations,
+    mark_tool_gone,
+    snapshot_key,
+    timeseries_sessions,
+)
 from dlp_review.tasks import (
     ReviewSetup,
     TaskError,
@@ -63,6 +68,7 @@ from dlp_schema.db.repository import (
     request_task_revocation,
 )
 from dlp_schema.labels import BlurTrackPayload, BoxKeyframe, LabelRecord
+from dlp_schema.lineage import Withdrawal
 from dlp_schema.review import (
     AssignmentStatus,
     ReviewAssignment,
@@ -564,8 +570,9 @@ def test_withdrawn_session_revocation_also_deletes_timeseries_csv(
 
     정답 근거: CSV는 동의를 철회한 작업자의 장갑·IMU 값이고 이미 발급한 Label Studio 서명 URL이
     가리킨다 (ADR 0039: 회수는 매체 객체 삭제로 끊는다). 블러 변경은 얼굴이 없는 CSV를 회수하지
-    않는다. 사용 중지 전에 블러 변경으로 바디캠 작업이 이미 회수됐어도, 남은 3인칭 작업의 사용
-    중지 회수가 CSV를 지운다. CSV를 지우지 못하면 그 매체는 대기로 남고 다시 돌리면 끝난다.
+    않는다. 사용 중지 전에 블러 변경으로 바디캠 작업이 이미 회수됐어도, 사용 중지 뒤 실행기가 CSV를
+    지운다. CSV를 지우지 못하면 작업 매체 표시와 별도로 실행이 미완료(`timeseries_left`, 대기)로
+    끝나고 다시 돌리면 끝난다 (CSV에는 작업 행 표시가 없어 실행마다 확인한다).
     """
     _, labeling = stores
     csv = timeseries_key(SID)
@@ -592,12 +599,65 @@ def test_withdrawn_session_revocation_also_deletes_timeseries_csv(
         assert request_task_revocation(conn, "cvat:4", reason="withdrawn:dpo01", at=NOW)
     store = FailingCsv(labeling, calls)
     first = _run(engine, store, cvat, ls)
-    assert first.pending == ["cvat:4"] and labeling.head(csv) is not None
-    assert _status(engine, "cvat:4").media_revoked_at is None
+    assert not first.complete and first.pending == [] and first.timeseries_left == [csv]
+    assert any(e.startswith("[매체 노출 남음]") and csv in e for e in first.errors)
+    assert labeling.head(csv) is not None
+    assert _status(engine, "cvat:4").media_revoked_at == NOW  # 작업 매체는 지웠다
     again = _run(engine, store, cvat, ls)
-    assert again.complete and csv in again.media_done
+    assert again.complete and again.media_done == [csv]
     assert labeling.head(csv) is None
     assert labeling.head(seven["third"].media_uri.removeprefix(labeling.uri(""))) is None
+
+
+def test_withdrawn_session_csv_is_deleted_even_when_no_revocation_is_pending(
+    engine: sa.Engine,
+    seven: dict[str, ReviewTask],
+    stores: tuple[LocalStore, LocalStore],
+    policy: PrivacyPolicy,
+    tmp_path: Path,
+) -> None:
+    """사용 중지 전에 모든 비프라이버시 작업의 회수가 끝났어도 사용 중지 뒤 실행기가 CSV를 지운다.
+
+    정답 근거: 바디캠·3인칭 블러를 모두 바꿔 비프라이버시 작업 6개가 블러 변경으로 회수됐다(CSV는
+    둔다). 그 뒤 사용 중지는 새로 요청할 작업이 없어 회수 대기가 비지만, CSV는 동의를 철회한
+    작업자의 센서 값이라 지워야 한다. 대기 유무와 무관하게 사용 중지 세션의 CSV를 확인해 지운다:
+    모든 세션(`--pending`, 사용 중지 기록으로 찾는다)과 세션 지정 모두. 다시 돌리면 할 일이 없다.
+    """
+    _, labeling = stores
+    csv = timeseries_key(SID)
+    _put_media(labeling, csv, tmp_path)
+    with engine.begin() as conn:
+        insert_labels(conn, [_face(), _face("b-new3", "third")])
+        request_media_revocation(
+            conn, SID, policy, NOW, reason="blur_changed:cvat:1", streams={"bodycam", "third"},
+            legacy=True,
+        )  # fmt: skip
+    calls = Calls()
+    cvat, ls = FakeTool("cvat", calls, {2, 4, 5, 6, 7}), FakeTool("ls", calls, {3})
+    assert _run(engine, labeling, cvat, ls).complete
+    assert labeling.head(csv) is not None
+    with engine.begin() as conn:
+        assert all(
+            t.revoke_requested_at is not None
+            for t in repository.list_review_tasks(conn, SID)
+            if t.stage is not ReviewStage.PRIVACY
+        )
+        repository.set_lifecycle(conn, SID, LifecycleState.WITHDRAWN, at=NOW, actor="dpo01")
+        repository.insert_withdrawal(
+            conn, Withdrawal(session_id=SID, reason="동의 철회", withdrawn_at=NOW)
+        )
+        assert pending_revocations(conn, None) == []
+        assert timeseries_sessions(conn, None) == [SID] == timeseries_sessions(conn, SID)
+    report = execute_media_revocations(
+        engine, None, labeling=labeling, raw_bucket="dlp-raw", cvat=cvat, label_studio=ls,
+        clock=lambda: NOW,
+    )  # fmt: skip
+    assert report.complete and report.media_done == [csv] and report.errors == []
+    assert labeling.head(csv) is None
+    _put_media(labeling, csv, tmp_path)  # 같은 세션 지정 실행도 지운다
+    assert _run(engine, labeling, cvat, ls).media_done == [csv]
+    again = _run(engine, labeling, cvat, ls)
+    assert again.complete and again.media_done == [] and labeling.head(csv) is None
 
 
 def test_executor_refuses_to_delete_when_any_precheck_fails(

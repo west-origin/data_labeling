@@ -8,9 +8,12 @@
 순서는 "넓고 확실한 것부터"다:
 1. 매체: 서로 다른 매체 URI마다 라벨링 버킷의 워터마크 사본을 지운다. Label Studio 작업의 서명
    URL은 이 객체를 가리키므로 객체를 지우면 바로 끊긴다. 같은 키를 쓰는 작업은 함께 표시한다.
-   세션이 사용 중지(withdrawn)면 세션의 검수 시계열 CSV(`tasks.timeseries_key`)도 함께 지운다:
-   동의를 철회한 작업자의 장갑·IMU 값이고, 이미 발급한 Label Studio 서명 URL이 가리킨다. 블러
-   변경 회수는 CSV를 두고(얼굴이 없다), CSV를 지우지 못하면 그 매체도 대기로 남아 다시 한다.
+   이어서 범위 안의 사용 중지(withdrawn) 세션마다 검수 시계열 CSV(`tasks.timeseries_key`)를 확인해
+   있으면 지운다 (`timeseries_sessions`, 회수 대기 유무와 무관, 멱등): 동의를 철회한 작업자의
+   장갑·IMU 값이고, 이미 발급한 Label Studio 서명 URL이 가리킨다. 사용 중지 전에 블러 변경 등으로
+   모든 작업의 회수가 끝났으면 사용 중지가 새로 요청할 작업이 없어도 CSV는 남아 있다. 블러 변경
+   회수는 CSV를 둔다(얼굴이 없다). CSV에는 작업 행 표시가 없어, 지우지 못하면 `timeseries_left`에
+   남겨 실행을 미완료로 끝내고 다음 실행이 다시 확인한다.
 2. CVAT: 작업 행 잠금(SKIP LOCKED) → 주인 대조 → 배정 해제(최선 노력) → 스냅숏(최선 노력, 이미
    있으면 두기) → 삭제(404도 성공) → 없음 확인 → 표시. CVAT는 영상을 자기 안에 올리므로 작업을
    지워야 끊긴다.
@@ -31,6 +34,7 @@
 
 공개 이름:
 - `RevocationReport`, `RevocationIncompleteError`: 실행 결과와 "대기가 남았다" 예외.
+- `timeseries_sessions`: 시계열 CSV를 확인해 지울 사용 중지 세션.
 - `snapshot_key`: 스냅숏 객체 키.
 - `ToolLike`, `CvatLike`: 실행기가 쓰는 도구 클라이언트 메서드 (실제 `clients`가 만족한다).
 - `execute_media_revocations`: 대기 회수를 실행한다.
@@ -61,6 +65,7 @@ from dlp_schema.db.repository import (
     mark_task_media_revoked,
     mark_task_tool_revoked,
     pending_revocations,
+    withdrawn_session_ids,
 )
 from dlp_schema.db.tables import review_tasks
 from dlp_schema.review import ReviewStage, ReviewTask, ReviewTool
@@ -92,11 +97,19 @@ class RevocationReport:
     warnings: list[str] = field(default_factory=list[str])
     # 실행 뒤 DB에서 다시 읽은 대기 작업 키
     pending: list[str] = field(default_factory=list[str])
+    # 지우지 못한 사용 중지 세션의 시계열 CSV 키 (작업 행 표시가 없어 pending에 들지 않는다.
+    # 다음 실행이 다시 확인해 지운다)
+    timeseries_left: list[str] = field(default_factory=list[str])
 
     @property
     def complete(self) -> bool:
-        """대기가 남지 않았다."""
-        return not self.pending
+        """대기가 남지 않았다 (작업 대기도, 지우지 못한 시계열 CSV도 없다)."""
+        return not self.pending and not self.timeseries_left
+
+    @property
+    def remaining(self) -> list[str]:
+        """남은 일: 대기 작업 키, 이어서 지우지 못한 시계열 CSV 키."""
+        return [*self.pending, *self.timeseries_left]
 
 
 class ToolLike(Protocol):
@@ -164,8 +177,7 @@ def _delete_media(
 ) -> list[str]:
     """같은 매체 URI를 쓰는 대기 작업 묶음의 사본을 지우고 표시한다. 지운 키.
 
-    사용 중지 세션이면 시계열 CSV도 지운다(있을 때만, 지운 키에 넣는다). 사본·CSV를 모두 지운 뒤에만
-    완료를 표시한다 (CSV 삭제가 실패하면 다음 실행이 멱등 삭제부터 다시 한다).
+    시계열 CSV는 여기서 지우지 않는다 (`_timeseries_phase`: 대기 묶음이 없는 사용 중지 세션도 본다).
 
     Raises:
         TaskError, RawAccessError: 지우기 전 판정 실패 (살아 있는 작업이 같은 키를 씀 등).
@@ -179,24 +191,16 @@ def _delete_media(
             for t in list_review_tasks(conn, first.session_id)
             if t.media_uri == first.media_uri and t.revoke_requested_at is None
         ]
-        withdrawn = get_session(conn, first.session_id).lifecycle_state is LifecycleState.WITHDRAWN
     if live:
         raise TaskError(f"{key}: 회수 요청 없는 작업 {live}이 같은 사본을 써서 지우지 않습니다")
     if not isinstance(labeling, DeletableStore):
         raise TaskError(f"{type(labeling).__name__}는 삭제를 지원하지 않습니다")
-    done = [key]
     labeling.delete(key)
     if labeling.head(key) is not None:
         raise TaskError(f"{key}: 지운 뒤에도 객체가 남아 있습니다")
-    csv = timeseries_key(first.session_id)
-    if withdrawn and labeling.head(csv) is not None:
-        labeling.delete(csv)
-        if labeling.head(csv) is not None:
-            raise TaskError(f"{csv}: 사용 중지 세션의 시계열을 지운 뒤에도 남아 있습니다")
-        done.append(csv)
     with engine.begin() as conn:
         mark_task_media_revoked(conn, first.session_id, first.media_uri, clock())
-    return done
+    return [key]
 
 
 def _media_phase(
@@ -218,6 +222,64 @@ def _media_phase(
         except (TaskError, RawAccessError, *_STORE_ERRORS) as exc:
             keys = ", ".join(t.task_key for t in group)
             report.errors.append(f"[매체 노출 남음] {keys}: {exc}")
+
+
+def timeseries_sessions(conn: sa.Connection, session_id: str | None) -> list[str]:
+    """시계열 CSV를 확인해 지울 사용 중지 세션 (세션 ID 순).
+
+    Label Studio 작업 행이 있는(만든 적 있는) 사용 중지 세션이다: CSV는 Label Studio 작업을 만들
+    때만 올린다 (`tasks.timeseries_key`). session_id가 있으면 그 세션만, None이면 사용 중지 기록
+    (`withdrawals`)이 있는 모든 세션을 본다. 회수 대기 유무와 무관하다: 사용 중지 전에 모든 작업의
+    회수가 끝났으면 사용 중지가 새로 요청할 작업이 없지만 CSV는 남아 있을 수 있다 (이 변경 전에
+    사용 중지한 세션도 같다).
+    """
+    sids = [session_id] if session_id is not None else sorted(withdrawn_session_ids(conn))
+    found: list[str] = []
+    for sid in sids:
+        if not any(t.tool is ReviewTool.LABEL_STUDIO for t in list_review_tasks(conn, sid)):
+            continue
+        if get_session(conn, sid).lifecycle_state is LifecycleState.WITHDRAWN:
+            found.append(sid)
+    return found
+
+
+def _delete_timeseries(labeling: ObjectStore, sid: str) -> bool:
+    """사용 중지 세션의 시계열 CSV를 지운다. 지웠으면 True, 이미 없으면 False.
+
+    Raises:
+        TaskError: 삭제를 지원하지 않는 저장소이거나 지운 뒤에도 남아 있을 때.
+        `STORE_ERRORS`: 저장소 실패.
+    """
+    csv = timeseries_key(sid)
+    if labeling.head(csv) is None:
+        return False
+    if not isinstance(labeling, DeletableStore):
+        raise TaskError(f"{type(labeling).__name__}는 삭제를 지원하지 않습니다")
+    labeling.delete(csv)
+    if labeling.head(csv) is not None:
+        raise TaskError("사용 중지 세션의 시계열을 지운 뒤에도 남아 있습니다")
+    return True
+
+
+def _timeseries_phase(
+    engine: sa.Engine, session_id: str | None, labeling: ObjectStore, report: RevocationReport
+) -> None:
+    """범위 안 사용 중지 세션의 시계열 CSV를 지운다 (`timeseries_sessions`, 멱등).
+
+    지운 키는 media_done에, 실패는 errors(매체 노출 남음)와 timeseries_left에 남긴다.
+    """
+    with engine.connect() as conn:
+        sids = timeseries_sessions(conn, session_id)
+    for sid in sids:
+        csv = timeseries_key(sid)
+        try:
+            deleted = _delete_timeseries(labeling, sid)
+        except (TaskError, *_STORE_ERRORS) as exc:
+            report.errors.append(f"[매체 노출 남음] {csv}: {exc}")
+            report.timeseries_left.append(csv)
+            continue
+        if deleted:
+            report.media_done.append(csv)
 
 
 def _write_snapshot(
@@ -359,10 +421,12 @@ def execute_media_revocations(
         clock: 완료 표시 시각 (시간대 필수).
 
     Returns:
-        `RevocationReport`. 예외로 끝내지 않는다 (실패는 errors, 남은 일은 pending).
+        `RevocationReport`. 예외로 끝내지 않는다 (실패는 errors, 남은 일은 pending·
+        timeseries_left).
 
-    부작용: 라벨링 버킷 사본 삭제·스냅숏 쓰기, CVAT·Label Studio 작업 배정 해제·삭제,
-    `review_tasks` 완료 표시. 외부 삭제는 되돌릴 수 없다.
+    부작용: 라벨링 버킷 사본·사용 중지 세션 시계열 CSV 삭제(대기가 없어도 `timeseries_sessions`의
+    CSV는 확인한다)·스냅숏 쓰기, CVAT·Label Studio 작업 배정 해제·삭제, `review_tasks` 완료 표시.
+    외부 삭제는 되돌릴 수 없다.
     """
     report = RevocationReport()
     with engine.connect() as conn:
@@ -371,6 +435,7 @@ def execute_media_revocations(
         report.errors.append(f"라벨링 저장소가 원본 버킷({raw_bucket})입니다 (설정 오류)")
     else:
         _media_phase(engine, pending, labeling, raw_bucket, report, clock)
+        _timeseries_phase(engine, session_id, labeling, report)
         unassign = cvat.unassign if cvat is not None else None
         _tool_phase(engine, pending, ReviewTool.CVAT, cvat, unassign, labeling, report, clock)
         _tool_phase(
