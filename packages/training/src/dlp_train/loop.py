@@ -56,6 +56,7 @@ from dlp_eval.runner import (
     TIMELINE_TASKS,
     GoldenSession,
     MissingPredictionsError,
+    TruthLag,
     golden_sessions,
     load_golden_merged,
     refreeze_hint,
@@ -316,11 +317,7 @@ def run_training_job(  # noqa: C901
     if lag is not None:
         result.warnings.append(lag.message())
     if not any(matches(job.task, x) for g in golden for x in g.truth):
-        hint = refreeze_hint(version.golden_set_version)
-        result.reason = (
-            f"골든셋 {version.golden_set_version}에 고정한 {job.task} 정답이 없어 평가할 수 "
-            f"없습니다. 라벨링·검수 전에 고정한 버전이면 {hint}"
-        )
+        result.reason = _no_truth_reason(version.golden_set_version, job.task, lag)
         return result
     has_deployed = bool(list_model_versions(conn, job.task, ModelStatus.DEPLOYED))
     if spec.replaces and not job.baseline_versions and not has_deployed:
@@ -497,6 +494,23 @@ def run_training_job(  # noqa: C901
         tracker.finish(mlflow_run, "FAILED")
         raise
     return result
+
+
+def _no_truth_reason(golden_version: str, task: str, lag: TruthLag | None) -> str:
+    """골든셋에 그 과제의 고정 정답이 없어 건너뛸 때의 사유 (고치는 명령 안내 포함).
+
+    세션이 모두 사용 중지되었으면 `--from`으로 다시 고정할 수 없으므로 새 골든셋 제안을 안내한다
+    (`TruthLag.remedy`). 그 밖에는 라벨링·검수 전에 고정한 버전일 때의 `--from` 안내다.
+    """
+    if lag is not None and lag.all_withdrawn:
+        return (
+            f"골든셋 {golden_version}의 세션이 모두 사용 중지되어 {task} 정답으로 평가할 수 "
+            f"없습니다. {lag.remedy()}"
+        )
+    return (
+        f"골든셋 {golden_version}에 고정한 {task} 정답이 없어 평가할 수 없습니다. "
+        f"라벨링·검수 전에 고정한 버전이면 {refreeze_hint(golden_version)}"
+    )
 
 
 def _frozen_golden_set(conn: sa.Connection, golden_version: str) -> GoldenSet:

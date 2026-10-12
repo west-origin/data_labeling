@@ -9,7 +9,9 @@ DB에서 정답·예측을 모아 지표·하위 집단·게이트 리포트를 
   정답을 고치면 새 골든 버전을 만든다. 정답을 고정하지 않은 이전 형식 골든셋(None)만 현재 라벨로
   정답을 읽으며, `truth_anchor`가 리포트에 고정 여부와 정답 라벨 ID 해시를 남긴다. 고정한 정답이
   비었거나 지금 정답과 다르면(라벨링 전에 고정, 고정 뒤 수정) `truth_lag`가 차이를 알려 주고
-  `refreeze_hint`가 다시 고정하는 명령을 안내한다 (경고만 하고 고정한 정답으로 평가한다).
+  `refreeze_hint`가 다시 고정하는 명령을 안내한다 (경고만 하고 고정한 정답으로 평가한다). 세션이
+  모두 사용 중지되어 `--from`으로 다시 고정할 수 없으면 `new_golden_hint`가 새 골든셋 제안을
+  안내한다.
 - 정답 근거와 평가 입력은 같은 읽기에서 만든다: `golden_sessions`를 한 번 읽어 `truth_anchor`와
   `load_golden`·`load_golden_merged`(`sessions=`)에 함께 넘긴다.
 - 예측: 과제별로 지정한 model_version의 레코드 (삭제 레코드 제외). 나중에 검수자가 고쳤어도 모델이
@@ -30,8 +32,8 @@ WP11, ADR 0013·0015·0025. 진입점: `dlp_cli.eval_cmds`(`dlp eval golden`)와
 
 공개 이름: `TASK_KINDS`, `TIMELINE_TASKS`, `is_truth`, `GoldenSession`, `golden_sessions`,
 `golden_truth_ids`, `truth_anchor`, `GOLDEN_TRUTH`, `TruthLag`, `truth_lag`, `refreeze_hint`,
-`load_golden`, `load_golden_merged`, `MissingPredictionsError`, `report_dict`, `markdown`,
-`write_report`.
+`new_golden_hint`, `load_golden`, `load_golden_merged`, `MissingPredictionsError`, `report_dict`,
+`markdown`, `write_report`.
 """
 
 from __future__ import annotations
@@ -178,10 +180,25 @@ def truth_anchor(golden: GoldenSet, sessions: Sequence[GoldenSession]) -> dict[s
 
 
 def refreeze_hint(golden_version: str) -> str:
-    """정답을 지금 라벨로 다시 고정하는 명령 안내 (CLI 경고·학습 루프 사유에 붙인다, ADR 0041)."""
+    """정답을 지금 라벨로 다시 고정하는 명령 안내 (CLI 경고·학습 루프 사유에 붙인다, ADR 0041).
+
+    `--from`이면 도메인은 원본 골든셋 것을 쓰므로 `--domain` 없이 그대로 실행된다
+    (`dlp_cli.dataset_cmds.cmd_golden`).
+    """
     return (
         f"`dlp dataset golden --from {golden_version} --create <새 버전>`으로 정답을 다시 "
         "고정하고 그 버전으로 평가하거나 데이터셋 버전을 만드세요"
+    )
+
+
+def new_golden_hint(domain: str) -> str:
+    """새 골든셋을 제안·확정하는 명령 안내 (`--from`으로 다시 고정할 세션이 남지 않았을 때).
+
+    골든셋의 세션이 모두 사용 중지되면 `dlp dataset golden --from`은 새 버전을 만들지 않는다.
+    """
+    return (
+        f"`dlp dataset golden --domain {domain} --create <새 버전>`으로 새 골든셋을 제안·확정하고 "
+        "라벨링·검수를 마친 뒤 `--from <새 버전> --create <다음 버전>`으로 정답을 고정하세요"
     )
 
 
@@ -190,32 +207,53 @@ class TruthLag:
     """고정한 정답과 지금 정답의 차이 (평가하는 세션 기준). `truth_lag`가 만든다."""
 
     golden_version: str
-    frozen: int  # 고정한 정답 수
+    domain: str  # 골든셋 도메인 (새 골든셋 안내에 쓴다)
+    frozen: int  # 평가하는 세션에 고정한 정답 수
     added: int  # 지금 정답에만 있는 라벨 수 (고정 뒤 새로 만들거나 승인·수정한 것)
     dropped: int  # 고정한 정답 중 지금 정답이 아닌 수 (고정 뒤 고쳐지거나 지워진 것)
+    withdrawn: int = 0  # 고정한 정답 중 사용 중지로 평가에서 빠진 세션의 것
+    all_withdrawn: bool = False  # 골든셋 세션이 모두 사용 중지됨 (`--from`으로 다시 고정할 수 없다)
+
+    def remedy(self) -> str:
+        """고치는 명령 안내: 세션이 모두 사용 중지면 새 골든셋 제안, 아니면 `--from` 다시 고정."""
+        if self.all_withdrawn:
+            return new_golden_hint(self.domain)
+        return refreeze_hint(self.golden_version)
 
     def message(self) -> str:
-        """사람이 읽는 경고 문장 (다시 고정하는 명령 안내 포함)."""
+        """사람이 읽는 경고 문장 (고치는 명령 안내 포함)."""
         v = self.golden_version
-        if self.frozen == 0:
+        gone = f"사용 중지로 빠진 고정 정답 {self.withdrawn}개"
+        if self.all_withdrawn:
+            head = f"골든셋 {v}의 세션이 모두 사용 중지되어 평가할 세션이 없습니다 ({gone})."
+        elif self.frozen == 0 and self.withdrawn:
+            head = (
+                f"골든셋 {v}의 평가하는 세션에 고정한 정답이 없습니다 ({gone}, 지금 정답 "
+                f"{self.added}개)."
+            )
+        elif self.frozen == 0:
             head = (
                 f"골든셋 {v}에 고정한 정답이 없습니다 (라벨링·검수 전에 고정한 버전, "
                 f"지금 정답 {self.added}개)."
             )
         else:
+            more = f", {gone}" if self.withdrawn else ""
             head = (
                 f"골든셋 {v}의 고정한 정답 {self.frozen}개가 지금 정답과 다릅니다 (고정 뒤 새 정답 "
-                f"{self.added}개, 고쳐지거나 지워진 정답 {self.dropped}개). 이 버전은 고정한 "
+                f"{self.added}개, 고쳐지거나 지워진 정답 {self.dropped}개{more}). 이 버전은 고정한 "
                 "정답으로 평가합니다."
             )
-        return f"{head} {refreeze_hint(v)}"
+        return f"{head} {self.remedy()}"
 
 
 def truth_lag(golden: GoldenSet, sessions: Sequence[GoldenSession]) -> TruthLag | None:
-    """고정한 정답이 비었거나 지금 정답과 다르면 그 차이, 아니면 None.
+    """고정한 정답이 비었거나 지금 정답과 다르거나 평가할 세션이 없으면 그 차이, 아니면 None.
 
     라벨링 전에 세션만 정하며 고정한 버전(빈 정답)이나, 고정한 뒤 사람이 라벨을 더 만들거나 고친
-    버전을 알아채려고 쓴다. 평가는 그대로 고정한 정답으로 한다 (경고용, ADR 0041).
+    버전을 알아채려고 쓴다. 평가는 그대로 고정한 정답으로 한다 (경고용, ADR 0041). 사용 중지로
+    빠진 세션의 고정 정답은 `withdrawn`으로 따로 센다 (라벨링 전에 고정한 것과 구별한다). 남은
+    세션의 고정 정답이 지금 정답과 같으면 일부 세션이 사용 중지됐어도 None이다 (평가에는 문제가
+    없다. 리포트의 `truth_anchor`가 평가한 세션을 남긴다).
 
     Args:
         golden: 골든셋 버전. 정답을 고정하지 않은 이전 형식(None)이면 None을 돌려준다 (현재 라벨로
@@ -227,9 +265,19 @@ def truth_lag(golden: GoldenSet, sessions: Sequence[GoldenSession]) -> TruthLag 
         return None
     frozen = {x.label_id for g in sessions for x in g.truth}
     current = {x.label_id for g in sessions for x in _current_truth(g.labels)}
-    if frozen and frozen == current:
+    # 고정한 정답 중 평가하는 세션에 없는 것 = 사용 중지로 빠진 세션의 것
+    withdrawn = len(set(golden.truth_label_ids) - frozen)
+    if sessions and frozen and frozen == current:
         return None
-    return TruthLag(golden.version, len(frozen), len(current - frozen), len(frozen - current))
+    return TruthLag(
+        golden.version,
+        golden.domain.value,
+        len(frozen),
+        len(current - frozen),
+        len(frozen - current),
+        withdrawn=withdrawn,
+        all_withdrawn=not sessions,
+    )
 
 
 def _predictions(

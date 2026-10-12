@@ -564,6 +564,18 @@ def test_timeline_tasks_withdrawal_and_approval_baseline(engine: sa.Engine, tmp_
         deployed = list_model_versions(conn, "contact", ModelStatus.DEPLOYED)
         assert [d.model_version for d in deployed] == [c2.model_version]
 
+    # 골든 세션이 모두 사용 중지되면 평가하지 않고 건너뛴다. 거부될 `--from golden-v1` 대신 새
+    # 골든셋 제안을 사유·경고로 안내한다 ("라벨링·검수 전에 고정한 버전"이 아니다)
+    with engine.begin() as conn:
+        for sid in ("gd0", "gd1"):
+            withdraw_session(conn, sid, "consent", FIXED_TIME)
+    gone = run(TrainingJob("contact", "dv1", force=True), 30)
+    assert gone.status == "skipped" and "모두 사용 중지" in gone.reason
+    assert "--domain cleaning --create" in gone.reason and "--from golden-v1" not in gone.reason
+    assert "라벨링·검수 전에" not in gone.reason
+    assert len(gone.warnings) == 1 and "모두 사용 중지" in gone.warnings[0]
+    assert "--from golden-v1" not in gone.warnings[0]
+
 
 # ---------------------------------------------------------------- 직접 배포 호출의 리포트 검사 (T4)
 
