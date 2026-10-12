@@ -15,18 +15,28 @@
       결과라 자동화 편향 감시용이다 (shown 대 holdout의 틀림인데 승인·ok 놓침 비교).
     - 분모에서 뺀다: 재검수 배정(`:resample`·`:ai-flagged`, 선택이 AI에 의존), 이중 작업(별도 표),
       회수한 작업(수집되지 않아 결과 기록이 없다. 노출 집계에서도 뺀다).
-    - 층화(ok 놓침률): 표본 묶음의 표본 라벨(배정 `sample_label_ids`, 무작위)과 전수 검수 라벨을
-      층으로 나눈다. 표본 라벨 하나는 그 배정 묶음 모집단(표본 + 보류)을 대표한다 (가중치 = 모집단
-      / 표본).
-      층별 비율과 한쪽 95% Clopper-Pearson 상한을 내고, 모집단 크기로 가중해 합친다. 합친 상한은
-      층별 상한의 가중 합이다 (보수적 근사: 층마다 따로 95%라 동시 신뢰 수준은 더 낮다).
-    - 확신도 ECE: 대조군에서 확신도가 있는 ok·wrong·suspect 판정의 "맞음" = (지적 = 바꿈).
+    - 표본 가중: 표본 묶음의 표본 라벨(배정 `sample_label_ids`, 무작위) 하나는 그 배정 묶음
+      모집단(표본 + 보류)을 대표한다 (`AiRow.weight` = 모집단 / 표본 수, 전수 검수 라벨 = 1). 계획
+      단계는 집단과 무관하게 AI가 지적한 라벨을 표본 묶음에서 빼 전수 검수하고
+      (`ops.runner.plan_session`의 `escalated_ids`) AI ok 라벨은 일부만 표본으로 보므로,
+      행을 그대로 세면 대조군에서도 "바뀐 ok 라벨"이 모집단보다 적게 잡혀 재현율·κ가 부풀려진다.
+      그래서 판정·사람 결과 지표(지적 정밀도·재현율·ok 놓침률·틀림인데 승인·제안 정확 일치, 종류별,
+      κ, ECE)는 행 가중치로 가중한다 (모집단 추정). 분모 행의 가중치가 모두 같으면 개수 비율이고
+      상한은 Clopper-Pearson 정확 구간, 다르면 가중치 합 비율이고 상한은 Korn-Graubard
+      근사(`dlp_eval.metrics.proportion`, 유효 표본 수 (Σw)²/Σw²)다. 혼동 행렬과 행 수(`rows`)는
+      원자료 확인용 행 개수다 (가중치 없음). 제안 적용 지표(보인 제안 중 적용 비율 등)는 검수자
+      행동의 개수 비율이다 (가중치 없음).
+    - 층화(ok 놓침률): 표본 층(표본 라벨)과 전수 층으로 나눈다. 층마다 가중 비율과 그 한쪽 95%
+      상한을 내고(표본 층 안에서도 배정마다 가중치가 다르므로 가중한다), 층 모집단(가중치 합)으로
+      가중해 합친다. 합친 값은 전체 가중 비율과 같고, 합친 상한은 층별 상한의 가중 합이다 (보수적
+      근사: 층마다 따로 95%라 동시 신뢰 수준은 더 낮다, F-AIR-11).
+    - 확신도 ECE: 대조군에서 확신도가 있는 ok·wrong·suspect 판정의 "맞음" = (지적 = 바꿈), 행 가중.
       자기 보고 확신도는 보정 전에는 결정에 쓰지 않는다 (참고 지표).
-    - Cohen κ: 대조군의 (지적 여부, 바꿈 여부), unsure 제외.
+    - Cohen κ: 대조군의 (지적 여부, 바꿈 여부), unsure 제외, 행 가중.
     - 오류 삽입 누출: 블라인드가 아닌 작업 중 "AI 없음" 화면(shown이 아닌 집단)에서 오류 삽입 작업의
       비율 대 전체에서의 비율 (F-AIR-03).
 
-공개 이름: `Rate`, `AiRow`, `ArmStats`, `StratumRate`, `ApplyStats`, `AiAgreement`,
+공개 이름: `Rate`, `weighted_rate`, `AiRow`, `ArmStats`, `StratumRate`, `ApplyStats`, `AiAgreement`,
 `AiExposureStats`, `AiQuality`, `ai_agreement`, `exposure_stats`, `confidence_floors`,
 `load_ai_rows`, `ai_quality`, `CHANGED`, `FLAGS`.
 """
@@ -42,7 +52,7 @@ from typing import Literal
 import sqlalchemy as sa
 
 from dlp_eval.metrics.classification import cohen_kappa, ece
-from dlp_eval.metrics.proportion import clopper_pearson_upper
+from dlp_eval.metrics.proportion import clopper_pearson_upper, effective_upper
 from dlp_review.ai_display import root_assignment_id
 from dlp_schema.aireview import (
     AiApplyResult,
@@ -81,10 +91,21 @@ Stratum = Literal["sample", "full"]
 
 @dataclass(frozen=True)
 class Rate:
-    """비율 num/den과 한쪽 95% Clopper-Pearson 상한 (분모가 0이면 둘 다 NaN)."""
+    """비율 num/den과 한쪽 95% 상한 (분모가 0이면 둘 다 NaN).
 
-    num: int
-    den: int
+    n_eff가 None이면 num·den은 개수이고 상한은 Clopper-Pearson 정확 구간이다. 표본 가중 비율이면
+    num·den은 가중치 합, n_eff는 유효 표본 수 (Σw)²/Σw²이고 상한은 Korn-Graubard 근사다 (모듈
+    docstring "표본 가중").
+    """
+
+    num: float
+    den: float
+    n_eff: float | None = None
+
+    @property
+    def weighted(self) -> bool:
+        """표본 가중 비율인가."""
+        return self.n_eff is not None
 
     @property
     def value(self) -> float:
@@ -93,14 +114,32 @@ class Rate:
 
     @property
     def upper95(self) -> float:
-        """한쪽 95% 상한 (`dlp_eval.metrics.proportion.clopper_pearson_upper`)."""
-        return clopper_pearson_upper(self.num, self.den)
+        """한쪽 95% 상한 (`dlp_eval.metrics.proportion`)."""
+        if self.n_eff is None:
+            return clopper_pearson_upper(round(self.num), round(self.den))
+        return effective_upper(min(self.value, 1.0), self.n_eff) if self.den else math.nan
 
 
-def _rate(rows: Iterable[AiRow], hit: str, given: str) -> Rate:
-    """조건(given)을 만족하는 행 중 hit를 만족하는 비율. 조건 이름은 `AiRow`의 bool 속성."""
+def weighted_rate(hits: Sequence[float], pool: Sequence[float]) -> Rate:
+    """가중치 → 비율 (hits: 사건 표본의 가중치, pool: 모든 표본의 가중치).
+
+    분모 표본의 가중치가 모두 같으면 가중 비율과 값이 같은 개수 비율이다 (상한은 정확 구간).
+    """
+    if len(set(pool)) <= 1:
+        return Rate(len(hits), len(pool))
+    total = sum(pool)
+    return Rate(sum(hits), total, n_eff=total * total / sum(w * w for w in pool))
+
+
+def _rate(rows: Iterable[AiRow], hit: str, given: str, *, weighted: bool = True) -> Rate:
+    """조건(given)을 만족하는 행 중 hit를 만족하는 비율. 조건 이름은 `AiRow`의 bool 속성.
+
+    weighted면 행 가중치(`AiRow.weight`)로 가중한다 (모듈 docstring "표본 가중").
+    """
     pool = [r for r in rows if getattr(r, given)]
-    return Rate(sum(1 for r in pool if getattr(r, hit)), len(pool))
+    if not weighted:
+        return Rate(sum(1 for r in pool if getattr(r, hit)), len(pool))
+    return weighted_rate([r.weight for r in pool if getattr(r, hit)], [r.weight for r in pool])
 
 
 @dataclass(frozen=True)
@@ -206,9 +245,10 @@ class ArmStats:
     """한 집단(또는 한 종류)의 판정 지표.
 
     Attributes:
-        rows: 분모에 든 행 수 (`AiRow.comparable`).
-        confusion: AI 판정 → 사람 결과 → 수.
-        flag_precision / flag_recall / ok_miss / wrong_approved / suggestion_exact: 모듈 docstring.
+        rows: 분모에 든 행 수 (`AiRow.comparable`, 가중치 없음).
+        confusion: AI 판정 → 사람 결과 → 행 수 (원자료 확인용, 가중치 없음).
+        flag_precision / flag_recall / ok_miss / wrong_approved / suggestion_exact: 모듈 docstring
+            (행 가중 비율).
     """
 
     rows: int
@@ -240,7 +280,7 @@ def _arm_stats(rows: Sequence[AiRow]) -> ArmStats:
 
 @dataclass(frozen=True)
 class StratumRate:
-    """층 하나의 ok 놓침률과 모집단 크기 (표본 층은 가중치 합)."""
+    """층 하나의 ok 놓침률(행 가중)과 모집단 크기 (가중치 합)."""
 
     rate: Rate
     population: float
@@ -251,7 +291,8 @@ class ApplyStats:
     """보인 집단의 제안 적용 지표.
 
     Attributes:
-        shown_suggestions: 화면에 보인 제안 수.
+        shown_suggestions: 화면에 보인 제안 수. 비율은 모두 개수 비율이다 (검수자 행동, 가중치
+            없음).
         apply_rate: 적용을 고른 비율 (보인 제안 중).
         accept_rate: 실제로 적용된 비율 (보인 제안 중, 주간 `suggestion_accept_rate`).
         conflict_edited / invalid_now: 적용을 고른 것 중 검수자 결과가 우선한·지금 검증 실패 비율.
@@ -274,7 +315,7 @@ class AiAgreement:
         ok_miss_strata: 층(sample·full) → 대조군 ok 놓침률.
         ok_miss_rate / ok_miss_upper95: 층을 모집단으로 가중해 합친 대조군 ok 놓침률과 그 보수적
             상한.
-        ece / kappa: 대조군 확신도 ECE, Cohen κ (자료가 없으면 NaN).
+        ece / kappa: 대조군 확신도 ECE, Cohen κ (행 가중, 자료가 없으면 NaN).
         apply: 보인 집단의 제안 적용 지표.
         excluded: 분모에서 뺀 행 수 (사유 → 수).
     """
@@ -314,7 +355,8 @@ def _strata(holdout: Sequence[AiRow]) -> tuple[dict[str, StratumRate], float, fl
     for name in ("sample", "full"):
         oks = [r for r in holdout if r.stratum == name and r.ok]
         if oks:
-            rate = Rate(sum(1 for r in oks if r.changed), len(oks))
+            # 표본 층 안에서도 배정마다 가중치(묶음 모집단/표본)가 달라 행 가중 비율로 낸다
+            rate = weighted_rate([r.weight for r in oks if r.changed], [r.weight for r in oks])
             strata[name] = StratumRate(rate, sum(r.weight for r in oks))
     total = sum(s.population for s in strata.values())
     if not total:
@@ -339,19 +381,30 @@ def ai_agreement(rows: Sequence[AiRow]) -> AiAgreement:
     scored = [r for r in holdout if r.confidence is not None and (r.flagged or r.ok)]
     if scored:
         conf = [r.confidence or 0.0 for r in scored]
-        out.ece = ece(conf, [r.flagged == r.changed for r in scored])
+        out.ece = ece(
+            conf, [r.flagged == r.changed for r in scored], weights=[r.weight for r in scored]
+        )
     judged = [r for r in holdout if r.verdict is not AiVerdictValue.UNSURE]
     if judged:
-        out.kappa = cohen_kappa([r.flagged for r in judged], [r.changed for r in judged])
+        out.kappa = cohen_kappa(
+            [r.flagged for r in judged], [r.changed for r in judged], [r.weight for r in judged]
+        )
     shown = [r for r in rows if r.arm is AiArm.SHOWN and not r.followup]
+    # 검수자 행동의 개수 비율 (가중치 없음)
     out.apply = ApplyStats(
         shown_suggestions=sum(1 for r in shown if r.shown_suggestion),
-        apply_rate=_rate(shown, "apply_chosen", "shown_suggestion"),
-        accept_rate=_rate(shown, "applied", "shown_suggestion"),
-        conflict_edited=_rate(shown, "conflict", "apply_chosen"),
-        invalid_now=_rate(shown, "invalid", "apply_chosen"),
+        apply_rate=_rate(shown, "apply_chosen", "shown_suggestion", weighted=False),
+        accept_rate=_rate(shown, "applied", "shown_suggestion", weighted=False),
+        conflict_edited=_rate(shown, "conflict", "apply_chosen", weighted=False),
+        invalid_now=_rate(shown, "invalid", "apply_chosen", weighted=False),
     )
     return out
+
+
+def _precision(rows: Sequence[AiRow]) -> float:
+    """P(바꿈 | 행) (행 가중)."""
+    total = sum(r.weight for r in rows)
+    return sum(r.weight for r in rows if r.changed) / total if total else math.nan
 
 
 def confidence_floors(
@@ -359,9 +412,11 @@ def confidence_floors(
 ) -> dict[str, tuple[float | None, int, float]]:
     """판정 값별 최소 확신도 조안 (`review.yaml ai_review.show_min_confidence`, `--ai-thresholds`).
 
-    대조군(편향 없음)에서 확신도가 있는 판정마다, 그 값 이상만 보일 때 정밀도 P(바꿈 | 판정, 확신도
-    ≥ t)가 목표 이상인 가장 낮은 t를 고른다 (보이는 지적을 가장 많이 남긴다). 표본 수와 그때의
-    정밀도를 함께 돌려준다. 목표에 닿는 t가 없으면 (None, 표본 수, 전체 정밀도).
+    대조군(편향 없음)에서 확신도가 있는 판정마다, 확신도 ≥ t인 판정을 모두 보일 때의 정밀도
+    P(바꿈 | 판정, 확신도 ≥ t)(행 가중)가 목표 이상인 가장 낮은 t를 고른다 (보이는 지적을 가장 많이
+    남긴다). t 후보는 관측된 확신도 값이고, 같은 확신도의 판정은 함께 보이거나 함께 숨는다 (자기
+    보고 확신도는 0.7·0.8·0.9처럼 이산값이라 동률이 흔하다). 결과는 입력 순서와 무관하다. 그때의
+    표본 수와 정밀도를 함께 돌려준다. 목표에 닿는 t가 없으면 (None, 표본 수, 전체 정밀도).
 
     Returns:
         판정 값(wrong·suspect·unsure) → (최소 확신도 | None, 그 이상 표본 수, 정밀도).
@@ -369,17 +424,15 @@ def confidence_floors(
     out: dict[str, tuple[float | None, int, float]] = {}
     pool = [r for r in rows if r.comparable and r.arm is AiArm.HOLDOUT and r.confidence is not None]
     for v in (AiVerdictValue.WRONG, AiVerdictValue.SUSPECT, AiVerdictValue.UNSURE):
-        mine = sorted((r for r in pool if r.verdict is v), key=lambda r: r.confidence or 0.0)
+        mine = [r for r in pool if r.verdict is v]
         if not mine:
             continue
-        best: tuple[float | None, int, float] = (
-            None, len(mine), sum(r.changed for r in mine) / len(mine),
-        )  # fmt: skip
-        for i, r in enumerate(mine):
-            rest = mine[i:]
-            precision = sum(x.changed for x in rest) / len(rest)
+        best: tuple[float | None, int, float] = (None, len(mine), _precision(mine))
+        for t in sorted({r.confidence or 0.0 for r in mine}):
+            shown = [r for r in mine if (r.confidence or 0.0) >= t]
+            precision = _precision(shown)
             if precision >= target_precision:
-                best = (r.confidence, len(rest), precision)
+                best = (t, len(shown), precision)
                 break
         out[v.value] = best
     return out

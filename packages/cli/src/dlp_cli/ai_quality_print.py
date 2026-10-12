@@ -1,7 +1,9 @@
 """AI 1차 검수 품질 보고 출력 (`dlp review quality --ai`, WP17.8, ADR 0040 7.3).
 
 계산은 `dlp_review.ops.ai_quality`가 하고 여기서는 글·JSON으로 바꾼다. 편향 없는 값은 대조군
-(holdout)이고, 보인 집단(shown) 값은 자동화 편향 감시용이다 (같은 줄에 섞지 않는다).
+(holdout)이고, 보인 집단(shown) 값은 자동화 편향 감시용이다 (같은 줄에 섞지 않는다). 판정 지표는
+표본 가중 비율이다: 가중치가 섞이면 `12.3% (가중 20.0/108.0, 유효 n 5.7)`처럼 가중치 합과 유효 표본
+수를 보이고, 혼동 행렬은 행 수 그대로다.
 
 공개 이름: `print_ai_quality`, `ai_quality_json`, `print_thresholds`.
 """
@@ -27,8 +29,12 @@ def _pct(value: float) -> str:
 
 
 def _rate(r: Rate, *, upper: bool = False) -> str:
-    """비율 → `12.3% (4/32)` (상한을 붙이면 `, 상한 25.0%`)."""
-    text = f"{_pct(r.value)} ({r.num}/{r.den})"
+    """비율 → `12.3% (4/32)`, 가중 비율은 `12.3% (가중 4.0/32.5, 유효 n 9.1)` (상한을 붙이면
+    `, 95% 상한 25.0%`)."""
+    if r.n_eff is not None:
+        text = f"{_pct(r.value)} (가중 {r.num:.1f}/{r.den:.1f}, 유효 n {r.n_eff:.1f})"
+    else:
+        text = f"{_pct(r.value)} ({r.num:g}/{r.den:g})"
     return text + (f", 95% 상한 {_pct(r.upper95)}" if upper and r.den else "")
 
 
@@ -82,7 +88,7 @@ def print_ai_quality(q: AiQuality, max_defect_ratio: float) -> None:
             f"{_rate(s.flag_recall)} · ok 놓침률 {_rate(s.ok_miss)}"
         )
     if "holdout" in a.arms:
-        print(f"  혼동 행렬(대조군, AI → 사람): {a.arms['holdout'].confusion}")
+        print(f"  혼동 행렬(대조군, AI → 사람, 행 수): {a.arms['holdout'].confusion}")
     print(f"  검수 분/영상 1시간: {_by(q.review_minutes, '{:.1f}')}")
     print(
         f"  이중 일치 κ(짝 집단별): {_by(q.double_kappa_by_arm, '{:.3f}')} · 블라인드 프리라벨 "
@@ -99,7 +105,10 @@ def print_ai_quality(q: AiQuality, max_defect_ratio: float) -> None:
 def print_thresholds(q: AiQuality, target: float) -> None:
     """`review.yaml ai_review.show_min_confidence` 조안 (대조군 기준, `confidence_floors`)."""
     floors = confidence_floors(q.rows, target)
-    print(f"show_min_confidence 조안 (목표 정밀도 {target:.0%}, 대조군·자기 보고 확신도):")
+    print(
+        f"show_min_confidence 조안 (목표 정밀도 {target:.0%}, 대조군·자기 보고 확신도, 같은 "
+        "확신도는 함께 보인다):"
+    )
     if not floors:
         print("  확신도가 있는 대조군 판정이 없다 (조안 없음)")
     for verdict, (floor, n, precision) in sorted(floors.items()):
@@ -113,7 +122,10 @@ def _rate_json(r: Rate) -> dict[str, Any]:
     def clean(v: float) -> float | None:
         return None if math.isnan(v) else v
 
-    return {"num": r.num, "den": r.den, "value": clean(r.value), "upper95": clean(r.upper95)}
+    return {
+        "num": r.num, "den": r.den, "value": clean(r.value), "upper95": clean(r.upper95),
+        "weighted": r.weighted, "n_eff": r.n_eff,
+    }  # fmt: skip
 
 
 def _arm_json(s: ArmStats) -> dict[str, Any]:

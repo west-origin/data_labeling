@@ -89,14 +89,16 @@ def test_digest_follows_result_sections(
         ("selection", {"reasons": ["low_confidense"]}, "reasons"),
         ("selection", {"reasons": ["low_confidence", "ai_wrong"]}, "AI 판정 사유"),
         ("server", {"max_context_splits": 2}, "max_context_splits"),
+        ("gate", {"inject": {"verb_swapp": 0.1}}, "모르는 교란 종류"),
+        ("gate", {"inject": {"verb_swap": 1.5}}, "0~1"),
     ],
 )
 def test_fixed_decisions_are_load_errors(
     policy: AiReviewPolicy, section: str, values: dict[str, Any], message: str
 ) -> None:
     """블러 판정, 검수 화면 없는 종류, 센서 출처, 외부 백엔드, 타임라인 종류 삭제, 계약보다 긴 이유,
-    프레임 상한 초과, 모르는 선택 사유(오타)와 AI 판정 사유, 해시 밖 절의 결과 바꾸는 키는 로드
-    오류다."""
+    프레임 상한 초과, 모르는 선택 사유(오타)와 AI 판정 사유, 해시 밖 절의 결과 바꾸는 키, 골든
+    게이트의 모르는 교란 종류·범위 밖 비율은 로드 오류다 (평가 도중 traceback 대신)."""
     with pytest.raises(ValidationError, match=message):
         with_policy(policy, **{section: values})
 

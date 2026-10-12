@@ -60,7 +60,7 @@
   도구 밖에서 덧씌우고 라벨 형식은 바꾸지 않는다 (ADR 0038).
   AI 1차 검수 표시·수집(ADR 0040): `dlp_review.ai_display`(판정 → 검수 화면 표시·우선순위·표본 제외, 노출 기록·대조군),
   `dlp_review.ai_collect`(검수자가 고른 제안 적용·세션 검증·결과 기록 `ai_review_outcomes`),
-  `dlp_review.ops.ai_quality`(대조군만으로 지적 정밀도·재현율·ok 놓침률 95% 상한·ECE·κ). `dlp review quality --ai`.
+  `dlp_review.ops.ai_quality`(대조군만으로, 표본 가중 지적 정밀도·재현율·ok 놓침률 95% 상한·ECE·κ). `dlp review quality --ai`.
   설정은 `review.yaml ai_review`(코드 기본 off).
 - `packages/datasets/` (`dlp_datasets`) — 데이터셋 버전(lakeFS 커밋), 작업자·장소 단위 분할(holdout 포함), 골든셋 제안,
   사용 중지 전파, 계보 조회. `dlp dataset golden|build|withdraw`, `dlp lineage <세션>`. 정책은 `config/policies/dataset.yaml`.

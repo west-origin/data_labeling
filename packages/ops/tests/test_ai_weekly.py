@@ -9,6 +9,10 @@
   (fallback 1개, 프롬프트 1,000토큰씩, 캐시 400토큰 둘) → fallback 25%, 캐시 800/4,000 = 20%.
   대조군 작업 하나(ok·승인) → ok 놓침 0/1, 95% 상한 = CP(0,1) = 0.95.
 - s003: prelabeled·승인, 건너뜀(waived) → 백로그 아님. s004: prelabeled, 승인 전 → 백로그 아님.
+- s005: prelabeled·승인, 허용되지 않은 판정 버전의 completed 실행만 있음 → 백로그.
+- s006: prelabeled·승인, 실행 없음이지만 사용 중지 → 백로그 아님.
+→ 백로그 = s001 + s005 = 2/60시간. 그 주에 끝난 실행은 s002·s005 둘 (영상 2/60시간, 걸린 시간
+  120 + 30초).
 """
 
 from __future__ import annotations
@@ -46,9 +50,11 @@ from dlp_schema.db.aireview_repository import (
 from dlp_schema.db.repository import (
     insert_review_task,
     insert_session,
+    insert_withdrawal,
     register_ontology,
     set_lifecycle,
 )
+from dlp_schema.lineage import Withdrawal
 from dlp_schema.review import ReviewStage, ReviewTask, ReviewTool
 from dlp_schema.session import LifecycleState, PrivacyState
 from dlp_schema.testing import (
@@ -66,6 +72,7 @@ ROOT = Path(__file__).resolve().parents[3]
 WEEK = "2026-W41"
 IN = FIXED_TIME  # 2026-10-07 09:00 UTC (W41 안)
 AI = AiDisplayConfig(AiReviewDisplayPolicy(mode="advisory"), (AI_VERSION,), AI_TARGET_RULE)
+OLD_VERSION = "aireview-" + "e" * 12 + "+vlm-old"  # 허용 버전(AI_VERSION)이 아닌 판정 버전
 
 
 @pytest.fixture(scope="module")
@@ -113,10 +120,17 @@ def _scene(engine: sa.Engine) -> None:
         media_uri="s3://dlp-labeling/x.mp4", label_kinds=("action",), created_at=IN,
         sent_label_ids=("s002-a0",),
     )  # fmt: skip
+    old_run = "air-run-" + "5" * 24
     with engine.begin() as conn:
-        for sid in ("s001", "s002", "s003"):
+        for sid in ("s001", "s002", "s003", "s005", "s006"):
             _session(conn, sid, PrivacyState.APPROVED)
         _session(conn, "s004", PrivacyState.AUTO_BLURRED)
+        insert_ai_run(conn, make_ai_run("s005", old_run, created_at=IN, version=OLD_VERSION))
+        insert_ai_run_event(conn, AiRunEvent(
+            session_id="s005", run_id=old_run, event=AiRunEventKind.COMPLETED, at=IN,
+            counts={"elapsed_s": 30},
+        ))  # fmt: skip
+        insert_withdrawal(conn, Withdrawal(session_id="s006", reason="동의 철회", withdrawn_at=IN))
         insert_ai_run(conn, make_ai_run("s002", run, created_at=IN))
         insert_ai_units(conn, units)
         insert_ai_run_event(conn, AiRunEvent(
@@ -147,20 +161,26 @@ def test_ai_weekly_matches_hand_calculation(engine: sa.Engine) -> None:
         ai = ai_weekly(conn, start, end, AI)
         assert ai_weekly(conn, start, end, None) is None  # AI 끔이면 절 없음
     assert ai is not None
-    assert ai.backlog_hours == pytest.approx(1 / 60)  # s001만 (60초)
+    # s001 + s005 (허용되지 않은 버전의 완료 실행은 판정이 끝난 것이 아니다). s006은 사용 중지
+    assert ai.backlog_hours == pytest.approx(2 / 60)
     assert ai.fallback_rate == pytest.approx(0.25)  # 1/4
     assert ai.cache_hit_ratio == pytest.approx(0.2)  # 800/4000
-    assert ai.video_hours == pytest.approx(1 / 60)  # s002 실행 하나
-    assert ai.device_seconds_per_video_hour == pytest.approx(120 * 60)  # 120초 / (1/60시간)
+    assert ai.video_hours == pytest.approx(2 / 60)  # s002·s005 실행
+    assert ai.device_seconds_per_video_hour == pytest.approx(150 * 30)  # 150초 / (2/60시간)
     assert ai.coverage == pytest.approx(1.0)
     assert ai.ok_miss_rate == 0.0 and ai.ok_miss_upper95 == pytest.approx(0.95)
     assert math.isnan(ai.flag_precision)  # 대조군 지적 없음
-    assert ai.counts == {"units": 4, "fallback_units": 1, "runs": 1, "outcome_rows": 1}
-    # 다음 주에는 그 주 자료가 없다 (백로그는 주 끝 시점: 아직 s001이 남는다)
+    assert ai.counts == {"units": 4, "fallback_units": 1, "runs": 2, "outcome_rows": 1}
+    # 다음 주에는 그 주 자료가 없다 (백로그는 주 끝 시점: 아직 s001·s005가 남는다)
     with engine.connect() as conn:
         later = ai_weekly(conn, end, end + timedelta(days=7), AI)
     assert later is not None and math.isnan(later.fallback_rate)
-    assert later.backlog_hours == pytest.approx(1 / 60)
+    assert later.backlog_hours == pytest.approx(2 / 60)
+    # s005의 옛 버전을 허용 버전에 넣으면 백로그에서 빠진다
+    both = AiDisplayConfig(AI.policy, (AI_VERSION, OLD_VERSION), AI_TARGET_RULE)
+    with engine.connect() as conn:
+        allowed = ai_weekly(conn, start, end, both)
+    assert allowed is not None and allowed.backlog_hours == pytest.approx(1 / 60)
 
 
 def test_ai_alerts_and_markdown(policy: OpsPolicy) -> None:

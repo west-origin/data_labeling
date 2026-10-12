@@ -4,7 +4,8 @@
 서버(`FakeOpenAIServer`, 판정 요청에 모두 ok로 답한다)로 돈다.
 
 정답 근거: 가짜 서버가 모두 ok로 답하므로 교란한 라벨을 하나도 잡지 못한다 → 탐지 재현율 0,
-ok 놓침률 1, 오지적 0. 게이트는 실패지만 `gate.block: false`(결정)라 종료 0이고 경고만 낸다.
+틀린 라벨을 ok라 한 비율 1, ok 놓침률 P(틀림 | AI ok) = 틀린 라벨 수 / 대상 수(교란 유병률),
+오지적 0. 게이트는 실패지만 `gate.block: false`(결정)라 종료 0이고 경고만 낸다.
 block을 true로 바꾸면 종료 1이다. 평가 내내 DB에 INSERT·UPDATE·DELETE가 한 번도 없다.
 """
 
@@ -110,7 +111,8 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[list[str], _
 def test_eval_writes_nothing_and_gate_only_warns(
     world: tuple[list[str], _Watched], tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """모두 ok로 답하는 서버: 탐지 0·ok 놓침 1 → 게이트 실패지만 경고만(종료 0). DB 쓰기 0건."""
+    """모두 ok로 답하는 서버: 탐지 0·틀린 라벨을 ok라 함 1 → 게이트 실패지만 경고만(종료 0). DB
+    쓰기 0건."""
     args, watched = world
     out = tmp_path / "report.json"
     with FakeOpenAIServer(MODEL) as server:
@@ -125,7 +127,11 @@ def test_eval_writes_nothing_and_gate_only_warns(
     assert "[게이트 실패 — 경고만 (gate.block: false)]" in text
     assert watched.writes == [] and calls > 0
     report = json.loads(out.read_text("utf-8"))
-    assert report["wrong_recall"] == 0.0 and report["ok_miss_rate"] == 1.0
+    assert report["wrong_recall"] == 0.0 and report["wrong_called_ok_rate"] == 1.0
+    wrong_ok = sum(v["ok"] for k, v in report["by_error"].items() if k != "clean")
+    all_ok = sum(v["ok"] for v in report["by_error"].values())
+    assert all_ok == report["targets"] and 0 < wrong_ok < all_ok
+    assert report["ok_miss_rate"] == pytest.approx(wrong_ok / all_ok)
     assert report["false_flag_rate"] == 0.0 and report["units"] == calls
     assert report["gate"]["passed"] is False and report["gate"]["block"] is False
     assert set(report["by_error"]) >= {"clean", "verb_swap"}

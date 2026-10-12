@@ -15,9 +15,13 @@
       종료 코드는 0이다 (차단은 파일럿 WP17.9 뒤 결정. true로 바꾸면 종료 1).
     - 판정 모델이 행동 분류 모델(`actions.yaml vlm.model`)과 같으면 경고하고 행동 라벨 지표를
       따로 보인다 (자기 검수 상관 오류).
-    종료: 0 완료(게이트 경고 포함) / 1 게이트 실패(block이 true일 때만) / 2 서버 주소 없음 / 3 서버
-    장애로 일부 미판정 / 5 설정 불일치(4xx·모델 불일치·사내 주소 아님·원본 버킷 저장소·모르는 교란
-    종류) / 6 골든셋 없음·판정할 세션 없음 / 130 Ctrl-C.
+    - ok 놓침률은 P(틀린 라벨 | AI ok)다 (품질 보고와 같은 정의, `evaluate` docstring). 틀린 라벨을
+      ok라 한 비율 P(AI ok | 틀린 라벨)은 참고로 함께 보인다.
+    종료: 0 완료(게이트 경고 포함) / 1 게이트 실패(block이 true일 때만) / 2 서버 주소 없음, 또는
+    인자 오류(`--inject`의 모르는 교란 종류·형식 오류 등, argparse 사용법 오류) / 3 서버 장애로 일부
+    미판정 / 5 설정 불일치(4xx·모델 불일치·사내 주소 아님·원본 버킷 저장소) / 6 골든셋 없음·판정할
+    세션 없음 / 130 Ctrl-C. `aireview.yaml gate.inject`의 모르는 교란 종류는 정책 로드 오류다
+    (`GatePolicy`).
 """
 
 from __future__ import annotations
@@ -150,7 +154,9 @@ def _print_report(report: EvalReport, out: Path, gate: bool) -> None:
     )
     print(
         f"  틀린 라벨 탐지 재현율 {pct(report.wrong_recall)} · 깨끗한 라벨 오지적률 "
-        f"{pct(report.false_flag_rate)} · ok 놓침률 {pct(report.ok_miss_rate)} · 제안 정확 일치 "
+        f"{pct(report.false_flag_rate)} · ok 놓침률(AI ok 중 틀린 라벨) "
+        f"{pct(report.ok_miss_rate)} · 틀린 라벨을 ok라 함 {pct(report.wrong_called_ok_rate)} · "
+        f"제안 정확 일치 "
         f"{pct(report.suggestion_exact_rate)} · ECE {pct(report.ece)}"
     )
     for name, s in report.by_error.items():

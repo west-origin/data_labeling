@@ -4,11 +4,14 @@
 (`dlp_schema.testing.sqlite_db`)로 본다. 서비스가 필요 없다.
 
 손 계산 (대조군 행 H1~H8, 보인 집단 행 S1~S6, 분모 밖 H9~H11·D1; 각 테스트 docstring)
-- 지적 정밀도 = 바꿈∧지적 / 지적, 재현율 = 바꿈∧지적 / 바꿈, ok 놓침률 = 바꿈∧ok / ok.
+- 지적 정밀도 = 바꿈∧지적 / 지적, 재현율 = 바꿈∧지적 / 바꿈, ok 놓침률 = 바꿈∧ok / ok. 모두 행
+  가중치(표본 라벨 = 묶음 모집단/표본, 전수 = 1)로 센다: 대조군 ok 놓침률 = h2(1) / (1+1+4+4) =
+  1/10. 분모 행의 가중치가 모두 같으면 개수 비율이다 (정밀도 2/3 등).
 - 층화: 전수 층 ok 2개 중 1개 바꿈(모집단 2), 표본 층 ok 2개 중 0(가중치 4씩, 모집단 8) →
   합 = (2·0.5 + 8·0)/10 = 0.1. 상한 = (2·CP(1,2) + 8·CP(0,2))/10, CP(1,2) = √0.95,
   CP(0,2) = 1-√0.05.
-- κ: 대조군 unsure 제외 7행, 일치 5 → po = 5/7, pe = (4·4 + 3·3)/49 → κ = 10/24.
+- κ(행 가중): 대조군 unsure 제외 7행, 가중치 1,1,4,4,1,1,1 (합 13). 일치 무게 11 → po = 11/13. 지적
+  무게 3/13, 바꿈 무게 3/13 → pe = (3·3 + 10·10)/169 = 109/169 → κ = (143-109)/(169-109) = 17/30.
 - ECE(15구간): 확신도 0.95(맞음)·0.85(틀림)·0.75(맞음)·0.65(틀림)가 각자 다른 구간 →
   (0.05 + 0.85 + 0.25 + 0.65)/4 = 0.45.
 """
@@ -143,7 +146,8 @@ def test_agreement_matches_hand_calculation() -> None:
     assert h.rows == 8
     assert (h.flag_precision.num, h.flag_precision.den) == (2, 3)  # h5·h7 / h5·h6·h7
     assert (h.flag_recall.num, h.flag_recall.den) == (2, 3)  # h5·h7 / h2·h5·h7
-    assert (h.ok_miss.num, h.ok_miss.den) == (1, 4)  # h2 / h1~h4
+    assert (h.ok_miss.num, h.ok_miss.den) == (1, 10)  # h2 / h1~h4 (가중치 1,1,4,4)
+    assert h.ok_miss.n_eff == pytest.approx(100 / 34) and not h.flag_recall.weighted
     assert (h.wrong_approved.num, h.wrong_approved.den) == (1, 2)  # h6 / h5·h6
     assert (h.suggestion_exact.num, h.suggestion_exact.den) == (1, 2)  # h5 / h5·h6
     assert h.confusion == {
@@ -159,7 +163,7 @@ def test_agreement_matches_hand_calculation() -> None:
     assert sample.rate.upper95 == pytest.approx(1 - math.sqrt(0.05))
     want = (2 * math.sqrt(0.95) + 8 * (1 - math.sqrt(0.05))) / 10
     assert a.ok_miss_upper95 == pytest.approx(want)
-    assert a.kappa == pytest.approx(10 / 24)
+    assert a.kappa == pytest.approx(17 / 30)
     assert a.ece == pytest.approx(0.45)
     # 보인 집단 (d1은 이중 측정이라 빠진다)
     s = a.arms["shown"]
@@ -176,7 +180,7 @@ def test_agreement_matches_hand_calculation() -> None:
     assert (p.invalid_now.num, p.invalid_now.den) == (1, 3)
     assert a.excluded == {"stale": 1, "no_verdict": 1, "followup": 1, "measured": 1}
     # 종류별 (대조군): action은 h1~h4, event는 h5~h8
-    assert (a.by_kind["action"].ok_miss.num, a.by_kind["action"].ok_miss.den) == (1, 4)
+    assert (a.by_kind["action"].ok_miss.num, a.by_kind["action"].ok_miss.den) == (1, 10)
     assert math.isnan(a.by_kind["action"].flag_precision.value)
     assert a.by_kind["event"].flag_precision.value == pytest.approx(2 / 3)
 
@@ -187,6 +191,62 @@ def test_empty_rows_give_nan_not_zero() -> None:
     assert a.arms == {} and math.isnan(a.ok_miss_rate) and math.isnan(a.ok_miss_upper95)
     assert math.isnan(a.kappa) and math.isnan(a.ece)
     assert a.apply is not None and math.isnan(a.apply.accept_rate.value)
+
+
+def test_sample_stratum_weights_differ_between_assignments() -> None:
+    """표본 층 안에서 배정마다 가중치가 다르다: 배정 A(가중치 4, 2행 모두 승인), 배정 B(가중치 20,
+    5행 중 1행 바뀜). 층 비율 = (0·8 + 20·1)/(8 + 100) = 20/108 (모집단 가중). 상한은 유효 표본 수
+    n* = 108²/(2·16 + 5·400)의 Korn-Graubard 근사. 회귀: 행 단순 비율 1/7 = 0.143로 모집단
+    비율 0.185를 과소 추정했다."""
+    from dlp_eval.metrics.proportion import effective_upper
+
+    rows = [row(f"a{i}", V.OK, H.APPROVED, stratum="sample", weight=4.0) for i in range(2)]
+    rows += [row(f"b{i}", V.OK, H.CORRECTED if i == 0 else H.APPROVED, stratum="sample",
+                 weight=20.0) for i in range(5)]  # fmt: skip
+    a = ai_agreement(rows)
+    sample = a.ok_miss_strata["sample"]
+    assert (sample.rate.num, sample.rate.den, sample.population) == (20.0, 108.0, 108.0)
+    n_eff = 108**2 / (2 * 16 + 5 * 400)
+    assert sample.rate.n_eff == pytest.approx(n_eff)
+    assert a.ok_miss_rate == pytest.approx(20 / 108)
+    assert a.ok_miss_upper95 == pytest.approx(effective_upper(20 / 108, n_eff))
+    assert a.arms["holdout"].ok_miss.value == pytest.approx(20 / 108)
+
+
+def test_holdout_recall_and_kappa_are_weighted_by_sampling() -> None:
+    """계획 단계가 AI 지적 라벨을 표본에서 빼 전수 검수하고 ok 라벨은 표본(가중치 10)만 본다.
+    대조군: 틀림·바뀜 5, 틀림·승인 5(전수, 가중치 1), ok 표본 9행(가중치 10, 1행 바뀜).
+    재현율 = 5 / (5 + 10) = 1/3 (모집단: 바뀐 ok 라벨 약 10개). κ(가중): 무게 합 100, 일치 5 + 80 →
+    po = 0.85, 지적 0.1·바뀜 0.15 → pe = 0.015 + 0.765 = 0.78 → κ = 0.07/0.22 = 7/22. 회귀: 행을
+    그대로 세어 재현율 5/6, κ 70/184로 부풀렸다."""
+    rows = [row(f"c{i}", V.WRONG, H.CORRECTED) for i in range(5)]
+    rows += [row(f"w{i}", V.WRONG, H.APPROVED) for i in range(5)]
+    rows += [row(f"o{i}", V.OK, H.CORRECTED if i == 0 else H.APPROVED, stratum="sample",
+                 weight=10.0) for i in range(9)]  # fmt: skip
+    a = ai_agreement(rows)
+    h = a.arms["holdout"]
+    assert (h.flag_recall.num, h.flag_recall.den) == (5.0, 15.0)
+    assert h.flag_recall.value == pytest.approx(1 / 3)
+    assert h.flag_recall.n_eff == pytest.approx(15**2 / (5 + 100))
+    assert (h.flag_precision.num, h.flag_precision.den) == (5, 10)  # 지적은 모두 가중치 1
+    assert a.kappa == pytest.approx(7 / 22)
+    assert h.rows == 19 and h.confusion["ok"] == {"corrected": 1, "approved": 8}  # 행 수 그대로
+
+
+def test_confidence_floors_treat_ties_together() -> None:
+    """같은 확신도의 판정은 함께 보이거나 함께 숨는다 (임계값으로 실제로 고를 수 있는 값만).
+
+    wrong 0.5 둘(승인 하나·바뀜 하나): 목표 1.0이면 0.5 이상은 1/2라 닿지 않는다 → (None, 2, 0.5).
+    입력 순서를 바꿔도 같다. 0.8(바뀜)을 더하면 목표 1.0 → (0.8, 1, 1.0), 목표 0.6 → 0.5 이상
+    2/3 → (0.5, 3, 2/3). 회귀: 정렬 목록의 꼬리를 잘라 동률 중 일부만 세어 (0.5, 1, 1.0)을 냈다."""
+    tie = [row("t1", V.WRONG, H.APPROVED, confidence=0.5),
+           row("t2", V.WRONG, H.CORRECTED, confidence=0.5)]  # fmt: skip
+    assert confidence_floors(tie, 1.0) == {"wrong": (None, 2, 0.5)}
+    assert confidence_floors(tie[::-1], 1.0) == {"wrong": (None, 2, 0.5)}
+    more = [*tie, row("t3", V.WRONG, H.CORRECTED, confidence=0.8)]
+    assert confidence_floors(more, 1.0) == {"wrong": (0.8, 1, 1.0)}
+    floor, n, precision = confidence_floors(more, 0.6)["wrong"]
+    assert (floor, n) == (0.5, 3) and precision == pytest.approx(2 / 3)
 
 
 def test_confidence_floors_pick_lowest_threshold_meeting_target() -> None:

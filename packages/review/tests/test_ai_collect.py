@@ -30,7 +30,7 @@ from dlp_media.storage import LocalStore
 from dlp_review.ai_display import AiDisplayConfig, flag_region_id
 from dlp_review.clients import LabelStudioClient
 from dlp_review.collect import collect_task
-from dlp_review.labelstudio import AI_DECISION, AI_FLAGS, TO_NAME, to_ls_results
+from dlp_review.labelstudio import AI_DECISION, AI_FLAGS, FROM_NAME, TO_NAME, to_ls_results
 from dlp_review.ops.policy import AiReviewDisplayPolicy, LabelStudioPolicy
 from dlp_review.reconcile import ReviewedItem, same_as_sent
 from dlp_review.tasks import ReviewSetup
@@ -97,29 +97,31 @@ MODEL: dict[str, Any] = {
 }
 
 
-def _labels() -> dict[str, LabelRecord]:
-    """장면의 검수 전 모델 라벨 (모듈 docstring)."""
+def _labels(stream: str | None = None) -> dict[str, LabelRecord]:
+    """장면의 검수 전 모델 라벨 (모듈 docstring). stream: 행동·사이 구간의 스트림 (실제 행동 단계는
+    기준 스트림을 쓴다)."""
     right = {"hand": "right"}
     left = {"hand": "left"}
+    m: dict[str, Any] = {**MODEL, "stream_id": stream}
     return {
-        "a1": make_label(action_payload(), label_id="s001-a1", **MODEL),
+        "a1": make_label(action_payload(), label_id="s001-a1", **m),
         "g1": make_label({"kind": "gap", "gap_type": "idle", **right}, label_id="s001-g1",
-                         t_start_ms=1000, t_end_ms=2000, **MODEL),
+                         t_start_ms=1000, t_end_ms=2000, **m),
         "a2": make_label(action_payload(action_id="a002", verb="lift", t_approach_ms=2000,
                                         t_contact_start_ms=2100, t_contact_end_ms=2900,
                                         t_end_ms=3000),
-                         label_id="s001-a2", t_start_ms=2000, t_end_ms=3000, **MODEL),
+                         label_id="s001-a2", t_start_ms=2000, t_end_ms=3000, **m),
         "e1": make_label({"kind": "event", "event_type": "slip", "severity": 2},
                          label_id="s001-e1", t_start_ms=3000, t_end_ms=4000, **MODEL),
         "s1": make_label({"kind": "segment", "segment_id": "sk1", "level": "skill",
                           "ref_id": "wipe", "child_ids": ["a001", "a002"]},
                          label_id="s001-s1", t_start_ms=0, t_end_ms=3000, **MODEL),
         "a3": make_label(action_payload(action_id="a003", verb="push", **left),
-                         label_id="s001-a3", **MODEL),
+                         label_id="s001-a3", **m),
         "a4": make_label(action_payload(action_id="a004", t_approach_ms=1000,
                                         t_contact_start_ms=1100, t_contact_end_ms=1900,
                                         t_end_ms=2000, **left),
-                         label_id="s001-a4", t_start_ms=1000, t_end_ms=2000, **MODEL),
+                         label_id="s001-a4", t_start_ms=1000, t_end_ms=2000, **m),
     }  # fmt: skip
 
 
@@ -208,12 +210,13 @@ def _scene(
     mode: ReviewMode = ReviewMode.STANDARD,
     verdicts: list[AiVerdict] | None = None,
     exposure: bool = True,
+    stream: str | None = None,
 ) -> dict[str, LabelRecord]:
     """세션·라벨·작업(label_studio:3)·판정 단위·노출 기록을 넣는다. 라벨(이름 → 레코드)을 돌려준다.
 
-    노출: arm이 shown이면 맞음(a4)만 hidden, 그 밖이면 전부 hidden.
+    노출: arm이 shown이면 맞음(a4)만 hidden, 그 밖이면 전부 hidden. stream: `_labels`와 같다.
     """
-    labels = _labels()
+    labels = _labels(stream)
     sent = list(labels.values())
     judged = verdicts if verdicts is not None else _verdicts(labels)
     task = ReviewTask(
@@ -249,6 +252,20 @@ def _decide(region_id: str, alias: str) -> dict[str, Any]:
 def _submitted(labels: dict[str, LabelRecord], *extra: dict[str, Any]) -> list[dict[str, Any]]:
     """검수자가 예측(프리라벨 결과)을 그대로 내고 extra 결과를 더한 주석."""
     return [*to_ls_results(list(labels.values())), *extra]
+
+
+def _relabel(results: list[dict[str, Any]], region_id: str, name: str) -> None:
+    """검수자가 Label Studio에서 구간의 라벨 이름을 바꿨다 (제자리에서 고친다)."""
+    for r in results:
+        if r["id"] == region_id and r.get("type") == "timeserieslabels":
+            r["value"] = {**r["value"], "timeserieslabels": [name]}
+
+
+def _drawn(start: int, end: int, name: str) -> dict[str, Any]:
+    """검수자가 라벨 컨트롤로 새로 그린 구간 (원 라벨 없음)."""
+    value = {"start": start, "end": end, "instant": False, "timeserieslabels": [name]}
+    return {"id": f"new-{start}", "from_name": FROM_NAME, "to_name": TO_NAME,
+            "type": "timeserieslabels", "value": value}  # fmt: skip
 
 
 def _collect(engine: sa.Engine, setup: ReviewSetup) -> tuple[Any, AiOutcome | None]:
@@ -434,20 +451,141 @@ def test_suggestion_is_rechecked_from_db_now(engine: sa.Engine, tmp_path: Path) 
     assert record is not None and any("지금 검사" in w for w in record.warnings)
 
 
-def test_stale_label_apply_is_invalid_now(engine: sa.Engine, tmp_path: Path) -> None:
-    """작업을 보낸 뒤 다른 단계가 고친 라벨은 stale이다 (적용 결정도 반영하지 않는다)."""
+@pytest.mark.parametrize(
+    ("name", "retracted"),
+    [("a1", False), ("g1", False), ("g1", True), ("e1", False)],
+    ids=["set-corrected", "change_kind-corrected", "change_kind-retracted", "delete-corrected"],
+)
+def test_stale_label_apply_is_invalid_now(
+    name: str, retracted: bool, engine: sa.Engine, tmp_path: Path
+) -> None:
+    """작업을 보낸 뒤 다른 단계가 고쳤거나 지운 라벨은 stale이고 적용 결정도 반영하지 않는다
+    (set·change_kind·delete 모두). 회귀: 종류 변경 제안(g1 사이 구간 → push 행동)을 적용하면 parent
+    없는 새 행동 레코드가 drop_retracted를 지나, 다른 단계가 지운 g1이 행동으로 되살아나거나 새 버전
+    사이 구간(g1-v2)과 같은 손·같은 구간에 행동이 겹쳐 운영 라벨이 됐다. 결과 기록은 invalid_now라
+    기록과 저장이 어긋났다."""
     labels = _scene(engine)
-    a1 = labels["a1"]
-    newer = a1.model_copy(update={"label_id": "s001-a1-v2", "parent_label_id": a1.label_id})
+    x = labels[name]
+    newer = x.model_copy(update={"label_id": f"{x.label_id}-v2", "parent_label_id": x.label_id,
+                                 "retracted": retracted})  # fmt: skip
     with engine.begin() as conn:
         insert_labels(conn, [newer])
-    results = _submitted(labels, _decide(a1.label_id, "apply"))
+    results = _submitted(labels, _decide(x.label_id, "apply"))
     outcome, record = _collect(engine, _setup(tmp_path, results, _ai()))
-    assert a1.label_id in outcome.stale
-    item = _items(record)[a1.label_id]
-    assert (item.human, item.apply_result, item.match) == (
-        AiHumanAction.STALE, AiApplyResult.INVALID_NOW, "na",
+    assert outcome.stale == [x.label_id] and not outcome.new_records
+    item = _items(record)[x.label_id]
+    assert (item.human, item.apply_result, item.match, item.result_label_ids) == (
+        AiHumanAction.STALE, AiApplyResult.INVALID_NOW, "na", (),
     )  # fmt: skip
+    assert record is not None and any("다른 단계가 바꾼" in w for w in record.warnings)
+    with engine.connect() as conn:
+        current = {r.label_id for r in current_labels(get_labels(conn, SID))}
+    assert current == ({r.label_id for r in labels.values()} - {x.label_id}) | (
+        set() if retracted else {newer.label_id}
+    )
+
+
+@pytest.mark.parametrize("segment", [True, False], ids=["with-segment", "no-segment"])
+def test_change_kind_apply_with_same_drawn_region_is_one_record(
+    segment: bool, engine: sa.Engine, tmp_path: Path
+) -> None:
+    """종류 변경 제안(g1 → push)을 적용하면서 검수자가 같은 구간에 같은 행동을 직접 그렸다: 원
+    항목만 빼고 새 항목은 하나만 남는다 (replaced, applied, exact). 회귀: 두 항목의 내용이 같아 같은
+    label_id 레코드 둘이 생겨, 상위 구간이 없으면 insert_labels가 IntegrityError(원시 DB 오류)로
+    수집 전체를 멈췄다 (상위 구간이 있으면 action_id 중복으로 적용이 invalid_now가 됐다)."""
+    labels = _scene(engine)
+    g1, s1 = labels["g1"], labels["s1"]
+    results = _submitted(labels, _decide(g1.label_id, "apply"),
+                         _drawn(1000, 2000, "action.right:push"))  # fmt: skip
+    if not segment:  # 검수자가 상위 구간 s1을 지웠다
+        results = [r for r in results if r["id"] != s1.label_id]
+    outcome, record = _collect(engine, _setup(tmp_path, results, _ai()))
+    fresh = [r for r in outcome.new_records if r.parent_label_id is None]
+    assert [r.payload for r in fresh] == [PUSH]
+    gone = next(r for r in outcome.new_records if r.parent_label_id == g1.label_id)
+    assert gone.retracted
+    g = _items(record)[g1.label_id]
+    assert (g.human, g.apply_result, g.match) == (
+        AiHumanAction.REPLACED, AiApplyResult.APPLIED, "exact",
+    )  # fmt: skip
+    assert set(g.result_label_ids) == {gone.label_id, fresh[0].label_id}
+
+
+@pytest.mark.parametrize("stream", [None, "bodycam"])
+def test_kind_changed_in_tool_like_suggestion_is_applied(
+    stream: str | None, engine: sa.Engine, tmp_path: Path
+) -> None:
+    """검수자가 Label Studio에서 g1의 라벨만 제안대로 바꿔 붙이고(gap → push 행동) 적용도 골랐다:
+    검수자 결과가 제안과 같으므로 applied (replaced, exact). 다른 동사로 바꿨으면 conflict_edited
+    (같은 종류라 partial, 다음 테스트). 바꿔 붙인 구간은 원 라벨의 스트림을 잇는다 (원 라벨이 기준
+    스트림인 실제 행동 단계 출력도 같다). 회귀: 종류를 바꾸면 원 라벨 ID가 사라져 늘
+    conflict_edited였다.
+    """
+    labels = _scene(engine, stream=stream)
+    g1 = labels["g1"]
+    results = _submitted(labels, _decide(g1.label_id, "apply"))
+    _relabel(results, g1.label_id, "action.right:push")
+    outcome, record = _collect(engine, _setup(tmp_path, results, _ai()))
+    [new] = [r for r in outcome.new_records if r.parent_label_id is None]
+    assert new.payload == PUSH and new.stream_id == stream
+    g = _items(record)[g1.label_id]
+    assert (g.human, g.apply_result, g.match) == (
+        AiHumanAction.REPLACED, AiApplyResult.APPLIED, "exact",
+    )  # fmt: skip
+
+
+def test_kind_changed_in_tool_unlike_suggestion_is_conflict(
+    engine: sa.Engine, tmp_path: Path
+) -> None:
+    """적용을 골랐지만 검수자가 다른 동사(pull) 행동으로 바꿔 붙였다 → conflict_edited, partial."""
+    labels = _scene(engine)
+    g1 = labels["g1"]
+    results = _submitted(labels, _decide(g1.label_id, "apply"))
+    _relabel(results, g1.label_id, "action.right:pull")
+    _, record = _collect(engine, _setup(tmp_path, results, _ai()))
+    g = _items(record)[g1.label_id]
+    assert (g.human, g.apply_result, g.match) == (
+        AiHumanAction.REPLACED, AiApplyResult.CONFLICT_EDITED, "partial",
+    )  # fmt: skip
+
+
+def test_direct_correction_without_decision_measures_match(
+    engine: sa.Engine, tmp_path: Path
+) -> None:
+    """결정 없이 직접 고친 행 (적용 표 "직접 고침"): 제안이 바꾸자고 한 필드 기준으로 match를 잰다.
+
+    a1 제안은 동사 press 하나 → 검수자가 press로 고침 → exact. a3 제안은 동사 pull + 대상 bucket_01
+    → 검수자가 동사만 pull로 고침(대상 그대로) → partial (2개 중 1개). a2 제안(사이 구간으로 종류
+    변경)인데 동사만 바꿈 → none. 셋 다 decision=none, apply_result 없음.
+    """
+    labels = _labels()
+    a1, a2, a3 = labels["a1"], labels["a2"], labels["a3"]
+    pull = a3.payload.model_copy(update={"verb": "pull", "target_id": "bucket_01"})
+    verdicts = [
+        make_ai_verdict(a1.label_id, "wrong", suggestion=AiSuggestion(
+            op="set", fields=("verb",), payload=a1.payload.model_copy(update={"verb": "press"}))),
+        make_ai_verdict(a2.label_id, "wrong", problems=("should_be_gap",), suggestion=AiSuggestion(
+            op="change_kind", fields=("gap_type", "kind"), payload=IDLE)),
+        make_ai_verdict(a3.label_id, "wrong", suggestion=AiSuggestion(
+            op="set", fields=("target", "verb"), payload=pull)),
+    ]  # fmt: skip
+    _scene(engine, verdicts=verdicts)
+    results = _submitted(labels)
+    _relabel(results, a1.label_id, "action.right:press")
+    _relabel(results, a2.label_id, "action.right:push")
+    _relabel(results, a3.label_id, "action.left:pull")
+    _, record = _collect(engine, _setup(tmp_path, results, _ai()))
+    items = _items(record)
+    got = {k: (items[x.label_id].human, items[x.label_id].match) for k, x in
+           (("a1", a1), ("a2", a2), ("a3", a3))}  # fmt: skip
+    assert got == {
+        "a1": (AiHumanAction.CORRECTED, "exact"), "a2": (AiHumanAction.CORRECTED, "none"),
+        "a3": (AiHumanAction.CORRECTED, "partial"),
+    }  # fmt: skip
+    assert all(
+        (items[x.label_id].decision, items[x.label_id].apply_result) == (AiDecision.NONE, None)
+        for x in (a1, a2, a3)
+    )
 
 
 def test_double_task_applies_into_measurement_records(engine: sa.Engine, tmp_path: Path) -> None:

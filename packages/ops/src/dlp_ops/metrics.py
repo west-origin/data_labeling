@@ -231,8 +231,8 @@ class AiWeekly:
             기록도 없는 세션의 영상 시간 합 (사용 중지 제외).
         coverage: 그 주에 만든 작업의 판정률 평균 (제외 집단 빼고).
         flag_precision / flag_recall / ok_miss_rate / ok_miss_upper95: 그 주에 수집한 작업의
-            대조군(holdout) 지적 정밀도·재현율, 층화 ok 놓침률과 보수적 95% 상한
-            (`dlp_review.ops.ai_quality`).
+            대조군(holdout) 지적 정밀도·재현율, 층화 ok 놓침률과 보수적 95% 상한 (표본 가중,
+            `dlp_review.ops.ai_quality`).
         suggestion_accept_rate: 보인 제안 중 실제로 적용된 비율.
         fallback_rate: 그 주에 기록한 판정 단위 중 형식에 맞는 응답을 끝내 받지 못한 단위 비율.
         cache_hit_ratio: 그 주 판정 단위의 접두사 캐시 적중 토큰 / 프롬프트 토큰.

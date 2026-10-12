@@ -132,9 +132,13 @@ estimate:
 # 해시 제외. 골든 게이트 (dlp aireview eval --gate, WP17.8). 판정 모델·프롬프트·프레임 설정을 바꿀 때 본다.
 # min_wrong_recall: 틀린 라벨(교란·과거 수정) 중 wrong·suspect로 잡은 비율의 하한.
 # max_false_flag_rate: 깨끗한 라벨을 wrong·suspect라 한 비율의 상한.
-# max_ok_miss_rate: 틀린 라벨을 ok라고 한 비율의 상한 (review.yaml sampling.max_defect_ratio와 같은 값).
+# max_ok_miss_rate: ok 놓침률 = P(틀린 라벨 | AI ok)의 상한. AI가 맞다고 한 라벨 중 틀린 라벨 비율이라
+#   review.yaml sampling.max_defect_ratio(표본 합격 묶음의 결함 비율 상한)와 같은 값으로 둔다 (품질 보고
+#   dlp review quality --ai의 ok 놓침률과 같은 정의). perturb 방식에서는 교란 비율에 따라 달라지므로 같은
+#   inject로 잰 값끼리 비교한다. 틀린 라벨을 ok라 한 비율 P(AI ok | 틀린 라벨)은 보고서에만 싣는다.
 # block: false면 실패해도 경고만 하고 종료 0이다 (결정: 차단 여부는 파일럿 WP17.9 뒤 정한다).
 # inject: perturb 방식(--mode perturb)의 기본 교란 비율 (교란 종류 → 라벨마다 적용 확률, --inject로 바꾼다).
+#   종류는 dlp_aireview.perturb.KINDS 안이어야 한다 (모르는 종류는 정책 로드 오류).
 gate:
   min_wrong_recall: 0.6
   max_false_flag_rate: 0.1

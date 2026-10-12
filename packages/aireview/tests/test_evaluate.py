@@ -8,7 +8,11 @@
 - perturb: 넣은 오류는 모두 wrong(오라클이 정답과 다른 값을 지적), 손대지 않은 라벨은 ok →
   탐지 재현율 1, 오지적 0, ok 놓침 0, 게이트 통과. DB 표 행 수가 전후 같다.
 - history: 사람이 승인한 모델 라벨은 ok, 고친 라벨은 wrong(제안 = 사람 수정본), 지운 박스는
-  wrong(삭제). 사람 수정본은 맥락에 들지 않는다.
+  wrong(삭제). 정답은 후손 사슬의 지금 상태다 (QA가 다시 고쳤으면 마지막 수정본, QA가 지웠으면
+  삭제, 원래 값으로 되돌렸으면 맞음). 같은 손·같은 구간을 다른 종류로 다시 그렸으면 replaced(제안 =
+  다시 그린 레코드). 사람 수정본·다시 그린 레코드(정답)는 맥락에 들지 않는다.
+- ok 놓침률 = P(틀린 라벨 | AI ok) = 틀린 라벨의 ok 수 / 모든 ok 수 (설계 7.2, 품질 보고와 같은
+  정의).
 """
 
 from __future__ import annotations
@@ -35,12 +39,22 @@ from dlp_aireview.runner import RunOptions
 from dlp_schema.aireview import AiVerdict
 from dlp_schema.db.repository import get_labels, insert_labels, record_review
 from dlp_schema.db.tables import metadata
-from dlp_schema.labels import ActionPayload, LabelRecord, Provenance, Source, VerificationState
+from dlp_schema.labels import (
+    ActionPayload,
+    Evidence,
+    GapPayload,
+    Hand,
+    HandStatePayload,
+    LabelRecord,
+    Provenance,
+    Source,
+    VerificationState,
+)
 from dlp_schema.ontology import Ontology
 from dlp_schema.testing import FIXED_TIME, make_ai_verdict
 
 from .blurred import RAW, DbScene, db_scene
-from .conftest import make_scene
+from .conftest import SID, make_scene
 
 
 def _counts(engine: sa.Engine) -> dict[str, int]:
@@ -145,6 +159,109 @@ def test_history_mode_uses_reviewed_model_records_without_leaking_answers(
     assert report.same_model_as_actions and "action" in report.by_kind
 
 
+def _child(x: LabelRecord, suffix: str, hours: int, **update: object) -> LabelRecord:
+    """x의 사람 자식 레코드 (수정·삭제, hours시간 뒤)."""
+    return x.model_copy(update={
+        "label_id": f"{x.label_id}:{suffix}", "parent_label_id": x.label_id,
+        "provenance": Provenance(source=Source.HUMAN), "confidence": None,
+        "created_at": FIXED_TIME + timedelta(hours=hours), **update,
+    })  # fmt: skip
+
+
+def test_history_truth_follows_descendant_chain_and_hides_answers(
+    policy: AiReviewPolicy, ontology: Ontology
+) -> None:
+    """정답 = 후손 사슬의 지금 상태, 정답 레코드는 맥락에 없다 (판정 없이 사례만 본다).
+
+    - twice: 사람이 press로 고친 뒤 QA가 다시 pull로 고침 → corrected, 제안 = pull (첫 수정본 아님).
+    - dropped: 사람이 고친 뒤 QA가 지움 → deleted.
+    - reverted: 사람이 고친 뒤 QA가 원래 동사로 되돌림 → 맞음(approved).
+    - replaced: 사람이 지우고 같은 손·같은 구간을 사이 구간(idle)으로 다시 그림(parent 없음) →
+      replaced, 제안 = 다시 그린 사이 구간. 회귀: 다시 그린 레코드는 대상의 후손이 아니라 맥락에
+      그대로 들어가 정답이 새었다.
+    - 같은 구간이지만 다른 손의 새 사이 구간은 replaced의 정답이 아니다 (그 대상은 deleted).
+    """
+    scene = make_scene()
+    acts = [x for x in scene.labels if isinstance(x.payload, ActionPayload)]
+    twice, dropped, reverted, replaced, other = acts[:5]
+    for x in (twice, dropped, reverted, replaced, other):
+        assert isinstance(x.payload, ActionPayload)
+
+    def verb(x: LabelRecord, v: str) -> dict[str, object]:
+        assert isinstance(x.payload, ActionPayload)
+        return {"payload": x.payload.model_copy(update={"verb": v})}
+
+    def alt(x: LabelRecord) -> str:
+        assert isinstance(x.payload, ActionPayload)
+        return "press" if x.payload.verb != "press" else "push"
+
+    t1 = _child(twice, "r1", 1, **verb(twice, alt(twice)))
+    t2 = _child(t1, "r2", 2, **verb(twice, "pull" if alt(twice) != "pull" else "lift"))
+    d1 = _child(dropped, "r1", 1, **verb(dropped, alt(dropped)))
+    d2 = _child(d1, "r2", 2, retracted=True)
+    v1 = _child(reverted, "r1", 1, **verb(reverted, alt(reverted)))
+    v2 = _child(v1, "r2", 2, payload=reverted.payload)
+    gone = _child(replaced, "r1", 1, retracted=True)
+    assert isinstance(replaced.payload, ActionPayload) and isinstance(other.payload, ActionPayload)
+    gap = GapPayload(hand=replaced.payload.hand, gap_type="idle")
+    redraw = replaced.model_copy(update={
+        "label_id": f"{SID}-h:rnew", "parent_label_id": None, "stream_id": None, "payload": gap,
+        "provenance": Provenance(source=Source.HUMAN), "confidence": None,
+        "created_at": FIXED_TIME + timedelta(hours=1),
+    })  # fmt: skip
+    gone_other = _child(other, "r1", 1, retracted=True)
+    flipped = Hand.LEFT if other.payload.hand is Hand.RIGHT else Hand.RIGHT
+    wrong_hand = redraw.model_copy(update={
+        "label_id": f"{SID}-h:rhand", "t_start_ms": other.t_start_ms, "t_end_ms": other.t_end_ms,
+        "payload": GapPayload(hand=flipped, gap_type="idle"),
+    })  # fmt: skip
+    history = [*scene.labels, t1, t2, d1, d2, v1, v2, gone, redraw, gone_other, wrong_hand]
+    case = history_case(scene.session, history, o=ontology, policy=policy)
+    got = {x.label_id: (case.truth[x.label_id].wrong, case.truth[x.label_id].error)
+           for x in (twice, dropped, reverted, replaced, other)}  # fmt: skip
+    assert got == {
+        twice.label_id: (True, "corrected"), dropped.label_id: (True, "deleted"),
+        reverted.label_id: (False, "approved"), replaced.label_id: (True, "replaced"),
+        other.label_id: (True, "deleted"),
+    }  # fmt: skip
+    assert case.truth[twice.label_id].expected == t2.payload
+    assert case.truth[dropped.label_id].delete
+    assert case.truth[replaced.label_id].expected == gap
+    in_context = {x.label_id for x in case.labels}
+    answers = {t1.label_id, t2.label_id, d1.label_id, d2.label_id, v1.label_id, v2.label_id,
+               gone.label_id, redraw.label_id, gone_other.label_id}  # fmt: skip
+    assert not in_context & answers  # 정답(후손·다시 그린 레코드)이 맥락으로 새지 않는다
+    assert wrong_hand.label_id in in_context  # 정답으로 쓰지 않은 사람 추가는 맥락에 남는다
+
+
+def test_perturb_case_excludes_glove_sensor_labels(
+    policy: AiReviewPolicy, ontology: Ontology
+) -> None:
+    """장갑 센서 근거 라벨(센서 출처, 모델 출처 OBSERVED 손 상태)은 교란·판정 대상이 아니다. 사본은
+    모두 모델 출처로 바뀌므로 원래 출처로 거른다 (사용자 결정). 맥락으로는 남는다."""
+    scene = make_scene()
+    hand = HandStatePayload(
+        hand=Hand.LEFT, contact_target_kind="object", target_id="bucket_01", role="active"
+    )
+    sensor = scene.labels[0].model_copy(update={
+        "label_id": f"{SID}-sensor-contact", "stream_id": None, "t_start_ms": 3_000,
+        "t_end_ms": 3_500, "payload": hand, "confidence": None,
+        "provenance": Provenance(source=Source.SENSOR, sensor_id="glove_left"),
+    })  # fmt: skip
+    glove = sensor.model_copy(update={
+        "label_id": f"{SID}-glove-contact", "evidence": Evidence.OBSERVED,
+        "provenance": Provenance(source=Source.MODEL, model_version="contact-heuristic-1"),
+        "confidence": 0.9,
+    })  # fmt: skip
+    truth = [_human(x) for x in scene.labels] + [sensor, glove]
+    case = perturb_case(scene.session, truth, {"verb_swap": 0.5}, seed=1, o=ontology,
+                        policy=policy)  # fmt: skip
+    targets = {x.label_id for x in case.targets}
+    assert targets and not targets & {sensor.label_id, glove.label_id}
+    assert not set(case.truth) & {sensor.label_id, glove.label_id}
+    assert {sensor.label_id, glove.label_id} <= {x.label_id for x in case.labels}
+
+
 def _case(n_wrong: int, n_clean: int, o: Ontology) -> EvalCase:
     """판정만 보는 가짜 사례 (앞 n_wrong개가 틀린 라벨)."""
     scene = make_scene()
@@ -157,8 +274,9 @@ def _case(n_wrong: int, n_clean: int, o: Ontology) -> EvalCase:
 
 
 def test_score_and_gate_hand_calculation(policy: AiReviewPolicy, ontology: Ontology) -> None:
-    """틀린 라벨 4개 중 3개 지적·1개 ok, 깨끗한 라벨 6개 중 1개 지적 → 탐지 재현율 0.75, 오지적률
-    1/6, ok 놓침률 0.25. 게이트(재현율 ≥ 0.6, 오지적 ≤ 0.1, ok 놓침 ≤ 0.05)는 오지적·ok 놓침 둘이
+    """틀린 라벨 4개 중 3개 지적·1개 ok, 깨끗한 라벨 6개 중 1개 지적·5개 ok → 탐지 재현율 0.75,
+    오지적률 1/6, ok 놓침률 = P(틀림 | AI ok) = 1/(1+5) = 1/6 (설계 7.2 정의), 틀린 라벨을 ok라 한
+    비율 = 1/4 (참고). 게이트(재현율 ≥ 0.6, 오지적 ≤ 0.1, ok 놓침 ≤ 0.05)는 오지적·ok 놓침 둘이
     실패이고, block이 false라 차단하지 않는다. ECE: 확신도 0.9 판정 10개, 맞음 8개 → |0.8 - 0.9|."""
     case = _case(4, 6, ontology)
     values = ["wrong", "wrong", "suspect", "ok", "suspect", "ok", "ok", "ok", "ok", "ok"]
@@ -172,7 +290,9 @@ def test_score_and_gate_hand_calculation(policy: AiReviewPolicy, ontology: Ontol
     )
     assert report.wrong_recall == pytest.approx(0.75)
     assert report.false_flag_rate == pytest.approx(1 / 6)
-    assert report.ok_miss_rate == pytest.approx(0.25)
+    assert report.ok_miss_rate == pytest.approx(1 / 6)
+    assert report.wrong_called_ok_rate == pytest.approx(0.25)
+    assert any(f.startswith("ok 놓침률") for f in report.gate.failures)
     assert report.ece == pytest.approx(0.1)
     assert not report.gate.passed and len(report.gate.failures) == 2 and not report.gate.block
     assert report.by_error["verb_swap"].flagged == 3 and report.by_error["clean"].flagged == 1
@@ -182,4 +302,5 @@ def test_score_and_gate_hand_calculation(policy: AiReviewPolicy, ontology: Ontol
         same_model_as_actions=False,
     )  # fmt: skip
     assert empty.wrong_recall == 0.0 and empty.by_error["verb_swap"].unjudged == 4
+    assert empty.ok_miss_rate is None  # AI ok가 없으면 분모 0 (자료 없음 → 게이트 실패)
     assert not empty.gate.passed and empty.units_per_s is None

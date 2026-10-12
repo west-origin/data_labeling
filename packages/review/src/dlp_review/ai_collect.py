@@ -31,12 +31,19 @@
     - 적용, op=change_kind(action↔gap): 원 항목을 빼고 원 라벨 없는 새 항목(새 action_id는
       `h-<손>-<시작>`) → 원 라벨 삭제 레코드 + parent 없는 새 사람 레코드 → replaced, applied.
     - 적용, op=delete(이벤트·공간 트랙): 항목을 뺀다 → 원 라벨 삭제 레코드 → deleted, applied.
-    - 적용했지만 검수자가 구간이나 값도 고침(또는 지움): 검수자 결과가 우선 → conflict_edited
-      (검수자가 고친 결과가 제안과 같으면 applied).
+    - 적용했지만 검수자가 구간이나 값도 고침(또는 지움): 검수자 결과가 우선 → conflict_edited.
+      검수자가 고친 결과가 제안과 같으면 applied다: 삭제 제안인데 검수자가 지움, set 제안과 같은
+      구간·같은 페이로드로 고침, change_kind 제안인데 Label Studio에서 같은 구간의 종류를 제안과
+      같은 내용으로 바꿔 붙임(원 라벨 없는 새 항목이 된다).
+    - 적용, op=change_kind인데 검수자가 같은 구간·같은 내용의 새 항목을 직접 그려 둠: 원 항목만 빼고
+      새 항목은 더하지 않는다 (같은 레코드 둘 방지) → replaced, applied.
     - 적용, 제안 없음 → no_suggestion. 지금 온톨로지 검사·세션 검증 실패 → invalid_now (적용하지
-      않음).
+      않음). 세션 검증에는 새 레코드 ID 중복도 든다 (`insert_labels`의 원시 DB 오류 대신 되돌림).
     - 기각: 그대로 → decision=dismiss.
-    - 보낸 뒤 다른 단계가 바꾼 라벨: `drop_retracted`가 뺀다 → human=stale (적용했으면 invalid_now).
+    - 보낸 뒤 다른 단계가 바꾼 라벨(자식 레코드가 생김, `collect.drop_retracted`와 같은 기준): 적용
+      결정이 있어도 항목을 바꾸지 않는다 → invalid_now. 결과는 `drop_retracted`가 빼므로
+      human=stale. (종류 변경 제안을 그대로 적용하면 parent 없는 새 레코드가 drop_retracted를 지나
+      다른 단계가 지운 라벨이 다른 종류로 되살아난다.)
     - 집단(arm)이 shown이 아니거나 그 라벨의 판정이 화면에 따로 보이지 않았으면 결정을 무시한다 →
       not_shown.
     - 이중 작업(arm=shown): 적용은 같게 반영하고 결과는 측정 레코드가 된다 → human=na.
@@ -80,7 +87,7 @@ from dlp_schema.aireview import (
 from dlp_schema.db.aireview_repository import get_ai_exposure, get_ai_unit, insert_ai_outcome
 from dlp_schema.db.ontology_repository import get_session_ontology
 from dlp_schema.label_validation import validate_session_labels
-from dlp_schema.labels import LabelRecord, Provenance, Source
+from dlp_schema.labels import LabelPayload, LabelRecord, Provenance, Source
 from dlp_schema.ontology import Ontology
 from dlp_schema.review import ReviewMode, ReviewTask
 from dlp_schema.validation import OntologyViolationError, check_label
@@ -111,6 +118,9 @@ class AiCollect:
         results: 적용 결정을 받은 라벨 ID → 처리 결과.
         changes: 실제로 항목을 바꾸는 적용 (라벨 ID → 변경). `settle`이 되돌릴 수 있다.
         warnings: 수집 출력·결과 기록에 남길 경고 문장.
+        base: 도구 결과 항목 (`apply_decisions`가 채운다, 적용 전).
+        superseded: 이력에서 자식 레코드가 있는 라벨 ID (보낸 뒤 다른 단계가 지웠거나 다른 작업이
+            먼저 고침. `collect.drop_retracted`와 같은 기준, `begin`이 채운다).
     """
 
     task: ReviewTask
@@ -124,6 +134,7 @@ class AiCollect:
     changes: dict[str, Change] = field(default_factory=dict[str, Change])
     warnings: list[str] = field(default_factory=list[str])
     base: list[ReviewedItem] = field(default_factory=list[ReviewedItem])
+    superseded: frozenset[str] = frozenset()
 
     def items(self, keep: Sequence[str] | None = None) -> list[ReviewedItem]:
         """도구 결과(`base`)에 적용(`changes` 중 keep, None이면 전부)을 반영한 검수 항목."""
@@ -171,6 +182,7 @@ def begin(
     return AiCollect(
         task=task, exposure=exposure, sent={x.label_id: x for x in sent}, verdicts=verdicts,
         ontology=get_session_ontology(conn, task.session_id), history=history,
+        superseded=frozenset(x.parent_label_id for x in history if x.parent_label_id),
     )  # fmt: skip
 
 
@@ -223,6 +235,39 @@ def _candidate(original: LabelRecord, s: AiSuggestion, o: Ontology) -> list[str]
     return check_label(candidate, o)
 
 
+def _same_span(a: LabelRecord | ReviewedItem, b: LabelRecord | ReviewedItem) -> bool:
+    """같은 구간인가 (스트림은 둘 다 있을 때만 비교한다).
+
+    Label Studio에서 새로 그린 시간 구간은 메타가 없어 스트림이 None이다 (종류를 바꿔 붙인 구간은
+    원 라벨의 스트림을 잇는다, `labelstudio._reviewed_item`). 원 라벨(행동은 기준 스트림)과 스트림만
+    다른 같은 구간을 다른 곳으로 보지 않는다.
+    """
+    streams = (a.stream_id, b.stream_id)
+    return (a.t_start_ms, a.t_end_ms) == (b.t_start_ms, b.t_end_ms) and (
+        None in streams or streams[0] == streams[1]
+    )
+
+
+def _drawn(ai: AiCollect, place: LabelRecord | ReviewedItem, payload: LabelPayload) -> bool:
+    """검수자가 원 라벨 없이 같은 구간·같은 페이로드의 항목을 이미 냈는가 (도구 결과 기준)."""
+    return any(
+        x.origin_label_id is None and _same_span(x, place) and x.payload == payload for x in ai.base
+    )
+
+
+def _gone(ai: AiCollect, original: LabelRecord, s: AiSuggestion) -> AiApplyResult:
+    """검수자가 원 라벨 구간을 지웠거나 다른 종류로 바꿔 붙였을 때의 적용 결과 (항목은 그대로).
+
+    검수자 결과가 제안과 같으면 applied: 삭제 제안을 지움, change_kind 제안과 같은 구간·같은
+    내용으로 종류를 바꿔 붙임. 그 밖은 검수자 결과가 우선한 것이다 (conflict_edited).
+    """
+    if s.op == "delete":
+        return AiApplyResult.APPLIED
+    if s.op == "change_kind" and s.payload is not None and _drawn(ai, original, s.payload):
+        return AiApplyResult.APPLIED
+    return AiApplyResult.CONFLICT_EDITED
+
+
 def _apply_one(
     ai: AiCollect,
     label_id: str,
@@ -237,11 +282,15 @@ def _apply_one(
     if judged is None or original is None:
         ai.warnings.append(f"{label_id}: 보인 판정의 단위·원 라벨을 찾지 못해 적용하지 않았다")
         return AiApplyResult.INVALID_NOW, None
+    if label_id in ai.superseded:
+        # 보낸 뒤 다른 단계가 바꾼 라벨: 결과는 drop_retracted가 빼고(stale), 적용도 하지 않는다
+        ai.warnings.append(f"{label_id}: 보낸 뒤 다른 단계가 바꾼 라벨이라 제안을 적용하지 않았다")
+        return AiApplyResult.INVALID_NOW, None
     s = judged[0].suggestion
     if s is None:
         return AiApplyResult.NO_SUGGESTION, None
     if item is None:  # 검수자가 그 구간을 지웠다 (또는 다른 종류로 바꿔 붙였다)
-        return (AiApplyResult.APPLIED if s.op == "delete" else AiApplyResult.CONFLICT_EDITED), None
+        return _gone(ai, original, s), None
     if not same_as_sent(normalize(original) if normalize else original, item):
         same = (
             s.payload is not None
@@ -257,6 +306,10 @@ def _apply_one(
         return AiApplyResult.INVALID_NOW, None
     if s.op == "delete" or s.payload is None:
         return AiApplyResult.APPLIED, ("delete", None)
+    if s.op == "change_kind" and _drawn(ai, item, s.payload):
+        # 검수자가 같은 내용을 직접 그려 뒀다: 원 항목만 빼고 새 항목은 더하지 않는다 (같은 레코드
+        # 둘이면 label_id가 같아 저장이 실패한다)
+        return AiApplyResult.APPLIED, ("change_kind", None)
     # 종류 변경은 원 라벨 없는 새 항목이다 (Label Studio에서 종류를 바꿔 붙인 것과 같은 의미)
     origin = label_id if s.op == "set" else None
     new = ReviewedItem(origin, item.stream_id, item.t_start_ms, item.t_end_ms, s.payload)
@@ -297,7 +350,14 @@ def apply_decisions(
 
 
 def _valid(ai: AiCollect, outcome: ReviewOutcome) -> bool:
-    """새 레코드가 세션 단위 검증을 통과하는가 (`insert_labels`가 할 검사와 같다)."""
+    """새 레코드가 세션 단위 검증을 통과하는가 (`insert_labels`가 할 검사와 같다).
+
+    레코드 ID가 겹치면(서로 또는 이력과) 저장이 원시 DB 오류(IntegrityError)로 실패하므로 그것도
+    검증 실패로 본다.
+    """
+    ids = [r.label_id for r in outcome.new_records]
+    if len(set(ids)) != len(ids) or not {x.label_id for x in ai.history}.isdisjoint(ids):
+        return False
     try:
         validate_session_labels(ai.ontology, ai.history, outcome.new_records)
     except OntologyViolationError:
@@ -342,24 +402,26 @@ def settle(
 # ---------------------------------------------------------------- 결과 기록
 
 
-def _same_place(a: LabelRecord, b: LabelRecord) -> bool:
-    """같은 스트림·같은 구간인가 (Label Studio에서 구간 라벨만 다른 종류로 바꾼 경우)."""
-    return (a.stream_id, a.t_start_ms, a.t_end_ms) == (b.stream_id, b.t_start_ms, b.t_end_ms)
-
-
 def _replacement(
     ai: AiCollect, original: LabelRecord, outcome: ReviewOutcome
 ) -> LabelRecord | None:
-    """종류를 바꿔 다시 그린 새 레코드 (적용한 change_kind의 새 항목, 아니면 같은 구간의 다른 종류
-    새 레코드). 없으면 None."""
+    """종류를 바꿔 다시 그린 새 레코드 (적용한 change_kind의 새 항목, 아니면 같은 손·같은 구간의
+    다른 종류 새 레코드). 없으면 None."""
     fresh = [r for r in outcome.new_records if r.parent_label_id is None and not r.retracted]
     change = ai.changes.get(original.label_id)
     if change is not None and change[0] == "change_kind" and change[1] is not None:
         new = change[1]
-        span = (new.t_start_ms, new.t_end_ms)
-        hits = [r for r in fresh if r.payload == new.payload and (r.t_start_ms, r.t_end_ms) == span]
+        hits = [r for r in fresh if r.payload == new.payload and _same_span(r, new)]
         return hits[0] if hits else None
-    return next((r for r in fresh if _same_place(r, original) and r.kind != original.kind), None)
+    hand = getattr(original.payload, "hand", None)
+    return next(
+        (
+            r for r in fresh
+            if _same_span(r, original) and r.kind != original.kind
+            and getattr(r.payload, "hand", None) == hand
+        ),
+        None,
+    )  # fmt: skip
 
 
 def human_actions(
@@ -447,8 +509,9 @@ def record_outcome(
     """작업 하나의 AI 결과 기록을 쓴다 (AI가 없으면 None). 수집 트랜잭션에서 한 번 부른다.
 
     항목은 보낸 라벨마다 하나다 (판정이 없는 라벨은 unit_id·verdict가 None). 보낸 뒤 다른 단계가
-    바꾼(stale) 라벨에 적용 결정이 있었으면 적용하지 못했으므로 invalid_now로 남긴다. 기록은
-    `outcome.ai`에도 싣는다 (수집 출력).
+    바꾼(stale) 라벨의 적용은 `apply_decisions`가 이미 하지 않고 invalid_now로 둔다 (여기서는 사람
+    결과가 stale인데 applied로 남는 일이 없게 한 번 더 맞춘다). 기록은 `outcome.ai`에도 싣는다 (수집
+    출력).
 
     부작용: `ai_review_outcomes` 1행 (같은 작업에 두 번 쓰면 IntegrityError).
     """

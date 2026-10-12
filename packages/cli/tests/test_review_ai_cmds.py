@@ -308,11 +308,51 @@ def test_quality_ai_report_text_json_and_thresholds(
     assert main(["review", "quality", "--ai", "--json", "--url", url]) == 0
     data = json.loads(capsys.readouterr().out)
     holdout = data["arms"]["holdout"]
-    assert holdout["flag_precision"] == {"num": 1, "den": 1, "value": 1.0, "upper95": 1.0}
+    assert holdout["flag_precision"] == {
+        "num": 1, "den": 1, "value": 1.0, "upper95": 1.0, "weighted": False, "n_eff": None,
+    }  # fmt: skip
     assert data["exposure"]["tasks"] == {"holdout": 1}
     later = (FIXED_TIME + timedelta(days=1)).isoformat()
     assert main(["review", "quality", "--ai", "--json", "--since", later, "--url", url]) == 0
     assert json.loads(capsys.readouterr().out)["arms"] == {}
+
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [(["--json"], "--json"), (["--ai-thresholds", "0.5"], "--ai-thresholds"),
+     (["--since", "2026-10-01"], "--since"), (["--until", "2026-10-01T00:00:00+09:00"], "--until")],
+)  # fmt: skip
+def test_quality_ai_only_args_require_ai(
+    extra: list[str], message: str, db: tuple[str, sqlalchemy.Engine]
+) -> None:
+    """AI 전용 인자를 --ai 없이 주면 조용히 무시하지 않고 알린다 (예전: --json이면 `{}`만 내고
+    0)."""
+    url, _ = db
+    with pytest.raises(SystemExit, match=f"{message}.*--ai와 함께"):
+        main(["review", "quality", *extra, "--url", url])
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [["--since", "어제"], ["--until", "2026-13-01"], ["--ai-thresholds", "1.5"],
+     ["--ai-thresholds", "높음"]],
+)  # fmt: skip
+def test_quality_bad_time_or_precision_is_usage_error(
+    extra: list[str], db: tuple[str, sqlalchemy.Engine], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """잘못된 ISO 시각·정밀도는 traceback이 아니라 사용법 오류(종료 2)다."""
+    url, _ = db
+    with pytest.raises(SystemExit) as exc:
+        main(["review", "quality", "--ai", *extra, "--url", url])
+    assert exc.value.code == 2 and "error" in capsys.readouterr().err
+
+
+def test_quality_since_after_until_is_refused(db: tuple[str, sqlalchemy.Engine]) -> None:
+    """--since가 --until보다 뒤면 빈 기간이라 알린다."""
+    url, _ = db
+    with pytest.raises(SystemExit, match="앞이어야"):
+        main(["review", "quality", "--ai", "--since", "2026-10-02", "--until", "2026-10-01",
+              "--url", url])  # fmt: skip
 
 
 def test_collect_output_shows_ai_counts_and_warnings(capsys: pytest.CaptureFixture[str]) -> None:

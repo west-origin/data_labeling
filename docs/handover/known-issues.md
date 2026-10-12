@@ -17,8 +17,8 @@
 
 | 검사 | 결과 | 범위·한계 |
 | --- | --- | --- |
-| 기본 테스트 | **1052 passed, 6 skipped, 162 deselected, 6 xfailed**, 426초 | 6 skipped는 모델 가중치 없음. xfailed는 알려진 결함 재현. 서비스/격리 환경 제외 |
-| 서비스 테스트 | **159 passed, 1 skipped**, 438초 | 실제 PostgreSQL·Label Studio 1.23.2·CVAT·저장소. AI 종단(LS 작업 생성 → 결정이 든 주석 → 수집 → 사람 레코드·`ai_review_outcomes`) 포함. 생략 1건은 외부 큐레이션 MongoDB URI 없음 |
+| 기본 테스트 | **1085 passed, 6 skipped, 162 deselected, 6 xfailed**, 439초 | 6 skipped는 모델 가중치 없음. xfailed는 알려진 결함 재현. 서비스/격리 환경 제외. WP17.7·17.8 검증 지적 반영(stale 적용 차단, 표본 가중 품질 지표, 골든 평가 정답·ok 놓침 정의) 뒤 값 |
+| 서비스 테스트 | **159 passed, 1 skipped**, 437초 | 실제 PostgreSQL·Label Studio 1.23.2·CVAT·저장소. AI 종단(LS 작업 생성 → 결정이 든 주석 → 수집 → 사람 레코드·`ai_review_outcomes`) 포함. 생략 1건은 외부 큐레이션 MongoDB URI 없음 |
 | ruff·포맷·pyright strict | 오류 0 | `noqa: C901` 기준선은 처음 13개에서 지금 **11**개다 (이번 묶음에서 `collect_task` 분해로 하나 줄었다) |
 | 계약 검사 | 온톨로지·JSON Schema·테마 색·모델 라이선스 통과 | 이번 묶음은 계약 타입을 바꾸지 않았다. DB는 Alembic 0019(`ai_review_*` 추가 전용 표) |
 | 격리 환경(LeRobot) | 이번 미실행 | AI 1차 검수와 무관 |
@@ -26,8 +26,14 @@
 남은 과제(레지스트리 등록): 행동 VLM 직렬 호출(F-AIR-01), 오류 삽입 작업의 AI 표시·사본 판정(F-AIR-03),
 AI 충돌 기반 표적 QA(F-AIR-04), AI 표 파티션·보관 ADR(F-AIR-05), CVAT 2단계 표시(F-AIR-06), 경계 이동 제안
 적용(F-AIR-07), 누락 발견 표시(F-AIR-08), 장갑+영상 융합 접촉 판정(F-AIR-09), 골든 게이트 차단 여부(F-AIR-10,
-지금은 경고만), 층화 ok 놓침 상한의 보수적 근사(F-AIR-11), AI 끔 수집에서 결정 무시(F-AIR-12).
+지금은 경고만), 층화 ok 놓침 상한의 보수적 근사(F-AIR-11), AI 끔 수집에서 결정 무시(F-AIR-12), stale
+라벨의 종류를 Label Studio에서 직접 바꿔 붙이면 원 라벨 없는 새 레코드가 남는 기존 수집 결함(F-AIR-13, AI 적용
+경로는 막았다), 골든 평가 history 맥락에 남는 사람 추가 레코드(F-AIR-14).
 Label Studio 수집의 `from_name` 문제(F-AIR-02)는 고쳤다.
+
+판정 품질 지표는 표본 가중이다: 계획 단계가 AI 지적 라벨을 집단과 무관하게 표본에서 빼 전수 검수하므로
+대조군도 행을 그대로 세면 재현율·κ가 부풀려진다. 골든 게이트의 ok 놓침률은 품질 보고와 같은
+P(틀린 라벨 | AI ok)다.
 
 ## 2026-10-11 전수 검수와 외주 준비
 

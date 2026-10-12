@@ -8,9 +8,14 @@
     - `perturb_case` (통제된 오류): 골든 정답 라벨을 메모리에서 교란한다(`perturb`). 교란한 라벨의
       정답은 wrong(+ 원래 값 제안, 거짓 이벤트는 삭제), 나머지는 ok다.
     - `history_case` (실제 오류 분포): 사람이 검수한 과거 모델 레코드를 대상으로 한다. 승인 → ok,
-      사람 수정 → wrong(자식 사람 레코드의 페이로드가 정답 제안), 사람 삭제 → wrong(삭제, 같은
-      구간을 다른 종류로 다시 그렸으면 그 페이로드), 표본 검증·미검수·모델끼리의 교체는 뺀다.
-      맥락은 대상의 후손(사람 수정본)을 뺀 현재 라벨이다 (정답이 맥락으로 새지 않게).
+      사람 수정 → wrong, 사람 삭제 → wrong(삭제), 표본 검증·미검수·모델끼리의 교체는 뺀다. 정답은
+      대상 후손 사슬의 지금 상태다: 후손 중 현재 라벨(QA가 다시 고쳤으면 그 마지막 수정본)의
+      페이로드가 정답 제안이고, 사슬이 삭제로 끝났으면 삭제다 (같은 구간을 다른 종류로 다시 그린
+      사람 레코드가 있으면 replaced, 그 지금 상태의 페이로드). 고쳤다가 원래 값으로 되돌린 라벨은
+      맞음(approved)이다.
+      맥락은 대상, 대상의 후손, 정답으로 쓴 레코드(다시 그린 레코드와 그 후손)를 뺀 현재 라벨이다
+      (정답이 맥락으로 새지 않게). 한계: 검수자가 새로 그린 다른 레코드(정답으로 쓰지 않은 추가)는
+      판정 시점에 없던 정보지만 맥락에 남는다.
     두 방식 모두 대상·맥락 라벨을 "검수 전 자동 라벨" 사본(출처 model, 미검수)으로 바꿔 넣는다:
     운영에서 판정이 보는 맥락은 대개 검수 전 자동 라벨이라 "확정" 표시가 붙지 않는다. 골든 라벨은
     검수된 라벨이라 일반 대상 조건(`plan.targets`)을 통과하지 못하므로 대상 목록을 직접 넘긴다
@@ -19,11 +24,16 @@
     평가하지 않는다).
 
 지표 (`score`)
-    - 오류 종류별·라벨 종류별: 탐지(wrong·suspect) 재현율, ok 놓침(틀린 라벨을 ok라 함), 제안 정확
+    - 오류 종류별·라벨 종류별: 탐지(wrong·suspect) 재현율, ok 수(틀린 라벨을 ok라 함), 제안 정확
       일치(제안 페이로드가 정답과 같음, 삭제는 삭제 제안).
-    - 전체: 틀린 라벨 탐지 재현율(`wrong_recall`), 깨끗한 라벨 오지적률(`false_flag_rate`), ok
-      놓침률, 제안 정확 일치율, 확신도 ECE(`dlp_eval.metrics.classification.ece`, 맞음 = 지적 여부가
-      정답과 같음), 판단 불가·미응답·판정 안 됨 수, 단위/s.
+    - 전체: 틀린 라벨 탐지 재현율(`wrong_recall`), 깨끗한 라벨 오지적률(`false_flag_rate`), **ok
+      놓침률(`ok_miss_rate`) = P(틀린 라벨 | AI ok)** = 틀린 라벨의 ok 수 / 모든 ok 수 (설계 7.2와
+      `dlp_review.ops.ai_quality`의 ok 놓침률 P(바뀜 | AI ok)와 같은 정의. `review.yaml
+      sampling.max_defect_ratio`와 비교할 수 있는 "AI가 맞다고 한 라벨 중 결함 비율"이다), 틀린
+      라벨을 ok라 한 비율(`wrong_called_ok_rate` = P(AI ok | 틀린 라벨), 참고), 제안 정확 일치율,
+      확신도 ECE(`dlp_eval.metrics.classification.ece`, 맞음 = 지적 여부가 정답과 같음), 판단
+      불가·미응답·판정 안 됨 수, 단위/s. perturb 방식의 ok 놓침률은 교란 비율(틀린 라벨의 유병률)에
+      따라 달라지므로 같은 `gate.inject`로 잰 값끼리 비교한다.
     - 게이트(`gate_result`, `aireview.yaml gate`): 탐지 재현율 하한, 오지적률 상한, ok 놓침률 상한.
       자료가 없는 지표(분모 0)는 통과로 보지 않는다. `gate.block`이 false(결정)면 경고만 한다.
     - 판정 모델이 행동 분류 모델과 같으면(`same_model_as_actions`) 행동 라벨 판정에 상관 오류가 생길
@@ -165,40 +175,84 @@ def _operational(history: Sequence[LabelRecord]) -> list[LabelRecord]:
     return [x for x in history if not x.seeded_error and x.measurement is None]
 
 
-def _history_truth(
-    x: LabelRecord, kids: Sequence[LabelRecord], fresh: Sequence[LabelRecord]
-) -> Truth | None:
-    """과거 모델 레코드 하나의 정답 (사람이 본 결과가 아니면 None)."""
-    human = [k for k in kids if k.provenance.source is Source.HUMAN]
-    if not human:
-        approved = not kids and x.verification.state is State.HUMAN_APPROVED
-        return Truth(x.label_id, False, "approved") if approved else None
-    fixed = [k for k in human if not k.retracted]
-    if fixed:
-        return Truth(x.label_id, True, "corrected", expected=fixed[0].payload)
-    same = (x.stream_id, x.t_start_ms, x.t_end_ms)
-    redrawn = [
-        r for r in fresh if (r.stream_id, r.t_start_ms, r.t_end_ms) == same and r.kind != x.kind
-    ]
-    if redrawn:  # Label Studio에서 같은 구간을 다른 종류로 바꿔 붙였다 (삭제 + 새 사람 레코드)
-        return Truth(x.label_id, True, "replaced", expected=redrawn[0].payload)
-    return Truth(x.label_id, True, "deleted", delete=True)
+def _same_span(a: LabelRecord, b: LabelRecord) -> bool:
+    """같은 구간인가 (스트림은 둘 다 있을 때만 비교한다: Label Studio에서 새로 그린 시간 구간은
+    스트림이 None이다)."""
+    streams = (a.stream_id, b.stream_id)
+    return (a.t_start_ms, a.t_end_ms) == (b.t_start_ms, b.t_end_ms) and (
+        None in streams or streams[0] == streams[1]
+    )
 
 
-def _descendants(roots: set[str], history: Sequence[LabelRecord]) -> set[str]:
-    """roots의 모든 후손 ID (부모 사슬을 따라 내려간다)."""
-    children: dict[str, list[str]] = {}
+def _redrawn_as(r: LabelRecord, x: LabelRecord) -> bool:
+    """r이 x와 같은 손·같은 구간을 다른 종류로 다시 그린 레코드인가 (행동 ↔ 사이 구간 등)."""
+    hand = getattr(x.payload, "hand", None)
+    return _same_span(r, x) and r.kind != x.kind and getattr(r.payload, "hand", None) == hand
+
+
+def _children(history: Sequence[LabelRecord]) -> dict[str, list[LabelRecord]]:
+    """부모 라벨 ID → 직접 자식 레코드."""
+    out: dict[str, list[LabelRecord]] = {}
     for x in history:
         if x.parent_label_id:
-            children.setdefault(x.parent_label_id, []).append(x.label_id)
+            out.setdefault(x.parent_label_id, []).append(x)
+    return out
+
+
+def _descendants(roots: set[str], children: Mapping[str, Sequence[LabelRecord]]) -> set[str]:
+    """roots의 모든 후손 ID (부모 사슬을 따라 내려간다, children = `_children` 결과)."""
     out: set[str] = set()
     stack = list(roots)
     while stack:
         for c in children.get(stack.pop(), []):
-            if c not in out:
-                out.add(c)
-                stack.append(c)
+            if c.label_id not in out:
+                out.add(c.label_id)
+                stack.append(c.label_id)
     return out
+
+
+@dataclass(frozen=True)
+class _History:
+    """history 방식의 이력 색인: 직접 자식, 현재 라벨, 원 라벨 없는 사람 레코드."""
+
+    children: dict[str, list[LabelRecord]]
+    current: dict[str, LabelRecord]
+    fresh: tuple[LabelRecord, ...]
+
+
+def _now_of(root: LabelRecord, h: _History) -> LabelRecord | None:
+    """root 사슬의 지금 상태: root 자신이나 후손 중 현재 라벨 (여럿이면 가장 늦게 만든 것). 사슬이
+    삭제로 끝났으면 None."""
+    chain = {root.label_id, *_descendants({root.label_id}, h.children)}
+    found = [h.current[i] for i in chain if i in h.current]
+    return max(found, key=lambda x: (x.created_at, x.label_id)) if found else None
+
+
+def _history_truth(x: LabelRecord, h: _History) -> tuple[Truth, set[str]] | None:
+    """과거 모델 레코드 하나의 정답과 정답으로 쓴 레코드 ID (사람이 본 결과가 아니면 None).
+
+    정답은 대상 후손 사슬의 지금 상태다 (모듈 docstring). 정답으로 쓴 레코드는 맥락에서 뺀다.
+    """
+    kids = h.children.get(x.label_id, [])
+    if not any(k.provenance.source is Source.HUMAN for k in kids):
+        approved = not kids and x.verification.state is State.HUMAN_APPROVED
+        return (Truth(x.label_id, False, "approved"), set()) if approved else None
+    now = _now_of(x, h)
+    if now is not None:
+        if now.payload == x.payload and _same_span(now, x):  # 고쳤다가 원래 값으로 되돌렸다
+            return Truth(x.label_id, False, "approved"), {now.label_id}
+        return Truth(x.label_id, True, "corrected", expected=now.payload), {now.label_id}
+    for r in h.fresh:
+        # Label Studio에서 같은 구간을 다른 종류로 바꿔 붙였다 (삭제 + 새 사람 레코드)
+        if not _redrawn_as(r, x):
+            continue
+        redrawn = _now_of(r, h)
+        if redrawn is not None:
+            return (
+                Truth(x.label_id, True, "replaced", expected=redrawn.payload),
+                {r.label_id, redrawn.label_id},
+            )
+    return Truth(x.label_id, True, "deleted", delete=True), set()
 
 
 def history_case(
@@ -210,26 +264,30 @@ def history_case(
         history: 세션의 전체 라벨 이력 (`GoldenSession.labels`).
     """
     ops = _operational(history)
-    kids: dict[str, list[LabelRecord]] = {}
-    for x in ops:
-        if x.parent_label_id:
-            kids.setdefault(x.parent_label_id, []).append(x)
-    fresh = [
-        x for x in ops
-        if x.parent_label_id is None and x.provenance.source is Source.HUMAN and not x.retracted
-    ]  # fmt: skip
+    h = _History(
+        children=_children(ops),
+        current={x.label_id: x for x in current_labels(list(history))},
+        fresh=tuple(
+            x for x in ops
+            if x.parent_label_id is None and x.provenance.source is Source.HUMAN
+            and not x.retracted
+        ),
+    )  # fmt: skip
     truth: dict[str, Truth] = {}
     chosen: list[LabelRecord] = []
+    answers: set[str] = set()
     for x in ops:
         if x.provenance.source is not Source.MODEL or x.retracted or glove_derived(x):
             continue
-        t = _history_truth(x, kids.get(x.label_id, []), fresh)
-        if t is not None:
-            truth[x.label_id] = t
+        found = _history_truth(x, h)
+        if found is not None:
+            truth[x.label_id] = found[0]
+            answers |= found[1]
             chosen.append(x)
     ids = {x.label_id for x in chosen}
-    hidden = ids | _descendants(ids, ops)
-    context = [x for x in current_labels(list(history)) if x.label_id not in hidden]
+    roots = ids | answers
+    hidden = roots | _descendants(roots, h.children)
+    context = [x for x in h.current.values() if x.label_id not in hidden]
     labels = tuple(_unreviewed(x) for x in (*chosen, *context))
     targets = tuple(x for x in eval_targets(labels, policy, o) if x.label_id in ids)
     return EvalCase(
@@ -382,7 +440,10 @@ class EvalReport(Contract):
     by_kind: dict[str, KindStat]
     wrong_recall: float | None
     false_flag_rate: float | None
+    # P(틀린 라벨 | AI ok): 게이트 `max_ok_miss_rate`와 비교한다
     ok_miss_rate: float | None
+    # P(AI ok | 틀린 라벨): 참고 (게이트에 쓰지 않는다)
+    wrong_called_ok_rate: float | None
     suggestion_exact_rate: float | None
     ece: float | None
     gate: GateResult
@@ -487,7 +548,8 @@ def score(
         by_error=dict(sorted(by_error.items())), by_kind=_kinds(cases, judged.verdicts),
         wrong_recall=_ratio(sum(s.flagged for s in wrong), n_wrong),
         false_flag_rate=_ratio(sum(s.flagged for s in clean), n_clean),
-        ok_miss_rate=_ratio(sum(s.ok for s in wrong), n_wrong),
+        ok_miss_rate=_ratio(sum(s.ok for s in wrong), sum(s.ok for s in by_error.values())),
+        wrong_called_ok_rate=_ratio(sum(s.ok for s in wrong), n_wrong),
         suggestion_exact_rate=_ratio(sum(s.exact for s in wrong), sum(s.expected for s in wrong)),
         ece=None if not conf or math.isnan(e := ece(conf, correct)) else e,
         gate=GateResult(passed=False),

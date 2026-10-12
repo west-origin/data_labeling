@@ -649,21 +649,46 @@ def cmd_queue(args: argparse.Namespace) -> int:
     return 0
 
 
-def _ai_window(args: argparse.Namespace) -> tuple[datetime, datetime] | None:
-    """`--ai`의 기간 [since, until) (없으면 처음부터 지금까지, 시간대 없는 값은 UTC)."""
-    if not args.ai:
-        return None
-
-    def parse(text: str | None, default: datetime) -> datetime:
-        if text is None:
-            return default
+def _iso_time(text: str) -> datetime:
+    """ISO 시각 (argparse 형식 함수, 시간대 없는 값은 UTC). 잘못된 값은 사용법 오류다."""
+    try:
         at = datetime.fromisoformat(text)
-        return at if at.tzinfo is not None else at.replace(tzinfo=UTC)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"ISO 시각이 아닙니다: {text}") from exc
+    return at if at.tzinfo is not None else at.replace(tzinfo=UTC)
 
-    now = datetime.now(UTC)
-    return parse(args.since, datetime(1970, 1, 1, tzinfo=UTC)), parse(
-        args.until, now + timedelta(seconds=1)
-    )
+
+def _precision(text: str) -> float:
+    """목표 정밀도 0~1 (argparse 형식 함수)."""
+    try:
+        value = float(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"0~1 사이 수가 아닙니다: {text}") from exc
+    if not 0 <= value <= 1:
+        raise argparse.ArgumentTypeError(f"0~1 사이 수가 아닙니다: {text}")
+    return value
+
+
+def _ai_window(args: argparse.Namespace) -> tuple[datetime, datetime] | None:
+    """`--ai`의 기간 [since, until) (없으면 처음부터 지금까지). AI 전용 인자를 --ai 없이 주면
+    조용히 무시하지 않고 `SystemExit`로 알린다 (`--json`은 AI 절만 내므로 --ai가 필요하다)."""
+    if not args.ai:
+        extra = [
+            name for name, on in (
+                ("--json", args.json), ("--ai-thresholds", args.ai_thresholds is not None),
+                ("--since", args.since is not None), ("--until", args.until is not None),
+            ) if on
+        ]  # fmt: skip
+        if extra:
+            raise SystemExit(f"{', '.join(extra)}는 --ai와 함께 씁니다")
+        return None
+    since = args.since or datetime(1970, 1, 1, tzinfo=UTC)
+    until = args.until or datetime.now(UTC) + timedelta(seconds=1)
+    if since >= until:
+        raise SystemExit(
+            f"--since({since.isoformat()})가 --until({until.isoformat()})보다 앞이어야 합니다"
+        )
+    return since, until
 
 
 def cmd_quality(args: argparse.Namespace) -> int:
@@ -675,7 +700,8 @@ def cmd_quality(args: argparse.Namespace) -> int:
     - `--ai [--since ISO] [--until ISO]`: AI 1차 검수 판정 품질 (WP17.8,
       `dlp_review.ops.ai_quality`). 편향 없는 값은 대조군(holdout)이다. `--ai-thresholds P`는 목표
       정밀도 P를 만족하는 판정별 최소 확신도를 `review.yaml ai_review.show_min_confidence` 조안으로
-      낸다. `--json`은 AI 절을 JSON으로 낸다.
+      낸다. `--json`은 AI 절을 JSON으로 낸다. `--json`·`--ai-thresholds`·`--since`·`--until`은
+      `--ai`가 필요하다 (없으면 종료 1과 안내, 잘못된 시각·정밀도는 사용법 오류 종료 2).
     """
     policy = load_ops_policy(repo_root())
     window = _ai_window(args)
@@ -1148,10 +1174,14 @@ def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
 
     ql = rsub.add_parser("quality", help="오류 삽입 발견율, 이중 라벨 일치도, 프리라벨 편향")
     ql.add_argument("--ai", action="store_true", help="AI 1차 검수 판정 품질도 낸다 (WP17.8)")
-    ql.add_argument("--since", help="--ai 기간 시작 (ISO 시각, 기본: 처음부터)")
-    ql.add_argument("--until", help="--ai 기간 끝 (ISO 시각, 기본: 지금)")
     ql.add_argument(
-        "--ai-thresholds", type=float, metavar="PRECISION",
+        "--since",
+        type=_iso_time,
+        help="--ai 기간 시작 (ISO 시각, 시간대 없으면 UTC, 기본: 처음부터)",
+    )
+    ql.add_argument("--until", type=_iso_time, help="--ai 기간 끝 (ISO 시각, 기본: 지금)")
+    ql.add_argument(
+        "--ai-thresholds", type=_precision, metavar="PRECISION",
         help="목표 정밀도(0~1)를 만족하는 판정별 최소 확신도 조안 (--ai와 함께)",
     )  # fmt: skip
     ql.add_argument("--json", action="store_true", help="AI 절을 JSON으로 (--ai와 함께)")
