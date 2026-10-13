@@ -127,8 +127,10 @@ external:
   # 상관 오류 방지). 최종 모델은 WP17.3 bench(DGX Spark 실측)와 WP17.8 골든 평가로 정한다.
   # 양자화·변환본(FP8, GGUF 등)은 원 가중치 라이선스를 잇는지 따로 확인하고, 실행 기록
   # backend.fingerprint와 served_model에 실제 가중치 저장소@revision을 남긴다.
+  # 같은 서버(services/vlm vlm-aireview)가 설명 라벨의 한→영 번역도 맡는다 (글만 보내는 요청, ADR 0043).
+  # 번역 결과(영어 설명 라벨)도 판매 데이터에 들어가므로 같은 상업 사용 판단(review)을 따른다.
   Qwen/Qwen3-VL-8B-Instruct:          # 기본 판정 모델 (revision 0c351dd)
-    served_by: 사내 OpenAI 호환 VLM 서버 (DGX Spark vLLM), config/policies/aireview.yaml backend.model
+    served_by: 사내 OpenAI 호환 VLM 서버 (DGX Spark vLLM), config/policies/aireview.yaml backend.model, config/policies/translate.yaml backend.model
     license: Apache-2.0
     training_data: ["공개되지 않음 (모델 카드에 학습 데이터 출처 명시 없음)"]
     commercial: review

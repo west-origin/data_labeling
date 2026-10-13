@@ -23,6 +23,9 @@ import sqlalchemy as sa
 from dlp_actions.clients import OpenAICompatibleVlm, OracleVlm
 from dlp_actions.policy import load_policy
 from dlp_actions.runner import run_actions
+from dlp_actions.translate import run_translate
+from dlp_actions.translate_policy import load_policy as load_translate_policy
+from dlp_actions.translators import GlossaryStubTranslator
 from dlp_actions.vlm import SegmentRequest, VlmUnavailableError
 from dlp_fixtures.actions import generate_action_scenario
 from dlp_fixtures.video import write_video
@@ -276,6 +279,65 @@ def test_input_change_reruns_and_reviewed_description_protects_its_action(pg: sa
         and x.label_id == f"{desc.label_id}:edit"
         for x in descriptions
     )
+    assert all(a.t_end_ms == b.t_start_ms for a, b in itertools.pairwise(timeline2))
+
+
+def test_actions_rerun_drops_english_siblings_of_dropped_descriptions(pg: sa.Engine) -> None:
+    """설명의 영어 번역(ADR 0043)과 행동 단계 재실행.
+
+    정답: 번역 뒤 설명마다 영어 형제가 있다 (원문·번역 모두 현재 라벨). 정책이 바뀌어 행동을 다시
+    만들면 검수 전 행동·설명과 함께 그 영어 번역도 지운다 (삭제 수 = 행동·공백 + 설명 + 번역).
+    검수자가 승인한 번역이 있는 행동은 지우지 않는다. 다시 번역하면 새 설명만 번역한다.
+    """
+    ontology = load_ontology(ROOT / "config/ontology/v1")
+    policy = load_policy(ROOT)
+    tpolicy = load_translate_policy(ROOT)
+    truth = [x for x in SCENARIO.labels if isinstance(x.payload, ActionPayload | GapPayload)]
+    with pg.begin() as conn:
+        first = run_actions(conn, SID, OracleVlm(truth), ontology, policy, FIXED_TIME)
+    with pg.begin() as conn:
+        t1 = run_translate(conn, SID, GlossaryStubTranslator(), ontology, tpolicy, FIXED_TIME)
+        descriptions = current_labels(get_labels(conn, SID, kinds=["description"]))
+        timeline = _timeline(conn)
+    n_actions = first.hands["right"]["actions"]
+    assert t1.translated == n_actions and t1.pending == []
+    english = [
+        x for x in descriptions
+        if isinstance(x.payload, DescriptionPayload) and x.payload.language == "en"
+    ]  # fmt: skip
+    assert len(english) == n_actions and len(descriptions) == 2 * n_actions
+    # 한 행동의 영어 번역을 검수자가 승인한다 → 그 행동은 보호된다
+    kept = english[0]
+    assert isinstance(kept.payload, DescriptionPayload)
+    with pg.begin() as conn:
+        record_review(conn, kept.label_id, VerificationState.HUMAN_APPROVED, "r1", FIXED_TIME)
+    changed = policy.model_copy(
+        update={"boundaries": policy.boundaries.model_copy(update={"merge_ms": 90})}
+    )
+    with pg.begin() as conn:
+        second = run_actions(conn, SID, OracleVlm(truth), ontology, changed, FIXED_TIME)
+        after = current_labels(get_labels(conn, SID, kinds=["description"]))
+        timeline2 = _timeline(conn)
+    # 보호된 행동 1개와 그 설명·번역을 뺀 나머지가 지워졌다
+    assert second.retracted == (len(timeline) - 1) + 2 * (n_actions - 1)
+    assert kept.payload.segment_id in {
+        x.payload.action_id for x in timeline2 if isinstance(x.payload, ActionPayload)
+    }
+    stale_en = [
+        x for x in after
+        if isinstance(x.payload, DescriptionPayload) and x.payload.language == "en"
+    ]  # fmt: skip
+    assert [x.label_id for x in stale_en] == [kept.label_id]  # 검수 전 번역은 행동과 함께 지워졌다
+    with pg.begin() as conn:
+        t2 = run_translate(conn, SID, GlossaryStubTranslator(), ontology, tpolicy, FIXED_TIME)
+        final = current_labels(get_labels(conn, SID, kinds=["description"]))
+    ko = [
+        x for x in final if isinstance(x.payload, DescriptionPayload) and x.payload.language == "ko"
+    ]
+    en = [
+        x for x in final if isinstance(x.payload, DescriptionPayload) and x.payload.language == "en"
+    ]
+    assert t2.retracted == 0 and len(en) == len(ko)
     assert all(a.t_end_ms == b.t_start_ms for a, b in itertools.pairwise(timeline2))
 
 

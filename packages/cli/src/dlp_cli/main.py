@@ -42,6 +42,7 @@ from dlp_cli import (
     schema_cmds,
     sync_cmds,
     train_cmds,
+    translate_cmds,
 )
 from dlp_cli.health import CheckResult, default_checks, run_checks
 
@@ -128,6 +129,7 @@ def build_parser() -> argparse.ArgumentParser:
     prelabel_cmds.add_commands(sub)  # dlp prelabel run — 자동 프리라벨 (WP8)
     relations_cmds.add_commands(sub)  # dlp relations run — 관계 도출 (WP9)
     actions_cmds.add_commands(sub)  # dlp actions run — 행동 구간 (WP10)
+    translate_cmds.add_commands(sub)  # dlp translate run|pending — 설명 영어 번역 (ADR 0043)
     # AI 1차 검수: dlp aireview probe|bench|estimate|run|status|show|waive|eval (WP17)
     aireview_cmds.add_commands(sub)
     eval_cmds.add_commands(sub)  # dlp eval golden — 골든셋 평가 (WP11)

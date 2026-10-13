@@ -17,6 +17,9 @@ track_rank`: 사람·검수 → 최신 → 긴 구간 → 라벨 ID)로 하나�
   검수자가 승인·표본 검증한 레코드와 사람이 고치거나 만든 레코드는 남기고(설명이 검수된 행동도
   남긴다: 행동만 지우면 설명이 고아가 된다), 새 결과 중 그와 겹치는 구간은 버린 뒤 남는 빈 시간을
   미상(unknown) 공백으로 채운다 (타임라인 공백 0 유지, ADR 0015).
+- 설명의 영어 번역(`dlp_actions.translate`, ADR 0043)은 이 단계 출처가 아니지만, 행동을 지울 때 그
+  행동의 검수 전 설명과 함께 검수 전 번역도 지운다 (원문 없는 번역이 남지 않게). 검수된 번역은 그
+  행동을 지우지 않게 보호한다 (검수된 설명과 같은 규칙). 번역은 CLI가 이 단계가 커밋된 뒤 따로 돈다.
 
 입력은 `current_labels()`(운영 라벨)에서 고르고, 다시 돌릴지는 전체 이력(`get_labels`)으로 정한다.
 작업량 추정용 `vlm_request_count`(손마다 후보 구간 수, 순수 함수)는 같은 트랙·접촉 선택
@@ -39,6 +42,7 @@ import sqlalchemy as sa
 
 from dlp_actions.pipeline import segment_count, segment_hand
 from dlp_actions.policy import ActionsPolicy
+from dlp_actions.translate import is_machine_translation
 from dlp_actions.vlm import VlmClient
 from dlp_media.storage import ObjectStore, blurred_key
 from dlp_privacy.policy import load_policy as load_privacy_policy
@@ -325,11 +329,11 @@ def run_actions(
             - unresolved
         )
     )
-    descriptions_by_action = {
-        x.payload.segment_id: x
-        for x in current
-        if isinstance(x.payload, DescriptionPayload) and _ours(x)
-    }
+    # 행동마다 이 단계의 설명과 그 기계 번역(영어 형제, ADR 0043). 행동을 지우면 둘 다 지운다
+    descriptions_by_action: dict[str, list[LabelRecord]] = {}
+    for x in current:
+        if isinstance(x.payload, DescriptionPayload) and (_ours(x) or is_machine_translation(x)):
+            descriptions_by_action.setdefault(x.payload.segment_id, []).append(x)
     # 설명이 검수된(사람이 고쳤거나 승인·표본 검증한) 행동.
     # 행동을 지우면 설명이 고아가 되므로 남긴다
     reviewed_descriptions = {
@@ -358,13 +362,13 @@ def run_actions(
         ]
 
     def with_descriptions(mine: list[LabelRecord]) -> list[LabelRecord]:
-        """지울 행동에 딸린 검수 전 설명까지."""
+        """지울 행동에 딸린 검수 전 설명(과 그 영어 번역)까지."""
         return mine + [
             d
             for x in mine
             if isinstance(x.payload, ActionPayload)
-            and (d := descriptions_by_action.get(x.payload.action_id)) is not None
-            and d.verification.state is VerificationState.UNREVIEWED
+            for d in descriptions_by_action.get(x.payload.action_id, [])
+            if d.verification.state is VerificationState.UNREVIEWED
         ]
 
     # 손 트랙이 사라진 손 (예: 손 모델 버전이 바뀌어 그 손을 더 찾지 못함): 새로 만들 입력이

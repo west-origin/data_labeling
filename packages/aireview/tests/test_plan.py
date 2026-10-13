@@ -46,6 +46,7 @@ from dlp_schema.labels import (
     ActionPayload,
     BlurTrackPayload,
     BoxKeyframe,
+    DescriptionPayload,
     EventPayload,
     GapPayload,
     Hand,
@@ -563,3 +564,30 @@ def test_kinds_only_choose_targets_not_requests(
         assert unit_text(u, images, positions, ontology, ABSENT) == unit_text(
             after[u.unit_id], images, positions, ontology, ABSENT
         )
+
+
+def test_bilingual_descriptions_do_not_add_judged_units(
+    scene: Scene, policy: AiReviewPolicy, ontology: Ontology
+) -> None:
+    """설명 라벨(한국어 원문 + 영어 번역, ADR 0043)은 판정 대상이 아니고 단위·요청을 바꾸지 않는다.
+
+    정답: 설명 둘을 더해도 대상 목록·창(단위 키·대상·맥락)이 그대로다. 영어 번역이 판정 단위를
+    두 배로 만들지 않는다.
+    """
+    action = next(x for x in scene.labels if isinstance(x.payload, ActionPayload))
+    assert isinstance(action.payload, ActionPayload)
+    seg = action.payload.action_id
+    ko = _label(
+        "desc-ko", DescriptionPayload(segment_id=seg, text="걸레로 닦는다"),
+        action.t_start_ms, action.t_end_ms,
+    )  # fmt: skip
+    en = _label(
+        "desc-ko:en0000", DescriptionPayload(
+            segment_id=seg, text="Wipes with a cloth", language="en", source_label_id="desc-ko"
+        ), action.t_start_ms, action.t_end_ms,
+    )  # fmt: skip
+    with_desc = [*scene.labels, ko, en]
+    assert targets(with_desc, policy, ontology) == targets(scene.labels, policy, ontology)
+    assert plan_windows(scene.session, with_desc, policy, ontology) == plan_windows(
+        scene.session, scene.labels, policy, ontology
+    )

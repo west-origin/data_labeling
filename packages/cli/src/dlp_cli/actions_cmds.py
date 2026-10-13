@@ -1,10 +1,13 @@
 """행동 구간 하위 명령 (WP10, ADR 0012·0026).
 
 등록하는 명령:
-- `dlp actions run <세션> [--vlm-url] [--store] [--url]` — 바디캠 손마다 2단 구조로 행동 구간을
-  만든다. 1단: 손목 속도·접촉 신호로 경계 후보. 2단: OpenAI 호환 VLM이 온톨로지 안에서
-  분류·설명(JSON Schema 강제, 재시도 뒤 실패하면 미상). 마지막으로 인접 동일 분류를 병합하고
-  빈 시간을 미상 공백으로 채운다(타임라인 공백 0).
+- `dlp actions run <세션> [--vlm-url] [--store] [--url] [--translate-url] [--no-translate]` — 바디캠
+  손마다 2단 구조로 행동 구간을 만든다. 1단: 손목 속도·접촉 신호로 경계 후보. 2단: OpenAI 호환 VLM이
+  온톨로지 안에서 분류·설명(JSON Schema 강제, 재시도 뒤 실패하면 미상). 마지막으로 인접 동일 분류를
+  병합하고 빈 시간을 미상 공백으로 채운다(타임라인 공백 0).
+  행동 트랜잭션을 커밋한 뒤 한국어 설명의 영어 번역을 최선 노력으로 만든다
+  (`dlp_cli.translate_cmds.translate_after_actions`, ADR 0043). 번역 실패·서버 미연동은 행동 결과와
+  종료 코드에 영향이 없고, 남은 설명은 `dlp translate run --pending`이 채운다.
 
 순서: `dlp prelabel run`·`dlp relations run` 뒤, 검수 배정(`dlp review plan`) 전.
 VLM에는 블러본만 보낸다 (라벨링 버킷에서 읽고 원본 버킷에는 접근하지 않는다).
@@ -36,6 +39,7 @@ from dlp_actions.runner import run_actions
 from dlp_actions.vlm import VlmRequestError, VlmUnavailableError
 from dlp_cli.ontology_access import session_ontology
 from dlp_cli.schema_cmds import database_url
+from dlp_cli.translate_cmds import translate_after_actions
 from dlp_media.storage import store_from_spec
 from dlp_schema import load_config, repo_root
 
@@ -107,6 +111,9 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(f"{hand}: 같은 버전 결과가 있어 건너뜀")
     if s.retracted:
         print(f"이전 버전 레코드 {s.retracted}개 삭제 표시")
+    # 행동 결과는 커밋됐다. 설명 번역은 따로 돌고 실패해도 이 명령을 실패시키지 않는다 (ADR 0043)
+    if not args.no_translate:
+        translate_after_actions(args.url, args.session_id, args.translate_url)
     return 0
 
 
@@ -119,4 +126,8 @@ def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
     run.add_argument("--vlm-url", help="OpenAI 호환 VLM 서버 (기본: DLP_VLM_URL)")
     run.add_argument("--store", default="s3", help="'s3' 또는 'local:<디렉터리>'")
     run.add_argument("--url", help="DB URL (기본: DLP_DATABASE_URL)")
+    run.add_argument("--translate-url", help="사내 번역 서버 (기본: DLP_TRANSLATE_URL)")
+    run.add_argument(
+        "--no-translate", action="store_true", help="끝에 설명 영어 번역을 돌리지 않는다"
+    )
     run.set_defaults(func=cmd_run)
