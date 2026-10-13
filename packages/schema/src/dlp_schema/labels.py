@@ -418,12 +418,19 @@ class RelationPayload(Contract):
 
 
 # 자연어 설명 (VLM 또는 사람). segment_id: 설명하는 상위 구간·행동 ID. text: 설명.
-# language: 언어 코드 (기본 ko).
+# language: 언어 코드 (기본 ko). source_label_id: 번역이면 원문 설명 라벨 ID (ADR 0043).
+#   한국어 설명마다 영어 번역을 별도 레코드로 둔다 (`dlp_actions.translate`). 번역은 원문의 수정이
+#   아니라서 parent_label_id를 쓰지 않는다: parent로 이으면 `current_labels`가 원문을 현재 라벨에서
+#   빼 버린다. 원문과 번역이 둘 다 운영 라벨이고, 번역은 이 필드로 원문 레코드를 가리킨다.
+#   원문이 고쳐지면(새 레코드) 이 값이 현재 원문과 달라져 낡은 번역으로 판정된다.
 class DescriptionPayload(Contract):
     kind: Literal["description"] = "description"
     segment_id: Identifier
     text: str = Field(min_length=1)
     language: str = "ko"
+    source_label_id: Identifier | None = Field(
+        default=None, description="번역 레코드면 원문 설명 라벨 ID (원문이면 None)"
+    )
 
 
 # 페이로드 판별 공용체: JSON의 "kind" 값으로 어느 타입인지 정한다. 새 종류를 더하면 여기,

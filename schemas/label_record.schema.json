@@ -330,6 +330,20 @@
           "title": "Segment Id",
           "type": "string"
         },
+        "source_label_id": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "번역 레코드면 원문 설명 라벨 ID (원문이면 None)",
+          "title": "Source Label Id"
+        },
         "text": {
           "minLength": 1,
           "title": "Text",

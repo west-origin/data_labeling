@@ -59,8 +59,13 @@ def test_loader_rejects_duplicate_keys_across_files(tmp_path: Path) -> None:
 def test_cross_references_are_checked(ontology: Ontology) -> None:
     """없는 도메인·물리 유형·상태 속성을 참조하면 세 위반이 한 메시지에 모두 나온다."""
     data: dict[str, Any] = ontology.model_dump(mode="json")
-    data["tasks"]["bad_task"] = {"domain": "gardening", "ko": "정원"}
-    data["objects"]["bad_obj"] = {"ko": "x", "physical_type": "plasma", "states": ["smell"]}
+    data["tasks"]["bad_task"] = {"domain": "gardening", "ko": "정원", "en": "Garden"}
+    data["objects"]["bad_obj"] = {
+        "ko": "x",
+        "en": "x",
+        "physical_type": "plasma",
+        "states": ["smell"],
+    }
     with pytest.raises(ValidationError) as exc:
         Ontology.model_validate(data)
     text = str(exc.value)
@@ -103,7 +108,12 @@ def test_contactless_verb_and_point_event(ontology: Ontology) -> None:
     비접촉 원시 동사 glance를 테스트용으로 사전에 더해 확인한다.
     """
     data: dict[str, Any] = ontology.model_dump(mode="json")
-    data["verbs"]["glance"] = {"level": "primitive", "ko": "보다", "contactless": True}
+    data["verbs"]["glance"] = {
+        "level": "primitive",
+        "ko": "보다",
+        "en": "glance",
+        "contactless": True,
+    }
     o = Ontology.model_validate(data)
     assert any("비접촉" in p for p in check_label(make_label(action_payload(verb="glance")), o))
     drop = {"kind": "event", "event_type": "drop", "related_action_id": "a001"}
@@ -145,3 +155,60 @@ def test_trajectory_and_relation_parts_must_be_known(ontology: Ontology) -> None
     relation = {"kind": "relation", "subject_id": "rag_01", "subject_part": "cloth_face",
                 "predicate": "contact", "object_id": "table_01", "object_part": "lid"}  # fmt: skip
     assert check_label(make_label(relation), ontology) == ["알 수 없는 부분: lid"]
+
+
+# ---------------------------------------------------------------- 한·영 이름 (ADR 0043)
+
+# v1 사전 항목 수 (도메인 3, 작업 17, 동사 34, 공백 3, 이벤트 15, 접촉 대상 6, 파지 8, 손 역할 3,
+# 손 관절 6, 물리 유형 5, 상태 속성 6, 객체 30, 표면 부분 4, 프라이버시 대상 13, 신체 부위 26, 자세
+# 9)
+V1_TERMS = 188
+
+
+def test_every_term_has_korean_and_english_names(ontology: Ontology) -> None:
+    """v1의 모든 사전 항목(하위 단계 포함)에 빈칸 아닌 ko·en 이름이 있고, 키는 "범주:ID"다."""
+    names = ontology.display_names()
+    assert len(names) == V1_TERMS
+    for key, name in names.items():
+        assert name.ko.strip(), key
+        assert name.en.strip(), key
+        assert name.en.isascii(), f"{key}: 영어 이름에 비ASCII 글자 {name.en}"
+    assert names["verbs:grasp"].ko == "잡다"
+    assert names["verbs:grasp"].en == "grasp"
+    assert names["objects:mop"].en == "Mop"
+    # 같은 ID가 다른 범주에 있어도(person) 범주로 구별된다
+    assert names["physical_types:person"].en == "Person"
+    assert ontology.name("objects", "bucket", "en") == "Bucket"
+    assert ontology.name("objects", "bucket", "ko") == "양동이"
+    assert ontology.name("objects", "moon", "en") is None
+
+
+def test_substep_names_are_included(ontology: Ontology) -> None:
+    """작업의 하위 단계도 "substeps:<ID>"로 이름 표에 들어간다."""
+    data = ontology.model_dump(mode="json")
+    data["tasks"]["floor_sweep_mop"]["substeps"] = {
+        "sweep_floor": {"ko": "바닥 쓸기", "en": "Sweep the floor"}
+    }
+    names = Ontology.model_validate(data).display_names()
+    assert names["substeps:sweep_floor"].en == "Sweep the floor"
+    assert len(names) == V1_TERMS + 1
+
+
+@pytest.mark.parametrize("en", [None, "", "   "])
+def test_term_without_english_name_is_rejected(ontology: Ontology, en: str | None) -> None:
+    """en이 없거나 비면(공백만 포함) 사전 적재가 실패한다."""
+    data = ontology.model_dump(mode="json")
+    if en is None:
+        del data["verbs"]["grasp"]["en"]
+    else:
+        data["verbs"]["grasp"]["en"] = en
+    with pytest.raises(ValidationError):
+        Ontology.model_validate(data)
+
+
+def test_term_without_korean_name_is_rejected(ontology: Ontology) -> None:
+    """ko가 비어도 사전 적재가 실패한다."""
+    data = ontology.model_dump(mode="json")
+    data["objects"]["mop"]["ko"] = " "
+    with pytest.raises(ValidationError):
+        Ontology.model_validate(data)

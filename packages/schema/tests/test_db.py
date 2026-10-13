@@ -12,6 +12,7 @@ import itertools
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 import sqlalchemy as sa
@@ -498,3 +499,40 @@ def test_privacy_holds_are_append_only_and_block_downgrade(pg: sa.Engine) -> Non
     pg.dispose()
     with pytest.raises(RuntimeError, match="0017"):
         downgrade(url, "0015")
+
+
+def test_adding_english_names_to_registered_draft_is_additive(ontology: Ontology) -> None:
+    """en 없이 등록된 초안 v1에 en을 더한 사전을 다시 등록하면 덧붙이기로 받는다 (ADR 0028·0043).
+
+    서비스 없이 시간대 보존 SQLite로 돈다. 저장 내용은 새 사전(en 포함)으로 바뀐다.
+    """
+    from dlp_schema.db.ontology_repository import LegacyOntologyContentError, get_ontology
+    from dlp_schema.testing import sqlite_db
+
+    def strip_en(value: Any) -> Any:
+        if isinstance(value, dict):
+            items: dict[str, Any] = value  # pyright: ignore[reportUnknownVariableType]
+            return {k: strip_en(v) for k, v in items.items() if k != "en"}
+        return value
+
+    old = ontology.model_dump(mode="json")
+    engine = sqlite_db()
+    try:
+        with engine.begin() as conn:
+            # 예전 형식(en 없음) 그대로의 행을 넣는다 (지금 계약으로는 만들 수 없는 내용)
+            conn.execute(
+                ontology_versions.insert().values(
+                    version=ontology.version, status="draft", content=strip_en(old)
+                )
+            )
+        # 다시 등록하기 전에는 읽을 때 재등록 안내로 실패한다
+        with engine.connect() as conn, pytest.raises(LegacyOntologyContentError, match="register"):
+            get_ontology(conn, ontology.version)
+        with engine.begin() as conn:
+            register_ontology(conn, ontology)
+        with engine.connect() as conn:
+            stored = conn.execute(sa.select(ontology_versions.c.content)).scalar_one()
+            assert get_ontology(conn, ontology.version) == ontology
+        assert stored == old
+    finally:
+        engine.dispose()

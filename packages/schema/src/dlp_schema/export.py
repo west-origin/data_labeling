@@ -35,10 +35,13 @@ from pydantic import AwareDatetime, Field, field_validator
 from dlp_schema.common import Confidence, Contract, Identifier, Ms, SemVer
 from dlp_schema.dataset import Split
 from dlp_schema.labels import BlurTrackPayload, LabelPayload, Source, VerificationState
+from dlp_schema.ontology import TermName
 from dlp_schema.session import Domain, StreamKind
 
-# 구간 JSON 형식 버전. 필드를 바꾸면(하위 호환이 깨지면) 올리고 구매자 문서를 함께 갱신한다.
-INTERVAL_FORMAT_VERSION = "1.0"
+# 구간 JSON 형식 버전. 필드를 바꾸면 올리고 구매자 문서를 함께 갱신한다 (하위 호환이 깨지면 주
+# 버전).
+# 1.1: 온톨로지 한·영 표시 이름 `term_names`를 덧붙였다 (ADR 0043, 하위 호환).
+INTERVAL_FORMAT_VERSION = "1.1"
 
 
 # 내보낸 스트림 하나.
@@ -104,6 +107,9 @@ class IntervalFile(Contract):
     #   streams: 내보낸 스트림 목록.
     #   labels: 내보낸 라벨 목록 (블러 라벨 없음).
     #   exported_at: 내보낸 시각 (시간대 필수).
+    #   term_names: 온톨로지 사전 항목의 한·영 표시 이름. 키는 "<범주>:<ID>"(예: "verbs:grasp",
+    #     `Ontology.display_names`). 페이로드에는 ID만 있으므로 사람이 읽는 이름은 이 표로 찾는다
+    #     (형식 1.1, ADR 0043). 설명(description) 라벨은 언어마다 한 레코드(language ko·en)다.
     format: Literal["dlp-intervals"] = "dlp-intervals"
     format_version: str = INTERVAL_FORMAT_VERSION
     export_id: Identifier
@@ -118,3 +124,7 @@ class IntervalFile(Contract):
     streams: tuple[ExportedStream, ...]
     labels: tuple[ExportedLabel, ...]
     exported_at: AwareDatetime
+    term_names: dict[str, TermName] = Field(
+        default_factory=dict[str, TermName],
+        description='온톨로지 항목 "<범주>:<ID>" → 한·영 표시 이름 (ko, en)',
+    )

@@ -12,7 +12,8 @@
 주요 이름
     - 사전 항목 타입: `Term`과 하위 타입(`DomainTerm`, `TaskTerm`, `VerbTerm`, `StateAttribute`,
       `ObjectClass`, `EventTerm`, `PrivacyTarget`), `ToolSpec`, `VerbLevel`.
-    - `Ontology`: 사전 전체와 교차 참조 검증, 조회 도우미.
+    - `TermName`, `TERM_CATEGORIES`: 한·영 표시 이름과 이름이 있는 범주 (ADR 0043).
+    - `Ontology`: 사전 전체와 교차 참조 검증, 조회 도우미 (`display_names`, `name` 포함).
     - `load_ontology(dir)`: 디렉터리의 YAML을 합쳐 검증한다.
     - `find_ontology_dir(root, version)`: manifest의 version으로 디렉터리를 찾는다.
 
@@ -31,18 +32,31 @@ from __future__ import annotations
 
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 import yaml
-from pydantic import Field, model_validator
+from pydantic import Field, StringConstraints, model_validator
 
 from dlp_schema.common import Contract, OntologyId, SemVer
 
+# 사람이 읽는 이름의 글자 제약: 앞뒤 공백을 지우고 1자 이상 (빈 이름 금지, ADR 0043).
+DisplayName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
-# 사전 항목의 공통 필드. ko: 사람이 읽는 한국어 이름 (필수). description: 보충 설명 (선택).
+
+# 사전 항목의 공통 필드. ko: 사람이 읽는 한국어 이름 (필수). en: 영어 이름 (필수, ADR 0043).
+# description: 보충 설명 (선택, 한국어). ID는 언어와 무관한 영어 snake_case이고 라벨에는 ID만
+# 저장한다. ko·en은 화면·내보내기·번역 용어집에 쓰는 표시 이름이다.
 class Term(Contract):
-    ko: str
+    ko: DisplayName
+    en: DisplayName
     description: str | None = None
+
+
+# 사전 항목 하나의 한·영 표시 이름 (`Ontology.display_names`). 내보내기 구간 JSON의 `term_names`
+# 값이기도 하다 (`dlp_schema.export.IntervalFile`).
+class TermName(Contract):
+    ko: DisplayName
+    en: DisplayName
 
 
 # 도메인 (청소·요양돌봄·간호). phase: 기준 문서 로드맵의 도입 단계 (A/B/C).
@@ -193,6 +207,31 @@ class Ontology(Contract):
             return frozenset()
         return frozenset(obj.tool.working_parts) | frozenset(obj.tool.grip_parts)
 
+    def display_names(self) -> dict[str, TermName]:
+        """모든 사전 항목의 한·영 표시 이름. 키는 `"<범주>:<ID>"`다 (ADR 0043).
+
+        범주는 `Ontology`의 사전 필드 이름(예: `verbs`, `objects`)이고, 작업의 하위 단계는
+        `substeps`다. 같은 ID가 여러 범주에 있을 수 있어(예: `person`) 범주를 붙인다.
+        상태 속성의 값(`values`, 예: dirty)은 사전 항목이 아니라 이름이 없다. 순서는 필드 순 →
+        범주 안 ID 순으로 결정적이다.
+        """
+        out: dict[str, TermName] = {}
+        for category in TERM_CATEGORIES:
+            table: dict[str, Term] = getattr(self, category)
+            for term_id, term in sorted(table.items()):
+                out[f"{category}:{term_id}"] = TermName(ko=term.ko, en=term.en)
+        substeps = sorted((k, v) for t in self.tasks.values() for k, v in t.substeps.items())
+        for term_id, term in substeps:
+            out[f"substeps:{term_id}"] = TermName(ko=term.ko, en=term.en)
+        return out
+
+    def name(self, category: str, term_id: str, language: Literal["ko", "en"]) -> str | None:
+        """사전 항목의 표시 이름 (`display_names`의 키 규칙). 없는 범주·ID면 None."""
+        found = self.display_names().get(f"{category}:{term_id}")
+        if found is None:
+            return None
+        return found.ko if language == "ko" else found.en
+
     def known_parts(self) -> frozenset[str]:
         """부분 ID 전체: 모든 도구의 작용부·파지부, 표면 부분, 손 관절.
 
@@ -200,6 +239,14 @@ class Ontology(Contract):
         """
         tool = {p for oid in self.objects for p in self.tool_parts(oid)}
         return frozenset(tool) | frozenset(self.surface_parts) | frozenset(self.hand_joints)
+
+
+# 이름(ko·en)이 있는 사전 범주 = `Ontology`의 사전 필드 (하위 단계는 `display_names`가 따로 넣는다)
+TERM_CATEGORIES = (
+    "domains", "tasks", "verbs", "gap_types", "contact_target_kinds", "grasp_types", "hand_roles",
+    "body_parts", "postures", "physical_types", "state_attributes", "objects", "events",
+    "privacy_targets", "surface_parts", "hand_joints",
+)  # fmt: skip
 
 
 def load_ontology(directory: Path) -> Ontology:

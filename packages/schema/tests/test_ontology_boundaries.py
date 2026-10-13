@@ -166,14 +166,18 @@ def test_review_projects_separate_versions_and_draft_additions(ontology: Ontolog
     data["version"] = "2.0.0"
     assert ontology_project(base, Ontology.model_validate(data)) != first
     data["version"] = "1.0.0"
-    data["tasks"]["surface_wipe_disinfect"]["substeps"] = {"check_surface": {"ko": "표면 확인"}}
+    data["tasks"]["surface_wipe_disinfect"]["substeps"] = {
+        "check_surface": {"ko": "표면 확인", "en": "Check surface"}
+    }
     assert ontology_project(base, Ontology.model_validate(data)) != first
     assert ontology_project(base, Ontology.model_validate(ontology.model_dump())) == first
 
 
 def test_episode_rejects_substep_from_another_task(ontology: Ontology):
     data = ontology.model_dump(mode="json")
-    data["tasks"]["floor_sweep_mop"]["substeps"] = {"sweep_floor": {"ko": "바닥 쓸기"}}
+    data["tasks"]["floor_sweep_mop"]["substeps"] = {
+        "sweep_floor": {"ko": "바닥 쓸기", "en": "Sweep floor"}
+    }
     test_ontology = Ontology.model_validate(data)
     child = make_label(
         {"kind": "segment", "segment_id": "sub", "level": "substep", "ref_id": "sweep_floor"},

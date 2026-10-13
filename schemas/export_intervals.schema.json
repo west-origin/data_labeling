@@ -330,6 +330,20 @@
           "title": "Segment Id",
           "type": "string"
         },
+        "source_label_id": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "번역 레코드면 원문 설명 라벨 ID (원문이면 None)",
+          "title": "Source Label Id"
+        },
         "text": {
           "minLength": 1,
           "title": "Text",
@@ -1147,6 +1161,27 @@
       "title": "StreamKind",
       "type": "string"
     },
+    "TermName": {
+      "additionalProperties": false,
+      "properties": {
+        "en": {
+          "minLength": 1,
+          "title": "En",
+          "type": "string"
+        },
+        "ko": {
+          "minLength": 1,
+          "title": "Ko",
+          "type": "string"
+        }
+      },
+      "required": [
+        "ko",
+        "en"
+      ],
+      "title": "TermName",
+      "type": "object"
+    },
     "Trajectory3DPayload": {
       "additionalProperties": false,
       "description": "3D 궤적. 카메라 자세는 entity_id=\"camera\"에 회전(쿼터니언)까지 기록한다.",
@@ -1323,7 +1358,7 @@
       "type": "string"
     },
     "format_version": {
-      "default": "1.0",
+      "default": "1.1",
       "title": "Format Version",
       "type": "string"
     },
@@ -1360,6 +1395,14 @@
       },
       "title": "Streams",
       "type": "array"
+    },
+    "term_names": {
+      "additionalProperties": {
+        "$ref": "#/$defs/TermName"
+      },
+      "description": "온톨로지 항목 \"<범주>:<ID>\" → 한·영 표시 이름 (ko, en)",
+      "title": "Term Names",
+      "type": "object"
     },
     "worker_id": {
       "description": "가명 (내보내기마다 다른 HMAC)",

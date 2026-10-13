@@ -15,7 +15,13 @@
           "default": null,
           "title": "Description"
         },
+        "en": {
+          "minLength": 1,
+          "title": "En",
+          "type": "string"
+        },
         "ko": {
+          "minLength": 1,
           "title": "Ko",
           "type": "string"
         },
@@ -26,6 +32,7 @@
       },
       "required": [
         "ko",
+        "en",
         "phase"
       ],
       "title": "DomainTerm",
@@ -56,6 +63,11 @@
           "default": null,
           "title": "Description"
         },
+        "en": {
+          "minLength": 1,
+          "title": "En",
+          "type": "string"
+        },
         "form": {
           "enum": [
             "point",
@@ -65,6 +77,7 @@
           "type": "string"
         },
         "ko": {
+          "minLength": 1,
           "title": "Ko",
           "type": "string"
         },
@@ -92,6 +105,7 @@
       },
       "required": [
         "ko",
+        "en",
         "category",
         "form"
       ],
@@ -113,7 +127,13 @@
           "default": null,
           "title": "Description"
         },
+        "en": {
+          "minLength": 1,
+          "title": "En",
+          "type": "string"
+        },
         "ko": {
+          "minLength": 1,
           "title": "Ko",
           "type": "string"
         },
@@ -150,6 +170,7 @@
       },
       "required": [
         "ko",
+        "en",
         "physical_type"
       ],
       "title": "ObjectClass",
@@ -170,7 +191,13 @@
           "default": null,
           "title": "Description"
         },
+        "en": {
+          "minLength": 1,
+          "title": "En",
+          "type": "string"
+        },
         "ko": {
+          "minLength": 1,
           "title": "Ko",
           "type": "string"
         },
@@ -181,6 +208,7 @@
       },
       "required": [
         "ko",
+        "en",
         "required"
       ],
       "title": "PrivacyTarget",
@@ -201,7 +229,13 @@
           "default": null,
           "title": "Description"
         },
+        "en": {
+          "minLength": 1,
+          "title": "En",
+          "type": "string"
+        },
         "ko": {
+          "minLength": 1,
           "title": "Ko",
           "type": "string"
         },
@@ -217,6 +251,7 @@
       },
       "required": [
         "ko",
+        "en",
         "values"
       ],
       "title": "StateAttribute",
@@ -242,7 +277,13 @@
           "title": "Domain",
           "type": "string"
         },
+        "en": {
+          "minLength": 1,
+          "title": "En",
+          "type": "string"
+        },
         "ko": {
+          "minLength": 1,
           "title": "Ko",
           "type": "string"
         },
@@ -258,6 +299,7 @@
       },
       "required": [
         "ko",
+        "en",
         "domain"
       ],
       "title": "TaskTerm",
@@ -278,13 +320,20 @@
           "default": null,
           "title": "Description"
         },
+        "en": {
+          "minLength": 1,
+          "title": "En",
+          "type": "string"
+        },
         "ko": {
+          "minLength": 1,
           "title": "Ko",
           "type": "string"
         }
       },
       "required": [
-        "ko"
+        "ko",
+        "en"
       ],
       "title": "Term",
       "type": "object"
@@ -347,7 +396,13 @@
           "default": null,
           "title": "Description"
         },
+        "en": {
+          "minLength": 1,
+          "title": "En",
+          "type": "string"
+        },
         "ko": {
+          "minLength": 1,
           "title": "Ko",
           "type": "string"
         },
@@ -357,6 +412,7 @@
       },
       "required": [
         "ko",
+        "en",
         "level"
       ],
       "title": "VerbTerm",

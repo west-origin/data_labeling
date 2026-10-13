@@ -74,7 +74,7 @@ def target_ontology(ontology: Ontology) -> Ontology:
     """이관 테스트 목적지: 기존 ID를 유지하면서 grip·cloth_side·origin을 추가한 v1.1."""
     data = ontology.model_dump(mode="json")
     data["version"] = "1.1.0"
-    data["verbs"]["grip"] = {"ko": "잡기", "level": "primitive"}
+    data["verbs"]["grip"] = {"ko": "잡기", "en": "grip", "level": "primitive"}
     data["objects"]["rag"]["tool"]["working_parts"].append("cloth_side")
-    data["surface_parts"]["origin"] = {"ko": "원점"}
+    data["surface_parts"]["origin"] = {"ko": "원점", "en": "Origin"}
     return Ontology.model_validate(data)
