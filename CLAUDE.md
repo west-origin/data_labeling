@@ -19,7 +19,8 @@
 - `make todo-models` — 실제 모델을 아직 연동하지 못한 곳(`TODO(real-model):` 표시) 목록
 - `make licenses` — 정책이 쓰는 모델의 라이선스·학습 데이터·상업 사용 분류 표 (위반이 있으면 실패, `make check`에 포함)
 - `make fixtures` — 합성 픽스처를 `data/fixtures/`에 생성 (저장소에는 넣지 않음)
-- `make db-upgrade` — 개발 DB에 Alembic 마이그레이션 적용 + 온톨로지 v1 등록
+- `make db-upgrade` — 개발 DB에 Alembic 마이그레이션 적용 + 온톨로지 v1 등록 (온톨로지 이름을 덧붙인 뒤에도 다시 돌린다.
+  `en` 없는 예전 등록은 읽을 때 `LegacyOntologyContentError`, ADR 0043)
 - `make up` / `make down` / `make clean` — 개발 서비스 기동 / 중지 / 볼륨까지 삭제
 - `make health` — `dlp services check`로 서비스 헬스체크
 - `make test-services` — 실행 중인 서비스 대상 통합 테스트 (`@pytest.mark.services`, `isolated_env` 표시 테스트는 뺀다)
@@ -75,6 +76,11 @@
 - `packages/actions/` (`dlp_actions`) — 행동 구간 2단 구조: 손목 속도·접촉으로 경계 후보 → VLM이 온톨로지 안에서 분류·설명
   (JSON Schema 강제, 재시도 후 미상) → 병합·채우기(공백 0). `dlp actions run <세션> --vlm-url`. CPU·CI는 `OracleVlm` stub.
   정책은 `config/policies/actions.yaml`.
+  설명 영어 번역(ADR 0043, `dlp_actions.translate`): 현재 한국어 설명마다 영어 형제 레코드(`language=en`,
+  `source_label_id`=원문 ID, parent 아님)를 사내 서버(`dlp_models.vlm`, 기본 Qwen3-VL-8B)로 만든다. 온톨로지 ko→en
+  이름을 용어집으로 넣는다. 멱등, 원문이 바뀌면 검수 전 번역만 교체, 서버 장애는 대기로 남긴다(예외 없음).
+  `dlp translate run <세션>|--pending`, `dlp translate pending`. `dlp actions run`이 커밋 뒤 자동으로 부른다
+  (실패해도 행동 결과·종료 코드 불변). CPU·CI는 `GlossaryStubTranslator`. 정책은 `config/policies/translate.yaml`.
 - `packages/aireview/` (`dlp_aireview`) — AI 1차 검수 판정(ADR 0040): 사내 vLLM(OpenAI 호환, 기본 Qwen3-VL-8B)이 블러본
   프레임과 라벨 맥락으로 라벨마다 ok·suspect·wrong·unsure와 이유·제안을 낸다. 참고용 판정만 추가 전용 `ai_review_*` 표에
   쓴다(멱등·재개, 세션 잠금). CPU·CI는 `OracleJudge`·`FakeOpenAIServer`. 골든셋 평가(`evaluate`: 교란·이력, DB에 쓰지 않음,
@@ -92,12 +98,15 @@
   데이터셋 버전 스냅샷에서, 검증 정책 적용, 블러본만. 작업자·장소 ID는 내보내기마다 다른 가명(HMAC). 내보내기 이력은
   올리기 전에 따로 커밋한다. 세션·라벨 ID도 내보내기마다 다른 가명이고(이력에는 내부 ID, 세션 대응표는 내부 경로),
   manifest에 파일 목록과 sha256을 넣는다 (ADR 0027). `dlp export coco|intervals|lerobot`. 정책은 `config/policies/export.yaml`.
+  온톨로지 한·영 이름을 싣는다(COCO 범주 `name_ko`·`name_en`, 구간 JSON `term_names` 형식 1.1, LeRobot 어휘 `term_names`).
+  설명은 언어마다 한 레코드(ko·en)이고 번역의 `source_label_id`도 가명 라벨 ID다 (ADR 0043).
   LeRobot은 격리된 일회용 환경(`scripts/lerobot_write.py`, `scripts/lerobot_check.py`)에서 공식 API로 쓰고 읽는다.
 - `packages/ops/` (`dlp_ops`) — 운영 대시보드와 보안: 주간 운영 지표(검수 시간·수정률·자동 승인율·편향·발견율·
   잔여 블러 누락·원가, AI 1차 검수 절: 백로그·fallback·캐시 적중·장비 시간·ok 놓침 상한)와 경고, 원본 접근 월간 감사
   리포트, 원본 보관 만료 알림·결정.
   `dlp ops weekly|audit-report|retention|retention-decide|log-work|privacy-audit`. 정책은 `config/policies/ops.yaml`.
 - `config/` — 온톨로지·정책·기본값 YAML. 코드에 값을 하드코딩하지 않는다.
+  온톨로지 항목은 한국어 `ko`와 영어 `en` 표시 이름이 모두 필수다 (ID는 영어 snake_case, 라벨에는 ID만, ADR 0043).
 - `schemas/` — 생성된 JSON Schema. 직접 편집하지 않는다 (`make schemas`).
 - `services/` — 개발용 docker compose (PostgreSQL, SeaweedFS S3, Label Studio, Prefect, MLflow, lakeFS), CVAT 실행 스크립트.
 - `tests/` — 패키지를 가로지르는 통합 테스트.
@@ -108,7 +117,8 @@
 - 계약 라벨의 시각은 정수 ms로 저장하고 프레임 번호로 대체하지 않는다. 동기화 오프셋·드리프트 계산과
   일부 시계열은 실수 값을 사용한다. 시간 구간 라벨은 마스터 타임라인 시각, 공간 라벨
   (박스·마스크·키포인트·블러·3D 궤적)의 키프레임은 그 스트림 영상의 PTS 시각이다 (기준 스트림은 같다, ADR 0019).
-- 라벨은 덮어쓰지 않는다. 수정은 새 레코드 + `parent_label_id`.
+- 라벨은 덮어쓰지 않는다. 수정은 새 레코드 + `parent_label_id`. 번역(영어 설명)은 수정이 아니라 별도 운영 라벨이라
+  parent가 아니라 `DescriptionPayload.source_label_id`로 원문을 가리킨다 (ADR 0043).
 - 다른 단계의 입력은 `current_labels()`(운영 라벨)로 고른다. 오류 삽입 레코드와 그 후손, 블라인드·이중 측정
   레코드(`measurement`)는 운영 라벨이 아니며 학습·내보내기에 들어가면 안 된다.
 - 모듈 사이 계약 데이터(세션·라벨·검수·데이터셋 등)는 `dlp_schema` 타입으로 주고받는다. 저장소·렌더 게이트 같은

@@ -496,3 +496,6 @@ issues:
   - {id: F-AIR-31, title: "같은 값이어야 하는 AI ok 놓침률 기준 세 곳의 일치를 검사하지 않음", severity: low, status: fixed, kind: test,
      files: [tests/test_policy_consistency.py], source: docs/handover/full-review-2026-10-12.md,
      note: "정책 일치 검사를 더했다(f455eb4)"}
+  - {id: F-PAR-15, title: "설명(description) 라벨은 검수 도구 경로가 없어 모델 설명(한국어 원문·영어 번역)이 dlp review verify를 막음", severity: medium, status: open, kind: product,
+     files: [packages/review/src/dlp_review/verify.py, packages/review/src/dlp_review/labelstudio.py, packages/actions/src/dlp_actions/translate.py], source: docs/adr/0043-bilingual-labels.md,
+     note: "LS_KINDS·review.yaml units에 description이 없어 승인·표본 검증할 수 없다. 영어 번역(ADR 0043)으로 미검수 모델 설명이 두 배가 된다. Label Studio 설명 편집 화면 또는 행동 승인 시 설명 동반 처리가 필요하다"}

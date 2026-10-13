@@ -49,3 +49,4 @@ ADR은 결정 당시의 이유와 이관 조건을 기록한다. 후속 ADR이 �
 | 0040 | [ADR 0040: AI 1차 검수(로컬 VLM)는 참고용 판정만 남기고 사람 검수를 줄이지 않는다](0040-ai-first-pass-review.md) |
 | 0041 | [ADR 0041: 골든셋 버전은 만들 때 정답 라벨 ID를 고정한다](0041-golden-truth-freeze.md) |
 | 0042 | [ADR 0042: 사고 대응 중 프라이버시 승인을 보류한다](0042-privacy-approval-hold.md) |
+| 0043 | [ADR 0043: 라벨을 한국어와 영어로 함께 남긴다 (온톨로지 영어 이름, 설명 자동 번역)](0043-bilingual-labels.md) |

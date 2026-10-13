@@ -25,6 +25,11 @@ flowchart LR
 | 버전 간 ID 변경 | [이관](../packages/schema/src/dlp_schema/migration.py) |
 | 검수 화면의 사전 분리 | [프로젝트 이름](../packages/review/src/dlp_review/ontology_projects.py) |
 
+항목마다 한국어 이름 `ko`와 영어 이름 `en`이 모두 필요하다 (빈칸 금지, ADR 0043). 라벨에는 ID만
+저장하고, 두 이름은 검수 화면·내보내기(COCO `name_ko`·`name_en`, 구간 JSON `term_names`)·설명 번역
+용어집에 쓴다. 새 항목을 덧붙일 때 영어 이름도 함께 적는다. 영어 이름을 고치는 것은 덧붙이기가 아니라
+값 변경이라 새 온톨로지 버전이 필요하다.
+
 `primitive`는 행동 라벨, `skill`·`human_skill`은 상위 구간이다. 업무는 도메인→작업→하위 단계로
 분류한다. 현재 작업 하위 단계는 0개이며 기술과 원시 동작의 조합을 자동으로 생성하는 경로는 없다.
 현재 구조·항목 수는 [구조 검사](handover/ontology-structure-review.md)에 있다.
