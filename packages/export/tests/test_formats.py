@@ -38,7 +38,7 @@ from dlp_privacy.policy import load_policy as load_privacy_policy
 from dlp_privacy.runner import RenderMeta, operational_blur, render_hash, write_render_meta
 from dlp_schema.dataset import DatasetVersion, Split
 from dlp_schema.export import IntervalFile
-from dlp_schema.labels import VerificationState
+from dlp_schema.labels import DescriptionPayload, VerificationState
 from dlp_schema.ontology import Ontology
 from dlp_schema.testing import FIXED_TIME, action_payload, make_label
 
@@ -131,7 +131,7 @@ def test_verification_policy(scenario: Scenario, policy: ExportPolicy) -> None:
 
 
 def test_interval_json_validates_against_published_schema(
-    scenario: Scenario, policy: ExportPolicy, tmp_path: Path
+    scenario: Scenario, policy: ExportPolicy, ontology: Ontology, tmp_path: Path
 ) -> None:
     """구간 JSON이 공개 JSON Schema를 통과하고, 내부 ID·검수자 ID가 결과에 없다.
 
@@ -141,6 +141,7 @@ def test_interval_json_validates_against_published_schema(
     ids = Pseudonymizer.for_export("e1", b"secret", enabled=True)
     counts = write_intervals(
         source(scenario, policy), policy, tmp_path, export_id="e1", now=FIXED_TIME, ids=ids,
+        ontology=ontology,
     )  # fmt: skip
     sid = ids.session("s1")
     assert counts == {sid: 4}  # 손 상태, 관계, 행동, 작업 구간 (공간 라벨은 COCO·LeRobot으로)
@@ -161,6 +162,54 @@ def test_interval_json_validates_against_published_schema(
     assert {x.label_id for x in f.labels} == {
         ids.label(f"s1-{k}") for k in ("hs", "tsc", "act", "task")
     }
+    # 형식 1.1: 온톨로지 한·영 표시 이름 표 (ADR 0043)
+    assert f.format_version == "1.1"
+    assert f.term_names == ontology.display_names()
+    assert f.term_names["verbs:rub"].en == "rub" and f.term_names["verbs:rub"].ko == "문지르다"
+
+
+def test_bilingual_descriptions_are_exported_with_linked_ids(
+    scenario: Scenario, policy: ExportPolicy, ontology: Ontology, tmp_path: Path
+) -> None:
+    """한국어 설명과 영어 번역이 둘 다 나가고, 번역의 원문 참조도 같은 가명 라벨 ID다 (ADR 0043).
+
+    정답: 설명 2개(ko 원문 s1-dko, en 번역 s1-den). en의 source_label_id = ko의 가명 label_id,
+    segment_id는 둘 다 행동 ID의 가명. 내부 라벨 ID는 결과에 없다.
+    """
+    act_id = "s1-right-a0"
+    ko = make_label(
+        {"kind": "description", "segment_id": act_id, "text": "걸레로 바닥을 닦는다"},
+        label_id="s1-dko", session_id="s1", t_start_ms=200, t_end_ms=900,
+    )  # fmt: skip
+    en = make_label(
+        {"kind": "description", "segment_id": act_id, "text": "Wipes the floor with a cloth",
+         "language": "en", "source_label_id": "s1-dko"},
+        label_id="s1-dko:en1a2b3c4d", session_id="s1", t_start_ms=200, t_end_ms=900,
+    )  # fmt: skip
+    src = source(scenario, policy)
+    sess = src.sessions[0]
+    src = ExportSource(
+        src.version,
+        [ExportSession(sess.session, sess.split, [*sess.labels, ko, en], sess.render_hashes)],
+        src.label_states,
+    )
+    ids = Pseudonymizer.for_export("e1", b"secret", enabled=True)
+    write_intervals(
+        src, policy, tmp_path, export_id="e1", now=FIXED_TIME, ids=ids, ontology=ontology
+    )
+    path = tmp_path / "intervals" / f"{ids.session('s1')}.json"
+    f = IntervalFile.model_validate_json(path.read_text())
+    descs = {x.payload.language: x for x in f.labels if isinstance(x.payload, DescriptionPayload)}
+    assert set(descs) == {"ko", "en"}
+    en_payload = descs["en"].payload
+    assert isinstance(en_payload, DescriptionPayload)
+    assert en_payload.source_label_id == descs["ko"].label_id == ids.label("s1-dko")
+    assert en_payload.text == "Wipes the floor with a cloth"
+    assert en_payload.segment_id == ids.ref("s1", act_id)
+    assert "s1-dko" not in path.read_text()
+    # 가명 처리를 끄면 원래 ID 그대로
+    off = Pseudonymizer(None)
+    assert exported(en, off).payload == en.payload
 
 
 def test_pseudonyms_are_per_export() -> None:
@@ -269,6 +318,9 @@ def test_coco_loads_with_pycocotools(
         ev.accumulate()
         ev.summarize()
     assert ev.stats[0] == pytest.approx(1.0)
+    # 범주에 한·영 표시 이름이 붙는다 (name은 온톨로지 ID 그대로, ADR 0043)
+    cat = coco.loadCats([cup])[0]
+    assert (cat["name"], cat["name_ko"], cat["name_en"]) == ("cup", "컵", "Cup")
 
 
 def test_coco_person_boxes_work_with_keypoint_eval(
@@ -329,6 +381,12 @@ def test_lerobot_frame_features(
     """
     lp = policy.lerobot
     vocab = Vocab.from_ontology(ontology)
+    # 어휘의 한·영 표시 이름은 어휘 순서와 같다 (ADR 0043)
+    names = vocab.as_json()["term_names"]
+    assert len(names["verb"]) == len(vocab.verbs)
+    rub = vocab.verbs.index("rub")
+    assert names["verb"][rub] == {"ko": "문지르다", "en": "rub"}
+    assert len(names["task"]) == len(vocab.tasks)
     video = tmp_path / "v.mp4"
     scenario.labeling.get_file("sessions/s1/blurred/bodycam.mp4", video)
     index = build_pts_index(video)

@@ -44,7 +44,7 @@ import json
 import math
 import os
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -69,7 +69,7 @@ from dlp_schema.labels import (
     Trajectory3DPayload,
     VerificationState,
 )
-from dlp_schema.ontology import Ontology
+from dlp_schema.ontology import Ontology, TermName
 from dlp_schema.session import Session, Stream
 
 # 특징 배열의 손 순서 (왼손이 앞)
@@ -108,18 +108,35 @@ class Vocab:
     hand_roles: tuple[str, ...]  # 손 역할 (온톨로지 순서)
     working_parts: frozenset[str]  # 도구 작용부 이름 (도구-표면 접촉·작용부 3D에 쓴다)
     tasks: tuple[str, ...]  # 에피소드 task 문자열 (작업 ID와 도메인)
+    # 어휘별 한·영 표시 이름 (어휘 이름 → 번호 순서와 같은 이름 목록, ADR 0043)
+    names: dict[str, tuple[TermName, ...]] = field(default_factory=dict[str, tuple[TermName, ...]])
 
     @classmethod
     def from_ontology(cls, o: Ontology) -> Vocab:
         """온톨로지에서 어휘를 만든다 (모든 도구 객체의 작용부를 모은다)."""
         parts = {p for obj in o.objects.values() if obj.tool for p in obj.tool.working_parts}
+        verbs = tuple(sorted(o.verbs))
+        all_names = o.display_names()
+
+        def named(category: str, ids: tuple[str, ...]) -> tuple[TermName, ...]:
+            """어휘 ID 순서대로 표시 이름."""
+            return tuple(all_names[f"{category}:{i}"] for i in ids)
+
         return cls(
-            tuple(sorted(o.verbs)),
+            verbs,
             tuple(o.contact_target_kinds),
             tuple(o.grasp_types),
             tuple(o.hand_roles),
             frozenset(parts),
             tuple(sorted(o.tasks)) + tuple(sorted(o.domains)),
+            {
+                "verb": named("verbs", verbs),
+                "contact_target_kind": named("contact_target_kinds", tuple(o.contact_target_kinds)),
+                "grasp_type": named("grasp_types", tuple(o.grasp_types)),
+                "hand_role": named("hand_roles", tuple(o.hand_roles)),
+                "task": named("tasks", tuple(sorted(o.tasks)))
+                + named("domains", tuple(sorted(o.domains))),
+            },
         )
 
     def as_json(self) -> dict[str, Any]:
@@ -137,6 +154,10 @@ class Vocab:
             ],
             "verification_groups": list(GROUPS),
             "missing": -1,
+            # 어휘별 한·영 표시 이름 (위 목록과 같은 순서, 형식 추가 키, ADR 0043)
+            "term_names": {
+                k: [n.model_dump(mode="json") for n in v] for k, v in self.names.items()
+            },
         }
 
 

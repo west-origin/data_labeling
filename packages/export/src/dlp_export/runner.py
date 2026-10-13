@@ -299,7 +299,7 @@ def run_export(  # noqa: C901
         if fmt == "intervals":
             details = {
                 "labels_per_session": write_intervals(
-                    src, policy, out, export_id=export_id, now=now, ids=ids
+                    src, policy, out, export_id=export_id, now=now, ids=ids, ontology=ontology
                 )
             }
             written = {es.session.session_id for es in src.sessions}

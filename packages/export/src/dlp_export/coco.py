@@ -71,11 +71,17 @@ def categories(ontology: Ontology) -> tuple[list[dict[str, Any]], dict[str, int]
 
     순서: 온톨로지 객체(이름순) → (객체 person이 없으면) person 범주 → hand 범주.
     person 범주(객체든 새로 만든 것이든)에 coco17 keypoints·skeleton을 붙인다.
+    온톨로지 객체 범주의 `name`은 온톨로지 ID 그대로이고(기존 소비자 호환), 표시 이름
+    `name_ko`·`name_en`을 덧붙인다 (COCO는 범주의 추가 키를 허용한다, ADR 0043).
     """
     cats: list[dict[str, Any]] = []
     obj: dict[str, int] = {}
     for i, name in enumerate(sorted(ontology.objects), start=1):
-        cats.append({"id": i, "name": name, "supercategory": "object"})
+        term = ontology.objects[name]
+        cats.append(
+            {"id": i, "name": name, "supercategory": "object", "name_ko": term.ko,
+             "name_en": term.en}
+        )  # fmt: skip
         obj[name] = i
     skel: dict[str, int] = {}
     if "person" in obj:
