@@ -68,6 +68,10 @@ class ReviewOutcome:
     direct_reissue: list[tuple[str, str, str]] = field(default_factory=list[tuple[str, str, str]])
     # AI 1차 검수 결과 기록 (노출 기록이 있는 작업, `ai_collect.record_outcome`이 채운다)
     ai: AiOutcome | None = None
+    # 행동·상위 구간 검수 결과를 따라 검수 상태를 물려받은 설명 라벨 ID와 지운 설명 라벨 ID
+    # (F-PAR-15, `dlp_schema.description_follow`. collect가 채운다. AI 결과 기록과 무관하다)
+    descriptions_approved: list[str] = field(default_factory=list[str])
+    descriptions_retracted: list[str] = field(default_factory=list[str])
 
     @property
     def corrected(self) -> int:

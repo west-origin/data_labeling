@@ -296,6 +296,12 @@ def _print_outcome(task: ReviewTask, outcome: ReviewOutcome | None, *, ai: bool 
         f"{task.task_key}: 승인 {len(outcome.approved)}, 수정 {outcome.corrected}, "
         f"삭제 {outcome.retracted}, 추가 {outcome.added}"
     )
+    if outcome.descriptions_approved or outcome.descriptions_retracted:
+        # 설명 라벨은 행동·상위 구간 결과를 따른다 (ADR 0043 3절)
+        print(
+            f"  설명: 행동 검수 물려받음 {len(outcome.descriptions_approved)}, "
+            f"검수 전 설명 삭제 {len(outcome.descriptions_retracted)}"
+        )
     _print_ai_outcome(outcome)
     if not outcome.revoked:
         return
@@ -358,6 +364,11 @@ def cmd_verify(args: argparse.Namespace) -> int:
     with engine.begin() as conn:
         result = verify_session(conn, args.session_id, datetime.now(UTC), actor)
     engine.dispose()
+    if result.descriptions_approved or result.descriptions_retracted:
+        print(
+            f"{args.session_id}: 설명이 행동 검수를 따름 (물려받음 {result.descriptions_approved}, "
+            f"검수 전 설명 삭제 {result.descriptions_retracted}, ADR 0043 3절)"
+        )
     if result.already:
         print(f"{args.session_id}: 이미 검수 완료 단계")
     elif result.verified:

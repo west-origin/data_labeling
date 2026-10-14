@@ -31,7 +31,13 @@
     이력 읽기·번역(서버 호출)은 세션을 잠그지 않는다. 쓰기 직전에 세션을 잠그고 이력을 다시
     읽어 계획을 다시 세운 뒤, 그 사이 낡은 결과는 버리고 쓴다 (긴 세션 잠금을 피한다, R3).
 
-DB: `label_records` 읽기·쓰기(추가만). 트랜잭션은 호출자(CLI)가 연다.
+검수 물려받기 (F-PAR-15)
+    쓴 뒤 `apply_description_follow`로 설명이 행동·상위 구간 검수를 따르게 한다. 행동이 이미 승인·
+    표본 검증됐으면 새 번역도 같은 검수자·상태로 기록한다(검수 시각은 번역 생성 시각). 행동이
+    검수 전이면 번역도 미검수로 남는다.
+
+DB: `label_records` 읽기·쓰기(추가만, 검수 상태 갱신은 위 물려받기만). 트랜잭션은 호출자(CLI)가
+연다.
 """
 
 from __future__ import annotations
@@ -53,6 +59,7 @@ from dlp_actions.translators import (
     Translator,
 )
 from dlp_schema.common import derived_id
+from dlp_schema.db.description_repository import apply_description_follow
 from dlp_schema.db.locks import lock_session
 from dlp_schema.db.repository import get_labels, insert_labels
 from dlp_schema.episode import current_labels, is_protected, retractions, version_tag
@@ -99,6 +106,7 @@ class TranslateSummary:
         invalid: 그중 응답 위반인 원문 라벨 ID.
         stopped: 남은 원문을 묻지 않고 멈춘 이유 ("unavailable" | "config", 없으면 None).
         error: 멈춘 원인 메시지 (서버 응답 앞부분, 키는 들어가지 않는다).
+        inherited: 행동·상위 구간 검수를 물려받은 설명 수 (F-PAR-15, 승인된 행동의 새 번역 등).
     """
 
     version: str
@@ -111,6 +119,7 @@ class TranslateSummary:
     invalid: list[str] = field(default_factory=list[str])
     stopped: str | None = None
     error: str | None = None
+    inherited: int = 0
 
 
 def is_machine_translation(x: LabelRecord) -> bool:
@@ -329,8 +338,12 @@ def run_translate(
             replaced += olds
     removed = retractions([*fresh.stale, *replaced], version, now)
     insert_labels(conn, [*removed, *new])
+    # 행동이 이미 검수됐으면 새 번역도 그 검수를 물려받는다. 행동을 지웠거나 의미를 고친 검수 전
+    # 설명은 지운다 (F-PAR-15, ADR 0043 3절. 같은 잠금·트랜잭션)
+    follow = apply_description_follow(conn, session_id, now)
+    summary.inherited = len(follow.approve)
     summary.translated = len(new)
-    summary.retracted = len(removed)
+    summary.retracted = len(removed) + len(follow.retract)
     summary.covered = fresh.covered
     summary.kept_reviewed = [x.label_id for x in fresh.kept_reviewed]
     summary.deleted = fresh.deleted

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -56,7 +56,7 @@ from dlp_schema.labels import (
     VerificationState,
 )
 from dlp_schema.ontology import Ontology, load_ontology
-from dlp_schema.testing import FIXED_TIME, make_label, make_session, sqlite_db
+from dlp_schema.testing import FIXED_TIME, action_payload, make_label, make_session, sqlite_db
 
 ROOT = Path(__file__).resolve().parents[3]
 SID = "s001"
@@ -158,6 +158,45 @@ def test_rerun_is_idempotent(db: sa.Engine, ontology: Ontology, policy: Translat
     stub = GlossaryStubTranslator(EN)
     again = _run(db, ontology, policy, stub)
     assert (again.translated, again.retracted, again.covered, stub.calls) == (0, 0, 2, 0)
+
+
+def _approved_action(engine: sa.Engine, action_id: str, reviewed_at: datetime) -> None:
+    """설명 원문이 가리키는 행동(모델)을 넣고 검수자 r1이 승인한다 (F-PAR-15)."""
+    action = make_label(
+        action_payload(action_id=action_id), label_id=f"{action_id}-act", session_id=SID,
+        provenance=Provenance(source=Source.MODEL, model_version=ACTIONS_VERSION), confidence=0.9,
+    )  # fmt: skip
+    with engine.begin() as conn:
+        insert_labels(conn, [action])
+        record_review(conn, action.label_id, VerificationState.HUMAN_APPROVED, "r1", reviewed_at)
+
+
+def test_translation_of_approved_action_inherits_review(
+    db: sa.Engine, ontology: Ontology, policy: TranslatePolicy
+) -> None:
+    """행동을 승인한 뒤에 만든 번역은 그 승인을 물려받는다 (F-PAR-15, ADR 0043 3절).
+
+    정답: s001-a0 행동만 r1이 FIXED_TIME에 승인. 번역 시각 later에 원문 s001-a0-desc와 그 번역이
+    human_approved(검수자 r1). 원문은 행동 검수 시각, 번역은 자기 생성 시각(검수가 생성보다 앞서지
+    않는다). 행동이 없는 s001-a1의 원문·번역은 미검수 그대로.
+    """
+    later = FIXED_TIME + timedelta(hours=2)
+    _approved_action(db, "s001-a0", FIXED_TIME)
+    with db.begin() as conn:
+        s = run_translate(conn, SID, GlossaryStubTranslator(EN), ontology, policy, later)
+    assert (s.translated, s.inherited) == (2, 2)
+    current = {x.label_id: x for x in _current(db)}
+    english = _english(list(current.values()))
+    source = current["s001-a0-desc"].verification
+    assert (source.state, source.reviewer_id, source.reviewed_at) == (
+        VerificationState.HUMAN_APPROVED, "r1", FIXED_TIME,
+    )  # fmt: skip
+    en = english["s001-a0-desc"].verification
+    assert (en.state, en.reviewer_id, en.reviewed_at) == (
+        VerificationState.HUMAN_APPROVED, "r1", later,
+    )  # fmt: skip
+    assert current["s001-a1-desc"].verification.state is VerificationState.UNREVIEWED
+    assert english["s001-a1-desc"].verification.state is VerificationState.UNREVIEWED
 
 
 def test_corrected_source_replaces_only_unreviewed_translation(

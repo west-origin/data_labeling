@@ -80,6 +80,8 @@ def _report(session_id: str, s: TranslateSummary) -> int:
         f"{session_id}: 번역 {s.translated}, 이미 있음 {s.covered}, 삭제 표시 {s.retracted}, "
         f"대기 {len(s.pending)}"
     )
+    if s.inherited:
+        print(f"  행동 검수를 물려받은 설명 {s.inherited}개 (ADR 0043 3절)")
     if s.kept_reviewed:
         print(
             f"  검수된 영어 설명이 있어 새로 만들지 않은 원문 {len(s.kept_reviewed)}개 "

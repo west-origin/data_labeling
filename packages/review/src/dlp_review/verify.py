@@ -18,6 +18,9 @@
   (수집 출력 `collect._note_revocations`와 같은 기준).
 - 블러를 뺀 현재 운영 라벨 중 모델 라벨은 모두 사람 검수 상태다
   (human_approved, human_corrected, sample_verified). 사람이 만든 라벨은 그 자체로 검수된 것이다.
+  모델 설명 라벨(한국어 원문·영어 번역)은 검수 도구 경로가 없어 행동·상위 구간 검수를 물려받는다
+  (F-PAR-15, ADR 0043 3절). `verify_session`은 판정 전에 그 규칙을 한 번 적용해, 규칙 전에 검수한
+  세션도 메운다. 행동이 검수 전이면 그 설명도 계속 완료를 막는다.
 - 블러를 뺀 현재 운영 라벨이 하나 이상 있다 (빈 세션은 완료가 아니다).
 
 관련: ADR 0028(생애주기 기록), ADR 0029(검수 완료 판정 명령).
@@ -41,6 +44,7 @@ from dlp_privacy.policy import PrivacyPolicy
 from dlp_privacy.policy import load_policy as load_privacy_policy
 from dlp_privacy.runner import stale_media_tasks
 from dlp_schema import repo_root
+from dlp_schema.db.description_repository import apply_description_follow
 from dlp_schema.db.repository import (
     get_labels,
     get_session,
@@ -76,6 +80,9 @@ class VerifyResult:
     already: bool = False
     # verified가 False일 때 완료를 막은 이유 (사람이 읽는 한국어 문장)
     reasons: list[str] = field(default_factory=list[str])
+    # 판정 전에 행동 검수를 물려받은 설명 수와 지운 설명 수 (F-PAR-15, 메우기)
+    descriptions_approved: int = 0
+    descriptions_retracted: int = 0
 
 
 def verification_gaps(
@@ -224,7 +231,9 @@ def verify_session(
 
     반환: `VerifyResult`. prelabeled가 아니면(그 전 단계 또는 withdrawn) verified=False와 그 이유를
     돌려준다 (예외 아님. withdrawn이어도 이유 문장은 "프리라벨 전 단계다"로 나온다).
-    부작용: 조건을 모두 만족하면 `set_lifecycle`로 `sessions.lifecycle_state`를 바꾸고
+    부작용: prelabeled면 먼저 설명 규칙을 적용한다(`apply_description_follow`: 설명 검수 상태 갱신·
+    검수 전 설명 삭제 레코드, 세션 잠금). 조건을 모두 만족하면 `set_lifecycle`로
+    `sessions.lifecycle_state`를 바꾸고
     `session_lifecycle_events`에 전이 기록을 남긴다. 트랜잭션은 호출자가 연다.
     """
     session = get_session(conn, session_id)
@@ -240,8 +249,12 @@ def verify_session(
         return VerifyResult(
             session_id, verified=False, reasons=[f"프리라벨 전 단계다 (lifecycle={state.value})"]
         )
+    # 이 규칙 전에 수집한 세션도 설명이 행동 검수를 따르게 메운다 (멱등, F-PAR-15)
+    follow = apply_description_follow(conn, session_id, now)
     reasons = verification_gaps(conn, session_id, privacy_policy)
-    if reasons:
-        return VerifyResult(session_id, verified=False, reasons=reasons)
-    set_lifecycle(conn, session_id, LifecycleState.HUMAN_VERIFIED, at=now, actor=actor)
-    return VerifyResult(session_id, verified=True)
+    if not reasons:
+        set_lifecycle(conn, session_id, LifecycleState.HUMAN_VERIFIED, at=now, actor=actor)
+    return VerifyResult(
+        session_id, verified=not reasons, reasons=reasons,
+        descriptions_approved=len(follow.approve), descriptions_retracted=len(follow.retract),
+    )  # fmt: skip

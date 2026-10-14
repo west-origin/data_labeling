@@ -16,6 +16,9 @@
 - 운영 블러 라벨이 바뀌면 프라이버시 승인을 풀어 다시 승인·렌더하게 하고, 그 스트림의 이미 배포한
   라벨링 작업 매체에 회수를 요청하고(같은 커밋, ADR 0039), 이전 블러본 렌더 기록을 무효로 둔다
   (ADR 0024). 외부 삭제(S3 사본·도구 작업)는 커밋 뒤 호출자가 `dlp_review.revoke`로 한다.
+- 설명 라벨(한국어 원문·영어 번역)은 검수 도구 경로가 없어 그것이 설명하는 행동·상위 구간의 결과를
+  따른다 (F-PAR-15, ADR 0043 3절): 그대로 승인·시각만 고침 → 같은 검수자·시각으로 승인, 표본 합격 →
+  표본 검증, 지움·의미를 고침 → 검수 전 설명을 지운다. 이미 검수된 설명은 건드리지 않는다.
 - AI 1차 검수(WP17.7, ADR 0040): 노출 기록이 있는 작업이면 검수자가 명시적으로 고른 "제안 적용"만
   검수 항목에 반영한다. 제안 내용은 DB의 판정 단위에서 다시 읽어 검사하고, 세션 검증에 걸리면 AI
   적용만 되돌린다 (`ai_collect`). 사람 결과와 판정의 연결은 `ai_review_outcomes`에 작업마다 한 번
@@ -31,7 +34,8 @@ WP6·WP12, ADR 0006·0014·0015·0024. 진입점: `dlp review collect <작업 �
 
 부작용 요약 (`collect_task`): `label_records` 삽입, 검수 상태 갱신(`record_review`),
 `review_tasks` 수집 표시, `review_work` 기록(Label Studio, 잰 시간이 0보다 클 때만),
-`ai_review_outcomes` 기록(AI를 켜고 노출 기록이 있는 작업만), 세션
+`ai_review_outcomes` 기록(AI를 켜고 노출 기록이 있는 작업만), 설명 라벨의 검수 상태 물려받기·
+검수 전 설명 삭제(F-PAR-15, `apply_description_follow`, 배정 마무리 뒤), 세션
 `privacy_state` 되돌림(승인 상태였을 때만), 블러가 바뀐 스트림의 라벨링 작업 회수 요청
 (`review_tasks`, 외부 호출 없음), 라벨링 버킷의 렌더 기록 무효화, 배정 마무리
 (`review_assignments`). 블러 검수 작업이면 원본 버킷의
@@ -75,6 +79,7 @@ from dlp_review.tasks import (
 )
 from dlp_review.verify import reissue_slot
 from dlp_schema.aireview import AiDecision
+from dlp_schema.db.description_repository import apply_description_follow
 from dlp_schema.db.repository import (
     get_assignment,
     get_labels,
@@ -462,4 +467,9 @@ def collect_task(
 
         # AI 판정 사용이 켜져 있으면 표본 합격 뒤 늦게 도착한 지적의 보류 라벨을 재검수로 보낸다
         finish_assignment(conn, assignment, now, ops_policy, ai=setup.ai)
+    # 설명 라벨은 검수 도구 경로가 없어 행동·상위 구간 결과를 따른다 (승인·표본 검증은 물려받고,
+    # 지웠거나 의미를 고친 행동의 검수 전 설명은 지운다. F-PAR-15). 표본 판정 뒤라 표본 검증도 본다
+    follow = apply_description_follow(conn, task.session_id, now)
+    outcome.descriptions_approved = [r.label_id for r in follow.approve]
+    outcome.descriptions_retracted = [x.label_id for x in follow.retract]
     return outcome
