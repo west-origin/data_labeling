@@ -79,6 +79,9 @@
   설명 영어 번역(ADR 0043, `dlp_actions.translate`): 현재 한국어 설명마다 영어 형제 레코드(`language=en`,
   `source_label_id`=원문 ID, parent 아님)를 사내 서버(`dlp_models.vlm`, 기본 Qwen3-VL-8B)로 만든다. 온톨로지 ko→en
   이름을 용어집으로 넣는다. 멱등, 원문이 바뀌면 검수 전 번역만 교체, 서버 장애는 대기로 남긴다(예외 없음).
+  설명(ko·en)은 검수 도구 경로가 없어 `segment_id`가 가리키는 행동·상위 구간의 검수를 따른다
+  (`dlp_schema.description_follow`, ADR 0043 3절): 승인·표본 검증은 물려받고, 의미를 고쳤거나 지운 행동의
+  검수 전 설명은 지운다. 수집·`dlp review verify`·번역 단계가 적용한다.
   `dlp translate run <세션>|--pending`, `dlp translate pending`. `dlp actions run`이 커밋 뒤 자동으로 부른다
   (실패해도 행동 결과·종료 코드 불변). CPU·CI는 `GlossaryStubTranslator`. 정책은 `config/policies/translate.yaml`.
 - `packages/aireview/` (`dlp_aireview`) — AI 1차 검수 판정(ADR 0040): 사내 vLLM(OpenAI 호환, 기본 Qwen3-VL-8B)이 블러본
