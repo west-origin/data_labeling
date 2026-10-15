@@ -53,7 +53,7 @@ from dlp_review.tasks import (
 )
 from dlp_review.verify import verification_gaps
 from dlp_schema import load_ontology, repo_root
-from dlp_schema.db import repository
+from dlp_schema.db import locks, repository, review_repository
 from dlp_schema.db.repository import (
     get_assignment,
     get_labels,
@@ -1144,3 +1144,86 @@ def test_verification_ignores_legacy_tasks_without_hash(
         mark_review_task_collected(conn, "cvat:2", NOW)
         insert_labels(conn, [_face()])
         assert not any("회수" in r for r in verification_gaps(conn, SID, policy))
+
+
+@pytest.mark.parametrize("b_first", [False, True])
+def test_concurrent_runner_never_deletes_media_of_a_recreated_task(
+    tmp_path: Path,
+    stores: tuple[LocalStore, LocalStore],
+    policy: PrivacyPolicy,
+    monkeypatch: pytest.MonkeyPatch,
+    b_first: bool,
+) -> None:
+    """F-REV-29: 회수 실행기 둘이 겹쳐도 다시 만든 작업의 매체(같은 키)를 지우지 않는다.
+
+    흉내 내는 순서: 실행기 A가 대기를 읽는다 → (그 사이) 실행기 B가 같은 회수를 끝내고 생성
+    게이트가 열려 같은 렌더 해시·매체 키로 새 작업이 만들어진다(B) → A가 이어서 지운다.
+    작업 생성은 세션 잠금을 쥐고 올린다. 그래서 A가 세션 잠금을 쥔 동안에는 B가 끼어들 수 없고
+    (잠금이 풀린 뒤로 미룬다), 잠금 전이면 바로 끼어든다(b_first). 행 잠금이 없는 SQLite라
+    잠금 시점은 `lock_session` 대역으로 본다.
+
+    정답: 어느 순서든 새 작업의 사본은 남고 새 작업에 매체 회수 표시가 없다.
+    """
+    from dlp_review import revoke as revoke_module
+
+    raw, labeling = stores
+    engine = sqlite_db(f"sqlite:///{tmp_path / 'race.db'}")
+    current = render_hash([], policy)
+    key = labeling_media_key(SID, "labeler01", "bodycam", current)
+    uri = _put_media(labeling, key, tmp_path)
+    with engine.begin() as conn:
+        register_ontology(conn, load_ontology(repo_root() / "config/ontology/v1"))
+        insert_session(conn, _session(raw, tmp_path, PrivacyState.APPROVED))
+        insert_review_task(
+            conn, _task("cvat:2", ReviewTool.CVAT, "bodycam", ReviewStage.LABELING, uri,
+                        render_hash=current, assignee="labeler01"),
+        )  # fmt: skip
+        request_task_revocation(conn, "cvat:2", reason="hold:ops01:x", at=NOW)
+    new_bytes = tmp_path / "new.bin"
+    new_bytes.write_bytes(b"recreated task media")
+    state = {"held": False, "done": False}
+
+    def runner_b_and_recreate() -> None:
+        """B: 같은 회수를 끝내고(사본 삭제·표시), 같은 키로 새 작업과 새 사본을 만든다."""
+        state["done"] = True
+        labeling.delete(key)
+        with engine.begin() as conn:
+            repository.mark_task_media_revoked(conn, SID, uri, NOW)
+            insert_review_task(
+                conn, _task("cvat:9", ReviewTool.CVAT, "bodycam", ReviewStage.LABELING, uri,
+                            render_hash=current, assignee="labeler01"),
+            )  # fmt: skip
+        labeling.put_file(key, new_bytes, sha256_file(new_bytes))
+
+    real_list = review_repository.list_review_tasks
+    real_lock = locks.lock_session if hasattr(revoke_module, "lock_session") else None
+
+    def list_then_maybe_b(conn: sa.Connection, session_id: str) -> list[ReviewTask]:
+        out = real_list(conn, session_id)
+        if not state["held"] and not state["done"]:
+            runner_b_and_recreate()  # 잠금 밖에서 확인한 직후 B가 끼어든다
+        return out
+
+    def lock_after_b(conn: sa.Connection, session_id: str) -> None:
+        if b_first and not state["done"]:
+            runner_b_and_recreate()  # B가 먼저 잠금을 쥐고 끝냈다
+        state["held"] = True
+        assert real_lock is not None
+        real_lock(conn, session_id)
+
+    monkeypatch.setattr(revoke_module, "list_review_tasks", list_then_maybe_b)
+    if real_lock is not None:
+        monkeypatch.setattr(revoke_module, "lock_session", lock_after_b)
+    report = execute_media_revocations(
+        engine, SID, labeling=labeling, raw_bucket="dlp-raw", cvat=None, label_studio=None,
+        clock=lambda: NOW,
+    )  # fmt: skip
+    if not state["done"]:
+        runner_b_and_recreate()  # A의 잠금이 풀린 뒤 B
+    assert labeling.head(key) is not None, "다시 만든 작업의 사본이 지워졌다"
+    assert (labeling.root / key).read_bytes() == b"recreated task media"
+    assert not any("[매체 노출 남음]" in e for e in report.errors), report.errors
+    with engine.connect() as conn:
+        assert get_review_task(conn, "cvat:9").media_revoked_at is None
+        assert get_review_task(conn, "cvat:2").media_revoked_at == NOW
+    engine.dispose()

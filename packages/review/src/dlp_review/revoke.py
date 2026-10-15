@@ -25,9 +25,12 @@
 인스턴스를 새로 만들고 DB를 남기면 같은 외부 ID가 다른 세션·라벨러의 작업일 수 있다. 다르면 대기로
 두고, 운영자가 원래 작업이 없어진 것을 확인해 `mark_tool_gone`으로 정리한다.
 
-세션 잠금은 잡지 않는다. S3 삭제와 "NULL인 열만 표시"는 멱등이고, 도구 단계만 작업 행을 잠가 같은
-작업의 스냅숏·삭제가 겹치지 않게 한다. 요청 쪽은 미요청 행만, 실행기는 요청된 행만 다루므로 서로
-기다리지 않는다. 블러본 파일(`blurred_key`)은 지우지 않는다 (ADR 0024: 렌더 기록 무효로 막는다).
+매체 삭제만 세션 잠금을 잡는다 (F-REV-29): 작업 생성이 같은 잠금을 쥐고 사본을 올리므로, 잠금
+아래에서 "같은 키를 쓰는 살아 있는 작업이 없고 아직 표시되지 않았다"를 다시 확인한 뒤 지우고
+표시한다. 잠금 밖 확인만으로는 다른 실행기가 같은 회수를 끝내 생성 게이트가 열린 사이 같은 렌더
+해시로 다시 만든 작업의 새 사본(같은 키)을 지울 수 있었다. 도구 단계는 작업 행만 잠가(SKIP
+LOCKED) 같은 작업의 스냅숏·삭제가 겹치지 않게 한다. "NULL인 열만 표시"는 멱등이다.
+블러본 파일(`blurred_key`)은 지우지 않는다 (ADR 0024: 렌더 기록 무효로 막는다).
 
 스냅숏: 라벨링 버킷 `sessions/<세션>/revoked/<도구>-<외부 ID>.json`. 라벨러가 진행 중이던 주석을
 보존한다 (자동으로 이어받지는 않는다). 영상·서명 URL은 담지 않는다.
@@ -62,6 +65,7 @@ from dlp_review.tasks import MEDIA_HASH_CHARS, TaskError, object_key, timeseries
 from dlp_schema.db.repository import (
     get_session,
     list_review_tasks,
+    lock_session,
     mark_task_media_revoked,
     mark_task_tool_revoked,
     pending_revocations,
@@ -185,20 +189,24 @@ def _delete_media(
     """
     first = group[0]
     key = _media_key(labeling, raw_bucket, first)
-    with engine.connect() as conn:
-        live = [
-            t.task_key
-            for t in list_review_tasks(conn, first.session_id)
-            if t.media_uri == first.media_uri and t.revoke_requested_at is None
-        ]
-    if live:
-        raise TaskError(f"{key}: 회수 요청 없는 작업 {live}이 같은 사본을 써서 지우지 않습니다")
     if not isinstance(labeling, DeletableStore):
         raise TaskError(f"{type(labeling).__name__}는 삭제를 지원하지 않습니다")
-    labeling.delete(key)
-    if labeling.head(key) is not None:
-        raise TaskError(f"{key}: 지운 뒤에도 객체가 남아 있습니다")
+    # 작업 생성(`tasks.create_labeling_tasks`)과 같은 세션 잠금 아래에서 다시 확인하고 지운다
+    # (F-REV-29). 잠금 밖 확인은 낡을 수 있다: 다른 실행기가 같은 회수를 끝내 생성 게이트가 열리면
+    # 같은 렌더 해시로 다시 만든 작업이 같은 키에 새 사본을 올린다
     with engine.begin() as conn:
+        lock_session(conn, first.session_id)
+        same = [
+            t for t in list_review_tasks(conn, first.session_id) if t.media_uri == first.media_uri
+        ]
+        if not any(t.revoke_requested_at is not None and t.media_revoked_at is None for t in same):
+            return []  # 다른 실행기가 이미 지우고 표시했다
+        live = [t.task_key for t in same if t.revoke_requested_at is None]
+        if live:
+            raise TaskError(f"{key}: 회수 요청 없는 작업 {live}이 같은 사본을 써서 지우지 않습니다")
+        labeling.delete(key)
+        if labeling.head(key) is not None:
+            raise TaskError(f"{key}: 지운 뒤에도 객체가 남아 있습니다")
         mark_task_media_revoked(conn, first.session_id, first.media_uri, clock())
     return [key]
 
