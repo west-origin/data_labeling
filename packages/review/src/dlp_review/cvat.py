@@ -285,7 +285,8 @@ def _point_to(pt: Keypoint, scale: Scale) -> tuple[float, float]:
 def quantize(label: LabelRecord, scale: Scale = UNIT_SCALE) -> LabelRecord:
     """CVAT에 보냈다가 고치지 않고 받은 값 (좌표 변환·반올림 왕복). 수집 때 비교 기준이다.
 
-    박스·블러·키포인트 트랙만 바꾸고 그 밖의 라벨은 그대로 돌려준다.
+    박스·블러·키포인트 트랙만 바꾸고 그 밖의 라벨은 그대로 돌려준다. 키포인트의 신뢰도와 손 중심
+    3D 점(world, ADR 0044)은 도구로 보내지 않으므로 뺀다.
     """
     p = label.payload
     if isinstance(p, BoxTrackPayload | BlurTrackPayload):
@@ -295,10 +296,13 @@ def quantize(label: LabelRecord, scale: Scale = UNIT_SCALE) -> LabelRecord:
         return label.model_copy(update={"payload": p.model_copy(update={"keyframes": kfs})})
     if isinstance(p, KeypointTrackPayload):
         sx, sy = scale
-        # 보낼 때(_point_to)와 받을 때(from_cvat_tracks의 나눗셈·반올림)를 그대로 재현한다
+        # 보낼 때(_point_to)와 받을 때(from_cvat_tracks의 나눗셈·반올림)를 그대로 재현한다.
+        # 손 중심 3D 점(world)은 CVAT로 보내지 않으므로 돌아온 값에도 없다 (ADR 0044). 고치지 않은
+        # 트랙은 원래 레코드를 승인하므로 world가 남고, 고친 트랙의 사람 레코드에는 world가 없다
         kfs = tuple(
             f.model_copy(
                 update={
+                    "world": None,
                     "points": tuple(
                         Keypoint(
                             x=_r(_point_to(pt, scale)[0] / sx),
@@ -306,7 +310,7 @@ def quantize(label: LabelRecord, scale: Scale = UNIT_SCALE) -> LabelRecord:
                             visibility=pt.visibility,
                         )
                         for pt in f.points
-                    )
+                    ),
                 }
             )
             for f in p.keyframes

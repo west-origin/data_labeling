@@ -18,8 +18,8 @@
 주요 이름
     - 메타데이터: `Source`, `Evidence`, `VerificationState`, `Provenance`, `Verification`.
     - 좌표·3D: `CoordinateFrame`, `Source3D`, `Hand`.
-    - 키프레임: `BoxKeyframe`, `Rle`, `MaskKeyframe`, `Keypoint`, `KeypointFrame`,
-      `Trajectory3DSample`.
+    - 키프레임: `BoxKeyframe`, `Rle`, `MaskKeyframe`, `Keypoint`, `KeypointFrame`, `WorldPoint`,
+      `Trajectory3DSample`. `without_world`(손 중심 3D 점을 뺀 사본, ADR 0044).
     - 페이로드: `*Payload` 14종과 판별 공용체 `LabelPayload`.
     - `SKELETON_SIZES`, `SPATIAL_KINDS`, `LabelRecord`.
 
@@ -167,10 +167,38 @@ class Keypoint(Contract):
     confidence: Confidence | None = None
 
 
+# 손 모델의 손 중심 3D 점 (미터). 좌표축은 카메라와 같은 방향(X 오른쪽, Y 아래, Z 앞)이고 원점은
+# 손의 대략적인 기하 중심이다 (MediaPipe hand_world_landmarks, ADR 0044). 카메라 좌표가 아니다.
+class WorldPoint(Contract):
+    x: float
+    y: float
+    z: float
+
+
+def _drop_none(value: object) -> bool:
+    """직렬화에서 뺄 값인가 (None). 선택 필드를 더해도 예전 라벨의 JSON이 그대로이게 한다."""
+    return value is None
+
+
 # 한 시각의 키포인트 묶음. points 개수는 골격 크기(`SKELETON_SIZES`)와 같아야 한다.
+# world: 손 모델이 낸 손 중심 3D 점 (선택, hand21만, points와 같은 순서·개수, ADR 0044). 손 모양
+#   정보이고 검수 대상이 아니다. 검수 도구는 2D만 보이므로 사람이 쓰거나 고친 트랙에는 없다
+#   (`without_world`, CVAT 수집). None이면 JSON에 싣지 않는다 (예전 라벨과 같은 JSON).
 class KeypointFrame(Contract):
     t_ms: Ms
     points: tuple[Keypoint, ...]
+    world: tuple[WorldPoint, ...] | None = Field(
+        default=None,
+        exclude_if=_drop_none,
+        description="손 모델의 손 중심 3D 점 (m, 카메라와 같은 축, 원점은 손 중심). hand21만",
+    )
+
+    @model_validator(mode="after")
+    def _check(self) -> KeypointFrame:
+        """world가 있으면 points와 개수가 같은지 검사한다. Raises: ValueError."""
+        if self.world is not None and len(self.world) != len(self.points):
+            raise ValueError("world 점 수는 points 수와 같아야 합니다")
+        return self
 
 
 # 골격 이름 → 키포인트 수.
@@ -214,7 +242,21 @@ class KeypointTrackPayload(Contract):
             raise ValueError(f"{self.skeleton} 골격은 프레임마다 키포인트 {n}개가 필요합니다")
         if self.skeleton == "hand21" and self.hand is None:
             raise ValueError("손 골격에는 hand(left/right)가 필요합니다")
+        if self.skeleton != "hand21" and any(f.world is not None for f in self.keyframes):
+            raise ValueError("world 점은 hand21 골격에만 둡니다")
         return self
+
+
+def without_world(payload: KeypointTrackPayload) -> KeypointTrackPayload:
+    """world 점을 모두 뺀 사본 (ADR 0044).
+
+    검수 도구는 2D 점만 보이고 고친다. 고친 2D와 모델의 예전 world 점이 함께 남지 않게, 도구로 보낸
+    형태(`dlp_review.cvat.quantize`)와 사람 레코드에는 world를 싣지 않는다.
+    """
+    if all(f.world is None for f in payload.keyframes):
+        return payload
+    frames = tuple(f.model_copy(update={"world": None}) for f in payload.keyframes)
+    return payload.model_copy(update={"keyframes": frames})
 
 
 # 블러 트랙 (프라이버시 게이트 출력). target: 프라이버시 대상 ID. keyframes: 가릴 박스.

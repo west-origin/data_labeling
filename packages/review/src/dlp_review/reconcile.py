@@ -25,12 +25,14 @@ from datetime import datetime
 from dlp_schema.aireview import AiOutcome
 from dlp_schema.common import derived_id
 from dlp_schema.labels import (
+    KeypointTrackPayload,
     LabelPayload,
     LabelRecord,
     Provenance,
     Source,
     Verification,
     VerificationState,
+    without_world,
 )
 
 
@@ -157,13 +159,18 @@ def reconcile(
         item: ReviewedItem, parent: LabelRecord | None, *, retracted: bool = False
     ) -> LabelRecord:
         """검수 항목으로 새 사람 레코드를 만든다 (parent가 있으면 수정·삭제, 없으면 추가)."""
+        payload = item.payload
+        if isinstance(payload, KeypointTrackPayload) and not retracted:
+            # 사람이 고치거나 그린 골격에는 모델의 손 중심 3D 점을 싣지 않는다 (ADR 0044). 도구
+            # 변환기는 world를 내지 않지만, 다른 경로로 들어와도 고친 2D와 예전 world가 섞이지 않게
+            payload = without_world(payload)
         # ID 해시 입력: 내용이 다르면 ID도 달라진다 (정렬된 JSON이라 결정적)
         content = json.dumps(
             [
                 item.t_start_ms,
                 item.t_end_ms,
                 item.stream_id,
-                item.payload.model_dump(mode="json"),
+                payload.model_dump(mode="json"),
                 retracted,
             ],
             sort_keys=True,
@@ -181,7 +188,7 @@ def reconcile(
             parent_label_id=parent.label_id if parent else None,
             retracted=retracted,
             created_at=now,
-            payload=item.payload,
+            payload=payload,
         )
 
     for item in reviewed:

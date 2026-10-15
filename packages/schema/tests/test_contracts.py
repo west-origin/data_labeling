@@ -17,11 +17,13 @@ from pydantic import ValidationError
 from dlp_schema.export import ExportedLabel
 from dlp_schema.labels import (
     SPATIAL_KINDS,
+    KeypointTrackPayload,
     LabelRecord,
     Provenance,
     Source,
     Verification,
     VerificationState,
+    without_world,
 )
 from dlp_schema.review import ReviewTask
 from dlp_schema.session import (
@@ -195,6 +197,31 @@ def test_keypoint_count_must_match_skeleton() -> None:
     bad = {**PAYLOADS[2], "keyframes": [{"t_ms": 0, "points": HAND21[:20]}]}
     with pytest.raises(ValidationError, match="21"):
         make_label(bad, stream_id="bodycam")
+
+
+WORLD21 = [{"x": 0.001 * i, "y": -0.002 * i, "z": 0.0} for i in range(21)]
+
+
+def test_hand_world_points_are_optional_and_omitted_from_json_when_absent() -> None:
+    """ADR 0044: 손 중심 3D 점(world)은 선택이다. 없으면 JSON에 키가 없어 예전 라벨과 같은 JSON이고,
+    있으면 왕복한다. 점 수가 points와 다르거나 전신 골격(coco17)에 두면 거부한다. `without_world`는
+    world만 뺀 사본을 낸다.
+    """
+    plain = make_label(PAYLOADS[2], stream_id="bodycam")
+    assert '"world"' not in plain.model_dump_json()
+    with_world = {**PAYLOADS[2], "keyframes": [{"t_ms": 0, "points": HAND21, "world": WORLD21}]}
+    label = make_label(with_world, stream_id="bodycam")
+    assert LabelRecord.model_validate_json(label.model_dump_json()) == label
+    assert isinstance(label.payload, KeypointTrackPayload)
+    assert without_world(label.payload) == plain.payload
+    short = {**PAYLOADS[2], "keyframes": [{"t_ms": 0, "points": HAND21, "world": WORLD21[:20]}]}
+    with pytest.raises(ValidationError, match="world"):
+        make_label(short, stream_id="bodycam")
+    coco = [{"x": 1, "y": 1, "visibility": 2}] * 17
+    body = {"kind": "keypoint_track", "entity_id": "p1", "skeleton": "coco17",
+            "keyframes": [{"t_ms": 0, "points": coco, "world": WORLD21[:17]}]}  # fmt: skip
+    with pytest.raises(ValidationError, match="hand21"):
+        make_label(body, stream_id="bodycam")
 
 
 @pytest.mark.parametrize(

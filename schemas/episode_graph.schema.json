@@ -644,6 +644,22 @@
           "minimum": 0,
           "title": "T Ms",
           "type": "integer"
+        },
+        "world": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/WorldPoint"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "손 모델의 손 중심 3D 점 (m, 카메라와 같은 축, 원점은 손 중심). hand21만",
+          "title": "World"
         }
       },
       "required": [
@@ -1420,6 +1436,30 @@
       ],
       "title": "VerificationState",
       "type": "string"
+    },
+    "WorldPoint": {
+      "additionalProperties": false,
+      "properties": {
+        "x": {
+          "title": "X",
+          "type": "number"
+        },
+        "y": {
+          "title": "Y",
+          "type": "number"
+        },
+        "z": {
+          "title": "Z",
+          "type": "number"
+        }
+      },
+      "required": [
+        "x",
+        "y",
+        "z"
+      ],
+      "title": "WorldPoint",
+      "type": "object"
     }
   },
   "additionalProperties": false,

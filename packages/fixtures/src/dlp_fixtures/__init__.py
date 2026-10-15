@@ -14,6 +14,9 @@
 - `generate_action_scenario` (`actions.py`): 경계를 아는 행동 시퀀스 (손 키포인트, 장갑 압력,
   정답 행동·사이 구간·손 상태 라벨) (WP10).
 - `generate_wiping_scenario` (`wiping.py`): 정답 도구-표면 접촉 구간과 커버리지를 아는 걸레질 (WP9).
+- `generate_hand3d_scenario` (`hand3d.py`): 정답 카메라 좌표 3D를 아는 손 시퀀스 (2D 투영, 손 중심
+  3D 점, 손바닥만 손 깊이인 합성 깊이). 정답 = 프레임마다 21관절 카메라 좌표 (손가락 끝 3D,
+  ADR 0044). 메모리에서만 쓴다 (`generate_all`이 파일로 쓰지 않는다).
 - `generate_all`: 위 모두를 디렉터리에 쓴다 (`dlp fixtures generate`).
 
 시간 규약: 라벨 시각은 정수 ms. 시간 구간 라벨은 마스터 타임라인, 공간 라벨 키프레임은 영상 PTS
@@ -26,6 +29,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from dlp_fixtures.actions import ActionScenario, generate_action_scenario
+from dlp_fixtures.hand3d import Hand3DScenario, generate_hand3d_scenario
 from dlp_fixtures.io import write_jsonl
 from dlp_fixtures.sessions import generate_sessions
 from dlp_fixtures.sync import SyncScenario, generate_sync_scenario
@@ -35,11 +39,13 @@ from dlp_fixtures.wiping import WipingScenario, generate_wiping_scenario
 __all__ = [
     "ActionScenario",
     "BlurScenario",
+    "Hand3DScenario",
     "SyncScenario",
     "WipingScenario",
     "generate_action_scenario",
     "generate_all",
     "generate_blur_scenario",
+    "generate_hand3d_scenario",
     "generate_sessions",
     "generate_sync_scenario",
     "generate_wiping_scenario",

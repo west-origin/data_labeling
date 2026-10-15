@@ -23,6 +23,7 @@ import numpy as np
 import pytest
 
 from dlp_fixtures.actions import generate_action_scenario
+from dlp_fixtures.hand3d import generate_hand3d_scenario
 from dlp_fixtures.video import TARGET_COLORS, generate_blur_scenario, write_video
 from dlp_media.proxy import make_proxy
 from dlp_media.pts import build_pts_index
@@ -73,6 +74,8 @@ from dlp_schema.labels import (
     Hand,
     HandStatePayload,
     KeypointTrackPayload,
+    Provenance,
+    Source,
     VerificationState,
 )
 from dlp_schema.ontology import Ontology, load_ontology
@@ -459,6 +462,45 @@ def test_reconcile_compares_against_normalized_originals() -> None:
     out = reconcile([jittered], [item], session_id="syn-blur", ontology_version="1.0.0",
                     reviewer_id="r", now=FIXED_TIME, normalize=quantize)  # fmt: skip
     assert out.approved == [original.label_id] and not out.new_records
+
+
+def test_cvat_round_trip_keeps_world_only_on_untouched_hand_tracks() -> None:
+    """ADR 0044: 손 중심 3D 점(world)은 CVAT로 보내지 않는다. 고치지 않은 모델 손 트랙은 원래 레코드
+    승인(world 유지)이고, 검수자가 점 하나를 옮긴 트랙의 사람 레코드에는 world가 없다 (고친 2D와
+    모델의 예전 world가 섞이지 않는다 → 3D 단계는 그 트랙을 관절별 깊이로 올린다).
+
+    정답 근거: `dlp_fixtures.hand3d`의 world를 가진 손 트랙(모델 출처로 바꿈)과 프레임 시각.
+    """
+    s = generate_hand3d_scenario(0, n_frames=5)
+    [truth] = s.labels
+    model = truth.model_copy(
+        update={"provenance": Provenance(source=Source.MODEL, model_version="mediapipe-test")}
+    )
+    assert isinstance(model.payload, KeypointTrackPayload)
+    schema = fake_schema(list(KEYPOINT_LABELS))
+    [track] = to_cvat_tracks([model], s.frame_times, schema)
+    assert "world" not in json.dumps(track)
+    [same] = from_cvat_tracks([track], s.frame_times, schema, "bodycam", new_box_kind="box_track")
+    assert same.payload == quantize(model).payload
+    assert all(f.world is None for f in same.payload.keyframes)  # type: ignore[union-attr]
+    kept = reconcile([model], [same], session_id=s.session_id, ontology_version="1.0.0",
+                     reviewer_id="rev1", now=FIXED_TIME, normalize=quantize)  # fmt: skip
+    assert kept.approved == [model.label_id] and not kept.new_records
+
+    track["shapes"][0]["points"][0] += 3.0  # 검수자가 첫 프레임 손목을 3 px 옮겼다
+    [moved] = from_cvat_tracks([track], s.frame_times, schema, "bodycam", new_box_kind="box_track")
+    out = reconcile([model], [moved], session_id=s.session_id, ontology_version="1.0.0",
+                    reviewer_id="rev1", now=FIXED_TIME, normalize=quantize)  # fmt: skip
+    [fixed] = out.new_records
+    assert fixed.parent_label_id == model.label_id and not fixed.retracted
+    assert isinstance(fixed.payload, KeypointTrackPayload)
+    assert all(f.world is None for f in fixed.payload.keyframes)
+    # 다른 경로로 world가 실린 항목이 들어와도 사람 레코드에는 싣지 않는다 (reconcile 방어)
+    smuggled = ReviewedItem(None, "bodycam", model.t_start_ms, model.t_end_ms, model.payload)
+    [drawn] = reconcile([], [smuggled], session_id=s.session_id, ontology_version="1.0.0",
+                        reviewer_id="rev1", now=FIXED_TIME).new_records  # fmt: skip
+    assert isinstance(drawn.payload, KeypointTrackPayload)
+    assert all(f.world is None for f in drawn.payload.keyframes)
 
 
 # ---------------------------------------------------------------- 그 밖
