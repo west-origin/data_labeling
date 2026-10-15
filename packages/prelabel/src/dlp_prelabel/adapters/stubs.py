@@ -27,8 +27,10 @@ class OraclePredictor:
     """정답 라벨 중 kinds에 해당하는 것을 좌표 흔들림(jitter_px)을 넣어 모델 출처로 돌려준다.
 
     키포인트 트랙은 모든 점의 x·y에, 박스 트랙은 x에만 정규분포 흔들림(표준편차 jitter_px)을
-    넣는다. 다른 종류는 그대로 낸다. 같은 seed면 결과가 같다 (결정적). version은
-    `oracle-<이름>-j<jitter_px>`라 흔들림을 바꾸면 새 버전이 된다 (재실행·지우기 시험에 쓴다).
+    넣는다. 키프레임의 손 중심 3D 점(world, MediaPipe hand_world_landmarks 흉내, ADR 0044)은 정답
+    그대로 낸다 (정답 3D를 아는 픽스처 `dlp_fixtures.hand3d`가 채운다. 없는 정답이면 없다). 다른
+    종류는 그대로 낸다. 같은 seed면 결과가 같다 (결정적). version은 `oracle-<이름>-j<jitter_px>`라
+    흔들림을 바꾸면 새 버전이 된다 (재실행·지우기 시험에 쓴다).
     """
 
     def __init__(

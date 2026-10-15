@@ -54,8 +54,9 @@ lerobot:
   video_stream: bodycam      # 에피소드 영상 스트림 종류
   max_width: 640             # 이보다 넓으면 줄인다 (0이면 원본 크기)
   interp_max_gap_ms: 200     # 키포인트·3D 궤적을 이 간격 안에서만 선형 보간
-  # observation.state에 넣는 손 3D 점 (Trajectory3D part 이름). 바꾸면 state 열 수가 바뀐다
-  hand_points_3d: [wrist, thumb_tip, index_tip]
+  # observation.state에 넣는 손 3D 점 (Trajectory3D part 이름, 카메라 좌표 m). 바꾸면 state 열 수가 바뀐다.
+  # 손목과 다섯 손가락 끝 (prelabel.yaml depth.hand_points와 맞춘다, ADR 0044)
+  hand_points_3d: [wrist, thumb_tip, index_tip, middle_tip, ring_tip, pinky_tip]
   repo_id: dlp/export        # LeRobot 데이터셋 repo_id (허브에 올리지 않는다, 메타데이터용)
   robot_type: human_bodycam  # LeRobot 메타데이터 robot_type
   vcodec: h264               # 에피소드 영상 코덱

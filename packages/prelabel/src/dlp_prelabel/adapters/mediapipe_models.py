@@ -6,7 +6,9 @@
 모델 입출력 (MediaPipe Tasks, VIDEO 모드: 프레임마다 엄격히 증가하는 시각(ms)을 넘겨야 한다.
 반올림한 PTS ms가 앞 프레임과 같은 프레임은 `common.strictly_increasing`이 건너뛴다):
 - HandLandmarker(`hand_landmarker.task`): RGB 프레임 → 손마다 21관절(이미지 크기로 정규화한 0~1 x,
-  y)과 손 판정(Left/Right, 거울상 가정). 여기서 픽셀로 바꾼다 (x*W, y*H). skeleton="hand21"
+  y), 손 중심 3D 21점(hand_world_landmarks, 미터, 원점은 손의 대략적인 기하 중심)과 손 판정
+  (Left/Right, 거울상 가정). 2D는 여기서 픽셀로 바꾸고 (x*W, y*H), 3D는 키프레임 world에 싣는다
+  (ADR 0044, `lift3d`가 손가락 끝 3D에 쓴다). skeleton="hand21"
   (MediaPipe 관절 순서: 0 손목, 4 엄지 끝, 8 검지 끝, 12 중지 끝, 16 약지 끝, 20 새끼 끝).
 - ObjectDetector(`efficientdet_lite0.tflite`): RGB 프레임 → COCO 클래스 이름·점수·박스 (origin_x,
   origin_y, width, height 픽셀). 출력 좌표계: 스트림 픽셀, 왼쪽 위 원점. 키프레임 시각은 스트림
@@ -37,6 +39,7 @@ from dlp_schema.labels import (
     KeypointFrame,
     KeypointTrackPayload,
     LabelRecord,
+    WorldPoint,
 )
 from dlp_schema.predictor import Clip, ModelUnavailableError
 
@@ -90,12 +93,32 @@ def best_per_hand[T](
     return best
 
 
+def hand_frame(t_ms: int, landmarks: Any, world: Any, width: int, height: int) -> KeypointFrame:
+    """MediaPipe 손 하나 → 키프레임 (2D 픽셀 점 + 손 중심 3D 점, ADR 0044).
+
+    Args:
+        t_ms: 스트림 PTS ms.
+        landmarks: `hand_landmarks[i]` (정규화 0~1 x, y). 픽셀로 바꾼다 (x*W, y*H).
+        world: `hand_world_landmarks[i]` (미터, 원점은 손의 대략적인 기하 중심, 카메라와 같은
+            축). 0.1 mm(소수 넷째 자리)로 반올림해 싣는다. 점 수가 다르면 싣지 않는다.
+        width, height: 프레임 크기(px).
+    """
+    points = tuple(Keypoint(x=lm.x * width, y=lm.y * height, visibility=2) for lm in landmarks)
+    world_points = tuple(
+        WorldPoint(x=round(p.x, 4), y=round(p.y, 4), z=round(p.z, 4)) for p in world
+    )
+    return KeypointFrame(
+        t_ms=t_ms, points=points, world=world_points if len(world_points) == len(points) else None
+    )
+
+
 class MediaPipeHands:
     """손 21관절 어댑터 (name="hands").
 
-    version: `mediapipe-<가중치 버전>+rgb1+p<hands 절 해시>`.
-    RGB 행 패딩 제거 버전을 포함한다. 손(왼·오른)마다 트랙 하나를 낸다. 라벨
-    ID는 `<세션>-<스트림>-hands-<version_tag>-<left|right>`, entity_id는 `<left|right>_hand`.
+    version: `mediapipe-<가중치 버전>+rgb1+w1+p<hands 절 해시>`.
+    RGB 행 패딩 제거(rgb1)와 손 중심 3D 점 싣기(w1, ADR 0044) 버전을 포함한다. 손(왼·오른)마다
+    트랙 하나를 낸다. 라벨 ID는 `<세션>-<스트림>-hands-<version_tag>-<left|right>`, entity_id는
+    `<left|right>_hand`.
     """
 
     name = "hands"
@@ -105,13 +128,14 @@ class MediaPipeHands:
     ) -> None:
         """가중치를 확인하고 버전을 정한다. Raises: ModelUnavailableError."""
         self.path, version = _model(root, policy.models.hands)
-        self.version = f"{version}+rgb1+p{policy.digest('hands')}"
+        self.version = f"{version}+rgb1+w1+p{policy.digest('hands')}"
         self.policy, self.ontology_version, self.now = policy, ontology_version, now
 
     def run(self, clip: Clip) -> list[LabelRecord]:
         """영상 전체 프레임에서 손을 찾아 손마다 hand21 키포인트 트랙을 돌려준다.
 
-        프레임마다 손별 최고 점수 탐지 하나만 쓴다 (`best_per_hand`). 관절 visibility는 모두
+        프레임마다 손별 최고 점수 탐지 하나만 쓴다 (`best_per_hand`). 키프레임에는 2D 점과 손 중심
+        3D 점(hand_world_landmarks, `hand_frame`)을 함께 싣는다. 관절 visibility는 모두
         2(보임)로 둔다 (MediaPipe가 관절별 가림을 주지 않는다). 트랙 신뢰도는 손 판정 점수의
         평균이다. 한 손이 잠시 사라져도 같은 트랙에 이어 붙인다 (키프레임 사이에 빈 시간이 생길
         수 있다).
@@ -140,19 +164,17 @@ class MediaPipeHands:
                     (
                         flip_hand(handed[0].category_name, self.policy.hands.input_is_mirrored),
                         float(handed[0].score),
-                        landmarks,
+                        (landmarks, world),
                     )
-                    for landmarks, handed in zip(
-                        result.hand_landmarks, result.handedness, strict=True
+                    for landmarks, world, handed in zip(
+                        result.hand_landmarks,
+                        result.hand_world_landmarks,
+                        result.handedness,
+                        strict=True,
                     )
                 )
-                for hand, (score, landmarks) in found.items():
-                    points = tuple(
-                        # 정규화 좌표(0~1) → 픽셀
-                        Keypoint(x=lm.x * w, y=lm.y * h, visibility=2)
-                        for lm in landmarks
-                    )
-                    frames[hand].append((KeypointFrame(t_ms=t, points=points), score))
+                for hand, (score, (landmarks, world)) in found.items():
+                    frames[hand].append((hand_frame(t, landmarks, world, w, h), score))
         out: list[LabelRecord] = []
         for hand, items in frames.items():
             if not items:

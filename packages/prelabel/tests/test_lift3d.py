@@ -96,7 +96,8 @@ def test_lifting_unprojects_with_depth_and_respects_stride() -> None:
 
     정답 근거: fx=160, cx=160. 손목 (80, 120)은 왼쪽 절반이라 z=1 → x=(80-160)*1/160=-0.5, y=0.
     버킷 중심 (220, 120)은 오른쪽 절반이라 z=2 → x=(220-160)*2/160=0.75. 화면 밖 키프레임(500
-    ms)은 빠진다. 정책 hand_points [0, 4, 8] → 부위 wrist, thumb_tip, index_tip.
+    ms)은 빠진다. 정책 hand_points [0, 4, 8, 12, 16, 20] → 부위 손목과 다섯 손가락 끝. 이 트랙에는
+    손 중심 3D 점(world)이 없어 관절마다 깊이만 쓴다.
     """
     policy = load_policy(ROOT).depth.model_copy(update={"frame_stride_ms": 200})
     frames = [(t, np.zeros((H, W, 3), dtype=np.uint8)) for t in range(0, 1_000, 100)]
@@ -108,7 +109,9 @@ def test_lifting_unprojects_with_depth_and_respects_stride() -> None:
     wrist = out[("right_hand", "wrist")]
     assert [s.t_ms for s in wrist] == [0, 200, 400, 600, 800]
     assert (wrist[0].x, wrist[0].y, wrist[0].z) == pytest.approx((-0.5, 0.0, 1.0))
-    assert {p for e, p in out if e == "right_hand"} == {"wrist", "thumb_tip", "index_tip"}
+    assert {p for e, p in out if e == "right_hand"} == {
+        "wrist", "thumb_tip", "index_tip", "middle_tip", "ring_tip", "pinky_tip"
+    }  # fmt: skip
     [bucket] = out[("ov_bucket_01", None)]  # 화면 밖 키프레임은 건너뛴다
     assert (bucket.t_ms, bucket.x, bucket.z) == (0, pytest.approx(0.75), pytest.approx(2.0))
 

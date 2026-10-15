@@ -1,8 +1,14 @@
 """단안 메트릭 깊이로 바디캠의 손 관절·객체를 카메라 좌표 3D 궤적으로 올린다.
 
-frame_stride_ms마다 깊이 맵을 만들고, 그 프레임에 있는 손 키포인트(정책의 hand_points)와 객체 박스
-중심의 깊이(주변 패치 중앙값)를 읽어 카메라 내부 파라미터로 역투영한다. 좌표계는 카메라 (광축 Z 앞,
-X 오른쪽, Y 아래, 미터)다. 월드 좌표는 카메라 자세(SLAM)가 생긴 뒤에 만든다.
+frame_stride_ms마다 깊이 맵을 만들고, 그 프레임에 있는 손 키포인트(정책의 hand_points: 손목과 다섯
+손가락 끝)와 객체 박스 중심을 카메라 좌표로 올린다. 좌표계는 카메라 (광축 Z 앞, X 오른쪽, Y 아래,
+미터)다. 월드 좌표는 카메라 자세(SLAM)가 생긴 뒤에 만든다 (F-PAR-26).
+
+- 손 키프레임에 손 중심 3D 점(`KeypointFrame.world`, MediaPipe hand_world_landmarks)이 있으면 손
+  모양 + 2D 픽셀 + 손바닥 깊이·손 크기 사전값으로 21관절을 함께 맞춘다 (`handfit.fit_hand`,
+  ADR 0044). 얇은 손가락 끝에서 배경 깊이를 읽는 문제가 없다.
+- world가 없거나(사람이 고친 트랙, 예전 버전) 맞춤이 실패하면 관절마다 그 픽셀의 깊이(주변 패치
+  중앙값)로 역투영한다 (예전 방식). 박스 중심도 이 방식이다.
 
 파이프라인 위치: `runner._lift`가 바디캠의 현재 hand21 손·박스 트랙을 (개체, 트랙 종류)마다 하나씩
 골라(`runner.pick_lift_tracks`) 넘겨 부른다. 결과는 trajectory3d 라벨 (frame=camera,
@@ -25,11 +31,13 @@ from numpy.typing import NDArray
 from dlp_models.depth import Intrinsics, MetricDepth, sample_depth
 from dlp_models.registry import resolve
 from dlp_prelabel.common import Image, iter_frames, model_label
+from dlp_prelabel.handfit import fit_hand
 from dlp_prelabel.policy import HAND21_JOINTS, DepthPolicy, PrelabelPolicy
 from dlp_schema.episode import version_tag
 from dlp_schema.labels import (
     BoxTrackPayload,
     CoordinateFrame,
+    KeypointFrame,
     KeypointTrackPayload,
     LabelPayload,
     LabelRecord,
@@ -82,17 +90,26 @@ def lift_key(payload: LabelPayload) -> tuple[str, str] | None:
     return None
 
 
+# 깊이만으로 올릴 점: (개체, 부위, u, v 픽셀). 부위 None은 박스 중심
+_Point = tuple[str, str | None, float, float]
+
+
 def _points_by_time(
-    tracks: list[LabelRecord], policy: DepthPolicy
-) -> dict[int, list[tuple[str, str | None, float, float]]]:
-    """스트림 PTS ms → 그 시각에 올릴 점 (개체, 부위, u, v 픽셀) 목록 (`lift_tracks` 1단계).
+    tracks: list[LabelRecord],
+) -> tuple[dict[int, list[_Point]], dict[int, list[tuple[str, KeypointFrame]]]]:
+    """스트림 PTS ms → 그 시각에 올릴 박스 중심 점과 손 키프레임 (`lift_tracks` 1단계).
+
+    Returns:
+        (박스 중심 점, (개체, 손 키프레임)). 손 관절은 시각마다 키프레임째로 넘겨 `_lift_hand`가
+        맞춤(world 있음) 또는 관절별 깊이로 올린다.
 
     Raises:
         ValueError: 같은 (개체, 트랙 종류) 트랙이 둘 이상일 때 (F-PAR-01). 두 트랙의 표본을 한
             궤적에 섞지 않는다. 러너는 `runner.pick_lift_tracks`로 하나만 고른다.
     """
     seen: dict[tuple[str, str], str] = {}
-    points: dict[int, list[tuple[str, str | None, float, float]]] = {}
+    points: dict[int, list[_Point]] = {}
+    hands: dict[int, list[tuple[str, KeypointFrame]]] = {}
     for label in tracks:
         p = label.payload
         key = lift_key(p)
@@ -106,19 +123,61 @@ def _points_by_time(
         seen[key] = label.label_id
         if isinstance(p, KeypointTrackPayload):
             for f in p.keyframes:
-                for i in policy.hand_points:
-                    kp = f.points[i]
-                    # visibility 0(라벨 없음)인 관절은 올리지 않는다
-                    if kp.visibility > 0:
-                        name = HAND21_NAMES[i]
-                        points.setdefault(f.t_ms, []).append((p.entity_id, name, kp.x, kp.y))
+                hands.setdefault(f.t_ms, []).append((p.entity_id, f))
         elif isinstance(p, BoxTrackPayload):
             for k in p.keyframes:
                 if not k.outside:
                     # 박스는 중심 한 점만 올린다 (part=None)
                     cx, cy = k.x + k.w / 2, k.y + k.h / 2
                     points.setdefault(k.t_ms, []).append((p.entity_id, None, cx, cy))
-    return points
+    return points, hands
+
+
+def _unproject_depth(
+    dmap: NDArray[np.float32], intr: Intrinsics, u: float, v: float, policy: DepthPolicy
+) -> tuple[float, float, float] | None:
+    """픽셀 (u, v)의 깊이(주변 패치 중앙값)로 역투영. 깊이가 nan이거나 범위 밖이면 None."""
+    z = sample_depth(dmap, u, v, policy.patch_radius_px)
+    # 화면 밖(nan)이나 믿기 어려운 깊이는 버린다 (그 시각 샘플이 빠진다)
+    if math.isnan(z) or not policy.min_depth_m <= z <= policy.max_depth_m:
+        return None
+    return intr.unproject(u, v, z)
+
+
+def _lift_hand(
+    frame: KeypointFrame, dmap: NDArray[np.float32], intr: Intrinsics, policy: DepthPolicy
+) -> list[tuple[str, tuple[float, float, float]]]:
+    """손 키프레임 하나 → (관절 이름, 카메라 좌표) 목록 (`policy.hand_points` 중 보이는 관절).
+
+    world가 있고 맞춤이 되면 `handfit.fit_hand` 결과를 쓴다 (깊이 z가 [min_depth_m, max_depth_m]
+    밖인 관절은 뺀다). 아니면 관절마다 그 픽셀 깊이로 역투영한다. visibility 0(라벨 없음)인 관절은
+    올리지 않는다.
+    """
+    fitted: NDArray[np.float64] | None = None
+    if frame.world is not None:
+        world = np.array([[w.x, w.y, w.z] for w in frame.world], dtype=np.float64)
+        pixels = np.array([[q.x, q.y] for q in frame.points], dtype=np.float64)
+        visible = np.array([q.visibility > 0 for q in frame.points])
+        fitted = fit_hand(world, pixels, visible, dmap, intr, policy)
+    out: list[tuple[str, tuple[float, float, float]]] = []
+    for i in policy.hand_points:
+        kp = frame.points[i]
+        if kp.visibility == 0:
+            continue
+        if fitted is not None:
+            x, y, z = (float(c) for c in fitted[i])
+            xyz = (x, y, z) if policy.min_depth_m <= z <= policy.max_depth_m else None
+        else:
+            xyz = _unproject_depth(dmap, intr, kp.x, kp.y, policy)
+        if xyz is not None:
+            out.append((HAND21_NAMES[i], xyz))
+    return out
+
+
+def _sample(t: int, xyz: tuple[float, float, float]) -> Trajectory3DSample:
+    """3D 표본 (소수 넷째 자리, 0.1 mm)."""
+    x, y, z = xyz
+    return Trajectory3DSample(t_ms=t, x=round(x, 4), y=round(y, 4), z=round(z, 4))
 
 
 def lift_tracks(
@@ -130,12 +189,13 @@ def lift_tracks(
 ) -> dict[tuple[str, str | None], list[Trajectory3DSample]]:
     """(entity_id, part) → 3D 샘플. tracks는 hand21 키포인트 트랙과 박스 트랙.
 
-    hand21 트랙은 `policy.hand_points` 관절마다 part=관절 이름(예: "wrist"), 박스 트랙은 화면 밖이
-    아닌 키프레임의 박스 중심을 part=None으로 올린다. 깊이는 키프레임 시각과 PTS가 정확히 같은
-    프레임에서만 읽고, 마지막으로 깊이를 만든 프레임에서 frame_stride_ms가 지나기 전 프레임은
-    건너뛴다 (0이어도 마지막 프레임보다 늦은 프레임만 쓴다: PTS 반올림으로 같은 ms 프레임이 이어져도
-    표본은 시각마다 하나). 깊이가 nan(화면 밖)이거나 [min_depth_m, max_depth_m] 밖이면 그 점은
-    버린다.
+    hand21 트랙은 `policy.hand_points` 관절마다 part=관절 이름(예: "wrist", "pinky_tip"), 박스
+    트랙은 화면 밖이 아닌 키프레임의 박스 중심을 part=None으로 올린다. 손 관절은 키프레임에 world가
+    있으면 손 전체 맞춤(`_lift_hand`, ADR 0044), 없으면 관절별 깊이다. 깊이는 키프레임 시각과 PTS가
+    정확히 같은 프레임에서만 읽고, 마지막으로 깊이를 만든 프레임에서 frame_stride_ms가 지나기 전
+    프레임은 건너뛴다 (0이어도 마지막 프레임보다 늦은 프레임만 쓴다: PTS 반올림으로 같은 ms 프레임이
+    이어져도 표본은 시각마다 하나). 깊이가 nan(화면 밖)이거나 [min_depth_m, max_depth_m] 밖이면 그
+    점은 버린다.
 
     Args:
         frames: (스트림 PTS ms, RGB 프레임) 순회 (`common.iter_frames`).
@@ -151,8 +211,8 @@ def lift_tracks(
     Raises:
         ValueError: 같은 (개체, 트랙 종류) 트랙이 둘 이상일 때 (F-PAR-01).
     """
-    # 1단계: 스트림 PTS ms → 그 시각에 올릴 점 (개체, 부위, u, v 픽셀) 목록
-    points = _points_by_time(tracks, policy)
+    # 1단계: 스트림 PTS ms → 그 시각에 올릴 박스 중심과 손 키프레임
+    points, hands = _points_by_time(tracks)
     # 깊이를 만드는 프레임 사이 최소 간격. 0이어도 1 ms로 두어 같은 시각을 두 번 쓰지 않는다
     min_gap = max(policy.frame_stride_ms, 1)
     out: dict[tuple[str, str | None], list[Trajectory3DSample]] = {}
@@ -160,7 +220,7 @@ def lift_tracks(
     intr: Intrinsics | None = None
     for t, img in frames:
         # 2단계: 점이 있는 프레임 중 frame_stride_ms 간격으로만 깊이를 만든다 (CPU 비용)
-        if t not in points or (last is not None and t - last < min_gap):
+        if (t not in points and t not in hands) or (last is not None and t - last < min_gap):
             continue
         last = t
         if intr is None:
@@ -168,23 +228,21 @@ def lift_tracks(
             # 않는다고 본다)
             intr = intrinsics_for(calib, img.shape[1], img.shape[0], policy.default_hfov_deg)
         dmap = depth.predict(img)
-        for entity, part, u, v in points[t]:
-            z = sample_depth(dmap, u, v, policy.patch_radius_px)
-            # 화면 밖(nan)이나 믿기 어려운 깊이는 버린다 (그 시각 샘플이 빠진다)
-            if math.isnan(z) or not policy.min_depth_m <= z <= policy.max_depth_m:
-                continue
-            x, y, z = intr.unproject(u, v, z)
-            out.setdefault((entity, part), []).append(
-                Trajectory3DSample(t_ms=t, x=round(x, 4), y=round(y, 4), z=round(z, 4))
-            )
+        for entity, part, u, v in points.get(t, []):
+            xyz = _unproject_depth(dmap, intr, u, v, policy)
+            if xyz is not None:
+                out.setdefault((entity, part), []).append(_sample(t, xyz))
+        for entity, frame in hands.get(t, []):
+            for name, xyz in _lift_hand(frame, dmap, intr, policy):
+                out.setdefault((entity, name), []).append(_sample(t, xyz))
     return out
 
 
 class DepthLifter:
     """메트릭 깊이 3D 단계. 러너가 Predictor 목록과 따로 부른다 (입력이 영상 + 다른 라벨이다).
 
-    name: "depth3d". version: `depth3d-<가중치 버전>+p<depth 절 해시>` (러너가 입력 해시를 더
-    붙인다).
+    name: "depth3d". version: `depth3d-<가중치 버전>+hf1+p<depth 절 해시>` (hf1: 손 중심 3D 점
+    맞춤 판, ADR 0044. 러너가 입력 해시를 더 붙인다).
     """
 
     name = "depth3d"
@@ -197,7 +255,7 @@ class DepthLifter:
                 건너뛴다.
         """
         self.path, version = resolve(root, policy.models.depth)
-        self.version = f"depth3d-{version}+p{policy.digest('depth')}"
+        self.version = f"depth3d-{version}+hf1+p{policy.digest('depth')}"
         self.policy, self.now = policy, now
         self.model: DepthModel | None = None
 

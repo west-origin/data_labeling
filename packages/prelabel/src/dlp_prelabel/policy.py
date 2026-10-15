@@ -112,6 +112,35 @@ HAND21_JOINTS = {
 }  # fmt: skip
 
 
+class HandFitPolicy(Contract):
+    """손 중심 3D 점 맞춤 정책 (`depth.hand_fit` 절, ADR 0044, `dlp_prelabel.handfit`).
+
+    min_points: 맞춤에 쓰는 보이는 관절 수 하한 (이보다 적으면 깊이만 쓴다).
+    max_reprojection_px: 맞춘 손을 다시 투영한 2D 오차 RMS 상한(px). 넘으면 깊이만 쓴다.
+    anchor_points: 메트릭 깊이로 크기를 정할 때 깊이를 읽는 손바닥 관절 번호 (0~20, 얇은 손가락
+        끝은 배경 깊이가 섞이기 쉬워 넣지 않는다).
+    reference_palm_m: 손목(0)→중지 MCP(9) 기준 길이(m). None이면 손 모델 크기를 그대로 믿는다.
+    depth_weight: 크기 융합에서 깊이 쪽 가중치 (0이면 손 크기만, 1이면 깊이만, 로그 평균).
+    max_scale_ratio: 깊이 쪽과 손 크기 쪽 배율의 비가 이보다 크면 깊이를 믿지 않는다 (배경·가림).
+    """
+
+    min_points: int = Field(ge=3, le=21)
+    max_reprojection_px: float = Field(gt=0)
+    anchor_points: tuple[int, ...] = Field(min_length=1)
+    reference_palm_m: float | None = Field(default=None, gt=0)
+    depth_weight: float = Field(ge=0, le=1)
+    max_scale_ratio: float = Field(ge=1)
+
+    @field_validator("anchor_points")
+    @classmethod
+    def _joint_numbers(cls, v: tuple[int, ...]) -> tuple[int, ...]:
+        """anchor_points가 hand21 번호(0~20)인지 검사한다. 아니면 ValueError."""
+        bad = sorted(i for i in v if not 0 <= i <= 20)
+        if bad:
+            raise ValueError(f"anchor_points {bad}: hand21 번호(0~20)가 아닙니다")
+        return v
+
+
 class DepthPolicy(Contract):
     """메트릭 깊이 3D 올리기 정책 (`depth` 절).
 
@@ -120,6 +149,7 @@ class DepthPolicy(Contract):
     범위(m).
     hand_points: 올릴 hand21 관절 번호 (`HAND21_JOINTS`에 이름이 있는 번호만).
     confidence: 3D 궤적 라벨 신뢰도 (단안 깊이라 낮게).
+    hand_fit: 손 중심 3D 점이 있는 손 트랙의 맞춤 (`HandFitPolicy`, ADR 0044).
     """
 
     frame_stride_ms: int = Field(ge=0)
@@ -129,6 +159,7 @@ class DepthPolicy(Contract):
     max_depth_m: float = Field(gt=0)
     hand_points: tuple[int, ...] = Field(min_length=1)
     confidence: float = Field(ge=0, le=1)
+    hand_fit: HandFitPolicy
 
     @field_validator("hand_points")
     @classmethod

@@ -31,7 +31,8 @@ models:
     license: MIT
     training_data: ["WIDER FACE (CC BY-NC-ND 4.0)"]
     commercial: review
-  # 손 21관절 (prelabel.yaml models.hands → MediaPipeHands)
+  # 손 21관절 (prelabel.yaml models.hands → MediaPipeHands). 2D와 함께 손 중심 3D 점(hand_world_landmarks)도
+  # 싣고 손가락 끝 3D 맞춤에 쓴다 (ADR 0044). 손 메시 모델 HaMeR·WiLoR는 MANO(비상업 라이선스)에 묶여 쓰지 않는다 (F-PAR-27)
   hand_landmarker:
     path: data/models/hand_landmarker.task
     url: https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task

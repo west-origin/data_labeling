@@ -33,7 +33,7 @@ from dlp_prelabel.adapters.rtmpose import RtmPose
 from dlp_prelabel.adapters.stubs import UNAVAILABLE, OraclePredictor
 from dlp_prelabel.common import strictly_increasing
 from dlp_prelabel.policy import load_policy
-from dlp_schema.labels import Hand
+from dlp_schema.labels import Hand, KeypointTrackPayload
 from dlp_schema.ontology import load_ontology
 from dlp_schema.predictor import Clip, ModelUnavailableError, Predictor
 from dlp_schema.validation import check_label
@@ -199,8 +199,12 @@ class _FakeHandLandmarker:
             raise ValueError("Input timestamp must be monotonically increasing.")
         self.stamps.append(t)
         landmarks = [SimpleNamespace(x=0.5, y=0.5) for _ in range(21)]
+        # 손 중심 3D 점 (미터): i번 관절은 (0.01 i, -0.02, 0.000123456) — 0.1 mm로 반올림해 싣는다
+        world = [SimpleNamespace(x=0.01 * i, y=-0.02, z=0.000123456) for i in range(21)]
         handed = [SimpleNamespace(category_name="Right", score=0.9)]
-        return SimpleNamespace(hand_landmarks=[landmarks], handedness=[handed])
+        return SimpleNamespace(
+            hand_landmarks=[landmarks], hand_world_landmarks=[world], handedness=[handed]
+        )
 
 
 def test_mediapipe_hands_skips_frames_with_repeated_ms(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -256,3 +260,9 @@ def test_mediapipe_hands_skips_frames_with_repeated_ms(monkeypatch: pytest.Monke
     assert model.stamps == [0, 1, 2, 33]
     assert [k.t_ms for k in label.payload.keyframes] == [0, 1, 2, 33]  # type: ignore[union-attr]
     assert check_label(label, load_ontology(ROOT / "config/ontology/v1")) == []
+    # ADR 0044: 2D는 픽셀(0.5 x 20, 0.5 x 10), 손 중심 3D 점(hand_world_landmarks)도 함께 싣는다
+    assert isinstance(label.payload, KeypointTrackPayload)
+    frame = label.payload.keyframes[0]
+    assert (frame.points[0].x, frame.points[0].y) == (10.0, 5.0)
+    assert frame.world is not None and len(frame.world) == 21
+    assert (frame.world[3].x, frame.world[3].y, frame.world[3].z) == (0.03, -0.02, 0.0001)

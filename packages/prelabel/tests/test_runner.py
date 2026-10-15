@@ -21,6 +21,7 @@ import yaml
 from numpy.typing import NDArray
 
 from dlp_fixtures.actions import ENTITIES, ActionScenario, generate_action_scenario
+from dlp_fixtures.hand3d import generate_hand3d_scenario
 from dlp_fixtures.io import write_parquet
 from dlp_fixtures.video import generate_blur_scenario, write_video
 from dlp_media.ingest import ingest_session, load_manifest
@@ -28,7 +29,7 @@ from dlp_media.storage import S3Store
 from dlp_prelabel.adapters.stubs import OraclePredictor
 from dlp_prelabel.common import Image, iter_frames
 from dlp_prelabel.lift3d import DepthLifter, lift_tracks
-from dlp_prelabel.policy import PrelabelPolicy, load_policy
+from dlp_prelabel.policy import HAND21_JOINTS, PrelabelPolicy, load_policy
 from dlp_prelabel.runner import CONTACT_PREFIX, CONTACT_STEP, pick_lift_tracks, run_prelabel
 from dlp_schema.db.migrate import upgrade
 from dlp_schema.db.repository import (
@@ -181,8 +182,8 @@ def test_prelabel_session_with_glove_contacts(pg: sa.Engine, tmp_path: Path) -> 
         lifted = get_labels(conn, sid, kinds=["trajectory3d"])
     assert summary.produced == {"bodycam/hands": 1, "bodycam/objects": 3}
     if lifter is not None:
-        # 손 관절 3개 + 객체 3개. 합성 영상의 깊이 값 자체는 의미가 없어 형식만 본다
-        assert summary.lifted == len(lifted) == 6
+        # 손 관절(손목 + 손가락 끝 5) + 객체 3개. 합성 영상의 깊이 값 자체는 의미가 없어 형식만 본다
+        assert summary.lifted == len(lifted) == len(policy.depth.hand_points) + 3
         assert all(check_label(x, ontology) == [] for x in lifted)
     truth = [
         x
@@ -556,7 +557,7 @@ class _UnitLifter(DepthLifter):
 
 
 def _bodycam_only_session(
-    pg: sa.Engine, tmp_path: Path, actions: ActionScenario, prefix: str
+    pg: sa.Engine, tmp_path: Path, frame_times: list[int], prefix: str
 ) -> tuple[str, S3Store]:
     """손 키프레임 시각 그대로 쓴 회색 바디캠 영상 하나뿐인 세션을 수집한다 (3D 단계 테스트용).
 
@@ -567,7 +568,7 @@ def _bodycam_only_session(
     """
     write_video(
         tmp_path / "bodycam.mp4",
-        ((t, np.full((240, 320, 3), 90, np.uint8)) for t in actions.frame_times),
+        ((t, np.full((240, 320, 3), 90, np.uint8)) for t in frame_times),
         width=320,
         height=240,
     )
@@ -598,7 +599,7 @@ def test_depth_lift_uses_the_reviewed_track_when_hand_versions_coexist(
     돌리면 같은 입력이라 건너뛴다.
     """
     actions = generate_action_scenario(1, n_units=2)
-    sid, raw = _bodycam_only_session(pg, tmp_path, actions, "lift")
+    sid, raw = _bodycam_only_session(pg, tmp_path, actions.frame_times, "lift")
     policy, ontology = load_policy(ROOT), load_ontology(ROOT / "config/ontology/v1")
     hands = OraclePredictor("hands", actions.labels, ("keypoint_track",), now=FIXED_TIME)
     hands2 = OraclePredictor(
@@ -665,7 +666,7 @@ def test_depth_lift_ignores_body_tracks_it_does_not_lift(pg: sa.Engine, tmp_path
     그대로다. 표본은 고른 손 트랙만 올린 `lift_tracks` 결과와 같다.
     """
     actions = generate_action_scenario(1, n_units=2)
-    sid, raw = _bodycam_only_session(pg, tmp_path, actions, "body3d")
+    sid, raw = _bodycam_only_session(pg, tmp_path, actions.frame_times, "body3d")
     policy, ontology = load_policy(ROOT), load_ontology(ROOT / "config/ontology/v1")
     hands = _two_unreviewed_hand_tracks(actions)
     t = np.asarray(actions.frame_times, dtype=np.float64)
@@ -713,7 +714,7 @@ def test_approving_the_other_hand_track_relifts_and_keeps_reviewed_trajectories(
     다시 돌리면 같은 버전이라 건너뛴다.
     """
     actions = generate_action_scenario(1, n_units=2)
-    sid, raw = _bodycam_only_session(pg, tmp_path, actions, "relift")
+    sid, raw = _bodycam_only_session(pg, tmp_path, actions.frame_times, "relift")
     policy, ontology = load_policy(ROOT), load_ontology(ROOT / "config/ontology/v1")
     hands = _two_unreviewed_hand_tracks(actions)
     lifter = _UnitLifter(policy)
@@ -755,6 +756,64 @@ def test_approving_the_other_hand_track_relifts_and_keeps_reviewed_trajectories(
         assert isinstance(x.payload, Trajectory3DPayload)
         assert list(x.payload.samples) == from_other[(x.payload.entity_id, x.payload.part)]
     assert all(check_label(x, ontology) == [] for x in new)
+
+
+def test_hand_world_fit_is_idempotent_and_policy_change_keeps_reviewed_trajectories(
+    pg: sa.Engine, tmp_path: Path
+) -> None:
+    """ADR 0044: 손 중심 3D 점(world)이 있는 모델 손 트랙으로 손목·다섯 손가락 끝 3D를 맞춘다.
+
+    시나리오: `dlp_fixtures.hand3d` 손(카메라 앞 0.4~0.55 m)을 Oracle 손 어댑터가 world와 함께 낸다
+    (DB를 거쳐도 world가 남는다). 가짜 깊이는 어디서나 1 m라 손 크기 사전값(0.09 m, 정답과 같음)과
+    배율 비가 1.5를 넘어 깊이를 버리고 크기 사전값만 쓴다 → 정답 3D와 1 mm 안 (캘리브레이션이 없어
+    기본 화각 90도 근사 fx=160을 쓰고, 픽스처도 같은 내부 파라미터다). 관절별 깊이였다면 z=1 m였다.
+    다시 돌리면 같은 버전이라 건너뛴다. 3D 하나를 승인하고 hand_fit 정책(depth_weight)을 바꾸면 정책
+    해시가 바뀌어 다시 돌고, 승인한 궤적은 남기고 검수 전 이전 궤적만 지운다.
+    """
+    s = generate_hand3d_scenario(0, n_frames=12)
+    sid, raw = _bodycam_only_session(pg, tmp_path, s.frame_times, "hand3d")
+    policy, ontology = load_policy(ROOT), load_ontology(ROOT / "config/ontology/v1")
+    hands: list[Predictor] = [
+        OraclePredictor("hands", s.labels, ("keypoint_track",), now=FIXED_TIME)
+    ]
+    with pg.begin() as conn:
+        first = run_prelabel(
+            conn, sid, raw, hands, policy, ontology, FIXED_TIME, lifter=_UnitLifter(policy)
+        )
+        again = run_prelabel(
+            conn, sid, raw, hands, policy, ontology, FIXED_TIME, lifter=_UnitLifter(policy)
+        )
+        [track] = get_labels(conn, sid, kinds=["keypoint_track"])
+        before = get_labels(conn, sid, kinds=["trajectory3d"])
+    assert isinstance(track.payload, KeypointTrackPayload)
+    assert all(f.world is not None for f in track.payload.keyframes)
+    n = len(policy.depth.hand_points)
+    assert first.lifted == len(before) == n and again.lifted == 0
+    joint_of = {name: i for i, name in HAND21_JOINTS.items()}
+    for x in before:
+        assert isinstance(x.payload, Trajectory3DPayload) and check_label(x, ontology) == []
+        joint = joint_of[x.payload.part or ""]
+        for q in x.payload.samples:
+            truth = s.joints_cam[q.t_ms][joint]
+            assert np.linalg.norm(np.array([q.x, q.y, q.z]) - truth) < 0.001
+
+    reviewed = before[0]
+    fit = policy.depth.hand_fit.model_copy(update={"depth_weight": 0.3})
+    changed = policy.model_copy(update={"depth": policy.depth.model_copy(update={"hand_fit": fit})})
+    assert changed.digest("depth") != policy.digest("depth")
+    with pg.begin() as conn:
+        record_review(
+            conn, reviewed.label_id, VerificationState.HUMAN_APPROVED, "rev01", FIXED_TIME
+        )
+        relift = run_prelabel(
+            conn, sid, raw, hands, changed, ontology, FIXED_TIME, lifter=_UnitLifter(changed)
+        )
+        history = get_labels(conn, sid, kinds=["trajectory3d"])
+    assert relift.lifted == n - 1
+    removed = {x.parent_label_id for x in history if x.retracted}
+    assert removed == {x.label_id for x in before} - {reviewed.label_id}
+    live = current_labels(history)
+    assert reviewed.label_id in {x.label_id for x in live} and len(live) == n
 
 
 def test_glove_started_before_the_bodycam_keeps_only_contacts_inside_the_session(
