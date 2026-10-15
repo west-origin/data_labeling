@@ -16,10 +16,13 @@
 
 요청
     행동 단계의 `VlmClient`(`OpenAICompatibleVlm`, CPU·CI는 `OracleVlm`)로 그 행동 구간의 블러본
-    프레임과 함께 묻는다. 응답 스키마는 행동 단계와 같은 모양이지만 label=action, verb·target_id·
-    tool_id를 검수자가 확정한 값 하나로 묶고 description을 필수로 한다. 그 값과 다르면 위반으로 다시
-    묻고(정책 `vlm.max_retries`), 끝내 위반이면 만들지 않는다 (`fallbacks`, 다음 실행이 다시
-    묻는다).
+    프레임과 함께 묻는다. 프롬프트와 응답 스키마는 손마다 검수자가 확정한 의미 필드 전부
+    (`MEANING_FIELDS`: 동사·대상·대상 부위·도구·방향·전후 상태, 설명 따르기가 의미 변경으로 보는
+    필드)를 싣는다. 응답은
+    label=action, 손마다 그 조합을 그대로 되돌린 `hands`, 필수 description이다 (`DescribeAnswer`).
+    검증은 손 단위 조합으로 한다: 양손 행동에서 한 손의 동사와 다른 손의 대상·도구를 섞으면 값 집합
+    안이어도 위반이다 (F-PAR-21). 위반이면 다시 묻고(정책 `vlm.max_retries`), 끝내 위반이면 만들지
+    않는다 (`fallbacks`, 다음 실행이 다시 묻는다).
     서버 장애는 정책 백오프 뒤 `VlmUnavailableError`를 올린다 (호출자가 트랜잭션을 되돌린다).
 
 기록과 출처 (감사)
@@ -51,20 +54,20 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import sqlalchemy as sa
-from pydantic import ValidationError
+from pydantic import Field, ValidationError
 
 from dlp_actions.policy import ActionsPolicy
 from dlp_actions.runner import input_digest
-from dlp_actions.vlm import SegmentRequest, VlmAnswer, VlmClient
+from dlp_actions.vlm import SegmentRequest, VlmClient
 from dlp_media.storage import ObjectStore, blurred_key
 from dlp_models.vlm import ask_validated, with_backoff
 from dlp_privacy.policy import load_policy as load_privacy_policy
 from dlp_privacy.runner import assert_render_current, check_fetched
 from dlp_schema import repo_root
-from dlp_schema.common import derived_id
+from dlp_schema.common import Contract, derived_id
 from dlp_schema.db.description_repository import apply_description_follow
 from dlp_schema.db.locks import lock_session
 from dlp_schema.db.repository import (
@@ -265,70 +268,149 @@ def describe_request(
     )
 
 
-def _allowed(acts: Sequence[ActionPayload]) -> tuple[list[str], list[str | None], list[str | None]]:
-    """확정한 동사·대상·도구 값 (응답이 고를 수 있는 값)."""
-    verbs = sorted({a.verb for a in acts})
-    targets = sorted({a.target_id for a in acts}, key=lambda v: (v is None, v or ""))
-    tools = sorted({a.tool_id for a in acts}, key=lambda v: (v is None, v or ""))
-    return verbs, targets, tools
+# 손마다 응답이 되돌려야 하는 행동 의미 필드 (설명 따르기 `meaning`이 비교하는 필드 중 손·시각
+# 밖 전부)
+MEANING_FIELDS = (
+    "verb", "target_id", "target_body_part", "tool_id", "direction", "pre_state", "post_state",
+)  # fmt: skip
+
+
+class HandMeaning(Contract):
+    """응답이 손마다 되돌리는 확정 의미 (`MEANING_FIELDS` + 손)."""
+
+    hand: Hand
+    verb: str
+    target_id: str | None = None
+    target_body_part: str | None = None
+    tool_id: str | None = None
+    direction: str | None = None
+    pre_state: dict[str, str] = Field(default_factory=dict[str, str])
+    post_state: dict[str, str] = Field(default_factory=dict[str, str])
+
+
+class DescribeAnswer(Contract):
+    """설명 재생성 응답: label=action, 손마다 확정 의미, 한국어 한 문장 설명(1~200자), 신뢰도."""
+
+    label: Literal["action"]
+    hands: list[HandMeaning]
+    description: str = Field(min_length=1, max_length=200)
+    confidence: float | None = Field(default=None, ge=0, le=1)
+
+
+def confirmed(target: DescribeTarget) -> list[dict[str, Any]]:
+    """손 순으로 검수자가 확정한 의미 (손 + `MEANING_FIELDS`, JSON 값)."""
+    out: list[dict[str, Any]] = []
+    for a in _actions(target):
+        data = a.model_dump(mode="json")
+        out.append({"hand": data["hand"], **{k: data[k] for k in MEANING_FIELDS}})
+    return out
+
+
+def _const(value: Any) -> dict[str, Any]:
+    """값 하나만 허용하는 스키마 (사전은 키마다 값 하나)."""
+    if isinstance(value, dict):
+        items: dict[str, Any] = dict(value)  # pyright: ignore[reportUnknownArgumentType]
+        return {
+            "type": "object",
+            "additionalProperties": False,
+            "required": sorted(items),
+            "properties": {k: {"enum": [v]} for k, v in sorted(items.items())},
+        }
+    return {"enum": [value]}
 
 
 def describe_schema(target: DescribeTarget) -> dict[str, Any]:
-    """응답 JSON Schema: label=action, 동사·대상·도구는 확정한 값, description 필수(1~200자)."""
-    verbs, targets, tools = _allowed(_actions(target))
+    """응답 JSON Schema: label=action, hands = 손마다 확정한 의미 조합(순서·개수 고정), description
+    필수(1~200자)."""
+    hands = confirmed(target)
     return {
         "type": "object",
         "additionalProperties": False,
-        "required": ["label", "verb", "description"],
+        "required": ["label", "hands", "description"],
         "properties": {
             "label": {"enum": ["action"]},
-            "verb": {"enum": verbs},
-            "gap_type": {"enum": [None]},
-            "target_id": {"enum": targets},
-            "tool_id": {"enum": tools},
+            "hands": {
+                "type": "array",
+                "minItems": len(hands),
+                "maxItems": len(hands),
+                "prefixItems": [
+                    {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": sorted(h),
+                        "properties": {k: _const(v) for k, v in h.items()},
+                    }
+                    for h in hands
+                ],
+                "items": False,
+            },
             "description": {"type": "string", "minLength": 1, "maxLength": 200},
             "confidence": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
         },
     }
 
 
+def _name(table: dict[str, Any], key: str | None) -> str:
+    """온톨로지 ID를 `ID: 한국어`로 (사전에 없으면 ID 그대로, None은 "없음")."""
+    if key is None:
+        return "없음"
+    term = table.get(key)
+    return f"{key}: {term.ko}" if term is not None else key
+
+
+def _states(ontology: Ontology, states: dict[str, str]) -> str:
+    """상태 속성 → 값 (없으면 "없음")."""
+    if not states:
+        return "없음"
+    return ", ".join(
+        f"{_name(ontology.state_attributes, k)} = {v}" for k, v in sorted(states.items())
+    )
+
+
 def describe_prompt(target: DescribeTarget, ontology: Ontology) -> str:
-    """한국어 프롬프트: 검수자가 확정한 손마다 동작(ID: 한국어)·대상·도구, 설명 작성 규칙."""
+    """한국어 프롬프트: 검수자가 확정한 손마다 의미 필드 전부, 설명 작성 규칙."""
     start, end = _span(target)
     lines: list[str] = []
     for a in _actions(target):
         hand = "오른손" if a.hand is Hand.RIGHT else "왼손"
-        verb = ontology.verbs.get(a.verb)
-        name = f"{a.verb}: {verb.ko}" if verb is not None else a.verb
         lines.append(
-            f"- {hand}: 동작 {name}, 대상 {a.target_id or '없음'}, 도구 {a.tool_id or '없음'}"
+            f"- {hand}: 동작 {_name(ontology.verbs, a.verb)}, 대상 {a.target_id or '없음'}, "
+            f"대상 부위 {_name(ontology.body_parts, a.target_body_part)}, "
+            f"도구 {a.tool_id or '없음'}, 방향 {a.direction or '없음'}, "
+            f"전 상태 {_states(ontology, a.pre_state)}, 후 상태 {_states(ontology, a.post_state)}"
         )
     return (
         f"1인칭 돌봄·청소 영상의 {start}~{end} ms 구간 프레임이다. 검수자가 이 구간의 행동을 "
         "다음과 같이 확정했다:\n" + "\n".join(lines) + "\n\n"
-        "이 확정된 행동을 한국어 한 문장 지시문으로 description에 쓴다 "
-        "(예: '걸레로 세면대를 문지른다'). label은 action이고 verb·target_id·tool_id는 위 값 "
-        "그대로 쓴다. 동작·대상·도구를 바꾸지 않는다.\nJSON 하나만 출력한다."
+        "이 확정된 행동(동작·대상·대상 부위·도구·방향·전후 상태)을 한국어 한 문장 지시문으로 "
+        "description에 쓴다 (예: '걸레로 세면대를 문지른다'). label은 action이고 hands에는 "
+        "손마다 위 값을 그대로 쓴다. 값을 바꾸거나 손 사이에 섞지 않는다.\nJSON 하나만 출력한다."
     )
 
 
-def validate_description(raw: str, target: DescribeTarget) -> tuple[VlmAnswer | None, list[str]]:
-    """응답 검사: JSON → 형식 → label=action → 확정한 동사·대상·도구 → 설명이 비지 않음."""
+def validate_description(
+    raw: str, target: DescribeTarget
+) -> tuple[DescribeAnswer | None, list[str]]:
+    """응답 검사: JSON → 형식 → 손마다 확정한 의미 조합 그대로 (손 단위, 섞임·누락·중복 위반)."""
     try:
-        answer = VlmAnswer.model_validate(json.loads(raw))
+        answer = DescribeAnswer.model_validate(json.loads(raw))
     except json.JSONDecodeError as exc:
         return None, [f"JSON이 아닙니다: {exc.msg}"]
     except ValidationError as exc:
         return None, [f"스키마 위반: {e['loc']} {e['msg']}" for e in exc.errors()]
-    verbs, targets, tools = _allowed(_actions(target))
+    want = confirmed(target)
+    got = [h.model_dump(mode="json") for h in answer.hands]
     errors: list[str] = []
-    if answer.label != "action" or answer.verb not in verbs:
-        errors.append(f"확정한 동작과 다릅니다: {answer.label}/{answer.verb} (허용 {verbs})")
-    if answer.target_id not in targets or answer.tool_id not in tools:
-        errors.append(f"확정한 대상·도구와 다릅니다: {answer.target_id}, {answer.tool_id}")
-    if not (answer.description or "").strip():
+    if sorted(map(_key, got)) != sorted(map(_key, want)):
+        errors.append(f"손마다 확정한 행동과 다릅니다: {got} (확정 {want})")
+    if not answer.description.strip():
         errors.append("description이 비었습니다")
     return (None, errors) if errors else (answer, [])
+
+
+def _key(hand: dict[str, Any]) -> str:
+    """손 조합 비교 키 (정렬된 JSON)."""
+    return json.dumps(hand, sort_keys=True, ensure_ascii=False)
 
 
 def ask_description(
@@ -337,7 +419,7 @@ def ask_description(
     request: SegmentRequest,
     ontology: Ontology,
     policy: ActionsPolicy,
-) -> VlmAnswer | None:
+) -> DescribeAnswer | None:
     """설명만 묻는다 (위반은 `vlm.max_retries`번, 장애는 `vlm.unavailable_backoff_s`로 다시).
 
     Returns:
@@ -368,7 +450,7 @@ def ask_description(
 def _record(
     target: DescribeTarget,
     session_id: str,
-    answer: VlmAnswer,
+    answer: DescribeAnswer,
     policy: ActionsPolicy,
     version: str,
     now: datetime,
@@ -388,9 +470,7 @@ def _record(
         evidence=Evidence.INFERRED,
         confidence=round(confidence, 4),
         created_at=now,
-        payload=DescriptionPayload(
-            segment_id=target.action_id, text=(answer.description or "").strip()
-        ),
+        payload=DescriptionPayload(segment_id=target.action_id, text=answer.description.strip()),
     )
 
 
@@ -441,7 +521,7 @@ def describe_session(
     if not plan.targets:
         return summary
     stream_id = get_session(conn, session_id).reference_stream.stream_id
-    answers: dict[str, VlmAnswer] = {}
+    answers: dict[str, DescribeAnswer] = {}
     with tempfile.TemporaryDirectory() as tmp:
         video = (
             None
@@ -462,7 +542,7 @@ def describe_session(
 def _write(
     conn: sa.Connection,
     session_id: str,
-    answers: dict[str, VlmAnswer],
+    answers: dict[str, DescribeAnswer],
     policy: ActionsPolicy,
     version: str,
     now: datetime,

@@ -22,6 +22,7 @@ import sqlalchemy as sa
 from dlp_actions.clients import OracleVlm
 from dlp_actions.describe import (
     DescribeTarget,
+    describe_schema,
     describe_session,
     describe_version,
     plan_describe,
@@ -210,13 +211,16 @@ def test_request_is_constrained_to_the_corrected_values(
     bad = Spy([act], faults=[])  # 고치기 전 동작(grasp)으로 답한다 → 매번 위반
     s = _describe(db, ontology, policy, bad)
     assert s.described == [] and s.fallbacks == ["a001"] and bad.calls == retries + 1
-    assert seen[0]["properties"]["verb"] == {"enum": ["lift"]}
-    assert seen[0]["properties"]["target_id"] == {"enum": ["rag_01"]}
+    (hand,) = seen[0]["properties"]["hands"]["prefixItems"]
+    assert hand["properties"]["verb"] == {"enum": ["lift"]}
+    assert hand["properties"]["target_id"] == {"enum": ["rag_01"]}
     assert [x for x in _descriptions(db) if x.label_id != "d"] == []
     target = DescribeTarget("a001", (fix,), "x")
-    ok = json.dumps(
-        {"label": "action", "verb": "lift", "target_id": "rag_01", "description": "들기"}
-    )
+    meaning: dict[str, Any] = {
+        "hand": "right", "verb": "lift", "target_id": "rag_01", "target_body_part": None,
+        "tool_id": None, "direction": None, "pre_state": {}, "post_state": {},
+    }  # fmt: skip
+    ok = json.dumps({"label": "action", "hands": [meaning], "description": "들기"})
     assert validate_description(ok, target)[0] is not None
     s2 = _describe(db, ontology, policy, _oracle(fix))
     assert s2.described == ["a001"]
@@ -301,3 +305,70 @@ def test_inherited_description_is_replaced_when_owner_changes_in_a_later_round(
         history = get_labels(conn, SID)
     gone = [x for x in history if x.retracted and x.parent_label_id in first]
     assert {x.provenance.model_version for x in gone} == {FOLLOW_VERSION}
+
+
+def test_direction_correction_rejects_an_answer_for_the_old_direction(
+    db: sa.Engine, ontology: Ontology, policy: ActionsPolicy
+) -> None:
+    """F-PAR-21 (Codex 2차 #1): 검수자가 방향만 고쳤다 (clockwise → counterclockwise). 방향은 의미
+    필드라 모델 설명은 지워지고 재생성 대상이다. 요청은 고친 방향을 싣고, 예전 방향으로 답하는
+    stub(고치기 전 레코드를 정답으로 아는 stub)은 매번 위반이라 만들지 않는다(fallback).
+
+    정답: 요청 프롬프트·스키마에 counterclockwise가 있고 clockwise는 없다. 예전 행동으로 답하면
+    재시도(정책 max_retries) 뒤 fallback, 고친 행동으로 답하면 만든다.
+    """
+    act = _action("act", direction="clockwise")
+    fix = _human(act, "fix", direction="counterclockwise")
+    with db.begin() as conn:
+        insert_labels(conn, [act, _model_desc(), fix])
+    seen: list[tuple[str, str]] = []
+
+    class Spy(OracleVlm):
+        def complete(self, request: SegmentRequest, prompt: str, schema: dict[str, Any]) -> str:
+            seen.append((prompt, json.dumps(schema)))
+            return super().complete(request, prompt, schema)
+
+    stale = Spy([act])
+    s = _describe(db, ontology, policy, stale)
+    assert s.described == [] and s.fallbacks == ["a001"]
+    assert stale.calls == policy.vlm.max_retries + 1
+    prompt, schema = seen[0]
+    assert "counterclockwise" in prompt and "counterclockwise" in schema
+    assert "clockwise" not in prompt.replace("counterclockwise", "")
+    assert _describe(db, ontology, policy, _oracle(fix)).described == ["a001"]
+
+
+def test_bimanual_answer_is_checked_per_hand_combination() -> None:
+    """F-PAR-21: 양손 행동(오른손 grasp rag_01 도구 없음, 왼손 lift bottle_01 도구 sponge_01)에서
+    손마다 값을 섞은 응답(오른손 grasp bottle_01 sponge_01)은 값 집합 안이어도 위반이다. 손마다
+    확정한 조합 그대로면 받는다. 대상 부위·전후 상태도 손 조합에 든다.
+
+    정답: 확정 조합 = {(right, grasp, rag_01, None), (left, lift, bottle_01, sponge_01)}.
+    """
+    right = _human(_action("r"), "r2", verb="grasp", target_id="rag_01", tool_id=None)
+    left = _human(_action("l", hand="left"), "l2", verb="lift", target_id="bottle_01",
+                  tool_id="sponge_01", post_state={"wetness": "wet"})  # fmt: skip
+    target = DescribeTarget("a001", (right, left), "x")
+    base: dict[str, Any] = {"target_body_part": None, "direction": None, "pre_state": {}}
+    good_hands: list[dict[str, Any]] = [
+        {**base, "hand": "right", "verb": "grasp", "target_id": "rag_01", "tool_id": None,
+         "post_state": {}},
+        {**base, "hand": "left", "verb": "lift", "target_id": "bottle_01", "tool_id": "sponge_01",
+         "post_state": {"wetness": "wet"}},
+    ]  # fmt: skip
+    good: dict[str, Any] = {"label": "action", "hands": good_hands, "description": "잡고 든다"}
+    assert validate_description(json.dumps(good), target)[0] is not None
+    crossed = json.loads(json.dumps(good))
+    crossed["hands"][0] |= {"target_id": "bottle_01", "tool_id": "sponge_01"}
+    answer, errors = validate_description(json.dumps(crossed), target)
+    assert answer is None and errors
+    stale_state = json.loads(json.dumps(good))
+    stale_state["hands"][1]["post_state"] = {}
+    assert validate_description(json.dumps(stale_state), target)[0] is None
+    one_hand: dict[str, Any] = {**good, "hands": good_hands[:1]}
+    assert validate_description(json.dumps(one_hand), target)[0] is None
+    schema = describe_schema(target)["properties"]["hands"]
+    assert (schema["minItems"], schema["maxItems"]) == (2, 2)
+    assert [h["properties"]["verb"] for h in schema["prefixItems"]] == [
+        {"enum": ["grasp"]}, {"enum": ["lift"]},
+    ]  # fmt: skip

@@ -36,6 +36,8 @@ class OracleVlm:
       "not_json" | "bad_verb" | "bad_target" 을 순서대로 소비한다.
 
     정답에 설명(`DescriptionPayload`)이 있으면 그 문장을, 없으면 "<동사> <대상>"을 설명으로 낸다.
+    설명 재생성 요청(스키마에 `hands`, `dlp_actions.describe`)이면 구간과 겹치는 정답 행동을 손마다
+    하나씩 골라 그 의미 필드 전부를 `hands`로 되돌린다 (정답이 고치기 전 레코드면 예전 값).
     """
 
     def __init__(self, truth: list[LabelRecord], faults: list[str] | None = None) -> None:
@@ -71,6 +73,8 @@ class OracleVlm:
                 return json.dumps(
                     {"label": "action", "verb": "rub", "target_id": "moon_01", "description": "-"}
                 )
+        if "hands" in schema.get("properties", {}):
+            return self._describe(request)
         best: LabelRecord | None = None
         overlap = 0
         for x in self.truth:
@@ -95,6 +99,41 @@ class OracleVlm:
         return json.dumps(
             {"label": "gap", "gap_type": p.gap_type, "description": None, "confidence": 0.9}
         )
+
+    def _describe(self, request: SegmentRequest) -> str:
+        """설명 재생성 응답: 겹치는 정답 행동의 손마다 의미 + 정답 설명 (없으면 "<동사> <대상>")."""
+        acts = _oracle_hands(self.truth, request)
+        if not acts:
+            return json.dumps({"label": "action", "hands": [], "description": "-"})
+        first = acts[0]
+        text = self.descriptions.get(
+            first.action_id, f"{first.verb} {first.target_id or ''}".strip()
+        )
+        return json.dumps(
+            {"label": "action", "hands": [_hand_meaning(a) for a in acts], "description": text,
+             "confidence": 0.9}, ensure_ascii=False,
+        )  # fmt: skip
+
+
+def _oracle_hands(truth: list[LabelRecord], request: SegmentRequest) -> list[ActionPayload]:
+    """구간과 겹치는 정답 행동을 손마다 하나 (겹침이 가장 큰 것, 손 이름 순)."""
+    best: dict[str, tuple[int, ActionPayload]] = {}
+    for x in truth:
+        p = x.payload
+        if not isinstance(p, ActionPayload):
+            continue
+        o = min(x.t_end_ms, request.end_ms) - max(x.t_start_ms, request.start_ms)
+        if o > 0 and o > best.get(p.hand.value, (0, p))[0]:
+            best[p.hand.value] = (o, p)
+    return [p for _, (_, p) in sorted(best.items())]
+
+
+def _hand_meaning(p: ActionPayload) -> dict[str, Any]:
+    """설명 재생성 응답의 손 하나 (손 + 의미 필드, `dlp_actions.describe.MEANING_FIELDS`)."""
+    data = p.model_dump(mode="json")
+    keys = ("hand", "verb", "target_id", "target_body_part", "tool_id", "direction", "pre_state",
+            "post_state")  # fmt: skip
+    return {k: data[k] for k in keys}
 
 
 def sample_frames(request: SegmentRequest, n: int, max_side: int) -> list[bytes]:
