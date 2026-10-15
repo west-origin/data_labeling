@@ -153,3 +153,52 @@ def test_segment_owner_and_seeded_copies() -> None:
     seeded = _action("seed", record={"seeded_error": True})
     plan = plan_description_follow([seeded, _desc()])
     assert (plan.approve, plan.retract) == ([], [])
+
+
+def _deleted(x: LabelRecord, label_id: str, at: Any = T1) -> LabelRecord:
+    """검수자 r1이 at에 지운 레코드 (삭제 레코드 + parent)."""
+    return x.model_copy(
+        update={"label_id": label_id, "parent_label_id": x.label_id, "retracted": True,
+                "provenance": Provenance(source=Source.HUMAN), "confidence": None,
+                "verification": _checked(VerificationState.HUMAN_CORRECTED, "r1", at),
+                "created_at": at}
+    )  # fmt: skip
+
+
+def test_bimanual_partial_deletion_retracts_description() -> None:
+    """F-PAR-16: 양손 행동(같은 action_id 두 레코드)에서 한 손을 지우고 다른 손을 승인하면 설명은
+    의미가 바뀐 것이다 (양손 동작을 말하던 설명이 한 손 동작을 말하게 된다) → 원문·번역을 지운다.
+
+    정답: 설명을 만들 때 현재였던 주인 가지(오른손·왼손 사슬의 처음 레코드) 중 왼손 가지에 현재
+    후손이 없다 → 부분 삭제 → 검수 전 설명(ko·en) 삭제, 승인 없음.
+    """
+    right = _action("r")
+    left = _action("l", hand="left")
+    approved = right.model_copy(
+        update={"verification": _checked(VerificationState.HUMAN_APPROVED, "r1")}
+    )
+    history = [approved, left, _deleted(left, "l-gone"), _desc(), _desc("den", source="d")]
+    plan = plan_description_follow(history)
+    assert (plan.approve, _ids(plan.retract)) == ([], ["d", "den"])
+
+
+def test_baseline_is_the_stage_run_that_made_the_description() -> None:
+    """단계 재실행처럼 이전 주인을 지우고 새 주인과 새 설명을 함께 만든 경우는 부분 삭제가 아니다.
+
+    정답: 새 설명(actions-2)의 비교 기준은 같은 실행이 만든 새 행동 하나다. 그 행동이 승인되면
+    설명도 승인한다. 이전 행동(actions-1, 지움)은 기준이 아니다.
+    """
+    old = _action("old")
+    old_gone = _deleted(old, "old-gone").model_copy(
+        update={"provenance": Provenance(source=Source.MODEL, model_version="actions-2"),
+                "verification": Verification()}
+    )  # fmt: skip
+    v2 = Provenance(source=Source.MODEL, model_version="actions-2")
+    new = _action("new", record={"created_at": T1, "provenance": v2,
+                                 "verification": _checked(VerificationState.HUMAN_APPROVED, "r1",
+                                                          T2)})  # fmt: skip
+    plan = plan_description_follow([old, old_gone, new, _desc("d2", created_at=T1, provenance=v2)])
+    assert plan.retract == []
+    assert plan.approve == [
+        InheritedReview("d2", VerificationState.HUMAN_APPROVED, "r1", T2, "new")
+    ]

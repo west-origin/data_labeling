@@ -14,10 +14,14 @@
 규칙 (현재 운영 라벨 중 모델 출처·미검수 설명마다, `plan_description_follow`)
     1. 주인 ID가 이력에 한 번도 없으면 건드리지 않는다 (주인을 모른다).
     2. 현재 주인이 하나도 없다(검수자·단계가 행동을 지움) → 설명을 지운다.
-    3. 현재 주인 중 하나라도 의미가 바뀌었다(`meaning`: 시각 필드를 뺀 페이로드가 그 사슬의 처음
-       레코드 = 모델이 설명한 레코드와 다르다. 동사·손·대상·도구·방향·전후 상태, 상위 구간의
-       수준·참조·자식) → 설명이 다른 행동을 말하므로 지운다. 고친 행동의 설명은 다시 만들지
-       않는다 (행동 단계는 검수된 행동과 겹치는 새 결과를 버린다, ADR 0015).
+    3. 현재 주인 중 하나라도 의미가 바뀌었다(`meaning`: 시각 필드를 뺀 페이로드가 비교 기준의 그
+       조상과 다르다. 동사·손·대상·도구·방향·전후 상태, 상위 구간의 수준·참조·자식), 또는 비교
+       기준에서 나오지 않은 주인이 생겼다 → 설명이 다른 행동을 말하므로 지운다.
+    3b. 부분 삭제(F-PAR-16): 비교 기준 레코드 중 지금 현재 후손이 없는 것이 있다 → 의미가 바뀐
+       것으로 보고 지운다. 양손 행동에서 한 손 레코드를 지우고 다른 손을 승인하면 "양손 동작"
+       설명이 한 손 동작을 말하게 된다.
+       고친 행동의 설명은 이 모듈이 다시 만들지 않는다. 사람이 의미를 고친 행동의 한국어 설명은
+       `dlp_actions.describe`(`dlp actions describe`)가 행동 VLM으로 다시 만든다 (ADR 0043 3절).
     4. 번역(source_label_id 있음)인데 원문이 현재 라벨이 아니면 건드리지 않는다 (번역 단계가
        낡은 번역으로 지운다).
     5. 현재 주인이 모두 사람이 확인한 상태(승인·표본 검증·사람 수정, 또는 사람 출처)이고 의미가
@@ -28,6 +32,13 @@
        - 시각: max(주인 검수 시각, 설명 생성 시각). 행동 승인 뒤에 만든 번역은 만든 시각에
          물려받는다 (검수 시각이 생성보다 앞서지 않게).
 
+비교 기준 (설명이 설명한 주인 레코드)
+    - 행동 단계 원문: 같은 단계 실행이 함께 만든 주인 레코드 = 주인 ID가 같고 모델 버전이 설명과
+      같은 운영 레코드 (시각을 보지 않아 같은 ms에 만든 레코드도 정확히 가른다).
+    - 다시 만든 설명(`REGENERATED_PREFIX`): 만든 시각에 현재였던 주인 레코드 (사람이 고친 레코드).
+    - 번역: 원문(`source_label_id`)의 기준.
+    - 기준을 찾지 못하면(이전 형식): 사슬의 처음 레코드와 비교하고 부분 삭제는 보지 않는다.
+
 이미 검수된 설명과 사람 출처 설명은 어떤 경우에도 건드리지 않는다. 결과는 결정적이고 멱등이다
 (적용한 뒤 다시 계산하면 빈 결과).
 
@@ -35,8 +46,8 @@
     설명에는 검수 도구 경로가 없으므로 검수된 모델 설명은 모두 이 규칙으로 물려받은 것이다.
     물려준 주인은 이력에서 다시 계산한다 (검수자가 같고 시각이 위 규칙과 같은 주인).
 
-공개 이름: `FOLLOW_VERSION`, `owner_id`, `meaning`, `InheritedReview`, `DescriptionFollow`,
-`plan_description_follow`, `inherited_owner`.
+공개 이름: `FOLLOW_VERSION`, `REGENERATED_PREFIX`, `owner_id`, `meaning`, `human_confirmed`,
+`InheritedReview`, `DescriptionFollow`, `plan_description_follow`, `inherited_owner`.
 """
 
 from __future__ import annotations
@@ -60,6 +71,11 @@ from dlp_schema.labels import (
 # 이 규칙이 쓰는 삭제 레코드의 출처 버전 (규칙 버전, 정책 값이 없다). 모델 출처라서 저장 검증이
 # 사람이 확인한 설명을 지우지 못하게 한 번 더 막는다 (`ProtectedLabelRetractionError`)
 FOLLOW_VERSION = "review-follow-1"
+
+# 사람이 고친 행동에 검수 뒤 다시 만든 설명의 모델 버전 접두사 (`dlp_actions.describe`,
+# ADR 0043 3절).
+# 이 설명의 비교 기준은 만든 시각에 현재였던(고친) 주인 레코드다
+REGENERATED_PREFIX = "describe-"
 
 # 의미 비교에서 빼는 행동 페이로드의 시각 필드 (경계만 고친 행동의 설명은 그대로 맞다)
 TIME_FIELDS = frozenset(
@@ -110,7 +126,7 @@ def _root(x: LabelRecord, by_id: dict[str, LabelRecord]) -> LabelRecord:
     return x
 
 
-def _reviewed(x: LabelRecord) -> bool:
+def human_confirmed(x: LabelRecord) -> bool:
     """사람이 확인한 주인인가 (검수자·시각이 있어야 물려줄 수 있다)."""
     v = x.verification
     if v.reviewer_id is None or v.reviewed_at is None:
@@ -120,7 +136,7 @@ def _reviewed(x: LabelRecord) -> bool:
 
 def _inherit(d: LabelRecord, owners: Sequence[LabelRecord]) -> InheritedReview | None:
     """주인이 모두 확인됐으면 설명이 물려받을 검수 (모듈 docstring 규칙 5), 아니면 None."""
-    if not owners or not all(_reviewed(o) for o in owners):
+    if not owners or not all(human_confirmed(o) for o in owners):
         return None
     sampled = [o for o in owners if o.verification.state is VerificationState.SAMPLE_VERIFIED]
     state = VerificationState.SAMPLE_VERIFIED if sampled else VerificationState.HUMAN_APPROVED
@@ -128,8 +144,83 @@ def _inherit(d: LabelRecord, owners: Sequence[LabelRecord]) -> InheritedReview |
     # 여럿이면 가장 늦게 검수한 주인 (같으면 라벨 ID 큰 것, 결정적)
     giver = max(pool, key=lambda o: (o.verification.reviewed_at, o.label_id))
     reviewer, at = giver.verification.reviewer_id, giver.verification.reviewed_at
-    assert reviewer is not None and at is not None  # _reviewed가 보장한다
+    assert reviewer is not None and at is not None  # human_confirmed가 보장한다
     return InheritedReview(d.label_id, state, reviewer, max(at, d.created_at), giver.label_id)
+
+
+def _chain(x: LabelRecord, by_id: dict[str, LabelRecord]) -> list[LabelRecord]:
+    """x에서 parent를 따라 올라간 사슬 (x 먼저, 처음 레코드가 마지막)."""
+    out = [x]
+    seen = {x.label_id}
+    while x.parent_label_id and x.parent_label_id in by_id and x.parent_label_id not in seen:
+        x = by_id[x.parent_label_id]
+        seen.add(x.label_id)
+        out.append(x)
+    return out
+
+
+class _Baseline:
+    """설명이 설명한 주인 레코드 (규칙 3·3b의 비교 기준, 모듈 docstring "비교 기준").
+
+    기준을 찾지 못하면(이전 형식 등) None: 사슬의 처음 레코드와 비교하고 부분 삭제는 보지 않는다.
+    """
+
+    def __init__(self, labels: list[LabelRecord], by_id: dict[str, LabelRecord]) -> None:
+        self.operational, self.by_id = labels, by_id
+        self._at: dict[datetime, list[LabelRecord]] = {}
+
+    def _current_at(self, when: datetime) -> list[LabelRecord]:
+        """when 시점의 현재 운영 라벨 (시각별로 한 번만 계산한다)."""
+        found = self._at.get(when)
+        if found is None:
+            found = current_labels([x for x in self.operational if x.created_at <= when])
+            self._at[when] = found
+        return found
+
+    def of(self, d: LabelRecord, p: DescriptionPayload) -> dict[str, LabelRecord] | None:
+        """설명 d가 설명한 주인 레코드 (라벨 ID → 레코드). 모르면 None."""
+        source = self.by_id.get(p.source_label_id) if p.source_label_id is not None else None
+        ref = source or d
+        version = ref.provenance.model_version
+        if version is None:
+            return None
+        if version.startswith(REGENERATED_PREFIX):
+            pool = self._current_at(ref.created_at)
+        else:
+            pool = [
+                x
+                for x in self.operational
+                if x.provenance.model_version == version and not x.retracted
+            ]
+        found = {x.label_id: x for x in pool if owner_id(x) == p.segment_id}
+        return found or None
+
+
+def _changed(
+    now: Sequence[LabelRecord], base: dict[str, LabelRecord] | None, by_id: dict[str, LabelRecord]
+) -> bool:
+    """규칙 3·3b: 현재 주인의 의미가 기준과 다르거나, 기준에서 나오지 않은 주인이 생겼거나, 기준
+    레코드 중 현재 후손이 없는 것이 있다 (부분 삭제)."""
+    if base is None:
+        return any(meaning(o) != meaning(_root(o, by_id)) for o in now)
+    reached: set[str] = set()
+    for o in now:
+        ancestor = next((a for a in _chain(o, by_id) if a.label_id in base), None)
+        if ancestor is None or meaning(o) != meaning(ancestor):
+            return True
+        reached.add(ancestor.label_id)
+    return bool(set(base) - reached)
+
+
+def _must_retract(
+    d: LabelRecord,
+    p: DescriptionPayload,
+    now: Sequence[LabelRecord],
+    by_id: dict[str, LabelRecord],
+    baseline: _Baseline,
+) -> bool:
+    """규칙 2·3·3b: 현재 주인이 없거나, 의미가 바뀌었거나, 일부 가지가 지워졌다."""
+    return not now or _changed(now, baseline.of(d, p), by_id)
 
 
 def plan_description_follow(history: Sequence[LabelRecord]) -> DescriptionFollow:
@@ -151,6 +242,7 @@ def plan_description_follow(history: Sequence[LabelRecord]) -> DescriptionFollow
     for x in current:
         if (k := owner_id(x)) is not None:
             owners[k].append(x)
+    baseline = _Baseline([x for x in labels if x.label_id not in excluded], by_id)
     out = DescriptionFollow()
     for d in current:
         p = d.payload
@@ -161,7 +253,7 @@ def plan_description_follow(history: Sequence[LabelRecord]) -> DescriptionFollow
         if d.verification.state is not VerificationState.UNREVIEWED:
             continue
         now = owners.get(p.segment_id, [])
-        if not now or any(meaning(o) != meaning(_root(o, by_id)) for o in now):
+        if _must_retract(d, p, now, by_id, baseline):
             out.retract.append(d)
             continue
         if p.source_label_id is not None and p.source_label_id not in current_ids:
