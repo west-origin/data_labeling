@@ -438,3 +438,33 @@ def test_check_reply_rules() -> None:
     assert check_reply('{"text": "aaaaaaaaaaaa"}', 10, True)[0] is None
     assert check_reply('{"text": "닦다"}', 10, True)[0] is None
     assert check_reply('{"text": "닦다"}', 10, False) == ("닦다", [])
+
+
+def test_description_added_during_translation_stays_pending(
+    db: sa.Engine, ontology: Ontology, policy: TranslatePolicy
+) -> None:
+    """F-PAR-17: 번역하는 동안(잠금 전) 한국어 설명이 새로 커밋되면 이번 실행은 그 원문을 번역하지
+    않았으므로 요약의 대기 목록에 들어야 한다 (전에는 pending=[]라 CLI가 0으로 끝났다).
+
+    정답: 처음 계획의 원문 2개는 번역되고, 번역 중 들어온 a2 설명은 대기다 (CLI 종료 코드는
+    `summary.pending`으로 정한다). 다음 실행이 a2를 번역하고 대기가 없다.
+    """
+    late = _ko("s001-a2", "걸레를 짠다")
+
+    class Racing(GlossaryStubTranslator):
+        """첫 번역 요청 때 다른 실행(행동 단계)이 새 설명을 커밋한 것처럼 넣는다."""
+
+        conn: sa.Connection | None = None
+
+        def translate(self, text: str, glossary: Any) -> str:
+            if self.calls == 0 and self.conn is not None:
+                insert_labels(self.conn, [late])
+            return super().translate(text, glossary)
+
+    stub = Racing({**EN, "걸레를 짠다": "Wrings the cloth"})
+    with db.begin() as conn:
+        stub.conn = conn
+        s = run_translate(conn, SID, stub, ontology, policy, FIXED_TIME)
+    assert s.translated == 2 and s.pending == [late.label_id]
+    again = _run(db, ontology, policy, GlossaryStubTranslator({"걸레를 짠다": "Wrings the cloth"}))
+    assert (again.translated, again.pending) == (1, [])
