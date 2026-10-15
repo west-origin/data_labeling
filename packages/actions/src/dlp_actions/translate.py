@@ -30,6 +30,8 @@
 잠금
     이력 읽기·번역(서버 호출)은 세션을 잠그지 않는다. 쓰기 직전에 세션을 잠그고 이력을 다시
     읽어 계획을 다시 세운 뒤, 그 사이 낡은 결과는 버리고 쓴다 (긴 세션 잠금을 피한다, R3).
+    잠근 뒤 사용 중지·승인 보류를 다시 보고, 그렇게 됐으면 아무것도 쓰지 않는다 (`blocked`,
+    `dlp_actions.write_check`, F-PAR-23. 번역은 픽셀을 쓰지 않아 렌더는 보지 않는다).
 
 검수 물려받기 (F-PAR-15)
     쓴 뒤 `apply_description_follow`로 설명이 행동·상위 구간 검수를 따르게 한다. 행동이 이미 승인·
@@ -58,6 +60,7 @@ from dlp_actions.translators import (
     TranslationUnavailableError,
     Translator,
 )
+from dlp_actions.write_check import write_blocker
 from dlp_schema.common import derived_id
 from dlp_schema.db.description_repository import apply_description_follow
 from dlp_schema.db.locks import lock_session
@@ -108,6 +111,8 @@ class TranslateSummary:
         stopped: 남은 원문을 묻지 않고 멈춘 이유 ("unavailable" | "config", 없으면 None).
         error: 멈춘 원인 메시지 (서버 응답 앞부분, 키는 들어가지 않는다).
         inherited: 행동·상위 구간 검수를 물려받은 설명 수 (F-PAR-15, 승인된 행동의 새 번역 등).
+        blocked: 쓰기 직전 확인(사용 중지·승인 보류)이 막은 이유. 있으면 아무것도 쓰지 않았고
+            원문은 대기로 남는다 (F-PAR-23).
     """
 
     version: str
@@ -121,6 +126,7 @@ class TranslateSummary:
     stopped: str | None = None
     error: str | None = None
     inherited: int = 0
+    blocked: str | None = None
 
 
 def is_machine_translation(x: LabelRecord) -> bool:
@@ -331,6 +337,12 @@ def run_translate(
     # 버린다
     lock_session(conn, session_id)
     fresh = plan_translation(get_labels(conn, session_id, kinds=KINDS), policy, version)
+    # 쓰기 직전 확인: 번역하는 동안 사용 중지·승인 보류됐으면 아무것도 쓰지 않는다 (F-PAR-23)
+    summary.blocked = write_blocker(conn, session_id)
+    if summary.blocked is not None:
+        summary.pending = [s.label_id for s, _ in fresh.todo]
+        summary.invalid = [i for i in summary.invalid if i in summary.pending]
+        return summary
     new: list[LabelRecord] = []
     replaced: list[LabelRecord] = []
     for source, olds in fresh.todo:

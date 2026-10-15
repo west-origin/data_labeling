@@ -89,6 +89,8 @@ def _report(session_id: str, s: TranslateSummary) -> int:
         )
     if s.invalid:
         print(f"  응답 위반으로 남은 원문 {len(s.invalid)}개: {', '.join(s.invalid[:5])}")
+    if s.blocked is not None:
+        print(f"  [쓰지 않음] 쓰기 직전 확인이 막았습니다 ({s.blocked}, F-PAR-23)")
     if s.stopped == "config":
         print(
             f"  [설정 오류] 서버가 요청을 거부했습니다. 서버 주소·모델·키를 확인하세요 ({s.error})"

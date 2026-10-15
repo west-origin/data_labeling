@@ -43,6 +43,8 @@ from dlp_schema.db.repository import (
     get_labels,
     insert_labels,
     insert_session,
+    insert_withdrawal,
+    record_privacy_hold,
     record_review,
     register_ontology,
 )
@@ -56,6 +58,7 @@ from dlp_schema.labels import (
     Verification,
     VerificationState,
 )
+from dlp_schema.lineage import Withdrawal
 from dlp_schema.ontology import Ontology, load_ontology
 from dlp_schema.testing import FIXED_TIME, action_payload, make_label, make_session, sqlite_db
 
@@ -516,3 +519,40 @@ def test_translation_of_human_description_for_corrected_action_is_kept(
     assert (again.translated, again.retracted, again.covered, stub.calls) == (0, 0, 1, calls)
     assert _english(_current(engine))[human.label_id].label_id == en.label_id
     engine.dispose()
+
+
+@pytest.mark.parametrize("change", ["hold", "withdraw"])
+def test_final_write_rechecks_hold_and_withdrawal_under_the_lock(
+    db: sa.Engine, ontology: Ontology, policy: TranslatePolicy, change: str
+) -> None:
+    """F-PAR-23: 번역하는 동안(잠금 전) 세션이 승인 보류·사용 중지되면 쓰기 직전 확인이 막아 아무
+    것도 쓰지 않는다. 원문은 대기로 남고(종료 코드 3) 이유를 알린다. 번역은 픽셀을 쓰지 않으므로
+    렌더는 보지 않는다.
+
+    정답: blocked에 이유, 번역 0개·삭제 0개, 대기 = 원문 2개, 이력 그대로.
+    """
+
+    class Interrupting(GlossaryStubTranslator):
+        conn: sa.Connection | None = None
+
+        def translate(self, text: str, glossary: Any) -> str:
+            if self.calls == 0 and self.conn is not None:
+                if change == "hold":
+                    record_privacy_hold(self.conn, SID, "hold", reason="r", actor="ops01",
+                                        at=FIXED_TIME)  # fmt: skip
+                else:
+                    insert_withdrawal(
+                        self.conn, Withdrawal(session_id=SID, reason="c", withdrawn_at=FIXED_TIME)
+                    )
+            return super().translate(text, glossary)
+
+    with db.connect() as conn:
+        before = get_labels(conn, SID)
+    stub = Interrupting(EN)
+    with db.begin() as conn:
+        stub.conn = conn
+        s = run_translate(conn, SID, stub, ontology, policy, FIXED_TIME)
+    assert s.blocked and (s.translated, s.retracted) == (0, 0)
+    assert sorted(s.pending) == sorted(f"{a}-desc" for a in KO)
+    with db.connect() as conn:
+        assert get_labels(conn, SID) == before

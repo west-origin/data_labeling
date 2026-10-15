@@ -33,12 +33,14 @@
     같다. 쓴 뒤 `apply_description_follow`로 고친 행동의 검수를 물려받는다 (사용자 정책 "행동을
     승인할 때 같이"): 검수자 = 행동 검수자, 검수 시각 = 설명 생성 시각. 그래서 이 설명은
     "검수 뒤 기계가 만든 글"임이 출처(`describe-` 버전)·생성 시각(행동 검수 뒤)·검수 시각 = 생성
-    시각으로 남고, 물려준 행동은 `inherited_owner`로 다시 계산한다. 영어 번역은 번역 단계가 평소대로
-    만들고 같은 규칙으로 물려받는다.
+    시각으로 남고, 물려준 행동은 물려받기 기록(`description_inheritance`, 경로 describe)에 남는다.
+    영어 번역은 번역 단계가 평소대로 만들고 같은 규칙으로 물려받는다.
 
 잠금
-    이력 읽기·VLM 호출은 세션을 잠그지 않는다. 쓰기 직전에 세션을 잠그고 설명 따르기를 먼저 적용한
-    뒤 다시 계획해, 그 사이 바뀐 행동의 결과는 버린다 (번역 단계와 같은 방식).
+    이력 읽기·VLM 호출은 세션을 잠그지 않는다. 쓰기 직전에 세션을 잠그고, 사용 중지·승인
+    보류·(프레임을 보냈으면) 렌더 해시를 다시 본다 (`dlp_actions.write_check.write_blocker`,
+    F-PAR-23). 막히면 아무것도 쓰지 않고 `blocked`로 알린다. 아니면 설명 따르기를 먼저 적용한 뒤
+    다시 계획해, 그 사이 바뀐 행동의 결과는 버린다 (번역 단계와 같은 방식).
 
 DB: `label_records` 읽기·쓰기(추가만, 검수 상태 갱신은 설명 따르기만). 트랜잭션은 호출자(CLI)가
 연다.
@@ -62,10 +64,12 @@ from pydantic import Field, ValidationError
 from dlp_actions.policy import ActionsPolicy
 from dlp_actions.runner import input_digest
 from dlp_actions.vlm import SegmentRequest, VlmClient
+from dlp_actions.write_check import write_blocker
 from dlp_media.storage import ObjectStore, blurred_key
 from dlp_models.vlm import ask_validated, with_backoff
+from dlp_privacy.policy import PrivacyPolicy
 from dlp_privacy.policy import load_policy as load_privacy_policy
-from dlp_privacy.runner import assert_render_current, check_fetched
+from dlp_privacy.runner import assert_render_current, check_fetched, expected_render_hash
 from dlp_schema import repo_root
 from dlp_schema.common import Contract, derived_id
 from dlp_schema.db.description_repository import apply_description_follow
@@ -134,6 +138,8 @@ class DescribeSummary:
         deleted: 이 버전 설명이 이력에 있으나 현재가 아니라 되살리지 않은 행동 수.
         retracted: 쓴 삭제 레코드 수 (이전 검수 전 설명, 설명 따르기 포함).
         inherited: 행동 검수를 물려받은 설명 수.
+        blocked: 쓰기 직전 확인(사용 중지·승인 보류·렌더 변경)이 막은 이유. 있으면 아무것도 쓰지
+            않았다 (F-PAR-23).
     """
 
     version: str
@@ -143,6 +149,7 @@ class DescribeSummary:
     deleted: int = 0
     retracted: int = 0
     inherited: int = 0
+    blocked: str | None = None
 
 
 def describe_version(policy: ActionsPolicy, vlm_version: str) -> str:
@@ -475,16 +482,24 @@ def _record(
 
 
 def _fetch_video(
-    conn: sa.Connection, labeling: ObjectStore, session_id: str, stream_id: str, work: Path
-) -> Path:
-    """지금 승인된 렌더의 블러본을 받는다 (ADR 0024, 아니면 RenderNotCurrentError)."""
+    conn: sa.Connection,
+    labeling: ObjectStore,
+    session_id: str,
+    stream_id: str,
+    work: Path,
+    privacy: PrivacyPolicy,
+) -> tuple[Path, str]:
+    """지금 승인된 렌더의 블러본을 받는다 (ADR 0024, 아니면 RenderNotCurrentError).
+
+    Returns:
+        (받은 파일, 받을 때의 렌더 해시). 해시는 쓰기 직전 확인이 다시 비교한다 (F-PAR-23).
+    """
     video = work / f"{stream_id}.mp4"
-    rendered = assert_render_current(
-        conn, labeling, session_id, stream_id, load_privacy_policy(repo_root())
-    )
+    before = expected_render_hash(conn, session_id, stream_id, privacy)
+    rendered = assert_render_current(conn, labeling, session_id, stream_id, privacy)
     labeling.get_file(blurred_key(session_id, stream_id), video)
     check_fetched(video, rendered, session_id, stream_id)
-    return video
+    return video, before
 
 
 def describe_session(
@@ -510,6 +525,9 @@ def describe_session(
         VlmUnavailableError, VlmRequestError: 서버 장애·설정 오류 (호출자가 되돌린다).
         RenderNotCurrentError: 블러본이 지금 승인된 렌더가 아닐 때.
 
+    사용 중지·승인 보류 세션은 묻지 않고, 묻는 동안 그렇게 됐거나 렌더가 바뀌었으면 쓰기 직전
+    확인(`write_blocker`, 세션 잠금 아래)이 막아 아무것도 쓰지 않는다 (`blocked`, F-PAR-23).
+
     부작용: `label_records`에 설명·삭제 레코드 추가, 설명 따르기(검수 상태 기록·삭제). VLM 호출.
     """
     version = describe_version(policy, client.version)
@@ -520,14 +538,18 @@ def describe_session(
     summary.waiting, summary.deleted = plan.waiting, plan.deleted
     if not plan.targets:
         return summary
+    summary.blocked = write_blocker(conn, session_id)
+    if summary.blocked is not None:
+        return summary
     stream_id = get_session(conn, session_id).reference_stream.stream_id
     answers: dict[str, DescribeAnswer] = {}
+    render: tuple[str, str, PrivacyPolicy] | None = None
     with tempfile.TemporaryDirectory() as tmp:
-        video = (
-            None
-            if labeling is None
-            else _fetch_video(conn, labeling, session_id, stream_id, Path(tmp))
-        )
+        video: Path | None = None
+        if labeling is not None:
+            privacy = load_privacy_policy(repo_root())
+            video, before = _fetch_video(conn, labeling, session_id, stream_id, Path(tmp), privacy)
+            render = (stream_id, before, privacy)
         for t in plan.targets:
             request = describe_request(t, session_id, stream_id, video)
             answer = ask_description(client, t, request, ontology, policy)
@@ -535,7 +557,7 @@ def describe_session(
                 summary.fallbacks.append(t.action_id)
             else:
                 answers[t.label_id] = answer
-    _write(conn, session_id, answers, policy, version, now, summary)
+    _write(conn, session_id, answers, policy, version, now, summary, render)
     return summary
 
 
@@ -547,9 +569,14 @@ def _write(
     version: str,
     now: datetime,
     summary: DescribeSummary,
+    render: tuple[str, str, PrivacyPolicy] | None,
 ) -> None:
-    """잠그고 설명 따르기를 먼저 적용한 뒤 다시 계획해, 아직 대상인 것만 쓰고 검수를 물려받는다."""
+    """잠그고 쓰기 직전 확인을 한 뒤(막히면 아무것도 쓰지 않음), 설명 따르기를 먼저 적용하고 다시
+    계획해 아직 대상인 것만 쓰고 검수를 물려받는다."""
     lock_session(conn, session_id)
+    summary.blocked = write_blocker(conn, session_id, render)
+    if summary.blocked is not None:
+        return
     first = apply_description_follow(conn, session_id, now, InheritanceMechanism.DESCRIBE)
     fresh = plan_describe(
         get_labels(conn, session_id), version, get_description_inheritance(conn, session_id)

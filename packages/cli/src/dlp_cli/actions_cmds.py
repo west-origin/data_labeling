@@ -160,6 +160,9 @@ def describe_one(
 
 def _print_describe(session_id: str, s: DescribeSummary) -> None:
     """설명 재생성 요약 한 줄과 남은 일."""
+    if s.blocked is not None:
+        print(f"[쓰지 않음] {session_id}: 쓰기 직전 확인이 막았습니다 ({s.blocked})")
+        return
     print(
         f"{session_id}: 고친 행동 설명 {len(s.described)}개 다시 만듦, "
         f"검수 물려받음 {s.inherited}, 사람 확인 대기 {s.waiting}, "
@@ -207,7 +210,8 @@ def cmd_describe(args: argparse.Namespace) -> int:
     """`dlp actions describe <세션> | --pending`: 고친 행동의 설명 재생성 (모듈 docstring).
 
     반환: 0 성공(위반으로 못 만든 설명은 다음 실행이 다시 묻는다) / 2 VLM 주소 없음 / 3 VLM 장애·
-    블러본이 지금 승인된 렌더가 아님 (그 세션은 아무것도 쓰지 않았다) / 5 VLM 설정 오류.
+    블러본이 지금 승인된 렌더가 아님·쓰기 직전 확인(사용 중지·승인 보류·렌더 변경, F-PAR-23)이 막음
+    (그 세션은 아무것도 쓰지 않았다) / 5 VLM 설정 오류.
     부작용: 세션마다 한 트랜잭션에서 `label_records` 설명·삭제 레코드 추가와 검수 상태 기록, VLM
     호출, 라벨링 버킷 블러본 읽기. 커밋 뒤 번역(최선 노력, `--no-translate`면 하지 않는다).
     """
@@ -239,6 +243,9 @@ def cmd_describe(args: argparse.Namespace) -> int:
             print(f"[VLM 설정 오류] {sid}: 서버 주소·모델·키를 확인하세요 ({exc})")
             return CONFIG
         _print_describe(sid, s)
+        if s.blocked is not None:
+            worst = max(worst, UNAVAILABLE)
+            continue
         if s.described and not args.no_translate:
             translate_after_actions(args.url, sid, args.translate_url)
     return worst

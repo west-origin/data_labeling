@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -34,13 +34,19 @@ from dlp_actions.translate import run_translate
 from dlp_actions.translate_policy import load_policy as load_translate_policy
 from dlp_actions.translators import GlossaryStubTranslator
 from dlp_actions.vlm import SegmentRequest
+from dlp_media.storage import LocalStore, blurred_key, sha256_file
+from dlp_privacy.policy import load_policy as load_privacy_policy
+from dlp_privacy.runner import RenderMeta, render_hash, write_render_meta
 from dlp_schema.db.description_repository import apply_description_follow
 from dlp_schema.db.repository import (
     get_description_inheritance,
     get_labels,
     insert_labels,
     insert_session,
+    insert_withdrawal,
+    record_privacy_hold,
     register_ontology,
+    set_privacy_state,
 )
 from dlp_schema.description_follow import FOLLOW_VERSION, REGENERATED_PREFIX, inherited_owner
 from dlp_schema.episode import current_labels
@@ -52,8 +58,10 @@ from dlp_schema.labels import (
     Verification,
     VerificationState,
 )
+from dlp_schema.lineage import Withdrawal
 from dlp_schema.ontology import Ontology, load_ontology
 from dlp_schema.review import InheritanceMechanism
+from dlp_schema.session import PrivacyState
 from dlp_schema.testing import FIXED_TIME, action_payload, make_label, make_session, sqlite_db
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -372,3 +380,79 @@ def test_bimanual_answer_is_checked_per_hand_combination() -> None:
     assert [h["properties"]["verb"] for h in schema["prefixItems"]] == [
         {"enum": ["grasp"]}, {"enum": ["lift"]},
     ]  # fmt: skip
+
+
+class _Interrupting(OracleVlm):
+    """첫 VLM 호출 때 다른 실행이 세션 상태를 바꾼 것처럼 hook을 부른다."""
+
+    hook: Callable[[], None] | None = None
+
+    def complete(self, request: SegmentRequest, prompt: str, schema: dict[str, Any]) -> str:
+        if self.calls == 0 and self.hook is not None:
+            self.hook()
+        return super().complete(request, prompt, schema)
+
+
+def _approved_render(db: sa.Engine, tmp_path: Path) -> LocalStore:
+    """세션을 승인 상태로 두고 지금 렌더(블러 0개)의 블러본·렌더 기록을 라벨링 저장소에 둔다."""
+    labeling = LocalStore(tmp_path / "store", "dlp-labeling")
+    video = tmp_path / "v.bin"
+    video.write_bytes(b"synthetic")
+    sha = sha256_file(video)
+    labeling.put_file(blurred_key(SID, "bodycam"), video, sha)
+    current = render_hash([], load_privacy_policy(ROOT))
+    write_render_meta(labeling, SID, "bodycam", RenderMeta(current, sha), tmp_path)
+    with db.begin() as conn:
+        set_privacy_state(conn, SID, PrivacyState.APPROVED)
+    return labeling
+
+
+@pytest.mark.parametrize("change", ["hold", "withdraw", "approval"])
+def test_final_write_rechecks_hold_withdrawal_and_render_under_the_lock(
+    db: sa.Engine, ontology: Ontology, policy: ActionsPolicy, change: str, tmp_path: Path
+) -> None:
+    """F-PAR-23: VLM에 묻는 동안(잠금 전) 세션이 승인 보류·사용 중지되거나 승인이 풀리면(블러
+    변경 등, 받은 블러본이 더는 지금 렌더가 아님) 쓰기 직전 확인이 막아 아무것도 쓰지 않고 이유를
+    알린다.
+
+    정답: blocked에 이유가 있고, 새 설명·설명 따르기 삭제·물려받기 기록이 하나도 없다 (이력 그대로).
+    바뀌지 않으면 같은 준비로 설명을 만든다 (대조).
+    """
+    act = _action("act")
+    fix = _human(act, "fix", verb="lift")
+    with db.begin() as conn:
+        insert_labels(conn, [act, _model_desc(), fix])
+    labeling = _approved_render(db, tmp_path)
+    with db.connect() as conn:
+        before = get_labels(conn, SID)
+    vlm = _Interrupting([fix])
+    with db.begin() as conn:
+        hooks: dict[str, Callable[[], Any]] = {
+            "hold": lambda: record_privacy_hold(
+                conn, SID, "hold", reason="report", actor="ops01", at=T1
+            ),
+            "withdraw": lambda: insert_withdrawal(
+                conn, Withdrawal(session_id=SID, reason="consent", withdrawn_at=T1)
+            ),
+            "approval": lambda: set_privacy_state(conn, SID, PrivacyState.AUTO_BLURRED),
+        }
+        vlm.hook = hooks[change]
+        s = describe_session(conn, SID, vlm, ontology, policy, T2, labeling)
+    assert s.described == [] and s.blocked, s
+    with db.connect() as conn:
+        assert get_labels(conn, SID) == before
+        assert get_description_inheritance(conn, SID) == []
+
+
+def test_final_write_check_passes_when_nothing_changed(
+    db: sa.Engine, ontology: Ontology, policy: ActionsPolicy, tmp_path: Path
+) -> None:
+    """대조: 같은 준비(승인·지금 렌더)에서 아무것도 바뀌지 않으면 쓴다."""
+    act = _action("act")
+    fix = _human(act, "fix", verb="lift")
+    with db.begin() as conn:
+        insert_labels(conn, [act, _model_desc(), fix])
+    labeling = _approved_render(db, tmp_path)
+    with db.begin() as conn:
+        s = describe_session(conn, SID, _oracle(fix), ontology, policy, T2, labeling)
+    assert s.described == ["a001"] and s.blocked is None
