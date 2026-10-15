@@ -128,9 +128,11 @@ from dlp_schema.db.aireview_repository import (
     list_ai_units,
 )
 from dlp_schema.db.locks import aireview_lock_held
+from dlp_schema.db.ontology_repository import get_session_ontology
 from dlp_schema.db.repository import get_labels, get_session, list_session_ids
 from dlp_schema.episode import current_labels
 from dlp_schema.labels import Hand
+from dlp_schema.ontology import ontology_digest
 from dlp_schema.session import LifecycleState, Session, Stream, StreamKind, SyncMethod
 from dlp_sync.policy import load_policy as load_sync_policy
 from dlp_sync.signals import glove_series
@@ -791,8 +793,15 @@ def _label_record(
         }
     except RenderNotCurrentError:
         hashes = None
+    digest = ontology_digest(get_session_ontology(conn, session_id))
     valid = (
-        valid_verdicts(units, current, versions=[policy.verdict_version], render_hashes=hashes)
+        valid_verdicts(
+            units,
+            current,
+            versions=[policy.verdict_version],
+            render_hashes=hashes,
+            ontology_digest=digest,
+        )
         if hashes is not None
         else {}
     )

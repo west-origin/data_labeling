@@ -189,6 +189,7 @@ def _window_text(
         render_hash="",
         sensor_sha256=unit_sensor_sha(w, policy, sensor),
         ontology_version=o.version,
+        ontology_digest="estimate",
     )
     images = [PromptImage(_EMPTY, t, 0, 0, k, (0, 0)) for k, t in enumerate(ms)]
     images += [

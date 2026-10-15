@@ -27,7 +27,9 @@
 시각: temporal 묶음은 마스터 ms이고 기준 스트림(바디캠, offset 0·배율 1)의 PTS ms와 같다.
 spatial은 그 스트림 PTS ms다 (ADR 0019). 프레임 번호와 간격의 곱으로 시각을 계산하지 않는다.
 
-단위 키(`unit_id`)는 판정 입력(대상·맥락 라벨 ID·프레임·렌더·센서·온톨로지)의 해시다. 라벨 하나를
+단위 키(`unit_id`)는 판정 입력(대상·맥락 라벨 ID·프레임·렌더·센서·온톨로지 버전과 내용 해시)의
+해시다. 온톨로지 내용 해시(`dlp_schema.ontology.ontology_digest`)는 같은 버전의 draft 덧붙이기로
+프롬프트 개체표·응답 스키마가 바뀐 것을 구별한다 (F-AIR-32). 라벨 하나를
 고치면 그 창만, 렌더 해시가 바뀌면 그 스트림만 다시 판정한다. 선택 방식은 키에 들어가지 않는다
 (all↔flagged 전환이 다시 판정을 부르지 않게). 맥락 라벨의 검수 상태(프롬프트 맥락 표의 "(확정)"
 표시, `prompt._confirmed`)도 키 밖이다: 승인은 같은 label_id 행의 검수 상태만 바꾸므로, 승인만으로는
@@ -67,7 +69,7 @@ from dlp_schema.labels import (
     ObjectStatePayload,
     SegmentPayload,
 )
-from dlp_schema.ontology import Ontology
+from dlp_schema.ontology import Ontology, ontology_digest
 from dlp_schema.review import FlaggedSpan, ReviewReason
 from dlp_schema.session import Session, StreamKind
 
@@ -137,6 +139,7 @@ class PlannedUnit:
         render_hash: 그 스트림 블러본의 렌더 해시.
         sensor_sha256: 이 단위가 장갑 문장을 쓰면 그 해시, 아니면 "absent".
         ontology_version: 세션 온톨로지 버전.
+        ontology_digest: 세션 온톨로지 내용 해시 (`ontology_digest`, F-AIR-32).
     """
 
     window: PlannedWindow
@@ -147,6 +150,7 @@ class PlannedUnit:
     render_hash: str
     sensor_sha256: str
     ontology_version: str
+    ontology_digest: str
 
     @property
     def group(self) -> AiGroup:
@@ -669,18 +673,20 @@ def unit_id(
     render_hash: str,
     sensor_sha256: str,
     ontology_version: str,
+    ontology_digest: str,
 ) -> str:
     """단위 키 `air-<sha256 24자>`.
 
     해시 입력: [버전, 세션, 묶음, 스트림, 구간 시작·끝, 분할 순번, 대상 ID(순서), 맥락 ID(정렬),
-    프레임 ms, 렌더 해시, 센서 해시, 온톨로지 버전]의 JSON.
+    프레임 ms, 렌더 해시, 센서 해시, 온톨로지 버전, 온톨로지 내용 해시]의 JSON.
+    내용 해시가 들어가므로 이 변경(F-AIR-32) 전에 기록한 단위와 키가 다르다: 한 번 다시 판정한다.
 
     문맥 초과 분할은 단위 안 일이라 키에 들어가지 않는다.
     """
     payload = [
         version, session_id, w.group.value, w.stream_id, w.t_start_ms, w.t_end_ms, w.split_index,
         [x.label_id for x in w.targets], sorted(x.label_id for x in w.context), list(frame_ms_),
-        render_hash, sensor_sha256, ontology_version,
+        render_hash, sensor_sha256, ontology_version, ontology_digest,
     ]  # fmt: skip
     text = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
     return "air-" + hashlib.sha256(text.encode()).hexdigest()[:24]
@@ -718,7 +724,7 @@ def plan_session(
         sensor: 장갑 접촉 구간 (없으면 `SensorContext.absent()`).
         only: 대상 지정 (평가 경로). (나머지는 `plan_windows`와 같다.)
     """
-    version = policy.verdict_version
+    version, digest = policy.verdict_version, ontology_digest(o)
     out: list[PlannedUnit] = []
     for w in plan_windows(session, current, policy, o, flagged=flagged, only=only):
         m = media.get(w.stream_id)
@@ -727,8 +733,12 @@ def plan_session(
         idx = tuple(pick_frames(m.pts, w.wanted_ms, nearest=w.group is AiGroup.SPATIAL))
         ms = tuple(frame_ms(m.pts, i) for i in idx)
         sensor_sha = unit_sensor_sha(w, policy, sensor)
-        uid = unit_id(version, session.session_id, w, ms, m.render_hash, sensor_sha, o.version)
-        out.append(PlannedUnit(w, uid, version, idx, ms, m.render_hash, sensor_sha, o.version))
+        uid = unit_id(
+            version, session.session_id, w, ms, m.render_hash, sensor_sha, o.version, digest
+        )
+        out.append(
+            PlannedUnit(w, uid, version, idx, ms, m.render_hash, sensor_sha, o.version, digest)
+        )
     return out
 
 
@@ -753,17 +763,22 @@ def uncovered_targets(
     *,
     version: str,
     render_hashes: Mapping[str, str],
+    ontology_digest: str | None = None,
 ) -> list[str]:
     """계획 창의 대상 중 판정되지 않은 라벨 (라벨 ID 정렬).
 
     "판정됨" = 지금 버전이고 그 스트림의 지금 렌더 해시인 단위에 대상으로 든 적이 있다.
+    ontology_digest를 주면 그 온톨로지 내용 해시로 기록한 단위만 센다 (F-AIR-32. 내용 해시가 없는
+    이전 단위는 세지 않는다: 다시 판정하면 내용 해시가 생긴다).
     `--pending`이 세션을 고르는 조건이다. 맥락 변화는 보지 않는다 (사람 검수가 진행될 때마다 다시
     고르지 않게).
     """
     covered = {
         i
         for u in units
-        if u.version == version and render_hashes.get(u.stream_id) == u.render_hash
+        if u.version == version
+        and render_hashes.get(u.stream_id) == u.render_hash
+        and (ontology_digest is None or u.ontology_digest == ontology_digest)
         for i in u.target_label_ids
     }
     return sorted({x.label_id for w in windows for x in w.targets} - covered)

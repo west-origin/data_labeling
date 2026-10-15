@@ -321,3 +321,27 @@ def test_contract_rejects_values_longer_than_varchar_columns(
             type(example).model_validate(data | {column.name: "a" * (length + 1)})
         checked += 1
     assert checked > 0
+
+
+def test_valid_verdicts_display_needs_current_ontology_digest() -> None:
+    """F-AIR-32: 표시 프로필에 온톨로지 내용 해시를 주면 같은 해시로 판정한 단위만 쓴다.
+
+    같은 버전의 draft 덧붙이기 전 판정(다른 해시)과 내용 해시가 없는 이전 단위는 빠진다. 증가
+    프로필(해시를 주지 않음)은 그대로 쓴다 (사람 검수를 늘리는 쪽).
+    """
+    current = [_model_label("l1"), _model_label("l2")]
+    d_old, d_new = "a" * 64, "b" * 64
+    old = _unit("air-" + "1" * 24, [_verdict("l1", "wrong")]).model_copy(
+        update={"ontology_digest": d_old}
+    )
+    legacy = _unit("air-" + "2" * 24, [_verdict("l2", "suspect")])
+    new = _unit("air-" + "3" * 24, [_verdict("l1", "ok")]).model_copy(
+        update={"ontology_digest": d_new}
+    )
+    units = [old, legacy, new]
+    shown = valid_verdicts(
+        units, current, versions=[VERSION], render_hashes={"bodycam": H1}, ontology_digest=d_new
+    )
+    assert {k: (v.verdict.value, u) for k, (v, u) in shown.items()} == {"l1": ("ok", new.unit_id)}
+    escalate = valid_verdicts(units, current, versions=[VERSION], render_hashes=None)
+    assert escalate["l1"][0].verdict is AiVerdictValue.WRONG and "l2" in escalate

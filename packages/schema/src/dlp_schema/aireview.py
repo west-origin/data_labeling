@@ -359,7 +359,9 @@ class AiReviewUnit(Contract):
     """요청 단위 하나의 판정 기록 (계획 단위 하나 = 행 하나, 재개·감사의 기준)."""
 
     # unit_id: 입력 전체(버전·세션·묶음·스트림·구간·분할 순번·대상·맥락·프레임·렌더 해시·
-    #   센서·온톨로지)의 해시 (dlp_aireview.plan.unit_id). run_id: 처음 쓴 실행.
+    #   센서·온톨로지 버전·내용 해시)의 해시 (dlp_aireview.plan.unit_id). run_id: 처음 쓴 실행.
+    # ontology_digest: 판정에 쓴 온톨로지 내용 해시 (dlp_schema.ontology.ontology_digest, F-AIR-32.
+    #   이 필드 전에 기록한 단위는 None).
     # version: 판정 버전. group / stream_id: 묶음과 프레임을 뽑은 블러본 스트림.
     # t_start_ms / t_end_ms: 증거 구간. target_label_ids: 판정 대상 (순서 = 응답 번호 i).
     # context_label_ids: 텍스트로만 준 맥락 라벨 (정렬).
@@ -390,6 +392,7 @@ class AiReviewUnit(Contract):
     blurred_sha256: Sha256 | None = None
     sensor_sha256: Sha256 | Literal["absent"]
     ontology_version: SemVer
+    ontology_digest: Sha256 | None = None
     frames: tuple[AiFrameRef, ...] = ()
     prompt_digest: Sha256
     outcome: Literal["answered", "fallback"]
@@ -668,6 +671,7 @@ def valid_verdicts(
     versions: Collection[str],
     render_hashes: Mapping[str, str] | None,
     strict_context: bool = False,
+    ontology_digest: str | None = None,
 ) -> dict[str, tuple[AiVerdict, str]]:
     """지금 유효한 판정: 라벨 ID → (가장 나쁜 판정, 그 단위 ID). ADR 0040 4.4.
 
@@ -678,7 +682,10 @@ def valid_verdicts(
        (표본 제외·마무리 보호처럼 사람 검수를 늘리는 쪽은 낡은 블러본의 지적이어도 안전하다).
     3. 대상 라벨이 지금도 `current`(운영 라벨) 안에 있고 검수 전 자동 라벨이다.
     4. `strict_context`면 단위의 대상·맥락 라벨이 모두 지금도 `current` 안에 있다.
-    5. 한 라벨에 판정이 여럿이면 `worst`.
+    5. `ontology_digest`를 주면 단위의 온톨로지 내용 해시가 같다 (F-AIR-32: 같은 버전 draft
+       덧붙이기 전 판정은 다른 개체표·응답 스키마로 받은 것이다. 내용 해시가 없는 이전 단위도 뺀다).
+       표시 프로필이 준다. 증가 프로필은 렌더처럼 보지 않는다 (사람 검수를 늘리는 쪽이라 안전하다).
+    6. 한 라벨에 판정이 여럿이면 `worst`.
 
     Args:
         units: 판정 단위 (보통 그 세션의 `list_ai_units`).
@@ -686,6 +693,8 @@ def valid_verdicts(
         versions: 허용 판정 버전.
         render_hashes: 스트림 → 지금 렌더 해시 (표시 프로필), None이면 증가 프로필.
         strict_context: 맥락 라벨까지 현재여야 하는지 (기본 False).
+        ontology_digest: 지금 세션 온톨로지의 내용 해시 (`dlp_schema.ontology.ontology_digest`).
+            None이면 보지 않는다.
     """
     by_id = {x.label_id: x for x in current}
     allowed = set(versions)
@@ -694,6 +703,8 @@ def valid_verdicts(
         if unit.version not in allowed:
             continue
         if render_hashes is not None and render_hashes.get(unit.stream_id) != unit.render_hash:
+            continue
+        if ontology_digest is not None and unit.ontology_digest != ontology_digest:
             continue
         if strict_context and any(
             i not in by_id for i in (*unit.target_label_ids, *unit.context_label_ids)

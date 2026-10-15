@@ -16,6 +16,7 @@
     - `Ontology`: 사전 전체와 교차 참조 검증, 조회 도우미 (`display_names`, `name` 포함).
     - `load_ontology(dir)`: 디렉터리의 YAML을 합쳐 검증한다.
     - `find_ontology_dir(root, version)`: manifest의 version으로 디렉터리를 찾는다.
+    - `ontology_digest(ontology)`: 내용 해시 (같은 버전의 draft 덧붙이기도 구별한다).
 
 DB 등록
     `dlp ontology register <버전>`(`make db-upgrade`)이 `db.repository.register_ontology`로
@@ -30,6 +31,8 @@ DB 등록
 
 from __future__ import annotations
 
+import hashlib
+import json
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -247,6 +250,17 @@ TERM_CATEGORIES = (
     "body_parts", "postures", "physical_types", "state_attributes", "objects", "events",
     "privacy_targets", "surface_parts", "hand_joints",
 )  # fmt: skip
+
+
+def ontology_digest(ontology: Ontology) -> str:
+    """온톨로지 내용 해시 (sha256 64자). 파싱된 값(`model_dump(mode="json")`)의 키 정렬 JSON.
+
+    같은 버전이라도 draft 덧붙이기(`register_ontology`)로 내용이 바뀌면 달라진다. YAML 주석·서식은
+    영향을 주지 않는다. 검수 화면 프로젝트 이름(`dlp_review.ontology_projects`)과 AI 1차 검수 단위
+    키(`dlp_aireview.plan.unit_id`, F-AIR-32)가 쓴다.
+    """
+    content = json.dumps(ontology.model_dump(mode="json"), sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(content.encode()).hexdigest()
 
 
 def load_ontology(directory: Path) -> Ontology:

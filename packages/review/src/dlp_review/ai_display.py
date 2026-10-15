@@ -81,7 +81,7 @@ from dlp_schema.labels import (
     LabelPayload,
     LabelRecord,
 )
-from dlp_schema.ontology import Ontology
+from dlp_schema.ontology import Ontology, ontology_digest
 from dlp_schema.review import FlaggedSpan, ReviewAssignment, ReviewMode, ReviewReason, ReviewTask
 
 # 라벨 하나의 유효한 판정: (가장 나쁜 판정, 그 단위 ID)
@@ -177,6 +177,8 @@ def load_ai_view(
     current: Sequence[LabelRecord],
     render_hashes: Mapping[str, str] | None,
     cfg: AiDisplayConfig,
+    *,
+    ontology: Ontology | None = None,
 ) -> AiView:
     """세션의 판정 단위(허용 버전)를 읽어 두 프로필의 유효한 판정을 계산한다 (DB 읽기만).
 
@@ -184,6 +186,8 @@ def load_ai_view(
         current: 지금 운영 라벨 (`current_labels(get_labels(...))`).
         render_hashes: 스트림 → 지금 렌더 해시. None이면 표시 프로필을 비운다 (승인 상태가 아니거나
             렌더를 모를 때: fail-closed). 증가 프로필은 늘 계산한다.
+        ontology: 세션 온톨로지. 주면 표시 프로필은 지금 온톨로지 내용 해시로 판정한 단위만 쓴다
+            (F-AIR-32). 증가 프로필은 보지 않는다.
     """
     units = list_ai_units(conn, session_id, versions=cfg.versions)
     strict = cfg.policy.strict_context
@@ -191,6 +195,7 @@ def load_ai_view(
         valid_verdicts(
             units, current, versions=cfg.versions, render_hashes=render_hashes,
             strict_context=strict,
+            ontology_digest=ontology_digest(ontology) if ontology is not None else None,
         )
         if render_hashes is not None
         else {}

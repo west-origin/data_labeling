@@ -7,11 +7,9 @@
   건드리지 않게 쓴다 (F-REV-15).
 """
 
-import hashlib
-import json
 import re
 
-from dlp_schema.ontology import Ontology
+from dlp_schema.ontology import Ontology, ontology_digest
 
 # 프로젝트 이름에 넣는 사전 해시 글자 수
 _TAG_CHARS = 12
@@ -19,8 +17,7 @@ _TAG_CHARS = 12
 
 def ontology_project(base: str, ontology: Ontology) -> str:
     """버전과 사전 해시를 프로젝트 이름에 넣어 draft 덧붙이기도 다른 화면으로 분리한다."""
-    content = json.dumps(ontology.model_dump(mode="json"), sort_keys=True, ensure_ascii=False)
-    tag = hashlib.sha256(content.encode()).hexdigest()[:_TAG_CHARS]
+    tag = ontology_digest(ontology)[:_TAG_CHARS]
     return f"{base}-v{ontology.version}-{tag}"
 
 

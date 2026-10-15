@@ -113,6 +113,7 @@ class JudgedUnit:
             context_label_ids=tuple(x.label_id for x in w.context),
             render_hash=u.render_hash, blurred_sha256=blurred_sha256,
             sensor_sha256=u.sensor_sha256, ontology_version=u.ontology_version,
+            ontology_digest=u.ontology_digest,
             frames=self.frames, prompt_digest=self.prompt_digest, outcome=self.outcome,
             attempts=self.attempts, sub_requests=self.sub_requests, errors=self.errors,
             verdicts=self.verdicts, findings=self.findings, response_sha256=self.response_sha256,

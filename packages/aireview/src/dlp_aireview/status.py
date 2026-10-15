@@ -55,6 +55,7 @@ from dlp_schema.db.repository import (
 )
 from dlp_schema.episode import current_labels
 from dlp_schema.labels import LabelRecord
+from dlp_schema.ontology import ontology_digest
 from dlp_schema.review import FlaggedSpan
 from dlp_schema.session import LifecycleState, PrivacyState, Session
 
@@ -120,10 +121,16 @@ def coverage(
         approved = True
     except RenderNotCurrentError:
         hashes, approved = {}, False
+    # 지금 온톨로지 내용으로 판정한 단위만 센다 (F-AIR-32: 같은 버전 draft 덧붙이기)
+    digest = ontology_digest(o)
     units = tuple(
-        u for u in list_ai_units(conn, sid, [version]) if hashes.get(u.stream_id) == u.render_hash
+        u
+        for u in list_ai_units(conn, sid, [version])
+        if hashes.get(u.stream_id) == u.render_hash and u.ontology_digest == digest
     )
-    left = uncovered_targets(windows, units, version=version, render_hashes=hashes)
+    left = uncovered_targets(
+        windows, units, version=version, render_hashes=hashes, ontology_digest=digest
+    )
     targets = frozenset(x.label_id for w in windows for x in w.targets)
     return Coverage(windows, hashes, approved, units, targets, tuple(left))
 

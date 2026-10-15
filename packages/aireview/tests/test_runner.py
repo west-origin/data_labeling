@@ -46,7 +46,7 @@ from dlp_aireview.testing import FakeOpenAIServer
 from dlp_models.vlm import VlmUnavailableError
 from dlp_privacy.errors import RenderNotCurrentError
 from dlp_schema.aireview import AiGroup, AiReviewUnit, AiRunEventKind
-from dlp_schema.ontology import Ontology
+from dlp_schema.ontology import Ontology, ontology_digest
 
 from .conftest import RENDER, SIZE, Scene, with_policy
 
@@ -582,3 +582,31 @@ def test_written_counts_judged_units_inserted_counts_new_rows(
     assert again.status == "completed" and again.written == again.planned and again.inserted == 0
     assert blind.events[-1].counts["written"] == again.planned
     assert blind.events[-1].counts["inserted"] == 0 and again.to_json()["inserted"] == 0
+
+
+def test_draft_ontology_addition_in_same_version_judges_again(
+    scene: Scene, policy: AiReviewPolicy, ontology: Ontology
+) -> None:
+    """F-AIR-32: 같은 버전의 draft 온톨로지에 항목을 덧붙이면(`register_ontology`가 받는 덧붙이기)
+    프롬프트·응답 스키마가 바뀌므로 단위 키가 바뀌어 다시 판정한다 (전에는 nothing_to_do).
+
+    정답: 덧붙인 동사 하나로 온톨로지 내용 해시가 바뀐다 → 모든 단위가 새 키 → 계획 수만큼 새로
+    판정. 단위 기록에 온톨로지 내용 해시가 남는다. 내용이 같으면 그대로 nothing_to_do다.
+    """
+    sink, judge = MemorySink(), OracleJudge(scene.labels)
+    first = run_session(run_input(scene, ontology), judge, sink, fast(policy))
+    assert first.status == "completed"
+    old = set(sink.units)
+    verb = next(iter(ontology.verbs.values()))
+    added = ontology.model_copy(
+        update={"verbs": {**ontology.verbs, "zz_added_verb": verb.model_copy(
+            update={"ko": "덧붙인 동사", "en": "added verb"})}}
+    )  # fmt: skip
+    assert added.version == ontology.version
+    again = run_session(run_input(scene, added), judge, sink, fast(policy))
+    assert again.status == "completed" and again.written == again.planned == first.planned
+    assert not old & {u for u in sink.units if u not in old} and len(sink.units) == 2 * len(old)
+    fresh = [u for k, u in sink.units.items() if k not in old]
+    assert {u.ontology_digest for u in fresh} == {ontology_digest(added)}
+    same = run_session(run_input(scene, added), judge, sink, fast(policy))
+    assert same.status == "nothing_to_do"

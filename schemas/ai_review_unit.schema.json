@@ -1609,6 +1609,19 @@
       "default": null,
       "title": "Latency Ms"
     },
+    "ontology_digest": {
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Ontology Digest"
+    },
     "ontology_version": {
       "pattern": "^\\d+\\.\\d+\\.\\d+$",
       "title": "Ontology Version",

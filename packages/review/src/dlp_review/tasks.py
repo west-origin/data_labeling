@@ -738,7 +738,10 @@ class _AiTasks:
 
     def view(self, stream_id: str, rhash: str) -> AiView:
         """그 스트림 블러본(렌더 해시 rhash)으로 만든 판정만 표시 프로필에 든다."""
-        return load_ai_view(self.conn, self.session_id, self.current, {stream_id: rhash}, self.cfg)
+        return load_ai_view(
+            self.conn, self.session_id, self.current, {stream_id: rhash}, self.cfg,
+            ontology=self.ontology,
+        )  # fmt: skip
 
     def expose(
         self, task: ReviewTask, sent: Sequence[LabelRecord], view: AiView, limit: int | None = None
