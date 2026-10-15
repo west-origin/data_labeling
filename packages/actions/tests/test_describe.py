@@ -35,7 +35,7 @@ from dlp_actions.translators import GlossaryStubTranslator
 from dlp_actions.vlm import SegmentRequest
 from dlp_schema.db.description_repository import apply_description_follow
 from dlp_schema.db.repository import get_labels, insert_labels, insert_session, register_ontology
-from dlp_schema.description_follow import REGENERATED_PREFIX, inherited_owner
+from dlp_schema.description_follow import FOLLOW_VERSION, REGENERATED_PREFIX, inherited_owner
 from dlp_schema.episode import current_labels
 from dlp_schema.labels import (
     DescriptionPayload,
@@ -244,3 +244,49 @@ def test_partial_deletion_regenerates_for_the_remaining_hand(
     (d,) = _descriptions(db)
     assert d.verification.state is VerificationState.HUMAN_APPROVED
     assert isinstance(d.payload, DescriptionPayload) and d.payload.text == NEW_TEXT
+
+
+def test_inherited_description_is_replaced_when_owner_changes_in_a_later_round(
+    db: sa.Engine, ontology: Ontology, policy: ActionsPolicy
+) -> None:
+    """ADR 0043 3절 규칙 6: 회차 1에 승인된 행동의 설명(ko·en)이 검수를 물려받은 뒤, 회차 2에
+    검수자 r2가 동사를 lift로 고치면 물려받은 설명은 보호를 잃어 지워지고, 재생성·번역이 새로
+    만들어 r2의 검수를 물려받는다. 직접 검수한 설명은 아니므로 저장 검증이 막지 않는다.
+
+    정답: 회차 1 뒤 현재 설명 = 모델 원문 d(r1, T1)와 번역(r1, T2). 회차 2 뒤 = 재생성 원문
+    (NEW_TEXT, r2, 검수 시각 = 생성 시각 T3)과 그 번역(r2, T4). 예전 d·번역은 설명 따르기 삭제.
+    """
+    act = _approved(_action("act"))
+    texts = {"걸레를 잡는다": "Grasps the cloth", NEW_TEXT: "Lifts the cloth"}
+    stub = GlossaryStubTranslator(texts)
+    tpolicy = load_translate_policy(ROOT)
+    with db.begin() as conn:
+        insert_labels(conn, [act, _model_desc()])
+        assert [r.label_id for r in apply_description_follow(conn, SID, T1).approve] == ["d"]
+        assert run_translate(conn, SID, stub, ontology, tpolicy, T2).inherited == 1
+    first = {x.label_id for x in _descriptions(db)}
+    assert len(first) == 2
+
+    fix = _human(act, "fix", verb="lift").model_copy(
+        update={"created_at": T2, "verification": Verification(
+            state=VerificationState.HUMAN_CORRECTED, reviewer_id="r2", reviewed_at=T2)}
+    )  # fmt: skip
+    with db.begin() as conn:
+        insert_labels(conn, [fix])
+        s = describe_session(conn, SID, _oracle(fix), ontology, policy, T3)
+    assert s.described == ["a001"] and s.retracted == 2 and s.inherited == 1
+    with db.begin() as conn:
+        t = run_translate(conn, SID, stub, ontology, tpolicy, T3 + timedelta(hours=1))
+    assert t.translated == 1 and t.inherited == 1
+    now = _descriptions(db)
+    assert first.isdisjoint({x.label_id for x in now}) and len(now) == 2
+    for x in now:
+        v = x.verification
+        assert (v.state, v.reviewer_id) == (VerificationState.HUMAN_APPROVED, "r2")
+    ko = next(x for x in now if isinstance(x.payload, DescriptionPayload)
+              and x.payload.source_label_id is None)  # fmt: skip
+    assert isinstance(ko.payload, DescriptionPayload) and ko.payload.text == NEW_TEXT
+    with db.connect() as conn:
+        history = get_labels(conn, SID)
+    gone = [x for x in history if x.retracted and x.parent_label_id in first]
+    assert {x.provenance.model_version for x in gone} == {FOLLOW_VERSION}

@@ -308,3 +308,37 @@ def test_sample_verified_action_passes_sample_state_to_descriptions(
     )  # fmt: skip
     assert current["d1en"].verification.state is VerificationState.HUMAN_APPROVED
     assert current["d3en"].verification.reviewer_id == "lead"
+
+
+def test_inherited_descriptions_follow_a_later_review_round(
+    engine: sa.Engine, tmp_path: Path
+) -> None:
+    """ADR 0043 3절 규칙 6: 회차 1에 물려받은 설명도, 회차 2에 검수자가 행동의 의미를 다시 고치면
+    지운다 (ko·en). 직접 검수한 번역(d3en, lead)과 의미가 그대로인 주인의 설명은 그대로다.
+
+    정답: 회차 1 결과는 위 정답 표와 같다 (d1·d1en·d2·dsk 물려받음). 회차 2(작업 3b)에 a1을 다시
+    보내 동사를 grasp → lift로 고친다 → d1·d1en 지움(설명 따르기 삭제 레코드, 보호 예외), d2·dsk·
+    d3en은 그대로 승인 상태.
+    """
+    owners = _scene(engine)
+    with engine.begin() as conn:
+        collect_task(conn, TASK, _setup(tmp_path, _reviewed(owners)), ASSIGNEE, LATER)
+    current, _ = _state(engine)
+    a1 = current["s001-a1"]
+    round2 = _task([a1]).model_copy(update={"task_key": "label_studio:3b"})
+    results = to_ls_results([a1])
+    for r in results:
+        r["value"] = {**r["value"], "timeserieslabels": ["action.right:lift"]}
+    later = LATER + timedelta(hours=1)
+    with engine.begin() as conn:
+        insert_review_task(conn, round2)
+        outcome = collect_task(conn, "label_studio:3b", _setup(tmp_path, results), ASSIGNEE, later)
+    assert outcome is not None and outcome.corrected == 1
+    assert sorted(outcome.descriptions_retracted) == ["d1", "d1en"]
+    current, history = _state(engine)
+    assert not {"d1", "d1en"} & set(current)
+    for lid in ("d1", "d1en"):
+        gone = next(x for x in history if x.parent_label_id == lid)
+        assert gone.retracted and gone.provenance.model_version == FOLLOW_VERSION
+    for lid in ("d2", "dsk", "d3en"):
+        assert current[lid].verification.state is VerificationState.HUMAN_APPROVED, lid

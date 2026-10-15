@@ -16,6 +16,7 @@ import pytest
 import sqlalchemy as sa
 
 from dlp_schema.db.repository import get_labels, insert_labels, record_review
+from dlp_schema.description_follow import FOLLOW_VERSION
 from dlp_schema.episode import current_labels, retractions
 from dlp_schema.label_validation import ProtectedLabelRetractionError, validate_session_labels
 from dlp_schema.labels import LabelRecord, Provenance, Source, Verification, VerificationState
@@ -179,3 +180,75 @@ def test_storage_refuses_stale_child_retraction_after_parent_approval(pg: sa.Eng
         with pytest.raises(ProtectedLabelRetractionError, match=r"라벨 orig\("):
             insert_labels(conn, stale)
         assert _ids(get_labels(conn, "s001")) == {"orig", "copy"}
+
+
+# -------------------------------- 설명 따르기의 좁은 예외 (ADR 0043 3절 규칙 6)
+#
+# 정답 근거: 검수자 r1이 행동 a1(action_id a001)을 승인했고(rev01, FIXED_TIME+5분), 설명 d·den이 그
+# 검수를 물려받았다(같은 검수자·시각). 다음 회차에 검수자가 동사를 고친다(사람 레코드 fix). 설명
+# 따르기(`FOLLOW_VERSION`)만, 물려받은 검수만 있는 설명만, 계획이 지우는 경우에만 지울 수 있다.
+
+
+def _description(label_id: str, verification: Verification, **kw: Any) -> LabelRecord:
+    payload: dict[str, Any] = {"kind": "description", "segment_id": "a001", "text": "설명"}
+    if (source := kw.pop("source", None)) is not None:
+        payload |= {"language": "en", "source_label_id": source, "text": "desc"}
+    fields: dict[str, Any] = {"provenance": MODEL, "confidence": 0.9, **kw}
+    return make_label(payload, label_id=label_id, verification=verification, **fields)
+
+
+def _reverb(parent: LabelRecord) -> LabelRecord:
+    """다음 회차 검수자의 의미 수정 (동사 grasp → lift)."""
+    return parent.model_copy(
+        update={"label_id": "fix", "parent_label_id": parent.label_id,
+                "provenance": Provenance(source=Source.HUMAN), "confidence": None,
+                "verification": APPROVED.model_copy(
+                    update={"state": VerificationState.HUMAN_CORRECTED}),
+                "payload": parent.payload.model_copy(update={"verb": "lift"})}
+    )  # fmt: skip
+
+
+def _inherited_scene() -> tuple[LabelRecord, list[LabelRecord]]:
+    """(승인된 행동 a1, 물려받은 설명 d·den)."""
+    owner = _model_label(VerificationState.HUMAN_APPROVED)
+    inherited = owner.verification
+    return owner, [_description("d", inherited), _description("den", inherited, source="d")]
+
+
+def test_follow_may_retract_inheritance_only_description_after_owner_change(
+    ontology: Ontology,
+) -> None:
+    """주인 의미가 다시 바뀌면 설명 따르기는 물려받은 설명(ko·en)을 지울 수 있다."""
+    owner, descs = _inherited_scene()
+    history = [owner, _reverb(owner), *descs]
+    validate_session_labels(ontology, history, retractions(descs, FOLLOW_VERSION, FIXED_TIME))
+
+
+def test_follow_exception_is_narrow(ontology: Ontology) -> None:
+    """예외 밖은 모두 거부한다: 주인이 그대로인 설명, 다른 단계 버전의 삭제, 직접 검수(lead)·사람
+    출처 설명, 설명이 아닌 보호 라벨(행동)."""
+    owner, descs = _inherited_scene()
+    fix = _reverb(owner)
+    refuse = pytest.raises(ProtectedLabelRetractionError)
+    with refuse:  # 주인이 그대로다 (계획이 지우지 않는다)
+        validate_session_labels(
+            ontology, [owner, *descs], retractions(descs, FOLLOW_VERSION, FIXED_TIME)
+        )
+    with refuse:  # 설명 따르기가 아닌 단계
+        validate_session_labels(
+            ontology, [owner, fix, *descs], retractions(descs, "translate-x", FIXED_TIME)
+        )
+    lead = APPROVED.model_copy(update={"reviewer_id": "lead"})
+    human = Provenance(source=Source.HUMAN)
+    for d in (
+        _description("dl", lead),
+        _description("dh", owner.verification, provenance=human, confidence=None),
+    ):
+        with refuse:
+            validate_session_labels(
+                ontology, [owner, fix, d], retractions([d], FOLLOW_VERSION, FIXED_TIME)
+            )
+    with refuse:  # 설명이 아닌 보호 라벨
+        validate_session_labels(
+            ontology, [owner, *descs], retractions([owner], FOLLOW_VERSION, FIXED_TIME)
+        )

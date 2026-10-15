@@ -1,13 +1,19 @@
 """세션 저장 전 순수 검증. 잠금·조회·INSERT는 저장소가 맡는다."""
 
+from dlp_schema.description_follow import (
+    FOLLOW_VERSION,
+    inheritance_only,
+    plan_description_follow,
+)
 from dlp_schema.episode import current_labels, non_operational_ids
-from dlp_schema.labels import LabelRecord, Source, VerificationState
+from dlp_schema.labels import DescriptionPayload, LabelRecord, Source, VerificationState
 from dlp_schema.ontology import Ontology
 from dlp_schema.validation import OntologyViolationError, check_label_set, validate_label
 
 # 사람이 확인한 라벨 상태. 이 상태의 라벨은 자동 단계가 지울 수 없다 (ADR 0015, 0019).
 # 그 라벨을 대신하는 마지막 현재 후손을 지우는 것도 막는다 (F-SCH-02).
-# 사람이 만든 미검수 라벨은 여기서 막지 않는다 (기존 정리 경로가 쓴다)
+# 사람이 만든 미검수 라벨은 여기서 막지 않는다 (기존 정리 경로가 쓴다).
+# 예외: 설명 따르기가 물려받은 검수만 있는 설명을 지울 때 (`_FollowExemption`, ADR 0043 3절 규칙 6)
 PROTECTED_STATES = (
     VerificationState.HUMAN_APPROVED,
     VerificationState.HUMAN_CORRECTED,
@@ -31,6 +37,10 @@ class ProtectedLabelRetractionError(OntologyViolationError):
     재현).
     저장 시점에는 세션 잠금 아래에서 최신 검수 상태를 보므로 여기서 거부한다. 단계는 다시 실행하면
     새 이력으로 그 라벨을 보존한다 (단계의 지울 후보 선택이 보호 조상을 걸러야 한다).
+
+    좁은 예외 하나 (ADR 0043 3절 규칙 6, `_follow_may_retract`): 설명 따르기(`FOLLOW_VERSION`)가
+    물려받은 검수만 있는 설명을, 같은 이력으로 다시 계산한 설명 따르기 계획이 지울 때. 그 밖의
+    보호 라벨(사람 출처, 직접 검수, 설명이 아닌 라벨)은 그대로 막는다.
     """
 
 
@@ -45,11 +55,13 @@ def validate_session_labels(
     그대로 복사해야 하므로 기존 오류 정리는 가능하지만 새 오류를 삭제로 위장할 수 없다.
     사람 출처가 아닌 삭제 레코드는 사람이 확인한(`PROTECTED_STATES`) 부모를 지울 수 없고,
     사람이 확인한 조상의 마지막 현재 후손도 지울 수 없다 (`ProtectedLabelRetractionError`).
+    예외는 설명 따르기가 물려받은 검수만 있는 설명을 지울 때뿐이다 (`_FollowExemption`).
     `history`는 호출자가 세션 잠금 아래에서 읽은 최신 이력이어야 한다.
     """
     if not incoming:
         return
     parents = {x.label_id: x for x in [*history, *incoming]}
+    follow = _FollowExemption(history)
     for label in incoming:
         if not label.retracted and label.ontology_version != ontology.version:
             raise OntologyViolationError(label.label_id, ["세션과 라벨의 온톨로지 버전 불일치"])
@@ -64,6 +76,7 @@ def validate_session_labels(
             if (
                 label.provenance.source is not Source.HUMAN
                 and parent.verification.state in PROTECTED_STATES
+                and not follow.allows(label, parent)
             ):
                 raise ProtectedLabelRetractionError(
                     label.label_id,
@@ -79,6 +92,37 @@ def validate_session_labels(
     problems = check_label_set(current_labels([*history, *incoming]), ontology)
     if problems:
         raise OntologyViolationError(incoming[0].label_id, problems)
+
+
+class _FollowExemption:
+    """보호 라벨 삭제 거부의 좁은 예외 (ADR 0043 3절 규칙 6).
+
+    허용 조건을 모두 만족해야 한다.
+
+    1. 삭제 레코드가 설명 따르기의 것이다: 모델 출처, `model_version == FOLLOW_VERSION`.
+    2. 지우는 레코드가 설명 라벨이고 보호가 물려받은 검수뿐이다 (`inheritance_only`: 모델 출처,
+       승인·표본 검증, 물려준 주인을 이력에서 다시 계산할 수 있음).
+    3. 저장 전 이력(세션 잠금 아래 최신)으로 다시 계산한 설명 따르기 계획이 그 설명을 지운다
+       (주인이 다시 바뀌었거나 지워졌다). 계획은 처음 필요할 때 한 번만 계산한다.
+    """
+
+    def __init__(self, history: list[LabelRecord]) -> None:
+        self.history = history
+        self._planned: set[str] | None = None
+
+    def allows(self, label: LabelRecord, parent: LabelRecord) -> bool:
+        """label(삭제 레코드)이 보호된 parent를 지워도 되는가."""
+        if (
+            label.provenance.source is not Source.MODEL
+            or label.provenance.model_version != FOLLOW_VERSION
+            or not isinstance(parent.payload, DescriptionPayload)
+            or not inheritance_only(parent, self.history)
+        ):
+            return False
+        if self._planned is None:
+            plan = plan_description_follow(self.history)
+            self._planned = {x.label_id for x in plan.retract}
+        return parent.label_id in self._planned
 
 
 def _protected_ancestors(

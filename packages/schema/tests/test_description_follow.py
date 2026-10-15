@@ -11,6 +11,7 @@ from typing import Any
 
 from dlp_schema.description_follow import (
     InheritedReview,
+    inheritance_only,
     meaning,
     plan_description_follow,
 )
@@ -202,3 +203,87 @@ def test_baseline_is_the_stage_run_that_made_the_description() -> None:
     assert plan.approve == [
         InheritedReview("d2", VerificationState.HUMAN_APPROVED, "r1", T2, "new")
     ]
+
+
+# -------------------------------- 규칙 6: 물려받은 검수만 있는 설명
+#
+# 2026-10-15 사용자 결정 ("추천안대로"): 물려받은 승인은 사람이 설명문을 읽은 것이 아니다. 물려받은
+# 뒤 다음 검수 회차에서 주인이 다시 바뀌면 그 설명(ko·en)도 지운다. 정답 근거: 회차 1에 검수자 r1이
+# T1에 행동을 승인했고 설명 d·den이 그 검수(r1, T1)를 물려받았다. 회차 2에 검수자 r2가 T2에 행동을
+# 고치거나 지운다.
+
+T3 = FIXED_TIME + timedelta(hours=3)
+
+
+def _inherited(x: LabelRecord, state: VerificationState = VerificationState.HUMAN_APPROVED,
+               who: str = "r1", at: Any = T1) -> LabelRecord:  # fmt: skip
+    """물려받은 검수(apply_description_follow가 record_review로 쓰는 값)를 가진 같은 레코드."""
+    return x.model_copy(update={"verification": _checked(state, who, at)})
+
+
+def _round2(parent: LabelRecord, label_id: str, **payload: Any) -> LabelRecord:
+    """회차 2에 검수자 r2가 T2에 고친 레코드."""
+    fixed = _fix(parent, label_id, **payload)
+    return fixed.model_copy(
+        update={"verification": _checked(VerificationState.HUMAN_CORRECTED, "r2", T2),
+                "created_at": T2}
+    )  # fmt: skip
+
+
+def _round1() -> tuple[LabelRecord, list[LabelRecord]]:
+    """회차 1 뒤: 승인된 행동 act와 물려받은 설명 d·den."""
+    act = _action(record={"verification": _checked(VerificationState.HUMAN_APPROVED, "r1")})
+    return act, [_inherited(_desc()), _inherited(_desc("den", source="d"))]
+
+
+def test_inherited_description_is_retracted_when_owner_changes_again() -> None:
+    """물려받은 뒤 행동의 동사를 다시 고치면 원문·번역을 지운다 (승인을 다시 주지 않는다).
+    그대로 두거나 시각만 고치면 아무것도 하지 않는다 (멱등)."""
+    act, descs = _round1()
+    assert all(inheritance_only(d, [act, *descs]) for d in descs)
+    unchanged = plan_description_follow([act, *descs])
+    assert (unchanged.approve, unchanged.retract) == ([], [])
+    timed = plan_description_follow([act, _round2(act, "t2", t_end_ms=1000), *descs])
+    assert (timed.approve, timed.retract) == ([], [])
+    changed = plan_description_follow([act, _round2(act, "v2", verb="lift"), *descs])
+    assert (changed.approve, _ids(changed.retract)) == ([], ["d", "den"])
+
+
+def test_inherited_description_follows_owner_deletion_and_bimanual_partial_delete() -> None:
+    """물려받은 뒤 행동을 지우거나, 양손 행동에서 한 손만 지우면 원문·번역을 지운다."""
+    act, descs = _round1()
+    gone = plan_description_follow([act, _deleted(act, "gone", T2), *descs])
+    assert _ids(gone.retract) == ["d", "den"]
+    ok = _checked(VerificationState.HUMAN_APPROVED, "r1")
+    right = _action("r", record={"verification": ok})
+    left = _action("l", hand="left", record={"verification": ok})
+    both = [right, left, *descs]
+    assert all(inheritance_only(d, both) for d in descs)
+    assert plan_description_follow(both).retract == []
+    partial = plan_description_follow([*both, _deleted(left, "l-gone", T2)])
+    assert (partial.approve, _ids(partial.retract)) == ([], ["d", "den"])
+
+
+def test_sample_verified_inherited_description_follows_owner_change() -> None:
+    """표본 합격으로 물려받은 설명(sample_verified, 검수자 `sampling:<배정>`)도 같다."""
+    sampled = _checked(VerificationState.SAMPLE_VERIFIED, "sampling:a")
+    act = _action(record={"verification": sampled})
+    d = _inherited(_desc(), VerificationState.SAMPLE_VERIFIED, "sampling:a")
+    assert inheritance_only(d, [act, d])
+    plan = plan_description_follow([act, _round2(act, "v2", target_id="bucket_01"), d])
+    assert _ids(plan.retract) == ["d"]
+
+
+def test_direct_review_human_text_and_unrecoverable_inheritance_stay_protected() -> None:
+    """물려받은 것이 아니면 보호한다: 직접 검수(lead), 사람이 쓴·고친 설명, 사람 수정 상태, 물려준
+    뒤 주인이 제자리에서 다시 검수돼 물려준 주인을 다시 계산할 수 없는 설명 (안전한 쪽)."""
+    act, _ = _round1()
+    direct = _inherited(_desc("dl"), who="lead")
+    human = _inherited(_desc("dh", provenance=Provenance(source=Source.HUMAN), confidence=None))
+    corrected = _inherited(_desc("dc"), VerificationState.HUMAN_CORRECTED)
+    d = _inherited(_desc())
+    rereviewed = _inherited(act, at=T3)  # 회차 3에 같은 레코드를 다시 승인 (시각 T3)
+    for x, owner in ((direct, act), (human, act), (corrected, act), (d, rereviewed)):
+        assert not inheritance_only(x, [owner, x]), x.label_id
+        plan = plan_description_follow([owner, _round2(owner, "v2", verb="lift"), x])
+        assert plan.retract == [], x.label_id

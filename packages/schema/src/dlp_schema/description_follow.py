@@ -39,15 +39,26 @@
     - 번역: 원문(`source_label_id`)의 기준.
     - 기준을 찾지 못하면(이전 형식): 사슬의 처음 레코드와 비교하고 부분 삭제는 보지 않는다.
 
-이미 검수된 설명과 사람 출처 설명은 어떤 경우에도 건드리지 않는다. 결과는 결정적이고 멱등이다
-(적용한 뒤 다시 계산하면 빈 결과).
+물려받은 검수만 있는 설명 (규칙 6, 2026-10-15 사용자 결정 "추천안대로", ADR 0043 3절)
+    물려받은 승인은 사람이 설명문을 읽은 것이 아니다. 물려받은 뒤 다음 검수 회차에서 주인의 의미가
+    다시 바뀌거나(규칙 3) 주인이 지워지거나(규칙 2) 일부만 지워지면(규칙 3b) 그 설명(한국어·영어)은
+    보호를 잃고 검수 전 설명처럼 지운다. 승인을 다시 물려주지는 않는다 (이미 검수 상태다).
+    `dlp actions describe`가 고친 행동의 설명을 다시 만들고 번역이 따라와 새로 물려받는다.
+    "물려받은 검수만 있음"(`inheritance_only`)은 이력으로 다시 계산한다: 모델 출처 설명이고, 상태가
+    승인·표본 검증이며, `inherited_owner`가 물려준 주인을 찾는다. 찾지 못하면(직접 검수, 또는 물려준
+    뒤 주인 레코드가 제자리에서 다시 검수돼 시각이 바뀐 경우) 보호를 유지한다 (안전한 쪽).
+
+그 밖의 검수된 설명(직접 검수)과 사람 출처 설명(사람이 쓰거나 고친 설명)은 어떤 경우에도 건드리지
+않는다. 결과는 결정적이고 멱등이다 (적용한 뒤 다시 계산하면 빈 결과).
 
 출처 감사 (`inherited_owner`)
-    설명에는 검수 도구 경로가 없으므로 검수된 모델 설명은 모두 이 규칙으로 물려받은 것이다.
-    물려준 주인은 이력에서 다시 계산한다 (검수자가 같고 시각이 위 규칙과 같은 주인).
+    설명에는 검수 도구 경로가 없으므로 검수된 모델 설명은 이 규칙으로 물려받았거나 `record_review`로
+    직접 검수한 것이다. 물려준 주인은 이력에서 다시 계산한다 (검수자가 같고 시각이 위 규칙과 같은
+    주인). DB 열·계약은 바꾸지 않는다.
 
-공개 이름: `FOLLOW_VERSION`, `REGENERATED_PREFIX`, `owner_id`, `meaning`, `human_confirmed`,
-`InheritedReview`, `DescriptionFollow`, `plan_description_follow`, `inherited_owner`.
+공개 이름: `FOLLOW_VERSION`, `REGENERATED_PREFIX`, `INHERITED_STATES`, `owner_id`, `meaning`,
+`human_confirmed`, `InheritedReview`, `DescriptionFollow`, `plan_description_follow`,
+`inherited_owner`, `inheritance_only`.
 """
 
 from __future__ import annotations
@@ -76,6 +87,9 @@ FOLLOW_VERSION = "review-follow-1"
 # ADR 0043 3절).
 # 이 설명의 비교 기준은 만든 시각에 현재였던(고친) 주인 레코드다
 REGENERATED_PREFIX = "describe-"
+
+# 설명이 물려받을 수 있는 검수 상태 (`_inherit`가 쓰는 상태. 사람 수정은 물려주지 않는다)
+INHERITED_STATES = (VerificationState.HUMAN_APPROVED, VerificationState.SAMPLE_VERIFIED)
 
 # 의미 비교에서 빼는 행동 페이로드의 시각 필드 (경계만 고친 행동의 설명은 그대로 맞다)
 TIME_FIELDS = frozenset(
@@ -242,7 +256,9 @@ def plan_description_follow(history: Sequence[LabelRecord]) -> DescriptionFollow
     for x in current:
         if (k := owner_id(x)) is not None:
             owners[k].append(x)
-    baseline = _Baseline([x for x in labels if x.label_id not in excluded], by_id)
+    operational = [x for x in labels if x.label_id not in excluded]
+    baseline = _Baseline(operational, by_id)
+    givers = _givers(operational)
     out = DescriptionFollow()
     for d in current:
         p = d.payload
@@ -250,13 +266,14 @@ def plan_description_follow(history: Sequence[LabelRecord]) -> DescriptionFollow
             continue
         if d.provenance.source is Source.HUMAN:
             continue
-        if d.verification.state is not VerificationState.UNREVIEWED:
-            continue
+        reviewed = d.verification.state is not VerificationState.UNREVIEWED
+        if reviewed and _inherited_from(d, givers) is None:
+            continue  # 직접 검수했거나 물려준 주인을 다시 계산할 수 없다 (보호 유지)
         now = owners.get(p.segment_id, [])
         if _must_retract(d, p, now, by_id, baseline):
-            out.retract.append(d)
+            out.retract.append(d)  # 규칙 2·3·3b, 물려받은 검수만 있는 설명도 (규칙 6)
             continue
-        if p.source_label_id is not None and p.source_label_id not in current_ids:
+        if reviewed or (p.source_label_id is not None and p.source_label_id not in current_ids):
             continue
         review = _inherit(d, now)
         if review is not None:
@@ -264,29 +281,50 @@ def plan_description_follow(history: Sequence[LabelRecord]) -> DescriptionFollow
     return out
 
 
+def _givers(operational: Sequence[LabelRecord]) -> dict[str, list[LabelRecord]]:
+    """주인 ID → 검수를 물려줄 수 있는 운영 주인 레코드 (현재가 아니어도 된다, 검수 시각 있음)."""
+    out: dict[str, list[LabelRecord]] = defaultdict(list)
+    for o in operational:
+        if (k := owner_id(o)) is not None and o.verification.reviewed_at is not None:
+            out[k].append(o)
+    return out
+
+
+def _inherited_from(d: LabelRecord, givers: dict[str, list[LabelRecord]]) -> LabelRecord | None:
+    """`inherited_owner`의 계산 (주인 후보를 미리 모은 판)."""
+    p, v = d.payload, d.verification
+    if not isinstance(p, DescriptionPayload) or d.provenance.source is Source.HUMAN:
+        return None
+    if v.state not in INHERITED_STATES or v.reviewed_at is None:
+        return None
+    found: list[LabelRecord] = []
+    for o in givers.get(p.segment_id, []):
+        at = o.verification.reviewed_at
+        if at is None or o.verification.reviewer_id != v.reviewer_id:
+            continue
+        if max(at, d.created_at) == v.reviewed_at:
+            found.append(o)
+    if not found:
+        return None
+    return max(found, key=lambda o: (o.verification.reviewed_at, o.label_id))
+
+
 def inherited_owner(d: LabelRecord, history: Sequence[LabelRecord]) -> LabelRecord | None:
     """검수된 모델 설명에 검수를 물려준 주인 레코드 (감사용). 물려받은 것이 아니면 None.
 
     주인 후보는 설명의 segment_id를 가진 운영 레코드(현재가 아니어도 된다) 중 검수자가 같고
     `max(주인 검수 시각, 설명 생성 시각)`이 설명의 검수 시각과 같은 것이다. 여럿이면 가장 늦게
-    검수한 주인.
+    검수한 주인. 설명의 상태가 물려받을 수 있는 상태(`INHERITED_STATES`)가 아니면 None.
     """
-    p, v = d.payload, d.verification
-    if not isinstance(p, DescriptionPayload) or d.provenance.source is Source.HUMAN:
-        return None
-    if v.state is VerificationState.UNREVIEWED or v.reviewed_at is None:
-        return None
     labels = list(history)
     excluded = non_operational_ids(labels)
-    found = [
-        o
-        for o in labels
-        if o.label_id not in excluded
-        and owner_id(o) == p.segment_id
-        and o.verification.reviewer_id == v.reviewer_id
-        and o.verification.reviewed_at is not None
-        and max(o.verification.reviewed_at, d.created_at) == v.reviewed_at
-    ]
-    if not found:
-        return None
-    return max(found, key=lambda o: (o.verification.reviewed_at, o.label_id))
+    return _inherited_from(d, _givers([x for x in labels if x.label_id not in excluded]))
+
+
+def inheritance_only(d: LabelRecord, history: Sequence[LabelRecord]) -> bool:
+    """d의 보호가 물려받은 검수뿐인가 (규칙 6: 주인이 다시 바뀌면 설명 따르기가 지울 수 있다).
+
+    모델 출처 설명이고, 승인·표본 검증 상태이며, 물려준 주인을 이력에서 다시 계산할 수 있을 때만
+    참이다. 사람 출처·사람 수정 상태·직접 검수한 설명은 거짓(보호 유지).
+    """
+    return inherited_owner(d, history) is not None
