@@ -274,10 +274,7 @@ def test_refresh_skips_withdrawn_unapproved_held_or_hashless_tasks(
         if case == "held":
             # 보류는 회수도 요청하므로, 요청이 남지 않은 작업을 흉내 내려 요청만 되돌린다
             # (보류 이유가 승인 상태보다 먼저 안내된다)
-            hold_session(
-                conn, SID, privacy, FIXED_TIME, reason="얼굴 누락 의심", actor="dpo01",
-                labeling=None,
-            )  # fmt: skip
+            hold_session(conn, SID, privacy, FIXED_TIME, reason="얼굴 누락 의심", actor="dpo01")
             conn.execute(
                 sa.update(review_tasks).values(
                     revoke_requested_at=None, revoke_reason=None, status="open"

@@ -954,9 +954,7 @@ def test_held_session_refuses_labeling_tasks_but_allows_blur_review(
         label_studio=ls, privacy=policy,
     )  # fmt: skip
     with engine.begin() as conn:
-        result = hold_session(
-            conn, SID, policy, NOW, reason="labeler report", actor="ops01", labeling=labeling
-        )
+        result = hold_session(conn, SID, policy, NOW, reason="labeler report", actor="ops01")
     assert sorted(t.task_key for t in result.revocations) == [
         "cvat:2", "cvat:4", "cvat:5", "cvat:6", "cvat:7", "label_studio:3",
     ]  # fmt: skip

@@ -23,7 +23,12 @@
    - 승인 상태면 AUTO_BLURRED로 되돌리고(기존 `set_privacy_state`),
    - 모든 영상 스트림의 배포된 라벨링 작업에 해시와 무관하게 회수를 요청하고(기존
      `request_media_revocation(force=True)`, 사유 `hold:<행위자>:<사유>`, 블러 검수 작업 제외),
-   - 렌더 기록을 무효로 둔다(기존 `invalidate_render`).
+   - 커밋 **뒤** 렌더 기록을 무효로 둔다(`invalidate_hold_renders` → 기존 `invalidate_render`).
+   2026-10-15 수정(F-PMS-14): 처음에는 무효화(라벨링 버킷 쓰기)도 같은 트랜잭션 안이라 저장소 쓰기가
+   실패하면 보류·승인 해제·회수 요청까지 되돌아갔다. 이제 DB 단계는 저장소와 무관하게 먼저 커밋하고,
+   무효화는 재시도 가능한 다음 단계다. 무효화가 실패하면 CLI가 알리고 종료 코드 5로 끝난다. 같은
+   명령을 다시 실행하면 보류 기록은 더하지 않고 무효화·회수만 다시 한다 (멱등). 그 사이에도 승인
+   상태가 AUTO_BLURRED라 렌더 게이트(`assert_render_current`)가 거부한다.
    커밋 뒤 CLI가 회수 실행기를 돌린다 (대기가 남으면 종료 코드 4, ADR 0039). 승인 상태를 요구하는
    모든 소비자(`assert_render_current`·`expected_render_hash`, `render_session`, 라벨링 작업 생성,
    내보내기·행동 VLM)가 그대로 막힌다. 블러 검수 작업 생성·수집은 막지 않는다 (보류 중에 블러를

@@ -24,19 +24,28 @@ import yaml
 
 from dlp_cli import dataset_cmds, privacy_cmds, review_cmds, review_config
 from dlp_cli.review_config import REVOCATION_PENDING_EXIT
-from dlp_media.storage import LocalStore, sha256_file
+from dlp_media.storage import LocalStore, blurred_key, sha256_file
 from dlp_privacy.pipeline import StreamResult
 from dlp_privacy.policy import load_policy as load_privacy_policy
-from dlp_privacy.runner import PrivacyGateError, render_hash, request_media_revocation
+from dlp_privacy.rendering import RenderMeta, read_render_meta, write_render_meta
+from dlp_privacy.runner import (
+    PrivacyGateError,
+    RenderNotCurrentError,
+    assert_render_current,
+    render_hash,
+    request_media_revocation,
+)
 from dlp_review.revoke import RevocationReport
 from dlp_review.tasks import ReviewSetup, labeling_media_key
 from dlp_schema import load_ontology, repo_root
 from dlp_schema.db.repository import (
+    active_privacy_hold,
     get_review_task,
     get_session,
     insert_labels,
     insert_review_task,
     insert_session,
+    list_privacy_holds,
     mark_review_task_collected,
     mark_task_media_revoked,
     mark_task_tool_revoked,
@@ -644,3 +653,54 @@ def test_privacy_hold_revokes_current_tasks_and_release_needs_reapproval(
         assert get_session(conn, "s001").privacy_state is PrivacyState.AUTO_BLURRED
     with pytest.raises(PrivacyGateError, match="보류 중이 아닙니다"):
         privacy_cmds.cmd_hold(release)
+
+
+class _BrokenLabeling(LocalStore):
+    """렌더 기록 쓰기가 실패하는 라벨링 버킷 (저장소 장애 흉내)."""
+
+    def put_file(self, key: str, path: Path, sha256: str) -> None:
+        raise OSError(f"{key}: 저장소 쓰기 실패")
+
+
+def test_privacy_hold_commits_db_even_when_render_invalidation_fails(
+    url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """F-PMS-14: 렌더 기록 무효화(저장소 쓰기)가 실패해도 보류·승인 해제·회수 요청은 커밋된다.
+
+    정답: 저장소 장애는 DB를 되돌리지 않는다 — 보류 기록이 남고 AUTO_BLURRED, 작업 회수 요청이
+    있고, 렌더 게이트(`assert_render_current`)가 거부한다. CLI는 무효화 실패를 알리고 0이 아닌
+    코드로 끝난다. 다시 실행하면(저장소 복구) 보류 기록은 더하지 않고 렌더 기록을 무효로 둔다.
+    """
+    policy = load_privacy_policy(repo_root())
+    current = render_hash([], policy)
+    labeling = _labeling(tmp_path)
+    _media_at(tmp_path, blurred_key("s001", "bodycam"))
+    write_render_meta(labeling, "s001", "bodycam", RenderMeta(current, "0" * 64), tmp_path)
+    uri = _media_at(tmp_path, labeling_media_key("s001", "labeler01", "bodycam", current))
+    with _engine(url).begin() as conn:
+        insert_review_task(conn, _task("cvat:2", "s001", uri, current))
+    monkeypatch.setattr(review_config, "review_setup", _revocation_only(tmp_path))
+    broken = _BrokenLabeling(tmp_path / "store", "dlp-labeling")
+    monkeypatch.setattr(privacy_cmds, "store_from_spec", Mock(return_value=broken))
+    hold = argparse.Namespace(
+        session_id="s001", reason="labeler report", release=False, actor="ops01", url=url,
+        store="unused",
+    )  # fmt: skip
+    assert privacy_cmds.cmd_hold(hold) not in (0, None)
+    assert "렌더 기록 무효화 실패" in capsys.readouterr().out
+    with _engine(url).connect() as conn:
+        assert active_privacy_hold(conn, "s001") is not None
+        assert get_session(conn, "s001").privacy_state is PrivacyState.AUTO_BLURRED
+        assert get_review_task(conn, "cvat:2").revoke_reason == "hold:ops01:labeler report"
+        with pytest.raises(RenderNotCurrentError):
+            assert_render_current(conn, labeling, "s001", "bodycam", policy)
+    # 렌더 기록은 아직 그대로다 (무효화 실패) → 다시 실행하면 무효로 둔다
+    meta = read_render_meta(labeling, "s001", "bodycam", tmp_path / "m1")
+    assert meta is not None and meta.render_hash == current
+    monkeypatch.setattr(privacy_cmds, "store_from_spec", Mock(return_value=labeling))
+    privacy_cmds.cmd_hold(hold)
+    assert "렌더 기록 무효화 실패" not in capsys.readouterr().out
+    meta = read_render_meta(labeling, "s001", "bodycam", tmp_path / "m2")
+    assert meta is not None and meta.render_hash is None
+    with _engine(url).connect() as conn:
+        assert len(list_privacy_holds(conn, "s001")) == 1

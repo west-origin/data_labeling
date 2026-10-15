@@ -47,7 +47,7 @@ from dlp_cli.raw_access import raw_store
 from dlp_cli.review_config import print_revocations, run_revocations
 from dlp_cli.schema_cmds import database_url
 from dlp_media.audit import current_actor
-from dlp_media.storage import ObjectStore, store_from_spec
+from dlp_media.storage import STORE_ERRORS, ObjectStore, store_from_spec
 from dlp_privacy.audit import (
     AuditResult,
     audit_candidates,
@@ -60,7 +60,7 @@ from dlp_privacy.audit import (
     weekly_miss_rates,
 )
 from dlp_privacy.detectors import build_detectors
-from dlp_privacy.hold import hold_session, release_hold
+from dlp_privacy.hold import HoldResult, hold_session, invalidate_hold_renders, release_hold
 from dlp_privacy.policy import load_policy
 from dlp_privacy.runner import (
     approve_session,
@@ -74,6 +74,9 @@ from dlp_schema.session import Session, Stream, StreamKind
 from dlp_train.deployed import deployed_predictors
 from dlp_train.policy import load_policy as load_training_policy
 from dlp_train.trainers import LoadContext
+
+# 보류는 커밋됐지만 렌더 기록 무효화(저장소 쓰기)가 실패했다. 같은 명령을 다시 실행한다 (F-PMS-14)
+HOLD_RENDER_PENDING_EXIT = 5
 
 
 def _engine(args: argparse.Namespace) -> sa.Engine:
@@ -209,14 +212,16 @@ def cmd_hold(args: argparse.Namespace) -> int:
     """`dlp privacy hold <세션> --reason R [--release] [--actor A]`: 승인 보류·해제 (ADR 0042).
 
     보류: 한 트랜잭션에서 보류 기록(추가만), 승인 해제(AUTO_BLURRED), 모든 영상 스트림의 배포된
-    라벨링 작업 회수 요청(사유 `hold:<행위자>:<사유>`), 렌더 기록 무효(`--store`의 라벨링 버킷).
-    커밋 뒤 회수 실행기를 돌린다 (검수 정책 파일은 읽지 않는다). 보류 중에는 블러본 열기·렌더·
+    라벨링 작업 회수 요청(사유 `hold:<행위자>:<사유>`)을 저장소와 무관하게 커밋한다. 커밋 뒤
+    렌더 기록 무효(`--store`의 라벨링 버킷, 실패해도 DB는 그대로, F-PMS-14)와 회수 실행기를
+    돌린다 (검수 정책 파일은 읽지 않는다). 보류 중에는 블러본 열기·렌더·
     라벨링 작업 생성·승인이 거부된다. 블러 검수 작업은 만들 수 있다. 다시 보류하면 기록은 더하지
     않고 회수 요청·무효화만 다시 한다.
     해제(`--release`): 해제 기록만 남긴다. 승인은 풀린 채라 재승인 절차를 다시 거친다.
 
     행위자는 `--actor`, 없으면 `DLP_ACTOR`, 그것도 없으면 OS 사용자다.
-    반환: 0, 보류 뒤 회수 대기가 남으면 `REVOCATION_PENDING_EXIT`(4).
+    반환: 0, 보류 뒤 회수 대기가 남으면 `REVOCATION_PENDING_EXIT`(4), 렌더 기록 무효화가 실패하면
+    `HOLD_RENDER_PENDING_EXIT`(5, 같은 명령을 다시 실행한다).
     예외: 보류 중이 아닌데 해제하면 `PrivacyGateError`, 사유가 비면 ValueError.
     """
     actor = args.actor or current_actor()
@@ -236,23 +241,45 @@ def cmd_hold(args: argparse.Namespace) -> int:
     root = repo_root()
     buckets = load_config(root / "config" / "defaults.yaml").buckets
     labeling = store_from_spec(args.store, buckets.labeling)
+    # DB 단계(보류·승인 해제·회수 요청)는 저장소와 무관하게 먼저 커밋한다 (F-PMS-14)
     with engine.begin() as conn:
         result = hold_session(
-            conn, args.session_id, load_policy(root), now, reason=args.reason, actor=actor,
-            labeling=labeling,
-        )  # fmt: skip
-    # 회수 요청은 위 커밋에 있다. 외부 채널은 커밋 뒤에 끊는다
+            conn, args.session_id, load_policy(root), now, reason=args.reason, actor=actor
+        )
+    held = result.held_since
+    # 렌더 기록 무효는 커밋 뒤 재시도 가능한 단계다. 실패해도 회수 실행기는 돌린다
+    invalidated, failure = _invalidate_after_hold(labeling, args.session_id, result)
     report = run_revocations(engine, args.session_id, url=args.url, purpose="privacy.hold")
     engine.dispose()
-    held = result.held_since
     state = "새 보류" if result.event is not None else "이미 보류 중"
     print(f"{args.session_id}: 승인 보류 ({state}, {held.actor}: {held.reason}, {held.at})")
     print(f"  이전 프라이버시 상태 {result.previous_state.value} → 승인 해제, 렌더 기록 무효 "
-          f"{result.invalidated or '-'}")  # fmt: skip
+          f"{invalidated or '-'}")  # fmt: skip
     if result.revocations:
         keys = ", ".join(t.task_key for t in result.revocations)
         print(f"  라벨링 작업 {len(result.revocations)}개 회수: {keys}")
-    return print_revocations(report, args.session_id)
+    code = print_revocations(report, args.session_id)
+    if failure is not None:
+        print(
+            f"  ! 렌더 기록 무효화 실패: {failure}. 보류·승인 해제·회수 요청은 커밋됐고 "
+            "렌더 게이트는 거부합니다. 저장소를 고친 뒤 같은 명령을 다시 실행하세요 "
+            f"(dlp privacy hold {args.session_id} --reason ...)"
+        )
+        return HOLD_RENDER_PENDING_EXIT
+    return code
+
+
+def _invalidate_after_hold(
+    labeling: ObjectStore, session_id: str, result: HoldResult
+) -> tuple[list[str], str | None]:
+    """보류 커밋 뒤 렌더 기록 무효. (무효로 한 스트림, 실패 메시지 또는 None)."""
+    try:
+        done = invalidate_hold_renders(
+            labeling, session_id, result.held_since, result.video_streams
+        )
+    except STORE_ERRORS as exc:
+        return [], f"{type(exc).__name__}: {exc}"
+    return done, None
 
 
 def cmd_audit_sample(args: argparse.Namespace) -> int:

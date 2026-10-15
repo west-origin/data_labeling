@@ -3,7 +3,8 @@
 시간대 보존 SQLite와 LocalStore로 돈다 (서비스 없음).
 
 정답 근거: 보류는 승인을 AUTO_BLURRED로 되돌리고(렌더 게이트·작업 생성·내보내기가 승인 상태를
-요구한다), 렌더 기록을 무효로 두고, 해시와 무관하게 모든 영상 스트림의 배포된 라벨링 작업에 회수를
+요구한다), 커밋 뒤 렌더 기록을 무효로 두고(`invalidate_hold_renders`, F-PMS-14),
+해시와 무관하게 모든 영상 스트림의 배포된 라벨링 작업에 회수를
 요청한다(블러 검수 작업 제외). 보류 동안 승인은 거부된다. 해제는 기록만 남기고 승인을 돌려놓지
 않는다 — 재승인(`approve_session`의 조건 확인) → 렌더를 다시 거친다. 보류·해제 기록은 추가만 한다.
 """
@@ -19,7 +20,7 @@ import pytest
 import sqlalchemy as sa
 
 from dlp_media.storage import LocalStore, blurred_key, sha256_file
-from dlp_privacy.hold import hold_session, release_hold
+from dlp_privacy.hold import hold_session, invalidate_hold_renders, release_hold
 from dlp_privacy.policy import PrivacyPolicy
 from dlp_privacy.runner import (
     PrivacyGateError,
@@ -27,6 +28,7 @@ from dlp_privacy.runner import (
     RenderNotCurrentError,
     approve_session,
     assert_render_current,
+    read_render_meta,
     render_hash,
     render_session,
     write_render_meta,
@@ -129,9 +131,7 @@ def test_hold_reverts_approval_invalidates_render_and_requests_revocation(
     with engine.connect() as conn:  # 보류 전에는 지금 블러본이다
         assert assert_render_current(conn, labeling, SID, "bodycam", policy) is not None
     with engine.begin() as conn:
-        result = hold_session(
-            conn, SID, policy, NOW, reason="labeler report", actor="ops01", labeling=labeling
-        )
+        result = hold_session(conn, SID, policy, NOW, reason="labeler report", actor="ops01")
     assert result.event is not None and result.event.action == "hold"
     assert (result.event.actor, result.event.reason, result.event.at) == (
         "ops01",
@@ -140,7 +140,14 @@ def test_hold_reverts_approval_invalidates_render_and_requests_revocation(
     )
     assert result.previous_state is PrivacyState.APPROVED
     assert sorted(t.task_key for t in result.revocations) == ["cvat:20", "cvat:21"]
-    assert sorted(result.invalidated) == sorted(STREAMS)
+    assert sorted(result.video_streams) == sorted(STREAMS)
+    # 렌더 기록 무효는 커밋 뒤 따로 한다 (F-PMS-14). 멱등이다
+    for _ in range(2):
+        done = invalidate_hold_renders(labeling, SID, result.held_since, result.video_streams)
+        assert sorted(done) == sorted(STREAMS)
+    for stream in STREAMS:
+        meta = read_render_meta(labeling, SID, stream, labeling.root.parent / "meta")
+        assert meta is not None and meta.render_hash is None
     with engine.connect() as conn:
         assert get_session(conn, SID).privacy_state is PrivacyState.AUTO_BLURRED
         for key in ("cvat:20", "cvat:21"):
@@ -155,7 +162,7 @@ def test_hold_reverts_approval_invalidates_render_and_requests_revocation(
     with engine.begin() as conn, pytest.raises(PrivacyGateError):
         render_session(conn, SID, LocalStore(labeling.root.parent, "dlp-raw"), labeling, policy)
     with engine.begin() as conn:
-        again = hold_session(conn, SID, policy, NOW, reason="x", actor="ops02", labeling=labeling)
+        again = hold_session(conn, SID, policy, NOW, reason="x", actor="ops02")
         assert again.event is None and again.held_since == result.event
         assert again.revocations == []
         assert [h.action for h in list_privacy_holds(conn, SID)] == ["hold"]
@@ -171,7 +178,7 @@ def test_release_records_only_and_needs_reapproval(
     with engine.begin() as conn, pytest.raises(PrivacyGateError, match="보류 중이 아닙니다"):
         release_hold(conn, SID, NOW, reason="x", actor="ops01")
     with engine.begin() as conn:
-        hold_session(conn, SID, policy, NOW, reason="incident", actor="ops01", labeling=approved)
+        hold_session(conn, SID, policy, NOW, reason="incident", actor="ops01")
     with engine.begin() as conn, pytest.raises(ValueError, match="사유"):
         release_hold(conn, SID, NOW, reason=" ", actor="ops01")
     later = NOW + timedelta(hours=1)
