@@ -64,6 +64,7 @@ from dlp_schema.db.aireview_repository import (
     insert_ai_units,
 )
 from dlp_schema.db.migrate import upgrade
+from dlp_schema.db.ontology_repository import get_session_ontology
 from dlp_schema.db.repository import (
     get_labels,
     insert_labels,
@@ -74,7 +75,7 @@ from dlp_schema.db.repository import (
 )
 from dlp_schema.episode import current_labels
 from dlp_schema.labels import LabelRecord, Provenance, Source, VerificationState
-from dlp_schema.ontology import load_ontology
+from dlp_schema.ontology import load_ontology, ontology_digest
 from dlp_schema.review import ReviewStage, ReviewTask, ReviewTaskStatus, ReviewTool
 from dlp_schema.testing import (
     AI_TARGET_RULE,
@@ -224,6 +225,8 @@ def _judge(pg: sa.Engine, sid: str, verdicts: list[AiVerdict], **unit: Any) -> N
         insert_ai_run(conn, make_ai_run(sid, run_id, render_hashes={stream: rhash}))
         uid = "air-" + uuid.uuid4().hex[:24]
         unit.setdefault("render_hash", rhash)
+        # 표시 프로필은 지금 세션 온톨로지 내용 해시로 판정한 단위만 쓴다 (F-AIR-32)
+        unit.setdefault("ontology_digest", ontology_digest(get_session_ontology(conn, sid)))
         insert_ai_units(conn, [make_ai_unit(uid, verdicts, run_id=run_id, session_id=sid, **unit)])
 
 
