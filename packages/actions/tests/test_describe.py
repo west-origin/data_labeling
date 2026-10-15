@@ -34,7 +34,13 @@ from dlp_actions.translate_policy import load_policy as load_translate_policy
 from dlp_actions.translators import GlossaryStubTranslator
 from dlp_actions.vlm import SegmentRequest
 from dlp_schema.db.description_repository import apply_description_follow
-from dlp_schema.db.repository import get_labels, insert_labels, insert_session, register_ontology
+from dlp_schema.db.repository import (
+    get_description_inheritance,
+    get_labels,
+    insert_labels,
+    insert_session,
+    register_ontology,
+)
 from dlp_schema.description_follow import FOLLOW_VERSION, REGENERATED_PREFIX, inherited_owner
 from dlp_schema.episode import current_labels
 from dlp_schema.labels import (
@@ -46,6 +52,7 @@ from dlp_schema.labels import (
     VerificationState,
 )
 from dlp_schema.ontology import Ontology, load_ontology
+from dlp_schema.review import InheritanceMechanism
 from dlp_schema.testing import FIXED_TIME, action_payload, make_label, make_session, sqlite_db
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -148,7 +155,8 @@ def test_meaning_correction_regenerates_and_inherits_approval(
     fix = _human(act, "fix", verb="lift")
     with db.begin() as conn:
         insert_labels(conn, [act, _model_desc(), fix])
-        assert [d.label_id for d in apply_description_follow(conn, SID, T1).retract] == ["d"]
+        follow = apply_description_follow(conn, SID, T1, InheritanceMechanism.COLLECT)
+        assert [d.label_id for d in follow.retract] == ["d"]
     vlm = _oracle(fix)
     s = _describe(db, ontology, policy, vlm)
     assert s.described == ["a001"] and s.fallbacks == [] and s.inherited == 1
@@ -163,7 +171,9 @@ def test_meaning_correction_regenerates_and_inherits_approval(
     v = d.verification
     assert (v.state, v.reviewer_id, v.reviewed_at) == (VerificationState.HUMAN_APPROVED, "r1", T2)
     with db.connect() as conn:
-        owner = inherited_owner(d, get_labels(conn, SID))
+        recs = get_description_inheritance(conn, SID)
+        owner = inherited_owner(d, get_labels(conn, SID), recs)
+    assert [r.mechanism for r in recs] == [InheritanceMechanism.DESCRIBE]
     assert owner is not None and owner.label_id == "fix"
     calls = vlm.calls
     again = _describe(db, ontology, policy, vlm)
@@ -262,7 +272,8 @@ def test_inherited_description_is_replaced_when_owner_changes_in_a_later_round(
     tpolicy = load_translate_policy(ROOT)
     with db.begin() as conn:
         insert_labels(conn, [act, _model_desc()])
-        assert [r.label_id for r in apply_description_follow(conn, SID, T1).approve] == ["d"]
+        first = apply_description_follow(conn, SID, T1, InheritanceMechanism.COLLECT)
+        assert [r.label_id for r in first.approve] == ["d"]
         assert run_translate(conn, SID, stub, ontology, tpolicy, T2).inherited == 1
     first = {x.label_id for x in _descriptions(db)}
     assert len(first) == 2

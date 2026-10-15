@@ -21,6 +21,7 @@ from dlp_schema.episode import current_labels, retractions
 from dlp_schema.label_validation import ProtectedLabelRetractionError, validate_session_labels
 from dlp_schema.labels import LabelRecord, Provenance, Source, Verification, VerificationState
 from dlp_schema.ontology import Ontology
+from dlp_schema.review import DescriptionInheritance, InheritanceMechanism
 from dlp_schema.testing import FIXED_TIME, action_payload, make_label
 
 MODEL = Provenance(source=Source.MODEL, model_version="actions-v1")
@@ -208,47 +209,64 @@ def _reverb(parent: LabelRecord) -> LabelRecord:
     )  # fmt: skip
 
 
-def _inherited_scene() -> tuple[LabelRecord, list[LabelRecord]]:
-    """(승인된 행동 a1, 물려받은 설명 d·den)."""
+def _inherited_scene() -> tuple[LabelRecord, list[LabelRecord], list[DescriptionInheritance]]:
+    """(승인된 행동 a1, 물려받은 설명 d·den, 그 물려받기 기록)."""
     owner = _model_label(VerificationState.HUMAN_APPROVED)
     inherited = owner.verification
-    return owner, [_description("d", inherited), _description("den", inherited, source="d")]
+    descs = [_description("d", inherited), _description("den", inherited, source="d")]
+    return owner, descs, [_record(d, i + 1) for i, d in enumerate(descs)]
+
+
+def _record(d: LabelRecord, event_id: int = 1) -> DescriptionInheritance:
+    """d의 지금 검수 상태를 준 물려받기 기록 (주인 a1)."""
+    v = d.verification
+    assert v.reviewer_id is not None and v.reviewed_at is not None
+    return DescriptionInheritance(
+        event_id=event_id, session_id=d.session_id, description_label_id=d.label_id,
+        owner_label_ids=("a1",), giver_label_id="a1", state=v.state, reviewer_id=v.reviewer_id,
+        reviewed_at=v.reviewed_at, mechanism=InheritanceMechanism.COLLECT,
+        rule_version=FOLLOW_VERSION, recorded_at=v.reviewed_at,
+    )  # fmt: skip
 
 
 def test_follow_may_retract_inheritance_only_description_after_owner_change(
     ontology: Ontology,
 ) -> None:
     """주인 의미가 다시 바뀌면 설명 따르기는 물려받은 설명(ko·en)을 지울 수 있다."""
-    owner, descs = _inherited_scene()
+    owner, descs, recs = _inherited_scene()
     history = [owner, _reverb(owner), *descs]
-    validate_session_labels(ontology, history, retractions(descs, FOLLOW_VERSION, FIXED_TIME))
+    validate_session_labels(ontology, history, retractions(descs, FOLLOW_VERSION, FIXED_TIME), recs)
 
 
 def test_follow_exception_is_narrow(ontology: Ontology) -> None:
-    """예외 밖은 모두 거부한다: 주인이 그대로인 설명, 다른 단계 버전의 삭제, 직접 검수(lead)·사람
-    출처 설명, 설명이 아닌 보호 라벨(행동)."""
-    owner, descs = _inherited_scene()
+    """예외 밖은 모두 거부한다: 주인이 그대로인 설명, 다른 단계 버전의 삭제, 물려받기 기록이
+    없는 설명(검수자·시각이 주인과 같아도 직접 검수, F-PAR-20)·직접 검수(lead)·사람 출처 설명,
+    설명이 아닌 보호 라벨(행동)."""
+    owner, descs, recs = _inherited_scene()
     fix = _reverb(owner)
     refuse = pytest.raises(ProtectedLabelRetractionError)
     with refuse:  # 주인이 그대로다 (계획이 지우지 않는다)
         validate_session_labels(
-            ontology, [owner, *descs], retractions(descs, FOLLOW_VERSION, FIXED_TIME)
+            ontology, [owner, *descs], retractions(descs, FOLLOW_VERSION, FIXED_TIME), recs
         )
     with refuse:  # 설명 따르기가 아닌 단계
         validate_session_labels(
-            ontology, [owner, fix, *descs], retractions(descs, "translate-x", FIXED_TIME)
+            ontology, [owner, fix, *descs], retractions(descs, "translate-x", FIXED_TIME), recs
+        )
+    with refuse:  # 기록 없음 = 직접 검수 (검수자·시각이 주인과 같아도)
+        validate_session_labels(
+            ontology, [owner, fix, *descs], retractions(descs, FOLLOW_VERSION, FIXED_TIME)
         )
     lead = APPROVED.model_copy(update={"reviewer_id": "lead"})
     human = Provenance(source=Source.HUMAN)
-    for d in (
-        _description("dl", lead),
-        _description("dh", owner.verification, provenance=human, confidence=None),
-    ):
+    human_desc = _description("dh", owner.verification, provenance=human, confidence=None)
+    # 직접 검수(기록 없음), 사람 출처 설명(잘못 쓴 기록이 있어도)
+    for d, given in ((_description("dl", lead), []), (human_desc, [_record(human_desc)])):
         with refuse:
             validate_session_labels(
-                ontology, [owner, fix, d], retractions([d], FOLLOW_VERSION, FIXED_TIME)
+                ontology, [owner, fix, d], retractions([d], FOLLOW_VERSION, FIXED_TIME), given
             )
     with refuse:  # 설명이 아닌 보호 라벨
         validate_session_labels(
-            ontology, [owner, *descs], retractions([owner], FOLLOW_VERSION, FIXED_TIME)
+            ontology, [owner, *descs], retractions([owner], FOLLOW_VERSION, FIXED_TIME), recs
         )

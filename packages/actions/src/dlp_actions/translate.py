@@ -65,6 +65,7 @@ from dlp_schema.db.repository import get_labels, insert_labels
 from dlp_schema.episode import current_labels, is_protected, retractions, version_tag
 from dlp_schema.labels import DescriptionPayload, LabelRecord, Provenance, Source
 from dlp_schema.ontology import Ontology
+from dlp_schema.review import InheritanceMechanism
 
 # 이 단계 모델 버전의 접두사
 PREFIX = "translate-"
@@ -341,7 +342,7 @@ def run_translate(
     insert_labels(conn, [*removed, *new])
     # 행동이 이미 검수됐으면 새 번역도 그 검수를 물려받는다. 행동을 지웠거나 의미를 고친 검수 전
     # 설명은 지운다 (F-PAR-15, ADR 0043 3절. 같은 잠금·트랜잭션)
-    follow = apply_description_follow(conn, session_id, now)
+    follow = apply_description_follow(conn, session_id, now, InheritanceMechanism.TRANSLATE)
     # 쓰고 물려받은 뒤의 실제 대기로 요약을 정한다 (F-PAR-17): 번역하는 동안 새로 들어온 원문은
     # 이번 실행이 묻지 않았으므로 대기다. 실패했지만 그 사이 지워진 원문은 대기가 아니다
     left = plan_translation(get_labels(conn, session_id, kinds=KINDS), policy, version)

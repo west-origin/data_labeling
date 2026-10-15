@@ -55,7 +55,13 @@ from dlp_schema.db.repository import (
 )
 from dlp_schema.episode import current_labels
 from dlp_schema.labels import Source, VerificationState
-from dlp_schema.review import AssignmentStatus, ReviewAssignment, ReviewTask, ReviewTaskStatus
+from dlp_schema.review import (
+    AssignmentStatus,
+    InheritanceMechanism,
+    ReviewAssignment,
+    ReviewTask,
+    ReviewTaskStatus,
+)
 from dlp_schema.session import LifecycleState, PrivacyState
 
 # 모델 라벨이 "사람이 확인했다"고 볼 수 있는 검증 상태.
@@ -250,7 +256,7 @@ def verify_session(
             session_id, verified=False, reasons=[f"프리라벨 전 단계다 (lifecycle={state.value})"]
         )
     # 이 규칙 전에 수집한 세션도 설명이 행동 검수를 따르게 메운다 (멱등, F-PAR-15)
-    follow = apply_description_follow(conn, session_id, now)
+    follow = apply_description_follow(conn, session_id, now, InheritanceMechanism.VERIFY)
     reasons = verification_gaps(conn, session_id, privacy_policy)
     if not reasons:
         set_lifecycle(conn, session_id, LifecycleState.HUMAN_VERIFIED, at=now, actor=actor)

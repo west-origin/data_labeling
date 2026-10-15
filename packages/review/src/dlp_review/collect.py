@@ -95,7 +95,14 @@ from dlp_schema.db.repository import (
 from dlp_schema.db.tables import review_tasks
 from dlp_schema.labels import LabelRecord, VerificationState
 from dlp_schema.ops import ReviewWork
-from dlp_schema.review import ReviewMode, ReviewStage, ReviewTask, ReviewTaskStatus, ReviewTool
+from dlp_schema.review import (
+    InheritanceMechanism,
+    ReviewMode,
+    ReviewStage,
+    ReviewTask,
+    ReviewTaskStatus,
+    ReviewTool,
+)
 from dlp_schema.session import PrivacyState, Session
 
 if TYPE_CHECKING:
@@ -469,7 +476,7 @@ def collect_task(
         finish_assignment(conn, assignment, now, ops_policy, ai=setup.ai)
     # 설명 라벨은 검수 도구 경로가 없어 행동·상위 구간 결과를 따른다 (승인·표본 검증은 물려받고,
     # 지웠거나 의미를 고친 행동의 검수 전 설명은 지운다. F-PAR-15). 표본 판정 뒤라 표본 검증도 본다
-    follow = apply_description_follow(conn, task.session_id, now)
+    follow = apply_description_follow(conn, task.session_id, now, InheritanceMechanism.COLLECT)
     outcome.descriptions_approved = [r.label_id for r in follow.approve]
     outcome.descriptions_retracted = [x.label_id for x in follow.retract]
     return outcome

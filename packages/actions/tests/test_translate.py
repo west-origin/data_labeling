@@ -53,6 +53,7 @@ from dlp_schema.labels import (
     LabelRecord,
     Provenance,
     Source,
+    Verification,
     VerificationState,
 )
 from dlp_schema.ontology import Ontology, load_ontology
@@ -468,3 +469,50 @@ def test_description_added_during_translation_stays_pending(
     assert s.translated == 2 and s.pending == [late.label_id]
     again = _run(db, ontology, policy, GlossaryStubTranslator({"걸레를 짠다": "Wrings the cloth"}))
     assert (again.translated, again.pending) == (1, [])
+
+
+def test_translation_of_human_description_for_corrected_action_is_kept(
+    ontology: Ontology, policy: TranslatePolicy
+) -> None:
+    """F-PAR-22 (Codex 2차 #3): 모델 행동 grasp → 검수자 r1이 lift로 고침 → r1이 한국어 설명을
+    직접 씀(사람 출처, 모델 버전 없음) → 번역. 맞는 영어 번역이 바로 지워지면 안 되고, 다시 돌려도
+    그대로다 (멱등, 번역기를 다시 부르지 않음).
+
+    정답: 사람 설명의 비교 기준은 쓴 시각(T1)의 주인 = 고친 lift 레코드 = 지금 주인이다. 번역은
+    남고, 고친 행동(사람 수정, 확인됨)의 검수를 물려받는다.
+    """
+    t1 = FIXED_TIME + timedelta(hours=1)
+    act = make_label(
+        action_payload(action_id="a001"), label_id="act", session_id=SID,
+        provenance=Provenance(source=Source.MODEL, model_version=ACTIONS_VERSION), confidence=0.9,
+    )  # fmt: skip
+    fix = act.model_copy(
+        update={"label_id": "fix", "parent_label_id": "act", "created_at": t1,
+                "provenance": Provenance(source=Source.HUMAN), "confidence": None,
+                "verification": Verification(state=VerificationState.HUMAN_CORRECTED,
+                                             reviewer_id="r1", reviewed_at=t1),
+                "payload": act.payload.model_copy(update={"verb": "lift"})}
+    )  # fmt: skip
+    human = _ko("a001", "걸레를 들어 올린다", provenance=Provenance(source=Source.HUMAN),
+                confidence=None, created_at=t1,
+                verification=Verification(state=VerificationState.HUMAN_CORRECTED,
+                                          reviewer_id="r1", reviewed_at=t1))  # fmt: skip
+    engine = sqlite_db()
+    with engine.begin() as conn:
+        register_ontology(conn, ontology)
+        insert_session(conn, make_session(SID))
+        insert_labels(conn, [act, fix, human])
+    stub = GlossaryStubTranslator({"걸레를 들어 올린다": "Lifts the cloth"})
+    later = FIXED_TIME + timedelta(hours=2)
+    with engine.begin() as conn:
+        s = run_translate(conn, SID, stub, ontology, policy, later)
+    assert (s.translated, s.retracted, s.pending, s.inherited) == (1, 0, [], 1)
+    en = _english(_current(engine))[human.label_id]
+    assert isinstance(en.payload, DescriptionPayload) and en.payload.text == "Lifts the cloth"
+    assert en.verification.state is VerificationState.HUMAN_APPROVED
+    calls = stub.calls
+    with engine.begin() as conn:
+        again = run_translate(conn, SID, stub, ontology, policy, later + timedelta(hours=1))
+    assert (again.translated, again.retracted, again.covered, stub.calls) == (0, 0, 1, calls)
+    assert _english(_current(engine))[human.label_id].label_id == en.label_id
+    engine.dispose()

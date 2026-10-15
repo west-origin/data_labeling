@@ -1,5 +1,7 @@
 """세션 저장 전 순수 검증. 잠금·조회·INSERT는 저장소가 맡는다."""
 
+from collections.abc import Sequence
+
 from dlp_schema.description_follow import (
     FOLLOW_VERSION,
     inheritance_only,
@@ -8,6 +10,7 @@ from dlp_schema.description_follow import (
 from dlp_schema.episode import current_labels, non_operational_ids
 from dlp_schema.labels import DescriptionPayload, LabelRecord, Source, VerificationState
 from dlp_schema.ontology import Ontology
+from dlp_schema.review import DescriptionInheritance
 from dlp_schema.validation import OntologyViolationError, check_label_set, validate_label
 
 # 사람이 확인한 라벨 상태. 이 상태의 라벨은 자동 단계가 지울 수 없다 (ADR 0015, 0019).
@@ -48,6 +51,7 @@ def validate_session_labels(
     ontology: Ontology,
     history: list[LabelRecord],
     incoming: list[LabelRecord],
+    inheritance: Sequence[DescriptionInheritance] = (),
 ) -> None:
     """새 라벨 의미와 저장 후 현재 구간·부분 참조를 검사한다.
 
@@ -56,12 +60,13 @@ def validate_session_labels(
     사람 출처가 아닌 삭제 레코드는 사람이 확인한(`PROTECTED_STATES`) 부모를 지울 수 없고,
     사람이 확인한 조상의 마지막 현재 후손도 지울 수 없다 (`ProtectedLabelRetractionError`).
     예외는 설명 따르기가 물려받은 검수만 있는 설명을 지울 때뿐이다 (`_FollowExemption`).
-    `history`는 호출자가 세션 잠금 아래에서 읽은 최신 이력이어야 한다.
+    `history`는 호출자가 세션 잠금 아래에서 읽은 최신 이력이어야 한다. `inheritance`는 같은
+    잠금 아래 읽은 세션의 물려받기 기록이다 (예외 판정에만 쓴다. 비면 예외가 없다).
     """
     if not incoming:
         return
     parents = {x.label_id: x for x in [*history, *incoming]}
-    follow = _FollowExemption(history)
+    follow = _FollowExemption(history, inheritance)
     for label in incoming:
         if not label.retracted and label.ontology_version != ontology.version:
             raise OntologyViolationError(label.label_id, ["세션과 라벨의 온톨로지 버전 불일치"])
@@ -100,14 +105,18 @@ class _FollowExemption:
     허용 조건을 모두 만족해야 한다.
 
     1. 삭제 레코드가 설명 따르기의 것이다: 모델 출처, `model_version == FOLLOW_VERSION`.
-    2. 지우는 레코드가 설명 라벨이고 보호가 물려받은 검수뿐이다 (`inheritance_only`: 모델 출처,
-       승인·표본 검증, 물려준 주인을 이력에서 다시 계산할 수 있음).
+    2. 지우는 레코드가 설명 라벨이고 보호가 물려받은 검수뿐이다 (`inheritance_only`: 지금 검수
+       상태가 명시 물려받기 기록 `description_inheritance`에서 왔다. 검수자·시각이 우연히 주인과
+       같은 직접 검수는 아니다, F-PAR-20).
     3. 저장 전 이력(세션 잠금 아래 최신)으로 다시 계산한 설명 따르기 계획이 그 설명을 지운다
        (주인이 다시 바뀌었거나 지워졌다). 계획은 처음 필요할 때 한 번만 계산한다.
     """
 
-    def __init__(self, history: list[LabelRecord]) -> None:
+    def __init__(
+        self, history: list[LabelRecord], inheritance: Sequence[DescriptionInheritance]
+    ) -> None:
         self.history = history
+        self.inheritance = inheritance
         self._planned: set[str] | None = None
 
     def allows(self, label: LabelRecord, parent: LabelRecord) -> bool:
@@ -116,11 +125,11 @@ class _FollowExemption:
             label.provenance.source is not Source.MODEL
             or label.provenance.model_version != FOLLOW_VERSION
             or not isinstance(parent.payload, DescriptionPayload)
-            or not inheritance_only(parent, self.history)
+            or not inheritance_only(parent, self.inheritance)
         ):
             return False
         if self._planned is None:
-            plan = plan_description_follow(self.history)
+            plan = plan_description_follow(self.history, self.inheritance)
             self._planned = {x.label_id for x in plan.retract}
         return parent.label_id in self._planned
 

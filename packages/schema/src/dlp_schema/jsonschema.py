@@ -35,7 +35,7 @@ from dlp_schema.lineage import ExportRecord, GoldenSet, ModelVersion, TrainingRu
 from dlp_schema.migration import OntologyMigration
 from dlp_schema.ontology import Ontology
 from dlp_schema.ops import PrivacyAuditRecord, RawAccessEvent, RetentionDecision, ReviewWork
-from dlp_schema.review import ReviewAssignment, ReviewTask
+from dlp_schema.review import DescriptionInheritance, ReviewAssignment, ReviewTask
 from dlp_schema.session import LifecycleEvent, PrivacyDetectionRun, PrivacyHoldEvent, Session
 
 # 생성할 스키마 목록. 키가 파일 이름이 된다 (`<키>.schema.json`).
@@ -53,6 +53,8 @@ CONTRACTS: dict[str, type[BaseModel]] = {
     "platform_config": PlatformConfig,
     "review_task": ReviewTask,
     "review_assignment": ReviewAssignment,
+    # 설명이 행동 검수를 물려받은 기록 (ADR 0043 3절, 추가 전용 표)
+    "description_inheritance": DescriptionInheritance,
     "golden_set": GoldenSet,
     "training_run": TrainingRun,
     "model_version": ModelVersion,

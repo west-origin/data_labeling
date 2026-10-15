@@ -2,7 +2,8 @@
 
 규칙은 `dlp_schema.description_follow`(순수 계산)에 있다. 이 모듈은 세션을 잠그고 이력을 읽어 그
 결과를 쓴다: 지울 설명은 삭제 레코드(출처 `FOLLOW_VERSION`, 추가만), 물려받는 검수는
-`record_review`(라벨 행에서 바꿀 수 있는 유일한 경로). 멱등이다.
+`record_review`(라벨 행에서 바꿀 수 있는 유일한 경로)와 같은 트랜잭션의 물려받기 기록
+(`description_inheritance`, 추가만, F-PAR-20). 멱등이다.
 
 호출자: 검수 수집(`dlp_review.collect.collect_task`, 표본 판정 뒤), 완료 판정
 (`dlp_review.verify.verify_session`, 이 규칙 전에 검수한 세션을 메운다), 번역 단계
@@ -15,6 +16,10 @@ from datetime import datetime
 
 import sqlalchemy as sa
 
+from dlp_schema.db.inheritance_repository import (
+    get_description_inheritance,
+    record_description_inheritance,
+)
 from dlp_schema.db.locks import lock_session
 from dlp_schema.db.repository import get_labels, insert_labels, record_review
 from dlp_schema.description_follow import (
@@ -23,27 +28,33 @@ from dlp_schema.description_follow import (
     plan_description_follow,
 )
 from dlp_schema.episode import retractions
+from dlp_schema.review import InheritanceMechanism
 
 
 def apply_description_follow(
-    conn: sa.Connection, session_id: str, now: datetime
+    conn: sa.Connection, session_id: str, now: datetime, mechanism: InheritanceMechanism
 ) -> DescriptionFollow:
     """세션의 설명이 주인(행동·상위 구간)의 검수 결과를 따르게 한다.
 
     Args:
         conn: 열린 트랜잭션의 DB 연결.
         session_id: 세션 ID.
-        now: 삭제 레코드 생성 시각 (시간대 필수). 물려받는 검수 시각은 규칙이 정한다.
+        now: 삭제 레코드 생성·물려받기 기록 시각 (시간대 필수). 물려받는 검수 시각은 규칙이 정한다.
+        mechanism: 물려받기 기록에 남길 경로 (수집·완료 판정·번역·재생성).
 
     Returns:
         적용한 결과 (`DescriptionFollow`, 비었으면 바꾼 것이 없다).
 
-    부작용: 세션 잠금(트랜잭션 끝까지), `label_records` 삭제 레코드 추가, 설명 행의 검수 상태 갱신.
+    부작용: 세션 잠금(트랜잭션 끝까지), `label_records` 삭제 레코드 추가, 설명 행의 검수 상태 갱신과
+    같은 트랜잭션의 `description_inheritance` 기록.
     """
     lock_session(conn, session_id)
-    plan = plan_description_follow(get_labels(conn, session_id))
+    plan = plan_description_follow(
+        get_labels(conn, session_id), get_description_inheritance(conn, session_id)
+    )
     if plan.retract:
         insert_labels(conn, retractions(plan.retract, FOLLOW_VERSION, now))
     for r in plan.approve:
         record_review(conn, r.label_id, r.state, r.reviewer_id, r.reviewed_at)
+        record_description_inheritance(conn, r.record(session_id, mechanism, now))
     return plan

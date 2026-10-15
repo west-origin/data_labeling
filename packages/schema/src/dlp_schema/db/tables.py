@@ -19,6 +19,8 @@
     - session_lifecycle_events: 수정·삭제·TRUNCATE 금지 (0011).
     - privacy_detection_runs: 0건을 포함한 탐지 완료 이력, 수정·삭제·TRUNCATE 금지 (0012).
     - privacy_holds: 사고 대응 승인 보류·해제 기록, 수정·삭제·TRUNCATE 금지 (0017, ADR 0042).
+    - description_inheritance: 설명의 검수 물려받기 기록, 수정·삭제·TRUNCATE 금지 (0021,
+      ADR 0043 3절).
     - ai_review_runs, ai_review_run_events, ai_review_units, ai_review_exposures,
       ai_review_outcomes: AI 1차 검수 기록 (라벨이 아니다), 수정·삭제·TRUNCATE 금지
       (0019, ADR 0040).
@@ -229,6 +231,43 @@ label_records = sa.Table(
     sa.CheckConstraint("t_start_ms <= t_end_ms", name="time_order"),
     sa.Index("ix_label_records_session_kind", "session_id", "kind"),
     sa.Index("ix_label_records_session_start", "session_id", "t_start_ms"),
+)
+
+# 설명이 주인(행동·상위 구간)의 검수를 물려받은 기록 (`DescriptionInheritance`, ADR 0043 3절).
+# 추가만 한다 (0021 트리거). 물려받는 `record_review`와 같은 트랜잭션에 쓴다. owner_label_ids는
+# 물려줄 때 현재였던 주인 레코드 ID 목록(JSON), giver_label_id는 상태·검수자·시각을 준 주인.
+# mechanism: collect | verify | translate | describe | backfill-heuristic (0021 이관).
+description_inheritance = sa.Table(
+    "description_inheritance",
+    metadata,
+    sa.Column(
+        "event_id",
+        sa.BigInteger().with_variant(sa.Integer(), "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    ),
+    sa.Column(
+        "session_id",
+        sa.String(128),
+        sa.ForeignKey("sessions.session_id"),
+        nullable=False,
+        index=True,
+    ),
+    sa.Column(
+        "description_label_id",
+        sa.String(128),
+        sa.ForeignKey("label_records.label_id"),
+        nullable=False,
+        index=True,
+    ),
+    sa.Column("owner_label_ids", Json, nullable=False),
+    sa.Column("giver_label_id", sa.String(128), nullable=False),
+    sa.Column("state", sa.String(32), nullable=False),
+    sa.Column("reviewer_id", sa.String(128), nullable=False),
+    sa.Column("reviewed_at", Ts, nullable=False),
+    sa.Column("mechanism", sa.String(32), nullable=False),
+    sa.Column("rule_version", sa.String(64), nullable=False),
+    sa.Column("recorded_at", Ts, nullable=False),
 )
 
 # 외부 검수 도구 작업 (`ReviewTask`). 색인 (session_id, stage): 세션별·단계별 작업 조회.

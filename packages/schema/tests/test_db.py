@@ -28,6 +28,7 @@ from dlp_schema.db.repository import (
     TransitionError,
     active_privacy_hold,
     get_dataset_version,
+    get_description_inheritance,
     get_labels,
     get_session,
     insert_dataset_version,
@@ -233,10 +234,11 @@ def test_labels_are_immutable_except_review(pg: sa.Engine) -> None:
             conn.execute(sa.text(statement))
 
 
-# TRUNCATE를 막아야 하는 추가 전용 테이블 (0010~0012, 0017)
+# TRUNCATE를 막아야 하는 추가 전용 테이블 (0010~0012, 0017, 0021)
 APPEND_ONLY_TABLES = (
     "label_records", "raw_access_log", "review_work", "privacy_audits", "retention_decisions",
     "session_lifecycle_events", "privacy_detection_runs", "privacy_holds",
+    "description_inheritance",
 )  # fmt: skip
 
 
@@ -499,6 +501,33 @@ def test_privacy_holds_are_append_only_and_block_downgrade(pg: sa.Engine) -> Non
     pg.dispose()
     with pytest.raises(RuntimeError, match="0017"):
         downgrade(url, "0015")
+
+
+@pytest.mark.services
+def test_description_inheritance_is_append_only(pg: sa.Engine) -> None:
+    """설명 물려받기 기록(0021, ADR 0043 3절)은 수정·삭제할 수 없다. 기록은 같은 트랜잭션의
+    `record_review`와 함께 설명 따르기가 쓴다 (경로·준 주인·검수 상태가 그대로 읽힌다)."""
+    from dlp_schema.db.description_repository import apply_description_follow
+    from dlp_schema.review import InheritanceMechanism
+
+    model = Provenance(source=Source.MODEL, model_version="actions-1")
+    action = make_label(action_payload(), label_id="a1", provenance=model, confidence=0.9)
+    desc = make_label({"kind": "description", "segment_id": "a001", "text": "설명"},
+                      label_id="d1", provenance=model, confidence=0.9)  # fmt: skip
+    with pg.begin() as conn:
+        insert_labels(conn, [action, desc])
+        record_review(conn, "a1", VerificationState.HUMAN_APPROVED, "r1", FIXED_TIME)
+        apply_description_follow(conn, "s001", FIXED_TIME, InheritanceMechanism.VERIFY)
+    with pg.connect() as conn:
+        (rec,) = get_description_inheritance(conn, "s001")
+    assert (rec.description_label_id, rec.giver_label_id, rec.reviewer_id) == ("d1", "a1", "r1")
+    assert rec.mechanism is InheritanceMechanism.VERIFY and rec.reviewed_at == FIXED_TIME
+    for statement in (
+        "UPDATE description_inheritance SET reviewer_id = 'x'",
+        "DELETE FROM description_inheritance",
+    ):
+        with pytest.raises(DBAPIError, match="description_inheritance"), pg.begin() as conn:
+            conn.execute(sa.text(statement))
 
 
 def test_adding_english_names_to_registered_draft_is_additive(ontology: Ontology) -> None:

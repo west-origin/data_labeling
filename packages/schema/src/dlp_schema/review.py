@@ -12,6 +12,8 @@
       `AssignmentStatus`.
     - `FlaggedSpan`: 먼저 볼 구간. `InjectedError`: 오류 삽입 기록.
     - `ReviewAssignment`, `ReviewTask`.
+    - `InheritanceMechanism`, `DescriptionInheritance`: 설명이 행동 검수를 물려받은 기록 (DB
+      `description_inheritance`, 추가만, ADR 0043 3절).
 
 주의
     - 프라이버시(블러) 검수 작업은 원본 영상을 보여 주므로 `config/policies/review.yaml
@@ -31,6 +33,7 @@ from typing import Literal
 from pydantic import AwareDatetime, Field, model_validator
 
 from dlp_schema.common import Contract, Identifier, Ms
+from dlp_schema.labels import VerificationState
 
 
 # 외부 검수 도구 종류. 작업 키 접두사(`cvat:42`, `label_studio:7`)로도 쓰인다.
@@ -260,4 +263,61 @@ class ReviewTask(Contract):
         for broken, message in rules:
             if broken:
                 raise ValueError(message)
+        return self
+
+
+# ---------------------------------------------------------------- 설명의 검수 물려받기 기록
+
+
+class InheritanceMechanism(StrEnum):
+    """설명이 주인의 검수를 물려받은 경로 (`DescriptionInheritance.mechanism`, ADR 0043 3절).
+
+    collect: 검수 수집(`dlp review collect`·웹훅). verify: 완료 판정(`dlp review verify`).
+    translate: 번역 단계 뒤(`dlp translate run`). describe: 설명 재생성 뒤(`dlp actions describe`).
+    backfill-heuristic: Alembic 0021이 이 기록 전의 물려받음을 예전 추정(검수자·시각 일치)으로
+    한 번 메운 것.
+    """
+
+    COLLECT = "collect"
+    VERIFY = "verify"
+    TRANSLATE = "translate"
+    DESCRIBE = "describe"
+    BACKFILL = "backfill-heuristic"
+
+
+class DescriptionInheritance(Contract):
+    """설명 라벨이 주인(행동·상위 구간)의 검수를 물려받은 기록 하나 (DB description_inheritance).
+
+    추가만 한다 (PostgreSQL 트리거). 물려받는 `record_review`와 같은 트랜잭션에 쓴다. 설명의 지금
+    검수 상태(state·reviewer_id·reviewed_at)가 그 설명의 마지막 기록과 같을 때만 "물려받은 검수만
+    있음"이다 (`dlp_schema.description_follow.inheritance_only`). 그 뒤 직접 검수로 상태가 바뀌면
+    더는 물려받은 것이 아니다. 검수자·시각이 우연히 주인과 같은 직접 검수는 기록이 없으므로
+    물려받은 것으로 보지 않는다 (F-PAR-20, ADR 0043 3절).
+    """
+
+    event_id: int = Field(ge=1, description="DB가 매기는 일련번호 (같은 설명 안에서 시간 순)")
+    session_id: Identifier
+    description_label_id: Identifier
+    owner_label_ids: tuple[Identifier, ...] = Field(
+        min_length=1, description="물려줄 때 현재였던 주인 레코드 (이관 기록은 물려준 주인 하나)"
+    )
+    giver_label_id: Identifier = Field(description="상태·검수자·시각을 준 주인 레코드")
+    state: VerificationState
+    reviewer_id: Identifier
+    reviewed_at: AwareDatetime
+    mechanism: InheritanceMechanism
+    rule_version: str = Field(min_length=1, description="설명 따르기 규칙 버전 (FOLLOW_VERSION)")
+    recorded_at: AwareDatetime
+
+    @model_validator(mode="after")
+    def _check(self) -> DescriptionInheritance:
+        """물려받을 수 있는 상태(승인·표본 검증)이고 준 주인이 주인 목록에 있는지.
+
+        Raises:
+            ValueError: 그 밖의 상태, 목록에 없는 준 주인.
+        """
+        if self.state not in (VerificationState.HUMAN_APPROVED, VerificationState.SAMPLE_VERIFIED):
+            raise ValueError("물려받는 검수 상태는 human_approved·sample_verified뿐입니다")
+        if self.giver_label_id not in self.owner_label_ids:
+            raise ValueError("검수를 준 주인은 주인 목록에 있어야 합니다")
         return self

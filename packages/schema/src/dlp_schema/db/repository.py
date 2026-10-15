@@ -17,6 +17,8 @@
       `record_privacy_hold`, `list_privacy_holds`, `active_privacy_hold`. 잠금: `lock_session`,
       `try_lock_session`(기다리지 않음, 고아 정리).
     - 라벨: `label_to_row`, `row_to_label`, `insert_labels`, `get_labels`, `record_review`.
+    - 설명 물려받기 기록(추가만, ADR 0043 3절): `record_description_inheritance`,
+      `get_description_inheritance` (`db.inheritance_repository`).
     - 검수 작업·배정: `insert_review_task`, `get_review_task`, `list_review_tasks`,
       `mark_review_task_collected`, `insert_assignment`, `get_assignment`, `list_assignments`,
       `update_assignment`. 매체 회수 outbox(ADR 0039): `request_task_revocation`,
@@ -51,6 +53,12 @@ import sqlalchemy as sa
 
 from dlp_schema.aireview import AI_REVIEWER_PREFIX
 from dlp_schema.dataset import DatasetVersion
+from dlp_schema.db.inheritance_repository import (
+    get_description_inheritance as get_description_inheritance,
+)
+from dlp_schema.db.inheritance_repository import (
+    record_description_inheritance as record_description_inheritance,
+)
 from dlp_schema.db.locks import lock_model_task as lock_model_task
 from dlp_schema.db.locks import lock_session as lock_session
 from dlp_schema.db.locks import try_lock_session as try_lock_session
@@ -116,6 +124,7 @@ from dlp_schema.db.tables import (
     training_runs,
     withdrawals,
 )
+from dlp_schema.description_follow import FOLLOW_VERSION
 from dlp_schema.label_validation import validate_session_labels
 from dlp_schema.labels import LabelRecord, VerificationState
 from dlp_schema.lineage import (
@@ -555,10 +564,14 @@ def insert_labels(conn: sa.Connection, labels: Iterable[LabelRecord]) -> int:
             lock_session(conn, sid)
         # 배치 전체를 검증한 뒤 INSERT한다. 세션별 이력·사전은 한 번만 읽는다.
         for sid in sorted({x.session_id for x in batch}):
+            mine = [x for x in batch if x.session_id == sid]
+            # 물려받기 기록은 설명 따르기 삭제가 있을 때만 읽는다 (보호 예외 판정, ADR 0043 3절)
+            follow = any(x.retracted and x.provenance.model_version == FOLLOW_VERSION for x in mine)
             validate_session_labels(
                 get_session_ontology(conn, sid),
                 get_labels(conn, sid),
-                [x for x in batch if x.session_id == sid],
+                mine,
+                get_description_inheritance(conn, sid) if follow else (),
             )
         rows = [label_to_row(x) for x in batch]
         conn.execute(label_records.insert(), rows)

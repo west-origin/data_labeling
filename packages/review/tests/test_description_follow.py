@@ -37,6 +37,7 @@ from dlp_review.verify import verify_session
 from dlp_schema import load_ontology, repo_root
 from dlp_schema.db.description_repository import apply_description_follow
 from dlp_schema.db.repository import (
+    get_description_inheritance,
     get_labels,
     insert_assignment,
     insert_labels,
@@ -50,6 +51,8 @@ from dlp_schema.description_follow import FOLLOW_VERSION, inherited_owner
 from dlp_schema.episode import current_labels
 from dlp_schema.labels import LabelRecord, Provenance, Source, VerificationState
 from dlp_schema.review import (
+    DescriptionInheritance,
+    InheritanceMechanism,
     ReviewAssignment,
     ReviewMode,
     ReviewStage,
@@ -198,6 +201,12 @@ def _reviewed(owners: dict[str, LabelRecord]) -> list[dict[str, Any]]:
     return results
 
 
+def _inheritance(engine: sa.Engine) -> list[DescriptionInheritance]:
+    """세션의 물려받기 기록."""
+    with engine.connect() as conn:
+        return get_description_inheritance(conn, SID)
+
+
 def _state(engine: sa.Engine) -> tuple[dict[str, LabelRecord], list[LabelRecord]]:
     """(현재 운영 라벨 ID → 레코드, 이력 전체)."""
     with engine.connect() as conn:
@@ -235,17 +244,24 @@ def test_descriptions_follow_approve_time_fix_verb_change_and_delete(
     assert current["d3en"].verification.reviewer_id == "lead"
     # 주인을 모르는 설명은 그대로 미검수
     assert current["dx"].verification.state is VerificationState.UNREVIEWED
-    # 감사: 물려준 주인을 이력에서 다시 계산한다 (시각만 고친 a2는 새 사람 레코드가 물려준다)
-    first = inherited_owner(current["d1en"], history)
+    # 감사: 물려받기 기록(같은 트랜잭션, 경로 collect)이 물려준 주인을 적는다 (시각만 고친 a2는
+    # 새 사람 레코드가 물려준다)
+    recs = _inheritance(engine)
+    assert sorted(r.description_label_id for r in recs) == ["d1", "d1en", "d2", "dsk"]
+    assert {r.mechanism for r in recs} == {InheritanceMechanism.COLLECT}
+    first = inherited_owner(current["d1en"], history, recs)
     assert first is not None and first.label_id == "s001-a1"
-    giver = inherited_owner(current["d2"], history)
+    giver = inherited_owner(current["d2"], history, recs)
     assert giver is not None and giver.parent_label_id == "s001-a2"
-    assert inherited_owner(current["d3en"], history) is None  # 직접 검수 (lead)
+    assert inherited_owner(current["d3en"], history, recs) is None  # 직접 검수 (lead)
 
-    # 멱등: 다시 적용해도 바뀌는 것이 없다
+    # 멱등: 다시 적용해도 바뀌는 것이 없다 (기록도 더하지 않는다)
     with engine.begin() as conn:
-        again = apply_description_follow(conn, SID, LATER + timedelta(hours=1))
+        again = apply_description_follow(
+            conn, SID, LATER + timedelta(hours=1), InheritanceMechanism.VERIFY
+        )
     assert (again.approve, again.retract) == ([], [])
+    assert len(_inheritance(engine)) == len(recs)
 
 
 def test_unreviewed_action_keeps_its_descriptions_blocking_verify(engine: sa.Engine) -> None:
@@ -342,3 +358,64 @@ def test_inherited_descriptions_follow_a_later_review_round(
         assert gone.retracted and gone.provenance.model_version == FOLLOW_VERSION
     for lid in ("d2", "dsk", "d3en"):
         assert current[lid].verification.state is VerificationState.HUMAN_APPROVED, lid
+
+
+def _round(engine: sa.Engine, tmp_path: Path, key: str, verb: str | None, at: Any) -> Any:
+    """현재 a1을 작업 key로 다시 보내 수집한다 (verb가 있으면 그 동사로 고침, 없으면 승인)."""
+    current, _ = _state(engine)
+    a1 = next(x for x in current.values() if x.payload.kind == "action"
+              and getattr(x.payload, "action_id", None) == "a001")  # fmt: skip
+    results = to_ls_results([a1])
+    if verb is not None:
+        for r in results:
+            r["value"] = {**r["value"], "timeserieslabels": [f"action.right:{verb}"]}
+    with engine.begin() as conn:
+        insert_review_task(conn, _task([a1]).model_copy(update={"task_key": key}))
+        return collect_task(conn, key, _setup(tmp_path, results), ASSIGNEE, at)
+
+
+def test_directly_reviewed_description_with_owner_reviewer_and_time_stays_protected(
+    engine: sa.Engine, tmp_path: Path
+) -> None:
+    """F-PAR-20 (Codex 2차 #2): 검수자가 행동 a1과 모델 설명 d1을 같은 배치에서 직접 승인하면
+    (`record_review`, 같은 검수자·시각) 물려받은 것이 아니다. 다음 회차에 a1의 동사를 고쳐도 d1은
+    지우지 않는다 (사람이 직접 검수한 설명). 물려받은 번역 d1en은 지운다.
+
+    정답: 직접 검수에는 물려받기 기록이 없다. 수집이 d1en만 물려받기로 기록하고, 회차 2의 의미
+    변경은 d1en만 지운다.
+    """
+    owners = _owners()
+    with engine.begin() as conn:
+        insert_session(conn, make_session(SID, privacy_state=PrivacyState.APPROVED))
+        insert_labels(conn, [owners["a1"], *_descriptions()[:2]])
+        for lid in ("s001-a1", "d1"):  # 같은 배치, 같은 검수자·시각
+            record_review(conn, lid, VerificationState.HUMAN_APPROVED, ASSIGNEE, LATER)
+        follow = apply_description_follow(conn, SID, LATER, InheritanceMechanism.VERIFY)
+    assert [r.label_id for r in follow.approve] == ["d1en"]
+    assert [r.description_label_id for r in _inheritance(engine)] == ["d1en"]
+    outcome = _round(engine, tmp_path, "label_studio:4", "lift", LATER + timedelta(hours=1))
+    assert outcome is not None and outcome.descriptions_retracted == ["d1en"]
+    current, _ = _state(engine)
+    assert current["d1"].verification.state is VerificationState.HUMAN_APPROVED
+
+
+def test_reapproving_the_giving_owner_keeps_inheritance_for_a_later_change(
+    engine: sa.Engine, tmp_path: Path
+) -> None:
+    """F-PAR-19 남은 한계를 없앰: 회차 1에 물려받은 d1·d1en, 회차 2에 같은 a1 레코드를 그대로 다시
+    승인(검수 시각이 바뀜), 회차 3에 동사를 고친다 → d1·d1en을 지운다.
+
+    정답: 물려받기 기록은 회차 1의 것 그대로이고 설명의 검수 상태도 그대로다 → 물려받음 유지.
+    """
+    owners = _owners()
+    with engine.begin() as conn:
+        insert_session(conn, make_session(SID, privacy_state=PrivacyState.APPROVED))
+        insert_labels(conn, [owners["a1"], *_descriptions()[:2]])
+    first = _round(engine, tmp_path, "label_studio:5", None, LATER)
+    assert first is not None and sorted(first.descriptions_approved) == ["d1", "d1en"]
+    again = _round(engine, tmp_path, "label_studio:6", None, LATER + timedelta(hours=1))
+    assert again is not None and again.approved == ["s001-a1"]
+    current, _ = _state(engine)
+    assert current["s001-a1"].verification.reviewed_at == LATER + timedelta(hours=1)
+    third = _round(engine, tmp_path, "label_studio:7", "lift", LATER + timedelta(hours=2))
+    assert third is not None and sorted(third.descriptions_retracted) == ["d1", "d1en"]

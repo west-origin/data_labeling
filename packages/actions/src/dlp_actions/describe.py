@@ -67,7 +67,12 @@ from dlp_schema import repo_root
 from dlp_schema.common import derived_id
 from dlp_schema.db.description_repository import apply_description_follow
 from dlp_schema.db.locks import lock_session
-from dlp_schema.db.repository import get_labels, get_session, insert_labels
+from dlp_schema.db.repository import (
+    get_description_inheritance,
+    get_labels,
+    get_session,
+    insert_labels,
+)
 from dlp_schema.description_follow import (
     REGENERATED_PREFIX,
     human_confirmed,
@@ -85,6 +90,7 @@ from dlp_schema.labels import (
     VerificationState,
 )
 from dlp_schema.ontology import Ontology
+from dlp_schema.review import DescriptionInheritance, InheritanceMechanism
 
 
 @dataclass(frozen=True)
@@ -183,17 +189,22 @@ def _originals(current: Sequence[LabelRecord], gone: set[str]) -> dict[str, list
     return out
 
 
-def plan_describe(history: Sequence[LabelRecord], version: str) -> DescribePlan:
+def plan_describe(
+    history: Sequence[LabelRecord],
+    version: str,
+    inheritance: Sequence[DescriptionInheritance] = (),
+) -> DescribePlan:
     """다시 만들 설명 (모듈 docstring "대상"). 순수 함수.
 
     Args:
         history: 세션의 라벨 이력 전체 (`get_labels`).
         version: 이번 설명 버전 (`describe_version`).
+        inheritance: 세션의 물려받기 기록 (설명 따르기가 지울 물려받은 설명을 가린다).
     """
     labels = list(history)
     excluded = non_operational_ids(labels)
     current = [x for x in current_labels(labels) if x.label_id not in excluded]
-    gone = {d.label_id for d in plan_description_follow(labels).retract}
+    gone = {d.label_id for d in plan_description_follow(labels, inheritance).retract}
     owners: dict[str, list[LabelRecord]] = defaultdict(list)
     for x in current:
         if isinstance(x.payload, ActionPayload):
@@ -423,7 +434,9 @@ def describe_session(
     """
     version = describe_version(policy, client.version)
     summary = DescribeSummary(version)
-    plan = plan_describe(get_labels(conn, session_id), version)
+    plan = plan_describe(
+        get_labels(conn, session_id), version, get_description_inheritance(conn, session_id)
+    )
     summary.waiting, summary.deleted = plan.waiting, plan.deleted
     if not plan.targets:
         return summary
@@ -457,8 +470,10 @@ def _write(
 ) -> None:
     """잠그고 설명 따르기를 먼저 적용한 뒤 다시 계획해, 아직 대상인 것만 쓰고 검수를 물려받는다."""
     lock_session(conn, session_id)
-    first = apply_description_follow(conn, session_id, now)
-    fresh = plan_describe(get_labels(conn, session_id), version)
+    first = apply_description_follow(conn, session_id, now, InheritanceMechanism.DESCRIBE)
+    fresh = plan_describe(
+        get_labels(conn, session_id), version, get_description_inheritance(conn, session_id)
+    )
     new: list[LabelRecord] = []
     stale: list[LabelRecord] = []
     for t in fresh.targets:
@@ -469,6 +484,6 @@ def _write(
             summary.described.append(t.action_id)
     removed = retractions(stale, version, now)
     insert_labels(conn, [*removed, *new])
-    follow = apply_description_follow(conn, session_id, now)
+    follow = apply_description_follow(conn, session_id, now, InheritanceMechanism.DESCRIBE)
     summary.inherited = len(first.approve) + len(follow.approve)
     summary.retracted = len(removed) + len(first.retract) + len(follow.retract)

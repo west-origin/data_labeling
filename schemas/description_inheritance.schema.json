@@ -1,0 +1,104 @@
+{
+  "$defs": {
+    "InheritanceMechanism": {
+      "description": "설명이 주인의 검수를 물려받은 경로 (`DescriptionInheritance.mechanism`, ADR 0043 3절).\n\ncollect: 검수 수집(`dlp review collect`·웹훅). verify: 완료 판정(`dlp review verify`).\ntranslate: 번역 단계 뒤(`dlp translate run`). describe: 설명 재생성 뒤(`dlp actions describe`).\nbackfill-heuristic: Alembic 0021이 이 기록 전의 물려받음을 예전 추정(검수자·시각 일치)으로\n한 번 메운 것.",
+      "enum": [
+        "collect",
+        "verify",
+        "translate",
+        "describe",
+        "backfill-heuristic"
+      ],
+      "title": "InheritanceMechanism",
+      "type": "string"
+    },
+    "VerificationState": {
+      "enum": [
+        "unreviewed",
+        "sample_verified",
+        "human_approved",
+        "human_corrected"
+      ],
+      "title": "VerificationState",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "설명 라벨이 주인(행동·상위 구간)의 검수를 물려받은 기록 하나 (DB description_inheritance).\n\n추가만 한다 (PostgreSQL 트리거). 물려받는 `record_review`와 같은 트랜잭션에 쓴다. 설명의 지금\n검수 상태(state·reviewer_id·reviewed_at)가 그 설명의 마지막 기록과 같을 때만 \"물려받은 검수만\n있음\"이다 (`dlp_schema.description_follow.inheritance_only`). 그 뒤 직접 검수로 상태가 바뀌면\n더는 물려받은 것이 아니다. 검수자·시각이 우연히 주인과 같은 직접 검수는 기록이 없으므로\n물려받은 것으로 보지 않는다 (F-PAR-20, ADR 0043 3절).",
+  "properties": {
+    "description_label_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Description Label Id",
+      "type": "string"
+    },
+    "event_id": {
+      "description": "DB가 매기는 일련번호 (같은 설명 안에서 시간 순)",
+      "minimum": 1,
+      "title": "Event Id",
+      "type": "integer"
+    },
+    "giver_label_id": {
+      "description": "상태·검수자·시각을 준 주인 레코드",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Giver Label Id",
+      "type": "string"
+    },
+    "mechanism": {
+      "$ref": "#/$defs/InheritanceMechanism"
+    },
+    "owner_label_ids": {
+      "description": "물려줄 때 현재였던 주인 레코드 (이관 기록은 물려준 주인 하나)",
+      "items": {
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+        "type": "string"
+      },
+      "minItems": 1,
+      "title": "Owner Label Ids",
+      "type": "array"
+    },
+    "recorded_at": {
+      "format": "date-time",
+      "title": "Recorded At",
+      "type": "string"
+    },
+    "reviewed_at": {
+      "format": "date-time",
+      "title": "Reviewed At",
+      "type": "string"
+    },
+    "reviewer_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Reviewer Id",
+      "type": "string"
+    },
+    "rule_version": {
+      "description": "설명 따르기 규칙 버전 (FOLLOW_VERSION)",
+      "minLength": 1,
+      "title": "Rule Version",
+      "type": "string"
+    },
+    "session_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Session Id",
+      "type": "string"
+    },
+    "state": {
+      "$ref": "#/$defs/VerificationState"
+    }
+  },
+  "required": [
+    "event_id",
+    "session_id",
+    "description_label_id",
+    "owner_label_ids",
+    "giver_label_id",
+    "state",
+    "reviewer_id",
+    "reviewed_at",
+    "mechanism",
+    "rule_version",
+    "recorded_at"
+  ],
+  "title": "DescriptionInheritance",
+  "type": "object"
+}
