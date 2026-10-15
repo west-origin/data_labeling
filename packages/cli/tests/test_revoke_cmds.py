@@ -704,3 +704,29 @@ def test_privacy_hold_commits_db_even_when_render_invalidation_fails(
     assert meta is not None and meta.render_hash is None
     with _engine(url).connect() as conn:
         assert len(list_privacy_holds(conn, "s001")) == 1
+
+
+def test_privacy_hold_is_recorded_even_when_the_store_client_cannot_be_created(
+    url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """F-PMS-16: 저장소 클라이언트 생성(잘못된 AWS 프로필·설정)이 실패해도 보류 DB 단계는 먼저
+    커밋된다. 클라이언트는 커밋 뒤에 만든다.
+
+    정답: 클라이언트 생성이 ProfileNotFound로 실패 → 보류 기록·AUTO_BLURRED·회수 요청은 남고, CLI는
+    무효화 실패를 알리며 0이 아닌 코드(5)로 끝난다.
+    """
+    from botocore.exceptions import ProfileNotFound
+
+    monkeypatch.setattr(review_config, "review_setup", _revocation_only(tmp_path))
+    monkeypatch.setattr(
+        privacy_cmds, "store_from_spec", Mock(side_effect=ProfileNotFound(profile="nope"))
+    )
+    hold = argparse.Namespace(
+        session_id="s001", reason="labeler report", release=False, actor="ops01", url=url,
+        store="s3",
+    )  # fmt: skip
+    assert privacy_cmds.cmd_hold(hold) == privacy_cmds.HOLD_RENDER_PENDING_EXIT
+    assert "렌더 기록 무효화 실패" in capsys.readouterr().out
+    with _engine(url).connect() as conn:
+        assert active_privacy_hold(conn, "s001") is not None
+        assert get_session(conn, "s001").privacy_state is PrivacyState.AUTO_BLURRED

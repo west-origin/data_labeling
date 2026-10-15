@@ -143,8 +143,10 @@ def test_hold_reverts_approval_invalidates_render_and_requests_revocation(
     assert sorted(result.video_streams) == sorted(STREAMS)
     # 렌더 기록 무효는 커밋 뒤 따로 한다 (F-PMS-14). 멱등이다
     for _ in range(2):
-        done = invalidate_hold_renders(labeling, SID, result.held_since, result.video_streams)
-        assert sorted(done) == sorted(STREAMS)
+        done = invalidate_hold_renders(
+            engine, labeling, SID, result.held_since, result.video_streams
+        )
+        assert sorted(done.invalidated) == sorted(STREAMS) and not done.superseded
     for stream in STREAMS:
         meta = read_render_meta(labeling, SID, stream, labeling.root.parent / "meta")
         assert meta is not None and meta.render_hash is None
@@ -190,3 +192,36 @@ def test_release_records_only_and_needs_reapproval(
         assert [h.action for h in list_privacy_holds(conn, SID)] == ["hold", "release"]
     with engine.begin() as conn:
         assert approve_session(conn, SID).privacy_state is PrivacyState.APPROVED
+
+
+def test_delayed_invalidation_of_an_old_hold_keeps_a_newer_render(
+    engine: sa.Engine, approved: LocalStore, policy: PrivacyPolicy, tmp_path: Path
+) -> None:
+    """F-PMS-15 (Codex 2차 #4): 보류 A를 커밋한 뒤 렌더 무효화가 늦어지는 사이 A가 해제되고 재승인·
+    재렌더되면, 늦게 도는 A의 무효화가 새 렌더를 무효로 덮어쓰면 안 된다.
+
+    정답: 무효화는 따로 잡은 세션 잠금 아래 A가 지금 유효한 보류인지 다시 본다. 해제됐으면 아무
+    것도 쓰지 않고(superseded) 새 렌더는 지금 블러본 그대로다. A가 유효한 동안의 무효화는 쓴다.
+    """
+    labeling = approved
+    with engine.begin() as conn:
+        held = hold_session(conn, SID, policy, NOW, reason="incident", actor="ops01").held_since
+    # (A의 무효화가 늦어지는 사이) 해제 → 재승인 → 재렌더(렌더 기록을 지금 해시로 다시 씀)
+    with engine.begin() as conn:
+        release_hold(conn, SID, NOW + timedelta(minutes=1), reason="ok", actor="ops02")
+    with engine.begin() as conn:
+        approve_session(conn, SID)
+    sha = sha256_file(tmp_path / "v.bin")
+    for stream in STREAMS:
+        write_render_meta(labeling, SID, stream, RenderMeta(render_hash([], policy), sha), tmp_path)
+    late = invalidate_hold_renders(engine, labeling, SID, held, list(STREAMS))
+    assert late.invalidated == [] and late.superseded
+    with engine.connect() as conn:
+        for stream in STREAMS:
+            assert assert_render_current(conn, labeling, SID, stream, policy) == sha
+    # 새 보류 B가 유효하면 B의 무효화는 쓰고, 낡은 A의 무효화는 여전히 건너뛴다
+    with engine.begin() as conn:
+        b = hold_session(conn, SID, policy, NOW, reason="again", actor="ops01").held_since
+    assert invalidate_hold_renders(engine, labeling, SID, held, ["bodycam"]).superseded
+    done = invalidate_hold_renders(engine, labeling, SID, b, ["bodycam"])
+    assert done.invalidated == ["bodycam"] and not done.superseded

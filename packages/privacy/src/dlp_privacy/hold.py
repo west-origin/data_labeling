@@ -6,12 +6,14 @@
 - `hold_session` (`dlp privacy hold <세션> --reason`): 세션 잠금 → 보류 기록(추가만) → 승인 상태면
   AUTO_BLURRED로 → 모든 영상 스트림의 배포된 라벨링 작업에 해시와 무관하게 회수 요청(사유
   `hold:<행위자>:<사유>`, 블러 검수 작업 제외). 이 DB 단계는 저장소와 무관하게 커밋된다.
-  렌더 기록 무효(`invalidate_hold_renders`)는 커밋 **뒤** 따로 하는 재시도 가능한 단계다
-  (F-PMS-14: 무효화 쓰기가 실패해 보류·승인 해제·회수 요청까지 되돌아가지 않게). 무효화가 실패해도
-  승인 상태가 이미 AUTO_BLURRED라 렌더 게이트는 거부한다. 승인 상태(APPROVED)를 요구하는
+  렌더 기록 무효(`invalidate_hold_renders`)는 커밋 **뒤** 따로 하는 재시도 가능한 단계다 (F-PMS-14:
+  무효화 쓰기가 실패해 보류·승인 해제·회수 요청까지 되돌아가지 않게). 무효화는 별도 트랜잭션에서
+  같은 세션 잠금을 잡고 그 보류가 아직 유효한 보류인지 다시 본 뒤 쓴다 (F-PMS-15: 늦은 무효화가
+  해제·재승인·재렌더 뒤의 새 렌더를 무효로 덮어쓰지 않게. 렌더도 같은 잠금을 쓴다). 무효화가
+  실패해도 승인 상태가 이미 AUTO_BLURRED라 렌더 게이트는 거부한다. 승인 상태(APPROVED)를 요구하는
   모든 소비자(블러본 열기 `assert_render_current`, 렌더, 라벨링 작업 생성, 내보내기, 행동 VLM)가
-  막힌다. 보류 중에는 `approve_session`이 거부한다 (블러 검수 작업 생성·수집은 막지 않는다:
-  보류 중에 블러를 고친다). 외부 삭제는 커밋 뒤 회수 실행기 몫이다 (CLI가 돌린다).
+  막힌다. 보류 중에는 `approve_session`이 거부한다 (블러 검수 작업 생성·수집은 막지 않는다: 보류
+  중에 블러를 고친다). 외부 삭제는 커밋 뒤 회수 실행기 몫이다 (CLI가 돌린다).
 - `release_hold` (`dlp privacy hold <세션> --release --reason`): 해제 기록만 남긴다. 승인을
   돌려놓지 않는다. 재승인 절차를 다시 거친다: (필요하면 블러 검수 → 수집) → `dlp privacy approve`
   (승인 조건 확인) → `dlp privacy render` → 다시 만들기.
@@ -23,7 +25,8 @@
 공개 이름:
 - `HoldResult`: 보류 결과 (이번 기록, 지금 유효한 보류, 이전 승인 상태, 회수 요청한 작업).
 - `hold_session`, `release_hold`: DB 단계 (호출자 트랜잭션).
-- `invalidate_hold_renders`: 커밋 뒤 렌더 기록 무효 (멱등, 실패하면 다시 실행).
+- `invalidate_hold_renders`, `HoldInvalidation`: 커밋 뒤 렌더 기록 무효 (멱등, 실패하면 다시 실행,
+  그 보류가 더는 유효하지 않으면 건너뜀).
 """
 
 from __future__ import annotations
@@ -124,25 +127,48 @@ def hold_session(
     return HoldResult(event, current, session.privacy_state, requested, videos)
 
 
+@dataclass(frozen=True)
+class HoldInvalidation:
+    """`invalidate_hold_renders` 결과."""
+
+    # 렌더 기록을 무효로 바꾼 스트림
+    invalidated: list[str] = field(default_factory=list[str])
+    # 그 보류가 지금 유효한 보류가 아니라(해제·다른 보류) 아무것도 쓰지 않았다
+    superseded: bool = False
+
+
 def invalidate_hold_renders(
-    labeling: ObjectStore, session_id: str, hold: PrivacyHoldEvent, streams: list[str]
-) -> list[str]:
-    """보류 커밋 뒤 영상 스트림의 렌더 기록을 무효로 둔다. 무효로 바꾼 스트림.
+    engine: sa.Engine,
+    labeling: ObjectStore,
+    session_id: str,
+    hold: PrivacyHoldEvent,
+    streams: list[str],
+) -> HoldInvalidation:
+    """보류 커밋 뒤 영상 스트림의 렌더 기록을 무효로 둔다.
+
+    별도 트랜잭션에서 세션 잠금(렌더·승인·해제와 같은 잠금)을 잡고, `hold`가 아직 지금 유효한
+    보류(마지막 기록)인지 다시 본 뒤에만 쓴다 (F-PMS-15). 그 사이 해제·재승인·재렌더됐으면 새
+    렌더를 무효로 덮어쓰지 않고 `superseded`로 알린다. 잠금은 저장소 쓰기가 끝날 때까지 쥔다.
 
     멱등이다 (이미 무효인 기록을 다시 무효로 쓴다). 저장소 오류는 호출자에게 그대로 전달한다:
     보류·승인 해제·회수 요청은 이미 커밋돼 있고, 같은 `dlp privacy hold`를 다시 실행하면 여기만
     다시 한다. 그 사이에도 승인 상태가 APPROVED가 아니라 렌더 게이트가 거부한다.
 
-    부작용: 라벨링 버킷 렌더 기록 덮어쓰기(무효).
+    부작용: 세션 행 잠금(이 함수의 트랜잭션), 라벨링 버킷 렌더 기록 덮어쓰기(무효).
     """
     invalidated: list[str] = []
-    with tempfile.TemporaryDirectory() as tmp:
-        for stream_id in streams:
-            if invalidate_render(
-                labeling, session_id, stream_id, f"hold:{hold.event_id}", Path(tmp)
-            ):
-                invalidated.append(stream_id)
-    return invalidated
+    with engine.begin() as conn:
+        lock_session(conn, session_id)
+        current = active_privacy_hold(conn, session_id)
+        if current is None or current.event_id != hold.event_id:
+            return HoldInvalidation([], superseded=True)
+        with tempfile.TemporaryDirectory() as tmp:
+            for stream_id in streams:
+                if invalidate_render(
+                    labeling, session_id, stream_id, f"hold:{hold.event_id}", Path(tmp)
+                ):
+                    invalidated.append(stream_id)
+    return HoldInvalidation(invalidated)
 
 
 def release_hold(

@@ -239,16 +239,18 @@ def cmd_hold(args: argparse.Namespace) -> int:
         )
         return 0
     root = repo_root()
-    buckets = load_config(root / "config" / "defaults.yaml").buckets
-    labeling = store_from_spec(args.store, buckets.labeling)
-    # DB 단계(보류·승인 해제·회수 요청)는 저장소와 무관하게 먼저 커밋한다 (F-PMS-14)
+    # DB 단계(보류·승인 해제·회수 요청)는 저장소와 무관하게 먼저 커밋한다 (F-PMS-14). 저장소
+    # 클라이언트도 커밋 뒤에 만든다: 잘못된 AWS 프로필·설정이 보류 기록을 막지 않게 (F-PMS-16)
     with engine.begin() as conn:
         result = hold_session(
             conn, args.session_id, load_policy(root), now, reason=args.reason, actor=actor
         )
     held = result.held_since
     # 렌더 기록 무효는 커밋 뒤 재시도 가능한 단계다. 실패해도 회수 실행기는 돌린다
-    invalidated, failure = _invalidate_after_hold(labeling, args.session_id, result)
+    labeling = load_config(root / "config" / "defaults.yaml").buckets.labeling
+    invalidated, failure = _invalidate_after_hold(
+        engine, args.store, labeling, args.session_id, result
+    )
     report = run_revocations(engine, args.session_id, url=args.url, purpose="privacy.hold")
     engine.dispose()
     state = "새 보류" if result.event is not None else "이미 보류 중"
@@ -270,16 +272,24 @@ def cmd_hold(args: argparse.Namespace) -> int:
 
 
 def _invalidate_after_hold(
-    labeling: ObjectStore, session_id: str, result: HoldResult
-) -> tuple[list[str], str | None]:
-    """보류 커밋 뒤 렌더 기록 무효. (무효로 한 스트림, 실패 메시지 또는 None)."""
+    engine: sa.Engine, store: str, bucket: str, session_id: str, result: HoldResult
+) -> tuple[list[str] | str, str | None]:
+    """보류 커밋 뒤 저장소 클라이언트를 만들고 렌더 기록을 무효로 둔다.
+
+    Returns:
+        (무효로 한 스트림, 또는 그 보류가 더는 유효하지 않아 건너뛴 사유 문자열, 실패 메시지 또는
+        None). 클라이언트 생성 실패(잘못된 지정·AWS 프로필·설정)도 실패로 알린다 (F-PMS-16).
+    """
     try:
+        labeling = store_from_spec(store, bucket)
         done = invalidate_hold_renders(
-            labeling, session_id, result.held_since, result.video_streams
+            engine, labeling, session_id, result.held_since, result.video_streams
         )
-    except STORE_ERRORS as exc:
+    except (*STORE_ERRORS, ValueError, KeyError) as exc:
         return [], f"{type(exc).__name__}: {exc}"
-    return done, None
+    if done.superseded:
+        return "건너뜀 (이 보류는 이미 해제·교체됨)", None
+    return done.invalidated, None
 
 
 def cmd_audit_sample(args: argparse.Namespace) -> int:
