@@ -50,7 +50,8 @@
   `dlp sync run <세션>`, `dlp sync adjust <세션> <스트림> <ms>`. 정책은 `config/policies/sync.yaml`.
 - `packages/privacy/` (`dlp_privacy`) — 프라이버시 게이트: 탐지기(YuNet, QR·바코드, OWLv2 오픈 보캐뷸러리, 반사면, 오라클 stub), 추적·보간·유지,
   모자이크 렌더, 검수 우선 구간, 잔여 누락 감사, 블러 변경 뒤 배포 매체 회수 요청(`dlp_privacy.revocation`, ADR 0039),
-  사고 대응 승인 보류(`dlp_privacy.hold`, ADR 0042).
+  사고 대응 승인 보류(`dlp_privacy.hold`, ADR 0042: DB 단계 커밋 뒤에 저장소 클라이언트를 만들고, 렌더 무효화는
+  별도 트랜잭션의 세션 잠금 아래 그 보류가 아직 유효할 때만 쓴다).
   `dlp privacy detect|approve|render|audit-sample|hold`. 정책은 `config/policies/privacy.yaml`.
 - `packages/review/` (`dlp_review`) — 검수 도구 연동: CVAT·Label Studio 변환기(무손실 왕복), 작업 생성, reconcile(검수 결과 →
   라벨 이력), 웹훅 수집, 라벨러 워터마크, 역할 경계, 배포 매체 회수 실행기(`dlp_review.revoke`).
@@ -82,7 +83,11 @@
   이름을 용어집으로 넣는다. 멱등, 원문이 바뀌면 검수 전 번역만 교체, 서버 장애는 대기로 남긴다(예외 없음).
   설명(ko·en)은 검수 도구 경로가 없어 `segment_id`가 가리키는 행동·상위 구간의 검수를 따른다
   (`dlp_schema.description_follow`, ADR 0043 3절): 승인·표본 검증은 물려받고, 의미를 고쳤거나 지운 행동의
-  검수 전 설명은 지운다. 물려받은 뒤 행동이 다시 바뀌면 물려받은 설명도 지운다(규칙 6). 수집·`dlp review verify`·번역 단계가 적용한다.
+  검수 전 설명은 지운다. 물려받은 뒤 행동이 다시 바뀌면 물려받은 설명도 지운다(규칙 6, 물려받음은
+  `description_inheritance` 기록으로 판정, Alembic 0021). 수집·`dlp review verify`·번역·재생성 단계가 적용한다.
+  재생성 요청은 손마다 고친 의미 필드 전부(동사·대상·부위·도구·방향·전후 상태)를 묶고 손 단위로 검증한다.
+  재생성·번역은 쓰기 직전 세션 잠금 아래 사용 중지·승인 보류·(프레임을 보냈으면) 렌더 해시를 다시 보고, 막히면
+  아무것도 쓰지 않는다 (`dlp_actions.write_check`).
   `dlp translate run <세션>|--pending`, `dlp translate pending`. `dlp actions run`이 커밋 뒤 자동으로 부른다
   (실패해도 행동 결과·종료 코드 불변). CPU·CI는 `GlossaryStubTranslator`. 정책은 `config/policies/translate.yaml`.
 - `packages/aireview/` (`dlp_aireview`) — AI 1차 검수 판정(ADR 0040): 사내 vLLM(OpenAI 호환, 기본 Qwen3-VL-8B)이 블러본
@@ -147,8 +152,11 @@
   넣고, 일반 단계는 전체 이력(`get_labels`)으로 재실행을 정한다.
   프라이버시는 최신 완료 세대의 활성 버전 집합으로 정하며, 과거 정책 복귀도 새 세대다 (ADR 0033). 버전이 바뀌면 검수 전인 이전 버전만
   `retractions()`로 지운다. 검수자가 승인·표본 검증한 라벨은 어떤 단계도 지우지 않는다 (ADR 0015, 0019).
-  좁은 예외 하나: 행동 검수를 물려받기만 한 모델 설명(사람이 직접 검수·작성·수정하지 않은 설명)은 물려준 행동이
-  다음 회차에 의미가 다시 바뀌거나 지워지면 설명 따르기(`review-follow-1`)만 지울 수 있다 (ADR 0043 3절 규칙 6).
+  좁은 예외 하나: 행동 검수를 물려받기만 한 모델 설명은 물려준 행동이 다음 회차에 의미가 다시 바뀌거나 지워지면
+  설명 따르기(`review-follow-1`)만 지울 수 있다 (ADR 0043 3절 규칙 6). "물려받기만 함"은 추정하지 않고 명시
+  기록(`description_inheritance`, 추가만, 물려받는 `record_review`와 같은 트랜잭션)으로만 정한다: 설명의 지금
+  검수 상태가 그 설명의 마지막 물려받기 기록과 같을 때뿐이다. 기록 없는 검수(검수자·시각이 우연히 행동과 같아도)와
+  기록 뒤 직접 검수, 사람이 쓰거나 고친 설명은 보호한다.
 - 내보내기는 데이터셋 버전에서만 만들고(`dlp_export`), 기본은 사람이 만들거나 승인·수정·표본 검증한 라벨만 넣는다.
   미검수는 명시적 옵션으로만. 블러 라벨·원본 위치·검수자 ID는 어떤 형식에도 넣지 않는다.
 - 원본 버킷 저장소는 `dlp_cli.raw_access.raw_store`(감사 저장소)로만 만든다 (DB 없는 로컬 개발은
