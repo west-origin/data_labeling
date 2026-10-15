@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import importlib.util
 import math
 import os
 import uuid
@@ -135,22 +136,65 @@ def test_labels_map_to_blurred_video_frames(
     assert s.fields["active_top_classes"] == ["box_track/cup"]
 
 
+# FiftyOne DB에 연결하지 못했다고 볼 예외의 클래스 이름 (pymongo·FiftyOne 서비스, 이름으로 본다: 그
+# 모듈을 import하는 것 자체가 실패할 수 있다). 내장 ConnectionError·TimeoutError도 연결 실패다.
+CONNECTION_ERROR_NAMES = frozenset(
+    {"ConnectionFailure", "ServerSelectionTimeoutError", "AutoReconnect", "NetworkTimeout",
+     "ServiceException", "ServiceListenTimeout", "ServiceExecutableNotFound",
+     "FiftyOneConfigError"}
+)  # fmt: skip
+
+
+def is_connection_error(exc: BaseException) -> bool:
+    """FiftyOne 데이터베이스 연결 실패인가 (건너뛸 환경 문제). 그 밖은 실패로 둔다 (F-COE-16).
+
+    원인 사슬(`__cause__`)도 본다: FiftyOne은 pymongo 연결 시간 초과를 ConnectionError로 감싼다.
+    """
+    seen: BaseException | None = exc
+    while seen is not None:
+        if isinstance(seen, ConnectionError | TimeoutError) or any(
+            c.__name__ in CONNECTION_ERROR_NAMES for c in type(seen).__mro__
+        ):
+            return True
+        seen = seen.__cause__
+    return False
+
+
 def _fiftyone_with_db() -> Any:
     """fiftyone 모듈. 설치되지 않았거나 데이터베이스에 연결하지 못하면 이 테스트를 건너뛴다.
 
     FiftyOne은 내장 MongoDB(mongod)를 띄우거나 `FIFTYONE_DATABASE_URI`로 붙는다. 컨테이너·
-    샌드박스에서 mongod를 띄울 수 없으면 import나 첫 연결이 ImportError가 아닌 예외로 실패한다.
-    그것은 이 저장소 코드의 결함이 아니라 환경 문제라 건너뛴다 (드라이버 왕복은 `services` 표시
-    테스트가 본다).
+    샌드박스에서 mongod를 띄울 수 없으면 import나 첫 연결이 연결 예외로 실패한다. 그것은 이 저장소
+    코드의 결함이 아니라 환경 문제라 건너뛴다 (드라이버 왕복은 `services` 표시 테스트가 본다).
+    설치돼 있는데 import가 실패하는 경우(의존성 비호환 등)와 연결 밖의 예외는 건너뛰지 않고 실패한다
+    (F-COE-16).
     """
+    if importlib.util.find_spec("fiftyone") is None:
+        pytest.skip("fiftyone 미설치 (make install-curation)")
     try:
         fo: Any = importlib.import_module("fiftyone")
         importlib.import_module("fiftyone.core.odm.database").get_db_conn()
-    except ImportError:
-        pytest.skip("fiftyone 미설치 (make install-curation)")
-    except Exception as exc:  # 환경마다 다른 연결·실행 파일 예외를 모두 건너뛰기로 바꾼다
+    except Exception as exc:
+        if not is_connection_error(exc):
+            raise
         pytest.skip(f"FiftyOne 데이터베이스에 연결하지 못함 ({type(exc).__name__})")
     return fo
+
+
+def test_only_connection_errors_skip_the_round_trip() -> None:
+    """F-COE-16: 연결 예외(내장 ConnectionError, pymongo·FiftyOne 서비스 예외, 그것을 원인으로 감싼
+    예외)만 건너뛰기 사유다. 의존성 비호환(ImportError·AttributeError·TypeError)과 그 밖의 오류는
+    실패로 드러난다."""
+
+    class ServerSelectionTimeoutError(Exception):
+        """pymongo의 같은 이름 예외를 흉내 낸다 (이름으로 판정)."""
+
+    wrapped = ConnectionError("Could not connect to `mongod`")
+    wrapped.__cause__ = ServerSelectionTimeoutError()
+    for exc in (wrapped, ServerSelectionTimeoutError(), TimeoutError()):
+        assert is_connection_error(exc), exc
+    for exc in (ImportError("numpy ABI"), AttributeError("x"), TypeError("y"), RuntimeError("z")):
+        assert not is_connection_error(exc), exc
 
 
 def test_push_to_fiftyone_round_trip(video: tuple[Path, list[int]], policy: ActivePolicy) -> None:
