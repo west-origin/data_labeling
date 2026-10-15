@@ -202,14 +202,16 @@ def _originals(current: Sequence[LabelRecord], gone: set[str]) -> dict[str, list
 def plan_describe(
     history: Sequence[LabelRecord],
     version: str,
-    inheritance: Sequence[DescriptionInheritance] = (),
+    inheritance: Sequence[DescriptionInheritance],
 ) -> DescribePlan:
     """다시 만들 설명 (모듈 docstring "대상"). 순수 함수.
 
     Args:
         history: 세션의 라벨 이력 전체 (`get_labels`).
         version: 이번 설명 버전 (`describe_version`).
-        inheritance: 세션의 물려받기 기록 (설명 따르기가 지울 물려받은 설명을 가린다).
+        inheritance: 세션의 물려받기 기록 (설명 따르기가 지울 물려받은 설명을 가린다). 기본값이
+            없다: 빠뜨리면 물려받은 설명을 직접 검수로 보아 대상을 놓친다 (F-PAR-24). DB에서는
+            `plan_session_describe`를 쓴다.
     """
     labels = list(history)
     excluded = non_operational_ids(labels)
@@ -238,6 +240,13 @@ def plan_describe(
         else:
             targets.append(DescribeTarget(action_id, mine, new_id, tuple(ds)))
     return DescribePlan(targets, waiting, deleted)
+
+
+def plan_session_describe(conn: sa.Connection, session_id: str, version: str) -> DescribePlan:
+    """DB의 세션 이력과 물려받기 기록으로 `plan_describe` (명령·재생성이 함께 쓴다, F-PAR-24)."""
+    return plan_describe(
+        get_labels(conn, session_id), version, get_description_inheritance(conn, session_id)
+    )
 
 
 def _hand(x: LabelRecord) -> Hand:
@@ -532,9 +541,7 @@ def describe_session(
     """
     version = describe_version(policy, client.version)
     summary = DescribeSummary(version)
-    plan = plan_describe(
-        get_labels(conn, session_id), version, get_description_inheritance(conn, session_id)
-    )
+    plan = plan_session_describe(conn, session_id, version)
     summary.waiting, summary.deleted = plan.waiting, plan.deleted
     if not plan.targets:
         return summary
@@ -578,9 +585,7 @@ def _write(
     if summary.blocked is not None:
         return
     first = apply_description_follow(conn, session_id, now, InheritanceMechanism.DESCRIBE)
-    fresh = plan_describe(
-        get_labels(conn, session_id), version, get_description_inheritance(conn, session_id)
-    )
+    fresh = plan_session_describe(conn, session_id, version)
     new: list[LabelRecord] = []
     stale: list[LabelRecord] = []
     for t in fresh.targets:

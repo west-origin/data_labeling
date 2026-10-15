@@ -270,14 +270,15 @@ def _must_retract(
 
 
 def plan_description_follow(
-    history: Sequence[LabelRecord], inheritance: Sequence[DescriptionInheritance] = ()
+    history: Sequence[LabelRecord], inheritance: Sequence[DescriptionInheritance]
 ) -> DescriptionFollow:
     """세션 이력에서 설명이 따를 결과를 정한다 (모듈 docstring 규칙). 순수 함수, DB를 쓰지 않는다.
 
     Args:
         history: 세션의 라벨 이력 전체 (`get_labels`, 종류를 거르지 않는다).
         inheritance: 세션의 물려받기 기록 (`get_description_inheritance`). 비면 검수된 설명은 모두
-            직접 검수한 것으로 보고 보호한다 (안전한 쪽).
+            직접 검수한 것으로 보고 보호한다. 기본값이 없다: 빠뜨린 호출자는 물려받은 설명을 놓친다
+            (F-PAR-24). 기록이 정말 없을 때만 빈 목록을 넘긴다.
 
     Returns:
         `DescriptionFollow`. 입력 순서를 따른다.

@@ -42,7 +42,12 @@ from datetime import UTC, datetime
 import sqlalchemy as sa
 
 from dlp_actions.clients import OpenAICompatibleVlm
-from dlp_actions.describe import DescribeSummary, describe_session, describe_version, plan_describe
+from dlp_actions.describe import (
+    DescribeSummary,
+    describe_session,
+    describe_version,
+    plan_session_describe,
+)
 from dlp_actions.policy import ActionsPolicy, load_policy
 from dlp_actions.runner import run_actions
 from dlp_actions.vlm import VlmRequestError, VlmUnavailableError
@@ -52,7 +57,7 @@ from dlp_cli.translate_cmds import translate_after_actions
 from dlp_media.storage import ObjectStore, store_from_spec
 from dlp_privacy.errors import RenderNotCurrentError
 from dlp_schema import load_config, repo_root
-from dlp_schema.db.repository import get_labels, list_session_ids
+from dlp_schema.db.repository import list_session_ids
 
 # 종료 코드 (모듈 docstring)
 OK, NO_URL, UNAVAILABLE, CONFIG = 0, 2, 3, 5
@@ -200,7 +205,7 @@ def describe_pending(db_url: str | None, policy: ActionsPolicy, vlm_version: str
             return [
                 sid
                 for sid in list_session_ids(conn)
-                if plan_describe(get_labels(conn, sid), version).targets
+                if plan_session_describe(conn, sid, version).targets
             ]
     finally:
         engine.dispose()

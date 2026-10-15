@@ -247,7 +247,7 @@ def test_waits_for_review_and_skips_untouched_or_time_only(
         right, left, _human(left, "l2", verb="lift"), other, _model_desc("db", "b001"),
         moved, _model_desc("dm", "m001"), _human(moved, "m2", t_end_ms=900),
     ]  # fmt: skip
-    plan = plan_describe(history, "describe-x+oracle-vlm-1")
+    plan = plan_describe(history, "describe-x+oracle-vlm-1", ())
     assert (plan.targets, plan.waiting, plan.deleted) == ([], 1, 0)
 
 

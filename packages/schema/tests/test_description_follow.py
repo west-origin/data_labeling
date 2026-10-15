@@ -76,7 +76,7 @@ def test_approved_action_passes_review_to_original_and_translation() -> None:
     """승인된 행동 → 원문·번역 human_approved, 검수자 같음, 시각 = max(행동 검수, 설명 생성)."""
     act = _action(record={"verification": _checked(VerificationState.HUMAN_APPROVED, "r1")})
     late_en = _desc("den", source="d", created_at=T2)  # 승인 뒤에 만든 번역
-    plan = plan_description_follow([act, _desc(), late_en])
+    plan = plan_description_follow([act, _desc(), late_en], ())
     assert plan.retract == []
     assert plan.approve == [
         InheritedReview("d", VerificationState.HUMAN_APPROVED, "r1", T1, "act", ("act",)),
@@ -86,7 +86,7 @@ def test_approved_action_passes_review_to_original_and_translation() -> None:
 
 def test_unreviewed_owner_waits_and_unknown_owner_is_left_alone() -> None:
     """행동이 검수 전이면 기다리고, 주인 ID가 이력에 없으면 건드리지 않는다."""
-    plan = plan_description_follow([_action(), _desc(), _desc("dx", "nope")])
+    plan = plan_description_follow([_action(), _desc(), _desc("dx", "nope")], ())
     assert (plan.approve, plan.retract) == ([], [])
 
 
@@ -95,11 +95,11 @@ def test_bimanual_action_needs_every_hand_reviewed_and_weakest_state_wins() -> N
     설명도 sample_verified (그 표본 검증의 검수자)."""
     right = _action("r", record={"verification": _checked(VerificationState.HUMAN_APPROVED, "r1")})
     left = _action("l", hand="left")
-    assert plan_description_follow([right, left, _desc()]).approve == []
+    assert plan_description_follow([right, left, _desc()], ()).approve == []
     sampled = left.model_copy(
         update={"verification": _checked(VerificationState.SAMPLE_VERIFIED, "sampling:a", T2)}
     )
-    plan = plan_description_follow([right, sampled, _desc()])
+    plan = plan_description_follow([right, sampled, _desc()], ())
     assert plan.approve == [
         InheritedReview("d", VerificationState.SAMPLE_VERIFIED, "sampling:a", T2, "l", ("l", "r"))
     ]
@@ -110,7 +110,7 @@ def test_time_only_correction_approves_but_meaning_change_retracts() -> None:
     이미 검수된 설명·사람 설명은 어느 쪽도 아니다."""
     act = _action()
     moved = _fix(act, "fix", t_approach_ms=0, t_contact_start_ms=300)
-    plan = plan_description_follow([act, moved, _desc()])
+    plan = plan_description_follow([act, moved, _desc()], ())
     assert plan.approve == [
         InheritedReview("d", VerificationState.HUMAN_APPROVED, "r1", T1, "fix", ("fix",))
     ]
@@ -119,7 +119,7 @@ def test_time_only_correction_approves_but_meaning_change_retracts() -> None:
         human = _desc("dh", provenance=Provenance(source=Source.HUMAN), confidence=None)
         history = [act, _fix(act, "fix", **change), _desc(), _desc("den", source="d"), reviewed,
                    human]  # fmt: skip
-        plan = plan_description_follow(history)
+        plan = plan_description_follow(history, ())
         assert (plan.approve, _ids(plan.retract)) == ([], ["d", "den"]), change
 
 
@@ -139,12 +139,12 @@ def test_deleted_owner_retracts_and_stale_translation_is_skipped() -> None:
                 "provenance": Provenance(source=Source.HUMAN), "confidence": None,
                 "verification": _checked(VerificationState.HUMAN_CORRECTED, "r1")}
     )  # fmt: skip
-    plan = plan_description_follow([act, gone, _desc(), _desc("den", source="d")])
+    plan = plan_description_follow([act, gone, _desc(), _desc("den", source="d")], ())
     assert (plan.approve, _ids(plan.retract)) == ([], ["d", "den"])
 
     approved = _action(record={"verification": _checked(VerificationState.HUMAN_APPROVED, "r1")})
     orphan_en = _desc("den", source="old")  # 원문 old는 이력에 없다
-    plan = plan_description_follow([approved, orphan_en])
+    plan = plan_description_follow([approved, orphan_en], ())
     assert (plan.approve, plan.retract) == ([], [])
 
 
@@ -154,10 +154,10 @@ def test_segment_owner_and_seeded_copies() -> None:
         {"kind": "segment", "segment_id": "sk1", "level": "skill", "ref_id": "wipe",
          "child_ids": []}, label_id="seg", t_end_ms=3000, **MODEL,
     )  # fmt: skip
-    plan = plan_description_follow([seg, _fix(seg, "seg2", ref_id="sweep"), _desc("ds", "sk1")])
+    plan = plan_description_follow([seg, _fix(seg, "seg2", ref_id="sweep"), _desc("ds", "sk1")], ())
     assert _ids(plan.retract) == ["ds"]
     seeded = _action("seed", record={"seeded_error": True})
-    plan = plan_description_follow([seeded, _desc()])
+    plan = plan_description_follow([seeded, _desc()], ())
     assert (plan.approve, plan.retract) == ([], [])
 
 
@@ -184,7 +184,7 @@ def test_bimanual_partial_deletion_retracts_description() -> None:
         update={"verification": _checked(VerificationState.HUMAN_APPROVED, "r1")}
     )
     history = [approved, left, _deleted(left, "l-gone"), _desc(), _desc("den", source="d")]
-    plan = plan_description_follow(history)
+    plan = plan_description_follow(history, ())
     assert (plan.approve, _ids(plan.retract)) == ([], ["d", "den"])
 
 
@@ -203,7 +203,8 @@ def test_baseline_is_the_stage_run_that_made_the_description() -> None:
     new = _action("new", record={"created_at": T1, "provenance": v2,
                                  "verification": _checked(VerificationState.HUMAN_APPROVED, "r1",
                                                           T2)})  # fmt: skip
-    plan = plan_description_follow([old, old_gone, new, _desc("d2", created_at=T1, provenance=v2)])
+    d2 = _desc("d2", created_at=T1, provenance=v2)
+    plan = plan_description_follow([old, old_gone, new, d2], ())
     assert plan.retract == []
     assert plan.approve == [
         InheritedReview("d2", VerificationState.HUMAN_APPROVED, "r1", T2, "new", ("new",))
@@ -306,7 +307,7 @@ def test_direct_review_and_human_text_stay_protected() -> None:
     corrected = _inherited(_desc("dc"), VerificationState.HUMAN_CORRECTED)
     for x in (direct, human, corrected):
         assert not inheritance_only(x, []), x.label_id
-        plan = plan_description_follow([act, _round2(act, "v2", verb="lift"), x])
+        plan = plan_description_follow([act, _round2(act, "v2", verb="lift"), x], ())
         assert plan.retract == [], x.label_id
     # 사람 설명은 기록이 있어도(잘못 쓴 기록) 물려받은 것이 아니다
     assert not inheritance_only(human, [_rec(human)])
@@ -323,7 +324,7 @@ def test_direct_review_with_same_reviewer_and_time_is_not_inheritance() -> None:
     d = _inherited(_desc())  # r1, T1 = 행동 검수와 같다 (직접 검수)
     history = [act, _round2(act, "v2", verb="lift"), d]
     assert not inheritance_only(d, [])
-    assert plan_description_follow(history).retract == []
+    assert plan_description_follow(history, ()).retract == []
     assert _ids(plan_description_follow(history, [_rec(d)]).retract) == ["d"]
 
 
@@ -368,8 +369,8 @@ def test_translation_of_human_description_compares_owners_at_writing() -> None:
     human = _desc("dh", provenance=Provenance(source=Source.HUMAN), confidence=None,
                   created_at=T1, verification=checked)  # fmt: skip
     en = _desc("den", source="dh", created_at=T2)
-    plan = plan_description_follow([act, fix, human, en])
+    plan = plan_description_follow([act, fix, human, en], ())
     assert plan.retract == []
     assert _ids([x for x in [en] if x.label_id in {r.label_id for r in plan.approve}]) == ["den"]
     again = _round2(fix, "v3", verb="wipe").model_copy(update={"created_at": T3})
-    assert _ids(plan_description_follow([act, fix, human, en, again]).retract) == ["den"]
+    assert _ids(plan_description_follow([act, fix, human, en, again], ()).retract) == ["den"]
