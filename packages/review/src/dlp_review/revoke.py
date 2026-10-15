@@ -104,11 +104,14 @@ class RevocationReport:
     # 지우지 못한 사용 중지 세션의 시계열 CSV 키 (작업 행 표시가 없어 pending에 들지 않는다.
     # 다음 실행이 다시 확인해 지운다)
     timeseries_left: list[str] = field(default_factory=list[str])
+    # 실행기 설정(저장소·도구 클라이언트)을 만들지 못한 사유. 있으면 아무것도 끊지 않았고 대기는
+    # 그대로다 (잘못된 AWS 프로필 등, F-PMS-17)
+    setup_error: str | None = None
 
     @property
     def complete(self) -> bool:
-        """대기가 남지 않았다 (작업 대기도, 지우지 못한 시계열 CSV도 없다)."""
-        return not self.pending and not self.timeseries_left
+        """대기가 남지 않았다 (작업 대기도, 지우지 못한 시계열 CSV도, 설정 실패도 없다)."""
+        return not self.pending and not self.timeseries_left and self.setup_error is None
 
     @property
     def remaining(self) -> list[str]:

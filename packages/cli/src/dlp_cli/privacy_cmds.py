@@ -75,7 +75,8 @@ from dlp_train.deployed import deployed_predictors
 from dlp_train.policy import load_policy as load_training_policy
 from dlp_train.trainers import LoadContext
 
-# 보류는 커밋됐지만 렌더 기록 무효화(저장소 쓰기)가 실패했다. 같은 명령을 다시 실행한다 (F-PMS-14)
+# 보류는 커밋됐지만 렌더 기록 무효화(저장소 쓰기, F-PMS-14)나 회수 실행기 준비(클라이언트 생성,
+# F-PMS-17)가 실패했다. 설정·저장소를 고친 뒤 같은 명령을 다시 실행한다
 HOLD_RENDER_PENDING_EXIT = 5
 
 
@@ -220,24 +221,41 @@ def cmd_hold(args: argparse.Namespace) -> int:
     해제(`--release`): 해제 기록만 남긴다. 승인은 풀린 채라 재승인 절차를 다시 거친다.
 
     행위자는 `--actor`, 없으면 `DLP_ACTOR`, 그것도 없으면 OS 사용자다.
-    반환: 0, 보류 뒤 회수 대기가 남으면 `REVOCATION_PENDING_EXIT`(4), 렌더 기록 무효화가 실패하면
-    `HOLD_RENDER_PENDING_EXIT`(5, 같은 명령을 다시 실행한다).
+    반환: 0, 보류 뒤 회수 대기가 남으면 `REVOCATION_PENDING_EXIT`(4), 렌더 기록 무효화나 회수
+    실행기 준비(저장소·AWS 프로필, F-PMS-17)가 실패하면 `HOLD_RENDER_PENDING_EXIT`(5, 커밋된 보류
+    결과를 먼저 알리고 재시도 명령을 보인다).
     예외: 보류 중이 아닌데 해제하면 `PrivacyGateError`, 사유가 비면 ValueError.
     """
     actor = args.actor or current_actor()
     now = datetime.now(UTC)
     engine = _engine(args)
-    if args.release:
-        with engine.begin() as conn:
-            event = release_hold(conn, args.session_id, now, reason=args.reason, actor=actor)
-        engine.dispose()
-        print(f"{args.session_id}: 승인 보류 해제 ({event.actor}: {event.reason})")
-        print(
-            "  승인은 풀린 채입니다. 재승인: (필요하면 블러 검수 → dlp review collect) → "
-            f"dlp privacy approve {args.session_id} → dlp privacy render {args.session_id} → "
-            f"다시 만들기 (dlp review verify {args.session_id}가 명령을 보인다)"
-        )
-        return 0
+    try:
+        if args.release:
+            return _release(args, engine, actor, now)
+        return _hold(args, engine, actor, now)
+    finally:
+        engine.dispose()  # 어느 경로·예외든 연결을 정리한다 (F-PMS-17)
+
+
+def _release(args: argparse.Namespace, engine: sa.Engine, actor: str, now: datetime) -> int:
+    """`cmd_hold --release`: 해제 기록만 남기고 재승인 절차를 안내한다."""
+    with engine.begin() as conn:
+        event = release_hold(conn, args.session_id, now, reason=args.reason, actor=actor)
+    print(f"{args.session_id}: 승인 보류 해제 ({event.actor}: {event.reason})")
+    print(
+        "  승인은 풀린 채입니다. 재승인: (필요하면 블러 검수 → dlp review collect) → "
+        f"dlp privacy approve {args.session_id} → dlp privacy render {args.session_id} → "
+        f"다시 만들기 (dlp review verify {args.session_id}가 명령을 보인다)"
+    )
+    return 0
+
+
+def _hold(args: argparse.Namespace, engine: sa.Engine, actor: str, now: datetime) -> int:
+    """`cmd_hold`의 보류 경로 (엔진 정리는 호출자가 한다).
+
+    커밋 뒤 단계(렌더 기록 무효, 회수 실행기)는 어느 것이 실패해도 예외로 끝나지 않는다: 커밋된
+    보류 결과를 먼저 알리고, 실패와 재시도 명령을 보인 뒤 `HOLD_RENDER_PENDING_EXIT`(5).
+    """
     root = repo_root()
     # DB 단계(보류·승인 해제·회수 요청)는 저장소와 무관하게 먼저 커밋한다 (F-PMS-14). 저장소
     # 클라이언트도 커밋 뒤에 만든다: 잘못된 AWS 프로필·설정이 보류 기록을 막지 않게 (F-PMS-16)
@@ -251,8 +269,8 @@ def cmd_hold(args: argparse.Namespace) -> int:
     invalidated, failure = _invalidate_after_hold(
         engine, args.store, labeling, args.session_id, result
     )
+    # 회수 실행기의 클라이언트 생성 실패는 보고서의 setup_error로 온다 (F-PMS-17)
     report = run_revocations(engine, args.session_id, url=args.url, purpose="privacy.hold")
-    engine.dispose()
     state = "새 보류" if result.event is not None else "이미 보류 중"
     print(f"{args.session_id}: 승인 보류 ({state}, {held.actor}: {held.reason}, {held.at})")
     print(f"  이전 프라이버시 상태 {result.previous_state.value} → 승인 해제, 렌더 기록 무효 "
@@ -261,11 +279,17 @@ def cmd_hold(args: argparse.Namespace) -> int:
         keys = ", ".join(t.task_key for t in result.revocations)
         print(f"  라벨링 작업 {len(result.revocations)}개 회수: {keys}")
     code = print_revocations(report, args.session_id)
+    retry = f"dlp privacy hold {args.session_id} --reason ..."
     if failure is not None:
         print(
             f"  ! 렌더 기록 무효화 실패: {failure}. 보류·승인 해제·회수 요청은 커밋됐고 "
-            "렌더 게이트는 거부합니다. 저장소를 고친 뒤 같은 명령을 다시 실행하세요 "
-            f"(dlp privacy hold {args.session_id} --reason ...)"
+            f"렌더 게이트는 거부합니다. 저장소를 고친 뒤 같은 명령을 다시 실행하세요 ({retry})"
+        )
+        return HOLD_RENDER_PENDING_EXIT
+    if report.setup_error is not None:
+        print(
+            "  ! 회수 실행기를 준비하지 못했습니다. 보류·승인 해제·회수 요청은 커밋됐습니다. "
+            f"저장소·AWS 프로필 설정을 고친 뒤 dlp review revoke {args.session_id} (또는 {retry})"
         )
         return HOLD_RENDER_PENDING_EXIT
     return code

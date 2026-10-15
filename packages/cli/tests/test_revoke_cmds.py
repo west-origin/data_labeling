@@ -730,3 +730,46 @@ def test_privacy_hold_is_recorded_even_when_the_store_client_cannot_be_created(
     with _engine(url).connect() as conn:
         assert active_privacy_hold(conn, "s001") is not None
         assert get_session(conn, "s001").privacy_state is PrivacyState.AUTO_BLURRED
+
+
+def test_privacy_hold_reports_revocation_setup_failure_after_commit(
+    url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """F-PMS-17: 보류 커밋 뒤 회수 실행기의 저장소 클라이언트 생성(잘못된 AWS 프로필)이 실패해도
+    보류 결과와 복구 안내를 먼저 알리고 종료 코드 5로 끝난다 (예외로 끝나지 않는다).
+
+    정답: 배포된 라벨링 작업 cvat:2가 있는 세션. 렌더 기록 무효화는 성공(로컬 저장소)하고
+    `review_setup`만 ProfileNotFound → 보류 기록·AUTO_BLURRED·회수 요청은 커밋, 작업은 회수 대기로
+    남고(매체 삭제 안 됨), 출력에 보류 결과·실패·재시도 명령이 있다. 같은 실패는 회수 보고의
+    대기(`complete`가 거짓)로 남는다.
+    """
+    from botocore.exceptions import ProfileNotFound
+
+    current = render_hash([], load_privacy_policy(repo_root()))
+    uri = _media_at(tmp_path, labeling_media_key("s001", "labeler01", "bodycam", current))
+    with _engine(url).begin() as conn:
+        insert_review_task(conn, _task("cvat:2", "s001", uri, current))
+    monkeypatch.setattr(
+        review_config, "review_setup", Mock(side_effect=ProfileNotFound(profile="nope"))
+    )
+    monkeypatch.setattr(privacy_cmds, "store_from_spec", Mock(return_value=_labeling(tmp_path)))
+    hold = argparse.Namespace(
+        session_id="s001", reason="labeler report", release=False, actor="ops01", url=url,
+        store="s3",
+    )  # fmt: skip
+    assert privacy_cmds.cmd_hold(hold) == privacy_cmds.HOLD_RENDER_PENDING_EXIT
+    out = capsys.readouterr().out
+    assert "승인 보류 (새 보류, ops01: labeler report" in out
+    assert "라벨링 작업 1개 회수: cvat:2" in out
+    assert "회수 실행 준비 실패" in out and "ProfileNotFound" in out
+    assert "dlp review revoke s001" in out
+    with _engine(url).connect() as conn:
+        assert active_privacy_hold(conn, "s001") is not None
+        assert get_session(conn, "s001").privacy_state is PrivacyState.AUTO_BLURRED
+        task = get_review_task(conn, "cvat:2")
+        assert task.revoke_reason == "hold:ops01:labeler report"
+        assert task.media_revoked_at is None
+    assert _labeling(tmp_path).head(labeling_media_key("s001", "labeler01", "bodycam", current))
+    report = review_config.run_revocations(_engine(url), "s001", url=url, purpose="privacy.hold")
+    assert not report.complete and report.pending == ["cvat:2"]
+    assert report.setup_error is not None and "ProfileNotFound" in report.setup_error

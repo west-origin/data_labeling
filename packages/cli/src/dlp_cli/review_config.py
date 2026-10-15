@@ -29,7 +29,7 @@ import sqlalchemy as sa
 
 from dlp_aireview.policy import load_policy as load_aireview_policy
 from dlp_cli.raw_access import raw_store
-from dlp_media.storage import S3Store
+from dlp_media.storage import STORE_ERRORS, S3Store
 from dlp_privacy.policy import load_policy as load_privacy_policy
 from dlp_privacy.runner import request_media_revocation
 from dlp_review.ai_display import AiDisplayConfig
@@ -182,9 +182,12 @@ def run_revocations(
             return RevocationReport()
     warnings: list[str] = []
     if setup is None:
-        setup, warnings = review_setup(
-            purpose, url, revocation_only=True, cvat=pending, label_studio=pending
-        )
+        try:
+            setup, warnings = review_setup(
+                purpose, url, revocation_only=True, cvat=pending, label_studio=pending
+            )
+        except SETUP_ERRORS as exc:
+            return _setup_failed(engine, session_id, exc)
     report = execute_media_revocations(
         engine,
         session_id,
@@ -195,6 +198,23 @@ def run_revocations(
     )
     report.warnings[:0] = warnings
     return report
+
+
+# 회수 전용 설정을 만들 때 날 수 있는 오류 (저장소 지정·AWS 프로필·자격 증명·설정, Label Studio
+# 설정). CVAT 접속 실패는 `review_setup`이 경고로 바꾼다
+SETUP_ERRORS: tuple[type[Exception], ...] = (*STORE_ERRORS, ToolError, ValueError, KeyError)
+
+
+def _setup_failed(engine: sa.Engine, session_id: str | None, exc: Exception) -> RevocationReport:
+    """설정을 만들지 못한 회수 보고: 아무것도 끊지 않았고 DB의 대기를 그대로 보인다 (F-PMS-17)."""
+    with engine.connect() as conn:
+        pending = [t.task_key for t in pending_revocations(conn, session_id)]
+    reason = f"{type(exc).__name__}: {exc}"
+    return RevocationReport(
+        errors=[f"[회수 실행 준비 실패] {reason}. 회수 요청은 커밋됐고 대기로 남았습니다"],
+        pending=pending,
+        setup_error=reason,
+    )
 
 
 def print_revocations(report: RevocationReport, session_id: str | None) -> int:
@@ -217,5 +237,8 @@ def print_revocations(report: RevocationReport, session_id: str | None) -> int:
         return 0
     target = session_id or "--pending"
     left = report.remaining
+    if not left:  # 설정 실패, 시계열 CSV 확인만 남음
+        print(f"  회수 확인 대기: 설정을 고친 뒤 dlp review revoke {target}")
+        return REVOCATION_PENDING_EXIT
     print(f"  회수 대기 {len(left)}개: {', '.join(left[:5])} (dlp review revoke {target})")
     return REVOCATION_PENDING_EXIT
