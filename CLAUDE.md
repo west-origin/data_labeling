@@ -72,6 +72,9 @@
 - `packages/models/` (`dlp_models`) — 모델 레지스트리(`config/models.yaml`, 해시 확인)와 공용 ONNX 런타임(OWLv2, 메트릭 깊이).
 - `packages/prelabel/` (`dlp_prelabel`) — 자동 프리라벨: MediaPipe 손·COCO 객체, RTMPose 전신, OWLv2 도구, 깊이 기반 3D 궤적,
   Oracle stub, 장갑·영상 접촉, 3인칭 착용자 매칭. `dlp prelabel run <세션>`. 정책은 `config/policies/prelabel.yaml`.
+  손 키프레임에는 MediaPipe 손 중심 3D 점(`KeypointFrame.world`, 선택, 검수 도구로 보내지 않고 사람이 고친 트랙에는
+  없음)을 싣고, 손목·다섯 손가락 끝 3D(카메라 좌표)는 그 손 모양 + 2D 투영 + 손바닥 깊이·손 크기 사전값으로 맞춘다
+  (`dlp_prelabel.handfit`, ADR 0044. world가 없거나 맞춤이 나쁘면 관절별 깊이). 월드 좌표는 SLAM 뒤(F-PAR-26).
 - `packages/relations/` (`dlp_relations`) — 관계 도출(YAML 규칙 엔진, `derived_by`=규칙 ID), 도구-표면 접촉(작용부-평면 거리),
   표면 커버리지. `dlp relations run <세션>` (멱등, 규칙 변경 시 차이만 반영). 정책은 `config/policies/relations.yaml`.
 - `packages/actions/` (`dlp_actions`) — 행동 구간 2단 구조: 손목 속도·접촉으로 경계 후보 → VLM이 온톨로지 안에서 분류·설명

@@ -559,3 +559,10 @@ issues:
      files: [packages/schema/src/dlp_schema/description_follow.py, packages/schema/src/dlp_schema/db/repository.py], source: docs/handover/external-review-2026-10-15.md, see: [F-PAR-20],
      repro: tests/test_known_defects.py::test_same_tuple_direct_review_after_inheritance_is_protected,
      note: "record_review는 행의 검수 칸만 갱신하고 흔적을 남기지 않는다. 직접 검수의 상태·검수자·시각이 마지막 물려받기 기록과 정확히 같으면 지금 상태가 그 기록과 같아 물려받은 검수만 있는 것으로 본다 (description_follow._active). 지금 경로에서 일어나기 어렵다: 설명은 검수 도구 경로가 없고, 표본 검증(sampling:<배정>)·수집은 검수 시각이 그 실행의 now라 물려준 주인의 검수 시각과 같으려면 같은 검수자가 그 시각을 그대로 다시 써야 한다. 깔끔한 고침은 직접 검수도 추가 전용 기록에 남겨 마지막 기록이 이기게 하는 것(예: description_inheritance에 mechanism direct, giver 없음)인데 계약·DB 변경(ADR 0043 개정, Alembic, make schemas)이라 이번 회차에 하지 않았다."}
+  # ── 손가락 끝 3D (ADR 0044) 후속 ──
+  - {id: F-PAR-26, title: "손가락 끝·손 3D가 카메라 좌표뿐: IMU 기반 시각-관성 SLAM으로 세션 고정 월드 좌표가 필요", severity: medium, status: open, kind: product,
+     files: [packages/prelabel/src/dlp_prelabel/adapters/stubs.py, packages/prelabel/src/dlp_prelabel/lift3d.py, config/policies/prelabel.yaml], source: docs/adr/0044-fingertip-3d-from-hand-world-landmarks.md,
+     note: "3단계(사용자 요청). 바디캠 6자유도(stubs.CAMERA_POSE, TODO(real-model))를 시각-관성 SLAM(Basalt BSD-3, 카메라-IMU 캘리브레이션 필요, IMU는 dlp_media GPMF·사이드카 추출기가 이미 받는다) 또는 메트릭 깊이 + RGB-D 오도메트리(Open3D MIT)로 만들고, 카메라 좌표 trajectory3d를 frame=world로 바꾼 새 궤적(source_3d=visual_inertial_slam)을 낸다. 세션 캘리브레이션(내부 파라미터) 수집 절차도 함께 정한다 (지금은 없으면 화각 근사)."}
+  - {id: F-PAR-27, title: "손 메시 모델(HaMeR·WiLoR)은 MANO 비상업 라이선스라 쓸 수 없어, 손 3D 모양은 MediaPipe world landmarks뿐", severity: low, status: open, kind: product,
+     files: [config/models.yaml, packages/prelabel/src/dlp_prelabel/handfit.py], source: docs/adr/0044-fingertip-3d-from-hand-world-landmarks.md,
+     note: "ADR 0010: 판매용 라벨에는 비상업 가중치·손 모델을 쓰지 않는다. HaMeR·WiLoR·FrankMocap 등은 MANO 파라미터 회귀라 MANO 라이선스(비상업 연구)에 묶인다. 상업 사용 가능한 손 메시·3D 손 자세 모델(가중치·학습 데이터 라이선스 확인)이 생기면 Predictor 어댑터·CPU stub과 함께 handfit의 손 모양 입력으로 바꿀 수 있다. 그때까지 손 모양 정확도는 MediaPipe world landmarks 수준이고 실영상 오차는 측정하지 않았다."}
