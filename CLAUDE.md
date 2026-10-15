@@ -74,7 +74,8 @@
 - `packages/relations/` (`dlp_relations`) — 관계 도출(YAML 규칙 엔진, `derived_by`=규칙 ID), 도구-표면 접촉(작용부-평면 거리),
   표면 커버리지. `dlp relations run <세션>` (멱등, 규칙 변경 시 차이만 반영). 정책은 `config/policies/relations.yaml`.
 - `packages/actions/` (`dlp_actions`) — 행동 구간 2단 구조: 손목 속도·접촉으로 경계 후보 → VLM이 온톨로지 안에서 분류·설명
-  (JSON Schema 강제, 재시도 후 미상) → 병합·채우기(공백 0). `dlp actions run <세션> --vlm-url`. CPU·CI는 `OracleVlm` stub.
+  (JSON Schema 강제, 재시도 후 미상) → 병합·채우기(공백 0). `dlp actions run <세션> --vlm-url`. 사람이 의미를 고친 행동의 설명은
+  `dlp actions describe <세션>|--pending`이 VLM에 다시 물어 만든다(검수를 물려받음, ADR 0043). CPU·CI는 `OracleVlm` stub.
   정책은 `config/policies/actions.yaml`.
   설명 영어 번역(ADR 0043, `dlp_actions.translate`): 현재 한국어 설명마다 영어 형제 레코드(`language=en`,
   `source_label_id`=원문 ID, parent 아님)를 사내 서버(`dlp_models.vlm`, 기본 Qwen3-VL-8B)로 만든다. 온톨로지 ko→en
