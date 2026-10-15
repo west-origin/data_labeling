@@ -272,3 +272,62 @@ def test_relabel_of_a_retracted_label_does_not_revive_it() -> None:
                     reviewer_id="r", now=FIXED_TIME)  # fmt: skip
     assert drop_retracted(out, [gap, gone]) == ["g"]
     assert not current_labels([gap, gone, *out.new_records])
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="F-PAR-25: 물려받은 설명을 같은 상태·검수자·시각으로 직접 다시 검수하면 구분되지 않음",
+)
+def test_same_tuple_direct_review_after_inheritance_is_protected() -> None:
+    """F-PAR-25 재현. 승인한 행동 act의 검수(r1, T1)를 모델 설명 d가 물려받았다(기록 있음). 그 뒤
+    검수자가 d를 직접 승인했는데 상태·검수자·시각이 물려받은 값과 같다 (r1, T1). 행동 의미가
+    다시 바뀐다.
+
+    올바른 동작(CLAUDE.md 규칙, ADR 0043 3절 규칙 6): 기록 뒤 직접 검수한 설명은 보호되어 설명
+    따르기가 지우지 않는다. 지금: `record_review`는 행만 갱신하고 흔적을 남기지 않아 지금 검수
+    상태가 마지막 물려받기 기록과 같으므로 물려받은 검수만 있는 것으로 보고 지운다
+    (`description_follow._active`).
+    """
+    from datetime import timedelta
+
+    from dlp_schema.db.description_repository import apply_description_follow
+    from dlp_schema.db.repository import (
+        get_description_inheritance,
+        get_labels,
+        insert_labels,
+        insert_session,
+        record_review,
+        register_ontology,
+    )
+    from dlp_schema.description_follow import plan_description_follow
+    from dlp_schema.labels import Provenance, Source, Verification, VerificationState
+    from dlp_schema.review import InheritanceMechanism
+    from dlp_schema.testing import action_payload, make_session, sqlite_db
+
+    t1, t2 = FIXED_TIME + timedelta(hours=1), FIXED_TIME + timedelta(hours=2)
+    model = Provenance(source=Source.MODEL, model_version="actions-abc+oracle-vlm-1+i0")
+    act = make_label(action_payload(), label_id="act", provenance=model, confidence=0.9)
+    desc = make_label({"kind": "description", "segment_id": "a001", "text": "걸레를 잡는다"},
+                      label_id="d", provenance=model, confidence=0.9)  # fmt: skip
+    fix = act.model_copy(
+        update={"label_id": "fix", "parent_label_id": "act", "created_at": t2,
+                "provenance": Provenance(source=Source.HUMAN), "confidence": None,
+                "verification": Verification(state=VerificationState.HUMAN_CORRECTED,
+                                             reviewer_id="r1", reviewed_at=t2),
+                "payload": act.payload.model_copy(update={"verb": "lift"})}
+    )  # fmt: skip
+    engine = sqlite_db()
+    with engine.begin() as conn:
+        register_ontology(conn, load_ontology(ROOT / "config" / "ontology" / "v1"))
+        insert_session(conn, make_session("s001"))
+        insert_labels(conn, [act, desc])
+        record_review(conn, "act", VerificationState.HUMAN_APPROVED, "r1", t1)
+        apply_description_follow(conn, "s001", t1, InheritanceMechanism.COLLECT)
+        record_review(conn, "d", VerificationState.HUMAN_APPROVED, "r1", t1)  # 직접 검수
+        insert_labels(conn, [fix])
+        plan = plan_description_follow(
+            get_labels(conn, "s001"), get_description_inheritance(conn, "s001")
+        )
+    engine.dispose()
+    assert [x.label_id for x in plan.retract] == []

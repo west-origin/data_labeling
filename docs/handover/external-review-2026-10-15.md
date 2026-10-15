@@ -5,15 +5,16 @@
 1차 기준: 커밋 `d24f3e9`. 외부 검수자(Codex)가 재현한 결함 5건, 테스트 환경 견고성 지적 1건, 리팩토링 권고 1건이다.
 지적마다 코드를 읽어 확인하고, 고치기 전에 실패하는 회귀 테스트(정답을 아는 합성 데이터, SQLite·로컬 저장소·
 stub)를 먼저 두었다. 5건 모두 유효했다. 상태·관련 파일은 레지스트리가 기준이다.
-2차 재검수(커밋 `1ebdb0a`)는 [아래 절](#2차-재검수-1ebdb0a)에 있다. 요약 표는 1·2차를 합친 건수다.
+2차 재검수(커밋 `1ebdb0a`)는 [아래 절](#2차-재검수-1ebdb0a), 3차 재검수(커밋 `1d7d670`)는
+[그다음 절](#3차-재검수-1d7d670)에 있다. 요약 표는 1·2·3차를 합친 건수다.
 
 ## 요약
 
 | 심각도 | 건수 | 대표 항목 |
 | --- | --- | --- |
 | 상 | 0 | |
-| 중 | 9 | 1차: 보류 중 저장소 실패가 DB 되돌림(F-PMS-14), 회수 실행기 경합(F-REV-29), draft 온톨로지 덧붙이기 뒤 AI 재판정 없음(F-AIR-32), 양손 부분 삭제 뒤 설명 승인(F-PAR-16), 번역 중 들어온 설명의 대기 누락(F-PAR-17). 2차: 직접 검수를 물려받음으로 추정(F-PAR-20), 재생성 요청의 의미 필드 누락(F-PAR-21), 사람 설명 번역 삭제(F-PAR-22), 늦은 보류 무효화가 새 렌더를 덮음(F-PMS-15) |
-| 하 | 5 | 1차: 테스트 환경(AWS 프로필·MongoDB) 의존(F-COE-14), 큰 모듈 분리 권고(F-COE-15, 미착수). 2차: 보류 전 저장소 클라이언트 생성(F-PMS-16), FiftyOne 건너뛰기 범위(F-COE-16), 재생성·번역 최종 쓰기 재확인(F-PAR-23) |
+| 중 | 10 | 1차: 보류 중 저장소 실패가 DB 되돌림(F-PMS-14), 회수 실행기 경합(F-REV-29), draft 온톨로지 덧붙이기 뒤 AI 재판정 없음(F-AIR-32), 양손 부분 삭제 뒤 설명 승인(F-PAR-16), 번역 중 들어온 설명의 대기 누락(F-PAR-17). 2차: 직접 검수를 물려받음으로 추정(F-PAR-20), 재생성 요청의 의미 필드 누락(F-PAR-21), 사람 설명 번역 삭제(F-PAR-22), 늦은 보류 무효화가 새 렌더를 덮음(F-PMS-15). 3차: `describe --pending`의 물려받기 기록 누락(F-PAR-24) |
+| 하 | 7 | 1차: 테스트 환경(AWS 프로필·MongoDB) 의존(F-COE-14), 큰 모듈 분리 권고(F-COE-15, 미착수). 2차: 보류 전 저장소 클라이언트 생성(F-PMS-16), FiftyOne 건너뛰기 범위(F-COE-16), 재생성·번역 최종 쓰기 재확인(F-PAR-23). 3차: 보류 뒤 회수 실행기 준비 실패(F-PMS-17), 같은 값 직접 재검수 구분 불가(F-PAR-25, 미수정) |
 
 ## 중 등급
 
@@ -118,3 +119,34 @@ stub)를 먼저 두었다. 5건 모두 유효했다. 상태·관련 파일은 �
   쓰기 직전 세션 잠금 아래 다시 보고(`dlp_actions.write_check`), 막히면 아무것도 쓰지 않는다.
   회귀: `packages/actions/tests/test_describe.py::test_final_write_rechecks_hold_withdrawal_and_render_under_the_lock`,
   `packages/actions/tests/test_translate.py::test_final_write_rechecks_hold_and_withdrawal_under_the_lock`.
+
+## 3차 재검수 1d7d670
+
+기준: 커밋 `1d7d670`. 외부 검수자(Codex)가 중 등급 1건, 하 등급 2건을 지적했다. 책임 개발자가 모두 유효로
+판단했다. 고친 두 건은 고치기 전 코드(`1d7d670`)에서 회귀 테스트가 실패하는 것을 먼저 확인했다.
+
+### 중 등급
+
+- **F-PAR-24** `dlp actions describe --pending`(`describe_pending`)이 `plan_describe`에 물려받기 기록을 넘기지
+  않았다. 인자 기본값이 빈 목록이라 물려받은 설명을 직접 검수로 보아 보호했고, 행동 의미가 다시 바뀐 세션을
+  대상에서 빠뜨렸다 (`describe_session`은 같은 세션을 처리한다).
+  - 고친 방법: DB에서 계획하는 곳은 `plan_session_describe`(세션 이력과 물려받기 기록을 함께 읽는다)를 쓴다.
+    `plan_describe`·`plan_description_follow`의 `inheritance` 인자는 기본값 없이 필수다. 빠뜨린 호출은
+    pyright가 잡고, 구문 트리 검사가 저장소의 모든 호출을 대조한다.
+  - 회귀: `packages/cli/tests/test_actions_describe_cmd.py::test_describe_pending_sees_inherited_descriptions_of_changed_actions`,
+    `tests/test_inheritance_required.py`.
+
+### 하 등급
+
+- **F-PMS-17** `dlp privacy hold` 커밋 뒤 회수 실행기가 저장소 클라이언트를 다시 만들다 잘못된 AWS 프로필
+  (`ProfileNotFound`)로 예외가 나, 보류 결과·복구 안내가 출력되지 않고 문서의 종료 코드 5도 나오지 않았다.
+  - 고친 방법: `run_revocations`는 회수 전용 설정 생성 실패를 `RevocationReport.setup_error`와 DB의 대기로
+    돌려준다 (다른 회수 호출자도 예외 대신 대기, 종료 코드 4). `cmd_hold`는 커밋된 보류 결과를 먼저 출력하고
+    실패와 재시도 명령(`dlp review revoke <세션>`)을 보인 뒤 5로 끝난다. 엔진은 `finally`에서 정리한다.
+  - 회귀: `packages/cli/tests/test_revoke_cmds.py::test_privacy_hold_reports_revocation_setup_failure_after_commit`.
+- **F-PAR-25** (미수정) 물려받은 설명을 같은 상태·검수자·시각으로 직접 다시 검수하면 물려받음과 구분되지 않아,
+  다음 회차에 행동이 바뀌면 설명 따르기가 지운다. `record_review`가 흔적을 남기지 않기 때문이다. 지금 경로에서는
+  같은 검수자가 물려준 주인의 검수 시각을 그대로 다시 써야 생긴다 (설명은 검수 도구 경로가 없고 표본 검증·수집은
+  그 실행의 시각을 쓴다). 깔끔한 고침은 직접 검수도 추가 전용 기록에 남겨 마지막 기록이 이기게 하는 것인데,
+  계약·DB 변경(ADR 0043 개정, Alembic, `make schemas`)이라 이번 회차에 하지 않았다.
+  재현: `tests/test_known_defects.py::test_same_tuple_direct_review_after_inheritance_is_protected`.
