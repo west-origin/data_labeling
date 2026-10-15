@@ -146,6 +146,7 @@ def test_open_defect_repros_are_strict_xfail(issues: list[dict[str, Any]]) -> No
 REPORTS = {
     "docs/handover/full-review-2026-10-11.md": REPORT_AREAS,
     "docs/handover/full-review-2026-10-12.md": (*REPORT_AREAS, "F-AIR-"),
+    "docs/handover/external-review-2026-10-15.md": (*REPORT_AREAS, "F-AIR-"),
 }
 
 
