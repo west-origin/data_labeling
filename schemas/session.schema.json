@@ -4,6 +4,20 @@
       "additionalProperties": false,
       "description": "세션 단위 캘리브레이션. 장착 위치가 바뀔 수 있어 세션마다 기록한다.",
       "properties": {
+        "camera_id": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "바디캠 기기 ID (등록된 캘리브레이션 조회)",
+          "title": "Camera Id"
+        },
         "camera_imu_extrinsics": {
           "anyOf": [
             {

@@ -17,16 +17,20 @@ from pydantic import ValidationError
 from dlp_schema.export import ExportedLabel
 from dlp_schema.labels import (
     SPATIAL_KINDS,
+    IntrinsicsSource,
     KeypointTrackPayload,
     LabelRecord,
+    Lift3DMethod,
     Provenance,
     Source,
+    Trajectory3DPayload,
     Verification,
     VerificationState,
     without_world,
 )
 from dlp_schema.review import ReviewTask
 from dlp_schema.session import (
+    Calibration,
     LifecycleState,
     PrivacyDetectionRun,
     PrivacyHoldEvent,
@@ -222,6 +226,46 @@ def test_hand_world_points_are_optional_and_omitted_from_json_when_absent() -> N
             "keyframes": [{"t_ms": 0, "points": coco, "world": WORLD21[:17]}]}  # fmt: skip
     with pytest.raises(ValidationError, match="hand21"):
         make_label(body, stream_id="bodycam")
+
+
+TRAJ: dict[str, Any] = {
+    "kind": "trajectory3d", "entity_id": "right_hand", "part": "wrist", "frame": "camera",
+    "source_3d": "mono_depth", "samples": [{"t_ms": 0, "x": 0.1, "y": 0.0, "z": 0.5}],
+}  # fmt: skip
+# ADR 0045 이전 trajectory3d 페이로드 JSON (방식·신뢰도·내부 파라미터 출처 없음). 바뀌면 안 된다
+OLD_TRAJ_JSON = (
+    '{"kind":"trajectory3d","entity_id":"right_hand","part":"wrist","frame":"camera",'
+    '"source_3d":"mono_depth","samples":[{"t_ms":0,"x":0.1,"y":0.0,"z":0.5,'
+    '"qw":null,"qx":null,"qy":null,"qz":null}]}'
+)
+
+
+def test_trajectory_sample_method_and_confidence_are_optional() -> None:
+    """ADR 0045: 3D 표본 방식·신뢰도와 페이로드 내부 파라미터 출처는 선택이다. 없으면 JSON이 예전과
+    글자 그대로 같아(라벨 내용 해시 불변) 예전 JSON도 그대로 읽힌다. 있으면 왕복하고, 신뢰도는 0~1.
+    """
+    old = make_label(TRAJ, stream_id="bodycam")
+    assert old.payload.model_dump_json() == OLD_TRAJ_JSON
+    assert LabelRecord.model_validate_json(old.model_dump_json()) == old
+    sample = {**TRAJ["samples"][0], "method": "hand_fit", "confidence": 0.62}
+    new = make_label({**TRAJ, "samples": [sample], "intrinsics": "calibrated"}, stream_id="bodycam")
+    assert isinstance(new.payload, Trajectory3DPayload)
+    assert new.payload.intrinsics is IntrinsicsSource.CALIBRATED
+    assert new.payload.samples[0].method is Lift3DMethod.HAND_FIT
+    assert LabelRecord.model_validate_json(new.model_dump_json()) == new
+    with pytest.raises(ValidationError, match="confidence"):
+        make_label({**TRAJ, "samples": [{**sample, "confidence": 1.5}]}, stream_id="bodycam")
+
+
+def test_session_camera_id_is_optional_and_omitted_when_absent() -> None:
+    """ADR 0045: 세션 캘리브레이션의 기기 ID는 선택이고 없으면 JSON에 없다 (예전 세션과 같은
+    JSON)."""
+    plain = make_session()
+    assert '"camera_id"' not in plain.model_dump_json()
+    tagged = make_session(calibration=Calibration(camera_id="cam-01"))
+    assert Session.model_validate_json(tagged.model_dump_json()) == tagged
+    with pytest.raises(ValidationError):
+        Calibration(camera_id="bad id")
 
 
 @pytest.mark.parametrize(

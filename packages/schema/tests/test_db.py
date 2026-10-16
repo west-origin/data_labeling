@@ -234,11 +234,11 @@ def test_labels_are_immutable_except_review(pg: sa.Engine) -> None:
             conn.execute(sa.text(statement))
 
 
-# TRUNCATE를 막아야 하는 추가 전용 테이블 (0010~0012, 0017, 0021)
+# TRUNCATE를 막아야 하는 추가 전용 테이블 (0010~0012, 0017, 0021, 0022)
 APPEND_ONLY_TABLES = (
     "label_records", "raw_access_log", "review_work", "privacy_audits", "retention_decisions",
     "session_lifecycle_events", "privacy_detection_runs", "privacy_holds",
-    "description_inheritance",
+    "description_inheritance", "camera_calibrations", "worker_hand_sizes",
 )  # fmt: skip
 
 
@@ -251,6 +251,35 @@ def test_append_only_tables_cannot_be_truncated(pg: sa.Engine, table: str) -> No
     if table == "label_records":
         with pytest.raises(DBAPIError, match="TRUNCATE"), pg.begin() as conn:
             conn.execute(sa.text("TRUNCATE sessions CASCADE"))
+
+
+@pytest.mark.services
+def test_calibration_registries_are_append_only(pg: sa.Engine) -> None:
+    """카메라 내부 파라미터·작업자 손 크기 등록(0022, ADR 0045)은 수정·삭제할 수 없다."""
+    from dlp_schema.calibration import CalibrationMethod, HandSizeSource
+    from dlp_schema.db.calibration_repository import (
+        register_camera_calibration,
+        register_hand_size,
+    )
+    from dlp_schema.session import CameraIntrinsics
+
+    k = CameraIntrinsics(width=640, height=480, fx=500.0, fy=500.0, cx=320.0, cy=240.0)
+    with pg.begin() as conn:
+        register_camera_calibration(conn, "cam-1", k, method=CalibrationMethod.IMPORTED,
+                                    now=FIXED_TIME)  # fmt: skip
+        register_hand_size(conn, "w01", 0.08, source=HandSizeSource.MEASURED, now=FIXED_TIME)
+    for table, statement in (
+        ("camera_calibrations", "UPDATE camera_calibrations SET camera_id = 'x'"),
+        ("camera_calibrations", "DELETE FROM camera_calibrations"),
+        ("worker_hand_sizes", "UPDATE worker_hand_sizes SET palm_m = 0.1"),
+        ("worker_hand_sizes", "DELETE FROM worker_hand_sizes"),
+    ):
+        with pytest.raises(DBAPIError, match=table), pg.begin() as conn:
+            conn.execute(sa.text(statement))
+    url = pg.url.render_as_string(hide_password=False)
+    pg.dispose()
+    with pytest.raises(RuntimeError, match="0022"):
+        downgrade(url, "0021")
 
 
 @pytest.mark.services

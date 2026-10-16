@@ -17,7 +17,7 @@
 
 주요 이름
     - 메타데이터: `Source`, `Evidence`, `VerificationState`, `Provenance`, `Verification`.
-    - 좌표·3D: `CoordinateFrame`, `Source3D`, `Hand`.
+    - 좌표·3D: `CoordinateFrame`, `Source3D`, `Lift3DMethod`, `IntrinsicsSource`(ADR 0045), `Hand`.
     - 키프레임: `BoxKeyframe`, `Rle`, `MaskKeyframe`, `Keypoint`, `KeypointFrame`, `WorldPoint`,
       `Trajectory3DSample`. `without_world`(손 중심 3D 점을 뺀 사본, ADR 0044).
     - 페이로드: `*Payload` 14종과 판별 공용체 `LabelPayload`.
@@ -77,6 +77,18 @@ class Source3D(StrEnum):
     VISUAL_SLAM = "visual_slam"  # 영상 SLAM
     VISUAL_INERTIAL_SLAM = "visual_inertial_slam"  # 영상 + IMU SLAM
     MULTI_VIEW = "multi_view"  # 여러 카메라 삼각측량
+
+
+# 3D 표본 하나를 얻은 추정 방식 (단안 깊이 결과, ADR 0045).
+class Lift3DMethod(StrEnum):
+    HAND_FIT = "hand_fit"  # 손 중심 3D 점 + 2D + 손바닥 깊이·손 크기 사전값 맞춤 (ADR 0044)
+    POINT_DEPTH = "point_depth"  # 그 픽셀의 깊이로 역투영 (관절별 깊이, 박스 중심)
+
+
+# 3D로 올릴 때 쓴 카메라 내부 파라미터의 출처 (ADR 0045).
+class IntrinsicsSource(StrEnum):
+    CALIBRATED = "calibrated"  # 세션 캘리브레이션 또는 등록된 카메라 캘리브레이션
+    HFOV_APPROX = "hfov_approx"  # 캘리브레이션 없음: 정책 기본 화각 근사
 
 
 # 작업자의 왼손·오른손 (작업자 기준. 영상의 좌우와 다를 수 있다).
@@ -269,6 +281,8 @@ class BlurTrackPayload(Contract):
 
 # 3D 궤적 표본. t_ms: 그 영상 스트림 PTS ms. x, y, z: 위치 (미터, frame 좌표계).
 # qw, qx, qy, qz: 방향 쿼터니언 (카메라 자세처럼 회전이 있을 때만, 없으면 모두 None).
+# method / confidence: 이 표본을 얻은 추정 방식과 그 품질로 정한 신뢰도 (선택, ADR 0045). None이면
+#   JSON에 싣지 않는다 (예전 라벨과 같은 JSON·해시).
 class Trajectory3DSample(Contract):
     t_ms: Ms
     x: float
@@ -278,6 +292,12 @@ class Trajectory3DSample(Contract):
     qx: float | None = None
     qy: float | None = None
     qz: float | None = None
+    method: Lift3DMethod | None = Field(
+        default=None, exclude_if=_drop_none, description="이 표본을 얻은 추정 방식"
+    )
+    confidence: Confidence | None = Field(
+        default=None, exclude_if=_drop_none, description="이 표본의 신뢰도 (맞춤 품질로 정함)"
+    )
 
 
 class Trajectory3DPayload(Contract):
@@ -287,12 +307,18 @@ class Trajectory3DPayload(Contract):
     #   `Ontology.known_parts` 안). None이면 개체 전체(중심).
     # frame: 좌표계. source_3d: 3D를 얻은 방법. samples: 1개 이상.
 
+    # intrinsics: 단안 깊이로 올릴 때 쓴 내부 파라미터의 출처 (선택, 궤적 안 모든 표본이 같다,
+    #   ADR 0045). None이면 JSON에 싣지 않는다.
+
     kind: Literal["trajectory3d"] = "trajectory3d"
     entity_id: Identifier
     part: OntologyId | None = None
     frame: CoordinateFrame
     source_3d: Source3D
     samples: tuple[Trajectory3DSample, ...] = Field(min_length=1)
+    intrinsics: IntrinsicsSource | None = Field(
+        default=None, exclude_if=_drop_none, description="카메라 내부 파라미터 출처"
+    )
 
 
 # ---------------------------------------------------------------- 시간 구간

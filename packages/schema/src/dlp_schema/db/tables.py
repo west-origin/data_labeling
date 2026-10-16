@@ -24,6 +24,8 @@
     - ai_review_runs, ai_review_run_events, ai_review_units, ai_review_exposures,
       ai_review_outcomes: AI 1차 검수 기록 (라벨이 아니다), 수정·삭제·TRUNCATE 금지
       (0019, ADR 0040).
+    - camera_calibrations, worker_hand_sizes: 카메라 내부 파라미터·작업자 손 크기 등록, 수정·
+      삭제·TRUNCATE 금지 (0022, ADR 0045).
 
 열 규약
     - 시각(`Ts`)은 모두 `TIMESTAMP WITH TIME ZONE`. 파이썬 쪽도 시간대 있는 datetime만 쓴다.
@@ -667,4 +669,34 @@ ai_review_outcomes = sa.Table(
     sa.Column("collected_at", Ts, nullable=False, index=True),
     sa.Column("items", Json, nullable=False),
     sa.Column("warnings", Json, nullable=False),
+)
+
+# 카메라(바디캠 기기) 내부 파라미터 등록 (`CameraCalibration`, ADR 0045). 추가만 한다 (0022 트리거).
+# 세션은 calibration.camera_id로 기기를 가리키고, 3D 단계가 `calibration.resolve_intrinsics`
+# 규칙(유효 시작 ≤ 녹화 시각 중 가장 늦은 것, 같으면 늦게 등록한 것)으로 고른다.
+camera_calibrations = sa.Table(
+    "camera_calibrations",
+    metadata,
+    sa.Column("calibration_id", sa.String(128), primary_key=True),
+    sa.Column("camera_id", sa.String(128), nullable=False, index=True),
+    sa.Column("intrinsics", Json, nullable=False),
+    sa.Column("method", sa.String(32), nullable=False),
+    sa.Column("rms_px", sa.Float(), nullable=True),
+    sa.Column("n_views", sa.Integer(), nullable=True),
+    sa.Column("source_sha256", sa.String(64), nullable=True),
+    sa.Column("valid_from", Ts, nullable=True),
+    sa.Column("created_at", Ts, nullable=False),
+)
+
+# 작업자 손바닥 길이 등록 (`WorkerHandSize`, ADR 0045). 추가만 한다 (0022 트리거). 가장 늦게 등록한
+# 값이 그 작업자의 3D 손 맞춤 손 크기 사전값이다. 작업자 ID는 내보내기에 넣지 않는다.
+worker_hand_sizes = sa.Table(
+    "worker_hand_sizes",
+    metadata,
+    sa.Column("record_id", sa.String(128), primary_key=True),
+    sa.Column("worker_id", sa.String(128), nullable=False, index=True),
+    sa.Column("palm_m", sa.Float(), nullable=False),
+    sa.Column("source", sa.String(32), nullable=False),
+    sa.Column("n_samples", sa.Integer(), nullable=True),
+    sa.Column("created_at", Ts, nullable=False),
 )

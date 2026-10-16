@@ -130,6 +130,11 @@ class CameraIntrinsics(Contract):
     distortion: tuple[float, ...] = ()
 
 
+def _drop_none(value: object) -> bool:
+    """직렬화에서 뺄 값인가 (None). 선택 필드를 더해도 예전 세션의 JSON이 그대로이게 한다."""
+    return value is None
+
+
 class Calibration(Contract):
     """세션 단위 캘리브레이션. 장착 위치가 바뀔 수 있어 세션마다 기록한다."""
 
@@ -137,9 +142,15 @@ class Calibration(Contract):
     # intrinsics: 바디캠 내부 파라미터. 없으면 깊이·3D 단계가 정책 기본값을 쓴다.
     # camera_imu_extrinsics: IMU 좌표계 → 카메라 좌표계 4x4 동차 변환 (행 우선 중첩 튜플).
     # glove_model: 장갑 기종 이름. glove_calibration: 장갑 보정 값 (이름 → 값, 기종별).
+    # camera_id: 바디캠 기기 ID (선택, ADR 0045). intrinsics가 없으면 3D 단계가 이 기기의 등록된
+    #   캘리브레이션(`dlp calib intrinsics|import`, DB camera_calibrations)을 쓴다. None이면 JSON에
+    #   싣지 않는다 (예전 세션과 같은 JSON).
 
     mount_position: str | None = None
     intrinsics: CameraIntrinsics | None = None
+    camera_id: Identifier | None = Field(
+        default=None, exclude_if=_drop_none, description="바디캠 기기 ID (등록된 캘리브레이션 조회)"
+    )
     camera_imu_extrinsics: tuple[tuple[float, ...], ...] | None = Field(
         default=None, description="IMU→카메라 4x4 변환 행렬"
     )

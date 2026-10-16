@@ -585,6 +585,14 @@
       "title": "HandStatePayload",
       "type": "object"
     },
+    "IntrinsicsSource": {
+      "enum": [
+        "calibrated",
+        "hfov_approx"
+      ],
+      "title": "IntrinsicsSource",
+      "type": "string"
+    },
     "Keypoint": {
       "additionalProperties": false,
       "properties": {
@@ -919,6 +927,14 @@
       ],
       "title": "LabelRecord",
       "type": "object"
+    },
+    "Lift3DMethod": {
+      "enum": [
+        "hand_fit",
+        "point_depth"
+      ],
+      "title": "Lift3DMethod",
+      "type": "string"
     },
     "MaskKeyframe": {
       "additionalProperties": false,
@@ -1271,6 +1287,18 @@
         "frame": {
           "$ref": "#/$defs/CoordinateFrame"
         },
+        "intrinsics": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IntrinsicsSource"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "카메라 내부 파라미터 출처"
+        },
         "kind": {
           "const": "trajectory3d",
           "default": "trajectory3d",
@@ -1314,6 +1342,33 @@
     "Trajectory3DSample": {
       "additionalProperties": false,
       "properties": {
+        "confidence": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "이 표본의 신뢰도 (맞춤 품질로 정함)",
+          "title": "Confidence"
+        },
+        "method": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Lift3DMethod"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "이 표본을 얻은 추정 방식"
+        },
         "qw": {
           "anyOf": [
             {
