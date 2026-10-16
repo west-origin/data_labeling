@@ -447,6 +447,54 @@ def test_lerobot_frame_features(
     assert ep.used == {f"s1-{k}" for k in ("kp", "hs", "tip", "tsc", "act", "task")}
 
 
+def test_lerobot_hand_point_confidence_follows_sample_confidence(
+    scenario: Scenario, policy: ExportPolicy, ontology: Ontology, tmp_path: Path
+) -> None:
+    """ADR 0045: 손 3D 점마다 표본 신뢰도를 `annotation.hand_points_3d_confidence`에 싣는다.
+
+    시나리오: 오른손 손목 3D 표본 100 ms(신뢰도 0.4)·300 ms(0.8), 엄지 끝 3D는 신뢰도 없는 표본
+    (예전·사람 궤적). 정답: 200 ms는 두 표본의 선형 보간 0.6, 엄지 끝은 값이 있어도(present 1)
+    신뢰도 -1, 왼손·궤적 밖 시각은 -1. 열 순서는 손(왼, 오른) x hand_points_3d.
+    """
+    lp = policy.lerobot
+    video = tmp_path / "v.mp4"
+    scenario.labeling.get_file("sessions/s1/blurred/bodycam.mp4", video)
+    base = {"session_id": "s1", "stream_id": "bodycam", "ontology_version": "1.0.0"}
+    wrist = make_label(
+        {"kind": "trajectory3d", "entity_id": "right_hand", "part": "wrist", "frame": "camera",
+         "source_3d": "mono_depth", "intrinsics": "calibrated",
+         "samples": [{"t_ms": 100, "x": 0.1, "y": 0.0, "z": 0.5, "method": "hand_fit",
+                      "confidence": 0.4},
+                     {"t_ms": 300, "x": 0.3, "y": 0.0, "z": 0.5, "method": "hand_fit",
+                      "confidence": 0.8}]},
+        label_id="s1-wrist3d", t_start_ms=100, t_end_ms=300, **base,
+    )  # fmt: skip
+    thumb = make_label(
+        {"kind": "trajectory3d", "entity_id": "right_hand", "part": "thumb_tip", "frame": "camera",
+         "source_3d": "mono_depth",
+         "samples": [{"t_ms": 100, "x": 0.1, "y": 0.0, "z": 0.5},
+                     {"t_ms": 300, "x": 0.3, "y": 0.0, "z": 0.5}]},
+        label_id="s1-thumb3d", t_start_ms=100, t_end_ms=300, **base,
+    )  # fmt: skip
+    labels = [*source(scenario, policy).sessions[0].labels, wrist, thumb]
+    ep = build_episode(
+        scenario.session, scenario.session.streams[0], build_pts_index(video), (64, 48), labels,
+        Vocab.from_ontology(ontology), lp,
+    )  # fmt: skip
+    n = len(lp.hand_points_3d)
+    assert ep.hand_points_3d_confidence.shape == (len(ep.times_ms), 2 * n)
+    col = {name: i for i, name in enumerate(state_names(lp))}
+    k = int(np.argmin(np.abs(ep.times_ms - 200)))
+    w, th = lp.hand_points_3d.index("wrist"), lp.hand_points_3d.index("thumb_tip")
+    right = ep.hand_points_3d_confidence[k, n:]
+    expected = 0.4 + 0.4 * (ep.times_ms[k] - 100) / 200
+    assert right[w] == pytest.approx(expected, abs=1e-5)
+    assert ep.state[k, col["right.thumb_tip.present"]] == 1.0 and right[th] == -1.0
+    assert np.all(ep.hand_points_3d_confidence[k, :n] == -1.0)
+    late = int(np.argmin(np.abs(ep.times_ms - 700)))
+    assert np.all(ep.hand_points_3d_confidence[late] == -1.0)
+
+
 def test_lerobot_counts_only_written_labels(
     scenario: Scenario, policy: ExportPolicy, ontology: Ontology, tmp_path: Path
 ) -> None:

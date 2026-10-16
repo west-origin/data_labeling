@@ -214,6 +214,11 @@ def features(policy: LeRobotPolicy, height: int, width: int) -> dict[str, Any]:
         "annotation.verification": {
             "dtype": "int64", "shape": [len(GROUPS)], "names": list(GROUPS),
         },
+        # 손 3D 점(observation.state의 x3d·y3d·z3d)마다 표본 신뢰도 (0~1, 없으면 -1, ADR 0045)
+        "annotation.hand_points_3d_confidence": {
+            "dtype": "float32", "shape": [2 * len(policy.hand_points_3d)],
+            "names": [f"{h}.{p}" for h in hands for p in policy.hand_points_3d],
+        },
     }  # fmt: skip
 
 
@@ -248,6 +253,11 @@ def _interp(
     return v0 * (1 - w) + v1 * w
 
 
+def _nan_if_none(value: float | None) -> float:
+    """None이면 NaN (보간에서 "없음"이 퍼지게)."""
+    return math.nan if value is None else value
+
+
 def _covering(labels: list[LabelRecord], t: float) -> list[LabelRecord]:
     """시각 t(마스터 ms)를 덮는 구간 라벨 (반열린 [시작, 끝), 길이 0이면 그 시각에서만).
 
@@ -270,6 +280,10 @@ class Episode:
     verification: NDArray[np.int64]  # (n, len(GROUPS))
     tasks: list[str]  # 길이 n, 프레임별 task 문자열
     used: frozenset[str] = frozenset()  # 실제로 어느 프레임 특징에 들어간 라벨 ID
+    # (n, 2*len(hand_points_3d)): 손 3D 점 신뢰도 (없으면 -1, ADR 0045)
+    hand_points_3d_confidence: NDArray[np.float32] = field(
+        default_factory=lambda: np.zeros((0, 0), np.float32)
+    )
 
 
 def build_episode(  # noqa: C901
@@ -347,7 +361,8 @@ def build_episode(  # noqa: C901
             traj.setdefault((p.entity_id, p.part), []).append(
                 (
                     [
-                        (s.t_ms, np.array([s.x, s.y, s.z]))
+                        # [x, y, z, 신뢰도]. 표본 신뢰도가 없으면(예전·사람 궤적) NaN (ADR 0045)
+                        (s.t_ms, np.array([s.x, s.y, s.z, _nan_if_none(s.confidence)]))
                         for s in sorted(p.samples, key=lambda s: s.t_ms)
                     ],
                     x,
@@ -357,7 +372,10 @@ def build_episode(  # noqa: C901
     def traj_at(
         entity: str, part: str | None, ts: float
     ) -> tuple[NDArray[np.float64], LabelRecord] | None:
-        """개체·부분의 스트림 시각 ts 3D 좌표와 그 값을 준 라벨 (없으면 None)."""
+        """개체·부분의 스트림 시각 ts [x, y, z, 신뢰도]와 그 값을 준 라벨 (없으면 None).
+
+        신뢰도는 두 표본 사이 선형 보간이고, 어느 한쪽이라도 없으면 NaN이다.
+        """
         for series, x in traj.get((entity, part), []):
             v = _interp(series, ts, gap)
             if v is not None:
@@ -384,6 +402,8 @@ def build_episode(  # noqa: C901
     # 값이 없으면 state는 0(present·v 열도 0), 정수 특징은 -1
     state = np.zeros((n, dim), np.float32)
     hs = np.full((n, 8), -1, np.int64)
+    # 손 3D 점 신뢰도 (손마다 hand_points_3d 순서, 값이나 신뢰도가 없으면 -1, ADR 0045)
+    conf3d = np.full((n, 2 * len(policy.hand_points_3d)), -1.0, np.float32)
     tsc = np.full((n, 2), -1, np.int64)
     verb = np.full((n, 2), -1, np.int64)
     ver = np.full((n, len(GROUPS)), -1, np.int64)
@@ -418,7 +438,9 @@ def build_episode(  # noqa: C901
             for pi, part in enumerate(policy.hand_points_3d):
                 got = traj_at(f"{hand.value}_hand", part, ts)
                 if got is not None:
-                    state[k, base + pi * 4 : base + pi * 4 + 4] = [*got[0], 1.0]
+                    state[k, base + pi * 4 : base + pi * 4 + 4] = [*got[0][:3], 1.0]
+                    c = float(got[0][3])
+                    conf3d[k, hi * len(policy.hand_points_3d) + pi] = -1.0 if math.isnan(c) else c
                     worse(k, 1, got[1])
             # 손 상태와 쥔 도구
             cur = [x for x in _covering(hand_states, t) if x.payload.hand is hand]  # type: ignore[union-attr]
@@ -456,7 +478,7 @@ def build_episode(  # noqa: C901
                 for part in sorted(p for e, p in traj if e == tool_id and p in vocab.working_parts):
                     got = traj_at(tool_id, part, ts)
                     if got is not None:
-                        state[k, tip_base : tip_base + 4] = [*got[0], 1.0]
+                        state[k, tip_base : tip_base + 4] = [*got[0][:3], 1.0]
                         worse(k, 1, got[1])
                         break
             # 행동
@@ -476,7 +498,7 @@ def build_episode(  # noqa: C901
     # action = 다음 프레임 state (마지막 프레임은 자기 자신)
     action = np.concatenate([state[1:], state[-1:]], axis=0)
     return Episode(
-        frame_index, times, state, action, hs, tsc, verb, ver, task_names, frozenset(used)
+        frame_index, times, state, action, hs, tsc, verb, ver, task_names, frozenset(used), conf3d
     )
 
 
@@ -519,6 +541,7 @@ def write_package(
             tool_surface_contact=ep.tool_surface_contact,
             verb=ep.verb,
             verification=ep.verification,
+            hand_points_3d_confidence=ep.hand_points_3d_confidence,
         )
         items.append({"session_id": ids.session(session.session_id), "video": str(video),
                       "npz": str(npz), "tasks": ep.tasks})  # fmt: skip

@@ -14,7 +14,7 @@ package.json은 dlp_export.lerobot.write_package가 만든다: 에피소드마�
 package.json 키: `repo_id`, `fps`, `robot_type`, `vcodec`, `width`, `height`, `video_key`,
 `features`(이름 → LeRobot 특징 정의), `episodes`(각각 `video`, `npz`, `tasks`).
 npz 배열: `frame_index`, `state`, `action`, `hand_state`, `tool_surface_contact`, `verb`,
-`verification` (첫 축 = 에피소드 프레임).
+`verification`, `hand_points_3d_confidence`(ADR 0045) (첫 축 = 에피소드 프레임).
 """
 
 from __future__ import annotations
@@ -91,6 +91,7 @@ def main() -> None:
                 "annotation.tool_surface_contact": data["tool_surface_contact"][k],
                 "annotation.verb": data["verb"][k],
                 "annotation.verification": data["verification"][k],
+                "annotation.hand_points_3d_confidence": data["hand_points_3d_confidence"][k],
                 "task": ep["tasks"][k],
             })  # fmt: skip
         ds.save_episode()

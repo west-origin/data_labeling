@@ -47,6 +47,9 @@ def main() -> None:
             "tool_surface_contact": [int(v) for v in x["annotation.tool_surface_contact"]],
             "verb": [int(v) for v in x["annotation.verb"]],
             "verification": [int(v) for v in x["annotation.verification"]],
+            "hand_points_3d_confidence": [
+                float(v) for v in x["annotation.hand_points_3d_confidence"]
+            ],
         })  # fmt: skip
     print(json.dumps(out))
 
