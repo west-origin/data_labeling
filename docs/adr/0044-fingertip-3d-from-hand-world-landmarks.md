@@ -1,6 +1,6 @@
 # ADR 0044: 단일 카메라 영상에서 손가락 끝 3D를 손 모델 3D 점으로 맞춘다
 
-- 상태: 채택
+- 상태: 채택 (2026-10-16 개정: 1절 부분 수정 트랙의 world 보존, 4절·열린 결정은 ADR 0045로 이어짐)
 - 날짜: 2026-10-15
 - 관련: ADR 0002(계약·라벨 저장), ADR 0006(검수 도구 무손실 왕복), ADR 0008·0009(프리라벨 어댑터·모델
   레지스트리), ADR 0010(모델 상업 사용), ADR 0015·0026(검수된 라벨 보존, 3D 중복 방지), ADR 0019(공간 라벨
@@ -35,9 +35,18 @@ MediaPipe Hand Landmarker(이미 쓰는 Apache-2.0 모델)는 2D 21점과 함께
 - world는 손 모양 보조 정보이고 검수 대상이 아니다. 검수 도구(CVAT)는 2D만 보이므로:
   - 도구로 보낸 형태(`dlp_review.cvat.quantize`)에서 world를 뺀다 (신뢰도처럼). 고치지 않은 트랙은
     원래 레코드를 승인하므로 world가 남는다 (2D를 승인한 것이고 world는 그 2D와 짝인 모델 출력이다).
-  - 고치거나 새로 그린 사람 레코드에는 world가 없다. `reconcile`도 사람 레코드를 만들 때
-    `without_world`를 적용한다 (다른 경로 방어). **고친 2D와 모델의 예전 world가 함께 남지 않는다.**
-    그 트랙의 3D는 관절별 깊이 방식으로 돌아간다 (아래 4절).
+  - 새로 그린 사람 레코드에는 world가 없다. `reconcile`은 사람 레코드를 만들 때 먼저
+    `without_world`로 들어온 world를 모두 버린다 (다른 경로 방어). **고친 2D와 모델의 예전 world가
+    함께 남지 않는다.**
+  - 2026-10-16 개정 (열린 결정 1): 검수자가 트랙의 일부 키프레임만 고치면, 고친 사람 레코드에서
+    2D가 parent와 같은 키프레임에만 parent의 world를 되살린다 (`reconcile.keep_unchanged_world`).
+    같다의 기준은 같은 시각(t_ms) 키프레임에서 도구로 보낸 형태(CVAT `quantize` 왕복 결과, 좌표 소수
+    셋째 자리와 보임 정도)의 points와 돌아온 points가 정확히 같은 것이다. 그래서 world가 있는
+    키프레임의 2D는 늘 parent 2D의 양자화 값이고(0.0005 px 안), 고친·새 키프레임과 손·개체를 바꾼
+    트랙에는 world가 없다. 그 트랙의 3D는 world가 있는 시각은 맞춤, 없는 시각은 관절별 깊이로 올린다
+    (`lift3d`는 키프레임마다 고른다). 들어온 항목에 실린 world는 쓰지 않고 parent에서만 가져온다.
+    회귀: `packages/review/tests/test_units.py::test_cvat_round_trip_keeps_world_only_on_untouched_hand_keyframes`,
+    `test_partial_world_restore_needs_same_hand_and_exact_2d`.
   - Label Studio는 키포인트 트랙을 다루지 않는다.
 - MediaPipe 어댑터 버전에 `+w1`을 붙여 다시 돌리면 검수 전 손 트랙이 world를 가진 새 버전으로
   바뀐다. 검수된 예전 손 트랙은 지우지 않으므로 world가 없고, 그 트랙을 고르면 관절별 깊이로 올린다.
@@ -54,12 +63,13 @@ ring_tip, pinky_tip). 온톨로지 `hand_joints`에 다섯 손가락 끝이 이�
 1. **이동량 맞춤**: 손 모양 W_i를 그대로 두고 카메라 좌표 Q_i = W_i + T가 2D 픽셀로 투영되도록 T를
    선형 최소제곱으로 푼다 (핀홀 식이 T에 선형). 관절 깊이로 한 번 다시 가중해 잔차를 정규화 재투영
    오차로 맞춘다. 내부 파라미터는 세션 캘리브레이션(`Session.calibration.intrinsics`, 해상도 비례 조정),
-   없으면 `depth.default_hfov_deg` 근사다 (기존 `intrinsics_for`).
+   없으면 등록된 기기 캘리브레이션(ADR 0045), 그것도 없으면 `depth.default_hfov_deg` 근사다
+   (`intrinsics_for`).
 2. **크기(거리)**: 단안 투영은 Q 전체를 카메라 원점 기준으로 k배 해도 같은 2D다. k를 두 근거로 정한다.
    - 깊이 k_depth: 손바닥 관절(`hand_fit.anchor_points`: 손목·MCP)의 깊이 맵 값 / Q_jz의 중앙값.
      얇은 손가락 끝은 쓰지 않는다.
    - 손 크기 사전값 k_size = `reference_palm_m`(0.09 m, 손목 → 중지 MCP) / |W_0 - W_9|. null이면 1
-     (MediaPipe 크기를 믿는다).
+     (MediaPipe 크기를 믿는다). 작업자별 등록값이 있으면 그 값을 쓴다 (ADR 0045).
    - k = exp(w log k_depth + (1 - w) log k_size), w = `depth_weight`(0.5). 깊이가 없거나 두 배율 비가
      `max_scale_ratio`(1.5)를 넘으면(배경·가림 깊이) k = k_size.
 3. P_i = k Q_i. 2D 투영은 맞춘 그대로, 손 안의 상대 위치는 손 모양을 k배 한 것이다.
@@ -73,9 +83,11 @@ ring_tip, pinky_tip). 온톨로지 `hand_joints`에 다섯 손가락 끝이 이�
 ### 4. 바뀌지 않는 것
 
 - 결과는 기존과 같은 trajectory3d (frame=camera, source_3d=mono_depth, part=관절 이름, 표본 시각은 바디캠
-  PTS ms, `depth.confidence` 0.5). 한 궤적 안에 맞춘 시각과 관절별 깊이 시각이 섞일 수 있다. 어느 방식인지
-  표본마다 기록하지 않는다 (열린 결정).
-- 모델 버전 `depth3d-<가중치>+hf1+p<depth 절 해시>+i<입력 해시>`. 정책 값이나 추정기 판(hf1)이 바뀌면
+  PTS ms). 한 궤적 안에 맞춘 시각과 관절별 깊이 시각이 섞일 수 있다. 2026-10-16부터 표본마다 방식과
+  맞춤 품질로 정한 신뢰도를 기록하고 라벨 신뢰도는 그 평균이다 (예전 `depth.confidence` 0.5 고정 삭제,
+  ADR 0045).
+- 모델 버전 `depth3d-<가중치>+hf1+p<depth 절 해시>+i<입력 해시>` (ADR 0045부터 `+hf2`, 끝에
+  `+hp<w|p>`). 정책 값이나 추정기 판(hf1)이 바뀌면
   다시 돌고, 검수 전 이전 3D만 `retractions()`로 지운다. 검수·표본 검증한 3D는 지우지 않는다.
 - 카메라 좌표뿐이다. 월드 좌표(세션 고정)는 카메라 6자유도(SLAM)가 생긴 뒤에 만든다 (F-PAR-26,
   `stubs.CAMERA_POSE`의 `TODO(real-model)` 그대로).
@@ -112,7 +124,8 @@ world landmarks만 쓰므로 `config/models.yaml`에 새 모델은 없다.
 
 - 장점: 손가락 끝 3D가 배경 깊이에 오염되지 않고, 다섯 손가락 끝의 상대 위치가 손 모양으로 묶인다. 새
   모델·DB 변경 없이 기존 버전·검수 보존 규칙을 그대로 쓴다.
-- 비용: 손 트랙 JSON이 키프레임마다 63개 수만큼 커진다 (0.1 mm 반올림). 사람이 고친 손 트랙의 3D는 관절별
-  깊이로 돌아간다.
-- 열린 결정: (1) 고친 트랙에서 고치지 않은 프레임의 world를 되살릴지, (2) 표본별 추정 방식 기록,
-  (3) 실제 세션 캘리브레이션 수집 절차(지금은 없으면 화각 근사), (4) 손 크기 사전값을 작업자별로 둘지.
+- 비용: 손 트랙 JSON이 키프레임마다 63개 수만큼 커진다 (0.1 mm 반올림). 사람이 고친 손 트랙의 3D는 고친
+  키프레임만 관절별 깊이로 돌아간다 (1절 개정).
+- 열린 결정 (2026-10-16 모두 정함): (1) 고친 트랙에서 고치지 않은 프레임의 world를 되살릴지 → 되살린다
+  (1절 개정), (2) 표본별 추정 방식 기록, (3) 실제 세션 캘리브레이션 수집 절차, (4) 손 크기 사전값을
+  작업자별로 둘지 → ADR 0045.

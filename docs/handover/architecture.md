@@ -15,6 +15,7 @@ Prefect 서비스가 기동된 것만으로 모든 작업이 영속 큐에서 �
 | 멀티스트림 시각 보정 | [sync pipeline](../../packages/sync/src/dlp_sync/pipeline.py) | `config/policies/sync.yaml` |
 | 탐지·승인·렌더 | [privacy](../../packages/privacy/src/dlp_privacy/)의 `runner.py`, `generation.py`, `rendering.py`, `revocation.py`(블러 변경 뒤 배포 매체 회수 요청), `hold.py`(사고 대응 승인 보류, ADR 0042) | `config/policies/privacy.yaml` |
 | 자동 라벨 초안 | [prelabel runner](../../packages/prelabel/src/dlp_prelabel/runner.py), `adapters/` | `config/policies/prelabel.yaml`, `config/models.yaml` |
+| 카메라 내부 파라미터·작업자 손 크기 (ADR 0045) | [media calibration](../../packages/media/src/dlp_media/calibration.py)(체커보드·파일), [prelabel palm](../../packages/prelabel/src/dlp_prelabel/palm.py)(손 크기 추정), [등록 저장소](../../packages/schema/src/dlp_schema/db/calibration_repository.py), [CLI](../../packages/cli/src/dlp_cli/calib_cmds.py) | `config/policies/calibration.yaml`, `prelabel.yaml palm_estimate`, 절차 [camera-calibration.md](camera-calibration.md) |
 | 관계·접촉·행동 | [relations](../../packages/relations/src/dlp_relations/), [actions](../../packages/actions/src/dlp_actions/) | 각 단계의 `config/policies/*.yaml` |
 | 설명 영어 번역 (ADR 0043) | [actions](../../packages/actions/src/dlp_actions/)의 `translate.py`(계획·실행), `translators.py`(stub·사내 서버 어댑터, 공통 전송 `dlp_models.vlm`), `translate_policy.py`, [CLI](../../packages/cli/src/dlp_cli/translate_cmds.py)(`dlp actions run` 끝의 자동 번역 포함) | `config/policies/translate.yaml`, `config/models.yaml` external |
 | 고친 행동의 설명 재생성 (ADR 0043 3절) | [actions](../../packages/actions/src/dlp_actions/)의 `describe.py`(대상 계획·설명 전용 VLM 요청·검수 물려받기), [CLI](../../packages/cli/src/dlp_cli/actions_cmds.py)(`dlp actions describe`, `dlp actions run` 끝의 자동 실행) | `config/policies/actions.yaml` (`vlm` 절) |
@@ -70,7 +71,7 @@ Prefect 서비스가 기동된 것만으로 모든 작업이 영속 큐에서 �
 
 | 저장 위치 | 내용·접근 |
 | --- | --- |
-| PostgreSQL | 세션·라벨 이력·탐지 세대·검수 작업·배포·내보내기 이력·감사, AI 1차 검수 기록(`ai_review_*` 5개 표, 추가 전용, 라벨이 아니다, ADR 0040) |
+| PostgreSQL | 세션·라벨 이력·탐지 세대·검수 작업·배포·내보내기 이력·감사, AI 1차 검수 기록(`ai_review_*` 5개 표, 추가 전용, 라벨이 아니다, ADR 0040), 기기 내부 파라미터·작업자 손 크기 등록(추가 전용, ADR 0045) |
 | 원본 버킷 | 영상·프록시·PTS·센서 파생물. CLI는 [raw_store](../../packages/cli/src/dlp_cli/raw_access.py) 감사 경로 사용 |
 | 라벨링 버킷 | 승인된 블러본·렌더 기록·워터마크 검수 영상·시계열 CSV |
 | 데이터셋 버킷/lakeFS | 버전 스냅샷·내보내기·내부 가명 대응표(구매자 공개 금지) |

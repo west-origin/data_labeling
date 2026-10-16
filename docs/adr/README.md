@@ -51,3 +51,4 @@ ADR은 결정 당시의 이유와 이관 조건을 기록한다. 후속 ADR이 �
 | 0042 | [ADR 0042: 사고 대응 중 프라이버시 승인을 보류한다](0042-privacy-approval-hold.md) |
 | 0043 | [ADR 0043: 라벨을 한국어와 영어로 함께 남긴다 (온톨로지 영어 이름, 설명 자동 번역)](0043-bilingual-labels.md) |
 | 0044 | [ADR 0044: 단일 카메라 영상에서 손가락 끝 3D를 손 모델 3D 점으로 맞춘다](0044-fingertip-3d-from-hand-world-landmarks.md) |
+| 0045 | [ADR 0045: 3D 표본의 방식·신뢰도, 카메라 내부 파라미터 등록, 작업자 손 크기 사전값](0045-3d-sample-quality-calibration-and-hand-size.md) |
