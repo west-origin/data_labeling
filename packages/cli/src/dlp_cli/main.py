@@ -27,6 +27,7 @@ from dlp_cli import (
     actions_cmds,
     active_cmds,
     aireview_cmds,
+    calib_cmds,
     dataset_cmds,
     eval_cmds,
     export_cmds,
@@ -127,6 +128,7 @@ def build_parser() -> argparse.ArgumentParser:
     review_cmds.add_commands(sub)  # dlp review … — 검수 도구 연동·운영 (WP6, WP12)
     dataset_cmds.add_commands(sub)  # dlp dataset … / dlp lineage — 데이터셋·계보 (WP7)
     prelabel_cmds.add_commands(sub)  # dlp prelabel run — 자동 프리라벨 (WP8)
+    calib_cmds.add_commands(sub)  # dlp calib … — 카메라 내부 파라미터·작업자 손 크기 (ADR 0045)
     relations_cmds.add_commands(sub)  # dlp relations run — 관계 도출 (WP9)
     actions_cmds.add_commands(sub)  # dlp actions run — 행동 구간 (WP10)
     translate_cmds.add_commands(sub)  # dlp translate run|pending — 설명 영어 번역 (ADR 0043)

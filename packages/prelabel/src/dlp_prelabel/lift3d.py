@@ -20,7 +20,7 @@ source_3d=mono_depth)이고, 관계 단계(`dlp_relations`)의 도구-표면 접
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable
+from collections.abc import Container, Iterable, Iterator
 from datetime import datetime
 from pathlib import Path
 from typing import Protocol
@@ -31,16 +31,18 @@ from numpy.typing import NDArray
 from dlp_models.depth import Intrinsics, MetricDepth, sample_depth
 from dlp_models.registry import resolve
 from dlp_prelabel.common import Image, iter_frames, model_label
-from dlp_prelabel.handfit import fit_hand
+from dlp_prelabel.handfit import HandFit, fit_confidence, fit_hand, point_confidence
 from dlp_prelabel.policy import HAND21_JOINTS, DepthPolicy, PrelabelPolicy
 from dlp_schema.episode import version_tag
 from dlp_schema.labels import (
     BoxTrackPayload,
     CoordinateFrame,
+    IntrinsicsSource,
     KeypointFrame,
     KeypointTrackPayload,
     LabelPayload,
     LabelRecord,
+    Lift3DMethod,
     Source3D,
     Trajectory3DPayload,
     Trajectory3DSample,
@@ -144,40 +146,109 @@ def _unproject_depth(
     return intr.unproject(u, v, z)
 
 
-def _lift_hand(
+# 표본 하나: (부위 이름, 카메라 좌표, 추정 방식, 신뢰도)
+_Lifted = tuple[str, tuple[float, float, float], Lift3DMethod, float]
+
+
+def hand_fit_of(
     frame: KeypointFrame, dmap: NDArray[np.float32], intr: Intrinsics, policy: DepthPolicy
-) -> list[tuple[str, tuple[float, float, float]]]:
-    """손 키프레임 하나 → (관절 이름, 카메라 좌표) 목록 (`policy.hand_points` 중 보이는 관절).
+) -> HandFit | None:
+    """손 키프레임의 손 맞춤 (world가 없거나 맞춤이 안 되면 None, `handfit.fit_hand`)."""
+    if frame.world is None:
+        return None
+    world = np.array([[w.x, w.y, w.z] for w in frame.world], dtype=np.float64)
+    pixels = np.array([[q.x, q.y] for q in frame.points], dtype=np.float64)
+    visible = np.array([q.visibility > 0 for q in frame.points])
+    return fit_hand(world, pixels, visible, dmap, intr, policy)
+
+
+def _lift_hand(
+    frame: KeypointFrame,
+    dmap: NDArray[np.float32],
+    intr: Intrinsics,
+    policy: DepthPolicy,
+    calibrated: bool,
+) -> list[_Lifted]:
+    """손 키프레임 하나 → (관절 이름, 카메라 좌표, 방식, 신뢰도) 목록.
+
+    `policy.hand_points` 중 보이는 관절만 낸다.
 
     world가 있고 맞춤이 되면 `handfit.fit_hand` 결과를 쓴다 (깊이 z가 [min_depth_m, max_depth_m]
     밖인 관절은 뺀다). 아니면 관절마다 그 픽셀 깊이로 역투영한다. visibility 0(라벨 없음)인 관절은
-    올리지 않는다.
+    올리지 않는다. 신뢰도는 맞춤이면 `fit_confidence`(그 시각 맞춤 품질, 관절마다 같다), 깊이면
+    `point_confidence` (ADR 0045).
     """
-    fitted: NDArray[np.float64] | None = None
-    if frame.world is not None:
-        world = np.array([[w.x, w.y, w.z] for w in frame.world], dtype=np.float64)
-        pixels = np.array([[q.x, q.y] for q in frame.points], dtype=np.float64)
-        visible = np.array([q.visibility > 0 for q in frame.points])
-        fitted = fit_hand(world, pixels, visible, dmap, intr, policy)
-    out: list[tuple[str, tuple[float, float, float]]] = []
+    fitted = hand_fit_of(frame, dmap, intr, policy)
+    out: list[_Lifted] = []
+    if fitted is not None:
+        conf = fit_confidence(fitted, calibrated=calibrated, policy=policy)
+    else:
+        conf = point_confidence(calibrated=calibrated, policy=policy)
     for i in policy.hand_points:
         kp = frame.points[i]
         if kp.visibility == 0:
             continue
         if fitted is not None:
-            x, y, z = (float(c) for c in fitted[i])
+            x, y, z = (float(c) for c in fitted.points[i])
             xyz = (x, y, z) if policy.min_depth_m <= z <= policy.max_depth_m else None
+            method = Lift3DMethod.HAND_FIT
         else:
             xyz = _unproject_depth(dmap, intr, kp.x, kp.y, policy)
+            method = Lift3DMethod.POINT_DEPTH
         if xyz is not None:
-            out.append((HAND21_NAMES[i], xyz))
+            out.append((HAND21_NAMES[i], xyz, method, conf))
     return out
 
 
-def _sample(t: int, xyz: tuple[float, float, float]) -> Trajectory3DSample:
-    """3D 표본 (소수 넷째 자리, 0.1 mm)."""
+def _sample(
+    t: int, xyz: tuple[float, float, float], method: Lift3DMethod, confidence: float
+) -> Trajectory3DSample:
+    """3D 표본 (소수 넷째 자리, 0.1 mm)과 그 추정 방식·신뢰도."""
     x, y, z = xyz
-    return Trajectory3DSample(t_ms=t, x=round(x, 4), y=round(y, 4), z=round(z, 4))
+    return Trajectory3DSample(
+        t_ms=t,
+        x=round(x, 4),
+        y=round(y, 4),
+        z=round(z, 4),
+        method=method,
+        confidence=confidence,
+    )
+
+
+def depth_frames(
+    frames: Iterable[tuple[int, Image]],
+    wanted: Container[int],
+    depth: DepthModel,
+    calib: CameraIntrinsics | None,
+    policy: DepthPolicy,
+) -> Iterator[tuple[int, NDArray[np.float32], Intrinsics]]:
+    """깊이를 만들 프레임마다 (PTS ms, 깊이 맵, 내부 파라미터).
+
+    wanted에 있는 시각의 프레임 중 마지막으로 깊이를 만든 프레임에서 frame_stride_ms가 지나기 전
+    프레임은 건너뛴다 (0이어도 1 ms로 두어 같은 시각을 두 번 쓰지 않는다). 내부 파라미터는 첫
+    처리 프레임의 크기로 한 번 정한다 (`intrinsics_for`, 영상 중간에 해상도가 바뀌지 않는다고 본다).
+    `lift_tracks`와 작업자 손 크기 추정(`dlp_prelabel.palm`)이 함께 쓴다.
+    """
+    min_gap = max(policy.frame_stride_ms, 1)
+    last: int | None = None
+    intr: Intrinsics | None = None
+    for t, img in frames:
+        if t not in wanted or (last is not None and t - last < min_gap):
+            continue
+        last = t
+        if intr is None:
+            intr = intrinsics_for(calib, img.shape[1], img.shape[0], policy.default_hfov_deg)
+        yield t, depth.predict(img), intr
+
+
+def hand_frames_by_time(
+    tracks: list[LabelRecord],
+) -> dict[int, list[tuple[str, KeypointFrame]]]:
+    """스트림 PTS ms → 그 시각 (개체, 손 키프레임).
+
+    hand21 트랙만 보며 `_points_by_time`과 같은 검사(같은 개체 트랙 둘이면 ValueError)를 한다.
+    """
+    return _points_by_time(tracks)[1]
 
 
 def lift_tracks(
@@ -195,15 +266,17 @@ def lift_tracks(
     정확히 같은 프레임에서만 읽고, 마지막으로 깊이를 만든 프레임에서 frame_stride_ms가 지나기 전
     프레임은 건너뛴다 (0이어도 마지막 프레임보다 늦은 프레임만 쓴다: PTS 반올림으로 같은 ms 프레임이
     이어져도 표본은 시각마다 하나). 깊이가 nan(화면 밖)이거나 [min_depth_m, max_depth_m] 밖이면 그
-    점은 버린다.
+    점은 버린다. 표본마다 추정 방식(`Lift3DMethod`)과 신뢰도를 싣는다 (ADR 0045).
 
     Args:
         frames: (스트림 PTS ms, RGB 프레임) 순회 (`common.iter_frames`).
         depth: 깊이 추론기 (프레임마다 미터 깊이 맵).
         tracks: 바디캠 현재 라벨 중 키포인트·박스 트랙 (`lift_key`가 None인 것은 무시).
             (개체, 트랙 종류)마다 하나여야 한다 (러너는 `runner.pick_lift_tracks`로 고른다).
-        calib: 세션 카메라 내부 파라미터 (None이면 화각 근사). 첫 처리 프레임 크기로 한 번 정한다.
-        policy: `prelabel.yaml depth`.
+        calib: 카메라 내부 파라미터 (세션 또는 등록된 캘리브레이션, None이면 화각 근사). 첫 처리
+            프레임 크기로 한 번 정한다.
+        policy: `prelabel.yaml depth` (작업자 손 크기 사전값은 `hand_fit.reference_palm_m`을 바꾼
+            사본으로 넘긴다).
 
     Returns:
         (entity_id, part) → 시각 순(중복 없음) `Trajectory3DSample` (카메라 좌표 m, 소수 넷째 자리).
@@ -213,36 +286,42 @@ def lift_tracks(
     """
     # 1단계: 스트림 PTS ms → 그 시각에 올릴 박스 중심과 손 키프레임
     points, hands = _points_by_time(tracks)
-    # 깊이를 만드는 프레임 사이 최소 간격. 0이어도 1 ms로 두어 같은 시각을 두 번 쓰지 않는다
-    min_gap = max(policy.frame_stride_ms, 1)
+    calibrated = calib is not None
+    box_conf = point_confidence(calibrated=calibrated, policy=policy)
     out: dict[tuple[str, str | None], list[Trajectory3DSample]] = {}
-    last: int | None = None
-    intr: Intrinsics | None = None
-    for t, img in frames:
-        # 2단계: 점이 있는 프레임 중 frame_stride_ms 간격으로만 깊이를 만든다 (CPU 비용)
-        if (t not in points and t not in hands) or (last is not None and t - last < min_gap):
-            continue
-        last = t
-        if intr is None:
-            # 내부 파라미터는 첫 처리 프레임의 크기로 한 번 정한다 (영상 중간에 해상도가 바뀌지
-            # 않는다고 본다)
-            intr = intrinsics_for(calib, img.shape[1], img.shape[0], policy.default_hfov_deg)
-        dmap = depth.predict(img)
+    # 2단계: 점이 있는 프레임 중 frame_stride_ms 간격으로만 깊이를 만든다 (CPU 비용)
+    for t, dmap, intr in depth_frames(frames, points.keys() | hands.keys(), depth, calib, policy):
         for entity, part, u, v in points.get(t, []):
             xyz = _unproject_depth(dmap, intr, u, v, policy)
             if xyz is not None:
-                out.setdefault((entity, part), []).append(_sample(t, xyz))
+                sample = _sample(t, xyz, Lift3DMethod.POINT_DEPTH, box_conf)
+                out.setdefault((entity, part), []).append(sample)
         for entity, frame in hands.get(t, []):
-            for name, xyz in _lift_hand(frame, dmap, intr, policy):
-                out.setdefault((entity, name), []).append(_sample(t, xyz))
+            for name, xyz, method, conf in _lift_hand(frame, dmap, intr, policy, calibrated):
+                out.setdefault((entity, name), []).append(_sample(t, xyz, method, conf))
     return out
+
+
+def with_palm(policy: DepthPolicy, palm_m: float | None) -> DepthPolicy:
+    """손 크기 사전값을 작업자 값으로 바꾼 depth 정책 사본 (None이면 그대로, ADR 0045)."""
+    if palm_m is None:
+        return policy
+    fit = policy.hand_fit.model_copy(update={"reference_palm_m": palm_m})
+    return policy.model_copy(update={"hand_fit": fit})
+
+
+def mean_confidence(samples: Iterable[Trajectory3DSample]) -> float:
+    """표본 신뢰도의 평균 (소수 셋째 자리). 신뢰도가 없는 표본은 빼고, 모두 없으면 0."""
+    values = [x.confidence for x in samples if x.confidence is not None]
+    return round(sum(values) / len(values), 3) if values else 0.0
 
 
 class DepthLifter:
     """메트릭 깊이 3D 단계. 러너가 Predictor 목록과 따로 부른다 (입력이 영상 + 다른 라벨이다).
 
-    name: "depth3d". version: `depth3d-<가중치 버전>+hf1+p<depth 절 해시>` (hf1: 손 중심 3D 점
-    맞춤 판, ADR 0044. 러너가 입력 해시를 더 붙인다).
+    name: "depth3d". version: `depth3d-<가중치 버전>+hf2+p<depth 절 해시>` (hf1: 손 중심 3D 점
+    맞춤 판, ADR 0044. hf2: 표본별 방식·신뢰도, ADR 0045. 러너가 입력 해시와 손 크기 사전값 출처
+    `+hp<w|p>`를 더 붙인다).
     """
 
     name = "depth3d"
@@ -255,9 +334,15 @@ class DepthLifter:
                 건너뛴다.
         """
         self.path, version = resolve(root, policy.models.depth)
-        self.version = f"depth3d-{version}+hf1+p{policy.digest('depth')}"
+        self.version = f"depth3d-{version}+hf2+p{policy.digest('depth')}"
         self.policy, self.now = policy, now
         self.model: DepthModel | None = None
+
+    def depth_model(self) -> DepthModel:
+        """깊이 추론기. ONNX 세션은 처음 쓸 때 한 번만 연다 (가중치가 커서 생성 비용이 크다)."""
+        if self.model is None:
+            self.model = MetricDepth(self.path)
+        return self.model
 
     def run(
         self,
@@ -269,6 +354,7 @@ class DepthLifter:
         calib: CameraIntrinsics | None,
         ontology_version: str,
         version: str | None = None,
+        palm_m: float | None = None,
     ) -> list[LabelRecord]:
         """바디캠 영상에서 트랙을 3D로 올려 trajectory3d 라벨을 만든다.
 
@@ -276,24 +362,26 @@ class DepthLifter:
             video: 바디캠 영상 로컬 경로.
             session_id, stream_id: 라벨의 세션·스트림 (바디캠).
             tracks: 올릴 손·박스 트랙. (개체, 트랙 종류)마다 하나 (`lift_tracks` 참고).
-            calib: 세션 카메라 내부 파라미터.
+            calib: 카메라 내부 파라미터 (세션 또는 등록된 캘리브레이션,
+                `calibration_repository.session_intrinsics`). None이면 화각 근사이고 페이로드
+                intrinsics는 hfov_approx다.
             ontology_version: 라벨에 넣을 온톨로지 버전.
             version: 라벨에 쓸 모델 버전 (기본: `self.version`). 러너는 입력 해시를 붙여 넘긴다.
+            palm_m: 작업자 손 크기 사전값 (m, None이면 정책 `hand_fit.reference_palm_m`, ADR 0045).
 
         Returns:
             (개체, 부위)마다 trajectory3d 라벨 하나. ID는
-            `<세션>-<스트림>-3d-<version_tag>-<개체>-<부위|center>`. 신뢰도는 `depth.confidence`
-            고정. DB에는 쓰지 않는다 (러너가 쓴다).
+            `<세션>-<스트림>-3d-<version_tag>-<개체>-<부위|center>`. 표본마다 방식·신뢰도를 싣고,
+            라벨 신뢰도는 표본 신뢰도의 평균(소수 셋째 자리)이다. DB에는 쓰지 않는다 (러너가 쓴다).
 
         Raises:
             ValueError: tracks에 같은 (개체, 트랙 종류) 트랙이 둘 이상일 때 (`lift_tracks`).
         """
         # 러너는 입력 해시를 붙인 버전을 넘긴다 (라벨 ID의 version_tag도 이 버전으로 만든다)
         model_version = version or self.version
-        # ONNX 세션은 처음 쓸 때 한 번만 연다 (가중치가 커서 생성 비용이 크다)
-        if self.model is None:
-            self.model = MetricDepth(self.path)
-        samples = lift_tracks(iter_frames(video), self.model, tracks, calib, self.policy.depth)
+        policy = with_palm(self.policy.depth, palm_m)
+        samples = lift_tracks(iter_frames(video), self.depth_model(), tracks, calib, policy)
+        intrinsics = IntrinsicsSource.HFOV_APPROX if calib is None else IntrinsicsSource.CALIBRATED
         out: list[LabelRecord] = []
         for (entity, part), ss in sorted(
             samples.items(), key=lambda kv: (kv[0][0], kv[0][1] or "")
@@ -304,6 +392,7 @@ class DepthLifter:
                 frame=CoordinateFrame.CAMERA,
                 source_3d=Source3D.MONO_DEPTH,
                 samples=tuple(ss),
+                intrinsics=intrinsics,
             )
             tag = version_tag(model_version)
             out.append(
@@ -315,7 +404,7 @@ class DepthLifter:
                     t_end_ms=ss[-1].t_ms,
                     ontology_version=ontology_version,
                     model_version=model_version,
-                    confidence=self.policy.depth.confidence,
+                    confidence=mean_confidence(ss),
                     payload=payload,
                     now=self.now,
                 )

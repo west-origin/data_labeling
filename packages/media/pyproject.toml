@@ -9,7 +9,9 @@ dependencies = [
     "dlp-schema",
     "h5py>=3.11",
     "numpy>=2.0",
+    "opencv-contrib-python-headless>=4.10",
     "pyarrow>=18.0",
+    "pyyaml>=6.0",
 ]
 
 [build-system]

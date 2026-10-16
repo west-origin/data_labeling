@@ -12,6 +12,7 @@
   라벨처럼 돌려준다 (MediaPipe hand_world_landmarks 흉내).
 - `intrinsics`: 투영에 쓴 내부 파라미터. 기본값은 320x240, 가로 화각 90도 근사와 같다
   (fx = fy = 160, 주점 중앙) — 캘리브레이션 없는 세션의 기본 근사(`prelabel.yaml depth`)와 맞다.
+  `focal_px`로 바꿀 수 있다. 손 크기도 `hand_scale`로 바꿀 수 있다 (작업자 손 크기 사전값 시험).
 - `depth`: 합성 메트릭 깊이 모델 (`SceneDepth`). 배경 평면 + 손바닥 관절 둘레 원판만 관절 깊이를
   갖는다. 얇은 손가락 끝은 배경 깊이가 나오므로 관절별 깊이 방식은 손가락 끝에서 틀린다.
 - `frames()`: (PTS ms, 작은 RGB 프레임). 프레임 번호를 첫 픽셀에 적어 `SceneDepth`가 그 시각의
@@ -172,6 +173,8 @@ def generate_hand3d_scenario(
     world_noise_m: float = 0.0,
     world_scale: float = 1.0,
     depth_bias: float = 1.0,
+    hand_scale: float = 1.0,
+    focal_px: float = 160.0,
 ) -> Hand3DScenario:
     """정답 3D를 아는 손 시퀀스. 같은 인자면 같은 결과다 (결정적).
 
@@ -183,9 +186,13 @@ def generate_hand3d_scenario(
         world_noise_m: 손 중심 3D 점 흔들림 표준편차(m).
         world_scale: 손 중심 3D 점 크기 배율 (손 모델이 실제 손 크기를 틀리는 정도, 1.1이면 10% 큼).
         depth_bias: 합성 깊이 배율 오차 (`SceneDepth.bias`).
+        hand_scale: 정답 손 크기 배율 (손목 → 중지 MCP = 0.09 m x hand_scale, ADR 0045 작업자 손
+            크기). 손목 위치는 그대로다.
+        focal_px: 투영 초점 거리 fx = fy (px). 기본 160은 가로 화각 90도 근사와 같다. 다르면
+            캘리브레이션 없이 화각 근사로 올린 3D가 틀린다 (ADR 0045 캘리브레이션 시험).
     """
     rng = np.random.default_rng(seed)
-    k = CameraIntrinsics(width=320, height=240, fx=160.0, fy=160.0, cx=160.0, cy=120.0)
+    k = CameraIntrinsics(width=320, height=240, fx=focal_px, fy=focal_px, cx=160.0, cy=120.0)
     mirror = np.array([-1.0, 1.0, 1.0]) if hand is Hand.LEFT else np.ones(3)
     frame_times = [round(i * FRAME_MS) for i in range(n_frames)]
     joints: list[NDArray[np.float64]] = []
@@ -193,7 +200,7 @@ def generate_hand3d_scenario(
     frames: list[KeypointFrame] = []
     for i, t in enumerate(frame_times):
         rot, wrist, curl = _pose(i / max(n_frames - 1, 1))
-        cam = (rot @ (hand_model(curl) * mirror).T).T + wrist
+        cam = (rot @ (hand_model(curl) * mirror * hand_scale).T).T + wrist
         px = _project(cam, k)
         joints.append(cam)
         pixels.append(px)

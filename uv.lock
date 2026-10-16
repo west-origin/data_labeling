@@ -975,7 +975,9 @@ dependencies = [
     { name = "dlp-schema" },
     { name = "h5py" },
     { name = "numpy" },
+    { name = "opencv-contrib-python-headless" },
     { name = "pyarrow" },
+    { name = "pyyaml" },
 ]
 
 [package.metadata]
@@ -985,7 +987,9 @@ requires-dist = [
     { name = "dlp-schema", editable = "packages/schema" },
     { name = "h5py", specifier = ">=3.11" },
     { name = "numpy", specifier = ">=2.0" },
+    { name = "opencv-contrib-python-headless", specifier = ">=4.10" },
     { name = "pyarrow", specifier = ">=18.0" },
+    { name = "pyyaml", specifier = ">=6.0" },
 ]
 
 [[package]]

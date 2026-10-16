@@ -141,6 +141,28 @@ class HandFitPolicy(Contract):
         return v
 
 
+class SampleConfidencePolicy(Contract):
+    """3D 표본 신뢰도 정책 (`depth.sample_confidence` 절, ADR 0045, `handfit.fit_confidence`).
+
+    hand_fit: 손 맞춤 표본의 최고 신뢰도 (재투영 0, 21관절 보임, 깊이·사전값 일치, 캘리브레이션).
+    point_depth: 관절별 깊이·박스 중심 표본의 신뢰도 (그 픽셀 깊이 하나로 역투영).
+    reprojection_floor: 재투영 RMS가 `hand_fit.max_reprojection_px`일 때 곱하는 값 (0이면
+        그 끝에서 0).
+    points_floor: 보이는 관절 수가 `hand_fit.min_points`일 때 곱하는 값 (21관절이면 1).
+    agreement_floor: 깊이·손 크기 배율 비가 `hand_fit.max_scale_ratio`일 때 곱하는 값 (비 1이면 1).
+    no_depth: 깊이를 못 쓰거나 버리고 손 크기 사전값만으로 크기를 정한 맞춤에 곱하는 값.
+    hfov_approx: 캘리브레이션 없이 기본 화각 근사 내부 파라미터를 쓴 표본에 곱하는 값.
+    """
+
+    hand_fit: float = Field(ge=0, le=1)
+    point_depth: float = Field(ge=0, le=1)
+    reprojection_floor: float = Field(ge=0, le=1)
+    points_floor: float = Field(ge=0, le=1)
+    agreement_floor: float = Field(ge=0, le=1)
+    no_depth: float = Field(ge=0, le=1)
+    hfov_approx: float = Field(ge=0, le=1)
+
+
 class DepthPolicy(Contract):
     """메트릭 깊이 3D 올리기 정책 (`depth` 절).
 
@@ -148,8 +170,9 @@ class DepthPolicy(Contract):
     patch_radius_px: 깊이 중앙값을 읽을 패치 반지름. min_depth_m / max_depth_m: 받아들일 깊이
     범위(m).
     hand_points: 올릴 hand21 관절 번호 (`HAND21_JOINTS`에 이름이 있는 번호만).
-    confidence: 3D 궤적 라벨 신뢰도 (단안 깊이라 낮게).
     hand_fit: 손 중심 3D 점이 있는 손 트랙의 맞춤 (`HandFitPolicy`, ADR 0044).
+    sample_confidence: 표본 신뢰도 (`SampleConfidencePolicy`, ADR 0045). 궤적 라벨 신뢰도는 그
+        궤적 표본 신뢰도의 평균이다.
     """
 
     frame_stride_ms: int = Field(ge=0)
@@ -158,8 +181,8 @@ class DepthPolicy(Contract):
     min_depth_m: float = Field(gt=0)
     max_depth_m: float = Field(gt=0)
     hand_points: tuple[int, ...] = Field(min_length=1)
-    confidence: float = Field(ge=0, le=1)
     hand_fit: HandFitPolicy
+    sample_confidence: SampleConfidencePolicy
 
     @field_validator("hand_points")
     @classmethod
@@ -172,6 +195,24 @@ class DepthPolicy(Contract):
                 f"hand_points {bad}: 이름이 없는 hand21 번호 (허용 {sorted(HAND21_JOINTS)})"
             )
         return v
+
+
+class PalmEstimatePolicy(Contract):
+    """작업자 손 크기 추정 정책 (`palm_estimate` 절, ADR 0045, `dlp_prelabel.palm`).
+
+    캘리브레이션이 있는 세션의 손 맞춤 중 품질이 좋은 시각마다 깊이 배율만으로 잰 손목 → 중지 MCP
+    길이의 중앙값을 낸다. 3D 단계 버전(`depth` 절 해시)에는 들어가지 않는다 (추정 명령만 쓴다).
+
+    max_reprojection_px: 쓸 맞춤의 재투영 RMS 상한(px, 맞춤 기본값보다 엄격하게).
+    min_visible: 쓸 맞춤의 보이는 관절 수 하한.
+    min_samples: 이보다 적으면 추정하지 않는다 (등록하지 않음).
+    palm_range_m: 받아들일 손바닥 길이 범위 (m, [하한, 상한]). 밖의 값은 버린다 (깊이 오류).
+    """
+
+    max_reprojection_px: float = Field(gt=0)
+    min_visible: int = Field(ge=3, le=21)
+    min_samples: int = Field(ge=1)
+    palm_range_m: tuple[float, float]
 
 
 class GloveContactPolicy(Contract):
@@ -255,6 +296,7 @@ class PrelabelPolicy(Contract):
     contact: ContactPolicy
     wearer_matching: WearerPolicy
     depth: DepthPolicy
+    palm_estimate: PalmEstimatePolicy
     # 마스터 타임라인 구간(stream_id 없음)을 내는 예측기 이름. 기준 스트림에서 세션당 한 번만 돌린다
     timeline_predictors: tuple[str, ...] = ()
 

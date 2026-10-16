@@ -111,7 +111,9 @@ def test_session_status_counts_and_interrupted_guess(
             AiRunEvent(
                 session_id=db.session_id,
                 event=AiRunEventKind.STARTED,
-                at=FIXED_TIME + timedelta(days=9),
+                # 판정 실행의 이벤트 시각은 실제 시계다. 고정 시각 + 며칠로 두면 그 날짜가 지난 뒤
+                # completed보다 앞서 마지막 이벤트가 되지 않았다 (F-AIR-33)
+                at=datetime.now(UTC) + timedelta(days=1),
             ),
         )
     with db.engine.connect() as conn:

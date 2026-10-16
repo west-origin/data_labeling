@@ -13,6 +13,7 @@ import os
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -48,10 +49,12 @@ from dlp_schema.labels import (
     BoxTrackPayload,
     Hand,
     HandStatePayload,
+    IntrinsicsSource,
     Keypoint,
     KeypointFrame,
     KeypointTrackPayload,
     LabelRecord,
+    Lift3DMethod,
     Provenance,
     Source,
     Trajectory3DPayload,
@@ -557,7 +560,12 @@ class _UnitLifter(DepthLifter):
 
 
 def _bodycam_only_session(
-    pg: sa.Engine, tmp_path: Path, frame_times: list[int], prefix: str
+    pg: sa.Engine,
+    tmp_path: Path,
+    frame_times: list[int],
+    prefix: str,
+    *,
+    camera_id: str | None = None,
 ) -> tuple[str, S3Store]:
     """손 키프레임 시각 그대로 쓴 회색 바디캠 영상 하나뿐인 세션을 수집한다 (3D 단계 테스트용).
 
@@ -573,11 +581,14 @@ def _bodycam_only_session(
         height=240,
     )
     sid = f"{prefix}-{uuid.uuid4().hex[:8]}"
-    manifest = {
+    manifest: dict[str, Any] = {
         "session_id": sid, "domain": "cleaning", "worker_id": "w01", "site_id": "site01",
         "consent_version": "c1", "recorded_at": FIXED_TIME.isoformat(), "ontology_version": "1.0.0",
         "streams": [{"stream_id": "bodycam", "kind": "bodycam", "path": "bodycam.mp4"}],
     }  # fmt: skip
+    if camera_id is not None:
+        # 수집 매니페스트에는 기기 ID만 적고 내부 파라미터는 등록부에서 찾는다 (ADR 0045)
+        manifest["calibration"] = {"camera_id": camera_id}
     (tmp_path / "m.yaml").write_text(yaml.safe_dump(manifest), encoding="utf-8")
     raw = S3Store.from_env("dlp-raw")
     with pg.begin() as conn:
@@ -814,6 +825,72 @@ def test_hand_world_fit_is_idempotent_and_policy_change_keeps_reviewed_trajector
     assert removed == {x.label_id for x in before} - {reviewed.label_id}
     live = current_labels(history)
     assert reviewed.label_id in {x.label_id for x in live} and len(live) == n
+
+
+def test_registered_calibration_and_worker_palm_relift_only_unreviewed_3d(
+    pg: sa.Engine, tmp_path: Path
+) -> None:
+    """ADR 0045: 등록한 기기 캘리브레이션과 작업자 손 크기가 3D 단계 입력이다.
+
+    시나리오: 정답 손이 20% 작고(손바닥 0.072 m) 카메라 초점 거리가 200 px라, 캘리브레이션 없는
+    화각 근사(fx 160)와 정책 손 크기(0.09 m)로는 3D가 틀린다. 매니페스트에는 기기 ID(cam-a)만 있다.
+    가짜 깊이(1 m)는 배율 비가 커서 버려지므로 크기는 손 크기 사전값으로만 정해진다.
+    1회: intrinsics=hfov_approx, 버전 +hpp. 기기 캘리브레이션(fx 200)과 작업자 값(0.072)을 등록하면
+    입력 해시가 바뀌어 다시 돌고(버전 +hpw), 검수 전 이전 3D는 지워지며 새 3D는 정답과 1 mm 안,
+    intrinsics=calibrated, 표본 방식 hand_fit, 신뢰도는 정책 식(깊이 없음 x 일치)과 같다. 다시
+    돌리면 건너뛴다. 3D 라벨에도 작업자 ID는 없다.
+    """
+    from dlp_schema.calibration import CalibrationMethod, HandSizeSource
+    from dlp_schema.db.calibration_repository import (
+        register_camera_calibration,
+        register_hand_size,
+    )
+
+    s = generate_hand3d_scenario(7, n_frames=8, hand_scale=0.8, focal_px=200.0)
+    sid, raw = _bodycam_only_session(pg, tmp_path, s.frame_times, "calib", camera_id="cam-a")
+    policy, ontology = load_policy(ROOT), load_ontology(ROOT / "config/ontology/v1")
+    hands: list[Predictor] = [
+        OraclePredictor("hands", s.labels, ("keypoint_track",), now=FIXED_TIME)
+    ]
+    with pg.begin() as conn:
+        first = run_prelabel(
+            conn, sid, raw, hands, policy, ontology, FIXED_TIME, lifter=_UnitLifter(policy)
+        )
+        before = get_labels(conn, sid, kinds=["trajectory3d"])
+        register_camera_calibration(
+            conn, "cam-a", s.intrinsics, method=CalibrationMethod.IMPORTED, now=FIXED_TIME
+        )
+        register_hand_size(conn, "w01", 0.072, source=HandSizeSource.MEASURED, now=FIXED_TIME)
+        second = run_prelabel(
+            conn, sid, raw, hands, policy, ontology, FIXED_TIME, lifter=_UnitLifter(policy)
+        )
+        again = run_prelabel(
+            conn, sid, raw, hands, policy, ontology, FIXED_TIME, lifter=_UnitLifter(policy)
+        )
+        history = get_labels(conn, sid, kinds=["trajectory3d"])
+    n = len(policy.depth.hand_points)
+    assert first.lifted == second.lifted == n and again.lifted == 0
+    assert all((x.provenance.model_version or "").endswith("+hpp") for x in before)
+    for x in before:
+        assert isinstance(x.payload, Trajectory3DPayload)
+        assert x.payload.intrinsics is IntrinsicsSource.HFOV_APPROX
+    assert {x.parent_label_id for x in history if x.retracted} == {x.label_id for x in before}
+    live = current_labels(history)
+    assert len(live) == n
+    c, fit = policy.depth.sample_confidence, policy.depth.hand_fit
+    joint_of = {name: i for i, name in HAND21_JOINTS.items()}
+    for x in live:
+        assert isinstance(x.payload, Trajectory3DPayload) and check_label(x, ontology) == []
+        assert (x.provenance.model_version or "").endswith("+hpw")
+        assert "w01" not in x.model_dump_json()
+        assert x.payload.intrinsics is IntrinsicsSource.CALIBRATED
+        for q in x.payload.samples:
+            assert q.method is Lift3DMethod.HAND_FIT
+            assert q.confidence == pytest.approx(c.hand_fit * c.no_depth, abs=2e-3)
+            truth = s.joints_cam[q.t_ms][joint_of[x.payload.part or ""]]
+            assert np.linalg.norm(np.array([q.x, q.y, q.z]) - truth) < 0.001
+        assert x.confidence == pytest.approx(c.hand_fit * c.no_depth, abs=2e-3)
+    assert fit.reference_palm_m == 0.09  # 정책 기본값은 그대로다
 
 
 def test_glove_started_before_the_bodycam_keeps_only_contacts_inside_the_session(

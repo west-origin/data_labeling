@@ -133,7 +133,6 @@ depth:
   # 손목과 다섯 손가락 끝 (hand21 번호 → 온톨로지 hand_joints: wrist, thumb_tip, index_tip, middle_tip,
   # ring_tip, pinky_tip). 이름이 없는 번호는 로더가 거부한다 (policy.HAND21_JOINTS)
   hand_points: [0, 4, 8, 12, 16, 20]
-  confidence: 0.5           # 단안 깊이의 절대 거리는 장면에 따라 크게 틀릴 수 있어 낮게 둔다
   # 손 중심 3D 점(MediaPipe hand_world_landmarks)이 있는 손 트랙의 손가락 끝 3D (ADR 0044, dlp_prelabel.handfit).
   # 손 모양은 손 모델의 3D 점, 방향은 2D 픽셀(알려진 내부 파라미터로 이동량 최소제곱), 크기(거리)는
   # 메트릭 깊이(손바닥 관절)와 손 크기 사전값을 로그 평균으로 섞어 정한다. world가 없거나(사람이 고친
@@ -150,7 +149,27 @@ depth:
     reference_palm_m: 0.09
     depth_weight: 0.5         # 크기 융합의 깊이 가중치 (0 손 크기만, 1 깊이만)
     max_scale_ratio: 1.5      # 깊이·손 크기 배율 비가 이보다 크면 깊이를 버린다 (배경·가림 깊이)
+    # reference_palm_m은 작업자별 등록값(`dlp calib palm`, DB worker_hand_sizes)이 있으면 그 값이 앞선다
+    # (작업자 값 → 이 기본값, ADR 0045). 어느 쪽을 썼는지는 3D 단계 모델 버전의 +hp<w|p>와 입력 해시에 남는다.
+  # 3D 표본마다 신뢰도를 방식·맞춤 품질로 정한다 (ADR 0045, dlp_prelabel.handfit.fit_confidence).
+  # 궤적 라벨 신뢰도는 표본 신뢰도의 평균이다. 단안 깊이의 절대 거리는 장면에 따라 크게 틀릴 수 있어 상한도 낮게 둔다.
+  sample_confidence:
+    hand_fit: 0.8             # 맞춤 표본 최고값 (재투영 0, 21관절 보임, 깊이·사전값 일치, 캘리브레이션)
+    point_depth: 0.4          # 관절별 깊이·박스 중심 (픽셀 깊이 하나, 손가락 끝은 배경 깊이가 섞이기 쉽다)
+    reprojection_floor: 0.5   # 재투영 RMS가 hand_fit.max_reprojection_px일 때 곱 (0이면 선형으로 0까지)
+    points_floor: 0.7         # 보이는 관절이 hand_fit.min_points일 때 곱 (21관절이면 1)
+    agreement_floor: 0.6      # 깊이·사전값 배율 비가 hand_fit.max_scale_ratio일 때 곱 (비 1이면 1)
+    no_depth: 0.7             # 깊이를 못 쓰거나 버리고 손 크기 사전값만으로 크기를 정한 맞춤에 곱
+    hfov_approx: 0.6          # 캘리브레이션 없이 default_hfov_deg 근사를 쓴 표본에 곱
 
 # TODO(real-model): 카메라 6자유도 궤적은 아직 연동하지 않았다 (stub). 후보는 Basalt 시각-관성
 #   SLAM(BSD-3, CPU, C++ 빌드·캘리브레이션 필요)이나 메트릭 깊이 + RGB-D 오도메트리(Open3D, CPU).
 #   그때까지 3D 궤적(손가락 끝 포함)은 카메라 좌표계(frame=camera)뿐이다 (F-PAR-26).
+
+# 작업자 손 크기 추정 (`dlp calib palm-estimate`, ADR 0045, dlp_prelabel.palm). 캘리브레이션이 있는 세션의
+# 손 맞춤 중 품질 좋은 시각마다 깊이 배율만으로 잰 손목→중지 MCP 길이의 중앙값. 3D 단계 버전에는 들어가지 않는다.
+palm_estimate:
+  max_reprojection_px: 3.0    # 쓸 맞춤의 재투영 RMS 상한 (px, 맞춤 기본 8 px보다 엄격)
+  min_visible: 18             # 쓸 맞춤의 보이는 관절 수 하한
+  min_samples: 30             # 이보다 적으면 추정하지 않는다 (200 ms 간격이면 약 6초 분량)
+  palm_range_m: [0.06, 0.12]  # 받아들일 손바닥 길이 (m). 밖의 값은 깊이 오류로 보고 버린다

@@ -53,6 +53,7 @@ from dlp_prelabel.lift3d import DepthLifter, lift_key
 from dlp_prelabel.policy import PrelabelPolicy
 from dlp_prelabel.wearer import match_wearer, wrist_speed
 from dlp_schema.config import repo_root
+from dlp_schema.db.calibration_repository import session_intrinsics, session_palm
 from dlp_schema.db.repository import get_labels, get_session, insert_labels, set_lifecycle
 from dlp_schema.episode import (
     current_labels,
@@ -415,9 +416,11 @@ def _lift(
     """3D 궤적 단계: 바디캠 손·박스 트랙을 메트릭 깊이로 카메라 좌표 3D 궤적으로 올린다.
 
     멱등: 같은 버전을 낸 적이 있으면(검수자가 모두 고쳤어도) 다시 만들지 않는다. 버전
-    (`<lifter.version>+i<입력 해시>`)에는 실제로 올리는 트랙(고른 트랙의 라벨 ID) 해시가 들어가
-    입력이 바뀌거나 고르는 트랙이 바뀌면(예: 다른 트랙 승인) 다시 만든다. 같은 (개체, 부위,
-    좌표계)의 검수된·사람 궤적이 있으면 새 궤적은 버린다.
+    (`<lifter.version>+i<입력 해시>+hp<w|p>`)에는 실제로 올리는 트랙(고른 트랙의 라벨 ID), 쓸 내부
+    파라미터(`calibration_repository.session_intrinsics`)와 손 크기 사전값(`session_palm`,
+    ADR 0045)의 해시가 들어가, 입력이 바뀌거나 고르는 트랙이 바뀌면(예: 다른 트랙 승인),
+    캘리브레이션·작업자 손 크기를 등록하면 다시 만든다. 같은 (개체, 부위, 좌표계)의 검수된·사람
+    궤적이 있으면 새 궤적은 버린다.
 
     입력: 기준 스트림(바디캠)의 현재 hand21 키포인트·박스 트랙 (모델·사람 출처 모두)을 (개체, 트랙
     종류)마다 하나씩 고른 것 (`pick_lift_tracks`, F-PAR-01). 출력 라벨 ID 접두사는
@@ -428,7 +431,13 @@ def _lift(
     body = session.reference_stream
     # 같은 entity_id 트랙이 여럿이면 하나만 올린다 (표본 시각이 겹쳐 라벨 검증이 실패하지 않게)
     tracks = pick_lift_tracks(current, body.stream_id)
-    version = f"{lifter.version}+i{input_digest(tracks)}"
+    # 내부 파라미터(세션 값 → 등록된 기기 캘리브레이션 → 화각 근사)와 손 크기 사전값(작업자 등록값 →
+    # 정책 기본값)도 입력이다 (ADR 0045). 등록이 바뀌면 입력 해시가 바뀌어 다시 돈다. 사전값 출처
+    # 글자(+hpw 작업자, +hpp 정책)는 버전에 그대로 남긴다 (작업자 ID·값은 해시로만 들어간다)
+    intr = session_intrinsics(conn, session)
+    palm = session_palm(conn, session)
+    digest = input_digest(tracks, intr.digest_input(), palm.digest_input())
+    version = f"{lifter.version}+i{digest}+hp{palm.source}"
     if any(x.provenance.model_version == version for x in history):
         return 0
     stale = _stale(history, f"{session.session_id}-{body.stream_id}-3d-", version)
@@ -442,9 +451,10 @@ def _lift(
         session_id=session.session_id,
         stream_id=body.stream_id,
         tracks=tracks,
-        calib=session.calibration.intrinsics,
+        calib=intr.intrinsics,
         ontology_version=session.ontology_version or "",
         version=version,
+        palm_m=palm.palm_m,
     )
     labels = drop_protected_trajectories(labels, current)
     insert_labels(conn, [*retractions(stale, version, now), *labels])

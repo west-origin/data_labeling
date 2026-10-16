@@ -1,0 +1,13 @@
+# 카메라 내부 파라미터 캘리브레이션 (ADR 0045, dlp_media.calibration, `dlp calib intrinsics`).
+# 체커보드(평면, 안쪽 코너 수와 칸 크기를 아는 인쇄물)를 그 카메라로 여러 각도에서 찍은 영상에서 OpenCV
+# calibrateCamera로 fx·fy·cx·cy·왜곡 계수를 구한다. 결과는 DB camera_calibrations에 기기 ID로 등록한다.
+# 절차는 docs/handover/camera-calibration.md.
+version: 1
+intrinsics:
+  sample_every_ms: 200       # 이 간격(ms, PTS 기준)마다 프레임 하나를 검사한다
+  min_views: 8               # 쓸 보드 장면이 이보다 적으면 실패 (등록하지 않는다)
+  max_views: 40              # 장면이 많으면 고르게 이만큼만 쓴다 (계산 시간)
+  min_motion_px: 15.0        # 앞서 채택한 장면과 코너 평균 이동이 이보다 작으면 같은 장면으로 보고 건너뛴다
+  max_rms_px: 1.0            # 재투영 RMS(px)가 이보다 크면 실패 (보드 인쇄·초점·움직임 흐림 의심)
+  fix_k3: true               # 3차 방사 왜곡 계수를 0으로 고정 (일반 렌즈에서 과적합 방지. 어안은 별도 모델 필요)
+  zero_tangent: false        # 접선 왜곡(p1, p2)을 0으로 고정할지
