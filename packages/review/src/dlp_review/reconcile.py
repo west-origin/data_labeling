@@ -11,7 +11,7 @@ WP6, ADR 0006·0002(라벨은 덮어쓰지 않는다: 수정은 새 레코드 + 
 파이프라인 위치: `dlp_review.collect.collect_task`가 도구 결과를 변환기(`cvat`·`labelstudio`)로
 `ReviewedItem`으로 바꾼 뒤 이 모듈의 `reconcile`을 부른다. 순수 함수이며 DB를 쓰지 않는다.
 
-공개 이름: `ReviewedItem`, `ReviewOutcome`, `same_as_sent`, `reconcile`.
+공개 이름: `ReviewedItem`, `ReviewOutcome`, `same_as_sent`, `keep_unchanged_world`, `reconcile`.
 """
 
 from __future__ import annotations
@@ -106,6 +106,46 @@ def same_as_sent(a: LabelRecord, b: ReviewedItem) -> bool:
     )
 
 
+def keep_unchanged_world(
+    payload: KeypointTrackPayload, parent: LabelRecord, sent: LabelRecord
+) -> KeypointTrackPayload:
+    """사람 레코드 키프레임 중 2D가 parent와 같은 것에만 parent의 손 중심 3D 점을 되살린다.
+
+    ADR 0044 1절 (2026-10-16 개정): 검수자가 손 트랙의 일부 키프레임만 고치면, 고치지 않은
+    키프레임의 2D는 모델이 낸 2D 그대로다. 그 키프레임의 world는 그 2D와 짝인 모델 출력이므로
+    남기고, 고친 키프레임·새로 생긴 시각에는 싣지 않는다. 판정은 같은 시각(t_ms)의 키프레임에서
+    도구로 보낸 형태(`sent`, CVAT `quantize` 왕복 결과)의 points(좌표·보임 정도)와 돌아온 points가
+    정확히 같을 때다. 그래서 world가 있는 키프레임의 2D는 늘 parent 2D의 양자화 값이다.
+
+    Args:
+        payload: world를 뺀 사람 레코드 페이로드 (`without_world` 결과).
+        parent: 원래 라벨 (world 원본, 직전 사람 레코드여도 그 world는 같은 규칙으로 남은 것이다).
+        sent: parent를 도구로 보낸 형태 (normalize 결과, 없으면 parent 그대로).
+
+    Returns:
+        되살릴 키프레임이 없으면 payload 그대로, 있으면 그 키프레임에만 world를 채운 사본. 개체·
+        골격·손이 parent와 다르면(다른 손으로 바꿈) 되살리지 않는다.
+    """
+    p, q = parent.payload, sent.payload
+    if not (
+        isinstance(p, KeypointTrackPayload)
+        and isinstance(q, KeypointTrackPayload)
+        and (p.entity_id, p.skeleton, p.hand) == (payload.entity_id, payload.skeleton, payload.hand)
+    ):
+        return payload
+    world = {f.t_ms: f.world for f in p.keyframes if f.world is not None}
+    sent_points = {f.t_ms: f.points for f in q.keyframes}
+    frames = tuple(
+        f.model_copy(update={"world": world[f.t_ms]})
+        if f.t_ms in world and sent_points.get(f.t_ms) == f.points
+        else f
+        for f in payload.keyframes
+    )
+    if all(f.world is None for f in frames):
+        return payload
+    return payload.model_copy(update={"keyframes": frames})
+
+
 def _new_id(base: str, reviewer: str, now: datetime, content: str) -> str:
     """새 사람 레코드 ID `"<base>:r<해시 12자>"`.
 
@@ -161,9 +201,12 @@ def reconcile(
         """검수 항목으로 새 사람 레코드를 만든다 (parent가 있으면 수정·삭제, 없으면 추가)."""
         payload = item.payload
         if isinstance(payload, KeypointTrackPayload) and not retracted:
-            # 사람이 고치거나 그린 골격에는 모델의 손 중심 3D 점을 싣지 않는다 (ADR 0044). 도구
-            # 변환기는 world를 내지 않지만, 다른 경로로 들어와도 고친 2D와 예전 world가 섞이지 않게
+            # 사람이 고치거나 그린 골격에는 들어온 손 중심 3D 점을 그대로 싣지 않는다 (ADR 0044).
+            # 도구 변환기는 world를 내지 않지만, 다른 경로로 들어와도 고친 2D와 예전 world가 섞이지
+            # 않게 먼저 모두 빼고, 2D가 parent와 같은 키프레임에만 parent의 world를 되살린다
             payload = without_world(payload)
+            if parent is not None:
+                payload = keep_unchanged_world(payload, parent, sent[parent.label_id])
         # ID 해시 입력: 내용이 다르면 ID도 달라진다 (정렬된 JSON이라 결정적)
         content = json.dumps(
             [

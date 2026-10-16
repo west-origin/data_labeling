@@ -464,12 +464,13 @@ def test_reconcile_compares_against_normalized_originals() -> None:
     assert out.approved == [original.label_id] and not out.new_records
 
 
-def test_cvat_round_trip_keeps_world_only_on_untouched_hand_tracks() -> None:
+def test_cvat_round_trip_keeps_world_only_on_untouched_hand_keyframes() -> None:
     """ADR 0044: 손 중심 3D 점(world)은 CVAT로 보내지 않는다. 고치지 않은 모델 손 트랙은 원래 레코드
-    승인(world 유지)이고, 검수자가 점 하나를 옮긴 트랙의 사람 레코드에는 world가 없다 (고친 2D와
-    모델의 예전 world가 섞이지 않는다 → 3D 단계는 그 트랙을 관절별 깊이로 올린다).
+    승인(world 유지)이다. 검수자가 첫 프레임 손목만 옮기면 사람 레코드의 그 키프레임에는 world가
+    없고, 2D가 그대로인 나머지 키프레임에는 원래 world가 되살아난다 (2026-10-16 개정).
 
-    정답 근거: `dlp_fixtures.hand3d`의 world를 가진 손 트랙(모델 출처로 바꿈)과 프레임 시각.
+    정답 근거: `dlp_fixtures.hand3d`의 world를 가진 손 트랙(모델 출처로 바꿈)과 프레임 시각. 불변
+    조건: world가 있는 키프레임의 points는 모두 `quantize(parent)`의 같은 시각 points와 같다.
     """
     s = generate_hand3d_scenario(0, n_frames=5)
     [truth] = s.labels
@@ -494,13 +495,62 @@ def test_cvat_round_trip_keeps_world_only_on_untouched_hand_tracks() -> None:
     [fixed] = out.new_records
     assert fixed.parent_label_id == model.label_id and not fixed.retracted
     assert isinstance(fixed.payload, KeypointTrackPayload)
-    assert all(f.world is None for f in fixed.payload.keyframes)
+    original = {f.t_ms: f for f in model.payload.keyframes}
+    sent = quantize(model).payload
+    assert isinstance(sent, KeypointTrackPayload)
+    sent_points = {f.t_ms: f.points for f in sent.keyframes}
+    first, *rest = sorted(fixed.payload.keyframes, key=lambda f: f.t_ms)
+    assert first.t_ms == s.frame_times[0] and first.world is None
+    assert [f.t_ms for f in rest] == s.frame_times[1:]
+    for f in rest:
+        assert f.world == original[f.t_ms].world and f.points == sent_points[f.t_ms]
+    # 다시 수집해도 같은 레코드 (멱등, ID 해시에 되살린 world가 들어간다)
+    again = reconcile([model], [moved], session_id=s.session_id, ontology_version="1.0.0",
+                      reviewer_id="rev1", now=FIXED_TIME, normalize=quantize)  # fmt: skip
+    assert again.new_records == out.new_records
     # 다른 경로로 world가 실린 항목이 들어와도 사람 레코드에는 싣지 않는다 (reconcile 방어)
     smuggled = ReviewedItem(None, "bodycam", model.t_start_ms, model.t_end_ms, model.payload)
     [drawn] = reconcile([], [smuggled], session_id=s.session_id, ontology_version="1.0.0",
                         reviewer_id="rev1", now=FIXED_TIME).new_records  # fmt: skip
     assert isinstance(drawn.payload, KeypointTrackPayload)
     assert all(f.world is None for f in drawn.payload.keyframes)
+
+
+def test_partial_world_restore_needs_same_hand_and_exact_2d() -> None:
+    """world는 parent의 같은 시각 키프레임과 2D(좌표·보임 정도)가 정확히 같을 때만 되살아난다.
+
+    시나리오 (normalize 없는 경로, 정답 3D 손 트랙 4프레임):
+    - 둘째 프레임 검지 끝 보임 정도만 2→1로 바꿈, 셋째 프레임 시각을 1 ms 옮김(새 시각) →
+      그 둘에는 world 없음, 첫째·넷째에는 원래 world.
+    - 들어온 world가 엉뚱한 값이어도 parent의 world로 바뀐다 (들어온 world는 버린다).
+    - 같은 2D를 왼손 트랙으로 바꾸면(손 다름) world를 하나도 되살리지 않는다.
+    """
+    s = generate_hand3d_scenario(4, n_frames=4)
+    [model] = s.labels
+    p = model.payload
+    assert isinstance(p, KeypointTrackPayload)
+    f0, f1, f2, f3 = p.keyframes
+    bogus = tuple(w.model_copy(update={"z": w.z + 1.0}) for w in f0.world or ())
+    f1_vis = f1.points[8].model_copy(update={"visibility": 1})
+    edited = p.model_copy(update={"keyframes": (
+        f0.model_copy(update={"world": bogus}),
+        f1.model_copy(update={"points": (*f1.points[:8], f1_vis, *f1.points[9:])}),
+        f2.model_copy(update={"t_ms": f2.t_ms + 1}),
+        f3,
+    )})  # fmt: skip
+    item = ReviewedItem(model.label_id, "bodycam", model.t_start_ms, model.t_end_ms, edited)
+    [rec] = reconcile([model], [item], session_id=s.session_id, ontology_version="1.0.0",
+                      reviewer_id="rev1", now=FIXED_TIME).new_records  # fmt: skip
+    assert isinstance(rec.payload, KeypointTrackPayload)
+    got = [f.world for f in rec.payload.keyframes]
+    assert got == [f0.world, None, None, f3.world]
+
+    other_hand = edited.model_copy(update={"hand": Hand.LEFT, "entity_id": "left_hand"})
+    item = ReviewedItem(model.label_id, "bodycam", model.t_start_ms, model.t_end_ms, other_hand)
+    [rec] = reconcile([model], [item], session_id=s.session_id, ontology_version="1.0.0",
+                      reviewer_id="rev1", now=FIXED_TIME).new_records  # fmt: skip
+    assert isinstance(rec.payload, KeypointTrackPayload)
+    assert all(f.world is None for f in rec.payload.keyframes)
 
 
 # ---------------------------------------------------------------- 그 밖

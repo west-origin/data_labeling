@@ -298,7 +298,8 @@ def quantize(label: LabelRecord, scale: Scale = UNIT_SCALE) -> LabelRecord:
         sx, sy = scale
         # 보낼 때(_point_to)와 받을 때(from_cvat_tracks의 나눗셈·반올림)를 그대로 재현한다.
         # 손 중심 3D 점(world)은 CVAT로 보내지 않으므로 돌아온 값에도 없다 (ADR 0044). 고치지 않은
-        # 트랙은 원래 레코드를 승인하므로 world가 남고, 고친 트랙의 사람 레코드에는 world가 없다
+        # 트랙은 원래 레코드를 승인하므로 world가 남는다. 고친 트랙의 사람 레코드는 2D가 이 값과
+        # 같은 키프레임에만 원래 world를 되살린다 (`reconcile.keep_unchanged_world`)
         kfs = tuple(
             f.model_copy(
                 update={
