@@ -18,7 +18,8 @@
       `try_lock_session`(기다리지 않음, 고아 정리).
     - 라벨: `label_to_row`, `row_to_label`, `insert_labels`, `get_labels`, `record_review`.
     - 설명 물려받기 기록(추가만, ADR 0043 3절): `record_description_inheritance`,
-      `get_description_inheritance` (`db.inheritance_repository`).
+      `get_description_inheritance` (`db.inheritance_repository`). 3D 궤적 물려받기 기록(추가만,
+      ADR 0048): `record_trajectory_inheritance`, `get_trajectory_inheritance`.
     - 검수 작업·배정: `insert_review_task`, `get_review_task`, `list_review_tasks`,
       `mark_review_task_collected`, `insert_assignment`, `get_assignment`, `list_assignments`,
       `update_assignment`. 매체 회수 outbox(ADR 0039): `request_task_revocation`,
@@ -57,7 +58,13 @@ from dlp_schema.db.inheritance_repository import (
     get_description_inheritance as get_description_inheritance,
 )
 from dlp_schema.db.inheritance_repository import (
+    get_trajectory_inheritance as get_trajectory_inheritance,
+)
+from dlp_schema.db.inheritance_repository import (
     record_description_inheritance as record_description_inheritance,
+)
+from dlp_schema.db.inheritance_repository import (
+    record_trajectory_inheritance as record_trajectory_inheritance,
 )
 from dlp_schema.db.locks import lock_model_task as lock_model_task
 from dlp_schema.db.locks import lock_session as lock_session

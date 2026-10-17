@@ -21,6 +21,8 @@
     - privacy_holds: 사고 대응 승인 보류·해제 기록, 수정·삭제·TRUNCATE 금지 (0017, ADR 0042).
     - description_inheritance: 설명의 검수 물려받기 기록, 수정·삭제·TRUNCATE 금지 (0021,
       ADR 0043 3절).
+    - trajectory_inheritance: 3D 궤적이 2D 손 트랙 검수를 물려받은 기록, 수정·삭제·TRUNCATE 금지
+      (0023, ADR 0048).
     - ai_review_runs, ai_review_run_events, ai_review_units, ai_review_exposures,
       ai_review_outcomes: AI 1차 검수 기록 (라벨이 아니다), 수정·삭제·TRUNCATE 금지
       (0019, ADR 0040).
@@ -264,6 +266,43 @@ description_inheritance = sa.Table(
     ),
     sa.Column("owner_label_ids", Json, nullable=False),
     sa.Column("giver_label_id", sa.String(128), nullable=False),
+    sa.Column("state", sa.String(32), nullable=False),
+    sa.Column("reviewer_id", sa.String(128), nullable=False),
+    sa.Column("reviewed_at", Ts, nullable=False),
+    sa.Column("mechanism", sa.String(32), nullable=False),
+    sa.Column("rule_version", sa.String(64), nullable=False),
+    sa.Column("recorded_at", Ts, nullable=False),
+)
+
+# 3D 궤적이 그것을 계산한 2D 손 트랙의 검수를 물려받은 기록 (`TrajectoryInheritance`, ADR 0048).
+# 추가만 한다 (0023 트리거). 물려받는 `record_review`와 같은 트랜잭션에 쓴다. source_label_id는
+# 2D 손 트랙, via_label_ids는 그 사이 입력(월드 좌표: 카메라 좌표 궤적, 자세)의 JSON 목록.
+# mechanism: collect | verify | prelabel.
+trajectory_inheritance = sa.Table(
+    "trajectory_inheritance",
+    metadata,
+    sa.Column(
+        "event_id",
+        sa.BigInteger().with_variant(sa.Integer(), "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    ),
+    sa.Column(
+        "session_id",
+        sa.String(128),
+        sa.ForeignKey("sessions.session_id"),
+        nullable=False,
+        index=True,
+    ),
+    sa.Column(
+        "trajectory_label_id",
+        sa.String(128),
+        sa.ForeignKey("label_records.label_id"),
+        nullable=False,
+        index=True,
+    ),
+    sa.Column("source_label_id", sa.String(128), nullable=False),
+    sa.Column("via_label_ids", Json, nullable=False),
     sa.Column("state", sa.String(32), nullable=False),
     sa.Column("reviewer_id", sa.String(128), nullable=False),
     sa.Column("reviewed_at", Ts, nullable=False),

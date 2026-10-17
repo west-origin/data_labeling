@@ -8,6 +8,8 @@
     - `make_session`: 바디캠(기준) + IMU 두 스트림을 가진 세션 `s001`.
     - `make_label`: 사람 출처 라벨 하나 (세션 `s001`, 온톨로지 1.0.0).
     - `action_payload`: 온톨로지 v1에서 유효한 원시 동작(grasp) 페이로드 사전.
+    - `hand_track_payload`, `trajectory_payload`: hand21 손 트랙·3D 궤적 페이로드 사전 (3D가 2D 손
+      트랙 검수를 물려받는 시험, ADR 0048).
     - `sqlite_db`: 시간대를 보존하는 SQLite 테스트 DB (서비스 없이 저장소 함수를 시험할 때).
     - AI 1차 검수 기록(WP17): `AI_VERSION`, `AI_TARGET_RULE`, `make_ai_verdict`, `make_ai_run`,
       `make_ai_unit`.
@@ -138,6 +140,57 @@ def action_payload(**overrides: Any) -> dict[str, Any]:
         "t_end_ms": 1_000,
     }
     data.update(overrides)
+    return data
+
+
+def hand_track_payload(
+    entity: str = "right_hand", times: Sequence[int] = (0, 1_000)
+) -> dict[str, Any]:
+    """hand21 손 키포인트 트랙 페이로드 사전 (키프레임마다 21점, 자리 값 픽셀).
+
+    Args:
+        entity: 개체 ID (`<left|right>_hand`, 손은 이름에서 정한다).
+        times: 키프레임 시각 (스트림 PTS ms, 오름차순).
+    """
+    points = [{"x": 100.0 + j, "y": 80.0 + j, "visibility": 2} for j in range(21)]
+    return {
+        "kind": "keypoint_track",
+        "entity_id": entity,
+        "skeleton": "hand21",
+        "hand": entity.split("_")[0],
+        "keyframes": [{"t_ms": t, "points": points} for t in times],
+    }
+
+
+def trajectory_payload(
+    entity: str = "right_hand",
+    part: str | None = "wrist",
+    *,
+    frame: str = "camera",
+    derived_from: Sequence[str] | None = None,
+    times: Sequence[int] = (0, 1_000),
+    offset_m: float = 0.0,
+) -> dict[str, Any]:
+    """3D 궤적 페이로드 사전. entity "camera"면 단위 회전 자세 (frame=world).
+
+    Args:
+        entity / part / frame: 개체·부위·좌표계.
+        derived_from: 입력 라벨 ID (카메라 좌표: 2D 트랙, 월드 좌표: 카메라 좌표 궤적·자세).
+        times: 표본 시각 (스트림 PTS ms).
+        offset_m: 표본 x 값 (다른 내용의 궤적을 만들 때).
+    """
+    pose = entity == "camera"
+    rot = {"qw": 1.0, "qx": 0.0, "qy": 0.0, "qz": 0.0} if pose else {}
+    data: dict[str, Any] = {
+        "kind": "trajectory3d",
+        "entity_id": entity,
+        "part": None if pose else part,
+        "frame": "world" if pose else frame,
+        "source_3d": "visual_inertial_slam" if pose else "mono_depth",
+        "samples": [{"t_ms": t, "x": offset_m, "y": 0.0, "z": 0.5, **rot} for t in times],
+    }
+    if derived_from is not None:
+        data["derived_from"] = list(derived_from)
     return data
 
 

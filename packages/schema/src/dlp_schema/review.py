@@ -14,6 +14,8 @@
     - `ReviewAssignment`, `ReviewTask`.
     - `InheritanceMechanism`, `DescriptionInheritance`: 설명이 행동 검수를 물려받은 기록 (DB
       `description_inheritance`, 추가만, ADR 0043 3절).
+    - `TrajectoryInheritanceMechanism`, `TrajectoryInheritance`: 3D 궤적이 2D 손 트랙 검수를
+      물려받은 기록 (DB `trajectory_inheritance`, 추가만, ADR 0048).
 
 주의
     - 프라이버시(블러) 검수 작업은 원본 영상을 보여 주므로 `config/policies/review.yaml
@@ -320,4 +322,60 @@ class DescriptionInheritance(Contract):
             raise ValueError("물려받는 검수 상태는 human_approved·sample_verified뿐입니다")
         if self.giver_label_id not in self.owner_label_ids:
             raise ValueError("검수를 준 주인은 주인 목록에 있어야 합니다")
+        return self
+
+
+# ---------------------------------------------------------------- 3D 궤적의 검수 물려받기 기록
+
+
+class TrajectoryInheritanceMechanism(StrEnum):
+    """3D 궤적이 2D 손 트랙의 검수를 물려받은 경로 (`TrajectoryInheritance.mechanism`, ADR 0048).
+
+    collect: 검수 수집(`dlp review collect`·웹훅). verify: 완료 판정(`dlp review verify`).
+    prelabel: 프리라벨 3D·월드 좌표 단계 뒤(`dlp prelabel run`, 이미 승인된 2D에서 새로 만든 3D).
+    """
+
+    COLLECT = "collect"
+    VERIFY = "verify"
+    PRELABEL = "prelabel"
+
+
+class TrajectoryInheritance(Contract):
+    """3D 궤적이 그것을 계산한 2D 손 트랙의 검수를 물려받은 기록 하나 (DB trajectory_inheritance).
+
+    추가만 한다 (PostgreSQL 트리거). 물려받는 `record_review`와 같은 트랜잭션에 쓴다. 3D의 지금
+    검수 상태(state·reviewer_id·reviewed_at)가 그 3D의 마지막 기록과 같을 때만 "물려받은 검수만
+    있음"이다 (`dlp_schema.trajectory_follow.active_trajectory_inheritance`). 기록이 없는 검수는
+    직접 검수로 보고 추정하지 않는다 (ADR 0048).
+
+    source_label_id는 3D가 계산된 2D 손 트랙(hand21 키포인트 트랙) 레코드다. via_label_ids는 그
+    사이의 입력이다: 카메라 좌표 궤적은 비고, 월드 좌표 궤적은 (카메라 좌표 궤적, 카메라 자세)다.
+    카메라 자세는 자동 추정이고 사람이 보지 않는다 (물려받은 것은 2D 손 위치의 검수뿐이다).
+    """
+
+    event_id: int = Field(ge=1, description="DB가 매기는 일련번호 (같은 궤적 안에서 시간 순)")
+    session_id: Identifier
+    trajectory_label_id: Identifier
+    source_label_id: Identifier = Field(description="상태·검수자·시각을 준 2D 손 트랙 레코드")
+    via_label_ids: tuple[Identifier, ...] = Field(
+        default=(), description="2D 트랙과 이 궤적 사이의 입력 (월드 좌표: 카메라 좌표 궤적, 자세)"
+    )
+    state: VerificationState
+    reviewer_id: Identifier
+    reviewed_at: AwareDatetime
+    mechanism: TrajectoryInheritanceMechanism
+    rule_version: str = Field(min_length=1, description="궤적 따르기 규칙 버전")
+    recorded_at: AwareDatetime
+
+    @model_validator(mode="after")
+    def _check(self) -> TrajectoryInheritance:
+        """물려받을 수 있는 상태(승인·표본 검증)이고 자기 자신을 거치지 않는지.
+
+        Raises:
+            ValueError: 그 밖의 상태, 출처·경유 목록에 궤적 자신이 있을 때.
+        """
+        if self.state not in (VerificationState.HUMAN_APPROVED, VerificationState.SAMPLE_VERIFIED):
+            raise ValueError("물려받는 검수 상태는 human_approved·sample_verified뿐입니다")
+        if self.trajectory_label_id in (self.source_label_id, *self.via_label_ids):
+            raise ValueError("궤적은 자기 자신에게서 검수를 물려받을 수 없습니다")
         return self

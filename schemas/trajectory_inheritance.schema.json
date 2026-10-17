@@ -1,0 +1,101 @@
+{
+  "$defs": {
+    "TrajectoryInheritanceMechanism": {
+      "description": "3D 궤적이 2D 손 트랙의 검수를 물려받은 경로 (`TrajectoryInheritance.mechanism`, ADR 0048).\n\ncollect: 검수 수집(`dlp review collect`·웹훅). verify: 완료 판정(`dlp review verify`).\nprelabel: 프리라벨 3D·월드 좌표 단계 뒤(`dlp prelabel run`, 이미 승인된 2D에서 새로 만든 3D).",
+      "enum": [
+        "collect",
+        "verify",
+        "prelabel"
+      ],
+      "title": "TrajectoryInheritanceMechanism",
+      "type": "string"
+    },
+    "VerificationState": {
+      "enum": [
+        "unreviewed",
+        "sample_verified",
+        "human_approved",
+        "human_corrected"
+      ],
+      "title": "VerificationState",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "3D 궤적이 그것을 계산한 2D 손 트랙의 검수를 물려받은 기록 하나 (DB trajectory_inheritance).\n\n추가만 한다 (PostgreSQL 트리거). 물려받는 `record_review`와 같은 트랜잭션에 쓴다. 3D의 지금\n검수 상태(state·reviewer_id·reviewed_at)가 그 3D의 마지막 기록과 같을 때만 \"물려받은 검수만\n있음\"이다 (`dlp_schema.trajectory_follow.active_trajectory_inheritance`). 기록이 없는 검수는\n직접 검수로 보고 추정하지 않는다 (ADR 0048).\n\nsource_label_id는 3D가 계산된 2D 손 트랙(hand21 키포인트 트랙) 레코드다. via_label_ids는 그\n사이의 입력이다: 카메라 좌표 궤적은 비고, 월드 좌표 궤적은 (카메라 좌표 궤적, 카메라 자세)다.\n카메라 자세는 자동 추정이고 사람이 보지 않는다 (물려받은 것은 2D 손 위치의 검수뿐이다).",
+  "properties": {
+    "event_id": {
+      "description": "DB가 매기는 일련번호 (같은 궤적 안에서 시간 순)",
+      "minimum": 1,
+      "title": "Event Id",
+      "type": "integer"
+    },
+    "mechanism": {
+      "$ref": "#/$defs/TrajectoryInheritanceMechanism"
+    },
+    "recorded_at": {
+      "format": "date-time",
+      "title": "Recorded At",
+      "type": "string"
+    },
+    "reviewed_at": {
+      "format": "date-time",
+      "title": "Reviewed At",
+      "type": "string"
+    },
+    "reviewer_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Reviewer Id",
+      "type": "string"
+    },
+    "rule_version": {
+      "description": "궤적 따르기 규칙 버전",
+      "minLength": 1,
+      "title": "Rule Version",
+      "type": "string"
+    },
+    "session_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Session Id",
+      "type": "string"
+    },
+    "source_label_id": {
+      "description": "상태·검수자·시각을 준 2D 손 트랙 레코드",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Source Label Id",
+      "type": "string"
+    },
+    "state": {
+      "$ref": "#/$defs/VerificationState"
+    },
+    "trajectory_label_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Trajectory Label Id",
+      "type": "string"
+    },
+    "via_label_ids": {
+      "default": [],
+      "description": "2D 트랙과 이 궤적 사이의 입력 (월드 좌표: 카메라 좌표 궤적, 자세)",
+      "items": {
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+        "type": "string"
+      },
+      "title": "Via Label Ids",
+      "type": "array"
+    }
+  },
+  "required": [
+    "event_id",
+    "session_id",
+    "trajectory_label_id",
+    "source_label_id",
+    "state",
+    "reviewer_id",
+    "reviewed_at",
+    "mechanism",
+    "rule_version",
+    "recorded_at"
+  ],
+  "title": "TrajectoryInheritance",
+  "type": "object"
+}

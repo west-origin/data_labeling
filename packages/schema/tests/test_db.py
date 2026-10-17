@@ -234,11 +234,12 @@ def test_labels_are_immutable_except_review(pg: sa.Engine) -> None:
             conn.execute(sa.text(statement))
 
 
-# TRUNCATE를 막아야 하는 추가 전용 테이블 (0010~0012, 0017, 0021, 0022)
+# TRUNCATE를 막아야 하는 추가 전용 테이블 (0010~0012, 0017, 0021, 0022, 0023)
 APPEND_ONLY_TABLES = (
     "label_records", "raw_access_log", "review_work", "privacy_audits", "retention_decisions",
     "session_lifecycle_events", "privacy_detection_runs", "privacy_holds",
     "description_inheritance", "camera_calibrations", "worker_hand_sizes",
+    "trajectory_inheritance",
 )  # fmt: skip
 
 
@@ -557,6 +558,41 @@ def test_description_inheritance_is_append_only(pg: sa.Engine) -> None:
     ):
         with pytest.raises(DBAPIError, match="description_inheritance"), pg.begin() as conn:
             conn.execute(sa.text(statement))
+
+
+@pytest.mark.services
+def test_trajectory_inheritance_is_append_only_and_blocks_downgrade(pg: sa.Engine) -> None:
+    """3D 궤적 물려받기 기록(0023, ADR 0048)은 수정·삭제할 수 없고, 기록이 있으면 0023을 되돌릴
+    수 없다. 기록은 같은 트랜잭션의 `record_review`와 함께 궤적 따르기가 쓴다."""
+    from dlp_schema.db.repository import get_trajectory_inheritance
+    from dlp_schema.db.trajectory_repository import apply_trajectory_follow
+    from dlp_schema.review import TrajectoryInheritanceMechanism
+    from dlp_schema.testing import hand_track_payload, trajectory_payload
+
+    model = Provenance(source=Source.MODEL, model_version="m-1")
+    track = make_label(hand_track_payload(), label_id="g1", stream_id="bodycam",
+                       provenance=model, confidence=0.8)  # fmt: skip
+    cam = make_label(trajectory_payload(derived_from=("g1",)), label_id="c1",
+                     stream_id="bodycam", provenance=model, confidence=0.8)  # fmt: skip
+    with pg.begin() as conn:
+        insert_labels(conn, [track, cam])
+        record_review(conn, "g1", VerificationState.HUMAN_APPROVED, "r1", FIXED_TIME)
+        apply_trajectory_follow(conn, "s001", FIXED_TIME, TrajectoryInheritanceMechanism.VERIFY)
+    with pg.connect() as conn:
+        (rec,) = get_trajectory_inheritance(conn, "s001")
+        [c1] = [x for x in get_labels(conn, "s001") if x.label_id == "c1"]
+    assert (rec.trajectory_label_id, rec.source_label_id, rec.reviewer_id) == ("c1", "g1", "r1")
+    assert c1.verification.state is VerificationState.HUMAN_APPROVED
+    for statement in (
+        "UPDATE trajectory_inheritance SET reviewer_id = 'x'",
+        "DELETE FROM trajectory_inheritance",
+    ):
+        with pytest.raises(DBAPIError, match="trajectory_inheritance"), pg.begin() as conn:
+            conn.execute(sa.text(statement))
+    url = pg.url.render_as_string(hide_password=False)
+    pg.dispose()
+    with pytest.raises(RuntimeError, match="0023"):
+        downgrade(url, "0022")
 
 
 def test_adding_english_names_to_registered_draft_is_additive(ontology: Ontology) -> None:

@@ -1,4 +1,11 @@
-"""설명의 검수 물려받기 기록 저장·조회 (`description_inheritance`, 추가만, ADR 0043 3절).
+"""검수 물려받기 기록 저장·조회 (추가만).
+
+- 설명(`description_inheritance`, ADR 0043 3절): `record_description_inheritance`,
+  `get_description_inheritance`.
+- 3D 궤적(`trajectory_inheritance`, ADR 0048): `record_trajectory_inheritance`,
+  `get_trajectory_inheritance`. 쓰기는 궤적 따르기 적용
+  (`dlp_schema.db.trajectory_repository.apply_trajectory_follow`)이 물려받는 `record_review`와 같은
+  트랜잭션에서만 한다.
 
 쓰기는 설명 따르기 적용(`dlp_schema.db.description_repository.apply_description_follow`)이 물려받는
 `record_review`와 같은 트랜잭션에서만 한다. 읽기는 설명 따르기 계획과 저장 검증의 좁은 예외
@@ -12,8 +19,8 @@ from typing import Any
 
 import sqlalchemy as sa
 
-from dlp_schema.db.tables import description_inheritance
-from dlp_schema.review import DescriptionInheritance
+from dlp_schema.db.tables import description_inheritance, trajectory_inheritance
+from dlp_schema.review import DescriptionInheritance, TrajectoryInheritance
 
 
 def _utc(row: Any, name: str) -> Any:
@@ -58,6 +65,48 @@ def get_description_inheritance(
             {
                 **r,
                 "owner_label_ids": tuple(r["owner_label_ids"]),
+                "reviewed_at": _utc(r, "reviewed_at"),
+                "recorded_at": _utc(r, "recorded_at"),
+            }
+        )
+        for r in rows
+    ]
+
+
+def record_trajectory_inheritance(
+    conn: sa.Connection, record: TrajectoryInheritance
+) -> TrajectoryInheritance:
+    """3D 궤적 기록 하나를 추가한다 (event_id는 DB가 매긴다). 세션을 잠근 트랜잭션에서 부른다.
+
+    Returns:
+        DB 일련번호를 채운 기록.
+    """
+    values = record.model_dump(mode="python", exclude={"event_id"})
+    values["via_label_ids"] = list(record.via_label_ids)
+    values["state"] = record.state.value
+    values["mechanism"] = record.mechanism.value
+    values["reviewed_at"] = record.reviewed_at.astimezone(UTC)
+    values["recorded_at"] = record.recorded_at.astimezone(UTC)
+    event_id = conn.execute(
+        trajectory_inheritance.insert()
+        .values(**values)
+        .returning(trajectory_inheritance.c.event_id)
+    ).scalar_one()
+    return record.model_copy(update={"event_id": int(event_id)})
+
+
+def get_trajectory_inheritance(conn: sa.Connection, session_id: str) -> list[TrajectoryInheritance]:
+    """세션의 3D 궤적 물려받기 기록 (일련번호 순)."""
+    rows = conn.execute(
+        sa.select(trajectory_inheritance)
+        .where(trajectory_inheritance.c.session_id == session_id)
+        .order_by(trajectory_inheritance.c.event_id)
+    ).mappings()
+    return [
+        TrajectoryInheritance.model_validate(
+            {
+                **r,
+                "via_label_ids": tuple(r["via_label_ids"]),
                 "reviewed_at": _utc(r, "reviewed_at"),
                 "recorded_at": _utc(r, "recorded_at"),
             }
