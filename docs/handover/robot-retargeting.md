@@ -42,9 +42,11 @@
 6. 3D 궤적에는 검수 화면이 없다. 대신 3D 손 궤적(카메라·월드 좌표)은 그것을 계산한 2D 손 트랙의 검수를
    물려받는다 (ADR 0048). 2D 손 트랙을 CVAT에서 승인·수정하거나 표본 검증하면 수집·`dlp review verify`·
    `dlp prelabel run`이 3D에 검수 상태를 기록하고, 기본 내보내기(검수 라벨만)에 손 목표가 생긴다.
-   2D를 고친 뒤에는 `dlp prelabel run <세션>`으로 고친 2D에서 3D를 다시 만든다 (그 전까지 예전 3D는
-   "끊김"으로 내보내기에서 빠진다). manifest `verification_policy.trajectory3d`에 근거
-   (`inherited_from_2d_hand_track`, 자세 `automatic_unreviewed`, 근거별 수)가 남는다.
+   2D를 고치면 그 2D에서 물려받기만 한 예전 3D는 수집·완료 판정이 지우고(ADR 0050), `dlp prelabel run
+   <세션>`이 고친 2D에서 3D를 다시 만든다. 카메라 자세는 사람 검수 대상이 아닌 자동 라벨이라 완료
+   판정을 막지 않는다 (`review.yaml verify.automatic`). manifest `verification_policy.trajectory3d`에 근거
+   (`inherited_from_2d_hand_track`, 자세 `automatic_unreviewed`, `pose_derived`, 근거별 수)가, 로봇 모드
+   `meta/dlp_retarget.json`에 `camera_pose: automatic_unreviewed`가 남는다.
    `--include-unreviewed`는 그대로 쓸 수 있다.
 
 ## 2. 로봇 설정 만들기 (저장소 밖)
