@@ -11,6 +11,8 @@ JSON Schema는 `schemas/export_intervals.schema.json`(`make schemas`로 생성)�
 - 검수자 ID·검수 시각 같은 내부 정보는 넣지 않고 검증 상태만 남긴다.
 - 온톨로지 한·영 표시 이름(`term_names`, 형식 1.1)을 파일마다 넣는다. 설명 라벨은 언어마다 한
   레코드이고, 영어 번역의 원문 참조(`source_label_id`)는 원문의 가명 라벨 ID로 바꾼다 (ADR 0043).
+- 객체 물리 사전값 표(`physical_priors`, 형식 1.2, 측정값 아님 `measured: false`)를 파일마다 넣는다
+  (ADR 0049).
 """
 
 from __future__ import annotations
@@ -22,7 +24,7 @@ from typing import Any
 from dlp_export.policy import ExportPolicy
 from dlp_export.pseudonym import Pseudonymizer
 from dlp_export.source import ExportSource
-from dlp_schema.export import ExportedLabel, ExportedStream, IntervalFile
+from dlp_schema.export import ExportedLabel, ExportedStream, IntervalFile, physical_prior_table
 from dlp_schema.labels import DescriptionPayload, LabelRecord
 from dlp_schema.ontology import Ontology
 
@@ -76,11 +78,12 @@ def write_intervals(
         export_id: 내보내기 ID (파일에 기록).
         now: 내보내기 시각 (시간대 포함).
         ids: 이 내보내기의 가명 함수.
-        ontology: 데이터셋 버전의 온톨로지 (`term_names`의 한·영 이름).
+        ontology: 데이터셋 버전의 온톨로지 (`term_names`의 한·영 이름, `physical_priors` 표).
     """
     (out / "intervals").mkdir(parents=True, exist_ok=True)
     counts: dict[str, int] = {}
     names = ontology.display_names()
+    priors = physical_prior_table(ontology)
     for es in src.sessions:
         s = es.session
         labels = sorted(
@@ -101,6 +104,7 @@ def write_intervals(
             labels=tuple(exported(x, ids) for x in labels),
             exported_at=now,
             term_names=names,
+            physical_priors=priors,
         )
         (out / "intervals" / f"{f.session_id}.json").write_text(
             f.model_dump_json(indent=2), encoding="utf-8"

@@ -16,6 +16,9 @@
     - `ExportedStream`: 내보낸 스트림 하나.
     - `ExportedLabel`: 내보낸 라벨 하나 (블러 라벨 금지).
     - `IntervalFile`: 세션 하나의 구간 JSON 파일 전체.
+    - `PhysicalPriorTable`, `physical_prior_table`: 온톨로지 객체 물리 사전값 표 (ADR 0049).
+      구간 JSON `physical_priors`, COCO, LeRobot `meta/dlp_vocab.json`이 같은 표를 싣는다.
+      측정값이 아니라 사전값이다 (`measured: false`, 객체마다 `source: prior_*`).
 
 주의
     - 블러 라벨(`blur_track`)·원본 위치(`dlp-raw` URI)·검수자
@@ -32,16 +35,64 @@ from typing import Literal
 
 from pydantic import AwareDatetime, Field, field_validator
 
-from dlp_schema.common import Confidence, Contract, Identifier, Ms, SemVer
+from dlp_schema.common import Confidence, Contract, Identifier, Ms, OntologyId, SemVer
 from dlp_schema.dataset import Split
 from dlp_schema.labels import BlurTrackPayload, LabelPayload, Source, VerificationState
-from dlp_schema.ontology import TermName
+from dlp_schema.ontology import Ontology, PhysicalPriors, TermName
 from dlp_schema.session import Domain, StreamKind
 
 # 구간 JSON 형식 버전. 필드를 바꾸면 올리고 구매자 문서를 함께 갱신한다 (하위 호환이 깨지면 주
 # 버전).
 # 1.1: 온톨로지 한·영 표시 이름 `term_names`를 덧붙였다 (ADR 0043, 하위 호환).
-INTERVAL_FORMAT_VERSION = "1.1"
+# 1.2: 객체 물리 사전값 표 `physical_priors`를 덧붙였다 (ADR 0049, 하위 호환).
+INTERVAL_FORMAT_VERSION = "1.2"
+
+# 물리 사전값의 단위·가정 (구매자용 영어 설명, 계약의 의미라 정책 값이 아니다. ADR 0049).
+PHYSICAL_PRIOR_CONVENTIONS: dict[str, str] = {
+    "nature": "Class-level priors from general knowledge or literature, NOT measurements of the "
+    "recorded objects. Review before use as ground truth.",
+    "mass_kg": "Mass range in kilograms [min, max]; by_state overrides per object state value.",
+    "static_friction": "Static friction coefficient range (dimensionless) against dry bare skin, "
+    "nitrile glove or rubber gripper pad; wet conditions under by_state.wetness.",
+    "tactile": "Tactile property IDs felt by the hand (grip part for tools, main contact surface "
+    "otherwise).",
+    "material": "Representative material ID; part_materials overrides per tool part.",
+}
+
+
+class PhysicalPriorTable(Contract):
+    """온톨로지 객체 클래스의 물리 사전값 표. 측정값이 아니라 사전값이다 (measured는 늘 false)."""
+
+    # 필드 (위 docstring은 JSON Schema description이라 여기 주석으로 보강한다):
+    #   measured: 늘 false. 영상 속 물체를 잰 값이 아님을 소비자가 기계적으로 확인하게 한다.
+    #   conventions: 단위·상대면·상태별 범위의 뜻 (`PHYSICAL_PRIOR_CONVENTIONS`).
+    #   materials / tactile_properties: 재질·촉감 ID → 한·영 표시 이름.
+    #   objects: 객체 클래스 ID → 물리 사전값 (사전값이 있는 클래스만, 각자 source: prior_*).
+    measured: Literal[False] = False
+    conventions: dict[str, str] = Field(default_factory=lambda: dict(PHYSICAL_PRIOR_CONVENTIONS))
+    materials: dict[OntologyId, TermName] = Field(default_factory=dict[OntologyId, TermName])
+    tactile_properties: dict[OntologyId, TermName] = Field(
+        default_factory=dict[OntologyId, TermName]
+    )
+    objects: dict[OntologyId, PhysicalPriors] = Field(
+        default_factory=dict[OntologyId, PhysicalPriors],
+        description="객체 클래스 ID → 물리 사전값 (측정값 아님, source: prior_*)",
+    )
+
+
+def physical_prior_table(ontology: Ontology) -> PhysicalPriorTable:
+    """온톨로지의 물리 사전값 표 (재질·촉감 이름과 사전값이 있는 객체만, ID 순으로 결정적)."""
+    return PhysicalPriorTable(
+        materials={k: TermName(ko=v.ko, en=v.en) for k, v in sorted(ontology.materials.items())},
+        tactile_properties={
+            k: TermName(ko=v.ko, en=v.en) for k, v in sorted(ontology.tactile_properties.items())
+        },
+        objects={
+            k: v.physical_priors
+            for k, v in sorted(ontology.objects.items())
+            if v.physical_priors is not None
+        },
+    )
 
 
 # 내보낸 스트림 하나.
@@ -110,6 +161,7 @@ class IntervalFile(Contract):
     #   term_names: 온톨로지 사전 항목의 한·영 표시 이름. 키는 "<범주>:<ID>"(예: "verbs:grasp",
     #     `Ontology.display_names`). 페이로드에는 ID만 있으므로 사람이 읽는 이름은 이 표로 찾는다
     #     (형식 1.1, ADR 0043). 설명(description) 라벨은 언어마다 한 레코드(language ko·en)다.
+    #   physical_priors: 객체 물리 사전값 표 (형식 1.2, ADR 0049). 측정값이 아니다 (measured false).
     format: Literal["dlp-intervals"] = "dlp-intervals"
     format_version: str = INTERVAL_FORMAT_VERSION
     export_id: Identifier
@@ -127,4 +179,7 @@ class IntervalFile(Contract):
     term_names: dict[str, TermName] = Field(
         default_factory=dict[str, TermName],
         description='온톨로지 항목 "<범주>:<ID>" → 한·영 표시 이름 (ko, en)',
+    )
+    physical_priors: PhysicalPriorTable | None = Field(
+        default=None, description="객체 물리 사전값 표 (측정값 아님, 형식 1.2, ADR 0049)"
     )

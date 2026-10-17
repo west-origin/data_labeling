@@ -12,7 +12,13 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from dlp_schema.ontology import Ontology, VerbLevel, find_ontology_dir, load_ontology
+from dlp_schema.ontology import (
+    Ontology,
+    PriorSource,
+    VerbLevel,
+    find_ontology_dir,
+    load_ontology,
+)
 from dlp_schema.testing import action_payload, make_label
 from dlp_schema.validation import OntologyViolationError, check_label, validate_label
 
@@ -212,3 +218,100 @@ def test_term_without_korean_name_is_rejected(ontology: Ontology) -> None:
     data["objects"]["mop"]["ko"] = " "
     with pytest.raises(ValidationError):
         Ontology.model_validate(data)
+
+
+# ---------------------------------------------------------------- 객체 물리 사전값 (ADR 0049)
+
+
+def test_v1_objects_carry_physical_priors(ontology: Ontology) -> None:
+    """v1 객체는 person을 빼고 모두 물리 사전값이 있고, 모두 측정값이 아닌 추정(prior_estimate)이다.
+
+    정답 근거: config/ontology/v1/objects.yaml (2026-10-17 덧붙임). 재질·촉감 이름은 표시 이름 표
+    (`display_names`, 번역 용어집)에 들지 않고 `physics_names`에만 있다.
+    """
+    with_priors = {k for k, v in ontology.objects.items() if v.physical_priors is not None}
+    assert with_priors == set(ontology.objects) - {"person"}
+    sources = {v.physical_priors.source for v in ontology.objects.values() if v.physical_priors}
+    assert sources == {PriorSource.PRIOR_ESTIMATE}
+    bucket = ontology.objects["bucket"].physical_priors
+    assert bucket is not None and bucket.mass_kg is not None
+    assert bucket.mass_kg.by_state["fill_state"]["full"].min == 5.0
+    names = ontology.physics_names()
+    assert names["materials:plastic"].en == "Plastic"
+    assert names["tactile_properties:slippery_when_wet"].ko == "젖으면 미끄러움"
+    assert not set(names) & set(ontology.display_names())
+    assert len(ontology.display_names()) == V1_TERMS  # 용어집(번역 버전)은 그대로
+
+
+def _with_priors(ontology: Ontology, obj: str, priors: dict[str, Any]) -> dict[str, Any]:
+    """obj의 물리 사전값을 priors로 바꾼 사전 데이터 (검증 전)."""
+    data = ontology.model_dump(mode="json")
+    data["objects"][obj]["physical_priors"] = priors
+    return data
+
+
+def _by_state(attr: str, value: str, lo: float, hi: float) -> dict[str, Any]:
+    """기본 범위 0.1~1에 상태별 범위 하나를 붙인 질량 사전값."""
+    return {"min": 0.1, "max": 1, "by_state": {attr: {value: {"min": lo, "max": hi}}}}
+
+
+_EST = "prior_estimate"
+
+
+@pytest.mark.parametrize(
+    ("obj", "priors", "message"),
+    [
+        ("cup", {"source": _EST, "mass_kg": {"min": 2.0, "max": 1.0}}, "min"),
+        ("cup", {"source": _EST, "mass_kg": {"min": -1.0, "max": 1.0}}, "greater"),
+        ("cup", {"source": _EST, "mass_kg": {"min": 0.1, "max": "inf"}}, "finite"),
+        ("cup", {"source": _EST, "static_friction": {"min": 0, "max": 1}}, "greater"),
+        ("cup", {"source": "measured", "material": "ceramic"}, "source"),
+        ("cup", {"material": "ceramic"}, "source"),
+        ("cup", {"source": _EST}, "비었습니다"),
+        ("cup", {"source": _EST, "material": "unobtainium"}, "알 수 없는 재질"),
+        ("cup", {"source": _EST, "tactile": ["fluffy"]}, "알 수 없는 촉감"),
+        ("cup", {"source": _EST, "tactile": ["hard", "hard"]}, "중복"),
+        ("mop", {"source": _EST, "part_materials": {"handle": "unobtainium"}}, "알 수 없는 재질"),
+        ("cup", {"source": _EST, "part_materials": {"handle": "plastic"}}, "도구 부분이 아닌"),
+        ("cup", {"source": _EST, "mass_kg": _by_state("wetness", "wet", 1, 2)}, "states에 없음"),
+        ("cup", {"source": _EST, "mass_kg": _by_state("fill_state", "brimming", 1, 2)}, "brimming"),
+        ("cup", {"source": _EST, "mass_kg": _by_state("fill_state", "full", 3, 2)}, "min"),
+    ],
+)
+def test_physical_prior_validation(
+    ontology: Ontology, obj: str, priors: dict[str, Any], message: str
+) -> None:
+    """잘못된 범위(min>max, 0 이하, 무한대), 측정값 출처, 빈 블록, 사전에 없는 재질·촉감, 중복 촉감,
+    도구 부분이 아닌 재질 부분, 객체에 없는 상태 속성·값의 상태별 범위를 거부한다."""
+    with pytest.raises(ValidationError, match=message):
+        Ontology.model_validate(_with_priors(ontology, obj, priors))
+
+
+@pytest.mark.parametrize("category", ["materials", "tactile_properties"])
+@pytest.mark.parametrize("missing", ["ko", "en"])
+def test_physics_vocabulary_requires_both_names(
+    ontology: Ontology, category: str, missing: str
+) -> None:
+    """재질·촉감 어휘도 ko·en이 모두 필요하다 (ADR 0043)."""
+    data = ontology.model_dump(mode="json")
+    del next(iter(data[category].values()))[missing]
+    with pytest.raises(ValidationError):
+        Ontology.model_validate(data)
+
+
+def test_valid_state_dependent_priors_are_accepted(ontology: Ontology) -> None:
+    """상태별 범위는 기본 범위 밖이어도 되고(젖은 물체의 마찰), 도구 부분 재질도 받는다."""
+    friction = {"min": 0.3, "max": 0.8, "by_state": {"wetness": {"wet": {"min": 0.1, "max": 0.2}}}}
+    priors: dict[str, Any] = {
+        "source": "prior_literature",
+        "note": "제품 사양",
+        "material": "metal",
+        "part_materials": {"mop_head": "fabric"},
+        "tactile": ["hard"],
+        "static_friction": friction,
+    }
+    o = Ontology.model_validate(_with_priors(ontology, "mop", priors))
+    got = o.objects["mop"].physical_priors
+    assert got is not None and got.source is PriorSource.PRIOR_LITERATURE
+    assert got.static_friction is not None
+    assert got.static_friction.by_state["wetness"]["wet"].max == 0.2

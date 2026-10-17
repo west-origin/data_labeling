@@ -125,6 +125,9 @@ def test_migration_unsupported_state_change_goes_to_review(ontology: Ontology):
     data = ontology.model_dump(mode="json")
     data["version"] = "2.0.0"
     data["state_attributes"]["wetness"]["values"] = ["damp", "dry"]
+    # 물리 사전값의 상태별 범위도 상태 값을 참조하므로 새 버전 사전에서는 함께 없앤다 (ADR 0049)
+    for obj in data["objects"].values():
+        obj["physical_priors"] = None
     target = Ontology.model_validate(data)
     original = make_label(
         {

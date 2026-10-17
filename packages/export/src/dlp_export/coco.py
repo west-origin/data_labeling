@@ -36,6 +36,7 @@ from dlp_export.source import ExportSource, fetch_blurred
 from dlp_media.probe import probe
 from dlp_media.pts import build_pts_index
 from dlp_media.storage import ObjectStore
+from dlp_schema.export import physical_prior_table
 from dlp_schema.labels import BoxTrackPayload, KeypointTrackPayload, LabelRecord
 from dlp_schema.ontology import Ontology
 from dlp_schema.session import StreamKind
@@ -73,15 +74,23 @@ def categories(ontology: Ontology) -> tuple[list[dict[str, Any]], dict[str, int]
     person 범주(객체든 새로 만든 것이든)에 coco17 keypoints·skeleton을 붙인다.
     온톨로지 객체 범주의 `name`은 온톨로지 ID 그대로이고(기존 소비자 호환), 표시 이름
     `name_ko`·`name_en`을 덧붙인다 (COCO는 범주의 추가 키를 허용한다, ADR 0043).
+    사전값이 있는 객체 범주에는 `physical_priors`(측정값 아님 `measured: false`,
+    `source: prior_*`)를 덧붙인다. 재질·촉감 이름과 단위·가정은 최상위 `physical_priors`에
+    있다 (ADR 0049).
     """
     cats: list[dict[str, Any]] = []
     obj: dict[str, int] = {}
     for i, name in enumerate(sorted(ontology.objects), start=1):
         term = ontology.objects[name]
-        cats.append(
-            {"id": i, "name": name, "supercategory": "object", "name_ko": term.ko,
-             "name_en": term.en}
-        )  # fmt: skip
+        entry: dict[str, Any] = {"id": i, "name": name, "supercategory": "object",
+                                 "name_ko": term.ko, "name_en": term.en}  # fmt: skip
+        if term.physical_priors is not None:
+            # 측정값이 아닌 사전값임을 범주마다 measured false로 밝힌다 (ADR 0049)
+            entry["physical_priors"] = {
+                "measured": False,
+                **term.physical_priors.model_dump(mode="json"),
+            }
+        cats.append(entry)
         obj[name] = i
     skel: dict[str, int] = {}
     if "person" in obj:
@@ -288,6 +297,10 @@ def write_coco(  # noqa: C901
         "images": images,
         "annotations": anns,
         "categories": cats,
+        # 물리 사전값의 단위·가정·재질·촉감 이름 (객체별 값은 범주에, 측정값 아님, ADR 0049)
+        "physical_priors": physical_prior_table(ontology).model_dump(
+            mode="json", exclude={"objects"}
+        ),
     }  # fmt: skip
     (out / "coco" / "annotations.json").write_text(json.dumps(coco, ensure_ascii=False), "utf-8")
     result.images, result.annotations = len(images), len(anns)

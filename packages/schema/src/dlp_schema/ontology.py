@@ -12,11 +12,14 @@
 주요 이름
     - 사전 항목 타입: `Term`과 하위 타입(`DomainTerm`, `TaskTerm`, `VerbTerm`, `StateAttribute`,
       `ObjectClass`, `EventTerm`, `PrivacyTarget`), `ToolSpec`, `VerbLevel`.
+    - 객체 물리 사전값(ADR 0049): `PhysicalPriors`, `PriorRange`, `StatePriorRange`, `PriorSource`.
+      재질(`materials`)·촉감(`tactile_properties`) 어휘와 함께 쓴다. 측정값이 아니라 사전값이다.
     - `TermName`, `TERM_CATEGORIES`: 한·영 표시 이름과 이름이 있는 범주 (ADR 0043).
     - `Ontology`: 사전 전체와 교차 참조 검증, 조회 도우미 (`display_names`, `name` 포함).
     - `load_ontology(dir)`: 디렉터리의 YAML을 합쳐 검증한다.
     - `find_ontology_dir(root, version)`: manifest의 version으로 디렉터리를 찾는다.
     - `ontology_digest(ontology)`: 내용 해시 (같은 버전의 draft 덧붙이기도 구별한다).
+    - `PHYSICS_CATEGORIES`: 물리 사전값 어휘 범주 (`Ontology.physics_names`, 용어집에 넣지 않는다).
 
 DB 등록
     `dlp ontology register <버전>`(`make db-upgrade`)이 `db.repository.register_ontology`로
@@ -102,16 +105,111 @@ class ToolSpec(Contract):
     grip_parts: tuple[OntologyId, ...] = Field(min_length=1)
 
 
+# ---------------------------------------------------------------- 물리 사전값 (ADR 0049)
+
+
+# 물리 사전값의 출처. 둘 다 측정값이 아니다 (이 세션·이 물체를 잰 값이 아니라 클래스의 일반 범위).
+class PriorSource(StrEnum):
+    PRIOR_LITERATURE = "prior_literature"  # 문헌·제품 사양·표준 표에서 옮긴 범위 (출처를 note에)
+    PRIOR_ESTIMATE = "prior_estimate"  # 일반 지식으로 잡은 넓은 추정 범위 (전문가 검토 전)
+
+
+class PriorRange(Contract):
+    """사전값 범위 [min, max]. 둘 다 0보다 큰 유한한 수이고 min ≤ max다. 측정값이 아니다."""
+
+    min: float = Field(gt=0, allow_inf_nan=False)
+    max: float = Field(gt=0, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def _ordered(self) -> PriorRange:
+        """min ≤ max인지 본다.
+
+        Raises:
+            ValueError: min > max일 때.
+        """
+        if self.min > self.max:
+            raise ValueError(f"사전값 범위의 min({self.min})이 max({self.max})보다 큽니다")
+        return self
+
+
+class StatePriorRange(PriorRange):
+    """기본 사전값 범위와, 객체 상태 값별로 바꿔 쓰는 범위 (예: 양동이 fill_state=full의 질량).
+
+    min·max는 기본 조건(건조, 상태를 따로 적지 않음)의 범위다. by_state: 상태 속성 ID → 상태 값 ID →
+    범위. 상태 속성은 그 객체의 states에, 값은 그 속성의 values에 있어야 한다 (`Ontology` 검증기).
+    상태별 범위는 기본 범위 밖일 수 있다 (예: 젖은 바닥의 마찰).
+    """
+
+    by_state: dict[OntologyId, dict[OntologyId, PriorRange]] = Field(
+        default_factory=dict, description="상태 속성 ID → 상태 값 ID → 사전값 범위"
+    )
+
+
+class PhysicalPriors(Contract):
+    """객체 클래스의 물리 사전값 (재질·촉감·질량·정지 마찰 계수). 측정값이 아니라 사전값(prior)이다.
+
+    클래스의 흔한 실물 범위를 넓게 잡은 값이며, 영상 속 특정 물체를 잰 값이 아니다. 내보내기는
+    `measured: false`와 출처(source)를 함께 싣는다 (ADR 0049).
+    """
+
+    # 필드:
+    #   source: 수치 사전값의 출처 (필수). note: 근거·가정 메모 (선택, 한국어).
+    #   material: 대표 재질 ID (materials의 키). part_materials: 도구 부분 ID → 재질 ID (그 객체의
+    #     작용부·파지부만, 대표 재질과 다른 부분만 적는다).
+    #   tactile: 촉감 속성 ID 목록 (tactile_properties의 키, 중복 금지).
+    #   mass_kg: 질량 범위 (kg). by_state로 상태별 범위 (예: fill_state).
+    #   static_friction: 정지 마찰 계수 범위 (무차원). 상대면은 건조한 맨손 피부·니트릴 장갑·고무
+    #     그리퍼 패드를 함께 보는 넓은 범위이고, 젖은 경우는 by_state(wetness)로 따로 적는다.
+    source: PriorSource = Field(description="수치 사전값의 출처 (prior_*: 측정값이 아님)")
+    note: str | None = None
+    material: OntologyId | None = None
+    part_materials: dict[OntologyId, OntologyId] = Field(
+        default_factory=dict, description="도구 부분 ID → 재질 ID (대표 재질과 다른 부분만)"
+    )
+    tactile: tuple[OntologyId, ...] = ()
+    mass_kg: StatePriorRange | None = Field(default=None, description="질량 사전값 범위 (kg)")
+    static_friction: StatePriorRange | None = Field(
+        default=None,
+        description=(
+            "정지 마찰 계수 사전값 범위 (무차원). 상대면: 건조한 맨손 피부·니트릴 장갑·고무 그리퍼 "
+            "패드. 젖음은 by_state.wetness"
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _not_empty(self) -> PhysicalPriors:
+        """재질·촉감·질량·마찰 중 하나는 있어야 하고 촉감 ID는 겹치지 않아야 한다.
+
+        Raises:
+            ValueError: 모두 비었거나 촉감 ID가 중복될 때.
+        """
+        if (
+            self.material is None
+            and not self.part_materials
+            and not self.tactile
+            and self.mass_kg is None
+            and self.static_friction is None
+        ):
+            raise ValueError("물리 사전값이 비었습니다 (재질·촉감·질량·마찰 중 하나는 필요)")
+        if len(set(self.tactile)) != len(self.tactile):
+            raise ValueError("촉감 속성 ID가 중복됩니다")
+        return self
+
+
 # 객체 클래스.
 #   physical_type: 물리 유형 ID (physical_types의 키).
 #   states: 이 클래스가 가질 수 있는 상태 속성 ID (state_attributes의 키).
 #   tool: 도구면 부분 정의, 아니면 None.
 #   surface: 처리 대상 표면인지 (청결 상태·커버리지 기록 대상).
+#   physical_priors: 물리 사전값 (선택, ADR 0049). 측정값이 아니다.
 class ObjectClass(Term):
     physical_type: OntologyId
     states: tuple[OntologyId, ...] = ()
     tool: ToolSpec | None = None
     surface: bool = False
+    physical_priors: PhysicalPriors | None = Field(
+        default=None, description="물리 사전값 (재질·촉감·질량·마찰, 측정값 아님, ADR 0049)"
+    )
 
 
 # 이벤트 유형.
@@ -139,6 +237,8 @@ class PrivacyTarget(Term):
 #   domains·tasks·verbs·gap_types·contact_target_kinds·grasp_types·hand_roles·body_parts·postures·
 #   physical_types·state_attributes·objects·events·privacy_targets: 범주별 사전 (ID → 항목).
 #   surface_parts·hand_joints: 부분 ID 사전 (3차 검수에서 추가, 기본값 빈 사전).
+#   materials·tactile_properties: 객체 물리 사전값(`ObjectClass.physical_priors`)의 재질·촉감 어휘
+#     (ADR 0049, 기본값 빈 사전). 라벨에는 쓰지 않는다.
 class Ontology(Contract):
     version: SemVer
     status: Literal["draft", "frozen"]
@@ -163,6 +263,12 @@ class Ontology(Contract):
     hand_joints: dict[OntologyId, Term] = Field(
         default_factory=dict, description="손 3D 궤적의 부분 ID (hand21 골격의 이름 붙은 점)"
     )
+    materials: dict[OntologyId, Term] = Field(
+        default_factory=dict, description="객체 물리 사전값의 재질 ID (ADR 0049)"
+    )
+    tactile_properties: dict[OntologyId, Term] = Field(
+        default_factory=dict, description="객체 물리 사전값의 촉감 속성 ID (ADR 0049)"
+    )
 
     @model_validator(mode="after")
     def _check_references(self) -> Ontology:
@@ -170,6 +276,7 @@ class Ontology(Contract):
 
         - 작업의 domain이 domains에 있는지
         - 객체의 physical_type·states가 각 사전에 있는지
+        - 객체 물리 사전값의 재질·촉감·부분·상태 참조 (`_physics_errors`)
         - 하위 단계 ID가 작업 사이에서도 고유한지
 
         Raises:
@@ -187,12 +294,62 @@ class Ontology(Contract):
                 for s in obj.states
                 if s not in self.state_attributes
             )
+            errors.extend(self._physics_errors(oid, obj))
         substep_ids = [s for t in self.tasks.values() for s in t.substeps]
         if len(substep_ids) != len(set(substep_ids)):
             errors.append("하위 단계 ID는 작업 사이에서도 고유해야 합니다")
         if errors:
             raise ValueError("; ".join(errors))
         return self
+
+    def _physics_errors(self, oid: str, obj: ObjectClass) -> list[str]:
+        """객체 물리 사전값의 교차 참조 위반 목록 (ADR 0049).
+
+        재질·촉감 ID가 어휘에 있는지, part_materials의 부분이 그 객체의 도구 부분인지, by_state의
+        상태 속성이 그 객체의 states에 있고 값이 그 속성의 values에 있는지 본다.
+        """
+        p = obj.physical_priors
+        if p is None:
+            return []
+        errors: list[str] = []
+        materials = [p.material] if p.material is not None else []
+        for m in [*materials, *p.part_materials.values()]:
+            if m not in self.materials:
+                errors.append(f"객체 {oid}: 알 수 없는 재질 {m}")
+        parts = set(obj.tool.working_parts) | set(obj.tool.grip_parts) if obj.tool else set[str]()
+        errors.extend(
+            f"객체 {oid}: 도구 부분이 아닌 재질 부분 {part}"
+            for part in p.part_materials
+            if part not in parts
+        )
+        errors.extend(
+            f"객체 {oid}: 알 수 없는 촉감 속성 {t}"
+            for t in p.tactile
+            if t not in self.tactile_properties
+        )
+        for name, rng in (("mass_kg", p.mass_kg), ("static_friction", p.static_friction)):
+            if rng is not None:
+                errors.extend(self._state_range_errors(oid, obj, name, rng))
+        return errors
+
+    def _state_range_errors(
+        self, oid: str, obj: ObjectClass, name: str, rng: StatePriorRange
+    ) -> list[str]:
+        """by_state의 상태 속성·값이 그 객체에 허용된 것인지 본다."""
+        errors: list[str] = []
+        for attr, by_value in rng.by_state.items():
+            if attr not in obj.states:
+                errors.append(
+                    f"객체 {oid}: {name}.by_state의 상태 속성 {attr}가 객체 states에 없음"
+                )
+                continue
+            values = self.state_attributes[attr].values if attr in self.state_attributes else ()
+            errors.extend(
+                f"객체 {oid}: {name}.by_state.{attr}의 알 수 없는 값 {v}"
+                for v in by_value
+                if v not in values
+            )
+        return errors
 
     # ------------------------------------------------------------ 조회 도우미
 
@@ -228,6 +385,19 @@ class Ontology(Contract):
             out[f"substeps:{term_id}"] = TermName(ko=term.ko, en=term.en)
         return out
 
+    def physics_names(self) -> dict[str, TermName]:
+        """물리 사전값 어휘(재질·촉감)의 한·영 표시 이름. 키는 `"<범주>:<ID>"`다 (ADR 0049).
+
+        `display_names`(라벨 어휘, 번역 용어집)와 따로 둔다. 라벨에는 이 ID가 들어가지 않고,
+        용어집에 넣으면 번역 버전(용어집 해시)이 바뀌어 검수 전 번역을 모두 다시 만들기 때문이다.
+        """
+        out: dict[str, TermName] = {}
+        for category in PHYSICS_CATEGORIES:
+            table: dict[str, Term] = getattr(self, category)
+            for term_id, term in sorted(table.items()):
+                out[f"{category}:{term_id}"] = TermName(ko=term.ko, en=term.en)
+        return out
+
     def name(self, category: str, term_id: str, language: Literal["ko", "en"]) -> str | None:
         """사전 항목의 표시 이름 (`display_names`의 키 규칙). 없는 범주·ID면 None."""
         found = self.display_names().get(f"{category}:{term_id}")
@@ -250,6 +420,9 @@ TERM_CATEGORIES = (
     "body_parts", "postures", "physical_types", "state_attributes", "objects", "events",
     "privacy_targets", "surface_parts", "hand_joints",
 )  # fmt: skip
+
+# 물리 사전값 어휘 범주 (ADR 0049). `display_names`·번역 용어집에는 넣지 않는다 (`physics_names`).
+PHYSICS_CATEGORIES = ("materials", "tactile_properties")
 
 
 def ontology_digest(ontology: Ontology) -> str:

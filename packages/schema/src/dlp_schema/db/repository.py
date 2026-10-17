@@ -219,16 +219,25 @@ def register_ontology(conn: sa.Connection, ontology: Ontology) -> None:
     )
 
 
-def _is_additive(old: Any, new: Any) -> bool:
+# 비어 있던(null) 자리에 사전을 채워도 덧붙이기로 보는 키. 객체 물리 사전값은 라벨의 해석·유효성과
+# 무관한 선택 정보라, 사전값 없이 등록된 객체에 나중에 사전값을 더하는 것을 허용한다 (ADR 0049).
+# 이미 있는 사전값의 값을 바꾸는 것은 여전히 덧붙이기가 아니다.
+_FILLABLE_NULL_KEYS = frozenset({"physical_priors"})
+
+
+def _is_additive(old: Any, new: Any, key: str | None = None) -> bool:
     """new가 old에 키를 더하기만 했는가 (사전은 재귀로, 그 밖의 값은 같아야 한다).
 
     old의 모든 키가 new에 있고 그 값도 재귀로 덧붙이기여야 한다. 목록·문자열 등 사전이 아닌 값은
-    완전히 같아야 한다 (목록에 원소를 더하는 것은 덧붙이기가 아니다).
+    완전히 같아야 한다 (목록에 원소를 더하는 것은 덧붙이기가 아니다). 예외: `_FILLABLE_NULL_KEYS`의
+    키는 null → 사전도 덧붙이기다. key는 이 값의 사전 키 (최상위는 None).
     """
     if isinstance(old, dict) and isinstance(new, dict):
         old_d: dict[str, Any] = old  # pyright: ignore[reportUnknownVariableType]
         new_d: dict[str, Any] = new  # pyright: ignore[reportUnknownVariableType]
-        return all(k in new_d and _is_additive(v, new_d[k]) for k, v in old_d.items())
+        return all(k in new_d and _is_additive(v, new_d[k], k) for k, v in old_d.items())
+    if old is None and key in _FILLABLE_NULL_KEYS and isinstance(new, dict):
+        return True
     return bool(old == new)
 
 

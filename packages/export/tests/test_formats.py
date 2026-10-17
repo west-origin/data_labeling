@@ -163,9 +163,19 @@ def test_interval_json_validates_against_published_schema(
         ids.label(f"s1-{k}") for k in ("hs", "tsc", "act", "task")
     }
     # 형식 1.1: 온톨로지 한·영 표시 이름 표 (ADR 0043)
-    assert f.format_version == "1.1"
     assert f.term_names == ontology.display_names()
     assert f.term_names["verbs:rub"].en == "rub" and f.term_names["verbs:rub"].ko == "문지르다"
+    # 형식 1.2: 객체 물리 사전값 표. 측정값이 아니라 사전값이다 (ADR 0049)
+    assert f.format_version == "1.2"
+    priors = data["physical_priors"]
+    assert priors["measured"] is False and "NOT measurements" in priors["conventions"]["nature"]
+    assert priors["materials"]["ceramic"] == {"ko": "도자기·세라믹", "en": "Ceramic or porcelain"}
+    assert priors["tactile_properties"]["slippery_when_wet"]["en"] == "Slippery when wet"
+    bucket = priors["objects"]["bucket"]
+    assert bucket["source"] == "prior_estimate" and bucket["material"] == "plastic"
+    assert bucket["mass_kg"]["by_state"]["fill_state"]["full"] == {"min": 5.0, "max": 16.0}
+    assert "person" not in priors["objects"]  # 사전값이 없는 클래스는 싣지 않는다
+    assert all(o["source"].startswith("prior_") for o in priors["objects"].values())
 
 
 def test_bilingual_descriptions_are_exported_with_linked_ids(
@@ -321,6 +331,14 @@ def test_coco_loads_with_pycocotools(
     # 범주에 한·영 표시 이름이 붙는다 (name은 온톨로지 ID 그대로, ADR 0043)
     cat = coco.loadCats([cup])[0]
     assert (cat["name"], cat["name_ko"], cat["name_en"]) == ("cup", "컵", "Cup")
+    # 객체 범주에 물리 사전값(측정값 아님)이, 최상위에 단위·재질·촉감 이름이 붙는다 (ADR 0049)
+    assert cat["physical_priors"]["measured"] is False
+    assert cat["physical_priors"]["source"] == "prior_estimate"
+    assert cat["physical_priors"]["material"] == "ceramic"
+    assert "physical_priors" not in coco.loadCats(coco.getCatIds(catNms=["person"]))[0]
+    top = coco.dataset["physical_priors"]
+    assert top["measured"] is False and "objects" not in top
+    assert top["materials"]["ceramic"]["en"] == "Ceramic or porcelain"
 
 
 def test_coco_person_boxes_work_with_keypoint_eval(
@@ -387,6 +405,11 @@ def test_lerobot_frame_features(
     rub = vocab.verbs.index("rub")
     assert names["verb"][rub] == {"ko": "문지르다", "en": "rub"}
     assert len(names["task"]) == len(vocab.tasks)
+    # 물리 사전값 표 (측정값 아님, ADR 0049)
+    priors = vocab.as_json()["physical_priors"]
+    assert priors["measured"] is False
+    assert priors["objects"]["mop"]["part_materials"] == {"mop_head": "fabric"}
+    assert priors["objects"]["floor"]["static_friction"]["by_state"]["wetness"]["wet"]["max"] == 0.5
     video = tmp_path / "v.mp4"
     scenario.labeling.get_file("sessions/s1/blurred/bodycam.mp4", video)
     index = build_pts_index(video)

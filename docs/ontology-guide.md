@@ -30,6 +30,13 @@ flowchart LR
 용어집에 쓴다. 새 항목을 덧붙일 때 영어 이름도 함께 적는다. 영어 이름을 고치는 것은 덧붙이기가 아니라
 값 변경이라 새 온톨로지 버전이 필요하다.
 
+객체 클래스에는 물리 사전값 `physical_priors`(재질·촉감·질량 kg·정지 마찰 계수 범위, 상태별 범위
+`by_state`)를 선택으로 둔다 (ADR 0049). 재질·촉감 어휘는 `physics.yaml`(`materials`·`tactile_properties`,
+ko·en 필수)이고 라벨에는 쓰지 않으며 번역 용어집에도 넣지 않는다. 값은 측정값이 아니라 클래스의 넓은
+사전값이고 `source`(`prior_estimate`·`prior_literature`)가 필수다. v1 값은 모두 추정이라 사람 검토가
+필요하다 (F-SCH-16). 내보내기는 `measured: false`와 함께 싣는다 (COCO 범주·구간 JSON 1.2·LeRobot 어휘).
+등록된 사전값의 숫자를 고치는 것도 값 변경이라 새 버전이 필요하다.
+
 `primitive`는 행동 라벨, `skill`·`human_skill`은 상위 구간이다. 업무는 도메인→작업→하위 단계로
 분류한다. 현재 작업 하위 단계는 0개이며 기술과 원시 동작의 조합을 자동으로 생성하는 경로는 없다.
 현재 구조·항목 수는 [구조 검사](handover/ontology-structure-review.md)에 있다.

@@ -630,3 +630,62 @@ def test_adding_english_names_to_registered_draft_is_additive(ontology: Ontology
         assert stored == old
     finally:
         engine.dispose()
+
+
+def test_adding_physical_priors_to_registered_draft_is_additive(ontology: Ontology) -> None:
+    """물리 사전값 없이 등록된 초안 v1에 사전값·재질·촉감 어휘를 더해 다시 등록하면 덧붙이기다.
+
+    ADR 0049.
+
+    예전 등록 내용은 새 코드로도 읽히고(사전값 없음, 어휘 빈 사전) 다시 등록하면 새 내용으로 바뀐다.
+    내용 해시(`ontology_digest`)는 달라져 AI 1차 검수 단위·검수 화면 프로젝트가 새로 갈린다.
+    """
+    from dlp_schema.db.ontology_repository import get_ontology
+    from dlp_schema.ontology import ontology_digest
+    from dlp_schema.testing import sqlite_db
+
+    old = ontology.model_dump(mode="json")
+    for obj in old["objects"].values():
+        del obj["physical_priors"]
+    del old["materials"], old["tactile_properties"]
+    engine = sqlite_db()
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                ontology_versions.insert().values(
+                    version=ontology.version, status="draft", content=old
+                )
+            )
+        with engine.connect() as conn:
+            before = get_ontology(conn, ontology.version)
+        assert before.materials == {} and before.objects["cup"].physical_priors is None
+        assert ontology_digest(before) != ontology_digest(ontology)
+        with engine.begin() as conn:
+            register_ontology(conn, ontology)
+        with engine.connect() as conn:
+            assert get_ontology(conn, ontology.version) == ontology
+    finally:
+        engine.dispose()
+
+
+def test_filling_null_priors_is_additive_but_changing_values_is_not(ontology: Ontology) -> None:
+    """사전값 없이(null) 등록한 객체에 나중에 사전값을 채우는 것은 덧붙이기지만, 이미 등록된
+    사전값의 숫자를 바꾸는 것은 덧붙이기가 아니라 거부된다 (ADR 0028·0049)."""
+    from dlp_schema.testing import sqlite_db
+
+    data = ontology.model_dump(mode="json")
+    data["objects"]["cup"]["physical_priors"] = None
+    without_cup = Ontology.model_validate(data)
+    data = ontology.model_dump(mode="json")
+    data["objects"]["cup"]["physical_priors"]["mass_kg"]["max"] = 9.0
+    changed = Ontology.model_validate(data)
+    engine = sqlite_db()
+    try:
+        with engine.begin() as conn:
+            register_ontology(conn, without_cup)
+        with engine.begin() as conn:
+            register_ontology(conn, ontology)  # null → 사전값: 덧붙이기
+        with pytest.raises(ValueError, match="덧붙이기가 아닌"), engine.begin() as conn:
+            register_ontology(conn, changed)
+    finally:
+        engine.dispose()

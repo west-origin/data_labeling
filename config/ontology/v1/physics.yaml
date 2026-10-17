@@ -1,0 +1,37 @@
+# 온톨로지 v1 사전 파일 (dlp_schema.ontology.load_ontology가 이 디렉터리의 *.yaml을 합친다).
+# 최상위 키는 파일 사이에서 겹치면 안 된다. 키(ID)는 소문자 snake_case(OntologyId), ko·en은 사람용 한·영 이름
+# (둘 다 필수, 빈칸 금지, ADR 0043).
+# DB 등록(`dlp ontology register 1.0.0`)은 파싱된 값으로 비교하므로 주석 변경은 등록 내용에 영향이 없다.
+# ID를 지우거나 바꾸거나 값을 바꾸면 새 온톨로지 버전 + 이관 표(config/ontology/migrations/)가 필요하다.
+# 초안(draft)에서는 새 ID를 덧붙이는 것만 같은 버전으로 허용된다 (ADR 0028).
+#
+# 객체 물리 사전값(objects.yaml의 physical_priors)이 쓰는 재질·촉감 어휘 (ADR 0049, 2026-10-17 덧붙임).
+# 라벨에는 쓰지 않는다. 표시 이름은 내보내기의 물리 사전값 표에만 싣고 번역 용어집(display_names)에는
+# 넣지 않는다 (용어집 해시가 바뀌면 검수 전 번역을 모두 다시 만든다).
+
+# 재질: 객체(또는 도구 부분)의 대표 재질. 같은 클래스라도 실물마다 다를 수 있어 "흔한 경우"를 적는다.
+materials:
+  plastic: {ko: 플라스틱, en: Plastic}
+  metal: {ko: 금속, en: Metal}
+  wood: {ko: 목재, en: Wood}
+  ceramic: {ko: 도자기·세라믹, en: Ceramic or porcelain}
+  glass: {ko: 유리, en: Glass}
+  fabric: {ko: 직물·섬유, en: Fabric or textile}
+  polyurethane_foam: {ko: 폴리우레탄 폼, en: Polyurethane foam}
+  nonwoven: {ko: 부직포·흡수체, en: Nonwoven fabric or absorbent core}
+  rubber: {ko: 고무·니트릴, en: Rubber or nitrile}
+  painted_plaster: {ko: 도장된 석고·회벽, en: Painted plaster or gypsum}
+
+# 촉감 속성: 손이 느끼는 성질. 도구는 파지부, 그 밖은 주로 닿는 면 기준이다.
+tactile_properties:
+  hard: {ko: 단단함, en: Hard}
+  soft: {ko: 부드러움·말랑함, en: Soft}
+  elastic: {ko: 탄성 있음, en: Elastic}
+  rough: {ko: 거칢, en: Rough}
+  smooth: {ko: 매끄러움, en: Smooth}
+  slippery: {ko: 미끄러움, en: Slippery}
+  slippery_when_wet: {ko: 젖으면 미끄러움, en: Slippery when wet}
+  sticky: {ko: 끈적임, en: Sticky}
+  absorbent: {ko: 흡수성 있음, en: Absorbent}
+  fibrous: {ko: 섬유질 결, en: Fibrous}
+  cold_to_touch: {ko: 차갑게 느껴짐, en: Cold to the touch}

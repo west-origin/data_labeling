@@ -56,6 +56,7 @@ from dlp_export.frames import stream_ms
 from dlp_export.policy import ExportPolicy, LeRobotPolicy
 from dlp_export.pseudonym import Pseudonymizer
 from dlp_media.pts import PtsIndex
+from dlp_schema.export import PhysicalPriorTable, physical_prior_table
 from dlp_schema.labels import (
     ActionPayload,
     CoordinateFrame,
@@ -112,6 +113,8 @@ class Vocab:
     tasks: tuple[str, ...]  # 에피소드 task 문자열 (작업 ID와 도메인)
     # 어휘별 한·영 표시 이름 (어휘 이름 → 번호 순서와 같은 이름 목록, ADR 0043)
     names: dict[str, tuple[TermName, ...]] = field(default_factory=dict[str, tuple[TermName, ...]])
+    # 객체 물리 사전값 표 (측정값 아님, ADR 0049). 없으면 dlp_vocab.json에 싣지 않는다.
+    physical_priors: PhysicalPriorTable | None = None
 
     @classmethod
     def from_ontology(cls, o: Ontology) -> Vocab:
@@ -139,10 +142,19 @@ class Vocab:
                 "task": named("tasks", tuple(sorted(o.tasks)))
                 + named("domains", tuple(sorted(o.domains))),
             },
+            physical_prior_table(o),
         )
 
     def as_json(self) -> dict[str, Any]:
         """meta/dlp_vocab.json 내용 (구매자가 정수 특징을 ID로 되돌릴 때 쓴다)."""
+        out = self._ids_json()
+        if self.physical_priors is not None:
+            # 객체 물리 사전값 표 (측정값 아님 measured false, 형식 추가 키, ADR 0049)
+            out["physical_priors"] = self.physical_priors.model_dump(mode="json")
+        return out
+
+    def _ids_json(self) -> dict[str, Any]:
+        """어휘 목록과 한·영 이름 (as_json의 물리 사전값 앞부분)."""
         return {
             "verb": list(self.verbs),
             "contact_target_kind": list(self.contact_target_kinds),

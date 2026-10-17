@@ -602,3 +602,14 @@ issues:
   - {id: F-PAR-31, title: "루프 닫힘·묶음 조정이 있는 외부 시각-관성 SLAM 엔진 미연동: 내장 오도메트리는 드리프트가 쌓임", severity: low, status: open, kind: product,
      files: [packages/prelabel/src/dlp_prelabel/campose.py, packages/prelabel/src/dlp_prelabel/adapters/stubs.py], source: docs/adr/0046-camera-pose-and-world-frame.md, see: [F-PAR-26],
      note: "TODO(real-model) 자리(stubs.SLAM_ENGINE, prelabel.yaml camera_pose). 후보 Basalt(BSD-3, CPU, C++ 빌드)를 CameraPoseEstimator 어댑터로 붙인다. 긴 세션(수 분 이상)에서는 내장 오도메트리의 거리 비례 드리프트와 요 드리프트가 커지고, 추적을 잃으면(max_lost_ms) 그 뒤 자세가 없다(재위치 추정 없음). IMU 없는 세션의 영상 전용 경로(Open3D RGB-D 오도메트리, MIT)도 없다."}
+
+  # ── 객체 물리 사전값 후속 (ADR 0049) ──
+  - {id: F-SCH-14, title: "장면별 촉감 라벨이 없음: 온톨로지 물리 사전값은 클래스 수준이라 이 장면의 물체가 미끄러운지·끈적한지는 모름", severity: low, status: open, kind: product,
+     files: [packages/schema/src/dlp_schema/ontology.py, config/ontology/v1/physics.yaml], source: docs/adr/0049-object-physical-priors.md, see: [F-SCH-15, F-SCH-16],
+     note: "다음 단계 후보: 객체 트랙 구간마다 촉감 속성(tactile_properties ID)을 다는 시간 구간 라벨(새 페이로드 종류라 계약 변경·ADR·make schemas 필요)과, 사내 VLM이 블러본 프레임에서 후보를 제안하고 사람이 확정하는 흐름(AI 1차 검수와 같은 원칙: 제안은 사람이 적용할 때만 라벨). 지금은 기존 상태 라벨(wetness·fill_state 등)과 사전값의 by_state 범위로만 장면 조건을 반영할 수 있다."}
+  - {id: F-SCH-15, title: "장갑 압력으로 파지력·질량을 추정하지 않음: 질량·마찰은 사전값 범위뿐", severity: low, status: open, kind: product,
+     files: [packages/media/src/dlp_media/glove.py, config/ontology/v1/objects.yaml], source: docs/adr/0049-object-physical-priors.md, see: [F-SCH-14],
+     note: "장갑 압력(정규화된 Parquet)과 손 3D 궤적(들어 올리는 가속도)으로 들기 구간의 파지력·물체 질량을 추정해 사전값 범위와 대조하는 단계가 후보다. 장갑 센서의 힘 보정(단위 N)이 먼저 필요하고, 추정값은 세션 라벨(측정·추정 출처 구분)로 따로 남기며 온톨로지 사전값 표를 고치지 않는다."}
+  - {id: F-SCH-16, title: "v1 객체 물리 사전값은 일반 지식으로 잡은 넓은 추정(prior_estimate)이고 전문가 검토 전", severity: medium, status: open, kind: product,
+     files: [config/ontology/v1/objects.yaml, config/ontology/v1/physics.yaml], source: docs/adr/0049-object-physical-priors.md, see: [F-SCH-14],
+     note: "질량·정지 마찰 계수 범위, 재질·촉감은 문헌 확인 없이 잡은 보수적 넓은 범위다. 현장 물품(요양시설 양동이·침대·장갑 사양)과 문헌(마찰 계수 표)으로 사람이 검토하고, 근거가 있으면 source를 prior_literature로 바꾸고 note에 출처를 적는다. 등록된 초안에서도 기존 값 변경은 덧붙이기가 아니라 register_ontology가 거부한다 (ADR 0028): 검토 결과는 운영 DB 등록 전에 반영하거나, 등록 뒤라면 새 온톨로지 버전 + 이관으로 낸다."}
