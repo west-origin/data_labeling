@@ -18,9 +18,8 @@
       평균 가속도로 중력 정렬, 정지면 자이로 편향 제거), 이동은 이전 자세 프레임의 특징점(Shi-Tomasi
       +
       피라미드 LK, 앞뒤 왕복 검사)을 메트릭 깊이로 월드 3D로 올리고, 지금 프레임 2D 투영식에서
-      회전을
-      고정한 채 카메라 중심 3개 미지수를 선형으로 푼다 (두 점 RANSAC → 인라이어 깊이 가중 재풀이).
-      루프 닫힘·묶음 조정은 없다 (오도메트리 드리프트가 쌓인다).
+      회전을 고정한 채 카메라 중심 3개 미지수를 선형으로 푼다 (두 점 RANSAC → 인라이어 깊이 가중
+      재풀이). 루프 닫힘·묶음 조정은 없다 (오도메트리 드리프트가 쌓인다).
     - `OraclePoseEstimator` (CPU stub): 정답 자세를 그대로 돌려준다 (합성 픽스처, 러너 시험).
     - TODO(real-model): 루프 닫힘·묶음 조정이 있는 외부 시각-관성 SLAM 엔진(Basalt, BSD-3)은
     연동하지
@@ -28,8 +27,7 @@
 
 파이프라인 위치: `runner._camera_pose`가 바디캠 영상·IMU·깊이 모델로 부르고 결과를 trajectory3d
 (entity_id="camera", frame=world)로 저장한다 (`pose_label`). 월드 좌표 손 궤적은 `worldframe`이
-만든다.
-정책: `prelabel.yaml camera_pose`.
+만든다. 정책: `prelabel.yaml camera_pose`.
 """
 
 from __future__ import annotations

@@ -549,6 +549,18 @@ issues:
   - {id: F-COE-16, title: "FiftyOne 왕복 테스트가 모든 예외를 건너뛰기로 바꿔 실제 의존성 비호환도 숨김", severity: low, status: fixed, kind: test,
      files: [packages/active/tests/test_curation.py], source: docs/handover/external-review-2026-10-15.md, see: [F-COE-14],
      note: "미설치(find_spec 없음)와 연결 예외(내장 ConnectionError·TimeoutError, pymongo·FiftyOne 서비스 예외, 그것을 원인으로 감싼 예외)만 건너뛴다. 설치된 뒤의 import 실패·그 밖의 예외는 실패한다. 회귀: packages/active/tests/test_curation.py::test_only_connection_errors_skip_the_round_trip"}
+  - {id: F-COE-17, title: "로봇 리타기팅이 팔 하나 + 평행 그리퍼만 지원: 다지 손(dexterous) 고객 로봇은 설정에서 거부", severity: low, status: open, kind: product,
+     files: [packages/retarget/src/dlp_retarget/robot.py, packages/retarget/src/dlp_retarget/targets.py], source: docs/adr/0047-robot-retargeting-export.md,
+     note: "GripperConfig가 type dexterous를 거부한다. 다지 손은 손가락 21관절 방향 벡터 맞춤(dex-retargeting, MIT)이 후보이고, 손 3D가 지금은 손목·다섯 손가락 끝뿐이라(ADR 0044) 손가락 마디 3D(MediaPipe world landmarks 21점의 월드 변환)도 함께 필요하다. 양팔 로봇(손 둘)도 아직 없다."}
+  - {id: F-COE-18, title: "리타기팅 에피소드의 영상은 사람 손 그대로: 로봇 관절 상태와 화면의 도메인 차이", severity: medium, status: open, kind: product,
+     files: [packages/export/src/dlp_export/robot.py], source: docs/adr/0047-robot-retargeting-export.md,
+     note: "요구대로 영상은 바꾸지 않는다. 고객 정책이 영상을 입력으로 쓰면 화면 속 사람 손과 로봇 상태가 다르다. 손 인페인팅 + 로봇 렌더 합성(로봇 메시를 카메라 자세·내부 파라미터로 투영)은 연구 과제이고, 인페인팅 모델의 상업 라이선스 조사(ADR 0010)가 먼저다."}
+  - {id: F-COE-19, title: "3D 궤적(카메라·월드 좌표)에 검수 경로가 없어 기본 내보내기(검수 라벨만)에서 로봇 목표가 빈다", severity: medium, status: open, kind: product,
+     files: [packages/export/src/dlp_export/robot.py, packages/export/src/dlp_export/source.py], source: docs/adr/0047-robot-retargeting-export.md,
+     note: "검수 도구(CVAT·Label Studio)는 trajectory3d를 보이지 않고 표본 검증 묶음도 3D를 다루지 않는다. 그래서 dlp export lerobot --robot은 --include-unreviewed를 명시해야 손 목표가 생긴다(manifest verification_policy에 남음). 결정 필요: 2D 손 트랙 승인을 그 트랙에서 만든 3D가 물려받을지(설명 따르기 ADR 0043과 비슷한 명시 기록), 3D 표본 검증(리타기팅 재생 영상을 보고 판정)을 둘지."}
+  - {id: F-COE-20, title: "리타기팅이 충돌·동역학·토크를 보지 않고 실제 고객 로봇·시뮬레이터 검증이 없음", severity: medium, status: open, kind: product,
+     files: [packages/retarget/src/dlp_retarget/ik.py, config/robots/so101.yaml], source: docs/adr/0047-robot-retargeting-export.md,
+     note: "IK는 관절 위치·속도 한계와 끝단 위치·방향 오차만 본다. 자기 충돌·환경(탁자) 충돌, 가속도·토크 한계, 특이점 근처 관절 급변 검사는 없다(mink 격리 환경에 충돌 회피 제약을 더할 수 있다). SO-101 그리퍼 열림 방향(closed 0, open 1.5 rad)은 공개 모델 문서에 정의가 없어 근사다. 위치 배율·배치는 운영자가 정하는 값이다. 합성 정답(정기구학 궤적)만 검사했고 실제 사람 동작의 작업 성공률은 측정하지 않았다."}
   - {id: F-PAR-23, title: "설명 재생성·번역의 최종 쓰기가 사용 중지·승인 보류·렌더 변경을 다시 확인하지 않음", severity: low, status: fixed, kind: code,
      files: [packages/actions/src/dlp_actions/write_check.py, packages/actions/src/dlp_actions/describe.py, packages/actions/src/dlp_actions/translate.py, packages/cli/src/dlp_cli/actions_cmds.py, packages/cli/src/dlp_cli/translate_cmds.py], source: docs/handover/external-review-2026-10-15.md,
      note: "쓰기 직전 세션 잠금 아래 사용 중지·승인 보류·(프레임을 보냈으면) 렌더 해시를 다시 본다 (내보내기 최종 게시 확인과 같은 방식). 막히면 아무것도 쓰지 않고 blocked로 알린다 (describe 종료 3, 번역은 대기). 회귀: packages/actions/tests/test_describe.py::test_final_write_rechecks_hold_withdrawal_and_render_under_the_lock (보류·사용 중지·승인 해제), ::test_final_write_check_passes_when_nothing_changed, packages/actions/tests/test_translate.py::test_final_write_rechecks_hold_and_withdrawal_under_the_lock"}
@@ -563,12 +575,21 @@ issues:
      repro: tests/test_known_defects.py::test_same_tuple_direct_review_after_inheritance_is_protected,
      note: "record_review는 행의 검수 칸만 갱신하고 흔적을 남기지 않는다. 직접 검수의 상태·검수자·시각이 마지막 물려받기 기록과 정확히 같으면 지금 상태가 그 기록과 같아 물려받은 검수만 있는 것으로 본다 (description_follow._active). 지금 경로에서 일어나기 어렵다: 설명은 검수 도구 경로가 없고, 표본 검증(sampling:<배정>)·수집은 검수 시각이 그 실행의 now라 물려준 주인의 검수 시각과 같으려면 같은 검수자가 그 시각을 그대로 다시 써야 한다. 깔끔한 고침은 직접 검수도 추가 전용 기록에 남겨 마지막 기록이 이기게 하는 것(예: description_inheritance에 mechanism direct, giver 없음)인데 계약·DB 변경(ADR 0043 개정, Alembic, make schemas)이라 이번 회차에 하지 않았다."}
   # ── 손가락 끝 3D (ADR 0044) 후속 ──
-  - {id: F-PAR-26, title: "손가락 끝·손 3D가 카메라 좌표뿐: IMU 기반 시각-관성 SLAM으로 세션 고정 월드 좌표가 필요", severity: medium, status: open, kind: product,
-     files: [packages/prelabel/src/dlp_prelabel/adapters/stubs.py, packages/prelabel/src/dlp_prelabel/lift3d.py, config/policies/prelabel.yaml], source: docs/adr/0044-fingertip-3d-from-hand-world-landmarks.md,
-     note: "3단계(사용자 요청). 바디캠 6자유도(stubs.CAMERA_POSE, TODO(real-model))를 시각-관성 SLAM(Basalt BSD-3, 카메라-IMU 캘리브레이션 필요, IMU는 dlp_media GPMF·사이드카 추출기가 이미 받는다) 또는 메트릭 깊이 + RGB-D 오도메트리(Open3D MIT)로 만들고, 카메라 좌표 trajectory3d를 frame=world로 바꾼 새 궤적(source_3d=visual_inertial_slam)을 낸다. 내부 파라미터 등록 절차는 ADR 0045(dlp calib intrinsics|import, docs/handover/camera-calibration.md)로 생겼다. 카메라-IMU 외부 파라미터 캘리브레이션은 아직 없다."}
+  - {id: F-PAR-26, title: "손가락 끝·손 3D가 카메라 좌표뿐: IMU 기반 시각-관성 SLAM으로 세션 고정 월드 좌표가 필요", severity: medium, status: fixed, kind: product,
+     files: [packages/prelabel/src/dlp_prelabel/campose.py, packages/prelabel/src/dlp_prelabel/worldframe.py, packages/prelabel/src/dlp_prelabel/runner.py, config/policies/prelabel.yaml], source: docs/adr/0046-camera-pose-and-world-frame.md, see: [F-PAR-29, F-PAR-30, F-PAR-31],
+     note: "ADR 0046로 고침: 내장 IMU 시각 오도메트리(자이로 적분 + 가속도 기울기 보정으로 중력 정렬, 특징점 + 메트릭 깊이로 회전 고정 이동량)가 바디캠 자세를 trajectory3d(entity camera, frame world, 쿼터니언)로 남기고, 카메라 좌표 궤적을 frame=world 새 궤적(derived_from)으로 바꾼다. IMU 시각은 동기화 오프셋(Stream.to_master_ms)으로 맞춘다. 라이선스 조사: Basalt·Kimera-VIO(BSD) 허용, ORB-SLAM3·OpenVINS(GPL-3) 제외, MASt3R·DUSt3R(CC BY-NC) 금지, DROID-SLAM(가중치 조건 미확인·GPU) 검토. 합성 정답에서 ATE 2~4 mm(1.5 m 경로). 루프 닫힘이 있는 외부 엔진은 F-PAR-31, 실영상 정확도는 F-PAR-29, 카메라-IMU 외부 파라미터 추정은 F-PAR-30."}
   - {id: F-PAR-27, title: "손 메시 모델(HaMeR·WiLoR)은 MANO 비상업 라이선스라 쓸 수 없어, 손 3D 모양은 MediaPipe world landmarks뿐", severity: low, status: open, kind: product,
      files: [config/models.yaml, packages/prelabel/src/dlp_prelabel/handfit.py], source: docs/adr/0044-fingertip-3d-from-hand-world-landmarks.md,
      note: "ADR 0010: 판매용 라벨에는 비상업 가중치·손 모델을 쓰지 않는다. HaMeR·WiLoR·FrankMocap 등은 MANO 파라미터 회귀라 MANO 라이선스(비상업 연구)에 묶인다. 상업 사용 가능한 손 메시·3D 손 자세 모델(가중치·학습 데이터 라이선스 확인)이 생기면 Predictor 어댑터·CPU stub과 함께 handfit의 손 모양 입력으로 바꿀 수 있다. 그때까지 손 모양 정확도는 MediaPipe world landmarks 수준이고 실영상 오차는 측정하지 않았다."}
   - {id: F-PAR-28, title: "등록한 렌즈 왜곡 계수를 3D 단계가 쓰지 않아 광각 바디캠 화면 가장자리 손의 3D가 틀릴 수 있음", severity: low, status: open, kind: product,
      files: [packages/prelabel/src/dlp_prelabel/lift3d.py, packages/prelabel/src/dlp_prelabel/handfit.py, packages/media/src/dlp_media/calibration.py], source: docs/adr/0045-3d-sample-quality-calibration-and-hand-size.md, see: [F-PAR-26],
      note: "ADR 0045: dlp calib intrinsics·import는 OpenCV 왜곡 계수(k1, k2, p1, p2, k3)를 camera_calibrations에 기록하지만, lift3d.intrinsics_for·handfit은 핀홀(fx·fy·cx·cy)만 쓴다. 고치려면 2D 키포인트·박스 중심을 cv2.undistortPoints로 정규화 좌표로 바꾼 뒤 맞춤·역투영하고(깊이 맵 표본 위치는 원래 픽셀), 3D 단계 버전 판을 올린다. 어안(초광각) 모드는 cv2.fisheye 모델과 캘리브레이션 경로가 따로 필요하다. 합성 시험은 왜곡을 넣은 체커보드·손 픽스처로 만든다."}
+  - {id: F-PAR-29, title: "바디캠 자세·월드 좌표 손 3D의 실영상 정확도를 측정하지 않음 (합성 정답만)", severity: medium, status: open, kind: product,
+     files: [packages/prelabel/src/dlp_prelabel/campose.py, packages/fixtures/src/dlp_fixtures/camera_motion.py], source: docs/adr/0046-camera-pose-and-world-frame.md, see: [F-PAR-26],
+     note: "합성 장면(무늬 평면, 정답 깊이)에서만 ATE·RPE·손 오차를 쟀다. 실제로는 특징점이 적은 장면, 빠른 고개 돌림의 흐림, 단안 깊이 배율 오차(장면마다 수~수십 %), 롤링 셔터, 렌즈 왜곡(F-PAR-28)이 더해진다. 모션 캡처나 체커보드·AprilTag(BSD) 기준점을 둔 실제 세션으로 ATE와 월드 손 오차를 재고 confidence 값을 보정해야 한다."}
+  - {id: F-PAR-30, title: "카메라-IMU 외부 파라미터·시간 오프셋을 데이터에서 추정하지 않아 매니페스트에 직접 적어야 함", severity: medium, status: open, kind: product,
+     files: [packages/prelabel/src/dlp_prelabel/runner.py, config/policies/prelabel.yaml, packages/schema/src/dlp_schema/session.py], source: docs/adr/0046-camera-pose-and-world-frame.md, see: [F-PAR-26],
+     note: "자세 단계는 Session.calibration.camera_imu_extrinsics(회전)가 없으면 돌지 않는다(정책 기본값 null). IMU 축은 기종마다 달라 틀린 회전은 조용히 틀린 월드 좌표를 낸다(합성에서 외부 파라미터를 단위 행렬로 보면 회전 오차 30도 이상). 내장 IMU는 shared_clock이라 시간 오프셋 0으로 보지만 실제 기기는 수~수십 ms 어긋날 수 있다(합성에서 120 ms 오프셋을 잊으면 ATE 0.36 m). 자이로 각속도와 영상 회전을 정렬해 회전·오프셋을 추정하는 단계(Kalibr BSD-3 결과 가져오기 포함)와 dlp calib 하위 명령이 필요하다."}
+  - {id: F-PAR-31, title: "루프 닫힘·묶음 조정이 있는 외부 시각-관성 SLAM 엔진 미연동: 내장 오도메트리는 드리프트가 쌓임", severity: low, status: open, kind: product,
+     files: [packages/prelabel/src/dlp_prelabel/campose.py, packages/prelabel/src/dlp_prelabel/adapters/stubs.py], source: docs/adr/0046-camera-pose-and-world-frame.md, see: [F-PAR-26],
+     note: "TODO(real-model) 자리(stubs.SLAM_ENGINE, prelabel.yaml camera_pose). 후보 Basalt(BSD-3, CPU, C++ 빌드)를 CameraPoseEstimator 어댑터로 붙인다. 긴 세션(수 분 이상)에서는 내장 오도메트리의 거리 비례 드리프트와 요 드리프트가 커지고, 추적을 잃으면(max_lost_ms) 그 뒤 자세가 없다(재위치 추정 없음). IMU 없는 세션의 영상 전용 경로(Open3D RGB-D 오도메트리, MIT)도 없다."}

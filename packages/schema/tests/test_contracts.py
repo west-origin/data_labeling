@@ -258,9 +258,9 @@ def test_trajectory_sample_method_and_confidence_are_optional() -> None:
 
 
 def test_trajectory_derived_from_is_optional_and_world_pose_round_trips() -> None:
-    """ADR 0046: 3D 궤적의 입력 라벨 ID(derived_from)는 선택이고 없으면 JSON에 없다 (예전 JSON 그대로).
-    월드 좌표 궤적은 (카메라 궤적, 자세) 두 ID를 싣고, 카메라 자세(entity camera, frame world)는
-    표본마다 쿼터니언을 싣는다."""
+    """ADR 0046: 3D 궤적의 입력 라벨 ID(derived_from)는 선택이고 없으면 JSON에 없다 (예전 JSON
+    그대로). 월드 좌표 궤적은 (카메라 궤적, 자세) 두 ID를 싣고, 카메라 자세(entity camera, frame
+    world)는 표본마다 쿼터니언을 싣는다."""
     old = make_label(TRAJ, stream_id="bodycam")
     assert '"derived_from"' not in old.model_dump_json()
     world = make_label(

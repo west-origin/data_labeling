@@ -223,13 +223,12 @@ class PoseImuPolicy(Contract):
     static_gyro_std: 초기 구간 자이로 크기의 표준편차가 이 값(rad/s) 이하이고 가속도 크기 표준편차가
         `static_acc_std`(m/s²) 이하이면 정지로 보고 자이로 편향을 그 평균으로 뺀다. 아니면 편향 0.
     accel_gain: 가속도 기울기 보정 이득 (1/s, 상보 필터). 0이면 자이로만 적분한다.
-    accel_tolerance: 가속도 크기가 중력과 이만큼(m/s²) 안일 때만 기울기를 보정한다 (빠른 움직임
-    제외).
+    accel_tolerance: 가속도 크기가 중력과 이만큼(m/s²) 안일 때만 기울기를 보정한다 (빠른 움직임은
+        보정하지 않는다).
     gravity: 중력 가속도 크기 (m/s²).
     default_imu_to_camera: 세션 캘리브레이션에 카메라-IMU 외부 파라미터가 없을 때 쓸 IMU → 카메라
         회전 (3x3 행 우선). None이면 그런 세션은 자세를 만들지 않는다 (기종마다 축이 달라 기본값이
-        틀릴
-        수 있다).
+        틀릴 수 있다).
     """
 
     init_window_ms: int = Field(gt=0)

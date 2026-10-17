@@ -145,13 +145,14 @@ class UnavailablePredictor:
 #   나온다 (relations.yaml tool_surface의 TODO).
 TOOL_PART_MASKS = UnavailablePredictor("tool_part_masks", "SAM 2.1 마스크 미연동")
 
-# TODO(real-model): 루프 닫힘·묶음 조정이 있는 외부 시각-관성 SLAM 엔진 (바디캠 6자유도). 지금은 내장
-#   IMU 시각 오도메트리(`dlp_prelabel.campose.ImuVisualOdometry`, ADR 0046)만 있어 거리에 비례해 드리프트가
-#   쌓인다. 후보는 Basalt(BSD-3, CPU, C++ 빌드, 카메라-IMU 외부 파라미터 캘리브레이션 필요)이고
-#   `campose.CameraPoseEstimator` 어댑터로 붙인다. ORB-SLAM3·OpenVINS(GPL-3)와 MASt3R·DUSt3R(CC BY-NC)는
-#   쓰지 않는다 (ADR 0046 라이선스 조사).
+# TODO(real-model): 루프 닫힘·묶음 조정이 있는 외부 시각-관성 SLAM 엔진 (바디캠 6자유도).
+#   지금은 내장 IMU 시각 오도메트리(`dlp_prelabel.campose.ImuVisualOdometry`, ADR 0046)만 있어
+#   거리에 비례해 드리프트가 쌓인다. 후보는 Basalt(BSD-3, CPU, C++ 빌드, 카메라-IMU 외부 파라미터
+#   캘리브레이션 필요)이고 `campose.CameraPoseEstimator` 어댑터로 붙인다. ORB-SLAM3·OpenVINS
+#   (GPL-3)와 MASt3R·DUSt3R(CC BY-NC)는 쓰지 않는다 (ADR 0046 라이선스 조사).
 SLAM_ENGINE = UnavailablePredictor(
-    "slam_engine", "외부 시각-관성 SLAM 엔진 미연동 (내장 IMU 시각 오도메트리만, 드리프트 보정 없음)"
+    "slam_engine",
+    "외부 시각-관성 SLAM 엔진 미연동 (내장 IMU 시각 오도메트리만, 드리프트 보정 없음)",
 )
 
 # TODO(real-model): 영상만으로 접촉을 판정하는 학습 분류기. 장갑 세션의 접촉 구간을 정답으로

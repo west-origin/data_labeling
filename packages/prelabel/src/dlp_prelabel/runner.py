@@ -20,11 +20,10 @@
    바뀌어 지워지면 새 트랙으로 다시 찾는다.
 5. 바디캠 자세와 월드 좌표 3D (ADR 0046, `camera_pose.enabled`): 동기화된 IMU 스트림과 카메라-IMU
    외부 파라미터가 있고 깊이 모델(또는 넘겨받은 자세 추정기)이 있으면 바디캠 6자유도 자세를 추정해
-   trajectory3d(entity_id="camera", frame=world)로 남기고(`_camera_pose`), 현재 자세 하나와 바디캠의
-   현재
-   카메라 좌표 궤적((개체, 부위)마다 하나)으로 월드 좌표 궤적을 만든다(`_world`). 두 단계 모두
-   버전에
-   정책 절 해시와 입력 해시를 넣고, 입력이 바뀌면 검수 전인 이전 결과만 지운다.
+   trajectory3d(entity_id="camera", frame=world)로 남기고(`_PoseStage.camera_pose`), 현재 자세
+   하나와 바디캠의 현재 카메라 좌표 궤적((개체, 부위)마다 하나)으로 월드 좌표 궤적을 만든다
+   (`_PoseStage.world`). 두 단계 모두 버전에 정책 절 해시와 입력 해시를 넣고, 입력이 바뀌면 검수
+   전인 이전 결과만 지운다.
 6. 프라이버시 승인 상태의 세션은 생애주기를 prelabeled로 옮긴다.
 
 진입점: `dlp prelabel run <세션>` (`dlp_cli.prelabel_cmds`)이 어댑터·깊이 단계를 만들고, 원본
@@ -548,8 +547,10 @@ def pick_world_inputs(
 
 @dataclass
 class _PoseStage:
-    """자세·월드 좌표 단계 (모듈 docstring 5). 둘 다 멱등이다 (같은 버전이 이력에 있으면
-    건너뛴다)."""
+    """자세·월드 좌표 단계 (모듈 docstring 5).
+
+    둘 다 멱등이다 (같은 버전이 이력에 있으면 건너뛴다).
+    """
 
     conn: sa.Connection
     session: Session
@@ -634,8 +635,10 @@ class _PoseStage:
         return None
 
     def world(self, history: list[LabelRecord]) -> None:
-        """현재 자세와 카메라 좌표 궤적으로 월드 좌표 궤적을 넣는다 (입력이 없으면 검수 전 이전 것만
-        지운다)."""
+        """현재 자세와 카메라 좌표 궤적으로 월드 좌표 궤적을 넣는다.
+
+        입력(자세나 카메라 좌표 궤적)이 없으면 검수 전 이전 결과만 지운다.
+        """
         session, body = self.session, self.session.reference_stream.stream_id
         current = current_labels(history)
         pose, cams = pick_world_inputs(current, body)
