@@ -77,8 +77,9 @@
 ### 5. 내보내기 (`dlp export lerobot <버전> --robot <ID>`, `dlp_export.robot`)
 
 - 데이터셋 버전 스냅샷에서만, 기존 검증 정책 그대로 (기본은 사람이 만들거나 승인·수정·표본 검증한 라벨만).
-  월드 좌표 손 3D(ADR 0046)도 이 규칙으로 고른다. 3D 궤적에는 아직 검수 화면이 없어 검수 전 3D는
-  `--include-unreviewed`로만 들어간다 (F-COE-19, 결정 필요).
+  월드 좌표 손 3D(ADR 0046)도 이 규칙으로 고른다. 3D 궤적에는 검수 화면이 없어 처음에는 검수 전 3D가
+  `--include-unreviewed`로만 들어갔다 (F-COE-19). ADR 0048부터 3D 손 궤적은 그것을 계산한 2D 손 트랙의
+  검수를 물려받아 기본 정책으로 들어간다.
 - 특징: `observation.state`·`action` = 로봇 관절(팔 + 그리퍼, rad, URDF 관절 이름, action = 다음 프레임),
   `observation.human_state` = 사람 모드 state, `annotation.*` 그대로, `retarget.target_present`·`reachable`·
   `position_error_m`·`orientation_error_rad`·`velocity_limited`·`verification`(그 프레임 월드 손 라벨의 최저

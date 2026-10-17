@@ -54,3 +54,4 @@ ADR은 결정 당시의 이유와 이관 조건을 기록한다. 후속 ADR이 �
 | 0045 | [ADR 0045: 3D 표본의 방식·신뢰도, 카메라 내부 파라미터 등록, 작업자 손 크기 사전값](0045-3d-sample-quality-calibration-and-hand-size.md) |
 | 0046 | [ADR 0046: 바디캠 6자유도 자세(IMU 회전 + 메트릭 깊이 이동)로 손 3D를 세션 월드 좌표에 둔다](0046-camera-pose-and-world-frame.md) |
 | 0047 | [ADR 0047: 사람 1인칭 손 동작을 고객 로봇 관절 궤적으로 옮겨 LeRobot 에피소드로 낸다](0047-robot-retargeting-export.md) |
+| 0048 | [ADR 0048: 3D 손 궤적은 그것을 계산한 2D 손 트랙의 검수를 물려받는다](0048-3d-trajectory-review-inherited-from-2d.md) |
