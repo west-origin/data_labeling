@@ -5,6 +5,9 @@
   동의를 철회한 세션도 빠진다.
 - 라벨: 데이터셋 버전 스냅샷(labels.jsonl)의 이력에서 운영 현재 라벨(`current_labels`: 오류 삽입·
   측정 제외) 중 사람이 만든 것과 검증 정책 상태의 모델 라벨. 블러 등 제외 종류는 뺀다.
+  3D 손 궤적은 2D 손 트랙 검수를 물려받아 검수 상태가 된다 (ADR 0048). 물려받은 뒤 출처 2D가
+  바뀌어 끊긴 궤적(`lapsed_trajectories`, 지금 DB의 물려받기 기록 `trajectory_inheritance`로
+  판정)은 낡은 3D라 옵션과 관계없이 넣지 않는다.
 - 세션 메타데이터: 스냅샷의 sessions.jsonl(빌드 때 고정)을 쓴다. 그 전 버전은 DB의 지금 세션.
 - 영상: 라벨링 버킷의 블러본 (sessions/<세션>/blurred/<스트림>.mp4).
   스냅샷이 아니라 **지금** DB 상태로 세션이 프라이버시 승인 상태여야 하고, 블러본은 지금 운영 블러
@@ -18,7 +21,7 @@
 from __future__ import annotations
 
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -39,10 +42,17 @@ from dlp_privacy.runner import (
 )
 from dlp_schema import repo_root
 from dlp_schema.dataset import DatasetVersion, Split
-from dlp_schema.db.repository import get_dataset_version, get_session, withdrawn_session_ids
+from dlp_schema.db.repository import (
+    get_dataset_version,
+    get_session,
+    get_trajectory_inheritance,
+    withdrawn_session_ids,
+)
 from dlp_schema.episode import current_labels
 from dlp_schema.labels import LabelRecord, Source, VerificationState
+from dlp_schema.review import TrajectoryInheritance
 from dlp_schema.session import Session, Stream
+from dlp_schema.trajectory_follow import lapsed_trajectories
 
 
 class ExportError(RuntimeError):
@@ -62,6 +72,8 @@ class ExportSession:
     # 스트림 → 지금 DB 상태로 본 블러본 렌더 해시 (load_source가 승인 상태를 확인하고 채운다).
     # 여기 없는 스트림의 블러본은 받지 않는다
     render_hashes: dict[str, str] = field(default_factory=dict[str, str])
+    # 세션의 3D 궤적 물려받기 기록 (지금 DB, manifest의 검수 근거 표시, ADR 0048)
+    trajectory_inheritance: tuple[TrajectoryInheritance, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -83,7 +95,10 @@ def label_states(policy: ExportPolicy, include_unreviewed: bool) -> tuple[Verifi
 
 
 def select_labels(
-    history: list[LabelRecord], policy: ExportPolicy, states: tuple[VerificationState, ...]
+    history: list[LabelRecord],
+    policy: ExportPolicy,
+    states: tuple[VerificationState, ...],
+    inheritance: Sequence[TrajectoryInheritance],
 ) -> list[LabelRecord]:
     """세션 라벨 이력 → 내보낼 라벨.
 
@@ -91,17 +106,22 @@ def select_labels(
        블라인드·이중 측정 레코드 제외).
     2. 제외 종류(`excluded_kinds`, 블러) 빼기.
     3. 사람이 만든 라벨은 상태와 관계없이 넣고, 모델 라벨은 `states`에 든 것만.
+    4. 출처 2D가 바뀌어 물려받은 검수가 끊긴 3D 궤적은 뺀다 (ADR 0048, 옵션과 무관).
 
     Args:
         history: 한 세션의 라벨 레코드 전체 (스냅샷 labels.jsonl에서 그 세션 몫).
         policy: 내보내기 정책.
         states: `label_states()` 결과.
+        inheritance: 그 세션의 3D 궤적 물려받기 기록 (`get_trajectory_inheritance`). 기본값이
+            없다: 빠뜨리면 끊긴 궤적을 검수된 것으로 넣는다. 기록이 정말 없을 때만 빈 목록.
     """
+    lapsed = lapsed_trajectories(history, inheritance)
     return [
         x
         for x in current_labels(history)
         if x.kind not in policy.excluded_kinds
         and (x.provenance.source is Source.HUMAN or x.verification.state in states)
+        and x.label_id not in lapsed
     ]
 
 
@@ -183,11 +203,9 @@ def load_source(
                 )
             except RenderNotCurrentError as exc:
                 raise ExportError(str(exc)) from exc
-        sessions.append(
-            ExportSession(
-                session, chosen[sid], select_labels(by_session[sid], policy, states), hashes
-            )
-        )
+        inheritance = tuple(get_trajectory_inheritance(conn, sid))
+        labels = select_labels(by_session[sid], policy, states, inheritance)
+        sessions.append(ExportSession(session, chosen[sid], labels, hashes, inheritance))
     return ExportSource(version, sessions, states)
 
 

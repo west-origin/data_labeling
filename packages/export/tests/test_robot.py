@@ -34,10 +34,13 @@ from dlp_export.robot import (
     robot_override,
 )
 from dlp_export.source import label_states, select_labels
-from dlp_fixtures.retarget import hand_points_for_grasp, world_hand_labels
+from dlp_fixtures.retarget import hand_points_for_grasp, world_hand_labels, world_hand_sources
 from dlp_media.pts import build_pts_index
-from dlp_schema.labels import LabelRecord, VerificationState
+from dlp_schema.labels import LabelRecord, Source, Verification, VerificationState
 from dlp_schema.ontology import Ontology
+from dlp_schema.review import TrajectoryInheritance, TrajectoryInheritanceMechanism
+from dlp_schema.testing import FIXED_TIME
+from dlp_schema.trajectory_follow import plan_trajectory_follow
 
 from .conftest import ROOT, Scenario
 
@@ -102,7 +105,7 @@ def test_world_trajectories_do_not_leak_into_human_state(
 ) -> None:
     """같은 (손, 부위)의 월드 좌표 궤적이 있어도 사람 모드 observation.state(카메라 좌표 3D)는
     그대로다."""
-    labels = select_labels(scenario.labels, policy, label_states(policy, False))
+    labels = select_labels(scenario.labels, policy, label_states(policy, False), ())
     base = _episode(scenario, policy, ontology, labels, tmp_path)
     world, _ = _truth_labels(robot, scenario.times, VerificationState.HUMAN_APPROVED)
     mixed = _episode(scenario, policy, ontology, [*labels, *world], tmp_path)
@@ -123,7 +126,7 @@ def test_robot_episode_follows_reviewed_world_hand(
     관절, 검증 등급 2, 쓴 라벨은 손목·엄지 끝·검지 끝 셋이다. 묶음에는 retarget.* 배열과
     robot_type이 들어간다."""
     world, pos_b = _truth_labels(robot, scenario.times, VerificationState.HUMAN_APPROVED)
-    labels = select_labels([*scenario.labels, *world], policy, label_states(policy, False))
+    labels = select_labels([*scenario.labels, *world], policy, label_states(policy, False), ())
     ep = _episode(scenario, policy, ontology, labels, tmp_path)
     stream = scenario.session.streams[0]
     rob = retarget_session(ep, stream, labels, robot, rpolicy, policy.lerobot, DlsIkSolver())
@@ -181,12 +184,98 @@ def test_unreviewed_world_hand_is_not_used_by_default(
     world, _ = _truth_labels(robot, scenario.times, VerificationState.UNREVIEWED)
     stream = scenario.session.streams[0]
     for include, expect in ((False, 0), (True, 1)):
-        labels = select_labels([*scenario.labels, *world], policy, label_states(policy, include))
+        labels = select_labels(
+            [*scenario.labels, *world], policy, label_states(policy, include), ()
+        )
         ep = _episode(scenario, policy, ontology, labels, tmp_path)
         rob: RobotEpisode = retarget_session(
             ep, stream, labels, robot, rpolicy, policy.lerobot, DlsIkSolver()
         )
         assert (rob.result.report.frames_with_target > 0) == bool(expect)
+
+
+def _inherit(history: list[LabelRecord]) -> tuple[list[LabelRecord], list[TrajectoryInheritance]]:
+    """궤적 따르기를 이력에 적용한 결과 (`apply_trajectory_follow` 흉내, 기록 event_id는 순번)."""
+    plan = plan_trajectory_follow(history, [])
+    got = {r.label_id: r for r in plan.approve}
+    out = [
+        x.model_copy(
+            update={
+                "verification": Verification(
+                    state=r.state, reviewer_id=r.reviewer_id, reviewed_at=r.reviewed_at
+                )
+            }
+        )
+        if (r := got.get(x.label_id))
+        else x
+        for x in history
+    ]
+    records = [
+        r.record("s1", TrajectoryInheritanceMechanism.COLLECT, FIXED_TIME).model_copy(
+            update={"event_id": i + 1}
+        )
+        for i, r in enumerate(plan.approve)
+    ]
+    return out, records
+
+
+def test_world_hand_inherited_from_approved_2d_is_used_by_default(
+    scenario: Scenario,
+    policy: ExportPolicy,
+    ontology: Ontology,
+    robot: LoadedRobot,
+    rpolicy: RetargetPolicy,
+    tmp_path: Path,
+) -> None:
+    """F-COE-19 (ADR 0048): 2D 손 트랙을 승인하면 그 트랙에서 계산한 카메라·월드 좌표 3D가 검수를
+    물려받아 기본 내보내기(검수 라벨만)에 손 목표·손 3D 점이 생긴다. 그 뒤 2D를 고쳐 물려받음이
+    끊기면 낡은 3D는 옵션과 관계없이 빠진다 (지우지는 않는다).
+
+    정답: 월드 손 6점(검수 전) + 그 입력(2D 트랙 승인, 카메라 좌표 6점·자세 검수 전)에 궤적 따르기를
+    적용하면 카메라·월드 12개가 human_approved가 되고, 기본 정책으로 목표가 있는 프레임이 생긴다.
+    """
+    world, _ = _truth_labels(robot, scenario.times, VerificationState.UNREVIEWED)
+    sources = world_hand_sources(
+        "s1", scenario.times, _world_points(world), track_state=VerificationState.HUMAN_APPROVED
+    )
+    history, records = _inherit([*scenario.labels, *sources, *world])
+    assert len(records) == 12
+    stream = scenario.session.streams[0]
+    default = label_states(policy, False)
+    labels = select_labels(history, policy, default, records)
+    ep = _episode(scenario, policy, ontology, labels, tmp_path)
+    rob = retarget_session(ep, stream, labels, robot, rpolicy, policy.lerobot, DlsIkSolver())
+    assert rob.result.report.frames_with_target > 0
+    assert (ep.hand_points_3d_confidence >= 0).any()  # 사람 모드 손 3D 점 (카메라 좌표)
+
+    track = next(x for x in sources if x.kind == "keypoint_track")
+    fixed = track.model_copy(
+        update={
+            "label_id": f"{track.label_id}-fix",
+            "parent_label_id": track.label_id,
+            "provenance": track.provenance.model_copy(
+                update={"source": Source.HUMAN, "model_version": None}
+            ),
+            "confidence": None,
+            "verification": Verification(
+                state=VerificationState.HUMAN_CORRECTED, reviewer_id="rev1", reviewed_at=FIXED_TIME
+            ),
+        }
+    )
+    for include in (False, True):
+        chosen = select_labels([*history, fixed], policy, label_states(policy, include), records)
+        inherited = {r.trajectory_label_id for r in records}
+        assert not inherited & {x.label_id for x in chosen}
+
+
+def _world_points(world: list[LabelRecord]) -> dict[str, NDArray[np.float64]]:
+    """월드 좌표 라벨 → 부위 → (n, 3) 표본 (카메라 좌표 입력을 같은 값으로 만든다)."""
+    out: dict[str, NDArray[np.float64]] = {}
+    for x in world:
+        p = x.payload
+        assert p.kind == "trajectory3d" and p.part is not None
+        out[p.part] = np.array([[s.x, s.y, s.z] for s in p.samples])
+    return out
 
 
 @pytest.mark.isolated_env
@@ -204,7 +293,7 @@ def test_official_lerobot_loader_reads_robot_episode(
     from dlp_export.lerobot import run_script
 
     world, _ = _truth_labels(robot, scenario.times, VerificationState.HUMAN_APPROVED)
-    labels = select_labels([*scenario.labels, *world], policy, label_states(policy, False))
+    labels = select_labels([*scenario.labels, *world], policy, label_states(policy, False), ())
     ep = _episode(scenario, policy, ontology, labels, tmp_path)
     rob = retarget_session(
         ep, scenario.session.streams[0], labels, robot, rpolicy, policy.lerobot, DlsIkSolver()

@@ -1,4 +1,7 @@
-"""설명 따르기 계획기는 물려받기 기록을 빠뜨릴 수 없다 (F-PAR-24, ADR 0043 3절).
+"""물려받기 계획기는 물려받기 기록을 빠뜨릴 수 없다 (F-PAR-24, ADR 0043 3절, ADR 0048).
+
+3D 궤적 따르기(`dlp_schema.trajectory_follow`)와 그 기록으로 끊긴 궤적을 빼는 내보내기 선택
+(`dlp_export.source.select_labels`)도 같은 규칙이다 (빠뜨리면 끊긴 3D를 검수된 것으로 넣는다).
 
 정답 근거: 물려받기 기록(`description_inheritance`)이 비면 검수된 설명은 모두 직접 검수로 보여
 보호된다. 호출자가 기록을 빠뜨리면 조용히 다른 결과를 낸다 (`dlp actions describe --pending`이
@@ -16,11 +19,18 @@ from pathlib import Path
 from typing import Any
 
 from dlp_actions.describe import plan_describe
+from dlp_export.source import select_labels
 from dlp_schema.description_follow import (
     active_inheritance,
     inheritance_only,
     inherited_owner,
     plan_description_follow,
+)
+from dlp_schema.trajectory_follow import (
+    active_trajectory_inheritance,
+    lapsed_trajectories,
+    plan_trajectory_follow,
+    review_basis,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,6 +42,11 @@ PLANNERS: dict[str, tuple[Callable[..., Any], int]] = {
     "inherited_owner": (inherited_owner, 2),
     "active_inheritance": (active_inheritance, 1),
     "inheritance_only": (inheritance_only, 1),
+    "plan_trajectory_follow": (plan_trajectory_follow, 1),
+    "lapsed_trajectories": (lapsed_trajectories, 1),
+    "active_trajectory_inheritance": (active_trajectory_inheritance, 1),
+    "review_basis": (review_basis, 1),
+    "select_labels": (select_labels, 3),
 }
 
 

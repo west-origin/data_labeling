@@ -52,7 +52,7 @@ def test_official_lerobot_loader_reads_export(
         width=64,
         height=48,
     )
-    labels = select_labels(scenario.labels, policy, label_states(policy, False))
+    labels = select_labels(scenario.labels, policy, label_states(policy, False), ())
     ep = build_episode(
         scenario.session, scenario.session.streams[0], build_pts_index(video), (64, 48), labels,
         Vocab.from_ontology(ontology), lp,

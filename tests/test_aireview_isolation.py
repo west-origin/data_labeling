@@ -111,7 +111,7 @@ def _downstream(engine: sa.Engine, tmp_path: Path) -> dict[str, Any]:
         "history": [x.model_dump_json() for x in history],
         "current": [x.model_dump_json() for x in current_labels(history)],
         "export": [
-            [x.label_id for x in select_labels(history, export, label_states(export, flag))]
+            [x.label_id for x in select_labels(history, export, label_states(export, flag), ())]
             for flag in (False, True)
         ],
         "train": {

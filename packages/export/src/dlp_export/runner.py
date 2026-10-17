@@ -77,10 +77,11 @@ from dlp_privacy.runner import RenderNotCurrentError, expected_render_hash
 from dlp_schema.dataset import Split
 from dlp_schema.db.repository import get_session, set_lifecycle, withdrawn_session_ids
 from dlp_schema.db.tables import sessions as sessions_table
-from dlp_schema.labels import LabelRecord, VerificationState
+from dlp_schema.labels import LabelRecord, Trajectory3DPayload, VerificationState
 from dlp_schema.lineage import ExportRecord
 from dlp_schema.ontology import Ontology
 from dlp_schema.session import LifecycleState, Session, Stream
+from dlp_schema.trajectory_follow import review_basis
 
 # 지원 형식 (CLI 하위 명령 이름과 같다)
 Format = Literal["coco", "intervals", "lerobot"]
@@ -294,6 +295,27 @@ def _lerobot(
     return used, written, details
 
 
+def _trajectory_policy(src: ExportSource, used: list[LabelRecord]) -> dict[str, Any]:
+    """manifest verification_policy.trajectory3d: 3D 궤적의 검수 근거 (ADR 0048).
+
+    3D 손 궤적은 검수 도구가 없어 그것을 계산한 2D 손 트랙의 검수를 물려받는다. 사람이 3D 값을
+    본 것이 아니고, 월드 좌표는 자동 카메라 자세에도 기댄다는 것을 받는 쪽이 알 수 있게 쓴다.
+    review_basis: 결과에 들어간 3D 궤적의 근거별 수 (`trajectory_follow.review_basis`).
+    """
+    by_session = {es.session.session_id: es.trajectory_inheritance for es in src.sessions}
+    basis = Counter(
+        review_basis(x, by_session.get(x.session_id, ()))
+        for x in used
+        if isinstance(x.payload, Trajectory3DPayload)
+    )
+    return {
+        "hand_review": "inherited_from_2d_hand_track",
+        "camera_pose": "automatic_unreviewed",
+        "lapsed_inheritance": "excluded",
+        "review_basis": dict(sorted(basis.items())),
+    }
+
+
 def _robot_summary(meta: dict[str, Any]) -> dict[str, Any]:
     """manifest 최상위 robot 항목 (로봇 ID, 모델 sha256·라이선스, 리타기팅 판)."""
     keys = ("robot_id", "model_sha256", "model_license", "retarget_version", "solver")
@@ -429,6 +451,7 @@ def run_export(  # noqa: C901
                 "label_states": [s.value for s in src.label_states],
                 "human_created": "always",
                 "include_unreviewed": include_unreviewed,
+                "trajectory3d": _trajectory_policy(src, used),
             },
             "splits": [s.value for s in (splits or policy.splits)],
             "pseudonymized_ids": list(PSEUDONYMIZED) if ids.enabled else [],

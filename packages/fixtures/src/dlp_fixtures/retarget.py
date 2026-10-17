@@ -9,6 +9,8 @@
 - `hand_points_for_grasp`: 잡기 점·접근 축·닫힘 축·열림 거리 → 손 6점 (부위 이름 → (n, 3)).
 - `world_hand_labels`: 손 6점 → 세션 월드 좌표 trajectory3d 라벨 (월드 단계 출력 흉내, 내보내기
 시험).
+- `world_hand_sources`: 위 월드 좌표 라벨의 `derived_from`이 가리키는 입력 (2D 손 트랙, 카메라 좌표
+  궤적, 카메라 자세). 3D가 2D 손 트랙 검수를 물려받는 시험(ADR 0048)에 쓴다.
 """
 
 from __future__ import annotations
@@ -21,6 +23,10 @@ from numpy.typing import NDArray
 
 from dlp_schema.labels import (
     CoordinateFrame,
+    Hand,
+    Keypoint,
+    KeypointFrame,
+    KeypointTrackPayload,
     LabelRecord,
     Lift3DMethod,
     Provenance,
@@ -157,4 +163,105 @@ def world_hand_labels(
                 ),
             )
         )
+    return out
+
+
+def _model_label(
+    label_id: str,
+    session_id: str,
+    stream_id: str,
+    times: tuple[int, int],
+    state: VerificationState,
+    payload: KeypointTrackPayload | Trajectory3DPayload,
+    version: str,
+) -> LabelRecord:
+    """모델 출처 공간 라벨 (검증 상태 state, 검수됐으면 검수자 rev1·FIXED_TIME)."""
+    reviewed = state is not VerificationState.UNREVIEWED
+    return LabelRecord(
+        label_id=label_id,
+        session_id=session_id,
+        stream_id=stream_id,
+        t_start_ms=times[0],
+        t_end_ms=times[1],
+        ontology_version="1.0.0",
+        provenance=Provenance(source=Source.MODEL, model_version=version),
+        confidence=0.7,
+        verification=Verification(
+            state=state,
+            reviewer_id="rev1" if reviewed else None,
+            reviewed_at=FIXED_TIME if reviewed else None,
+        ),
+        created_at=FIXED_TIME,
+        payload=payload,
+    )
+
+
+def world_hand_sources(
+    session_id: str,
+    times_ms: Sequence[int],
+    points: dict[str, NDArray[np.float64]],
+    *,
+    hand: str = "right",
+    stream_id: str = "bodycam",
+    track_state: VerificationState = VerificationState.UNREVIEWED,
+) -> list[LabelRecord]:
+    """`world_hand_labels`의 `derived_from` 입력: [2D 손 트랙, 카메라 좌표 궤적 6개, 카메라 자세].
+
+    자세는 늘 원점·단위 회전이라 카메라 좌표 궤적 표본 = 월드 좌표 표본이다 (정답이 같다). 2D 손
+    트랙(hand21, `<세션>-hands-fx-<손>`)의 픽셀 값은 시험이 쓰지 않는 자리 값이다. 카메라 좌표 궤적
+    (`<세션>-cam-<부위>`)은 그 2D 트랙에서 계산된 것으로 `derived_from`에 적는다 (ADR 0048). 2D
+    트랙의 검증 상태는 track_state, 3D 입력은 모두 검수 전이다.
+    """
+    span = (int(times_ms[0]), int(times_ms[-1]))
+    track_id = f"{session_id}-hands-fx-{hand}"
+    frames = tuple(
+        KeypointFrame(
+            t_ms=int(t),
+            points=tuple(Keypoint(x=100.0 + j, y=80.0 + j, visibility=2) for j in range(21)),
+        )
+        for t in times_ms
+    )
+    entity = f"{hand}_hand"
+    track = KeypointTrackPayload(
+        entity_id=entity, skeleton="hand21", hand=Hand(hand), keyframes=frames
+    )
+    out = [_model_label(track_id, session_id, stream_id, span, track_state, track, "hands-fx")]
+    for part in PARTS:
+        samples = tuple(
+            Trajectory3DSample(
+                t_ms=int(t), x=round(float(p[0]), 5), y=round(float(p[1]), 5),
+                z=round(float(p[2]), 5), method=Lift3DMethod.HAND_FIT, confidence=0.7,
+            )
+            for t, p in zip(times_ms, points[part], strict=True)
+            if not np.isnan(p).any()
+        )  # fmt: skip
+        payload = Trajectory3DPayload(
+            entity_id=entity, part=part, frame=CoordinateFrame.CAMERA,
+            source_3d=Source3D.MONO_DEPTH, samples=samples, derived_from=(track_id,),
+        )  # fmt: skip
+        out.append(
+            _model_label(
+                f"{session_id}-cam-{part}", session_id, stream_id,
+                (samples[0].t_ms, samples[-1].t_ms), VerificationState.UNREVIEWED, payload,
+                "depth3d-fixture",
+            )
+        )  # fmt: skip
+    pose = Trajectory3DPayload(
+        entity_id="camera", frame=CoordinateFrame.WORLD, source_3d=Source3D.VISUAL_INERTIAL_SLAM,
+        samples=tuple(
+            Trajectory3DSample(t_ms=int(t), x=0.0, y=0.0, z=0.0, qw=1.0, qx=0.0, qy=0.0, qz=0.0)
+            for t in times_ms
+        ),
+    )  # fmt: skip
+    out.append(
+        _model_label(
+            f"{session_id}-pose",
+            session_id,
+            stream_id,
+            span,
+            VerificationState.UNREVIEWED,
+            pose,
+            "campose-fixture",
+        )
+    )
     return out

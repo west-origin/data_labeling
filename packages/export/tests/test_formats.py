@@ -106,7 +106,7 @@ def source(sc: Scenario, policy: ExportPolicy, include_unreviewed: bool = False)
             ExportSession(
                 sc.session,
                 Split.TRAIN,
-                select_labels(sc.labels, policy, states),
+                select_labels(sc.labels, policy, states, ()),
                 sc.render_hashes,
             )
         ],
@@ -565,7 +565,7 @@ def test_offset_third_person_keyframes_use_stream_time(
         version,
         [
             ExportSession(
-                session, Split.TRAIN, select_labels(labels, policy, states), {"third": digest}
+                session, Split.TRAIN, select_labels(labels, policy, states, ()), {"third": digest}
             )
         ],
         states,
