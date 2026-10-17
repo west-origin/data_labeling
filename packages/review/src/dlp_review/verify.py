@@ -20,7 +20,10 @@
   (human_approved, human_corrected, sample_verified). 사람이 만든 라벨은 그 자체로 검수된 것이다.
   모델 설명 라벨(한국어 원문·영어 번역)은 검수 도구 경로가 없어 행동·상위 구간 검수를 물려받는다
   (F-PAR-15, ADR 0043 3절). `verify_session`은 판정 전에 그 규칙을 한 번 적용해, 규칙 전에 검수한
-  세션도 메운다. 행동이 검수 전이면 그 설명도 계속 완료를 막는다.
+  세션도 메운다. 행동이 검수 전이면 그 설명도 계속 완료를 막는다. 3D 손 궤적(카메라·월드 좌표)도
+  검수 도구 경로가 없어 그것을 계산한 2D 손 트랙의 검수를 물려받는다 (ADR 0048,
+  `apply_trajectory_follow`). 2D가 검수 전이거나 출처 2D가 없는 3D(카메라 자세, 박스 중심)는 계속
+  완료를 막는다 (F-COE-21).
 - 블러를 뺀 현재 운영 라벨이 하나 이상 있다 (빈 세션은 완료가 아니다).
 
 관련: ADR 0028(생애주기 기록), ADR 0029(검수 완료 판정 명령).
@@ -53,6 +56,7 @@ from dlp_schema.db.repository import (
     pending_revocations,
     set_lifecycle,
 )
+from dlp_schema.db.trajectory_repository import apply_trajectory_follow
 from dlp_schema.episode import current_labels
 from dlp_schema.labels import Source, VerificationState
 from dlp_schema.review import (
@@ -61,6 +65,7 @@ from dlp_schema.review import (
     ReviewAssignment,
     ReviewTask,
     ReviewTaskStatus,
+    TrajectoryInheritanceMechanism,
 )
 from dlp_schema.session import LifecycleState, PrivacyState
 
@@ -89,6 +94,9 @@ class VerifyResult:
     # 판정 전에 행동 검수를 물려받은 설명 수와 지운 설명 수 (F-PAR-15, 메우기)
     descriptions_approved: int = 0
     descriptions_retracted: int = 0
+    # 판정 전에 2D 손 트랙 검수를 물려받은 3D 궤적 수와 출처가 끊긴 물려받은 3D 수 (ADR 0048)
+    trajectories_approved: int = 0
+    trajectories_lapsed: int = 0
 
 
 def verification_gaps(
@@ -257,10 +265,13 @@ def verify_session(
         )
     # 이 규칙 전에 수집한 세션도 설명이 행동 검수를 따르게 메운다 (멱등, F-PAR-15)
     follow = apply_description_follow(conn, session_id, now, InheritanceMechanism.VERIFY)
+    # 3D 손 궤적도 그것을 계산한 2D 손 트랙 검수를 물려받는다 (ADR 0048, 멱등)
+    traj = apply_trajectory_follow(conn, session_id, now, TrajectoryInheritanceMechanism.VERIFY)
     reasons = verification_gaps(conn, session_id, privacy_policy)
     if not reasons:
         set_lifecycle(conn, session_id, LifecycleState.HUMAN_VERIFIED, at=now, actor=actor)
     return VerifyResult(
         session_id, verified=not reasons, reasons=reasons,
         descriptions_approved=len(follow.approve), descriptions_retracted=len(follow.retract),
+        trajectories_approved=len(traj.approve), trajectories_lapsed=len(traj.lapsed),
     )  # fmt: skip

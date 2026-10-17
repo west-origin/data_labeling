@@ -264,6 +264,17 @@ def cmd_create(args: argparse.Namespace) -> int:
     return 0
 
 
+def _print_trajectories(approved: int, lapsed: int) -> None:
+    """3D 손 궤적의 2D 트랙 검수 물려받기 결과 (ADR 0048). 끊긴 것은 다시 만들라고 안내한다."""
+    if approved:
+        print(f"  3D 손 궤적: 2D 손 트랙 검수 물려받음 {approved} (ADR 0048)")
+    if lapsed:
+        print(
+            f"  3D 손 궤적 {lapsed}개의 출처 2D가 바뀌어 물려받은 검수가 끊김 "
+            "(내보내기에서 빠진다. dlp prelabel run <세션>으로 고친 2D에서 다시 만든다)"
+        )
+
+
 def _print_ai_outcome(outcome: ReviewOutcome) -> None:
     """AI 1차 검수 결과 기록이 있으면 적용·기각 수와 경고를 출력한다 (WP17.7)."""
     if outcome.ai is None:
@@ -302,6 +313,7 @@ def _print_outcome(task: ReviewTask, outcome: ReviewOutcome | None, *, ai: bool 
             f"  설명: 행동 검수 물려받음 {len(outcome.descriptions_approved)}, "
             f"검수 전 설명 삭제 {len(outcome.descriptions_retracted)}"
         )
+    _print_trajectories(len(outcome.trajectories_approved), len(outcome.trajectories_lapsed))
     _print_ai_outcome(outcome)
     if not outcome.revoked:
         return
@@ -369,6 +381,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
             f"{args.session_id}: 설명이 행동 검수를 따름 (물려받음 {result.descriptions_approved}, "
             f"검수 전 설명 삭제 {result.descriptions_retracted}, ADR 0043 3절)"
         )
+    _print_trajectories(result.trajectories_approved, result.trajectories_lapsed)
     if result.already:
         print(f"{args.session_id}: 이미 검수 완료 단계")
     elif result.verified:
