@@ -60,8 +60,10 @@ from dlp_schema.db.aireview_repository import (
     list_ai_units_created,
 )
 from dlp_schema.db.repository import (
+    get_description_inheritance,
     get_labels,
     get_session,
+    get_trajectory_inheritance,
     list_assignments,
     list_golden_sets,
     list_lifecycle_events,
@@ -70,11 +72,13 @@ from dlp_schema.db.repository import (
     list_session_ids,
     withdrawn_session_ids,
 )
+from dlp_schema.description_follow import active_inheritance
 from dlp_schema.episode import current_labels, non_operational_ids
-from dlp_schema.history import review_changes
+from dlp_schema.history import ReviewChange, review_changes
 from dlp_schema.labels import LabelRecord, Source, VerificationState
 from dlp_schema.review import AssignmentStatus, ReviewMode, ReviewTool
 from dlp_schema.session import LifecycleState, PrivacyState
+from dlp_schema.trajectory_follow import active_trajectory_inheritance
 
 # 개별 검수로 보는 상태 (수정률·자동 승인율 계산). 표본 검증은 개별로 본 것이 아니라 뺀다
 REVIEWED = (VerificationState.HUMAN_APPROVED, VerificationState.HUMAN_CORRECTED)
@@ -386,6 +390,27 @@ class WeeklyMetrics:
         return {k: _clean(v) for k, v in asdict(self).items()}
 
 
+def _reviewer_changes(
+    conn: sa.Connection, sid: str, history: list[LabelRecord]
+) -> list[ReviewChange]:
+    """검수자가 직접 낸 검수 변화 (수정률·자동 승인율 분자·분모).
+
+    블러 트랙은 따로 본다. 검수를 물려받기만 한 라벨(행동 검수를 물려받은 설명 ADR 0043 3절,
+    2D 손 트랙 검수를 물려받은 3D 궤적 ADR 0048)은 검수자가 본 것이 아니므로 뺀다. 행동·손 트랙
+    하나 승인에 물려받은 라벨 여러 개가 "그대로 승인"으로 세어져 자동 승인율이 부풀지 않게 한다
+    (F-COE-23). 물려받음은 명시 기록으로만 판정한다 (지금 검수 상태가 마지막 기록과 같을 때).
+    """
+    descriptions = get_description_inheritance(conn, sid)
+    trajectories = get_trajectory_inheritance(conn, sid)
+    return [
+        c
+        for c in review_changes(history, REVIEWED)
+        if c.label.kind != "blur_track"
+        and active_inheritance(c.label, descriptions) is None
+        and active_trajectory_inheritance(c.label, trajectories) is None
+    ]
+
+
 def weekly_metrics(  # noqa: C901
     conn: sa.Connection,
     week: str,
@@ -439,8 +464,7 @@ def weekly_metrics(  # noqa: C901
             m.verified_episodes += 1
         if sid in golden:
             continue
-        changes = [c for c in review_changes(history, REVIEWED) if c.label.kind != "blur_track"]
-        for c in changes:
+        for c in _reviewer_changes(conn, sid, history):
             if not inside(c.at):
                 continue
             if c.change == "accepted":

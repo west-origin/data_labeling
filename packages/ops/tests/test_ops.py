@@ -588,3 +588,64 @@ def test_retention_alerts(pg: sa.Engine) -> None:
     assert items["r-soon"].expires_on == date(2027, 10, 20)
     assert items["r-old"].finalized_at == finished["r-old"]
     assert {k for k, v in items.items() if v.alert} == {"r-old", "r-soon", "r-gone"}
+
+
+def test_inherited_3d_is_not_counted_as_reviewer_acceptance() -> None:
+    """F-COE-23: 검수를 물려받기만 한 라벨(2D 손 트랙을 따른 3D 궤적 ADR 0048, 행동을 따른 설명
+    ADR 0043 3절)은 검수자가 본 것이 아니므로 자동 승인율·수정률에 넣지 않는다.
+
+    정답: 승인한 2D 손 트랙 g1과 행동 a1 + 물려받은 3D c1·설명 d1 → 검수자 변화는 g1·a1 승인 둘.
+    """
+    from dlp_ops.metrics import _reviewer_changes  # pyright: ignore[reportPrivateUsage]
+    from dlp_schema.db.description_repository import apply_description_follow
+    from dlp_schema.db.repository import (
+        get_labels,
+        insert_labels,
+        insert_session,
+        record_review,
+        register_ontology,
+    )
+    from dlp_schema.db.trajectory_repository import apply_trajectory_follow
+    from dlp_schema.review import InheritanceMechanism, TrajectoryInheritanceMechanism
+    from dlp_schema.testing import (
+        FIXED_TIME,
+        action_payload,
+        hand_track_payload,
+        sqlite_db,
+        trajectory_payload,
+    )
+
+    model: dict[str, Any] = {
+        "provenance": Provenance(source=Source.MODEL, model_version="m-1"),
+        "confidence": 0.8,
+        "stream_id": "bodycam",
+    }
+    timeline = {k: v for k, v in model.items() if k != "stream_id"}
+    engine = sqlite_db()
+    with engine.begin() as conn:
+        register_ontology(conn, load_ontology(ROOT / "config/ontology/v1"))
+        insert_session(conn, make_session())
+        insert_labels(
+            conn,
+            [
+                make_label(hand_track_payload(), label_id="g1", **model),
+                make_label(trajectory_payload(derived_from=("g1",)), label_id="c1", **model),
+                make_label(action_payload(), label_id="a1", **timeline),
+                make_label(
+                    {"kind": "description", "segment_id": "a001", "text": "걸레를 잡는다"},
+                    label_id="d1", **timeline,
+                ),
+            ],
+        )  # fmt: skip
+        record_review(conn, "g1", VerificationState.HUMAN_APPROVED, "rev01", FIXED_TIME)
+        record_review(conn, "a1", VerificationState.HUMAN_APPROVED, "rev01", FIXED_TIME)
+        apply_trajectory_follow(conn, "s001", FIXED_TIME, TrajectoryInheritanceMechanism.VERIFY)
+        apply_description_follow(conn, "s001", FIXED_TIME, InheritanceMechanism.VERIFY)
+        labels = {x.label_id: x for x in get_labels(conn, "s001")}
+        changes = _reviewer_changes(conn, "s001", list(labels.values()))
+    assert labels["c1"].verification.state is VerificationState.HUMAN_APPROVED
+    assert labels["d1"].verification.state is VerificationState.HUMAN_APPROVED
+    assert sorted((c.change, c.label.label_id) for c in changes) == [
+        ("accepted", "a1"),
+        ("accepted", "g1"),
+    ]
