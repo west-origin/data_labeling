@@ -120,8 +120,9 @@ def test_new_trajectories_for_reviewed_entity_parts_are_dropped() -> None:
 
 
 def test_lapsed_inherited_trajectories_do_not_block_or_feed_new_ones() -> None:
-    """ADR 0048: 출처 2D가 바뀌어 물려받은 검수가 끊긴 궤적(lapsed)은 지우지 못하지만, 새 궤적을
-    막지 않고(보호 판정에서 뺀다) 월드 좌표 단계 입력으로도 고르지 않는다.
+    """ADR 0048·0050: 출처 2D가 바뀌어 물려받은 검수가 끊긴 궤적(lapsed)은 궤적 따르기가 지우기
+    전이라도(이중 방어) 새 궤적을 막지 않고(보호 판정에서 뺀다) 월드 좌표 단계 입력으로도 고르지
+    않는다.
 
     정답: 끊긴 승인 손목 궤적이 있어도 새 손목 궤적이 남고, 월드 입력은 끊긴 것 대신 새 것이다.
     끊기지 않은 승인 궤적은 그대로 새 것을 막는다.

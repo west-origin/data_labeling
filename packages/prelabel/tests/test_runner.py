@@ -1175,14 +1175,16 @@ def test_3d_inherits_the_approved_2d_track_and_regenerates_after_correction(
     시나리오와 정답
     1. 2D 손 트랙을 승인한 뒤 3D 단계를 돌리면 hand_points 수만큼 3D가 생기고(derived_from = 그
        트랙), 같은 실행에서 human_approved·rev01을 물려받는다 (기록 경로 prelabel).
-    2. 검수자가 2D를 고치면(사람 수정 레코드) 물려받은 3D는 끊김이 되지만 지우지 않는다. 다음
-       실행은 고친 2D로 새 3D를 그 옆에 만들고(끊긴 3D가 막지 않는다), 새 3D가 고친 2D의 검수를
-       물려받는다. 새 3D 표본은 고친 트랙만 올린 `lift_tracks` 결과와 같다.
+    2. 검수자가 2D를 고치면(사람 수정 레코드) 물려받은 3D는 끊김이다. 다음 실행은 고친 2D로 새
+       3D를 만들고(끊긴 3D가 막지 않는다), 새 3D가 고친 2D의 검수를 물려받고, 끊긴 3D는 궤적
+       따르기(`trajectory-follow-1`)가 지운다 (ADR 0050). 새 3D 표본은 고친 트랙만 올린
+       `lift_tracks` 결과와 같다.
     3. 다시 돌리면 아무것도 바뀌지 않는다 (멱등).
     """
     from dlp_schema.db.repository import get_trajectory_inheritance
     from dlp_schema.labels import Verification, without_world
     from dlp_schema.review import TrajectoryInheritanceMechanism
+    from dlp_schema.trajectory_follow import TRAJECTORY_FOLLOW_VERSION
 
     actions = generate_action_scenario(1, n_units=2)
     sid, raw = _bodycam_only_session(pg, tmp_path, actions.frame_times, "inherit")
@@ -1230,12 +1232,14 @@ def test_3d_inherits_the_approved_2d_track_and_regenerates_after_correction(
         third = run_prelabel(conn, sid, raw, hands, policy, ontology, FIXED_TIME, lifter=lifter)
         history = get_labels(conn, sid, kinds=["trajectory3d"])
     assert second.lifted == n and second.trajectories_inherited == n
-    assert second.trajectories_lapsed == n == third.trajectories_lapsed
+    assert second.trajectories_retracted == n and third.trajectories_retracted == 0
     assert third.lifted == 0 and third.trajectories_inherited == 0
     live = current_labels(history)
     old_ids = {x.label_id for x in lifted}
-    assert old_ids <= {x.label_id for x in live}  # 끊긴 3D도 지우지 않는다
-    assert not any(x.retracted for x in history)
+    assert not old_ids & {x.label_id for x in live}  # 끊긴 물려받은 3D는 지운다 (ADR 0050)
+    gone = [x for x in history if x.retracted]
+    assert {x.parent_label_id for x in gone} == old_ids
+    assert {x.provenance.model_version for x in gone} == {TRAJECTORY_FOLLOW_VERSION}
     expected = _lifted_from(tmp_path / "bodycam.mp4", fixed, policy)
     new = [x for x in live if x.label_id not in old_ids]
     assert len(new) == n

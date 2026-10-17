@@ -264,14 +264,14 @@ def cmd_create(args: argparse.Namespace) -> int:
     return 0
 
 
-def _print_trajectories(approved: int, lapsed: int) -> None:
-    """3D 손 궤적의 2D 트랙 검수 물려받기 결과 (ADR 0048). 끊긴 것은 다시 만들라고 안내한다."""
+def _print_trajectories(approved: int, retracted: int) -> None:
+    """3D 궤적의 2D 트랙 검수 물려받기 결과 (ADR 0048·0050). 지운 것은 다시 만들라고 안내한다."""
     if approved:
-        print(f"  3D 손 궤적: 2D 손 트랙 검수 물려받음 {approved} (ADR 0048)")
-    if lapsed:
+        print(f"  3D 궤적: 2D 트랙 검수 물려받음 {approved} (ADR 0048)")
+    if retracted:
         print(
-            f"  3D 손 궤적 {lapsed}개의 출처 2D가 바뀌어 물려받은 검수가 끊김 "
-            "(내보내기에서 빠진다. dlp prelabel run <세션>으로 고친 2D에서 다시 만든다)"
+            f"  3D 궤적 {retracted}개: 출처 2D가 바뀌어 물려받은 검수가 끊겨 지움 (ADR 0050. "
+            "dlp prelabel run <세션>으로 고친 2D에서 다시 만든다)"
         )
 
 
@@ -313,7 +313,7 @@ def _print_outcome(task: ReviewTask, outcome: ReviewOutcome | None, *, ai: bool 
             f"  설명: 행동 검수 물려받음 {len(outcome.descriptions_approved)}, "
             f"검수 전 설명 삭제 {len(outcome.descriptions_retracted)}"
         )
-    _print_trajectories(len(outcome.trajectories_approved), len(outcome.trajectories_lapsed))
+    _print_trajectories(len(outcome.trajectories_approved), len(outcome.trajectories_retracted))
     _print_ai_outcome(outcome)
     if not outcome.revoked:
         return
@@ -372,16 +372,25 @@ def cmd_verify(args: argparse.Namespace) -> int:
     """
     # 회귀: 예전에는 DLP_ACTOR가 없으면 "unknown"으로 기록해 판정자를 알 수 없었다
     actor = args.actor or current_actor()
+    # 자동 라벨 분류(카메라 자세 등, ADR 0050)는 DLP_REVIEW_POLICY_FILE을 따르는 정책에서 읽는다
+    automatic = load_ops_policy(repo_root()).verify.automatic
     engine = sa.create_engine(database_url(args.url))
     with engine.begin() as conn:
-        result = verify_session(conn, args.session_id, datetime.now(UTC), actor)
+        result = verify_session(
+            conn, args.session_id, datetime.now(UTC), actor, automatic=automatic
+        )
     engine.dispose()
     if result.descriptions_approved or result.descriptions_retracted:
         print(
             f"{args.session_id}: 설명이 행동 검수를 따름 (물려받음 {result.descriptions_approved}, "
             f"검수 전 설명 삭제 {result.descriptions_retracted}, ADR 0043 3절)"
         )
-    _print_trajectories(result.trajectories_approved, result.trajectories_lapsed)
+    _print_trajectories(result.trajectories_approved, result.trajectories_retracted)
+    if result.automatic_unreviewed:
+        print(
+            f"  자동 라벨(카메라 자세) {result.automatic_unreviewed}개: 사람 검수 대상이 아니라 "
+            "완료를 막지 않음 (검수 전 그대로, 내보내기 manifest에 automatic_unreviewed, ADR 0050)"
+        )
     if result.already:
         print(f"{args.session_id}: 이미 검수 완료 단계")
     elif result.verified:

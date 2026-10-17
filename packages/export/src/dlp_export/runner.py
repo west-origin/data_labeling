@@ -35,6 +35,7 @@ import hashlib
 import json
 import tempfile
 from collections import Counter
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -77,11 +78,12 @@ from dlp_privacy.runner import RenderNotCurrentError, expected_render_hash
 from dlp_schema.dataset import Split
 from dlp_schema.db.repository import get_session, set_lifecycle, withdrawn_session_ids
 from dlp_schema.db.tables import sessions as sessions_table
-from dlp_schema.labels import LabelRecord, Trajectory3DPayload, VerificationState
+from dlp_schema.labels import CoordinateFrame, LabelRecord, Trajectory3DPayload, VerificationState
 from dlp_schema.lineage import ExportRecord
 from dlp_schema.ontology import Ontology
+from dlp_schema.review import TrajectoryInheritance
 from dlp_schema.session import LifecycleState, Session, Stream
-from dlp_schema.trajectory_follow import review_basis
+from dlp_schema.trajectory_follow import CAMERA_POSE_REVIEW, is_camera_pose, review_basis
 
 # 지원 형식 (CLI 하위 명령 이름과 같다)
 Format = Literal["coco", "intervals", "lerobot"]
@@ -296,21 +298,45 @@ def _lerobot(
 
 
 def _trajectory_policy(src: ExportSource, used: list[LabelRecord]) -> dict[str, Any]:
-    """manifest verification_policy.trajectory3d: 3D 궤적의 검수 근거 (ADR 0048).
-
-    3D 손 궤적은 검수 도구가 없어 그것을 계산한 2D 손 트랙의 검수를 물려받는다. 사람이 3D 값을
-    본 것이 아니고, 월드 좌표는 자동 카메라 자세에도 기댄다는 것을 받는 쪽이 알 수 있게 쓴다.
-    review_basis: 결과에 들어간 3D 궤적의 근거별 수 (`trajectory_follow.review_basis`).
-    """
+    """manifest verification_policy.trajectory3d (`trajectory_manifest`, 세션별 물려받기 기록)."""
     by_session = {es.session.session_id: es.trajectory_inheritance for es in src.sessions}
-    basis = Counter(
-        review_basis(x, by_session.get(x.session_id, ()))
-        for x in used
+    return trajectory_manifest(used, by_session)
+
+
+def trajectory_manifest(
+    used: Sequence[LabelRecord], inheritance: Mapping[str, Sequence[TrajectoryInheritance]]
+) -> dict[str, Any]:
+    """manifest verification_policy.trajectory3d: 3D 궤적의 검수 근거 (ADR 0048·0050).
+
+    3D 궤적은 검수 도구가 없어 그것을 계산한 2D 트랙(손 키포인트·객체 박스)의 검수를 물려받는다.
+    사람이 3D 값을 본 것이 아니고, 카메라 자세는 사람 검수 대상이 아닌 자동 추정이며 월드 좌표는
+    그 자세에 기댄다는 것을 받는 쪽이 알 수 있게 쓴다. 모든 형식에 같은 절을 싣는다.
+
+    Args:
+        used: 결과에 들어간 라벨.
+        inheritance: 세션 ID → 그 세션의 3D 궤적 물려받기 기록 (지금 DB).
+
+    Returns:
+        hand_review·object_review(물려받는 2D), camera_pose(automatic_unreviewed), pose_derived
+        (자세에 기대는 결과 라벨 수: 월드 좌표 궤적·자세 궤적 자체), lapsed_inheritance(excluded:
+        끊긴 물려받은 3D는 넣지 않는다), review_basis(결과에 들어간 3D 궤적의 근거별 수,
+        `trajectory_follow.review_basis`).
+    """
+    traj = [x for x in used if isinstance(x.payload, Trajectory3DPayload)]
+    basis = Counter(review_basis(x, inheritance.get(x.session_id, ())) for x in traj)
+    poses = sum(1 for x in traj if is_camera_pose(x))
+    world = sum(
+        1
+        for x in traj
         if isinstance(x.payload, Trajectory3DPayload)
+        and x.payload.frame is CoordinateFrame.WORLD
+        and not is_camera_pose(x)
     )
     return {
         "hand_review": "inherited_from_2d_hand_track",
-        "camera_pose": "automatic_unreviewed",
+        "object_review": "inherited_from_2d_box_track",
+        "camera_pose": CAMERA_POSE_REVIEW,
+        "pose_derived": {"world_frame_trajectories": world, "camera_pose_trajectories": poses},
         "lapsed_inheritance": "excluded",
         "review_basis": dict(sorted(basis.items())),
     }

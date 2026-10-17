@@ -35,8 +35,8 @@ WP6·WP12, ADR 0006·0014·0015·0024. 진입점: `dlp review collect <작업 �
 부작용 요약 (`collect_task`): `label_records` 삽입, 검수 상태 갱신(`record_review`),
 `review_tasks` 수집 표시, `review_work` 기록(Label Studio, 잰 시간이 0보다 클 때만),
 `ai_review_outcomes` 기록(AI를 켜고 노출 기록이 있는 작업만), 설명 라벨의 검수 상태 물려받기·
-검수 전 설명 삭제(F-PAR-15, `apply_description_follow`, 배정 마무리 뒤), 3D 손 궤적의 2D 트랙
-검수 물려받기(ADR 0048, `apply_trajectory_follow`, 그 뒤), 세션
+검수 전 설명 삭제(F-PAR-15, `apply_description_follow`, 배정 마무리 뒤), 3D 궤적의 2D 트랙
+검수 물려받기·끊긴 물려받은 3D 삭제(ADR 0048·0050, `apply_trajectory_follow`, 그 뒤), 세션
 `privacy_state` 되돌림(승인 상태였을 때만), 블러가 바뀐 스트림의 라벨링 작업 회수 요청
 (`review_tasks`, 외부 호출 없음), 라벨링 버킷의 렌더 기록 무효화, 배정 마무리
 (`review_assignments`). 블러 검수 작업이면 원본 버킷의
@@ -482,10 +482,11 @@ def collect_task(
     follow = apply_description_follow(conn, task.session_id, now, InheritanceMechanism.COLLECT)
     outcome.descriptions_approved = [r.label_id for r in follow.approve]
     outcome.descriptions_retracted = [x.label_id for x in follow.retract]
-    # 3D 손 궤적은 검수 도구 경로가 없어 그것을 계산한 2D 손 트랙의 검수를 물려받는다 (ADR 0048)
+    # 3D 궤적은 검수 도구 경로가 없어 그것을 계산한 2D 트랙(손·박스)의 검수를 물려받고, 물려받기만
+    # 한 3D의 출처 2D가 바뀌면 지운다 (ADR 0048·0050)
     traj = apply_trajectory_follow(
         conn, task.session_id, now, TrajectoryInheritanceMechanism.COLLECT
     )
     outcome.trajectories_approved = [r.label_id for r in traj.approve]
-    outcome.trajectories_lapsed = [x.label_id for x in traj.lapsed]
+    outcome.trajectories_retracted = [x.label_id for x in traj.retract]
     return outcome

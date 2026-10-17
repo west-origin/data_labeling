@@ -22,8 +22,11 @@
   (F-PAR-15, ADR 0043 3절). `verify_session`은 판정 전에 그 규칙을 한 번 적용해, 규칙 전에 검수한
   세션도 메운다. 행동이 검수 전이면 그 설명도 계속 완료를 막는다. 3D 손 궤적(카메라·월드 좌표)도
   검수 도구 경로가 없어 그것을 계산한 2D 손 트랙의 검수를 물려받는다 (ADR 0048,
-  `apply_trajectory_follow`). 2D가 검수 전이거나 출처 2D가 없는 3D(카메라 자세, 박스 중심)는 계속
-  완료를 막는다 (F-COE-21).
+  `apply_trajectory_follow`). 객체 박스 중심 3D도 그 박스 트랙의 검수를 물려받는다 (ADR 0050).
+  2D가 검수 전인 3D는 계속 완료를 막는다. 카메라 자세(entity camera, 자동 추정)는 사람 검수
+  대상이 아니라 review.yaml `verify.automatic`에 camera_pose가 있으면(기본) 검수 전이어도 완료를
+  막지 않는다 (F-COE-21, ADR 0050. 검수 상태는 그대로이고 내보내기 manifest가
+  automatic_unreviewed로 밝힌다).
 - 블러를 뺀 현재 운영 라벨이 하나 이상 있다 (빈 세션은 완료가 아니다).
 
 관련: ADR 0028(생애주기 기록), ADR 0029(검수 완료 판정 명령).
@@ -32,6 +35,7 @@
 - `VERIFIED_STATES`: 모델 라벨을 "사람이 확인했다"고 보는 검증 상태.
 - `VerifyResult`: 판정 결과.
 - `reissue_slot`: 회수된 직접 작업을 다시 만드는 단위 (담당자, 스트림, 도구). 수집 출력과 공유한다.
+- `automatic_label`: 사람 검수 대상이 아닌 자동 라벨인가 (review.yaml verify.automatic, ADR 0050).
 - `verification_gaps`: 완료를 막는 이유 목록 (읽기만).
 - `verify_session`: 조건을 보고 생애주기를 옮긴다 (DB 쓰기, 멱등).
 """
@@ -46,6 +50,8 @@ import sqlalchemy as sa
 from dlp_privacy.policy import PrivacyPolicy
 from dlp_privacy.policy import load_policy as load_privacy_policy
 from dlp_privacy.runner import stale_media_tasks
+from dlp_review.ops.policy import AutomaticLabel
+from dlp_review.ops.policy import load_policy as load_review_policy
 from dlp_schema import repo_root
 from dlp_schema.db.description_repository import apply_description_follow
 from dlp_schema.db.repository import (
@@ -58,7 +64,7 @@ from dlp_schema.db.repository import (
 )
 from dlp_schema.db.trajectory_repository import apply_trajectory_follow
 from dlp_schema.episode import current_labels
-from dlp_schema.labels import Source, VerificationState
+from dlp_schema.labels import LabelRecord, Source, VerificationState
 from dlp_schema.review import (
     AssignmentStatus,
     InheritanceMechanism,
@@ -68,6 +74,7 @@ from dlp_schema.review import (
     TrajectoryInheritanceMechanism,
 )
 from dlp_schema.session import LifecycleState, PrivacyState
+from dlp_schema.trajectory_follow import is_camera_pose
 
 # 모델 라벨이 "사람이 확인했다"고 볼 수 있는 검증 상태.
 # SAMPLE_VERIFIED(표본 합격으로 일괄 검증)도 포함한다. 오류 삽입 정답 풀(`ops.runner.VERIFIED`)은
@@ -94,18 +101,29 @@ class VerifyResult:
     # 판정 전에 행동 검수를 물려받은 설명 수와 지운 설명 수 (F-PAR-15, 메우기)
     descriptions_approved: int = 0
     descriptions_retracted: int = 0
-    # 판정 전에 2D 손 트랙 검수를 물려받은 3D 궤적 수와 출처가 끊긴 물려받은 3D 수 (ADR 0048)
+    # 판정 전에 2D 트랙 검수를 물려받은 3D 궤적 수와 출처가 끊겨 지운 물려받은 3D 수 (ADR 0048·0050)
     trajectories_approved: int = 0
-    trajectories_lapsed: int = 0
+    trajectories_retracted: int = 0
+    # 검수 전이지만 자동 라벨(review.yaml verify.automatic)이라 완료를 막지 않은 라벨 수 (ADR 0050)
+    automatic_unreviewed: int = 0
+
+
+def automatic_label(x: LabelRecord, automatic: tuple[AutomaticLabel, ...]) -> bool:
+    """x가 사람 검수 대상이 아닌 자동 라벨인가 (review.yaml verify.automatic, ADR 0050)."""
+    return "camera_pose" in automatic and is_camera_pose(x)
 
 
 def verification_gaps(
-    conn: sa.Connection, session_id: str, privacy_policy: PrivacyPolicy | None = None
+    conn: sa.Connection,
+    session_id: str,
+    privacy_policy: PrivacyPolicy | None = None,
+    automatic: tuple[AutomaticLabel, ...] | None = None,
 ) -> list[str]:
     """완료를 막는 이유 목록 (비었으면 완료 조건을 모두 만족).
 
     인자: conn(DB 연결, 읽기만), session_id(세션 ID), privacy_policy(렌더 해시 계산용 프라이버시
-    정책, None이면 저장소의 `privacy.yaml`).
+    정책, None이면 저장소의 `privacy.yaml`), automatic(검수 전이어도 막지 않는 자동 라벨 분류,
+    None이면 저장소 review.yaml `verify.automatic`, ADR 0050).
     반환: 이유 문장 목록. 순서는 블러 승인 → 작업 → 매체 회수 → 배정 → 라벨.
     예외: 세션이 없으면 `get_session`이 던지는 예외.
     부작용 없음 (`sessions`, `review_tasks`, `review_assignments`, `label_records` 조회).
@@ -131,14 +149,33 @@ def verification_gaps(
     labels = [x for x in current_labels(get_labels(conn, session_id)) if x.kind != "blur_track"]
     if not labels:
         reasons.append("블러를 뺀 운영 라벨이 없다")
+    auto = _automatic(automatic)
     pending = [
         x.label_id
         for x in labels
-        if x.provenance.source is Source.MODEL and x.verification.state not in VERIFIED_STATES
+        if x.provenance.source is Source.MODEL
+        and x.verification.state not in VERIFIED_STATES
+        and not automatic_label(x, auto)
     ]
     if pending:
         reasons.append(f"검수하지 않은 모델 라벨 {len(pending)}개 (예: {pending[0]})")
     return reasons
+
+
+def _automatic(automatic: tuple[AutomaticLabel, ...] | None) -> tuple[AutomaticLabel, ...]:
+    """자동 라벨 분류 (None이면 저장소 review.yaml `verify.automatic`)."""
+    return load_review_policy(repo_root()).verify.automatic if automatic is None else automatic
+
+
+def _automatic_unreviewed(
+    conn: sa.Connection, session_id: str, automatic: tuple[AutomaticLabel, ...]
+) -> int:
+    """검수 전이지만 자동 라벨이라 완료를 막지 않는 현재 운영 라벨 수 (출력용)."""
+    return sum(
+        1
+        for x in current_labels(get_labels(conn, session_id, kinds=["trajectory3d"]))
+        if x.verification.state is VerificationState.UNREVIEWED and automatic_label(x, automatic)
+    )
 
 
 # 회수 뒤 다시 만들기 안내에 넣는 AI 1차 검수 단계 (WP17.6). 블러가 바뀌면 이전 판정은 렌더 해시가
@@ -237,11 +274,12 @@ def verify_session(
     now: datetime,
     actor: str,
     privacy_policy: PrivacyPolicy | None = None,
+    automatic: tuple[AutomaticLabel, ...] | None = None,
 ) -> VerifyResult:
     """조건을 만족하면 prelabeled → human_verified로 옮긴다. 멱등: 이미 그 뒤 단계면 그대로 둔다.
 
     now: 전이 시각 (시간대 필수, 운영 지표의 검증 주가 된다). actor: 판정을 실행한 사람·서비스.
-    privacy_policy: `verification_gaps`에 그대로 넘긴다 (None이면 저장소 정책).
+    privacy_policy·automatic: `verification_gaps`에 그대로 넘긴다 (None이면 저장소 정책).
 
     반환: `VerifyResult`. prelabeled가 아니면(그 전 단계 또는 withdrawn) verified=False와 그 이유를
     돌려준다 (예외 아님. withdrawn이어도 이유 문장은 "프리라벨 전 단계다"로 나온다).
@@ -265,13 +303,15 @@ def verify_session(
         )
     # 이 규칙 전에 수집한 세션도 설명이 행동 검수를 따르게 메운다 (멱등, F-PAR-15)
     follow = apply_description_follow(conn, session_id, now, InheritanceMechanism.VERIFY)
-    # 3D 손 궤적도 그것을 계산한 2D 손 트랙 검수를 물려받는다 (ADR 0048, 멱등)
+    # 3D 궤적도 2D 트랙 검수를 물려받고, 끊긴 물려받은 3D는 지운다 (ADR 0048·0050, 멱등)
     traj = apply_trajectory_follow(conn, session_id, now, TrajectoryInheritanceMechanism.VERIFY)
-    reasons = verification_gaps(conn, session_id, privacy_policy)
+    auto = _automatic(automatic)
+    reasons = verification_gaps(conn, session_id, privacy_policy, auto)
     if not reasons:
         set_lifecycle(conn, session_id, LifecycleState.HUMAN_VERIFIED, at=now, actor=actor)
     return VerifyResult(
         session_id, verified=not reasons, reasons=reasons,
         descriptions_approved=len(follow.approve), descriptions_retracted=len(follow.retract),
-        trajectories_approved=len(traj.approve), trajectories_lapsed=len(traj.lapsed),
+        trajectories_approved=len(traj.approve), trajectories_retracted=len(traj.retract),
+        automatic_unreviewed=_automatic_unreviewed(conn, session_id, auto),
     )  # fmt: skip

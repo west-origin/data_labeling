@@ -28,6 +28,7 @@ from dlp_schema.description_follow import (
 )
 from dlp_schema.trajectory_follow import (
     active_trajectory_inheritance,
+    inheritance_only_trajectory,
     lapsed_trajectories,
     plan_trajectory_follow,
     review_basis,
@@ -45,6 +46,7 @@ PLANNERS: dict[str, tuple[Callable[..., Any], int]] = {
     "plan_trajectory_follow": (plan_trajectory_follow, 1),
     "lapsed_trajectories": (lapsed_trajectories, 1),
     "active_trajectory_inheritance": (active_trajectory_inheritance, 1),
+    "inheritance_only_trajectory": (inheritance_only_trajectory, 1),
     "review_basis": (review_basis, 1),
     "select_labels": (select_labels, 3),
 }

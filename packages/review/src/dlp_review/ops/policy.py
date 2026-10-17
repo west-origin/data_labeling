@@ -15,8 +15,9 @@ WP12, ADR 0014. `dlp review plan|assign|qa|quality|create|collect|serve`와 운�
 - `SIGV4_MAX_EXPIRES_S`: 서명 URL 유효 시간 상한 (`media.signed_url_ttl_s` 검증).
 - `UnitsPolicy`·`PriorityPolicy`·`SamplingPolicy`·`SeedingPolicy`·`MeasurementPolicy`·
   `ReviewersPolicy`·`MediaPolicy`·`CvatPolicy`·`LabelStudioPolicy`·`WebhookPolicy`·`OrphanPolicy`·
-  `AiConfidenceFloor`·`AiReviewDisplayPolicy`(AI 1차 검수 판정 사용 방식, WP17.6):
-  review.yaml의 절별 모델.
+  `AiConfidenceFloor`·`AiReviewDisplayPolicy`(AI 1차 검수 판정 사용 방식, WP17.6)·
+  `VerifyPolicy`(완료 판정에서 뺄 자동 라벨, ADR 0050): review.yaml의 절별 모델.
+- `AutomaticLabel`: 사람 검수 대상이 아닌 자동 라벨 분류 이름 (지금은 camera_pose뿐).
 - `ReviewOpsPolicy`: 전체 정책 (review.yaml + `ratios` = defaults.yaml `review`).
 - `load_policy`: 저장소 루트에서 정책을 읽어 검증한다.
 
@@ -42,6 +43,10 @@ from dlp_schema.config import ReviewConfig, load_config
 
 # 오류 삽입 과제에 넣는 오류 종류 (dlp_review.ops.seeding 참조)
 ErrorType = Literal["boundary_shift", "class_swap", "blur_deletion"]
+
+# 사람 검수 대상이 아닌 자동 라벨 분류 (ADR 0050). camera_pose: 모델 출처 카메라 자세 궤적
+# (`dlp_schema.trajectory_follow.is_camera_pose`, entity camera)
+AutomaticLabel = Literal["camera_pose"]
 
 
 # CVAT 작업 라벨(공간) 검수 화면이 보여 주는 라벨 종류. 블러(blur_track)는 프라이버시 검수 단위라
@@ -279,6 +284,17 @@ class AiReviewDisplayPolicy(Contract):
     strict_context: bool = False
 
 
+class VerifyPolicy(Contract):
+    """`dlp review verify` 완료 판정 (ADR 0050).
+
+    automatic: 사람 검수 대상이 아닌 자동 라벨 분류. 검수 전이어도 완료를 막지 않는다 (검수 상태를
+    바꾸지 않는다. 기본 내보내기에는 여전히 들어가지 않고, 그 값에서 계산한 라벨을 내보내면
+    manifest가 automatic_unreviewed로 밝힌다).
+    """
+
+    automatic: tuple[AutomaticLabel, ...] = ("camera_pose",)
+
+
 class ReviewOpsPolicy(Contract):
     """검수 운영 정책 전체. `load_policy`가 만든다."""
 
@@ -298,6 +314,8 @@ class ReviewOpsPolicy(Contract):
     orphans: OrphanPolicy
     # 절이 없으면 끔 (AI 1차 검수 판정을 읽지 않는다, WP17.6)
     ai_review: AiReviewDisplayPolicy = Field(default_factory=AiReviewDisplayPolicy)
+    # 절이 없으면 카메라 자세를 자동 라벨로 본다 (ADR 0050)
+    verify: VerifyPolicy = Field(default_factory=VerifyPolicy)
     ratios: ReviewConfig  # 배정 비율 (config/defaults.yaml `review` 절)
 
 

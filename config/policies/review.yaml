@@ -138,6 +138,15 @@ label_studio:
   # dlp 검수자 ID → Label Studio 사용자 이메일. 한 계정을 두 검수자에게 줄 수 없다 (로드 시 검증).
   users: {}                           # 예: {labeler01: labeler01@example.com}
 
+# 완료 판정 (dlp review verify, dlp_review.verify, ADR 0050).
+verify:
+  # 사람 검수 대상이 아닌 자동 라벨. 검수 도구 경로가 없고 물려받을 2D도 없어, 여기 있으면 검수 전이어도
+  # 완료를 막지 않는다 (검수 상태는 바꾸지 않는다: 기본 내보내기(검수 라벨만)에 그 라벨 자체는 들어가지
+  # 않고, 그 값으로 계산한 월드 좌표 3D를 내보내면 manifest가 camera_pose: automatic_unreviewed로 밝힌다).
+  # 값: camera_pose (모델 출처 카메라 자세 궤적, entity camera, dlp_prelabel.campose). 빼면 자세가 있는
+  # 세션은 검수 경로가 없어 완료되지 못한다.
+  automatic: [camera_pose]
+
 # AI 1차 검수 판정을 검수 운영에 쓰는 방식 (WP17.6, ADR 0040, dlp_review.ai_display). 판정은 참고용이고
 # 라벨도 검수 상태도 아니다. 사람 검수를 늘리는 쪽(우선순위 priority.weights ai_*, 표본 제외, 늦은 지적의
 # 재검수 배정 `<배정>:ai-flagged`)으로만 쓰고, AI의 ok는 아무것도 줄이지 않는다.

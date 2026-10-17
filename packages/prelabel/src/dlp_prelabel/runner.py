@@ -24,10 +24,11 @@
    하나와 바디캠의 현재 카메라 좌표 궤적((개체, 부위)마다 하나)으로 월드 좌표 궤적을 만든다
    (`_PoseStage.world`). 두 단계 모두 버전에 정책 절 해시와 입력 해시를 넣고, 입력이 바뀌면 검수
    전인 이전 결과만 지운다.
-   3D 손 궤적은 그것을 계산한 2D 손 트랙의 검수를 물려받는다 (ADR 0048): 3D·월드 좌표 단계 뒤
-   `apply_trajectory_follow`(경로 prelabel)가 이미 확인된 2D에서 만든 새 3D에 검수 상태와
-   물려받기 기록을 쓴다. 출처 2D가 고쳐져 끊긴 물려받은 3D(`lapsed_trajectories`)는 지우지 않고,
-   보호 판정·월드 좌표 입력에서 빼서 고친 2D로 만든 새 3D가 그 옆에 들어가게 한다.
+   3D 궤적(손 관절·박스 중심)은 그것을 계산한 2D 트랙의 검수를 물려받는다 (ADR 0048·0050):
+   3D·월드 좌표 단계 뒤 `apply_trajectory_follow`(경로 prelabel)가 이미 확인된 2D에서 만든 새 3D에
+   검수 상태와 물려받기 기록을 쓰고, 출처 2D가 고쳐져 끊긴 물려받기만 한 3D를 지운다. 보호
+   판정·월드 좌표 입력은 끊긴 3D(`lapsed_trajectories`)를 이중 방어로 계속 빼서, 수집이 아직 지우지
+   못한 끊긴 3D가 있어도 고친 2D로 만든 새 3D가 들어가고 그 뒤 따르기가 끊긴 것을 지운다.
 6. 프라이버시 승인 상태의 세션은 생애주기를 prelabeled로 옮긴다.
 
 진입점: `dlp prelabel run <세션>` (`dlp_cli.prelabel_cmds`)이 어댑터·깊이 단계를 만들고, 원본
@@ -177,8 +178,8 @@ class PrelabelSummary:
     retracted: 예측기 단계(1)의 이전 버전과 배포 모델이 대신한 기본 어댑터·접촉 단계에서 지운 라벨
     수 (3D·접촉 단계가 새 버전으로 지운 수는 세지 않는다). lifted: 새 3D 궤적 수.
     wearer: 착용자로 찾은 원래 트랙 라벨 ID. wearer_scores: 인물(라벨 ID)별 상관.
-    trajectories_inherited: 2D 손 트랙 검수를 물려받은 3D 궤적 수. trajectories_lapsed: 출처 2D가
-    바뀌어 물려받음이 끊긴 3D 궤적 수 (지우지 않음, 내보내기에서 빠짐, ADR 0048).
+    trajectories_inherited: 2D 트랙 검수를 물려받은 3D 궤적 수. trajectories_retracted: 출처 2D가
+    바뀌어 물려받음이 끊겨 지운 3D 궤적 수 (ADR 0048·0050).
     """
 
     produced: dict[str, int] = field(default_factory=dict[str, int])  # "스트림/predictor" → 라벨 수
@@ -196,18 +197,19 @@ class PrelabelSummary:
     wearer: str | None = None
     wearer_scores: dict[str, float] = field(default_factory=dict[str, float])
     trajectories_inherited: int = 0
-    trajectories_lapsed: int = 0
+    trajectories_retracted: int = 0
 
 
 def _follow(conn: sa.Connection, session_id: str, now: datetime, summary: PrelabelSummary) -> None:
-    """3D 궤적이 출처 2D 손 트랙의 검수를 물려받게 한다 (ADR 0048, 세션 잠금, 멱등)."""
+    """3D 궤적이 출처 2D 트랙의 검수를 따르게 한다 (ADR 0048·0050, 세션 잠금, 멱등)."""
     plan = apply_trajectory_follow(conn, session_id, now, TrajectoryInheritanceMechanism.PRELABEL)
     summary.trajectories_inherited += len(plan.approve)
-    summary.trajectories_lapsed = len(plan.lapsed)
+    summary.trajectories_retracted += len(plan.retract)
 
 
 def _lapsed(conn: sa.Connection, session_id: str, history: list[LabelRecord]) -> frozenset[str]:
-    """출처가 끊긴 물려받은 3D 궤적 (보호 판정·월드 좌표 입력에서 뺀다, ADR 0048)."""
+    """출처가 끊긴 물려받은 3D 궤적 (보호 판정·월드 좌표 입력에서 뺀다, 따르기가 지우기 전의 이중
+    방어, ADR 0048·0050)."""
     return lapsed_trajectories(history, get_trajectory_inheritance(conn, session_id))
 
 
@@ -441,7 +443,7 @@ def drop_protected_trajectories(
 
     ADR 0026: 검수된 결과는 지우지 않으므로, 같은 대상의 모델 궤적을 옆에 또 넣으면 중복이 된다.
     단 출처 2D가 바뀌어 물려받음이 끊긴 궤적(lapsed, ADR 0048)은 막지 않는다: 그 궤적은 낡았고
-    (지울 수는 없다) 고친 2D로 만든 새 궤적이 그 자리를 이어받는다.
+    (이어지는 궤적 따르기가 지운다, ADR 0050) 고친 2D로 만든 새 궤적이 그 자리를 이어받는다.
     """
     kept = {
         _trajectory_key(x.payload)

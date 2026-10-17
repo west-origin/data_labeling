@@ -1,20 +1,25 @@
-"""3D 손 궤적이 그것을 계산한 2D 손 트랙의 검수 결과를 따른다 (F-COE-19, ADR 0048).
+"""3D 궤적이 그것을 계산한 2D 트랙의 검수 결과를 따른다 (F-COE-19·21·22, ADR 0048·0050).
 
 3D 궤적(`Trajectory3DPayload`)은 검수 도구(CVAT·Label Studio)에 경로가 없다. 그래서 기본
 내보내기(검수 라벨만)에서 로봇 목표·손 3D 점이 비었다. 사용자가 고른 규칙은 "3D 궤적은 그것을
-계산한 2D 손 키포인트 트랙의 검수 상태를 물려받는다"다. 이 모듈은 세션 이력과 물려받기 기록만
-보고 결과를 정하는 순수 계산이다. DB 적용은 `dlp_schema.db.trajectory_repository`가 맡는다.
-설명 따르기(`dlp_schema.description_follow`, ADR 0043 3절)와 같은 틀이다.
+계산한 2D 트랙(손 키포인트 트랙, 객체 박스 트랙)의 검수 상태를 물려받는다"다. 이 모듈은 세션
+이력과 물려받기 기록만 보고 결과를 정하는 순수 계산이다. DB 적용은
+`dlp_schema.db.trajectory_repository`가 맡는다. 설명 따르기(`dlp_schema.description_follow`,
+ADR 0043 3절)와 같은 틀이다.
 
 출처 (`trajectory_basis`, 모두 지금 운영 현재 라벨이어야 한다)
-    - 카메라 좌표 손 궤적: 모델 출처, frame=camera, `derived_from` = (2D 트랙 하나). 그 2D 트랙이
-      hand21 키포인트 트랙이고 개체(entity_id)가 같아야 한다. 라벨은 덮어쓰지 않으므로(고치면 새
-      ID) derived_from의 ID가 지금 현재 트랙이면 3D는 정확히 그 2D 내용으로 계산된 것이다.
-    - 월드 좌표 손 궤적: 모델 출처, frame=world, `derived_from` = (카메라 좌표 궤적, 카메라 자세).
+    - 카메라 좌표 손 궤적: 모델 출처, frame=camera, part 있음, `derived_from` = (2D 트랙 하나).
+      그 2D 트랙이 hand21 키포인트 트랙이고 개체(entity_id)·스트림이 같아야 한다. 라벨은 덮어쓰지
+      않으므로(고치면 새 ID) derived_from의 ID가 지금 현재 트랙이면 3D는 정확히 그 2D 내용으로
+      계산된 것이다.
+    - 카메라 좌표 박스 중심 궤적 (ADR 0050): 모델 출처, frame=camera, part 없음, `derived_from` =
+      (박스 트랙 하나). 그 박스 트랙의 개체·스트림이 같아야 한다.
+    - 월드 좌표 궤적: 모델 출처, frame=world, `derived_from` = (카메라 좌표 궤적, 카메라 자세).
       카메라 좌표 궤적이 위 조건을 만족하고(같은 개체·부위) 자세가 현재 자세 궤적이어야 한다.
-      카메라 자세는 자동 추정이고 물려받지 않는다 (검수 근거 표시는 내보내기 manifest).
-    - derived_from이 없는 예전 3D(`depth3d-…+hf2` 이전), 박스 중심 3D, 카메라 자세, 사람 출처
-      궤적은 출처가 없다 (물려받지 않는다).
+      카메라 자세는 자동 추정이고 물려받지 않는다 (사람 검수 대상이 아님, `is_camera_pose`,
+      ADR 0050. 완료 판정은 review.yaml verify.automatic로 빼고, 내보내기 manifest가 밝힌다).
+    - derived_from이 없는 예전 3D(`depth3d-…+hf2` 이전), 카메라 자세, 사람 출처 궤적은 출처가 없다
+      (물려받지 않는다).
 
 규칙 (`plan_trajectory_follow`)
     1. 검수 전 모델 궤적의 출처 2D 트랙이 사람이 확인한 상태(`human_confirmed`: 승인·표본 검증·
@@ -25,17 +30,21 @@
        물려받지 않는다. 다음 `dlp prelabel run`이 고친 2D로 새 3D를 만들고(입력 해시가 바뀐다) 그
        새 3D가 물려받는다.
     3. 물려받은 검수만 있는 궤적(마지막 기록과 지금 검수 상태가 같다)의 출처가 더는 성립하지 않으면
-       (2D가 고쳐지거나 지워짐, 카메라 좌표 궤적·자세가 바뀜) "끊김"(`lapsed`)이다. 끊긴 궤적은
-       지우지 않는다: CLAUDE.md의 좁은 예외는 물려받은 설명만 다루므로 3D를 지우려면 규칙을 넓혀야
-       한다 (ADR 0048 "남은 결정"). 대신 프리라벨이 그 옆에 새 3D를 만들 수 있게 보호 판정에서
-       빼고(`dlp_prelabel.runner`), 내보내기는 끊긴 궤적을 넣지 않는다(`dlp_export.source`).
+       (2D가 고쳐지거나 지워짐, 카메라 좌표 궤적·자세가 바뀜) "끊김"이고 궤적 따르기
+       (`TRAJECTORY_FOLLOW_VERSION` 출처 삭제 레코드)가 지운다 (ADR 0050, 설명 따르기 규칙 6과
+       같은 좁은 예외. 저장 검증 `label_validation`이 같은 계획을 다시 계산해 확인한다).
+       월드 좌표 궤적은 카메라 좌표 궤적이 끊기면 같은 계획에서 함께 끊긴다.
     4. 직접 검수(기록 없음, 기록 뒤 상태가 바뀜)와 사람 출처 궤적은 건드리지 않고 끊김으로도 보지
-       않는다.
+       않는다 (지우지 않는다).
 
-결과는 결정적이고 멱등이다 (적용한 뒤 다시 계산하면 approve가 빈다).
+`lapsed_trajectories`는 같은 끊김 집합이다. 적용 뒤에는 지금 DB에서 보통 비지만, 프리라벨 보호
+판정·월드 좌표 입력과 내보내기(스냅샷은 지우기 전 이력일 수 있다)가 이중 방어로 계속 뺀다.
 
-공개 이름: `TRAJECTORY_FOLLOW_VERSION`, `TrajectoryBasis`, `InheritedTrajectoryReview`,
-`TrajectoryFollow`, `trajectory_basis`, `plan_trajectory_follow`, `active_trajectory_inheritance`,
+결과는 결정적이고 멱등이다 (적용한 뒤 다시 계산하면 approve·retract가 빈다).
+
+공개 이름: `TRAJECTORY_FOLLOW_VERSION`, `CAMERA_ENTITY`, `CAMERA_POSE_REVIEW`, `TrajectoryBasis`,
+`InheritedTrajectoryReview`, `TrajectoryFollow`, `is_camera_pose`, `trajectory_basis`,
+`plan_trajectory_follow`, `active_trajectory_inheritance`, `inheritance_only_trajectory`,
 `lapsed_trajectories`, `review_basis`.
 """
 
@@ -48,6 +57,7 @@ from datetime import datetime
 from dlp_schema.description_follow import human_confirmed
 from dlp_schema.episode import current_labels
 from dlp_schema.labels import (
+    BoxTrackPayload,
     CoordinateFrame,
     KeypointTrackPayload,
     LabelRecord,
@@ -62,6 +72,10 @@ TRAJECTORY_FOLLOW_VERSION = "trajectory-follow-1"
 
 # 카메라 자세 궤적의 개체 ID (`dlp_prelabel.campose`, ADR 0046)
 CAMERA_ENTITY = "camera"
+
+# 내보내기가 카메라 자세(와 그것에 기대는 월드 좌표 결과)의 검수 근거로 밝히는 값 (ADR 0050):
+# 사람 검수 대상이 아닌 자동 추정이고 검수 전이다
+CAMERA_POSE_REVIEW = "automatic_unreviewed"
 
 
 @dataclass(frozen=True)
@@ -104,27 +118,46 @@ class InheritedTrajectoryReview:
 
 @dataclass
 class TrajectoryFollow:
-    """궤적이 따를 결과. approve는 검수 상태 기록, lapsed는 출처가 끊긴 물려받은 궤적 (안 지움)."""
+    """궤적이 따를 결과. approve는 검수 상태 기록, retract는 출처가 끊긴 물려받은 궤적(지운다)."""
 
     approve: list[InheritedTrajectoryReview] = field(
         default_factory=list[InheritedTrajectoryReview]
     )
-    lapsed: list[LabelRecord] = field(default_factory=list[LabelRecord])
+    retract: list[LabelRecord] = field(default_factory=list[LabelRecord])
 
 
-def _hand_track_of(
+def is_camera_pose(x: LabelRecord) -> bool:
+    """모델 출처 카메라 자세 궤적인가 (entity camera, 자동 추정, 사람 검수 대상 아님, ADR 0050)."""
+    p = x.payload
+    return (
+        isinstance(p, Trajectory3DPayload)
+        and p.entity_id == CAMERA_ENTITY
+        and x.provenance.source is Source.MODEL
+    )
+
+
+def _source_track_of(
     x: LabelRecord, p: Trajectory3DPayload, current: dict[str, LabelRecord]
 ) -> LabelRecord | None:
-    """카메라 좌표 궤적 x의 출처 2D 손 트랙 (현재, hand21, 같은 개체·스트림). 아니면 None."""
+    """카메라 좌표 궤적 x의 출처 2D 트랙 (현재, 같은 개체·스트림). 아니면 None.
+
+    부위가 있으면(손 관절) hand21 키포인트 트랙, 없으면(박스 중심, ADR 0050) 박스 트랙이어야 한다.
+    """
     if p.frame is not CoordinateFrame.CAMERA or p.derived_from is None or len(p.derived_from) != 1:
         return None
     g = current.get(p.derived_from[0])
     if g is None or g.stream_id != x.stream_id:
         return None
     gp = g.payload
-    if not isinstance(gp, KeypointTrackPayload) or gp.skeleton != "hand21":
-        return None
-    return g if gp.entity_id == p.entity_id else None
+    if p.part is None:
+        ok = isinstance(gp, BoxTrackPayload) and gp.entity_id == p.entity_id
+    else:
+        ok = (
+            isinstance(gp, KeypointTrackPayload)
+            and gp.skeleton == "hand21"
+            and gp.entity_id == p.entity_id
+        )
+    return g if ok else None
 
 
 def _world_basis(p: Trajectory3DPayload, current: dict[str, LabelRecord]) -> TrajectoryBasis | None:
@@ -143,7 +176,7 @@ def _world_basis(p: Trajectory3DPayload, current: dict[str, LabelRecord]) -> Tra
         or cam.provenance.source is not Source.MODEL
     ):
         return None
-    g = _hand_track_of(cam, cp, current)
+    g = _source_track_of(cam, cp, current)
     return None if g is None else TrajectoryBasis(g, (cam.label_id, pose.label_id))
 
 
@@ -159,7 +192,7 @@ def trajectory_basis(x: LabelRecord, current: dict[str, LabelRecord]) -> Traject
         return None
     if p.frame is CoordinateFrame.WORLD:
         return _world_basis(p, current)
-    g = _hand_track_of(x, p, current)
+    g = _source_track_of(x, p, current)
     return None if g is None else TrajectoryBasis(g)
 
 
@@ -242,7 +275,7 @@ def plan_trajectory_follow(
         if x.verification.state is not VerificationState.UNREVIEWED:
             r = _active(x, latest)
             if r is not None and not _holds(x, r, by_id):
-                out.lapsed.append(x)  # 규칙 3 (지우지 않는다)
+                out.retract.append(x)  # 규칙 3 (물려받은 검수만 있는 끊긴 궤적, 지운다)
             continue  # 직접 검수는 그대로 (규칙 4)
         basis = trajectory_basis(x, by_id)
         review = _inherit(x, basis) if basis is not None else None
@@ -254,18 +287,33 @@ def plan_trajectory_follow(
 def lapsed_trajectories(
     history: Sequence[LabelRecord], inheritance: Sequence[TrajectoryInheritance]
 ) -> frozenset[str]:
-    """출처가 끊긴 물려받은 궤적의 라벨 ID (규칙 3). 프리라벨 보호 판정·내보내기가 뺀다."""
-    return frozenset(x.label_id for x in plan_trajectory_follow(history, inheritance).lapsed)
+    """출처가 끊긴 물려받은 궤적의 라벨 ID (규칙 3, 궤적 따르기가 지울 것).
+
+    적용 뒤 지금 DB에서는 보통 비지만, 프리라벨 보호 판정·월드 좌표 입력과 내보내기(스냅샷 이력)가
+    이중 방어로 뺀다.
+    """
+    return frozenset(x.label_id for x in plan_trajectory_follow(history, inheritance).retract)
+
+
+def inheritance_only_trajectory(
+    x: LabelRecord, inheritance: Sequence[TrajectoryInheritance]
+) -> bool:
+    """x의 보호가 물려받은 검수뿐인가 (규칙 3: 출처가 끊기면 궤적 따르기가 지울 수 있다).
+
+    지금 검수 상태가 명시 물려받기 기록에서 왔을 때만 참이다 (`active_trajectory_inheritance`).
+    사람 출처·직접 검수(기록 없음, 기록 뒤 상태가 바뀜)는 거짓(보호 유지).
+    """
+    return active_trajectory_inheritance(x, inheritance) is not None
 
 
 def review_basis(x: LabelRecord, inheritance: Sequence[TrajectoryInheritance]) -> str:
     """내보내기 manifest의 검수 근거 이름.
 
-    human(사람 출처), inherited_from_2d(2D 손 트랙에서 물려받음), direct(기록 없는 검수),
-    unreviewed(검수 전).
+    human(사람 출처), inherited_from_2d(2D 손·박스 트랙에서 물려받음), direct(기록 없는 검수),
+    automatic(검수 전 카메라 자세: 사람 검수 대상이 아닌 자동 추정, ADR 0050), unreviewed(검수 전).
     """
     if x.provenance.source is Source.HUMAN:
         return "human"
     if x.verification.state is VerificationState.UNREVIEWED:
-        return "unreviewed"
+        return "automatic" if is_camera_pose(x) else "unreviewed"
     return "inherited_from_2d" if active_trajectory_inheritance(x, inheritance) else "direct"

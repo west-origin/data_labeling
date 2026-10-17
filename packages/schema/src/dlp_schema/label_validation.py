@@ -8,15 +8,27 @@ from dlp_schema.description_follow import (
     plan_description_follow,
 )
 from dlp_schema.episode import current_labels, non_operational_ids
-from dlp_schema.labels import DescriptionPayload, LabelRecord, Source, VerificationState
+from dlp_schema.labels import (
+    DescriptionPayload,
+    LabelRecord,
+    Source,
+    Trajectory3DPayload,
+    VerificationState,
+)
 from dlp_schema.ontology import Ontology
-from dlp_schema.review import DescriptionInheritance
+from dlp_schema.review import DescriptionInheritance, TrajectoryInheritance
+from dlp_schema.trajectory_follow import (
+    TRAJECTORY_FOLLOW_VERSION,
+    inheritance_only_trajectory,
+    plan_trajectory_follow,
+)
 from dlp_schema.validation import OntologyViolationError, check_label_set, validate_label
 
 # 사람이 확인한 라벨 상태. 이 상태의 라벨은 자동 단계가 지울 수 없다 (ADR 0015, 0019).
 # 그 라벨을 대신하는 마지막 현재 후손을 지우는 것도 막는다 (F-SCH-02).
 # 사람이 만든 미검수 라벨은 여기서 막지 않는다 (기존 정리 경로가 쓴다).
-# 예외: 설명 따르기가 물려받은 검수만 있는 설명을 지울 때 (`_FollowExemption`, ADR 0043 3절 규칙 6)
+# 예외: 설명 따르기가 물려받은 검수만 있는 설명을 지울 때 (`_FollowExemption`, ADR 0043 3절 규칙 6),
+# 궤적 따르기가 물려받은 검수만 있는 끊긴 3D 궤적을 지울 때 (`_TrajectoryExemption`, ADR 0050)
 PROTECTED_STATES = (
     VerificationState.HUMAN_APPROVED,
     VerificationState.HUMAN_CORRECTED,
@@ -41,9 +53,11 @@ class ProtectedLabelRetractionError(OntologyViolationError):
     저장 시점에는 세션 잠금 아래에서 최신 검수 상태를 보므로 여기서 거부한다. 단계는 다시 실행하면
     새 이력으로 그 라벨을 보존한다 (단계의 지울 후보 선택이 보호 조상을 걸러야 한다).
 
-    좁은 예외 하나 (ADR 0043 3절 규칙 6, `_follow_may_retract`): 설명 따르기(`FOLLOW_VERSION`)가
-    물려받은 검수만 있는 설명을, 같은 이력으로 다시 계산한 설명 따르기 계획이 지울 때. 그 밖의
-    보호 라벨(사람 출처, 직접 검수, 설명이 아닌 라벨)은 그대로 막는다.
+    좁은 예외 둘. (1) ADR 0043 3절 규칙 6 (`_FollowExemption`): 설명 따르기(`FOLLOW_VERSION`)가
+    물려받은 검수만 있는 설명을, 같은 이력으로 다시 계산한 설명 따르기 계획이 지울 때.
+    (2) ADR 0050 (`_TrajectoryExemption`): 궤적 따르기(`TRAJECTORY_FOLLOW_VERSION`)가 2D 트랙
+    검수를 물려받기만 한 3D 궤적을, 같은 이력으로 다시 계산한 궤적 따르기 계획이 지울 때(출처가
+    끊김). 그 밖의 보호 라벨(사람 출처, 직접 검수, 다른 종류의 라벨)은 그대로 막는다.
     """
 
 
@@ -52,6 +66,7 @@ def validate_session_labels(
     history: list[LabelRecord],
     incoming: list[LabelRecord],
     inheritance: Sequence[DescriptionInheritance] = (),
+    trajectory_inheritance: Sequence[TrajectoryInheritance] = (),
 ) -> None:
     """새 라벨 의미와 저장 후 현재 구간·부분 참조를 검사한다.
 
@@ -59,14 +74,17 @@ def validate_session_labels(
     그대로 복사해야 하므로 기존 오류 정리는 가능하지만 새 오류를 삭제로 위장할 수 없다.
     사람 출처가 아닌 삭제 레코드는 사람이 확인한(`PROTECTED_STATES`) 부모를 지울 수 없고,
     사람이 확인한 조상의 마지막 현재 후손도 지울 수 없다 (`ProtectedLabelRetractionError`).
-    예외는 설명 따르기가 물려받은 검수만 있는 설명을 지울 때뿐이다 (`_FollowExemption`).
-    `history`는 호출자가 세션 잠금 아래에서 읽은 최신 이력이어야 한다. `inheritance`는 같은
-    잠금 아래 읽은 세션의 물려받기 기록이다 (예외 판정에만 쓴다. 비면 예외가 없다).
+    예외는 설명 따르기가 물려받은 검수만 있는 설명을 지울 때(`_FollowExemption`)와 궤적 따르기가
+    물려받은 검수만 있는 끊긴 3D 궤적을 지울 때(`_TrajectoryExemption`)뿐이다.
+    `history`는 호출자가 세션 잠금 아래에서 읽은 최신 이력이어야 한다. `inheritance`(설명)·
+    `trajectory_inheritance`(3D 궤적)는 같은 잠금 아래 읽은 세션의 물려받기 기록이다 (예외 판정에만
+    쓴다. 비면 그 예외가 없다).
     """
     if not incoming:
         return
     parents = {x.label_id: x for x in [*history, *incoming]}
     follow = _FollowExemption(history, inheritance)
+    trajectories = _TrajectoryExemption(history, trajectory_inheritance)
     for label in incoming:
         if not label.retracted and label.ontology_version != ontology.version:
             raise OntologyViolationError(label.label_id, ["세션과 라벨의 온톨로지 버전 불일치"])
@@ -82,6 +100,7 @@ def validate_session_labels(
                 label.provenance.source is not Source.HUMAN
                 and parent.verification.state in PROTECTED_STATES
                 and not follow.allows(label, parent)
+                and not trajectories.allows(label, parent)
             ):
                 raise ProtectedLabelRetractionError(
                     label.label_id,
@@ -130,6 +149,40 @@ class _FollowExemption:
             return False
         if self._planned is None:
             plan = plan_description_follow(self.history, self.inheritance)
+            self._planned = {x.label_id for x in plan.retract}
+        return parent.label_id in self._planned
+
+
+class _TrajectoryExemption:
+    """보호 라벨 삭제 거부의 두 번째 좁은 예외 (ADR 0050, 궤적 따르기 규칙 3).
+
+    허용 조건을 모두 만족해야 한다.
+
+    1. 삭제 레코드가 궤적 따르기의 것이다: 모델 출처, `model_version == TRAJECTORY_FOLLOW_VERSION`.
+    2. 지우는 레코드가 3D 궤적이고 보호가 물려받은 검수뿐이다 (`inheritance_only_trajectory`: 지금
+       검수 상태가 명시 물려받기 기록 `trajectory_inheritance`의 마지막 기록과 같다).
+    3. 저장 전 이력(세션 잠금 아래 최신)으로 다시 계산한 궤적 따르기 계획이 그 궤적을 지운다
+       (출처 2D·경유 입력이 바뀌었거나 지워졌다). 계획은 처음 필요할 때 한 번만 계산한다.
+    """
+
+    def __init__(
+        self, history: list[LabelRecord], inheritance: Sequence[TrajectoryInheritance]
+    ) -> None:
+        self.history = history
+        self.inheritance = inheritance
+        self._planned: set[str] | None = None
+
+    def allows(self, label: LabelRecord, parent: LabelRecord) -> bool:
+        """label(삭제 레코드)이 보호된 parent를 지워도 되는가."""
+        if (
+            label.provenance.source is not Source.MODEL
+            or label.provenance.model_version != TRAJECTORY_FOLLOW_VERSION
+            or not isinstance(parent.payload, Trajectory3DPayload)
+            or not inheritance_only_trajectory(parent, self.inheritance)
+        ):
+            return False
+        if self._planned is None:
+            plan = plan_trajectory_follow(self.history, self.inheritance)
             self._planned = {x.label_id for x in plan.retract}
         return parent.label_id in self._planned
 

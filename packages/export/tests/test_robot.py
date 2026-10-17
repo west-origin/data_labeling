@@ -33,6 +33,7 @@ from dlp_export.robot import (
     robot_features,
     robot_override,
 )
+from dlp_export.runner import trajectory_manifest
 from dlp_export.source import label_states, select_labels
 from dlp_fixtures.retarget import hand_points_for_grasp, world_hand_labels, world_hand_sources
 from dlp_media.pts import build_pts_index
@@ -169,6 +170,7 @@ def test_robot_episode_follows_reviewed_world_hand(
         "retarget-dls"
     )
     assert math.isclose(meta["episodes"][0]["reachable_fraction"], res.report.reachable_fraction)
+    assert meta["camera_pose"] == "automatic_unreviewed"  # 월드 좌표 목표는 자동 자세에 기댄다
 
 
 def test_unreviewed_world_hand_is_not_used_by_default(
@@ -229,7 +231,9 @@ def test_world_hand_inherited_from_approved_2d_is_used_by_default(
 ) -> None:
     """F-COE-19 (ADR 0048): 2D 손 트랙을 승인하면 그 트랙에서 계산한 카메라·월드 좌표 3D가 검수를
     물려받아 기본 내보내기(검수 라벨만)에 손 목표·손 3D 점이 생긴다. 그 뒤 2D를 고쳐 물려받음이
-    끊기면 낡은 3D는 옵션과 관계없이 빠진다 (지우지는 않는다).
+    끊기면 낡은 3D는 옵션과 관계없이 빠진다 (궤적 따르기가 지우기 전의 스냅샷이어도, ADR 0050).
+    manifest 절(`trajectory_manifest`)은 결과에 든 월드 좌표 궤적이 자동 카메라 자세에 기댄다는 것과
+    근거별 수를 밝힌다.
 
     정답: 월드 손 6점(검수 전) + 그 입력(2D 트랙 승인, 카메라 좌표 6점·자세 검수 전)에 궤적 따르기를
     적용하면 카메라·월드 12개가 human_approved가 되고, 기본 정책으로 목표가 있는 프레임이 생긴다.
@@ -247,6 +251,17 @@ def test_world_hand_inherited_from_approved_2d_is_used_by_default(
     rob = retarget_session(ep, stream, labels, robot, rpolicy, policy.lerobot, DlsIkSolver())
     assert rob.result.report.frames_with_target > 0
     assert (ep.hand_points_3d_confidence >= 0).any()  # 사람 모드 손 3D 점 (카메라 좌표)
+    manifest = trajectory_manifest(labels, {"s1": records})
+    assert manifest["camera_pose"] == "automatic_unreviewed"
+    assert manifest["pose_derived"] == {
+        "world_frame_trajectories": 6,
+        "camera_pose_trajectories": 0,
+    }
+    assert manifest["review_basis"]["inherited_from_2d"] == 12
+    with_pose = select_labels(history, policy, label_states(policy, True), records)
+    basis = trajectory_manifest(with_pose, {"s1": records})
+    assert basis["pose_derived"]["camera_pose_trajectories"] == 1
+    assert basis["review_basis"]["automatic"] == 1
 
     track = next(x for x in sources if x.kind == "keypoint_track")
     fixed = track.model_copy(

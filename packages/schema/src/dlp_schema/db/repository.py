@@ -154,6 +154,7 @@ from dlp_schema.session import (
     SyncMethod,
     can_transition,
 )
+from dlp_schema.trajectory_follow import TRAJECTORY_FOLLOW_VERSION
 
 
 class TransitionError(ValueError):
@@ -581,13 +582,19 @@ def insert_labels(conn: sa.Connection, labels: Iterable[LabelRecord]) -> int:
         # 배치 전체를 검증한 뒤 INSERT한다. 세션별 이력·사전은 한 번만 읽는다.
         for sid in sorted({x.session_id for x in batch}):
             mine = [x for x in batch if x.session_id == sid]
-            # 물려받기 기록은 설명 따르기 삭제가 있을 때만 읽는다 (보호 예외 판정, ADR 0043 3절)
+            # 물려받기 기록은 설명·궤적 따르기 삭제가 있을 때만 읽는다 (보호 예외 판정, ADR 0043
+            # 3절·ADR 0050)
             follow = any(x.retracted and x.provenance.model_version == FOLLOW_VERSION for x in mine)
+            traj = any(
+                x.retracted and x.provenance.model_version == TRAJECTORY_FOLLOW_VERSION
+                for x in mine
+            )
             validate_session_labels(
                 get_session_ontology(conn, sid),
                 get_labels(conn, sid),
                 mine,
                 get_description_inheritance(conn, sid) if follow else (),
+                get_trajectory_inheritance(conn, sid) if traj else (),
             )
         rows = [label_to_row(x) for x in batch]
         conn.execute(label_records.insert(), rows)

@@ -74,10 +74,11 @@ class ReviewOutcome:
     # (F-PAR-15, `dlp_schema.description_follow`. collect가 채운다. AI 결과 기록과 무관하다)
     descriptions_approved: list[str] = field(default_factory=list[str])
     descriptions_retracted: list[str] = field(default_factory=list[str])
-    # 2D 손 트랙 검수를 물려받은 3D 궤적 라벨 ID와, 출처 2D가 바뀌어 물려받음이 끊긴 3D 궤적 라벨 ID
-    # (지우지 않는다. 다음 `dlp prelabel run`이 고친 2D로 다시 만든다. ADR 0048, collect가 채운다)
+    # 2D 트랙(손·박스) 검수를 물려받은 3D 궤적 라벨 ID와, 출처 2D가 바뀌어 물려받음이 끊겨 지운
+    # 3D 궤적 라벨 ID (다음 `dlp prelabel run`이 고친 2D로 다시 만든다. ADR 0048·0050, collect가
+    # 채운다)
     trajectories_approved: list[str] = field(default_factory=list[str])
-    trajectories_lapsed: list[str] = field(default_factory=list[str])
+    trajectories_retracted: list[str] = field(default_factory=list[str])
 
     @property
     def corrected(self) -> int:

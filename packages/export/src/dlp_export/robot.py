@@ -50,6 +50,7 @@ from dlp_export.lerobot import (
 from dlp_export.policy import LeRobotPolicy
 from dlp_schema.labels import CoordinateFrame, LabelRecord, Trajectory3DPayload
 from dlp_schema.session import Stream
+from dlp_schema.trajectory_follow import CAMERA_POSE_REVIEW
 
 # 로봇 모드에서 npz에 더하는 프레임 배열 (특징 이름 → npz 키)
 ROBOT_ARRAYS = {
@@ -230,6 +231,8 @@ def retarget_meta(
         "hand": cfg.arm.hand.value,
         "placement": cfg.arm.placement.model_dump(mode="json"),
         "unreachable_policy": policy.unreachable.value,
+        # 목표는 월드 좌표 손 3D라 자동 카메라 자세(사람 검수 대상 아님)에 기댄다 (ADR 0050)
+        "camera_pose": CAMERA_POSE_REVIEW,
         "episodes": reports,
     }
 
