@@ -18,7 +18,14 @@
    키포인트 트랙은 entity_id="wearer"인 새 레코드(parent=원래 트랙)로 남긴다. 이 레코드는 모델
    출력(검수 전, 출처 MODEL)이다. 원래 트랙이 사람 출처여도 출처를 물려받지 않는다. 전신 모델 버전이
    바뀌어 지워지면 새 트랙으로 다시 찾는다.
-5. 프라이버시 승인 상태의 세션은 생애주기를 prelabeled로 옮긴다.
+5. 바디캠 자세와 월드 좌표 3D (ADR 0046, `camera_pose.enabled`): 동기화된 IMU 스트림과 카메라-IMU
+   외부 파라미터가 있고 깊이 모델(또는 넘겨받은 자세 추정기)이 있으면 바디캠 6자유도 자세를 추정해
+   trajectory3d(entity_id="camera", frame=world)로 남기고(`_camera_pose`), 현재 자세 하나와 바디캠의
+   현재
+   카메라 좌표 궤적((개체, 부위)마다 하나)으로 월드 좌표 궤적을 만든다(`_world`). 두 단계 모두
+   버전에
+   정책 절 해시와 입력 해시를 넣고, 입력이 바뀌면 검수 전인 이전 결과만 지운다.
+6. 프라이버시 승인 상태의 세션은 생애주기를 prelabeled로 옮긴다.
 
 진입점: `dlp prelabel run <세션>` (`dlp_cli.prelabel_cmds`)이 어댑터·깊이 단계를 만들고, 원본
 저장소를 감사 저장소(`dlp_cli.raw_access.raw_store`, ADR 0020)로 열어 `run_prelabel`을 한
@@ -31,6 +38,7 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
@@ -39,9 +47,20 @@ from pathlib import Path
 
 import numpy as np
 import sqlalchemy as sa
+from numpy.typing import NDArray
 
+from dlp_media.imu import read_imu_table
 from dlp_media.storage import ObjectStore
-from dlp_prelabel.common import input_digest, model_label
+from dlp_prelabel.campose import (
+    CameraPoseEstimator,
+    ImuSeries,
+    ImuVisualOdometry,
+    ModelDepth,
+    is_pose_label,
+    pose_label,
+    pose_samples,
+)
+from dlp_prelabel.common import input_digest, iter_frames, model_label
 from dlp_prelabel.contact import (
     ContactInterval,
     clip_to_session,
@@ -52,6 +71,7 @@ from dlp_prelabel.contact import (
 from dlp_prelabel.lift3d import DepthLifter, lift_key
 from dlp_prelabel.policy import PrelabelPolicy
 from dlp_prelabel.wearer import match_wearer, wrist_speed
+from dlp_prelabel.worldframe import world_label
 from dlp_schema.config import repo_root
 from dlp_schema.db.calibration_repository import session_intrinsics, session_palm
 from dlp_schema.db.repository import get_labels, get_session, insert_labels, set_lifecycle
@@ -65,6 +85,7 @@ from dlp_schema.episode import (
 )
 from dlp_schema.labels import (
     BoxTrackPayload,
+    CoordinateFrame,
     Evidence,
     Hand,
     HandStatePayload,
@@ -78,7 +99,7 @@ from dlp_schema.labels import (
 )
 from dlp_schema.ontology import Ontology
 from dlp_schema.predictor import Clip, Predictor
-from dlp_schema.session import LifecycleState, Session, StreamKind, SyncMethod
+from dlp_schema.session import LifecycleState, Session, Stream, StreamKind, SyncMethod
 from dlp_sync.policy import load_policy as load_sync_policy
 from dlp_sync.signals import glove_series, imu_series
 
@@ -98,6 +119,9 @@ REPLACED_VERSION = "replaced-by-deployed-model"
 # 지워진다.
 CONTACT_PREFIX = "contact-heuristic-1"
 WEARER_PREFIX = "wearer-xcorr-1"
+# 카메라 자세(POSE_PREFIX-<추정기 판>)·월드 좌표(WORLD_PREFIX) 단계 버전 접두사 (ADR 0046)
+POSE_PREFIX = "campose"
+WORLD_PREFIX = "world3d-1"
 # 사람 개체의 물리 유형 (온톨로지 physical_types의 ID). 접촉 단계는 이 유형 박스와의 접촉을 사람
 # 접촉으로 보고 라벨을 만들지 않는다 (`contact_target_kind`, F-PAR-03)
 PERSON_PHYSICAL_TYPE = "person"
@@ -149,6 +173,12 @@ class PrelabelSummary:
     person_contacts: int = 0  # 사람 박스 접촉 (부위를 몰라 라벨을 만들지 않음)
     retracted: int = 0  # 예측기 단계·배포 모델 대체로 지운 라벨 (3D·접촉 단계 것은 빠진다)
     lifted: int = 0
+    # 카메라 자세 표본 수(이번에 새로 만든 자세 궤적), 새 월드 좌표 궤적 수,
+    # 자세 단계를 건너뛴 이유, 추적을 잃은 시각 (ADR 0046)
+    poses: int = 0
+    world: int = 0
+    pose_note: str | None = None
+    pose_lost_at_ms: int | None = None
     wearer: str | None = None
     wearer_scores: dict[str, float] = field(default_factory=dict[str, float])
 
@@ -176,6 +206,7 @@ def run_prelabel(
     lifter: DepthLifter | None = None,
     replaced: Iterable[str] = (),
     pressure_prefixes: Sequence[str] | None = None,
+    pose_estimator: CameraPoseEstimator | None = None,
 ) -> PrelabelSummary:
     """세션 하나의 프리라벨 단계(모듈 docstring의 1~5)를 돌린다.
 
@@ -193,6 +224,9 @@ def run_prelabel(
             재학습 모델 양쪽으로 겹쳐 남지 않게).
         pressure_prefixes: 장갑 압력 채널 접두사 (sync.yaml glove.pressure_prefixes). None이면
             저장소 sync.yaml에서 읽는다. 접촉 단계 모델 버전에 들어가 바뀌면 접촉을 다시 만든다.
+        pose_estimator: 바디캠 자세 추정기 (None이면 깊이 단계가 있을 때 내장
+            `ImuVisualOdometry`, 없으면 자세 단계를 건너뛴다). 시험은 `OraclePoseEstimator`를
+            넘긴다.
 
     Returns:
         `PrelabelSummary`.
@@ -269,6 +303,12 @@ def run_prelabel(
         current = current_labels(history)
         if lifter is not None:
             summary.lifted = _lift(conn, session, history, current, raw, work, lifter, now)
+        if policy.camera_pose.enabled:
+            stage = _PoseStage(conn, session, raw, work, policy, now, summary)
+            stage.camera_pose(get_labels(conn, session_id), lifter, pose_estimator)
+            stage.world(get_labels(conn, session_id))
+            history = get_labels(conn, session_id)
+            current = current_labels(history)
         if CONTACT_STEP not in replaced:
             _contacts(
                 conn, session, history, current, raw, work, policy, ontology, now, prefixes, summary
@@ -459,6 +499,163 @@ def _lift(
     labels = drop_protected_trajectories(labels, current)
     insert_labels(conn, [*retractions(stale, version, now), *labels])
     return len(labels)
+
+
+def synced_imu(session: Session) -> Stream | None:
+    """자세 단계가 쓸 IMU 스트림: 동기화된(unsynced가 아닌) 첫 IMU 스트림 (없으면 None)."""
+    return next(
+        (
+            s
+            for s in session.streams
+            if s.kind is StreamKind.IMU and s.sync_method is not SyncMethod.UNSYNCED
+        ),
+        None,
+    )
+
+
+def imu_to_camera(session: Session, policy: PrelabelPolicy) -> NDArray[np.float64] | None:
+    """IMU → 카메라 회전 (세션 `camera_imu_extrinsics`의 회전 부분 → 정책 기본값 → None)."""
+    extr = session.calibration.camera_imu_extrinsics
+    if extr is not None:
+        return np.array(extr, dtype=np.float64)[:3, :3]
+    default = policy.camera_pose.imu.default_imu_to_camera
+    return None if default is None else np.array(default, dtype=np.float64)
+
+
+def pick_world_inputs(
+    current: list[LabelRecord], stream_id: str
+) -> tuple[LabelRecord | None, list[LabelRecord]]:
+    """월드 좌표 단계 입력: (현재 카메라 자세 하나, 카메라 좌표 궤적 (개체, 부위)마다 하나).
+
+    여럿이면 `track_rank`(사람·검수 → 최신 → 긴 구간 → 라벨 ID)로 고른다. 자세는 그 스트림의
+    entity_id="camera"·frame=world 궤적, 카메라 좌표 궤적은 그 스트림의 frame=camera 궤적이다.
+    """
+    pose: LabelRecord | None = None
+    cams: dict[tuple[str, str | None], LabelRecord] = {}
+    for x in current:
+        p = x.payload
+        if x.stream_id != stream_id or not isinstance(p, Trajectory3DPayload):
+            continue
+        if is_pose_label(x):
+            if pose is None or track_rank(x) > track_rank(pose):
+                pose = x
+        elif p.frame is CoordinateFrame.CAMERA:
+            key = (p.entity_id, p.part)
+            if key not in cams or track_rank(x) > track_rank(cams[key]):
+                cams[key] = x
+    return pose, sorted(cams.values(), key=lambda x: x.label_id)
+
+
+@dataclass
+class _PoseStage:
+    """자세·월드 좌표 단계 (모듈 docstring 5). 둘 다 멱등이다 (같은 버전이 이력에 있으면
+    건너뛴다)."""
+
+    conn: sa.Connection
+    session: Session
+    raw: ObjectStore
+    work: Path
+    policy: PrelabelPolicy
+    now: datetime
+    summary: PrelabelSummary
+
+    def _version(
+        self, est: CameraPoseEstimator, imu: Stream, r_ci: NDArray[np.float64], depth: str
+    ) -> str:
+        """자세 단계 버전 `campose-<추정기 판>+p<camera_pose 절 해시>+i<입력 해시>`.
+
+        입력: IMU 스트림(위치·동기화 값), IMU → 카메라 회전, 내부 파라미터(출처·값), 깊이 모델 버전.
+        """
+        sync = json.dumps(
+            {
+                "uri": imu.uri, "offset_ms": imu.offset_ms, "clock_scale": imu.clock_scale,
+                "manual_adjustment_ms": imu.manual_adjustment_ms, "method": imu.sync_method.value,
+            },
+            sort_keys=True,
+        )  # fmt: skip
+        intr = session_intrinsics(self.conn, self.session).digest_input()
+        rot = json.dumps(np.round(r_ci, 9).tolist())
+        digest = input_digest([], sync, rot, intr, depth)
+        return f"{POSE_PREFIX}-{est.version}+p{self.policy.digest('camera_pose')}+i{digest}"
+
+    def _skip(self, note: str) -> None:
+        """자세 단계를 건너뛴 이유를 요약에 남긴다."""
+        self.summary.pose_note = note
+
+    def camera_pose(
+        self,
+        history: list[LabelRecord],
+        lifter: DepthLifter | None,
+        estimator: CameraPoseEstimator | None,
+    ) -> None:
+        """바디캠 자세를 추정해 자세 궤적 라벨을 넣는다 (조건이 안 되면 이유만 남긴다).
+
+        부작용: 원본 버킷에서 IMU Parquet과 바디캠 영상을 받는다 (넘겨받은 감사 저장소).
+        """
+        session, body = self.session, self.session.reference_stream
+        imu = synced_imu(session)
+        r_ci = imu_to_camera(session, self.policy)
+        if imu is None:
+            return self._skip("동기화된 IMU 스트림이 없습니다")
+        if r_ci is None:
+            return self._skip("카메라-IMU 외부 파라미터가 없습니다 (camera_imu_extrinsics)")
+        if estimator is None and lifter is None:
+            return self._skip("깊이 모델이 없어 이동 배율을 정할 수 없습니다")
+        est: CameraPoseEstimator = estimator or ImuVisualOdometry(
+            self.policy.camera_pose, hfov_deg=self.policy.depth.default_hfov_deg
+        )
+        version = self._version(est, imu, r_ci, lifter.version if lifter else "none")
+        if any(x.provenance.model_version == version for x in history):
+            return None
+        data = read_imu_table(_fetch(self.raw, imu.uri, self.work))
+        series = ImuSeries(
+            np.array([imu.to_master_ms(float(t)) for t in data.t_ms]), data.acc, data.gyro
+        )
+        try:
+            track = est.estimate(
+                iter_frames(_fetch(self.raw, body.uri, self.work)),
+                imu=series,
+                imu_to_camera=r_ci,
+                intrinsics=session_intrinsics(self.conn, session).intrinsics,
+                depth=ModelDepth(lifter.depth_model()) if lifter else None,
+            )
+        except ValueError as exc:
+            return self._skip(f"자세 추정 실패: {exc}")
+        label = pose_label(
+            track, session_id=session.session_id, stream_id=body.stream_id, version=version,
+            ontology_version=session.ontology_version or "", now=self.now,
+        )  # fmt: skip
+        current = current_labels(history)
+        new = drop_protected_trajectories([label] if label else [], current)
+        stale = _stale(history, f"{session.session_id}-{body.stream_id}-campose-", version)
+        insert_labels(self.conn, [*retractions(stale, version, self.now), *new])
+        self.summary.poses = len(track.samples) if new else 0
+        self.summary.pose_lost_at_ms = track.lost_at_ms
+        return None
+
+    def world(self, history: list[LabelRecord]) -> None:
+        """현재 자세와 카메라 좌표 궤적으로 월드 좌표 궤적을 넣는다 (입력이 없으면 검수 전 이전 것만
+        지운다)."""
+        session, body = self.session, self.session.reference_stream.stream_id
+        current = current_labels(history)
+        pose, cams = pick_world_inputs(current, body)
+        inputs = [pose, *cams] if pose is not None else []
+        version = f"{WORLD_PREFIX}+p{self.policy.digest('world_frame')}+i{input_digest(inputs)}"
+        if any(x.provenance.model_version == version for x in history):
+            return
+        stale = _stale(history, f"{session.session_id}-{body}-world3d-", version)
+        labels: list[LabelRecord] = []
+        if pose is not None and cams:
+            poses = pose_samples(pose)
+            gap = self.policy.world_frame.max_pose_gap_ms
+            for cam in cams:
+                lbl = world_label(cam, pose, poses, version=version, max_gap_ms=gap, now=self.now)
+                if lbl is not None:
+                    labels.append(lbl)
+        labels = drop_protected_trajectories(labels, current)
+        if stale or labels:
+            insert_labels(self.conn, [*retractions(stale, version, self.now), *labels])
+        self.summary.world = len(labels)
 
 
 def _has_live_wearer(history: list[LabelRecord]) -> bool:

@@ -952,6 +952,7 @@ dependencies = [
     { name = "av" },
     { name = "dlp-schema" },
     { name = "numpy" },
+    { name = "opencv-contrib-python-headless" },
     { name = "pyarrow" },
     { name = "segno" },
 ]
@@ -961,6 +962,7 @@ requires-dist = [
     { name = "av", specifier = ">=14.0" },
     { name = "dlp-schema", editable = "packages/schema" },
     { name = "numpy", specifier = ">=2.0" },
+    { name = "opencv-contrib-python-headless", specifier = ">=4.10" },
     { name = "pyarrow", specifier = ">=18.0" },
     { name = "segno", specifier = ">=1.6" },
 ]

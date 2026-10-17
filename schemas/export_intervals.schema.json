@@ -1218,6 +1218,23 @@
       "additionalProperties": false,
       "description": "3D 궤적. 카메라 자세는 entity_id=\"camera\"에 회전(쿼터니언)까지 기록한다.",
       "properties": {
+        "derived_from": {
+          "anyOf": [
+            {
+              "items": {
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "이 궤적을 계산한 입력 라벨 ID",
+          "title": "Derived From"
+        },
         "entity_id": {
           "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
           "title": "Entity Id",

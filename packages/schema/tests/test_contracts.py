@@ -257,6 +257,30 @@ def test_trajectory_sample_method_and_confidence_are_optional() -> None:
         make_label({**TRAJ, "samples": [{**sample, "confidence": 1.5}]}, stream_id="bodycam")
 
 
+def test_trajectory_derived_from_is_optional_and_world_pose_round_trips() -> None:
+    """ADR 0046: 3D 궤적의 입력 라벨 ID(derived_from)는 선택이고 없으면 JSON에 없다 (예전 JSON 그대로).
+    월드 좌표 궤적은 (카메라 궤적, 자세) 두 ID를 싣고, 카메라 자세(entity camera, frame world)는
+    표본마다 쿼터니언을 싣는다."""
+    old = make_label(TRAJ, stream_id="bodycam")
+    assert '"derived_from"' not in old.model_dump_json()
+    world = make_label(
+        {**TRAJ, "frame": "world", "derived_from": ["s1-bodycam-3d-a-right_hand-wrist", "s1-pose"]},
+        stream_id="bodycam",
+    )
+    assert isinstance(world.payload, Trajectory3DPayload)
+    assert world.payload.derived_from == ("s1-bodycam-3d-a-right_hand-wrist", "s1-pose")
+    assert LabelRecord.model_validate_json(world.model_dump_json()) == world
+    pose = make_label(
+        {"kind": "trajectory3d", "entity_id": "camera", "frame": "world",
+         "source_3d": "visual_inertial_slam",
+         "samples": [{"t_ms": 0, "x": 0, "y": 0, "z": 0, "qw": 1, "qx": 0, "qy": 0, "qz": 0}]},
+        stream_id="bodycam",
+    )  # fmt: skip
+    assert LabelRecord.model_validate_json(pose.model_dump_json()) == pose
+    with pytest.raises(ValidationError):
+        make_label({**TRAJ, "derived_from": ["bad id"]}, stream_id="bodycam")
+
+
 def test_session_camera_id_is_optional_and_omitted_when_absent() -> None:
     """ADR 0045: 세션 캘리브레이션의 기기 ID는 선택이고 없으면 JSON에 없다 (예전 세션과 같은
     JSON)."""

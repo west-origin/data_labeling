@@ -22,12 +22,14 @@ import yaml
 from numpy.typing import NDArray
 
 from dlp_fixtures.actions import ENTITIES, ActionScenario, generate_action_scenario
+from dlp_fixtures.camera_motion import HAND_PARTS, CameraMotionScenario, generate_camera_motion
 from dlp_fixtures.hand3d import generate_hand3d_scenario
 from dlp_fixtures.io import write_parquet
 from dlp_fixtures.video import generate_blur_scenario, write_video
 from dlp_media.ingest import ingest_session, load_manifest
 from dlp_media.storage import S3Store
 from dlp_prelabel.adapters.stubs import OraclePredictor
+from dlp_prelabel.campose import OraclePoseEstimator, is_pose_label
 from dlp_prelabel.common import Image, iter_frames
 from dlp_prelabel.lift3d import DepthLifter, lift_tracks
 from dlp_prelabel.policy import HAND21_JOINTS, PrelabelPolicy, load_policy
@@ -47,6 +49,7 @@ from dlp_schema.episode import current_labels
 from dlp_schema.labels import (
     BoxKeyframe,
     BoxTrackPayload,
+    CoordinateFrame,
     Hand,
     HandStatePayload,
     IntrinsicsSource,
@@ -1036,3 +1039,129 @@ def test_person_box_contacts_are_left_for_review(pg: sa.Engine, tmp_path: Path) 
     with pg.begin() as conn:
         again = run_prelabel(conn, sid, raw, predictors, policy, ontology, FIXED_TIME)
     assert again.contacts == 0 and again.person_contacts == 0
+
+
+def _pose_session(
+    pg: sa.Engine, tmp_path: Path, sc: CameraMotionScenario, *, extrinsics: bool = True
+) -> tuple[str, S3Store]:
+    """렌더 바디캠 영상 + IMU 사이드카(동기화 오프셋은 사람 조정)인 세션을 수집한다 (ADR 0046).
+
+    카메라 좌표 손 궤적(3D 단계 출력 흉내, 모델 출처)도 넣는다. Returns: (세션 ID, 원본 저장소).
+    """
+    write_video(tmp_path / "bodycam.mp4", sc.frames(), width=sc.width, height=sc.height)
+    write_parquet(tmp_path / "imu.parquet", sc.imu_columns())
+    sid = f"pose-{uuid.uuid4().hex[:8]}"
+    manifest: dict[str, Any] = {
+        "session_id": sid, "domain": "cleaning", "worker_id": "w01", "site_id": "site01",
+        "consent_version": "c1", "recorded_at": FIXED_TIME.isoformat(), "ontology_version": "1.0.0",
+        "streams": [
+            {"stream_id": "bodycam", "kind": "bodycam", "path": "bodycam.mp4"},
+            {"stream_id": "imu", "kind": "imu", "path": "imu.parquet"},
+        ],
+    }  # fmt: skip
+    if extrinsics:
+        manifest["calibration"] = {
+            "camera_imu_extrinsics": [list(r) for r in sc.imu_to_camera],
+            "intrinsics": sc.intrinsics.model_dump(mode="json"),
+        }
+    (tmp_path / "m.yaml").write_text(yaml.safe_dump(manifest), encoding="utf-8")
+    raw = S3Store.from_env("dlp-raw")
+    with pg.begin() as conn:
+        session = ingest_session(*load_manifest(tmp_path / "m.yaml"), raw, conn).session
+        imu = session.stream("imu").model_copy(
+            update={"sync_method": SyncMethod.MANUAL, "offset_ms": sc.imu_offset_ms}
+        )
+        update_stream_sync(conn, sid, imu)
+        cams = [
+            x.model_copy(
+                update={"session_id": sid, "label_id": x.label_id.replace(sc.session_id, sid)}
+            )
+            for x in sc.camera_labels(stride_ms=100)
+        ]
+        insert_labels(conn, cams)
+    return sid, raw
+
+
+def test_camera_pose_and_world_trajectories_are_idempotent_and_keep_reviewed(
+    pg: sa.Engine, tmp_path: Path
+) -> None:
+    """ADR 0046: 동기화된 IMU·외부 파라미터가 있는 세션에서 자세 궤적 하나와 손 6점 월드 궤적을
+    만든다.
+
+    - 정답 자세 stub(+ IMU 오프셋 75 ms)로 월드 손 6점이 정답과 1 mm 안, derived_from = (카메라
+    궤적,
+      자세). 다시 돌리면 아무것도 넣지 않는다.
+    - 월드 궤적 하나를 승인한 뒤 자세 추정기 판을 바꾸면: 자세는 새 버전으로 바뀌고(검수 전 이전
+    자세
+      삭제), 월드 궤적은 다시 만들어지되 승인한 (개체, 부위, world)는 남고 새로 만들지 않는다.
+    - 외부 파라미터가 없는 세션은 자세를 만들지 않고 이유를 남긴다.
+    """
+    sc = generate_camera_motion(11, duration_s=2.0, imu_offset_ms=75.0)
+    sid, raw = _pose_session(pg, tmp_path, sc)
+    policy, ontology = load_policy(ROOT), load_ontology(ROOT / "config/ontology/v1")
+    truth = {t: sc.pose(t) for t in sc.frame_times}
+
+    def oracle(version: str) -> OraclePoseEstimator:
+        return OraclePoseEstimator(truth, frame_stride_ms=100, version=version)
+
+    with pg.begin() as conn:
+        first = run_prelabel(
+            conn, sid, raw, [], policy, ontology, FIXED_TIME, pose_estimator=oracle("o1")
+        )
+        again = run_prelabel(
+            conn, sid, raw, [], policy, ontology, FIXED_TIME, pose_estimator=oracle("o1")
+        )
+        history = get_labels(conn, sid, kinds=["trajectory3d"])
+    assert first.pose_note is None and first.poses == 20 and first.world == len(HAND_PARTS)
+    assert again.poses == 0 and again.world == 0
+    live = current_labels(history)
+    poses = [x for x in live if is_pose_label(x)]
+    world = [
+        x
+        for x in live
+        if isinstance(x.payload, Trajectory3DPayload)
+        and x.payload.frame is CoordinateFrame.WORLD
+        and not is_pose_label(x)
+    ]
+    assert len(poses) == 1 and (poses[0].provenance.model_version or "").startswith("campose-o1+p")
+    assert len(world) == len(HAND_PARTS)
+    for x in world:
+        p = x.payload
+        assert isinstance(p, Trajectory3DPayload) and p.derived_from is not None
+        assert p.derived_from[1] == poses[0].label_id and check_label(x, ontology) == []
+        j = HAND_PARTS.index(p.part or "")
+        for s in p.samples:
+            assert np.linalg.norm(np.array([s.x, s.y, s.z]) - sc.hand_world(s.t_ms)[j]) < 1e-3
+
+    kept = next(
+        x for x in world if isinstance(x.payload, Trajectory3DPayload) and x.payload.part == "wrist"
+    )
+    with pg.begin() as conn:
+        record_review(conn, kept.label_id, VerificationState.HUMAN_APPROVED, "rev1", FIXED_TIME)
+        second = run_prelabel(
+            conn, sid, raw, [], policy, ontology, FIXED_TIME, pose_estimator=oracle("o2")
+        )
+        history = get_labels(conn, sid, kinds=["trajectory3d"])
+    live = current_labels(history)
+    assert second.poses == 20 and second.world == len(HAND_PARTS) - 1
+    poses = [x for x in live if is_pose_label(x)]
+    assert len(poses) == 1 and (poses[0].provenance.model_version or "").startswith("campose-o2+p")
+    world = [
+        x
+        for x in live
+        if isinstance(x.payload, Trajectory3DPayload)
+        and x.payload.frame is CoordinateFrame.WORLD
+        and not is_pose_label(x)
+    ]
+    assert kept.label_id in {x.label_id for x in world} and len(world) == len(HAND_PARTS)
+    parts = [x.payload.part or "" for x in world if isinstance(x.payload, Trajectory3DPayload)]
+    assert sorted(parts) == sorted(HAND_PARTS)  # 승인한 손목 옆에 새 손목을 만들지 않는다
+
+    (tmp_path / "noext").mkdir()
+    sid2, raw2 = _pose_session(pg, tmp_path / "noext", sc, extrinsics=False)
+    with pg.begin() as conn:
+        third = run_prelabel(
+            conn, sid2, raw2, [], policy, ontology, FIXED_TIME, pose_estimator=oracle("o1")
+        )
+    assert third.poses == 0 and third.world == 0
+    assert third.pose_note is not None and "외부 파라미터" in third.pose_note

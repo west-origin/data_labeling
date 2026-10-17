@@ -145,10 +145,14 @@ class UnavailablePredictor:
 #   나온다 (relations.yaml tool_surface의 TODO).
 TOOL_PART_MASKS = UnavailablePredictor("tool_part_masks", "SAM 2.1 마스크 미연동")
 
-# TODO(real-model): 바디캠 6자유도 궤적 (trajectory3d, entity_id="camera"). IMU가 있으면 시각-관성
-#   SLAM(Basalt BSD-3, CPU), 없으면 메트릭 깊이 + RGB-D 오도메트리(Open3D MIT, CPU)가 후보다.
-#   아직 연동하지 않았다. Basalt는 C++ 빌드와 카메라-IMU 캘리브레이션이 필요하다 (GPU는 필요 없다).
-CAMERA_POSE = UnavailablePredictor("camera_pose", "카메라 자세(SLAM·RGB-D 오도메트리) 미연동")
+# TODO(real-model): 루프 닫힘·묶음 조정이 있는 외부 시각-관성 SLAM 엔진 (바디캠 6자유도). 지금은 내장
+#   IMU 시각 오도메트리(`dlp_prelabel.campose.ImuVisualOdometry`, ADR 0046)만 있어 거리에 비례해 드리프트가
+#   쌓인다. 후보는 Basalt(BSD-3, CPU, C++ 빌드, 카메라-IMU 외부 파라미터 캘리브레이션 필요)이고
+#   `campose.CameraPoseEstimator` 어댑터로 붙인다. ORB-SLAM3·OpenVINS(GPL-3)와 MASt3R·DUSt3R(CC BY-NC)는
+#   쓰지 않는다 (ADR 0046 라이선스 조사).
+SLAM_ENGINE = UnavailablePredictor(
+    "slam_engine", "외부 시각-관성 SLAM 엔진 미연동 (내장 IMU 시각 오도메트리만, 드리프트 보정 없음)"
+)
 
 # TODO(real-model): 영상만으로 접촉을 판정하는 학습 분류기. 장갑 세션의 접촉 구간을 정답으로
 #   재학습 루프(`dlp train run contact`, WP13)에서 학습한다. 루프는 있지만 실제 학습기가 없다
@@ -157,4 +161,4 @@ LEARNED_CONTACT = UnavailablePredictor(
     "learned_contact", "재학습 루프의 실제 접촉 분류기 학습기 미연동 (dlp train run contact)"
 )
 
-UNAVAILABLE = (TOOL_PART_MASKS, CAMERA_POSE, LEARNED_CONTACT)
+UNAVAILABLE = (TOOL_PART_MASKS, SLAM_ENGINE, LEARNED_CONTACT)

@@ -139,7 +139,7 @@ depth:
   # 트랙, 예전 버전) 맞춤이 나쁘면 예전처럼 관절마다 깊이만 쓴다.
   # 정확도 주의: 단안 추정이라 절대 거리(크기) 오차가 남는다 (손 크기 개인차 약 ±10%, 깊이 모델 오차).
   # 손 안의 상대 위치(손가락 끝 사이)는 깊이만 쓸 때보다 훨씬 낫다. 좌표는 그 시각의 카메라 좌표다
-  # (frame=camera). 월드 좌표는 카메라 6자유도(SLAM)가 생긴 뒤에 만든다 (아래 TODO, F-PAR-26).
+  # (frame=camera). 월드 좌표 궤적은 아래 camera_pose·world_frame 단계가 따로 만든다 (ADR 0046).
   # 캘리브레이션이 없는 세션은 default_hfov_deg 근사 내부 파라미터를 써서 오차가 더 크다.
   hand_fit:
     min_points: 8             # 맞춤에 쓰는 보이는 관절 수 하한 (적으면 깊이만)
@@ -162,9 +162,56 @@ depth:
     no_depth: 0.7             # 깊이를 못 쓰거나 버리고 손 크기 사전값만으로 크기를 정한 맞춤에 곱
     hfov_approx: 0.6          # 캘리브레이션 없이 default_hfov_deg 근사를 쓴 표본에 곱
 
-# TODO(real-model): 카메라 6자유도 궤적은 아직 연동하지 않았다 (stub). 후보는 Basalt 시각-관성
-#   SLAM(BSD-3, CPU, C++ 빌드·캘리브레이션 필요)이나 메트릭 깊이 + RGB-D 오도메트리(Open3D, CPU).
-#   그때까지 3D 궤적(손가락 끝 포함)은 카메라 좌표계(frame=camera)뿐이다 (F-PAR-26).
+# 바디캠 6자유도 자세 (ADR 0046, dlp_prelabel.campose.ImuVisualOdometry). 동기화된 IMU 스트림(sync_method가
+# unsynced가 아님)과 메트릭 깊이 모델이 있는 세션에서만 돈다. 회전은 IMU 자이로 적분 + 가속도 기울기
+# 보정(중력 정렬), 이동은 이전 프레임 특징점의 메트릭 깊이 3D와 지금 프레임 2D로 회전을 고정한 채 푼다
+# (두 점 RANSAC). 결과는 trajectory3d(entity_id=camera, frame=world, source_3d=visual_inertial_slam, 표본마다
+# 쿼터니언). 월드 좌표: Z 위(중력 반대), 원점 = 첫 자세 카메라 중심, X = 첫 자세 광축의 수평 성분.
+# 정확도 주의: 루프 닫힘·묶음 조정이 없는 오도메트리라 거리에 비례해 드리프트가 쌓이고, 배율은 깊이 모델
+# 배율 오차를 그대로 따른다 (깊이 10% 편향 → 이동 10%). 요(yaw)는 자이로 편향만큼 천천히 돈다.
+# TODO(real-model): 루프 닫힘·묶음 조정이 있는 외부 시각-관성 SLAM 엔진(Basalt, BSD-3, C++ 빌드·카메라-IMU
+#   캘리브레이션 필요)을 `CameraPoseEstimator` 어댑터로 연동하지 않았다. 내장 IMU 시각 오도메트리만 있다
+#   (ADR 0046 라이선스 조사: ORB-SLAM3·OpenVINS는 GPL-3, MASt3R·DUSt3R는 CC BY-NC라 쓰지 않는다).
+camera_pose:
+  enabled: true
+  frame_stride_ms: 100      # 자세 표본 간격 (ms). 표본마다 깊이 추론 1회
+  max_lost_ms: 1000         # 이만큼 추적을 못 하면 그 뒤는 자세를 내지 않는다 (같은 월드 좌표로 잇지 못함)
+  imu:
+    init_window_ms: 500     # 첫 프레임부터 이 구간 IMU로 중력 방향·자이로 편향을 정한다
+    static_gyro_std: 0.05   # 이 구간 자이로 크기 표준편차(rad/s)와
+    static_acc_std: 0.3     # 가속도 크기 표준편차(m/s²)가 모두 이하면 정지로 보고 자이로 편향을 뺀다
+    accel_gain: 0.1         # 가속도 기울기 보정 이득 (1/s, 상보 필터. 0이면 자이로만)
+    accel_tolerance: 0.5    # 가속도 크기가 중력과 이만큼(m/s²) 안일 때만 기울기를 보정한다
+    gravity: 9.81
+    # 세션 캘리브레이션(camera_imu_extrinsics, 수집 매니페스트)이 없을 때 쓸 IMU → 카메라 회전 (3x3 행 우선).
+    # null이면 그런 세션은 자세를 만들지 않는다 (기종마다 IMU 축이 달라 틀린 기본값은 조용히 틀린 월드 좌표를 낸다)
+    default_imu_to_camera: null
+  features:
+    max_corners: 300
+    quality_level: 0.01
+    min_distance_px: 8
+    lk_window_px: 21
+    lk_levels: 3
+    fb_max_px: 1.0          # 앞뒤 추적 왕복 오차 상한 (px)
+  translation:
+    ransac_iterations: 100
+    inlier_px: 2.0          # 재투영 인라이어 문턱 (px)
+    min_inliers: 15         # 이보다 적으면 그 프레임은 자세 없음
+    seed: 0
+    depth_patch_px: 2       # 특징점 깊이를 읽는 패치 반지름
+    min_depth_m: 0.2
+    max_depth_m: 8.0
+  confidence:
+    base: 0.8               # 최고값 (단안 깊이 배율·드리프트가 남으므로 1보다 낮게)
+    good_inliers: 80        # 인라이어가 이 수 이상이면 인라이어 항 1
+    reprojection_floor: 0.5 # 인라이어 RMS가 translation.inlier_px일 때 곱
+    no_static_init: 0.7     # 초기 정지 구간이 없어 자이로 편향을 못 뺐을 때 곱
+    hfov_approx: 0.6        # 캘리브레이션 없이 화각 근사를 썼을 때 곱
+
+# 카메라 좌표 3D 궤적 → 세션 월드 좌표 (ADR 0046, dlp_prelabel.worldframe). 같은 (개체, 부위)의 frame=world 궤적을
+# 새로 만든다 (source_3d는 원래 값, derived_from = [카메라 좌표 궤적, 카메라 자세]). 표본 신뢰도 = 원래 표본 x 자세.
+world_frame:
+  max_pose_gap_ms: 250      # 표본 시각 양쪽 자세 표본 간격이 이보다 크면 그 표본은 바꾸지 않는다
 
 # 작업자 손 크기 추정 (`dlp calib palm-estimate`, ADR 0045, dlp_prelabel.palm). 캘리브레이션이 있는 세션의
 # 손 맞춤 중 품질 좋은 시각마다 깊이 배율만으로 잰 손목→중지 MCP 길이의 중앙값. 3D 단계 버전에는 들어가지 않는다.

@@ -309,6 +309,11 @@ class Trajectory3DPayload(Contract):
 
     # intrinsics: 단안 깊이로 올릴 때 쓴 내부 파라미터의 출처 (선택, 궤적 안 모든 표본이 같다,
     #   ADR 0045). None이면 JSON에 싣지 않는다.
+    # derived_from: 이 궤적을 계산한 입력 라벨 ID (선택, ADR 0046). 월드 좌표 궤적은 (카메라 좌표
+    #   궤적, 카메라 자세 궤적) 순이다. None이면 JSON에 싣지 않는다 (예전 라벨과 같은 JSON).
+    # 카메라 자세 (entity_id="camera", frame=world, ADR 0046): 표본 x·y·z는 세션 월드 좌표의 카메라
+    #   중심(m), qw·qx·qy·qz는 카메라 좌표 → 월드 좌표 회전 (해밀턴 단위 쿼터니언). 월드 좌표는 중력
+    #   정렬(Z 위), 원점은 첫 자세의 카메라 중심, X는 첫 자세 광축의 수평 성분이다.
 
     kind: Literal["trajectory3d"] = "trajectory3d"
     entity_id: Identifier
@@ -318,6 +323,9 @@ class Trajectory3DPayload(Contract):
     samples: tuple[Trajectory3DSample, ...] = Field(min_length=1)
     intrinsics: IntrinsicsSource | None = Field(
         default=None, exclude_if=_drop_none, description="카메라 내부 파라미터 출처"
+    )
+    derived_from: tuple[Identifier, ...] | None = Field(
+        default=None, exclude_if=_drop_none, description="이 궤적을 계산한 입력 라벨 ID"
     )
 
 

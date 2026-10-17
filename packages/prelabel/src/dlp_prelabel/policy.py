@@ -8,6 +8,7 @@
 절 → 쓰는 곳:
 - models → 모든 어댑터 (`config/models.yaml` 이름), hands → `MediaPipeHands`, body → `RtmPose`,
   objects → `MediaPipeObjects`, open_vocab_objects → `OwlObjects`, depth → `lift3d.DepthLifter`,
+  camera_pose → `campose`(바디캠 자세), world_frame → `worldframe`(월드 좌표 3D),
   contact → `runner._contacts`, wearer_matching → `runner._wearer`, timeline_predictors →
   `runner.run_prelabel` (마스터 타임라인 구간을 내는 배포 모델).
 """
@@ -215,6 +216,124 @@ class PalmEstimatePolicy(Contract):
     palm_range_m: tuple[float, float]
 
 
+class PoseImuPolicy(Contract):
+    """카메라 자세의 IMU 회전 정책 (`camera_pose.imu` 절, ADR 0046, `campose.imu_orientation`).
+
+    init_window_ms: 첫 프레임부터 이 길이의 IMU로 중력 방향과 자이로 편향을 정한다.
+    static_gyro_std: 초기 구간 자이로 크기의 표준편차가 이 값(rad/s) 이하이고 가속도 크기 표준편차가
+        `static_acc_std`(m/s²) 이하이면 정지로 보고 자이로 편향을 그 평균으로 뺀다. 아니면 편향 0.
+    accel_gain: 가속도 기울기 보정 이득 (1/s, 상보 필터). 0이면 자이로만 적분한다.
+    accel_tolerance: 가속도 크기가 중력과 이만큼(m/s²) 안일 때만 기울기를 보정한다 (빠른 움직임
+    제외).
+    gravity: 중력 가속도 크기 (m/s²).
+    default_imu_to_camera: 세션 캘리브레이션에 카메라-IMU 외부 파라미터가 없을 때 쓸 IMU → 카메라
+        회전 (3x3 행 우선). None이면 그런 세션은 자세를 만들지 않는다 (기종마다 축이 달라 기본값이
+        틀릴
+        수 있다).
+    """
+
+    init_window_ms: int = Field(gt=0)
+    static_gyro_std: float = Field(ge=0)
+    static_acc_std: float = Field(ge=0)
+    accel_gain: float = Field(ge=0)
+    accel_tolerance: float = Field(gt=0)
+    gravity: float = Field(gt=0)
+    default_imu_to_camera: tuple[tuple[float, float, float], ...] | None = None
+
+    @field_validator("default_imu_to_camera")
+    @classmethod
+    def _rotation(
+        cls, v: tuple[tuple[float, float, float], ...] | None
+    ) -> tuple[tuple[float, float, float], ...] | None:
+        """3x3 회전 행렬(직교, 행렬식 1)인지 검사한다. 아니면 ValueError."""
+        if v is None:
+            return v
+        import numpy as np
+
+        m = np.array(v, dtype=np.float64)
+        if m.shape != (3, 3) or not np.allclose(m @ m.T, np.eye(3), atol=1e-6):
+            raise ValueError("default_imu_to_camera는 3x3 회전 행렬이어야 합니다")
+        if np.linalg.det(m) < 0:
+            raise ValueError("default_imu_to_camera의 행렬식이 -1입니다 (반사)")
+        return v
+
+
+class PoseFeaturePolicy(Contract):
+    """특징점 추적 정책 (`camera_pose.features` 절, OpenCV goodFeaturesToTrack + 피라미드 LK).
+
+    max_corners / quality_level / min_distance_px: 특징점 검출. lk_window_px / lk_levels: LK 창
+    크기와 피라미드 단계. fb_max_px: 앞뒤 추적 왕복 오차 상한 (넘으면 버린다).
+    """
+
+    max_corners: int = Field(ge=8)
+    quality_level: float = Field(gt=0, lt=1)
+    min_distance_px: float = Field(gt=0)
+    lk_window_px: int = Field(ge=5)
+    lk_levels: int = Field(ge=0)
+    fb_max_px: float = Field(gt=0)
+
+
+class PoseTranslationPolicy(Contract):
+    """회전을 아는 이동량 풀이 정책 (`camera_pose.translation` 절, `campose.solve_translation`).
+
+    ransac_iterations: 두 점 표본 RANSAC 반복 수. inlier_px: 재투영 오차 인라이어 문턱(px).
+    min_inliers: 이보다 적으면 그 프레임은 자세를 내지 않는다. seed: RANSAC 난수 시드 (결정적).
+    depth_patch_px / min_depth_m / max_depth_m: 특징점 깊이를 읽는 패치 반지름과 받는 깊이 범위.
+    """
+
+    ransac_iterations: int = Field(ge=1)
+    inlier_px: float = Field(gt=0)
+    min_inliers: int = Field(ge=3)
+    seed: int
+    depth_patch_px: int = Field(ge=0)
+    min_depth_m: float = Field(gt=0)
+    max_depth_m: float = Field(gt=0)
+
+
+class PoseConfidencePolicy(Contract):
+    """자세 표본 신뢰도 (`camera_pose.confidence` 절, `campose.pose_confidence`).
+
+    base: 최고값. good_inliers: 인라이어가 이 수 이상이면 인라이어 항 1 (적으면 비례해 낮춤).
+    reprojection_floor: 인라이어 재투영 RMS가 `translation.inlier_px`일 때 곱하는 값.
+    no_static_init: 초기 정지 구간이 없어 자이로 편향을 빼지 못했을 때 곱하는 값.
+    hfov_approx: 캘리브레이션 없이 화각 근사 내부 파라미터를 썼을 때 곱하는 값.
+    """
+
+    base: float = Field(ge=0, le=1)
+    good_inliers: int = Field(ge=1)
+    reprojection_floor: float = Field(ge=0, le=1)
+    no_static_init: float = Field(ge=0, le=1)
+    hfov_approx: float = Field(ge=0, le=1)
+
+
+class CameraPosePolicy(Contract):
+    """바디캠 6자유도 자세 정책 (`camera_pose` 절, ADR 0046, `dlp_prelabel.campose`).
+
+    enabled: 거짓이면 자세·월드 좌표 단계를 돌리지 않는다.
+    frame_stride_ms: 자세를 내는 프레임 간격 (깊이 추론 1회/프레임).
+    max_lost_ms: 마지막으로 추적한 프레임에서 이만큼 지나도록 추적을 못 하면 그 뒤는 자세를 내지
+        않는다 (같은 월드 좌표로 이을 수 없다).
+    """
+
+    enabled: bool
+    frame_stride_ms: int = Field(ge=0)
+    max_lost_ms: int = Field(ge=0)
+    imu: PoseImuPolicy
+    features: PoseFeaturePolicy
+    translation: PoseTranslationPolicy
+    confidence: PoseConfidencePolicy
+
+
+class WorldFramePolicy(Contract):
+    """카메라 좌표 3D 궤적 → 세션 월드 좌표 (`world_frame` 절, ADR 0046, `dlp_prelabel.worldframe`).
+
+    max_pose_gap_ms: 표본 시각 양쪽 자세 표본 간격이 이보다 크면 그 표본은 월드 좌표로 바꾸지
+    않는다.
+    """
+
+    max_pose_gap_ms: int = Field(ge=0)
+
+
 class GloveContactPolicy(Contract):
     """장갑 압력 접촉 정책 (`contact.glove` 절). 단위는 장갑 압력 합(정규화 값).
 
@@ -297,6 +416,8 @@ class PrelabelPolicy(Contract):
     wearer_matching: WearerPolicy
     depth: DepthPolicy
     palm_estimate: PalmEstimatePolicy
+    camera_pose: CameraPosePolicy
+    world_frame: WorldFramePolicy
     # 마스터 타임라인 구간(stream_id 없음)을 내는 예측기 이름. 기준 스트림에서 세션당 한 번만 돌린다
     timeline_predictors: tuple[str, ...] = ()
 

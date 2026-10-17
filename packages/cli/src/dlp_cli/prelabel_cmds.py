@@ -161,6 +161,12 @@ def cmd_run(args: argparse.Namespace) -> int:
     for key in s.skipped:
         print(f"{key}: 같은 모델 버전 결과가 있어 건너뜀")
     print(f"3D 궤적 {s.lifted}개, 접촉 구간 {s.contacts}개, 3인칭 착용자 {s.wearer or '-'}")
+    # 바디캠 자세·월드 좌표 3D (ADR 0046). 건너뛴 이유가 있으면 그대로 보인다
+    if s.pose_note:
+        print(f"[자세 없음] {s.pose_note}")
+    else:
+        lost = f", {s.pose_lost_at_ms} ms부터 추적을 잃음" if s.pose_lost_at_ms is not None else ""
+        print(f"카메라 자세 표본 {s.poses}개{lost}, 월드 좌표 3D 궤적 {s.world}개")
     if s.person_contacts:
         # 사람 박스 접촉은 부위(body_part)를 몰라 손 상태 라벨을 만들지 않았다 (F-PAR-03)
         print(
@@ -174,7 +180,9 @@ def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
     """`prelabel run` 하위 명령을 등록한다."""
     pre = sub.add_parser("prelabel", help="자동 프리라벨")
     psub = pre.add_subparsers(dest="prelabel_command", required=True)
-    run = psub.add_parser("run", help="손·전신·객체·도구 모델, 3D 궤적, 접촉, 착용자 매칭")
+    run = psub.add_parser(
+        "run", help="손·전신·객체·도구 모델, 3D 궤적, 카메라 자세·월드 좌표, 접촉, 착용자 매칭"
+    )
     run.add_argument("session_id")
     run.add_argument("--store", default="s3", help="'s3' 또는 'local:<디렉터리>'")
     run.add_argument("--url", help="DB URL (기본: DLP_DATABASE_URL)")
