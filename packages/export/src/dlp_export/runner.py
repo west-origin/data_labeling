@@ -2,7 +2,8 @@
 
 1. 데이터셋 버전에서 세션·라벨을 고른다 (검증 정책, 사용 중지 제외, 블러 라벨 제외).
 2. 형식별로 쓴다: coco / intervals / lerobot
-   (lerobot은 격리 환경에서 공식 API로 쓰고 공식 로더로 다시 읽는다).
+   (lerobot은 격리 환경에서 공식 API로 쓰고 공식 로더로 다시 읽는다). lerobot에 로봇 ID를 주면
+   세션 월드 좌표 손을 그 로봇 관절 궤적으로 옮긴 에피소드를 쓴다 (`dlp_export.robot`, ADR 0047).
 3. manifest.json (대상, 일시, 형식, 검증 정책, 세션, 라벨 수, 파일 목록과 sha256)을 넣고, 원본 버킷
    위치가 없는지 확인한다. 작업자·장소·세션·라벨 ID는 내보내기마다 다른 가명으로 바꾼다
    (export.yaml ids, ADR 0027). 내보내기 이력(exports.session_ids)에는 내부 세션 ID를 남기고,
@@ -40,16 +41,28 @@ from pathlib import Path
 from typing import Any, Literal
 
 import sqlalchemy as sa
+from dlp_retarget.ik import IkSolver
+from dlp_retarget.policy import RetargetPolicy
+from dlp_retarget.policy import load_policy as load_retarget_policy
+from dlp_retarget.robot import LoadedRobot, load_robot
 
 from dlp_datasets.lineage import record_export
 from dlp_datasets.snapshot import SnapshotStore
 from dlp_export.coco import write_coco
 from dlp_export.intervals import write_intervals
 from dlp_export.lerobot import Episode, Vocab, build_episode, run_script, write_package
-from dlp_export.policy import ExportPolicy
+from dlp_export.policy import ExportPolicy, LeRobotPolicy
 from dlp_export.pseudonym import Pseudonymizer
+from dlp_export.robot import (
+    RobotEpisode,
+    make_solver,
+    retarget_meta,
+    retarget_session,
+    robot_override,
+)
 from dlp_export.source import (
     ExportError,
+    ExportSession,
     ExportSource,
     assert_no_raw,
     fetch_blurred,
@@ -67,7 +80,7 @@ from dlp_schema.db.tables import sessions as sessions_table
 from dlp_schema.labels import LabelRecord, VerificationState
 from dlp_schema.lineage import ExportRecord
 from dlp_schema.ontology import Ontology
-from dlp_schema.session import LifecycleState, Session
+from dlp_schema.session import LifecycleState, Session, Stream
 
 # 지원 형식 (CLI 하위 명령 이름과 같다)
 Format = Literal["coco", "intervals", "lerobot"]
@@ -115,6 +128,62 @@ def _label_counts(labels: list[LabelRecord]) -> dict[str, int]:
     return dict(sorted(c.items()))
 
 
+@dataclass
+class _RobotRun:
+    """로봇 리타기팅 내보내기 상태 (`_lerobot` 안에서만): 로봇·정책·풀이기, 에피소드 결과, 보고."""
+
+    robot: LoadedRobot
+    policy: RetargetPolicy
+    solver: IkSolver
+    results: list[RobotEpisode] = field(default_factory=list[RobotEpisode])
+    reports: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
+
+    @classmethod
+    def load(cls, root: Path, robot_id: str) -> _RobotRun:
+        """로봇(모델 sha256 확인)·리타기팅 정책·풀이기를 준비한다.
+
+        Raises:
+            RobotError: 로봇 설정·모델 확인 실패.
+        """
+        policy = load_retarget_policy(root)
+        return cls(load_robot(root, robot_id), policy, make_solver(root, policy))
+
+    def add(
+        self,
+        es: ExportSession,
+        stream: Stream,
+        ep: Episode,
+        lp: LeRobotPolicy,
+        index: int,
+        sid: str,
+    ) -> bool:
+        """에피소드를 리타기팅하고 보고를 남긴다.
+
+        정책 결정이 drop이면 거짓을 돌려준다 (그 에피소드는 쓰지 않고 보고에만 남는다).
+        """
+        rob = retarget_session(ep, stream, es.labels, self.robot, self.policy, lp, self.solver)
+        report = rob.result.report
+        keep = report.decision == "keep"
+        self.reports.append(
+            {
+                "session_id": sid,
+                "episode_index": index if keep else None,
+                **report.model_dump(mode="json"),
+            }
+        )
+        if keep:
+            self.results.append(rob)
+        return keep
+
+    def used(self) -> set[str]:
+        """리타기팅에 쓴 월드 좌표 손 3D 라벨 ID."""
+        return {lid for r in self.results for lid in r.used}
+
+    def meta(self) -> dict[str, Any]:
+        """meta/dlp_retarget.json·manifest details.retarget."""
+        return retarget_meta(self.robot, self.policy, self.solver, self.reports)
+
+
 def _lerobot(
     root: Path,
     src: ExportSource,
@@ -124,6 +193,7 @@ def _lerobot(
     out: Path,
     work: Path,
     ids: Pseudonymizer,
+    robot: str | None = None,
 ) -> tuple[list[LabelRecord], set[str], dict[str, Any]]:
     """(내보낸 라벨, 내보낸 세션(내부 ID), 세부 정보). 결과 파일의 세션 ID는 가명이다.
 
@@ -137,6 +207,7 @@ def _lerobot(
         subprocess.CalledProcessError: 격리 환경 스크립트가 실패했을 때.
     """
     vocab = Vocab.from_ontology(ontology)
+    run = _RobotRun.load(root, robot) if robot is not None else None
     episodes: list[tuple[Session, Path, Episode]] = []
     size: tuple[int, int] | None = None  # 첫 에피소드 크기 (모든 에피소드를 이 크기로 쓴다)
     sessions: list[dict[str, Any]] = []
@@ -163,11 +234,14 @@ def _lerobot(
             es.session, stream, build_pts_index(video), (info.width, info.height), es.labels, vocab,
             policy.lerobot,
         )  # fmt: skip
+        sid = ids.session(es.session.session_id)
+        if run is not None and not run.add(es, stream, ep, policy.lerobot, len(sessions), sid):
+            continue  # 정책이 버리기로 한 에피소드 (보고에는 남는다)
         episodes.append((es.session, video, ep))
         sessions.append(
             {
                 "episode_index": len(sessions),
-                "session_id": ids.session(es.session.session_id),
+                "session_id": sid,
                 "split": es.split.value,
                 "stream_id": stream.stream_id,
                 "start_ms": float(ep.times_ms[0]),
@@ -175,9 +249,14 @@ def _lerobot(
             }
         )
     if not episodes or size is None:
-        raise ExportError(f"{policy.lerobot.video_stream} 스트림이 있는 세션이 없습니다")
+        dropped = " (리타기팅 정책이 모든 에피소드를 버렸습니다)" if run and run.reports else ""
+        raise ExportError(f"{policy.lerobot.video_stream} 스트림이 있는 세션이 없습니다{dropped}")
     written = {s.session_id for s, _, _ in episodes}
-    pkg = write_package(episodes, policy, size, work / "lerobot_pkg", ids)
+    override = None
+    if run is not None:
+        pairs = [(ep, r) for (_, _, ep), r in zip(episodes, run.results, strict=True)]
+        override = robot_override(pairs, policy.lerobot, run.robot)
+    pkg = write_package(episodes, policy, size, work / "lerobot_pkg", ids, override)
     dest = out / "lerobot"
     # 격리 환경: 공식 API로 쓰고, 공식 로더로 다시 읽어 확인 (JSON을 표준 출력으로 돌려준다)
     run_script(root, policy.lerobot, "lerobot_write.py", str(pkg), str(dest))
@@ -192,8 +271,19 @@ def _lerobot(
     (dest / "meta" / "dlp_episodes.json").write_text(
         json.dumps(sessions, ensure_ascii=False, indent=2), "utf-8"
     )
+    details: dict[str, Any] = {
+        "episodes": len(episodes), "frames": check["frames"], "loader_check": check,
+    }  # fmt: skip
+    if run is not None:
+        # 로봇·모델 sha256·리타기팅 판·에피소드별 도달 가능성 보고 (manifest details에도 들어간다)
+        details["retarget"] = run.meta()
+        (dest / "meta" / "dlp_retarget.json").write_text(
+            json.dumps(details["retarget"], ensure_ascii=False, indent=2), "utf-8"
+        )
     # 실제로 어느 프레임 특징에 들어간 라벨만 센다 (영상 밖 시각·다른 스트림·쓰지 않는 손 등은 뺀다)
-    used_ids = {lid for _, _, ep in episodes for lid in ep.used}
+    used_ids: set[str] = {lid for _, _, ep in episodes for lid in ep.used}
+    if run is not None:
+        used_ids |= run.used()
     used = [
         x
         for es in src.sessions
@@ -201,11 +291,13 @@ def _lerobot(
         for x in es.labels
         if x.label_id in used_ids
     ]
-    return (
-        used,
-        written,
-        {"episodes": len(episodes), "frames": check["frames"], "loader_check": check},
-    )
+    return used, written, details
+
+
+def _robot_summary(meta: dict[str, Any]) -> dict[str, Any]:
+    """manifest 최상위 robot 항목 (로봇 ID, 모델 sha256·라이선스, 리타기팅 판)."""
+    keys = ("robot_id", "model_sha256", "model_license", "retarget_version", "solver")
+    return {k: meta[k] for k in keys}
 
 
 def lock_sessions(conn: sa.Connection, session_ids: set[str]) -> None:
@@ -240,6 +332,7 @@ def run_export(  # noqa: C901
     splits: tuple[Split, ...] | None,
     now: datetime,
     id_secret: bytes | None = None,
+    robot: str | None = None,
 ) -> ExportResult:
     """내보내기 하나. DB 트랜잭션은 이 함수가 연다 (이력은 올리기 전에 따로 커밋한다).
 
@@ -259,6 +352,8 @@ def run_export(  # noqa: C901
         include_unreviewed: 미검수 모델 라벨 포함 (명시적 옵션).
         splits: 내보낼 분할 (None이면 정책 기본).
         now: 내보내기 시각 (시간대 포함). 내보내기 ID에도 들어간다.
+        robot: LeRobot 형식에서 손을 옮길 로봇 ID (`config/robots/<ID>.yaml` 또는 DLP_ROBOTS_DIR,
+            ADR 0047). None이면 사람 시연 에피소드. 다른 형식에서는 무시하지 않고 거부한다.
         id_secret: 작업자·장소·세션·라벨 가명 비밀값 바이트 (CLI가 `check_secret`으로 확인한 뒤
             넘긴다). 없으면 실행마다 임의 값을 써 가명을 재현할 수 없다. 세션 추적용 내부 대응표는
             별도로 남는다 (export.yaml ids).
@@ -278,6 +373,8 @@ def run_export(  # noqa: C901
     """
     if labeling.bucket == raw_bucket or datasets.bucket == raw_bucket:
         raise ExportError("내보내기는 원본 버킷을 읽거나 쓰지 않습니다")
+    if robot is not None and fmt != "lerobot":
+        raise ExportError("로봇 리타기팅(--robot)은 lerobot 형식에서만 씁니다")
     privacy = load_privacy_policy(root)
     # 1) 고르기 (읽기 전용 연결). 같은 정책으로 최종 게시 때도 다시 확인한다.
     with engine.connect() as conn:
@@ -311,7 +408,9 @@ def run_export(  # noqa: C901
             details = {"images": r.images, "annotations": r.annotations, "dropped": r.dropped}
             written, used = r.sessions, list(r.labels.values())
         else:
-            used, written, details = _lerobot(root, src, policy, ontology, labeling, out, work, ids)
+            used, written, details = _lerobot(
+                root, src, policy, ontology, labeling, out, work, ids, robot
+            )
         if not written:
             raise ExportError(f"{version_id}: 이 형식으로 쓴 세션이 없습니다")
         counts = _label_counts(used)
@@ -339,6 +438,8 @@ def run_export(  # noqa: C901
                 if es.session.session_id in written
             ],
             "label_counts": counts,
+            # 로봇 리타기팅: 로봇 ID·모델 sha256·리타기팅 판 (ADR 0047, 상세는 details.retarget)
+            **({"robot": _robot_summary(details["retarget"])} if "retarget" in details else {}),
             "details": details,
             "files": inventory,
         }

@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import os
 from datetime import UTC, datetime
+from typing import Any
 
 import sqlalchemy as sa
 
@@ -52,6 +53,9 @@ def cmd_export(args: argparse.Namespace) -> int:
         args.include_unreviewed: 미검수 모델 라벨 포함 (명시적 옵션).
         args.split: 내보낼 분할 목록. 비우면 정책 `splits`(기본 train, val).
         args.store: 라벨링·데이터셋 버킷 저장소 지정.
+        args.robot: lerobot에서 사람 손을 옮길 로봇 ID (`config/robots/<ID>.yaml` 또는
+            DLP_ROBOTS_DIR, ADR 0047). 주면 observation.state가 로봇 관절이고 도달 가능성 보고가
+            meta/dlp_retarget.json·manifest에 들어간다.
 
     반환: 0 성공, 2 가명 비밀값이 운영 환경에서 개발용 값일 때.
     `ExportError`(내보낼 세션 없음, 원본 버킷 사용 등)는 예외로 끝난다.
@@ -90,6 +94,7 @@ def cmd_export(args: argparse.Namespace) -> int:
         splits=tuple(Split(s) for s in args.split) or None,
         now=datetime.now(UTC),
         id_secret=secret.encode() if secret else None,
+        robot=args.robot,
     )
     engine.dispose()
     n = len(r.record.session_ids)
@@ -100,7 +105,24 @@ def cmd_export(args: argparse.Namespace) -> int:
         print(f"작업자·장소·세션·라벨 가명: {env}가 없어 임의 비밀값을 썼습니다 (되짚을 수 없음)")
     for k, n in r.label_counts.items():
         print(f"  {k}: {n}")
+    _print_retarget(r.details.get("retarget"))
     return 0
+
+
+def _print_retarget(meta: dict[str, Any] | None) -> None:
+    """로봇 리타기팅 요약 (에피소드별 도달 비율·최대 오차·결정)."""
+    if meta is None:
+        return
+    sha = meta["model_sha256"][:12]
+    print(f"로봇 {meta['robot_id']} (모델 sha256 {sha}, {meta['retarget_version']})")
+    for e in meta["episodes"]:
+        err = e["position_error_max_m"]
+        worst = "-" if err is None else f"{err * 1000:.0f} mm"
+        reason = f" ({e['reason']})" if e["reason"] else ""
+        print(
+            f"  {e['session_id']}: 목표 {e['target_fraction']:.0%}, "
+            f"도달 {e['reachable_fraction']:.0%}, 최대 위치 오차 {worst}, {e['decision']}{reason}"
+        )
 
 
 def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:  # pyright: ignore[reportPrivateUsage]
@@ -118,4 +140,9 @@ def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
     )  # fmt: skip
     exp.add_argument("--store", default="s3", help="'s3' 또는 'local:<디렉터리>'")
     exp.add_argument("--url", help="DB URL (기본: DLP_DATABASE_URL)")
+    exp.add_argument(
+        "--robot",
+        help="lerobot: 사람 손을 이 로봇 관절 궤적으로 옮긴다 (config/robots/<ID>.yaml 또는 "
+        "DLP_ROBOTS_DIR, ADR 0047)",
+    )
     exp.set_defaults(func=cmd_export)

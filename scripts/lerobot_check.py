@@ -7,7 +7,8 @@ python scripts/lerobot_check.py <루트> <repo_id>
 실행한다. 작업공간 밖에서 도므로 `dlp_*` 패키지를 가져오지 않는다 (ruff만 검사, pyright 범위 밖).
 
 출력(표준 출력 JSON 한 줄): 프레임 수, 에피소드 수, fps, 특징 이름, task 목록, 그리고
-처음·가운데·끝 프레임 표본(인덱스, 에피소드, 타임스탬프(초), 영상 크기·평균 밝기, 상태·주석 값).
+처음·가운데·끝 프레임 표본(인덱스, 에피소드, 타임스탬프(초), 영상 크기·평균 밝기, 상태·주석 값,
+로봇 리타기팅 모드(ADR 0047)면 `extra`에 observation.human_state·retarget.* 값).
 호출자가 이 값을 기대값(에피소드 수, 주석 값)과 비교해 공식 로더로 읽힘을 확인한다.
 """
 
@@ -50,6 +51,11 @@ def main() -> None:
             "hand_points_3d_confidence": [
                 float(v) for v in x["annotation.hand_points_3d_confidence"]
             ],
+            "extra": {
+                k: [float(v) for v in x[k].reshape(-1)]
+                for k in sorted(ds.features)
+                if k.startswith("retarget.") or k == "observation.human_state"
+            },
         })  # fmt: skip
     print(json.dumps(out))
 

@@ -12,9 +12,11 @@ package.json은 dlp_export.lerobot.write_package가 만든다: 에피소드마�
 원본 버킷에는 접근하지 않는다 (블러본 로컬 사본만 읽는다).
 
 package.json 키: `repo_id`, `fps`, `robot_type`, `vcodec`, `width`, `height`, `video_key`,
-`features`(이름 → LeRobot 특징 정의), `episodes`(각각 `video`, `npz`, `tasks`).
-npz 배열: `frame_index`, `state`, `action`, `hand_state`, `tool_surface_contact`, `verb`,
-`verification`, `hand_points_3d_confidence`(ADR 0045) (첫 축 = 에피소드 프레임).
+`features`(이름 → LeRobot 특징 정의), `frame_arrays`(영상 외 특징 이름 → npz 배열 키),
+`episodes`(각각 `video`, `npz`, `tasks`).
+npz 배열: `frame_index`와 `frame_arrays`가 가리키는 배열 (첫 축 = 에피소드 프레임). 사람 모드는
+state·action·hand_state·tool_surface_contact·verb·verification·hand_points_3d_confidence(ADR 0045),
+로봇 리타기팅 모드(ADR 0047)는 state·action이 로봇 관절이고 human_state·retarget.* 배열이 더 있다.
 """
 
 from __future__ import annotations
@@ -83,17 +85,8 @@ def main() -> None:
     for ep in spec["episodes"]:
         data = np.load(ep["npz"])
         for k, img in enumerate(frames(ep["video"], data["frame_index"], size)):
-            ds.add_frame({
-                spec["video_key"]: img,
-                "observation.state": data["state"][k],
-                "action": data["action"][k],
-                "annotation.hand_state": data["hand_state"][k],
-                "annotation.tool_surface_contact": data["tool_surface_contact"][k],
-                "annotation.verb": data["verb"][k],
-                "annotation.verification": data["verification"][k],
-                "annotation.hand_points_3d_confidence": data["hand_points_3d_confidence"][k],
-                "task": ep["tasks"][k],
-            })  # fmt: skip
+            frame = {name: data[key][k] for name, key in spec["frame_arrays"].items()}
+            ds.add_frame({spec["video_key"]: img, **frame, "task": ep["tasks"][k]})
         ds.save_episode()
     ds.finalize()
     print(json.dumps({"episodes": len(spec["episodes"])}))

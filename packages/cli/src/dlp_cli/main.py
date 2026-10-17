@@ -40,6 +40,7 @@ from dlp_cli import (
     privacy_cmds,
     relations_cmds,
     review_cmds,
+    robot_cmds,
     schema_cmds,
     sync_cmds,
     train_cmds,
@@ -138,6 +139,7 @@ def build_parser() -> argparse.ArgumentParser:
     train_cmds.add_commands(sub)  # dlp train run|models|approve — 재학습 (WP13)
     active_cmds.add_commands(sub)  # dlp active rank|fiftyone — 액티브 러닝 (WP14)
     export_cmds.add_commands(sub)  # dlp export coco|intervals|lerobot — 내보내기 (WP15)
+    robot_cmds.add_commands(sub)  # dlp robot check — 리타기팅 로봇 등록 확인 (ADR 0047)
     ops_cmds.add_commands(sub)  # dlp ops … — 운영 지표·감사·보관 (WP16)
     return parser
 

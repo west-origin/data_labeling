@@ -27,6 +27,7 @@ members = [
     "dlp-prelabel",
     "dlp-privacy",
     "dlp-relations",
+    "dlp-retarget",
     "dlp-review",
     "dlp-schema",
     "dlp-sync",
@@ -666,6 +667,7 @@ dependencies = [
     { name = "dlp-prelabel" },
     { name = "dlp-privacy" },
     { name = "dlp-relations" },
+    { name = "dlp-retarget" },
     { name = "dlp-review" },
     { name = "dlp-schema" },
     { name = "dlp-sync" },
@@ -707,6 +709,7 @@ requires-dist = [
     { name = "dlp-prelabel", editable = "packages/prelabel" },
     { name = "dlp-privacy", editable = "packages/privacy" },
     { name = "dlp-relations", editable = "packages/relations" },
+    { name = "dlp-retarget", editable = "packages/retarget" },
     { name = "dlp-review", editable = "packages/review" },
     { name = "dlp-schema", editable = "packages/schema" },
     { name = "dlp-sync", editable = "packages/sync" },
@@ -854,6 +857,7 @@ dependencies = [
     { name = "dlp-prelabel" },
     { name = "dlp-privacy" },
     { name = "dlp-relations" },
+    { name = "dlp-retarget" },
     { name = "dlp-review" },
     { name = "dlp-schema" },
     { name = "dlp-sync" },
@@ -875,6 +879,7 @@ requires-dist = [
     { name = "dlp-prelabel", editable = "packages/prelabel" },
     { name = "dlp-privacy", editable = "packages/privacy" },
     { name = "dlp-relations", editable = "packages/relations" },
+    { name = "dlp-retarget", editable = "packages/retarget" },
     { name = "dlp-review", editable = "packages/review" },
     { name = "dlp-schema", editable = "packages/schema" },
     { name = "dlp-sync", editable = "packages/sync" },
@@ -927,6 +932,7 @@ dependencies = [
     { name = "dlp-datasets" },
     { name = "dlp-media" },
     { name = "dlp-privacy" },
+    { name = "dlp-retarget" },
     { name = "dlp-schema" },
     { name = "numpy" },
     { name = "opencv-contrib-python-headless" },
@@ -938,6 +944,7 @@ requires-dist = [
     { name = "dlp-datasets", editable = "packages/datasets" },
     { name = "dlp-media", editable = "packages/media" },
     { name = "dlp-privacy", editable = "packages/privacy" },
+    { name = "dlp-retarget", editable = "packages/retarget" },
     { name = "dlp-schema", editable = "packages/schema" },
     { name = "numpy", specifier = ">=2.0" },
     { name = "opencv-contrib-python-headless", specifier = ">=4.10" },
@@ -1109,6 +1116,23 @@ requires-dist = [
     { name = "numpy", specifier = ">=2.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "sqlalchemy", specifier = ">=2.0" },
+]
+
+[[package]]
+name = "dlp-retarget"
+version = "0.1.0"
+source = { editable = "packages/retarget" }
+dependencies = [
+    { name = "dlp-schema" },
+    { name = "numpy" },
+    { name = "pyyaml" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "dlp-schema", editable = "packages/schema" },
+    { name = "numpy", specifier = ">=2.0" },
+    { name = "pyyaml", specifier = ">=6.0" },
 ]
 
 [[package]]

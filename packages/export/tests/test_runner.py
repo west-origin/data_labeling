@@ -245,6 +245,74 @@ def test_lerobot_export_end_to_end(
     assert list(out.rglob("*.mp4")) and list(out.rglob("data/**/*.parquet"))
 
 
+@pytest.mark.isolated_env
+def test_lerobot_robot_export_end_to_end(
+    engine: sa.Engine, policy: ExportPolicy, ontology: Ontology, tmp_path: Path
+) -> None:
+    """로봇 리타기팅 LeRobot 내보내기 종단 (ADR 0047, 격리 환경, `make test-isolated`).
+
+    정답: 세션 a·b에 승인된 월드 좌표 손 6점(탁자 위에서 원을 그리는 잡기 점, 앞아래를 향한 손)을
+    넣고 `--robot so101`로 내보내면 에피소드 2개, observation.state는 SO-101 관절 6개, manifest
+    최상위 robot에 모델 sha256과 리타기팅 판, meta/dlp_retarget.json에 에피소드 보고가 있다. 쓴 라벨
+    수에
+    승인된 trajectory3d(손목·엄지 끝·검지 끝 x 2세션 = 6)가 들어간다.
+    """
+    from dlp_fixtures.retarget import hand_points_for_grasp, world_hand_labels
+
+    snapshots = LocalSnapshotStore(tmp_path / "snap")
+    labeling = LocalStore(tmp_path / "store", "dlp-labeling")
+    datasets = LocalStore(tmp_path / "store", "dlp-datasets")
+    times = vfr_times(np.random.default_rng(5), 800)
+    t = np.array(times, dtype=np.float64) / 1000
+    n = t.size
+    grasp = np.column_stack(
+        [0.5 + 0.05 * np.cos(2 * np.pi * t), -0.05 + 0.05 * np.sin(2 * np.pi * t), np.full(n, -0.6)]
+    )
+    approach = np.tile([0.7, 0.0, -0.7], (n, 1))
+    closing = np.tile([0.0, 1.0, 0.0], (n, 1))
+    pts = hand_points_for_grasp(grasp, approach, closing, np.full(n, 0.05))
+    with engine.begin() as conn:
+        register_ontology(conn, ontology)
+        for i, sid in enumerate(("a", "b")):
+            insert_session(
+                conn,
+                make_session(sid, worker_id=f"w{i}", site_id=f"x{i}").model_copy(
+                    update={"privacy_state": PrivacyState.APPROVED}
+                ),
+            )
+            insert_labels(conn, [*scenario_labels(sid, times), *world_hand_labels(sid, times, pts)])
+            write_blurred(labeling, sid, times, tmp_path)
+        build_dataset_version(
+            conn, snapshots, load_dataset_policy(ROOT), version_id="dv1",
+            ontology_version="1.0.0", golden_set_version=None, now=FIXED_TIME,
+        )  # fmt: skip
+    r = run_export(
+        engine, root=ROOT, version_id="dv1", fmt="lerobot", target="acme",
+        snapshots=snapshots, labeling=labeling, datasets=datasets, raw_bucket="dlp-raw",
+        policy=policy, ontology=ontology, include_unreviewed=False, splits=None,
+        now=FIXED_TIME, robot="so101",
+    )  # fmt: skip
+    out = tmp_path / "store" / "dlp-datasets" / "exports" / r.record.export_id
+    manifest = json.loads((out / "manifest.json").read_text())
+    meta = json.loads((out / "lerobot" / "meta" / "dlp_retarget.json").read_text())
+    info = json.loads((out / "lerobot" / "meta" / "info.json").read_text())
+    assert r.details["episodes"] == 2 and r.details["loader_check"]["episodes"] == 2
+    assert manifest["robot"]["robot_id"] == "so101"
+    assert manifest["robot"]["model_sha256"] == meta["model_sha256"]
+    assert manifest["robot"]["retarget_version"].startswith("retarget-dls-dls1+r")
+    assert (
+        info["robot_type"] == "so101" and len(info["features"]["observation.state"]["names"]) == 6
+    )
+    reports = meta["episodes"]
+    assert [e["session_id"] for e in reports] == [
+        r.session_pseudonyms["a"],
+        r.session_pseudonyms["b"],
+    ]
+    assert all(e["frames_with_target"] > 0 and e["reachable_fraction"] > 0.9 for e in reports)
+    assert r.label_counts["trajectory3d/human_approved"] == 6
+    assert "w0" not in (out / "lerobot" / "meta" / "dlp_retarget.json").read_text()
+
+
 def test_lerobot_refuses_mixed_aspect_ratios(
     engine: sa.Engine, policy: ExportPolicy, ontology: Ontology, tmp_path: Path
 ) -> None:

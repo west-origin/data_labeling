@@ -1,0 +1,17 @@
+[project]
+name = "dlp-retarget"
+version = "0.1.0"
+description = "사람 손 3D → 로봇 관절 궤적 변환: 로봇 등록, URDF 기구학, IK, 도달 가능성 보고 (ADR 0047)"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "dlp-schema",
+    "numpy>=2.0",
+    "pyyaml>=6.0",
+]
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dlp_retarget"]

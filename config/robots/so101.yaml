@@ -1,0 +1,48 @@
+# 공개 시험 로봇: SO-101 6자유도 팔(5관절 + 평행 그리퍼) (ADR 0047, dlp_retarget.robot).
+# 리타기팅 경로·시험에만 쓰는 공개 모델이다. 고객 로봇 설정·설계 파일은 저장소에 넣지 않고 DLP_ROBOTS_DIR
+# (저장소 밖 디렉터리)에 둔다 (docs/handover/robot-retargeting.md). 저장소 안 설정은 model.public: true여야
+# 로더가 받는다.
+robot_id: so101
+display_name: SO-101 (TheRobotStudio, 공개 시험 모델)
+model:
+  format: urdf
+  # 원본 그대로 (메시 STL은 넣지 않았다. IK는 관절만 읽는다). 바꾸면 sha256을 새로 적는다
+  path: models/so101/so101_new_calib.urdf
+  sha256: 3a65d2d35e68a8d2f0c2cc176d19b884506543c93ba72980145b80abe276022c
+  license: Apache-2.0 (models/so101/LICENSE)
+  source: https://github.com/TheRobotStudio/SO-ARM100 Simulation/SO101/so101_new_calib.urdf (main, 2026-10-17 받음)
+  public: true
+base_link: base_link
+arm:
+  hand: right
+  # 그리퍼 도구 중심점 (URDF의 고정 관절 gripper_frame_joint 자식 링크)
+  tip_link: gripper_frame_link
+  joints: [shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll]
+  # gripper_frame_link 좌표: z = 손목 → 집게 끝 방향(팔을 편 영점 자세에서 로봇 앞), x = 움직이는 집게가
+  # 여닫히는 방향 (그리퍼 관절 축은 y). 고객 로봇은 설계자에게 확인한다
+  approach_axis: [0.0, 0.0, 1.0]
+  closing_axis: [1.0, 0.0, 0.0]
+  gripper:
+    type: parallel
+    joint: gripper
+    # URDF 한계 [-0.1745, 1.7453] rad 중 0을 닫힘, 1.5를 엶으로 본 근사 (공개 모델 문서에 열림 방향 정의 없음)
+    closed: 0.0
+    open: 1.5
+    closed_distance_m: 0.01   # 엄지-검지 끝 거리가 이 이하면 닫힘
+    open_distance_m: 0.09     # 이 이상이면 엶
+  placement:
+    # 에피소드마다 손 잡기 점 평균을 로봇 앞 작업 중심에 두고, 사람 동작을 절반 크기로 옮긴다
+    # (사람 팔 약 0.6 m, SO-101 팔 약 0.4 m). 배율·중심은 고객과 정한다
+    mode: episode_centroid
+    position_scale: 0.5
+    workspace_center: [0.25, 0.0, 0.10]
+ik:
+  position_tolerance_m: 0.01        # 끝단 위치 오차가 이 안이면 도달
+  orientation_mode: approach        # 5자유도 팔: 접근 축만 맞춘다 (축 둘레 회전은 자유)
+  orientation_tolerance_rad: 0.6    # 접근 축 각 오차가 이 안이면 도달 (약 34도)
+  orientation_weight: 0.05          # 회전 1 rad = 위치 5 cm로 본다 (위치 우선)
+  smoothness_weight: 0.01           # 반복 걸음 추가 감쇠 (직전 해 근처 자세 가지로 수렴, 해를 끌어당기지 않음)
+  damping: 0.0001
+  max_iterations: 100
+  restarts: 8
+  velocity_scale: 0.5               # URDF 속도 한계(10 rad/s)의 절반

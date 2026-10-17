@@ -15,6 +15,8 @@ Prefect 서비스가 기동된 것만으로 모든 작업이 영속 큐에서 �
 | 멀티스트림 시각 보정 | [sync pipeline](../../packages/sync/src/dlp_sync/pipeline.py) | `config/policies/sync.yaml` |
 | 탐지·승인·렌더 | [privacy](../../packages/privacy/src/dlp_privacy/)의 `runner.py`, `generation.py`, `rendering.py`, `revocation.py`(블러 변경 뒤 배포 매체 회수 요청), `hold.py`(사고 대응 승인 보류, ADR 0042) | `config/policies/privacy.yaml` |
 | 자동 라벨 초안 | [prelabel runner](../../packages/prelabel/src/dlp_prelabel/runner.py), `adapters/` | `config/policies/prelabel.yaml`, `config/models.yaml` |
+| 바디캠 자세·세션 월드 좌표 3D (ADR 0046) | [prelabel campose](../../packages/prelabel/src/dlp_prelabel/campose.py)(추정기 어댑터·내장 IMU 시각 오도메트리·자세 라벨), `worldframe.py`(월드 좌표 궤적), 러너 `_PoseStage` | `prelabel.yaml camera_pose`·`world_frame` |
+| 로봇 리타기팅 (ADR 0047) | [retarget](../../packages/retarget/src/dlp_retarget/)(로봇 등록·URDF 기구학·IK·도달 보고), [export robot](../../packages/export/src/dlp_export/robot.py)(LeRobot 로봇 모드), `scripts/retarget_mink.py`(격리 환경 mink) | `config/robots/<ID>.yaml`(고객 것은 `DLP_ROBOTS_DIR`), `config/policies/retarget.yaml`, 절차 [robot-retargeting.md](robot-retargeting.md) |
 | 카메라 내부 파라미터·작업자 손 크기 (ADR 0045) | [media calibration](../../packages/media/src/dlp_media/calibration.py)(체커보드·파일), [prelabel palm](../../packages/prelabel/src/dlp_prelabel/palm.py)(손 크기 추정), [등록 저장소](../../packages/schema/src/dlp_schema/db/calibration_repository.py), [CLI](../../packages/cli/src/dlp_cli/calib_cmds.py) | `config/policies/calibration.yaml`, `prelabel.yaml palm_estimate`, 절차 [camera-calibration.md](camera-calibration.md) |
 | 관계·접촉·행동 | [relations](../../packages/relations/src/dlp_relations/), [actions](../../packages/actions/src/dlp_actions/) | 각 단계의 `config/policies/*.yaml` |
 | 설명 영어 번역 (ADR 0043) | [actions](../../packages/actions/src/dlp_actions/)의 `translate.py`(계획·실행), `translators.py`(stub·사내 서버 어댑터, 공통 전송 `dlp_models.vlm`), `translate_policy.py`, [CLI](../../packages/cli/src/dlp_cli/translate_cmds.py)(`dlp actions run` 끝의 자동 번역 포함) | `config/policies/translate.yaml`, `config/models.yaml` external |
@@ -35,7 +37,7 @@ Prefect 서비스가 기동된 것만으로 모든 작업이 영속 큐에서 �
 | 패키지 | 직접 사용하는 내부 패키지 |
 | --- | --- |
 | schema | 없음 |
-| fixtures, media, models, datasets, relations, eval | schema |
+| fixtures, media, models, datasets, relations, retarget, eval | schema |
 | sync | media, schema |
 | privacy | media, models, schema |
 | prelabel | media, models, schema, sync |
@@ -44,9 +46,9 @@ Prefect 서비스가 기동된 것만으로 모든 작업이 영속 큐에서 �
 | aireview | eval, media, models, privacy, schema |
 | review | eval, media, privacy, schema, sync |
 | train | datasets, eval, media, schema |
-| export | datasets, media, privacy, schema |
+| export | datasets, media, privacy, retarget, schema |
 | ops | privacy, review, schema |
-| cli | 나머지 17개 패키지 |
+| cli | 나머지 18개 패키지 |
 
 `schema`에는 계약뿐 아니라 DB 구현도 함께 있다. CLI에는 연결 코드 외에 모델 선택·온톨로지 선택도
 남아 있다. 단순한 계층 구조로 가정해 파일을 옮기기 전에 [후속 과제](known-issues.md)를 확인한다.

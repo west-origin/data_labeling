@@ -44,6 +44,7 @@ import json
 import math
 import os
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -57,6 +58,7 @@ from dlp_export.pseudonym import Pseudonymizer
 from dlp_media.pts import PtsIndex
 from dlp_schema.labels import (
     ActionPayload,
+    CoordinateFrame,
     Hand,
     HandStatePayload,
     KeypointTrackPayload,
@@ -222,7 +224,7 @@ def features(policy: LeRobotPolicy, height: int, width: int) -> dict[str, Any]:
     }  # fmt: skip
 
 
-def _interp(
+def interp_series(
     series: list[tuple[int, NDArray[np.float64]]], t: float, max_gap: int
 ) -> NDArray[np.float64] | None:
     """(시각, 값) 목록에서 t의 값.
@@ -357,7 +359,13 @@ def build_episode(  # noqa: C901
     ] = {}
     for x in preferred(labels):
         p = x.payload
-        if isinstance(p, Trajectory3DPayload) and x.stream_id in (None, stream.stream_id):
+        # 카메라 좌표 궤적만 (세션 월드 좌표 궤적·카메라 자세(ADR 0046)는 state에 섞지 않는다. 로봇
+        # 모드는 월드 좌표 손 점을 `dlp_export.robot`에서 따로 읽는다)
+        if (
+            isinstance(p, Trajectory3DPayload)
+            and p.frame is CoordinateFrame.CAMERA
+            and x.stream_id in (None, stream.stream_id)
+        ):
             traj.setdefault((p.entity_id, p.part), []).append(
                 (
                     [
@@ -377,7 +385,7 @@ def build_episode(  # noqa: C901
         신뢰도는 두 표본 사이 선형 보간이고, 어느 한쪽이라도 없으면 NaN이다.
         """
         for series, x in traj.get((entity, part), []):
-            v = _interp(series, ts, gap)
+            v = interp_series(series, ts, gap)
             if v is not None:
                 return v, x
         return None
@@ -423,7 +431,7 @@ def build_episode(  # noqa: C901
         for hi, hand in enumerate(HANDS):
             # 2D
             for series, x in kp2d[hand]:
-                v = _interp(series, ts, gap)
+                v = interp_series(series, ts, gap)
                 if v is not None:
                     # 양쪽 키프레임에 다 라벨이 있는 관절만 값이 있다. 보임 정도는 둘 중 낮은 쪽
                     # (보간한 v의 내림: 끝점에서는 그 값, 사이에서는 작은 값)
@@ -502,12 +510,40 @@ def build_episode(  # noqa: C901
     )
 
 
+# 사람 모드 프레임 특징 → npz 배열 키 (쓰기 스크립트가 이 대응으로 프레임을 채운다)
+FRAME_ARRAYS = {
+    "observation.state": "state",
+    "action": "action",
+    "annotation.hand_state": "hand_state",
+    "annotation.tool_surface_contact": "tool_surface_contact",
+    "annotation.verb": "verb",
+    "annotation.verification": "verification",
+    "annotation.hand_points_3d_confidence": "hand_points_3d_confidence",
+}
+
+
+@dataclass(frozen=True)
+class PackageOverride:
+    """로봇 모드 등 특징을 바꾼 묶음 (ADR 0047, `dlp_export.robot`).
+
+    features: (높이, 너비) → `features` 대신 쓸 특징 정의 (영상 키 포함, 크기는 줄인 뒤 값).
+    arrays: 특징 → npz 키 (영상 제외 모든 특징).
+    extra: 에피소드마다 npz에 더하거나 바꿀 배열 (episodes와 같은 순서). robot_type: 메타데이터 값.
+    """
+
+    features: Callable[[int, int], dict[str, Any]]
+    arrays: dict[str, str]
+    extra: list[dict[str, NDArray[Any]]]
+    robot_type: str
+
+
 def write_package(
     episodes: list[tuple[Session, Path, Episode]],
     policy: ExportPolicy,
     size: tuple[int, int],
     pkg: Path,
     ids: Pseudonymizer,
+    override: PackageOverride | None = None,
 ) -> Path:
     """격리 환경의 쓰기 스크립트가 읽을 묶음 (package.json + 에피소드마다 npz).
 
@@ -520,6 +556,7 @@ def write_package(
             맞춘다 (h264 요구).
         pkg: 묶음을 쓸 디렉터리 (만든다).
         ids: 가명 함수 (package.json의 session_id는 가명).
+        override: 로봇 모드 특징·배열 (None이면 사람 모드, ADR 0047).
 
     Returns:
         package.json 경로.
@@ -532,23 +569,28 @@ def write_package(
     items: list[dict[str, Any]] = []
     for i, (session, video, ep) in enumerate(episodes):
         npz = pkg / f"episode_{i:06d}.npz"
-        np.savez(
-            npz,
-            frame_index=ep.frame_index,
-            state=ep.state,
-            action=ep.action,
-            hand_state=ep.hand_state,
-            tool_surface_contact=ep.tool_surface_contact,
-            verb=ep.verb,
-            verification=ep.verification,
-            hand_points_3d_confidence=ep.hand_points_3d_confidence,
-        )
+        arrays: dict[str, NDArray[Any]] = {
+            "frame_index": ep.frame_index,
+            "state": ep.state,
+            "action": ep.action,
+            "hand_state": ep.hand_state,
+            "tool_surface_contact": ep.tool_surface_contact,
+            "verb": ep.verb,
+            "verification": ep.verification,
+            "hand_points_3d_confidence": ep.hand_points_3d_confidence,
+        }
+        if override is not None:
+            arrays.update(override.extra[i])
+        np.savez(npz, **arrays)  # pyright: ignore[reportArgumentType]
         items.append({"session_id": ids.session(session.session_id), "video": str(video),
                       "npz": str(npz), "tasks": ep.tasks})  # fmt: skip
+    feats = features(lp, h, w) if override is None else override.features(h, w)
     spec = {
-        "repo_id": lp.repo_id, "fps": lp.fps, "robot_type": lp.robot_type, "vcodec": lp.vcodec,
-        "width": w, "height": h, "features": features(lp, h, w), "episodes": items,
+        "repo_id": lp.repo_id, "fps": lp.fps, "vcodec": lp.vcodec,
+        "robot_type": lp.robot_type if override is None else override.robot_type,
+        "width": w, "height": h, "features": feats, "episodes": items,
         "video_key": video_key(lp),
+        "frame_arrays": FRAME_ARRAYS if override is None else override.arrays,
     }  # fmt: skip
     path = pkg / "package.json"
     path.write_text(json.dumps(spec, ensure_ascii=False), "utf-8")

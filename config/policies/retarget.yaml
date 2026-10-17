@@ -1,0 +1,26 @@
+# 로봇 리타기팅 정책 (ADR 0047, dlp_retarget.policy). 읽는 곳: `dlp export lerobot --robot <ID>` (dlp_export.robot).
+# 로봇마다 다른 값(허용 오차, 배치, 그리퍼, IK 가중치)은 로봇 설정 config/robots/<ID>.yaml(또는 DLP_ROBOTS_DIR)에 둔다.
+# 이 파일과 로봇 설정, 모델 파일 sha256은 리타기팅 판(retarget-...+r..+m..+p..)에 들어가 내보내기 manifest에 남는다.
+
+version: 1
+
+# IK 풀이기: dls(내장 감쇠 최소제곱, numpy, CPU) | mink(MuJoCo 기반 mink, 격리 환경 scripts/retarget-env)
+solver: dls
+
+# 도달하지 못한 프레임: mark(가장 가까운 해 + retarget.reachable=0 표시, 에피소드는 낸다)
+# | drop_episode(아래 비율을 어긴 에피소드는 내보내지 않고 meta/dlp_retarget.json에 이유를 남긴다).
+# 어느 쪽도 목표를 작업 공간 안으로 몰래 잘라 "도달"로 만들지 않는다.
+unreachable: mark
+max_unreachable_fraction: 0.2   # 목표가 있는 프레임 중 도달하지 못한 비율 상한 (drop_episode)
+min_target_fraction: 0.5        # 에피소드 프레임 중 손 목표(월드 좌표 손 3점)가 있어야 하는 비율 하한 (drop_episode)
+
+# 손 점 역할 → 3D 궤적 부위 (frame=world 궤적, 개체 "<손>_hand", ADR 0046)
+hand_parts:
+  wrist: wrist
+  thumb: thumb_tip
+  index: index_tip
+
+# mink 격리 환경 (solver: mink일 때). 의존성(mink, mujoco 등)과 해시는 <project>/uv.lock에 고정한다
+mink:
+  python: "3.12"
+  project: scripts/retarget-env
