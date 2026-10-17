@@ -23,6 +23,8 @@
   `config/robots/`에는 공개 시험 모델만 둔다. 저장소 안 설정이 `public: false`면 로더가 거부한다
   (`test_every_repo_robot_is_a_public_model_with_matching_hash`).
 - 모델 파일은 읽기 전에 sha256을 확인한다. 다르면 거부한다. 해시는 리타기팅 판과 내보내기 manifest에 남는다.
+- `dlp robot check <ID>`: 등록·sha256·관절 연쇄를 확인하고 영점 자세의 끝 링크 축·최대 팔 길이를 보인다
+  (운영자가 접근·닫힘 축과 배치를 정할 때 쓴다).
 - 형식은 URDF만 읽는다 (관절만, 메시·관성 없이). MJCF는 고객에게 URDF를 받거나 변환해 받는다 (MuJoCo의
   URDF 읽기 경로를 mink 풀이기가 이미 쓴다).
 - 공개 시험 모델: **SO-101** (TheRobotStudio/SO-ARM100 `Simulation/SO101/so101_new_calib.urdf`,
