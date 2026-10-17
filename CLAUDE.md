@@ -46,6 +46,9 @@
   알고리즘 모듈의 테스트는 이 생성기로 작성하고, 생성기 출력의 정답을 기준으로 판정한다.
 - `packages/media/` (`dlp_media`) — 세션 수집: 원본 저장소(불변, 멱등), PTS 인덱스, 프록시, IMU 추출기(GPMF·사이드카),
   장갑 Parquet·HDF5 정규화. `dlp ingest <매니페스트>`로 실행한다.
+  카메라 내부 파라미터 등록(`dlp_media.calibration`, ADR 0045): 세션 값 → 기기(`calibration.camera_id`) 등록값
+  (`camera_calibrations`, 추가만) → 화각 근사 순으로 고른다. 작업자 손 크기 사전값은 `worker_hand_sizes`(추가만).
+  `dlp calib intrinsics|import|show|palm|palm-estimate`. 정책은 `config/policies/calibration.yaml`.
 - `packages/sync/` (`dlp_sync`) — 멀티스트림 동기화: QR 슬레이트, 두드림, 오디오·운동 상호상관, 드리프트 보정.
   `dlp sync run <세션>`, `dlp sync adjust <세션> <스트림> <ms>`. 정책은 `config/policies/sync.yaml`.
 - `packages/privacy/` (`dlp_privacy`) — 프라이버시 게이트: 탐지기(YuNet, QR·바코드, OWLv2 오픈 보캐뷸러리, 반사면, 오라클 stub), 추적·보간·유지,
@@ -55,7 +58,7 @@
   `dlp privacy detect|approve|render|audit-sample|hold`. 정책은 `config/policies/privacy.yaml`.
 - `packages/review/` (`dlp_review`) — 검수 도구 연동: CVAT·Label Studio 변환기(무손실 왕복), 작업 생성, reconcile(검수 결과 →
   라벨 이력), 웹훅 수집, 라벨러 워터마크, 역할 경계, 배포 매체 회수 실행기(`dlp_review.revoke`).
-  `dlp review create|collect|verify|serve|register-webhooks|revoke|refresh-urls` (verify: 검수가 끝난 세션을 human_verified로,
+  `dlp review create|collect|verify|serve|register-webhooks|revoke|refresh-urls` (verify: 검수가 끝난 세션을 human_verified로. 설명·3D 궤적 따르기를 먼저 적용하고, `review.yaml verify.automatic`(기본 `camera_pose`)의 자동 라벨은 검수 전이어도 완료를 막지 않는다(검수 상태는 그대로), ADR 0050,
   revoke: 블러가 바뀐 뒤 이미 배포한 라벨링 매체 회수, 대기가 남으면 종료 코드 4, ADR 0039. `revoke --orphans`: DB 기록 없이
   남은 도구 작업·사본 정리(기본 보고만, `--apply`일 때 삭제). refresh-urls: 열린 Label Studio 작업의 서명 URL 다시 서명).
   Label Studio 결과는 담당자 계정(`review.yaml label_studio.users`)이 낸 주석만 받는다.
@@ -74,7 +77,17 @@
   Oracle stub, 장갑·영상 접촉, 3인칭 착용자 매칭. `dlp prelabel run <세션>`. 정책은 `config/policies/prelabel.yaml`.
   손 키프레임에는 MediaPipe 손 중심 3D 점(`KeypointFrame.world`, 선택, 검수 도구로 보내지 않고 사람이 고친 트랙에는
   없음)을 싣고, 손목·다섯 손가락 끝 3D(카메라 좌표)는 그 손 모양 + 2D 투영 + 손바닥 깊이·손 크기 사전값으로 맞춘다
-  (`dlp_prelabel.handfit`, ADR 0044. world가 없거나 맞춤이 나쁘면 관절별 깊이). 월드 좌표는 SLAM 뒤(F-PAR-26).
+  (`dlp_prelabel.handfit`, ADR 0044. world가 없거나 맞춤이 나쁘면 관절별 깊이). 표본마다 방식·신뢰도, 궤적마다 내부
+  파라미터 출처를 남기고 작업자 손 크기(`dlp_prelabel.palm`)를 우선한다 (ADR 0045).
+  바디캠 6자유도 자세(IMU 회전 + 깊이 기반 이동, `dlp_prelabel.campose`)와 월드 좌표 3D 궤적(`dlp_prelabel.worldframe`,
+  ADR 0046). 3D 궤적(손 관절·박스 중심, 카메라·월드 좌표)은 `derived_from`의 2D 트랙 검수를 물려받고
+  (`dlp_schema.trajectory_follow`, 기록 `trajectory_inheritance`, ADR 0048·0050), 물려받기만 한 3D의 출처가 바뀌면
+  궤적 따르기가 지운다. 3D·월드 단계 뒤와 수집·`dlp review verify`에서 적용한다(세션 잠금, 멱등). 카메라 자세
+  (entity `camera`)는 사람 검수 대상이 아닌 자동 라벨이다.
+- `packages/retarget/` (`dlp_retarget`) — 고객 로봇 리타기팅(ADR 0047): 로봇 등록(`config/robots/<ID>.yaml`, 모델 sha256,
+  고객 모델 파일은 저장소 밖 `DLP_ROBOTS_DIR`), URDF 기구학, 손 → 끝단 목표·평행 그리퍼, 관절·속도 한계 IK(내장, mink는
+  격리 환경 `scripts/retarget-env`), 닿지 못한 프레임은 자르지 않고 표시. `dlp robot check <ID>`,
+  `dlp export lerobot --robot <ID>`. 정책은 `config/policies/retarget.yaml`.
 - `packages/relations/` (`dlp_relations`) — 관계 도출(YAML 규칙 엔진, `derived_by`=규칙 ID), 도구-표면 접촉(작용부-평면 거리),
   표면 커버리지. `dlp relations run <세션>` (멱등, 규칙 변경 시 차이만 반영). 정책은 `config/policies/relations.yaml`.
 - `packages/actions/` (`dlp_actions`) — 행동 구간 2단 구조: 손목 속도·접촉으로 경계 후보 → VLM이 온톨로지 안에서 분류·설명
@@ -110,15 +123,19 @@
   데이터셋 버전 스냅샷에서, 검증 정책 적용, 블러본만. 작업자·장소 ID는 내보내기마다 다른 가명(HMAC). 내보내기 이력은
   올리기 전에 따로 커밋한다. 세션·라벨 ID도 내보내기마다 다른 가명이고(이력에는 내부 ID, 세션 대응표는 내부 경로),
   manifest에 파일 목록과 sha256을 넣는다 (ADR 0027). `dlp export coco|intervals|lerobot`. 정책은 `config/policies/export.yaml`.
-  온톨로지 한·영 이름을 싣는다(COCO 범주 `name_ko`·`name_en`, 구간 JSON `term_names` 형식 1.1, LeRobot 어휘 `term_names`).
+  온톨로지 한·영 이름을 싣는다(COCO 범주 `name_ko`·`name_en`, 구간 JSON `term_names` 형식 1.2, LeRobot 어휘 `term_names`).
   설명은 언어마다 한 레코드(ko·en)이고 번역의 `source_label_id`도 가명 라벨 ID다 (ADR 0043).
   LeRobot은 격리된 일회용 환경(`scripts/lerobot_write.py`, `scripts/lerobot_check.py`)에서 공식 API로 쓰고 읽는다.
+  객체 물리 사전값(재질·촉감·질량·마찰, ADR 0049)은 세 형식 모두 `measured: false`로 싣는다 (측정값 아님).
+  manifest `verification_policy.trajectory3d`는 3D 검수 근거(2D에서 물려받음, `camera_pose: automatic_unreviewed`,
+  `pose_derived`, 근거별 수)를 밝히고, 끊긴 물려받은 3D는 옵션과 관계없이 넣지 않는다 (ADR 0048·0050).
 - `packages/ops/` (`dlp_ops`) — 운영 대시보드와 보안: 주간 운영 지표(검수 시간·수정률·자동 승인율·편향·발견율·
   잔여 블러 누락·원가, AI 1차 검수 절: 백로그·fallback·캐시 적중·장비 시간·ok 놓침 상한)와 경고, 원본 접근 월간 감사
   리포트, 원본 보관 만료 알림·결정.
   `dlp ops weekly|audit-report|retention|retention-decide|log-work|privacy-audit`. 정책은 `config/policies/ops.yaml`.
 - `config/` — 온톨로지·정책·기본값 YAML. 코드에 값을 하드코딩하지 않는다.
   온톨로지 항목은 한국어 `ko`와 영어 `en` 표시 이름이 모두 필수다 (ID는 영어 snake_case, 라벨에는 ID만, ADR 0043).
+  객체 물리 사전값(`physical_priors`: 재질·촉감·질량·마찰 범위, 출처는 사전값만)은 `config/ontology/v1/physics.yaml` 어휘를 쓴다 (ADR 0049).
 - `schemas/` — 생성된 JSON Schema. 직접 편집하지 않는다 (`make schemas`).
 - `services/` — 개발용 docker compose (PostgreSQL, SeaweedFS S3, Label Studio, Prefect, MLflow, lakeFS), CVAT 실행 스크립트.
 - `tests/` — 패키지를 가로지르는 통합 테스트.
@@ -155,11 +172,14 @@
   넣고, 일반 단계는 전체 이력(`get_labels`)으로 재실행을 정한다.
   프라이버시는 최신 완료 세대의 활성 버전 집합으로 정하며, 과거 정책 복귀도 새 세대다 (ADR 0033). 버전이 바뀌면 검수 전인 이전 버전만
   `retractions()`로 지운다. 검수자가 승인·표본 검증한 라벨은 어떤 단계도 지우지 않는다 (ADR 0015, 0019).
-  좁은 예외 하나: 행동 검수를 물려받기만 한 모델 설명은 물려준 행동이 다음 회차에 의미가 다시 바뀌거나 지워지면
-  설명 따르기(`review-follow-1`)만 지울 수 있다 (ADR 0043 3절 규칙 6). "물려받기만 함"은 추정하지 않고 명시
-  기록(`description_inheritance`, 추가만, 물려받는 `record_review`와 같은 트랜잭션)으로만 정한다: 설명의 지금
-  검수 상태가 그 설명의 마지막 물려받기 기록과 같을 때뿐이다. 기록 없는 검수(검수자·시각이 우연히 행동과 같아도)와
-  기록 뒤 직접 검수, 사람이 쓰거나 고친 설명은 보호한다.
+  좁은 예외 둘. (1) 행동 검수를 물려받기만 한 모델 설명은 물려준 행동이 다음 회차에 의미가 다시 바뀌거나 지워지면
+  설명 따르기(`review-follow-1`)만 지울 수 있다 (ADR 0043 3절 규칙 6). (2) 2D 트랙(손 키포인트·객체 박스) 검수를
+  물려받기만 한 모델 3D 궤적은 출처(`derived_from`의 2D 트랙, 월드 좌표면 카메라 좌표 궤적·카메라 자세)가 바뀌거나
+  지워지면 궤적 따르기(`trajectory-follow-1`)만 지울 수 있다 (ADR 0048·0050). "물려받기만 함"은 추정하지 않고 명시
+  기록(설명 `description_inheritance`, 3D `trajectory_inheritance`, 추가만, 물려받는 `record_review`와 같은
+  트랜잭션)으로만 정한다: 그 라벨의 지금 검수 상태가 마지막 물려받기 기록과 같을 때뿐이다. 저장 검증
+  (`label_validation`)은 같은 이력으로 다시 계산한 따르기 계획이 지우는 것만 허용한다. 기록 없는 검수(검수자·시각이
+  우연히 같아도)와 기록 뒤 직접 검수, 사람이 쓰거나 고친 라벨은 보호한다.
 - 내보내기는 데이터셋 버전에서만 만들고(`dlp_export`), 기본은 사람이 만들거나 승인·수정·표본 검증한 라벨만 넣는다.
   미검수는 명시적 옵션으로만. 블러 라벨·원본 위치·검수자 ID는 어떤 형식에도 넣지 않는다.
 - 원본 버킷 저장소는 `dlp_cli.raw_access.raw_store`(감사 저장소)로만 만든다 (DB 없는 로컬 개발은
