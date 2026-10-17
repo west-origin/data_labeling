@@ -302,6 +302,14 @@ def lift_tracks(
     return out
 
 
+def _source_of(
+    inputs: dict[tuple[str, bool], str], entity: str, part: str | None
+) -> tuple[str, ...] | None:
+    """(개체, 부위) 궤적을 올린 입력 트랙 ID (손 관절이면 손 트랙, 박스 중심이면 박스 트랙)."""
+    found = inputs.get((entity, part is not None))
+    return None if found is None else (found,)
+
+
 def with_palm(policy: DepthPolicy, palm_m: float | None) -> DepthPolicy:
     """손 크기 사전값을 작업자 값으로 바꾼 depth 정책 사본 (None이면 그대로, ADR 0045)."""
     if palm_m is None:
@@ -319,9 +327,10 @@ def mean_confidence(samples: Iterable[Trajectory3DSample]) -> float:
 class DepthLifter:
     """메트릭 깊이 3D 단계. 러너가 Predictor 목록과 따로 부른다 (입력이 영상 + 다른 라벨이다).
 
-    name: "depth3d". version: `depth3d-<가중치 버전>+hf2+p<depth 절 해시>` (hf1: 손 중심 3D 점
-    맞춤 판, ADR 0044. hf2: 표본별 방식·신뢰도, ADR 0045. 러너가 입력 해시와 손 크기 사전값 출처
-    `+hp<w|p>`를 더 붙인다).
+    name: "depth3d". version: `depth3d-<가중치 버전>+hf3+p<depth 절 해시>` (hf1: 손 중심 3D 점
+    맞춤 판, ADR 0044. hf2: 표본별 방식·신뢰도, ADR 0045. hf3: 궤적마다 입력 트랙 ID
+    `derived_from`, ADR 0048 — 3D가 2D 손 트랙 검수를 물려받는 근거. 러너가 입력 해시와 손 크기
+    사전값 출처 `+hp<w|p>`를 더 붙인다).
     """
 
     name = "depth3d"
@@ -334,7 +343,7 @@ class DepthLifter:
                 건너뛴다.
         """
         self.path, version = resolve(root, policy.models.depth)
-        self.version = f"depth3d-{version}+hf2+p{policy.digest('depth')}"
+        self.version = f"depth3d-{version}+hf3+p{policy.digest('depth')}"
         self.policy, self.now = policy, now
         self.model: DepthModel | None = None
 
@@ -372,7 +381,9 @@ class DepthLifter:
         Returns:
             (개체, 부위)마다 trajectory3d 라벨 하나. ID는
             `<세션>-<스트림>-3d-<version_tag>-<개체>-<부위|center>`. 표본마다 방식·신뢰도를 싣고,
-            라벨 신뢰도는 표본 신뢰도의 평균(소수 셋째 자리)이다. DB에는 쓰지 않는다 (러너가 쓴다).
+            라벨 신뢰도는 표본 신뢰도의 평균(소수 셋째 자리)이다. `derived_from`은 그 개체를 올린
+            입력 트랙의 라벨 ID 하나다 (ADR 0048: 손 3D가 그 2D 트랙의 검수를 물려받는 근거).
+            DB에는 쓰지 않는다 (러너가 쓴다).
 
         Raises:
             ValueError: tracks에 같은 (개체, 트랙 종류) 트랙이 둘 이상일 때 (`lift_tracks`).
@@ -382,6 +393,14 @@ class DepthLifter:
         policy = with_palm(self.policy.depth, palm_m)
         samples = lift_tracks(iter_frames(video), self.depth_model(), tracks, calib, policy)
         intrinsics = IntrinsicsSource.HFOV_APPROX if calib is None else IntrinsicsSource.CALIBRATED
+        # 개체 → 올린 입력 트랙 (같은 개체의 손·박스 트랙이 함께 오면 part로 가른다: 손은 관절 이름,
+        # 박스는 None)
+        inputs = {
+            (t.payload.entity_id, isinstance(t.payload, KeypointTrackPayload)): t.label_id
+            for t in tracks
+            if lift_key(t.payload) is not None
+            and isinstance(t.payload, KeypointTrackPayload | BoxTrackPayload)
+        }
         out: list[LabelRecord] = []
         for (entity, part), ss in sorted(
             samples.items(), key=lambda kv: (kv[0][0], kv[0][1] or "")
@@ -393,6 +412,7 @@ class DepthLifter:
                 source_3d=Source3D.MONO_DEPTH,
                 samples=tuple(ss),
                 intrinsics=intrinsics,
+                derived_from=_source_of(inputs, entity, part),
             )
             tag = version_tag(model_version)
             out.append(

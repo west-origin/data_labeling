@@ -20,6 +20,7 @@ from dlp_prelabel.runner import (
     drop_protected_trajectories,
     pick_hand_tracks,
     pick_lift_tracks,
+    pick_world_inputs,
     wearer_copy,
 )
 from dlp_schema.config import repo_root
@@ -114,8 +115,27 @@ def test_new_trajectories_for_reviewed_entity_parts_are_dropped() -> None:
         _traj("new-tip", "hand_right", "index_tip"),
         _traj("new-rag", "rag_01", None),
     ]
-    kept = drop_protected_trajectories(new, current)
+    kept = drop_protected_trajectories(new, current, frozenset())
     assert [x.label_id for x in kept] == ["new-tip", "new-rag"]
+
+
+def test_lapsed_inherited_trajectories_do_not_block_or_feed_new_ones() -> None:
+    """ADR 0048: 출처 2D가 바뀌어 물려받은 검수가 끊긴 궤적(lapsed)은 지우지 못하지만, 새 궤적을
+    막지 않고(보호 판정에서 뺀다) 월드 좌표 단계 입력으로도 고르지 않는다.
+
+    정답: 끊긴 승인 손목 궤적이 있어도 새 손목 궤적이 남고, 월드 입력은 끊긴 것 대신 새 것이다.
+    끊기지 않은 승인 궤적은 그대로 새 것을 막는다.
+    """
+    current = [
+        _traj("old-wrist", "hand_right", "wrist", verification=APPROVED),
+        _traj("old-tip", "hand_right", "index_tip", verification=APPROVED),
+    ]
+    new = [_traj("new-wrist", "hand_right", "wrist"), _traj("new-tip", "hand_right", "index_tip")]
+    lapsed = frozenset({"old-wrist"})
+    kept = drop_protected_trajectories(new, current, lapsed)
+    assert [x.label_id for x in kept] == ["new-wrist"]
+    _, cams = pick_world_inputs([*current, kept[0]], "bodycam", lapsed)
+    assert sorted(x.label_id for x in cams) == ["new-wrist", "old-tip"]
 
 
 def _person(label_id: str, **kw: Any) -> LabelRecord:

@@ -96,7 +96,8 @@ def test_missing_selected_prelabel_model_requires_explicit_partial_run(
         hands.side_effect = ModelUnavailableError("weights missing")
         run.return_value = SimpleNamespace(
             produced={}, skipped=[], lifted=0, contacts=0, person_contacts=0, wearer=None,
-            poses=0, world=0, pose_note=None, pose_lost_at_ms=None,
+            poses=0, world=0, pose_note=None, pose_lost_at_ms=None, trajectories_inherited=0,
+            trajectories_lapsed=0,
         )  # fmt: skip
         assert cmd_run(args) == (0 if allow_partial else 1)
     assert run.call_count == int(allow_partial)

@@ -218,3 +218,5 @@ def test_coexisting_hand_versions_lift_from_the_reviewed_track(tmp_path: Path) -
         assert isinstance(x.payload, Trajectory3DPayload)
         assert [s.t_ms for s in x.payload.samples] == [0, 200, 400, 600, 800]
         assert {(s.x, s.z) for s in x.payload.samples} == {(-0.5, 1.0)}
+        # 올린 2D 트랙이 출처로 남는다 (3D가 그 트랙의 검수를 물려받는 근거, ADR 0048)
+        assert x.payload.derived_from == ("left-v1",)

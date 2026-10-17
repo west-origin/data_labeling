@@ -1165,3 +1165,82 @@ def test_camera_pose_and_world_trajectories_are_idempotent_and_keep_reviewed(
         )
     assert third.poses == 0 and third.world == 0
     assert third.pose_note is not None and "외부 파라미터" in third.pose_note
+
+
+def test_3d_inherits_the_approved_2d_track_and_regenerates_after_correction(
+    pg: sa.Engine, tmp_path: Path
+) -> None:
+    """F-COE-19 (ADR 0048): 3D 손 궤적은 그것을 계산한 2D 손 트랙의 검수를 물려받는다.
+
+    시나리오와 정답
+    1. 2D 손 트랙을 승인한 뒤 3D 단계를 돌리면 hand_points 수만큼 3D가 생기고(derived_from = 그
+       트랙), 같은 실행에서 human_approved·rev01을 물려받는다 (기록 경로 prelabel).
+    2. 검수자가 2D를 고치면(사람 수정 레코드) 물려받은 3D는 끊김이 되지만 지우지 않는다. 다음
+       실행은 고친 2D로 새 3D를 그 옆에 만들고(끊긴 3D가 막지 않는다), 새 3D가 고친 2D의 검수를
+       물려받는다. 새 3D 표본은 고친 트랙만 올린 `lift_tracks` 결과와 같다.
+    3. 다시 돌리면 아무것도 바뀌지 않는다 (멱등).
+    """
+    from dlp_schema.db.repository import get_trajectory_inheritance
+    from dlp_schema.labels import Verification, without_world
+    from dlp_schema.review import TrajectoryInheritanceMechanism
+
+    actions = generate_action_scenario(1, n_units=2)
+    sid, raw = _bodycam_only_session(pg, tmp_path, actions.frame_times, "inherit")
+    policy, ontology = load_policy(ROOT), load_ontology(ROOT / "config/ontology/v1")
+    hands: list[Predictor] = [
+        OraclePredictor("hands", actions.labels, ("keypoint_track",), now=FIXED_TIME)
+    ]
+    lifter = _UnitLifter(policy)
+    n = len(policy.depth.hand_points)
+    with pg.begin() as conn:
+        run_prelabel(conn, sid, raw, hands, policy, ontology, FIXED_TIME)
+        [track] = get_labels(conn, sid, kinds=["keypoint_track"])
+        record_review(conn, track.label_id, VerificationState.HUMAN_APPROVED, "rev01", FIXED_TIME)
+        first = run_prelabel(conn, sid, raw, hands, policy, ontology, FIXED_TIME, lifter=lifter)
+        lifted = get_labels(conn, sid, kinds=["trajectory3d"])
+        records = get_trajectory_inheritance(conn, sid)
+    assert first.lifted == len(lifted) == n and first.trajectories_inherited == n
+    for x in lifted:
+        assert isinstance(x.payload, Trajectory3DPayload)
+        assert x.payload.derived_from == (track.label_id,)
+        assert (x.verification.state, x.verification.reviewer_id) == (
+            VerificationState.HUMAN_APPROVED, "rev01",
+        )  # fmt: skip
+    assert {r.mechanism for r in records} == {TrajectoryInheritanceMechanism.PRELABEL}
+
+    # 검수자가 2D를 고쳤다 (CVAT 수집이 남기는 것과 같은 사람 수정 레코드, world 점 없음)
+    assert isinstance(track.payload, KeypointTrackPayload)
+    moved = tuple(
+        f.model_copy(
+            update={"points": tuple(p.model_copy(update={"x": p.x + 4.0}) for p in f.points)}
+        )
+        for f in without_world(track.payload).keyframes
+    )
+    fixed = make_label(
+        track.payload.model_copy(update={"keyframes": moved}),
+        label_id=f"{track.label_id}:fix", t_start_ms=track.t_start_ms, t_end_ms=track.t_end_ms,
+        session_id=sid, stream_id=track.stream_id, parent_label_id=track.label_id,
+        verification=Verification(
+            state=VerificationState.HUMAN_CORRECTED, reviewer_id="rev01", reviewed_at=FIXED_TIME
+        ),
+    )  # fmt: skip
+    with pg.begin() as conn:
+        insert_labels(conn, [fixed])
+        second = run_prelabel(conn, sid, raw, hands, policy, ontology, FIXED_TIME, lifter=lifter)
+        third = run_prelabel(conn, sid, raw, hands, policy, ontology, FIXED_TIME, lifter=lifter)
+        history = get_labels(conn, sid, kinds=["trajectory3d"])
+    assert second.lifted == n and second.trajectories_inherited == n
+    assert second.trajectories_lapsed == n == third.trajectories_lapsed
+    assert third.lifted == 0 and third.trajectories_inherited == 0
+    live = current_labels(history)
+    old_ids = {x.label_id for x in lifted}
+    assert old_ids <= {x.label_id for x in live}  # 끊긴 3D도 지우지 않는다
+    assert not any(x.retracted for x in history)
+    expected = _lifted_from(tmp_path / "bodycam.mp4", fixed, policy)
+    new = [x for x in live if x.label_id not in old_ids]
+    assert len(new) == n
+    for x in new:
+        assert isinstance(x.payload, Trajectory3DPayload)
+        assert x.payload.derived_from == (fixed.label_id,)
+        assert x.verification.state is VerificationState.HUMAN_APPROVED
+        assert list(x.payload.samples) == expected[(x.payload.entity_id, x.payload.part)]

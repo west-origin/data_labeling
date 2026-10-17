@@ -167,6 +167,12 @@ def cmd_run(args: argparse.Namespace) -> int:
     else:
         lost = f", {s.pose_lost_at_ms} ms부터 추적을 잃음" if s.pose_lost_at_ms is not None else ""
         print(f"카메라 자세 표본 {s.poses}개{lost}, 월드 좌표 3D 궤적 {s.world}개")
+    if s.trajectories_inherited or s.trajectories_lapsed:
+        # 3D 손 궤적은 그것을 계산한 2D 손 트랙의 검수를 물려받는다 (ADR 0048)
+        print(
+            f"3D 손 궤적: 2D 손 트랙 검수 물려받음 {s.trajectories_inherited}, "
+            f"출처 2D가 바뀌어 끊김 {s.trajectories_lapsed} (지우지 않음, 내보내기에서 빠짐)"
+        )
     if s.person_contacts:
         # 사람 박스 접촉은 부위(body_part)를 몰라 손 상태 라벨을 만들지 않았다 (F-PAR-03)
         print(

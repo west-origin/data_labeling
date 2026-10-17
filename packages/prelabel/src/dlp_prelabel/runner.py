@@ -24,6 +24,10 @@
    하나와 바디캠의 현재 카메라 좌표 궤적((개체, 부위)마다 하나)으로 월드 좌표 궤적을 만든다
    (`_PoseStage.world`). 두 단계 모두 버전에 정책 절 해시와 입력 해시를 넣고, 입력이 바뀌면 검수
    전인 이전 결과만 지운다.
+   3D 손 궤적은 그것을 계산한 2D 손 트랙의 검수를 물려받는다 (ADR 0048): 3D·월드 좌표 단계 뒤
+   `apply_trajectory_follow`(경로 prelabel)가 이미 확인된 2D에서 만든 새 3D에 검수 상태와
+   물려받기 기록을 쓴다. 출처 2D가 고쳐져 끊긴 물려받은 3D(`lapsed_trajectories`)는 지우지 않고,
+   보호 판정·월드 좌표 입력에서 빼서 고친 2D로 만든 새 3D가 그 옆에 들어가게 한다.
 6. 프라이버시 승인 상태의 세션은 생애주기를 prelabeled로 옮긴다.
 
 진입점: `dlp prelabel run <세션>` (`dlp_cli.prelabel_cmds`)이 어댑터·깊이 단계를 만들고, 원본
@@ -73,7 +77,14 @@ from dlp_prelabel.wearer import match_wearer, wrist_speed
 from dlp_prelabel.worldframe import world_label
 from dlp_schema.config import repo_root
 from dlp_schema.db.calibration_repository import session_intrinsics, session_palm
-from dlp_schema.db.repository import get_labels, get_session, insert_labels, set_lifecycle
+from dlp_schema.db.repository import (
+    get_labels,
+    get_session,
+    get_trajectory_inheritance,
+    insert_labels,
+    set_lifecycle,
+)
+from dlp_schema.db.trajectory_repository import apply_trajectory_follow
 from dlp_schema.episode import (
     current_labels,
     is_protected,
@@ -98,7 +109,9 @@ from dlp_schema.labels import (
 )
 from dlp_schema.ontology import Ontology
 from dlp_schema.predictor import Clip, Predictor
+from dlp_schema.review import TrajectoryInheritanceMechanism
 from dlp_schema.session import LifecycleState, Session, Stream, StreamKind, SyncMethod
+from dlp_schema.trajectory_follow import lapsed_trajectories
 from dlp_sync.policy import load_policy as load_sync_policy
 from dlp_sync.signals import glove_series, imu_series
 
@@ -164,6 +177,8 @@ class PrelabelSummary:
     retracted: 예측기 단계(1)의 이전 버전과 배포 모델이 대신한 기본 어댑터·접촉 단계에서 지운 라벨
     수 (3D·접촉 단계가 새 버전으로 지운 수는 세지 않는다). lifted: 새 3D 궤적 수.
     wearer: 착용자로 찾은 원래 트랙 라벨 ID. wearer_scores: 인물(라벨 ID)별 상관.
+    trajectories_inherited: 2D 손 트랙 검수를 물려받은 3D 궤적 수. trajectories_lapsed: 출처 2D가
+    바뀌어 물려받음이 끊긴 3D 궤적 수 (지우지 않음, 내보내기에서 빠짐, ADR 0048).
     """
 
     produced: dict[str, int] = field(default_factory=dict[str, int])  # "스트림/predictor" → 라벨 수
@@ -180,6 +195,20 @@ class PrelabelSummary:
     pose_lost_at_ms: int | None = None
     wearer: str | None = None
     wearer_scores: dict[str, float] = field(default_factory=dict[str, float])
+    trajectories_inherited: int = 0
+    trajectories_lapsed: int = 0
+
+
+def _follow(conn: sa.Connection, session_id: str, now: datetime, summary: PrelabelSummary) -> None:
+    """3D 궤적이 출처 2D 손 트랙의 검수를 물려받게 한다 (ADR 0048, 세션 잠금, 멱등)."""
+    plan = apply_trajectory_follow(conn, session_id, now, TrajectoryInheritanceMechanism.PRELABEL)
+    summary.trajectories_inherited += len(plan.approve)
+    summary.trajectories_lapsed = len(plan.lapsed)
+
+
+def _lapsed(conn: sa.Connection, session_id: str, history: list[LabelRecord]) -> frozenset[str]:
+    """출처가 끊긴 물려받은 3D 궤적 (보호 판정·월드 좌표 입력에서 뺀다, ADR 0048)."""
+    return lapsed_trajectories(history, get_trajectory_inheritance(conn, session_id))
 
 
 def _fetch(store: ObjectStore, uri: str, work: Path) -> Path:
@@ -302,12 +331,15 @@ def run_prelabel(
         current = current_labels(history)
         if lifter is not None:
             summary.lifted = _lift(conn, session, history, current, raw, work, lifter, now)
+        # 새 카메라 좌표 3D가 확인된 2D의 검수를 물려받은 뒤 월드 좌표 단계가 입력을 고른다
+        _follow(conn, session_id, now, summary)
         if policy.camera_pose.enabled:
             stage = _PoseStage(conn, session, raw, work, policy, now, summary)
             stage.camera_pose(get_labels(conn, session_id), lifter, pose_estimator)
             stage.world(get_labels(conn, session_id))
-            history = get_labels(conn, session_id)
-            current = current_labels(history)
+            _follow(conn, session_id, now, summary)
+        history = get_labels(conn, session_id)
+        current = current_labels(history)
         if CONTACT_STEP not in replaced:
             _contacts(
                 conn, session, history, current, raw, work, policy, ontology, now, prefixes, summary
@@ -403,16 +435,20 @@ def _trajectory_key(p: Trajectory3DPayload) -> tuple[str, str | None, str]:
 
 
 def drop_protected_trajectories(
-    labels: list[LabelRecord], current: list[LabelRecord]
+    labels: list[LabelRecord], current: list[LabelRecord], lapsed: frozenset[str]
 ) -> list[LabelRecord]:
     """새 3D 궤적 중 같은 (개체, 부위, 좌표계)의 검수된·사람 궤적이 이미 있는 것을 버린다.
 
     ADR 0026: 검수된 결과는 지우지 않으므로, 같은 대상의 모델 궤적을 옆에 또 넣으면 중복이 된다.
+    단 출처 2D가 바뀌어 물려받음이 끊긴 궤적(lapsed, ADR 0048)은 막지 않는다: 그 궤적은 낡았고
+    (지울 수는 없다) 고친 2D로 만든 새 궤적이 그 자리를 이어받는다.
     """
     kept = {
         _trajectory_key(x.payload)
         for x in current
-        if isinstance(x.payload, Trajectory3DPayload) and is_protected(x)
+        if isinstance(x.payload, Trajectory3DPayload)
+        and is_protected(x)
+        and x.label_id not in lapsed
     }
     return [
         x
@@ -495,7 +531,9 @@ def _lift(
         version=version,
         palm_m=palm.palm_m,
     )
-    labels = drop_protected_trajectories(labels, current)
+    labels = drop_protected_trajectories(
+        labels, current, _lapsed(conn, session.session_id, history)
+    )
     insert_labels(conn, [*retractions(stale, version, now), *labels])
     return len(labels)
 
@@ -522,18 +560,23 @@ def imu_to_camera(session: Session, policy: PrelabelPolicy) -> NDArray[np.float6
 
 
 def pick_world_inputs(
-    current: list[LabelRecord], stream_id: str
+    current: list[LabelRecord], stream_id: str, lapsed: frozenset[str]
 ) -> tuple[LabelRecord | None, list[LabelRecord]]:
     """월드 좌표 단계 입력: (현재 카메라 자세 하나, 카메라 좌표 궤적 (개체, 부위)마다 하나).
 
     여럿이면 `track_rank`(사람·검수 → 최신 → 긴 구간 → 라벨 ID)로 고른다. 자세는 그 스트림의
     entity_id="camera"·frame=world 궤적, 카메라 좌표 궤적은 그 스트림의 frame=camera 궤적이다.
+    출처 2D가 바뀌어 물려받음이 끊긴 궤적(lapsed, ADR 0048)은 고르지 않는다 (낡은 3D다).
     """
     pose: LabelRecord | None = None
     cams: dict[tuple[str, str | None], LabelRecord] = {}
     for x in current:
         p = x.payload
-        if x.stream_id != stream_id or not isinstance(p, Trajectory3DPayload):
+        if (
+            x.stream_id != stream_id
+            or not isinstance(p, Trajectory3DPayload)
+            or x.label_id in lapsed
+        ):
             continue
         if is_pose_label(x):
             if pose is None or track_rank(x) > track_rank(pose):
@@ -627,7 +670,8 @@ class _PoseStage:
             ontology_version=session.ontology_version or "", now=self.now,
         )  # fmt: skip
         current = current_labels(history)
-        new = drop_protected_trajectories([label] if label else [], current)
+        lapsed = _lapsed(self.conn, session.session_id, history)
+        new = drop_protected_trajectories([label] if label else [], current, lapsed)
         stale = _stale(history, f"{session.session_id}-{body.stream_id}-campose-", version)
         insert_labels(self.conn, [*retractions(stale, version, self.now), *new])
         self.summary.poses = len(track.samples) if new else 0
@@ -641,7 +685,8 @@ class _PoseStage:
         """
         session, body = self.session, self.session.reference_stream.stream_id
         current = current_labels(history)
-        pose, cams = pick_world_inputs(current, body)
+        lapsed = _lapsed(self.conn, session.session_id, history)
+        pose, cams = pick_world_inputs(current, body, lapsed)
         inputs = [pose, *cams] if pose is not None else []
         version = f"{WORLD_PREFIX}+p{self.policy.digest('world_frame')}+i{input_digest(inputs)}"
         if any(x.provenance.model_version == version for x in history):
@@ -655,7 +700,7 @@ class _PoseStage:
                 lbl = world_label(cam, pose, poses, version=version, max_gap_ms=gap, now=self.now)
                 if lbl is not None:
                     labels.append(lbl)
-        labels = drop_protected_trajectories(labels, current)
+        labels = drop_protected_trajectories(labels, current, lapsed)
         if stale or labels:
             insert_labels(self.conn, [*retractions(stale, version, self.now), *labels])
         self.summary.world = len(labels)
