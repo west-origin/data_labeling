@@ -4,7 +4,7 @@
 - 날짜: 2026-10-19
 - 관련: ADR 0045(3D 표본 방식·신뢰도), ADR 0047(로봇 리타기팅), ADR 0048·0050(3D 검수 물려받기),
   ADR 0049(물리 사전값), ADR 0027(내보내기 가명), ADR 0028(초안 온톨로지 덧붙이기). 전수 검수
-  `docs/handover/full-review-2026-10-17.md` 묶음 C, 문제 레지스트리 F-COE-40~55·F-SCH-20~25.
+  `docs/handover/full-review-2026-10-17.md` 묶음 C, 문제 레지스트리 F-COE-40~56·F-SCH-20~25.
 - 계약 변경:
   - LeRobot 특징 추가 `annotation.hand_points_3d_method`·`annotation.hand_points_3d_intrinsics`·
     `annotation.contact_object_class`, `meta/dlp_vocab.json`의 `object_class`·`hand_point_3d_method`·
