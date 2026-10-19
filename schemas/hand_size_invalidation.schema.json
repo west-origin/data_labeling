@@ -1,0 +1,48 @@
+{
+  "additionalProperties": false,
+  "description": "손 크기 등록 무효 기록 한 건 (추가만, ADR 0052, `dlp calib palm-revoke`).\n\nrecord_id가 있으면 그 등록 하나, None이면 그 작업자의 created_at 이전(같은 시각 포함) 모든\n등록을 무효로 한다. 무효 뒤에 새로 등록한 값(동의를 다시 받은 뒤 잰 값 등)은 다시 쓰인다.",
+  "properties": {
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "invalidation_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Invalidation Id",
+      "type": "string"
+    },
+    "reason": {
+      "maxLength": 500,
+      "minLength": 1,
+      "title": "Reason",
+      "type": "string"
+    },
+    "record_id": {
+      "anyOf": [
+        {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Record Id"
+    },
+    "worker_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Worker Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "invalidation_id",
+    "worker_id",
+    "reason",
+    "created_at"
+  ],
+  "title": "HandSizeInvalidation",
+  "type": "object"
+}

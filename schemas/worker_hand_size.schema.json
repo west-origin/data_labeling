@@ -1,0 +1,86 @@
+{
+  "$defs": {
+    "HandSizeSource": {
+      "description": "작업자 손 크기 값의 출처.",
+      "enum": [
+        "measured",
+        "estimated"
+      ],
+      "title": "HandSizeSource",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "작업자 손바닥 길이(손목 → 중지 MCP) 등록 한 건 (추가만, 늦게 등록한 유효한 것이 앞선다).",
+  "properties": {
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "estimator": {
+      "anyOf": [
+        {
+          "maxLength": 256,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Estimator"
+    },
+    "n_samples": {
+      "anyOf": [
+        {
+          "minimum": 1,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "N Samples"
+    },
+    "palm_m": {
+      "exclusiveMaximum": 0.16,
+      "exclusiveMinimum": 0.04,
+      "title": "Palm M",
+      "type": "number"
+    },
+    "record_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Record Id",
+      "type": "string"
+    },
+    "source": {
+      "$ref": "#/$defs/HandSizeSource"
+    },
+    "source_session_ids": {
+      "default": [],
+      "description": "추정 표본을 낸 세션 ID (사용 중지 전파·계보)",
+      "items": {
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+        "type": "string"
+      },
+      "title": "Source Session Ids",
+      "type": "array"
+    },
+    "worker_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Worker Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "record_id",
+    "worker_id",
+    "palm_m",
+    "source",
+    "created_at"
+  ],
+  "title": "WorkerHandSize",
+  "type": "object"
+}

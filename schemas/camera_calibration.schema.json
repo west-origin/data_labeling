@@ -1,0 +1,153 @@
+{
+  "$defs": {
+    "CalibrationMethod": {
+      "description": "캘리브레이션을 얻은 방법.",
+      "enum": [
+        "checkerboard",
+        "imported"
+      ],
+      "title": "CalibrationMethod",
+      "type": "string"
+    },
+    "CameraIntrinsics": {
+      "additionalProperties": false,
+      "properties": {
+        "cx": {
+          "title": "Cx",
+          "type": "number"
+        },
+        "cy": {
+          "title": "Cy",
+          "type": "number"
+        },
+        "distortion": {
+          "default": [],
+          "items": {
+            "type": "number"
+          },
+          "title": "Distortion",
+          "type": "array"
+        },
+        "distortion_model": {
+          "default": "opencv",
+          "title": "Distortion Model",
+          "type": "string"
+        },
+        "fx": {
+          "title": "Fx",
+          "type": "number"
+        },
+        "fy": {
+          "title": "Fy",
+          "type": "number"
+        },
+        "height": {
+          "exclusiveMinimum": 0,
+          "title": "Height",
+          "type": "integer"
+        },
+        "width": {
+          "exclusiveMinimum": 0,
+          "title": "Width",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "width",
+        "height",
+        "fx",
+        "fy",
+        "cx",
+        "cy"
+      ],
+      "title": "CameraIntrinsics",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "카메라 하나의 내부 파라미터 등록 한 건 (추가만, 늦게 등록한 것이 앞선다).",
+  "properties": {
+    "calibration_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Calibration Id",
+      "type": "string"
+    },
+    "camera_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Camera Id",
+      "type": "string"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "intrinsics": {
+      "$ref": "#/$defs/CameraIntrinsics"
+    },
+    "method": {
+      "$ref": "#/$defs/CalibrationMethod"
+    },
+    "n_views": {
+      "anyOf": [
+        {
+          "minimum": 1,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "N Views"
+    },
+    "rms_px": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Rms Px"
+    },
+    "source_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Source Sha256"
+    },
+    "valid_from": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Valid From"
+    }
+  },
+  "required": [
+    "calibration_id",
+    "camera_id",
+    "intrinsics",
+    "method",
+    "created_at"
+  ],
+  "title": "CameraCalibration",
+  "type": "object"
+}

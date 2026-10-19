@@ -28,6 +28,8 @@
       (0019, ADR 0040).
     - camera_calibrations, worker_hand_sizes: 카메라 내부 파라미터·작업자 손 크기 등록, 수정·
       삭제·TRUNCATE 금지 (0022, ADR 0045).
+    - worker_hand_size_sources, worker_hand_size_invalidations, session_camera_assignments: 손 크기
+      추정 출처 세션·손 크기 무효 기록·세션 기기 연결, 수정·삭제·TRUNCATE 금지 (0024, ADR 0052).
 
 열 규약
     - 시각(`Ts`)은 모두 `TIMESTAMP WITH TIME ZONE`. 파이썬 쪽도 시간대 있는 datetime만 쓴다.
@@ -711,8 +713,9 @@ ai_review_outcomes = sa.Table(
 )
 
 # 카메라(바디캠 기기) 내부 파라미터 등록 (`CameraCalibration`, ADR 0045). 추가만 한다 (0022 트리거).
-# 세션은 calibration.camera_id로 기기를 가리키고, 3D 단계가 `calibration.resolve_intrinsics`
-# 규칙(유효 시작 ≤ 녹화 시각 중 가장 늦은 것, 같으면 늦게 등록한 것)으로 고른다.
+# 세션은 calibration.camera_id(또는 session_camera_assignments)로 기기를 가리키고, 3D 단계가
+# `calibration.resolve_intrinsics` 규칙(유효 시작 ≤ 녹화 시각 중 가장 늦은 것, 같으면 늦게 등록한
+# 것)으로 고른다.
 camera_calibrations = sa.Table(
     "camera_calibrations",
     metadata,
@@ -727,8 +730,9 @@ camera_calibrations = sa.Table(
     sa.Column("created_at", Ts, nullable=False),
 )
 
-# 작업자 손바닥 길이 등록 (`WorkerHandSize`, ADR 0045). 추가만 한다 (0022 트리거). 가장 늦게 등록한
-# 값이 그 작업자의 3D 손 맞춤 손 크기 사전값이다. 작업자 ID는 내보내기에 넣지 않는다.
+# 작업자 손바닥 길이 등록 (`WorkerHandSize`, ADR 0045). 추가만 한다 (0022 트리거). 유효한(무효 기록·
+# 출처 세션 사용 중지가 없는) 등록 중 가장 늦은 값이 그 작업자의 3D 손 맞춤 손 크기 사전값이다
+# (ADR 0052). 작업자 ID는 내보내기에 넣지 않는다.
 worker_hand_sizes = sa.Table(
     "worker_hand_sizes",
     metadata,
@@ -737,5 +741,61 @@ worker_hand_sizes = sa.Table(
     sa.Column("palm_m", sa.Float(), nullable=False),
     sa.Column("source", sa.String(32), nullable=False),
     sa.Column("n_samples", sa.Integer(), nullable=True),
+    sa.Column("created_at", Ts, nullable=False),
+    # 추정기 판 (`<깊이 3D 판>+pe<palm_estimate 절 해시>`, 잰 값·0024 이전 추정은 NULL, ADR 0052)
+    sa.Column("estimator", sa.String(256), nullable=True),
+)
+
+# 손 크기 추정 표본을 낸 세션 (`WorkerHandSize.source_session_ids`, ADR 0052). 추가만 한다 (0024
+# 트리거). 출처 세션이 사용 중지되면 그 추정 등록은 결정에서 빠진다 (`calibration.resolve_palm`).
+# 세션 ID 색인은 "이 세션을 출처로 쓴 손 크기" 역조회(계보)에 쓴다.
+worker_hand_size_sources = sa.Table(
+    "worker_hand_size_sources",
+    metadata,
+    sa.Column(
+        "record_id",
+        sa.String(128),
+        sa.ForeignKey("worker_hand_sizes.record_id"),
+        primary_key=True,
+    ),
+    sa.Column(
+        "session_id",
+        sa.String(128),
+        sa.ForeignKey("sessions.session_id"),
+        primary_key=True,
+        index=True,
+    ),
+)
+
+# 손 크기 등록 무효 기록 (`HandSizeInvalidation`, ADR 0052, `dlp calib palm-revoke`). 추가만 한다
+# (0024 트리거). record_id가 NULL이면 그 작업자의 created_at 이전 모든 등록을 무효로 한다.
+worker_hand_size_invalidations = sa.Table(
+    "worker_hand_size_invalidations",
+    metadata,
+    sa.Column("invalidation_id", sa.String(128), primary_key=True),
+    sa.Column("worker_id", sa.String(128), nullable=False, index=True),
+    sa.Column(
+        "record_id", sa.String(128), sa.ForeignKey("worker_hand_sizes.record_id"), nullable=True
+    ),
+    sa.Column("reason", sa.String(500), nullable=False),
+    sa.Column("created_at", Ts, nullable=False),
+)
+
+# 수집 뒤 세션 → 바디캠 기기 연결 (`SessionCameraAssignment`, ADR 0052, `dlp calib assign`). 추가만
+# 한다 (0024 트리거). 매니페스트 calibration.camera_id가 없는 세션에만 쓰이고, 가장 늦은 기록이
+# 쓰인다.
+session_camera_assignments = sa.Table(
+    "session_camera_assignments",
+    metadata,
+    sa.Column("assignment_id", sa.String(128), primary_key=True),
+    sa.Column(
+        "session_id",
+        sa.String(128),
+        sa.ForeignKey("sessions.session_id"),
+        nullable=False,
+        index=True,
+    ),
+    sa.Column("camera_id", sa.String(128), nullable=False),
+    sa.Column("reason", sa.String(500), nullable=False),
     sa.Column("created_at", Ts, nullable=False),
 )

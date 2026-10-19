@@ -1,0 +1,41 @@
+{
+  "additionalProperties": false,
+  "description": "수집 뒤에 세션을 바디캠 기기에 잇는 기록 한 건 (추가만, ADR 0052, `dlp calib assign`).\n\n매니페스트에 camera_id가 없던 세션(ADR 0045 이전 수집 등)에 쓴다. 세션 행(수집 JSON)을 바꾸면\n수집 재실행의 충돌 검사와 부딪히므로 세션 밖 표에 둔다. 가장 늦은 기록이 쓰인다.",
+  "properties": {
+    "assignment_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Assignment Id",
+      "type": "string"
+    },
+    "camera_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Camera Id",
+      "type": "string"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "reason": {
+      "maxLength": 500,
+      "minLength": 1,
+      "title": "Reason",
+      "type": "string"
+    },
+    "session_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Session Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "assignment_id",
+    "session_id",
+    "camera_id",
+    "reason",
+    "created_at"
+  ],
+  "title": "SessionCameraAssignment",
+  "type": "object"
+}
