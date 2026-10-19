@@ -9,6 +9,7 @@
 - `intrinsics`: 렌더에 쓴 내부 파라미터 (정답).
 - `inner_corners`: 보드 안쪽 코너 수 (열, 행). `square_m`: 칸 한 변 (m).
 - `frame_times`: 영상 PTS ms. 자세 하나를 `hold_frames` 프레임 동안 유지한다 (실제 촬영처럼).
+- `tilt_deg`(인자): 보드 기울기 진폭. 0이면 정면만 찍은 퇴화 영상이다 (F-PMS-20 시험).
 
 테스트 사용처: `dlp_media.calibration`(정답 복원 오차), `dlp calib intrinsics` 명령.
 """
@@ -83,14 +84,20 @@ def render_board(
 
 
 def _poses(
-    n: int, rng: np.random.Generator
+    n: int, rng: np.random.Generator, tilt_deg: float
 ) -> list[tuple[NDArray[np.float64], NDArray[np.float64]]]:
-    """기울기(±35도)·회전·거리(0.45~0.75 m)·화면 위치가 다른 보드 자세 n개."""
+    """기울기(진폭 tilt_deg)·회전·거리(0.45~0.75 m)·화면 위치가 다른 보드 자세 n개.
+
+    tilt_deg가 0이면 보드가 늘 영상면과 평행하다 (면내 회전·위치·거리만 바뀐다). 이런 영상은
+    캘리브레이션이 퇴화해 초점 거리가 정해지지 않는다 (`dlp_media.calibration` 모듈 설명).
+    """
     out: list[tuple[NDArray[np.float64], NDArray[np.float64]]] = []
+    # 기울기가 0이면 잡음도 0 (완전히 정면), 아니면 ±0.05 rad(약 3도) 잡음을 더한다
+    jitter = 0.05 if tilt_deg > 0 else 0.0
     for i in range(n):
         a = 2 * np.pi * i / n
-        rx = np.deg2rad(30) * np.sin(a) + rng.uniform(-0.05, 0.05)
-        ry = np.deg2rad(30) * np.cos(a) + rng.uniform(-0.05, 0.05)
+        rx = np.deg2rad(tilt_deg) * np.sin(a) + rng.uniform(-jitter, jitter)
+        ry = np.deg2rad(tilt_deg) * np.cos(a) + rng.uniform(-jitter, jitter)
         rz = rng.uniform(-0.3, 0.3)
         z = rng.uniform(0.45, 0.75)
         center = np.array([rng.uniform(-0.06, 0.06), rng.uniform(-0.04, 0.04), z])
@@ -107,6 +114,7 @@ def generate_checkerboard_video(
     hold_frames: int = 9,
     inner_corners: tuple[int, int] = (8, 6),
     square_m: float = 0.025,
+    tilt_deg: float = 30.0,
 ) -> CheckerboardScenario:
     """체커보드 영상을 path(MP4)에 쓰고 정답을 돌려준다. 같은 인자면 같은 영상이다 (결정적).
 
@@ -116,12 +124,13 @@ def generate_checkerboard_video(
         intrinsics: 정답 내부 파라미터 (기본 640x480, fx 520, fy 515, 주점이 중앙에서 조금 벗어남).
         n_poses: 보드 자세 수. hold_frames: 자세마다 프레임 수.
         inner_corners: 안쪽 코너 (열, 행). square_m: 칸 한 변 (m).
+        tilt_deg: 보드 기울기 진폭 (도). 0이면 퇴화 영상(정면만)이다.
     """
     k = intrinsics or CameraIntrinsics(
         width=640, height=480, fx=520.0, fy=515.0, cx=326.0, cy=236.0
     )
     rng = np.random.default_rng(seed)
-    poses = _poses(n_poses, rng)
+    poses = _poses(n_poses, rng, tilt_deg)
     times = [round(i * FRAME_MS) for i in range(n_poses * hold_frames)]
     images = [render_board(k, rot, c, inner_corners, square_m) for rot, c in poses]
     write_video(

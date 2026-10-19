@@ -1,7 +1,7 @@
-# 카메라 내부 파라미터 캘리브레이션 (ADR 0045, dlp_media.calibration, `dlp calib intrinsics`).
-# 체커보드(평면, 안쪽 코너 수와 칸 크기를 아는 인쇄물)를 그 카메라로 여러 각도에서 찍은 영상에서 OpenCV
-# calibrateCamera로 fx·fy·cx·cy·왜곡 계수를 구한다. 결과는 DB camera_calibrations에 기기 ID로 등록한다.
-# 절차는 docs/handover/camera-calibration.md.
+# 카메라 내부 파라미터 캘리브레이션 (ADR 0045·0052, dlp_media.calibration, `dlp calib intrinsics|import`).
+# 체커보드(평평한 판에 붙인, 칸이 정사각형인 인쇄물. 칸 크기는 내부 파라미터에 영향이 없다)를 그 카메라로
+# 여러 위치·기울기에서 찍은 영상에서 OpenCV calibrateCamera로 fx·fy·cx·cy·왜곡 계수를 구한다. 결과는
+# DB camera_calibrations에 기기 ID로 등록한다. 절차는 docs/handover/camera-calibration.md.
 version: 1
 intrinsics:
   sample_every_ms: 200       # 이 간격(ms, PTS 기준)마다 프레임 하나를 검사한다
@@ -11,3 +11,15 @@ intrinsics:
   max_rms_px: 1.0            # 재투영 RMS(px)가 이보다 크면 실패 (보드 인쇄·초점·움직임 흐림 의심)
   fix_k3: true               # 3차 방사 왜곡 계수를 0으로 고정 (일반 렌즈에서 과적합 방지. 어안은 별도 모델 필요)
   zero_tangent: false        # 접선 왜곡(p1, p2)을 0으로 고정할지
+  # 퇴화(degenerate) 검사 (F-PMS-20). 보드가 늘 영상면과 평행하면 초점 거리·주점이 관측되지 않아
+  # 재투영 RMS가 작아도 엉뚱한 해(합성 실험: 정답 fx 520 → 12088, k2 -488)가 나온다.
+  # 장면별 보드 기울기(보드 법선과 광축 사이 각도, calibrateCamera가 푼 자세에서 계산) 중 최대값이
+  # 이보다 작으면 실패한다. 합성 실험(dlp_fixtures.calibration tilt_deg)에서 퇴화 영상(기울기 진폭
+  # 0~3도)은 최대 2.2~7.5도, 정상(진폭 10·30도)은 12.4~32.9도였다. 퇴화 해의 자세 자체가 부정확해
+  # 정면 영상도 수 도로 나올 수 있으므로 여유를 두고, 화각 범위 검사가 함께 막는다.
+  min_max_view_tilt_deg: 10.0
+  # 타당 범위 검사 (영상 캘리브레이션과 파일 가져오기 모두, 명백한 이상값을 막는 보조 기준)
+  hfov_range_deg: [20.0, 170.0]   # 핀홀 가로 화각 2*atan(width/(2*fx))의 허용 범위 (도)
+  max_principal_offset_frac: 0.15 # 주점의 화면 중앙 이탈 상한 (|cx - w/2|/w, |cy - h/2|/h)
+  max_fx_fy_ratio: 1.2            # max(fx/fy, fy/fx) 상한 (화소는 거의 정사각형이다)
+  max_abs_distortion: 20.0        # 왜곡 계수 절댓값 상한 (rational 모델 k4~k6까지 고려한 넓은 값)
