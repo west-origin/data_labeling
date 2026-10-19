@@ -147,6 +147,7 @@ REPORTS = {
     "docs/handover/full-review-2026-10-11.md": REPORT_AREAS,
     "docs/handover/full-review-2026-10-12.md": (*REPORT_AREAS, "F-AIR-"),
     "docs/handover/external-review-2026-10-15.md": (*REPORT_AREAS, "F-AIR-"),
+    "docs/handover/full-review-2026-10-17.md": REPORT_AREAS,
 }
 
 
