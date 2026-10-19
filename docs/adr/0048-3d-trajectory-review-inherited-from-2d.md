@@ -117,7 +117,8 @@
 
 ## 배포
 
-1. `make db-upgrade` (Alembic 0023, 백필 없음).
+1. `make db-migrate` (Alembic 0023, 백필 없음). `make db-upgrade`는 온톨로지도 다시 등록하므로 ADR 0049
+   배포 2단계 결정 전에는 쓰지 않는다 (사전값은 승인 옵션 없이는 바뀌지 않는다, ADR 0053).
 2. 3D가 있는 세션마다 `dlp prelabel run <세션>`: 판 `+hf3`으로 검수 전 3D를 derived_from이 있는 3D로 다시
    만들고, 이미 확인된 2D의 검수를 물려받는다 (월드 좌표도 입력이 바뀌어 다시 만든다).
 3. 이미 완료 판정 전인 세션은 `dlp review verify <세션>`이 남은 물려받기를 메운다.

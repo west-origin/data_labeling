@@ -83,7 +83,7 @@ arm:
   placement: {mode: episode_centroid, position_scale: 0.7, workspace_center: [0.45, 0.0, 0.15]}
 ik:
   position_tolerance_m: 0.01
-  orientation_mode: full                 # 6축 이상이면 full, 5축이면 approach
+  orientation_mode: full                 # 접근 축 둘레 롤 관절(손목 끝 roll)이 있으면 full (아래 3의 4)
   orientation_tolerance_rad: 0.35
   orientation_weight: 0.1
   smoothness_weight: 0.01
@@ -94,7 +94,15 @@ ik:
 ```
 
 확인 (로더가 sha256·관절 목록·그리퍼 관절을 검사하고, 영점 자세의 끝 링크 축·접근·닫힘 축·최대 팔
-길이를 보인다. 실패하면 종료 코드 1과 이유):
+길이를 보인다. 실패하면 종료 코드 1과 이유). 로더가 거부하는 것:
+
+- robot_id가 영숫자로 시작하지 않거나 `/`가 있음 (설정 디렉터리를 벗어나지 못하게).
+- `public: false` 설정의 모델 파일이 저장소 작업 트리 안에 있음 (고객 파일은 `DLP_ROBOTS_DIR`).
+- 접근·닫힘 축이 단위 벡터가 아니거나 서로 직교하지 않음 (예: 대각 축은 [0.7071068, 0.7071068, 0]으로
+  적는다. 조용히 정규화하지 않는다).
+- 그리퍼 관절이 고정·mimic 관절이거나 팔 관절과 같음, closed·open이 URDF 한계 밖 (단위는 rad 또는 m,
+  도로 적으면 거부).
+- 팔 연쇄에 floating·planar·mimic 관절, lower/upper가 없는 revolute·prismatic 관절.
 
 ```bash
 uv run dlp robot check acme_arm
@@ -108,6 +116,13 @@ uv run dlp robot check acme_arm
    세션마다 달라도 로봇 작업 공간 가운데에 온다). 사람과 로봇의 위치 관계가 중요하면 `world_fixed`로
    세션 월드 좌표(Z 위, 원점 = 첫 자세 카메라, X = 첫 시선의 수평 방향)에 로봇 기준을 고정한다.
 3. `position_scale`은 사람 팔 길이 대비 로봇 팔 길이로 시작한다. 배율을 바꾸면 리타기팅 판이 바뀐다.
+4. `ik.orientation_mode`는 관절 수가 아니라 구조로 고른다 (ADR 0053).
+   - `full`: 접근 축 둘레 롤을 바꾸는 관절이 있으면 (영점에서 어떤 관절 축이 접근 축과 평행, 보통 손목 끝
+     wrist roll). 그 관절이 사람 손의 롤(엄지 → 검지)을 따라간다. SO-101처럼 pan + pitch 연쇄 끝에 roll이
+     있는 5축 팔도 full이다 (접근 축의 요는 따로 맞추지 못하고 오차로 남는다).
+   - `approach`: 롤을 바꿀 관절이 없을 때만. 롤 관절이 있는데 approach면 그 관절 값이 사람 손과 무관한
+     IK 부산물로 팔린다.
+   - `none`: 방향을 맞출 수 없는 팔 (위치만). 회전 오차는 -1(재지 않음)로 나간다.
 
 ## 4. 내보내기
 
@@ -118,8 +133,17 @@ uv run dlp export lerobot <데이터셋 버전> --target acme --robot acme_arm [
 출력에 에피소드마다 `목표 a%, 도달 b%, 최대 위치 오차 c mm, keep|drop`이 나온다.
 
 - 결과: `observation.state`·`action` = 로봇 관절(rad, URDF 이름), `observation.human_state` = 사람
-  특징, `retarget.*` = 프레임별 목표 유무·도달·오차·속도 한계·검증 등급. `meta/dlp_retarget.json`과
-  manifest(`robot`, `details.retarget`)에 로봇 ID, 모델 sha256, 리타기팅 판, 에피소드 보고가 있다.
+  특징, `retarget.*` = 프레임별 목표 유무·도달·오차·속도 한계(팔·그리퍼, 재시작 프레임 포함)·검증 등급.
+  `meta/dlp_retarget.json`과 manifest(`robot`, `details.retarget`)에 로봇 ID, 모델 sha256, 리타기팅 판,
+  에피소드 보고, 도달 판정 기준(`ik`, `hand_parts`, `reachable_definition`, `orientation_error_definition`)이
+  있다.
+- 손 목표가 하나도 없는 에피소드는 정책과 관계없이 빠진다 (보고에 `drop`과 이유). 목표가 생기기 전 프레임은
+  시작 자세(관절 범위 가운데)·닫힌 그리퍼이고 `target_present=0`이다.
+- 손이 끊겼다 다시 잡히는 프레임은 직전 자세에 가까운 해로 이어 가고, 속도 한계 때문에 몇 프레임 늦게
+  도달할 수 있다 (그 프레임은 `velocity_limited=1`, `reachable=0`).
+- 출력 끝의 `경고:`는 궤적 구간 안 손 3D가 기준(`export.yaml lerobot.min_hand_points_3d_coverage`)보다
+  덜 채워진 에피소드다. 3D 표본 간격(`prelabel.yaml depth.frame_stride_ms`)과 `lerobot.interp_max_gap_3d_ms`를
+  확인한다.
 - 닿지 못한 프레임은 값이 아니라 `retarget.reachable=0`으로 표시된다 (가장 가까운 해). 고객 학습에서 그
   프레임을 빼거나 가중치를 낮추게 안내한다.
 - 도달 비율이 낮은 에피소드를 아예 빼려면 `config/policies/retarget.yaml`에서 `unreachable: drop_episode`와
@@ -129,7 +153,7 @@ uv run dlp export lerobot <데이터셋 버전> --target acme --robot acme_arm [
 ## 5. 품질 확인 (납품 전)
 
 1. 에피소드 보고의 `reachable_fraction`, `frames_out_of_reach`, `velocity_limited_frames`,
-   `longest_unreachable_ms`를 본다. 팔 길이 밖이 많으면 배치·배율을, 속도 한계가 많으면 velocity_scale
+   `longest_unreachable_ms`(이어진 미도달 구간의 첫·마지막 프레임 시각 차, 한 프레임이면 0)를 본다. 팔 길이 밖이 많으면 배치·배율을, 속도 한계가 많으면 velocity_scale
    또는 고객의 실제 속도 한계를 다시 정한다.
 2. 고객 시뮬레이터(MuJoCo·Isaac 등)에서 관절 궤적을 재생해 충돌·작업 성공을 본다. 이 플랫폼은 충돌·
    동역학을 검사하지 않는다 (F-COE-20).
@@ -142,5 +166,7 @@ uv run dlp export lerobot <데이터셋 버전> --target acme --robot acme_arm [
 | `모델 파일 sha256이 다릅니다` | 고객 파일이 바뀌었다. 새 버전이면 sha256을 새로 적는다 (판이 바뀐다) |
 | `arm.joints ...가 ... 연쇄의 움직이는 관절 ...와 다릅니다` | joints 순서·이름을 연쇄 출력대로 고친다 |
 | `저장소 안에는 공개 시험 모델만 둡니다` | 고객 설정을 저장소에 두었다. DLP_ROBOTS_DIR로 옮긴다 |
-| 모든 프레임 `목표 0%` | 월드 좌표 손 3D가 없다 (1의 5 확인) 또는 검수 전이라 기본 정책이 뺐다 (1의 6) |
+| `목표 0%, ..., drop (손 목표가 있는 프레임이 없습니다)` | 월드 좌표 손 3D가 없다 (1의 5 확인) 또는 검수 전이라 기본 정책이 뺐다 (1의 6). 그 에피소드는 내보내지 않는다 |
+| `손 부위 [...]가 온톨로지 ... hand_joints에 없습니다` | `export.yaml lerobot.hand_points_3d`나 `retarget.yaml hand_parts`의 이름 오타 |
+| `로봇 ID ...: 영숫자로 시작하고` | `--robot`에 경로를 적었다. 파일 이름(robot_id)만 적는다 |
 | `리타기팅 정책이 모든 에피소드를 버렸습니다` | drop_episode 기준을 어긴 에피소드뿐이다. 보고의 reason을 본다 |

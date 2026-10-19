@@ -30,7 +30,10 @@ make health
 
 `make up`에는 PostgreSQL·SeaweedFS S3·Label Studio·Prefect·MLflow·lakeFS와 버킷 초기화가
 포함된다. **CVAT와 외부 MongoDB는 포함되지 않는다.** DB 마이그레이션은 현재 head를 따르고,
-온톨로지 1.0.0을 등록한다. 기존 운영 DB는 별도 백업·이관 절차를 거친다.
+온톨로지 1.0.0을 등록한다. 기존 운영 DB는 별도 백업·이관 절차를 거친다. 운영 배포의 마이그레이션
+단계는 `make db-migrate`(마이그레이션만)를 쓴다. `make db-upgrade`는 등록된 초안의 물리 사전값을
+승인 없이 바꾸지 않으므로, 사전값이 달라졌으면 등록 단계가 종료 코드 3으로 멈춘다 (승인은
+`uv run dlp ontology register 1.0.0 --accept-physical-priors`, ADR 0049·0053).
 
 기본 단위 테스트에도 FiftyOne의 실제 데이터셋 쓰기·읽기가 포함된다. 사용 가능한 내장 또는 외부
 MongoDB가 필요하며, DB 연결 실패는 테스트 생략이 아니라 실패가 될 수 있다. 외부 MongoDB 7을

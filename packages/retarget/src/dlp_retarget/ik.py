@@ -182,7 +182,7 @@ def seeds(chain: Chain, count: int) -> list[Vec]:
 
 
 class DlsIkSolver:
-    """내장 감쇠 최소제곱 풀이기 (모듈 설명). version: `dls1`."""
+    """내장 감쇠 최소제곱 풀이기 (모듈 설명). version: `dls2`."""
 
     name = "dls"
     # dls2: 다시 시작할 때 직전 해를 시작점에 넣고 직전 해에 가까운 도달 해를 고르며, 다시 시작하는
