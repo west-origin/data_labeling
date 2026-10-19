@@ -5,7 +5,8 @@
 #   make install-curation   전체 검사에 필요한 의존성 설치 (FiftyOne 포함, 잠금 파일 기준)
 #   make check              린트·타입·계약·단위 테스트 (개발 Compose 불필요, 큐레이션 Mongo는 필요)
 #   make up                 개발 서비스 기동 (docker 필요, .env 자동 생성)
-#   make db-upgrade         DB 마이그레이션 + 온톨로지 v1 등록
+#   make db-migrate         DB 마이그레이션만 (운영 배포)
+#   make db-upgrade         DB 마이그레이션 + 온톨로지 v1 등록 (사전값 변경은 승인 옵션 필요)
 #   make models             모델 가중치 받기 (실제 모델로 돌릴 때)
 #   make test-services      서비스 통합 테스트
 #
@@ -67,14 +68,19 @@ todo-models:
 fixtures:
 	uv run dlp fixtures generate --out data/fixtures
 
-# 개발 DB에 Alembic 마이그레이션을 끝까지 적용하고 온톨로지 1.0.0을 등록한다.
-# 전제: make up (PostgreSQL), DLP_DATABASE_URL(없으면 개발 기본값). 여러 번 돌려도 된다.
-db-upgrade:
+# DB에 Alembic 마이그레이션만 끝까지 적용한다 (온톨로지 등록 없음). 운영 배포의 마이그레이션 단계는 이것을 쓴다.
+# 전제: PostgreSQL, DLP_DATABASE_URL(없으면 개발 기본값). 여러 번 돌려도 된다.
+db-migrate:
 	uv run dlp db upgrade
+
+# 개발 DB에 마이그레이션을 적용하고 온톨로지 1.0.0을 등록한다 (온톨로지 이름을 덧붙인 뒤에도 다시 돌린다).
+# 등록된 초안의 물리 사전값이 config와 다르면 등록은 승인 없이 실패한다(종료 코드 3, ADR 0049·0053). 그 값을
+# 운영에 실어도 되는지 정한 뒤에만 `uv run dlp ontology register 1.0.0 --accept-physical-priors`를 따로 돌린다.
+db-upgrade: db-migrate
 	uv run dlp ontology register 1.0.0
 
 # 파일이 아닌 명령 대상 (같은 이름의 파일이 있어도 항상 실행)
-.PHONY: install install-curation test-isolated lint fmt typecheck test contracts schemas ui-theme coverage review-scope models export-models todo-models licenses fixtures db-upgrade check env up down ps logs health test-services \
+.PHONY: install install-curation test-isolated lint fmt typecheck test contracts schemas ui-theme coverage review-scope models export-models todo-models licenses fixtures db-migrate db-upgrade check env up down ps logs health test-services \
         cvat-up cvat-down cvat-superuser clean
 
 # 작업공간 의존성 설치 (uv.lock 그대로, --locked: 잠금 파일과 pyproject가 어긋나면 실패).

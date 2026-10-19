@@ -6,7 +6,8 @@
   만든다. `--check`는 파일이 코드와 일치하는지만 본다 (`make schemas` / `make contracts`).
 - `dlp ontology validate [--root]` — `config/ontology/*/manifest.yaml`의 모든 온톨로지 버전을
   검증한다.
-- `dlp ontology register <버전>` — 온톨로지 버전을 DB(`ontology_versions` 테이블)에 등록한다.
+- `dlp ontology register <버전> [--accept-physical-priors]` — 온톨로지 버전을 DB(`ontology_versions`
+  테이블)에 등록한다. 등록된 초안의 물리 사전값이 바뀌면 승인 옵션이 있어야 한다 (ADR 0053).
 - `dlp db upgrade [revision]` — Alembic 마이그레이션 적용 (`make db-upgrade`).
 
 공개 함수:
@@ -31,6 +32,7 @@ from sqlalchemy.exc import NoResultFound
 from dlp_schema import find_ontology_dir, load_ontology, repo_root
 from dlp_schema.db.migrate import upgrade
 from dlp_schema.db.repository import (
+    PhysicalPriorsChangeError,
     get_labels,
     get_session_ontology,
     list_session_ids,
@@ -132,6 +134,11 @@ def cmd_ontology_register(args: argparse.Namespace) -> int:
         args.root: 온톨로지 루트. None이면 `<저장소>/config/ontology`.
         args.url: DB URL (`database_url` 규칙).
 
+        args.accept_physical_priors: 등록된 초안의 물리 사전값 변경(채우기·값 변경·덮어쓰기 추가)을
+            승인한다. 운영에 그 값을 실어도 되는지 정한 뒤에만 준다 (ADR 0049 배포 절, ADR 0053).
+
+    반환: 0 등록·변경 없음, 3 사전값이 달라졌는데 승인 옵션이 없을 때 (아무것도 쓰지 않는다).
+
     부작용: 한 트랜잭션 안에서 `register_ontology`로 `ontology_versions`에 쓴다.
     같은 버전을 다시 등록하면 내용이 같을 때 아무것도 하지 않고(멱등), 초안(draft)에 키를 덧붙이기만
     했으면 내용을 바꾸며(ADR 0028), 그 밖의 변경은 `register_ontology`가 오류를 낸다.
@@ -139,10 +146,24 @@ def cmd_ontology_register(args: argparse.Namespace) -> int:
     root = Path(args.root) if args.root else repo_root() / "config" / "ontology"
     ontology = load_ontology(find_ontology_dir(root, args.version))
     engine = sa.create_engine(database_url(args.url))
-    with engine.begin() as conn:
-        register_ontology(conn, ontology)
-    engine.dispose()
-    print(f"온톨로지 {ontology.version} 등록됨")
+    try:
+        with engine.begin() as conn:
+            action = register_ontology(
+                conn, ontology, accept_physical_priors=args.accept_physical_priors
+            )
+    except PhysicalPriorsChangeError as e:
+        print(f"오류: {e}")
+        return 3
+    finally:
+        engine.dispose()
+    priors = sum(1 for o in ontology.objects.values() if o.physical_priors is not None)
+    done = {
+        "inserted": "새로 등록",
+        "unchanged": "내용 같음",
+        "appended": "덧붙이기",
+        "priors_replaced": "물리 사전값 교체",
+    }[action]
+    print(f"온톨로지 {ontology.version} 등록됨 ({done}, 물리 사전값이 있는 객체 {priors}개)")
     return 0
 
 
@@ -192,6 +213,11 @@ def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
     register.add_argument("version")
     register.add_argument("--root")
     register.add_argument("--url", help="DB URL (기본: DLP_DATABASE_URL)")
+    register.add_argument(
+        "--accept-physical-priors",
+        action="store_true",
+        help="등록된 초안의 물리 사전값 변경을 승인한다 (ADR 0049·0053)",
+    )
     register.set_defaults(func=cmd_ontology_register)
     audit = onto_sub.add_parser(
         "audit", help="기존 운영 라벨의 사전·버전·구간 참조 검사 (읽기 전용)"

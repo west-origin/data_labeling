@@ -276,13 +276,27 @@ _EST = "prior_estimate"
         ("cup", {"source": _EST, "mass_kg": _by_state("wetness", "wet", 1, 2)}, "states에 없음"),
         ("cup", {"source": _EST, "mass_kg": _by_state("fill_state", "brimming", 1, 2)}, "brimming"),
         ("cup", {"source": _EST, "mass_kg": _by_state("fill_state", "full", 3, 2)}, "min"),
+        # ADR 0049 규칙과 기본 범위의 뜻 (F-SCH-22·23)
+        ("cup", {"source": "prior_literature", "material": "ceramic"}, "note"),
+        ("person", {"source": _EST, "mass_kg": {"min": 40, "max": 120}}, "물리 유형 person"),
+        ("mop", {"source": _EST, "material": "metal", "part_materials": {"mop_head": "metal"}},
+         "대표 재질과 같은"),
+        ("towel", {"source": _EST, "mass_kg": _by_state("wetness", "dry", 0.2, 0.5)}, "기본"),
+        ("cup", {"source": _EST, "mass_kg": _by_state("fill_state", "full", 0.5, 2)}, "모든 상태"),
+        ("towel", {"source": _EST, "mass_kg": {"min": 0.1, "max": 1, "by_state": {
+            "wetness": {"wet": {"min": 0.2, "max": 3}},
+            "fold_state": {"folded": {"min": 0.1, "max": 1}}}}}, "하나만"),
+        ("cup", {"source": _EST, "mass_kg": {"min": 0.1, "max": 1, "by_state": {"fill_state": {}}}},
+         "상태 값이 없습니다"),
     ],
-)
+)  # fmt: skip
 def test_physical_prior_validation(
     ontology: Ontology, obj: str, priors: dict[str, Any], message: str
 ) -> None:
     """잘못된 범위(min>max, 0 이하, 무한대), 측정값 출처, 빈 블록, 사전에 없는 재질·촉감, 중복 촉감,
-    도구 부분이 아닌 재질 부분, 객체에 없는 상태 속성·값의 상태별 범위를 거부한다."""
+    도구 부분이 아닌 재질 부분, 객체에 없는 상태 속성·값의 상태별 범위를 거부한다. 문헌 출처의 빈
+    note, 사람·액체 유형의 사전값, 대표 재질과 같은 부분 재질, 기본 조건(건조)을 따로 적은 범위,
+    모든 상태를 덮어야 하는 기본 범위 밖의 상태별 범위, 두 상태 속성, 빈 상태 값 사전도 거부한다."""
     with pytest.raises(ValidationError, match=message):
         Ontology.model_validate(_with_priors(ontology, obj, priors))
 

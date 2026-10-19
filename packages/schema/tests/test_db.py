@@ -604,9 +604,14 @@ def test_adding_english_names_to_registered_draft_is_additive(ontology: Ontology
     from dlp_schema.testing import sqlite_db
 
     def strip_en(value: Any) -> Any:
+        # 물리 사전값 어휘(ADR 0049)는 처음부터 en과 함께 들어왔으므로 그대로 둔다
         if isinstance(value, dict):
             items: dict[str, Any] = value  # pyright: ignore[reportUnknownVariableType]
-            return {k: strip_en(v) for k, v in items.items() if k != "en"}
+            return {
+                k: v if k in ("materials", "tactile_properties") else strip_en(v)
+                for k, v in items.items()
+                if k != "en"
+            }
         return value
 
     old = ontology.model_dump(mode="json")
@@ -632,15 +637,16 @@ def test_adding_english_names_to_registered_draft_is_additive(ontology: Ontology
         engine.dispose()
 
 
-def test_adding_physical_priors_to_registered_draft_is_additive(ontology: Ontology) -> None:
-    """물리 사전값 없이 등록된 초안 v1에 사전값·재질·촉감 어휘를 더해 다시 등록하면 덧붙이기다.
+def test_adding_physical_priors_to_registered_draft_needs_acceptance(ontology: Ontology) -> None:
+    """물리 사전값 없이 등록된 초안 v1에 사전값·재질·촉감 어휘를 더해 다시 등록하려면 명시 승인이
+    필요하다 (ADR 0049·0053, F-SCH-21). 승인 없이는 거부하고 내용을 그대로 두며, 승인하면 새
+    내용으로 바뀐다.
 
-    ADR 0049.
-
-    예전 등록 내용은 새 코드로도 읽히고(사전값 없음, 어휘 빈 사전) 다시 등록하면 새 내용으로 바뀐다.
-    내용 해시(`ontology_digest`)는 달라져 AI 1차 검수 단위·검수 화면 프로젝트가 새로 갈린다.
+    예전 등록 내용은 새 코드로도 읽힌다(사전값 없음, 어휘 빈 사전). 내용 해시(`ontology_digest`)가
+    달라져 AI 1차 검수 단위·검수 화면 프로젝트가 새로 갈린다.
     """
     from dlp_schema.db.ontology_repository import get_ontology
+    from dlp_schema.db.repository import PhysicalPriorsChangeError
     from dlp_schema.ontology import ontology_digest
     from dlp_schema.testing import sqlite_db
 
@@ -660,32 +666,88 @@ def test_adding_physical_priors_to_registered_draft_is_additive(ontology: Ontolo
             before = get_ontology(conn, ontology.version)
         assert before.materials == {} and before.objects["cup"].physical_priors is None
         assert ontology_digest(before) != ontology_digest(ontology)
-        with engine.begin() as conn:
+        with (
+            pytest.raises(PhysicalPriorsChangeError, match="accept-physical-priors"),
+            engine.begin() as conn,
+        ):
             register_ontology(conn, ontology)
         with engine.connect() as conn:
+            assert get_ontology(conn, ontology.version) == before
+        with engine.begin() as conn:
+            assert register_ontology(conn, ontology, accept_physical_priors=True) == (
+                "priors_replaced"
+            )
+        with engine.connect() as conn:
             assert get_ontology(conn, ontology.version) == ontology
+        with engine.begin() as conn:
+            assert register_ontology(conn, ontology) == "unchanged"
     finally:
         engine.dispose()
 
 
-def test_filling_null_priors_is_additive_but_changing_values_is_not(ontology: Ontology) -> None:
-    """사전값 없이(null) 등록한 객체에 나중에 사전값을 채우는 것은 덧붙이기지만, 이미 등록된
-    사전값의 숫자를 바꾸는 것은 덧붙이기가 아니라 거부된다 (ADR 0028·0049)."""
+def _with(ontology: Ontology, edit: Any) -> Ontology:
+    """model_dump 사전을 edit로 고친 온톨로지 사본."""
+    data = ontology.model_dump(mode="json")
+    edit(data)
+    return Ontology.model_validate(data)
+
+
+def test_physical_prior_changes_are_never_silently_additive(ontology: Ontology) -> None:
+    """등록된 초안의 사전값은 채우기·값 변경·상태별(by_state)·부분별(part_materials) 덮어쓰기 추가
+    모두 승인 없이는 거부된다 (덧붙이기 판정이 사전 키 추가를 받아 젖은 바닥 마찰·밀대 머리 재질의
+    뜻이 조용히 바뀌던 문제, F-SCH-20). 승인하면 초안에서만 바뀌고, 확정 버전과 사전값 밖의
+    비덧붙이기 변경은 승인해도 거부된다."""
+    from dlp_schema.db.repository import PhysicalPriorsChangeError
     from dlp_schema.testing import sqlite_db
 
-    data = ontology.model_dump(mode="json")
-    data["objects"]["cup"]["physical_priors"] = None
-    without_cup = Ontology.model_validate(data)
-    data = ontology.model_dump(mode="json")
-    data["objects"]["cup"]["physical_priors"]["mass_kg"]["max"] = 9.0
-    changed = Ontology.model_validate(data)
+    def no_cup(d: dict[str, Any]) -> None:
+        d["objects"]["cup"]["physical_priors"] = None
+
+    def heavier_cup(d: dict[str, Any]) -> None:
+        d["objects"]["cup"]["physical_priors"]["mass_kg"]["max"] = 9.0
+
+    def wet_towel_friction(d: dict[str, Any]) -> None:
+        sf = d["objects"]["towel"]["physical_priors"]["static_friction"]
+        sf["by_state"] = {"wetness": {"wet": {"min": 0.2, "max": 0.6}}}
+
+    def mop_without_parts(d: dict[str, Any]) -> None:
+        d["objects"]["mop"]["physical_priors"]["part_materials"] = {}
+
+    def rename_verb(d: dict[str, Any]) -> None:
+        first = sorted(d["verbs"])[0]
+        d["verbs"][first]["ko"] = "바뀐 이름"
+
+    cases = [
+        (_with(ontology, no_cup), ontology),  # null → 사전값 채우기
+        (ontology, _with(ontology, heavier_cup)),  # 값 변경
+        (ontology, _with(ontology, wet_towel_friction)),  # by_state 덮어쓰기 추가
+        (_with(ontology, mop_without_parts), ontology),  # part_materials 덮어쓰기 추가
+    ]
+    for registered, new in cases:
+        engine = sqlite_db()
+        try:
+            with engine.begin() as conn:
+                register_ontology(conn, registered)
+            with pytest.raises(PhysicalPriorsChangeError), engine.begin() as conn:
+                register_ontology(conn, new)
+            with engine.begin() as conn:
+                assert register_ontology(conn, new, accept_physical_priors=True) == (
+                    "priors_replaced"
+                )
+        finally:
+            engine.dispose()
     engine = sqlite_db()
     try:
         with engine.begin() as conn:
-            register_ontology(conn, without_cup)
-        with engine.begin() as conn:
-            register_ontology(conn, ontology)  # null → 사전값: 덧붙이기
+            register_ontology(conn, ontology)
         with pytest.raises(ValueError, match="덧붙이기가 아닌"), engine.begin() as conn:
-            register_ontology(conn, changed)
+            register_ontology(conn, _with(ontology, rename_verb), accept_physical_priors=True)
+        frozen = ontology.model_copy(update={"status": "frozen"})
+        with engine.begin() as conn:
+            conn.execute(sa.delete(ontology_versions))
+            register_ontology(conn, frozen)
+        with pytest.raises(ValueError, match="확정된"), engine.begin() as conn:
+            changed = _with(frozen, heavier_cup)
+            register_ontology(conn, changed, accept_physical_priors=True)
     finally:
         engine.dispose()
