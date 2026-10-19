@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
@@ -29,12 +31,18 @@ from typing import Any, Literal
 import yaml
 from pydantic import Field, model_validator
 
-from dlp_retarget.urdf import Chain, Joint, build_chain, load_joints
+from dlp_retarget.urdf import MOVING, Chain, Joint, build_chain, load_joints
 from dlp_schema.common import Contract, Identifier
 from dlp_schema.labels import Hand
 
 # 고객 로봇 설정·모델을 두는 저장소 밖 디렉터리를 가리키는 환경 변수
 ROBOTS_DIR_ENV = "DLP_ROBOTS_DIR"
+# 로봇 ID 형식 (`dlp_schema.common.Identifier`와 같다). 첫 글자가 점·슬래시가 아니고 슬래시가 없어
+# `../` 같은 경로 탈출이 생기지 않는다
+_ROBOT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+# 접근·닫힘 축의 단위 길이·직교 검사 허용 오차. 정책 값이 아니라 입력 확인용이다: 설정에는 정확한
+# 단위 벡터(예: [0, 0, 1], [0.7071068, 0.7071068, 0])를 적는다
+_AXIS_TOLERANCE = 1e-6
 
 
 class RobotError(ValueError):
@@ -111,6 +119,9 @@ class ArmConfig(Contract):
     tip_link: 끝 링크 (도구 중심점).
     joints: 움직일 관절 이름 (연쇄의 움직이는 관절과 같은 순서·집합).
     approach_axis / closing_axis: 끝 링크 좌표의 접근 축(손목 → 손가락 끝 방향)과 그리퍼 닫힘 축.
+        둘 다 단위 벡터이고 서로 직교해야 한다 (회전 오차 = 두 단위 벡터 사이 각이라, 길이가 1이
+        아니면 오차와 도달 판정이 틀린다). 조용히 정규화하지 않는다: 적은 값과 쓰는 값(설정 해시)이
+        같아야 한다.
     """
 
     hand: Hand
@@ -121,11 +132,34 @@ class ArmConfig(Contract):
     gripper: GripperConfig
     placement: Placement
 
+    @model_validator(mode="after")
+    def _axes(self) -> ArmConfig:
+        """접근·닫힘 축이 단위 길이이고 서로 직교하는지. Raises: ValueError."""
+        for name, v in (("approach_axis", self.approach_axis), ("closing_axis", self.closing_axis)):
+            if abs(math.sqrt(sum(x * x for x in v)) - 1.0) > _AXIS_TOLERANCE:
+                raise ValueError(f"{name} {list(v)}는 단위 벡터여야 합니다")
+        dot = sum(a * c for a, c in zip(self.approach_axis, self.closing_axis, strict=True))
+        if abs(dot) > _AXIS_TOLERANCE:
+            raise ValueError("approach_axis와 closing_axis는 서로 직교해야 합니다")
+        return self
+
 
 class OrientationMode(StrEnum):
+    """IK가 맞추는 끝단 방향.
+
+    어느 것을 고를지는 관절 수가 아니라 팔 구조로 정한다 (`dlp robot check`의 영점 축으로 본다):
+    - full: 접근 축 둘레 롤을 바꾸는 관절(손목 끝 wrist roll 등)이 있으면 쓴다. 그 관절이 사람 손의
+      롤(엄지 → 검지 닫힘 축)을 따라가게 된다. SO-101처럼 pan + pitch 연쇄 끝에 wrist roll이 있는
+      5축 팔도 full이다 (이 구조는 접근 축의 요를 따로 맞추지 못할 뿐 롤은 맞춘다. 요 오차는 가중
+      최소제곱이 위치와 나눠 지고 보고 오차에 드러난다).
+    - approach: 접근 축 둘레 롤을 바꿀 관절이 없을 때만 쓴다 (롤이 목표 없이 남아도 내보낼 관절이
+      없다). 롤 관절이 있는데 approach를 쓰면 그 관절 값이 사람 손과 무관한 IK 부산물이 된다.
+    - none: 위치만 (방향을 맞출 수 없는 3축 팔 등). 내보내는 회전 오차는 -1(재지 않음)이다.
+    """
+
     NONE = "none"  # 위치만 맞춘다
-    APPROACH = "approach"  # 위치 + 접근 축 (축 둘레 회전은 자유, 5자유도 팔)
-    FULL = "full"  # 위치 + 접근·닫힘 축 (6자유도 이상)
+    APPROACH = "approach"  # 위치 + 접근 축 (축 둘레 롤은 자유)
+    FULL = "full"  # 위치 + 접근·닫힘 축 (롤까지)
 
 
 class IkConfig(Contract):
@@ -203,11 +237,15 @@ def find_config(robot_id: str, dirs: Sequence[Path]) -> Path:
     """로봇 ID의 설정 파일 (`<ID>.yaml`, 먼저 찾은 디렉터리).
 
     Raises:
-        RobotError: 어느 디렉터리에도 없을 때.
+        RobotError: ID 형식이 틀렸을 때(경로 구분자·`..`로 디렉터리를 벗어나지 못하게), 어느
+        디렉터리에도
+            없을 때.
     """
+    if not _ROBOT_ID_RE.match(robot_id):
+        raise RobotError(f"로봇 ID {robot_id!r}: 영숫자로 시작하고 영숫자·_.:-만 씁니다")
     for d in dirs:
         path = d / f"{robot_id}.yaml"
-        if path.is_file():
+        if path.is_file() and path.resolve().parent == d.resolve():
             return path
     raise RobotError(f"로봇 {robot_id}: 설정 파일이 없습니다 ({', '.join(str(d) for d in dirs)})")
 
@@ -233,8 +271,10 @@ def load_robot_file(path: Path, *, inside_repo: Path | None = None) -> LoadedRob
         inside_repo: 저장소 루트. 설정이 그 안에 있으면 공개 모델(`model.public`)만 허용한다.
 
     Raises:
-        RobotError: 모델 파일이 없거나 sha256이 다를 때, 저장소 안 설정이 공개 모델이 아닐 때, 관절
-            목록이 연쇄와 다를 때, 그리퍼 관절이 없을 때. UrdfError: URDF가 틀렸을 때.
+        RobotError: 모델 파일이 없거나 sha256이 다를 때, 저장소 안 설정이 공개 모델이 아닐 때,
+        비공개
+            모델 파일이 저장소 안에 있을 때, 관절 목록이 연쇄와 다를 때, 그리퍼 관절이 없거나 맞지
+            않을 때(`_check_gripper`). UrdfError: URDF가 틀렸을 때.
     """
     cfg = read_config(path)
     in_repo = inside_repo is not None and path.resolve().is_relative_to(inside_repo.resolve())
@@ -244,6 +284,15 @@ def load_robot_file(path: Path, *, inside_repo: Path | None = None) -> LoadedRob
         )
     model = Path(cfg.model.path)
     model = model if model.is_absolute() else path.parent / model
+    if (
+        inside_repo is not None
+        and not cfg.model.public
+        and model.resolve().is_relative_to(inside_repo.resolve())
+    ):
+        # 설정은 저장소 밖에 있어도 모델 파일이 저장소 작업 트리 안이면 커밋될 수 있다
+        raise RobotError(
+            f"{cfg.robot_id}: 고객 모델 파일은 저장소 밖({ROBOTS_DIR_ENV})에 둡니다: {model}"
+        )
     if not model.is_file():
         raise RobotError(f"{cfg.robot_id}: 모델 파일이 없습니다: {model}")
     digest = sha256_file(model)
@@ -258,10 +307,34 @@ def load_robot_file(path: Path, *, inside_repo: Path | None = None) -> LoadedRob
             f"{cfg.robot_id}: arm.joints {list(cfg.arm.joints)}가 {cfg.base_link} → "
             f"{cfg.arm.tip_link} 연쇄의 움직이는 관절 {list(chain.names)}와 다릅니다"
         )
-    grip = joints.get(cfg.arm.gripper.joint)
-    if grip is None:
-        raise RobotError(f"{cfg.robot_id}: 그리퍼 관절 {cfg.arm.gripper.joint}가 없습니다")
+    grip = _check_gripper(cfg, joints, chain)
     return LoadedRobot(cfg, chain, grip, digest, model)
+
+
+def _check_gripper(cfg: RobotConfig, joints: dict[str, Joint], chain: Chain) -> Joint:
+    """그리퍼 관절: 있고, 움직이는 독립 관절이고, 팔 연쇄 관절이 아니고, closed·open이 URDF 한계 안.
+
+    도 단위로 적은 값(open: 85)이나 고정 관절, 팔 관절과 같은 이름(내보내는 관절 이름이 겹친다)을
+    막는다.
+
+    Raises:
+        RobotError: 위 조건을 어길 때.
+    """
+    g = cfg.arm.gripper
+    grip = joints.get(g.joint)
+    if grip is None:
+        raise RobotError(f"{cfg.robot_id}: 그리퍼 관절 {g.joint}가 없습니다")
+    if grip.kind not in MOVING or grip.mimic is not None:
+        raise RobotError(f"{cfg.robot_id}: 그리퍼 관절 {g.joint}는 움직이는 독립 관절이어야 합니다")
+    if grip.name in chain.names:
+        raise RobotError(f"{cfg.robot_id}: 그리퍼 관절 {g.joint}가 팔 관절과 겹칩니다")
+    lo, hi = min(g.closed, g.open), max(g.closed, g.open)
+    if lo < grip.lower or hi > grip.upper:
+        raise RobotError(
+            f"{cfg.robot_id}: 그리퍼 closed·open [{g.closed}, {g.open}]이 URDF 한계 "
+            f"[{grip.lower}, {grip.upper}] 밖입니다 (단위는 rad 또는 m)"
+        )
+    return grip
 
 
 def load_robot(root: Path, robot_id: str, env: dict[str, str] | None = None) -> LoadedRobot:

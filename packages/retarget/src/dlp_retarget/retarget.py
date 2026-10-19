@@ -3,9 +3,18 @@
 입력: 에피소드 프레임 시각과 그 시각의 손 점 3개(세션 월드 좌표, 없으면 NaN). 출력: 프레임별 관절 값
 (팔 관절 + 그리퍼), 목표 유무, 도달 여부, 위치·회전 오차, 속도 한계 표시와 `FeasibilityReport`.
 
-정직성 규칙: 목표가 없는 프레임은 관절 값을 직전 해로 두되 target_present=0으로 표시하고, 닿지 못한
-프레임은 가장 가까운 해를 내되 reachable=0과 오차를 남긴다. 정책 `unreachable: drop_episode`는
-비율이 상한을 넘는 에피소드를 버릴 것을 결정(`decision`)만 하고, 실제로 빼는 것은 내보내기가 한다.
+정직성 규칙:
+- 목표가 없는 프레임은 관절 값을 직전 프레임 값으로 두되 target_present=0으로 표시한다. 첫 목표 앞의
+  프레임은 풀 해가 아직 없어 시작 자세(관절 범위 가운데)와 닫힌 그리퍼(`gripper.closed`)다. 어느
+  쪽도 사람 동작에서 온 값이 아니다.
+- 닿지 못한 프레임은 가장 가까운 해를 내되 reachable=0과 오차를 남긴다.
+- 속도 한계: 팔 관절은 풀이기가(`ik.limit_step`), 그리퍼 관절은 여기서 같은 규칙(URDF velocity x
+  velocity_scale x 프레임 간격, 직전 프레임 값 기준)으로 자르고 `velocity_limited`에 합친다.
+- 목표가 하나도 없는 에피소드는 정책과 관계없이 버리기로 결정한다 (로봇 관절이 모두 시작 자세라 로봇
+  데이터로 의미가 없다). 정책 `unreachable: drop_episode`는 비율 기준까지 더 본다.
+  결정(`decision`)만 하고 실제로 빼는 것은 내보내기가 한다.
+- orientation_mode none은 회전을 재지 않으므로 회전 오차를 NaN(내보내기 -1)으로 둔다 (0이면 방향이
+  완벽히 맞은 것과 구분되지 않는다).
 """
 
 from __future__ import annotations
@@ -17,9 +26,9 @@ from typing import Literal
 import numpy as np
 from numpy.typing import NDArray
 
-from dlp_retarget.ik import IkProblem, IkSolver
+from dlp_retarget.ik import IkProblem, IkSolver, limit_step
 from dlp_retarget.policy import RetargetPolicy, UnreachableAction
-from dlp_retarget.robot import LoadedRobot
+from dlp_retarget.robot import LoadedRobot, OrientationMode
 from dlp_retarget.targets import gripper_values, hand_targets
 from dlp_retarget.urdf import Chain
 from dlp_schema.common import Contract
@@ -41,8 +50,10 @@ class FeasibilityReport(Contract):
     """에피소드 도달 가능성 보고 (내보내기 meta/dlp_retarget.json, manifest details).
 
     fraction은 0~1. 오차 통계는 목표가 있는 프레임만 (없으면 None). frames_out_of_reach: 목표가 팔
-    첫 관절에서 최대 팔 길이보다 먼 프레임 (어떤 자세로도 닿을 수 없음). longest_unreachable_ms:
-    목표가 있는데 닿지 못한 프레임이 이어진 가장 긴 시간. decision: 정책에 따라 내보낼지(keep)
+    첫 관절에서 최대 팔 길이보다 먼 프레임 (어떤 자세로도 닿을 수 없음). velocity_limited_frames:
+    팔·그리퍼 중 하나라도 속도 한계로 잘린 프레임 수. longest_unreachable_ms: 목표가 있는데 닿지
+    못한 프레임이 이어진 가장 긴 구간의 첫·마지막 프레임 시각 차 (홀로 떨어진 프레임 하나면 0,
+    미도달 유무는 reachable_frames < frames_with_target으로 본다). decision: 내보낼지(keep)
     버릴지(drop).
     """
 
@@ -97,7 +108,8 @@ def max_reach(chain: Chain) -> tuple[Vec, float]:
 
 
 def _longest_run_ms(mask: NDArray[np.bool_], times: Vec) -> float:
-    """참이 이어진 가장 긴 구간의 길이 (ms, 첫 프레임 시각 ~ 마지막 프레임 시각)."""
+    """참이 이어진 가장 긴 구간의 길이 (ms, 첫 프레임 시각 ~ 마지막 프레임 시각, 한 프레임이면
+    0)."""
     best, start = 0.0, None
     for k, m in enumerate(mask):
         if m and start is None:
@@ -112,9 +124,11 @@ def _longest_run_ms(mask: NDArray[np.bool_], times: Vec) -> float:
 def _decide(
     n: int, with_target: int, reachable: int, policy: RetargetPolicy
 ) -> tuple[Literal["keep", "drop"], str | None]:
-    """정책에 따른 내보내기 결정과 이유."""
+    """정책에 따른 내보내기 결정과 이유 (목표가 없는 에피소드는 정책과 관계없이 drop)."""
     target_fraction = with_target / n if n else 0.0
     unreachable = 1 - reachable / with_target if with_target else 1.0
+    if with_target == 0:
+        return "drop", "손 목표가 있는 프레임이 없습니다 (월드 좌표 손 3D 없음)"
     if policy.unreachable is UnreachableAction.MARK:
         return "keep", None
     if target_fraction < policy.min_target_fraction:
@@ -152,12 +166,11 @@ def retarget_episode(
     )
     sol = solver.solve(problem)
     n = tg.present.size
-    grip = gripper_values(tg.opening_m, cfg.arm.gripper)
-    held = np.empty(n)
-    last = cfg.arm.gripper.closed
-    for k in range(n):
-        last = float(grip[k]) if tg.present[k] else last
-        held[k] = last
+    held, grip_limited = _gripper_track(tg.present, tg.opening_m, robot, points.times_ms)
+    velocity_limited = sol.velocity_limited | grip_limited
+    orientation_error = sol.orientation_error_rad
+    if cfg.ik.orientation_mode is OrientationMode.NONE:
+        orientation_error = np.full(n, np.nan)  # 재지 않음 (모듈 설명)
     q = np.column_stack([sol.q, held])
     origin, reach = max_reach(robot.chain)
     far = tg.present & (np.linalg.norm(np.nan_to_num(tg.position) - origin, axis=1) > reach)
@@ -171,10 +184,10 @@ def retarget_episode(
         reachable_fraction=round(reachable / with_target, 4) if with_target else 0.0,
         position_error_mean_m=_stat(sol.position_error_m, "mean"),
         position_error_max_m=_stat(sol.position_error_m, "max"),
-        orientation_error_mean_rad=_stat(sol.orientation_error_rad, "mean"),
-        orientation_error_max_rad=_stat(sol.orientation_error_rad, "max"),
+        orientation_error_mean_rad=_stat(orientation_error, "mean"),
+        orientation_error_max_rad=_stat(orientation_error, "max"),
         frames_out_of_reach=int(far.sum()),
-        velocity_limited_frames=int(sol.velocity_limited.sum()),
+        velocity_limited_frames=int(velocity_limited.sum()),
         longest_unreachable_ms=_longest_run_ms(tg.present & ~sol.reachable, points.times_ms),
         decision=decision,
         reason=reason,
@@ -185,7 +198,32 @@ def retarget_episode(
         target_present=tg.present,
         reachable=sol.reachable,
         position_error_m=sol.position_error_m,
-        orientation_error_rad=sol.orientation_error_rad,
-        velocity_limited=sol.velocity_limited,
+        orientation_error_rad=orientation_error,
+        velocity_limited=velocity_limited,
         report=report,
     )
+
+
+def _gripper_track(
+    present: NDArray[np.bool_], opening_m: Vec, robot: LoadedRobot, times_ms: Vec
+) -> tuple[Vec, NDArray[np.bool_]]:
+    """프레임별 그리퍼 관절 값과 속도 한계 표시.
+
+    목표가 있는 프레임은 열림 거리 대응 값(`gripper_values`), 없는 프레임은 직전 값(첫 목표 전에는
+    closed)이다. 첫 프레임을 뺀 모든 프레임을 직전 프레임 값 기준 속도 한계(URDF 그리퍼 velocity x
+    velocity_scale)로 자른다. 손가락 끝 깊이 잡음으로 열림 거리가 프레임마다 흔들려도 내보낸 값이
+    로봇이 낼 수 없는 속도가 되지 않고, 잘린 프레임이 표시된다.
+    """
+    cfg = robot.config
+    want = gripper_values(opening_m, cfg.arm.gripper)
+    vmax = np.array([robot.gripper.velocity * cfg.ik.velocity_scale])
+    n = present.size
+    held = np.empty(n)
+    limited = np.zeros(n, dtype=np.bool_)
+    last = np.array([cfg.arm.gripper.closed])
+    for k in range(n):
+        cur = np.array([float(want[k])]) if present[k] else last
+        if k > 0:
+            cur, limited[k] = limit_step(cur, last, vmax, times_ms, k)
+        held[k], last = float(cur[0]), cur
+    return held, limited

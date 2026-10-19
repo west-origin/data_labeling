@@ -73,7 +73,8 @@ def test_official_lerobot_loader_reads_export(
     assert check["episodes"] == 2 and check["frames"] == 2 * n
     assert {"observation.state", "action", "annotation.hand_state", "annotation.verb",
             "annotation.verification", "annotation.tool_surface_contact",
-            "annotation.hand_points_3d_confidence",
+            "annotation.hand_points_3d_confidence", "annotation.hand_points_3d_method",
+            "annotation.hand_points_3d_intrinsics", "annotation.contact_object_class",
             "observation.images.bodycam"} <= set(check["features"])  # fmt: skip
     assert check["tasks"] == ["cleaning", "floor_sweep_mop"]
     for s in check["samples"]:
@@ -87,6 +88,9 @@ def test_official_lerobot_loader_reads_export(
         assert np.allclose(
             s["hand_points_3d_confidence"], ep.hand_points_3d_confidence[k], atol=1e-6
         )
+        assert s["hand_points_3d_method"] == ep.hand_points_3d_method[k].tolist()
+        assert s["hand_points_3d_intrinsics"] == ep.hand_points_3d_intrinsics[k].tolist()
+        assert s["contact_object_class"] == ep.contact_object_class[k].tolist()
         assert s["task"] == ep.tasks[k]
         # PTS로 고른 블러본 프레임이 그대로 들어갔다 (손실 압축 허용 오차 안)
         assert s["image_mean"] * 255 == pytest.approx(gray(int(ep.frame_index[k])), abs=6)

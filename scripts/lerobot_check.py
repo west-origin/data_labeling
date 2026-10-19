@@ -7,7 +7,8 @@ python scripts/lerobot_check.py <루트> <repo_id>
 실행한다. 작업공간 밖에서 도므로 `dlp_*` 패키지를 가져오지 않는다 (ruff만 검사, pyright 범위 밖).
 
 출력(표준 출력 JSON 한 줄): 프레임 수, 에피소드 수, fps, 특징 이름, task 목록, 그리고
-처음·가운데·끝 프레임 표본(인덱스, 에피소드, 타임스탬프(초), 영상 크기·평균 밝기, 상태·주석 값,
+처음·가운데·끝 프레임 표본(인덱스, 에피소드, 타임스탬프(초), 영상 크기·평균 밝기, 상태·주석 값(손 3D
+점 방식·내부 파라미터 출처·접촉 객체 클래스 포함),
 로봇 리타기팅 모드(ADR 0047)면 `extra`에 observation.human_state·retarget.* 값).
 호출자가 이 값을 기대값(에피소드 수, 주석 값)과 비교해 공식 로더로 읽힘을 확인한다.
 """
@@ -18,6 +19,13 @@ import json
 import sys
 
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
+# 표본에 정수 목록으로 싣는 주석 특징 (있을 때만, ADR 0053)
+INT_ANNOTATIONS = (
+    "annotation.hand_points_3d_method",
+    "annotation.hand_points_3d_intrinsics",
+    "annotation.contact_object_class",
+)
 
 
 def main() -> None:
@@ -51,6 +59,12 @@ def main() -> None:
             "hand_points_3d_confidence": [
                 float(v) for v in x["annotation.hand_points_3d_confidence"]
             ],
+            # 정수 주석 특징 (ADR 0053): 손 3D 점 방식·내부 파라미터 출처, 손마다 접촉 객체 클래스
+            **{
+                k.removeprefix("annotation."): [int(v) for v in x[k]]
+                for k in INT_ANNOTATIONS
+                if k in ds.features
+            },
             "extra": {
                 k: [float(v) for v in x[k].reshape(-1)]
                 for k in sorted(ds.features)

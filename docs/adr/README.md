@@ -59,3 +59,4 @@ ADR은 결정 당시의 이유와 이관 조건을 기록한다. 후속 ADR이 �
 | 0050 | [ADR 0050: 끊긴 물려받은 3D는 궤적 따르기가 지우고, 박스 중심 3D도 물려받으며, 카메라 자세는 자동 라벨이다](0050-inherited-3d-retraction-box-center-and-automatic-pose.md) |
 | 0051 | [ADR 0051: 물려받기만 한 3D는 입력이 바뀌면 새 계산으로 바꾸고, 지금 2D의 3D가 없으면 완료하지 않는다](0051-inherited-3d-replaced-when-inputs-change.md) |
 | 0052 | [ADR 0052: 작업자 손 크기의 출처·무효 기록, 수집 뒤 세션 기기 연결, 캘리브레이션 값 검사](0052-hand-size-lifecycle-and-calibration-hardening.md) |
+| 0053 | [ADR 0053: 리타기팅·내보내기·물리 사전값 전수 검수 정정 (묶음 C)](0053-retargeting-export-and-prior-review-fixes.md) |

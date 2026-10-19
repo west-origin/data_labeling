@@ -38,8 +38,11 @@ arm:
     workspace_center: [0.25, 0.0, 0.10]
 ik:
   position_tolerance_m: 0.01        # 끝단 위치 오차가 이 안이면 도달
-  orientation_mode: approach        # 5자유도 팔: 접근 축만 맞춘다 (축 둘레 회전은 자유)
-  orientation_tolerance_rad: 0.6    # 접근 축 각 오차가 이 안이면 도달 (약 34도)
+  # full: 위치 + 접근·닫힘 축. 5축이지만 마지막 관절 wrist_roll이 접근 축 둘레 롤이라 사람 손의 롤(엄지 → 검지
+  # 닫힘 축)을 맞출 수 있다. 접근 축의 요는 shoulder_pan(위치가 이미 정함)에 묶여 따로 맞추지 못하고, 그 오차는
+  # 위치와 가중 최소제곱으로 나눠 진다. approach로 두면 wrist_roll이 사람 손과 무관한 IK 부산물이 된다 (ADR 0053)
+  orientation_mode: full
+  orientation_tolerance_rad: 0.6    # 접근·닫힘 축 각 오차의 큰 쪽이 이 안이면 도달 (약 34도)
   orientation_weight: 0.05          # 회전 1 rad = 위치 5 cm로 본다 (위치 우선)
   smoothness_weight: 0.01           # 반복 걸음 추가 감쇠 (직전 해 근처 자세 가지로 수렴, 해를 끌어당기지 않음)
   damping: 0.0001

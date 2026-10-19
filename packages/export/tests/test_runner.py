@@ -299,7 +299,7 @@ def test_lerobot_robot_export_end_to_end(
     assert r.details["episodes"] == 2 and r.details["loader_check"]["episodes"] == 2
     assert manifest["robot"]["robot_id"] == "so101"
     assert manifest["robot"]["model_sha256"] == meta["model_sha256"]
-    assert manifest["robot"]["retarget_version"].startswith("retarget-dls-dls1+r")
+    assert manifest["robot"]["retarget_version"].startswith("retarget-dls-dls2+r")
     assert (
         info["robot_type"] == "so101" and len(info["features"]["observation.state"]["names"]) == 6
     )
@@ -311,6 +311,8 @@ def test_lerobot_robot_export_end_to_end(
     assert all(e["frames_with_target"] > 0 and e["reachable_fraction"] > 0.9 for e in reports)
     assert r.label_counts["trajectory3d/human_approved"] == 6
     assert "w0" not in (out / "lerobot" / "meta" / "dlp_retarget.json").read_text()
+    # 도달 판정 기준이 meta에 있다 (ADR 0053)
+    assert meta["ik"]["orientation_mode"] == "full" and "hand_parts" in meta
 
 
 def test_lerobot_refuses_mixed_aspect_ratios(

@@ -48,7 +48,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 import sqlalchemy as sa
 
@@ -164,21 +164,43 @@ class TransitionError(ValueError):
 # ---------------------------------------------------------------- 온톨로지
 
 
-def register_ontology(conn: sa.Connection, ontology: Ontology) -> None:
+class PhysicalPriorsChangeError(ValueError):
+    """등록된 버전의 물리 사전값을 명시 승인 없이 바꾸려 할 때 (ADR 0049·0053)."""
+
+
+RegisterAction = Literal["inserted", "unchanged", "appended", "priors_replaced"]
+
+
+def register_ontology(
+    conn: sa.Connection, ontology: Ontology, *, accept_physical_priors: bool = False
+) -> RegisterAction:
     """온톨로지 버전을 등록한다.
 
     같은 버전이 이미 있으면
-    - 내용이 같으면 아무것도 하지 않는다.
-    - 등록된 버전이 초안(draft)이고 새 내용이 덧붙이기만 한 것이면(기존 키와 값은 그대로, 새 키만
-      더함) 내용을 새 것으로 바꾼다 (ADR 0028). 예전 내용으로 기록된 라벨은 새 내용에서도 모두
-      유효하다. 상태(draft/frozen) 변경은 덧붙이기가 아니다.
+    - 내용이 같으면 아무것도 하지 않는다 ("unchanged").
+    - 등록된 버전이 초안(draft)이고, 물리 사전값 밖의 내용이 덧붙이기만 한 것이면(기존 키와 값은
+      그대로, 새 키만 더함) 내용을 새 것으로 바꾼다 (ADR 0028, "appended"). 예전 내용으로 기록된
+      라벨은 새 내용에서도 모두 유효하다. 상태(draft/frozen) 변경은 덧붙이기가 아니다.
+    - 물리 사전값(객체 `physical_priors`, 재질·촉감 어휘)이 달라지면(없던 사전값 채우기, 값 변경,
+      상태별·부분별 덮어쓰기 추가 모두) `accept_physical_priors`가 참일 때만 바꾼다
+      ("priors_replaced"). 사전값은 라벨의 해석·유효성과 무관해 라벨 검수에는 영향이 없지만,
+      구매자에게 파는 값의 뜻이 같은 버전 안에서 바뀌므로 운영자가 명시적으로 승인해야 한다
+      (`dlp ontology register --accept-physical-priors`, ADR 0053). 내용 해시(`ontology_digest`)가
+      바뀌어 AI 1차 검수 단위와 검수 화면 프로젝트가 새로 갈린다 (ADR 0049 배포 절).
     - 그 밖(확정된 버전, 키 삭제·값 변경)은 오류다. 새 버전을 만들고 이관(migrate_labels)한다.
+
+    처음 등록(행 없음)은 사전값을 포함해 그대로 넣는다 ("inserted").
 
     Args:
         conn: DB 연결 (트랜잭션은 호출자가 연다).
         ontology: 등록할 온톨로지 (`load_ontology` 결과).
+        accept_physical_priors: 등록된 초안의 물리 사전값 변경을 승인한다.
+
+    Returns:
+        한 일 (`RegisterAction`).
 
     Raises:
+        PhysicalPriorsChangeError: 사전값이 달라지는데 승인하지 않았을 때 (초안).
         ValueError: 같은 버전이 다른 내용으로 이미 있고 덧붙이기로 받을 수 없을 때.
 
     부작용:
@@ -202,43 +224,91 @@ def register_ontology(conn: sa.Connection, ontology: Ontology) -> None:
                 version=ontology.version, status=ontology.status, content=content
             )
         )
-        return
+        return "inserted"
     existing: Any = row["content"]
     if existing == content:
-        return
-    if row["status"] == "draft" and _is_additive(existing, content):
+        return "unchanged"
+    draft = row["status"] == "draft"
+    if draft and _is_additive(_without_priors(existing), _without_priors(content)):
+        priors_changed = _priors_of(existing) != _priors_of(content)
+        if priors_changed and not accept_physical_priors:
+            raise PhysicalPriorsChangeError(
+                f"온톨로지 {ontology.version}의 물리 사전값이 등록 내용과 다릅니다 (채우기·값 "
+                "변경·상태별/부분별 덮어쓰기 추가). 운영에 그대로 실어도 되는지 정한 뒤 `dlp "
+                f"ontology register {ontology.version} --accept-physical-priors`로 등록하세요 "
+                "(ADR 0049·0053)"
+            )
         conn.execute(
             ontology_versions.update()
             .where(ontology_versions.c.version == ontology.version)
             .values(content=content)
         )
-        return
-    why = "확정된 버전입니다" if row["status"] != "draft" else "덧붙이기가 아닌 변경입니다"
+        return "priors_replaced" if priors_changed else "appended"
+    why = "확정된 버전입니다" if not draft else "덧붙이기가 아닌 변경입니다"
     raise ValueError(
         f"온톨로지 {ontology.version}이 다른 내용으로 이미 등록되어 있습니다 ({why}). "
         "버전을 올리고 이관하세요"
     )
 
 
-# 비어 있던(null) 자리에 사전을 채워도 덧붙이기로 보는 키. 객체 물리 사전값은 라벨의 해석·유효성과
-# 무관한 선택 정보라, 사전값 없이 등록된 객체에 나중에 사전값을 더하는 것을 허용한다 (ADR 0049).
-# 이미 있는 사전값의 값을 바꾸는 것은 여전히 덧붙이기가 아니다.
-_FILLABLE_NULL_KEYS = frozenset({"physical_priors"})
+# 물리 사전값 어휘 (온톨로지 최상위 키). 객체 `physical_priors`와 함께 사전값 묶음으로 본다.
+_PRIOR_VOCAB_KEYS = ("materials", "tactile_properties")
 
 
-def _is_additive(old: Any, new: Any, key: str | None = None) -> bool:
+def _as_dict(value: Any) -> dict[str, Any] | None:
+    """JSON 사전이면 그대로(타입만 좁힌다), 아니면 None."""
+    if isinstance(value, dict):
+        d: dict[str, Any] = value  # pyright: ignore[reportUnknownVariableType]
+        return d
+    return None
+
+
+def _without_priors(content: Any) -> Any:
+    """등록 내용에서 물리 사전값 묶음(객체 physical_priors, 재질·촉감 어휘)을 뺀 사본.
+
+    사전값 묶음은 덧붙이기 판정과 따로 본다: 상태별(by_state)·부분별(part_materials) 사전은 키를
+    더해도 기존 값의 뜻이 바뀌므로 키 단위 덧붙이기 규칙을 쓸 수 없다 (F-SCH-20).
+    """
+    top = _as_dict(content)
+    if top is None:
+        return content
+    data = {k: v for k, v in top.items() if k not in _PRIOR_VOCAB_KEYS}
+    objects = _as_dict(data.get("objects"))
+    if objects is not None:
+        stripped: dict[str, Any] = {}
+        for oid, obj in objects.items():
+            d = _as_dict(obj)
+            stripped[oid] = (
+                obj if d is None else {k: v for k, v in d.items() if k != "physical_priors"}
+            )
+        data["objects"] = stripped
+    return data
+
+
+def _priors_of(content: Any) -> dict[str, Any] | None:
+    """등록 내용의 물리 사전값 묶음 (객체 ID → 사전값(없으면 None), 재질·촉감 어휘). 비교용."""
+    top = _as_dict(content)
+    if top is None:
+        return None
+    objects = _as_dict(top.get("objects")) or {}
+    priors: dict[str, Any] = {}
+    for oid, obj in objects.items():
+        d = _as_dict(obj)
+        priors[oid] = None if d is None else d.get("physical_priors")
+    return {"objects": priors, **{k: top.get(k) or {} for k in _PRIOR_VOCAB_KEYS}}
+
+
+def _is_additive(old: Any, new: Any) -> bool:
     """new가 old에 키를 더하기만 했는가 (사전은 재귀로, 그 밖의 값은 같아야 한다).
 
     old의 모든 키가 new에 있고 그 값도 재귀로 덧붙이기여야 한다. 목록·문자열 등 사전이 아닌 값은
-    완전히 같아야 한다 (목록에 원소를 더하는 것은 덧붙이기가 아니다). 예외: `_FILLABLE_NULL_KEYS`의
-    키는 null → 사전도 덧붙이기다. key는 이 값의 사전 키 (최상위는 None).
+    완전히 같아야 한다 (목록에 원소를 더하는 것은 덧붙이기가 아니다). 물리 사전값 묶음은 호출 전에
+    `_without_priors`로 빼고 따로 비교한다.
     """
     if isinstance(old, dict) and isinstance(new, dict):
         old_d: dict[str, Any] = old  # pyright: ignore[reportUnknownVariableType]
         new_d: dict[str, Any] = new  # pyright: ignore[reportUnknownVariableType]
-        return all(k in new_d and _is_additive(v, new_d[k], k) for k, v in old_d.items())
-    if old is None and key in _FILLABLE_NULL_KEYS and isinstance(new, dict):
-        return True
+        return all(k in new_d and _is_additive(v, new_d[k]) for k, v in old_d.items())
     return bool(old == new)
 
 

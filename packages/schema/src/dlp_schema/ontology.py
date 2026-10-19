@@ -132,17 +132,69 @@ class PriorRange(Contract):
         return self
 
 
+# 기본 범위(min·max)가 특정 상태 값의 범위인 상태 속성 → 그 값 (ADR 0049·0053). 젖음은 기본이
+# 건조(dry) 조건이고 젖은 경우만 by_state.wetness.wet로 따로 적는다 (dry를 따로 적으면 거부). 이
+# 표에 없는 상태 속성(fill_state·cleanliness 등)의 기본 범위는 그 속성의 모든 상태를 덮는 범위이고,
+# by_state 범위는 기본 범위 안이어야 한다. 구매자 규약의 base_range와 같은 뜻이다
+# (`dlp_schema.export.PHYSICAL_PRIOR_CONVENTIONS`).
+BASE_CONDITION_STATES: dict[str, str] = {"wetness": "dry"}
+# 물리 사전값을 적지 않는 물리 유형 (ADR 0049 1절: 사람·액체·분말은 클래스 수준 값이 뜻이 없다)
+NO_PRIOR_PHYSICAL_TYPES = frozenset({"person", "fluid_powder"})
+
+
 class StatePriorRange(PriorRange):
     """기본 사전값 범위와, 객체 상태 값별로 바꿔 쓰는 범위 (예: 양동이 fill_state=full의 질량).
 
-    min·max는 기본 조건(건조, 상태를 따로 적지 않음)의 범위다. by_state: 상태 속성 ID → 상태 값 ID →
-    범위. 상태 속성은 그 객체의 states에, 값은 그 속성의 values에 있어야 한다 (`Ontology` 검증기).
-    상태별 범위는 기본 범위 밖일 수 있다 (예: 젖은 바닥의 마찰).
+    min·max는 기본 범위다. 젖음(wetness)이 있는 객체에서는 건조 조건의 범위이고(젖은 경우는
+    by_state.wetness.wet), 그 밖의 상태 속성에서는 그 속성의 모든 상태를 덮는 범위다
+    (`BASE_CONDITION_STATES`). 상태를 모르면 기본 범위와 by_state 범위 전체를 덮는 범위를 쓴다.
+    by_state: 상태 속성 ID → 상태 값 ID → 범위 (상태 속성은 하나만, 조합 규칙은 두지 않는다). 상태
+    속성은 그 객체의 states에, 값은 그 속성의 values에 있어야 한다 (`Ontology` 검증기).
     """
 
     by_state: dict[OntologyId, dict[OntologyId, PriorRange]] = Field(
-        default_factory=dict, description="상태 속성 ID → 상태 값 ID → 사전값 범위"
+        default_factory=dict,
+        description="상태 속성 ID → 상태 값 ID → 사전값 범위 (상태 속성 하나만)",
     )
+
+    @model_validator(mode="after")
+    def _one_attribute(self) -> StatePriorRange:
+        """by_state는 상태 속성 하나만, 그 아래 값이 하나 이상.
+
+        두 속성(젖음 + 청결)을 함께 적으면 둘 다 해당하는 물체에 어느 범위를 쓸지 정해지지 않는다.
+
+        Raises:
+            ValueError: 상태 속성이 둘 이상이거나 값 사전이 비었을 때.
+        """
+        if len(self.by_state) > 1:
+            raise ValueError(f"by_state에는 상태 속성을 하나만 적습니다: {sorted(self.by_state)}")
+        for attr, values in self.by_state.items():
+            if not values:
+                raise ValueError(f"by_state.{attr}에 상태 값이 없습니다")
+        return self
+
+
+def _base_meaning_errors(
+    oid: str, name: str, attr: str, rng: StatePriorRange, by_value: dict[str, PriorRange]
+) -> list[str]:
+    """기본 범위의 뜻(`BASE_CONDITION_STATES`)과 by_state가 맞는지.
+
+    기본이 특정 상태 값(젖음 → 건조)인 속성은 그 값을 by_state에 따로 적지 않는다. 그 밖의 속성은
+    기본 범위가 모든 상태를 덮으므로 by_state 범위가 기본 범위 안이어야 한다.
+    """
+    base_value = BASE_CONDITION_STATES.get(attr)
+    if base_value is not None:
+        if base_value in by_value:
+            return [
+                f"객체 {oid}: {name}.by_state.{attr}.{base_value}는 기본 범위의 조건이라 따로 "
+                "적지 않습니다"
+            ]
+        return []
+    return [
+        f"객체 {oid}: {name}.by_state.{attr}.{v} 범위가 기본 범위(모든 상태를 덮음) 밖입니다"
+        for v, r in by_value.items()
+        if r.min < rng.min or r.max > rng.max
+    ]
 
 
 class PhysicalPriors(Contract):
@@ -153,13 +205,15 @@ class PhysicalPriors(Contract):
     """
 
     # 필드:
-    #   source: 수치 사전값의 출처 (필수). note: 근거·가정 메모 (선택, 한국어).
+    #   source: 수치 사전값의 출처 (필수). note: 근거·가정 메모 (선택, 한국어. prior_literature면
+    #     출처 필수).
     #   material: 대표 재질 ID (materials의 키). part_materials: 도구 부분 ID → 재질 ID (그 객체의
     #     작용부·파지부만, 대표 재질과 다른 부분만 적는다).
     #   tactile: 촉감 속성 ID 목록 (tactile_properties의 키, 중복 금지).
     #   mass_kg: 질량 범위 (kg). by_state로 상태별 범위 (예: fill_state).
     #   static_friction: 정지 마찰 계수 범위 (무차원). 상대면은 건조한 맨손 피부·니트릴 장갑·고무
-    #     그리퍼 패드를 함께 보는 넓은 범위이고, 젖은 경우는 by_state(wetness)로 따로 적는다.
+    #     그리퍼 패드를 함께 보는 넓은 범위이고, 젖은 경우는 by_state(wetness)로 따로 적는다. 물체
+    #     쪽 면은 도구면 손으로 쥐는 파지부(grip_parts), 아니면 주 접촉면이다 (촉감도 같다).
     source: PriorSource = Field(description="수치 사전값의 출처 (prior_*: 측정값이 아님)")
     note: str | None = None
     material: OntologyId | None = None
@@ -172,17 +226,26 @@ class PhysicalPriors(Contract):
         default=None,
         description=(
             "정지 마찰 계수 사전값 범위 (무차원). 상대면: 건조한 맨손 피부·니트릴 장갑·고무 그리퍼 "
-            "패드. 젖음은 by_state.wetness"
+            "패드. 물체 쪽 면: 도구는 파지부(grip_parts), 그 밖은 주 접촉면. "
+            "젖음은 by_state.wetness"
         ),
     )
 
     @model_validator(mode="after")
     def _not_empty(self) -> PhysicalPriors:
         """재질·촉감·질량·마찰 중 하나는 있어야 하고 촉감 ID는 겹치지 않아야 한다.
+        prior_literature면 note에 출처가 있어야 하고(구매자에게 '문헌 출처'로 판다),
+        part_materials는 대표 재질과 다른 부분만 적는다.
 
         Raises:
-            ValueError: 모두 비었거나 촉감 ID가 중복될 때.
+            ValueError: 모두 비었거나 촉감 ID가 중복될 때, 문헌 출처에 note가 없을 때, 대표 재질과
+                같은 부분 재질이 있을 때.
         """
+        if self.source is PriorSource.PRIOR_LITERATURE and not (self.note or "").strip():
+            raise ValueError("source가 prior_literature면 note에 출처를 적습니다")
+        same = sorted(k for k, v in self.part_materials.items() if v == self.material)
+        if same:
+            raise ValueError(f"part_materials에 대표 재질과 같은 부분이 있습니다: {same}")
         if (
             self.material is None
             and not self.part_materials
@@ -312,6 +375,8 @@ class Ontology(Contract):
         if p is None:
             return []
         errors: list[str] = []
+        if obj.physical_type in NO_PRIOR_PHYSICAL_TYPES:
+            errors.append(f"객체 {oid}: 물리 유형 {obj.physical_type}에는 사전값을 적지 않습니다")
         materials = [p.material] if p.material is not None else []
         for m in [*materials, *p.part_materials.values()]:
             if m not in self.materials:
@@ -349,6 +414,7 @@ class Ontology(Contract):
                 for v in by_value
                 if v not in values
             )
+            errors.extend(_base_meaning_errors(oid, name, attr, rng, by_value))
         return errors
 
     # ------------------------------------------------------------ 조회 도우미

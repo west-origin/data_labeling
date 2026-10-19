@@ -4,6 +4,7 @@
 - 날짜: 2026-10-17
 - 관련: ADR 0046(세션 월드 좌표 손 3D, 이 ADR의 입력), ADR 0018·0021·0027(내보내기·격리 환경·가명),
   ADR 0010(상업 사용), ADR 0045(LeRobot 손 3D 특징). 문제 레지스트리 F-COE-17~20(남은 일).
+  ADR 0053이 회전 모드 선택·재시작·그리퍼 속도 한계·설정 검증·meta 기준을 보완한다 (F-COE-40~49).
   계약 변경 없음 (라벨·DB 그대로). 새 패키지 `packages/retarget` (`dlp_retarget`, schema에만 의존),
   `dlp_export`가 이를 쓴다 (architecture.md 의존 표 갱신). 설정: `config/robots/<ID>.yaml`(로봇),
   `config/policies/retarget.yaml`(정책). 격리 환경 `scripts/retarget-env`(mink, uv.lock 고정).
@@ -54,20 +55,26 @@
 
 - 내장 풀이기: 프레임마다 직전 해에서 시작하는 감쇠 최소제곱 반복 `(JᵀJ + (λ+μ)I)Δq = JᵀE`, 관절 위치
   한계는 반복마다 자르고, 속도 한계(URDF velocity x `velocity_scale` x 프레임 간격)는 직전 해 기준으로
-  자른 뒤 `velocity_limited`로 표시한다. 회전 오차는 `orientation_mode`(none, approach: 접근 축만 — 5자유도
-  팔, full: 접근·닫힘 축). 첫 목표·끊긴 뒤는 여러 시작점(관절 범위 가운데 + 결정적 난수)에서 고른다.
+  자른 뒤 `velocity_limited`로 표시한다. 회전 오차는 `orientation_mode`(none, approach: 접근 축만, full:
+  접근·닫힘 축). 모드는 관절 수가 아니라 구조로 고른다: 접근 축 둘레 롤을 바꾸는 관절(손목 끝 wrist roll)이
+  있으면 full, 없을 때만 approach (ADR 0053, SO-101은 full). 첫 목표·끊긴 뒤는 여러 시작점(직전 해 + 관절
+  범위 가운데 + 결정적 난수)에서 풀어 직전 해에 가까운 도달 해를 고르고, 이 프레임에도 속도 한계를 적용한다
+  (ADR 0053). 그리퍼도 URDF 그리퍼 속도 x `velocity_scale`로 자르고 같은 표시에 합친다.
   μ(smoothness_weight)는 걸음 감쇠라 해 자체를 끌어당기지 않는다 (끌어당기면 0.5 mm 넘는 위치 오차가
   남아 이렇게 정했다).
-- mink 풀이기: URDF에서 메시·충돌·전달 장치를 빼고(고정 링크 보존) MuJoCo로 읽어 FrameTask(접근 축 둘레
-  회전 비용 0)와 ConfigurationLimit로 프레임마다 수렴할 때까지 미분 IK. 오차·도달·속도 한계 판정은 내장과
-  같은 코드(`ik.frame_errors`)로 한다.
+- mink 풀이기: URDF에서 메시·충돌·전달 장치를 빼고(고정 링크 보존) MuJoCo로 읽어, 끝 링크에 단 도구
+  중심점 site(z = 접근 축)의 FrameTask(approach면 site z 둘레 회전 비용 0, ADR 0053)와 ConfigurationLimit로
+  프레임마다 수렴할 때까지 미분 IK. 오차·도달·속도 한계 판정은 내장과 같은 코드(`ik.frame_errors`,
+  `ik.limit_step`)로 한다.
 
 ### 4. 도달 가능성과 정직성 규칙 (`dlp_retarget.retarget`)
 
 - 프레임마다 `target_present`(손 목표 있음), `reachable`(위치 오차 ≤ `position_tolerance_m` 그리고
   회전 오차 ≤ `orientation_tolerance_rad`), 위치·회전 오차, `velocity_limited`.
 - 닿지 못한 프레임도 **가장 가까운 해와 실제 오차**를 낸다. 목표를 작업 공간 안으로 잘라 "도달"로
-  만들지 않는다. 목표가 없는 프레임은 직전 해를 두고 `target_present=0`으로 표시한다.
+  만들지 않는다. 목표가 없는 프레임은 직전 프레임 값을 두고(첫 목표 전에는 시작 자세 = 관절 범위 가운데,
+  닫힌 그리퍼) `target_present=0`으로 표시한다. 목표가 하나도 없는 에피소드는 정책과 관계없이 버리기로
+  결정한다 (ADR 0053).
 - 에피소드 보고 `FeasibilityReport`: 프레임 수, 목표 비율, 도달 비율, 위치·회전 오차 평균·최대, 팔 길이
   밖 프레임 수(첫 관절에서 링크 길이 합보다 먼 목표), 속도 한계 프레임 수, 가장 긴 미도달 구간(ms), 결정.
 - 정책 `retarget.yaml unreachable`: `mark`(기본, 표시만 하고 낸다) 또는 `drop_episode`(도달 못 한 비율이
@@ -85,7 +92,8 @@
   `position_error_m`·`orientation_error_rad`·`velocity_limited`·`verification`(그 프레임 월드 손 라벨의 최저
   검증 등급). LeRobot `robot_type` = 로봇 ID. 영상은 그대로 (사람 손이 보인다, F-COE-18).
 - `meta/dlp_retarget.json`과 manifest `details.retarget`: 로봇 ID, 모델 sha256·라이선스, 관절 이름, 배치,
-  리타기팅 판, 에피소드별 보고. manifest 최상위 `robot`에 요약 (로봇 ID, 모델 sha256, 판).
+  리타기팅 판, 에피소드별 보고, 도달 판정 기준(`ik`, `hand_parts`, `reachable_definition`,
+  `orientation_error_definition`, ADR 0053). manifest 최상위 `robot`에 요약 (로봇 ID, 모델 sha256, 판).
 - 리타기팅 판: `retarget-<풀이기>-<판>+r<로봇 설정 해시>+m<모델 sha256 앞 12자>+p<정책 해시>`.
 - 쓰기·읽기 스크립트는 특징 → npz 배열 대응(`frame_arrays`)으로 일반화했다 (사람 모드 결과는 같다).
 - 작업자·장소 ID는 어디에도 넣지 않는다 (세션 ID는 기존처럼 내보내기마다 다른 가명).
@@ -97,7 +105,8 @@
 
 | 조건 | 풀이기 | 도달 비율 | 끝단 위치 오차 (정답 대비) | 접근 축 오차 | 비고 |
 | --- | --- | --- | --- | --- | --- |
-| 도달 가능 궤적 (world_fixed, 배율 0.5) | 내장 | 100% | 최대 0.07 mm | 최대 0.5도 | 시험 상한 2 mm·1도, 약 50 ms/프레임 |
+| 도달 가능 궤적 (world_fixed, 배율 0.5) | 내장 | 100% | 최대 0.07 mm | 최대 0.5도 | 시험 상한 2 mm·1도, 약 50 ms/프레임. approach 모드 시절 값이다. full(ADR 0053)은 닫힘 축(롤) 오차 1도·wrist_roll 0.01 rad 안 (approach는 최대 22도·0.39 rad) |
+| 사람 손 요가 팔 평면과 ±20도 어긋남 | 내장 (full) | 100% | — | 요만큼 남음 | 롤(닫힘 축의 접근 축 수직 성분) 오차 3도 안 (approach는 평균 53도) |
 | 같음 | mink | 100% | 0.01 mm 미만 | 0.01도 미만 | 시험 상한 5 mm, 약 25 ms/프레임 (격리 환경) |
 | 1.0~1.5초 손을 위로 2 m (로봇 기준 1 m) | 내장 | 74% | 도달 구간 0.05 mm | — | 그 15프레임 모두 미도달·팔 길이 밖, 보고 위치 오차 최대 1.07 m, 돌아올 때 속도 한계 23프레임 |
 | 같음 | mink | 59% | 도달 구간 0.01 mm 미만 | — | 같은 15프레임 미도달, 속도 한계 35프레임 |
@@ -112,6 +121,7 @@
   닿지 못한 구간이 프레임 단위로 드러나고, 어떤 로봇·모델·판·정책으로 만들었는지 manifest에 남는다.
 - 비용·한계: 팔 하나 + 평행 그리퍼만 (다지 손은 dex-retargeting(MIT) 후보, F-COE-17). 자기 충돌·환경 충돌·
   토크·동역학을 보지 않는다 (F-COE-20). 영상 속 손과 로봇 상태의 도메인 차이(손 인페인팅·로봇 렌더 합성은
-  연구 과제, F-COE-18). 5자유도 팔은 접근 축 둘레 회전을 맞추지 않는다. 배율·배치는 운영 결정이다.
+  연구 과제, F-COE-18). pan + pitch 연쇄 끝에 wrist roll이 있는 5자유도 팔(SO-101)은 접근 축의 요를 따로
+  맞추지 못한다(롤은 맞춘다, ADR 0053). 배율·배치는 운영 결정이다.
   SO-101 그리퍼 열림 방향(closed 0, open 1.5 rad)은 공개 모델 문서에 정의가 없어 근사다.
 - 운영 절차: `docs/handover/robot-retargeting.md`.

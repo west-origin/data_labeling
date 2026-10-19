@@ -11,15 +11,19 @@ LeRobot 특징 (로봇 모드):
   작용부).
 - annotation.* : 사람 모드와 같다.
 - retarget.target_present (int64): 그 프레임에 손 목표(세 점 모두)가 있었나 (0/1). 없으면 관절은
-  직전 해.
-- retarget.reachable (int64): 허용 오차 안에 닿았나 (0/1). 0이면 관절은 가장 가까운 해(지어내지
-  않음).
-- retarget.position_error_m / retarget.orientation_error_rad (float32): 끝단 오차 (목표 없음 -1).
-- retarget.velocity_limited (int64): 속도 한계로 잘린 프레임 (0/1).
+  직전 프레임 값 (첫 목표 전에는 시작 자세 = 관절 범위 가운데, 닫힌 그리퍼).
+- retarget.reachable (int64): 허용 오차 안에 닿았나 (0/1). 기준은 meta/dlp_retarget.json `ik`
+  (위치 position_tolerance_m, 회전 orientation_tolerance_rad, orientation_mode)와
+  `reachable_definition`이다. 0이면 관절은 가장 가까운 해(지어내지 않음).
+- retarget.position_error_m (float32): 끝단 위치 오차 (목표 없음 -1).
+- retarget.orientation_error_rad (float32): 끝단 회전 오차. 뜻은 orientation_mode에 따른다
+  (`orientation_error_definition`: approach는 접근 축 각, full은 접근·닫힘 축 각의 큰 쪽). 목표가
+  없거나 none 모드(재지 않음)면 -1.
+- retarget.velocity_limited (int64): 팔·그리퍼 관절 중 하나라도 속도 한계로 잘린 프레임 (0/1).
 - retarget.verification (int64): 그 프레임에 쓴 월드 손 3D 라벨의 가장 낮은 검증 등급 (없음 -1).
 
 시각 규약 (ADR 0019): 에피소드 시각은 마스터, 3D 궤적은 그 스트림 시각(`stream_ms`)에서 읽고
-`interp_max_gap_ms` 안에서만 선형 보간한다.
+`interp_max_gap_3d_ms` 안에서만 선형 보간한다.
 """
 
 from __future__ import annotations
@@ -51,6 +55,21 @@ from dlp_export.policy import LeRobotPolicy
 from dlp_schema.labels import CoordinateFrame, LabelRecord, Trajectory3DPayload
 from dlp_schema.session import Stream
 from dlp_schema.trajectory_follow import CAMERA_POSE_REVIEW
+
+# retarget.orientation_error_rad의 뜻 (orientation_mode 값 → 구매자용 영어 설명, 계약의 의미)
+ORIENTATION_ERROR_DEFINITION = {
+    "none": "not measured (-1); only the position is matched",
+    "approach": "angle between the tool approach axis and the hand approach axis "
+    "(wrist to grasp point); rotation about the approach axis (roll) is not evaluated",
+    "full": "max of the approach-axis angle and the closing-axis angle "
+    "(thumb to index direction); roll is evaluated",
+}
+# retarget.reachable의 뜻 (구매자용)
+REACHABLE_DEFINITION = (
+    "1 when position error <= ik.position_tolerance_m and (unless orientation_mode is none) "
+    "orientation error <= ik.orientation_tolerance_rad, after the velocity limit "
+    "(URDF velocity x ik.velocity_scale) has been applied"
+)
 
 # 로봇 모드에서 npz에 더하는 프레임 배열 (특징 이름 → npz 키)
 ROBOT_ARRAYS = {
@@ -163,7 +182,7 @@ def retarget_session(
 ) -> RobotEpisode:
     """사람 에피소드 시각에서 손 점을 읽어 리타기팅한다."""
     points, used, ver = world_hand_points(
-        stream, labels, ep.times_ms, robot, policy, lerobot.interp_max_gap_ms
+        stream, labels, ep.times_ms, robot, policy, lerobot.interp_max_gap_3d_ms
     )
     return RobotEpisode(retarget_episode(points, robot, policy, solver), used, ver)
 
@@ -216,8 +235,14 @@ def robot_arrays(ep: Episode, rob: RobotEpisode) -> dict[str, NDArray[Any]]:
 def retarget_meta(
     robot: LoadedRobot, policy: RetargetPolicy, solver: IkSolver, reports: list[dict[str, Any]]
 ) -> dict[str, Any]:
-    """meta/dlp_retarget.json·manifest details.retarget 내용 (로봇·모델 해시·판·에피소드 보고)."""
+    """meta/dlp_retarget.json·manifest details.retarget 내용.
+
+    로봇·모델 해시·판·에피소드 보고와 함께, 도달·오차를 해석하는 기준(`ik`: 허용 오차·
+    orientation_mode·velocity_scale 등, `hand_parts`: 손 점 역할 → 부위, 두 정의 문자열)을 싣는다.
+    모델 파일 경로·작업자·장소 ID는 싣지 않는다.
+    """
     cfg = robot.config
+    mode = cfg.ik.orientation_mode.value
     return {
         "robot_id": cfg.robot_id,
         "display_name": cfg.display_name,
@@ -231,6 +256,10 @@ def retarget_meta(
         "hand": cfg.arm.hand.value,
         "placement": cfg.arm.placement.model_dump(mode="json"),
         "unreachable_policy": policy.unreachable.value,
+        "ik": cfg.ik.model_dump(mode="json"),
+        "hand_parts": policy.hand_parts.model_dump(mode="json"),
+        "reachable_definition": REACHABLE_DEFINITION,
+        "orientation_error_definition": ORIENTATION_ERROR_DEFINITION[mode],
         # 목표는 월드 좌표 손 3D라 자동 카메라 자세(사람 검수 대상 아님)에 기댄다 (ADR 0050)
         "camera_pose": CAMERA_POSE_REVIEW,
         "episodes": reports,
