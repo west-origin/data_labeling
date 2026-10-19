@@ -26,6 +26,12 @@ from pathlib import Path
 from pydantic import BaseModel
 
 from dlp_schema.aireview import AiExposure, AiOutcome, AiReviewRun, AiReviewUnit
+from dlp_schema.calibration import (
+    CameraCalibration,
+    HandSizeInvalidation,
+    SessionCameraAssignment,
+    WorkerHandSize,
+)
 from dlp_schema.config import PlatformConfig
 from dlp_schema.dataset import DatasetVersion
 from dlp_schema.episode import EpisodeGraph
@@ -62,6 +68,11 @@ CONTRACTS: dict[str, type[BaseModel]] = {
     "description_inheritance": DescriptionInheritance,
     # 3D 궤적이 2D 손 트랙 검수를 물려받은 기록 (ADR 0048, 추가 전용 표)
     "trajectory_inheritance": TrajectoryInheritance,
+    # 기기 캘리브레이션·작업자 손 크기 등록과 그 무효·기기 연결 기록 (ADR 0045·0052, 추가 전용 표)
+    "camera_calibration": CameraCalibration,
+    "worker_hand_size": WorkerHandSize,
+    "hand_size_invalidation": HandSizeInvalidation,
+    "session_camera_assignment": SessionCameraAssignment,
     "golden_set": GoldenSet,
     "training_run": TrainingRun,
     "model_version": ModelVersion,

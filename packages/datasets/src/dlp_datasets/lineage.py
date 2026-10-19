@@ -32,6 +32,7 @@ from datetime import datetime
 import sqlalchemy as sa
 
 from dlp_schema.dataset import Split
+from dlp_schema.db.calibration_repository import hand_size_records_from_session
 from dlp_schema.db.repository import (
     dataset_versions_with_session,
     get_dataset_version,
@@ -65,6 +66,9 @@ class SessionLineage:
     golden_sets: list[str] = field(default_factory=list[str])  # 이 세션이 든 골든셋 버전
     # 이번 사용 중지(`withdraw_session`)가 매체 회수를 요청한 검수 작업 키. 계보 조회는 비어 있다
     revocations: list[str] = field(default_factory=list[str])
+    # 이 세션을 추정 출처로 쓴 작업자 손 크기 등록 ID (ADR 0052). 사용 중지되면 그 추정은 손 크기
+    # 결정에서 빠지고, 같은 작업자 다른 세션의 검수 전 3D가 다음 프리라벨에서 다시 만들어진다
+    hand_sizes: list[str] = field(default_factory=list[str])
 
 
 # 학습 예제는 학습·검증 분할에서만 뽑는다 (dlp_train.extract).
@@ -73,7 +77,7 @@ TRAINING_SPLITS = frozenset({Split.TRAIN, Split.VAL})
 
 
 def session_lineage(conn: sa.Connection, session_id: str) -> SessionLineage:
-    """세션 → 골든셋·데이터셋 버전 → 학습 실행 → 내보내기.
+    """세션 → 골든셋·데이터셋 버전 → 학습 실행 → 내보내기, 그리고 이 세션에서 추정한 손 크기 등록.
 
     학습 실행은 그 버전에서 세션이 학습·검증 분할에 있었던 것만 돌려준다.
     내보내기는 그 버전들의 내보내기 중 `session_ids`(실제로 쓴 세션)에 이 세션이 있는 것만.
@@ -93,7 +97,15 @@ def session_lineage(conn: sa.Connection, session_id: str) -> SessionLineage:
     ]
     runs = list_training_runs(conn, trained) if trained else []
     golden = [g.version for g in list_golden_sets(conn) if session_id in g.session_ids]
-    return SessionLineage(session_id, session.lifecycle_state, versions, runs, exports, golden)
+    return SessionLineage(
+        session_id,
+        session.lifecycle_state,
+        versions,
+        runs,
+        exports,
+        golden,
+        hand_sizes=hand_size_records_from_session(conn, session_id),
+    )
 
 
 def withdraw_session(

@@ -8,7 +8,8 @@
 - `audit-report <YYYY-MM> [--fail-on-flags]` — 원본 접근(`raw_access_log`) 월간 감사 리포트.
   권한 없는 접근·업무 시간 밖 접근 같은 확인할 것(flags)을 표시한다.
 - `retention [--today] [--all]` — 원본 보관 기간 만료 알림 (기간은 `defaults.yaml`
-  `retention.raw_retention_days`, 아직 미정이면 알림만 없음).
+  `retention.raw_retention_days`, 아직 미정이면 알림만 없음). 세션이 모두 사용 중지된 작업자의 지금
+  쓰이는 손 크기 등록도 알린다 (ADR 0052, `dlp calib palm-revoke`).
 - `retention-decide <세션> extend|delete [--until] --reason` — 보관 연장·삭제 결정을 기록한다.
   실제 삭제는 이 명령이 하지 않는다 (`RETENTION_NOTE` 참고).
 - `log-work <세션> --reviewer --stage --minutes` — 도구가 재지 않는 검수 작업 시간을 손으로
@@ -51,6 +52,7 @@ from dlp_ops.retention import RETENTION_NOTE, retention_status
 from dlp_privacy import audit as audit_privacy
 from dlp_privacy.runner import collected_privacy_reviews, operational_blur
 from dlp_schema import load_config, repo_root
+from dlp_schema.db.calibration_repository import hand_sizes_to_review
 from dlp_schema.db.repository import (
     get_labels,
     get_session,
@@ -154,6 +156,7 @@ def cmd_retention(args: argparse.Namespace) -> int:
     engine = _engine(args)
     with engine.connect() as conn:
         items = retention_status(conn, today, days, load_policy(root).retention.alert_days_before)
+        hand_sizes = hand_sizes_to_review(conn)
     engine.dispose()
     print(f"상태: {dict(Counter(i.status for i in items))}")
     for i in items:
@@ -161,6 +164,12 @@ def cmd_retention(args: argparse.Namespace) -> int:
             print(f"  [{i.status}] {i.session_id} 만료 {i.expires_on or '-'} {i.note}")
     if any(i.status in ("expired", "withdrawn", "delete_decided") for i in items):
         print(f"참고: {RETENTION_NOTE}")
+    # 작업자 손 크기(신체 측정값)는 세션 원본과 따로 남는다 (ADR 0052): 세션이 모두 사용 중지된
+    # 작업자의 지금 쓰이는 등록을 알린다
+    for h in hand_sizes:
+        print(f"  [손 크기] {h.worker_id} {h.record_id}: {h.reason}")
+    if hand_sizes:
+        print("참고: 동의 철회·삭제 요구면 dlp calib palm-revoke <작업자> --reason ...")
     return 0
 
 

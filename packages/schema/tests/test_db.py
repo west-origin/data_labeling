@@ -234,12 +234,13 @@ def test_labels_are_immutable_except_review(pg: sa.Engine) -> None:
             conn.execute(sa.text(statement))
 
 
-# TRUNCATE를 막아야 하는 추가 전용 테이블 (0010~0012, 0017, 0021, 0022, 0023)
+# TRUNCATE를 막아야 하는 추가 전용 테이블 (0010~0012, 0017, 0021, 0022, 0023, 0024)
 APPEND_ONLY_TABLES = (
     "label_records", "raw_access_log", "review_work", "privacy_audits", "retention_decisions",
     "session_lifecycle_events", "privacy_detection_runs", "privacy_holds",
     "description_inheritance", "camera_calibrations", "worker_hand_sizes",
-    "trajectory_inheritance",
+    "trajectory_inheritance", "worker_hand_size_sources", "worker_hand_size_invalidations",
+    "session_camera_assignments",
 )  # fmt: skip
 
 
@@ -281,6 +282,40 @@ def test_calibration_registries_are_append_only(pg: sa.Engine) -> None:
     pg.dispose()
     with pytest.raises(RuntimeError, match="0022"):
         downgrade(url, "0021")
+
+
+@pytest.mark.services
+def test_hand_size_lifecycle_and_camera_assignments_are_append_only(pg: sa.Engine) -> None:
+    """손 크기 출처·무효 기록과 세션 기기 연결(0024, ADR 0052)은 수정·삭제할 수 없고, 기록이 있으면
+    0024를 되돌릴 수 없다.
+    """
+    from dlp_schema.calibration import HandSizeSource
+    from dlp_schema.db.calibration_repository import (
+        assign_session_camera,
+        invalidate_hand_sizes,
+        register_hand_size,
+    )
+
+    session = make_session("s001")
+    with pg.begin() as conn:
+        insert_session(conn, session)
+        register_hand_size(conn, "w01", 0.08, source=HandSizeSource.ESTIMATED, now=FIXED_TIME,
+                           n_samples=40, source_session_ids=["s001"], estimator="e")  # fmt: skip
+        invalidate_hand_sizes(conn, "w01", reason="동의 철회", now=FIXED_TIME)
+        assign_session_camera(conn, session, "cam-1", reason="기록부", now=FIXED_TIME)
+    updates = {
+        "worker_hand_size_sources": "session_id = session_id",
+        "worker_hand_size_invalidations": "reason = 'x'",
+        "session_camera_assignments": "camera_id = 'x'",
+    }
+    for table, change in updates.items():
+        for statement in (f"UPDATE {table} SET {change}", f"DELETE FROM {table}"):
+            with pytest.raises(DBAPIError, match=table), pg.begin() as conn:
+                conn.execute(sa.text(statement))
+    url = pg.url.render_as_string(hide_password=False)
+    pg.dispose()
+    with pytest.raises(RuntimeError, match="0024"):
+        downgrade(url, "0023")
 
 
 @pytest.mark.services

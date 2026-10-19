@@ -1,9 +1,8 @@
-"""`dlp calib intrinsics|import|palm|show` 명령 테스트 (ADR 0045, SQLite 파일 DB, 서비스 불필요).
+"""`dlp calib intrinsics|import|assign|palm|show` 명령 테스트 (ADR 0045·0052, SQLite 파일 DB).
 
 정답: 합성 체커보드 영상(`dlp_fixtures.calibration`)의 렌더 내부 파라미터, 테스트가 쓴 캘리브레이션
-파일과 손 크기 값. 같은 명령을 다시 돌리면 쓰지 않는다 (멱등).
-`palm-estimate`는 깊이 모델 가중치와 원본 저장소가 필요해 여기서 돌리지 않는다 (추정 함수는
-`packages/prelabel/tests/test_handfit_quality.py`).
+파일과 손 크기 값. 같은 명령을 다시 돌리면 쓰지 않는다 (멱등). `palm-estimate`·`palm-revoke`는
+`test_calib_palm_estimate.py`(가짜 깊이·로컬 원본 저장소).
 """
 
 from __future__ import annotations
@@ -18,8 +17,16 @@ import yaml
 from dlp_cli import calib_cmds
 from dlp_cli.main import main
 from dlp_fixtures.calibration import generate_checkerboard_video
-from dlp_schema.db.calibration_repository import get_camera_calibrations, get_worker_hand_sizes
-from dlp_schema.testing import sqlite_db
+from dlp_schema import repo_root
+from dlp_schema.db.calibration_repository import (
+    get_camera_calibrations,
+    get_worker_hand_sizes,
+    session_intrinsics,
+)
+from dlp_schema.db.repository import get_session, insert_session, register_ontology
+from dlp_schema.ontology import load_ontology
+from dlp_schema.session import Calibration
+from dlp_schema.testing import make_session, sqlite_db
 
 
 class _AwareSqlalchemy:
@@ -70,8 +77,12 @@ def test_import_palm_and_show(url: str, tmp_path: Path, capsys: pytest.CaptureFi
     path.write_text(yaml.safe_dump(k), "utf-8")
     since = "2026-10-01T00:00:00+09:00"
     assert main(["calib", "import", "cam-1", str(path), "--valid-from", since, "--url", url]) == 0
-    assert main(["calib", "palm", "w01", "0.081", "--url", url]) == 0
-    assert main(["calib", "palm", "w01", "0.081", "--url", url]) == 0
+    # 세션이 없는 작업자 ID는 오타로 보고 거부한다 (F-COE-72). 첫 녹화 전 등록은 옵션으로
+    assert main(["calib", "palm", "w01", "0.081", "--url", url]) == 2
+    assert "[거부]" in capsys.readouterr().out
+    allow = "--allow-unknown-worker"
+    assert main(["calib", "palm", "w01", "0.081", allow, "--url", url]) == 0
+    assert main(["calib", "palm", "w01", "0.081", allow, "--url", url]) == 0
     assert main(["calib", "show", "--camera", "cam-1", "--worker", "w01", "--url", url]) == 0
     out = capsys.readouterr().out
     assert "fx 500.00" in out and "0.0810 m" in out and "건너뜀" in out
@@ -81,6 +92,89 @@ def test_import_palm_and_show(url: str, tmp_path: Path, capsys: pytest.CaptureFi
     assert cal.valid_from is not None and cal.valid_from.utcoffset() is not None
     assert len(sizes) == 1 and sizes[0].source.value == "measured"
     with pytest.raises(Exception, match="palm_m"):
-        main(["calib", "palm", "w01", "0.5", "--url", url])
+        main(["calib", "palm", "w01", "0.5", allow, "--url", url])
     with pytest.raises(SystemExit):
         main(["calib", "import", "cam-1", str(path), "--valid-from", "2026-10-01", "--url", url])
+
+
+def test_import_rejects_bad_files_with_exit_2(
+    url: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """파싱 오류·모르는 키·ROS 미보정·타당 범위 밖 파일은 처리되지 않은 예외가 아니라 종료
+    코드 2이고 DB에 쓰지 않는다 (F-PMS-21·22).
+    """
+    files = {
+        "broken.json": '{"fx": 1',
+        "extra.yaml": "width: 640\nheight: 480\nfx: 500\nfy: 500\ncx: 320\ncy: 240\nname: x\n",
+        "uncal.yaml": yaml.safe_dump({
+            "image_width": 640, "image_height": 480,
+            "camera_matrix": {"rows": 3, "cols": 3, "data": [0.0] * 9},
+            "distortion_coefficients": {"rows": 1, "cols": 5, "data": [0.0] * 5},
+        }),
+        "narrow.yaml": "width: 640\nheight: 480\nfx: 9000\nfy: 9000\ncx: 320\ncy: 240\n",
+    }  # fmt: skip
+    for name, text in files.items():
+        (tmp_path / name).write_text(text, "utf-8")
+        assert main(["calib", "import", "cam-1", str(tmp_path / name), "--url", url]) == 2, name
+    assert capsys.readouterr().out.count("[실패]") == len(files)
+    with sqlite_db(url, create=False).connect() as conn:
+        assert get_camera_calibrations(conn, "cam-1") == []
+
+
+def test_undated_registration_shadowed_by_dated_warns_and_supersede_fixes(
+    url: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """유효 시작 있는 등록에 가려 쓰이지 않는 새 등록은 경고하고, --supersede로 같은 유효 시작에
+    다시 등록하면 그 값이 쓰인다 (F-PMS-25).
+    """
+    bad, good = tmp_path / "bad.yaml", tmp_path / "good.yaml"
+    bad.write_text("width: 640\nheight: 480\nfx: 520\nfy: 520\ncx: 320\ncy: 240\n", "utf-8")
+    good.write_text("width: 640\nheight: 480\nfx: 500\nfy: 500\ncx: 320\ncy: 240\n", "utf-8")
+    since = "2026-01-01T00:00:00+09:00"
+    assert main(["calib", "import", "cam-1", str(bad), "--valid-from", since, "--url", url]) == 0
+    capsys.readouterr()
+    assert main(["calib", "import", "cam-1", str(good), "--url", url]) == 0
+    out = capsys.readouterr().out
+    assert "[주의]" in out and "--supersede" in out
+    with sqlite_db(url, create=False).connect() as conn:
+        dated = next(r for r in get_camera_calibrations(conn, "cam-1") if r.valid_from)
+    args = ["calib", "import", "cam-1", str(good), "--supersede", dated.calibration_id]
+    assert main([*args, "--url", url]) == 0
+    assert "[주의]" not in capsys.readouterr().out
+    with sqlite_db(url, create=False).connect() as conn:
+        records = get_camera_calibrations(conn, "cam-1")
+    assert records[-1].valid_from == dated.valid_from and records[-1].intrinsics.fx == 500.0
+    assert main(["calib", "import", "cam-1", str(good), "--supersede", "cal-x", "--url", url]) == 2
+
+
+def test_assign_links_existing_sessions_to_a_camera(
+    url: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """매니페스트에 기기가 없던 세션을 `dlp calib assign`으로 이으면 등록된 값이 쓰인다 (F-PMS-24).
+
+    매니페스트에 다른 기기가 있는 세션이 섞이면 아무것도 쓰지 않고 종료 코드 2.
+    """
+    eng = sqlite_db(url, create=False)
+    with eng.begin() as conn:
+        register_ontology(conn, load_ontology(repo_root() / "config/ontology/v1"))
+        insert_session(conn, make_session("s001"))
+        insert_session(conn, make_session("s002"))
+        insert_session(conn, make_session("s003", calibration=Calibration(camera_id="cam-x")))
+    path = tmp_path / "cam.yaml"
+    path.write_text("width: 1920\nheight: 1080\nfx: 1400\nfy: 1400\ncx: 960\ncy: 540\n", "utf-8")
+    assert main(["calib", "import", "gopro-1", str(path), "--url", url]) == 0
+    base = ["calib", "assign", "gopro-1", "--reason", "촬영 기록부", "--url", url]
+    assert main([*base, "s001", "s003"]) == 2
+    assert "[충돌]" in capsys.readouterr().out
+    with eng.connect() as conn:
+        assert session_intrinsics(conn, get_session(conn, "s001")).origin == "hfov"
+    assert main([*base, "--worker", "w01", "--until", "2100-01-01T00:00:00+00:00"]) == 2
+    assert main([*base, "s001", "s002"]) == 0
+    assert main([*base, "s001"]) == 0
+    assert "0개 연결" in capsys.readouterr().out
+    assert main([*base[:3], "--reason", "x", "--url", url]) == 2
+    assert main(["calib", "show", "--session", "s001", "--url", url]) == 0
+    assert "registry:" in capsys.readouterr().out
+    with eng.connect() as conn:
+        assert session_intrinsics(conn, get_session(conn, "s002")).origin.startswith("registry:")
+    eng.dispose()

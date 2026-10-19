@@ -16,9 +16,9 @@
 
 | 심각도 | 건수 |
 |---|---|
-| 상 | 6 |
-| 중 | 9 |
-| 하 | 11 |
+| 상 | 7 |
+| 중 | 12 |
+| 하 | 22 |
 
 ## 지적과 처리
 
@@ -61,3 +61,26 @@
 | F-COE-35 | 하 | invariants.md의 없는 시험 이름과 정적 검사 |
 | F-COE-36 | 하 | '사람이 고친 트랙에는 world 없음' 서술 (CLAUDE.md는 통합 커밋) |
 
+## 묶음 B
+
+캘리브레이션·작업자 손 크기 (ADR 0045, 고침은 ADR 0052·Alembic 0024). 지적 20건 중 2건(2D 검수를 물려받은
+3D에 등록 값이 반영되지 않음, 가로세로 비율이 다른 내부 파라미터 늘이기)은 묶음 A가 다룬다. 같은 지적은 합쳤다
+(distortion_model 2건 → F-PMS-23, 잰 값 덮어쓰기 3건 → F-PMS-28).
+
+| ID | 심각도 | 상태 | 요약 |
+|---|---|---|---|
+| F-PMS-20 | 상 | fixed | 정면만 찍은 퇴화 체커보드 영상이 틀린 초점 거리로 등록됨 → 보드 기울기·타당 범위 검사 |
+| F-PMS-21 | 중 | fixed | 파일 가져오기 값 검사 없음(ROS 미보정·음수·nan·화면 밖 주점) → `check_intrinsics` |
+| F-PMS-22 | 하 | fixed | 가져오기 파싱 오류·모르는 키·비 FileStorage XML·BOM이 처리되지 않은 예외 → 종료 코드 2 |
+| F-PMS-23 | 하 | fixed | 어안 왜곡 모델을 opencv로 기록 → plumb_bob·rational_polynomial만 받음 |
+| F-PMS-24 | 중 | fixed | 이미 수집한 세션에 기기를 이을 길 없음 → `session_camera_assignments`, `dlp calib assign` |
+| F-PMS-25 | 하 | fixed | 잘못 등록한 기기 값 바로잡기 절차 없음 → `--supersede`, 가려짐 경고, 문서 |
+| F-PMS-26 | 하 | fixed | 문서의 "칸 크기 오차가 들어간다"가 틀림 → 문서·도움말·회귀 시험 |
+| F-PMS-27 | 하 | open | 돌봄 대상자 손이 손 크기 추정에 섞임 → 한계 문서화·`--reviewed-only`(착용자 손 판정은 남음) |
+| F-PMS-28 | 하 | fixed | 추정이 잰 값을 경고 없이 덮음 → `--override-measured` 없으면 거부 |
+| F-PMS-29 | 중 | fixed | 사용 중지 세션에서 나온 손 크기 추정이 계속 쓰이고 출처 불명 → 출처 세션 기록·결정에서 제외·잠금 재확인 |
+| F-PMS-30 | 하 | fixed | 동의 철회·삭제 요구 때 손 크기를 무효로 할 길 없음 → 추가 전용 무효 기록, `dlp calib palm-revoke` |
+| F-COE-70 | 하 | fixed | palm-estimate가 표본을 낼 수 없는 세션의 원본까지 읽음 → 원본 전에 world 확인 |
+| F-COE-71 | 하 | fixed | palm-estimate 명령 경로 시험 없음 → 가짜 깊이·로컬 원본 저장소 종단 시험 |
+| F-COE-72 | 하 | fixed | 없는 작업자 ID에도 등록 → 거부(`--allow-unknown-worker`), 세션 없음 알림 |
+| F-COE-73 | 하 | fixed | 원본 없는 세션 하나로 palm-estimate 전체가 예외 → head 확인·삭제 결정 세션 제외 |

@@ -1,12 +1,13 @@
 """세션·모델 배포·AI 판정 실행 잠금. 연결과 커밋은 호출자가 관리한다.
 
-- `lock_session`: 세션 행 FOR UPDATE (트랜잭션 잠금).
+- `lock_session`: 세션 행 FOR UPDATE (트랜잭션 잠금). `share_lock_sessions`: 여러 세션 행 FOR SHARE.
 - `lock_model_task`: 과제별 배포 직렬화 (트랜잭션 advisory lock).
 - `try_lock_aireview`·`unlock_aireview`: 세션별 AI 판정 실행기 하나 (세션 수준 advisory lock,
   WP17.4). `aireview_lock_held`: 잠금을 잡지 않고 누가 쥐고 있는지만 본다 (상태 조회).
 """
 
 import hashlib
+from collections.abc import Iterable
 
 import sqlalchemy as sa
 
@@ -24,6 +25,24 @@ def lock_session(conn: sa.Connection, session_id: str) -> None:
         .where(sessions.c.session_id == session_id)
         .with_for_update()
     ).scalar_one()
+
+
+def share_lock_sessions(conn: sa.Connection, session_ids: Iterable[str]) -> None:
+    """세션 행들을 FOR SHARE로 잠근다 (트랜잭션 끝까지, ID 순서, PostgreSQL).
+
+    사용 중지(`withdraw_session`)는 세션 행을 갱신하므로, 이 잠금을 쥔 동안 사용 중지는 기다린다.
+    잠근 뒤 사용 중지를 다시 읽으면 그 사이에 커밋된 사용 중지까지 본다 (내보내기 게시·손 크기
+    추정 등록의 최종 확인, ADR 0052). SQLite는 행 잠금이 없어 읽기만 한다.
+    """
+    ids = sorted(set(session_ids))
+    if not ids:
+        return
+    conn.execute(
+        sa.select(sessions.c.session_id)
+        .where(sessions.c.session_id.in_(ids))
+        .order_by(sessions.c.session_id)
+        .with_for_update(read=True)
+    ).all()
 
 
 def try_lock_session(conn: sa.Connection, session_id: str) -> bool:

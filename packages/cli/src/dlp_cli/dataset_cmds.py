@@ -265,6 +265,12 @@ def cmd_withdraw(args: argparse.Namespace) -> int:
     if lineage.revocations:
         keys = ", ".join(lineage.revocations)
         print(f"검수 작업 {len(lineage.revocations)}개 회수 요청: {keys}")
+    if lineage.hand_sizes:
+        # 이 세션에서 나온 손 크기 추정은 이제 결정에서 빠진다 (ADR 0052)
+        print(
+            f"손 크기 추정 {lineage.hand_sizes}: 출처 세션 사용 중지로 더 쓰지 않음 "
+            "(작업자의 다른 세션은 dlp prelabel run으로 3D를 다시 만든다)"
+        )
     return print_revocations(report, args.session_id)
 
 
@@ -285,6 +291,8 @@ def cmd_lineage(args: argparse.Namespace) -> int:
         "계보",
         lineage.golden_sets,
     )
+    if lineage.hand_sizes:
+        print(f"  손 크기 추정 출처: {lineage.hand_sizes}")
     return 0
 
 

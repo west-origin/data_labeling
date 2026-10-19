@@ -153,3 +153,33 @@ def test_palm_estimate_recovers_the_worker_hand_size() -> None:
         [palm_samples(b.frames(), b.depth, b.labels, b.intrinsics, policy)], policy
     )
     assert biased is not None and biased.palm_m == pytest.approx(0.072 * 1.1, abs=1e-3)
+
+
+class _CountingDepth:
+    """깊이 추론 횟수를 센다 (정답 깊이를 그대로 낸다)."""
+
+    def __init__(self, s: Hand3DScenario) -> None:
+        self.s, self.calls = s, 0
+
+    def predict(self, image: NDArray[np.uint8]) -> NDArray[np.float32]:
+        self.calls += 1
+        return self.s.depth.predict(image)
+
+
+def test_palm_samples_skip_depth_where_hand_has_no_world() -> None:
+    """손 3D 점(world)이 없는 키프레임(사람이 그리거나 고친 트랙) 시각에는 깊이를 추론하지 않는다.
+
+    world가 없으면 손 맞춤을 할 수 없어 표본도 없다 (F-COE-70). world가 있는 트랙은 표본을 낸다.
+    """
+    policy = _prelabel()
+    s = generate_hand3d_scenario(3, hand_scale=0.8, n_frames=20)
+    bare = [
+        x.model_copy(update={"payload": without_world(x.payload)})
+        if isinstance(x.payload, KeypointTrackPayload)
+        else x
+        for x in s.labels
+    ]
+    depth = _CountingDepth(s)
+    assert palm_samples(s.frames(), depth, bare, s.intrinsics, policy) == []
+    assert depth.calls == 0
+    assert len(palm_samples(s.frames(), depth, s.labels, s.intrinsics, policy)) == 20
