@@ -127,6 +127,8 @@ class CameraMotionScenario:
     imu_acc: NDArray[np.float64]  # (N, 3) IMU 좌표 비력 m/s²
     imu_gyro: NDArray[np.float64]  # (N, 3) IMU 좌표 각속도 rad/s
     depth_bias: float = 1.0
+    # 처음부터 끝까지 월드 Z축으로 일정하게 도는 각속도 (rad/s, 0이면 없음). 정지 구간에도 돈다
+    start_yaw_rate: float = 0.0
     texture: NDArray[np.float32] = field(default_factory=lambda: np.zeros((1, 1), np.float32))
     width: int = 320
     height: int = 240
@@ -146,7 +148,7 @@ class CameraMotionScenario:
                 m.bob_m * math.sin(2 * math.pi * u / 0.9),
             ]
         )
-        yaw = s * m.yaw_rad * math.sin(2 * math.pi * u / 2.7)
+        yaw = s * m.yaw_rad * math.sin(2 * math.pi * u / 2.7) + self.start_yaw_rate * t_s
         pitch = -0.6 + s * m.pitch_rad * math.sin(2 * math.pi * u / 1.9)
         roll = s * m.roll_rad * math.sin(2 * math.pi * u / 1.3)
         # 월드 Z로 고개 돌림, 카메라 x로 숙임(음수 = 아래), 카메라 z로 기울임
@@ -354,6 +356,7 @@ def generate_camera_motion(
     acc_noise: float = 0.0,
     depth_bias: float = 1.0,
     motion: MotionSpec | None = None,
+    start_yaw_rate: float = 0.0,
 ) -> CameraMotionScenario:
     """정답 자세를 아는 머리 카메라 시퀀스. 같은 인자면 같은 결과다 (결정적).
 
@@ -367,6 +370,8 @@ def generate_camera_motion(
         gyro_bias, gyro_noise, acc_noise: 자이로 편향(rad/s), 자이로·가속도 흰잡음 표준편차.
         depth_bias: `depth_at` 배율 오차 (1.1이면 10% 멀게).
         motion: 움직임 크기 (기본 `MotionSpec()`).
+        start_yaw_rate: 녹화 시작부터 월드 Z축으로 일정하게 도는 각속도 (rad/s). 몸을 돌리며 녹화를
+            시작한 경우: 정지 구간이 없는데 자이로 크기는 거의 상수다 (정지 판정 시험, F-PAR-46).
     """
     rng = np.random.default_rng(seed)
     r_ci = DEFAULT_IMU_TO_CAMERA if imu_to_camera is None else imu_to_camera
@@ -387,6 +392,7 @@ def generate_camera_motion(
         imu_acc=np.zeros((0, 3)),
         imu_gyro=np.zeros((0, 3)),
         depth_bias=depth_bias,
+        start_yaw_rate=start_yaw_rate,
         texture=_texture(rng),
         session_id=f"campose-{seed:03d}",
     )

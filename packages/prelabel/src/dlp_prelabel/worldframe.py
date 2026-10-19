@@ -1,9 +1,10 @@
 """카메라 좌표 3D 궤적 → 세션 월드 좌표 궤적 (ADR 0046, F-PAR-26).
 
-`campose`의 카메라 자세(R_wc, p)로 카메라 좌표 표본 X_c를 X_w = R_wc · X_c + p로 바꾼다. 자세는 표본
-시각 양쪽 자세 표본 사이를 보간한다 (회전 구면 보간, 위치 선형). 양쪽 간격이
-`world_frame.max_pose_gap_ms`
-보다 크거나 자세 범위 밖이면 그 표본은 바꾸지 않는다 (외삽하지 않는다).
+`campose`의 카메라 자세(R_wc, p)로 카메라 좌표 표본 X_c를 X_w = R_wc · X_c + p로 바꾼다 (R_wc는
+카메라 → 월드 회전, p는 월드 좌표 카메라 중심, 미터. 규약은 `posemath`). 자세는 표본 시각 양쪽 자세
+표본 사이를 보간한다 (회전 구면 보간, 위치 선형). 양쪽 간격이 `world_frame.max_pose_gap_ms`보다
+크거나 자세 범위 밖이면 그 표본은 바꾸지 않는다 (외삽하지 않는다: 그 사이 머리가 얼마나 움직였는지
+모르므로 지어내지 않는다). 시각은 둘 다 바디캠 PTS ms라 맞춰 볼 필요가 없다 (ADR 0019).
 
 결과는 같은 (개체, 부위)의 새 trajectory3d (frame=world, source_3d=원래 값, derived_from=[카메라
 좌표 궤적 ID, 자세 ID]). 표본 방식(method)은 원래 값, 신뢰도 = 원래 표본 신뢰도(없으면 1) x 보간한
@@ -38,6 +39,7 @@ def pose_at(
     if not poses:
         return None
     times = [p.t_ms for p in poses]
+    # i: t_ms 이상인 첫 자세 표본 자리 (이분 탐색)
     i = int(np.searchsorted(times, t_ms))
     if i < len(times) and times[i] == t_ms:
         s = poses[i]
@@ -45,11 +47,13 @@ def pose_at(
     if i == 0 or i == len(times):
         return None
     a, b = poses[i - 1], poses[i]
+    # 양쪽 자세가 너무 멀면(추적 실패로 비었거나 자세 간격이 김) 보간하지 않는다
     if b.t_ms - a.t_ms > max_gap_ms:
         return None
     w = (t_ms - a.t_ms) / (b.t_ms - a.t_ms)
     r = slerp(a.rotation, b.rotation, w)
     p = a.position * (1 - w) + b.position * w
+    # 보간한 자세는 두 표본 중 덜 믿는 쪽만큼만 믿는다
     return r, p, min(a.confidence, b.confidence)
 
 
@@ -63,7 +67,9 @@ def to_world_samples(
         if got is None:
             continue
         r, p, pose_conf = got
+        # X_w = R_wc · X_c + p (카메라 좌표 점을 돌린 뒤 카메라 중심만큼 옮긴다)
         xyz = r @ np.array([s.x, s.y, s.z]) + p
+        # 두 오차가 겹치므로 신뢰도를 곱한다 (카메라 좌표 3D 표본 x 그 시각 자세)
         conf = (1.0 if s.confidence is None else s.confidence) * pose_conf
         out.append(
             Trajectory3DSample(

@@ -12,6 +12,13 @@
    최소제곱으로 푼다. 핀홀 투영 a_i = (u_i - cx) / fx, b_i = (v_i - cy) / fy에서
    (W_ix + Tx) - a_i (W_iz + Tz) = 0, (W_iy + Ty) - b_i (W_iz + Tz) = 0 은 T에 선형이다. 한 번 푼 뒤
    관절 깊이 1/(W_iz + Tz)로 가중해 다시 풀면 잔차가 정규화 재투영 오차와 같아진다.
+   1b. 회전 다듬기 (F-PAR-42): MediaPipe world는 손 영역을 잘라 추정해 자세가 카메라 축과 수 도
+   어긋날 수 있다. 1의 해(R = I)에서 시작해 손 중심 c를 축으로 한 작은 회전 R = exp([ω]x)와 T를
+   함께 가우스-뉴턴으로 다듬는다: Q_i = R (W_i - c) + c + T. 잔차는 정규화 재투영 오차를 손 2D
+   크기로 나눈 값이고, ω에는 `hand_fit.rotation_prior` 가중의 0 쪽 사전값을 둔다 (평평한 손은
+   2D만으로 기울기가 잘 정해지지 않아, 사전값이 없으면 잡음에 회전이 흔들린다).
+   `hand_fit.max_rotation_deg`보다 크게 돌아야 맞으면 손 모양 자체가 2D와 다르다고 보고 1의 해를
+   쓴다.
 2. 크기(거리) 정하기: 단안 투영은 Q 전체를 카메라 원점 기준으로 k배 해도 같은 2D를 낸다. k를
    두 근거로 정한다.
    - 깊이: 손바닥 관절 j마다 깊이 맵 값 / Q_jz의 중앙값 k_depth (얇은 손가락 끝은 배경 깊이가 섞여
@@ -22,14 +29,19 @@
    max_scale_ratio를 넘으면(배경·가림 깊이) k = k_size.
 3. 결과: P_i = k Q_i. 2D 투영은 맞춘 그대로이고, 손 안의 상대 위치는 손 모델 모양을 k배 한 것이다.
 
-실패(보이는 관절 부족, 풀 수 없음, 관절이 카메라 뒤, 재투영 RMS 초과)면 None을 돌려주고, 호출자
-(`lift3d.lift_tracks`)가 관절마다 깊이만 쓰는 예전 방식으로 올린다.
+실패(보이는 관절 부족, 풀 수 없음, 관절이 카메라 뒤, 상대 재투영 오차 초과)면 None을 돌려주고,
+호출자(`lift3d.lift_tracks`)가 손바닥 관절만 깊이로 올린다 (손가락 끝은 내지 않는다, F-PAR-40).
 
-품질과 신뢰도 (ADR 0045): 맞춤은 재투영 RMS·보이는 관절 수·깊이와 손 크기 사전값의 배율 비를
-`HandFit`에 함께 낸다. `fit_confidence`·`point_confidence`가 `depth.sample_confidence` 정책으로
+재투영 오차 단위 (F-PAR-43): 픽셀 RMS를 그 시각 손 2D 크기(보이는 관절이 그 중심에서 떨어진
+거리의 RMS, px)로 나눈 상대값 `rms_rel`로 문턱·신뢰도를 정한다. 같은 손·같은 자세 오차면 해상도
+(320x240이든 4K든)와 거리에 상관없이 같은 값이 된다. 픽셀 RMS(`rms_px`)는 진단용으로 남긴다.
+
+품질과 신뢰도 (ADR 0045): 맞춤은 상대 재투영 오차·보이는 관절 수·깊이와 손 크기 사전값의 배율
+비를 `HandFit`에 함께 낸다. `fit_confidence`·`point_confidence`가 `depth.sample_confidence` 정책으로
 표본마다 신뢰도를 정한다 (캘리브레이션이 없으면 낮춘다).
 
-한계: 단안이라 절대 거리 오차가 남는다 (손 크기 개인차, 깊이 모델 오차). 렌즈 왜곡은 다루지 않는다.
+한계: 단안이라 절대 거리 오차가 남는다 (손 크기 개인차, 깊이 모델 오차). 렌즈 왜곡은 다루지 않는다
+(F-PAR-28).
 깊이 맵은 손 표면 깊이라 관절 중심보다 약간 앞(수 mm~1 cm)이다. 좌표는 그 시각의 카메라 좌표다.
 """
 
@@ -43,11 +55,16 @@ from numpy.typing import NDArray
 
 from dlp_models.depth import Intrinsics, sample_depth
 from dlp_prelabel.policy import DepthPolicy, HandFitPolicy
+from dlp_prelabel.posemath import exp_so3
 
 # 손 크기 사전값의 두 끝 관절 (손목, 중지 MCP)
 PALM_FROM, PALM_TO = 0, 9
-# 이동량 정규방정식의 조건수 상한 (넘으면 풀 수 없다고 본다: 점이 한 줄에 몰림 등)
+# 이동량 정규방정식의 조건수 상한 (넘으면 풀 수 없다고 본다: 점이 한 줄에 몰림 등).
+# 수치 안정성 한계라 정책 값이 아니다 (결과를 고르는 조정 값이 아님)
 MAX_CONDITION = 1e8
+# 회전 다듬기의 가우스-뉴턴 반복 수와 수치 미분 간격 (회전 rad·이동 m). 수렴용 수치 상수다
+GN_ITERATIONS = 8
+GN_STEP = 1e-6
 
 
 def solve_translation(
@@ -58,9 +75,11 @@ def solve_translation(
     선형 최소제곱 뒤 관절 깊이로 한 번 다시 가중한다 (모듈 설명 1단계). 관절 하나라도 카메라 뒤
     (깊이 ≤ 0)면 None.
     """
+    # 정규화 영상 좌표 (a, b) = 광선 방향 기울기 (x/z, y/z). 픽셀을 카메라 앞 1 m 평면 위 점으로
     a = (pixels[:, 0] - intr.cx) / intr.fx
     b = (pixels[:, 1] - intr.cy) / intr.fy
     n = len(world)
+    # 관절마다 두 줄: x - a z = 0, y - b z = 0 을 T(Tx, Ty, Tz)에 대해 정리한 계수
     rows = np.zeros((2 * n, 3))
     rows[0::2, 0], rows[0::2, 2] = 1.0, -a
     rows[1::2, 1], rows[1::2, 2] = 1.0, -b
@@ -69,6 +88,8 @@ def solve_translation(
     rhs[1::2] = b * world[:, 2] - world[:, 1]
     weights = np.ones(2 * n)
     t = np.zeros(3)
+    # 두 번 푼다: 첫 번째는 대수 오차(가까운 관절이 더 크게 셈), 두 번째는 1/z 가중으로 정규화
+    # 재투영 오차에 맞춘다
     for _ in range(2):
         aw = rows * weights[:, None]
         if np.linalg.cond(aw) > MAX_CONDITION:
@@ -91,6 +112,77 @@ def reprojection_rms(
     return float(np.sqrt(np.mean((u - pixels[:, 0]) ** 2 + (v - pixels[:, 1]) ** 2)))
 
 
+def hand_size_px(pixels: NDArray[np.float64]) -> float:
+    """손 2D 크기 (px): 관절이 그 중심에서 떨어진 거리의 RMS (상대 재투영 오차의 분모).
+
+    손바닥 길이 한 쌍(손목 → 중지 MCP)보다 가림·자세에 덜 민감하다 (보이는 관절 전체로 정한다).
+    """
+    return float(np.sqrt(np.mean(np.sum((pixels - pixels.mean(axis=0)) ** 2, axis=1))))
+
+
+def _normalized_residuals(
+    params: NDArray[np.float64],
+    world: NDArray[np.float64],
+    center: NDArray[np.float64],
+    ab: NDArray[np.float64],
+    size: float,
+    prior: float,
+) -> NDArray[np.float64]:
+    """회전 다듬기 잔차: [관절별 정규화 재투영 오차 / 손 크기, 회전 사전값 √prior · ω].
+
+    params = (ω 3개: 손 중심 c 기준 회전 벡터 rad, T 3개: 이동 m). 관절이 카메라 뒤면 깊이를 작은
+    양수로 눌러 큰 잔차를 내, 가우스-뉴턴이 그쪽으로 가지 않게 한다.
+    """
+    q = (world - center) @ exp_so3(params[:3]).T + center + params[3:]
+    z = np.maximum(q[:, 2], 1e-6)
+    res = np.concatenate([(q[:, 0] / z - ab[:, 0]) / size, (q[:, 1] / z - ab[:, 1]) / size])
+    return np.concatenate([res, math.sqrt(prior) * params[:3]])
+
+
+def refine_rotation(
+    world: NDArray[np.float64],
+    pixels: NDArray[np.float64],
+    t: NDArray[np.float64],
+    intr: Intrinsics,
+    policy: HandFitPolicy,
+) -> NDArray[np.float64]:
+    """이동량 해 T에서 시작해 손 중심 기준 작은 회전과 이동을 함께 다듬은 카메라 좌표 (n, 3).
+
+    모듈 설명 1b. world·pixels는 맞춤에 쓰는(보이는) 관절만. 다듬은 회전이
+    `max_rotation_deg`보다 크거나 재투영 RMS가 줄지 않으면 이동량 해 world + T를 그대로
+    돌려준다. `rotation_prior`가 0이면 다듬지 않는다 (예전 동작).
+    """
+    plain = world + t
+    if policy.rotation_prior <= 0 or len(world) < 4:
+        return plain
+    # 정규화 좌표(초점 거리로 나눈 값)로 계산하면 해상도와 무관하다
+    ab = np.stack([(pixels[:, 0] - intr.cx) / intr.fx, (pixels[:, 1] - intr.cy) / intr.fy], axis=1)
+    size = max(float(np.sqrt(np.mean(np.sum((ab - ab.mean(axis=0)) ** 2, axis=1)))), 1e-9)
+    center = world.mean(axis=0)
+    x = np.concatenate([np.zeros(3), t])
+    for _ in range(GN_ITERATIONS):
+        r0 = _normalized_residuals(x, world, center, ab, size, policy.rotation_prior)
+        # 수치 미분 야코비안 (변수 6개, 관절 21개라 비용이 작다)
+        jac = np.empty((r0.size, 6))
+        for j in range(6):
+            dx = np.zeros(6)
+            dx[j] = GN_STEP
+            r1 = _normalized_residuals(x + dx, world, center, ab, size, policy.rotation_prior)
+            jac[:, j] = (r1 - r0) / GN_STEP
+        step = np.linalg.lstsq(jac, -r0, rcond=None)[0]
+        x = x + step
+        if float(np.linalg.norm(step)) < 1e-9:
+            break
+    if math.degrees(float(np.linalg.norm(x[:3]))) > policy.max_rotation_deg:
+        return plain
+    refined = (world - center) @ exp_so3(x[:3]).T + center + x[3:]
+    if np.any(refined[:, 2] <= 0):
+        return plain
+    if reprojection_rms(refined, pixels, intr) >= reprojection_rms(plain, pixels, intr):
+        return plain
+    return refined
+
+
 def size_scale(world: NDArray[np.float64], policy: HandFitPolicy) -> float:
     """손 크기 사전값 배율 k_size (사전값이 없거나 손바닥 길이가 0이면 1)."""
     palm = _palm_length(world)
@@ -111,6 +203,7 @@ def depth_scale(
     깊이 맵 값이 nan(화면 밖)이거나 [min_depth_m, max_depth_m] 밖인 관절, 보이지 않는 관절은 뺀다.
     """
     ratios: list[float] = []
+    # 손바닥 관절만: 손가락 끝은 얇아 패치 중앙값이 배경 깊이를 읽기 쉽다
     for j in policy.hand_fit.anchor_points:
         if not visible[j]:
             continue
@@ -126,7 +219,9 @@ class HandFit:
     """한 시각 손 맞춤 결과와 품질 진단 (`fit_hand`, 표본 신뢰도 `fit_confidence`에 쓴다).
 
     points: 21관절 카메라 좌표 (21, 3) 미터.
-    rms_px: 보이는 관절의 재투영 RMS (px).
+    rms_px: 보이는 관절의 재투영 RMS (px, 진단용. 해상도에 비례한다).
+    rms_rel: 보이는 관절의 상대 재투영 오차 = rms_px / 손 2D 크기 (`hand_size_px`). 문턱
+        (`hand_fit.max_reprojection_ratio`)·신뢰도·손 크기 추정 품질 기준은 이 값을 쓴다 (F-PAR-43).
     n_visible: 맞춤에 쓴 보이는 관절 수.
     scale_ratio: 깊이 배율과 손 크기 사전값 배율의 비 max(kd/ks, ks/kd) (깊이를 섞었을 때만,
         깊이가 없거나 너무 어긋나 버렸으면 None).
@@ -137,6 +232,7 @@ class HandFit:
 
     points: NDArray[np.float64]
     rms_px: float
+    rms_rel: float
     n_visible: int
     scale_ratio: float | None
     palm_m: float
@@ -147,8 +243,10 @@ def fuse_scale(k_depth: float | None, k_size: float, policy: HandFitPolicy) -> f
     """두 배율의 로그 가중 평균 (깊이가 없거나 너무 어긋나면 k_size)."""
     if k_depth is None or k_depth <= 0:
         return k_size
+    # 두 근거가 max_scale_ratio배 넘게 다르면 깊이가 배경·가림을 읽은 것으로 보고 버린다
     if max(k_depth / k_size, k_size / k_depth) > policy.max_scale_ratio:
         return k_size
+    # 로그(기하) 평균: 배율은 곱으로 틀리므로 2배와 0.5배가 대칭이 되게 로그 공간에서 섞는다
     w = policy.depth_weight
     return math.exp(w * math.log(k_depth) + (1 - w) * math.log(k_size))
 
@@ -184,11 +282,15 @@ def fit_hand(
     t = solve_translation(world[visible], pixels[visible], intr)
     if t is None:
         return None
-    cam = world + t
+    # 1b: 손 중심 기준 회전을 함께 다듬는다. 보이는 관절로 정한 강체 변환을 21관절 전체에 쓴다
+    refined = refine_rotation(world[visible], pixels[visible], t, intr, fit)
+    rigid = _rigid_from(world[visible], refined)
+    cam = world + t if rigid is None else world @ rigid[0].T + rigid[1]
     if np.any(cam[:, 2] <= 0):
         return None
     rms = reprojection_rms(cam[visible], pixels[visible], intr)
-    if rms > fit.max_reprojection_px:
+    rel = rms / max(hand_size_px(pixels[visible]), 1e-9)
+    if rel > fit.max_reprojection_ratio:
         return None
     k_depth = depth_scale(cam, pixels, visible, depth, policy)
     k_size = size_scale(world, fit)
@@ -198,14 +300,33 @@ def fit_hand(
         r = max(k_depth / k_size, k_size / k_depth)
         ratio = r if r <= fit.max_scale_ratio else None
     palm = _palm_length(world)
+    # 카메라 원점 기준 k배는 2D 투영을 바꾸지 않는다 (광선을 따라 멀어지거나 가까워질 뿐)
     return HandFit(
         points=cam * k,
         rms_px=rms,
+        rms_rel=rel,
         n_visible=n_visible,
         scale_ratio=ratio,
         palm_m=k * palm,
         palm_from_depth=k_depth * palm if k_depth is not None and k_depth > 0 else None,
     )
+
+
+def _rigid_from(
+    src: NDArray[np.float64], dst: NDArray[np.float64]
+) -> tuple[NDArray[np.float64], NDArray[np.float64]] | None:
+    """src(n, 3) → dst(n, 3) 강체 변환 (R, T): dst ≈ src Rᵀ + T (SVD 정렬, 반사 없음).
+
+    회전 다듬기는 보이는 관절로만 하므로, 같은 변환을 가려진 관절까지 옮기려고 다시 구한다.
+    """
+    if len(src) < 3:
+        return None
+    cs, cd = src.mean(axis=0), dst.mean(axis=0)
+    u, _, vt = np.linalg.svd((src - cs).T @ (dst - cd))
+    # 행렬식 부호로 반사를 막는다 (det = -1이면 마지막 축을 뒤집는다)
+    d = 1.0 if np.linalg.det(vt.T @ u.T) >= 0 else -1.0
+    r = vt.T @ np.diag([1.0, 1.0, d]) @ u.T
+    return r, cd - cs @ r.T
 
 
 def _ramp(value: float, lo: float, hi: float, floor: float) -> float:
@@ -220,14 +341,16 @@ def fit_confidence(fit: HandFit, *, calibrated: bool, policy: DepthPolicy) -> fl
     """맞춤 표본 신뢰도 (0~1, 소수 셋째 자리, ADR 0045).
 
     `sample_confidence.hand_fit` x 재투영 항 x 관절 수 항 x 깊이·사전값 일치 항 x 내부 파라미터
-    항. 재투영 항은 RMS 0 → 1, `hand_fit.max_reprojection_px` → `reprojection_floor`. 관절 수 항은
+    항. 재투영 항은 상대 오차 0 → 1, `hand_fit.max_reprojection_ratio` → `reprojection_floor`
+    (해상도와 무관, F-PAR-43). 관절 수 항은
     21 → 1, `hand_fit.min_points` → `points_floor`. 일치 항은 배율 비 1 → 1,
     `hand_fit.max_scale_ratio` → `agreement_floor`이고 깊이를 못 쓰거나 버렸으면 `no_depth`.
     캘리브레이션이 없으면 `hfov_approx`를 곱한다.
     """
     c, fit_policy = policy.sample_confidence, policy.hand_fit
     value = c.hand_fit
-    value *= _ramp(fit.rms_px, 0.0, fit_policy.max_reprojection_px, c.reprojection_floor)
+    value *= _ramp(fit.rms_rel, 0.0, fit_policy.max_reprojection_ratio, c.reprojection_floor)
+    # 관절 수 항: 많을수록 좋으므로 부호를 뒤집어 _ramp(작을수록 1)에 넣는다 (21개 → 1)
     value *= _ramp(-float(fit.n_visible), -21.0, -float(fit_policy.min_points), c.points_floor)
     if fit.scale_ratio is None:
         value *= c.no_depth

@@ -109,15 +109,18 @@ def test_confidence_drops_with_noise_and_depth_disagreement() -> None:
 
 
 def test_fit_confidence_ramps_between_policy_ends() -> None:
-    """식의 끝값: RMS = max_reprojection_px, 관절 = min_points, 깊이 없음이면 각 floor·no_depth를
-    곱한 값이다. 가장 좋은 맞춤은 정책 최고값 그대로다.
+    """식의 끝값: 상대 재투영 오차 = max_reprojection_ratio, 관절 = min_points, 깊이 없음이면 각
+    floor·no_depth를 곱한 값이다. 가장 좋은 맞춤은 정책 최고값 그대로다. 픽셀 RMS(진단용)는 보지
+    않는다.
     """
     policy = _prelabel().depth
     c, fp = policy.sample_confidence, policy.hand_fit
-    worst = HandFit(np.zeros((21, 3)), fp.max_reprojection_px, fp.min_points, None, 0.09, None)
+    worst = HandFit(
+        np.zeros((21, 3)), 99.0, fp.max_reprojection_ratio, fp.min_points, None, 0.09, None
+    )
     expected = c.hand_fit * c.reprojection_floor * c.points_floor * c.no_depth
     assert fit_confidence(worst, calibrated=True, policy=policy) == round(expected, 3)
-    best = HandFit(np.zeros((21, 3)), 0.0, 21, 1.0, 0.09, 0.09)
+    best = HandFit(np.zeros((21, 3)), 0.0, 0.0, 21, 1.0, 0.09, 0.09)
     assert fit_confidence(best, calibrated=True, policy=policy) == c.hand_fit
 
 

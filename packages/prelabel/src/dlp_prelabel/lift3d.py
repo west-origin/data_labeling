@@ -2,13 +2,20 @@
 
 frame_stride_ms마다 깊이 맵을 만들고, 그 프레임에 있는 손 키포인트(정책의 hand_points: 손목과 다섯
 손가락 끝)와 객체 박스 중심을 카메라 좌표로 올린다. 좌표계는 카메라 (광축 Z 앞, X 오른쪽, Y 아래,
-미터)다. 월드 좌표는 카메라 자세(SLAM)가 생긴 뒤에 만든다 (F-PAR-26).
+미터)다. 이 단계는 카메라 좌표만 만든다. 세션 월드 좌표 궤적은 바디캠 자세(`campose`)와
+`worldframe` 단계가 이 결과를 derived_from으로 받아 따로 만든다 (ADR 0046, F-PAR-45).
 
 - 손 키프레임에 손 중심 3D 점(`KeypointFrame.world`, MediaPipe hand_world_landmarks)이 있으면 손
   모양 + 2D 픽셀 + 손바닥 깊이·손 크기 사전값으로 21관절을 함께 맞춘다 (`handfit.fit_hand`,
   ADR 0044). 얇은 손가락 끝에서 배경 깊이를 읽는 문제가 없다.
-- world가 없거나(사람이 고친 트랙, 예전 버전) 맞춤이 실패하면 관절마다 그 픽셀의 깊이(주변 패치
-  중앙값)로 역투영한다 (예전 방식). 박스 중심도 이 방식이다.
+- world가 없는 키프레임(사람이 고치거나 새로 그린 키프레임, 예전 버전. 사람 수정 레코드도 2D가
+  그대로인 키프레임은 parent의 world를 지닌다)이나 맞춤이 실패한 키프레임은 손바닥 관절
+  (`hand_fit.anchor_points`, 지금은 손목)만 그 픽셀의 깊이(주변 패치 중앙값)로 역투영한다. 손가락
+  끝은 픽셀 깊이가 배경을 읽어 수백 mm 틀리므로 내지 않는다 (`depth.fingertip_fallback: drop`,
+  F-PAR-40. point_depth면 예전처럼 올린다). 박스 중심도 픽셀 깊이 방식이다.
+- 내부 파라미터: 세션·등록 캘리브레이션을 프레임 크기에 비례 조정한다. 화면비가 다르면(다른 촬영
+  모드) 그 캘리브레이션을 쓰지 않고 화각 근사로 떨어지며 표본·궤적 출처도 hfov_approx다
+  (`intrinsics_for`, F-PAR-44).
 
 파이프라인 위치: `runner._lift`가 바디캠의 현재 hand21 손·박스 트랙을 (개체, 트랙 종류)마다 하나씩
 골라(`runner.pick_lift_tracks`) 넘겨 부른다. 결과는 trajectory3d 라벨 (frame=camera,
@@ -62,8 +69,26 @@ class DepthModel(Protocol):
         ...
 
 
+def calibration_fits(
+    calib: CameraIntrinsics, width: int, height: int, max_aspect_mismatch: float
+) -> bool:
+    """캘리브레이션을 이 프레임 크기에 비례 조정해 써도 되는가 (화면비가 허용 오차 안).
+
+    같은 화면비의 축소·확대(프록시)는 fx·cx와 fy·cy를 같은 비율로 맞추면 정확하다. 화면비가
+    다르면(4:3 모드에서 잰 값을 16:9 모드에 씀) 센서를 잘라 쓴 것이라 가로·세로를 따로 늘리면
+    비정사각 픽셀과 틀린 주점이 된다 (F-PAR-44).
+    """
+    # 상대 차이: 1920x1080(16:9) vs 4000x3000(4:3)이면 1.778 / 1.333 - 1 = 0.33
+    ratio = (width / height) / (calib.width / calib.height)
+    return abs(ratio - 1.0) <= max_aspect_mismatch
+
+
 def intrinsics_for(
-    calib: CameraIntrinsics | None, width: int, height: int, hfov_deg: float
+    calib: CameraIntrinsics | None,
+    width: int,
+    height: int,
+    hfov_deg: float,
+    max_aspect_mismatch: float,
 ) -> Intrinsics:
     """세션 캘리브레이션(해상도가 다르면 비례 조정) 또는 기본 화각 근사.
 
@@ -71,10 +96,14 @@ def intrinsics_for(
         calib: 세션 캘리브레이션 내부 파라미터 (없으면 None).
         width, height: 실제 디코드한 프레임 크기(px). 캘리브레이션 해상도와 다르면 fx·cx는 가로
             비율, fy·cy는 세로 비율로 맞춘다 (프록시·다운스케일 영상 대응).
-        hfov_deg: calib가 없을 때 쓸 가로 화각 (`depth.default_hfov_deg`).
+        hfov_deg: calib가 없거나 쓸 수 없을 때의 가로 화각 (`depth.default_hfov_deg`).
+        max_aspect_mismatch: 화면비 허용 오차 (`depth.max_intrinsics_aspect_mismatch`). 넘으면
+            calib를 쓰지 않고 화각 근사로 떨어진다 (`calibration_fits`).
     """
-    if calib is None:
+    if calib is None or not calibration_fits(calib, width, height, max_aspect_mismatch):
         return Intrinsics.from_hfov(width, height, hfov_deg)
+    # 같은 화면비의 축소·확대: 픽셀 좌표가 가로·세로 같은 비율로 늘어나므로 fx·cx는 가로, fy·cy는
+    # 세로 비율을 곱한다 (화면비가 같아 sx ≈ sy)
     sx, sy = width / calib.width, height / calib.height
     return Intrinsics(calib.fx * sx, calib.fy * sy, calib.cx * sx, calib.cy * sy)
 
@@ -129,7 +158,8 @@ def _points_by_time(
         elif isinstance(p, BoxTrackPayload):
             for k in p.keyframes:
                 if not k.outside:
-                    # 박스는 중심 한 점만 올린다 (part=None)
+                    # 박스는 중심 한 점만 올린다 (part=None). 박스 좌표는 왼쪽 위 (x, y)와 크기 (w,
+                    # h) px
                     cx, cy = k.x + k.w / 2, k.y + k.h / 2
                     points.setdefault(k.t_ms, []).append((p.entity_id, None, cx, cy))
     return points, hands
@@ -139,6 +169,8 @@ def _unproject_depth(
     dmap: NDArray[np.float32], intr: Intrinsics, u: float, v: float, policy: DepthPolicy
 ) -> tuple[float, float, float] | None:
     """픽셀 (u, v)의 깊이(주변 패치 중앙값)로 역투영. 깊이가 nan이거나 범위 밖이면 None."""
+    # 깊이는 (2r+1)^2 패치 중앙값이다 (경계 한 픽셀이 배경을 읽어도 버틴다). 광축 방향 평면 깊이
+    # z(m)
     z = sample_depth(dmap, u, v, policy.patch_radius_px)
     # 화면 밖(nan)이나 믿기 어려운 깊이는 버린다 (그 시각 샘플이 빠진다)
     if math.isnan(z) or not policy.min_depth_m <= z <= policy.max_depth_m:
@@ -174,9 +206,10 @@ def _lift_hand(
     `policy.hand_points` 중 보이는 관절만 낸다.
 
     world가 있고 맞춤이 되면 `handfit.fit_hand` 결과를 쓴다 (깊이 z가 [min_depth_m, max_depth_m]
-    밖인 관절은 뺀다). 아니면 관절마다 그 픽셀 깊이로 역투영한다. visibility 0(라벨 없음)인 관절은
-    올리지 않는다. 신뢰도는 맞춤이면 `fit_confidence`(그 시각 맞춤 품질, 관절마다 같다), 깊이면
-    `point_confidence` (ADR 0045).
+    밖인 관절은 뺀다). 아니면 손바닥 관절(`hand_fit.anchor_points`)만 그 픽셀 깊이로 역투영하고,
+    손가락 끝은 `fingertip_fallback`이 point_depth일 때만 같은 방식으로 올린다 (기본 drop,
+    F-PAR-40). visibility 0(라벨 없음)인 관절은 올리지 않는다. 신뢰도는 맞춤이면
+    `fit_confidence`(그 시각 맞춤 품질, 관절마다 같다), 깊이면 `point_confidence` (ADR 0045).
     """
     fitted = hand_fit_of(frame, dmap, intr, policy)
     out: list[_Lifted] = []
@@ -184,11 +217,15 @@ def _lift_hand(
         conf = fit_confidence(fitted, calibrated=calibrated, policy=policy)
     else:
         conf = point_confidence(calibrated=calibrated, policy=policy)
+    # 맞춤 없이 픽셀 깊이로 믿고 올릴 수 있는 관절: 손바닥(넓은 면이라 깊이 패치가 손 위에 있다)
+    palm = set(policy.hand_fit.anchor_points)
+    keep_tips = policy.fingertip_fallback == "point_depth"
     for i in policy.hand_points:
         kp = frame.points[i]
-        if kp.visibility == 0:
+        if kp.visibility == 0 or (fitted is None and i not in palm and not keep_tips):
             continue
         if fitted is not None:
+            # 맞춘 21관절 중 이 관절 (카메라 좌표 m). 깊이 범위 밖이면 그 관절만 뺀다
             x, y, z = (float(c) for c in fitted.points[i])
             xyz = (x, y, z) if policy.min_depth_m <= z <= policy.max_depth_m else None
             method = Lift3DMethod.HAND_FIT
@@ -226,7 +263,8 @@ def depth_frames(
 
     wanted에 있는 시각의 프레임 중 마지막으로 깊이를 만든 프레임에서 frame_stride_ms가 지나기 전
     프레임은 건너뛴다 (0이어도 1 ms로 두어 같은 시각을 두 번 쓰지 않는다). 내부 파라미터는 첫
-    처리 프레임의 크기로 한 번 정한다 (`intrinsics_for`, 영상 중간에 해상도가 바뀌지 않는다고 본다).
+    처리 프레임의 크기로 한 번 정한다 (`intrinsics_for`, 영상 중간에 해상도가 바뀌지 않는다고 본다.
+    화면비가 다른 캘리브레이션은 화각 근사로 떨어진다).
     `lift_tracks`와 작업자 손 크기 추정(`dlp_prelabel.palm`)이 함께 쓴다.
     """
     min_gap = max(policy.frame_stride_ms, 1)
@@ -237,7 +275,10 @@ def depth_frames(
             continue
         last = t
         if intr is None:
-            intr = intrinsics_for(calib, img.shape[1], img.shape[0], policy.default_hfov_deg)
+            intr = intrinsics_for(
+                calib, img.shape[1], img.shape[0], policy.default_hfov_deg,
+                policy.max_intrinsics_aspect_mismatch,
+            )  # fmt: skip
         yield t, depth.predict(img), intr
 
 
@@ -284,13 +325,35 @@ def lift_tracks(
     Raises:
         ValueError: 같은 (개체, 트랙 종류) 트랙이 둘 이상일 때 (F-PAR-01).
     """
+    return lift_tracks_with_source(frames, depth, tracks, calib, policy)[0]
+
+
+def lift_tracks_with_source(
+    frames: Iterable[tuple[int, Image]],
+    depth: DepthModel,
+    tracks: list[LabelRecord],
+    calib: CameraIntrinsics | None,
+    policy: DepthPolicy,
+) -> tuple[dict[tuple[str, str | None], list[Trajectory3DSample]], bool]:
+    """`lift_tracks`와 같고, 실제로 캘리브레이션을 썼는지(화각 근사가 아님)를 함께 돌려준다.
+
+    calib가 있어도 첫 처리 프레임과 화면비가 맞지 않으면 화각 근사를 쓰고 거짓이다 (F-PAR-44).
+    처리한 프레임이 없으면 calib 유무를 그대로 돌려준다.
+    """
     # 1단계: 스트림 PTS ms → 그 시각에 올릴 박스 중심과 손 키프레임
     points, hands = _points_by_time(tracks)
-    calibrated = calib is not None
-    box_conf = point_confidence(calibrated=calibrated, policy=policy)
+    calibrated: bool | None = None
+    box_conf = point_confidence(calibrated=calib is not None, policy=policy)
     out: dict[tuple[str, str | None], list[Trajectory3DSample]] = {}
     # 2단계: 점이 있는 프레임 중 frame_stride_ms 간격으로만 깊이를 만든다 (CPU 비용)
     for t, dmap, intr in depth_frames(frames, points.keys() | hands.keys(), depth, calib, policy):
+        if calibrated is None:
+            # 깊이 맵은 프레임과 같은 크기다 (H, W). 화면비가 다르면 화각 근사를 썼다
+            h, w = dmap.shape[:2]
+            calibrated = calib is not None and calibration_fits(
+                calib, w, h, policy.max_intrinsics_aspect_mismatch
+            )
+            box_conf = point_confidence(calibrated=calibrated, policy=policy)
         for entity, part, u, v in points.get(t, []):
             xyz = _unproject_depth(dmap, intr, u, v, policy)
             if xyz is not None:
@@ -299,7 +362,7 @@ def lift_tracks(
         for entity, frame in hands.get(t, []):
             for name, xyz, method, conf in _lift_hand(frame, dmap, intr, policy, calibrated):
                 out.setdefault((entity, name), []).append(_sample(t, xyz, method, conf))
-    return out
+    return out, calib is not None if calibrated is None else calibrated
 
 
 def _source_of(
@@ -327,13 +390,18 @@ def mean_confidence(samples: Iterable[Trajectory3DSample]) -> float:
 class DepthLifter:
     """메트릭 깊이 3D 단계. 러너가 Predictor 목록과 따로 부른다 (입력이 영상 + 다른 라벨이다).
 
-    name: "depth3d". version: `depth3d-<가중치 버전>+hf3+p<depth 절 해시>` (hf1: 손 중심 3D 점
+    name: "depth3d". version: `depth3d-<가중치 버전>+hf4+p<depth 절 해시>` (hf1: 손 중심 3D 점
     맞춤 판, ADR 0044. hf2: 표본별 방식·신뢰도, ADR 0045. hf3: 궤적마다 입력 트랙 ID
-    `derived_from`, ADR 0048 — 3D가 2D 손 트랙 검수를 물려받는 근거. 러너가 입력 해시와 손 크기
-    사전값 출처 `+hp<w|p>`를 더 붙인다).
+    `derived_from`, ADR 0048 — 3D가 2D 손 트랙 검수를 물려받는 근거. hf4: 손 모델 자세 회전
+    다듬기·해상도와 무관한 상대 재투영 문턱, 맞춤 없는 손가락 끝 빼기, 화면비가 다른 캘리브레이션
+    거부, F-PAR-40·42·43·44. 러너가 입력 해시와 손 크기 사전값 출처 `+hp<w|p>`를 더 붙인다).
+    weights_version: 깊이 가중치 버전만 (자세 단계 버전의 깊이 입력, depth 절의 손 맞춤 정책이
+    바뀌어도 자세를 다시 추정하지 않게, F-PAR-53).
     """
 
     name = "depth3d"
+    # 깊이 가중치 판 (`__init__`이 정한다. 가중치 없이 만든 시험용 하위 클래스는 빈 값)
+    weights_version: str = ""
 
     def __init__(self, root: Path, policy: PrelabelPolicy, *, now: datetime) -> None:
         """가중치를 확인하고 버전을 정한다. 모델 세션은 처음 `run`할 때 연다.
@@ -343,7 +411,8 @@ class DepthLifter:
                 건너뛴다.
         """
         self.path, version = resolve(root, policy.models.depth)
-        self.version = f"depth3d-{version}+hf3+p{policy.digest('depth')}"
+        self.weights_version = version
+        self.version = f"depth3d-{version}+hf4+p{policy.digest('depth')}"
         self.policy, self.now = policy, now
         self.model: DepthModel | None = None
 
@@ -372,8 +441,8 @@ class DepthLifter:
             session_id, stream_id: 라벨의 세션·스트림 (바디캠).
             tracks: 올릴 손·박스 트랙. (개체, 트랙 종류)마다 하나 (`lift_tracks` 참고).
             calib: 카메라 내부 파라미터 (세션 또는 등록된 캘리브레이션,
-                `calibration_repository.session_intrinsics`). None이면 화각 근사이고 페이로드
-                intrinsics는 hfov_approx다.
+                `calibration_repository.session_intrinsics`). None이거나 영상과 화면비가 맞지
+                않으면 화각 근사이고 페이로드 intrinsics는 hfov_approx다 (F-PAR-44).
             ontology_version: 라벨에 넣을 온톨로지 버전.
             version: 라벨에 쓸 모델 버전 (기본: `self.version`). 러너는 입력 해시를 붙여 넘긴다.
             palm_m: 작업자 손 크기 사전값 (m, None이면 정책 `hand_fit.reference_palm_m`, ADR 0045).
@@ -391,8 +460,11 @@ class DepthLifter:
         # 러너는 입력 해시를 붙인 버전을 넘긴다 (라벨 ID의 version_tag도 이 버전으로 만든다)
         model_version = version or self.version
         policy = with_palm(self.policy.depth, palm_m)
-        samples = lift_tracks(iter_frames(video), self.depth_model(), tracks, calib, policy)
-        intrinsics = IntrinsicsSource.HFOV_APPROX if calib is None else IntrinsicsSource.CALIBRATED
+        samples, used = lift_tracks_with_source(
+            iter_frames(video), self.depth_model(), tracks, calib, policy
+        )
+        # 출처는 실제로 쓴 값을 따른다 (화면비가 달라 화각 근사로 떨어졌으면 hfov_approx)
+        intrinsics = IntrinsicsSource.CALIBRATED if used else IntrinsicsSource.HFOV_APPROX
         # 개체 → 올린 입력 트랙 (같은 개체의 손·박스 트랙이 함께 오면 part로 가른다: 손은 관절 이름,
         # 박스는 None)
         inputs = {

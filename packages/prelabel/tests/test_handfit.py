@@ -10,6 +10,11 @@ DB·서비스·모델 가중치 불필요.
   1~2 cm 생긴다 → 평균 20 mm, 관절별 깊이의 손가락 끝(수백 mm)보다 열 배 이상 낫다.
 - 깊이 10% 편향: 손 크기 사전값(정답과 같은 0.09 m)과 반반 섞어 크기 오차 약 5% → 0.5 m에서 약
   25 mm → 35 mm. 손 안 상대 위치(손목 기준 손가락 끝)는 5% x 0.17 m ≈ 8 mm → 10 mm.
+- 손 모델 자세가 8도 어긋남(F-PAR-42): 회전 다듬기가 2D로 자세를 되찾아 2 mm (흔들림 없음). 다듬지
+  않으면(rotation_prior 0) 손가락 끝이 손 중심에서 약 0.1 m 떨어져 8도면 약 14 mm 틀린다 → 5 mm
+  넘음.
+- 해상도(F-PAR-43): 같은 장면을 320x240과 1920x1440(6배)에 투영하면 상대 재투영 오차가 같아 맞춤
+  성패·신뢰도가 같다 (신뢰도 반올림 0.001 → 0.01 안).
 """
 
 from __future__ import annotations
@@ -28,6 +33,7 @@ from dlp_prelabel.policy import HAND21_JOINTS, DepthPolicy, load_policy
 from dlp_schema.labels import (
     KeypointTrackPayload,
     LabelRecord,
+    Lift3DMethod,
     Trajectory3DSample,
     WorldPoint,
     without_world,
@@ -38,11 +44,15 @@ JOINT_OF = {name: i for i, name in HAND21_JOINTS.items()}
 TIPS = ("thumb_tip", "index_tip", "middle_tip", "ring_tip", "pinky_tip")
 
 
-def _policy(**hand_fit: object) -> DepthPolicy:
-    """저장소 정책의 depth 절 (모든 프레임에서 깊이, hand_fit 일부 값 바꾸기)."""
+def _policy(fallback: str = "drop", **hand_fit: object) -> DepthPolicy:
+    """저장소 정책의 depth 절 (모든 프레임에서 깊이, 손가락 끝 대체 방식, hand_fit 값 바꾸기)."""
     depth = load_policy(ROOT).depth
     return depth.model_copy(
-        update={"frame_stride_ms": 0, "hand_fit": depth.hand_fit.model_copy(update=hand_fit)}
+        update={
+            "frame_stride_ms": 0,
+            "fingertip_fallback": fallback,
+            "hand_fit": depth.hand_fit.model_copy(update=hand_fit),
+        }
     )
 
 
@@ -86,14 +96,61 @@ def test_noise_free_fingertips_match_ground_truth() -> None:
 
 def test_fit_beats_per_joint_depth_under_noise() -> None:
     """2D 1 px·손 중심 3D 3 mm 흔들림에서도 손가락 끝 평균 오차 20 mm 안이다. 같은 트랙에서
-    world를 빼면(관절별 깊이) 손가락 끝이 배경 깊이를 읽어 300 mm 넘게 틀린다 (손목은 손바닥 원판
-    위라 맞다).
+    world를 빼고 예전 대체(point_depth)를 켜면 손가락 끝이 배경 깊이를 읽어 300 mm 넘게 틀린다
+    (손목은 손바닥 원판 위라 맞다). 기본(drop)은 그 손가락 끝을 내지 않고 손목만 낸다 (F-PAR-40).
     """
     s = generate_hand3d_scenario(1, pixel_noise_px=1.0, world_noise_m=0.003)
     fit = _errors_mm(s, _lift(s, _policy()))
-    depth_only = _errors_mm(s, _lift(s, _policy(), _without_world(s)))
+    depth_only = _errors_mm(s, _lift(s, _policy("point_depth"), _without_world(s)))
     assert max(fit.values()) < 20.0
     assert min(depth_only[t] for t in TIPS) > 300.0 and depth_only["wrist"] < 10.0
+    dropped = _errors_mm(s, _lift(s, _policy(), _without_world(s)))
+    assert set(dropped) == {"wrist"} and dropped["wrist"] < 10.0
+
+
+def test_partially_corrected_track_never_mixes_background_fingertips() -> None:
+    """검수자가 홀수 키프레임을 고쳐 그 키프레임의 world가 빠진 트랙 (F-PAR-40 재현): 손가락 끝은
+    맞춤이 되는 짝수 키프레임에서만 나오고 모두 정답과 1 mm 안이다 (예전에는 홀수 키프레임이 배경
+    깊이로 올라 약 0.7 m씩 튀었다). 손목은 모든 키프레임에 있다.
+    """
+    s = generate_hand3d_scenario(0, n_frames=12)
+    [x] = s.labels
+    assert isinstance(x.payload, KeypointTrackPayload)
+    frames = tuple(
+        f if i % 2 == 0 else f.model_copy(update={"world": None})
+        for i, f in enumerate(x.payload.keyframes)
+    )
+    partial = x.model_copy(update={"payload": x.payload.model_copy(update={"keyframes": frames})})
+    out = _lift(s, _policy(), [partial])
+    even = set(s.frame_times[0::2])
+    for tip in TIPS:
+        assert {q.t_ms for q in out[("right_hand", tip)]} == even
+    assert len(out[("right_hand", "wrist")]) == len(s.frame_times)
+    assert max(_errors_mm(s, out).values()) < 1.0
+
+
+def test_rotated_hand_model_pose_is_refined_from_the_2d() -> None:
+    """손 모델 자세가 카메라 축과 8도 어긋나도(MediaPipe world, F-PAR-42) 1920x1440에서 맞춤이 되고
+    손가락 끝 오차가 2 mm 안이다. 회전을 다듬지 않으면 5 mm 넘게 틀린다 (모듈 설명)."""
+    s = generate_hand3d_scenario(6, n_frames=6, resolution_scale=6.0, world_rotation_deg=8.0)
+    out = _lift(s, _policy())
+    assert all(q.method is Lift3DMethod.HAND_FIT for ss in out.values() for q in ss)
+    assert max(_errors_mm(s, out).values()) < 2.0
+    plain = _errors_mm(s, _lift(s, _policy(rotation_prior=0.0)))
+    assert max(plain[t] for t in TIPS) > 5.0
+
+
+def test_fit_threshold_and_confidence_do_not_depend_on_resolution() -> None:
+    """같은 장면·같은 손 모델 흔들림(3 mm)을 320x240과 1920x1440에 올리면 둘 다 모든 표본이 맞춤이고
+    표본 신뢰도가 0.01 안에서 같다 (예전 픽셀 문턱은 고해상도에서 맞춤을 버렸다, F-PAR-43)."""
+    small = generate_hand3d_scenario(7, n_frames=6, world_noise_m=0.003)
+    large = generate_hand3d_scenario(7, n_frames=6, world_noise_m=0.003, resolution_scale=6.0)
+    a, b = _lift(small, _policy()), _lift(large, _policy())
+    assert a.keys() == b.keys()
+    for key in a:
+        assert all(q.method is Lift3DMethod.HAND_FIT for q in [*a[key], *b[key]])
+        for qa, qb in zip(a[key], b[key], strict=True):
+            assert qa.confidence == pytest.approx(qb.confidence, abs=0.01)
 
 
 def test_hand_size_prior_corrects_a_wrong_hand_model_scale() -> None:
@@ -150,8 +207,10 @@ def test_too_few_visible_joints_fall_back() -> None:
         for f in x.payload.keyframes
     )
     hidden = x.model_copy(update={"payload": x.payload.model_copy(update={"keyframes": frames})})
-    out = _lift(s, _policy(min_points=21), [hidden])
-    # 손목(가림)은 빠지고, 손가락 끝은 관절별 깊이(배경)로 올라 크게 틀린다
+    # 기본(drop): 손목은 가려졌고 손가락 끝은 맞춤 없이 내지 않아 표본이 없다
+    assert _lift(s, _policy(min_points=21), [hidden]) == {}
+    # point_depth: 손가락 끝이 관절별 깊이(배경)로 올라 크게 틀린다
+    out = _lift(s, _policy("point_depth", min_points=21), [hidden])
     assert ("right_hand", "wrist") not in out
     assert min(_errors_mm(s, out).values()) > 300.0
 
