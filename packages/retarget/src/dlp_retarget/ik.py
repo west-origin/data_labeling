@@ -192,8 +192,8 @@ class DlsIkSolver:
     def _restart(self, chain: Chain, goal: Goal, problem: IkProblem, q_prev: Vec | None) -> Vec:
         """여러 시작점에서 풀어 고른 해.
 
-        직전 해가 있으면 도달 해 가운데 직전 해에 가장 가까운 것, 없거나 도달 해가 없으면 비용(위치 오차
-        + w · 회전 오차)이 가장 작은 것.
+        직전 해가 있으면 도달 해 가운데 직전 해에 가장 가까운 것, 직전 해나 도달 해가 없으면 비용
+        (위치 오차 + w · 회전 오차)이 가장 작은 것.
         """
         cfg = problem.config
         starts = ([] if q_prev is None else [q_prev]) + seeds(chain, cfg.restarts)
