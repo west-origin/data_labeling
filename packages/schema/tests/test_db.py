@@ -296,9 +296,8 @@ def test_hand_size_lifecycle_and_camera_assignments_are_append_only(pg: sa.Engin
         register_hand_size,
     )
 
-    session = make_session("s001")
+    session = make_session()  # pg 픽스처가 이미 등록한 기본 세션 s001
     with pg.begin() as conn:
-        insert_session(conn, session)
         register_hand_size(conn, "w01", 0.08, source=HandSizeSource.ESTIMATED, now=FIXED_TIME,
                            n_samples=40, source_session_ids=["s001"], estimator="e")  # fmt: skip
         invalidate_hand_sizes(conn, "w01", reason="동의 철회", now=FIXED_TIME)
