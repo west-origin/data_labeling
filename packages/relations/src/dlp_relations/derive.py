@@ -126,6 +126,18 @@ def derive(  # noqa: C901
     chosen: dict[tuple[str, str, FrameKey], LabelRecord] = {}
     corners: dict[tuple[str, FrameKey], dict[str, Track3D]] = {}
     corner_src: dict[tuple[str, str, FrameKey], LabelRecord] = {}
+    # 월드 좌표 단계(ADR 0046)가 카메라 좌표 궤적을 옮겨 만든 사본: 그 카메라 좌표 궤적이 아직
+    # 현재면 같은 측정을 두 번 쓰게 되므로 뺀다 (두 판의 접촉이 merge로 합쳐지고 커버리지가 반올림
+    # 차로 흔들렸다, F-PAR-57). 카메라 좌표 원본이 없는 월드 좌표 궤적은 그대로 쓴다
+    live_ids = {x.label_id for x in current}
+    copies = {
+        x.label_id
+        for x in current
+        if isinstance(x.payload, Trajectory3DPayload)
+        and x.payload.frame is CoordinateFrame.WORLD
+        and x.payload.derived_from
+        and x.payload.derived_from[0] in live_ids
+    }
 
     def track(x: LabelRecord) -> Track3D:
         """저장된 PTS는 그대로 두고 계산용 궤적의 시각만 마스터에 맞춘다."""
@@ -140,7 +152,7 @@ def derive(  # noqa: C901
 
     for x in sorted(current, key=_preference):
         p = x.payload
-        if not isinstance(p, Trajectory3DPayload) or p.part is None:
+        if not isinstance(p, Trajectory3DPayload) or p.part is None or x.label_id in copies:
             continue
         obj = ontology.objects.get(class_of(p.entity_id, classes))
         if obj is None:

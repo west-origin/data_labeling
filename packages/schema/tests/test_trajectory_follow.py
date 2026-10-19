@@ -270,6 +270,33 @@ def test_supersede_needs_inheritance_only_same_source_and_another_version() -> N
     assert [x.label_id for x in plan.retract] == ["c1"]
 
 
+def test_world_3d_inherits_a_directly_reviewed_camera_trajectory() -> None:
+    """F-PAR-58: 카메라 좌표 궤적 자체를 사람이 확인했으면(직접 검수·검수자 있는 사람 출처) 2D가
+    검수 전이거나 없어도 그 월드 좌표 궤적이 카메라 궤적의 검수를 물려받는다 (출처 = 카메라 궤적,
+    경유 = 자세). 예전에는 출처가 없어 월드 좌표가 검수 전으로 남아 완료 판정을 영구히 막았다.
+    카메라 궤적이 다시 바뀌면(지워짐) 끊긴다."""
+    direct = _reviewed(_cam("cd", "g1"), VerificationState.HUMAN_APPROVED)  # 2D g1은 검수 전
+    human = make_label(
+        trajectory_payload(part="index_tip"), label_id="hc", stream_id="bodycam",
+        verification=Verification(
+            state=VerificationState.HUMAN_APPROVED, reviewer_id="lead", reviewed_at=T_REVIEW
+        ),
+    )  # fmt: skip
+    wh = make_label(
+        trajectory_payload(part="index_tip", frame="world", derived_from=("hc", "pose1")),
+        label_id="wh", **MODEL,
+    )  # fmt: skip
+    history = [_track(), direct, human, _pose(), _world("wd", "cd"), wh]
+    plan = plan_trajectory_follow(history, [])
+    got = {r.label_id: r for r in plan.approve}
+    assert set(got) == {"wd", "wh"}
+    assert (got["wd"].source_label_id, got["wd"].via_label_ids) == ("cd", ("pose1",))
+    assert (got["wh"].source_label_id, got["wh"].reviewer_id) == ("hc", "lead")
+    applied, records = _apply(history, [])
+    gone = make_label(direct.payload, label_id="cd-x", parent_label_id="cd", retracted=True, **M2)
+    assert lapsed_trajectories([*applied, gone], records) == {"wd"}
+
+
 def test_follow_is_idempotent() -> None:
     """적용한 뒤 다시 계산하면 물려받을 것도 끊긴 것도 없다."""
     g1 = _reviewed(_track(), VerificationState.SAMPLE_VERIFIED)
@@ -296,6 +323,9 @@ def test_trajectory_inheritance_contract_rejects_bad_records() -> None:
         TrajectoryInheritance.model_validate({**base, "state": "human_corrected"})
     with pytest.raises(ValidationError, match="자기 자신"):
         TrajectoryInheritance.model_validate({**base, "via_label_ids": ["c1"]})
+    # 계약 설명이 출처를 손 트랙으로만 적지 않는다 (박스 트랙 출처, ADR 0050, F-COE-34)
+    described = TrajectoryInheritance.model_fields["source_label_id"].description or ""
+    assert "박스 트랙" in described and "hand21" in described
 
 
 def test_apply_writes_review_and_record_in_one_step_and_is_idempotent(ontology: Ontology) -> None:

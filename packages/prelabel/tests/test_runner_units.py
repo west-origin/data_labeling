@@ -139,6 +139,18 @@ def test_lapsed_inherited_trajectories_do_not_block_or_feed_new_ones() -> None:
     assert sorted(x.label_id for x in cams) == ["new-wrist", "old-tip"]
 
 
+def test_world_inputs_skip_human_camera_trajectories_without_a_reviewer() -> None:
+    """F-PAR-58: 검수자가 없는 사람 출처 카메라 좌표 궤적은 월드 좌표 입력으로 고르지 않는다 (그
+    월드 좌표는 물려받을 검수가 없어 완료 판정을 영구히 막는다). 검수자가 있는 사람 궤적은 고른다."""
+    human = _traj("h-wrist", "hand_right", "wrist", provenance=Provenance(source=Source.HUMAN))
+    reviewed = _traj(
+        "h-tip", "hand_right", "index_tip", provenance=Provenance(source=Source.HUMAN),
+        verification=APPROVED,
+    )  # fmt: skip
+    _, cams = pick_world_inputs([human, reviewed], "bodycam", frozenset())
+    assert [x.label_id for x in cams] == ["h-tip"]
+
+
 def _person(label_id: str, **kw: Any) -> LabelRecord:
     """3인칭 coco17 인물 트랙 레코드 (키프레임 하나)."""
     frame = KeypointFrame(

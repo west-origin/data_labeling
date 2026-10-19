@@ -3,7 +3,10 @@
 기간은 config/defaults.yaml retention.raw_retention_days(미정이면 알림을 내지 않는다). 기산점은
 블러본·라벨 확정 시각, 곧 사람 검증을 마친 세션의 마지막 사람 검수 변화(승인·수정·추가·
 삭제·표본 검증, 블러 포함) 시각이다. 운영 라벨만 본다: 모델 버전 교체로 지운 레코드, 오류
-삽입·측정 레코드, 검수 전 모델 라벨은 기산점을 늦추지 않는다 (dlp_schema.history.review_changes).
+삽입·측정 레코드, 검수 전 모델 라벨, 검수를 물려받기만 한 3D 궤적·설명(ADR 0043·0048, 물려받는
+검수 시각은 max(주인 검수 시각, 라벨 생성 시각)이라 자동 단계가 3D를 다시 만들 때마다 늦어진다,
+F-COE-31)은 기산점을 늦추지 않는다 (`dlp_schema.reviewer_changes`). 물려준 2D·행동의 사람 검수는
+그대로 센다.
 만료가 alert_days_before 안이거나 지났는데 결정(연장·삭제)이 없으면 알린다. 연장은 기한까지
 유효하다. 사용 중지된 세션은 기간과 무관하게 삭제 대상으로 보인다. 삭제 결정을 기록하면 더 알리지
 않는다. 원본 삭제 자체는 사람이 결정을 기록한 뒤 운영 절차로 한다.
@@ -33,13 +36,15 @@ from typing import Literal
 import sqlalchemy as sa
 
 from dlp_schema.db.repository import (
+    get_description_inheritance,
     get_labels,
     get_session,
+    get_trajectory_inheritance,
     list_retention_decisions,
     list_session_ids,
 )
-from dlp_schema.history import review_changes
 from dlp_schema.labels import VerificationState
+from dlp_schema.reviewer_changes import reviewer_changes
 from dlp_schema.session import LifecycleState
 
 # 보관 기간을 세기 시작하는 생애주기 상태 (사람 검증을 마친 뒤)
@@ -85,11 +90,16 @@ class RetentionItem:
 
 
 def finalized_at(conn: sa.Connection, session_id: str) -> datetime | None:
-    """마지막 사람 검수 변화 시각 (운영 라벨만, 블러 포함).
+    """마지막 사람 검수 변화 시각 (운영 라벨만, 블러 포함, 물려받기만 한 라벨 제외).
 
     반환: 사람 검수 변화가 하나도 없으면 None (그 세션은 아직 기산점이 없어 알림 대상이 아니다).
     """
-    changes = review_changes(get_labels(conn, session_id), REVIEW_STATES)
+    changes = reviewer_changes(
+        get_labels(conn, session_id),
+        REVIEW_STATES,
+        get_description_inheritance(conn, session_id),
+        get_trajectory_inheritance(conn, session_id),
+    )
     return max((c.at for c in changes), default=None)
 
 

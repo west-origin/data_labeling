@@ -290,9 +290,13 @@ class VerifyPolicy(Contract):
     automatic: 사람 검수 대상이 아닌 자동 라벨 분류. 검수 전이어도 완료를 막지 않는다 (검수 상태를
     바꾸지 않는다. 기본 내보내기에는 여전히 들어가지 않고, 그 값에서 계산한 라벨을 내보내면
     manifest가 automatic_unreviewed로 밝힌다).
+    require_current_3d: 참이면 출처 2D가 바뀌어 지운(또는 낡은) 3D 궤적을 고친 2D로 다시 만들기
+        전에는 완료를 막는다 (`dlp prelabel run`을 안내한다, F-COE-30). 깊이 모델이 없어 다시 만들
+        수 없는 운영에서만 끈다.
     """
 
     automatic: tuple[AutomaticLabel, ...] = ("camera_pose",)
+    require_current_3d: bool = True
 
 
 class ReviewOpsPolicy(Contract):

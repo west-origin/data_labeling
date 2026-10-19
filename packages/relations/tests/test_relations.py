@@ -147,6 +147,53 @@ def test_tool_contact_needs_grasp_and_same_coordinate_frame(
     assert derive([to_world(x) for x in w.labels], ontology, policy).contacts == []
 
 
+def _world_copy(x: LabelRecord) -> LabelRecord:
+    """월드 좌표 단계가 만드는 사본 흉내: 같은 표본, frame=world, derived_from=(원본, 자세)."""
+    p = x.payload
+    assert isinstance(p, Trajectory3DPayload)
+    payload = p.model_copy(
+        update={"frame": CoordinateFrame.WORLD, "derived_from": (x.label_id, "pose-1")}
+    )
+    return x.model_copy(update={"label_id": f"{x.label_id}-w", "payload": payload})
+
+
+def test_world_copies_of_camera_trajectories_are_not_counted_twice(
+    policy: RelationsPolicy, ontology: Ontology
+) -> None:
+    """F-PAR-57: 월드 좌표 단계가 모든 카메라 좌표 궤적을 frame=world 사본으로 옮겨도(카메라 원본이
+    현재) 접촉·관계·커버리지는 카메라 좌표만 쓸 때와 같다. 원본이 없는 월드 좌표 궤적은 그대로
+    쓴다 (위 `test_tool_contact_needs_grasp_and_same_coordinate_frame`의 전부 world 경우)."""
+    w = generate_wiping_scenario(0)
+    copies = [_world_copy(x) for x in w.labels if isinstance(x.payload, Trajectory3DPayload)]
+    alone, both = derive(w.labels, ontology, policy), derive([*w.labels, *copies], ontology, policy)
+    assert len(both.contacts) == len(alone.contacts) == len(w.contacts)
+    assert [c.payload for c in both.coverage] == [c.payload for c in alone.coverage]
+    assert [(r.start_ms, r.end_ms) for r in both.relations] == [
+        (r.start_ms, r.end_ms) for r in alone.relations
+    ]
+
+
+def test_contacts_do_not_bridge_a_gap_in_tool_samples(
+    policy: RelationsPolicy, ontology: Ontology
+) -> None:
+    """F-PAR-57: 줄 사이 들어 올림(상승·이동·하강)이 작용부 샘플 공백(월드 좌표 자세 공백 흉내)에
+    덮여도 두 접촉을 하나로 잇지 않는다 (공백이 max_sample_gap_ms를 넘으면 그 앞에서 끝낸다)."""
+    w = generate_wiping_scenario(0)
+    (s0, e0), (s1, _) = w.contacts[0], w.contacts[1]
+    assert s1 - e0 > policy.tool_surface.max_sample_gap_ms
+
+    def drop_lift(x: LabelRecord) -> LabelRecord:
+        p = x.payload
+        if not (isinstance(p, Trajectory3DPayload) and p.entity_id == "rag_01"):
+            return x
+        kept = tuple(q for q in p.samples if not e0 + 40 < q.t_ms < s1 - 40)
+        return x.model_copy(update={"payload": p.model_copy(update={"samples": kept})})
+
+    got = derive([drop_lift(x) for x in w.labels], ontology, policy).contacts
+    assert len(got) == len(w.contacts)
+    assert abs(got[0].end_ms - e0) <= TOLERANCE_MS and got[0].start_ms <= s0 + TOLERANCE_MS
+
+
 def test_hand_state_rules_follow_grasp_type(policy: RelationsPolicy) -> None:
     """행동 시나리오의 손 상태마다 규칙 하나가 맞고, grasp_type에 따라
     술어(grasp/support/contact)가 정해지는지 본다.

@@ -16,6 +16,9 @@ ADR 0043 3절)와 같은 틀이다.
       (박스 트랙 하나). 그 박스 트랙의 개체·스트림이 같아야 한다.
     - 월드 좌표 궤적: 모델 출처, frame=world, `derived_from` = (카메라 좌표 궤적, 카메라 자세).
       카메라 좌표 궤적이 위 조건을 만족하고(같은 개체·부위) 자세가 현재 자세 궤적이어야 한다.
+      카메라 좌표 궤적 자체를 사람이 확인했으면(사람 출처·직접 검수, `human_confirmed`) 그 2D가
+      검수 전이거나 없어도 그 카메라 좌표 궤적이 출처다 (경유 = 자세만, F-PAR-58: 사람이 확인한
+      3D로 만든 월드 좌표가 물려받을 곳이 없어 완료 판정을 영구히 막지 않게).
       카메라 자세는 자동 추정이고 물려받지 않는다 (사람 검수 대상이 아님, `is_camera_pose`,
       ADR 0050. 완료 판정은 review.yaml verify.automatic로 빼고, 내보내기 manifest가 밝힌다).
     - derived_from이 없는 예전 3D(`depth3d-…+hf2` 이전), 카메라 자세, 사람 출처 궤적은 출처가 없다
@@ -87,7 +90,10 @@ CAMERA_POSE_REVIEW = "automatic_unreviewed"
 
 @dataclass(frozen=True)
 class TrajectoryBasis:
-    """3D 궤적의 검수 출처: 2D 손 트랙과 그 사이 입력 (월드 좌표: 카메라 좌표 궤적, 자세)."""
+    """3D 궤적의 검수 출처: 2D 트랙(또는 사람이 확인한 카메라 좌표 궤적)과 그 사이 입력.
+
+    월드 좌표면 via = (카메라 좌표 궤적, 자세), 출처가 카메라 좌표 궤적 자체면 via = (자세,).
+    """
 
     source: LabelRecord
     via: tuple[str, ...] = ()
@@ -180,11 +186,16 @@ def _world_basis(p: Trajectory3DPayload, current: dict[str, LabelRecord]) -> Tra
         or not isinstance(pp, Trajectory3DPayload)
         or pp.entity_id != CAMERA_ENTITY
         or (cp.entity_id, cp.part) != (p.entity_id, p.part)
-        or cam.provenance.source is not Source.MODEL
     ):
         return None
-    g = _source_track_of(cam, cp, current)
-    return None if g is None else TrajectoryBasis(g, (cam.label_id, pose.label_id))
+    g = _source_track_of(cam, cp, current) if cam.provenance.source is Source.MODEL else None
+    # 2D가 확인됐거나 카메라 궤적도 확인 전이면 2D가 출처다 (2D 검수를 기다린다)
+    if g is not None and (human_confirmed(g) or not human_confirmed(cam)):
+        return TrajectoryBasis(g, (cam.label_id, pose.label_id))
+    # 카메라 좌표 궤적 자체를 사람이 확인했다 (사람 출처·직접 검수): 그 검수를 물려받는다
+    if human_confirmed(cam):
+        return TrajectoryBasis(cam, (pose.label_id,))
+    return None
 
 
 def trajectory_basis(x: LabelRecord, current: dict[str, LabelRecord]) -> TrajectoryBasis | None:

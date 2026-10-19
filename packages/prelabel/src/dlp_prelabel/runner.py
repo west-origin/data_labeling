@@ -95,6 +95,7 @@ from dlp_schema.db.repository import (
     set_lifecycle,
 )
 from dlp_schema.db.trajectory_repository import apply_trajectory_follow
+from dlp_schema.description_follow import human_confirmed
 from dlp_schema.episode import (
     current_labels,
     is_protected,
@@ -735,7 +736,9 @@ def pick_world_inputs(
 
     여럿이면 `track_rank`(사람·검수 → 최신 → 긴 구간 → 라벨 ID)로 고른다. 자세는 그 스트림의
     entity_id="camera"·frame=world 궤적, 카메라 좌표 궤적은 그 스트림의 frame=camera 궤적이다.
-    출처 2D가 바뀌어 물려받음이 끊긴 궤적(lapsed, ADR 0048)은 고르지 않는다 (낡은 3D다).
+    출처 2D가 바뀌어 물려받음이 끊긴 궤적(lapsed, ADR 0048)은 고르지 않는다 (낡은 3D다). 검수자가
+    없는 사람 출처 카메라 좌표 궤적도 고르지 않는다: 그 월드 좌표는 물려받을 검수가 없어 검수
+    경로가 없는 채 완료 판정을 영구히 막는다 (F-PAR-58).
     """
     pose: LabelRecord | None = None
     cams: dict[tuple[str, str | None], LabelRecord] = {}
@@ -745,6 +748,7 @@ def pick_world_inputs(
             x.stream_id != stream_id
             or not isinstance(p, Trajectory3DPayload)
             or x.label_id in lapsed
+            or (x.provenance.source is Source.HUMAN and not human_confirmed(x))
         ):
             continue
         if is_pose_label(x):

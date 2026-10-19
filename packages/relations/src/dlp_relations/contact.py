@@ -102,7 +102,8 @@ def tool_surface_contacts(
     알고리즘 (작용부 샘플마다):
     1. 같은 시각 표면 좌표계를 만들고(꼭짓점 보간) 작용부를 (a, b, 거리)로 바꾼다.
     2. 표면 안·쥐는 중(`require_grasp`)·거리 ≤ on이면 접촉 시작. 접촉 중 표면 밖·안 쥠·거리 > off면
-       끝. 끝 시각은 마지막으로 거리 ≤ on이었던 샘플이다.
+       끝. 앞 샘플과 `max_sample_gap_ms`보다 떨어진 샘플(자세 공백·3D 결측)이 오면 그 앞에서
+       끝낸다 (빈 사이를 건너 잇지 않는다, F-PAR-57). 끝 시각은 마지막으로 거리 ≤ on이었던 샘플이다.
     3. 시작·마지막 on 샘플로 정한 시간 구간 밖의 좌표는 뺀다. 구간 내부의 on~off 샘플은 남긴다.
     4. merge_gap_ms 이하로 끊긴 구간을 잇고, min_duration_ms 미만 구간은 버린다.
 
@@ -119,8 +120,16 @@ def tool_surface_contacts(
     runs: list[SurfaceContact] = []
     current: SurfaceContact | None = None
     last_on: int | None = None
+    prev: int | None = None
     for t_raw, p in zip(tool.times, tool.xyz, strict=True):
         t = int(t_raw)
+        # 샘플이 빈 사이(자세 공백 등)를 건너 접촉을 잇지 않는다: 진행 중이면 그 앞에서 끝낸다
+        if current is not None and prev is not None and t - prev > policy.max_sample_gap_ms:
+            assert last_on is not None
+            current.end_ms = last_on
+            runs.append(current)
+            current, last_on = None, None
+        prev = t
         # 작용부 샘플 시각의 표면 좌표계 (꼭짓점 보간). 못 만들면 이 샘플은 표면 밖으로 본다
         frame = surface_frame_at(corners, t, policy.max_time_gap_ms)
         local = frame.local(p) if frame is not None else None

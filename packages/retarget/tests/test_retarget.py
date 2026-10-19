@@ -268,7 +268,7 @@ def test_unreachable_segment_is_flagged_not_clamped(
     )
 
 
-def test_missinghand_points_of_hold_and_are_marked(
+def test_missing_hand_points_hold_and_are_marked(
     robot: LoadedRobot, policy: RetargetPolicy
 ) -> None:
     """손 점이 없는 프레임은 목표 없음(target_present=0)으로 표시하고 관절은 직전 해를 유지한다.

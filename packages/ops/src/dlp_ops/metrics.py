@@ -72,13 +72,12 @@ from dlp_schema.db.repository import (
     list_session_ids,
     withdrawn_session_ids,
 )
-from dlp_schema.description_follow import active_inheritance
 from dlp_schema.episode import current_labels, non_operational_ids
-from dlp_schema.history import ReviewChange, review_changes
+from dlp_schema.history import ReviewChange
 from dlp_schema.labels import LabelRecord, Source, VerificationState
 from dlp_schema.review import AssignmentStatus, ReviewMode, ReviewTool
+from dlp_schema.reviewer_changes import reviewer_changes
 from dlp_schema.session import LifecycleState, PrivacyState
-from dlp_schema.trajectory_follow import active_trajectory_inheritance
 
 # 개별 검수로 보는 상태 (수정률·자동 승인율 계산). 표본 검증은 개별로 본 것이 아니라 뺀다
 REVIEWED = (VerificationState.HUMAN_APPROVED, VerificationState.HUMAN_CORRECTED)
@@ -402,13 +401,8 @@ def _reviewer_changes(
     """
     descriptions = get_description_inheritance(conn, sid)
     trajectories = get_trajectory_inheritance(conn, sid)
-    return [
-        c
-        for c in review_changes(history, REVIEWED)
-        if c.label.kind != "blur_track"
-        and active_inheritance(c.label, descriptions) is None
-        and active_trajectory_inheritance(c.label, trajectories) is None
-    ]
+    changes = reviewer_changes(history, REVIEWED, descriptions, trajectories)
+    return [c for c in changes if c.label.kind != "blur_track"]
 
 
 def weekly_metrics(  # noqa: C901
