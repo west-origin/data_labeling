@@ -38,6 +38,7 @@ from dlp_schema.db.calibration_repository import (
     register_camera_calibration,
     session_palm,
 )
+from dlp_schema.db.locks import share_lock_sessions
 from dlp_schema.db.repository import (
     get_session,
     insert_labels,
@@ -227,7 +228,7 @@ def test_withdrawal_during_estimate_blocks_the_write(
     world: _World, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """추정 중 출처 세션이 사용 중지되면 잠근 뒤 다시 읽어 쓰지 않는다 (종료 코드 5, F-PMS-29)."""
-    real = calib_cmds.share_lock_sessions
+    real = share_lock_sessions
 
     def _withdraw_then_lock(conn: sqlalchemy.Connection, ids: Any) -> None:
         # 다른 트랜잭션의 사용 중지가 잠금 직전에 커밋된 것을 흉내 낸다
