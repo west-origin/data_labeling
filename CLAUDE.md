@@ -19,8 +19,10 @@
 - `make todo-models` — 실제 모델을 아직 연동하지 못한 곳(`TODO(real-model):` 표시) 목록
 - `make licenses` — 정책이 쓰는 모델의 라이선스·학습 데이터·상업 사용 분류 표 (위반이 있으면 실패, `make check`에 포함)
 - `make fixtures` — 합성 픽스처를 `data/fixtures/`에 생성 (저장소에는 넣지 않음)
+- `make db-migrate` — Alembic 마이그레이션만 적용 (운영 배포 단계, 온톨로지 등록 없음)
 - `make db-upgrade` — 개발 DB에 Alembic 마이그레이션 적용 + 온톨로지 v1 등록 (온톨로지 이름을 덧붙인 뒤에도 다시 돌린다.
-  `en` 없는 예전 등록은 읽을 때 `LegacyOntologyContentError`, ADR 0043)
+  `en` 없는 예전 등록은 읽을 때 `LegacyOntologyContentError`, ADR 0043). 등록된 초안의 물리 사전값이 바뀌면 승인 없이
+  종료 코드 3으로 아무것도 쓰지 않는다. 승인은 `uv run dlp ontology register 1.0.0 --accept-physical-priors` (ADR 0053)
 - `make up` / `make down` / `make clean` — 개발 서비스 기동 / 중지 / 볼륨까지 삭제
 - `make health` — `dlp services check`로 서비스 헬스체크
 - `make test-services` — 실행 중인 서비스 대상 통합 테스트 (`@pytest.mark.services`, `isolated_env` 표시 테스트는 뺀다)
@@ -48,7 +50,12 @@
   장갑 Parquet·HDF5 정규화. `dlp ingest <매니페스트>`로 실행한다.
   카메라 내부 파라미터 등록(`dlp_media.calibration`, ADR 0045): 세션 값 → 기기(`calibration.camera_id`) 등록값
   (`camera_calibrations`, 추가만) → 화각 근사 순으로 고른다. 작업자 손 크기 사전값은 `worker_hand_sizes`(추가만).
-  `dlp calib intrinsics|import|show|palm|palm-estimate`. 정책은 `config/policies/calibration.yaml`.
+  수집 뒤 세션 → 기기 연결은 `session_camera_assignments`(추가만, `dlp calib assign`, 매니페스트 camera_id가 앞선다).
+  작업자 손 크기는 유효한 등록 중 최신 → 정책 순이다. 무효 기록 `worker_hand_size_invalidations`(`dlp calib palm-revoke`,
+  동의 철회·삭제 요구)와, 추정 출처 세션(`worker_hand_size_sources`)이 사용 중지된 추정은 결정에서 빠진다 (ADR 0052).
+  `palm-estimate`는 잰 값을 `--override-measured` 없이 덮지 않는다. 캘리브레이션은 보드 기울기·타당 범위 검사
+  (`calibration.yaml`)를 통과해야 등록한다. 화면비가 다른 캘리브레이션은 쓰지 않고 화각 근사로 떨어진다.
+  `dlp calib intrinsics|import|assign|show|palm|palm-estimate|palm-revoke`. 정책은 `config/policies/calibration.yaml`.
 - `packages/sync/` (`dlp_sync`) — 멀티스트림 동기화: QR 슬레이트, 두드림, 오디오·운동 상호상관, 드리프트 보정.
   `dlp sync run <세션>`, `dlp sync adjust <세션> <스트림> <ms>`. 정책은 `config/policies/sync.yaml`.
 - `packages/privacy/` (`dlp_privacy`) — 프라이버시 게이트: 탐지기(YuNet, QR·바코드, OWLv2 오픈 보캐뷸러리, 반사면, 오라클 stub), 추적·보간·유지,
@@ -58,7 +65,7 @@
   `dlp privacy detect|approve|render|audit-sample|hold`. 정책은 `config/policies/privacy.yaml`.
 - `packages/review/` (`dlp_review`) — 검수 도구 연동: CVAT·Label Studio 변환기(무손실 왕복), 작업 생성, reconcile(검수 결과 →
   라벨 이력), 웹훅 수집, 라벨러 워터마크, 역할 경계, 배포 매체 회수 실행기(`dlp_review.revoke`).
-  `dlp review create|collect|verify|serve|register-webhooks|revoke|refresh-urls` (verify: 검수가 끝난 세션을 human_verified로. 설명·3D 궤적 따르기를 먼저 적용하고, `review.yaml verify.automatic`(기본 `camera_pose`)의 자동 라벨은 검수 전이어도 완료를 막지 않는다(검수 상태는 그대로), ADR 0050,
+  `dlp review create|collect|verify|serve|register-webhooks|revoke|refresh-urls` (verify: 검수가 끝난 세션을 human_verified로. 설명·3D 궤적 따르기를 먼저 적용하고, `review.yaml verify.automatic`(기본 `camera_pose`)의 자동 라벨은 검수 전이어도 완료를 막지 않는다(검수 상태는 그대로), ADR 0050, 출처 2D가 바뀌어 지운 3D를 지금 2D로 다시 만들기 전에는 완료를 막고 `dlp prelabel run`을 안내한다(`verify.require_current_3d`, ADR 0051),
   revoke: 블러가 바뀐 뒤 이미 배포한 라벨링 매체 회수, 대기가 남으면 종료 코드 4, ADR 0039. `revoke --orphans`: DB 기록 없이
   남은 도구 작업·사본 정리(기본 보고만, `--apply`일 때 삭제). refresh-urls: 열린 Label Studio 작업의 서명 URL 다시 서명).
   Label Studio 결과는 담당자 계정(`review.yaml label_studio.users`)이 낸 주석만 받는다.
@@ -75,18 +82,23 @@
 - `packages/models/` (`dlp_models`) — 모델 레지스트리(`config/models.yaml`, 해시 확인)와 공용 ONNX 런타임(OWLv2, 메트릭 깊이).
 - `packages/prelabel/` (`dlp_prelabel`) — 자동 프리라벨: MediaPipe 손·COCO 객체, RTMPose 전신, OWLv2 도구, 깊이 기반 3D 궤적,
   Oracle stub, 장갑·영상 접촉, 3인칭 착용자 매칭. `dlp prelabel run <세션>`. 정책은 `config/policies/prelabel.yaml`.
-  손 키프레임에는 MediaPipe 손 중심 3D 점(`KeypointFrame.world`, 선택, 검수 도구로 보내지 않고 사람이 고친 트랙에는
-  없음)을 싣고, 손목·다섯 손가락 끝 3D(카메라 좌표)는 그 손 모양 + 2D 투영 + 손바닥 깊이·손 크기 사전값으로 맞춘다
-  (`dlp_prelabel.handfit`, ADR 0044. world가 없거나 맞춤이 나쁘면 관절별 깊이). 표본마다 방식·신뢰도, 궤적마다 내부
+  손 키프레임에는 MediaPipe 손 중심 3D 점(`KeypointFrame.world`, 선택, 검수 도구로 보내지 않는다. 사람이 고친 트랙에는
+  2D가 그대로인 키프레임에만 parent의 world가 남는다, ADR 0044 1절 개정)을 싣고, 손목·다섯 손가락 끝 3D(카메라 좌표)는
+  그 손 모양 + 2D 투영 + 손바닥 깊이·손 크기 사전값으로 맞춘다 (`dlp_prelabel.handfit`, ADR 0044. 손 모델 자세는 손 중심
+  회전으로 다듬고 문턱은 해상도와 무관한 상대 재투영 오차다. world가 없거나 맞춤이 나쁘면 손바닥 관절만 픽셀 깊이로
+  올리고 손가락 끝은 내지 않는다, `depth.fingertip_fallback`). 표본마다 방식·신뢰도, 궤적마다 내부
   파라미터 출처를 남기고 작업자 손 크기(`dlp_prelabel.palm`)를 우선한다 (ADR 0045).
   바디캠 6자유도 자세(IMU 회전 + 깊이 기반 이동, `dlp_prelabel.campose`)와 월드 좌표 3D 궤적(`dlp_prelabel.worldframe`,
   ADR 0046). 3D 궤적(손 관절·박스 중심, 카메라·월드 좌표)은 `derived_from`의 2D 트랙 검수를 물려받고
-  (`dlp_schema.trajectory_follow`, 기록 `trajectory_inheritance`, ADR 0048·0050), 물려받기만 한 3D의 출처가 바뀌면
-  궤적 따르기가 지운다. 3D·월드 단계 뒤와 수집·`dlp review verify`에서 적용한다(세션 잠금, 멱등). 카메라 자세
+  (`dlp_schema.trajectory_follow`, 기록 `trajectory_inheritance`, ADR 0048·0050), 물려받기만 한 3D의 출처가 바뀌거나
+  같은 2D에서 입력이 바뀌어 새로 계산한 3D가 생기면 궤적 따르기가 지운다(새 3D가 같은 검수를 물려받는다, ADR 0051).
+  단계는 마지막으로 낸 버전으로 다시 돌릴지 정한다(입력이 되돌아오면 `+r<n>`으로 다시 만듦). 3D·월드 단계 뒤와 수집·`dlp review verify`에서 적용한다(세션 잠금, 멱등). 카메라 자세
   (entity `camera`)는 사람 검수 대상이 아닌 자동 라벨이다.
 - `packages/retarget/` (`dlp_retarget`) — 고객 로봇 리타기팅(ADR 0047): 로봇 등록(`config/robots/<ID>.yaml`, 모델 sha256,
   고객 모델 파일은 저장소 밖 `DLP_ROBOTS_DIR`), URDF 기구학, 손 → 끝단 목표·평행 그리퍼, 관절·속도 한계 IK(내장, mink는
-  격리 환경 `scripts/retarget-env`), 닿지 못한 프레임은 자르지 않고 표시. `dlp robot check <ID>`,
+  격리 환경 `scripts/retarget-env`), 닿지 못한 프레임은 자르지 않고 표시. `orientation_mode`는 관절 수가 아니라 구조로
+  고른다(접근 축 둘레 롤 관절이 있으면 full, SO-101은 full). 재시작 프레임·그리퍼에도 속도 한계, 손 목표가 없는 에피소드는
+  drop, 설정·URDF 검증(축 단위·직교, 그리퍼, mimic, robot_id 경로) (ADR 0053). `dlp robot check <ID>`,
   `dlp export lerobot --robot <ID>`. 정책은 `config/policies/retarget.yaml`.
 - `packages/relations/` (`dlp_relations`) — 관계 도출(YAML 규칙 엔진, `derived_by`=규칙 ID), 도구-표면 접촉(작용부-평면 거리),
   표면 커버리지. `dlp relations run <세션>` (멱등, 규칙 변경 시 차이만 반영). 정책은 `config/policies/relations.yaml`.
@@ -129,6 +141,9 @@
   객체 물리 사전값(재질·촉감·질량·마찰, ADR 0049)은 세 형식 모두 `measured: false`로 싣는다 (측정값 아님).
   manifest `verification_policy.trajectory3d`는 3D 검수 근거(2D에서 물려받음, `camera_pose: automatic_unreviewed`,
   `pose_derived`, 근거별 수)를 밝히고, 끊긴 물려받은 3D는 옵션과 관계없이 넣지 않는다 (ADR 0048·0050).
+  3D는 `lerobot.interp_max_gap_3d_ms`로 보간하고 궤적 구간 채움 비율이 낮으면 경고한다. LeRobot에 3D 방식·내부 파라미터
+  출처·접촉 객체 클래스 특징을 싣는다. 페이로드의 라벨 ID 필드(`pseudonym.LABEL_REF_FIELDS`, 예: `derived_from`)도 라벨
+  가명이 된다. 손 부위 설정은 내보내기 시작 때 hand_joints와 대조한다 (ADR 0053).
 - `packages/ops/` (`dlp_ops`) — 운영 대시보드와 보안: 주간 운영 지표(검수 시간·수정률·자동 승인율·편향·발견율·
   잔여 블러 누락·원가, AI 1차 검수 절: 백로그·fallback·캐시 적중·장비 시간·ok 놓침 상한)와 경고, 원본 접근 월간 감사
   리포트, 원본 보관 만료 알림·결정.
@@ -136,6 +151,7 @@
 - `config/` — 온톨로지·정책·기본값 YAML. 코드에 값을 하드코딩하지 않는다.
   온톨로지 항목은 한국어 `ko`와 영어 `en` 표시 이름이 모두 필수다 (ID는 영어 snake_case, 라벨에는 ID만, ADR 0043).
   객체 물리 사전값(`physical_priors`: 재질·촉감·질량·마찰 범위, 출처는 사전값만)은 `config/ontology/v1/physics.yaml` 어휘를 쓴다 (ADR 0049).
+  by_state는 상태 속성 하나만, 젖음 기본 범위 = 건조, prior_literature는 note 필수, 사전값 표에 `content_sha256` (ADR 0053).
 - `schemas/` — 생성된 JSON Schema. 직접 편집하지 않는다 (`make schemas`).
 - `services/` — 개발용 docker compose (PostgreSQL, SeaweedFS S3, Label Studio, Prefect, MLflow, lakeFS), CVAT 실행 스크립트.
 - `tests/` — 패키지를 가로지르는 통합 테스트.
@@ -175,7 +191,9 @@
   좁은 예외 둘. (1) 행동 검수를 물려받기만 한 모델 설명은 물려준 행동이 다음 회차에 의미가 다시 바뀌거나 지워지면
   설명 따르기(`review-follow-1`)만 지울 수 있다 (ADR 0043 3절 규칙 6). (2) 2D 트랙(손 키포인트·객체 박스) 검수를
   물려받기만 한 모델 3D 궤적은 출처(`derived_from`의 2D 트랙, 월드 좌표면 카메라 좌표 궤적·카메라 자세)가 바뀌거나
-  지워지면 궤적 따르기(`trajectory-follow-1`)만 지울 수 있다 (ADR 0048·0050). "물려받기만 함"은 추정하지 않고 명시
+  지워지면, 또는 같은 출처 2D에서 3D 단계가 다른 판(내부 파라미터·작업자 손 크기·depth 정책·추정기 판·자세 입력 변경)으로
+  새로 계산한 검수 전 3D가 같은 (스트림, 개체, 부위, 좌표계)에 생기면(새 3D가 같은 2D 검수를 물려받는다) 궤적
+  따르기(`trajectory-follow-1`)만 지울 수 있다 (ADR 0048·0050·0051). "물려받기만 함"은 추정하지 않고 명시
   기록(설명 `description_inheritance`, 3D `trajectory_inheritance`, 추가만, 물려받는 `record_review`와 같은
   트랜잭션)으로만 정한다: 그 라벨의 지금 검수 상태가 마지막 물려받기 기록과 같을 때뿐이다. 저장 검증
   (`label_validation`)은 같은 이력으로 다시 계산한 따르기 계획이 지우는 것만 허용한다. 기록 없는 검수(검수자·시각이
