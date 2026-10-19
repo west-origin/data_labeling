@@ -42,7 +42,7 @@ from dlp_schema.labels import DescriptionPayload, VerificationState
 from dlp_schema.ontology import Ontology
 from dlp_schema.testing import FIXED_TIME, action_payload, make_label
 
-from .conftest import ROOT, Scenario
+from .conftest import ROOT, Scenario, model
 
 NOIDS = Pseudonymizer(None)  # 가명 처리 없이 (내부 ID를 그대로 확인하는 테스트)
 
@@ -659,3 +659,220 @@ def test_coco_skips_images_without_annotations(
     assert sorted(i["t_ms"] for i in data["images"]) == [t[2], t[4]]  # 박스 키프레임 둘
     assert len(list((out2 / "coco" / "images").iterdir())) == 2 and r.sessions == {"s1"}
     assert {a["image_id"] for a in data["annotations"]} == {i["id"] for i in data["images"]}
+
+
+# ---------------------------------------------------------------- 묶음 C (ADR 0053)
+
+
+def _traj(
+    label_id: str,
+    part: str,
+    times: list[int],
+    methods: list[str | None] | None = None,
+    intrinsics: str | None = "calibrated",
+    entity: str = "right_hand",
+) -> Any:
+    """카메라 좌표 3D 궤적 라벨 (모델 출처, 사람 승인)."""
+    samples: list[dict[str, Any]] = []
+    for i, t in enumerate(times):
+        s: dict[str, Any] = {"t_ms": t, "x": t / 1000, "y": 0.0, "z": 0.5, "confidence": 0.5}
+        m = methods[i] if methods is not None else "hand_fit"
+        if m is not None:
+            s["method"] = m
+        samples.append(s)
+    payload: dict[str, Any] = {
+        "kind": "trajectory3d", "entity_id": entity, "part": part, "frame": "camera",
+        "source_3d": "mono_depth", "samples": samples,
+        "derived_from": ["s1-bodycam-kp-right"],
+    }  # fmt: skip
+    if intrinsics is not None:
+        payload["intrinsics"] = intrinsics
+    return make_label(
+        payload, label_id=label_id, session_id="s1", stream_id="bodycam", t_start_ms=times[0],
+        t_end_ms=times[-1], ontology_version="1.0.0",
+        **model(VerificationState.HUMAN_APPROVED),
+    )  # fmt: skip
+
+
+def _ep(scenario: Scenario, policy: ExportPolicy, ontology: Ontology, extra: list[Any], tmp: Path):
+    """시나리오 라벨 + extra로 에피소드를 만든다."""
+    video = tmp / "v.mp4"
+    scenario.labeling.get_file("sessions/s1/blurred/bodycam.mp4", video)
+    labels = [*source(scenario, policy).sessions[0].labels, *extra]
+    return build_episode(
+        scenario.session, scenario.session.streams[0], build_pts_index(video), (64, 48), labels,
+        Vocab.from_ontology(ontology), policy.lerobot,
+    )  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    "times",
+    [
+        [0, 200, 400, 601, 801],  # 29.97 fps: 깊이 간격 200 ms 뒤 첫 프레임 (200/201 ms)
+        [0, 208, 417, 625, 834],  # 24 fps (208/209 ms)
+        [0, 233, 450, 690, 920],  # VFR
+    ],
+)
+def test_lerobot_hand_3d_survives_real_frame_rates(
+    scenario: Scenario, policy: ExportPolicy, ontology: Ontology, tmp_path: Path, times: list[int]
+) -> None:
+    """3D 표본 간격이 깊이 간격(200 ms) + 한 프레임일 때도 궤적 구간 안 모든 에피소드 프레임에 손
+    3D가 있다(present 1, 신뢰도 ≥ 0, 채움 비율 1). 2D 보간 한도(200 ms)를 3D에 쓰던 때는 29.97
+    fps에서 약 20%, 24 fps·VFR에서 거의 모두 빠졌다 (F-COE-50)."""
+    lp = policy.lerobot
+    ep = _ep(scenario, policy, ontology, [_traj("s1-w3d", "wrist", times)], tmp_path)
+    col = {name: i for i, name in enumerate(state_names(lp))}["right.wrist.present"]
+    inside = (ep.times_ms >= times[0]) & (ep.times_ms <= times[-1])
+    w = len(lp.hand_points_3d) + lp.hand_points_3d.index("wrist")
+    assert ep.state[inside, col].all()
+    assert (ep.hand_points_3d_confidence[inside, w] >= 0).all()
+    narrow = policy.model_copy(
+        update={"lerobot": lp.model_copy(update={"interp_max_gap_3d_ms": 200})}
+    )
+    old = _ep(scenario, narrow, ontology, [_traj("s1-w3d", "wrist", times)], tmp_path)
+    assert old.hand_points_3d_coverage is not None
+    assert old.hand_points_3d_coverage < lp.min_hand_points_3d_coverage  # 경고 대상
+
+
+def test_lerobot_exports_3d_method_intrinsics_and_contact_object_class(
+    scenario: Scenario, policy: ExportPolicy, ontology: Ontology, tmp_path: Path
+) -> None:
+    """손 3D 점마다 추정 방식(hand_fit 0, point_depth 1, 보간 양끝이 다르면 mixed 2)과 내부 파라미터
+    출처(calibrated 0, hfov_approx 1, 없음 -1)를 싣고, 손마다 접촉 대상 객체 클래스 번호를 싣는다
+    (신뢰도 범위가 방식끼리 겹쳐 신뢰도만으로 관절별 깊이 대체 표본을 가를 수 없었다, F-COE-51;
+    LeRobot에 객체 클래스가 없어 객체별 사전값을 프레임에 이을 수 없었다, F-COE-52)."""
+    lp = policy.lerobot
+    times = [100, 300, 500]
+    wrist = _traj("s1-w3d", "wrist", times, ["hand_fit", "hand_fit", "point_depth"], "calibrated")
+    thumb = _traj("s1-t3d", "thumb_tip", times, [None, None, None], "hfov_approx")
+    index = _traj("s1-i3d", "index_tip", times, intrinsics=None)
+    mop = make_label(
+        {"kind": "box_track", "entity_id": "mop_1", "class_id": "mop",
+         "keyframes": [{"t_ms": 100, "x": 1, "y": 1, "w": 5, "h": 5}]},
+        label_id="s1-mopbox", session_id="s1", stream_id="bodycam", t_start_ms=100, t_end_ms=100,
+        ontology_version="1.0.0", **model(VerificationState.HUMAN_APPROVED),
+    )  # fmt: skip
+    ep = _ep(scenario, policy, ontology, [wrist, thumb, index, mop], tmp_path)
+    vocab = Vocab.from_ontology(ontology).as_json()
+    n = len(lp.hand_points_3d)
+    w, th, ix = (n + lp.hand_points_3d.index(p) for p in ("wrist", "thumb_tip", "index_tip"))
+    k2 = int(np.argmin(np.abs(ep.times_ms - 200)))  # hand_fit 둘 사이
+    k4 = int(np.argmin(np.abs(ep.times_ms - 400)))  # hand_fit ~ point_depth 사이
+    assert vocab["hand_point_3d_method"] == ["hand_fit", "point_depth", "mixed"]
+    assert vocab["hand_point_3d_intrinsics"] == ["calibrated", "hfov_approx"]
+    assert ep.hand_points_3d_method[k2, w] == 0 and ep.hand_points_3d_method[k4, w] == 2
+    assert ep.hand_points_3d_method[k2, th] == -1 and ep.hand_points_3d_method[k2, ix] == 0
+    assert ep.hand_points_3d_intrinsics[k2, w] == 0 and ep.hand_points_3d_intrinsics[k2, th] == 1
+    assert ep.hand_points_3d_intrinsics[k2, ix] == -1
+    assert np.all(ep.hand_points_3d_method[k2, :n] == -1)  # 왼손 3D 없음
+    # 손 상태 100~600 ms 오른손이 mop_1(도구)에 닿는다 → 객체 클래스 mop, 왼손은 -1
+    k3 = int(np.argmin(np.abs(ep.times_ms - 300)))
+    mop_index = vocab["object_class"].index("mop")
+    assert ep.contact_object_class[k3, 1] == mop_index and ep.contact_object_class[k3, 0] == -1
+    assert "s1-mopbox" in ep.used
+    assert set(vocab["object_class"]) >= set(vocab["physical_priors"]["objects"])
+    late = int(np.argmin(np.abs(ep.times_ms - 800)))
+    assert ep.contact_object_class[late, 1] == -1
+
+
+def test_physical_prior_table_states_base_meaning_and_content_hash(ontology: Ontology) -> None:
+    """구매자 규약에 기본 범위의 뜻(젖음은 건조, 그 밖은 모든 상태 포괄)·도구 기준면(파지부)이 있고,
+    표에 내용 해시가 있어 같은 버전의 정정을 가릴 수 있다 (F-SCH-23·21)."""
+    from dlp_schema.export import physical_prior_table, prior_content_sha256
+
+    table = physical_prior_table(ontology)
+    assert (
+        "dry" in table.conventions["base_range"] and "spans all" in table.conventions["base_range"]
+    )
+    assert "grip part" in table.conventions["reference_surface"]
+    assert table.content_sha256 == prior_content_sha256(table) and len(table.content_sha256) == 64
+    data = ontology.model_dump(mode="json")
+    data["objects"]["cup"]["physical_priors"]["mass_kg"]["max"] = 9.0
+    changed = physical_prior_table(Ontology.model_validate(data))
+    assert changed.content_sha256 != table.content_sha256
+
+
+def test_interval_json_new_schema_reads_older_files(
+    scenario: Scenario, policy: ExportPolicy, ontology: Ontology, tmp_path: Path
+) -> None:
+    """하위 호환의 뜻: 1.2 공개 스키마와 리더(`IntervalFile`)가 1.0·1.1 모양 파일(term_names·
+    physical_priors 없음)을 받는다. 옛 스키마가 새 파일을 거부하는 것(최상위 additionalProperties
+    false)은 약속하지 않는다 (F-SCH-24)."""
+    write_intervals(
+        source(scenario, policy), policy, tmp_path, export_id="e1", now=FIXED_TIME, ids=NOIDS,
+        ontology=ontology,
+    )  # fmt: skip
+    path = tmp_path / "intervals" / "s1.json"
+    data = json.loads(path.read_text("utf-8"))
+    schema = json.loads((ROOT / "schemas" / "export_intervals.schema.json").read_text("utf-8"))
+    for version, drop in (
+        ("1.1", ("physical_priors",)),
+        ("1.0", ("physical_priors", "term_names")),
+    ):
+        old = {k: v for k, v in data.items() if k not in drop}
+        old["format_version"] = version
+        jsonschema.validate(old, schema)
+        IntervalFile.model_validate(old)
+
+
+def test_trajectory_derived_from_is_pseudonymized_like_label_ids() -> None:
+    """3D 궤적 `derived_from`(내부 라벨 ID, 세션 ID 접두)은 라벨 가명으로 통째로 바뀌고, 결과 JSON에
+    내부 세션 ID가 남지 않는다 (F-COE-53)."""
+    ids = Pseudonymizer.for_export("export-x", b"secret", enabled=True)
+    x = _traj("s1-bodycam-3d-w", "wrist", [100, 200])
+    out = exported(x, ids).model_dump(mode="json")
+    assert out["payload"]["derived_from"] == [ids.label("s1-bodycam-kp-right")]
+    assert "s1-" not in json.dumps(out)
+
+
+def test_every_label_id_reference_field_is_pseudonymized() -> None:
+    """계약의 모든 페이로드에서 Identifier 필드는 `_id`·`_ids` 이름 규칙이거나
+    `pseudonym.LABEL_REF_FIELDS`에 있다 (새 필드가 가명 규칙을 조용히 벗어나지 않게, F-COE-53)."""
+    import typing
+
+    from dlp_export.pseudonym import LABEL_REF_FIELDS
+    from dlp_schema import labels as schema_labels
+
+    payloads = typing.get_args(typing.get_args(schema_labels.LabelPayload)[0])
+    assert payloads
+    unnamed: list[str] = []
+    for model_cls in payloads:
+        for name, f in model_cls.model_fields.items():
+            text = repr(f.annotation) + repr(f.metadata)
+            is_id = "A-Za-z0-9" in text or "Identifier" in text
+            if is_id and not (name.endswith(("_id", "_ids")) or name in LABEL_REF_FIELDS):
+                unnamed.append(f"{model_cls.__name__}.{name}")
+    assert unnamed == [], unnamed
+
+
+@pytest.mark.parametrize(
+    ("points", "match"),
+    [([], "at least 1"), (["wrist", "wrist"], "두 번")],
+)
+def test_lerobot_hand_points_policy_is_validated(
+    policy: ExportPolicy, points: list[str], match: str
+) -> None:
+    """hand_points_3d는 1개 이상·중복 없음 (F-COE-54)."""
+    from pydantic import ValidationError
+
+    data = policy.model_dump(mode="json")
+    data["lerobot"]["hand_points_3d"] = points
+    with pytest.raises(ValidationError, match=match):
+        ExportPolicy.model_validate(data)
+
+
+def test_unknown_hand_part_fails_before_export(policy: ExportPolicy, ontology: Ontology) -> None:
+    """온톨로지 hand_joints에 없는 손 3D 점·리타기팅 부위는 내보내기 전에 거부한다 (오타면 열이 전부
+    빈 값으로 팔렸다, F-COE-54)."""
+    from dlp_retarget.policy import load_policy as load_retarget
+
+    from dlp_export.runner import check_hand_parts
+
+    check_hand_parts(ontology, policy.lerobot, load_retarget(ROOT))
+    typo = policy.lerobot.model_copy(update={"hand_points_3d": ("wrist", "middle_tips")})
+    with pytest.raises(ExportError, match="middle_tips"):
+        check_hand_parts(ontology, typo, None)
+    rp = load_retarget(ROOT)
+    bad = rp.model_copy(update={"hand_parts": rp.hand_parts.model_copy(update={"index": "indx"})})
+    with pytest.raises(ExportError, match="indx"):
+        check_hand_parts(ontology, policy.lerobot, bad)

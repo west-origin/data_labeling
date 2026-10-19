@@ -57,15 +57,31 @@ class LeRobotPolicy(Contract):
     fps: int = Field(ge=1)  # 에피소드 고정 프레임률. 가변 프레임 블러본에서 PTS로 프레임을 고른다
     video_stream: str  # 에피소드 영상으로 쓰는 스트림 종류 (`StreamKind` 값, 기본 bodycam)
     max_width: int = Field(ge=0)  # 이보다 넓으면 줄인다 (0이면 원본 크기)
-    # 키포인트·3D 궤적을 선형 보간하는 최대 표본 간격 (ms). 더 벌어지면 값 없음
+    # 2D 키포인트를 선형 보간하는 최대 키프레임 간격 (ms). 더 벌어지면 값 없음
     interp_max_gap_ms: int = Field(ge=0)
-    # observation.state에 넣는 손 3D 점 (`Trajectory3DPayload.part`, 개체는 "<손>_hand")
-    hand_points_3d: tuple[str, ...]
+    # 3D 궤적(손 점·도구 작용부·로봇 목표의 월드 손 점)을 선형 보간하는 최대 표본 간격 (ms). 3D
+    # 표본은 깊이 프레임 간격(prelabel.yaml depth.frame_stride_ms)마다 그 뒤 첫 영상 프레임에 찍혀
+    # 간격이 그 값 + 최대 한 프레임 간격이다. 그보다 작으면 29.97·24 fps·VFR 영상의 3D가 대부분
+    # 빠진다 (tests/test_policy_consistency.py가 대조, ADR 0053)
+    interp_max_gap_3d_ms: int = Field(ge=0)
+    # 궤적 구간 안 손 3D 점이 실제로 채워진 프레임 비율이 이보다 낮으면 내보내기 경고를 낸다 (0~1)
+    min_hand_points_3d_coverage: float = Field(ge=0, le=1)
+    # observation.state에 넣는 손 3D 점 (`Trajectory3DPayload.part`, 개체는 "<손>_hand"). 온톨로지
+    # hand_joints 안이고 중복 없이 1개 이상 (내보내기 시작 때 온톨로지와 대조한다)
+    hand_points_3d: tuple[str, ...] = Field(min_length=1)
     repo_id: str  # LeRobot 데이터셋 repo_id (허브에는 올리지 않는다, 오프라인)
     robot_type: str  # LeRobot 메타데이터 robot_type
     vcodec: str  # 에피소드 영상 코덱
     aspect_tolerance: float = Field(ge=0)  # 한 데이터셋에 넣을 수 있는 화면비(가로/세로) 차이
     env: LeRobotEnv
+
+    @field_validator("hand_points_3d")
+    @classmethod
+    def _unique_points(cls, v: tuple[str, ...]) -> tuple[str, ...]:
+        """손 3D 점 이름이 겹치면 거부한다 (특징 이름이 두 번 들어간다). Raises: ValueError."""
+        if len(set(v)) != len(v):
+            raise ValueError(f"hand_points_3d에 같은 이름이 두 번 있습니다: {list(v)}")
+        return v
 
 
 class IdsPolicy(Contract):

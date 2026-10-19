@@ -106,6 +106,8 @@ def cmd_export(args: argparse.Namespace) -> int:
     for k, n in r.label_counts.items():
         print(f"  {k}: {n}")
     _print_retarget(r.details.get("retarget"))
+    for w in r.details.get("warnings", []):
+        print(f"경고: {w}")
     return 0
 
 

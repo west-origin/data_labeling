@@ -25,7 +25,7 @@ from dlp_export.policy import ExportPolicy
 from dlp_export.pseudonym import Pseudonymizer
 from dlp_export.source import ExportSource
 from dlp_schema.export import ExportedLabel, ExportedStream, IntervalFile, physical_prior_table
-from dlp_schema.labels import DescriptionPayload, LabelRecord
+from dlp_schema.labels import LabelRecord
 from dlp_schema.ontology import Ontology
 
 
@@ -33,16 +33,13 @@ def exported(x: LabelRecord, ids: Pseudonymizer) -> ExportedLabel:
     """검수자 ID 등 내부 정보는 빼고 검증 상태만 남긴다.
 
     라벨 ID와 페이로드 속 세션 ID는 이 내보내기의 가명으로 바꾼다 (ids).
-    번역 설명의 원문 라벨 ID(`source_label_id`)는 라벨 ID라서 세션 부분이 아니라 통째로 라벨
-    가명(`ids.label`)으로 바꾼다. 원문이 같은 파일에 있으면 그 label_id와 같다.
-    가명 처리가 꺼져 있으면 페이로드 객체를 그대로 넣는다.
+    라벨 ID를 담는 페이로드 필드(번역 원문 `source_label_id`, 3D 궤적 `derived_from`)는 세션 부분이
+    아니라 통째로 라벨 가명(`ids.label`)으로 바꾼다 (`pseudonym.LABEL_REF_FIELDS`). 원문이 같은
+    파일에 있으면 그 label_id와 같다. 가명 처리가 꺼져 있으면 페이로드 객체를 그대로 넣는다.
     """
     payload: Any = x.payload
     if ids.enabled:
-        data: dict[str, Any] = ids.payload_ids(x.session_id, x.payload.model_dump(mode="json"))
-        if isinstance(x.payload, DescriptionPayload) and x.payload.source_label_id:
-            data["source_label_id"] = ids.label(x.payload.source_label_id)
-        payload = data
+        payload = ids.payload_ids(x.session_id, x.payload.model_dump(mode="json"))
     return ExportedLabel(
         label_id=ids.label(x.label_id),
         stream_id=x.stream_id,

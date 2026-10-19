@@ -53,6 +53,12 @@ def check_secret(secret: str | None, policy: IdsPolicy, environ: Mapping[str, st
         )
 
 
+# 페이로드에서 라벨 ID를 담는 필드 (`_id`·`_ids` 이름 규칙 밖이거나 세션 부분만 바꾸면 안 되는 것).
+# 새 페이로드 필드가 라벨 ID를 담으면 여기에 더한다 (packages/export/tests/test_formats.py가
+# 계약의 모든 Identifier 필드를 이 목록·이름 규칙과 대조한다, ADR 0027·0053).
+LABEL_REF_FIELDS = frozenset({"source_label_id", "derived_from"})
+
+
 @dataclass(frozen=True)
 class Pseudonymizer:
     """내보내기 하나의 가명 함수. 호출하면 `(종류, ID) → "<종류>-<태그>"`.
@@ -140,7 +146,9 @@ class Pseudonymizer:
     def payload_ids(self, session_id: str, data: Any) -> Any:
         """페이로드의 `_id` 문자열과 `_ids` 참조 배열에 ref를 적용한다 (중첩 포함).
 
-        온톨로지 식별자인 class_id·ref_id는 세션 ID와 같아도 보존한다.
+        온톨로지 식별자인 class_id·ref_id는 세션 ID와 같아도 보존한다. 라벨 ID를 담는 필드
+        (`LABEL_REF_FIELDS`: 번역 원문 source_label_id, 3D 궤적 입력 derived_from)는 세션 부분이
+        아니라 값 통째로 라벨 가명(`label`)으로 바꾼다 (같은 파일의 label_id 가명과 맞는다).
 
         Args:
             session_id: 이 라벨의 내부 세션 ID.
@@ -155,7 +163,9 @@ class Pseudonymizer:
         if isinstance(data, dict):
             out: dict[str, Any] = {}
             for k, v in data.items():  # pyright: ignore[reportUnknownVariableType]
-                if (
+                if isinstance(k, str) and k in LABEL_REF_FIELDS:
+                    out[k] = self._label_refs(v)
+                elif (
                     isinstance(k, str)
                     and k.endswith("_id")
                     and k not in {"class_id", "ref_id"}
@@ -175,3 +185,11 @@ class Pseudonymizer:
         if isinstance(data, list | tuple):
             return [self.payload_ids(session_id, v) for v in data]  # pyright: ignore[reportUnknownVariableType]
         return data
+
+    def _label_refs(self, value: Any) -> Any:
+        """라벨 ID 문자열 또는 그 목록 → 라벨 가명 (None은 그대로)."""
+        if isinstance(value, str):
+            return self.label(value)
+        if isinstance(value, list | tuple):
+            return [self.label(v) if isinstance(v, str) else v for v in value]  # pyright: ignore[reportUnknownVariableType]
+        return value

@@ -202,18 +202,23 @@ def _lerobot(
 
     세션마다 `video_stream` 스트림 블러본 하나가 에피소드 하나다. 그 스트림이 없는 세션은 건너뛴다.
     격리 환경에서 `out/lerobot`에 쓰고 공식 로더로 다시 읽어 에피소드 수를 확인한 뒤,
-    meta/dlp_vocab.json(어휘)과 meta/dlp_episodes.json(에피소드 → 세션 가명·분할)을 덧붙인다.
+    meta/dlp_vocab.json(어휘)과 meta/dlp_episodes.json(에피소드 → 세션 가명·분할·손 3D 채움)을
+    덧붙인다. 궤적 구간 안 손 3D 채움 비율이 `min_hand_points_3d_coverage`보다 낮은 에피소드는
+    세부 정보 `warnings`에 남긴다 (manifest details, CLI 출력).
 
     Raises:
-        ExportError: 화면비가 `aspect_tolerance` 넘게 다른 에피소드가 섞였을 때, 쓸 세션이 없을 때,
-            로더가 읽은 에피소드 수가 다를 때.
+        ExportError: 손 3D 점·리타기팅 손 부위가 온톨로지 hand_joints에 없을 때, 내보내는
+            에피소드끼리 화면비가 `aspect_tolerance` 넘게 다를 때(리타기팅 정책이 버린 에피소드는
+            크기·화면비 기준에 넣지 않는다), 쓸 세션이 없을 때, 로더가 읽은 에피소드 수가 다를 때.
         subprocess.CalledProcessError: 격리 환경 스크립트가 실패했을 때.
     """
     vocab = Vocab.from_ontology(ontology)
     run = _RobotRun.load(root, robot) if robot is not None else None
+    check_hand_parts(ontology, policy.lerobot, run.policy if run is not None else None)
     episodes: list[tuple[Session, Path, Episode]] = []
-    size: tuple[int, int] | None = None  # 첫 에피소드 크기 (모든 에피소드를 이 크기로 쓴다)
+    size: tuple[int, int] | None = None  # 처음 내보내는 에피소드 크기 (모든 에피소드를 이 크기로)
     sessions: list[dict[str, Any]] = []
+    warnings: list[str] = []
     for es in src.sessions:
         stream = next(
             (s for s in es.session.streams if s.kind.value == policy.lerobot.video_stream), None
@@ -223,24 +228,16 @@ def _lerobot(
         video = fetch_blurred(labeling, es, stream, work)
         info = probe(video).video
         assert info is not None
-        if size is None:
-            size = (info.width, info.height)
-        elif abs(info.width / info.height - size[0] / size[1]) > policy.lerobot.aspect_tolerance:
-            # 다른 화면비를 한 크기로 맞추면 영상이 찌그러진다
-            # (2D 관절은 정규화라 맞지만 화면은 틀린다)
-            raise ExportError(
-                f"{es.session.session_id}: 화면비가 다른 에피소드는 한 LeRobot 데이터셋에 "
-                f"넣지 않습니다 ({info.width}x{info.height} vs {size[0]}x{size[1]}). "
-                "화면비별로 나눠 내보내세요"
-            )
         ep = build_episode(
             es.session, stream, build_pts_index(video), (info.width, info.height), es.labels, vocab,
             policy.lerobot,
         )  # fmt: skip
         sid = ids.session(es.session.session_id)
         if run is not None and not run.add(es, stream, ep, policy.lerobot, len(sessions), sid):
-            continue  # 정책이 버리기로 한 에피소드 (보고에는 남는다)
+            continue  # 정책이 버리기로 한 에피소드 (보고에는 남고 크기·화면비 기준에 넣지 않는다)
+        size = _dataset_size(size, (info.width, info.height), es, policy.lerobot)
         episodes.append((es.session, video, ep))
+        coverage = ep.hand_points_3d_coverage
         sessions.append(
             {
                 "episode_index": len(sessions),
@@ -249,8 +246,15 @@ def _lerobot(
                 "stream_id": stream.stream_id,
                 "start_ms": float(ep.times_ms[0]),
                 "frames": len(ep.times_ms),
+                "hand_points_3d_coverage": None if coverage is None else round(coverage, 4),
             }
         )
+        if coverage is not None and coverage < policy.lerobot.min_hand_points_3d_coverage:
+            warnings.append(
+                f"{sid}: 궤적 구간 안 손 3D 점이 {coverage:.0%}만 채워짐 (기준 "
+                f"{policy.lerobot.min_hand_points_3d_coverage:.0%}, 3D 표본 간격이 "
+                f"interp_max_gap_3d_ms {policy.lerobot.interp_max_gap_3d_ms} ms보다 긴지 확인)"
+            )
     if not episodes or size is None:
         dropped = " (리타기팅 정책이 모든 에피소드를 버렸습니다)" if run and run.reports else ""
         raise ExportError(f"{policy.lerobot.video_stream} 스트림이 있는 세션이 없습니다{dropped}")
@@ -277,6 +281,8 @@ def _lerobot(
     details: dict[str, Any] = {
         "episodes": len(episodes), "frames": check["frames"], "loader_check": check,
     }  # fmt: skip
+    if warnings:
+        details["warnings"] = warnings
     if run is not None:
         # 로봇·모델 sha256·리타기팅 판·에피소드별 도달 가능성 보고 (manifest details에도 들어간다)
         details["retarget"] = run.meta()
@@ -295,6 +301,48 @@ def _lerobot(
         if x.label_id in used_ids
     ]
     return used, written, details
+
+
+def check_hand_parts(
+    ontology: Ontology, lerobot: LeRobotPolicy, retarget: RetargetPolicy | None
+) -> None:
+    """손 3D 점(export.yaml lerobot.hand_points_3d)과 리타기팅 손 부위(retarget.yaml hand_parts)가
+    온톨로지 hand_joints에 있는지. 이름이 틀리면 그 열이 아무 경고 없이 전부 빈 값(present 0,
+    신뢰도 -1)으로 팔리므로 내보내기 전에 막는다.
+
+    Raises:
+        ExportError: 온톨로지에 없는 부위가 있을 때.
+    """
+    names = list(lerobot.hand_points_3d)
+    if retarget is not None:
+        names += list(retarget.hand_parts.model_dump().values())
+    unknown = sorted(set(names) - set(ontology.hand_joints))
+    if unknown:
+        raise ExportError(
+            f"손 부위 {unknown}가 온톨로지 {ontology.version} hand_joints에 없습니다 "
+            "(export.yaml lerobot.hand_points_3d, retarget.yaml hand_parts)"
+        )
+
+
+def _dataset_size(
+    size: tuple[int, int] | None, video: tuple[int, int], es: ExportSession, lp: LeRobotPolicy
+) -> tuple[int, int]:
+    """데이터셋 영상 크기: 처음 내보내는 에피소드 크기. 화면비가 다르면 거부한다.
+
+    다른 화면비를 한 크기로 맞추면 영상이 찌그러진다 (2D 관절은 정규화라 맞지만 화면은 틀린다).
+
+    Raises:
+        ExportError: 화면비가 `aspect_tolerance` 넘게 다를 때.
+    """
+    if size is None:
+        return video
+    if abs(video[0] / video[1] - size[0] / size[1]) > lp.aspect_tolerance:
+        raise ExportError(
+            f"{es.session.session_id}: 화면비가 다른 에피소드는 한 LeRobot 데이터셋에 "
+            f"넣지 않습니다 ({video[0]}x{video[1]} vs {size[0]}x{size[1]}). "
+            "화면비별로 나눠 내보내세요"
+        )
+    return size
 
 
 def _trajectory_policy(src: ExportSource, used: list[LabelRecord]) -> dict[str, Any]:

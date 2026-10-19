@@ -8,11 +8,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from dlp_retarget.policy import load_policy as load_retarget
+
 from dlp_actions.policy import load_policy as load_actions
 from dlp_aireview.policy import load_policy as load_aireview
+from dlp_export.policy import load_policy as load_export
 from dlp_ops.policy import load_policy as load_ops
+from dlp_prelabel.policy import HAND21_JOINTS
 from dlp_prelabel.policy import load_policy as load_prelabel
 from dlp_review.ops.policy import load_policy as load_review
+from dlp_schema import find_ontology_dir, load_ontology
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -78,3 +83,31 @@ def test_bucket_comments_keep_proxy_in_raw_bucket() -> None:
     text = (ROOT / "config" / "defaults.yaml").read_text(encoding="utf-8")
     assert "프록시" in _key_comment(text, "raw")
     assert "프록시" not in _key_comment(text, "labeling")
+
+
+# 바디캠으로 받는 가장 느린 프레임률 (fps, 영화 24 fps NTSC판). 3D 표본 간격의 여유를 정한다
+SLOWEST_FPS = 23.976
+
+
+def test_3d_interpolation_limit_covers_the_depth_sample_stride() -> None:
+    """LeRobot 3D 보간 한도는 3D 표본 간격(깊이 간격 + 최대 한 프레임)보다 커야 한다.
+
+    3D 표본은 `prelabel.yaml depth.frame_stride_ms`가 지난 뒤 첫 영상 프레임에 찍힌다 (월드 좌표
+    표본도 같은 시각). 한도가 깊이 간격과 같으면 29.97·24 fps·VFR에서 손 3D·로봇 목표가 대부분
+    빠졌다 (F-COE-50, ADR 0053).
+    """
+    stride = load_prelabel(ROOT).depth.frame_stride_ms
+    limit = load_export(ROOT).lerobot.interp_max_gap_3d_ms
+    assert limit >= stride + 1000 / SLOWEST_FPS
+
+
+def test_exported_and_retargeted_hand_points_are_produced_by_prelabel() -> None:
+    """내보내기 손 3D 점(`export.yaml lerobot.hand_points_3d`)과 리타기팅 손 부위(`retarget.yaml
+    hand_parts`)는 프리라벨이 만드는 부위(`prelabel.yaml depth.hand_points`) 안이고 온톨로지
+    hand_joints 안이다 (한쪽만 바꾸면 그 열이 아무 경고 없이 비었다, F-COE-54)."""
+    made = {HAND21_JOINTS[i] for i in load_prelabel(ROOT).depth.hand_points}
+    exported = set(load_export(ROOT).lerobot.hand_points_3d)
+    retargeted = set(load_retarget(ROOT).hand_parts.model_dump().values())
+    ontology = load_ontology(find_ontology_dir(ROOT / "config" / "ontology", "1.0.0"))
+    assert exported <= made and retargeted <= made
+    assert made <= set(ontology.hand_joints)

@@ -12,6 +12,8 @@ from __future__ import annotations
 import json
 import math
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import numpy as np
 import pytest
@@ -20,6 +22,7 @@ from dlp_retarget.policy import RetargetPolicy, load_policy
 from dlp_retarget.robot import LoadedRobot, Placement, PlacementMode, load_robot
 from numpy.typing import NDArray
 
+from dlp_export import runner
 from dlp_export.lerobot import Episode, Vocab, build_episode, write_package
 from dlp_export.policy import ExportPolicy
 from dlp_export.pseudonym import Pseudonymizer
@@ -34,13 +37,20 @@ from dlp_export.robot import (
     robot_override,
 )
 from dlp_export.runner import trajectory_manifest
-from dlp_export.source import label_states, select_labels
+from dlp_export.source import (
+    ExportError,
+    ExportSession,
+    ExportSource,
+    label_states,
+    select_labels,
+)
 from dlp_fixtures.retarget import hand_points_for_grasp, world_hand_labels, world_hand_sources
 from dlp_media.pts import build_pts_index
+from dlp_schema.dataset import DatasetVersion, Split
 from dlp_schema.labels import LabelRecord, Source, Verification, VerificationState
 from dlp_schema.ontology import Ontology
 from dlp_schema.review import TrajectoryInheritance, TrajectoryInheritanceMechanism
-from dlp_schema.testing import FIXED_TIME
+from dlp_schema.testing import FIXED_TIME, make_session
 from dlp_schema.trajectory_follow import plan_trajectory_follow
 
 from .conftest import ROOT, Scenario
@@ -333,3 +343,169 @@ def test_official_lerobot_loader_reads_robot_episode(
         assert np.allclose(s["state"], rob.result.q[k], atol=1e-5)
         assert s["extra"]["retarget.reachable"] == [float(rob.result.reachable[k])]
         assert len(s["extra"]["observation.human_state"]) == ep.state.shape[1]
+
+
+# ---------------------------------------------------------------- 묶음 C (ADR 0053)
+
+
+def test_retarget_meta_states_the_reachability_criteria(
+    robot: LoadedRobot, rpolicy: RetargetPolicy
+) -> None:
+    """meta/dlp_retarget.json에 도달 판정 기준(IK 허용 오차·orientation_mode·velocity_scale), 손 점
+    역할, reachable·회전 오차의 뜻을 싣는다 (판 문자열만으로는 알 수 없었다, F-COE-46). SO-101은
+    full 모드다 (F-COE-40). 모델 경로는 싣지 않는다."""
+    meta = retarget_meta(robot, rpolicy, make_solver(ROOT, rpolicy), [])
+    assert meta["ik"] == robot.config.ik.model_dump(mode="json")
+    assert meta["ik"]["orientation_mode"] == "full"
+    assert meta["hand_parts"] == {"wrist": "wrist", "thumb": "thumb_tip", "index": "index_tip"}
+    assert "roll is evaluated" in meta["orientation_error_definition"]
+    assert "position_tolerance_m" in meta["reachable_definition"]
+    assert "so101_new_calib" not in json.dumps(meta)
+
+
+def test_robot_targets_survive_film_rate_world_samples(
+    scenario: Scenario,
+    policy: ExportPolicy,
+    ontology: Ontology,
+    robot: LoadedRobot,
+    rpolicy: RetargetPolicy,
+    tmp_path: Path,
+) -> None:
+    """월드 손 3D 표본이 24 fps 깊이 간격(208/209 ms)이어도 그 구간의 모든 에피소드 프레임에 로봇
+    목표가 있다 (2D 보간 한도 200 ms를 쓰던 때는 거의 모든 프레임이 target_present 0, F-COE-50)."""
+    times = [0, 208, 417, 625, 834]
+    world, _ = _truth_labels(robot, times, VerificationState.HUMAN_APPROVED)
+    labels = select_labels([*scenario.labels, *world], policy, label_states(policy, False), ())
+    ep = _episode(scenario, policy, ontology, labels, tmp_path)
+    rob = retarget_session(
+        ep, scenario.session.streams[0], labels, robot, rpolicy, policy.lerobot, DlsIkSolver()
+    )
+    inside = (ep.times_ms >= times[0]) & (ep.times_ms <= times[-1])
+    assert rob.result.target_present[inside].all()
+
+
+class _FakeRun:
+    """`_RobotRun` 대역: 세션 ID가 drop에 있으면 버린다."""
+
+    def __init__(self, drop: set[str]) -> None:
+        self.drop = drop
+        self.reports: list[dict[str, object]] = []
+        self.results: list[object] = []
+        self.policy = load_policy(ROOT)
+        self.robot = None
+
+    def add(self, es: object, stream: object, ep: object, lp: object, index: int, sid: str) -> bool:
+        keep = sid not in self.drop
+        self.reports.append({"session_id": sid, "decision": "keep" if keep else "drop"})
+        if keep:
+            self.results.append(object())
+        return keep
+
+    def used(self) -> set[str]:
+        return set()
+
+    def meta(self) -> dict[str, object]:
+        return {"episodes": self.reports}
+
+
+@pytest.mark.parametrize(
+    ("sizes", "drop", "expect"),
+    [
+        # 다른 화면비 첫 에피소드를 버림 / 같은 화면비의 작은 첫 에피소드를 버림 / 둘째를 버림
+        ({"a": (640, 480), "b": (1280, 720)}, {"a"}, (1280, 720)),
+        ({"a": (480, 360), "b": (640, 480)}, {"a"}, (640, 480)),
+        ({"a": (640, 480), "b": (1280, 720), "c": (640, 480)}, {"b"}, (640, 480)),
+    ],
+)
+def test_dropped_episodes_do_not_set_dataset_size(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    policy: ExportPolicy,
+    ontology: Ontology,
+    sizes: dict[str, tuple[int, int]],
+    drop: set[str],
+    expect: tuple[int, int],
+) -> None:
+    """리타기팅 정책이 버린 에피소드의 크기·화면비는 데이터셋 크기 기준이 되지 않는다 (버린 첫
+    세션의 해상도로 줄이거나 화면비가 달라 실패하던 문제, F-COE-49). 내보내는 에피소드끼리 화면비가
+    다르면 여전히 거부한다."""
+
+    got: dict[str, tuple[int, int]] = {}
+
+    def fake_run_script(root: Path, lp: object, script: str, *args: str) -> str:
+        if script == "lerobot_write.py":
+            (Path(args[1]) / "meta").mkdir(parents=True)
+            return ""
+        return json.dumps({"episodes": len(sizes) - len(drop), "frames": 1})
+
+    def fake_write_package(
+        eps: list[object], pol: object, size: tuple[int, int], *a: object
+    ) -> Path:
+        got["size"] = size
+        return tmp_path / "pkg.json"
+
+    def fake_fetch(store: object, es: ExportSession, stream: object, work: Path) -> Path:
+        return Path(es.session.session_id)
+
+    def fake_probe(video: Path) -> SimpleNamespace:
+        w, h = sizes[str(video)]
+        return SimpleNamespace(video=SimpleNamespace(width=w, height=h))
+
+    def fake_episode(*args: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            times_ms=np.array([0.0]), used=frozenset[str](), hand_points_3d_coverage=None
+        )
+
+    def fake_load(root: Path, robot_id: str) -> _FakeRun:
+        # 클래스에서 부르므로(_RobotRun.load(...)) 보통 함수로 바꿔 끼워도 된다
+        return _FakeRun(drop)
+
+    def nothing(*args: object) -> None:
+        return None
+
+    monkeypatch.setattr(runner, "fetch_blurred", fake_fetch)
+    monkeypatch.setattr(runner, "probe", fake_probe)
+    monkeypatch.setattr(runner, "build_pts_index", nothing)
+    monkeypatch.setattr(runner, "build_episode", fake_episode)
+    monkeypatch.setattr(runner._RobotRun, "load", fake_load)  # pyright: ignore[reportPrivateUsage]
+    monkeypatch.setattr(runner, "robot_override", nothing)
+    monkeypatch.setattr(runner, "write_package", fake_write_package)
+    monkeypatch.setattr(runner, "run_script", fake_run_script)
+    version = DatasetVersion(
+        version_id="dv", ontology_version="1.0.0", created_at=FIXED_TIME, snapshot_uri="lakefs://x",
+        splits={s: Split.TRAIN for s in sizes},
+    )  # fmt: skip
+    src = ExportSource(
+        version,
+        [ExportSession(make_session(s), Split.TRAIN, []) for s in sizes],
+        policy.label_states,
+    )
+    store: Any = None  # 블러본을 받지 않는다 (fetch_blurred 대역)
+    runner._lerobot(  # pyright: ignore[reportPrivateUsage]
+        ROOT,
+        src,
+        policy,
+        ontology,
+        store,
+        tmp_path / "out",
+        tmp_path,
+        Pseudonymizer(None),
+        robot="so101",
+    )
+    assert got["size"] == expect
+    mixed = {"a": (640, 480), "b": (1280, 720)}
+    with pytest.raises(ExportError, match="화면비"):
+        sizes.clear()
+        sizes.update(mixed)
+        drop.clear()
+        runner._lerobot(  # pyright: ignore[reportPrivateUsage]
+            ROOT,
+            src,
+            policy,
+            ontology,
+            store,
+            tmp_path / "out2",
+            tmp_path,
+            Pseudonymizer(None),
+            robot="so101",
+        )

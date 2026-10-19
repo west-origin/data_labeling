@@ -53,9 +53,16 @@ lerobot:
   fps: 30                    # 에피소드 프레임률 (가변 프레임 블러본에서 PTS로 그 시각에 보이던 프레임을 고른다)
   video_stream: bodycam      # 에피소드 영상 스트림 종류
   max_width: 640             # 이보다 넓으면 줄인다 (0이면 원본 크기)
-  interp_max_gap_ms: 200     # 키포인트·3D 궤적을 이 간격 안에서만 선형 보간
+  interp_max_gap_ms: 200     # 2D 키포인트를 이 간격 안에서만 선형 보간
+  # 3D 궤적(손 점·도구 작용부·로봇 목표)을 이 간격 안에서만 선형 보간. 3D 표본은 prelabel.yaml depth.frame_stride_ms
+  # (200) 뒤 첫 영상 프레임에 찍혀 간격이 200 + 최대 한 프레임(24 fps면 약 42 ms)이다. 200이면 29.97 fps에서 약 20%,
+  # 24 fps·VFR에서 거의 모든 3D가 빠졌다 (ADR 0053). 깊이 간격을 바꾸면 함께 본다 (tests/test_policy_consistency.py)
+  interp_max_gap_3d_ms: 300
+  # 궤적 구간 안 손 3D 점이 채워진 프레임 비율이 이보다 낮은 에피소드는 내보내기가 경고한다 (manifest details.warnings)
+  min_hand_points_3d_coverage: 0.9
   # observation.state에 넣는 손 3D 점 (Trajectory3D part 이름, 카메라 좌표 m). 바꾸면 state 열 수가 바뀐다.
-  # 손목과 다섯 손가락 끝 (prelabel.yaml depth.hand_points와 맞춘다, ADR 0044)
+  # 손목과 다섯 손가락 끝 (prelabel.yaml depth.hand_points가 만드는 부위 안, 온톨로지 hand_joints 안, 중복 없이.
+  # 정책 대조는 tests/test_policy_consistency.py, 온톨로지 대조는 내보내기 시작 때, ADR 0044·0053)
   hand_points_3d: [wrist, thumb_tip, index_tip, middle_tip, ring_tip, pinky_tip]
   repo_id: dlp/export        # LeRobot 데이터셋 repo_id (허브에 올리지 않는다, 메타데이터용)
   robot_type: human_bodycam  # LeRobot 메타데이터 robot_type

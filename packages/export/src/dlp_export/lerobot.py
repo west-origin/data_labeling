@@ -20,13 +20,22 @@
 프레임 특징 (손은 왼손·오른손 순):
 - observation.state (float32): 손 21관절 2D(정규화 x, y, COCO 보임 v: 0 없음·1 가려짐·2 보임)
   + 손 3D 점(카메라 좌표 x, y, z, 있음) + 쥔 도구 작용부 3D(x, y, z, 있음).
-  키포인트·궤적은 interp_max_gap_ms 안에서만 선형 보간한다.
+  2D 키포인트는 interp_max_gap_ms, 3D 궤적은 interp_max_gap_3d_ms 안에서만 선형 보간한다.
 - action (float32): 다음 프레임의 observation.state (사람 시연 데이터의 관례, 마지막은 그대로).
 - annotation.hand_state (int64): 손마다 [접촉, 접촉 대상 종류, 파지 유형, 역할]
   (어휘 번호, 라벨 없음 -1).
 - annotation.tool_surface_contact (int64): 손마다 쥔 도구 작용부의 표면 접촉
   (0/1, 쥔 도구 없음 -1).
 - annotation.verb (int64): 손마다 그 시각 원시 동작의 동사 번호 (없음 -1).
+- annotation.contact_object_class (int64): 손마다 접촉 대상(object·tool·fixed_surface)의 객체 클래스
+  번호 (어휘 object_class = 온톨로지 객체 ID 이름순, 대상의 박스·마스크 트랙이 없거나 접촉 없음 -1).
+  meta/dlp_vocab.json의 객체별 물리 사전값을 프레임에 잇는 열이다 (ADR 0049·0053).
+- annotation.hand_points_3d_confidence (float32): 손 3D 점마다 표본 신뢰도 (0~1, 없음 -1, ADR 0045).
+- annotation.hand_points_3d_method (int64): 손 3D 점마다 표본 추정 방식 (어휘 hand_point_3d_method:
+  0 hand_fit, 1 point_depth, 2 mixed = 보간 양끝 방식이 다름, 없음·모름 -1). 신뢰도 범위가 방식끼리
+  겹치므로 신뢰도만으로 관절별 깊이 대체 표본을 가를 수 없다 (ADR 0053).
+- annotation.hand_points_3d_intrinsics (int64): 손 3D 점마다 그 궤적의 내부 파라미터 출처 (어휘
+  hand_point_3d_intrinsics: 0 calibrated, 1 hfov_approx, 없음·모름 -1).
 - annotation.verification (int64): `GROUPS` 묶음 [손 2D, 손 3D, 손 상태, 행동, 도구-표면 접촉, 작업]
   마다 그 시각에 쓴 라벨의 가장 낮은 검증 등급 (미검수 0, 표본 검증 1, 사람 승인 2,
   사람 수정·작성 3, 라벨 없음 -1).
@@ -59,11 +68,15 @@ from dlp_media.pts import PtsIndex
 from dlp_schema.export import PhysicalPriorTable, physical_prior_table
 from dlp_schema.labels import (
     ActionPayload,
+    BoxTrackPayload,
     CoordinateFrame,
     Hand,
     HandStatePayload,
+    IntrinsicsSource,
     KeypointTrackPayload,
     LabelRecord,
+    Lift3DMethod,
+    MaskTrackPayload,
     RelationPayload,
     RelationPredicate,
     SegmentLevel,
@@ -86,6 +99,12 @@ GRADE = {
 }
 # annotation.verification 열 순서 (열 번호는 build_episode의 worse(k, g, …) 호출과 맞아야 한다)
 GROUPS = ("hands_2d", "hands_3d", "hand_state", "actions", "tool_contact", "task")
+# annotation.hand_points_3d_method 어휘 (번호 = 위치). mixed: 보간한 두 표본의 방식이 다름
+METHODS_3D = (*(m.value for m in Lift3DMethod), "mixed")
+# annotation.hand_points_3d_intrinsics 어휘 (번호 = 위치)
+INTRINSICS_3D = tuple(s.value for s in IntrinsicsSource)
+# 접촉 대상 객체 클래스를 싣는 접촉 종류 (target_id가 박스·마스크 트랙의 개체 ID인 종류)
+_OBJECT_TARGET_KINDS = frozenset({"object", "tool", "fixed_surface"})
 
 
 def grade(x: LabelRecord) -> int:
@@ -103,7 +122,8 @@ def preferred(labels: list[LabelRecord]) -> list[LabelRecord]:
 
 @dataclass(frozen=True)
 class Vocab:
-    """정수 특징의 어휘 (번호 = 튜플 안 위치). 온톨로지 버전이 같으면 같다."""
+    """정수 특징의 어휘 (번호 = 튜플 안 위치). 온톨로지 내용(`ontology_digest`)이 같으면 같다 (같은
+    버전이라도 초안 덧붙이기로 동사가 늘면 번호가 밀린다)."""
 
     verbs: tuple[str, ...]  # 동사 ID (이름순)
     contact_target_kinds: tuple[str, ...]  # 접촉 대상 종류 (온톨로지 순서)
@@ -111,6 +131,8 @@ class Vocab:
     hand_roles: tuple[str, ...]  # 손 역할 (온톨로지 순서)
     working_parts: frozenset[str]  # 도구 작용부 이름 (도구-표면 접촉·작용부 3D에 쓴다)
     tasks: tuple[str, ...]  # 에피소드 task 문자열 (작업 ID와 도메인)
+    # 객체 클래스 ID (이름순, annotation.contact_object_class). from_ontology가 위치 인자로 채운다
+    object_classes: tuple[str, ...] = ()
     # 어휘별 한·영 표시 이름 (어휘 이름 → 번호 순서와 같은 이름 목록, ADR 0043)
     names: dict[str, tuple[TermName, ...]] = field(default_factory=dict[str, tuple[TermName, ...]])
     # 객체 물리 사전값 표 (측정값 아님, ADR 0049). 없으면 dlp_vocab.json에 싣지 않는다.
@@ -121,6 +143,7 @@ class Vocab:
         """온톨로지에서 어휘를 만든다 (모든 도구 객체의 작용부를 모은다)."""
         parts = {p for obj in o.objects.values() if obj.tool for p in obj.tool.working_parts}
         verbs = tuple(sorted(o.verbs))
+        objects = tuple(sorted(o.objects))
         all_names = o.display_names()
 
         def named(category: str, ids: tuple[str, ...]) -> tuple[TermName, ...]:
@@ -134,6 +157,7 @@ class Vocab:
             tuple(o.hand_roles),
             frozenset(parts),
             tuple(sorted(o.tasks)) + tuple(sorted(o.domains)),
+            objects,
             {
                 "verb": named("verbs", verbs),
                 "contact_target_kind": named("contact_target_kinds", tuple(o.contact_target_kinds)),
@@ -141,6 +165,7 @@ class Vocab:
                 "hand_role": named("hand_roles", tuple(o.hand_roles)),
                 "task": named("tasks", tuple(sorted(o.tasks)))
                 + named("domains", tuple(sorted(o.domains))),
+                "object_class": named("objects", objects),
             },
             physical_prior_table(o),
         )
@@ -167,6 +192,9 @@ class Vocab:
                 "human_corrected_or_created",
             ],
             "verification_groups": list(GROUPS),
+            "object_class": list(self.object_classes),
+            "hand_point_3d_method": list(METHODS_3D),
+            "hand_point_3d_intrinsics": list(INTRINSICS_3D),
             "missing": -1,
             # 어휘별 한·영 표시 이름 (위 목록과 같은 순서, 형식 추가 키, ADR 0043)
             "term_names": {
@@ -211,6 +239,7 @@ def features(policy: LeRobotPolicy, height: int, width: int) -> dict[str, Any]:
     """
     n = len(state_names(policy))
     hands = [h.value for h in HANDS]
+    points = [f"{h}.{p}" for h in hands for p in policy.hand_points_3d]
     return {
         video_key(policy): {
             "dtype": "video", "shape": [height, width, 3], "names": ["height", "width", "channels"],
@@ -228,10 +257,19 @@ def features(policy: LeRobotPolicy, height: int, width: int) -> dict[str, Any]:
         "annotation.verification": {
             "dtype": "int64", "shape": [len(GROUPS)], "names": list(GROUPS),
         },
+        # 손마다 접촉 대상 객체 클래스 번호 (어휘 object_class, 없음 -1, ADR 0053)
+        "annotation.contact_object_class": {"dtype": "int64", "shape": [2], "names": hands},
         # 손 3D 점(observation.state의 x3d·y3d·z3d)마다 표본 신뢰도 (0~1, 없으면 -1, ADR 0045)
         "annotation.hand_points_3d_confidence": {
-            "dtype": "float32", "shape": [2 * len(policy.hand_points_3d)],
-            "names": [f"{h}.{p}" for h in hands for p in policy.hand_points_3d],
+            "dtype": "float32", "shape": [2 * len(policy.hand_points_3d)], "names": points,
+        },
+        # 손 3D 점마다 추정 방식·내부 파라미터 출처 번호 (어휘 hand_point_3d_method·_intrinsics,
+        # 없음 -1, ADR 0053)
+        "annotation.hand_points_3d_method": {
+            "dtype": "int64", "shape": [2 * len(policy.hand_points_3d)], "names": points,
+        },
+        "annotation.hand_points_3d_intrinsics": {
+            "dtype": "int64", "shape": [2 * len(policy.hand_points_3d)], "names": points,
         },
     }  # fmt: skip
 
@@ -244,9 +282,9 @@ def interp_series(
     양쪽 표본 간격이 max_gap보다 크면 None. 값의 NaN은 그대로 퍼진다.
 
     Args:
-        series: 시각(ms) 오름차순 표본. 값은 같은 모양의 배열.
-        t: 읽을 시각 (series와 같은 시각 체계, 보통 스트림 시각 ms).
-        max_gap: 보간을 허용하는 최대 표본 간격 (ms, `interp_max_gap_ms`).
+        series: 시각(ms) 오름차순 표본. 값은 같은 모양의 배열. t: 읽을 시각 (series와 같은 시각
+        체계, 보통 스트림 시각 ms). max_gap: 보간을 허용하는 최대 표본 간격 (ms, 2D
+        `interp_max_gap_ms`·3D `interp_max_gap_3d_ms`).
 
     Returns:
         t와 같은 표본이 있으면 그 값, 두 표본 사이면 선형 보간 값, 범위 밖·간격 초과면 None.
@@ -298,6 +336,28 @@ class Episode:
     hand_points_3d_confidence: NDArray[np.float32] = field(
         default_factory=lambda: np.zeros((0, 0), np.float32)
     )
+    # (n, 2*len(hand_points_3d)): 손 3D 점 추정 방식·내부 파라미터 출처 번호 (없으면 -1, ADR 0053)
+    hand_points_3d_method: NDArray[np.int64] = field(
+        default_factory=lambda: np.zeros((0, 0), np.int64)
+    )
+    hand_points_3d_intrinsics: NDArray[np.int64] = field(
+        default_factory=lambda: np.zeros((0, 0), np.int64)
+    )
+    # (n, 2): 손마다 접촉 대상 객체 클래스 번호 (없으면 -1, ADR 0053)
+    contact_object_class: NDArray[np.int64] = field(
+        default_factory=lambda: np.zeros((0, 0), np.int64)
+    )
+    # 손 3D 점 채움: (그 점의 3D 궤적 구간 안 프레임·점 수, 그중 값이 채워진 수). 보간 한도가 표본
+    # 간격보다 작으면 둘이 크게 다르다 (내보내기 경고, ADR 0053)
+    hand_points_3d_span: int = 0
+    hand_points_3d_filled: int = 0
+
+    @property
+    def hand_points_3d_coverage(self) -> float | None:
+        """궤적 구간 안 손 3D 점 채움 비율 (구간이 없으면 None)."""
+        if self.hand_points_3d_span == 0:
+            return None
+        return self.hand_points_3d_filled / self.hand_points_3d_span
 
 
 def build_episode(  # noqa: C901
@@ -318,7 +378,7 @@ def build_episode(  # noqa: C901
         size: 블러본 원본 크기 (가로, 세로) 픽셀. 2D 관절을 0~1로 정규화하는 데 쓴다.
         labels: 내보낼 라벨 (`select_labels` 결과, 다른 스트림 라벨이 섞여 있어도 된다).
         vocab: 어휘.
-        policy: LeRobot 정책 (fps, interp_max_gap_ms, hand_points_3d).
+        policy: LeRobot 정책 (fps, interp_max_gap_ms, interp_max_gap_3d_ms, hand_points_3d).
 
     Returns:
         `Episode`. 프레임 수는 최소 1.
@@ -328,6 +388,7 @@ def build_episode(  # noqa: C901
     """
     w, h = size
     gap = policy.interp_max_gap_ms
+    gap3d = policy.interp_max_gap_3d_ms
     # 에피소드 시각: 블러본 첫 프레임부터 끝까지 1/fps 간격 (마스터 시각)
     start = stream.to_master_ms(float(index.ms[0]))
     end = stream.to_master_ms(index.duration_ms)
@@ -378,29 +439,27 @@ def build_episode(  # noqa: C901
             and p.frame is CoordinateFrame.CAMERA
             and x.stream_id in (None, stream.stream_id)
         ):
-            traj.setdefault((p.entity_id, p.part), []).append(
-                (
-                    [
-                        # [x, y, z, 신뢰도]. 표본 신뢰도가 없으면(예전·사람 궤적) NaN (ADR 0045)
-                        (s.t_ms, np.array([s.x, s.y, s.z, _nan_if_none(s.confidence)]))
-                        for s in sorted(p.samples, key=lambda s: s.t_ms)
-                    ],
-                    x,
-                )
-            )
+            traj.setdefault((p.entity_id, p.part), []).append((_series_3d(p), x))
 
     def traj_at(
         entity: str, part: str | None, ts: float
     ) -> tuple[NDArray[np.float64], LabelRecord] | None:
-        """개체·부분의 스트림 시각 ts [x, y, z, 신뢰도]와 그 값을 준 라벨 (없으면 None).
+        """개체·부분의 스트림 시각 ts [x, y, z, 신뢰도, 방식 번호]와 그 값을 준 라벨 (없으면 None).
 
-        신뢰도는 두 표본 사이 선형 보간이고, 어느 한쪽이라도 없으면 NaN이다.
+        신뢰도는 두 표본 사이 선형 보간이고, 어느 한쪽이라도 없으면 NaN이다. 방식 번호도 보간되므로
+        양끝이 다르면 정수가 아니다 (`_method_code`).
         """
         for series, x in traj.get((entity, part), []):
-            v = interp_series(series, ts, gap)
+            v = interp_series(series, ts, gap3d)
             if v is not None:
                 return v, x
         return None
+
+    def in_span(entity: str, part: str | None, ts: float) -> bool:
+        """그 개체·부분의 3D 궤적 중 하나의 첫·마지막 표본 사이에 ts가 있는가 (채움 비율의 분모)."""
+        return any(s[0][0] <= ts <= s[-1][0] for s, _ in traj.get((entity, part), []))
+
+    classes = _entity_classes(labels)
 
     # 시간 구간 라벨 (마스터 시각). 모두 preferred 순이라 _covering의 첫 원소를 쓴다
     ordered = preferred(labels)
@@ -422,8 +481,12 @@ def build_episode(  # noqa: C901
     # 값이 없으면 state는 0(present·v 열도 0), 정수 특징은 -1
     state = np.zeros((n, dim), np.float32)
     hs = np.full((n, 8), -1, np.int64)
-    # 손 3D 점 신뢰도 (손마다 hand_points_3d 순서, 값이나 신뢰도가 없으면 -1, ADR 0045)
+    # 손 3D 점 신뢰도·방식·내부 파라미터 (손마다 hand_points_3d 순서, 없으면 -1, ADR 0045·0053)
     conf3d = np.full((n, 2 * len(policy.hand_points_3d)), -1.0, np.float32)
+    method3d = np.full((n, 2 * len(policy.hand_points_3d)), -1, np.int64)
+    intr3d = np.full((n, 2 * len(policy.hand_points_3d)), -1, np.int64)
+    cobj = np.full((n, 2), -1, np.int64)
+    span3d = filled3d = 0
     tsc = np.full((n, 2), -1, np.int64)
     verb = np.full((n, 2), -1, np.int64)
     ver = np.full((n, len(GROUPS)), -1, np.int64)
@@ -456,11 +519,17 @@ def build_episode(  # noqa: C901
             # 3D 손 점 (개체 ID 규약: "<left|right>_hand", 부분 = hand_points_3d 이름)
             base = 2 * n2d + hi * n3d
             for pi, part in enumerate(policy.hand_points_3d):
-                got = traj_at(f"{hand.value}_hand", part, ts)
+                entity = f"{hand.value}_hand"
+                got = traj_at(entity, part, ts)
+                span3d += in_span(entity, part, ts)
                 if got is not None:
+                    col = hi * len(policy.hand_points_3d) + pi
                     state[k, base + pi * 4 : base + pi * 4 + 4] = [*got[0][:3], 1.0]
                     c = float(got[0][3])
-                    conf3d[k, hi * len(policy.hand_points_3d) + pi] = -1.0 if math.isnan(c) else c
+                    conf3d[k, col] = -1.0 if math.isnan(c) else c
+                    method3d[k, col] = _method_code(float(got[0][4]))
+                    intr3d[k, col] = _intrinsics_code(got[1])
+                    filled3d += 1
                     worse(k, 1, got[1])
             # 손 상태와 쥔 도구
             cur = [x for x in _covering(hand_states, t) if x.payload.hand is hand]  # type: ignore[union-attr]
@@ -484,6 +553,10 @@ def build_episode(  # noqa: C901
                 worse(k, 2, x)
                 if kind == "tool":
                     tool_id = p.target_id
+                hit = classes.get(p.target_id or "") if kind in _OBJECT_TARGET_KINDS else None
+                if hit is not None and hit[0] in vocab.object_classes:
+                    cobj[k, hi] = vocab.object_classes.index(hit[0])
+                    used.add(hit[1].label_id)
             # 쥔 도구가 있을 때만: 도구-표면 접촉(0/1)과 작용부 3D. 없으면 -1·0 그대로
             tip_base = 2 * n2d + 2 * n3d + hi * 4
             if tool_id is not None:
@@ -518,8 +591,55 @@ def build_episode(  # noqa: C901
     # action = 다음 프레임 state (마지막 프레임은 자기 자신)
     action = np.concatenate([state[1:], state[-1:]], axis=0)
     return Episode(
-        frame_index, times, state, action, hs, tsc, verb, ver, task_names, frozenset(used), conf3d
-    )
+        frame_index, times, state, action, hs, tsc, verb, ver, task_names, frozenset(used), conf3d,
+        method3d, intr3d, cobj, span3d, filled3d,
+    )  # fmt: skip
+
+
+def _series_3d(p: Trajectory3DPayload) -> list[tuple[int, NDArray[np.float64]]]:
+    """3D 궤적 → (시각, [x, y, z, 신뢰도, 방식 번호]) 목록 (시각순).
+
+    표본 신뢰도·방식이 없으면(예전·사람 궤적) NaN이다 (ADR 0045). 방식 번호는 `METHODS_3D` 위치다.
+    """
+    return [
+        (
+            s.t_ms,
+            np.array(
+                [
+                    s.x, s.y, s.z, _nan_if_none(s.confidence),
+                    math.nan if s.method is None else float(METHODS_3D.index(s.method.value)),
+                ]
+            ),
+        )
+        for s in sorted(p.samples, key=lambda s: s.t_ms)
+    ]  # fmt: skip
+
+
+def _method_code(v: float) -> int:
+    """보간한 방식 번호 → 특징 값. NaN이면 -1, 정수면 그 방식, 양끝이 달라 정수가 아니면 mixed."""
+    if math.isnan(v):
+        return -1
+    if abs(v - round(v)) < 1e-9:
+        return round(v)
+    return METHODS_3D.index("mixed")
+
+
+def _intrinsics_code(x: LabelRecord) -> int:
+    """궤적 라벨의 내부 파라미터 출처 번호 (`INTRINSICS_3D`, 없으면 -1)."""
+    p = x.payload
+    if isinstance(p, Trajectory3DPayload) and p.intrinsics is not None:
+        return INTRINSICS_3D.index(p.intrinsics.value)
+    return -1
+
+
+def _entity_classes(labels: list[LabelRecord]) -> dict[str, tuple[str, LabelRecord]]:
+    """개체 ID → (객체 클래스 ID, 그 클래스를 준 박스·마스크 트랙 라벨). `preferred` 순 첫 것."""
+    out: dict[str, tuple[str, LabelRecord]] = {}
+    for x in preferred(labels):
+        p = x.payload
+        if isinstance(p, BoxTrackPayload | MaskTrackPayload) and p.entity_id not in out:
+            out[p.entity_id] = (p.class_id, x)
+    return out
 
 
 # 사람 모드 프레임 특징 → npz 배열 키 (쓰기 스크립트가 이 대응으로 프레임을 채운다)
@@ -530,7 +650,10 @@ FRAME_ARRAYS = {
     "annotation.tool_surface_contact": "tool_surface_contact",
     "annotation.verb": "verb",
     "annotation.verification": "verification",
+    "annotation.contact_object_class": "contact_object_class",
     "annotation.hand_points_3d_confidence": "hand_points_3d_confidence",
+    "annotation.hand_points_3d_method": "hand_points_3d_method",
+    "annotation.hand_points_3d_intrinsics": "hand_points_3d_intrinsics",
 }
 
 
@@ -589,7 +712,10 @@ def write_package(
             "tool_surface_contact": ep.tool_surface_contact,
             "verb": ep.verb,
             "verification": ep.verification,
+            "contact_object_class": ep.contact_object_class,
             "hand_points_3d_confidence": ep.hand_points_3d_confidence,
+            "hand_points_3d_method": ep.hand_points_3d_method,
+            "hand_points_3d_intrinsics": ep.hand_points_3d_intrinsics,
         }
         if override is not None:
             arrays.update(override.extra[i])
