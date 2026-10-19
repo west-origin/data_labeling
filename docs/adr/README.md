@@ -57,3 +57,4 @@ ADR은 결정 당시의 이유와 이관 조건을 기록한다. 후속 ADR이 �
 | 0048 | [ADR 0048: 3D 손 궤적은 그것을 계산한 2D 손 트랙의 검수를 물려받는다](0048-3d-trajectory-review-inherited-from-2d.md) |
 | 0049 | [ADR 0049: 온톨로지 객체에 물리 사전값(재질·촉감·질량·마찰)을 둔다](0049-object-physical-priors.md) |
 | 0050 | [ADR 0050: 끊긴 물려받은 3D는 궤적 따르기가 지우고, 박스 중심 3D도 물려받으며, 카메라 자세는 자동 라벨이다](0050-inherited-3d-retraction-box-center-and-automatic-pose.md) |
+| 0051 | [ADR 0051: 물려받기만 한 3D는 입력이 바뀌면 새 계산으로 바꾸고, 지금 2D의 3D가 없으면 완료하지 않는다](0051-inherited-3d-replaced-when-inputs-change.md) |

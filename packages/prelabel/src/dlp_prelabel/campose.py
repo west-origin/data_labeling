@@ -5,25 +5,27 @@
     - 세션 월드 좌표: Z 위(중력 반대), 원점 = 첫 자세의 카메라 중심, X = 첫 자세 광축의 수평 성분,
       Y = Z x X (왼쪽). 미터, 오른손 좌표계.
     - 자세 표본: 카메라 → 월드 회전 R_wc와 카메라 중심 p (월드). 월드 점 = R_wc · 카메라 점 + p.
-    - IMU → 카메라 외부 파라미터: `Session.calibration.camera_imu_extrinsics`(4x4, IMU 점 → 카메라
-    점).
-      회전만 쓴다 (이동 팔 길이는 이동을 영상으로 풀어 필요 없다).
+      회전 행렬은 열 벡터에 왼쪽에서 곱하고 R_ab는 b 좌표 → a 좌표다 (`posemath` 규약). 라벨에는
+      R_wc를 해밀턴 단위 쿼터니언 (w, x, y, z), w ≥ 0으로 싣는다.
+    - IMU → 카메라 외부 파라미터: `Session.calibration.camera_imu_extrinsics`(4x4 또는 3x3, IMU 점
+      → 카메라 점, R_ci). 회전만 쓴다 (이동 팔 길이는 이동을 영상으로 풀어 필요 없다). 러너가
+      회전인지 검사한다 (반사·배율이면 자세를 만들지 않는다, F-PAR-49).
+    - IMU 측정 단위: 가속도는 비력(m/s², 정지 시 중력 반대 방향 +g), 자이로는 rad/s, IMU 좌표계.
     - 시각: 자세 표본은 바디캠 PTS ms다. IMU 표본 시각은 호출자가 `Stream.to_master_ms`로
-    바디캠(마스터)
-      시각으로 바꿔 넘긴다 (`ImuSeries`). 바디캠은 마스터라 PTS ms = 마스터 ms다 (ADR 0019).
+      바디캠(마스터) 시각으로 바꿔 넘긴다 (`ImuSeries`). 바디캠은 마스터라 PTS ms = 마스터 ms다
+      (ADR 0019).
 
 추정기 (`CameraPoseEstimator` 어댑터)
     - `ImuVisualOdometry` (내장, CPU): 회전은 IMU 자이로 적분 + 가속도 기울기 보정(상보 필터, 첫
-    구간의
-      평균 가속도로 중력 정렬, 정지면 자이로 편향 제거), 이동은 이전 자세 프레임의 특징점(Shi-Tomasi
-      +
-      피라미드 LK, 앞뒤 왕복 검사)을 메트릭 깊이로 월드 3D로 올리고, 지금 프레임 2D 투영식에서
-      회전을 고정한 채 카메라 중심 3개 미지수를 선형으로 푼다 (두 점 RANSAC → 인라이어 깊이 가중
-      재풀이). 루프 닫힘·묶음 조정은 없다 (오도메트리 드리프트가 쌓인다).
+      구간의 평균 가속도로 중력 정렬, 정지면 자이로 편향 제거), 이동은 이전 자세 프레임의
+      특징점(Shi-Tomasi + 피라미드 LK, 앞뒤 왕복 검사)을 메트릭 깊이로 월드 3D로 올리고, 지금 프레임
+      2D 투영식에서 회전을 고정한 채 카메라 중심 3개 미지수를 선형으로 푼다 (두 점 RANSAC →
+      인라이어 깊이 가중 재풀이). 루프 닫힘·묶음 조정은 없다 (오도메트리 드리프트가 쌓인다).
+      IMU가 덮지 않는 앞쪽 프레임은 건너뛰고(F-PAR-47), IMU 기록이 끊기면(`imu.max_gap_ms`) 그
+      앞에서 멈춘다(F-PAR-48).
     - `OraclePoseEstimator` (CPU stub): 정답 자세를 그대로 돌려준다 (합성 픽스처, 러너 시험).
     - TODO(real-model): 루프 닫힘·묶음 조정이 있는 외부 시각-관성 SLAM 엔진(Basalt, BSD-3)은
-    연동하지
-      않았다. 같은 `CameraPoseEstimator` 어댑터로 붙인다 (ADR 0046 라이선스 조사).
+      연동하지 않았다. 같은 `CameraPoseEstimator` 어댑터로 붙인다 (ADR 0046 라이선스 조사).
 
 파이프라인 위치: `runner._camera_pose`가 바디캠 영상·IMU·깊이 모델로 부르고 결과를 trajectory3d
 (entity_id="camera", frame=world)로 저장한다 (`pose_label`). 월드 좌표 손 궤적은 `worldframe`이
@@ -44,12 +46,13 @@ from numpy.typing import NDArray
 
 from dlp_models.depth import sample_depth
 from dlp_prelabel.common import Image, model_label
-from dlp_prelabel.lift3d import DepthModel
+from dlp_prelabel.lift3d import DepthModel, calibration_fits
 from dlp_prelabel.policy import CameraPosePolicy
 from dlp_prelabel.posemath import exp_so3, matrix_from_quat, orthonormalize, quat_from_matrix, slerp
 from dlp_schema.episode import version_tag
 from dlp_schema.labels import (
     CoordinateFrame,
+    IntrinsicsSource,
     LabelRecord,
     Source3D,
     Trajectory3DPayload,
@@ -61,7 +64,10 @@ Mat3 = NDArray[np.float64]
 Vec3 = NDArray[np.float64]
 # 카메라 자세 궤적의 개체 ID (계약 `Trajectory3DPayload`, 에피소드 `EntityKind.CAMERA`)
 CAMERA_ENTITY = "camera"
+# 월드 좌표 위 방향 (Z 위, 중력 반대)
 _UP = np.array([0.0, 0.0, 1.0])
+# 회전 행렬을 SVD로 다시 직교화하는 적분 간격 (표본 수). 곱셈 반올림 누적을 막는 수치 상수다
+_REORTHO_EVERY = 100
 
 
 @dataclass(frozen=True)
@@ -143,14 +149,19 @@ class CameraPoseEstimator(Protocol):
 
 @dataclass(frozen=True)
 class Orientation:
-    """IMU 회전 적분 결과: 표본 시각(ms)마다 IMU → 월드 회전 R_wi (N, 3, 3), 정지 초기화 여부."""
+    """IMU 회전 적분 결과: 표본 시각(ms)마다 IMU → 월드 회전 R_wi (N, 3, 3), 정지 초기화 여부.
+
+    gap_at_ms: IMU 기록이 `imu.max_gap_ms`보다 길게 끊긴 곳의 시작 시각 (그 뒤 표본은 담지 않는다,
+    없으면 None, F-PAR-48). 추정기는 그 뒤 프레임을 추적 상실로 표시한다.
+    """
 
     t_ms: NDArray[np.float64]
     r_wi: NDArray[np.float64]
     static_init: bool
+    gap_at_ms: float | None = None
 
     def at(self, t_ms: float) -> Mat3 | None:
-        """시각 t의 R_wi (두 표본 사이 구면 보간). 범위 밖이면 None."""
+        """시각 t의 R_wi (두 표본 사이 구면 보간). 범위 밖이면 None (빈틈 너머도 범위 밖이다)."""
         if t_ms < self.t_ms[0] or t_ms > self.t_ms[-1]:
             return None
         i = int(np.searchsorted(self.t_ms, t_ms))
@@ -167,6 +178,7 @@ def initial_imu_rotation(up_i: Vec3, forward_i: Vec3) -> Mat3:
         ValueError: 광축이 거의 수직이라 수평 방향(X)을 정할 수 없을 때.
     """
     z = up_i / np.linalg.norm(up_i)
+    # 광축에서 위 방향 성분을 빼면 수평 성분이 남는다 (그 방향을 월드 X로)
     horizontal = forward_i - float(forward_i @ z) * z
     if np.linalg.norm(horizontal) < 1e-3:
         raise ValueError("첫 자세의 광축이 수직이라 월드 X를 정할 수 없습니다")
@@ -176,48 +188,85 @@ def initial_imu_rotation(up_i: Vec3, forward_i: Vec3) -> Mat3:
     return np.stack([x, y, z], axis=1).T
 
 
+def _is_static(
+    acc: NDArray[np.float64], gyro: NDArray[np.float64], policy: CameraPosePolicy
+) -> bool:
+    """초기 구간이 정지인가 (그 자이로 평균을 편향으로 빼도 되는가, `PoseImuPolicy`).
+
+    크기의 표준편차만 보면 일정한 속도로 도는 시작(크기가 거의 상수)도 정지로 보고 실제 회전을
+    편향으로 빼 요 오차가 시간에 비례해 쌓인다 (F-PAR-46). 그래서 자이로 평균 벡터의 크기와 가속도
+    크기 평균(중력과 같아야 한다)도 본다.
+    """
+    p = policy.imu
+    acc_norm = np.linalg.norm(acc, axis=1)
+    gyro_norm = np.linalg.norm(gyro, axis=1)
+    return bool(
+        acc_norm.std() <= p.static_acc_std
+        and gyro_norm.std() <= p.static_gyro_std
+        and float(np.linalg.norm(gyro.mean(axis=0))) <= p.static_gyro_mean_max
+        and abs(float(acc_norm.mean()) - p.gravity) <= p.accel_tolerance
+    )
+
+
+def _first_gap(t: NDArray[np.float64], max_gap_ms: float) -> int | None:
+    """표본 간격이 max_gap_ms를 넘는 첫 자리 k (t[k] - t[k-1] > max_gap_ms). 없으면 None."""
+    gaps = np.flatnonzero(np.diff(t) > max_gap_ms)
+    return int(gaps[0]) + 1 if gaps.size else None
+
+
 def imu_orientation(
     imu: ImuSeries, r_ci: Mat3, start_ms: float, policy: CameraPosePolicy
 ) -> Orientation:
     """IMU 자이로 적분 + 가속도 기울기 보정으로 R_wi를 낸다 (start_ms 이후 표본만).
 
     1. start_ms(그 앞 마지막 표본)부터 `init_window_ms`의 평균 가속도(비력, 위 방향)로 중력을
-    정하고, 카메라 광축의 수평
-       성분을 월드 X로 둔다 (`initial_imu_rotation`). 그 구간이 정지(`static_*_std` 이하)면 자이로
-       평균을 편향으로 뺀다.
-    2. 표본마다 R_wi ← R_wi · exp(ω Δt) (두 표본 평균 각속도), 가속도 크기가 중력과
+       정하고, 카메라 광축의 수평 성분을 월드 X로 둔다 (`initial_imu_rotation`). 그 구간이 정지
+       (`_is_static`)면 자이로 평균을 편향으로 뺀다.
+    2. 표본마다 R_wi ← R_wi · exp(ω Δt) (두 표본 평균 각속도, 사다리꼴 적분), 가속도 크기가 중력과
        `accel_tolerance` 안이면 측정 위 방향을 월드 Z 쪽으로 `accel_gain` x Δt만큼 돌린다 (수평축
        회전이라 요는 바꾸지 않는다).
+    3. 표본 간격이 `max_gap_ms`를 넘는 곳(기록 끊김)에서 멈춘다. 그 앞까지만 담고 시작 시각을
+       `gap_at_ms`로 남긴다 (빈틈을 건너 적분하지 않는다, F-PAR-48).
 
     Raises:
-        ValueError: start_ms 뒤 초기 구간 IMU 표본이 2개보다 적을 때, 광축이 수직일 때.
+        ValueError: start_ms 뒤 초기 구간 IMU 표본이 2개보다 적을 때, 초기 구간에 빈틈이 있을 때,
+            광축이 수직일 때.
     """
     p = policy.imu
     # start_ms를 덮도록 그 앞 마지막 표본부터 쓴다
     first = max(int(np.searchsorted(imu.t_ms, start_ms, side="right")) - 1, 0)
     t, acc, gyro = imu.t_ms[first:], imu.acc[first:], imu.gyro[first:]
+    gap = _first_gap(t, p.max_gap_ms)
+    gap_at = None if gap is None else float(t[gap - 1])
+    if gap is not None:
+        t, acc, gyro = t[:gap], acc[:gap], gyro[:gap]
     win = t <= start_ms + p.init_window_ms
     if int(win.sum()) < 2:
         raise ValueError("자세 초기화 구간에 IMU 표본이 부족합니다 (IMU 동기화·범위를 확인하세요)")
-    acc_norm = np.linalg.norm(acc[win], axis=1)
-    gyro_norm = np.linalg.norm(gyro[win], axis=1)
-    static = bool(acc_norm.std() <= p.static_acc_std and gyro_norm.std() <= p.static_gyro_std)
+    if gap_at is not None and gap_at < start_ms + p.init_window_ms:
+        raise ValueError(f"자세 초기화 구간에 IMU 기록이 끊겼습니다 ({gap_at:.0f} ms)")
+    static = _is_static(acc[win], gyro[win], policy)
     bias = gyro[win].mean(axis=0) if static else np.zeros(3)
+    # 카메라 광축(카메라 +Z)을 IMU 좌표로: R_ci는 IMU → 카메라라 그 역(전치)을 곱한다
     forward_i = r_ci.T @ np.array([0.0, 0.0, 1.0])
+    # 정지(또는 거의 정지) 구간 평균 비력은 중력 반대 방향 = 위 (IMU 좌표)
     r = initial_imu_rotation(acc[win].mean(axis=0), forward_i)
     out = np.empty((t.size, 3, 3))
     out[0] = r
     for k in range(1, t.size):
         dt = (t[k] - t[k - 1]) / 1000
+        # 자이로는 IMU 좌표(몸체) 각속도라 오른쪽에서 곱한다: R_wi(t+dt) = R_wi(t) · exp(ω dt)
         omega = (gyro[k] + gyro[k - 1]) / 2 - bias
         r = r @ exp_so3(omega * dt)
         a: NDArray[np.float64] = acc[k]
         norm = float(np.linalg.norm(a))
+        # 상보 필터: 거의 가만할 때(|a| ≈ g)만 측정 위 방향을 믿고 기울기(롤·피치)를 조금씩 고친다
         if p.accel_gain > 0 and abs(norm - p.gravity) < p.accel_tolerance:
             v = r @ (a / norm)  # 지금 추정으로 본 측정 위 방향 (월드)
+            # v x Z 축으로 돌리면 v가 Z 쪽으로 간다. 그 축은 수평이라 요(Z축 회전)는 그대로다
             r = exp_so3(np.cross(v, _UP) * p.accel_gain * dt) @ r
-        out[k] = orthonormalize(r) if k % 100 == 0 else r
-    return Orientation(t, out, static)
+        out[k] = orthonormalize(r) if k % _REORTHO_EVERY == 0 else r
+    return Orientation(t, out, static, gap_at)
 
 
 # ---------------------------------------------------------------- 이동량
@@ -236,6 +285,7 @@ def _project_errors(
     y: NDArray[np.float64], c: Vec3, uv: NDArray[np.float64], k: CameraIntrinsics
 ) -> NDArray[np.float64]:
     """회전된 점 y(= R_cw X)와 c(= R_cw p)의 재투영 오차(px). 카메라 뒤 점은 inf."""
+    # 카메라 좌표 = R_cw (X - p) = y - c. 그 z가 깊이다 (1 mm보다 가까우면 카메라 뒤로 본다)
     z = y[:, 2] - c[2]
     with np.errstate(divide="ignore", invalid="ignore"):
         u = k.fx * (y[:, 0] - c[0]) / z + k.cx
@@ -247,7 +297,11 @@ def _project_errors(
 def _linear_center(
     y: NDArray[np.float64], xn: NDArray[np.float64], weights: NDArray[np.float64] | None = None
 ) -> Vec3 | None:
-    """투영식 (y_x - c_x) - x̂ (y_z - c_z) = 0 (x, y 두 줄)을 c에 대해 최소제곱으로 푼다."""
+    """투영식 (y_x - c_x) - x̂ (y_z - c_z) = 0 (x, y 두 줄)을 c에 대해 최소제곱으로 푼다.
+
+    xn = (x̂, ŷ): 지금 프레임 정규화 좌표. 회전을 아니까 미지수는 c(= R_cw p) 3개뿐이고 식이
+    선형이다.
+    """
     n = y.shape[0]
     a = np.zeros((2 * n, 3))
     b = np.zeros(2 * n)
@@ -279,10 +333,13 @@ def solve_translation(
     if n < max(tp.min_inliers, 2):
         return None
     r_cw = r_wc.T
+    # 월드 점을 카메라 축으로 돌려 둔다 (이동만 남는다: 카메라 점 = y - c, c = R_cw p)
     y = points_w @ r_cw.T
     xn = np.stack([(uv[:, 0] - k.cx) / k.fx, (uv[:, 1] - k.cy) / k.fy], axis=1)
     rng = np.random.default_rng(tp.seed)
     best: NDArray[np.bool_] | None = None
+    # 두 점 RANSAC: 점 둘이면 식 4개로 미지수 3개를 풀 수 있다. 인라이어 수가 가장 많은 가설을
+    # 고른다
     for _ in range(tp.ransac_iterations):
         pick = rng.choice(n, 2, replace=False)
         c = _linear_center(y[pick], xn[pick])
@@ -310,6 +367,7 @@ def solve_translation(
     if int(best.sum()) < tp.min_inliers:
         return None
     rms = float(np.sqrt(np.mean(err[best] ** 2)))
+    # c = R_cw p 이므로 카메라 중심 p = R_wc c
     return TranslationFit(r_wc @ c, int(best.sum()), rms)
 
 
@@ -318,7 +376,9 @@ def pose_confidence(
 ) -> float:
     """자세 표본 신뢰도 (`camera_pose.confidence`, 소수 셋째 자리)."""
     c = policy.confidence
+    # 인라이어 항: good_inliers개 이상이면 1, 적으면 비례해 낮춘다
     inlier_term = min(1.0, fit.inliers / c.good_inliers)
+    # 재투영 항: RMS 0 → 1, 인라이어 문턱(inlier_px) → reprojection_floor (그 사이 선형)
     reproj = 1 - (1 - c.reprojection_floor) * min(fit.rms_px / policy.translation.inlier_px, 1.0)
     value = c.base * inlier_term * reproj
     if not static_init:
@@ -380,7 +440,8 @@ def track_features(
     if uv.shape[0] == 0:
         return uv, np.zeros(0, dtype=np.bool_)
     win = (f.lk_window_px, f.lk_window_px)
-    crit = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01)
+    # 반복 종료: lk_max_iterations번 또는 한 번 이동이 lk_epsilon px보다 작아지면 (정책, F-PAR-55)
+    crit = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, f.lk_max_iterations, f.lk_epsilon)
     p0 = uv.reshape(-1, 1, 2)
     p1, st1, _ = cv2.calcOpticalFlowPyrLK(
         prev, cur, p0, np.empty_like(p0), winSize=win, maxLevel=f.lk_levels, criteria=crit
@@ -389,6 +450,7 @@ def track_features(
         cur, prev, p1, np.empty_like(p0), winSize=win, maxLevel=f.lk_levels, criteria=crit
     )
     p1a = np.asarray(p1, dtype=np.float32).reshape(-1, 2)
+    # 앞뒤 왕복 오차: 앞으로 이은 점을 거꾸로 다시 이어 원래 자리로 돌아오는지 (어긋나면 잘못 이음)
     fb = np.linalg.norm(np.asarray(back, dtype=np.float32).reshape(-1, 2) - uv, axis=1)
     ok = (np.asarray(st1, dtype=np.uint8).reshape(-1) == 1) & (
         np.asarray(st2, dtype=np.uint8).reshape(-1) == 1
@@ -416,18 +478,27 @@ def lift_features(
         if math.isnan(z) or not tp.min_depth_m <= z <= tp.max_depth_m:
             continue
         keep.append(i)
+        # 핀홀 역투영 (카메라 좌표): x = (u - cx) z / fx, y = (v - cy) z / fy
         pts.append(((float(u) - k.cx) * z / k.fx, (float(v) - k.cy) * z / k.fy, z))
     if not keep:
         return np.zeros((0, 2), np.float32), np.zeros((0, 3))
     cam = np.array(pts, dtype=np.float64)
+    # 카메라 좌표 → 월드: X_w = R_wc X_c + p (행 벡터라 R_wcᵀ를 오른쪽에서 곱한다)
     return uv[keep], cam @ r_wc.T + p_wc
 
 
 def scaled_intrinsics(
-    k: CameraIntrinsics | None, width: int, height: int, hfov_deg: float
+    k: CameraIntrinsics | None,
+    width: int,
+    height: int,
+    hfov_deg: float,
+    max_aspect_mismatch: float,
 ) -> CameraIntrinsics:
-    """해상도에 맞춘 내부 파라미터 (없으면 가로 화각 근사, `lift3d.intrinsics_for`와 같은 규칙)."""
-    if k is None:
+    """해상도에 맞춘 내부 파라미터 (없거나 화면비가 다르면 가로 화각 근사).
+
+    `lift3d.intrinsics_for`와 같은 규칙이다 (`lift3d.calibration_fits`, F-PAR-44).
+    """
+    if k is None or not calibration_fits(k, width, height, max_aspect_mismatch):
         f = width / 2 / math.tan(math.radians(hfov_deg) / 2)
         return CameraIntrinsics(width=width, height=height, fx=f, fy=f, cx=width / 2, cy=height / 2)
     sx, sy = width / k.width, height / k.height
@@ -442,17 +513,25 @@ def scaled_intrinsics(
 class ImuVisualOdometry:
     """내장 IMU 시각 오도메트리 (모듈 설명). CPU, 외부 엔진·가중치 없음 (깊이 모델은 넘겨받는다).
 
-    version: `imuvo1` (알고리즘을 바꾸면 숫자를 올린다).
+    version: `imuvo2` (알고리즘을 바꾸면 숫자를 올린다. imuvo2: IMU가 덮지 않는 앞 프레임 건너뛰기,
+    IMU 빈틈에서 멈춤, 정지 판정에 평균 각속도·중력 크기, 화면비가 다른 캘리브레이션 거부,
+    F-PAR-44·46·47·48).
     """
 
     name = "campose"
-    version = "imuvo1"
+    version = "imuvo2"
 
-    def __init__(self, policy: CameraPosePolicy, *, hfov_deg: float) -> None:
+    def __init__(
+        self, policy: CameraPosePolicy, *, hfov_deg: float, max_aspect_mismatch: float
+    ) -> None:
         """policy: `prelabel.yaml camera_pose`. hfov_deg: 내부 파라미터가 없을 때 가로 화각
-        (`depth.default_hfov_deg`)."""
+        (`depth.default_hfov_deg`). max_aspect_mismatch: 캘리브레이션 화면비 허용 오차
+        (`depth.max_intrinsics_aspect_mismatch`)."""
         self.policy = policy
         self.hfov_deg = hfov_deg
+        self.max_aspect_mismatch = max_aspect_mismatch
+        # 마지막 estimate에서 캘리브레이션을 실제로 썼는가 (화각 근사면 거짓, 라벨 출처에 쓴다)
+        self.calibrated = False
 
     def estimate(
         self,
@@ -466,8 +545,11 @@ class ImuVisualOdometry:
         """자세 궤적 (`CameraPoseEstimator.estimate`).
 
         frame_stride_ms 간격 프레임마다: IMU 회전으로 R_wc를 정하고, 마지막 자세 프레임(키프레임)의
-        특징점을 지금 프레임으로 추적해 이동량을 푼다. 첫 프레임은 원점이다. 풀이가 실패하면 그
-        프레임은 자세가 없고, 키프레임에서 `max_lost_ms`가 지나도록 실패하면 멈춘다.
+        특징점을 지금 프레임으로 추적해 이동량을 푼다. 첫 자세 프레임은 원점이다. IMU 첫 표본보다
+        앞선 프레임은 건너뛰고 IMU 회전은 IMU가 덮는 첫 프레임에서 초기화한다 (사이드카 IMU의 동기화
+        오프셋으로 IMU가 몇 ms 늦게 시작해도 자세를 낸다, F-PAR-47). 풀이가 실패하면 그 프레임은
+        자세가 없고, 키프레임에서 `max_lost_ms`가 지나도록 실패하거나 IMU 기록이 끊기면
+        (`Orientation.gap_at_ms`) `lost_at_ms`를 남기고 멈춘다. IMU가 정상으로 끝나면 그냥 멈춘다.
 
         Raises:
             ValueError: 깊이가 없을 때 (이동 배율을 정할 수 없다), IMU 초기화 실패.
@@ -475,33 +557,40 @@ class ImuVisualOdometry:
         if depth is None:
             raise ValueError("내장 오도메트리에는 메트릭 깊이가 필요합니다")
         policy = self.policy
+        # R_wc = R_wi · R_ic (카메라 → IMU → 월드). R_ic는 R_ci의 역(전치)
         r_ic = imu_to_camera.T
         track = PoseTrack(samples=[], stats={"frames": 0, "tracked": 0, "failed": 0})
         orient: Orientation | None = None
         key: _Keyframe | None = None
         k: CameraIntrinsics | None = None
         last_t: int | None = None
+        self.calibrated = False
         for t, img in frames:
             if last_t is not None and t - last_t < max(policy.frame_stride_ms, 1):
                 continue
+            if t < imu.t_ms[0]:
+                continue  # IMU가 아직 시작하지 않았다 (늦게 시작한 IMU, F-PAR-47)
             if orient is None:
                 orient = imu_orientation(imu, imu_to_camera, t, policy)
                 track.stats["static_init"] = float(orient.static_init)
             r_wi = orient.at(t)
             if r_wi is None:
-                break  # IMU가 끝났다
+                if orient.gap_at_ms is not None and t > orient.gap_at_ms:
+                    track.lost_at_ms = t  # IMU 기록이 끊겨 같은 월드 좌표로 잇지 못한다
+                break  # IMU가 끝났거나 끊겼다
             last_t = t
             track.stats["frames"] += 1
             if k is None:
-                k = scaled_intrinsics(intrinsics, img.shape[1], img.shape[0], self.hfov_deg)
+                k = self._intrinsics(intrinsics, img)
             r_wc = r_wi @ r_ic
             gray = _gray(img)
             if key is None:
+                # 첫 자세: 월드 원점 (카메라 중심 = 원점). 이동 근거가 없어 기본 신뢰도에서 감점만
                 position = np.zeros(3)
                 conf = round(
                     policy.confidence.base
                     * (1.0 if orient.static_init else policy.confidence.no_static_init)
-                    * (1.0 if intrinsics is not None else policy.confidence.hfov_approx),
+                    * (1.0 if self.calibrated else policy.confidence.hfov_approx),
                     3,
                 )
             else:
@@ -514,16 +603,25 @@ class ImuVisualOdometry:
                     continue
                 position = fit.position
                 conf = pose_confidence(
-                    fit, static_init=orient.static_init, calibrated=intrinsics is not None,
+                    fit, static_init=orient.static_init, calibrated=self.calibrated,
                     policy=policy,
                 )  # fmt: skip
             track.samples.append(PoseSample(t, r_wc, position, conf))
             track.stats["tracked"] += 1
+            # 자세를 낸 프레임이 다음 키프레임이다: 새 특징점을 뽑아 이 자세로 월드 3D에 올린다
             uv, pw = lift_features(
                 detect_features(gray, policy), depth.depth_at(t, img), k, r_wc, position, policy
             )
             key = _Keyframe(t, gray, uv, pw)
         return track
+
+    def _intrinsics(self, intrinsics: CameraIntrinsics | None, img: Image) -> CameraIntrinsics:
+        """첫 처리 프레임 크기에 맞춘 내부 파라미터를 정하고 캘리브레이션을 썼는지 기록한다."""
+        h, w = img.shape[:2]
+        self.calibrated = intrinsics is not None and calibration_fits(
+            intrinsics, w, h, self.max_aspect_mismatch
+        )
+        return scaled_intrinsics(intrinsics, w, h, self.hfov_deg, self.max_aspect_mismatch)
 
     def _step(
         self, key: _Keyframe, gray: NDArray[np.uint8], r_wc: Mat3, k: CameraIntrinsics
@@ -589,11 +687,14 @@ def pose_label(
     version: str,
     ontology_version: str,
     now: datetime,
+    intrinsics: IntrinsicsSource | None = None,
 ) -> LabelRecord | None:
     """자세 궤적 → trajectory3d 라벨 (entity_id="camera", frame=world, 표본 쿼터니언). 표본이 없으면
     None.
 
-    ID: `<세션>-<스트림>-campose-<version_tag>`. 라벨 신뢰도는 표본 신뢰도의 평균.
+    ID: `<세션>-<스트림>-campose-<version_tag>`. 라벨 신뢰도는 표본 신뢰도의 평균. intrinsics:
+    이동량을 풀 때 쓴 내부 파라미터 출처 (캘리브레이션·화각 근사, ADR 0045 "궤적마다 출처",
+    F-PAR-51).
     """
     if not track.samples:
         return None
@@ -619,6 +720,7 @@ def pose_label(
         frame=CoordinateFrame.WORLD,
         source_3d=Source3D.VISUAL_INERTIAL_SLAM,
         samples=tuple(samples),
+        intrinsics=intrinsics,
     )
     mean = round(sum(s.confidence for s in track.samples) / len(track.samples), 3)
     return model_label(

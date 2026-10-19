@@ -18,11 +18,12 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 
+from dlp_prelabel.posemath import rotation_problem
 from dlp_schema.common import Contract, OntologyId
 
 
@@ -116,8 +117,12 @@ HAND21_JOINTS = {
 class HandFitPolicy(Contract):
     """손 중심 3D 점 맞춤 정책 (`depth.hand_fit` 절, ADR 0044, `dlp_prelabel.handfit`).
 
-    min_points: 맞춤에 쓰는 보이는 관절 수 하한 (이보다 적으면 깊이만 쓴다).
-    max_reprojection_px: 맞춘 손을 다시 투영한 2D 오차 RMS 상한(px). 넘으면 깊이만 쓴다.
+    min_points: 맞춤에 쓰는 보이는 관절 수 하한 (이보다 적으면 맞춤 없이 손바닥 관절만 깊이로).
+    max_reprojection_ratio: 맞춘 손을 다시 투영한 2D 오차 RMS를 손 2D 크기(관절이 중심에서 떨어진
+        거리의 RMS, px)로 나눈 상대값의 상한. 넘으면 맞춤을 버린다. 해상도와 무관하다 (F-PAR-43).
+    rotation_prior: 회전 다듬기(손 중심 기준 작은 회전, F-PAR-42)의 0 쪽 사전값 가중 (상대 재투영
+        잔차 단위, 회전 rad당). 클수록 손 모델 자세를 더 믿는다. 0이면 회전을 다듬지 않는다.
+    max_rotation_deg: 회전 다듬기가 이보다 크게 돌아야 맞으면 다듬은 값을 버리고 이동량만 쓴다.
     anchor_points: 메트릭 깊이로 크기를 정할 때 깊이를 읽는 손바닥 관절 번호 (0~20, 얇은 손가락
         끝은 배경 깊이가 섞이기 쉬워 넣지 않는다).
     reference_palm_m: 손목(0)→중지 MCP(9) 기준 길이(m). None이면 손 모델 크기를 그대로 믿는다.
@@ -126,7 +131,9 @@ class HandFitPolicy(Contract):
     """
 
     min_points: int = Field(ge=3, le=21)
-    max_reprojection_px: float = Field(gt=0)
+    max_reprojection_ratio: float = Field(gt=0)
+    rotation_prior: float = Field(ge=0)
+    max_rotation_deg: float = Field(ge=0, le=90)
     anchor_points: tuple[int, ...] = Field(min_length=1)
     reference_palm_m: float | None = Field(default=None, gt=0)
     depth_weight: float = Field(ge=0, le=1)
@@ -147,7 +154,7 @@ class SampleConfidencePolicy(Contract):
 
     hand_fit: 손 맞춤 표본의 최고 신뢰도 (재투영 0, 21관절 보임, 깊이·사전값 일치, 캘리브레이션).
     point_depth: 관절별 깊이·박스 중심 표본의 신뢰도 (그 픽셀 깊이 하나로 역투영).
-    reprojection_floor: 재투영 RMS가 `hand_fit.max_reprojection_px`일 때 곱하는 값 (0이면
+    reprojection_floor: 상대 재투영 오차가 `hand_fit.max_reprojection_ratio`일 때 곱하는 값 (0이면
         그 끝에서 0).
     points_floor: 보이는 관절 수가 `hand_fit.min_points`일 때 곱하는 값 (21관절이면 1).
     agreement_floor: 깊이·손 크기 배율 비가 `hand_fit.max_scale_ratio`일 때 곱하는 값 (비 1이면 1).
@@ -171,6 +178,13 @@ class DepthPolicy(Contract):
     patch_radius_px: 깊이 중앙값을 읽을 패치 반지름. min_depth_m / max_depth_m: 받아들일 깊이
     범위(m).
     hand_points: 올릴 hand21 관절 번호 (`HAND21_JOINTS`에 이름이 있는 번호만).
+    fingertip_fallback: 맞춤이 없는 키프레임(world 없음·맞춤 실패)의 손바닥 밖 관절(손가락 끝)을
+        어떻게 할지. "drop"(기본): 내지 않는다 (픽셀 깊이가 배경을 읽어 수백 mm 틀린다, F-PAR-40).
+        "point_depth": 예전처럼 그 픽셀 깊이로 올린다. 손바닥 관절(`hand_fit.anchor_points`)은
+        어느 쪽이든 깊이로 올린다.
+    max_intrinsics_aspect_mismatch: 캘리브레이션 해상도와 디코드한 프레임의 화면비(가로/세로)가
+        이 상대 차이보다 크면 그 캘리브레이션을 쓰지 않고 화각 근사로 떨어진다 (같은 기기의 다른
+        촬영 모드는 센서를 잘라 비례 조정이 틀린다, F-PAR-44).
     hand_fit: 손 중심 3D 점이 있는 손 트랙의 맞춤 (`HandFitPolicy`, ADR 0044).
     sample_confidence: 표본 신뢰도 (`SampleConfidencePolicy`, ADR 0045). 궤적 라벨 신뢰도는 그
         궤적 표본 신뢰도의 평균이다.
@@ -182,6 +196,8 @@ class DepthPolicy(Contract):
     min_depth_m: float = Field(gt=0)
     max_depth_m: float = Field(gt=0)
     hand_points: tuple[int, ...] = Field(min_length=1)
+    fingertip_fallback: Literal["drop", "point_depth"]
+    max_intrinsics_aspect_mismatch: float = Field(ge=0)
     hand_fit: HandFitPolicy
     sample_confidence: SampleConfidencePolicy
 
@@ -204,13 +220,14 @@ class PalmEstimatePolicy(Contract):
     캘리브레이션이 있는 세션의 손 맞춤 중 품질이 좋은 시각마다 깊이 배율만으로 잰 손목 → 중지 MCP
     길이의 중앙값을 낸다. 3D 단계 버전(`depth` 절 해시)에는 들어가지 않는다 (추정 명령만 쓴다).
 
-    max_reprojection_px: 쓸 맞춤의 재투영 RMS 상한(px, 맞춤 기본값보다 엄격하게).
+    max_reprojection_ratio: 쓸 맞춤의 상대 재투영 오차 상한 (`HandFit.rms_rel`, 맞춤 기본값보다
+        엄격하게. 해상도와 무관, F-PAR-43).
     min_visible: 쓸 맞춤의 보이는 관절 수 하한.
     min_samples: 이보다 적으면 추정하지 않는다 (등록하지 않음).
     palm_range_m: 받아들일 손바닥 길이 범위 (m, [하한, 상한]). 밖의 값은 버린다 (깊이 오류).
     """
 
-    max_reprojection_px: float = Field(gt=0)
+    max_reprojection_ratio: float = Field(gt=0)
     min_visible: int = Field(ge=3, le=21)
     min_samples: int = Field(ge=1)
     palm_range_m: tuple[float, float]
@@ -219,9 +236,19 @@ class PalmEstimatePolicy(Contract):
 class PoseImuPolicy(Contract):
     """카메라 자세의 IMU 회전 정책 (`camera_pose.imu` 절, ADR 0046, `campose.imu_orientation`).
 
-    init_window_ms: 첫 프레임부터 이 길이의 IMU로 중력 방향과 자이로 편향을 정한다.
-    static_gyro_std: 초기 구간 자이로 크기의 표준편차가 이 값(rad/s) 이하이고 가속도 크기 표준편차가
-        `static_acc_std`(m/s²) 이하이면 정지로 보고 자이로 편향을 그 평균으로 뺀다. 아니면 편향 0.
+    init_window_ms: IMU가 덮는 첫 프레임부터 이 길이의 IMU로 중력 방향과 자이로 편향을 정한다.
+    static_gyro_std: 초기 구간 자이로 크기의 표준편차가 이 값(rad/s) 이하이고, 자이로 평균 벡터의
+        크기가 `static_gyro_mean_max`(rad/s) 이하이고, 가속도 크기 표준편차가 `static_acc_std`(m/s²)
+        이하이고, 가속도 크기 평균이 `gravity`와 `accel_tolerance` 안이면 정지로 보고 자이로 편향을
+        그 평균으로 뺀다. 아니면 편향 0 (신뢰도에 `confidence.no_static_init`를 곱한다).
+    static_gyro_mean_max: 정지로 볼 자이로 평균 크기 상한(rad/s). 실제 영점 편향보다 조금 크게
+        잡는다. 일정한 속도로 돌며 녹화를 시작하면 크기 표준편차는 0에 가깝지만 평균이 커서 정지가
+        아니다 (F-PAR-46).
+    max_gap_ms: IMU 표본 간격이 이보다 크면(기록 끊김) 그 앞에서 자세를 멈춘다. 빈틈을 건너
+        적분하면 회전을 지어낸다 (F-PAR-48). 초기화 구간 안에 빈틈이 있으면 자세를 만들지 않는다.
+    rotation_tolerance: 카메라-IMU 외부 파라미터(세션 값·`default_imu_to_camera`)의 회전 부분이
+        직교(R Rᵀ = I)에서 벗어나도 되는 원소별 허용 오차. 넘거나 행렬식이 음수(반사)면 자세를
+        만들지 않는다. 허용 오차 안이면 가장 가까운 회전으로 고쳐 쓴다 (F-PAR-49).
     accel_gain: 가속도 기울기 보정 이득 (1/s, 상보 필터). 0이면 자이로만 적분한다.
     accel_tolerance: 가속도 크기가 중력과 이만큼(m/s²) 안일 때만 기울기를 보정한다 (빠른 움직임은
         보정하지 않는다).
@@ -233,35 +260,36 @@ class PoseImuPolicy(Contract):
 
     init_window_ms: int = Field(gt=0)
     static_gyro_std: float = Field(ge=0)
+    static_gyro_mean_max: float = Field(ge=0)
     static_acc_std: float = Field(ge=0)
     accel_gain: float = Field(ge=0)
     accel_tolerance: float = Field(gt=0)
     gravity: float = Field(gt=0)
+    max_gap_ms: float = Field(gt=0)
+    rotation_tolerance: float = Field(gt=0)
     default_imu_to_camera: tuple[tuple[float, float, float], ...] | None = None
 
-    @field_validator("default_imu_to_camera")
-    @classmethod
-    def _rotation(
-        cls, v: tuple[tuple[float, float, float], ...] | None
-    ) -> tuple[tuple[float, float, float], ...] | None:
-        """3x3 회전 행렬(직교, 행렬식 1)인지 검사한다. 아니면 ValueError."""
-        if v is None:
-            return v
-        import numpy as np
+    @model_validator(mode="after")
+    def _rotation(self) -> PoseImuPolicy:
+        """default_imu_to_camera가 3x3 회전 행렬(직교, 행렬식 +1)인지 검사한다. 아니면 ValueError.
 
-        m = np.array(v, dtype=np.float64)
-        if m.shape != (3, 3) or not np.allclose(m @ m.T, np.eye(3), atol=1e-6):
-            raise ValueError("default_imu_to_camera는 3x3 회전 행렬이어야 합니다")
-        if np.linalg.det(m) < 0:
-            raise ValueError("default_imu_to_camera의 행렬식이 -1입니다 (반사)")
-        return v
+        세션 값과 같은 검사(`posemath.rotation_problem`, 허용 오차 `rotation_tolerance`)다.
+        """
+        if self.default_imu_to_camera is None:
+            return self
+
+        problem = rotation_problem(self.default_imu_to_camera, self.rotation_tolerance)
+        if problem is not None:
+            raise ValueError(f"default_imu_to_camera: {problem}")
+        return self
 
 
 class PoseFeaturePolicy(Contract):
     """특징점 추적 정책 (`camera_pose.features` 절, OpenCV goodFeaturesToTrack + 피라미드 LK).
 
     max_corners / quality_level / min_distance_px: 특징점 검출. lk_window_px / lk_levels: LK 창
-    크기와 피라미드 단계. fb_max_px: 앞뒤 추적 왕복 오차 상한 (넘으면 버린다).
+    크기와 피라미드 단계. lk_max_iterations / lk_epsilon: LK 반복 종료 기준 (반복 수, 이동량 px.
+    OpenCV 기본값 30, 0.01과 같다, F-PAR-55). fb_max_px: 앞뒤 추적 왕복 오차 상한 (넘으면 버린다).
     """
 
     max_corners: int = Field(ge=8)
@@ -269,6 +297,8 @@ class PoseFeaturePolicy(Contract):
     min_distance_px: float = Field(gt=0)
     lk_window_px: int = Field(ge=5)
     lk_levels: int = Field(ge=0)
+    lk_max_iterations: int = Field(ge=1)
+    lk_epsilon: float = Field(gt=0)
     fb_max_px: float = Field(gt=0)
 
 

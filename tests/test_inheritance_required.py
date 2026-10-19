@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from dlp_actions.describe import plan_describe
+from dlp_active.rates import session_changes
 from dlp_export.source import select_labels
 from dlp_schema.description_follow import (
     active_inheritance,
@@ -26,6 +27,7 @@ from dlp_schema.description_follow import (
     inherited_owner,
     plan_description_follow,
 )
+from dlp_schema.reviewer_changes import reviewer_changes
 from dlp_schema.trajectory_follow import (
     active_trajectory_inheritance,
     inheritance_only_trajectory,
@@ -49,6 +51,8 @@ PLANNERS: dict[str, tuple[Callable[..., Any], int]] = {
     "inheritance_only_trajectory": (inheritance_only_trajectory, 1),
     "review_basis": (review_basis, 1),
     "select_labels": (select_labels, 3),
+    "reviewer_changes": (reviewer_changes, 2),
+    "session_changes": (session_changes, 1),
 }
 
 

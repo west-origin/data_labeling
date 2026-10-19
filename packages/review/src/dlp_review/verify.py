@@ -27,6 +27,11 @@
   대상이 아니라 review.yaml `verify.automatic`에 camera_pose가 있으면(기본) 검수 전이어도 완료를
   막지 않는다 (F-COE-21, ADR 0050. 검수 상태는 그대로이고 내보내기 manifest가
   automatic_unreviewed로 밝힌다).
+- 3D 궤적이 지금 2D와 맞다 (review.yaml `verify.require_current_3d`, 기본 참, F-COE-30): 궤적
+  따르기가 출처 2D가 바뀌어 지운 3D의 대상(스트림, 개체, 좌표계)에 지금 2D로 계산한 3D가 없는데
+  3D 단계가 올릴 2D 트랙(hand21 손·박스)이 있으면 막고 `dlp prelabel run <세션>`을 안내한다. 검수
+  전인 채 출처 2D가 바뀐 낡은 3D도 같은 안내를 붙인다. 2D를 승인 뒤 고쳤든(물려받은 3D가 지워짐)
+  승인 전에 고쳤든(낡은 3D가 검수 전으로 남음) 같은 판정이다.
 - 블러를 뺀 현재 운영 라벨이 하나 이상 있다 (빈 세션은 완료가 아니다).
 
 관련: ADR 0028(생애주기 기록), ADR 0029(검수 완료 판정 명령).
@@ -64,7 +69,14 @@ from dlp_schema.db.repository import (
 )
 from dlp_schema.db.trajectory_repository import apply_trajectory_follow
 from dlp_schema.episode import current_labels
-from dlp_schema.labels import LabelRecord, Source, VerificationState
+from dlp_schema.labels import (
+    BoxTrackPayload,
+    KeypointTrackPayload,
+    LabelRecord,
+    Source,
+    Trajectory3DPayload,
+    VerificationState,
+)
 from dlp_schema.review import (
     AssignmentStatus,
     InheritanceMechanism,
@@ -74,7 +86,7 @@ from dlp_schema.review import (
     TrajectoryInheritanceMechanism,
 )
 from dlp_schema.session import LifecycleState, PrivacyState
-from dlp_schema.trajectory_follow import is_camera_pose
+from dlp_schema.trajectory_follow import TRAJECTORY_FOLLOW_VERSION, is_camera_pose
 
 # 모델 라벨이 "사람이 확인했다"고 볼 수 있는 검증 상태.
 # SAMPLE_VERIFIED(표본 합격으로 일괄 검증)도 포함한다. 오류 삽입 정답 풀(`ops.runner.VERIFIED`)은
@@ -118,12 +130,14 @@ def verification_gaps(
     session_id: str,
     privacy_policy: PrivacyPolicy | None = None,
     automatic: tuple[AutomaticLabel, ...] | None = None,
+    require_current_3d: bool | None = None,
 ) -> list[str]:
     """완료를 막는 이유 목록 (비었으면 완료 조건을 모두 만족).
 
     인자: conn(DB 연결, 읽기만), session_id(세션 ID), privacy_policy(렌더 해시 계산용 프라이버시
     정책, None이면 저장소의 `privacy.yaml`), automatic(검수 전이어도 막지 않는 자동 라벨 분류,
-    None이면 저장소 review.yaml `verify.automatic`, ADR 0050).
+    None이면 저장소 review.yaml `verify.automatic`, ADR 0050), require_current_3d(3D가 지금 2D와
+    맞아야 하는지, None이면 저장소 review.yaml `verify.require_current_3d`, F-COE-30).
     반환: 이유 문장 목록. 순서는 블러 승인 → 작업 → 매체 회수 → 배정 → 라벨.
     예외: 세션이 없으면 `get_session`이 던지는 예외.
     부작용 없음 (`sessions`, `review_tasks`, `review_assignments`, `label_records` 조회).
@@ -146,7 +160,8 @@ def verification_gaps(
         reasons.append(f"열린 검수 배정 {len(open_assignments)}개")
     # 블러 라벨은 블러 승인(privacy_state)으로 따로 판정하므로 라벨 조건에서 뺀다.
     # current_labels는 운영 라벨만 준다 (오류 삽입·측정 레코드 제외).
-    labels = [x for x in current_labels(get_labels(conn, session_id)) if x.kind != "blur_track"]
+    history = get_labels(conn, session_id)
+    labels = [x for x in current_labels(history) if x.kind != "blur_track"]
     if not labels:
         reasons.append("블러를 뺀 운영 라벨이 없다")
     auto = _automatic(automatic)
@@ -159,6 +174,96 @@ def verification_gaps(
     ]
     if pending:
         reasons.append(f"검수하지 않은 모델 라벨 {len(pending)}개 (예: {pending[0]})")
+    if _require_current_3d(require_current_3d):
+        reasons += trajectory_gaps(session_id, history, labels)
+    return reasons
+
+
+def _require_current_3d(value: bool | None) -> bool:
+    """3D가 지금 2D와 맞아야 하는가 (None이면 저장소 review.yaml `verify.require_current_3d`)."""
+    return load_review_policy(repo_root()).verify.require_current_3d if value is None else value
+
+
+# 3D 궤적 대상 키 (스트림, 개체, 좌표계)
+_Target = tuple[str | None, str, str]
+
+
+def _liftable(labels: list[LabelRecord]) -> set[tuple[str | None, str, bool]]:
+    """3D 단계가 올리는 현재 2D 트랙의 (스트림, 개체, 손 트랙인가) (hand21 손·박스 트랙)."""
+    out: set[tuple[str | None, str, bool]] = set()
+    for x in labels:
+        p = x.payload
+        if isinstance(p, KeypointTrackPayload) and p.skeleton == "hand21":
+            out.add((x.stream_id, p.entity_id, True))
+        elif isinstance(p, BoxTrackPayload):
+            out.add((x.stream_id, p.entity_id, False))
+    return out
+
+
+def _fresh(x: LabelRecord, live: set[str]) -> bool:
+    """3D 궤적이 지금 입력에서 나왔는가: 출처(derived_from 첫 항목, 2D 또는 카메라 좌표 궤적)가
+    지금 현재 라벨이다 (출처 기록이 없는 예전 3D·사람 3D는 그렇다고 본다)."""
+    p = x.payload
+    assert isinstance(p, Trajectory3DPayload)
+    return not p.derived_from or p.derived_from[0] in live
+
+
+def trajectory_gaps(
+    session_id: str, history: list[LabelRecord], labels: list[LabelRecord]
+) -> list[str]:
+    """3D 궤적이 지금 2D와 맞지 않아 완료를 막는 이유 (모듈 docstring의 마지막 조건, F-COE-30).
+
+    Args:
+        session_id: 세션 ID (안내 명령에 쓴다).
+        history: 세션 전체 이력. labels: 블러를 뺀 현재 운영 라벨.
+
+    Returns:
+        이유 문장 목록 (막을 것이 없으면 빈 목록). 카메라 자세는 보지 않는다 (자동 라벨).
+    """
+    live = {x.label_id for x in labels}
+    by_id = {x.label_id: x for x in history}
+    tracks = [x for x in labels if isinstance(x.payload, Trajectory3DPayload)]
+    covered: set[_Target] = set()
+    stale: list[str] = []
+    for x in tracks:
+        p = x.payload
+        assert isinstance(p, Trajectory3DPayload)
+        if is_camera_pose(x):
+            continue
+        if _fresh(x, live):
+            covered.add((x.stream_id, p.entity_id, p.frame.value))
+        elif x.verification.state is VerificationState.UNREVIEWED:
+            stale.append(x.label_id)
+    liftable = _liftable(labels)
+    missing: set[_Target] = set()
+    for gone in history:
+        parent = by_id.get(gone.parent_label_id or "")
+        if (
+            not gone.retracted
+            or gone.provenance.model_version != TRAJECTORY_FOLLOW_VERSION
+            or parent is None
+            or not isinstance(parent.payload, Trajectory3DPayload)
+        ):
+            continue
+        p = parent.payload
+        target = (parent.stream_id, p.entity_id, p.frame.value)
+        if (
+            target not in covered
+            and (parent.stream_id, p.entity_id, p.part is not None) in liftable
+        ):
+            missing.add(target)
+    reasons: list[str] = []
+    if missing:
+        stream, entity, frame = sorted(missing, key=lambda t: (t[0] or "", t[1], t[2]))[0]
+        reasons.append(
+            f"출처 2D가 바뀌어 지운 3D 궤적을 지금 2D로 다시 만들지 않았다 {len(missing)}개 대상 "
+            f"(예: {stream}/{entity}/{frame}) → dlp prelabel run {session_id}"
+        )
+    if stale:
+        reasons.append(
+            f"출처 2D가 바뀐 낡은 3D 궤적 {len(stale)}개 (예: {stale[0]}) → dlp prelabel run "
+            f"{session_id}"
+        )
     return reasons
 
 
@@ -284,9 +389,13 @@ def verify_session(
     반환: `VerifyResult`. prelabeled가 아니면(그 전 단계 또는 withdrawn) verified=False와 그 이유를
     돌려준다 (예외 아님. withdrawn이어도 이유 문장은 "프리라벨 전 단계다"로 나온다).
     부작용: prelabeled면 먼저 설명 규칙을 적용한다(`apply_description_follow`: 설명 검수 상태 갱신·
-    검수 전 설명 삭제 레코드, 세션 잠금). 조건을 모두 만족하면 `set_lifecycle`로
-    `sessions.lifecycle_state`를 바꾸고
-    `session_lifecycle_events`에 전이 기록을 남긴다. 트랜잭션은 호출자가 연다.
+    검수 전 설명 삭제 레코드, 세션 잠금). 이어서 궤적 따르기를 적용한다(`apply_trajectory_follow`:
+    3D 궤적의 2D 검수 물려받기와 같은 트랜잭션의 `trajectory_inheritance` 기록, 출처가 끊기거나
+    대체된 물려받기만 한 3D의 삭제 레코드 `trajectory-follow-1`, 세션 잠금, F-COE-33). 조건을 모두
+    만족하면 `set_lifecycle`로 `sessions.lifecycle_state`를 바꾸고 `session_lifecycle_events`에 전이
+    기록을 남긴다. 이미 완료 단계(human_verified 이후)면 아무것도 쓰지 않는다: 그 세션의 3D는
+    `dlp prelabel run`(생애주기와 무관하게 같은 실행에서 궤적 따르기 적용)이 메운다. 트랜잭션은
+    호출자가 연다.
     """
     session = get_session(conn, session_id)
     state = session.lifecycle_state

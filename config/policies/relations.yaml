@@ -63,6 +63,9 @@ tool_surface:
   min_duration_ms: 100        # 이보다 짧은 접촉 구간은 버린다
   merge_gap_ms: 100           # 이 이하로 끊긴 접촉 구간은 잇는다
   max_time_gap_ms: 100        # 작용부 샘플과 가장 가까운 표면 샘플의 시각 차 허용
+  # 연속한 작용부 샘플 사이가 이보다 비면(월드 좌표 자세 공백, 3D 결측) 접촉을 그 앞 샘플에서 끝낸다.
+  # 빈 사이 도구가 들렸을 수 있어 두 접촉을 잇지 않는다 (F-PAR-57). 3D 단계 간격(depth.frame_stride_ms 200)의 2배
+  max_sample_gap_ms: 400
   require_grasp: true         # 손이 도구를 쥔 구간 안에서만 접촉으로 본다
   confidence: 0.7             # 도구-표면 접촉 관계와 커버리지 레코드의 신뢰도
   corner_parts: [corner_0, corner_1, corner_2, corner_3]   # corner_0 원점, 1 가로, 3 세로

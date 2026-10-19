@@ -28,7 +28,8 @@ from dlp_schema.validation import OntologyViolationError, check_label_set, valid
 # 그 라벨을 대신하는 마지막 현재 후손을 지우는 것도 막는다 (F-SCH-02).
 # 사람이 만든 미검수 라벨은 여기서 막지 않는다 (기존 정리 경로가 쓴다).
 # 예외: 설명 따르기가 물려받은 검수만 있는 설명을 지울 때 (`_FollowExemption`, ADR 0043 3절 규칙 6),
-# 궤적 따르기가 물려받은 검수만 있는 끊긴 3D 궤적을 지울 때 (`_TrajectoryExemption`, ADR 0050)
+# 궤적 따르기가 물려받은 검수만 있는 끊긴·대체된 3D 궤적을 지울 때 (`_TrajectoryExemption`,
+# ADR 0050·0051)
 PROTECTED_STATES = (
     VerificationState.HUMAN_APPROVED,
     VerificationState.HUMAN_CORRECTED,
@@ -55,9 +56,10 @@ class ProtectedLabelRetractionError(OntologyViolationError):
 
     좁은 예외 둘. (1) ADR 0043 3절 규칙 6 (`_FollowExemption`): 설명 따르기(`FOLLOW_VERSION`)가
     물려받은 검수만 있는 설명을, 같은 이력으로 다시 계산한 설명 따르기 계획이 지울 때.
-    (2) ADR 0050 (`_TrajectoryExemption`): 궤적 따르기(`TRAJECTORY_FOLLOW_VERSION`)가 2D 트랙
+    (2) ADR 0050·0051 (`_TrajectoryExemption`): 궤적 따르기(`TRAJECTORY_FOLLOW_VERSION`)가 2D 트랙
     검수를 물려받기만 한 3D 궤적을, 같은 이력으로 다시 계산한 궤적 따르기 계획이 지울 때(출처가
-    끊김). 그 밖의 보호 라벨(사람 출처, 직접 검수, 다른 종류의 라벨)은 그대로 막는다.
+    끊김, 또는 같은 출처 2D에서 다른 판으로 새로 계산한 검수 전 3D가 같은 대상에 있음). 그 밖의
+    보호 라벨(사람 출처, 직접 검수, 다른 종류의 라벨)은 그대로 막는다.
     """
 
 
@@ -75,7 +77,7 @@ def validate_session_labels(
     사람 출처가 아닌 삭제 레코드는 사람이 확인한(`PROTECTED_STATES`) 부모를 지울 수 없고,
     사람이 확인한 조상의 마지막 현재 후손도 지울 수 없다 (`ProtectedLabelRetractionError`).
     예외는 설명 따르기가 물려받은 검수만 있는 설명을 지울 때(`_FollowExemption`)와 궤적 따르기가
-    물려받은 검수만 있는 끊긴 3D 궤적을 지울 때(`_TrajectoryExemption`)뿐이다.
+    물려받은 검수만 있는 끊긴·대체된 3D 궤적을 지울 때(`_TrajectoryExemption`)뿐이다.
     `history`는 호출자가 세션 잠금 아래에서 읽은 최신 이력이어야 한다. `inheritance`(설명)·
     `trajectory_inheritance`(3D 궤적)는 같은 잠금 아래 읽은 세션의 물려받기 기록이다 (예외 판정에만
     쓴다. 비면 그 예외가 없다).
@@ -154,7 +156,7 @@ class _FollowExemption:
 
 
 class _TrajectoryExemption:
-    """보호 라벨 삭제 거부의 두 번째 좁은 예외 (ADR 0050, 궤적 따르기 규칙 3).
+    """보호 라벨 삭제 거부의 두 번째 좁은 예외 (ADR 0050·0051, 궤적 따르기 규칙 3·5).
 
     허용 조건을 모두 만족해야 한다.
 
@@ -162,7 +164,9 @@ class _TrajectoryExemption:
     2. 지우는 레코드가 3D 궤적이고 보호가 물려받은 검수뿐이다 (`inheritance_only_trajectory`: 지금
        검수 상태가 명시 물려받기 기록 `trajectory_inheritance`의 마지막 기록과 같다).
     3. 저장 전 이력(세션 잠금 아래 최신)으로 다시 계산한 궤적 따르기 계획이 그 궤적을 지운다
-       (출처 2D·경유 입력이 바뀌었거나 지워졌다). 계획은 처음 필요할 때 한 번만 계산한다.
+       (출처 2D·경유 입력이 바뀌었거나 지워졌다, 또는 같은 출처 2D에서 다른 판으로 새로 계산한 검수
+       전 3D가 같은 대상에 이미 저장돼 있다: 규칙 5, ADR 0051). 새 3D가 아직 이력에 없으면 계획은
+       대체를 보지 않아 거부한다. 계획은 처음 필요할 때 한 번만 계산한다.
     """
 
     def __init__(

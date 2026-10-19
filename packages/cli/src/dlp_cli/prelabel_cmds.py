@@ -44,7 +44,7 @@ from dlp_prelabel.adapters.rtmpose import RtmPose
 from dlp_prelabel.adapters.stubs import UNAVAILABLE
 from dlp_prelabel.lift3d import DepthLifter
 from dlp_prelabel.policy import load_policy
-from dlp_prelabel.runner import CONTACT_STEP, run_prelabel
+from dlp_prelabel.runner import CONTACT_STEP, PrelabelSummary, run_prelabel
 from dlp_schema import load_config, repo_root
 from dlp_schema.db.repository import list_model_versions
 from dlp_schema.lineage import ModelStatus
@@ -156,14 +156,26 @@ def cmd_run(args: argparse.Namespace) -> int:
             )
     finally:
         engine.dispose()
+    _print_summary(s)
+    return 0
+
+
+def _print_summary(s: PrelabelSummary) -> None:
+    """`run_prelabel` 요약을 출력한다 (단계별 결과, 3D 보호·자세 이유, 물려받기, 사람 접촉)."""
     for key, n in s.produced.items():
         print(f"{key}: 라벨 {n}개")
     for key in s.skipped:
         print(f"{key}: 같은 모델 버전 결과가 있어 건너뜀")
     print(f"3D 궤적 {s.lifted}개, 접촉 구간 {s.contacts}개, 3인칭 착용자 {s.wearer or '-'}")
-    # 바디캠 자세·월드 좌표 3D (ADR 0046). 건너뛴 이유가 있으면 그대로 보인다
+    if s.lift_blocked:
+        # 직접 검수·사람 출처 3D는 새 입력(캘리브레이션·손 크기·판)으로도 대신하지 않는다 (ADR 0051)
+        print(
+            f"[3D 보호] 같은 대상에 직접 검수·사람 3D가 있어 새로 계산한 3D를 넣지 않음 "
+            f"{s.lift_blocked}개"
+        )
+    # 바디캠 자세·월드 좌표 3D (ADR 0046). 건너뛴 이유는 그대로 보인다 ([자세 낡음]은 지운 자세)
     if s.pose_note:
-        print(f"[자세 없음] {s.pose_note}")
+        print(s.pose_note if s.pose_note.startswith("[") else f"[자세 없음] {s.pose_note}")
     else:
         lost = f", {s.pose_lost_at_ms} ms부터 추적을 잃음" if s.pose_lost_at_ms is not None else ""
         print(f"카메라 자세 표본 {s.poses}개{lost}, 월드 좌표 3D 궤적 {s.world}개")
@@ -171,7 +183,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         # 3D 궤적은 그것을 계산한 2D 트랙(손·박스)의 검수를 물려받는다 (ADR 0048·0050)
         print(
             f"3D 궤적: 2D 트랙 검수 물려받음 {s.trajectories_inherited}, "
-            f"출처 2D가 바뀌어 끊겨 지움 {s.trajectories_retracted}"
+            f"출처 2D가 바뀌었거나 새 계산이 대신해 지움 {s.trajectories_retracted}"
         )
     if s.person_contacts:
         # 사람 박스 접촉은 부위(body_part)를 몰라 손 상태 라벨을 만들지 않았다 (F-PAR-03)
@@ -179,7 +191,6 @@ def cmd_run(args: argparse.Namespace) -> int:
             f"사람 접촉 {s.person_contacts}개: 대상자 부위를 알 수 없어 라벨을 만들지 않았습니다 "
             "(검수에서 부위와 함께 그린다)"
         )
-    return 0
 
 
 def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:  # pyright: ignore[reportPrivateUsage]

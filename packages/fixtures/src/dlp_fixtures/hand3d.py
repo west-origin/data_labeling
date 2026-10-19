@@ -13,6 +13,9 @@
 - `intrinsics`: 투영에 쓴 내부 파라미터. 기본값은 320x240, 가로 화각 90도 근사와 같다
   (fx = fy = 160, 주점 중앙) — 캘리브레이션 없는 세션의 기본 근사(`prelabel.yaml depth`)와 맞다.
   `focal_px`로 바꿀 수 있다. 손 크기도 `hand_scale`로 바꿀 수 있다 (작업자 손 크기 사전값 시험).
+  `resolution_scale`은 영상 크기·초점 거리·주점을 함께 늘린다 (같은 장면의 1080p·4K판, 해상도와
+  무관한 맞춤 문턱 시험, F-PAR-43). `world_rotation_deg`는 손 모델 3D 점의 자세를 정답과 그 각도만큼
+  어긋나게 한다 (MediaPipe world가 카메라 축과 정확히 같지 않은 경우, F-PAR-42).
 - `depth`: 합성 메트릭 깊이 모델 (`SceneDepth`). 배경 평면 + 손바닥 관절 둘레 원판만 관절 깊이를
   갖는다. 얇은 손가락 끝은 배경 깊이가 나오므로 관절별 깊이 방식은 손가락 끝에서 틀린다.
 - `frames()`: (PTS ms, 작은 RGB 프레임). 프레임 번호를 첫 픽셀에 적어 `SceneDepth`가 그 시각의
@@ -67,6 +70,12 @@ def _rot(rx: float, ry: float, rz: float) -> NDArray[np.float64]:
     my = np.array([[cy, 0, sy], [0, 1, 0], [-sy, 0, cy]])
     mz = np.array([[cz, -sz, 0], [sz, cz, 0], [0, 0, 1]])
     return mz @ my @ mx
+
+
+def _axis_angle(axis: NDArray[np.float64], angle: float) -> NDArray[np.float64]:
+    """단위 축·각(라디안) → 회전 행렬 (로드리게스 식)."""
+    kx = np.array([[0, -axis[2], axis[1]], [axis[2], 0, -axis[0]], [-axis[1], axis[0], 0]])
+    return np.eye(3) + np.sin(angle) * kx + (1 - np.cos(angle)) * (kx @ kx)
 
 
 def _chain(
@@ -175,6 +184,8 @@ def generate_hand3d_scenario(
     depth_bias: float = 1.0,
     hand_scale: float = 1.0,
     focal_px: float = 160.0,
+    resolution_scale: float = 1.0,
+    world_rotation_deg: float = 0.0,
 ) -> Hand3DScenario:
     """정답 3D를 아는 손 시퀀스. 같은 인자면 같은 결과다 (결정적).
 
@@ -190,9 +201,17 @@ def generate_hand3d_scenario(
             크기). 손목 위치는 그대로다.
         focal_px: 투영 초점 거리 fx = fy (px). 기본 160은 가로 화각 90도 근사와 같다. 다르면
             캘리브레이션 없이 화각 근사로 올린 3D가 틀린다 (ADR 0045 캘리브레이션 시험).
+        resolution_scale: 영상 크기 배율 (320x240 x 배율, 초점 거리·주점·깊이 원판 반지름도 같은
+            배율). 6이면 1920x1440. 장면(3D)은 그대로다.
+        world_rotation_deg: 손 중심 3D 점을 손 중심 기준으로 이 각도(도)만큼 돌린다 (축은 시드로
+            정하는 무작위 단위 벡터, 프레임마다 같다). 정답 3D·2D는 그대로다.
     """
     rng = np.random.default_rng(seed)
-    k = CameraIntrinsics(width=320, height=240, fx=focal_px, fy=focal_px, cx=160.0, cy=120.0)
+    w, h = round(320 * resolution_scale), round(240 * resolution_scale)
+    f = focal_px * resolution_scale
+    k = CameraIntrinsics(width=w, height=h, fx=f, fy=f, cx=w / 2, cy=h / 2)
+    axis = rng.normal(size=3)
+    tilt = _axis_angle(axis / np.linalg.norm(axis), np.deg2rad(world_rotation_deg))
     mirror = np.array([-1.0, 1.0, 1.0]) if hand is Hand.LEFT else np.ones(3)
     frame_times = [round(i * FRAME_MS) for i in range(n_frames)]
     joints: list[NDArray[np.float64]] = []
@@ -205,7 +224,7 @@ def generate_hand3d_scenario(
         joints.append(cam)
         pixels.append(px)
         seen = px + rng.normal(0, pixel_noise_px, px.shape) if pixel_noise_px else px
-        world = (cam - cam.mean(axis=0)) * world_scale
+        world = (cam - cam.mean(axis=0)) @ tilt.T * world_scale
         if world_noise_m:
             world = world + rng.normal(0, world_noise_m, world.shape)
         frames.append(
@@ -236,5 +255,12 @@ def generate_hand3d_scenario(
         frame_times=frame_times,
         joints_cam=dict(zip(frame_times, joints, strict=True)),
         labels=[track],
-        depth=SceneDepth(joints=joints, pixels=pixels, bias=depth_bias),
+        depth=SceneDepth(
+            joints=joints,
+            pixels=pixels,
+            bias=depth_bias,
+            disc_px=max(5, round(5 * resolution_scale)),
+        ),
+        width=w,
+        height=h,
     )

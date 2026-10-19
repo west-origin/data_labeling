@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -44,8 +45,9 @@ from dlp_prelabel.posemath import (
     slerp,
 )
 from dlp_prelabel.worldframe import pose_at, to_world_samples, world_label
-from dlp_schema.labels import CoordinateFrame, Lift3DMethod, Trajectory3DPayload
+from dlp_schema.labels import CoordinateFrame, IntrinsicsSource, Lift3DMethod, Trajectory3DPayload
 from dlp_schema.ontology import load_ontology
+from dlp_schema.session import CameraIntrinsics
 from dlp_schema.testing import FIXED_TIME
 from dlp_schema.validation import check_label
 
@@ -72,9 +74,18 @@ def _r_ci(sc: CameraMotionScenario) -> NDArray[np.float64]:
     return np.array(sc.imu_to_camera, dtype=np.float64)[:3, :3]
 
 
+def _odometry(policy: PrelabelPolicy, hfov_deg: float | None = None) -> ImuVisualOdometry:
+    """저장소 정책의 내장 오도메트리 (화각·화면비 허용 오차는 depth 절)."""
+    return ImuVisualOdometry(
+        policy.camera_pose,
+        hfov_deg=policy.depth.default_hfov_deg if hfov_deg is None else hfov_deg,
+        max_aspect_mismatch=policy.depth.max_intrinsics_aspect_mismatch,
+    )
+
+
 def _run(sc: CameraMotionScenario, policy: PrelabelPolicy, **kw: bool) -> PoseTrack:
     """내장 오도메트리로 자세 궤적을 낸다 (정답 깊이)."""
-    est = ImuVisualOdometry(policy.camera_pose, hfov_deg=policy.depth.default_hfov_deg)
+    est = _odometry(policy)
     return est.estimate(
         sc.frames(),
         imu=_imu(sc, **kw),
@@ -223,7 +234,7 @@ def test_tracking_loss_stops_instead_of_inventing_poses(policy: PrelabelPolicy) 
         for t, img in sc.frames():
             yield t, (np.full_like(img, 90) if t >= blind_from else img)
 
-    est = ImuVisualOdometry(policy.camera_pose, hfov_deg=90)
+    est = _odometry(policy, hfov_deg=90)
     track = est.estimate(
         frames(), imu=_imu(sc), imu_to_camera=_r_ci(sc), intrinsics=sc.intrinsics, depth=sc
     )
@@ -232,10 +243,107 @@ def test_tracking_loss_stops_instead_of_inventing_poses(policy: PrelabelPolicy) 
     assert all(s.t_ms < blind_from for s in track.samples)
 
 
+def _imu_without(sc: CameraMotionScenario, lo_ms: float, hi_ms: float) -> ImuSeries:
+    """마스터 시각 [lo_ms, hi_ms) IMU 표본을 뺀 IMU (늦은 시작·기록 끊김 흉내)."""
+    imu = _imu(sc)
+    keep = (imu.t_ms < lo_ms) | (imu.t_ms >= hi_ms)
+    return ImuSeries(imu.t_ms[keep], imu.acc[keep], imu.gyro[keep])
+
+
+def test_constant_rotation_start_is_not_mistaken_for_static(policy: PrelabelPolicy) -> None:
+    """0.2 rad/s로 일정하게 돌며 녹화를 시작하면(F-PAR-46 재현) 자이로 크기는 거의 상수지만 평균이
+    커서 정지가 아니다: 편향을 빼지 않아 회전이 맞고(2도 안), 신뢰도에 no_static_init을 곱한다.
+    예전에는 그 회전을 편향으로 빼 2초 뒤 회전 오차가 20도를 넘었다.
+    """
+    sc = generate_camera_motion(0, duration_s=2.0, start_yaw_rate=0.2)
+    track = _run(sc, policy)
+    c = policy.camera_pose.confidence
+    assert track.stats["static_init"] == 0
+    assert max(s.confidence for s in track.samples) <= round(c.base * c.no_static_init, 3)
+    assert math.degrees(_errors(sc, track)[3]) < 2.0
+
+
+def test_imu_starting_after_the_first_frame_still_gives_poses(policy: PrelabelPolicy) -> None:
+    """IMU 첫 표본이 첫 프레임보다 늦으면(사이드카 동기화 오프셋, F-PAR-47 재현) IMU가 덮는 첫
+    프레임부터 자세를 낸다. 예전에는 첫 프레임에서 'IMU가 끝났다'로 멈춰 자세가 0개였다. 초기화
+    구간(500 ms)이 움직임 시작 전에 끝나도록 정지 구간을 1초로 둔다 (그 구간이 움직임에 걸치면
+    중력 방향이 가속도로 틀어지는 것은 이 결함과 별개다).
+    """
+    for late in (10.0, 300.0):
+        sc = generate_camera_motion(4, duration_s=2.0, static_s=1.0)
+        imu = _imu_without(sc, -1e9, late)
+        track = _odometry(policy).estimate(
+            sc.frames(), imu=imu, imu_to_camera=_r_ci(sc), intrinsics=sc.intrinsics, depth=sc
+        )
+        assert len(track.samples) > 10, late
+        assert track.samples[0].t_ms >= late and track.lost_at_ms is None
+        assert math.degrees(_errors(sc, track)[3]) < 1.0
+
+
+def test_imu_gap_stops_instead_of_bridging(policy: PrelabelPolicy) -> None:
+    """IMU가 1.0~2.0초를 놓치면(F-PAR-48 재현) 빈틈 앞에서 자세를 멈추고 lost_at_ms를 남긴다 (빈틈
+    너머 회전을 지어내지 않는다). 표본 하나(5 ms)만 빠진 짧은 빈틈은 그대로 끝까지 잇는다. 초기화
+    구간 안의 빈틈은 거부한다.
+    """
+    sc = generate_camera_motion(0, duration_s=3.0)
+    track = _odometry(policy).estimate(
+        sc.frames(), imu=_imu_without(sc, 1000, 2000), imu_to_camera=_r_ci(sc),
+        intrinsics=sc.intrinsics, depth=sc,
+    )  # fmt: skip
+    assert track.lost_at_ms is not None and track.lost_at_ms >= 1000
+    assert track.samples and all(s.t_ms < 1000 for s in track.samples)
+    assert math.degrees(_errors(sc, track)[3]) < 0.5
+    short = _odometry(policy).estimate(
+        sc.frames(), imu=_imu_without(sc, 1000, 1006), imu_to_camera=_r_ci(sc),
+        intrinsics=sc.intrinsics, depth=sc,
+    )  # fmt: skip
+    full = _run(sc, policy)
+    assert short.lost_at_ms is None and len(short.samples) == len(full.samples)
+    with pytest.raises(ValueError, match="끊겼"):
+        _odometry(policy).estimate(
+            sc.frames(), imu=_imu_without(sc, 200, 300), imu_to_camera=_r_ci(sc),
+            intrinsics=sc.intrinsics, depth=sc,
+        )  # fmt: skip
+
+
+def test_calibration_of_another_aspect_ratio_is_not_used_for_poses(
+    policy: PrelabelPolicy,
+) -> None:
+    """화면비가 다른 캘리브레이션(16:9)을 4:3 영상에 주면 화각 근사로 떨어지고 신뢰도에
+    hfov_approx를 곱한다 (`lift3d`와 같은 규칙, F-PAR-44). 라벨의 내부 파라미터 출처는 러너가
+    `calibrated`로 정한다 (F-PAR-51)."""
+    sc = generate_camera_motion(0, duration_s=1.0)
+    wide = CameraIntrinsics(width=640, height=360, fx=320, fy=320, cx=320, cy=180)
+    est = _odometry(policy)
+    track = est.estimate(sc.frames(), imu=_imu(sc), imu_to_camera=_r_ci(sc), intrinsics=wide,
+                         depth=sc)  # fmt: skip
+    c = policy.camera_pose.confidence
+    assert not est.calibrated
+    assert track.samples[0].confidence == round(c.base * c.hfov_approx, 3)
+    label = pose_label(
+        track, session_id="s", stream_id="bodycam", version="v", ontology_version="1.0.0",
+        now=FIXED_TIME, intrinsics=IntrinsicsSource.HFOV_APPROX,
+    )  # fmt: skip
+    assert label is not None and isinstance(label.payload, Trajectory3DPayload)
+    assert label.payload.intrinsics is IntrinsicsSource.HFOV_APPROX
+
+
+def test_lk_termination_criteria_are_policy_values(policy: PrelabelPolicy) -> None:
+    """LK 반복 종료 기준은 정책 값이라 바꾸면 camera_pose 절 해시(자세 단계 버전)가 바뀐다
+    (F-PAR-55). 저장소 값은 OpenCV 기본값(30회, 0.01 px)과 같다."""
+    f = policy.camera_pose.features
+    assert (f.lk_max_iterations, f.lk_epsilon) == (30, 0.01)
+    features = f.model_copy(update={"lk_max_iterations": 1})
+    changed = policy.model_copy(
+        update={"camera_pose": policy.camera_pose.model_copy(update={"features": features})}
+    )
+    assert changed.digest("camera_pose") != policy.digest("camera_pose")
+
+
 def test_depth_is_required_for_metric_translation(policy: PrelabelPolicy) -> None:
     """깊이가 없으면 내장 오도메트리는 거부한다 (배율을 지어내지 않는다)."""
     sc = generate_camera_motion(0, duration_s=1.0)
-    est = ImuVisualOdometry(policy.camera_pose, hfov_deg=90)
+    est = _odometry(policy, hfov_deg=90)
     with pytest.raises(ValueError, match="깊이"):
         est.estimate(
             sc.frames(), imu=_imu(sc), imu_to_camera=_r_ci(sc), intrinsics=None, depth=None

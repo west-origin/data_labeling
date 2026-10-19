@@ -57,7 +57,7 @@ def palm_samples(
             if (
                 fit is None
                 or fit.palm_from_depth is None
-                or fit.rms_px > est.max_reprojection_px
+                or fit.rms_rel > est.max_reprojection_ratio
                 or fit.n_visible < est.min_visible
             ):
                 continue

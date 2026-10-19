@@ -1,12 +1,14 @@
 # ADR 0050: 끊긴 물려받은 3D는 궤적 따르기가 지우고, 박스 중심 3D도 물려받으며, 카메라 자세는 자동 라벨이다
 
-- 상태: 채택
+- 상태: 채택 (규칙과 저장 검증 예외를 ADR 0051이 넓혔다: 같은 2D에서 다시 계산한 3D가 물려받기만 한
+  3D를 대신함)
 - 날짜: 2026-10-17
 - 관련: ADR 0048(3D 궤적이 2D 손 트랙 검수를 물려받음, 이 ADR이 4절과 "남은 결정"을 바꾼다),
   ADR 0043 3절 규칙 6(설명 따르기의 좁은 삭제 예외, 이 ADR의 본보기), ADR 0046(카메라 자세·월드 좌표),
   ADR 0015·0026(검수 결과 보호). 문제 레지스트리 F-COE-21·F-COE-22(고침).
   계약 변경: 없음. 라벨·물려받기 기록 계약(`TrajectoryInheritance`)과 DB 표(`trajectory_inheritance`,
-  Alembic 0023)는 그대로다. 바뀌는 것은 규칙(`dlp_schema.trajectory_follow`), 저장 검증의 예외
+  Alembic 0023)는 그대로다. 타입·표는 그대로지만 `TrajectoryInheritance.source_label_id`의 의미가 박스
+  트랙까지 넓어졌다 (2026-10-19 설명 갱신, `make schemas`, F-COE-34). 바뀌는 것은 규칙(`dlp_schema.trajectory_follow`), 저장 검증의 예외
   (`dlp_schema.label_validation`), 검수 정책 절 `review.yaml verify`, 내보내기 manifest 절이다.
 
 ## 배경
@@ -94,7 +96,10 @@ ADR 0048 뒤 남은 두 문제.
 ## 배포
 
 1. 코드 배포 (DB 마이그레이션 없음).
-2. 깊이·자세를 쓰는 세션마다 `dlp review verify <세션>`: 박스 중심 3D 물려받기, 끊긴 물려받은 3D 삭제를
-   메우고 자세 때문에 막혔던 세션을 완료로 옮긴다. 끊긴 3D를 지운 세션은 `dlp prelabel run <세션>`으로
-   고친 2D에서 3D를 다시 만든다.
+2. 프리라벨 단계(prelabeled)의 깊이·자세 세션마다 `dlp review verify <세션>`: 박스 중심 3D 물려받기,
+   끊긴 물려받은 3D 삭제를 메우고 자세 때문에 막혔던 세션을 완료로 옮긴다. 끊긴 3D를 지운 세션은
+   `dlp prelabel run <세션>`으로 고친 2D에서 3D를 다시 만든다 (ADR 0051부터 그 전에는 완료되지 않는다).
+   이미 완료된 세션(human_verified 이후)에는 `dlp review verify`가 아무것도 쓰지 않는다. 그 세션의 3D는
+   ADR 0048 배포 2단계의 `dlp prelabel run`(생애주기 무관, 같은 실행에서 궤적 따르기 적용)이 메운다
+   (F-COE-33).
 3. 데이터셋 버전을 다시 만든 뒤 내보낸다 (스냅샷의 라벨이 새 상태여야 한다).

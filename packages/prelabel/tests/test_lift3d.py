@@ -24,6 +24,7 @@ from dlp_schema.labels import (
     BoxKeyframe,
     BoxTrackPayload,
     Hand,
+    IntrinsicsSource,
     Keypoint,
     KeypointFrame,
     KeypointTrackPayload,
@@ -97,9 +98,12 @@ def test_lifting_unprojects_with_depth_and_respects_stride() -> None:
     정답 근거: fx=160, cx=160. 손목 (80, 120)은 왼쪽 절반이라 z=1 → x=(80-160)*1/160=-0.5, y=0.
     버킷 중심 (220, 120)은 오른쪽 절반이라 z=2 → x=(220-160)*2/160=0.75. 화면 밖 키프레임(500
     ms)은 빠진다. 정책 hand_points [0, 4, 8, 12, 16, 20] → 부위 손목과 다섯 손가락 끝. 이 트랙에는
-    손 중심 3D 점(world)이 없어 관절마다 깊이만 쓴다.
+    손 중심 3D 점(world)이 없어 관절마다 깊이만 쓴다 (손가락 끝도 내는 point_depth 대체로 본다.
+    기본 drop은 손바닥 관절만 낸다: `test_default_fallback_lifts_only_palm_joints`).
     """
-    policy = load_policy(ROOT).depth.model_copy(update={"frame_stride_ms": 200})
+    policy = load_policy(ROOT).depth.model_copy(
+        update={"frame_stride_ms": 200, "fingertip_fallback": "point_depth"}
+    )
     frames = [(t, np.zeros((H, W, 3), dtype=np.uint8)) for t in range(0, 1_000, 100)]
     depth = PlaneDepth()
     calib = CameraIntrinsics(width=W, height=H, fx=160, fy=160, cx=160, cy=120)
@@ -116,14 +120,53 @@ def test_lifting_unprojects_with_depth_and_respects_stride() -> None:
     assert (bucket.t_ms, bucket.x, bucket.z) == (0, pytest.approx(0.75), pytest.approx(2.0))
 
 
+def test_default_fallback_lifts_only_palm_joints() -> None:
+    """world가 없는 손 트랙을 기본 정책(fingertip_fallback drop)으로 올리면 손바닥 관절인 손목만
+    나온다 (손가락 끝 픽셀 깊이는 배경을 읽기 쉬워 내지 않는다, F-PAR-40). 박스 중심은 그대로다."""
+    policy = load_policy(ROOT).depth.model_copy(update={"frame_stride_ms": 200})
+    assert policy.fingertip_fallback == "drop"
+    frames = [(t, np.zeros((H, W, 3), dtype=np.uint8)) for t in range(0, 1_000, 100)]
+    out = lift_tracks(frames, PlaneDepth(), _tracks(), None, policy)
+    assert set(out) == {("right_hand", "wrist"), ("ov_bucket_01", None)}
+
+
 def test_intrinsics_scale_with_resolution_or_fall_back_to_hfov() -> None:
     """캘리브레이션 해상도(1920x1080)의 절반 프레임이면 fx·fy·cx·cy가 절반이 되고, 캘리브레이션이
     없으면 화각 90도 근사(fx = 640/2/tan 45도 = 320, 주점은 중앙)가 되는지 본다.
     """
+    tol = load_policy(ROOT).depth.max_intrinsics_aspect_mismatch
     calib = CameraIntrinsics(width=1920, height=1080, fx=1000, fy=1000, cx=960, cy=540)
-    assert intrinsics_for(calib, 960, 540, 90) == Intrinsics(500, 500, 480, 270)
-    approx = intrinsics_for(None, 640, 480, 90)
+    assert intrinsics_for(calib, 960, 540, 90, tol) == Intrinsics(500, 500, 480, 270)
+    approx = intrinsics_for(None, 640, 480, 90, tol)
     assert approx.fx == pytest.approx(320) and (approx.cx, approx.cy) == (320, 240)
+
+
+def test_calibration_of_another_aspect_ratio_falls_back_to_hfov(tmp_path: Path) -> None:
+    """4:3 모드(4000x3000, fx = fy = 2000)에서 잰 캘리브레이션을 16:9 영상(1920x1080)에 쓰면 가로·
+    세로를 따로 늘려 fx/fy = 1.33(비정사각 픽셀)이 되던 것을 막는다 (F-PAR-44): 화각 근사로
+    떨어지고, 3D 라벨의 내부 파라미터 출처와 표본 신뢰도도 화각 근사다. 같은 화면비(2000x1500)는
+    비례 조정한다.
+    """
+    policy = load_policy(ROOT)
+    tol = policy.depth.max_intrinsics_aspect_mismatch
+    calib = CameraIntrinsics(width=4000, height=3000, fx=2000, fy=2000, cx=2000, cy=1500)
+    assert intrinsics_for(calib, 1920, 1080, 90, tol) == Intrinsics.from_hfov(1920, 1080, 90)
+    assert intrinsics_for(calib, 2000, 1500, 90, tol) == Intrinsics(1000, 1000, 1000, 750)
+    video = tmp_path / "bodycam.mp4"
+    write_video(
+        video, ((t, np.zeros((H, W, 3), dtype=np.uint8)) for t in range(0, 300, 100)),
+        width=W, height=H,
+    )  # fmt: skip
+    wide = CameraIntrinsics(width=640, height=360, fx=320, fy=320, cx=320, cy=180)  # 16:9
+    labels = PlaneLifter(policy).run(
+        video, session_id="s", stream_id="bodycam", tracks=_tracks()[1:], calib=wide,
+        ontology_version="1.0.0",
+    )  # fmt: skip
+    [box] = labels
+    assert isinstance(box.payload, Trajectory3DPayload)
+    assert box.payload.intrinsics is IntrinsicsSource.HFOV_APPROX
+    c = policy.depth.sample_confidence
+    assert box.payload.samples[0].confidence == round(c.point_depth * c.hfov_approx, 3)
 
 
 class PlaneLifter(DepthLifter):
@@ -202,7 +245,10 @@ def test_coexisting_hand_versions_lift_from_the_reviewed_track(tmp_path: Path) -
     )
     reviewed = _left_hand("left-v1", 80.0, verification=approved)
     newer = _left_hand("left-v2", 240.0, created_at=NOW.replace(day=8))
-    policy = load_policy(ROOT)
+    base = load_policy(ROOT)
+    # 손가락 끝까지 픽셀 깊이로 올려 관절 수만큼 궤적을 본다 (world 없는 트랙)
+    depth = base.depth.model_copy(update={"fingertip_fallback": "point_depth"})
+    policy = base.model_copy(update={"depth": depth})
     lifter = PlaneLifter(policy)
     calib = CameraIntrinsics(width=W, height=H, fx=160, fy=160, cx=160, cy=120)
     labels = lifter.run(

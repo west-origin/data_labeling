@@ -17,18 +17,26 @@ from dataclasses import dataclass, field
 import sqlalchemy as sa
 
 from dlp_active.policy import ActivePolicy
-from dlp_active.rates import RateTable, correction_rates
+from dlp_active.rates import RateTable, correction_rates, session_changes
 from dlp_active.terms import SessionContext, build_terms
 from dlp_schema.db.repository import (
+    get_description_inheritance,
     get_labels,
     get_session,
+    get_trajectory_inheritance,
     list_golden_sets,
     list_session_ids,
     withdrawn_session_ids,
 )
 from dlp_schema.episode import current_labels
+from dlp_schema.history import ReviewChange
 from dlp_schema.labels import LabelRecord, Source, VerificationState
 from dlp_schema.session import Session
+
+# 사람 검수 도구 경로가 없는 라벨 종류: 3D 궤적(2D 트랙 검수를 물려받거나 자동 라벨인 카메라 자세,
+# ADR 0048·0050)과 설명(행동 검수를 물려받음, ADR 0043). 검수 대기로 세면 세션 점수가 부풀고 영원히
+# 줄지 않는다 (F-COE-32). 정책 값이 아니라 도구 구조에서 오는 사실이다
+NO_REVIEW_PATH_KINDS = frozenset({"trajectory3d", "description"})
 
 
 @dataclass
@@ -44,13 +52,15 @@ class SessionScore:
 
 
 def pending_labels(history: list[LabelRecord], policy: ActivePolicy) -> list[LabelRecord]:
-    """검수 대기 라벨: 운영 현재 라벨 중 미검수 모델 라벨 (제외 종류 빼고)."""
+    """검수 대기 라벨: 운영 현재 라벨 중 미검수 모델 라벨 (제외 종류와 검수 경로가 없는 3D 궤적·
+    설명은 빼고, `NO_REVIEW_PATH_KINDS`)."""
     return [
         x
         for x in current_labels(history)
         if x.provenance.source is Source.MODEL
         and x.verification.state is VerificationState.UNREVIEWED
         and x.kind not in policy.excluded_kinds
+        and x.kind not in NO_REVIEW_PATH_KINDS
     ]
 
 
@@ -109,7 +119,7 @@ def rank_sessions(
     """
     withdrawn = withdrawn_session_ids(conn)
     golden = {sid for g in list_golden_sets(conn) for sid in g.session_ids}
-    histories: list[list[LabelRecord]] = []
+    histories: list[list[ReviewChange]] = []
     candidates: list[tuple[Session, list[LabelRecord]]] = []
     for sid in list_session_ids(conn):
         if sid in withdrawn:
@@ -118,7 +128,13 @@ def rank_sessions(
         # 골든셋 정답은 사람이 처음부터 만든 라벨이라 "추가"로 세면 수정률이 부풀려진다.
         # 수정률은 프리라벨을 검수한 세션에서만 센다.
         if sid not in golden:
-            histories.append(history)
+            histories.append(
+                session_changes(
+                    history,
+                    get_description_inheritance(conn, sid),
+                    get_trajectory_inheritance(conn, sid),
+                )
+            )
         session = get_session(conn, sid)
         if session.lifecycle_state in policy.candidates.lifecycle and not (
             policy.candidates.exclude_golden and sid in golden

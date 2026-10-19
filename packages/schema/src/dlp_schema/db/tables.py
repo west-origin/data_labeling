@@ -21,8 +21,8 @@
     - privacy_holds: 사고 대응 승인 보류·해제 기록, 수정·삭제·TRUNCATE 금지 (0017, ADR 0042).
     - description_inheritance: 설명의 검수 물려받기 기록, 수정·삭제·TRUNCATE 금지 (0021,
       ADR 0043 3절).
-    - trajectory_inheritance: 3D 궤적이 2D 손 트랙 검수를 물려받은 기록, 수정·삭제·TRUNCATE 금지
-      (0023, ADR 0048).
+    - trajectory_inheritance: 3D 궤적이 출처(2D 손·박스 트랙 등) 검수를 물려받은 기록,
+      수정·삭제·TRUNCATE 금지 (0023, ADR 0048).
     - ai_review_runs, ai_review_run_events, ai_review_units, ai_review_exposures,
       ai_review_outcomes: AI 1차 검수 기록 (라벨이 아니다), 수정·삭제·TRUNCATE 금지
       (0019, ADR 0040).
@@ -274,9 +274,10 @@ description_inheritance = sa.Table(
     sa.Column("recorded_at", Ts, nullable=False),
 )
 
-# 3D 궤적이 그것을 계산한 2D 손 트랙의 검수를 물려받은 기록 (`TrajectoryInheritance`, ADR 0048).
+# 3D 궤적이 그것을 계산한 출처의 검수를 물려받은 기록 (`TrajectoryInheritance`, ADR 0048·0050).
 # 추가만 한다 (0023 트리거). 물려받는 `record_review`와 같은 트랜잭션에 쓴다. source_label_id는
-# 2D 손 트랙, via_label_ids는 그 사이 입력(월드 좌표: 카메라 좌표 궤적, 자세)의 JSON 목록.
+# 출처(손 관절 3D: 2D 손 트랙, 박스 중심 3D: 박스 트랙, 사람이 확인한 카메라 좌표 궤적에서 만든
+# 월드 좌표: 그 궤적), via_label_ids는 그 사이 입력(월드 좌표: 카메라 좌표 궤적, 자세)의 JSON 목록.
 # mechanism: collect | verify | prelabel.
 trajectory_inheritance = sa.Table(
     "trajectory_inheritance",

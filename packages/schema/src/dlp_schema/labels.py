@@ -194,8 +194,10 @@ def _drop_none(value: object) -> bool:
 
 # 한 시각의 키포인트 묶음. points 개수는 골격 크기(`SKELETON_SIZES`)와 같아야 한다.
 # world: 손 모델이 낸 손 중심 3D 점 (선택, hand21만, points와 같은 순서·개수, ADR 0044). 손 모양
-#   정보이고 검수 대상이 아니다. 검수 도구는 2D만 보이므로 사람이 쓰거나 고친 트랙에는 없다
-#   (`without_world`, CVAT 수집). None이면 JSON에 싣지 않는다 (예전 라벨과 같은 JSON).
+#   정보이고 검수 대상이 아니다. 검수 도구는 2D만 보이므로 사람이 새로 그린 트랙에는 없고, 사람이
+#   고친 트랙은 2D가 parent의 양자화 2D와 같은 키프레임에만 parent의 world를 지닌다
+#   (`without_world`, `dlp_review.reconcile.keep_unchanged_world`, ADR 0044 1절 개정). None이면
+#   JSON에 싣지 않는다 (예전 라벨과 같은 JSON).
 class KeypointFrame(Contract):
     t_ms: Ms
     points: tuple[Keypoint, ...]
@@ -263,7 +265,8 @@ def without_world(payload: KeypointTrackPayload) -> KeypointTrackPayload:
     """world 점을 모두 뺀 사본 (ADR 0044).
 
     검수 도구는 2D 점만 보이고 고친다. 고친 2D와 모델의 예전 world 점이 함께 남지 않게, 도구로 보낸
-    형태(`dlp_review.cvat.quantize`)와 사람 레코드에는 world를 싣지 않는다.
+    형태(`dlp_review.cvat.quantize`)와 사람 레코드에는 먼저 world를 모두 뺀다. 수집이 2D를 고치지
+    않은 키프레임에만 parent의 world를 되살린다 (`dlp_review.reconcile.keep_unchanged_world`).
     """
     if all(f.world is None for f in payload.keyframes):
         return payload

@@ -10,7 +10,9 @@
   박스 트랙 검수를 물려받고, 카메라 자세는 자동 라벨이라 (review.yaml verify.automatic 기본)
   완료를 막지 않는다 (F-COE-21, ADR 0050).
 - 그 뒤 검수자가 g1을 고치면(g2) 물려받기만 한 c1(과 그 월드 좌표 w1)은 궤적 따르기가 지운다
-  (F-COE-22, ADR 0050). 직접 검수 3D는 남는다.
+  (F-COE-22, ADR 0050). 직접 검수 3D는 남는다. 고친 g2로 3D를 다시 만들기 전에는 완료를 막고
+  `dlp prelabel run`을 안내한다 (F-COE-30). 승인 전에 고쳐 낡은 3D가 검수 전으로 남은 경우도 같은
+  안내로 막는다.
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ import sqlalchemy as sa
 
 from dlp_review.collect import collect_task
 from dlp_review.labelstudio import to_ls_results
-from dlp_review.verify import verify_session
+from dlp_review.verify import verification_gaps, verify_session
 from dlp_schema import load_ontology, repo_root
 from dlp_schema.db.repository import (
     get_labels,
@@ -37,6 +39,7 @@ from dlp_schema.db.repository import (
     register_ontology,
     set_lifecycle,
 )
+from dlp_schema.db.trajectory_repository import apply_trajectory_follow
 from dlp_schema.episode import current_labels
 from dlp_schema.labels import LabelRecord, Provenance, Source, Verification, VerificationState
 from dlp_schema.review import TrajectoryInheritanceMechanism
@@ -187,12 +190,95 @@ def test_verify_retracts_lapsed_inherited_3d_and_keeps_direct_reviews(engine: sa
     with engine.begin() as conn:
         insert_labels(conn, [fixed])
         record_review(conn, "g9", VerificationState.HUMAN_APPROVED, "lead", LATER)
-        done = verify_session(conn, SID, LATER + timedelta(hours=1), "lead")
-    assert done.verified, done.reasons
-    assert (done.trajectories_approved, done.trajectories_retracted) == (0, 2)
+        missing = verify_session(conn, SID, LATER + timedelta(hours=1), "lead")
+    # 지운 손 3D(카메라·월드)를 고친 g2로 다시 만들기 전에는 완료가 아니다 (F-COE-30). 남은 직접
+    # 검수 cd는 예전 g1에서 나와 지금 2D의 3D로 치지 않는다
+    assert not missing.verified
+    assert any("dlp prelabel run" in r and "다시 만들지" in r for r in missing.reasons)
+    assert (missing.trajectories_approved, missing.trajectories_retracted) == (0, 2)
     live = _current(engine)
     assert {"cb", "wb", "cd", "pose1"} <= set(live) and not {"c1", "w1"} & set(live)
     with engine.connect() as conn:
         gone = [x for x in get_labels(conn, SID) if x.retracted]
     assert {x.parent_label_id for x in gone} == {"c1", "w1"}
     assert {x.provenance.model_version for x in gone} == {TRAJECTORY_FOLLOW_VERSION}
+    # 프리라벨이 g2로 다시 만든 3D(c2·w2)가 들어오면 물려받고 완료된다
+    regen = [
+        make_label(trajectory_payload(derived_from=("g2",)), label_id="c2", **SPATIAL),
+        make_label(
+            trajectory_payload(frame="world", derived_from=("c2", "pose1")), label_id="w2",
+            **SPATIAL,
+        ),
+    ]  # fmt: skip
+    with engine.begin() as conn:
+        insert_labels(conn, regen)
+        done = verify_session(conn, SID, LATER + timedelta(hours=2), "lead")
+    assert done.verified, done.reasons
+    assert done.trajectories_approved == 2
+
+
+def _corrected_g1() -> LabelRecord:
+    """검수자가 고친 g1 (사람 수정 g2)."""
+    return make_label(
+        hand_track_payload(times=(0, 500, 1_000)), label_id="g2", stream_id="bodycam",
+        parent_label_id="g1",
+        verification=Verification(
+            state=VerificationState.HUMAN_CORRECTED, reviewer_id="lead", reviewed_at=LATER
+        ),
+    )  # fmt: skip
+
+
+def test_correction_before_and_after_inheritance_block_alike(engine: sa.Engine) -> None:
+    """F-COE-30: 2D를 승인 전에 고치든(낡은 c1이 검수 전으로 남음) 승인·물려받은 뒤 고치든(c1이
+    지워짐) 완료 판정은 같은 결론(막힘)이고 둘 다 `dlp prelabel run`을 안내한다. 수집(또는 앞선
+    판정)이 이미 지운 뒤 다시 판정해도(이번 호출에서 지운 것이 0) 막는다."""
+    with engine.begin() as conn:
+        _prelabeled(conn, _hand_and_3d())
+        insert_labels(conn, [_corrected_g1()])
+        before = verify_session(conn, SID, LATER, "lead")
+    assert not before.verified
+    assert any("낡은 3D" in r and "dlp prelabel run" in r for r in before.reasons), before.reasons
+
+    other = sqlite_db()
+    with other.begin() as conn:
+        register_ontology(conn, load_ontology(repo_root() / "config/ontology/v1"))
+        _prelabeled(conn, _hand_and_3d())
+        record_review(conn, "g1", VerificationState.HUMAN_APPROVED, "rev01", LATER)
+        # c1이 물려받는다 (판정을 거치면 세션이 완료되므로 따르기만 적용한다)
+        apply_trajectory_follow(conn, SID, LATER, TrajectoryInheritanceMechanism.VERIFY)
+        insert_labels(conn, [_corrected_g1()])
+        after = verify_session(conn, SID, LATER + timedelta(hours=1), "lead")
+        again = verify_session(conn, SID, LATER + timedelta(hours=2), "lead")
+    assert not after.verified and after.trajectories_retracted == 1
+    assert not again.verified and again.trajectories_retracted == 0
+    for result in (after, again):
+        assert any("dlp prelabel run" in r for r in result.reasons), result.reasons
+    other.dispose()
+
+
+def test_regeneration_requirement_can_be_turned_off(engine: sa.Engine) -> None:
+    """깊이 모델이 없어 3D를 다시 만들 수 없는 운영은 review.yaml `verify.require_current_3d`를
+    끈다: 그러면 지운 3D 없이 완료된다 (그 손 3D는 내보내기에 없다)."""
+    with engine.begin() as conn:
+        _prelabeled(conn, _hand_and_3d())
+        record_review(conn, "g1", VerificationState.HUMAN_APPROVED, "rev01", LATER)
+        apply_trajectory_follow(conn, SID, LATER, TrajectoryInheritanceMechanism.VERIFY)
+        insert_labels(conn, [_corrected_g1()])
+        apply = verify_session(conn, SID, LATER + timedelta(hours=1), "lead")
+    assert not apply.verified
+    with engine.connect() as conn:
+        assert verification_gaps(conn, SID, require_current_3d=False) == []
+
+
+def test_verify_on_a_completed_session_writes_nothing(engine: sa.Engine) -> None:
+    """F-COE-33: 이미 완료 단계(human_verified 이후)인 세션의 판정은 궤적 따르기를 적용하지 않고
+    아무것도 쓰지 않는다 (그 세션의 3D는 `dlp prelabel run`이 메운다)."""
+    with engine.begin() as conn:
+        _prelabeled(conn, _hand_and_3d())
+        record_review(conn, "g1", VerificationState.HUMAN_APPROVED, "rev01", LATER)
+        set_lifecycle(conn, SID, LifecycleState.HUMAN_VERIFIED)
+        n = len(get_labels(conn, SID))
+        result = verify_session(conn, SID, LATER, "lead")
+        assert len(get_labels(conn, SID)) == n and get_trajectory_inheritance(conn, SID) == []
+    assert result.already and result.trajectories_approved == 0
+    assert _current(engine)["c1"].verification.state is VerificationState.UNREVIEWED

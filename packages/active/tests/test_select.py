@@ -14,13 +14,16 @@ import numpy as np
 import pytest
 
 from dlp_active.policy import ActivePolicy, load_policy
-from dlp_active.rates import correction_rates
-from dlp_active.select import score_sessions
+from dlp_active.rates import correction_rates, session_changes
+from dlp_active.select import pending_labels, score_sessions
 from dlp_active.terms import TERMS, SessionContext, register_term
+from dlp_schema.history import ReviewChange
 from dlp_schema.labels import LabelRecord, Provenance, Source, Verification, VerificationState
+from dlp_schema.review import TrajectoryInheritanceMechanism
 from dlp_schema.session import Session
-from dlp_schema.testing import FIXED_TIME, make_session
+from dlp_schema.testing import FIXED_TIME, hand_track_payload, make_session, trajectory_payload
 from dlp_schema.testing import make_label as _make_label
+from dlp_schema.trajectory_follow import plan_trajectory_follow
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -111,6 +114,31 @@ def pending(
 PAYLOADS = {"fold": action("fold_sheet"), "cup": box("cup"), "mop": box("mop"), "blur": blur()}
 
 
+def _changes(histories: list[list[LabelRecord]]) -> list[list[ReviewChange]]:
+    """물려받기 기록이 없는 세션들의 검수 결과 (`session_changes`)."""
+    return [session_changes(h, (), ()) for h in histories]
+
+
+def test_inherited_3d_is_neither_a_reviewer_acceptance_nor_pending(policy: ActivePolicy) -> None:
+    """F-COE-32: 2D 손 트랙 하나를 승인해 3D 궤적이 그 검수를 물려받아도(명시 기록) 수정률에
+    trajectory3d 클래스나 "그대로 승인"이 더해지지 않는다 (예전에는 3D 여러 개가 accepted로 세어져
+    전체 수정률이 희석됐다). 검수 경로가 없는 3D·설명은 검수 대기로도 세지 않는다."""
+    track = model(
+        "s1", "g1", hand_track_payload(), verification=reviewed(VerificationState.HUMAN_APPROVED)
+    )
+    c1 = model("s1", "c1", trajectory_payload(derived_from=("s1-g1",)))
+    (r,) = plan_trajectory_follow([track, c1], []).approve
+    v = Verification(state=r.state, reviewer_id=r.reviewer_id, reviewed_at=r.reviewed_at)
+    history = [track, c1.model_copy(update={"verification": v})]
+    record = r.record("s1", TrajectoryInheritanceMechanism.COLLECT, FIXED_TIME)
+    rates = correction_rates([session_changes(history, (), [record])], policy)
+    assert [k.split("/")[0] for k in rates.classes] == ["keypoint_track"]
+    naive = correction_rates(_changes([history]), policy)
+    assert any(k.startswith("trajectory3d/") for k in naive.classes)
+    pending_now = pending_labels([track, c1], policy)
+    assert pending_now == []
+
+
 def test_sessions_with_high_correction_classes_come_first(policy: ActivePolicy) -> None:
     """수정률 높은 클래스를 많이 담은 세션이 앞선다 (기준 문서의 예: 시트 접기 30%, 컵 0.5%).
 
@@ -123,7 +151,7 @@ def test_sessions_with_high_correction_classes_come_first(policy: ActivePolicy) 
         reviewed_history("r2", PAYLOADS["cup"], 2000, 10),
         reviewed_history("r3", PAYLOADS["mop"], 500, 50),
     ]
-    rates = correction_rates(histories, policy)
+    rates = correction_rates(_changes(histories), policy)
     # 평활 때문에 전체 수정률(약 6%) 쪽으로 조금 당겨진다
     assert rates.rate("action/fold_sheet") == pytest.approx(0.3, abs=0.015)
     assert rates.rate("box_track/cup") == pytest.approx(0.005, abs=0.002)
@@ -164,7 +192,7 @@ def test_random_distribution_matches_expected_order(policy: ActivePolicy) -> Non
         reviewed_history(f"r{i}", box(c), 300, round(300 * true_rates[i]))
         for i, c in enumerate(classes)
     ]
-    rates = correction_rates(histories, policy)
+    rates = correction_rates(_changes(histories), policy)
     payloads = {c: box(c) for c in classes}
     sessions: list[tuple[Session, list[LabelRecord]]] = []
     for j in range(30):
@@ -203,7 +231,7 @@ def test_rates_count_only_individual_reviews_and_smooth_small_classes(
         make_label(PAYLOADS["cup"], label_id=f"{sid}-seed", session_id=sid, seeded_error=True,
                    verification=reviewed(VerificationState.HUMAN_CORRECTED)),
     ]  # fmt: skip
-    rates = correction_rates([history], policy)
+    rates = correction_rates(_changes([history]), policy)
     assert set(rates.classes) == {"box_track/mop", "box_track/cup"}
     assert rates.classes["box_track/mop"].reviewed == 4  # 표본 검증 제외
     assert rates.classes["box_track/cup"].changed == 1  # 지운 오탐
@@ -218,7 +246,7 @@ def test_rates_count_only_individual_reviews_and_smooth_small_classes(
 def test_score_term_plugins(policy: ActivePolicy) -> None:
     """점수 항목 플러그인: 정책으로 항목을 바꾸면 순서가 바뀌고, 새 항목은 등록만 하면 켤 수 있으며,
     등록되지 않은 이름·겹치는 이름은 거부한다."""
-    rates = correction_rates([reviewed_history("r", PAYLOADS["cup"], 10, 1)], policy)
+    rates = correction_rates(_changes([reviewed_history("r", PAYLOADS["cup"], 10, 1)]), policy)
     sessions = [
         (make_session("a"), [model("a", "1", PAYLOADS["cup"], confidence=0.2)]),
         (make_session("b"), [model("b", f"{i}", PAYLOADS["cup"]) for i in range(3)]),
@@ -269,7 +297,7 @@ def test_per_minute_normalization(policy: ActivePolicy) -> None:
 
     합계로는 긴 세션(10분, 대기 10개)이 앞서지만 1분당으로는 짧은 세션(1분, 3개)이 앞선다.
     """
-    rates = correction_rates([reviewed_history("r", PAYLOADS["mop"], 100, 10)], policy)
+    rates = correction_rates(_changes([reviewed_history("r", PAYLOADS["mop"], 100, 10)]), policy)
     per_min = policy.model_copy(
         update={"score": policy.score.model_copy(update={"normalize": "per_minute"})}
     )
@@ -311,7 +339,7 @@ def test_class_changes_are_counted_under_the_model_predicted_class(policy: Activ
     history.append(human_mug("h6-del", parent_label_id=f"{sid}-h6", retracted=True))
     # 모델이 놓친 mug를 사람이 추가했다 (원본 없음: 그 라벨의 클래스로 센다)
     history.append(human_mug("add"))
-    rates = correction_rates([history], flat)
+    rates = correction_rates(_changes([history]), flat)
     cup, mug = rates.classes["box_track/cup"], rates.classes["box_track/mug"]
     assert (cup.reviewed, cup.changed) == (10, 7)
     assert (mug.reviewed, mug.changed) == (1, 1)

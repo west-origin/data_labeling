@@ -18,18 +18,23 @@
 처음 보는 클래스는 p를 쓴다.
 
 검수 결과 분류(accepted·corrected·added·deleted)는 `dlp_schema.history.review_changes`가 정한다
-(오류 삽입·측정 레코드는 거기서 빠진다). 블러 등 `excluded_kinds`는 여기서 뺀다.
+(오류 삽입·측정 레코드는 거기서 빠진다). 검수를 물려받기만 한 설명·3D 궤적은 검수자가 본 것이
+아니라 뺀다 (`dlp_schema.reviewer_changes`, 주간 지표와 같은 기준, F-COE-32: 손 트랙 하나 승인에
+따라온 3D 여러 개가 "그대로 승인"으로 세어져 전체 수정률이 희석됐다). 블러 등 `excluded_kinds`는
+여기서 뺀다.
 """
 
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
 from dlp_active.policy import ActivePolicy
-from dlp_schema.history import label_class, review_changes
+from dlp_schema.history import ReviewChange, label_class
 from dlp_schema.labels import LabelRecord, VerificationState
+from dlp_schema.review import DescriptionInheritance, TrajectoryInheritance
+from dlp_schema.reviewer_changes import reviewer_changes
 
 # 개별 검수 상태. 표본 검증은 표본만 본 것이라 세지 않는다
 REVIEWED = (VerificationState.HUMAN_APPROVED, VerificationState.HUMAN_CORRECTED)
@@ -62,21 +67,35 @@ class RateTable:
         return c.rate if c is not None else self.overall
 
 
-def correction_rates(histories: Iterable[list[LabelRecord]], policy: ActivePolicy) -> RateTable:
-    """세션별 라벨 이력들 → 클래스별 수정률.
-
-    검수 결과(`review_changes`)마다 모델 원본(origin, 없으면 그 라벨)의 클래스 키에 검수 1을 더하고,
-    accepted가 아니면 바뀜 1을 더한다.
+def session_changes(
+    history: list[LabelRecord],
+    inheritance: Sequence[DescriptionInheritance],
+    trajectory_inheritance: Sequence[TrajectoryInheritance],
+) -> list[ReviewChange]:
+    """세션 하나의 개별 검수 결과 중 검수자가 직접 낸 것 (물려받기만 한 설명·3D 궤적 제외).
 
     Args:
-        histories: 세션마다 전체 라벨 이력 (`get_labels`). 골든셋 세션은 호출자가 빼야 한다
-            (사람이 처음부터 만든 정답이 "추가"로 세어져 수정률이 부풀려진다).
+        history: 세션 전체 라벨 이력 (`get_labels`).
+        inheritance / trajectory_inheritance: 그 세션의 설명·3D 궤적 물려받기 기록 (기본값 없음).
+    """
+    return reviewer_changes(history, REVIEWED, inheritance, trajectory_inheritance)
+
+
+def correction_rates(sessions: Iterable[list[ReviewChange]], policy: ActivePolicy) -> RateTable:
+    """세션별 검수 결과들 → 클래스별 수정률.
+
+    검수 결과마다 모델 원본(origin, 없으면 그 라벨)의 클래스 키에 검수 1을 더하고, accepted가
+    아니면 바뀜 1을 더한다.
+
+    Args:
+        sessions: 세션마다 `session_changes` 결과. 골든셋 세션은 호출자가 빼야 한다 (사람이
+            처음부터 만든 정답이 "추가"로 세어져 수정률이 부풀려진다).
         policy: 액티브 러닝 정책 (`correction`, `excluded_kinds`).
     """
     reviewed: Counter[str] = Counter()
     changed: Counter[str] = Counter()
-    for history in histories:
-        for c in review_changes(history, REVIEWED):
+    for changes in sessions:
+        for c in changes:
             # 모델 원본의 클래스로 센다 (사람이 추가한 것은 원본이 없어 그 라벨로, F-ETA-06)
             counted = c.origin or c.label
             if counted.kind in policy.excluded_kinds:

@@ -649,3 +649,44 @@ def test_inherited_3d_is_not_counted_as_reviewer_acceptance() -> None:
         ("accepted", "a1"),
         ("accepted", "g1"),
     ]
+
+
+def test_inherited_3d_created_after_review_does_not_move_retention_origin() -> None:
+    """F-COE-31: 원본 보관 기산점은 마지막 사람 검수 변화다. 2D 손 트랙을 T0에 승인한 뒤 자동 단계가
+    170일 뒤 3D를 새로 만들어 그 검수를 물려받아도(물려받는 검수 시각 = 3D 생성 시각) 기산점은 T0
+    그대로다 (예전에는 기산점이 3D 생성 시각으로 밀려 원본 보관이 늘었다)."""
+    from datetime import timedelta
+
+    from dlp_ops.retention import finalized_at
+    from dlp_schema.db.repository import (
+        get_labels,
+        insert_labels,
+        insert_session,
+        record_review,
+        register_ontology,
+    )
+    from dlp_schema.db.trajectory_repository import apply_trajectory_follow
+    from dlp_schema.review import TrajectoryInheritanceMechanism
+    from dlp_schema.testing import FIXED_TIME, hand_track_payload, sqlite_db, trajectory_payload
+
+    later = FIXED_TIME + timedelta(days=170)
+    model: dict[str, Any] = {
+        "provenance": Provenance(source=Source.MODEL, model_version="m-1"),
+        "confidence": 0.8,
+        "stream_id": "bodycam",
+    }
+    engine = sqlite_db()
+    with engine.begin() as conn:
+        register_ontology(conn, load_ontology(ROOT / "config/ontology/v1"))
+        insert_session(conn, make_session())
+        insert_labels(conn, [make_label(hand_track_payload(), label_id="g1", **model)])
+        record_review(conn, "g1", VerificationState.HUMAN_APPROVED, "rev01", FIXED_TIME)
+        late3d = make_label(
+            trajectory_payload(derived_from=("g1",)), label_id="c1", created_at=later, **model
+        )
+        insert_labels(conn, [late3d])
+        apply_trajectory_follow(conn, "s001", later, TrajectoryInheritanceMechanism.PRELABEL)
+        c1 = next(x for x in get_labels(conn, "s001") if x.label_id == "c1")
+        origin = finalized_at(conn, "s001")
+    assert c1.verification.reviewed_at == later  # 물려받은 검수 시각은 3D 생성 시각
+    assert origin == FIXED_TIME

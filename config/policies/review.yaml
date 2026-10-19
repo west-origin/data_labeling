@@ -146,6 +146,10 @@ verify:
   # 값: camera_pose (모델 출처 카메라 자세 궤적, entity camera, dlp_prelabel.campose). 빼면 자세가 있는
   # 세션은 검수 경로가 없어 완료되지 못한다.
   automatic: [camera_pose]
+  # 출처 2D가 바뀌어 궤적 따르기가 지운(또는 검수 전인 채 낡은) 3D 궤적을 고친 2D로 다시 만들기 전에는 완료를
+  # 막고 `dlp prelabel run <세션>`을 안내한다 (F-COE-30). 2D 승인 뒤 고쳤든 승인 전에 고쳤든 같은 판정이다.
+  # 깊이 모델이 없어 3D를 다시 만들 수 없는 운영에서만 false로 둔다 (그러면 그 손·박스 3D 없이 완료된다)
+  require_current_3d: true
 
 # AI 1차 검수 판정을 검수 운영에 쓰는 방식 (WP17.6, ADR 0040, dlp_review.ai_display). 판정은 참고용이고
 # 라벨도 검수 상태도 아니다. 사람 검수를 늘리는 쪽(우선순위 priority.weights ai_*, 표본 제외, 늦은 지적의

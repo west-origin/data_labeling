@@ -12,6 +12,9 @@
   다시 만든 c2는 물려받는다. 이미 물려받은 c1은 끊김이고 궤적 따르기가 지운다 (ADR 0050).
 - 직접 검수(기록 없음)·기록 뒤 다시 검수한 3D·사람 출처 3D는 건드리지 않고 끊김으로도 보지 않는다.
 - 박스 중심 3D(part 없음, derived_from=박스 트랙)는 박스 트랙 검수를 같은 방식으로 물려받는다.
+- 대체됨 (ADR 0051): 물려받기만 한 c1과 같은 출처 g1에서 다른 판(m-2, 캘리브레이션 등록 등)으로
+  새로 계산한 검수 전 c1b가 같은 대상(스트림, 개체, 부위, 좌표계)에 있으면 c1을 지우고 c1b가 같은
+  검수를 물려받는다. 직접 검수·다른 출처·같은 판은 대체하지 않는다.
 """
 
 from __future__ import annotations
@@ -226,6 +229,74 @@ def test_world_3d_lapses_when_the_camera_pose_changes() -> None:
     assert {r.label_id for r in plan.approve} == {"w2"}  # w3은 지워진 자세에서 나왔다
 
 
+M2: dict[str, Any] = {**MODEL, "provenance": Provenance(source=Source.MODEL, model_version="m-2")}
+
+
+def test_inherited_3d_is_superseded_by_a_new_version_from_the_same_2d() -> None:
+    """물려받기만 한 c1은 같은 g1에서 다른 판으로 새로 계산한 c1b가 대신한다 (규칙 5, ADR 0051).
+
+    계획 한 번에 c1을 지우고 c1b가 같은 2D 검수를 물려받으며, 적용 뒤 다시 계산하면 비어 있다.
+    """
+    g1 = _reviewed(_track(), VerificationState.HUMAN_APPROVED)
+    history, records = _apply([g1, _cam("c1", "g1")], [])
+    newer = _cam("c1b", "g1", created_at=LATE, **M2)
+    plan = plan_trajectory_follow([*history, newer], records)
+    assert [x.label_id for x in plan.retract] == ["c1"]
+    assert [(r.label_id, r.source_label_id) for r in plan.approve] == [("c1b", "g1")]
+    assert lapsed_trajectories([*history, newer], records) == {"c1"}
+    gone = retractions(plan.retract, TRAJECTORY_FOLLOW_VERSION, LATE)
+    after, records = _apply([*history, newer, *gone], records)
+    again = plan_trajectory_follow(after, records)
+    assert again.retract == [] and again.approve == []
+
+
+def test_supersede_needs_inheritance_only_same_source_and_another_version() -> None:
+    """대체하지 않는 경우: 직접 검수(기록 없음)·사람 출처, 다른 2D에서 계산한 새 궤적, 같은 판의
+    사본, 이미 검수된 새 궤적, 더 먼저 만든 궤적 (규칙 4·5)."""
+    g1 = _reviewed(_track(), VerificationState.HUMAN_APPROVED)
+    g9 = _reviewed(_track("g9"), VerificationState.HUMAN_APPROVED)
+    history, records = _apply([g1, g9, _cam("c1", "g1")], [])
+    direct = _reviewed(_cam("cd", "g1", **M2), VerificationState.HUMAN_APPROVED)
+    human = make_label(trajectory_payload(derived_from=("g1",)), label_id="h3", stream_id="bodycam")
+    for extra in (
+        [_cam("c9", "g9", created_at=LATE, **M2)],  # 다른 출처 2D
+        [_cam("cs", "g1", created_at=LATE)],  # 같은 판 (m-1)
+        [_cam("ce", "g1", created_at=FIXED_TIME - timedelta(hours=1), **M2)],  # 더 먼저 만듦
+    ):
+        assert plan_trajectory_follow([*history, *extra], records).retract == [], extra
+    # 직접 검수·사람 출처 3D 옆에 새 판이 와도 그것들은 지우지 않는다 (c1만 대체된다)
+    newer = _cam("c1b", "g1", created_at=LATE, **M2)
+    plan = plan_trajectory_follow([*history, direct, human, newer], records)
+    assert [x.label_id for x in plan.retract] == ["c1"]
+
+
+def test_world_3d_inherits_a_directly_reviewed_camera_trajectory() -> None:
+    """F-PAR-58: 카메라 좌표 궤적 자체를 사람이 확인했으면(직접 검수·검수자 있는 사람 출처) 2D가
+    검수 전이거나 없어도 그 월드 좌표 궤적이 카메라 궤적의 검수를 물려받는다 (출처 = 카메라 궤적,
+    경유 = 자세). 예전에는 출처가 없어 월드 좌표가 검수 전으로 남아 완료 판정을 영구히 막았다.
+    카메라 궤적이 다시 바뀌면(지워짐) 끊긴다."""
+    direct = _reviewed(_cam("cd", "g1"), VerificationState.HUMAN_APPROVED)  # 2D g1은 검수 전
+    human = make_label(
+        trajectory_payload(part="index_tip"), label_id="hc", stream_id="bodycam",
+        verification=Verification(
+            state=VerificationState.HUMAN_APPROVED, reviewer_id="lead", reviewed_at=T_REVIEW
+        ),
+    )  # fmt: skip
+    wh = make_label(
+        trajectory_payload(part="index_tip", frame="world", derived_from=("hc", "pose1")),
+        label_id="wh", **MODEL,
+    )  # fmt: skip
+    history = [_track(), direct, human, _pose(), _world("wd", "cd"), wh]
+    plan = plan_trajectory_follow(history, [])
+    got = {r.label_id: r for r in plan.approve}
+    assert set(got) == {"wd", "wh"}
+    assert (got["wd"].source_label_id, got["wd"].via_label_ids) == ("cd", ("pose1",))
+    assert (got["wh"].source_label_id, got["wh"].reviewer_id) == ("hc", "lead")
+    applied, records = _apply(history, [])
+    gone = make_label(direct.payload, label_id="cd-x", parent_label_id="cd", retracted=True, **M2)
+    assert lapsed_trajectories([*applied, gone], records) == {"wd"}
+
+
 def test_follow_is_idempotent() -> None:
     """적용한 뒤 다시 계산하면 물려받을 것도 끊긴 것도 없다."""
     g1 = _reviewed(_track(), VerificationState.SAMPLE_VERIFIED)
@@ -252,6 +323,9 @@ def test_trajectory_inheritance_contract_rejects_bad_records() -> None:
         TrajectoryInheritance.model_validate({**base, "state": "human_corrected"})
     with pytest.raises(ValidationError, match="자기 자신"):
         TrajectoryInheritance.model_validate({**base, "via_label_ids": ["c1"]})
+    # 계약 설명이 출처를 손 트랙으로만 적지 않는다 (박스 트랙 출처, ADR 0050, F-COE-34)
+    described = TrajectoryInheritance.model_fields["source_label_id"].description or ""
+    assert "박스 트랙" in described and "hand21" in described
 
 
 def test_apply_writes_review_and_record_in_one_step_and_is_idempotent(ontology: Ontology) -> None:
@@ -327,6 +401,33 @@ def test_box_center_3d_inherits_the_box_track_and_lapses_with_it() -> None:
         ),
     )  # fmt: skip
     assert lapsed_trajectories([*history, fixed], records) == {"cb", "wb"}
+
+
+def test_storage_allows_retracting_a_superseded_inherited_3d_only_after_the_new_one(
+    ontology: Ontology,
+) -> None:
+    """저장 검증: 같은 g1의 새 판 c1b를 저장하기 전에는 물려받은 c1을 지울 수 없고, 저장한 뒤에는
+    궤적 따르기가 c1(과 그 월드 좌표 w1)을 지우며 c1b가 물려받는다. 직접 검수 cd·다시 검수한 cr은
+    그대로다 (ADR 0051)."""
+    engine = _db_with_inherited(ontology)
+    with engine.begin() as conn:
+        labels = {x.label_id: x for x in get_labels(conn, "s001")}
+    with engine.begin() as conn, pytest.raises(ProtectedLabelRetractionError):
+        insert_labels(conn, retractions([labels["c1"]], TRAJECTORY_FOLLOW_VERSION, LATE))
+    later = LATE + timedelta(hours=1)
+    with engine.begin() as conn:
+        insert_labels(conn, [_cam("c1b", "g1", created_at=later, **M2)])
+        plan = apply_trajectory_follow(conn, "s001", later, TrajectoryInheritanceMechanism.PRELABEL)
+        again = apply_trajectory_follow(
+            conn, "s001", later, TrajectoryInheritanceMechanism.PRELABEL
+        )
+        live = {x.label_id: x for x in current_labels(get_labels(conn, "s001"))}
+    # c1을 경유한 물려받기만 한 월드 좌표 w1도 같은 적용에서 지운다 (다음 월드 단계가 다시 만든다)
+    assert [x.label_id for x in plan.retract] == ["c1", "w1"]
+    assert [r.label_id for r in plan.approve] == ["c1b"]
+    assert again.retract == [] and again.approve == []
+    assert {"c1b", "cd", "cr"} <= set(live) and not {"c1", "w1"} & set(live)
+    assert live["c1b"].verification.state is VerificationState.HUMAN_APPROVED
 
 
 def _db_with_inherited(ontology: Ontology) -> sa.Engine:

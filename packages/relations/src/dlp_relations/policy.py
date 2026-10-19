@@ -58,6 +58,8 @@ class ToolSurfacePolicy(Contract):
     on_distance_m / off_distance_m: 평면까지 거리 히스테리시스 (m, off ≥ on 검증).
     inside_margin: 표면 사각형 밖으로 변 길이 비율만큼 여유. min_duration_ms / merge_gap_ms: 최소
     길이, 병합 간격. max_time_gap_ms: 작용부 시각과 표면 꼭짓점 샘플의 최대 시각 차 (보간 허용).
+    max_sample_gap_ms: 연속한 작용부 샘플 사이가 이보다 비면(자세 공백·3D 결측) 진행 중인 접촉을
+    그 앞 샘플에서 끝낸다. 빈 사이에 도구가 들렸을 수 있어 잇지 않는다 (F-PAR-57).
     require_grasp: 손이 도구를 쥔 구간(hand_state, tool, target_id=도구)에서만 접촉으로 본다.
     confidence: 접촉 관계·커버리지 신뢰도. corner_parts: 표면 꼭짓점 부위 이름 4개 (0 원점, 1
     가로 끝, 2 대각, 3 세로 끝).
@@ -69,6 +71,7 @@ class ToolSurfacePolicy(Contract):
     min_duration_ms: int = Field(ge=0)
     merge_gap_ms: int = Field(ge=0)
     max_time_gap_ms: int = Field(ge=0)
+    max_sample_gap_ms: int = Field(ge=0)
     require_grasp: bool
     confidence: float = Field(ge=0, le=1)
     corner_parts: tuple[OntologyId, OntologyId, OntologyId, OntologyId]

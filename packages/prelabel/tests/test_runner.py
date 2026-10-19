@@ -176,7 +176,7 @@ def test_prelabel_session_with_glove_contacts(pg: sa.Engine, tmp_path: Path) -> 
         OraclePredictor("hands", actions.labels, ("keypoint_track",), now=FIXED_TIME),
         OraclePredictor("objects", boxes, ("box_track",), now=FIXED_TIME),
     ]
-    policy, ontology = load_policy(ROOT), load_ontology(ROOT / "config/ontology/v1")
+    policy, ontology = _all_points(load_policy(ROOT)), load_ontology(ROOT / "config/ontology/v1")
     try:  # 실제 깊이 모델이 있으면 3D 궤적 단계도 돈다 (make export-models)
         lifter: DepthLifter | None = DepthLifter(ROOT, policy, now=FIXED_TIME)
     except ModelUnavailableError:
@@ -551,12 +551,22 @@ class _UnitDepth:
         return np.ones(image.shape[:2], dtype=np.float32)
 
 
+def _all_points(policy: PrelabelPolicy) -> PrelabelPolicy:
+    """손가락 끝도 픽셀 깊이로 올리는 정책 (world 없는 행동 픽스처 손 트랙으로 관절마다 궤적).
+
+    저장소 기본값(`depth.fingertip_fallback: drop`)은 맞춤 없는 손가락 끝을 내지 않는다 (F-PAR-40).
+    """
+    depth = policy.depth.model_copy(update={"fingertip_fallback": "point_depth"})
+    return policy.model_copy(update={"depth": depth})
+
+
 class _UnitLifter(DepthLifter):
     """가중치 파일 없이 `_UnitDepth`로 도는 깊이 3D 단계 (가중치 확인·ONNX 세션을 건너뛴다)."""
 
     def __init__(self, policy: PrelabelPolicy) -> None:  # pyright: ignore[reportMissingSuperCall]
         """`DepthLifter.__init__`의 가중치 확인 대신 가짜 모델과 버전을 직접 둔다."""
         self.path = Path("unused.onnx")
+        self.weights_version = "unit"
         self.version = f"depth3d-unit+p{policy.digest('depth')}"
         self.policy, self.now = policy, FIXED_TIME
         self.model = _UnitDepth()
@@ -614,7 +624,7 @@ def test_depth_lift_uses_the_reviewed_track_when_hand_versions_coexist(
     """
     actions = generate_action_scenario(1, n_units=2)
     sid, raw = _bodycam_only_session(pg, tmp_path, actions.frame_times, "lift")
-    policy, ontology = load_policy(ROOT), load_ontology(ROOT / "config/ontology/v1")
+    policy, ontology = _all_points(load_policy(ROOT)), load_ontology(ROOT / "config/ontology/v1")
     hands = OraclePredictor("hands", actions.labels, ("keypoint_track",), now=FIXED_TIME)
     hands2 = OraclePredictor(
         "hands", actions.labels, ("keypoint_track",), jitter_px=3.0, now=FIXED_TIME
@@ -681,7 +691,7 @@ def test_depth_lift_ignores_body_tracks_it_does_not_lift(pg: sa.Engine, tmp_path
     """
     actions = generate_action_scenario(1, n_units=2)
     sid, raw = _bodycam_only_session(pg, tmp_path, actions.frame_times, "body3d")
-    policy, ontology = load_policy(ROOT), load_ontology(ROOT / "config/ontology/v1")
+    policy, ontology = _all_points(load_policy(ROOT)), load_ontology(ROOT / "config/ontology/v1")
     hands = _two_unreviewed_hand_tracks(actions)
     t = np.asarray(actions.frame_times, dtype=np.float64)
     body = OraclePredictor(
@@ -729,7 +739,7 @@ def test_approving_the_other_hand_track_relifts_and_keeps_reviewed_trajectories(
     """
     actions = generate_action_scenario(1, n_units=2)
     sid, raw = _bodycam_only_session(pg, tmp_path, actions.frame_times, "relift")
-    policy, ontology = load_policy(ROOT), load_ontology(ROOT / "config/ontology/v1")
+    policy, ontology = _all_points(load_policy(ROOT)), load_ontology(ROOT / "config/ontology/v1")
     hands = _two_unreviewed_hand_tracks(actions)
     lifter = _UnitLifter(policy)
     video = tmp_path / "bodycam.mp4"
@@ -1088,12 +1098,13 @@ def test_camera_pose_and_world_trajectories_are_idempotent_and_keep_reviewed(
     """ADR 0046: 동기화된 IMU·외부 파라미터가 있는 세션에서 자세 궤적 하나와 손 6점 월드 궤적을
     만든다.
 
-    - 정답 자세 stub(+ IMU 오프셋 75 ms)로 월드 손 6점이 정답과 1 mm 안, derived_from = (카메라
-    궤적,
-      자세). 다시 돌리면 아무것도 넣지 않는다.
+    - 정답 자세 stub으로 월드 손 6점이 정답과 1 mm 안, derived_from = (카메라 궤적, 자세). 다시
+      돌리면 아무것도 넣지 않는다. stub은 IMU를 읽지 않는다: IMU 오프셋(75 ms)은 자세 버전의
+      입력에만 들어간다. 러너가 IMU를 마스터 시각으로 바꿔 추정기에 넘기는 배선은
+      `test_runner_rerun.py::test_runner_passes_master_time_imu_and_the_lifter_depth_to_the_estimator`가
+      본다 (F-PAR-52).
     - 월드 궤적 하나를 승인한 뒤 자세 추정기 판을 바꾸면: 자세는 새 버전으로 바뀌고(검수 전 이전
-    자세
-      삭제), 월드 궤적은 다시 만들어지되 승인한 (개체, 부위, world)는 남고 새로 만들지 않는다.
+      자세 삭제), 월드 궤적은 다시 만들어지되 승인한 (개체, 부위, world)는 남고 새로 만들지 않는다.
     - 외부 파라미터가 없는 세션은 자세를 만들지 않고 이유를 남긴다.
     """
     sc = generate_camera_motion(11, duration_s=2.0, imu_offset_ms=75.0)
@@ -1188,7 +1199,7 @@ def test_3d_inherits_the_approved_2d_track_and_regenerates_after_correction(
 
     actions = generate_action_scenario(1, n_units=2)
     sid, raw = _bodycam_only_session(pg, tmp_path, actions.frame_times, "inherit")
-    policy, ontology = load_policy(ROOT), load_ontology(ROOT / "config/ontology/v1")
+    policy, ontology = _all_points(load_policy(ROOT)), load_ontology(ROOT / "config/ontology/v1")
     hands: list[Predictor] = [
         OraclePredictor("hands", actions.labels, ("keypoint_track",), now=FIXED_TIME)
     ]
