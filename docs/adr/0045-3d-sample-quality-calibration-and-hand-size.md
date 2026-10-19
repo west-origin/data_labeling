@@ -38,7 +38,8 @@ ADR 0044의 손가락 끝 3D는 세 가지가 비어 있었다.
   내용 해시(검수 수집의 레코드 ID 해시 등)가 바뀌지 않는다 (`test_trajectory_sample_method_and_confidence_are_optional`).
   사람이 만든 3D·예전 3D는 None이다.
 - 신뢰도 식 (`dlp_prelabel.handfit.fit_confidence`, 값은 `prelabel.yaml depth.sample_confidence`):
-  - 맞춤: `hand_fit`(0.8) x 재투영 항(RMS 0 → 1, `hand_fit.max_reprojection_px` → `reprojection_floor`)
+  - 맞춤: `hand_fit`(0.8) x 재투영 항(상대 재투영 오차 0 → 1, `hand_fit.max_reprojection_ratio` →
+    `reprojection_floor`. 2026-10-19 전에는 픽셀 RMS와 `max_reprojection_px`였다, ADR 0044 3절 개정)
     x 관절 수 항(21 → 1, `hand_fit.min_points` → `points_floor`) x 일치 항(깊이·사전값 배율 비 1 → 1,
     `hand_fit.max_scale_ratio` → `agreement_floor`, 깊이를 못 쓰거나 버렸으면 `no_depth`).
   - 관절별 깊이·박스 중심: `point_depth`(0.4).
@@ -62,7 +63,11 @@ ADR 0044의 손가락 끝 3D는 세 가지가 비어 있었다.
   (`dlp_schema.calibration.resolve_intrinsics`). 렌즈를 바꾸거나 다시 재면 `--valid-from`으로 새로
   등록한다 (예전 세션은 예전 값을 계속 쓴다).
 - 3D 단계 입력 해시에 고른 값과 출처가 들어간다. 등록하면 `dlp prelabel run`이 검수 전 3D만 새
-  값으로 다시 만든다 (검수·표본 검증한 3D는 지우지 않는다, ADR 0015·0026).
+  값으로 다시 만든다 (검수·표본 검증한 3D는 지우지 않는다, ADR 0015·0026). 2026-10-19 (ADR 0051): 2D
+  트랙 검수를 물려받기만 한 3D(ADR 0048)도 새 값으로 다시 만든 3D가 대신하고 같은 2D 검수를 물려받는다.
+  직접 검수한 3D만 남는다. 캘리브레이션 화면비가 영상과 다르면(`depth.max_intrinsics_aspect_mismatch`
+  밖, 같은 기기의 다른 촬영 모드) 그 값을 쓰지 않고 화각 근사로 떨어지며 출처도 `hfov_approx`다
+  (F-PAR-44). 촬영 모드마다 기기 ID를 나눠 등록한다.
 - 체커보드 캘리브레이션 (`dlp_media.calibration.calibrate_video`, OpenCV 4.x, 이미 작업공간 의존성):
   PTS 간격으로 프레임을 검사해 `findChessboardCornersSB`로 코너를 찾고, 거의 같은 장면은 건너뛴 뒤
   `calibrateCamera`(k3 고정 기본)로 푼다. 장면 수·재투영 RMS 기준(`calibration.yaml`)을 못 맞추면

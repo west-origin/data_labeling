@@ -44,7 +44,7 @@ from dlp_prelabel.adapters.rtmpose import RtmPose
 from dlp_prelabel.adapters.stubs import UNAVAILABLE
 from dlp_prelabel.lift3d import DepthLifter
 from dlp_prelabel.policy import load_policy
-from dlp_prelabel.runner import CONTACT_STEP, run_prelabel
+from dlp_prelabel.runner import CONTACT_STEP, PrelabelSummary, run_prelabel
 from dlp_schema import load_config, repo_root
 from dlp_schema.db.repository import list_model_versions
 from dlp_schema.lineage import ModelStatus
@@ -156,6 +156,12 @@ def cmd_run(args: argparse.Namespace) -> int:
             )
     finally:
         engine.dispose()
+    _print_summary(s)
+    return 0
+
+
+def _print_summary(s: PrelabelSummary) -> None:
+    """`run_prelabel` 요약을 출력한다 (단계별 결과, 3D 보호·자세 이유, 물려받기, 사람 접촉)."""
     for key, n in s.produced.items():
         print(f"{key}: 라벨 {n}개")
     for key in s.skipped:
@@ -167,7 +173,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             f"[3D 보호] 같은 대상에 직접 검수·사람 3D가 있어 새로 계산한 3D를 넣지 않음 "
             f"{s.lift_blocked}개"
         )
-    # 바디캠 자세·월드 좌표 3D (ADR 0046). 건너뛴 이유가 있으면 그대로 보인다 ([자세 낡음]은 지운 자세)
+    # 바디캠 자세·월드 좌표 3D (ADR 0046). 건너뛴 이유는 그대로 보인다 ([자세 낡음]은 지운 자세)
     if s.pose_note:
         print(s.pose_note if s.pose_note.startswith("[") else f"[자세 없음] {s.pose_note}")
     else:
@@ -185,7 +191,6 @@ def cmd_run(args: argparse.Namespace) -> int:
             f"사람 접촉 {s.person_contacts}개: 대상자 부위를 알 수 없어 라벨을 만들지 않았습니다 "
             "(검수에서 부위와 함께 그린다)"
         )
-    return 0
 
 
 def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:  # pyright: ignore[reportPrivateUsage]
