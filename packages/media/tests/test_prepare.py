@@ -71,6 +71,39 @@ def test_prepare_preserves_pts_and_rotates_pixels(tmp_path: Path, rotation: int)
         prepare_video(src, dst, SETTINGS)
 
 
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="FFmpeg 필요")
+@pytest.mark.parametrize(("tag", "override"), [(-90, 180), (90, 0), (0, -90)])
+def test_prepare_display_rotation_overrides_wrong_tag(
+    tmp_path: Path, tag: int, override: int
+) -> None:
+    """표시 태그가 장착 방향과 다르면 운영자가 준 각도를 태그 대신 쓴다 (실영상 파일럿).
+
+    태그(-90)를 따르면 옆으로 눕는 영상을 180도로 바로 세우는 경우 등. 결과 픽셀은 저장 픽셀을
+    지정 각도만큼 반시계로 돌린 것과 같고, 태그 각도와는 다르다.
+    """
+    src, dst = tmp_path / "source.mp4", tmp_path / "ready.mp4"
+    source_video(src, tag)
+    result = prepare_video(src, dst, SETTINGS, display_rotation=override)
+    assert result.video is not None and result.video.rotation_degrees == 0
+    before, after = build_pts_index(src), build_pts_index(dst)
+    assert [before.frame_ms(i) for i in range(3)] == [after.frame_ms(i) for i in range(3)]
+    stored = next(iter_frames(src))[1]  # iter_frames는 태그를 적용하지 않은 저장 픽셀이다
+    _, pixels = next(iter_frames(dst))
+    expected = np.rot90(stored, k=override // 90)
+    assert pixels.shape == expected.shape
+    assert np.abs(pixels.astype(float) - expected.astype(float)).mean() < 3
+    by_tag = np.rot90(stored, k=tag // 90)
+    assert by_tag.shape != pixels.shape or np.abs(by_tag.astype(float) - pixels).mean() > 20
+
+
+def test_prepare_rejects_non_right_angle_override(tmp_path: Path) -> None:
+    src, dst = tmp_path / "source.mp4", tmp_path / "ready.mp4"
+    source_video(src, 0)
+    with pytest.raises(ValueError, match="90의 배수"):
+        prepare_video(src, dst, SETTINGS, display_rotation=45)
+    assert not dst.exists()
+
+
 def test_failed_prepare_does_not_publish_output(tmp_path: Path) -> None:
     src, dst = tmp_path / "source.mp4", tmp_path / "ready.mp4"
     source_video(src, 0)

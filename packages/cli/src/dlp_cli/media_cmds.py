@@ -65,9 +65,18 @@ def cmd_probe(args: argparse.Namespace) -> int:
 
 def cmd_prepare(args: argparse.Namespace) -> int:
     """로컬 영상의 방향과 시간을 정규화한다. 원본/기존 출력은 보존하며 DB에 등록하지 않는다."""
-    info = prepare_video(Path(args.file), Path(args.out), load_prepare_policy(repo_root()))
+    info = prepare_video(
+        Path(args.file),
+        Path(args.out),
+        load_prepare_policy(repo_root()),
+        display_rotation=args.display_rotation,
+    )
     assert info.video is not None
-    print(f"준비 완료: {args.out} {info.video.width}x{info.video.height}, 회전 0°, PTS 보존")
+    applied = "표시 태그" if args.display_rotation is None else f"지정 {args.display_rotation}°"
+    print(
+        f"준비 완료: {args.out} {info.video.width}x{info.video.height}, "
+        f"회전 0° (적용: {applied}), PTS 보존"
+    )
     return 0
 
 
@@ -134,6 +143,12 @@ def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
     p = media_sub.add_parser("prepare", help="픽셀 방향·PTS를 검증한 별도 MP4 사본 생성")
     p.add_argument("file")
     p.add_argument("--out", required=True)
+    p.add_argument(
+        "--display-rotation",
+        type=int,
+        help="표시 방향 태그가 장착 방향과 다를 때 태그 대신 쓸 반시계 회전 각도 (90의 배수, "
+        "저장 픽셀 기준. 영상을 직접 보고 정한다)",
+    )
     p.set_defaults(func=cmd_prepare)
     p = media_sub.add_parser("pts-index", help="PTS 인덱스 Parquet 생성")
     p.add_argument("file")

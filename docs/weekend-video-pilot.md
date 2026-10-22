@@ -60,6 +60,15 @@ uv run --no-sync dlp media prepare /path/to/original.mp4 --out /path/to/prepared
 uv run --no-sync dlp pilot check --profile cleaning --video /path/to/prepared.mp4
 ```
 
+스마트폰을 몸에 달면 방향 고정·장착 방향 때문에 표시 방향 태그가 실제와 다를 수 있다 (2026-10-22
+파일럿: 태그 -90°였지만 가슴에 거꾸로 단 가로 화면이라 저장 픽셀을 180° 돌려야 착용자 몸이 아래에 온다).
+준비 사본의 몇 장면을 보고 착용자 몸·팔이 화면 아래에서 들어오지 않으면, 원본에서 다시 만들며 태그 대신
+쓸 반시계 각도를 준다. 태그는 무시되고 같은 PTS·트랙 검사를 거친다.
+
+```bash
+uv run --no-sync dlp media prepare /path/to/original.mp4 --out /path/to/prepared.mp4 --display-rotation 180
+```
+
 입력 매니페스트에는 다음 형식을 쓰되, 꺾쇠 괄호 자리는 실제 정보로 채운다. 아래는 실행할 수 있는
 예제 동의 정보가 아니라 작성 양식이다. 새 세션 ID를 사용하고 이미 검수한 세션의 영상을 교체하지 않는다.
 
