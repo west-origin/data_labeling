@@ -52,6 +52,7 @@ from dlp_models.registry import resolve
 from dlp_models.vlm import OpenAICompatibleChat
 from dlp_prelabel.policy import load_policy as load_prelabel_policy
 from dlp_privacy import hints as privacy_hints
+from dlp_privacy.detection import FrameDetector
 from dlp_privacy.detectors import build_detectors
 from dlp_privacy.errors import RenderNotCurrentError
 from dlp_privacy.policy import PrivacyPolicy
@@ -93,10 +94,21 @@ def _face_detector(policy: PrivacyPolicy, root: Path) -> Detector | None:
     det = next((ready[n] for n in names if n in ready), None)
     if det is None:
         return None
-    threshold = policy.detection_threshold
+    return face_tta_detector(det, policy.detection_threshold)
+
+
+def face_tta_detector(det: FrameDetector, threshold: float) -> Detector:
+    """프라이버시 프레임 탐지기 → TTA 탐지기 (얼굴 탐지만, 박스는 (x, y, w, h) 튜플).
+
+    `Detection.box`는 `dlp_privacy.geometry.Box` 객체라 TTA의 튜플 박스로 풀어 준다.
+    """
 
     def detect(img: NDArray[np.uint8]) -> list[tuple[str, Box]]:
-        return [("face", tuple(d.box)) for d in det.detect(img, 0, threshold) if d.target == "face"]  # type: ignore[misc]
+        return [
+            ("face", (d.box.x, d.box.y, d.box.w, d.box.h))
+            for d in det.detect(img, 0, threshold)
+            if d.target == "face"
+        ]
 
     return detect
 

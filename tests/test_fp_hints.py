@@ -144,3 +144,26 @@ def test_tta_tracks_on_synthetic_video(tmp_path: Path) -> None:
     support = tta_tracks(video, tracks, _white, spec)
     assert support["real"] == 1.0
     assert support["ghost"] == 0.0
+
+
+def test_face_tta_detector_unpacks_privacy_boxes() -> None:
+    """CLI 얼굴 TTA 어댑터: `dlp_privacy` 탐지(Box 객체)를 (x, y, w, h) 튜플로 풀고
+    얼굴만 남긴다.
+
+    회귀: pilot-real2에서 `tuple(Box)`로 `dlp review hints --tta`가 TypeError로 멈췄다.
+    """
+    from dlp_cli.hints_cmds import face_tta_detector
+    from dlp_privacy.detection import Detection
+    from dlp_privacy.geometry import Box as PrivacyBox
+
+    class _Fake:
+        name, version = "fake", "1"
+
+        def detect(self, image: Any, t_ms: int, threshold: float) -> list[Detection]:
+            return [
+                Detection("face", PrivacyBox(10.0, 20.0, 30.0, 40.0), 0.9, "fake"),
+                Detection("license_plate", PrivacyBox(1.0, 2.0, 3.0, 4.0), 0.9, "fake"),
+            ]
+
+    detect = face_tta_detector(_Fake(), 0.5)
+    assert detect(np.zeros((8, 8, 3), dtype=np.uint8)) == [("face", (10.0, 20.0, 30.0, 40.0))]

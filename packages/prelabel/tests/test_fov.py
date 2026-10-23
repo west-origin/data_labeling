@@ -28,10 +28,10 @@ TRUE_F = 110.0
 
 
 def _policy(**focal: object) -> PrelabelPolicy:
-    """저장소 정책 (focal_estimate 일부를 바꾼 사본, 3D 간격은 매 프레임)."""
+    """저장소 정책 (focal_estimate를 켜고 일부를 바꾼 사본, 3D 간격은 매 프레임)."""
     p = load_policy(ROOT)
     fe = p.depth.focal_estimate.model_copy(
-        update={"frame_stride_ms": 0, "min_samples": 10, **focal}
+        update={"enabled": True, "frame_stride_ms": 0, "min_samples": 10, **focal}
     )
     depth = p.depth.model_copy(update={"focal_estimate": fe, "frame_stride_ms": 0})
     return p.model_copy(update={"depth": depth})
@@ -109,3 +109,8 @@ def test_lifter_uses_estimate_only_without_calibration(monkeypatch: pytest.Monke
     assert lifter.last_focal is None
     p = calibrated[0].payload
     assert isinstance(p, Trajectory3DPayload) and p.intrinsics is IntrinsicsSource.CALIBRATED
+
+
+def test_focal_estimate_is_off_by_default() -> None:
+    """저장소 정책은 추정을 끈다 (메트릭 깊이 모델의 화각 사전값을 되돌려 줌, F-PAR-65)."""
+    assert not load_policy(ROOT).depth.focal_estimate.enabled

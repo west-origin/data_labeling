@@ -230,8 +230,11 @@ depth:
   # 손 크기로 세션 초점 거리 추정 (ADR 0056, dlp_prelabel.fov). 캘리브레이션(세션·기기 등록)이 없는 세션에서만,
   # 품질 좋은 손 맞춤의 깊이 손바닥 길이와 손 크기 사전값(작업자 등록값, 없으면 hand_fit.reference_palm_m)의 비로
   # 초점 거리를 정한다. 출처는 estimated_hand_size (calibrated 아님). 깊이 모델·손 크기 사전값 오차가 그대로 남는다
+  # 기본 꺼 둠 (ADR 0056 개정, F-PAR-65): 메트릭 깊이 모델(Depth Anything V2 Metric)은 학습 화각을 전제로 거리를
+  # 내므로 p0/L이 카메라가 아니라 깊이 모델의 화각 사전값을 되돌려 준다. pilot-real2(0.5x 초광각, 공칭 초점 약
+  # 720 px)에서 fx 1767 px(가로 57도)를 냈다. 화각을 함께 추정하거나 입력받는 깊이 모델에서만 켠다
   focal_estimate:
-    enabled: true
+    enabled: false
     frame_stride_ms: 1000     # 추정용 깊이 추론 간격 (3D 단계 앞의 추가 비용, 200 ms 간격 3D의 약 1/5)
     min_samples: 20
     max_spread: 0.5           # 손바닥 길이 비의 (사분위 범위 / 중앙값) 상한

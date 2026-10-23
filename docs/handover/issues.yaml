@@ -839,6 +839,12 @@ issues:
   - {id: F-PMS-35, title: "강제 종료된 dlp prelabel run(컨테이너 재시작·SIGKILL)이 원본 영상 임시 사본(/tmp/tmp*/, 약 350 MB)을 지우지 못하고 남김 (개인정보가 담긴 원본이 로컬에 남고 디스크 여유를 줄여 SeaweedFS 쓰기 거부를 앞당김)", severity: medium, status: open, kind: ops,
      files: [packages/prelabel/src/dlp_prelabel/runner.py, packages/cli/src/dlp_cli/prelabel_cmds.py], source: docs/handover/pilot-real-2026-10-22.md, see: [F-PMS-32],
      note: "2026-10-23 파일럿: 컨테이너 재시작으로 끊긴 3D 단계와 전날 실행의 원본 사본 두 개(각 약 345 MB)가 /tmp에 남아 있어 지웠다. tempfile.TemporaryDirectory는 정상 종료·예외에서만 지운다. 필요: 원본 임시 사본을 정해진 작업 디렉터리(예: DLP_WORK_DIR)에 두고 시작할 때 낡은 사본을 지우거나, 운영 점검(dlp services check)이 남은 사본을 알린다."}
+  - {id: F-REV-31, title: "dlp review hints --tta가 프라이버시 탐지 박스(Box 객체)를 tuple()로 풀다 TypeError로 멈춤", severity: medium, status: fixed, kind: code,
+     files: [packages/cli/src/dlp_cli/hints_cmds.py], source: docs/handover/pilot-real-2026-10-22.md,
+     note: "pilot-real2 첫 실행에서 발견. type: ignore가 가렸다. face_tta_detector로 분리해 x·y·w·h로 풀고 회귀 tests/test_fp_hints.py::test_face_tta_detector_unpacks_privacy_boxes"}
+  - {id: F-PAR-65, title: "손 크기 초점 거리 추정(ADR 0056)이 메트릭 깊이 모델의 화각 사전값을 되돌려 줘 초광각에서 초점을 2.4배로 냄 (기본 끔)", severity: medium, status: open, kind: code,
+     files: [packages/prelabel/src/dlp_prelabel/fov.py, config/policies/prelabel.yaml], source: docs/handover/pilot-real-2026-10-22.md, see: [F-PAR-59],
+     note: "pilot-real2(0.5x 초광각, 공칭 초점 약 720 px): fx 1767 px(가로 57도), 표본 140, 퍼짐 0.42로 문턱 통과. f = f0·p0/L은 깊이가 화각과 무관하다고 전제하지만 Depth Anything V2 Metric은 학습 화각을 전제로 거리를 낸다. 합성 시험은 정답 깊이라 드러나지 않았다. 기본 enabled false로 바꿨다(ADR 0056 개정). 다시 켜려면 화각을 추정·입력받는 깊이 모델과 체커보드 세션 비교가 필요하다"}
   - {id: F-PAR-64, title: "MediaPipe 손 판정(Left·Right)이 한 손에서 프레임마다 바뀌어, 손별 트랙이 같은 손으로 건너뛰고 끊김이 생김 (손 판정을 프레임마다 따로 믿는 어댑터 구조)", severity: medium, status: open, kind: code,
      files: [packages/prelabel/src/dlp_prelabel/adapters/mediapipe_models.py], source: docs/handover/pilot-real-2026-10-22.md, see: [F-PAR-61],
      note: "pilot-real2: 채운 두 손 프레임의 두 손목 간격 중앙값이 손 크기의 0.08배(한 손을 두 트랙이 번갈아 잡음), 관측 두 손 프레임 중 간격이 손 크기보다 작은 68프레임의 좌우 일치는 0.76. 손목 2D 떨림 p95가 약 3(손 크기 배)인 것도 트랙이 다른 손으로 건너뛴 프레임이다. 지금은 한 프레임 안 겹침 빼기(dd1)와 다른 손 위의 채운 키프레임 빼기(dd2)만 했다. 필요: 위치 연속성으로 탐지를 트랙에 잇고(헝가리안 매칭) 손 판정은 트랙 단위로 다수결·평활해 정하는 손 추적기, 1인칭 기하(왼손은 화면 왼쪽에서 들어옴)를 약한 사전값으로."}
