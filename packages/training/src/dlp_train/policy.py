@@ -47,6 +47,57 @@ class TaskTraining(Contract):
     params: dict[str, Any] = Field(default_factory=dict[str, Any])  # 기본 하이퍼파라미터
 
 
+class GeometricAugment(Contract):
+    """기하 증강 (`augmentation.geometric`). hflip_p: 좌우 뒤집기 확률. rotate_deg: 회전 최대
+    각(도).
+    scale_range: 확대 배율 범위 (1보다 크면 자르기). perspective_frac: 모서리 흔들기 최대 비율."""
+
+    hflip_p: float = Field(ge=0, le=1)
+    rotate_deg: float = Field(ge=0, le=45)
+    scale_range: tuple[float, float]
+    perspective_frac: float = Field(ge=0, le=0.2)
+
+
+class PhotometricAugment(Contract):
+    """광학 증강 (`augmentation.photometric`). brightness·contrast: ±최대 변화 (0~1).
+    blur_sigma_max: 가우스 흐림 최대 sigma(px). noise_std_max: 잡음 최대 표준편차(0~255).
+    jpeg_p / jpeg_quality_range: JPEG 손상 확률과 품질 범위."""
+
+    brightness: float = Field(ge=0, le=1)
+    contrast: float = Field(ge=0, le=1)
+    blur_sigma_max: float = Field(ge=0)
+    noise_std_max: float = Field(ge=0)
+    jpeg_p: float = Field(ge=0, le=1)
+    jpeg_quality_range: tuple[int, int]
+
+
+class EgocentricAugment(Contract):
+    """1인칭 증강 (`augmentation.egocentric`). motion_blur_px_max: 움직임 흐림 최대 길이(px).
+    highlight_p / highlights_max: 반사광(젖은 손·스테인리스) 확률과 최대 개수. distortion_k1_max:
+    렌즈 방사 왜곡 k1 최대 크기 (±)."""
+
+    motion_blur_px_max: int = Field(ge=0)
+    highlight_p: float = Field(ge=0, le=1)
+    highlights_max: int = Field(ge=0)
+    distortion_k1_max: float = Field(ge=0, le=0.5)
+
+
+class AugmentationPolicy(Contract):
+    """학습 증강 (`augmentation` 절, ADR 0057, `dlp_train.augment`).
+
+    enabled: 끄면 학습 파라미터에 넣지 않는다. tasks: 증강을 쓰는 과제. seed: 표본 씨앗의 바탕.
+    copies: 표본마다 증강본 수. 해시(`augment.policy_digest`)가 모델 버전·MLflow에 들어간다.
+    """
+
+    enabled: bool
+    tasks: tuple[Task, ...] = ()
+    seed: int = Field(ge=0)
+    copies: int = Field(ge=1)
+    geometric: GeometricAugment
+    photometric: PhotometricAugment
+    egocentric: EgocentricAugment
+
+
 class TrainingPolicy(Contract):
     """`config/policies/training.yaml` 전체. 각 키의 의미는 YAML 주석을 본다."""
 
@@ -57,6 +108,7 @@ class TrainingPolicy(Contract):
     artifact_prefix: str  # 학습 산출물 버킷(buckets.mlflow) 안의 키 접두
     mlflow: MlflowPolicy
     tasks: dict[Task, TaskTraining]
+    augmentation: AugmentationPolicy  # 학습 증강 (ADR 0057)
 
     @field_validator("splits")
     @classmethod

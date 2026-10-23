@@ -118,6 +118,8 @@ class OracleStubTrainer:
                     "seed": int(params.get("seed", 0)),
                     "confidence": float(params.get("confidence", 0.9)),
                     "examples": len(data.examples),
+                    # 증강 설정 해시 (ADR 0057). stub은 픽셀을 보지 않아 증강본을 만들지 않는다
+                    "augmentation": params.get("augmentation"),
                 },
                 ensure_ascii=False,
                 indent=2,

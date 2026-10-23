@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import http.client
 import json
 import socket
 import threading
 import time
 from collections.abc import Callable, Generator
-from contextlib import closing, contextmanager
+from contextlib import contextmanager, suppress
 from http.server import ThreadingHTTPServer
 from unittest.mock import patch
 
@@ -46,6 +45,22 @@ def running(
         thread.join(timeout=2)
 
 
+def _post_once(server: ThreadingHTTPServer, raw: bytes) -> bytes:
+    """요청 바이트를 보내고 응답 바이트를 끝까지 읽는다.
+
+    서버가 본문을 다 읽기 전에 503을 보내고 닫으면 보내기가 BrokenPipe·ConnectionReset으로 끝날 수
+    있다 (CPU 부하에서 간헐, F-REV-30). 그래도 서버가 보낸 응답은 읽는다.
+    """
+    data = b""
+    with socket.create_connection(("127.0.0.1", server.server_port), timeout=2) as client:
+        with suppress(BrokenPipeError, ConnectionResetError):
+            client.sendall(raw)
+        with suppress(ConnectionResetError):
+            while chunk := client.recv(4096):
+                data += chunk
+    return data
+
+
 def post(
     server: ThreadingHTTPServer,
     body: bytes = BODY,
@@ -53,11 +68,27 @@ def post(
     secret: str = "secret",
     path: str = "/webhooks/label_studio",
 ) -> tuple[int, str | None]:
-    with closing(http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=2)) as client:
-        client.request("POST", path, body, {"X-DLP-Secret": secret})
-        response = client.getresponse()
-        response.read()
-        return response.status, response.getheader("Retry-After")
+    """POST 하나 → (상태 코드, Retry-After). 연결이 응답 없이 끊기면 두 번까지 다시 보낸다."""
+    raw = (
+        f"POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {len(body)}\r\n"
+        f"X-DLP-Secret: {secret}\r\nConnection: close\r\n\r\n"
+    ).encode() + body
+    data = b""
+    for _ in range(3):
+        data = _post_once(server, raw)
+        if data:
+            break
+    head = data.split(b"\r\n\r\n", 1)[0].decode("latin-1").split("\r\n")
+    status = int(head[0].split()[1])
+    retry = next(
+        (
+            line.split(":", 1)[1].strip()
+            for line in head[1:]
+            if line.lower().startswith("retry-after:")
+        ),
+        None,
+    )
+    return status, retry
 
 
 def post_after_worker_release(server: ThreadingHTTPServer) -> int:

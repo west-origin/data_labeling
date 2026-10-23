@@ -81,6 +81,7 @@ from dlp_schema.labels import LabelRecord
 from dlp_schema.lineage import GoldenSet, ModelStatus, ModelVersion, TrainingRun
 from dlp_schema.predictor import Clip, Predictor
 from dlp_schema.session import LifecycleState, Session, Stream, StreamKind
+from dlp_train.augment import policy_digest
 from dlp_train.extract import load_training_data, matches
 from dlp_train.policy import TrainingPolicy
 from dlp_train.tracking import Tracker
@@ -278,6 +279,10 @@ def run_training_job(  # noqa: C901
     if trainer is None or loader is None:
         raise TrainingError(f"학습기·로더가 없습니다: {trainer_name}")
     params = {**spec.params, **job.params}
+    aug = policy.augmentation
+    if aug.enabled and job.task in aug.tasks:
+        # 증강 설정 해시를 파라미터에 넣어 모델 버전 태그·MLflow에 남긴다 (ADR 0057)
+        params["augmentation"] = policy_digest(aug)
 
     # 1) 학습 예제 (골든셋 세션이 섞이면 멈춘다 — 분할기가 막지만 한 번 더 확인)
     version = get_dataset_version(conn, job.dataset_version_id)
@@ -360,7 +365,8 @@ def run_training_job(  # noqa: C901
         tracker.log_params(
             mlflow_run,
             {k: json.dumps(v) for k, v in sorted(params.items())}
-            | {"dataset_version": version.version_id, "examples": str(n)},
+            | {"dataset_version": version.version_id, "examples": str(n)}
+            | _augmentation_params(policy, params),
         )
         with tempfile.TemporaryDirectory() as tmp:
             work = Path(tmp)
@@ -494,6 +500,15 @@ def run_training_job(  # noqa: C901
         tracker.finish(mlflow_run, "FAILED")
         raise
     return result
+
+
+def _augmentation_params(policy: TrainingPolicy, params: dict[str, Any]) -> dict[str, str]:
+    """증강을 쓰면 MLflow에 남길 전체 설정 JSON (`augmentation_spec`, ADR 0057). 안 쓰면 빈 사전."""
+    if "augmentation" not in params:
+        return {}
+    return {
+        "augmentation_spec": json.dumps(policy.augmentation.model_dump(mode="json"), sort_keys=True)
+    }
 
 
 def _no_truth_reason(golden_version: str, task: str, lag: TruthLag | None) -> str:

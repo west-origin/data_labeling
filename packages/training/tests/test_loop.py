@@ -43,6 +43,7 @@ from dlp_schema.lineage import GoldenSet, ModelStatus, ModelVersion, TrainingRun
 from dlp_schema.ontology import load_ontology
 from dlp_schema.session import Domain, PrivacyState, Session, Stream, StreamKind, SyncMethod
 from dlp_schema.testing import FIXED_TIME, make_label, make_session
+from dlp_train.augment import policy_digest
 from dlp_train.deployed import deployed_predictors
 from dlp_train.loop import (
     DEPLOYED_BASELINE,
@@ -354,6 +355,10 @@ def test_training_loop_gate_blocks_or_deploys(engine: sa.Engine, tmp_path: Path)
     # MLflow 기록 (메모리): 실행마다 파라미터·학습 지표·골든 지표·산출물, 배포 모델만 레지스트리에
     rec = tracker.runs[r2.mlflow_run_id or ""]
     assert rec.status == "FINISHED" and rec.params["jitter_px"] == "0.0"
+    # 증강 설정 해시가 파라미터(모델 버전 태그 입력)와 MLflow에 남는다 (ADR 0057)
+    aug = load_policy(ROOT).augmentation
+    assert rec.params["augmentation"] == json.dumps(policy_digest(aug))
+    assert json.loads(rec.params["augmentation_spec"])["seed"] == aug.seed
     assert rec.metrics["gate/passed"] == 1.0 and "golden/hota" in rec.metrics
     assert {"model/oracle-stub.json", "golden/golden.json", "golden/golden.md"} <= set(
         rec.artifacts
