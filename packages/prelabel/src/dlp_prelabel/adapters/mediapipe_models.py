@@ -31,6 +31,7 @@ from typing import Any
 from dlp_models.registry import resolve
 from dlp_prelabel.common import iter_frames, model_label, strictly_increasing, track_boxes
 from dlp_prelabel.policy import PrelabelPolicy
+from dlp_prelabel.temporal import fill_gaps, filter_tracks, smooth_hand_frames
 from dlp_schema.episode import version_tag
 from dlp_schema.labels import (
     BoxKeyframe,
@@ -124,9 +125,10 @@ def hand_frame(t_ms: int, landmarks: Any, world: Any, width: int, height: int) -
 class MediaPipeHands:
     """손 21관절 어댑터 (name="hands").
 
-    version: `mediapipe-<가중치 버전>+rgb1+w1+hd2+p<hands 절 해시>`.
+    version: `mediapipe-<가중치 버전>+rgb1+w1+hd2+sm1+p<hands 절 해시>`.
     RGB 행 패딩 제거(rgb1), 손 중심 3D 점 싣기(w1, ADR 0044), 1인칭 손 판정을 뒤집지 않게 바로잡은
-    손 좌우 의미(hd2, F-PAR-61) 버전을 포함한다. 손(왼·오른)마다
+    손 좌우 의미(hd2, F-PAR-61), 2D 평활·짧은 끊김 채우기(sm1, ADR 0054) 버전을 포함한다.
+    손(왼·오른)마다
     트랙 하나를 낸다. 라벨 ID는 `<세션>-<스트림>-hands-<version_tag>-<left|right>`, entity_id는
     `<left|right>_hand`.
     """
@@ -138,7 +140,7 @@ class MediaPipeHands:
     ) -> None:
         """가중치를 확인하고 버전을 정한다. Raises: ModelUnavailableError."""
         self.path, version = _model(root, policy.models.hands)
-        self.version = f"{version}+rgb1+w1+hd2+p{policy.digest('hands')}"
+        self.version = f"{version}+rgb1+w1+hd2+sm1+p{policy.digest('hands')}"
         self.policy, self.ontology_version, self.now = policy, ontology_version, now
 
     def run(self, clip: Clip) -> list[LabelRecord]:
@@ -148,7 +150,8 @@ class MediaPipeHands:
         3D 점(hand_world_landmarks, `hand_frame`)을 함께 싣는다. 관절 visibility는 모두
         2(보임)로 둔다 (MediaPipe가 관절별 가림을 주지 않는다). 트랙 신뢰도는 손 판정 점수의
         평균이다. 한 손이 잠시 사라져도 같은 트랙에 이어 붙인다 (키프레임 사이에 빈 시간이 생길
-        수 있다).
+        수 있다). 라벨로 만들기 전에 손마다 2D를 평활하고(`hands.smoothing`), 짧은 끊김을 보간
+        키프레임으로 채운다(`hands.gap_fill`, 채운 키프레임 점수는 채움 신뢰도, ADR 0054).
         """
         mp, mpt, vision = _vision()
         options = vision.HandLandmarkerOptions(
@@ -161,12 +164,16 @@ class MediaPipeHands:
             min_hand_detection_confidence=self.policy.hands.min_score,
         )
         frames: dict[Hand, list[tuple[KeypointFrame, float]]] = {Hand.LEFT: [], Hand.RIGHT: []}
+        times: list[int] = []
+        size = (1, 1)
         with vision.HandLandmarker.create_from_options(options) as model:
             # VIDEO 모드는 넘기는 시각(ms)이 엄격히 증가해야 한다. 스트림 PTS ms를 그대로 넘기되,
             # PTS 반올림으로 앞 프레임과 같은 ms가 된 프레임은 건너뛴다 (`strictly_increasing`).
             # 그대로 넘기면 MediaPipe가 예외를 내 세션 전체 프리라벨이 실패했다.
             for t, img in strictly_increasing(iter_frames(clip.video)):
                 h, w = img.shape[:2]
+                times.append(t)
+                size = (w, h)
                 result = model.detect_for_video(
                     mp.Image(image_format=mp.ImageFormat.SRGB, data=img), t
                 )
@@ -186,9 +193,10 @@ class MediaPipeHands:
                 for hand, (score, (landmarks, world)) in found.items():
                     frames[hand].append((hand_frame(t, landmarks, world, w, h), score))
         out: list[LabelRecord] = []
-        for hand, items in frames.items():
-            if not items:
+        for hand, observed in frames.items():
+            if not observed:
                 continue
+            items = self._clean(observed, times, size)
             payload = KeypointTrackPayload(
                 entity_id=f"{hand.value}_hand",
                 skeleton="hand21",
@@ -210,6 +218,16 @@ class MediaPipeHands:
                 )
             )
         return out
+
+    def _clean(
+        self, observed: list[tuple[KeypointFrame, float]], times: list[int], size: tuple[int, int]
+    ) -> list[tuple[KeypointFrame, float]]:
+        """한 손 관측을 평활하고 짧은 끊김을 채운 (키프레임, 점수) 목록 (ADR 0054)."""
+        hp = self.policy.hands
+        score = {f.t_ms: s for f, s in observed}
+        smooth = smooth_hand_frames([f for f, _ in observed], size[0], size[1], hp.smoothing)
+        filled = fill_gaps(smooth, times, hp.gap_fill)
+        return [(f, hp.gap_fill.confidence if f.interpolated else score[f.t_ms]) for f in filled]
 
 
 class MediaPipeObjects:
@@ -269,8 +287,9 @@ class MediaPipeObjects:
                         )
                     )
                 detections.append((t, dets))
+        tracks = track_boxes(detections, iou_match=op.track_iou, max_gap_ms=op.max_gap_ms)
         return boxes_to_labels(
-            track_boxes(detections, iou_match=op.track_iou, max_gap_ms=op.max_gap_ms),
+            filter_tracks(tracks, op.track_filter),
             clip,
             self.version,
             self.ontology_version,

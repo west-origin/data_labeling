@@ -116,6 +116,9 @@ def keep_unchanged_world(
 ) -> KeypointTrackPayload:
     """사람 레코드 키프레임 중 2D가 parent와 같은 것에만 parent의 손 중심 3D 점을 되살린다.
 
+    보간 표시(`interpolated`, ADR 0054)도 같은 규칙으로 되살린다 (고치지 않은 키프레임의 2D는
+    여전히 보간 값이다).
+
     ADR 0044 1절 (2026-10-16 개정): 검수자가 손 트랙의 일부 키프레임만 고치면, 고치지 않은
     키프레임의 2D는 모델이 낸 2D 그대로다. 그 키프레임의 world는 그 2D와 짝인 모델 출력이므로
     남기고, 고친 키프레임·새로 생긴 시각에는 싣지 않는다. 판정은 같은 시각(t_ms)의 키프레임에서
@@ -138,15 +141,20 @@ def keep_unchanged_world(
         and (p.entity_id, p.skeleton, p.hand) == (payload.entity_id, payload.skeleton, payload.hand)
     ):
         return payload
-    world = {f.t_ms: f.world for f in p.keyframes if f.world is not None}
+    # 원래 키프레임의 모델 전용 값: world와 보간 표시 (ADR 0044·0054, 도구로 보내지 않는다)
+    model_fields = {
+        f.t_ms: {"world": f.world, "interpolated": f.interpolated}
+        for f in p.keyframes
+        if f.world is not None or f.interpolated
+    }
     sent_points = {f.t_ms: f.points for f in q.keyframes}
     frames = tuple(
-        f.model_copy(update={"world": world[f.t_ms]})
-        if f.t_ms in world and sent_points.get(f.t_ms) == f.points
+        f.model_copy(update=model_fields[f.t_ms])
+        if f.t_ms in model_fields and sent_points.get(f.t_ms) == f.points
         else f
         for f in payload.keyframes
     )
-    if all(f.world is None for f in frames):
+    if all(f.world is None and not f.interpolated for f in frames):
         return payload
     return payload.model_copy(update={"keyframes": frames})
 

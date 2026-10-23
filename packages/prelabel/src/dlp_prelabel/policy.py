@@ -25,6 +25,75 @@ from pydantic import Field, field_validator, model_validator
 
 from dlp_prelabel.posemath import rotation_problem
 from dlp_schema.common import Contract, OntologyId
+from dlp_schema.labels import Constraint3DFlag
+
+
+class TrackFilterPolicy(Contract):
+    """박스 트랙 거르기 (`objects.track_filter`·`open_vocab_objects.track_filter`, ADR 0054).
+
+    start_score: 트랙을 여는 점수 (탐지 문턱 min_score보다 크거나 같게, 히스테리시스).
+    min_keyframes / min_duration_ms: 남길 트랙의 최소 키프레임 수·길이(ms).
+    """
+
+    start_score: float = Field(ge=0, le=1)
+    min_keyframes: int = Field(ge=1)
+    min_duration_ms: int = Field(ge=0)
+
+
+class SmoothingPolicy(Contract):
+    """손 2D One Euro 평활 (`hands.smoothing`, ADR 0054). 값 단위는 정규화 좌표(0~1)/초.
+
+    min_cutoff_hz: 정지 때 차단 주파수 (낮을수록 강한 평활). beta: 속도에 따른 차단 주파수 증가.
+    d_cutoff_hz: 속도 추정 저역 통과. reset_gap_ms: 이보다 긴 끊김 뒤에는 필터를 새로 시작.
+    """
+
+    enabled: bool
+    min_cutoff_hz: float = Field(gt=0)
+    beta: float = Field(ge=0)
+    d_cutoff_hz: float = Field(gt=0)
+    reset_gap_ms: int = Field(ge=0)
+
+
+class GapFillPolicy(Contract):
+    """손 짧은 끊김 채우기 (`hands.gap_fill`, ADR 0054).
+
+    max_gap_ms: 이 이하로 끊긴 사이만 채운다 (0이면 채우지 않음). confidence: 채운 관절 신뢰도.
+    """
+
+    max_gap_ms: int = Field(ge=0)
+    confidence: float = Field(ge=0, le=1)
+
+
+class Constraints3DPolicy(Contract):
+    """손 3D 물리 제약 (`depth.constraints`, ADR 0054, `dlp_prelabel.constraints3d`).
+
+    reach_m: 카메라→손목 거리 타당 범위(m). max_speed_mps / max_accel_mps2: 손목 속도·가속도 상한.
+    max_dt_ms: 이보다 먼 이웃 표본으로는 속도·가속도를 세지 않는다. bone_tolerance: 손끝의 손목
+    거리가
+    세션 중앙값에서 이 비율 넘게 다르면 bone_length. min_bone_samples: 중앙값을 낼 최소 표본 수.
+    actions: 표시 → downweight(신뢰도 x downweight) | drop(표본 빼기).
+    """
+
+    enabled: bool
+    reach_m: tuple[float, float]
+    max_speed_mps: float = Field(gt=0)
+    max_accel_mps2: float = Field(gt=0)
+    max_dt_ms: int = Field(gt=0)
+    bone_tolerance: float = Field(gt=0)
+    min_bone_samples: int = Field(ge=1)
+    actions: dict[Constraint3DFlag, Literal["downweight", "drop"]]
+    downweight: float = Field(gt=0, le=1)
+
+    @model_validator(mode="after")
+    def _complete(self) -> Constraints3DPolicy:
+        """모든 표시에 동작이 있고 reach_m이 0 < 하한 < 상한인지 검사한다."""
+        missing = sorted(set(Constraint3DFlag) - set(self.actions))
+        if missing:
+            raise ValueError(f"depth.constraints.actions에 없는 표시: {missing}")
+        low, high = self.reach_m
+        if not 0 < low < high:
+            raise ValueError("depth.constraints.reach_m: 0 < 하한 < 상한이어야 합니다")
+        return self
 
 
 class ModelRoles(Contract):
@@ -58,6 +127,8 @@ class HandsPolicy(Contract):
 
     min_score: float = Field(ge=0, le=1)
     swap_handedness: bool
+    smoothing: SmoothingPolicy  # 2D One Euro 평활 (ADR 0054)
+    gap_fill: GapFillPolicy  # 짧은 끊김 채우기 (ADR 0054)
 
 
 class BodyPolicy(Contract):
@@ -89,6 +160,7 @@ class ObjectsPolicy(Contract):
     track_iou: float = Field(gt=0, le=1)
     max_gap_ms: float = Field(ge=0)
     coco_to_ontology: dict[str, OntologyId]
+    track_filter: TrackFilterPolicy  # 트랙 거르기 (ADR 0054)
 
 
 class OpenVocabObjectsPolicy(Contract):
@@ -106,6 +178,7 @@ class OpenVocabObjectsPolicy(Contract):
     max_gap_ms: float = Field(ge=0)
     nms_iou: float = Field(gt=0, le=1)
     queries: dict[str, OntologyId] = Field(min_length=1)
+    track_filter: TrackFilterPolicy  # 트랙 거르기 (ADR 0054)
 
 
 # hand21 번호 → 온톨로지 hand_joints 이름 (3D 궤적 part)
@@ -202,6 +275,7 @@ class DepthPolicy(Contract):
     max_intrinsics_aspect_mismatch: float = Field(ge=0)
     hand_fit: HandFitPolicy
     sample_confidence: SampleConfidencePolicy
+    constraints: Constraints3DPolicy  # 손 3D 물리 제약 (ADR 0054)
 
     @field_validator("hand_points")
     @classmethod

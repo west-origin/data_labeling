@@ -198,6 +198,9 @@ def _drop_none(value: object) -> bool:
 #   고친 트랙은 2D가 parent의 양자화 2D와 같은 키프레임에만 parent의 world를 지닌다
 #   (`without_world`, `dlp_review.reconcile.keep_unchanged_world`, ADR 0044 1절 개정). None이면
 #   JSON에 싣지 않는다 (예전 라벨과 같은 JSON).
+# interpolated: 앞뒤 관측 사이를 보간해 채운 키프레임이면 True (선택, ADR 0054). 관측이 아니다.
+#   None이면 JSON에 싣지 않는다 (예전 라벨과 같은 JSON). 검수 도구로 보내지 않는다 (world와 같은
+#   규칙).
 class KeypointFrame(Contract):
     t_ms: Ms
     points: tuple[Keypoint, ...]
@@ -205,6 +208,9 @@ class KeypointFrame(Contract):
         default=None,
         exclude_if=_drop_none,
         description="손 모델의 손 중심 3D 점 (m, 카메라와 같은 축, 원점은 손 중심). hand21만",
+    )
+    interpolated: Literal[True] | None = Field(
+        default=None, exclude_if=_drop_none, description="앞뒤 관측 사이를 보간해 채운 키프레임"
     )
 
     @model_validator(mode="after")
@@ -282,10 +288,21 @@ class BlurTrackPayload(Contract):
     keyframes: tuple[BoxKeyframe, ...] = Field(min_length=1)
 
 
+class Constraint3DFlag(StrEnum):
+    """3D 표본이 어긴 물리 제약 (ADR 0054, `dlp_prelabel.constraints3d`)."""
+
+    REACH = "reach"  # 카메라→손목 거리가 팔 길이 범위 밖
+    SPEED = "speed"  # 한 표본만 튄 속도
+    ACCEL = "accel"  # 가속도 상한 초과
+    BONE_LENGTH = "bone_length"  # 손목→손끝 거리가 세션 중앙값과 다름
+
+
 # 3D 궤적 표본. t_ms: 그 영상 스트림 PTS ms. x, y, z: 위치 (미터, frame 좌표계).
 # qw, qx, qy, qz: 방향 쿼터니언 (카메라 자세처럼 회전이 있을 때만, 없으면 모두 None).
 # method / confidence: 이 표본을 얻은 추정 방식과 그 품질로 정한 신뢰도 (선택, ADR 0045). None이면
 #   JSON에 싣지 않는다 (예전 라벨과 같은 JSON·해시).
+# flags: 이 표본이 어긴 손 3D 물리 제약 (선택, ADR 0054). 어겨도 정책이 drop이 아니면 표본을 남기고
+#   신뢰도를 낮춘다. None이면 JSON에 싣지 않는다.
 class Trajectory3DSample(Contract):
     t_ms: Ms
     x: float
@@ -300,6 +317,9 @@ class Trajectory3DSample(Contract):
     )
     confidence: Confidence | None = Field(
         default=None, exclude_if=_drop_none, description="이 표본의 신뢰도 (맞춤 품질로 정함)"
+    )
+    flags: tuple[Constraint3DFlag, ...] | None = Field(
+        default=None, exclude_if=_drop_none, description="이 표본이 어긴 물리 제약"
     )
 
 

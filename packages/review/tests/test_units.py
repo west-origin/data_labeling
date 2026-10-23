@@ -553,6 +553,43 @@ def test_partial_world_restore_needs_same_hand_and_exact_2d() -> None:
     assert all(f.world is None for f in rec.payload.keyframes)
 
 
+def test_interpolated_marker_follows_world_rule_in_cvat_round_trip() -> None:
+    """ADR 0054: 보간 표시(interpolated)는 CVAT로 보내지 않는다. 고치지 않은 트랙은 승인(표시 유지),
+    첫 프레임만 고치면 2D가 그대로인 보간 키프레임에만 표시가 되살아난다.
+
+    정답 근거: `dlp_fixtures.hand3d` 손 트랙(모델 출처)의 둘째·셋째 키프레임을 보간으로 표시.
+    """
+    s = generate_hand3d_scenario(1, n_frames=4)
+    [truth] = s.labels
+    p = truth.payload
+    assert isinstance(p, KeypointTrackPayload)
+    frames = tuple(
+        f.model_copy(update={"interpolated": True, "world": None}) if i in (1, 2) else f
+        for i, f in enumerate(p.keyframes)
+    )
+    model = truth.model_copy(update={
+        "provenance": Provenance(source=Source.MODEL, model_version="mediapipe-test"),
+        "payload": p.model_copy(update={"keyframes": frames}),
+    })  # fmt: skip
+    schema = fake_schema(list(KEYPOINT_LABELS))
+    [track] = to_cvat_tracks([model], s.frame_times, schema)
+    assert "interpolated" not in json.dumps(track)
+    assert all(f.interpolated is None for f in quantize(model).payload.keyframes)  # type: ignore[union-attr]
+    [same] = from_cvat_tracks([track], s.frame_times, schema, "bodycam", new_box_kind="box_track")
+    kept = reconcile([model], [same], session_id=s.session_id, ontology_version="1.0.0",
+                     reviewer_id="rev1", now=FIXED_TIME, normalize=quantize)  # fmt: skip
+    assert kept.approved == [model.label_id] and not kept.new_records
+
+    track["shapes"][0]["points"][0] += 3.0  # 첫 프레임(관측) 손목만 옮김
+    [moved] = from_cvat_tracks([track], s.frame_times, schema, "bodycam", new_box_kind="box_track")
+    out = reconcile([model], [moved], session_id=s.session_id, ontology_version="1.0.0",
+                    reviewer_id="rev1", now=FIXED_TIME, normalize=quantize)  # fmt: skip
+    [fixed] = out.new_records
+    assert isinstance(fixed.payload, KeypointTrackPayload)
+    marks = [f.interpolated for f in sorted(fixed.payload.keyframes, key=lambda f: f.t_ms)]
+    assert marks == [None, True, True, None]
+
+
 # ---------------------------------------------------------------- 그 밖
 
 

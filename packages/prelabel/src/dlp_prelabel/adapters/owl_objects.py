@@ -19,6 +19,7 @@ from dlp_models.registry import resolve
 from dlp_prelabel.adapters.mediapipe_models import boxes_to_labels
 from dlp_prelabel.common import iter_frames, track_boxes
 from dlp_prelabel.policy import PrelabelPolicy
+from dlp_prelabel.temporal import filter_tracks
 from dlp_schema.labels import LabelRecord
 from dlp_schema.predictor import Clip
 
@@ -72,8 +73,10 @@ class OwlObjects:
                 # 질의 번호 → 질의 문장 → 온톨로지 클래스 (트랙 키)
                 (t, [(op.queries[queries[d.query_index]], d.box, d.score) for d in found])
             )
+        # 시작 문턱·최소 길이로 짧은 오탐 트랙을 거른다 (ADR 0054)
+        tracks = track_boxes(detections, iou_match=op.track_iou, max_gap_ms=op.max_gap_ms)
         return boxes_to_labels(
-            track_boxes(detections, iou_match=op.track_iou, max_gap_ms=op.max_gap_ms),
+            filter_tracks(tracks, op.track_filter),
             clip,
             self.version,
             self.ontology_version,

@@ -680,6 +680,17 @@
       "title": "BoxTrackPayload",
       "type": "object"
     },
+    "Constraint3DFlag": {
+      "description": "3D 표본이 어긴 물리 제약 (ADR 0054, `dlp_prelabel.constraints3d`).",
+      "enum": [
+        "reach",
+        "speed",
+        "accel",
+        "bone_length"
+      ],
+      "title": "Constraint3DFlag",
+      "type": "string"
+    },
     "CoordinateFrame": {
       "enum": [
         "camera",
@@ -1006,6 +1017,20 @@
     "KeypointFrame": {
       "additionalProperties": false,
       "properties": {
+        "interpolated": {
+          "anyOf": [
+            {
+              "const": true,
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "앞뒤 관측 사이를 보간해 채운 키프레임",
+          "title": "Interpolated"
+        },
         "points": {
           "items": {
             "$ref": "#/$defs/Keypoint"
@@ -1493,6 +1518,22 @@
           "default": null,
           "description": "이 표본의 신뢰도 (맞춤 품질로 정함)",
           "title": "Confidence"
+        },
+        "flags": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/Constraint3DFlag"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "이 표본이 어긴 물리 제약",
+          "title": "Flags"
         },
         "method": {
           "anyOf": [

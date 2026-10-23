@@ -304,6 +304,8 @@ def quantize(label: LabelRecord, scale: Scale = UNIT_SCALE) -> LabelRecord:
             f.model_copy(
                 update={
                     "world": None,
+                    # 보간 표시(ADR 0054)도 도구로 보내지 않는다
+                    "interpolated": None,
                     "points": tuple(
                         Keypoint(
                             x=_r(_point_to(pt, scale)[0] / sx),

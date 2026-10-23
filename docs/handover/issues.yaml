@@ -827,6 +827,9 @@ issues:
   - {id: F-PAR-62, title: "손 좌우 뒤집기 정책(hands.swap_handedness)이 세션의 모든 영상 스트림에 하나로 적용되어, 사람이 카메라를 보는 방향이 바뀌는 3인칭 스트림의 손 좌우가 맞지 않을 수 있음", severity: low, status: open, kind: product,
      files: [packages/prelabel/src/dlp_prelabel/adapters/mediapipe_models.py, config/policies/prelabel.yaml, packages/schema/src/dlp_schema/predictor.py], source: docs/handover/pilot-real-2026-10-22.md, see: [F-PAR-61],
      note: "MediaPipe 판정은 손 모양 좌우성 기준이라 카메라를 등진 사람은 그대로, 마주 본 사람은 뒤집어야 맞다. Clip에 스트림 종류가 없어 어댑터는 스트림마다 다르게 정하지 못한다. 3인칭 스트림의 손 트랙은 착용자 매칭 외 하위 단계 입력이 아니어서 영향은 작다. 필요하면 스트림 종류별 정책과 사람 방향(RTMPose 어깨 좌우)으로 정한다."}
+  - {id: F-PAR-63, title: "손 3D 물리 제약 표시(Trajectory3DSample.flags)와 보간 키프레임 표시(KeypointFrame.interpolated)가 내보내기 형식에 실리지 않음 (낮춘 3D 신뢰도만 실리고, 채운 손 키프레임은 visibility 1로 나감)", severity: low, status: open, kind: code,
+     files: [packages/export/src/dlp_export/lerobot.py, packages/export/src/dlp_export/coco.py, packages/schema/src/dlp_schema/labels.py], source: docs/adr/0054-prelabel-temporal-consistency-and-hand-3d-constraints.md, see: [F-PAR-60],
+     note: "ADR 0054에서 라벨에는 남겼으나 LeRobot·COCO·구간 JSON 형식은 바꾸지 않았다. 구매자가 관측과 보간을 구분하려면 LeRobot 손 2D 특징에 보간 여부, 3D 특징에 제약 표시 비트를 더한다 (내보내기 형식 변경, ADR)."}
   - {id: F-PMS-33, title: "표시 방향 태그가 장착 방향과 다른 스마트폰 영상(태그 -90°, 실제로는 180°)을 dlp media prepare가 태그대로만 돌려 옆으로 누운 사본을 만들고 바로잡을 방법이 없었음", severity: medium, status: fixed, kind: code,
      files: [packages/media/src/dlp_media/prepare.py, packages/cli/src/dlp_cli/media_cmds.py, docs/weekend-video-pilot.md], source: docs/handover/pilot-real-2026-10-22.md,
      note: "dlp media prepare --display-rotation <반시계 각도>로 태그 대신 쓸 각도를 준다(FFmpeg 입력 옵션 -display_rotation, 같은 PTS·트랙·해상도 검사). 사람이 영상을 보고 정한다(자동 추정 없음). 옆으로 누운 사본(pilot-real1)과 바로 세운 사본(pilot-real2)의 단계별 결과 차이는 보고서에 있다. 회귀: packages/media/tests/test_prepare.py::test_prepare_display_rotation_overrides_wrong_tag, ::test_prepare_rejects_non_right_angle_override."}

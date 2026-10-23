@@ -38,6 +38,7 @@ from numpy.typing import NDArray
 from dlp_models.depth import Intrinsics, MetricDepth, sample_depth
 from dlp_models.registry import resolve
 from dlp_prelabel.common import Image, iter_frames, model_label
+from dlp_prelabel.constraints3d import constrain_hands
 from dlp_prelabel.handfit import HandFit, fit_confidence, fit_hand, point_confidence
 from dlp_prelabel.policy import HAND21_JOINTS, DepthPolicy, PrelabelPolicy
 from dlp_schema.episode import version_tag
@@ -153,8 +154,10 @@ def _points_by_time(
             )
         seen[key] = label.label_id
         if isinstance(p, KeypointTrackPayload):
+            # 보간해 채운 키프레임은 관측이 아니라 3D로 올리지 않는다 (ADR 0054)
             for f in p.keyframes:
-                hands.setdefault(f.t_ms, []).append((p.entity_id, f))
+                if not f.interpolated:
+                    hands.setdefault(f.t_ms, []).append((p.entity_id, f))
         elif isinstance(p, BoxTrackPayload):
             for k in p.keyframes:
                 if not k.outside:
@@ -362,6 +365,8 @@ def lift_tracks_with_source(
         for entity, frame in hands.get(t, []):
             for name, xyz, method, conf in _lift_hand(frame, dmap, intr, policy, calibrated):
                 out.setdefault((entity, name), []).append(_sample(t, xyz, method, conf))
+    # 손 3D 물리 제약: 어긴 표본에 표시를 남기고 정책대로 신뢰도를 낮추거나 뺀다 (ADR 0054)
+    out = constrain_hands(out, policy.constraints)
     return out, calib is not None if calibrated is None else calibrated
 
 
@@ -394,7 +399,8 @@ class DepthLifter:
     맞춤 판, ADR 0044. hf2: 표본별 방식·신뢰도, ADR 0045. hf3: 궤적마다 입력 트랙 ID
     `derived_from`, ADR 0048 — 3D가 2D 손 트랙 검수를 물려받는 근거. hf4: 손 모델 자세 회전
     다듬기·해상도와 무관한 상대 재투영 문턱, 맞춤 없는 손가락 끝 빼기, 화면비가 다른 캘리브레이션
-    거부, F-PAR-40·42·43·44. 러너가 입력 해시와 손 크기 사전값 출처 `+hp<w|p>`를 더 붙인다).
+    거부, F-PAR-40·42·43·44. hf5: 손 3D 물리 제약 표시·신뢰도 낮추기·튄 표본 빼기, 보간 키프레임
+    제외, ADR 0054. 러너가 입력 해시와 손 크기 사전값 출처 `+hp<w|p>`를 더 붙인다).
     weights_version: 깊이 가중치 버전만 (자세 단계 버전의 깊이 입력, depth 절의 손 맞춤 정책이
     바뀌어도 자세를 다시 추정하지 않게, F-PAR-53).
     """
@@ -412,7 +418,7 @@ class DepthLifter:
         """
         self.path, version = resolve(root, policy.models.depth)
         self.weights_version = version
-        self.version = f"depth3d-{version}+hf4+p{policy.digest('depth')}"
+        self.version = f"depth3d-{version}+hf5+p{policy.digest('depth')}"
         self.policy, self.now = policy, now
         self.model: DepthModel | None = None
 

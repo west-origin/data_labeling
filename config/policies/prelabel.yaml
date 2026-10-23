@@ -38,6 +38,21 @@ hands:
   # true는 거울상이 아닌 카메라를 사람이 마주 보는 영상에서만 쓴다. 이 값은 모든 영상 스트림에 적용된다
   # (3인칭 스트림은 사람이 카메라를 보는 방향에 따라 달라 맞지 않을 수 있다, F-PAR-62)
   swap_handedness: false
+  # 2D 평활 (One Euro, 정규화 좌표 0~1 단위, ADR 0054). 느릴 때 강하게, 빠를 때 약하게 거른다.
+  # min_cutoff_hz를 내리면 정지 떨림이 더 줄고 지연이 는다. beta를 올리면 빠른 동작 지연이 준다.
+  # 합성 시험(1920 px 폭, 30 fps, 떨림 4 px)에서 이 값은 정지 오차 x0.8, 느린 동작(약 300 px/s) x0.9,
+  # 매우 빠른 동작(약 1300 px/s) x1.2(지연)이다. 떨림이 작은 영상에서는 이득이 작다 (보수적으로 둠)
+  smoothing:
+    enabled: true
+    min_cutoff_hz: 8.0
+    beta: 300.0
+    d_cutoff_hz: 1.0
+    reset_gap_ms: 100       # 이보다 오래 끊긴 뒤에는 필터를 새로 시작한다
+  # 짧은 끊김 채우기: 같은 손이 이 이하로 끊긴 사이의 영상 프레임에 앞뒤 관측을 선형 보간한 키프레임을
+  # 넣는다 (interpolated, 관절 visibility 1·신뢰도 confidence, world 없음. 3D 단계는 올리지 않는다)
+  gap_fill:
+    max_gap_ms: 150         # 30 fps에서 약 4프레임. 0이면 채우지 않는다
+    confidence: 0.3
 
 # 전신 포즈 (YOLOX 사람 탐지 → RTMPose). 3인칭 착용자 매칭과 바디캠에 보이는 다른 사람 자세에 쓴다
 body:
@@ -62,6 +77,12 @@ objects:
     bed: bed
     bottle: spray_bottle
     person: person
+  # 트랙 거르기 (ADR 0054): start_score 이상 탐지가 나온 뒤부터 트랙을 열고(히스테리시스, 잇기는
+  # min_score), 키프레임 min_keyframes개·길이 min_duration_ms 미만 트랙은 버린다
+  track_filter:
+    start_score: 0.5
+    min_keyframes: 3          # 30 fps 3프레임
+    min_duration_ms: 60
 
 # COCO에 없는 청소·돌봄 도구는 OWLv2 오픈 보캐뷸러리 탐지로 찾는다 (CPU 프레임당 약 9초).
 # frame_stride_ms마다 추론하고, max_gap_ms 안에서 이어지는 탐지를 한 트랙으로 잇는다. 프리라벨은 추론한
@@ -91,6 +112,12 @@ open_vocab_objects:
     a rubber glove: glove
     a bathtub: bathtub
     a mirror: mirror
+  # 트랙 거르기 (ADR 0054). 추론 간격이 500 ms라 키프레임 2개 = 연속 두 번 추론에서 보인 것.
+  # 한 번만 보인 실제 도구도 빠진다 (재현 손실). 문턱은 정답 표본으로 다시 정한다 (F-PAR-60)
+  track_filter:
+    start_score: 0.2
+    min_keyframes: 2
+    min_duration_ms: 400
 
 # 접촉 구간 (모델이 아닌 알고리즘, dlp_prelabel.contact). 결과는 마스터 타임라인 hand_state 라벨이다.
 # 대상 종류는 온톨로지 객체 정의로 정한다 (tool 정의 → tool, surface → fixed_surface, 그 밖 → object).
@@ -181,6 +208,20 @@ depth:
     agreement_floor: 0.6      # 깊이·사전값 배율 비가 hand_fit.max_scale_ratio일 때 곱 (비 1이면 1)
     no_depth: 0.7             # 깊이를 못 쓰거나 버리고 손 크기 사전값만으로 크기를 정한 맞춤에 곱
     hfov_approx: 0.6          # 캘리브레이션 없이 default_hfov_deg 근사를 쓴 표본에 곱
+  # 손 3D 물리 제약 (ADR 0054, dlp_prelabel.constraints3d). 어긴 표본은 flags에 남기고 actions대로
+  # 신뢰도를 낮추거나(downweight) 뺀다(drop). 손목 표시는 같은 시각 손끝에도 붙인다.
+  # 대리 지표 기준(evaluation.yaml proxy)과 같은 값으로 시작했지만 따로 둔다 (측정 기준은 고정)
+  constraints:
+    enabled: true
+    reach_m: [0.15, 0.9]      # 1인칭 카메라→손목 거리 타당 범위 (m)
+    max_speed_mps: 3.0        # 손목이 한 표본만 튄 것: 들어오고 나가는 속도가 모두 이 값 초과
+    max_accel_mps2: 30.0
+    max_dt_ms: 400            # 이보다 먼 이웃 표본으로는 속도·가속도를 세지 않는다
+    bone_tolerance: 0.25      # 손끝의 손목 거리가 세션 중앙값에서 이 비율 넘게 다르면 bone_length
+    min_bone_samples: 10
+    # 화각 근사처럼 배율 전체가 틀린 세션에서 표본을 대량으로 지우지 않게 reach는 downweight
+    actions: {reach: downweight, speed: drop, accel: downweight, bone_length: downweight}
+    downweight: 0.5
 
 # 바디캠 6자유도 자세 (ADR 0046, dlp_prelabel.campose.ImuVisualOdometry). 동기화된 IMU 스트림(sync_method가
 # unsynced가 아님)과 메트릭 깊이 모델이 있는 세션에서만 돈다. 회전은 IMU 자이로 적분 + 가속도 기울기
