@@ -90,7 +90,7 @@ class GapFillPolicy(Contract):
 
     max_gap_ms: 이 이하로 끊긴 사이만 채운다 (0이면 채우지 않음). confidence: 채운 관절 신뢰도.
     max_jump_scale: 끊김 앞뒤 손목 거리가 손 크기(손목→중지 뿌리 px)의 이 배를 넘으면 채우지 않는다
-        (끊긴 사이 손 판정이 바뀌어 다른 손으로 이어진 경우, 2026-10-23 파일럿).
+        (빠르게 움직였거나 다른 손으로 이어진 끊김).
     """
 
     max_gap_ms: int = Field(ge=0)
@@ -161,6 +161,9 @@ class HandsPolicy(Contract):
 
     min_score: float = Field(ge=0, le=1)
     swap_handedness: bool
+    # 한 프레임의 두 손 탐지가 관절 외접 박스 IoU 이 이상으로 겹치면 같은 손을 두 번 본 것으로 보고
+    # 점수 높은 것만 남긴다 (`adapters.mediapipe_models.drop_duplicate_hands`, 2026-10-23 파일럿)
+    duplicate_iou: float = Field(gt=0, le=1)
     smoothing: SmoothingPolicy  # 2D One Euro 평활 (ADR 0054)
     gap_fill: GapFillPolicy  # 짧은 끊김 채우기 (ADR 0054)
 

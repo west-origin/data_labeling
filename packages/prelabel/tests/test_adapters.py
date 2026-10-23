@@ -26,6 +26,7 @@ from dlp_prelabel.adapters.mediapipe_models import (
     MediaPipeHands,
     MediaPipeObjects,
     best_per_hand,
+    drop_duplicate_hands,
     flip_hand,
 )
 from dlp_prelabel.adapters.owl_objects import OwlObjects
@@ -61,6 +62,17 @@ def test_egocentric_handedness_is_not_swapped() -> None:
     assert flip_hand("right", swap_handedness=False) is Hand.RIGHT
     assert flip_hand("Left", swap_handedness=True) is Hand.RIGHT
     assert flip_hand("Right", swap_handedness=True) is Hand.LEFT
+
+
+def test_duplicate_detection_of_one_hand_is_dropped() -> None:
+    """정답: 같은 자리 두 탐지(Left 하나, Right 하나)는 점수 높은 것만 남고, 떨어진 두 손은 둘 다.
+
+    2026-10-23 파일럿 회귀: 한 손을 두 번 본 탐지가 두 손 트랙을 한 손에 겹치게 했다.
+    """
+    dets = [(Hand.LEFT, 0.7, "a"), (Hand.RIGHT, 0.9, "b"), (Hand.LEFT, 0.8, "c")]
+    boxes = [(0.10, 0.10, 0.2, 0.2), (0.11, 0.10, 0.2, 0.2), (0.60, 0.50, 0.2, 0.2)]
+    assert drop_duplicate_hands(dets, boxes, 0.5) == [(Hand.RIGHT, 0.9, "b"), (Hand.LEFT, 0.8, "c")]
+    assert drop_duplicate_hands(dets, boxes, 1.0) == dets
 
 
 def test_two_detections_of_the_same_hand_keep_the_highest_score() -> None:

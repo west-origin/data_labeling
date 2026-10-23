@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from dlp_models.registry import resolve
-from dlp_prelabel.common import iter_frames, model_label, strictly_increasing, track_boxes
+from dlp_prelabel.common import iou, iter_frames, model_label, strictly_increasing, track_boxes
 from dlp_prelabel.policy import PrelabelPolicy
 from dlp_prelabel.temporal import fill_gaps, filter_tracks, smooth_hand_frames
 from dlp_schema.episode import version_tag
@@ -88,6 +88,30 @@ def flip_hand(label: str, swap_handedness: bool) -> Hand:
     return Hand.RIGHT if hand is Hand.LEFT else Hand.LEFT
 
 
+def _bbox(landmarks: Any) -> tuple[float, float, float, float]:
+    """정규화 관절 좌표의 외접 박스 (x, y, w, h)."""
+    xs, ys = [float(p.x) for p in landmarks], [float(p.y) for p in landmarks]
+    return (min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys))
+
+
+def drop_duplicate_hands[T](
+    detections: list[tuple[Hand, float, T]],
+    boxes: list[tuple[float, float, float, float]],
+    iou_max: float,
+) -> list[tuple[Hand, float, T]]:
+    """같은 손을 두 번 본 탐지(관절 외접 박스 IoU >= iou_max)는 점수 높은 것만 남긴다.
+
+    MediaPipe는 num_hands=2에서 한 손을 Left·Right 두 탐지로 낼 때가 있다. 그대로 두면 두 손 트랙이
+    한 손에 겹친다 (2026-10-23 파일럿). 순서는 입력 순서를 지킨다.
+    """
+    order = sorted(range(len(detections)), key=lambda i: -detections[i][1])
+    kept: list[int] = []
+    for i in order:
+        if all(iou(boxes[i], boxes[j]) < iou_max for j in kept):
+            kept.append(i)
+    return [detections[i] for i in sorted(kept)]
+
+
 def best_per_hand[T](
     detections: Iterable[tuple[Hand, float, T]],
 ) -> dict[Hand, tuple[float, T]]:
@@ -125,9 +149,10 @@ def hand_frame(t_ms: int, landmarks: Any, world: Any, width: int, height: int) -
 class MediaPipeHands:
     """손 21관절 어댑터 (name="hands").
 
-    version: `mediapipe-<가중치 버전>+rgb1+w1+hd2+sm1+p<hands 절 해시>`.
+    version: `mediapipe-<가중치 버전>+rgb1+w1+hd2+sm1+dd1+p<hands 절 해시>`.
     RGB 행 패딩 제거(rgb1), 손 중심 3D 점 싣기(w1, ADR 0044), 1인칭 손 판정을 뒤집지 않게 바로잡은
-    손 좌우 의미(hd2, F-PAR-61), 2D 평활·짧은 끊김 채우기(sm1, ADR 0054) 버전을 포함한다.
+    손 좌우 의미(hd2, F-PAR-61), 2D 평활·짧은 끊김 채우기(sm1, ADR 0054), 한 손을 두 번 본 탐지
+    빼기(dd1) 버전을 포함한다.
     손(왼·오른)마다
     트랙 하나를 낸다. 라벨 ID는 `<세션>-<스트림>-hands-<version_tag>-<left|right>`, entity_id는
     `<left|right>_hand`.
@@ -140,7 +165,7 @@ class MediaPipeHands:
     ) -> None:
         """가중치를 확인하고 버전을 정한다. Raises: ModelUnavailableError."""
         self.path, version = _model(root, policy.models.hands)
-        self.version = f"{version}+rgb1+w1+hd2+sm1+p{policy.digest('hands')}"
+        self.version = f"{version}+rgb1+w1+hd2+sm1+dd1+p{policy.digest('hands')}"
         self.policy, self.ontology_version, self.now = policy, ontology_version, now
 
     def run(self, clip: Clip) -> list[LabelRecord]:
@@ -177,7 +202,7 @@ class MediaPipeHands:
                 result = model.detect_for_video(
                     mp.Image(image_format=mp.ImageFormat.SRGB, data=img), t
                 )
-                found = best_per_hand(
+                dets = [
                     (
                         flip_hand(handed[0].category_name, self.policy.hands.swap_handedness),
                         float(handed[0].score),
@@ -189,6 +214,10 @@ class MediaPipeHands:
                         result.handedness,
                         strict=True,
                     )
+                ]
+                boxes = [_bbox(lm) for lm, _ in (d[2] for d in dets)]
+                found = best_per_hand(
+                    drop_duplicate_hands(dets, boxes, self.policy.hands.duplicate_iou)
                 )
                 for hand, (score, (landmarks, world)) in found.items():
                     frames[hand].append((hand_frame(t, landmarks, world, w, h), score))
