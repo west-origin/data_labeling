@@ -35,7 +35,8 @@
   0 hand_fit, 1 point_depth, 2 mixed = 보간 양끝 방식이 다름, 없음·모름 -1). 신뢰도 범위가 방식끼리
   겹치므로 신뢰도만으로 관절별 깊이 대체 표본을 가를 수 없다 (ADR 0053).
 - annotation.hand_points_3d_intrinsics (int64): 손 3D 점마다 그 궤적의 내부 파라미터 출처 (어휘
-  hand_point_3d_intrinsics: 0 calibrated, 1 hfov_approx, 없음·모름 -1).
+  hand_point_3d_intrinsics: 0 calibrated, 1 hfov_approx, 2 estimated_hand_size(ADR 0056),
+  없음·모름 -1).
 - annotation.verification (int64): `GROUPS` 묶음 [손 2D, 손 3D, 손 상태, 행동, 도구-표면 접촉, 작업]
   마다 그 시각에 쓴 라벨의 가장 낮은 검증 등급 (미검수 0, 표본 검증 1, 사람 승인 2,
   사람 수정·작성 3, 라벨 없음 -1).

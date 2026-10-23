@@ -225,6 +225,8 @@ class PrelabelSummary:
     trajectories_inherited: int = 0
     trajectories_retracted: int = 0
     lift_blocked: int = 0
+    # 손 크기 초점 거리 추정 (ADR 0056): "fx <px> hfov <도> n <표본> spread <퍼짐>" 또는 None
+    focal_estimate: str | None = None
 
 
 def _follow(conn: sa.Connection, session_id: str, now: datetime, summary: PrelabelSummary) -> None:
@@ -681,6 +683,12 @@ def _lift(
         version=version,
         palm_m=palm.palm_m,
     )
+    focal = getattr(lifter, "last_focal", None)
+    if focal is not None:
+        summary.focal_estimate = (
+            f"fx {focal.intrinsics.fx} hfov {focal.hfov_deg} n {focal.n_samples} "
+            f"spread {focal.spread}"
+        )
     # 새 궤적을 이력에 더해 지울 궤적을 구한다: 같은 2D에서 물려받기만 한 이전 궤적은 새 궤적이
     # 대신하므로(규칙 5) 막지 않는다
     kept = drop_protected_trajectories(

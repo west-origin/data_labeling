@@ -30,7 +30,7 @@ import math
 from collections.abc import Container, Iterable, Iterator
 from datetime import datetime
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 import numpy as np
 from numpy.typing import NDArray
@@ -56,6 +56,9 @@ from dlp_schema.labels import (
     Trajectory3DSample,
 )
 from dlp_schema.session import CameraIntrinsics
+
+if TYPE_CHECKING:
+    from dlp_prelabel.fov import FocalEstimate
 
 # hand21 관절 번호 → 이름 (MediaPipe 손 모델 순서)
 # policy.HAND21_JOINTS의 별칭 (이 모듈 안에서 읽기 쉽게)
@@ -386,6 +389,21 @@ def with_palm(policy: DepthPolicy, palm_m: float | None) -> DepthPolicy:
     return policy.model_copy(update={"hand_fit": fit})
 
 
+def _scale_confidence(
+    samples: dict[tuple[str, str | None], list[Trajectory3DSample]], factor: float
+) -> dict[tuple[str, str | None], list[Trajectory3DSample]]:
+    """모든 표본 신뢰도에 factor를 곱한 사본 (손 크기 추정 초점 거리, ADR 0056)."""
+    return {
+        k: [
+            s.model_copy(update={"confidence": round(s.confidence * factor, 3)})
+            if s.confidence is not None
+            else s
+            for s in ss
+        ]
+        for k, ss in samples.items()
+    }
+
+
 def mean_confidence(samples: Iterable[Trajectory3DSample]) -> float:
     """표본 신뢰도의 평균 (소수 셋째 자리). 신뢰도가 없는 표본은 빼고, 모두 없으면 0."""
     values = [x.confidence for x in samples if x.confidence is not None]
@@ -400,7 +418,8 @@ class DepthLifter:
     `derived_from`, ADR 0048 — 3D가 2D 손 트랙 검수를 물려받는 근거. hf4: 손 모델 자세 회전
     다듬기·해상도와 무관한 상대 재투영 문턱, 맞춤 없는 손가락 끝 빼기, 화면비가 다른 캘리브레이션
     거부, F-PAR-40·42·43·44. hf5: 손 3D 물리 제약 표시·신뢰도 낮추기·튄 표본 빼기, 보간 키프레임
-    제외, ADR 0054. 러너가 입력 해시와 손 크기 사전값 출처 `+hp<w|p>`를 더 붙인다).
+    제외, ADR 0054. fe1: 캘리브레이션 없는 세션의 손 크기 초점 거리 추정, ADR 0056. 러너가 입력
+    해시와 손 크기 사전값 출처 `+hp<w|p>`를 더 붙인다).
     weights_version: 깊이 가중치 버전만 (자세 단계 버전의 깊이 입력, depth 절의 손 맞춤 정책이
     바뀌어도 자세를 다시 추정하지 않게, F-PAR-53).
     """
@@ -418,9 +437,24 @@ class DepthLifter:
         """
         self.path, version = resolve(root, policy.models.depth)
         self.weights_version = version
-        self.version = f"depth3d-{version}+hf5+p{policy.digest('depth')}"
+        self.version = f"depth3d-{version}+hf5+fe1+p{policy.digest('depth')}"
         self.policy, self.now = policy, now
         self.model: DepthModel | None = None
+        # 마지막 run의 손 크기 초점 거리 추정 (없으면 None, 러너 요약용)
+        self.last_focal: FocalEstimate | None = None
+
+    def _focal(
+        self, video: Path, tracks: list[LabelRecord], policy: DepthPolicy
+    ) -> FocalEstimate | None:
+        """손 크기 초점 거리 추정 (`fov`). 꺼져 있거나 사전값이 없거나 표본이 모자라면 None."""
+        from dlp_prelabel.fov import estimate_focal, focal_samples  # 순환 import 회피
+
+        prior = policy.hand_fit.reference_palm_m
+        if not policy.focal_estimate.enabled or prior is None:
+            return None
+        full = self.policy.model_copy(update={"depth": policy})
+        values, size = focal_samples(iter_frames(video), self.depth_model(), tracks, full)
+        return None if size is None else estimate_focal(values, prior, size, full)
 
     def depth_model(self) -> DepthModel:
         """깊이 추론기. ONNX 세션은 처음 쓸 때 한 번만 연다 (가중치가 커서 생성 비용이 크다)."""
@@ -466,11 +500,17 @@ class DepthLifter:
         # 러너는 입력 해시를 붙인 버전을 넘긴다 (라벨 ID의 version_tag도 이 버전으로 만든다)
         model_version = version or self.version
         policy = with_palm(self.policy.depth, palm_m)
+        # 캘리브레이션이 없으면 손 크기로 초점 거리를 추정한다 (ADR 0056, 캘리브레이션은 덮지 않음)
+        self.last_focal = self._focal(video, tracks, policy) if calib is None else None
+        use = calib if self.last_focal is None else self.last_focal.intrinsics
         samples, used = lift_tracks_with_source(
-            iter_frames(video), self.depth_model(), tracks, calib, policy
+            iter_frames(video), self.depth_model(), tracks, use, policy
         )
         # 출처는 실제로 쓴 값을 따른다 (화면비가 달라 화각 근사로 떨어졌으면 hfov_approx)
         intrinsics = IntrinsicsSource.CALIBRATED if used else IntrinsicsSource.HFOV_APPROX
+        if self.last_focal is not None and used:
+            intrinsics = IntrinsicsSource.ESTIMATED_HAND_SIZE
+            samples = _scale_confidence(samples, policy.sample_confidence.estimated_hand_size)
         # 개체 → 올린 입력 트랙 (같은 개체의 손·박스 트랙이 함께 오면 part로 가른다: 손은 관절 이름,
         # 박스는 None)
         inputs = {

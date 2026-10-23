@@ -219,6 +219,16 @@ depth:
     agreement_floor: 0.6      # 깊이·사전값 배율 비가 hand_fit.max_scale_ratio일 때 곱 (비 1이면 1)
     no_depth: 0.7             # 깊이를 못 쓰거나 버리고 손 크기 사전값만으로 크기를 정한 맞춤에 곱
     hfov_approx: 0.6          # 캘리브레이션 없이 default_hfov_deg 근사를 쓴 표본에 곱
+    estimated_hand_size: 0.75 # 손 크기로 추정한 초점 거리(아래 focal_estimate)를 쓴 표본에 곱 (캘리브레이션 아님)
+  # 손 크기로 세션 초점 거리 추정 (ADR 0056, dlp_prelabel.fov). 캘리브레이션(세션·기기 등록)이 없는 세션에서만,
+  # 품질 좋은 손 맞춤의 깊이 손바닥 길이와 손 크기 사전값(작업자 등록값, 없으면 hand_fit.reference_palm_m)의 비로
+  # 초점 거리를 정한다. 출처는 estimated_hand_size (calibrated 아님). 깊이 모델·손 크기 사전값 오차가 그대로 남는다
+  focal_estimate:
+    enabled: true
+    frame_stride_ms: 1000     # 추정용 깊이 추론 간격 (3D 단계 앞의 추가 비용, 200 ms 간격 3D의 약 1/5)
+    min_samples: 20
+    max_spread: 0.5           # 손바닥 길이 비의 (사분위 범위 / 중앙값) 상한
+    hfov_range_deg: [40, 140] # 받아들일 가로 화각 (도)
   # 손 3D 물리 제약 (ADR 0054, dlp_prelabel.constraints3d). 어긴 표본은 flags에 남기고 actions대로
   # 신뢰도를 낮추거나(downweight) 뺀다(drop). 손목 표시는 같은 시각 손끝에도 붙인다.
   # 대리 지표 기준(evaluation.yaml proxy)과 같은 값으로 시작했지만 따로 둔다 (측정 기준은 고정)

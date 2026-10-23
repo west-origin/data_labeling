@@ -277,6 +277,7 @@ class SampleConfidencePolicy(Contract):
     agreement_floor: 깊이·손 크기 배율 비가 `hand_fit.max_scale_ratio`일 때 곱하는 값 (비 1이면 1).
     no_depth: 깊이를 못 쓰거나 버리고 손 크기 사전값만으로 크기를 정한 맞춤에 곱하는 값.
     hfov_approx: 캘리브레이션 없이 기본 화각 근사 내부 파라미터를 쓴 표본에 곱하는 값.
+    estimated_hand_size: 손 크기로 추정한 초점 거리(ADR 0056)를 쓴 표본에 곱하는 값.
     """
 
     hand_fit: float = Field(ge=0, le=1)
@@ -286,6 +287,22 @@ class SampleConfidencePolicy(Contract):
     agreement_floor: float = Field(ge=0, le=1)
     no_depth: float = Field(ge=0, le=1)
     hfov_approx: float = Field(ge=0, le=1)
+    estimated_hand_size: float = Field(ge=0, le=1)
+
+
+class FocalEstimatePolicy(Contract):
+    """손 크기로 세션 초점 거리 추정 (`depth.focal_estimate`, ADR 0056, `dlp_prelabel.fov`).
+
+    캘리브레이션(세션·기기 등록)이 없는 세션에서만 쓴다. frame_stride_ms: 추정용 깊이 추론 간격.
+    min_samples: 쓸 맞춤 표본 수 하한. max_spread: 손바닥 길이 비의 (사분위 범위 / 중앙값) 상한.
+    hfov_range_deg: 받아들일 가로 화각 범위(도). 밖이면 추정을 버리고 화각 근사를 쓴다.
+    """
+
+    enabled: bool
+    frame_stride_ms: int = Field(ge=0)
+    min_samples: int = Field(ge=3)
+    max_spread: float = Field(gt=0)
+    hfov_range_deg: tuple[float, float]
 
 
 class DepthPolicy(Contract):
@@ -318,6 +335,7 @@ class DepthPolicy(Contract):
     hand_fit: HandFitPolicy
     sample_confidence: SampleConfidencePolicy
     constraints: Constraints3DPolicy  # 손 3D 물리 제약 (ADR 0054)
+    focal_estimate: FocalEstimatePolicy  # 손 크기로 초점 거리 추정 (ADR 0056)
 
     @field_validator("hand_points")
     @classmethod

@@ -219,6 +219,8 @@ def _print_summary(s: PrelabelSummary) -> None:
     for key in s.skipped:
         print(f"{key}: 같은 모델 버전 결과가 있어 건너뜀")
     print(f"3D 궤적 {s.lifted}개, 접촉 구간 {s.contacts}개, 3인칭 착용자 {s.wearer or '-'}")
+    if s.focal_estimate:
+        print(f"[초점 거리 추정] 손 크기 기준 {s.focal_estimate} (출처 estimated_hand_size)")
     if s.lift_blocked:
         # 직접 검수·사람 출처 3D는 새 입력(캘리브레이션·손 크기·판)으로도 대신하지 않는다 (ADR 0051)
         print(

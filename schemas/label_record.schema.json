@@ -555,7 +555,8 @@
     "IntrinsicsSource": {
       "enum": [
         "calibrated",
-        "hfov_approx"
+        "hfov_approx",
+        "estimated_hand_size"
       ],
       "title": "IntrinsicsSource",
       "type": "string"

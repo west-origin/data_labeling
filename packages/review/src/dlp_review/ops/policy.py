@@ -303,6 +303,25 @@ class ObjectHintsPolicy(Contract):
     tta: TtaSpec
 
 
+class AiCropsPolicy(Contract):
+    """잘라 낸 박스 AI 확인 (review.yaml `ai_crops`, ADR 0056, `dlp_aireview.crops`). 힌트만 낸다.
+
+    margin: 박스 여유 비율 (블러 박스는 주변 맥락이 필요해 크게). max_side: 보낼 조각 긴 변(px).
+    jpeg_quality: JPEG 품질. min_confidence: no 답의 신뢰도 하한. frames_per_track: 트랙마다 물을
+    키프레임 수. max_tracks: 스트림마다 물을 트랙 수 상한 (블러·도구 각각, 신뢰도 낮은 것부터).
+    targets: 물을 블러 대상 ID (빈 목록이면 블러는 묻지 않는다). tools: 도구 박스도 물을지.
+    """
+
+    margin: float = Field(ge=0)
+    max_side: int = Field(ge=32)
+    jpeg_quality: int = Field(ge=10, le=100)
+    min_confidence: float = Field(ge=0, le=1)
+    frames_per_track: int = Field(ge=1)
+    max_tracks: int = Field(ge=0)
+    targets: tuple[str, ...] = ()
+    tools: bool = True
+
+
 class VerifyPolicy(Contract):
     """`dlp review verify` 완료 판정 (ADR 0050).
 
@@ -341,6 +360,8 @@ class ReviewOpsPolicy(Contract):
     verify: VerifyPolicy = Field(default_factory=VerifyPolicy)
     # 절이 없으면 힌트를 계산하지 않는다 (`dlp review hints`가 거부, ADR 0055)
     object_hints: ObjectHintsPolicy | None = None
+    # 절이 없으면 `dlp review hints --ai`가 거부한다 (ADR 0056)
+    ai_crops: AiCropsPolicy | None = None
     ratios: ReviewConfig  # 배정 비율 (config/defaults.yaml `review` 절)
 
 

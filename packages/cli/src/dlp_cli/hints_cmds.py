@@ -10,13 +10,17 @@
   생성이 단다.
 
 입력은 운영 라벨(`current_labels`)이다. `--tta`는 원본 영상을 감사 저장소로 받는다 (원본 접근 기록).
-OWLv2 TTA는 CPU 프레임당 수 초라 `review.yaml object_hints.tta.max_tracks`로 줄인다. 반환: 항상 0.
+OWLv2 TTA는 CPU 프레임당 수 초라 `review.yaml object_hints.tta.max_tracks`로 줄인다.
+`--ai`는 지금 승인된 블러본에서 박스를 잘라 사내 VLM(`DLP_VLM_URL`, 사내 주소 검사)에 묻고 no 답을
+`ai_crop_no` 힌트로 싣는다 (ADR 0056, 판정은 라벨·검수 상태가 아니다. 서버 주소가 없으면 stub이 모두
+unsure라 힌트가 생기지 않는다). 승인된 블러본이 없으면 그 스트림은 건너뛴다. 반환: 항상 0.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import tempfile
 from collections import Counter
 from pathlib import Path
@@ -26,19 +30,34 @@ import numpy as np
 import sqlalchemy as sa
 from numpy.typing import NDArray
 
+from dlp_aireview.backend import check_hosts
+from dlp_aireview.crops import (
+    CropAsk,
+    CropVerifier,
+    OracleCropVerifier,
+    VlmCropVerifier,
+    to_doubts,
+    verify_crops,
+)
+from dlp_aireview.media import frames_for, open_blurred
+from dlp_aireview.policy import load_policy as load_aireview_policy
 from dlp_cli.raw_access import raw_store
 from dlp_cli.review_config import load_review_policy
 from dlp_cli.schema_cmds import database_url
 from dlp_media.geometry import Box, Detector, TtaSpec, TtaTrack, tta_tracks
+from dlp_media.pts import PtsIndex
 from dlp_media.storage import ObjectStore, store_from_spec
 from dlp_models.owlv2 import Owlv2
 from dlp_models.registry import resolve
+from dlp_models.vlm import OpenAICompatibleChat
 from dlp_prelabel.policy import load_policy as load_prelabel_policy
 from dlp_privacy import hints as privacy_hints
 from dlp_privacy.detectors import build_detectors
+from dlp_privacy.errors import RenderNotCurrentError
 from dlp_privacy.policy import PrivacyPolicy
 from dlp_privacy.policy import load_policy as load_privacy_policy
 from dlp_review import object_hints
+from dlp_review.ops.policy import AiCropsPolicy
 from dlp_review.tasks import object_key
 from dlp_schema import load_config, repo_root
 from dlp_schema.db.repository import get_labels, get_session
@@ -108,7 +127,6 @@ def cmd_hints(args: argparse.Namespace) -> int:
     with engine.connect() as conn:
         session = get_session(conn, args.session_id)
         labels = current_labels(get_labels(conn, args.session_id))
-    engine.dispose()
     raw = raw_store(args.store, args.url, "review.hints")
     buckets = load_config(root / "config/defaults.yaml").buckets
     labeling = store_from_spec(args.store, buckets.labeling)
@@ -123,14 +141,21 @@ def cmd_hints(args: argparse.Namespace) -> int:
                 face_tta, tool_tta = _tta(
                     raw, stream.uri, own, privacy, review.object_hints.tta, root, work
                 )
-            ph = privacy_hints.privacy_hints(labels, sid, privacy.hints, face_tta)
-            oh = object_hints.object_hints(labels, sid, review.object_hints, tool_tta)
+            ai_p: dict[str, float] | None = None
+            ai_o: dict[str, float] | None = None
+            if args.ai:
+                ai_p, ai_o = _ai(
+                    engine, labeling, args.session_id, sid, own, work, raw_bucket=buckets.raw
+                )
+            ph = privacy_hints.privacy_hints(labels, sid, privacy.hints, face_tta, ai_p)
+            oh = object_hints.object_hints(labels, sid, review.object_hints, tool_tta, ai_o)
             priority = len(privacy.review_priority)
             privacy_hints.write_hint_segments(
                 raw, args.session_id, sid, privacy_hints.hint_segments(ph, priority), work
             )
             object_hints.write_object_hints(labeling, args.session_id, sid, oh, work)
             report["streams"][sid] = _summary(own, ph, oh, face_tta, tool_tta)
+    engine.dispose()
     text = json.dumps(report, ensure_ascii=False, indent=2)
     if args.out:
         Path(args.out).write_text(text, encoding="utf-8")
@@ -176,6 +201,81 @@ def _tta(
     return face, tool
 
 
+def _crop_asks(own: list[LabelRecord], cfg: AiCropsPolicy, pts: PtsIndex) -> list[CropAsk]:
+    """물을 박스: 블러(정책 대상)·도구 트랙을 신뢰도 낮은 것부터 max_tracks개씩."""
+    spec = TtaSpec(transforms=("hflip",), iou=0.5, max_tracks=cfg.max_tracks,
+                   frames_per_track=cfg.frames_per_track)  # fmt: skip
+    blur = [
+        x
+        for x in own
+        if isinstance(x.payload, BlurTrackPayload) and x.payload.target in cfg.targets
+    ]
+    tools = [
+        x for x in own
+        if cfg.tools and isinstance(x.payload, BoxTrackPayload)
+        and (x.provenance.model_version or "").startswith("owlv2")
+    ]  # fmt: skip
+    asks: list[CropAsk] = []
+    for kind, tracks in (("privacy", blur), ("object", tools)):
+        for label_id, key, frames in _pick(tracks, spec):
+            asks += [CropAsk(label_id, kind, key, pts.nearest(t), box) for t, box in frames]  # type: ignore[arg-type]
+    return asks
+
+
+def _ai(
+    engine: sa.Engine,
+    labeling: ObjectStore,
+    session_id: str,
+    stream_id: str,
+    own: list[LabelRecord],
+    work: Path,
+    *,
+    raw_bucket: str,
+) -> tuple[dict[str, float] | None, dict[str, float] | None]:
+    """승인된 블러본 조각을 사내 VLM에 물어 (블러 라벨 의심, 박스 라벨 의심). 블러본 없으면 None."""
+    root = repo_root()
+    cfg = load_review_policy(root).ai_crops
+    if cfg is None:
+        raise SystemExit("review.yaml에 ai_crops 절이 없습니다")
+    try:
+        media = open_blurred(
+            engine, labeling, session_id, stream_id, load_privacy_policy(root), work,
+            raw_bucket=raw_bucket,
+        )  # fmt: skip
+    except RenderNotCurrentError as exc:
+        print(f"[AI 조각 확인 건너뜀] {stream_id}: {exc}")
+        return None, None
+    asks = _crop_asks(own, cfg, media.pts)
+    verdicts = verify_crops(
+        asks, frames_for(media, sorted({a.frame_index for a in asks})), _verifier(root, cfg),
+        margin=cfg.margin, max_side=cfg.max_side,
+    )  # fmt: skip
+    media.path.unlink(missing_ok=True)
+    kinds = {a.label_id: a.kind for a in asks}
+    doubts = to_doubts(verdicts, cfg.min_confidence)
+    return (
+        {k: v for k, v in doubts.items() if kinds[k] == "privacy"},
+        {k: v for k, v in doubts.items() if kinds[k] == "object"},
+    )
+
+
+def _verifier(root: Path, cfg: AiCropsPolicy) -> CropVerifier:
+    """사내 VLM 조각 확인기 (`DLP_VLM_URL`, 사내 주소만). 주소가 없으면 stub(늘 unsure)."""
+    url = os.environ.get("DLP_VLM_URL")
+    if not url:
+        print("[AI 조각 확인] DLP_VLM_URL이 없어 stub(모두 unsure)으로 돌립니다")
+        return OracleCropVerifier()
+    policy = load_aireview_policy(root)
+    outside = check_hosts({"crops": url}, policy.server.internal_hosts)
+    if outside:
+        raise SystemExit("사내 대역 밖 VLM 서버에는 보내지 않습니다: " + "; ".join(outside))
+    chat = OpenAICompatibleChat(
+        url, policy.served_model, timeout_s=policy.server.timeout_s,
+        api_key=os.environ.get("DLP_VLM_API_KEY"), expected_model=policy.served_model,
+    )  # fmt: skip
+    return VlmCropVerifier(chat, policy.backend.model, cfg.jpeg_quality)
+
+
 def _summary(
     own: list[LabelRecord],
     ph: list[privacy_hints.Hint],
@@ -212,6 +312,9 @@ def add_review_commands(rsub: argparse._SubParsersAction[argparse.ArgumentParser
     h.add_argument("session_id")
     h.add_argument(
         "--tta", action="store_true", help="YuNet·OWLv2를 변환 화면에 다시 돌린다 (느림)"
+    )
+    h.add_argument(
+        "--ai", action="store_true", help="승인된 블러본 조각을 사내 VLM에 물어 힌트를 더한다"
     )
     h.add_argument("--store", default="s3", help="'s3' 또는 'local:<디렉터리>'")
     h.add_argument("--url", help="DB URL (기본: DLP_DATABASE_URL)")

@@ -89,6 +89,8 @@ class Lift3DMethod(StrEnum):
 class IntrinsicsSource(StrEnum):
     CALIBRATED = "calibrated"  # 세션 캘리브레이션 또는 등록된 카메라 캘리브레이션
     HFOV_APPROX = "hfov_approx"  # 캘리브레이션 없음: 정책 기본 화각 근사
+    # 캘리브레이션 없음: 손 크기 사전값과 메트릭 깊이로 세션 초점 거리를 추정 (ADR 0056)
+    ESTIMATED_HAND_SIZE = "estimated_hand_size"
 
 
 # 작업자의 왼손·오른손 (작업자 기준. 영상의 좌우와 다를 수 있다).

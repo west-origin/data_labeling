@@ -4,6 +4,7 @@
 - `wearer_body` (COCO person 박스): 키프레임 중 박스(여유 margin) 안에 MediaPipe 손목(착용자 손)이
   있고 보이는 RTMPose 머리 관절은 없는 비율이 wearer_share 이상. 1인칭 화면에서 COCO 사람 박스가
   착용자 자신의 팔·몸통을 덮는 경우다 (2026-10-22 파일럿).
+- `ai_crop_no` (ADR 0056): 사내 VLM이 블러본 조각에 그 클래스가 없다고 답함.
 - `tta_unstable` (TTA를 돌린 트랙): 좌우 뒤집기·배율 변환 화면에서 같은 자리 탐지가 다시 나온 비율의
   평균이 tta_min_support 미만 (`dlp_media.geometry.tta_support`).
 
@@ -88,12 +89,14 @@ def object_hints(
     stream_id: str,
     policy: ObjectHintsPolicy,
     tta: Mapping[str, float] | None = None,
+    ai: Mapping[str, float] | None = None,
 ) -> list[ObjectHint]:
     """한 스트림 운영 라벨에서 박스 트랙의 오탐 의심 힌트.
 
     Args:
         labels: 그 세션의 운영 라벨 (박스·손·COCO 트랙). 다른 스트림은 무시한다.
         tta: 박스 라벨 ID → TTA 지지 비율 평균. 없으면 그 규칙을 보지 않는다.
+        ai: 박스 라벨 ID → AI 조각 확인의 의심 정도 (ADR 0056). 있으면 `ai_crop_no` 힌트.
     """
     own = [x for x in labels if x.stream_id == stream_id]
     wrists = _index(_points(own, "hand21", (0,)))
@@ -116,6 +119,8 @@ def object_hints(
                 found.append(("wearer_body", round(own_body, 4)))
         if tta is not None and x.label_id in tta and tta[x.label_id] < policy.tta_min_support:
             found.append(("tta_unstable", round(1 - tta[x.label_id], 4)))
+        if ai is not None and x.label_id in ai:
+            found.append(("ai_crop_no", ai[x.label_id]))
         out += [
             ObjectHint(x.label_id, stream_id, p.class_id, r, s, x.t_start_ms, x.t_end_ms)
             for r, s in found

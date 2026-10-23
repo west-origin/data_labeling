@@ -738,7 +738,8 @@ def test_lerobot_exports_3d_method_intrinsics_and_contact_object_class(
     scenario: Scenario, policy: ExportPolicy, ontology: Ontology, tmp_path: Path
 ) -> None:
     """손 3D 점마다 추정 방식(hand_fit 0, point_depth 1, 보간 양끝이 다르면 mixed 2)과 내부 파라미터
-    출처(calibrated 0, hfov_approx 1, 없음 -1)를 싣고, 손마다 접촉 대상 객체 클래스 번호를 싣는다
+    출처(calibrated 0, hfov_approx 1, estimated_hand_size 2(ADR 0056), 없음 -1)를 싣고,
+    손마다 접촉 대상 객체 클래스 번호를 싣는다
     (신뢰도 범위가 방식끼리 겹쳐 신뢰도만으로 관절별 깊이 대체 표본을 가를 수 없었다, F-COE-51;
     LeRobot에 객체 클래스가 없어 객체별 사전값을 프레임에 이을 수 없었다, F-COE-52)."""
     lp = policy.lerobot
@@ -746,20 +747,25 @@ def test_lerobot_exports_3d_method_intrinsics_and_contact_object_class(
     wrist = _traj("s1-w3d", "wrist", times, ["hand_fit", "hand_fit", "point_depth"], "calibrated")
     thumb = _traj("s1-t3d", "thumb_tip", times, [None, None, None], "hfov_approx")
     index = _traj("s1-i3d", "index_tip", times, intrinsics=None)
+    middle = _traj(
+        "s1-m3d", "middle_tip", times, ["hand_fit", "hand_fit", "hand_fit"], "estimated_hand_size"
+    )
     mop = make_label(
         {"kind": "box_track", "entity_id": "mop_1", "class_id": "mop",
          "keyframes": [{"t_ms": 100, "x": 1, "y": 1, "w": 5, "h": 5}]},
         label_id="s1-mopbox", session_id="s1", stream_id="bodycam", t_start_ms=100, t_end_ms=100,
         ontology_version="1.0.0", **model(VerificationState.HUMAN_APPROVED),
     )  # fmt: skip
-    ep = _ep(scenario, policy, ontology, [wrist, thumb, index, mop], tmp_path)
+    ep = _ep(scenario, policy, ontology, [wrist, thumb, index, middle, mop], tmp_path)
     vocab = Vocab.from_ontology(ontology).as_json()
     n = len(lp.hand_points_3d)
     w, th, ix = (n + lp.hand_points_3d.index(p) for p in ("wrist", "thumb_tip", "index_tip"))
     k2 = int(np.argmin(np.abs(ep.times_ms - 200)))  # hand_fit 둘 사이
     k4 = int(np.argmin(np.abs(ep.times_ms - 400)))  # hand_fit ~ point_depth 사이
     assert vocab["hand_point_3d_method"] == ["hand_fit", "point_depth", "mixed"]
-    assert vocab["hand_point_3d_intrinsics"] == ["calibrated", "hfov_approx"]
+    assert vocab["hand_point_3d_intrinsics"] == ["calibrated", "hfov_approx", "estimated_hand_size"]
+    md = n + lp.hand_points_3d.index("middle_tip")
+    assert ep.hand_points_3d_intrinsics[k2, md] == 2
     assert ep.hand_points_3d_method[k2, w] == 0 and ep.hand_points_3d_method[k4, w] == 2
     assert ep.hand_points_3d_method[k2, th] == -1 and ep.hand_points_3d_method[k2, ix] == 0
     assert ep.hand_points_3d_intrinsics[k2, w] == 0 and ep.hand_points_3d_intrinsics[k2, th] == 1

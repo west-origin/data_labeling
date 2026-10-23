@@ -12,6 +12,8 @@
 - `on_hand` (얼굴만): 키프레임 중 박스 중심이 MediaPipe 손 관절 외접 박스(여유 margin) 안인 비율이
   min_share 이상.
 - `short_flicker` (모든 대상): 트랙 길이가 short_ms 미만 (한두 프레임 깜박임, ADR 0054 2절).
+- `ai_crop_no` (AI 조각 확인을 돌린 트랙, ADR 0056): 사내 VLM이 블러본 조각의 주변 맥락으로 그
+  대상이 아니라고 답함 (`dlp_aireview.crops`).
 - `tta_unstable` (TTA를 돌린 트랙): 좌우 뒤집기·배율 변환 화면에서 같은 자리 탐지가 다시 나온
   비율(`dlp_media.geometry.tta_support`)의 평균이 tta_min_support 미만.
 
@@ -147,12 +149,16 @@ def privacy_hints(
     stream_id: str,
     policy: PrivacyHintsPolicy,
     tta: Mapping[str, float] | None = None,
+    ai: Mapping[str, float] | None = None,
 ) -> list[Hint]:
     """한 스트림 운영 라벨에서 블러 트랙의 오탐 의심 힌트.
 
     Args:
         labels: 그 세션의 운영 라벨 (블러·손·COCO 트랙). 다른 스트림 라벨은 무시한다.
-        tta: 블러 라벨 ID → TTA 지지 비율 평균 (`tta_face_support`). 없으면 그 규칙을 보지 않는다.
+        tta: 블러 라벨 ID → TTA 지지 비율 평균 (`geometry.tta_tracks`). 없으면 그 규칙을 보지
+            않는다.
+        ai: 블러 라벨 ID → AI 조각 확인의 의심 정도 (`dlp_aireview.crops.to_doubts`, ADR 0056).
+            있으면 `ai_crop_no` 힌트.
     """
     own = [x for x in labels if x.stream_id == stream_id]
     heads, hands = _heads(own), _hands(own)
@@ -168,6 +174,8 @@ def privacy_hints(
             found.append(("short_flicker", 1.0))
         if tta is not None and x.label_id in tta and tta[x.label_id] < policy.tta_min_support:
             found.append(("tta_unstable", round(1 - tta[x.label_id], 4)))
+        if ai is not None and x.label_id in ai:
+            found.append(("ai_crop_no", ai[x.label_id]))
         out += [
             Hint(x.label_id, stream_id, p.target, r, s, x.t_start_ms, x.t_end_ms) for r, s in found
         ]
