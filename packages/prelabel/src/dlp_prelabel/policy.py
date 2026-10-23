@@ -89,10 +89,13 @@ class GapFillPolicy(Contract):
     """손 짧은 끊김 채우기 (`hands.gap_fill`, ADR 0054).
 
     max_gap_ms: 이 이하로 끊긴 사이만 채운다 (0이면 채우지 않음). confidence: 채운 관절 신뢰도.
+    max_jump_scale: 끊김 앞뒤 손목 거리가 손 크기(손목→중지 뿌리 px)의 이 배를 넘으면 채우지 않는다
+        (끊긴 사이 손 판정이 바뀌어 다른 손으로 이어진 경우, 2026-10-23 파일럿).
     """
 
     max_gap_ms: int = Field(ge=0)
     confidence: float = Field(ge=0, le=1)
+    max_jump_scale: float = Field(gt=0)
 
 
 class Constraints3DPolicy(Contract):

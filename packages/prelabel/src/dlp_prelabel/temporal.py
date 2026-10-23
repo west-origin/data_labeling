@@ -13,7 +13,8 @@ ADR 0054. 2026-10-22 첫 실영상 파일럿에서 OWLv2 도구 트랙의 약 69
   강하게, 빠를 때 약하게 → 정지 떨림은 줄고 빠른 동작의 지연은 작다). 끊김(reset_gap_ms 초과) 뒤에는
   새로 시작한다. 손 중심 3D 점(world)은 손 모양이라 그대로 둔다.
 - `fill_gaps`: 같은 손이 max_gap_ms 이하로 끊긴 사이의 영상 프레임 시각에 앞뒤 관측을 선형 보간한
-  키프레임을 넣는다. 채운 키프레임은 `interpolated=True`, 관절 visibility 1(관측 아님)·신뢰도
+  키프레임을 넣는다. 앞뒤 손목이 손 크기 x max_jump_scale보다 멀면(끊긴 사이 다른 손으로 이어짐)
+  채우지 않는다. 채운 키프레임은 `interpolated=True`, 관절 visibility 1(관측 아님)·신뢰도
   `confidence`, world 없음 (3D 단계는 채운 키프레임을 올리지 않는다).
 """
 
@@ -142,6 +143,19 @@ def _interpolate(a: KeypointFrame, b: KeypointFrame, t: int, confidence: float) 
     return KeypointFrame(t_ms=t, points=points, interpolated=True)
 
 
+def _plausible(a: KeypointFrame, b: KeypointFrame, max_jump_scale: float) -> bool:
+    """끊김 앞뒤가 같은 손으로 보이는가 (손목 이동 <= 손 크기 x max_jump_scale).
+
+    손 크기는 앞 키프레임의 손목→중지 뿌리(0→9) 픽셀 거리. 점이 모자라거나 손 크기가 0이면 판단하지
+    않고 채운다.
+    """
+    if len(a.points) <= 9 or len(b.points) <= 9:
+        return True
+    scale = math.dist((a.points[0].x, a.points[0].y), (a.points[9].x, a.points[9].y))
+    jump = math.dist((a.points[0].x, a.points[0].y), (b.points[0].x, b.points[0].y))
+    return scale <= 0 or jump <= max_jump_scale * scale
+
+
 def fill_gaps(
     frames: Sequence[KeypointFrame], frame_times: Sequence[int], policy: GapFillPolicy
 ) -> list[KeypointFrame]:
@@ -159,7 +173,7 @@ def fill_gaps(
     times = np.asarray(frame_times, dtype=np.int64)
     out: list[KeypointFrame] = [frames[0]]
     for a, b in pairwise(frames):
-        if b.t_ms - a.t_ms <= policy.max_gap_ms:
+        if b.t_ms - a.t_ms <= policy.max_gap_ms and _plausible(a, b, policy.max_jump_scale):
             lo, hi = np.searchsorted(times, [a.t_ms, b.t_ms], side="right")
             out.extend(
                 _interpolate(a, b, int(t), policy.confidence) for t in times[lo:hi] if t < b.t_ms

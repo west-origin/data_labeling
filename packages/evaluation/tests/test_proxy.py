@@ -102,6 +102,7 @@ def test_handedness_screen_side(policy: ProxyPolicy) -> None:
     report = proxy_report([left_ok, right_ok, left_bad, right_bad], policy, duration_ms=330)
     assert report["hands_2d"]["two_hand_frames"] == 10
     assert report["hands_2d"]["left_on_screen_left_frac"] == 0.8
+    assert report["hands_2d"]["left_on_screen_left_frac_observed"] == 0.8
     # 손목이 움직이지 않는 구간은 떨림 0
     assert report["hands_2d"]["left"]["wrist_jitter"]["p50"] == 0.0
 

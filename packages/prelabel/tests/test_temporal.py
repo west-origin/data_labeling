@@ -120,7 +120,7 @@ def test_fill_gaps_interpolates_short_gaps_only() -> None:
 
     채운 키프레임은 interpolated, 관절 visibility 1·신뢰도 0.3, world 없음.
     """
-    policy = GapFillPolicy(max_gap_ms=150, confidence=0.3)
+    policy = GapFillPolicy(max_gap_ms=150, confidence=0.3, max_jump_scale=1e9)
     all_times = [round(i * 1000 / 30) for i in range(40)]
     observed = [i for i in range(40) if i not in (5, 6, 7) and not 20 <= i < 35]
     frames = [_hand_frame(all_times[i], 100 + 10 * i, 200) for i in observed]
@@ -204,3 +204,21 @@ def test_lift_skips_interpolated_keyframes() -> None:
     payload["keyframes"][1]["interpolated"] = True
     label = make_label(payload, stream_id="bodycam")
     assert sorted(hand_frames_by_time([label])) == [0, 66]
+
+
+def test_fill_gaps_skips_identity_switch() -> None:
+    """정답: 끊김 앞뒤 손목이 손 크기(50 px)의 1배보다 멀면(다른 손으로 이어짐) 채우지 않는다.
+
+    손목 x 100 → 끊김 2프레임 → 손목 x 600 (500 px 이동). 같은 끊김이라도 이동 20 px면 채운다.
+    """
+
+    def hand(t: int, x: float) -> KeypointFrame:
+        pts = [Keypoint(x=x, y=400.0 - (50.0 if j == 9 else 0.0), visibility=2) for j in range(21)]
+        return KeypointFrame(t_ms=t, points=tuple(pts))
+
+    policy = GapFillPolicy(max_gap_ms=150, confidence=0.3, max_jump_scale=1.0)
+    times = [0, 33, 67, 100]
+    switched = fill_gaps([hand(0, 100.0), hand(100, 600.0)], times, policy)
+    assert [f.t_ms for f in switched] == [0, 100]
+    same = fill_gaps([hand(0, 100.0), hand(100, 120.0)], times, policy)
+    assert [f.t_ms for f in same] == [0, 33, 67, 100]

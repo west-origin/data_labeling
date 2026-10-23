@@ -232,7 +232,8 @@ def hands_2d(labels: Sequence[LabelRecord], policy: ProxyPolicy, duration_ms: in
     """손 2D: 손마다 존재 비율 추정·떨림, 두 손 프레임에서 왼손이 화면 왼쪽인 비율 (1인칭 기대 1).
 
     존재 비율 추정 = 손이 있는 프레임 수 / (세션 길이 / 손 키프레임 중앙 간격). 영상 프레임 수를
-    라벨만으로 알 수 없어 추정이다.
+    라벨만으로 알 수 없어 추정이다. 보간해 채운 키프레임(`interpolated`, ADR 0054)은
+    `filled_frames`로 따로 세고, `*_observed`는 관측 키프레임만 본 값이다.
     """
     frames = _hand_frames(labels)
     out: Report = {}
@@ -242,6 +243,7 @@ def hands_2d(labels: Sequence[LabelRecord], policy: ProxyPolicy, duration_ms: in
         expected = duration_ms / step if duration_ms and step else None
         out[hand.value] = {
             "frames": len(times),
+            "filled_frames": sum(bool(f.interpolated) for f in by_t.values()),
             "present_frac_est": _r(min(1.0, len(times) / expected)) if expected else None,
             "runs": len(runs(times, policy.gap_factor)),
             "wrist_jitter": dist(wrist_jitter(by_t, policy.max_dt_ms)),
@@ -251,8 +253,19 @@ def hands_2d(labels: Sequence[LabelRecord], policy: ProxyPolicy, duration_ms: in
         frames[Hand.LEFT][t].points[HAND_WRIST].x < frames[Hand.RIGHT][t].points[HAND_WRIST].x
         for t in both
     )
+    observed = [
+        t
+        for t in both
+        if not frames[Hand.LEFT][t].interpolated and not frames[Hand.RIGHT][t].interpolated
+    ]
+    left_obs = sum(
+        frames[Hand.LEFT][t].points[HAND_WRIST].x < frames[Hand.RIGHT][t].points[HAND_WRIST].x
+        for t in observed
+    )
     out["two_hand_frames"] = len(both)
     out["left_on_screen_left_frac"] = _frac(left_on_left, len(both))
+    out["two_hand_frames_observed"] = len(observed)
+    out["left_on_screen_left_frac_observed"] = _frac(left_obs, len(observed))
     return out
 
 
