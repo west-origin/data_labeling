@@ -76,6 +76,7 @@ from av.error import FFmpegError
 from dlp_media.audit import grant
 from dlp_media.pts import build_pts_index
 from dlp_media.storage import ObjectStore, S3Store, blurred_key, sha256_file
+from dlp_privacy.hints import read_hint_segments
 from dlp_privacy.policy import PrivacyPolicy
 from dlp_privacy.policy import load_policy as load_privacy_policy
 from dlp_privacy.review import ReviewSegment
@@ -98,6 +99,7 @@ from dlp_review.ai_display import (
 from dlp_review.clients import CvatClient, LabelStudioClient, cvat_task_name
 from dlp_review.cvat import KEYPOINT_LABELS, CvatSchema, Scale, label_spec, to_cvat_tracks
 from dlp_review.labelstudio import LS_KINDS, label_config, to_ls_results
+from dlp_review.object_hints import ObjectHint, read_object_hints
 from dlp_review.ontology_projects import ontology_project
 from dlp_review.ops.policy import CvatPolicy, LabelStudioPolicy, MediaPolicy
 from dlp_review.ops.policy import load_policy as load_ops_policy
@@ -473,9 +475,36 @@ def _segment_issues(
             (j for j in jobs if int(j["start_frame"]) <= frame <= int(j["stop_frame"])), jobs[0]
         )
         detail = f" ({seg.detail})" if seg.detail else ""
+        head = (
+            "[오탐 의심·원본 확인 후 판단]"
+            if seg.reason == "suspected_false_positive"
+            else "[먼저 볼 구간]"
+        )
+        message = f"{head} {seg.reason} · {seg.target} · {seg.t_start_ms}-{seg.t_end_ms} ms{detail}"
+        cvat.add_issue(int(job["id"]), frame, [0.0, 0.0, 16.0, 16.0], message)
+        made += 1
+    return made
+
+
+def _object_hint_issues(
+    cvat: CvatClient, task_id: int, hints: Sequence[ObjectHint], times: list[int], limit: int
+) -> int:
+    """객체·도구 오탐 의심 힌트를 CVAT 이슈로 단다 (비율이 큰 것부터 limit개). 단 수.
+
+    라벨을 바꾸지 않는다 (ADR 0055). 이슈는 트랙 첫 시각 이상인 첫 프레임에 단다.
+    """
+    jobs = cvat.jobs(task_id)
+    if not jobs or not times:
+        return 0
+    made = 0
+    for h in sorted(hints, key=lambda h: (-h.share, h.t_start_ms, h.label_id))[:limit]:
+        frame = min(bisect.bisect_left(times, h.t_start_ms), len(times) - 1)
+        job = next(
+            (j for j in jobs if int(j["start_frame"]) <= frame <= int(j["stop_frame"])), jobs[0]
+        )
         message = (
-            f"[먼저 볼 구간] {seg.reason} · {seg.target} · "
-            f"{seg.t_start_ms}-{seg.t_end_ms} ms{detail}"
+            f"[오탐 의심] {h.reason} {h.share:.2f} · {h.class_id} · "
+            f"{h.t_start_ms}-{h.t_end_ms} ms ({h.label_id})"
         )
         cvat.add_issue(int(job["id"]), frame, [0.0, 0.0, 16.0, 16.0], message)
         made += 1
@@ -610,6 +639,8 @@ def create_privacy_tasks(
             labels = pick(stream.stream_id, ("blur_track",))
             run = latest_privacy_detection(conn, session_id, stream.stream_id)
             segments = read_review_segments(setup.raw, session_id, stream.stream_id, work)
+            # 오탐 의심 힌트(`dlp review hints`, ADR 0055): 누락 위험 구간 이슈와 따로 센다
+            hints = read_hint_segments(setup.raw, session_id, stream.stream_id, work)
             grant(setup.raw, key, assignee)  # 원본을 검수자에게 보여 준다 (올리기 전에 기록)
             tid = setup.cvat.create_task(
                 cvat_task_name(session_id, stream.stream_id, "privacy"), pid, video
@@ -619,6 +650,7 @@ def create_privacy_tasks(
             times = frame_times(video)
             setup.cvat.put_tracks(tid, to_cvat_tracks(labels, times, schema, scale=scale))
             _segment_issues(setup.cvat, tid, segments, times, cvat_conf.privacy_issue_limit)
+            _segment_issues(setup.cvat, tid, hints, times, cvat_conf.hint_issue_limit)
             task = ReviewTask(
                 task_key=f"cvat:{tid}", tool=ReviewTool.CVAT, external_id=str(tid),
                 session_id=session_id, stream_id=stream.stream_id, stage=ReviewStage.PRIVACY,
@@ -839,6 +871,14 @@ class _LabelingRun:
         # 워터마크 영상은 블러본의 PTS·해상도를 유지하므로 라벨 좌표를 그대로(UNIT_SCALE) 보낸다
         times = frame_times(marked)
         cvat.put_tracks(tid, to_cvat_tracks(labels, times, schema))
+        # 객체·도구 오탐 의심 힌트 (`dlp review hints`, 라벨링 버킷, ADR 0055). 보낸 라벨 것만
+        sent = {x.label_id for x in labels}
+        hints = [
+            h
+            for h in read_object_hints(self.setup.labeling, sid, stream.stream_id, self.work)
+            if h.label_id in sent
+        ]
+        _object_hint_issues(cvat, tid, hints, times, self.setup.cvat_policy().hint_issue_limit)
         task = _task(
             f"cvat:{tid}", ReviewTool.CVAT, tid, sid, stream.stream_id, self.assignee,
             self.setup.labeling.uri(vkey), spatial, self.now, self.mode, self.assignment_id,

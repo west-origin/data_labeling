@@ -40,6 +40,37 @@ class TrackFilterPolicy(Contract):
     min_duration_ms: int = Field(ge=0)
 
 
+class ScenePolicy(Contract):
+    """장면 분류 (`scene` 절, ADR 0055, `dlp_prelabel.scene`). 도구 단계 버전에 분류 결과가
+    들어간다.
+
+    classifier: fixed(늘 default, CPU stub) | vlm(사내 VLM, `DLP_VLM_URL`). labels: 장면 이름 목록
+    (unknown 포함). default: fixed 분류기·분류 실패 때의 장면. min_confidence: 이 미만이면 unknown.
+    sample_frames: 보낼 프레임 수. max_side: 보낼 프레임 긴 변(px). blur_tolerance_ms /
+    blur_cell_px: 보낼 프레임에 블러 트랙 박스를 모자이크할 때 시각 허용 오차와 칸 크기. vlm_model:
+    `config/models.yaml external` 이름. timeout_s: 요청 시간 초과.
+    """
+
+    classifier: Literal["fixed", "vlm"]
+    labels: tuple[str, ...] = Field(min_length=1)
+    default: str
+    min_confidence: float = Field(ge=0, le=1)
+    sample_frames: int = Field(ge=1)
+    max_side: int = Field(ge=64)
+    blur_tolerance_ms: int = Field(ge=0)
+    blur_cell_px: int = Field(ge=2)
+    vlm_model: str
+    timeout_s: float = Field(gt=0)
+
+    @model_validator(mode="after")
+    def _default_known(self) -> ScenePolicy:
+        """default·unknown이 labels 안인지 검사한다."""
+        for name in (self.default, "unknown"):
+            if name not in self.labels:
+                raise ValueError(f"scene.labels에 {name}이 없습니다")
+        return self
+
+
 class SmoothingPolicy(Contract):
     """손 2D One Euro 평활 (`hands.smoothing`, ADR 0054). 값 단위는 정규화 좌표(0~1)/초.
 
@@ -179,6 +210,17 @@ class OpenVocabObjectsPolicy(Contract):
     nms_iou: float = Field(gt=0, le=1)
     queries: dict[str, OntologyId] = Field(min_length=1)
     track_filter: TrackFilterPolicy  # 트랙 거르기 (ADR 0054)
+    # 장면 → 그 장면에서 쓸 질의 문장 (queries의 키). 없는 장면(unknown 등)은 전체 질의 (ADR 0055)
+    scene_queries: dict[str, tuple[str, ...]] = Field(default_factory=dict[str, tuple[str, ...]])
+
+    @model_validator(mode="after")
+    def _scene_queries_known(self) -> OpenVocabObjectsPolicy:
+        """scene_queries의 질의가 모두 queries에 있는지 검사한다."""
+        for scene, names in self.scene_queries.items():
+            bad = sorted(set(names) - set(self.queries))
+            if bad or not names:
+                raise ValueError(f"scene_queries.{scene}: queries에 없는 질의 {bad} (또는 빈 목록)")
+        return self
 
 
 # hand21 번호 → 온톨로지 hand_joints 이름 (3D 궤적 part)
@@ -523,6 +565,7 @@ class PrelabelPolicy(Contract):
     palm_estimate: PalmEstimatePolicy
     camera_pose: CameraPosePolicy
     world_frame: WorldFramePolicy
+    scene: ScenePolicy  # 장면 분류 → 도구 질의 목록 (ADR 0055)
     # 마스터 타임라인 구간(stream_id 없음)을 내는 예측기 이름. 기준 스트림에서 세션당 한 번만 돌린다
     timeline_predictors: tuple[str, ...] = ()
 

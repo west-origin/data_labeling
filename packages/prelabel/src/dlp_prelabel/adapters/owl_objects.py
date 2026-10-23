@@ -19,6 +19,7 @@ from dlp_models.registry import resolve
 from dlp_prelabel.adapters.mediapipe_models import boxes_to_labels
 from dlp_prelabel.common import iter_frames, track_boxes
 from dlp_prelabel.policy import PrelabelPolicy
+from dlp_prelabel.scene import SceneResult, queries_for
 from dlp_prelabel.temporal import filter_tracks
 from dlp_schema.labels import LabelRecord
 from dlp_schema.predictor import Clip
@@ -27,7 +28,9 @@ from dlp_schema.predictor import Clip
 class OwlObjects:
     """OWLv2 도구 박스 어댑터 (name="tools").
 
-    version: `owlv2-<가중치 버전>+t<토크나이저 버전>+p<open_vocab_objects 절 해시>`. 라벨 ID는
+    version: `owlv2-<가중치 버전>+t<토크나이저 버전>+p<open_vocab_objects·scene 절 해시>+sc<장면>`
+    (장면은 `set_scene`, 기본은 정책 scene.default, ADR 0055). 장면의 질의만 묻는다
+    (`scene.queries_for`). 라벨 ID는
     `<세션>-<스트림>-tools-<version_tag>-<클래스>-<순번>`, entity_id는 `ov_<클래스>_<순번>` (COCO
     탐지 트랙과 겹치지 않게 `ov_` 접두사).
     """
@@ -44,10 +47,16 @@ class OwlObjects:
         """
         self.model_path, version = resolve(root, policy.models.open_vocab)
         self.tokenizer_path, tokenizer_version = resolve(root, policy.models.open_vocab_tokenizer)
-        self.version = (
-            f"owlv2-{version}+t{tokenizer_version}+p{policy.digest('open_vocab_objects')}"
+        self.base_version = (
+            f"owlv2-{version}+t{tokenizer_version}+p{policy.digest('open_vocab_objects', 'scene')}"
         )
         self.policy, self.ontology_version, self.now = policy, ontology_version, now
+        self.set_scene(SceneResult(policy.scene.default, 1.0, "fixed"))
+
+    def set_scene(self, scene: SceneResult) -> None:
+        """장면을 정한다 (버전 `+sc<장면>`이 바뀐다). 러너가 멱등 판정을 하기 전에 부른다."""
+        self.scene = scene
+        self.version = f"{self.base_version}+sc{scene.scene}"
 
     def run(self, clip: Clip) -> list[LabelRecord]:
         """영상 하나를 frame_stride_ms 간격으로 탐지해 박스 트랙 라벨로 돌려준다.
@@ -56,7 +65,9 @@ class OwlObjects:
         클래스별로 IoU 추적한다. 호출마다 ONNX 세션을 새로 연다 (스트림 하나에 한 번).
         """
         op = self.policy.open_vocab_objects
-        queries = list(op.queries)
+        # 장면의 질의만 묻는다 (unknown이면 전체, ADR 0055)
+        chosen = queries_for(self.scene.scene, op)
+        queries = list(chosen)
         model = Owlv2(self.model_path, self.tokenizer_path, queries, nms_iou=op.nms_iou)
         thresholds = [op.min_score] * len(queries)
         detections: list[
@@ -71,7 +82,7 @@ class OwlObjects:
             found = model.detect(img, thresholds)
             detections.append(
                 # 질의 번호 → 질의 문장 → 온톨로지 클래스 (트랙 키)
-                (t, [(op.queries[queries[d.query_index]], d.box, d.score) for d in found])
+                (t, [(chosen[queries[d.query_index]], d.box, d.score) for d in found])
             )
         # 시작 문턱·최소 길이로 짧은 오탐 트랙을 거른다 (ADR 0054)
         tracks = track_boxes(detections, iou_match=op.track_iou, max_gap_ms=op.max_gap_ms)

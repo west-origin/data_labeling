@@ -97,11 +97,11 @@ def test_oracle_predictors_emit_valid_model_labels() -> None:
 
 
 def test_unavailable_features_are_explicit() -> None:
-    """미연동 기능 stub 세 개(도구 부위 마스크, 외부 SLAM 엔진, 학습 접촉 분류기)가 이유를 갖고 빈
-    결과를 내는지 본다 (TODO(real-model) 자리가 조용히 사라지지 않게).
+    """미연동 기능 stub 네 개(도구 부위 마스크, 외부 SLAM 엔진, 학습 접촉 분류기, 로컬 장면
+    분류기)가 이유를 갖고 빈 결과를 내는지 본다 (TODO(real-model) 자리가 조용히 사라지지 않게).
     """
     names = {p.name for p in UNAVAILABLE}
-    assert names == {"tool_part_masks", "slam_engine", "learned_contact"}
+    assert names == {"tool_part_masks", "slam_engine", "learned_contact", "local_scene"}
     assert all(p.run(Clip("s", "bodycam", Path("x.mp4"))) == [] and p.reason for p in UNAVAILABLE)
 
 

@@ -25,6 +25,7 @@ from typing import Any, Literal
 import yaml
 from pydantic import Field
 
+from dlp_media.geometry import TtaSpec
 from dlp_schema.common import Contract, OntologyId
 from dlp_schema.config import PrivacyConfig, load_config
 
@@ -35,9 +36,12 @@ from dlp_schema.config import PrivacyConfig, load_config
 # - low_confidence: 관측 점수가 review_score 미만인 프레임.
 # - reflection: 반사면 속 얼굴 블러가 있는 프레임 (항상 확인).
 # - trained_model: 배포된 재학습 블러 모델이 낸 구간 (detail=모델 버전).
+# suspected_false_positive: 오탐 의심 힌트(`dlp_privacy.hints`, ADR 0055). review_priority에 넣지
+# 않으며 늘 그 목록 뒤 순위다 (누락 위험 구간을 먼저 본다)
 ReviewReason = Literal[
-    "no_detector", "track_gap", "disagreement", "low_confidence", "reflection", "trained_model"
-]
+    "no_detector", "track_gap", "disagreement", "low_confidence", "reflection", "trained_model",
+    "suspected_false_positive",
+]  # fmt: skip
 
 
 class TargetPolicy(Contract):
@@ -113,6 +117,26 @@ class DetectorSpec(Contract):
     queries: dict[str, str] = Field(default_factory=dict[str, str])
 
 
+class PrivacyHintsPolicy(Contract):
+    """블러 오탐 의심 힌트 (`hints` 절, ADR 0055, `dlp_privacy.hints`). 탐지 해시에 들어가지 않는다.
+
+    블러 라벨을 바꾸지 않고 검수 화면에 표시만 한다 (재현 우선).
+    """
+
+    # 다른 트랙(머리 관절·손) 키프레임을 같은 시각으로 볼 허용 오차 (ms)
+    time_tolerance_ms: int = Field(ge=0)
+    # 얼굴 박스·손 박스를 각 변 이 비율만큼 넓혀 본다
+    margin: float = Field(ge=0)
+    # 트랙 키프레임 중 이 비율 이상이 규칙에 걸리면 힌트 (no_head·on_hand)
+    min_share: float = Field(gt=0, le=1)
+    # 이보다 짧은 트랙은 short_flicker 힌트 (ms)
+    short_ms: int = Field(ge=0)
+    # TTA 지지 비율 평균이 이 미만이면 tta_unstable 힌트
+    tta_min_support: float = Field(ge=0, le=1)
+    # 얼굴 TTA 설정 (YuNet을 변환 화면에 다시 돌린다)
+    tta: TtaSpec
+
+
 class PrivacyPolicy(Contract):
     """프라이버시 정책 전체. `load_policy`로 만든다 (테스트는 model_copy로 일부를 바꾼다)."""
 
@@ -130,6 +154,8 @@ class PrivacyPolicy(Contract):
     review_priority: tuple[ReviewReason, ...]
     # 탐지기 이름 → 설정. targets.*.detectors와 reflection의 region/face_detector가 가리킨다.
     detectors: dict[str, DetectorSpec]
+    # 오탐 의심 힌트 (탐지 해시에 들어가지 않는다, ADR 0055)
+    hints: PrivacyHintsPolicy
     # config/defaults.yaml에서 채운다
     # (blur_hold_ms: 소실 전후 블러 유지 ms, render_mode: mosaic|solid, strip_audio_in_release,
     #  full_review_exit: 전수 검수 종료 판정 값 등)

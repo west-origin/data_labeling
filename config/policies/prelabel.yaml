@@ -118,6 +118,17 @@ open_vocab_objects:
     start_score: 0.2
     min_keyframes: 2
     min_duration_ms: 400
+  # 장면 → 그 장면에서 물을 질의 (위 queries의 키, ADR 0055). 여기 없는 장면(unknown 등)은 전체 질의다.
+  # 장면은 scene 절의 분류기(또는 dlp prelabel run --scene)가 정한다. 장면에 없는 도구는 찾지 않는다(재현 손실)
+  scene_queries:
+    kitchen: [a cleaning rag, a sponge, a scrub brush, a spray bottle, a bucket, a trash bag, a trash can,
+              a towel, a rubber glove, a broom, a dustpan, a mop]
+    bathroom: [a mop, a cleaning rag, a sponge, a scrub brush, a toilet brush, a spray bottle, a bucket,
+               a towel, a rubber glove, a bathtub, a mirror, a trash can]
+    bedroom: [a cleaning rag, a towel, a diaper, a trash bag, a trash can, a spray bottle, a rubber glove,
+              a mirror, a broom, a dustpan, a mop]
+    living: [a cleaning rag, a broom, a dustpan, a mop, a spray bottle, a trash bag, a trash can, a towel,
+             a bucket, a sponge, a mirror]
 
 # 접촉 구간 (모델이 아닌 알고리즘, dlp_prelabel.contact). 결과는 마스터 타임라인 hand_state 라벨이다.
 # 대상 종류는 온톨로지 객체 정의로 정한다 (tool 정의 → tool, surface → fixed_surface, 그 밖 → object).
@@ -294,3 +305,20 @@ palm_estimate:
   min_visible: 18             # 쓸 맞춤의 보이는 관절 수 하한
   min_samples: 30             # 이보다 적으면 추정하지 않는다 (200 ms 간격이면 약 6초 분량)
   palm_range_m: [0.06, 0.12]  # 받아들일 손바닥 길이 (m). 밖의 값은 깊이 오류로 보고 버린다
+
+# 장면 분류 (ADR 0055, dlp_prelabel.scene). 도구(OWLv2) 단계 앞에서 바디캠 프레임 몇 장으로 장면을 정하고
+# open_vocab_objects.scene_queries의 질의만 묻는다. 장면은 도구 단계 버전(+sc<장면>)에 들어간다.
+# fixed: 늘 default (CPU·CI stub). vlm: 사내 OpenAI 호환 VLM 서버(DLP_VLM_URL, 외부 API 금지)에 블러 트랙 박스를
+#   모자이크한 프레임을 보낸다 (블러 트랙이 없으면 보내지 않고 default). 사람이 알면 --scene이 앞선다.
+# TODO(real-model): 사내 VLM이 없는 환경의 로컬 장면 분류기 (Places365 계열은 비상업 라이선스라 못 쓴다).
+scene:
+  classifier: fixed
+  labels: [kitchen, bathroom, bedroom, living, unknown]
+  default: unknown          # 모르면 전체 질의 (재현 우선)
+  min_confidence: 0.6       # VLM 신뢰도가 이 미만이면 unknown
+  sample_frames: 6          # 영상 처음·끝 10%를 뺀 구간에서 고르게
+  max_side: 512             # 보낼 프레임 긴 변 (px)
+  blur_tolerance_ms: 300    # 그 시각에 가장 가까운 블러 키프레임을 쓸 허용 오차
+  blur_cell_px: 16          # 모자이크 칸 (px)
+  vlm_model: Qwen/Qwen3-VL-8B-Instruct   # config/models.yaml external (라이선스 검사 대상)
+  timeout_s: 60

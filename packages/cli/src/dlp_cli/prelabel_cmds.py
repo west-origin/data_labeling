@@ -28,6 +28,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -37,16 +38,21 @@ import sqlalchemy as sa
 from dlp_cli.ontology_access import session_ontology
 from dlp_cli.raw_access import raw_store
 from dlp_cli.schema_cmds import database_url
-from dlp_media.storage import store_from_spec
+from dlp_media.storage import ObjectStore, store_from_spec
+from dlp_models.vlm import OpenAICompatibleChat
 from dlp_prelabel.adapters.mediapipe_models import MediaPipeHands, MediaPipeObjects
 from dlp_prelabel.adapters.owl_objects import OwlObjects
 from dlp_prelabel.adapters.rtmpose import RtmPose
 from dlp_prelabel.adapters.stubs import UNAVAILABLE
 from dlp_prelabel.lift3d import DepthLifter
-from dlp_prelabel.policy import load_policy
+from dlp_prelabel.policy import PrelabelPolicy, load_policy
 from dlp_prelabel.runner import CONTACT_STEP, PrelabelSummary, run_prelabel
+from dlp_prelabel.scene import SceneResult, VlmScene, classify_video
+from dlp_review.tasks import object_key
 from dlp_schema import load_config, repo_root
-from dlp_schema.db.repository import list_model_versions
+from dlp_schema.db.repository import get_labels, get_session, list_model_versions
+from dlp_schema.episode import current_labels
+from dlp_schema.labels import BlurTrackPayload
 from dlp_schema.lineage import ModelStatus
 from dlp_schema.predictor import ModelUnavailableError, Predictor
 from dlp_sync.policy import load_policy as load_sync_policy
@@ -132,6 +138,13 @@ def cmd_run(args: argparse.Namespace) -> int:
             # 배포된 재학습 접촉 모델(hand_state)을 불러왔으면 기본 접촉 단계를 대신한다.
             # 둘 다 돌면 같은 접촉이 두 번 남는다 (training.yaml contact.replaces에 contact가 있으면
             # deployed.replaces로도 들어온다)
+            for p in predictors:
+                if isinstance(p, OwlObjects):
+                    scene = _scene(args, conn, raw, policy, Path(tmp))
+                    p.set_scene(scene)
+                    print(
+                        f"[장면] {scene.scene} (출처 {scene.source}, 신뢰도 {scene.confidence:.2f})"
+                    )
             contact_models = list_model_versions(conn, CONTACT_TASK, ModelStatus.DEPLOYED)
             loaded = {p.version for p in deployed.predictors}
             if contact_models and contact_models[-1].model_version in loaded:
@@ -158,6 +171,45 @@ def cmd_run(args: argparse.Namespace) -> int:
         engine.dispose()
     _print_summary(s)
     return 0
+
+
+def _scene(
+    args: argparse.Namespace,
+    conn: sa.Connection,
+    raw: ObjectStore,
+    policy: PrelabelPolicy,
+    work: Path,
+) -> SceneResult:
+    """도구 단계의 장면 (ADR 0055): --scene(사람) → 정책 분류기(fixed | 사내 VLM).
+
+    VLM은 기준 스트림 원본을 감사 저장소로 받아, 운영 블러 트랙 박스를 모자이크한 프레임만 보낸다.
+    서버 주소(`DLP_VLM_URL`)가 없으면 정책 기본 장면(출처 fallback)이다.
+    """
+    sp = policy.scene
+    if args.scene:
+        if args.scene not in sp.labels:
+            raise SystemExit(f"--scene {args.scene}: scene.labels {list(sp.labels)} 중 하나")
+        return SceneResult(args.scene, 1.0, "manual")
+    url = os.environ.get("DLP_VLM_URL")
+    if sp.classifier == "fixed" or not url:
+        source = "fixed" if sp.classifier == "fixed" else "fallback"
+        return SceneResult(sp.default, 1.0 if source == "fixed" else 0.0, source)
+    session = get_session(conn, args.session_id)
+    stream = session.reference_stream
+    blur = [
+        x
+        for x in current_labels(get_labels(conn, args.session_id))
+        if x.stream_id == stream.stream_id and isinstance(x.payload, BlurTrackPayload)
+    ]
+    video = work / "scene.mp4"
+    raw.get_file(object_key(raw, stream.uri), video)
+    chat = OpenAICompatibleChat(
+        url, sp.vlm_model, timeout_s=sp.timeout_s, api_key=os.environ.get("DLP_VLM_API_KEY")
+    )
+    try:
+        return classify_video(video, blur, VlmScene(chat, sp.vlm_model, sp), sp)
+    finally:
+        video.unlink(missing_ok=True)
 
 
 def _print_summary(s: PrelabelSummary) -> None:
@@ -209,6 +261,10 @@ def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
         default=[],
         choices=["hands", "body", "objects", "tools", "depth3d"],
         help="건너뛸 단계 (여러 번 쓸 수 있다). CPU에서 tools(OWLv2)는 프레임당 수 초가 걸린다",
+    )
+    run.add_argument(
+        "--scene",
+        help="도구(OWLv2) 질의를 고를 장면 (prelabel.yaml scene.labels, 분류기보다 앞선다)",
     )
     run.add_argument(
         "--allow-missing-models",

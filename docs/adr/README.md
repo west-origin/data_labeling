@@ -61,3 +61,4 @@ ADR은 결정 당시의 이유와 이관 조건을 기록한다. 후속 ADR이 �
 | 0052 | [ADR 0052: 작업자 손 크기의 출처·무효 기록, 수집 뒤 세션 기기 연결, 캘리브레이션 값 검사](0052-hand-size-lifecycle-and-calibration-hardening.md) |
 | 0053 | [ADR 0053: 리타기팅·내보내기·물리 사전값 전수 검수 정정 (묶음 C)](0053-retargeting-export-and-prior-review-fixes.md) |
 | 0054 | [ADR 0054: 프리라벨 시간 일관성과 손 3D 물리 제약](0054-prelabel-temporal-consistency-and-hand-3d-constraints.md) |
+| 0055 | [ADR 0055: 장면별 도구 질의, 오탐 의심 힌트, 테스트 시점 증강(TTA)](0055-scene-vocabulary-false-positive-hints-and-tta.md) |

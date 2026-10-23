@@ -83,6 +83,7 @@ import sqlalchemy as sa
 from sqlalchemy.exc import NoResultFound
 
 from dlp_aireview.status import prelabeled_at
+from dlp_cli import hints_cmds
 from dlp_cli.ai_quality_print import (
     ai_quality_json,
     print_ai_quality,
@@ -1148,6 +1149,7 @@ def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
     """`review` 하위 명령 묶음을 등록한다 (도구 연동 7개 + 운영 5개 + 화면 테마 1개)."""
     review = sub.add_parser("review", help="검수 도구 연동")
     rsub = review.add_subparsers(dest="review_command", required=True)
+    hints_cmds.add_review_commands(rsub)  # dlp review hints (ADR 0055)
 
     create = rsub.add_parser("create", help="세션의 검수 작업 생성")
     create.add_argument("session_id")

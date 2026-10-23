@@ -37,6 +37,7 @@ from typing import Any, Literal
 import yaml
 from pydantic import Field, model_validator
 
+from dlp_media.geometry import TtaSpec
 from dlp_schema.aireview import AiVersion
 from dlp_schema.common import Contract
 from dlp_schema.config import ReviewConfig, load_config
@@ -172,6 +173,8 @@ class CvatPolicy(Contract):
     privacy_issue_limit: int = Field(
         ge=0, description="블러 검수 작업에 CVAT 이슈로 남기는 검수 우선 구간 최대 수"
     )
+    # 오탐 의심 힌트 이슈 최대 수 (블러·라벨링 작업 각각, ADR 0055). 절이 없으면 0 (달지 않음)
+    hint_issue_limit: int = Field(default=0, ge=0)
 
     @model_validator(mode="after")
     def _one_to_one(self) -> CvatPolicy:
@@ -284,6 +287,22 @@ class AiReviewDisplayPolicy(Contract):
     strict_context: bool = False
 
 
+class ObjectHintsPolicy(Contract):
+    """객체·도구 오탐 의심 힌트 (review.yaml `object_hints`, ADR 0055, `dlp_review.object_hints`).
+
+    라벨을 바꾸지 않고 검수 화면에 표시만 한다. time_tolerance_ms: 손·머리 키프레임 시각 허용 오차.
+    margin: 박스 여유 비율. wearer_share: 사람 박스 키프레임 중 착용자 손목을 담고 머리 관절이 없는
+    비율이 이 이상이면 wearer_body. tta_min_support / tta: 도구 TTA (OWLv2를 변환 화면에 다시
+    돌린다).
+    """
+
+    time_tolerance_ms: int = Field(ge=0)
+    margin: float = Field(ge=0)
+    wearer_share: float = Field(gt=0, le=1)
+    tta_min_support: float = Field(ge=0, le=1)
+    tta: TtaSpec
+
+
 class VerifyPolicy(Contract):
     """`dlp review verify` 완료 판정 (ADR 0050).
 
@@ -320,6 +339,8 @@ class ReviewOpsPolicy(Contract):
     ai_review: AiReviewDisplayPolicy = Field(default_factory=AiReviewDisplayPolicy)
     # 절이 없으면 카메라 자세를 자동 라벨로 본다 (ADR 0050)
     verify: VerifyPolicy = Field(default_factory=VerifyPolicy)
+    # 절이 없으면 힌트를 계산하지 않는다 (`dlp review hints`가 거부, ADR 0055)
+    object_hints: ObjectHintsPolicy | None = None
     ratios: ReviewConfig  # 배정 비율 (config/defaults.yaml `review` 절)
 
 

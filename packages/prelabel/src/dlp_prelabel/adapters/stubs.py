@@ -162,4 +162,11 @@ LEARNED_CONTACT = UnavailablePredictor(
     "learned_contact", "재학습 루프의 실제 접촉 분류기 학습기 미연동 (dlp train run contact)"
 )
 
-UNAVAILABLE = (TOOL_PART_MASKS, SLAM_ENGINE, LEARNED_CONTACT)
+# TODO(real-model): 사내 VLM 서버 없이 도는 로컬 장면 분류기 (ADR 0055). 상업 사용 가능한 가중치를
+#   찾지 못했다 (Places365 계열은 비상업). 지금은 사내 VLM(`scene.VlmScene`)·사람이 준
+#   장면(--scene)·고정 기본값(unknown, 전체 질의)뿐이다.
+LOCAL_SCENE = UnavailablePredictor(
+    "local_scene", "로컬 장면 분류기 미연동 (사내 VLM 또는 --scene, 없으면 unknown·전체 도구 질의)"
+)
+
+UNAVAILABLE = (TOOL_PART_MASKS, SLAM_ENGINE, LEARNED_CONTACT, LOCAL_SCENE)

@@ -52,6 +52,7 @@ def used_models(root: Path) -> dict[str, str]:
     - `privacy.detectors.<탐지기>.model|tokenizer` — 프라이버시 대상(`targets`)이 쓰는 탐지기와, 그
       탐지기가 다시 쓰는 하위 탐지기(`region_detector`, `face_detector`)까지 따라간다.
     - `prelabel.models.<역할>` — 프리라벨 정책의 `models` 절 전부.
+    - `prelabel.scene.vlm_model` — 장면 분류 VLM (사내 서버, ADR 0055).
     - `actions.vlm.model` — 행동 분류 VLM.
     - `aireview.backend.model` — AI 1차 검수 판정 VLM (WP17, ADR 0040).
     - `translate.backend.model` — 설명 영어 번역 모델 (사내 서버, ADR 0043).
@@ -77,8 +78,10 @@ def used_models(root: Path) -> dict[str, str]:
                 used[f"privacy.detectors.{name}.{field}"] = model
         # 이미 처리한 탐지기는 다시 따라가지 않는다. 잘못된 순환 정책도 검사 명령을 멈추지 않는다.
         names |= {n for n in (spec.region_detector, spec.face_detector) if n is not None}
-    for role, model in load_prelabel_policy(root).models.model_dump().items():
+    prelabel = load_prelabel_policy(root)
+    for role, model in prelabel.models.model_dump().items():
         used[f"prelabel.models.{role}"] = model
+    used["prelabel.scene.vlm_model"] = prelabel.scene.vlm_model
     used["actions.vlm.model"] = load_actions_policy(root).vlm.model
     used["aireview.backend.model"] = load_aireview_policy(root).backend.model
     used["translate.backend.model"] = load_translate_policy(root).backend.model

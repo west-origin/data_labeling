@@ -830,6 +830,12 @@ issues:
   - {id: F-PAR-63, title: "손 3D 물리 제약 표시(Trajectory3DSample.flags)와 보간 키프레임 표시(KeypointFrame.interpolated)가 내보내기 형식에 실리지 않음 (낮춘 3D 신뢰도만 실리고, 채운 손 키프레임은 visibility 1로 나감)", severity: low, status: open, kind: code,
      files: [packages/export/src/dlp_export/lerobot.py, packages/export/src/dlp_export/coco.py, packages/schema/src/dlp_schema/labels.py], source: docs/adr/0054-prelabel-temporal-consistency-and-hand-3d-constraints.md, see: [F-PAR-60],
      note: "ADR 0054에서 라벨에는 남겼으나 LeRobot·COCO·구간 JSON 형식은 바꾸지 않았다. 구매자가 관측과 보간을 구분하려면 LeRobot 손 2D 특징에 보간 여부, 3D 특징에 제약 표시 비트를 더한다 (내보내기 형식 변경, ADR)."}
+  - {id: F-REV-30, title: "웹훅 시험 test_partial_body_times_out_and_releases_connection이 CPU 부하에서 간헐 실패 (503 응답 뒤 서버가 연결을 먼저 닫아 클라이언트 본문 전송이 BrokenPipeError)", severity: low, status: open, kind: test,
+     files: [packages/review/tests/test_webhook_http.py], source: docs/handover/pilot-real-2026-10-22.md,
+     note: "2026-10-23 make check 중 실영상 프리라벨(CPU 4코어 포화)과 함께 돌 때 한 번 실패, 단독 재실행은 통과. 시험의 post()가 본문을 보내는 동안 서버가 503을 먼저 보내고 닫으면 BrokenPipe가 난다. 시험 쪽에서 BrokenPipe·ConnectionReset을 응답 읽기로 처리하거나 서버가 본문을 버린 뒤 닫게 고친다."}
+  - {id: F-PMS-34, title: "블러 오탐 의심 힌트(no_head·on_hand)는 RTMPose·MediaPipe 결과에 기대어, 1인칭에서 머리 관절 없이 보이는 실제 얼굴(가까운 대상자 얼굴 일부 등)에도 붙을 수 있음", severity: low, status: open, kind: product,
+     files: [packages/privacy/src/dlp_privacy/hints.py, config/policies/privacy.yaml], source: docs/adr/0055-scene-vocabulary-false-positive-hints-and-tta.md, see: [F-PMS-31],
+     note: "힌트는 표시일 뿐 블러·승인을 바꾸지 않는다 (ADR 0055). 검수자 안내문에 오탐 의심이 블러 제거 근거가 아님을 적었다. 정답 표본으로 힌트 정밀도를 재야 한다."}
   - {id: F-PMS-33, title: "표시 방향 태그가 장착 방향과 다른 스마트폰 영상(태그 -90°, 실제로는 180°)을 dlp media prepare가 태그대로만 돌려 옆으로 누운 사본을 만들고 바로잡을 방법이 없었음", severity: medium, status: fixed, kind: code,
      files: [packages/media/src/dlp_media/prepare.py, packages/cli/src/dlp_cli/media_cmds.py, docs/weekend-video-pilot.md], source: docs/handover/pilot-real-2026-10-22.md,
      note: "dlp media prepare --display-rotation <반시계 각도>로 태그 대신 쓸 각도를 준다(FFmpeg 입력 옵션 -display_rotation, 같은 PTS·트랙·해상도 검사). 사람이 영상을 보고 정한다(자동 추정 없음). 옆으로 누운 사본(pilot-real1)과 바로 세운 사본(pilot-real2)의 단계별 결과 차이는 보고서에 있다. 회귀: packages/media/tests/test_prepare.py::test_prepare_display_rotation_overrides_wrong_tag, ::test_prepare_rejects_non_right_angle_override."}

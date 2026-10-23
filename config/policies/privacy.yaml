@@ -73,6 +73,20 @@ render:
 # 순서를 바꾸면 정책 해시가 바뀌어 다시 탐지한다.
 review_priority: [no_detector, track_gap, disagreement, low_confidence, reflection, trained_model]
 
+# 오탐 의심 힌트 (ADR 0055, dlp_privacy.hints, dlp review hints). 블러 라벨을 지우거나 바꾸지 않고, 블러
+# 검수 화면(CVAT 이슈)에 누락 위험 구간 다음 순위로 "오탐 의심"을 단다. 탐지 해시에 들어가지 않는다.
+hints:
+  time_tolerance_ms: 20     # 머리 관절·손 키프레임을 같은 시각으로 볼 허용 오차
+  margin: 0.1               # 얼굴·손 박스를 각 변 10% 넓혀 본다
+  min_share: 0.8            # 트랙 키프레임의 80% 이상이 머리 관절 없음(no_head)·손 위(on_hand)면 힌트
+  short_ms: 300             # 0.3초보다 짧은 블러 트랙은 short_flicker 힌트
+  tta_min_support: 0.5      # 변환 화면에서 다시 찾은 비율 평균이 이 미만이면 tta_unstable 힌트
+  tta:
+    transforms: [hflip, "scale:0.75"]
+    iou: 0.3
+    max_tracks: 2000        # 얼굴 트랙 상한 (YuNet은 빠르다)
+    frames_per_track: 3
+
 # 탐지기 정의 (이름 → 설정). targets.*.detectors와 reflection의 region/face_detector가
 # 이 이름을 쓴다.
 # kind별 구현은 dlp_privacy.detectors. 가중치(model, tokenizer)는 config/models.yaml 키이며
