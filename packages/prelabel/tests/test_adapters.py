@@ -27,6 +27,7 @@ from dlp_prelabel.adapters.mediapipe_models import (
     MediaPipeObjects,
     best_per_hand,
     drop_duplicate_hands,
+    drop_filled_overlaps,
     flip_hand,
 )
 from dlp_prelabel.adapters.owl_objects import OwlObjects
@@ -34,7 +35,7 @@ from dlp_prelabel.adapters.rtmpose import RtmPose
 from dlp_prelabel.adapters.stubs import UNAVAILABLE, OraclePredictor
 from dlp_prelabel.common import strictly_increasing
 from dlp_prelabel.policy import load_policy
-from dlp_schema.labels import Hand, KeypointTrackPayload
+from dlp_schema.labels import Hand, Keypoint, KeypointFrame, KeypointTrackPayload
 from dlp_schema.ontology import load_ontology
 from dlp_schema.predictor import Clip, ModelUnavailableError, Predictor
 from dlp_schema.validation import check_label
@@ -73,6 +74,27 @@ def test_duplicate_detection_of_one_hand_is_dropped() -> None:
     boxes = [(0.10, 0.10, 0.2, 0.2), (0.11, 0.10, 0.2, 0.2), (0.60, 0.50, 0.2, 0.2)]
     assert drop_duplicate_hands(dets, boxes, 0.5) == [(Hand.RIGHT, 0.9, "b"), (Hand.LEFT, 0.8, "c")]
     assert drop_duplicate_hands(dets, boxes, 1.0) == dets
+
+
+def test_filled_keyframe_on_top_of_the_other_hand_is_dropped() -> None:
+    """정답: 왼손의 채운 키프레임이 같은 시각 오른손 관측과 같은 자리면 빼고, 떨어져 있으면 남긴다.
+
+    관측 키프레임은 겹쳐도 남긴다 (관측 겹침은 `drop_duplicate_hands`가 탐지 단계에서 다룬다).
+    """
+
+    def frame(t: int, x: float, *, filled: bool = False) -> KeypointFrame:
+        pts = tuple(Keypoint(x=x + j, y=100.0 + j, visibility=2) for j in range(21))
+        return KeypointFrame(t_ms=t, points=pts, interpolated=True if filled else None)
+
+    left = [
+        (frame(0, 100), 0.9),
+        (frame(33, 300, filled=True), 0.3),
+        (frame(66, 900, filled=True), 0.3),
+    ]
+    right = [(frame(33, 300), 0.8), (frame(66, 500), 0.8)]
+    out = drop_filled_overlaps({Hand.LEFT: left, Hand.RIGHT: right}, 0.5)
+    assert [f.t_ms for f, _ in out[Hand.LEFT]] == [0, 66]
+    assert [f.t_ms for f, _ in out[Hand.RIGHT]] == [33, 66]
 
 
 def test_two_detections_of_the_same_hand_keep_the_highest_score() -> None:

@@ -836,6 +836,12 @@ issues:
   - {id: F-PMS-34, title: "블러 오탐 의심 힌트(no_head·on_hand)는 RTMPose·MediaPipe 결과에 기대어, 1인칭에서 머리 관절 없이 보이는 실제 얼굴(가까운 대상자 얼굴 일부 등)에도 붙을 수 있음", severity: low, status: open, kind: product,
      files: [packages/privacy/src/dlp_privacy/hints.py, config/policies/privacy.yaml], source: docs/adr/0055-scene-vocabulary-false-positive-hints-and-tta.md, see: [F-PMS-31],
      note: "힌트는 표시일 뿐 블러·승인을 바꾸지 않는다 (ADR 0055). 검수자 안내문에 오탐 의심이 블러 제거 근거가 아님을 적었다. 정답 표본으로 힌트 정밀도를 재야 한다."}
+  - {id: F-PMS-35, title: "강제 종료된 dlp prelabel run(컨테이너 재시작·SIGKILL)이 원본 영상 임시 사본(/tmp/tmp*/, 약 350 MB)을 지우지 못하고 남김 (개인정보가 담긴 원본이 로컬에 남고 디스크 여유를 줄여 SeaweedFS 쓰기 거부를 앞당김)", severity: medium, status: open, kind: ops,
+     files: [packages/prelabel/src/dlp_prelabel/runner.py, packages/cli/src/dlp_cli/prelabel_cmds.py], source: docs/handover/pilot-real-2026-10-22.md, see: [F-PMS-32],
+     note: "2026-10-23 파일럿: 컨테이너 재시작으로 끊긴 3D 단계와 전날 실행의 원본 사본 두 개(각 약 345 MB)가 /tmp에 남아 있어 지웠다. tempfile.TemporaryDirectory는 정상 종료·예외에서만 지운다. 필요: 원본 임시 사본을 정해진 작업 디렉터리(예: DLP_WORK_DIR)에 두고 시작할 때 낡은 사본을 지우거나, 운영 점검(dlp services check)이 남은 사본을 알린다."}
+  - {id: F-PAR-64, title: "MediaPipe 손 판정(Left·Right)이 한 손에서 프레임마다 바뀌어, 손별 트랙이 같은 손으로 건너뛰고 끊김이 생김 (손 판정을 프레임마다 따로 믿는 어댑터 구조)", severity: medium, status: open, kind: code,
+     files: [packages/prelabel/src/dlp_prelabel/adapters/mediapipe_models.py], source: docs/handover/pilot-real-2026-10-22.md, see: [F-PAR-61],
+     note: "pilot-real2: 채운 두 손 프레임의 두 손목 간격 중앙값이 손 크기의 0.08배(한 손을 두 트랙이 번갈아 잡음), 관측 두 손 프레임 중 간격이 손 크기보다 작은 68프레임의 좌우 일치는 0.76. 손목 2D 떨림 p95가 약 3(손 크기 배)인 것도 트랙이 다른 손으로 건너뛴 프레임이다. 지금은 한 프레임 안 겹침 빼기(dd1)와 다른 손 위의 채운 키프레임 빼기(dd2)만 했다. 필요: 위치 연속성으로 탐지를 트랙에 잇고(헝가리안 매칭) 손 판정은 트랙 단위로 다수결·평활해 정하는 손 추적기, 1인칭 기하(왼손은 화면 왼쪽에서 들어옴)를 약한 사전값으로."}
   - {id: F-PMS-33, title: "표시 방향 태그가 장착 방향과 다른 스마트폰 영상(태그 -90°, 실제로는 180°)을 dlp media prepare가 태그대로만 돌려 옆으로 누운 사본을 만들고 바로잡을 방법이 없었음", severity: medium, status: fixed, kind: code,
      files: [packages/media/src/dlp_media/prepare.py, packages/cli/src/dlp_cli/media_cmds.py, docs/weekend-video-pilot.md], source: docs/handover/pilot-real-2026-10-22.md,
      note: "dlp media prepare --display-rotation <반시계 각도>로 태그 대신 쓸 각도를 준다(FFmpeg 입력 옵션 -display_rotation, 같은 PTS·트랙·해상도 검사). 사람이 영상을 보고 정한다(자동 추정 없음). 옆으로 누운 사본(pilot-real1)과 바로 세운 사본(pilot-real2)의 단계별 결과 차이는 보고서에 있다. 회귀: packages/media/tests/test_prepare.py::test_prepare_display_rotation_overrides_wrong_tag, ::test_prepare_rejects_non_right_angle_override."}

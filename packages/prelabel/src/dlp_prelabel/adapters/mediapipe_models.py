@@ -112,6 +112,37 @@ def drop_duplicate_hands[T](
     return [detections[i] for i in sorted(kept)]
 
 
+def _frame_box(frame: KeypointFrame) -> tuple[float, float, float, float]:
+    """키프레임 관절(픽셀)의 외접 박스."""
+    xs, ys = [p.x for p in frame.points], [p.y for p in frame.points]
+    return (min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys))
+
+
+def drop_filled_overlaps(
+    tracks: dict[Hand, list[tuple[KeypointFrame, float]]], iou_max: float
+) -> dict[Hand, list[tuple[KeypointFrame, float]]]:
+    """채운(보간) 키프레임이 같은 시각 다른 손의 관측 키프레임과 겹치면(IoU >= iou_max) 뺀다.
+
+    MediaPipe가 한 손의 판정을 프레임마다 Left·Right로 바꾸면, 한쪽 트랙의 짧은 끊김을 채운 손이
+    다른 트랙의 관측 손 위에 놓인다 (2026-10-23 파일럿: 채운 두 손 프레임의 두 손목 간격 중앙값 = 손
+    크기의 0.08배). 관측 키프레임은 건드리지 않는다.
+    """
+    observed = {
+        hand: {f.t_ms: _frame_box(f) for f, _ in items if not f.interpolated}
+        for hand, items in tracks.items()
+    }
+    out: dict[Hand, list[tuple[KeypointFrame, float]]] = {}
+    for hand, items in tracks.items():
+        others = [boxes for h, boxes in observed.items() if h is not hand]
+        out[hand] = [
+            (f, s)
+            for f, s in items
+            if not f.interpolated
+            or all(f.t_ms not in o or iou(_frame_box(f), o[f.t_ms]) < iou_max for o in others)
+        ]
+    return out
+
+
 def best_per_hand[T](
     detections: Iterable[tuple[Hand, float, T]],
 ) -> dict[Hand, tuple[float, T]]:
@@ -149,10 +180,10 @@ def hand_frame(t_ms: int, landmarks: Any, world: Any, width: int, height: int) -
 class MediaPipeHands:
     """손 21관절 어댑터 (name="hands").
 
-    version: `mediapipe-<가중치 버전>+rgb1+w1+hd2+sm1+dd1+p<hands 절 해시>`.
+    version: `mediapipe-<가중치 버전>+rgb1+w1+hd2+sm1+dd2+p<hands 절 해시>`.
     RGB 행 패딩 제거(rgb1), 손 중심 3D 점 싣기(w1, ADR 0044), 1인칭 손 판정을 뒤집지 않게 바로잡은
     손 좌우 의미(hd2, F-PAR-61), 2D 평활·짧은 끊김 채우기(sm1, ADR 0054), 한 손을 두 번 본 탐지
-    빼기(dd1) 버전을 포함한다.
+    빼기와 다른 손 위에 놓인 채운 키프레임 빼기(dd2) 버전을 포함한다.
     손(왼·오른)마다
     트랙 하나를 낸다. 라벨 ID는 `<세션>-<스트림>-hands-<version_tag>-<left|right>`, entity_id는
     `<left|right>_hand`.
@@ -165,7 +196,7 @@ class MediaPipeHands:
     ) -> None:
         """가중치를 확인하고 버전을 정한다. Raises: ModelUnavailableError."""
         self.path, version = _model(root, policy.models.hands)
-        self.version = f"{version}+rgb1+w1+hd2+sm1+dd1+p{policy.digest('hands')}"
+        self.version = f"{version}+rgb1+w1+hd2+sm1+dd2+p{policy.digest('hands')}"
         self.policy, self.ontology_version, self.now = policy, ontology_version, now
 
     def run(self, clip: Clip) -> list[LabelRecord]:
@@ -222,10 +253,11 @@ class MediaPipeHands:
                 for hand, (score, (landmarks, world)) in found.items():
                     frames[hand].append((hand_frame(t, landmarks, world, w, h), score))
         out: list[LabelRecord] = []
-        for hand, observed in frames.items():
-            if not observed:
-                continue
-            items = self._clean(observed, times, size)
+        cleaned = drop_filled_overlaps(
+            {hand: self._clean(obs, times, size) for hand, obs in frames.items() if obs},
+            self.policy.hands.duplicate_iou,
+        )
+        for hand, items in cleaned.items():
             payload = KeypointTrackPayload(
                 entity_id=f"{hand.value}_hand",
                 skeleton="hand21",
