@@ -51,11 +51,13 @@ class HandsPolicy(Contract):
     """손 21관절(MediaPipe) 정책 (`hands` 절).
 
     min_score: 손 탐지 최소 신뢰도 (0~1, MediaPipe `min_hand_detection_confidence`).
-    input_is_mirrored: 입력이 거울상(셀카)인가. 바디캠은 False라 왼손·오른손 판정을 뒤집는다.
+    swap_handedness: MediaPipe 손 판정(거울상 셀카 기준)을 뒤집을지. 1인칭(바디캠·머리캠)은
+        손등 쪽에서 보므로 판정이 그대로 착용자 기준이라 False다. 거울상이 아닌 카메라를 사람이
+        마주 보는 영상만 True (F-PAR-61, `adapters.mediapipe_models.flip_hand`).
     """
 
     min_score: float = Field(ge=0, le=1)
-    input_is_mirrored: bool
+    swap_handedness: bool
 
 
 class BodyPolicy(Contract):

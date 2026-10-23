@@ -49,11 +49,18 @@ HAS_RTMPOSE = (ROOT / "data/models/rtmpose/rtmpose_m_body7_256x192.onnx").is_fil
 HAS_OWL = (ROOT / "data/models/owlv2/model_quantized.onnx").is_file()
 
 
-def test_handedness_is_flipped_for_non_mirrored_bodycam() -> None:
-    """MediaPipe는 거울상 입력을 가정하므로 바디캠(거울상 아님)에서는 Left/Right를 뒤집는지 본다."""
-    assert flip_hand("Left", input_is_mirrored=False) is Hand.RIGHT
-    assert flip_hand("Right", input_is_mirrored=False) is Hand.LEFT
-    assert flip_hand("Left", input_is_mirrored=True) is Hand.LEFT
+def test_egocentric_handedness_is_not_swapped() -> None:
+    """F-PAR-61 회귀: 1인칭 바디캠(정책 기본 swap_handedness=false)은 MediaPipe 판정을 그대로 쓴다.
+
+    예전에는 바디캠이 거울상이 아니라는 이유로 뒤집어, 바로 세운 1인칭 실영상의 두 손 프레임
+    대부분에서 왼손 트랙이 화면 오른쪽에 왔다. 사람이 마주 보는 비거울상 영상에서만 뒤집는다.
+    """
+    policy = load_policy(ROOT)
+    assert policy.hands.swap_handedness is False
+    assert flip_hand("Left", swap_handedness=False) is Hand.LEFT
+    assert flip_hand("right", swap_handedness=False) is Hand.RIGHT
+    assert flip_hand("Left", swap_handedness=True) is Hand.RIGHT
+    assert flip_hand("Right", swap_handedness=True) is Hand.LEFT
 
 
 def test_two_detections_of_the_same_hand_keep_the_highest_score() -> None:
@@ -257,6 +264,9 @@ def test_mediapipe_hands_skips_frames_with_repeated_ms(monkeypatch: pytest.Monke
     hands.ontology_version = "1.0.0"
     hands.now = NOW
     [label] = hands.run(Clip("s1", "bodycam", Path("v.mp4")))
+    # F-PAR-61: 1인칭 바디캠에서 MediaPipe "Right"는 그대로 착용자 오른손이다
+    assert label.payload.hand is Hand.RIGHT  # type: ignore[union-attr]
+    assert label.label_id.endswith("-right")
     assert model.stamps == [0, 1, 2, 33]
     assert [k.t_ms for k in label.payload.keyframes] == [0, 1, 2, 33]  # type: ignore[union-attr]
     assert check_label(label, load_ontology(ROOT / "config/ontology/v1")) == []

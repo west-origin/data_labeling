@@ -7,7 +7,8 @@
 반올림한 PTS ms가 앞 프레임과 같은 프레임은 `common.strictly_increasing`이 건너뛴다):
 - HandLandmarker(`hand_landmarker.task`): RGB 프레임 → 손마다 21관절(이미지 크기로 정규화한 0~1 x,
   y), 손 중심 3D 21점(hand_world_landmarks, 미터, 원점은 손의 대략적인 기하 중심)과 손 판정
-  (Left/Right, 거울상 가정). 2D는 여기서 픽셀로 바꾸고 (x*W, y*H), 3D는 키프레임 world에 싣는다
+  (Left/Right, 거울상 셀카 기준이라 1인칭 화면은 그대로 착용자 기준, `flip_hand`). 2D는 여기서
+  픽셀로 바꾸고 (x*W, y*H), 3D는 키프레임 world에 싣는다
   (ADR 0044, `lift3d`가 손가락 끝 3D에 쓴다). skeleton="hand21"
   (MediaPipe 관절 순서: 0 손목, 4 엄지 끝, 8 검지 끝, 12 중지 끝, 16 약지 끝, 20 새끼 끝).
 - ObjectDetector(`efficientdet_lite0.tflite`): RGB 프레임 → COCO 클래스 이름·점수·박스 (origin_x,
@@ -65,15 +66,23 @@ def _vision() -> Any:
     return mp, mpt, vision
 
 
-def flip_hand(label: str, input_is_mirrored: bool) -> Hand:
-    """MediaPipe 손 판정은 거울상 입력을 가정한다. 거울상이 아니면 왼손·오른손을 뒤집는다.
+def flip_hand(label: str, swap_handedness: bool) -> Hand:
+    """MediaPipe 손 판정(category_name) → 착용자 기준 손 (F-PAR-61).
+
+    MediaPipe 손 판정은 손 모양의 좌우성(엄지가 어느 쪽인가)으로 정한다. 학습 기준은 "거울상 셀카"
+    화면이다: 사람이 카메라를 마주 보고 화면을 좌우로 뒤집은 영상이다. 손등 쪽에서 손을 보는 1인칭
+    (바디캠·머리캠, 거울상 아님) 화면에서 손의 2D 모양은 거울상 셀카 화면의 같은 손과 좌우가 같다.
+    카메라를 등지고 손을 보는 시점은 마주 본 화면을 좌우로 뒤집은 것과 같기 때문이다. 그래서 1인칭
+    화면은 뒤집지 않는다. 뒤집어야 하는 것은 사람이 거울상이 아닌 카메라를 마주 볼 때뿐이다 (3인칭
+    정면 등). 2026-10-23 파일럿 확인: 바로 세운 1인칭 실영상에서 뒤집지 않은 판정의 왼손이
+    두 손 프레임 대부분에서 화면 왼쪽에 왔다 (pilot-real-2026-10-22.md).
 
     Args:
         label: MediaPipe category_name ("Left"/"Right", 대소문자 무관).
-        input_is_mirrored: 정책 `hands.input_is_mirrored` (바디캠은 False).
+        swap_handedness: 정책 `hands.swap_handedness`. 1인칭 바디캠은 False.
     """
     hand = Hand.LEFT if label.lower() == "left" else Hand.RIGHT
-    if input_is_mirrored:
+    if not swap_handedness:
         return hand
     return Hand.RIGHT if hand is Hand.LEFT else Hand.LEFT
 
@@ -115,8 +124,9 @@ def hand_frame(t_ms: int, landmarks: Any, world: Any, width: int, height: int) -
 class MediaPipeHands:
     """손 21관절 어댑터 (name="hands").
 
-    version: `mediapipe-<가중치 버전>+rgb1+w1+p<hands 절 해시>`.
-    RGB 행 패딩 제거(rgb1)와 손 중심 3D 점 싣기(w1, ADR 0044) 버전을 포함한다. 손(왼·오른)마다
+    version: `mediapipe-<가중치 버전>+rgb1+w1+hd2+p<hands 절 해시>`.
+    RGB 행 패딩 제거(rgb1), 손 중심 3D 점 싣기(w1, ADR 0044), 1인칭 손 판정을 뒤집지 않게 바로잡은
+    손 좌우 의미(hd2, F-PAR-61) 버전을 포함한다. 손(왼·오른)마다
     트랙 하나를 낸다. 라벨 ID는 `<세션>-<스트림>-hands-<version_tag>-<left|right>`, entity_id는
     `<left|right>_hand`.
     """
@@ -128,7 +138,7 @@ class MediaPipeHands:
     ) -> None:
         """가중치를 확인하고 버전을 정한다. Raises: ModelUnavailableError."""
         self.path, version = _model(root, policy.models.hands)
-        self.version = f"{version}+rgb1+w1+p{policy.digest('hands')}"
+        self.version = f"{version}+rgb1+w1+hd2+p{policy.digest('hands')}"
         self.policy, self.ontology_version, self.now = policy, ontology_version, now
 
     def run(self, clip: Clip) -> list[LabelRecord]:
@@ -162,7 +172,7 @@ class MediaPipeHands:
                 )
                 found = best_per_hand(
                     (
-                        flip_hand(handed[0].category_name, self.policy.hands.input_is_mirrored),
+                        flip_hand(handed[0].category_name, self.policy.hands.swap_handedness),
                         float(handed[0].score),
                         (landmarks, world),
                     )

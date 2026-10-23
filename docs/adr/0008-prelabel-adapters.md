@@ -12,6 +12,7 @@
 1. **모든 프리라벨 모델은 공통 `Predictor`(`run(clip) -> list[LabelRecord]`)를 구현하고 CPU용 stub을 함께 둔다.** stub은 정답 라벨을 모델 출처로 돌려주는 `OraclePredictor`다. CI와 다른 모듈 개발은 stub으로 진행한다.
 2. **이 환경(CPU, Hugging Face 접근 불가)에서 실제로 연동한 모델은 MediaPipe다.**
    - 손 21관절 (Hand Landmarker). MediaPipe는 거울상 입력을 가정하므로, 거울상이 아닌 바디캠에서는 왼손·오른손을 뒤집는다 (`hands.input_is_mirrored`).
+     (2026-10-23 개정, F-PAR-61: 이 뒤집기는 틀렸다. 판정은 손 모양 좌우성으로 정하고 기준이 거울상 셀카 화면이다. 손등 쪽에서 보는 1인칭 화면은 거울상 셀카와 손 모양 좌우가 같아 뒤집지 않는다. 정책은 `hands.swap_handedness`(1인칭 false)로 바꿨다.)
    - 전신 포즈 (Pose Landmarker lite, 33점 → COCO 17점)
    - COCO 객체 탐지 (EfficientDet-Lite0). 온톨로지에 대응하는 클래스(컵, 변기, 세면대, 침대, 병→분무기, 사람)만 남긴다.
 
