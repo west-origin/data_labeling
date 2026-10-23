@@ -422,11 +422,15 @@ def run_prelabel(
         if replaced_stale:
             insert_labels(conn, retractions(replaced_stale, REPLACED_VERSION, now))
             summary.retracted += len(replaced_stale)
-        # 1단계에서 넣은 라벨을 반영해 이력·현재 라벨을 다시 읽는다 (2~4단계의 입력)
+        # 1단계에서 넣은 라벨을 반영해 이력·현재 라벨을 다시 읽는다 (2~4단계의 입력).
+        # 세션 이력 사본은 손 키포인트 트랙 때문에 수 GB가 될 수 있다. 다음 사본을 읽기 전에 앞
+        # 사본을 놓아 둘 이상을 한꺼번에 들지 않는다 (F-PMS-36)
+        del existing
         history = get_labels(conn, session_id)
         current = current_labels(history)
         if lifter is not None:
             summary.lifted = _lift(conn, session, history, current, raw, work, lifter, now, summary)
+        del history, current
         # 새 카메라 좌표 3D가 확인된 2D의 검수를 물려받은 뒤 월드 좌표 단계가 입력을 고른다
         _follow(conn, session_id, now, summary)
         if policy.camera_pose.enabled:
