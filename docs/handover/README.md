@@ -104,6 +104,7 @@ flowchart LR
 | 주석과 구현의 불일치, 설명 수정 범위·검증 | [주석 집중 검수](comment-review.md) |
 | 전체 소스·설정 검사 목록, 추가 정정·새 실행 결과 | [전체 파일 검사](full-comment-review.md), [파일별 목록](full-comment-review-files.csv)(2026-10-10 시점, 지금 범위는 `make review-scope`) |
 | 실제 촬영 영상의 첫 실행 | [청소 영상 파일럿](../weekend-video-pilot.md) |
+| 첫 실영상(iPhone 13 가사 영상) 단계별 결과·실행 시간·화각 판단·막힌 것 | [실영상 파일럿 2026-10-22](pilot-real-2026-10-22.md) |
 | 바디캠 내부 파라미터·작업자 손 크기 등록 | [카메라 캘리브레이션](camera-calibration.md) |
 | 고객 로봇 등록·리타기팅 내보내기 | [로봇 리타기팅](robot-retargeting.md) |
 | 작업 규칙·필수 검사 | [CLAUDE.md](../../CLAUDE.md) |
