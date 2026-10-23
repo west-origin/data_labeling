@@ -49,6 +49,14 @@ import yaml
 from pydantic import AwareDatetime, Field
 from sqlalchemy.exc import NoResultFound
 
+from dlp_media.capture_check import (
+    CapturePolicy,
+    CaptureWarning,
+    calibration_warnings,
+    imu_warnings,
+    load_capture_policy,
+    video_warnings,
+)
 from dlp_media.glove import read_glove
 from dlp_media.imu import ImuData, extract_embedded_imu, read_imu_table
 from dlp_media.probe import MediaInfo, probe, require_upright
@@ -131,6 +139,8 @@ class IngestResult:
     # 같은 내용이 이미 있거나 파생 파일이 이미 있어 건너뛴 키
     skipped: list[str] = field(default_factory=list[str])
     db: str = "skipped"  # inserted | unchanged | skipped
+    # 촬영 점검 경고 (막지 않는다, `dlp_media.capture_check`)
+    warnings: list[CaptureWarning] = field(default_factory=list[CaptureWarning])
 
 
 def ingest_session(  # noqa: C901
@@ -140,6 +150,7 @@ def ingest_session(  # noqa: C901
     conn: sa.Connection | None = None,
     *,
     proxy: ProxyConfig | None = None,
+    capture: CapturePolicy | None = None,
 ) -> IngestResult:
     """매니페스트 하나를 수집한다 (모듈 docstring의 1~5단계).
 
@@ -149,6 +160,8 @@ def ingest_session(  # noqa: C901
         raw: 원본 버킷 저장소 (CLI는 감사 저장소).
         conn: DB 연결 (호출자가 연 트랜잭션). None이면 DB 등록을 건너뛴다 (db="skipped").
         proxy: 프록시 인코딩 설정. 없으면 저장소의 config/defaults.yaml media.proxy를 읽는다.
+        capture: 촬영 점검 기준. 없으면 저장소의 config/policies/media.yaml capture를 읽는다.
+            경고는 결과의 `warnings`에 담고 수집은 막지 않는다.
 
     Returns:
         `IngestResult`. 세션 스트림 순서는 매니페스트 순서이고, 내장 IMU 스트림("imu")은 바디캠
@@ -164,6 +177,9 @@ def ingest_session(  # noqa: C901
     부작용: 원본 버킷 쓰기(감사 write 기록), DB `sessions`·스트림 행 추가.
     """
     proxy_cfg = proxy if proxy is not None else default_proxy_config()
+    capture_cfg = capture if capture is not None else load_capture_policy(_root())
+    warnings: list[CaptureWarning] = []
+    imu_seen: ImuData | None = None
     sid = manifest.session_id
     prefix = f"sessions/{sid}"
     kinds = [s.kind for s in manifest.streams]
@@ -239,14 +255,17 @@ def ingest_session(  # noqa: C901
             if is_body:
                 duration_ms = index.duration_ms
                 recorded_at = recorded_at or info.creation_time
+                warnings += video_warnings(info, index, capture_cfg)
                 # 3) 바디캠 내장 IMU: 같은 시계이므로 SHARED_CLOCK
                 if not has_imu and (imu := extract_embedded_imu(src, info)) is not None:
+                    imu_seen = imu
                     streams.append(
                         _imu_stream("imu", imu, derived, prefix, SyncMethod.SHARED_CLOCK)
                     )
         elif ms.kind is StreamKind.IMU:
             # 4) IMU 사이드카: 다른 시계일 수 있어 동기화 전
             imu = read_imu_table(src)
+            imu_seen = imu_seen or imu
             streams.append(_imu_stream(ms.stream_id, imu, derived, prefix, SyncMethod.UNSYNCED))
         elif ms.kind in GLOVE_KINDS:
             # 4) 장갑: 정규화 Parquet이 스트림 uri가 된다 (원본은 raw/에 따로 보관)
@@ -279,10 +298,16 @@ def ingest_session(  # noqa: C901
         calibration=manifest.calibration,
         ontology_version=manifest.ontology_version,
     )
-    result = IngestResult(session, result_uploaded, result_skipped)
+    warnings += calibration_warnings(manifest.calibration) + imu_warnings(imu_seen, capture_cfg)
+    result = IngestResult(session, result_uploaded, result_skipped, warnings=warnings)
     if conn is not None:
         result.db = _register(conn, session)
     return result
+
+
+def _root() -> Path:
+    """이 파일에서 위로 찾은 저장소 루트."""
+    return repo_root(Path(__file__).parent)
 
 
 def default_proxy_config() -> ProxyConfig:

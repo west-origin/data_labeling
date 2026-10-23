@@ -17,6 +17,7 @@ from typing import Any, Literal
 import yaml
 from pydantic import Field
 
+from dlp_media.capture_check import CapturePolicy
 from dlp_media.probe import MediaInfo, probe, require_upright
 from dlp_media.pts import build_pts_index
 from dlp_schema.common import Contract
@@ -31,6 +32,7 @@ class NormalizePolicy(Contract):
 class MediaPolicy(Contract):
     version: int
     normalize: NormalizePolicy
+    capture: CapturePolicy  # 촬영 점검 경고 기준 (`dlp_media.capture_check`)
 
 
 def load_policy(root: Path) -> NormalizePolicy:

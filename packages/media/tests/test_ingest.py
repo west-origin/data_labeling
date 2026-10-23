@@ -72,6 +72,9 @@ def test_ingest_builds_session_and_is_idempotent(
     assert len(index) == 120  # 10 fps, 12초
     assert _local(body.uri.replace("raw/bodycam.mp4", "derived/bodycam.proxy.mp4"), store).is_file()
 
+    # 촬영 점검 경고 (막지 않음): 10 fps < 50, IMU 없음. 기기 정보 경고는 매니페스트에 따라 다르다
+    assert {"low_fps", "no_imu"} <= {w.code for w in first.warnings}
+
     second = ingest_session(manifest, base, store)
     assert second.uploaded == []
     assert sorted(second.skipped) == sorted(first.uploaded)
@@ -167,7 +170,10 @@ def test_embedded_imu_becomes_shared_clock_stream(
     monkeypatch.setattr(imu_module, "EXTRACTORS", [FakeExtractor()])
     streams = [{"stream_id": "bodycam", "kind": "bodycam", "path": str(sync[1] / "bodycam.mp4")}]
     manifest, base = load_manifest(write_manifest(tmp_path, sync[1], streams=streams))
-    session = ingest_session(manifest, base, LocalStore(tmp_path / "store", "dlp-raw")).session
+    result = ingest_session(manifest, base, LocalStore(tmp_path / "store", "dlp-raw"))
+    session = result.session
+    # 0 값 IMU는 처음 1초가 정지라 IMU 경고가 없다
+    assert not {"no_imu", "no_still_start"} & {w.code for w in result.warnings}
     imu = session.stream("imu")
     assert imu.kind is StreamKind.IMU
     assert imu.sync_method is SyncMethod.SHARED_CLOCK

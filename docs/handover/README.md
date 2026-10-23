@@ -106,6 +106,8 @@ flowchart LR
 | 실제 촬영 영상의 첫 실행 | [청소 영상 파일럿](../weekend-video-pilot.md) |
 | 첫 실영상(iPhone 13 가사 영상) 단계별 결과·실행 시간·화각 판단·막힌 것 | [실영상 파일럿 2026-10-22](pilot-real-2026-10-22.md) |
 | 바디캠 내부 파라미터·작업자 손 크기 등록 | [카메라 캘리브레이션](camera-calibration.md) |
+| 촬영 조건(렌즈 고정·손떨림 보정 끔·60 fps·노출 잠금·장착 방향·시작 1초 정지·체커보드·IMU), 준비·수집 경고 | [촬영 가이드](capture-guide.md) |
+| 정답 없는 품질 대리 지표 (`dlp ops quality-proxy`, 짧은 트랙·깜박임·모델 사이 불일치·손 3D 물리 위반) | [`dlp_eval.proxy`](../../packages/evaluation/src/dlp_eval/proxy.py), 기준 `evaluation.yaml proxy`, 파일럿 전후 값 [실영상 파일럿 10절](pilot-real-2026-10-22.md) |
 | 고객 로봇 등록·리타기팅 내보내기 | [로봇 리타기팅](robot-retargeting.md) |
 | 작업 규칙·필수 검사 | [CLAUDE.md](../../CLAUDE.md) |
 | 목표와 작업 패키지별 요구사항 | [제품 계획](../labeling-platform-plan.md), [구현 계획](../ai-implementation-plan.md) |

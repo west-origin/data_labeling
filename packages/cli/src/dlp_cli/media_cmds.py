@@ -30,6 +30,7 @@ import sqlalchemy as sa
 
 from dlp_cli.raw_access import raw_store, raw_store_offline
 from dlp_cli.schema_cmds import database_url
+from dlp_media.capture_check import CaptureWarning, load_capture_policy, prepare_warnings
 from dlp_media.ingest import ingest_session, load_manifest
 from dlp_media.prepare import load_policy as load_prepare_policy
 from dlp_media.prepare import prepare_video
@@ -63,8 +64,18 @@ def cmd_probe(args: argparse.Namespace) -> int:
     return 0
 
 
+def _print_warnings(warnings: list[CaptureWarning]) -> None:
+    """촬영 점검 경고를 한 줄씩 찍는다 (막지 않는다, docs/handover/capture-guide.md)."""
+    for w in warnings:
+        print(f"경고[{w.code}]: {w.message}")
+
+
 def cmd_prepare(args: argparse.Namespace) -> int:
-    """로컬 영상의 방향과 시간을 정규화한다. 원본/기존 출력은 보존하며 DB에 등록하지 않는다."""
+    """로컬 영상의 방향과 시간을 정규화한다. 원본/기존 출력은 보존하며 DB에 등록하지 않는다.
+
+    촬영 점검 경고(`dlp_media.capture_check`)를 함께 찍는다. 경고가 있어도 종료 코드는 0이다.
+    """
+    source = probe(Path(args.file))
     info = prepare_video(
         Path(args.file),
         Path(args.out),
@@ -76,6 +87,15 @@ def cmd_prepare(args: argparse.Namespace) -> int:
     print(
         f"준비 완료: {args.out} {info.video.width}x{info.video.height}, "
         f"회전 0° (적용: {applied}), PTS 보존"
+    )
+    _print_warnings(
+        prepare_warnings(
+            source,
+            info,
+            build_pts_index(Path(args.out)),
+            load_capture_policy(repo_root()),
+            rotation_override=args.display_rotation,
+        )
     )
     return 0
 
@@ -130,6 +150,7 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     print(f"세션 {result.session.session_id}: 스트림 {len(result.session.streams)}개")
     # result.db: "inserted"(새 세션) / "unchanged"(같은 내용으로 이미 있음) / "skipped"(--no-db)
     print(f"업로드 {len(result.uploaded)}, 건너뜀 {len(result.skipped)}, DB {result.db}")
+    _print_warnings(result.warnings)
     return 0
 
 

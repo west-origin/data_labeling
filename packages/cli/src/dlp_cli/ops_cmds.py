@@ -17,6 +17,9 @@
 - `privacy-audit <세션> <스트림> --misses` — 잔여 블러 누락 감사 결과를 기록한다 (길이는 그
   스트림의 길이). 감사자는 그 스트림의 블러 검수자와 달라야 한다. 감사 표본은
   `dlp privacy audit-sample`로 뽑는다.
+- `quality-proxy <세션> [--stream] [--out]` — 정답 없는 품질 대리 지표 (`dlp_eval.proxy`, 기준
+  `evaluation.yaml proxy`): 짧은 트랙·깜박임·프레임당 탐지 수, 모델 사이 불일치, 손 좌우·화면 위치,
+  손 3D 물리 위반. 읽기 전용.
 
 주기: `weekly`는 매주, `audit-report`는 매월, `retention`은 매주 정도 (저장소에 예약 실행 설정은
 없다 — 운영자가 cron 등으로 건다).
@@ -44,6 +47,8 @@ import sqlalchemy as sa
 from dlp_cli.raw_access import raw_store
 from dlp_cli.review_config import ai_display_config, load_review_policy
 from dlp_cli.schema_cmds import database_url
+from dlp_eval import proxy as proxy_mod
+from dlp_eval.policy import load_policy as load_eval_policy
 from dlp_media.audit import current_actor
 from dlp_ops import audit as audit_mod
 from dlp_ops import metrics as metrics_mod
@@ -60,6 +65,7 @@ from dlp_schema.db.repository import (
     insert_retention_decision,
     insert_review_work,
 )
+from dlp_schema.episode import current_labels
 from dlp_schema.ops import PrivacyAuditRecord, RetentionDecision, ReviewWork
 from dlp_schema.session import PrivacyState, StreamKind
 
@@ -329,8 +335,35 @@ def cmd_privacy_audit(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_quality_proxy(args: argparse.Namespace) -> int:
+    """`dlp ops quality-proxy <세션>`: 정답 없는 품질 대리 지표. 읽기 전용 (DB에 쓰지 않는다).
+
+    인자:
+        args.session: 세션 ID.
+        args.stream: 볼 스트림 (기본: 세션의 기준 스트림).
+        args.out: 리포트 파일 (.md, 옆에 .json). 없으면 표준 출력에 표만.
+
+    입력은 세션의 운영 라벨(`current_labels`)이다. 반환: 항상 0.
+    """
+    policy = load_eval_policy(repo_root()).proxy
+    engine = _engine(args)
+    with engine.connect() as conn:
+        session = get_session(conn, args.session)
+        labels = current_labels(get_labels(conn, args.session))
+    engine.dispose()
+    stream = args.stream or session.reference_stream.stream_id
+    report = proxy_mod.proxy_report(
+        labels, policy, stream_id=stream, duration_ms=session.duration_ms
+    )
+    report = {"session_id": args.session, "stream_id": stream, **report}
+    _write(args.out, proxy_mod.markdown(report, f"{args.session} {stream} 품질 대리 지표"), report)
+    return 0
+
+
 def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:  # pyright: ignore[reportPrivateUsage]
-    """`ops weekly|audit-report|retention|retention-decide|log-work|privacy-audit`을 등록한다."""
+    """`ops` 하위 명령(weekly·audit-report·retention·retention-decide·log-work·privacy-audit·
+    quality-proxy)을 등록한다.
+    """
     ops = sub.add_parser("ops", help="운영 지표·원본 접근 감사·보관 기간")
     osub = ops.add_subparsers(dest="ops_command", required=True)
     w = osub.add_parser("weekly", help="주간 운영 지표 (최근 여러 주와 경고)")
@@ -378,3 +411,9 @@ def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
     # 바디캠이 아닌 스트림은 그 스트림의 PTS 인덱스(원본 버킷)로 길이를 정한다
     pa.add_argument("--store", default="s3", help="'s3' 또는 'local:<디렉터리>'")
     pa.set_defaults(func=cmd_privacy_audit)
+    qp = osub.add_parser("quality-proxy", help="정답 없는 품질 대리 지표 (읽기 전용)")
+    qp.add_argument("session")
+    qp.add_argument("--stream", help="볼 스트림 (기본: 기준 스트림)")
+    qp.add_argument("--out", help="리포트 파일 (.md, 옆에 .json)")
+    qp.add_argument("--url")
+    qp.set_defaults(func=cmd_quality_proxy)

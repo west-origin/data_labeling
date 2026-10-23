@@ -141,6 +141,35 @@ class InterpGaps(Contract):
         return self.tasks.get(task, self.default)
 
 
+class ProxyPolicy(Contract):
+    """정답 없는 품질 대리 지표의 측정 기준 (`proxy` 절, `dlp_eval.proxy`).
+
+    필터·평활 같은 프리라벨 정책(`prelabel.yaml`)과 따로 둔다. 측정 기준이 필터와 함께 움직이면
+    필터를 느슨하게 해도 위반이 줄어든 것처럼 보이기 때문이다. 값을 바꾸면 이전 측정과 비교할 수
+    없다.
+    """
+
+    time_tolerance_ms: int = Field(ge=0)  # 서로 다른 트랙의 키프레임을 같은 시각으로 볼 허용 오차
+    short_track_ms: int = Field(ge=0)  # 이보다 짧은 트랙·연속 구간은 "짧음"으로 센다
+    gap_factor: float = Field(gt=1)  # 키프레임 간격이 중앙 간격의 이 배수를 넘으면 끊김으로 센다
+    wrist_agree_scale: float = Field(gt=0)  # 손목 일치: 거리 / 손 크기(손목→중지 뿌리 px) 상한
+    face_margin: float = Field(ge=0)  # 얼굴 박스 중심을 사람 박스 안으로 볼 때 사람 박스 확장 비율
+    reach_m: tuple[float, float]  # 카메라에서 손목까지 거리의 타당 범위 (m, 1인칭 팔 길이)
+    max_speed_mps: float = Field(gt=0)  # 손목 3D 속도 상한 (m/s)
+    max_accel_mps2: float = Field(gt=0)  # 손목 3D 가속도 상한 (m/s²)
+    max_dt_ms: int = Field(gt=0)  # 속도·가속도를 셀 이웃 표본 간격 상한 (넘으면 세지 않음)
+    wrist_tip_m: tuple[float, float]  # 손목→손가락 끝 거리의 타당 범위 (m, 성인 손)
+
+    @model_validator(mode="after")
+    def _ranges(self) -> ProxyPolicy:
+        """범위 값은 0 < 하한 < 상한이어야 한다."""
+        for name in ("reach_m", "wrist_tip_m"):
+            low, high = getattr(self, name)
+            if not 0 < low < high:
+                raise ValueError(f"proxy.{name}: 0 < 하한 < 상한이어야 합니다 ({low}, {high})")
+        return self
+
+
 class GateRule(Contract):
     """과제 하나의 배포 게이트 규칙 (`gate.<과제>`). 판정 로직은 `dlp_eval.gate.decide`."""
 
@@ -175,6 +204,7 @@ class EvaluationPolicy(Contract):
     ece_bins: int = Field(ge=1)  # ECE 신뢰도 구간 수
     min_samples_per_class: int = Field(ge=1)  # 이보다 정답 표본이 적은 클래스는 "표본 부족" 표시
     privacy: PrivacyEval
+    proxy: ProxyPolicy  # 정답 없는 품질 대리 지표 기준 (`dlp_eval.proxy`, `dlp ops quality-proxy`)
     # 하위 집단 리포트 축 (값은 `runner.golden_sessions`가 정한다)
     subgroups: tuple[Literal["glove", "site"], ...]
     gate: dict[Task, GateRule]  # 과제 → 배포 규칙 (없는 과제는 판정하지 않고 경고)

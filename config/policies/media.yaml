@@ -4,3 +4,11 @@ normalize:
   crf: 18
   preset: fast
   threads: 2
+# 촬영 점검 경고 (dlp_media.capture_check, dlp media prepare·dlp ingest가 출력, 막지 않는다).
+# 권장 촬영 조건은 docs/handover/capture-guide.md.
+capture:
+  min_fps: 50               # 이 미만이면 low_fps (권장 60 fps. 30 fps는 빠른 손동작이 흐려진다)
+  max_session_min: 30       # 이보다 긴 세션은 long_session (CPU 프리라벨 시간·검수 단위)
+  still_start_s: 1.0        # 시작 뒤 이 시간(초) 동안 정지해 있어야 한다 (IMU 바이어스·중력)
+  still_gyro_rad_s: 0.15    # 정지 판정 자이로 크기 상한 (rad/s, 약 8.6°/s)
+  still_acc_std_mps2: 0.3   # 정지 판정 가속도 크기 표준편차 상한 (m/s²)
