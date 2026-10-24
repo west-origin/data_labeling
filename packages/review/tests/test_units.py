@@ -1193,3 +1193,33 @@ def test_glove_series_uses_policy_prefixes(tmp_path: Path) -> None:
     )  # fmt: skip
     expected = load_sync_policy(ROOT / "config" / "policies" / "sync.yaml").glove.pressure_prefixes
     assert setup.pressure_prefixes() == expected
+
+
+def test_arm_without_visible_elbows_does_not_block_completion() -> None:
+    """ADR 0058: 출처 팔 트랙이 바뀌어 궤적 따르기가 지운 팔꿈치 3D는 지금 팔 트랙에 보이는 팔꿈치가
+    있으면 다시 만들 때까지 완료를 막고, 검수자가 팔꿈치를 모두 보이지 않음으로 고쳤으면 막지 않는다
+    (올릴 3D가 없다)."""
+    from dlp_review.verify import trajectory_gaps
+    from dlp_schema.episode import retractions
+    from dlp_schema.trajectory_follow import TRAJECTORY_FOLLOW_VERSION
+
+    def arm(label_id: str, elbow_vis: int) -> Any:
+        pts = [{"x": 1.0, "y": 2.0, "visibility": 2}, {"x": 3.0, "y": 4.0, "visibility": elbow_vis},
+               {"x": 1.0, "y": 2.0, "visibility": 0}]  # fmt: skip
+        return make_label(
+            {"kind": "keypoint_track", "entity_id": "left_arm", "skeleton": "arm3",
+             "hand": "left", "keyframes": [{"t_ms": t, "points": pts} for t in (0, 1_000)]},
+            label_id, stream_id="bodycam",
+        )  # fmt: skip
+
+    elbow = make_label(
+        {"kind": "trajectory3d", "entity_id": "left_arm", "part": "elbow", "frame": "camera",
+         "source_3d": "mono_depth", "derived_from": ["a1"],
+         "samples": [{"t_ms": 0, "x": 0.0, "y": 0.2, "z": 0.4}]},
+        "e1", 0, 0, stream_id="bodycam",
+        provenance=Provenance(source=Source.MODEL, model_version="depth3d-x"), confidence=0.5,
+    )  # fmt: skip
+    gone = retractions([elbow], TRAJECTORY_FOLLOW_VERSION, FIXED_TIME)
+    for current, blocked in ((arm("a2", 2), True), (arm("a2", 0), False)):
+        history = [arm("a1", 2), elbow, *gone, current]
+        assert bool(trajectory_gaps("s001", history, [current])) is blocked

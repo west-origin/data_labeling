@@ -9,6 +9,8 @@
   `--kp-tol-ms` 안일 때만.
 - 손 3D 상태 (아래 패널): 손목 표본의 방식(hand_fit·point_depth)·신뢰도·z(m), 같은 시각 손끝
   표본 수.
+- 착용자 팔 (arm3, ADR 0058): 손목 → 팔꿈치 굵은 선과 팔꿈치 점(보일 때만), 패널에 손마다 팔꿈치
+  보임·점수와 같은 시각 아래팔 3D 길이(손목 3D ↔ 팔꿈치 3D, m).
 - 블러 탐지 (blur_track): 블러를 적용하지 않고 테두리만 그린다 (오탐을 눈으로 판단하게).
   대상 ID와 탐지기 이름(`config/policies/privacy.yaml targets.*.detectors`를 표시용으로만 읽음),
   트랙 신뢰도를 적는다.
@@ -75,6 +77,7 @@ TIP_PARTS = ("thumb_tip", "index_tip", "middle_tip", "ring_tip", "pinky_tip")
 
 # 색 (BGR)
 HAND_COLORS = {"left": (80, 220, 80), "right": (40, 150, 255)}  # 초록, 주황
+ARM_COLORS = {"left": (255, 230, 120), "right": (120, 230, 255)}  # 하늘, 노랑
 BLUR_COLORS = {"face": (0, 0, 255), "reflection": (255, 0, 255), "shipping_label": (203, 160, 255)}
 BLUR_COLOR = (40, 80, 230)  # 그 밖의 블러 대상
 # 박스 글자 줄임말 (범례에 적는다)
@@ -111,13 +114,29 @@ class HandTrack:
 
 
 @dataclass(frozen=True)
+class ArmTrack:
+    """착용자 팔 arm3 트랙 (ADR 0058)."""
+
+    hand: str
+    times: tuple[int, ...]
+    points: tuple[
+        NDArray[np.float64], ...
+    ]  # 키프레임마다 (3, 4): x, y, visibility, 신뢰도(-1 없음)
+
+
+@dataclass(frozen=True)
 class Samples3D:
-    """한 (손, 부위) 3D 궤적 표본 (여러 궤적을 시각 순으로 합침)."""
+    """한 (손, 부위) 3D 궤적 표본 (여러 궤적을 시각 순으로 합침). 팔은 부위 `arm_<점>`."""
 
     times: tuple[int, ...]
     methods: tuple[str, ...]
     confidences: tuple[float | None, ...]
-    z: tuple[float, ...]
+    xyz: tuple[tuple[float, float, float], ...]
+
+    @property
+    def z(self) -> tuple[float, ...]:
+        """표본 z (m)."""
+        return tuple(p[2] for p in self.xyz)
 
 
 @dataclass
@@ -127,6 +146,7 @@ class Overlays:
     blur: list[BoxTrack] = field(default_factory=list)
     objects: list[BoxTrack] = field(default_factory=list)
     hands: list[HandTrack] = field(default_factory=list)
+    arms: list[ArmTrack] = field(default_factory=list)
     hand3d: dict[tuple[str, str], Samples3D] = field(default_factory=dict)
 
 
@@ -176,16 +196,22 @@ def _box_track(label: str, source: str, rec: LabelRecord, kfs: tuple[BoxKeyframe
     )
 
 
-def _add_3d(
-    acc: dict[tuple[str, str], list[tuple[int, str, float | None, float]]], p: Trajectory3DPayload
-) -> None:
-    """손 관절 카메라 좌표 궤적 표본을 (손, 부위)별로 모은다."""
-    if p.frame.value != "camera" or p.part is None or not p.entity_id.endswith("_hand"):
+Row3D = tuple[int, str, float | None, tuple[float, float, float]]
+
+
+def _add_3d(acc: dict[tuple[str, str], list[Row3D]], p: Trajectory3DPayload) -> None:
+    """손 관절·팔 점 카메라 좌표 궤적 표본을 (손, 부위)별로 모은다 (팔은 `arm_<점>`)."""
+    if p.frame.value != "camera" or p.part is None:
         return
-    hand = p.entity_id.removesuffix("_hand")
+    if p.entity_id.endswith("_hand"):
+        hand, part = p.entity_id.removesuffix("_hand"), p.part
+    elif p.entity_id.endswith("_arm"):
+        hand, part = p.entity_id.removesuffix("_arm"), f"arm_{p.part}"
+    else:
+        return
     for s in p.samples:
         method = s.method.value if s.method is not None else "?"
-        acc[(hand, p.part)].append((s.t_ms, method, s.confidence, s.z))
+        acc[(hand, part)].append((s.t_ms, method, s.confidence, (s.x, s.y, s.z)))
 
 
 def build_overlays(
@@ -206,9 +232,7 @@ def build_overlays(
     """
     det = detectors or {}
     out = Overlays()
-    acc3d: dict[tuple[str, str], list[tuple[int, str, float | None, float]]] = (
-        collections.defaultdict(list)
-    )
+    acc3d: dict[tuple[str, str], list[Row3D]] = collections.defaultdict(list)
     for rec in labels:
         if rec.stream_id != stream_id or rec.t_end_ms < start_ms - 2000 or rec.t_start_ms > end_ms:
             continue
@@ -226,6 +250,16 @@ def build_overlays(
                     for f in frames
                 )
                 out.hands.append(HandTrack(p.hand.value, tuple(f.t_ms for f in frames), pts))
+            case KeypointTrackPayload() if p.skeleton == "arm3" and p.hand is not None:
+                frames = [f for f in p.keyframes if start_ms - 100 <= f.t_ms <= end_ms + 100]
+                arm = tuple(
+                    np.array(
+                        [(k.x, k.y, k.visibility, -1.0 if k.confidence is None else k.confidence)
+                         for k in f.points], dtype=np.float64,
+                    )
+                    for f in frames
+                )  # fmt: skip
+                out.arms.append(ArmTrack(p.hand.value, tuple(f.t_ms for f in frames), arm))
             case Trajectory3DPayload():
                 _add_3d(acc3d, p)
             case _:
@@ -290,6 +324,24 @@ def hand_status(ov: Overlays, hand: str, t_ms: float, opts: DrawOptions) -> str:
         and _nearest(s.times, t_ms, opts.tol_3d_ms) is not None
     )
     return f"{hand[0].upper()} 3D wrist {wrist.methods[j]} c={c} z={wrist.z[j]:.2f}m tips {tips}/5"
+
+
+def arm_status(ov: Overlays, hand: str, t_ms: float, opts: DrawOptions) -> str:
+    """착용자 팔 한 줄: 팔꿈치 2D 보임·점수, 같은 시각 아래팔 3D 길이 (ADR 0058)."""
+    tag = f"{hand[0].upper()} arm"
+    track = next((a for a in ov.arms if a.hand == hand), None)
+    j = _nearest(track.times, t_ms, opts.kp_tol_ms) if track else None
+    if track is None or j is None:
+        return f"{tag}: -"
+    elbow = track.points[j][1]
+    text = f"{tag}: elbow " + (f"2D s={elbow[3]:.2f}" if elbow[2] > 0 else "not visible")
+    wrist, e3 = ov.hand3d.get((hand, "wrist")), ov.hand3d.get((hand, "arm_elbow"))
+    if wrist and e3:
+        i, k = _nearest(wrist.times, t_ms, opts.tol_3d_ms), _nearest(e3.times, t_ms, opts.tol_3d_ms)
+        if i is not None and k is not None and wrist.times[i] == e3.times[k]:
+            length = float(np.linalg.norm(np.subtract(wrist.xyz[i], e3.xyz[k])))
+            text += f" | forearm 3D {length:.2f} m"
+    return text
 
 
 # ---------------------------------------------------------------- 그리기
@@ -370,6 +422,26 @@ def _draw_hands(
     return drawn
 
 
+def _draw_arms(
+    img: Image, ov: Overlays, t_ms: int, sc: tuple[float, float], opts: DrawOptions
+) -> None:
+    """착용자 팔: 보이는 점끼리 굵은 선(손목 → 팔꿈치 → 어깨)과 팔꿈치 점."""
+    for tr in ov.arms:
+        j = _nearest(tr.times, t_ms, opts.kp_tol_ms)
+        if j is None:
+            continue
+        color = ARM_COLORS.get(tr.hand, OTHER_COLOR)
+        pts = tr.points[j]
+        xy = [(round(p[0] * sc[0]), round(p[1] * sc[1])) for p in pts]
+        for a, b in ((0, 1), (1, 2)):
+            if pts[a][2] > 0 and pts[b][2] > 0:
+                cv2.line(img, xy[a], xy[b], color, 3, cv2.LINE_AA)
+        if pts[1][2] > 0:
+            cv2.circle(img, xy[1], 6, color, -1, cv2.LINE_AA)
+            cv2.circle(img, xy[1], 6, (40, 40, 40), 1, cv2.LINE_AA)
+            _text(img, "elbow", (xy[1][0] + 8, xy[1][1] + 4), color, 0.32)
+
+
 def _hidden_line(name: str, hidden: collections.Counter[tuple[str, str]]) -> str:
     """문턱 미만 박스 요약 한 줄 (출처 하나)."""
     rows = {k[1]: v for k, v in hidden.items() if k[0] == name}
@@ -385,13 +457,14 @@ def _blur_line(ov: Overlays, t_ms: int, opts: DrawOptions) -> str:
 
 
 LEGEND = (
-    "hand: green=L orange=R white=fingertip | obj: cyan=COCO yellow=OWLv2, score=track conf",
+    "hand: green=L orange=R white=fingertip | arm: sky=L yellow=R wrist->elbow (only if seen)",
+    "obj: cyan=COCO yellow=OWLv2, score=track conf (wearer's own body boxes are suppressed)",
     "privacy: red=face/YN magenta=refl/RF pink=ship/QR+OV orange=doc,scr,photo,addr/OV",
 )
 
 
 def draw_frame(
-    img: Image, t_ms: float, ov: Overlays, opts: DrawOptions, *, session_id: str, panel_h: int = 122
+    img: Image, t_ms: float, ov: Overlays, opts: DrawOptions, *, session_id: str, panel_h: int = 165
 ) -> Image:
     """원본 크기 BGR 프레임 하나에 오버레이를 그린 축소 영상(+아래 패널)을 돌려준다.
 
@@ -404,6 +477,7 @@ def draw_frame(
     key = round(t_ms)
     _draw_boxes(small, ov.blur, key, sc, opts, blur=True)
     hidden = _draw_boxes(small, ov.objects, key, sc, opts, blur=False)
+    _draw_arms(small, ov, key, sc, opts)
     hands = _draw_hands(small, ov, key, sc, opts)
 
     panel = np.full((panel_h, opts.width, 3), 24, dtype=np.uint8)
@@ -414,6 +488,9 @@ def draw_frame(
     for hand in ("left", "right"):
         y += 15
         _plain(panel, hand_status(ov, hand, key, opts), (6, y), HAND_COLORS[hand], 0.36)
+    for hand in ("left", "right"):
+        y += 15
+        _plain(panel, arm_status(ov, hand, key, opts), (6, y), ARM_COLORS[hand], 0.36)
     y += 15
     _plain(panel, _blur_line(ov, key, opts), (6, y), (120, 120, 255), 0.34)
     for name in ("coco", "owlv2"):

@@ -194,11 +194,15 @@ _Target = tuple[str | None, str, str]
 
 def _liftable(labels: list[LabelRecord]) -> set[tuple[str | None, str, bool]]:
     """3D 단계가 올리는 현재 2D 트랙의 (스트림, 개체, 키포인트 트랙인가) (hand21 손·arm3 팔·박스
-    트랙, ADR 0058)."""
+    트랙, ADR 0058). 팔 트랙은 손목 밖 점(팔꿈치·어깨)이 하나라도 보일 때만이다: 검수자가 팔꿈치를
+    모두 보이지 않음으로 고치면 올릴 3D가 없어 완료를 막지 않는다."""
     out: set[tuple[str | None, str, bool]] = set()
     for x in labels:
         p = x.payload
-        if isinstance(p, KeypointTrackPayload) and p.skeleton in LIFTED_SKELETONS:
+        if isinstance(p, KeypointTrackPayload) and p.skeleton == "arm3":
+            if any(q.visibility > 0 for f in p.keyframes for q in f.points[1:]):
+                out.add((x.stream_id, p.entity_id, True))
+        elif isinstance(p, KeypointTrackPayload) and p.skeleton in LIFTED_SKELETONS:
             out.add((x.stream_id, p.entity_id, True))
         elif isinstance(p, BoxTrackPayload):
             out.add((x.stream_id, p.entity_id, False))
