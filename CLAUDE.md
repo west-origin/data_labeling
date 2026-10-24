@@ -56,6 +56,9 @@
   `palm-estimate`는 잰 값을 `--override-measured` 없이 덮지 않는다. 캘리브레이션은 보드 기울기·타당 범위 검사
   (`calibration.yaml`)를 통과해야 등록한다. 화면비가 다른 캘리브레이션은 쓰지 않고 화각 근사로 떨어진다.
   `dlp calib intrinsics|import|assign|show|palm|palm-estimate|palm-revoke`. 정책은 `config/policies/calibration.yaml`.
+  촬영 점검 경고 `dlp_media.capture_check`(prepare·ingest, 기준 `media.yaml capture`, 가이드 `docs/handover/capture-guide.md`),
+  TTA·학습 증강 공용 기하 변환 `dlp_media.geometry`, COCO RLE `dlp_media.rle`. 방향 태그가 틀린 영상은
+  `dlp media prepare --display-rotation <반시계 각도>`.
 - `packages/sync/` (`dlp_sync`) — 멀티스트림 동기화: QR 슬레이트, 두드림, 오디오·운동 상호상관, 드리프트 보정.
   `dlp sync run <세션>`, `dlp sync adjust <세션> <스트림> <ms>`. 정책은 `config/policies/sync.yaml`.
 - `packages/privacy/` (`dlp_privacy`) — 프라이버시 게이트: 탐지기(YuNet, QR·바코드, OWLv2 오픈 보캐뷸러리, 반사면, 오라클 stub), 추적·보간·유지,
@@ -63,6 +66,7 @@
   사고 대응 승인 보류(`dlp_privacy.hold`, ADR 0042: DB 단계 커밋 뒤에 저장소 클라이언트를 만들고, 렌더 무효화는
   별도 트랜잭션의 세션 잠금 아래 그 보류가 아직 유효할 때만 쓴다).
   `dlp privacy detect|approve|render|audit-sample|hold`. 정책은 `config/policies/privacy.yaml`.
+  블러 오탐 의심 힌트 `dlp_privacy.hints` (ADR 0055).
 - `packages/review/` (`dlp_review`) — 검수 도구 연동: CVAT·Label Studio 변환기(무손실 왕복), 작업 생성, reconcile(검수 결과 →
   라벨 이력), 웹훅 수집, 라벨러 워터마크, 역할 경계, 배포 매체 회수 실행기(`dlp_review.revoke`).
   `dlp review create|collect|verify|serve|register-webhooks|revoke|refresh-urls` (verify: 검수가 끝난 세션을 human_verified로. 설명·3D 궤적 따르기를 먼저 적용하고, `review.yaml verify.automatic`(기본 `camera_pose`)의 자동 라벨은 검수 전이어도 완료를 막지 않는다(검수 상태는 그대로), ADR 0050, 출처 2D가 바뀌어 지운 3D를 지금 2D로 다시 만들기 전에는 완료를 막고 `dlp prelabel run`을 안내한다(`verify.require_current_3d`, ADR 0051),
@@ -77,6 +81,9 @@
   `dlp_review.ai_collect`(검수자가 고른 제안 적용·세션 검증·결과 기록 `ai_review_outcomes`),
   `dlp_review.ops.ai_quality`(대조군만으로, 표본 가중 지적 정밀도·재현율·ok 놓침률 95% 상한·ECE·κ). `dlp review quality --ai`.
   설정은 `review.yaml ai_review`(코드 기본 off).
+  오탐 의심 힌트 `dlp review hints <세션> [--tta] [--ai]`(블러: 원본 버킷 hints 파일 → 블러 검수 CVAT 이슈, 객체
+  `dlp_review.object_hints`: 라벨링 CVAT 이슈, 잘라 낸 박스 AI 확인 `dlp_aireview.crops`). 라벨·블러는 바꾸지 않는다
+  (ADR 0055·0056).
 - `packages/datasets/` (`dlp_datasets`) — 데이터셋 버전(lakeFS 커밋), 작업자·장소 단위 분할(holdout 포함), 골든셋 제안,
   사용 중지 전파, 계보 조회. `dlp dataset golden|build|withdraw`, `dlp lineage <세션>`. 정책은 `config/policies/dataset.yaml`.
 - `packages/models/` (`dlp_models`) — 모델 레지스트리(`config/models.yaml`, 해시 확인)와 공용 ONNX 런타임(OWLv2, 메트릭 깊이).
@@ -94,6 +101,10 @@
   같은 2D에서 입력이 바뀌어 새로 계산한 3D가 생기면 궤적 따르기가 지운다(새 3D가 같은 검수를 물려받는다, ADR 0051).
   단계는 마지막으로 낸 버전으로 다시 돌릴지 정한다(입력이 되돌아오면 `+r<n>`으로 다시 만듦). 3D·월드 단계 뒤와 수집·`dlp review verify`에서 적용한다(세션 잠금, 멱등). 카메라 자세
   (entity `camera`)는 사람 검수 대상이 아닌 자동 라벨이다.
+  시간 일관성 `dlp_prelabel.temporal`(박스 트랙 거르기·손 One Euro 평활·짧은 끊김 보간, ADR 0054), 손 3D 물리 제약
+  `dlp_prelabel.constraints3d`(표본 `flags`), 장면 분류 `dlp_prelabel.scene`과 `dlp prelabel run <세션> --scene <장면>`
+  (도구 질의를 kitchen·bathroom·bedroom·living·unknown으로 고름, ADR 0055), 손 크기 초점 거리 추정 `dlp_prelabel.fov`
+  (출처 `estimated_hand_size`, 기본 끔, ADR 0056).
 - `packages/retarget/` (`dlp_retarget`) — 고객 로봇 리타기팅(ADR 0047): 로봇 등록(`config/robots/<ID>.yaml`, 모델 sha256,
   고객 모델 파일은 저장소 밖 `DLP_ROBOTS_DIR`), URDF 기구학, 손 → 끝단 목표·평행 그리퍼, 관절·속도 한계 IK(내장, mink는
   격리 환경 `scripts/retarget-env`), 닿지 못한 프레임은 자르지 않고 표시. `orientation_mode`는 관절 수가 아니라 구조로
@@ -124,10 +135,12 @@
   게이트 실패는 기본 경고만). `dlp aireview run|status|show|waive|estimate|bench|probe|eval`.
   정책은 `config/policies/aireview.yaml`.
 - `packages/evaluation/` (`dlp_eval`) — 지표 라이브러리(mAP·HOTA·IDF1·PCK·접촉·구간 F1·temporal mAP·ECE 등, 참조 구현과 일치 테스트),
-  골든셋 평가 하네스, 하위 집단 리포트, 배포 게이트. `dlp eval golden <골든셋> --model <과제>=<버전>`. 정책은 `config/policies/evaluation.yaml`.
+  골든셋 평가 하네스, 하위 집단 리포트, 배포 게이트, 정답 없는 대리 지표 `dlp_eval.proxy`(`dlp ops quality-proxy <세션>`,
+  기준 `evaluation.yaml proxy`). `dlp eval golden <골든셋> --model <과제>=<버전>`. 정책은 `config/policies/evaluation.yaml`.
 - `packages/training/` (`dlp_train`) — 재학습 루프: 데이터셋 버전에서 과제별 학습 예제 추출(자동 원본과 수정본 차이),
   학습 작업 템플릿, MLflow 기록, 모델 레지스트리(DB `model_versions`), 골든셋 평가·게이트 후 배포.
   `dlp train run|models|approve`. CI·CPU는 `oracle-stub` 학습기. 정책은 `config/policies/training.yaml`.
+  학습 증강 `dlp_train.augment` (ADR 0057).
 - `packages/active/` (`dlp_active`) — 액티브 러닝: 클래스별 수정률 기반 세션 점수(점수 항목 플러그인 `register_term`),
   FiftyOne 연동(블러본만). `dlp active rank|fiftyone`. 정책은 `config/policies/active.yaml`.
   FiftyOne은 선택 설치(`make install-curation`).
@@ -213,4 +226,10 @@
 - 함수 복잡도 상한은 15다 (ruff C901). 상한을 넘는 기존 함수의 `# noqa: C901`은 분해 대상 기준선이며 새로 달지 않는다.
 - 새로 찾은 문제는 `docs/handover/issues.yaml`에 넣는다. 확정 결함은 `tests/test_known_defects.py`에
   `xfail(strict=True)` 재현을 두고, 고치면 표시를 지우고 status를 fixed로 바꾼다 (`tests/test_issue_registry.py`).
+- 1인칭 바디캠의 MediaPipe 손 판정은 뒤집지 않는다 (`hands.swap_handedness: false`, F-PAR-61).
+- 프라이버시 탐지는 시간 거르기·오탐 힌트로 지우거나 바꾸지 않는다. 오탐 의심은 검수 화면 표시로만 쓴다 (ADR 0054·0055).
+- 보간해 채운 손 키프레임(`interpolated`)은 관측이 아니다. 3D로 올리지 않는다 (ADR 0054).
+- 손 크기로 추정한 내부 파라미터는 `estimated_hand_size`로 밝히고 `calibrated`로 쓰거나 실제 캘리브레이션을 덮지
+  않는다. 메트릭 깊이 모델의 화각 사전값을 되돌려 주므로 기본 끈다 (`depth.focal_estimate.enabled: false`, F-PAR-65).
+- 학습 증강의 입력은 데이터셋 버전의 학습·검증 분할 블러본만이다. 증강본은 라벨 이력·판매 내보내기에 넣지 않는다 (ADR 0057).
 - 코드 주석과 문서는 한국어, 식별자는 영어.
