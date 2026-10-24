@@ -184,6 +184,51 @@ def test_hand_3d_physics(policy: ProxyPolicy) -> None:
     assert "right_hand 3D" in markdown(proxy_report([wrist, tip], policy), "t")
 
 
+def test_wearer_arm_and_wearer_like_people(policy: ProxyPolicy) -> None:
+    """ADR 0058. 오른팔 arm3 4 키프레임: 팔꿈치 보임 3, 사슬 일치(손목 신뢰도 있음) 4, 일치 정도
+    0.8. 팔꿈치 3D는 손목에서 0.25, 0.25, 0.25, 0.5 m(범위 [0.18, 0.36] 밖 1/4).
+
+    사람 박스 둘: 착용자 오른손목(x 300, y 400)을 담는 박스(착용자처럼 보임)와 손목 밖 박스.
+    """
+    times = [0, 200, 400, 600]
+    frames = [
+        {"t_ms": t, "points": [
+            {"x": 300.0, "y": 400.0, "visibility": 2, "confidence": 0.8},
+            {"x": 250.0, "y": 470.0, "visibility": 0 if t == 600 else 2, "confidence": 0.7},
+            {"x": 300.0, "y": 400.0, "visibility": 0},
+        ]}
+        for t in times
+    ]  # fmt: skip
+    arm = _model(
+        "body-arm-right",
+        {"kind": "keypoint_track", "entity_id": "right_arm", "skeleton": "arm3", "hand": "right",
+         "keyframes": frames},
+        times, "rtmpose-x+p1",
+    )  # fmt: skip
+    wrist = _traj("wrist", [(t, 0.0, 0.0, 0.4) for t in times])
+    zs = [0.25, 0.25, 0.25, 0.5]
+    elbow = make_label(
+        {"kind": "trajectory3d", "entity_id": "right_arm", "part": "elbow", "frame": "camera",
+         "source_3d": "mono_depth",
+         "samples": [{"t_ms": t, "x": 0.0, "y": z, "z": 0.4}
+                     for t, z in zip(times, zs, strict=True)]},
+        label_id="3d-elbow", t_start_ms=0, t_end_ms=600, stream_id="bodycam",
+        provenance=Provenance(source=Source.MODEL, model_version="depth3d-x"), confidence=0.5,
+    )  # fmt: skip
+    hand = _hand("right", times, 300.0)
+    people = [
+        _box("p-wearer", "person", times, (200.0, 300.0, 300.0, 180.0)),
+        _box("p-other", "person", times, (10.0, 10.0, 50.0, 100.0)),
+    ]
+    report = proxy_report([arm, wrist, elbow, hand, *people], policy)["wearer"]
+    a = report["arm"]["right"]
+    assert (a["keyframes"], a["elbow_visible_frac"], a["chain_frac"]) == (4, 0.75, 1.0)
+    assert a["wrist_agreement"]["p50"] == 0.8
+    assert a["forearm"]["out_of_range_frac"] == 0.25 and a["forearm"]["length_cv"] is not None
+    assert report["people"] == {"person_tracks": 2, "wearer_like_tracks": 1}
+    assert "right 팔" in markdown(proxy_report([arm, wrist, elbow, hand, *people], policy), "t")
+
+
 def test_motion_skips_far_neighbours() -> None:
     """이웃 간격이 max_dt_ms를 넘으면 속도·가속도를 세지 않는다 (정답: 1 m / 0.1 s = 10 m/s)."""
     s = [

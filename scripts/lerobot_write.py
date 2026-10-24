@@ -17,6 +17,7 @@ package.json 키: `repo_id`, `fps`, `robot_type`, `vcodec`, `width`, `height`, `
 npz 배열: `frame_index`와 `frame_arrays`가 가리키는 배열 (첫 축 = 에피소드 프레임). 사람 모드는
 state·action·hand_state·tool_surface_contact·verb·verification·hand_points_3d_confidence(ADR 0045),
 contact_object_class·hand_points_3d_method·hand_points_3d_intrinsics(ADR 0053),
+wearer_arm(ADR 0058),
 로봇 리타기팅 모드(ADR 0047)는 state·action이 로봇 관절이고 human_state·retarget.* 배열이 더 있다.
 """
 

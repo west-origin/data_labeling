@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import Field, field_validator
@@ -69,6 +69,8 @@ class LeRobotPolicy(Contract):
     # observation.state에 넣는 손 3D 점 (`Trajectory3DPayload.part`, 개체는 "<손>_hand"). 온톨로지
     # hand_joints 안이고 중복 없이 1개 이상 (내보내기 시작 때 온톨로지와 대조한다)
     hand_points_3d: tuple[str, ...] = Field(min_length=1)
+    # annotation.wearer_arm에 넣는 착용자 팔 3D 점 (개체 "<손>_arm", 온톨로지 arm_joints, ADR 0058)
+    arm_points_3d: tuple[Literal["elbow", "shoulder"], ...] = ()
     repo_id: str  # LeRobot 데이터셋 repo_id (허브에는 올리지 않는다, 오프라인)
     robot_type: str  # LeRobot 메타데이터 robot_type
     vcodec: str  # 에피소드 영상 코덱

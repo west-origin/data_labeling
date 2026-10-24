@@ -20,9 +20,15 @@ import pytest
 from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
 
-from dlp_export.coco import write_coco
+from dlp_export.coco import categories, write_coco
 from dlp_export.intervals import exported, write_intervals
-from dlp_export.lerobot import Vocab, build_episode, state_names
+from dlp_export.lerobot import (
+    Vocab,
+    build_episode,
+    features,
+    state_names,
+    wearer_arm_names,
+)
 from dlp_export.policy import ExportPolicy
 from dlp_export.pseudonym import Pseudonymizer, check_secret
 from dlp_export.source import (
@@ -516,6 +522,61 @@ def test_lerobot_hand_point_confidence_follows_sample_confidence(
     assert np.all(ep.hand_points_3d_confidence[k, :n] == -1.0)
     late = int(np.argmin(np.abs(ep.times_ms - 700)))
     assert np.all(ep.hand_points_3d_confidence[late] == -1.0)
+
+
+def test_lerobot_and_coco_carry_the_wearer_arm(
+    scenario: Scenario, policy: ExportPolicy, ontology: Ontology, tmp_path: Path
+) -> None:
+    """ADR 0058: 착용자 팔 arm3 2D와 팔꿈치 3D가 `annotation.wearer_arm`에, COCO에는 wearer_arm
+    범주.
+
+    시나리오: 왼팔 arm3 키프레임 100·300 ms (손목 (16, 24), 팔꿈치 (8, 40) 보임, 어깨 0), 왼팔꿈치
+    3D 표본 100·300 ms (x 0.1 → 0.3, y 0.2, z 0.4). 정답: 200 ms에 2D는 정규화 값 그대로, v 2·2·0,
+    3D는 선형 보간 x 0.2·present 1. 오른팔·궤적 밖 시각은 0.
+    """
+    lp = policy.lerobot
+    video = tmp_path / "v.mp4"
+    scenario.labeling.get_file("sessions/s1/blurred/bodycam.mp4", video)
+    base = {"session_id": "s1", "stream_id": "bodycam", "ontology_version": "1.0.0"}
+    pts = [{"x": 16.0, "y": 24.0, "visibility": 2}, {"x": 8.0, "y": 40.0, "visibility": 2},
+           {"x": 16.0, "y": 24.0, "visibility": 0}]  # fmt: skip
+    arm = make_label(
+        {"kind": "keypoint_track", "entity_id": "left_arm", "skeleton": "arm3", "hand": "left",
+         "keyframes": [{"t_ms": t, "points": pts} for t in (100, 300)]},
+        label_id="s1-arm", t_start_ms=100, t_end_ms=300, **base,
+    )  # fmt: skip
+    elbow = make_label(
+        {"kind": "trajectory3d", "entity_id": "left_arm", "part": "elbow", "frame": "camera",
+         "source_3d": "mono_depth", "derived_from": ["s1-arm"],
+         "samples": [{"t_ms": 100, "x": 0.1, "y": 0.2, "z": 0.4},
+                     {"t_ms": 300, "x": 0.3, "y": 0.2, "z": 0.4}]},
+        label_id="s1-elbow3d", t_start_ms=100, t_end_ms=300, **base,
+    )  # fmt: skip
+    labels = [*source(scenario, policy).sessions[0].labels, arm, elbow]
+    ep = build_episode(
+        scenario.session, scenario.session.streams[0], build_pts_index(video), (64, 48), labels,
+        Vocab.from_ontology(ontology), lp,
+    )  # fmt: skip
+    names = wearer_arm_names(lp)
+    assert features(lp, 48, 64)["annotation.wearer_arm"]["shape"] == [len(names)]
+    col = {n: i for i, n in enumerate(names)}
+    k = int(np.argmin(np.abs(ep.times_ms - 200)))
+    row = ep.wearer_arm[k]
+    assert row[col["left.arm.wrist.x"]] == pytest.approx(16 / 64)
+    assert row[col["left.arm.elbow.y"]] == pytest.approx(40 / 48)
+    assert [row[col[f"left.arm.{j}.v"]] for j in ("wrist", "elbow", "shoulder")] == [2, 2, 0]
+    expected = 0.1 + 0.2 * (ep.times_ms[k] - 100) / 200
+    assert row[col["left.arm.elbow.x3d"]] == pytest.approx(expected, abs=1e-5)
+    assert row[col["left.arm.elbow.present"]] == 1.0
+    assert not row[col["right.arm.elbow.present"]] and not row[col["right.arm.wrist.v"]]
+    assert {"s1-arm", "s1-elbow3d"} <= ep.used
+    late = int(np.argmin(np.abs(ep.times_ms - 700)))
+    assert not ep.wearer_arm[late].any()
+    cats, _, skel = categories(ontology)
+    arm_cat = next(c for c in cats if c["id"] == skel["arm3"])
+    assert arm_cat["name"] == "wearer_arm"
+    assert arm_cat["keypoints"] == ["wrist", "elbow", "shoulder"]
+    assert arm_cat["skeleton"] == [[1, 2], [2, 3]]
 
 
 def test_lerobot_counts_only_written_labels(

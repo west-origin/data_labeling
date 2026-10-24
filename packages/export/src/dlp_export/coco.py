@@ -8,7 +8,8 @@ pycocotools로 읽고 평가할 수 있어야 한다 (테스트가 확인).
   남은 주석이 하나도 없는 프레임은 이미지도 내지 않는다 (내보낸 세션 = 주석이 들어간 세션).
 - 세션·라벨 ID는 내보내기마다 다른 가명이다 (dlp_export.pseudonym).
 - 범주: 온톨로지 객체(이름순) + 키포인트 범주 hand(hand21), person(coco17; 객체 person이 있으면
-  그 범주에 키포인트를 붙인다). 키포인트 범주에 든 박스만의 주석(예: person box_track)은
+  그 범주에 키포인트를 붙인다), wearer_arm(arm3 착용자 팔, 주석 hand로 같은 손 hand와 잇는다,
+  ADR 0058). 키포인트 범주에 든 박스만의 주석(예: person box_track)은
   num_keypoints 0과 0으로 채운 keypoints(3*K)를 가진다 (COCO 키포인트 평가가 모든 주석에서 읽는다).
 - 주석마다 track_id(개체), label_id, 검증 상태, 출처, 모델 버전, 신뢰도를 붙인다
   (보간한 값은 넣지 않는다).
@@ -37,7 +38,7 @@ from dlp_media.probe import probe
 from dlp_media.pts import build_pts_index
 from dlp_media.storage import ObjectStore
 from dlp_schema.export import physical_prior_table
-from dlp_schema.labels import BoxTrackPayload, KeypointTrackPayload, LabelRecord
+from dlp_schema.labels import ARM3_JOINTS, BoxTrackPayload, KeypointTrackPayload, LabelRecord
 from dlp_schema.ontology import Ontology
 from dlp_schema.session import StreamKind
 
@@ -63,6 +64,10 @@ COCO17 = (
 COCO17_SKELETON = [[16, 14], [14, 12], [17, 15], [15, 13], [12, 13], [6, 12], [7, 13], [6, 7],
                    [6, 8], [7, 9], [8, 10], [9, 11], [2, 3], [1, 2], [1, 3], [2, 4], [3, 5],
                    [4, 6], [5, 7]]  # fmt: skip
+# 착용자 팔 arm3 점 이름과 뼈대 (손목-팔꿈치-어깨, 0부터 번호, ADR 0058). 손목은 같은 손 hand 주석의
+# 손목과 같은 점이다 (hand21 손목이 기준)
+ARM3 = ARM3_JOINTS
+ARM3_SKELETON = [[0, 1], [1, 2]]
 # 이미지를 내는 영상 스트림 종류
 VIDEO = (StreamKind.BODYCAM, StreamKind.THIRD_PERSON)
 
@@ -70,7 +75,8 @@ VIDEO = (StreamKind.BODYCAM, StreamKind.THIRD_PERSON)
 def categories(ontology: Ontology) -> tuple[list[dict[str, Any]], dict[str, int], dict[str, int]]:
     """(범주 목록, 객체 클래스 → ID, 골격 → ID). ID는 1부터, 같은 온톨로지면 같다.
 
-    순서: 온톨로지 객체(이름순) → (객체 person이 없으면) person 범주 → hand 범주.
+    순서: 온톨로지 객체(이름순) → (객체 person이 없으면) person 범주 → hand 범주 → wearer_arm 범주
+    (착용자 팔 arm3 손목·팔꿈치·어깨, ADR 0058).
     person 범주(객체든 새로 만든 것이든)에 coco17 keypoints·skeleton을 붙인다.
     온톨로지 객체 범주의 `name`은 온톨로지 ID 그대로이고(기존 소비자 호환), 표시 이름
     `name_ko`·`name_en`을 덧붙인다 (COCO는 범주의 추가 키를 허용한다, ADR 0043).
@@ -111,6 +117,16 @@ def categories(ontology: Ontology) -> tuple[list[dict[str, Any]], dict[str, int]
     }
     cats.append(hand)
     skel["hand21"] = hand["id"]
+    # 착용자 팔 (ADR 0058): 주석의 hand 필드가 같은 손 hand 주석과 잇는다
+    arm: dict[str, Any] = {
+        "id": len(cats) + 1,
+        "name": "wearer_arm",
+        "supercategory": "person",
+        "keypoints": list(ARM3),
+        "skeleton": [[a + 1, b + 1] for a, b in ARM3_SKELETON],
+    }
+    cats.append(arm)
+    skel["arm3"] = arm["id"]
     return cats, obj, skel
 
 

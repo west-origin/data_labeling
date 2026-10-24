@@ -3,8 +3,9 @@
 골든셋이 없는 실영상 세션에서 프리라벨 품질의 경향을 잰다. 정확도가 아니라 "이상해 보이는 정도"다:
 짧은 트랙·깜박임(끊김)·프레임당 탐지 수, 모델 사이 불일치(MediaPipe 손목 vs RTMPose 손목, 얼굴 블러
 vs 사람·머리 위치), 손 좌우와 화면 위치, 손 3D의 물리 위반(팔 길이 밖 거리, 속도·가속도, 손목→손끝
-거리 흔들림)과 3D 맞춤 방식·신뢰도. 같은 기준(`evaluation.yaml proxy`)으로 잰 두 결과를 나란히 두어
-필터·모델 변경 전후를 비교한다.
+거리 흔들림)과 3D 맞춤 방식·신뢰도, 착용자 팔(팔꿈치 보임·팔 모델 손목 일치·아래팔 길이 흔들림)과
+착용자처럼 보이는 사람 박스(ADR 0058). 같은 기준(`evaluation.yaml proxy`)으로 잰 두 결과를 나란히
+두어 필터·모델 변경 전후를 비교한다.
 
 입력은 한 세션 한 스트림의 운영 라벨(`current_labels`)이다. DB에 쓰지 않는다. 결과는 JSON으로
 바꿀 수 있는 dict다 (키 이름은 보고서·비교 스크립트가 쓰므로 바꾸지 않는다).
@@ -37,6 +38,7 @@ from dlp_schema.labels import (
     Trajectory3DPayload,
     Trajectory3DSample,
 )
+from dlp_schema.wearer_body import WearerEvidence, wearer_box_frame
 
 # COCO 17점 관절 번호 (RTMPose): 머리 다섯 점(코·눈·귀)과 손목
 COCO_HEAD = (0, 1, 2, 3, 4)
@@ -519,6 +521,88 @@ def hand_3d(labels: Sequence[LabelRecord], policy: ProxyPolicy) -> Report:
     return out
 
 
+def _arm_frames(labels: Iterable[LabelRecord]) -> dict[Hand, list[KeypointFrame]]:
+    """손 → arm3 키프레임 (착용자 팔, ADR 0058)."""
+    out: dict[Hand, list[KeypointFrame]] = defaultdict(list)
+    for x in labels:
+        p = x.payload
+        if isinstance(p, KeypointTrackPayload) and p.skeleton == "arm3" and p.hand is not None:
+            out[p.hand].extend(p.keyframes)
+    return out
+
+
+def _forearm(labels: Sequence[LabelRecord], hand: Hand, policy: ProxyPolicy) -> Report:
+    """손목(손 3D)→팔꿈치(팔 3D) 거리: 분포, 변동계수, 범위 밖 비율 (카메라 좌표)."""
+    wrist = {s.t_ms: s for s in _trajectories(labels).get((f"{hand.value}_hand", "wrist"), [])}
+    lengths = [
+        math.dist((s.x, s.y, s.z), (w.x, w.y, w.z))
+        for x in labels
+        if isinstance(p := x.payload, Trajectory3DPayload)
+        and p.frame is CoordinateFrame.CAMERA
+        and p.entity_id == f"{hand.value}_arm"
+        and p.part == "elbow"
+        for s in p.samples
+        if (w := wrist.get(s.t_ms)) is not None
+    ]
+    low, high = policy.forearm_m
+    mean = float(np.mean(lengths)) if lengths else 0.0
+    return {
+        "length_m": dist(lengths),
+        "length_cv": _r(float(np.std(lengths)) / mean) if len(lengths) > 1 and mean > 0 else None,
+        "out_of_range_frac": _frac(sum(not low <= d <= high for d in lengths), len(lengths)),
+    }
+
+
+def wearer_arm(labels: Sequence[LabelRecord], policy: ProxyPolicy) -> Report:
+    """착용자 팔 (ADR 0058): 손마다 팔꿈치 보임 비율, 팔 모델 손목 일치, 아래팔 3D 길이 흔들림.
+
+    elbow_visible_frac: arm3 키프레임 중 팔꿈치가 보임(2)인 비율. chain_frac: 팔 모델 사슬이 hand21
+    손목과 맞은 키프레임 비율 (손목 점 신뢰도가 있음). wrist_agreement: 그 일치 정도(0~1) 분포.
+    forearm: 손목→팔꿈치 3D 거리 (`_forearm`).
+    """
+    out: Report = {}
+    for hand, frames in sorted(_arm_frames(labels).items(), key=lambda kv: kv[0].value):
+        elbows = sum(f.points[1].visibility == 2 for f in frames)
+        agreement = [f.points[0].confidence for f in frames if f.points[0].confidence is not None]
+        out[hand.value] = {
+            "keyframes": len(frames),
+            "elbow_visible_frac": _frac(elbows, len(frames)),
+            "chain_frac": _frac(len(agreement), len(frames)),
+            "wrist_agreement": dist(agreement),
+            "forearm": _forearm(labels, hand, policy),
+        }
+    return out
+
+
+def wearer_like_people(labels: Sequence[LabelRecord], policy: ProxyPolicy) -> Report:
+    """사람 박스 트랙 수와 그중 착용자처럼 보이는 트랙 수 (`dlp_schema.wearer_body`, ADR 0058).
+
+    키프레임 중 박스 안에 착용자 손목이 있고 다른 사람 머리 관절이 없는 비율이 wearer_share
+    이상이면 착용자처럼 보인다 (프레임 높이를 몰라 아래 가장자리 조건은 보지 않는다). 프리라벨
+    억제 뒤 남은 착용자 박스의 대리 지표다.
+    """
+    evidence = WearerEvidence.from_labels(labels, labels[0].stream_id or "") if labels else None
+    tracks = like = 0
+    tol, m = policy.time_tolerance_ms, policy.wearer_margin
+    for x in labels:
+        p = x.payload
+        if not (isinstance(p, BoxTrackPayload) and p.class_id == "person") or evidence is None:
+            continue
+        frames = [k for k in p.keyframes if not k.outside]
+        if not frames:
+            continue
+        tracks += 1
+        hits = sum(
+            wearer_box_frame(
+                (k.x, k.y, k.w, k.h), evidence.hands_near(k.t_ms, tol),
+                evidence.heads_near(k.t_ms, tol), margin=m, frame_h=None, bottom_band=1.0,
+            )
+            for k in frames
+        )  # fmt: skip
+        like += hits / len(frames) >= policy.wearer_share
+    return {"person_tracks": tracks, "wearer_like_tracks": like}
+
+
 def _span_ms(labels: Sequence[LabelRecord]) -> int:
     """라벨이 덮는 시간 길이 (세션 길이를 모를 때)."""
     if not labels:
@@ -543,7 +627,7 @@ def proxy_report(
 
     Returns:
         {"duration_ms", "groups": {묶음: {track, presence}}, "hands_2d", "agreement": {wrist, face},
-        "hand_3d"}.
+        "hand_3d", "wearer": {arm, people}} (wearer는 ADR 0058).
     """
     own = [x for x in labels if stream_id is None or x.stream_id == stream_id]
     span = duration_ms if duration_ms else _span_ms(own)
@@ -561,6 +645,7 @@ def proxy_report(
         "hands_2d": hands_2d(own, policy, span),
         "agreement": {"wrist": wrist_agreement(own, policy), "face": face_support(own, policy)},
         "hand_3d": hand_3d(own, policy),
+        "wearer": {"arm": wearer_arm(own, policy), "people": wearer_like_people(own, policy)},
     }
 
 
@@ -612,6 +697,21 @@ def _summary_lines(report: Report) -> list[str]:
             f"범위 밖 {_fmt(h['out_of_reach_frac'])}, 속도 초과 {_fmt(h['over_speed_frac'])}, "
             f"가속도 초과 {_fmt(h['over_accel_frac'])}, "
             f"손끝 거리 범위 밖 {_fmt(h['length_out_of_range_frac'])}"
+        )
+    wearer = report.get("wearer", {})
+    for hand, a in wearer.get("arm", {}).items():
+        fa = a["forearm"]
+        lines.append(
+            f"- {hand} 팔: 키프레임 {a['keyframes']}, 팔꿈치 보임 {_fmt(a['elbow_visible_frac'])}, "
+            f"사슬 손목 일치 {_fmt(a['chain_frac'])} "
+            f"(정도 p50 {_fmt(a['wrist_agreement']['p50'])}), "
+            f"아래팔 p50 {_fmt(fa['length_m']['p50'])} m, 변동계수 {_fmt(fa['length_cv'])}, "
+            f"범위 밖 {_fmt(fa['out_of_range_frac'])}"
+        )
+    if "people" in wearer:
+        pp = wearer["people"]
+        lines.append(
+            f"- 사람 박스 트랙 {pp['person_tracks']}, 착용자처럼 보임 {pp['wearer_like_tracks']}"
         )
     return lines
 

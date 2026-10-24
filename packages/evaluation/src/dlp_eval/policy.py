@@ -159,11 +159,14 @@ class ProxyPolicy(Contract):
     max_accel_mps2: float = Field(gt=0)  # 손목 3D 가속도 상한 (m/s²)
     max_dt_ms: int = Field(gt=0)  # 속도·가속도를 셀 이웃 표본 간격 상한 (넘으면 세지 않음)
     wrist_tip_m: tuple[float, float]  # 손목→손가락 끝 거리의 타당 범위 (m, 성인 손)
+    forearm_m: tuple[float, float]  # 손목→팔꿈치(착용자 아래팔) 3D 거리의 타당 범위 (m, ADR 0058)
+    wearer_margin: float = Field(ge=0)  # 착용자처럼 보이는 사람 박스: 박스 확장 비율 (ADR 0058)
+    wearer_share: float = Field(gt=0, le=1)  # 그 키프레임 비율이 이 이상이면 착용자처럼 보이는 트랙
 
     @model_validator(mode="after")
     def _ranges(self) -> ProxyPolicy:
         """범위 값은 0 < 하한 < 상한이어야 한다."""
-        for name in ("reach_m", "wrist_tip_m"):
+        for name in ("reach_m", "wrist_tip_m", "forearm_m"):
             low, high = getattr(self, name)
             if not 0 < low < high:
                 raise ValueError(f"proxy.{name}: 0 < 하한 < 상한이어야 합니다 ({low}, {high})")

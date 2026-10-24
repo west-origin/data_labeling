@@ -37,6 +37,9 @@
 - annotation.hand_points_3d_intrinsics (int64): 손 3D 점마다 그 궤적의 내부 파라미터 출처 (어휘
   hand_point_3d_intrinsics: 0 calibrated, 1 hfov_approx, 2 estimated_hand_size(ADR 0056),
   없음·모름 -1).
+- annotation.wearer_arm (float32): 손마다 착용자 팔 arm3 2D(손목·팔꿈치·어깨의 정규화 x, y, 보임 v)
+  + 팔 3D 점(`arm_points_3d`, 카메라 좌표 x, y, z, 있음) (ADR 0058, `wearer_arm_names`). 손목은 같은
+  손 hand21 손목과 같은 점이다. 2D·3D 보간 한도는 손과 같다.
 - annotation.verification (int64): `GROUPS` 묶음 [손 2D, 손 3D, 손 상태, 행동, 도구-표면 접촉, 작업]
   마다 그 시각에 쓴 라벨의 가장 낮은 검증 등급 (미검수 0, 표본 검증 1, 사람 승인 2,
   사람 수정·작성 3, 라벨 없음 -1).
@@ -68,6 +71,7 @@ from dlp_export.pseudonym import Pseudonymizer
 from dlp_media.pts import PtsIndex
 from dlp_schema.export import PhysicalPriorTable, physical_prior_table
 from dlp_schema.labels import (
+    ARM3_JOINTS,
     ActionPayload,
     BoxTrackPayload,
     CoordinateFrame,
@@ -226,6 +230,20 @@ def state_names(policy: LeRobotPolicy) -> list[str]:
     return names
 
 
+def wearer_arm_names(policy: LeRobotPolicy) -> list[str]:
+    """annotation.wearer_arm 열 이름 (ADR 0058).
+
+    손마다 [arm3 세 점*(x, y, v), arm_points_3d*(x3d, y3d, z3d, present)], 왼손이 앞.
+    """
+    names: list[str] = []
+    for h in HANDS:
+        for j in ARM3_JOINTS:
+            names += [f"{h.value}.arm.{j}.{a}" for a in ("x", "y", "v")]
+        for part in policy.arm_points_3d:
+            names += [f"{h.value}.arm.{part}.{a}" for a in ("x3d", "y3d", "z3d", "present")]
+    return names
+
+
 def video_key(policy: LeRobotPolicy) -> str:
     """에피소드 영상 특징 키 (예: observation.images.bodycam)."""
     return f"observation.images.{policy.video_stream}"
@@ -271,6 +289,11 @@ def features(policy: LeRobotPolicy, height: int, width: int) -> dict[str, Any]:
         },
         "annotation.hand_points_3d_intrinsics": {
             "dtype": "int64", "shape": [2 * len(policy.hand_points_3d)], "names": points,
+        },
+        # 착용자 팔 arm3 2D와 팔 3D 점 (ADR 0058)
+        "annotation.wearer_arm": {
+            "dtype": "float32", "shape": [len(wearer_arm_names(policy))],
+            "names": wearer_arm_names(policy),
         },
     }  # fmt: skip
 
@@ -352,6 +375,8 @@ class Episode:
     # 간격보다 작으면 둘이 크게 다르다 (내보내기 경고, ADR 0053)
     hand_points_3d_span: int = 0
     hand_points_3d_filled: int = 0
+    # (n, len(wearer_arm_names)): 착용자 팔 2D·3D (ADR 0058)
+    wearer_arm: NDArray[np.float32] = field(default_factory=lambda: np.zeros((0, 0), np.float32))
 
     @property
     def hand_points_3d_coverage(self) -> float | None:
@@ -591,10 +616,77 @@ def build_episode(  # noqa: C901
 
     # action = 다음 프레임 state (마지막 프레임은 자기 자신)
     action = np.concatenate([state[1:], state[-1:]], axis=0)
+    arm, arm_used = wearer_arm_features(stream, labels, times, size, policy)
     return Episode(
-        frame_index, times, state, action, hs, tsc, verb, ver, task_names, frozenset(used), conf3d,
-        method3d, intr3d, cobj, span3d, filled3d,
+        frame_index, times, state, action, hs, tsc, verb, ver, task_names,
+        frozenset(used | arm_used), conf3d, method3d, intr3d, cobj, span3d, filled3d, arm,
     )  # fmt: skip
+
+
+def _arm_2d(p: KeypointTrackPayload, w: int, h: int) -> list[tuple[int, NDArray[np.float64]]]:
+    """arm3 트랙 → 키프레임마다 (3, 3) [x/가로, y/세로, v] (보이지 않는 점은 NaN)."""
+    return [
+        (
+            f.t_ms,
+            np.array([[q.x / w, q.y / h, q.visibility] if q.visibility else [np.nan] * 3
+                      for q in f.points]),
+        )
+        for f in sorted(p.keyframes, key=lambda f: f.t_ms)
+    ]  # fmt: skip
+
+
+def wearer_arm_features(
+    stream: Stream,
+    labels: list[LabelRecord],
+    times: NDArray[np.float64],
+    size: tuple[int, int],
+    policy: LeRobotPolicy,
+) -> tuple[NDArray[np.float32], set[str]]:
+    """annotation.wearer_arm 배열 (n, len(wearer_arm_names))과 쓴 라벨 ID (ADR 0058).
+
+    손마다 그 스트림의 arm3 트랙(같은 손에 여럿이면 `preferred` 순, 시각마다 값이 있는 첫 것)과
+    카메라 좌표 팔 3D(`<손>_arm`, arm_points_3d)를 손과 같은 보간 한도로 읽는다. 값이 없으면 0
+    (v·present 0).
+    """
+    w, h = size
+    k2d, k3d = len(ARM3_JOINTS) * 3, len(policy.arm_points_3d) * 4
+    out = np.zeros((len(times), len(wearer_arm_names(policy))), np.float32)
+    used: set[str] = set()
+    ordered = preferred(labels)
+    for hi, hand in enumerate(HANDS):
+        arms = [
+            (_arm_2d(p, w, h), x) for x in ordered
+            if isinstance(p := x.payload, KeypointTrackPayload) and p.skeleton == "arm3"
+            and p.hand is hand and x.stream_id == stream.stream_id
+        ]  # fmt: skip
+        traj = {
+            p.part: (_series_3d(p), x) for x in reversed(ordered)
+            if isinstance(p := x.payload, Trajectory3DPayload)
+            and p.frame is CoordinateFrame.CAMERA and p.entity_id == f"{hand.value}_arm"
+            and x.stream_id in (None, stream.stream_id)
+        }  # fmt: skip
+        base = hi * (k2d + k3d)
+        for k, t in enumerate(times):
+            ts = stream_ms(stream, t)
+            for series, x in arms:
+                v = interp_series(series, ts, policy.interp_max_gap_ms)
+                if v is not None:
+                    labeled = ~np.isnan(v[:, 0])
+                    block = np.where(labeled[:, None], np.nan_to_num(v), 0.0)
+                    block[:, 2] = np.where(labeled, np.floor(np.nan_to_num(v[:, 2])), 0.0)
+                    out[k, base : base + k2d] = block.reshape(-1)
+                    used.add(x.label_id)
+                    break
+            for pi, part in enumerate(policy.arm_points_3d):
+                if part not in traj:
+                    continue
+                series3, x3 = traj[part]
+                got = interp_series(series3, ts, policy.interp_max_gap_3d_ms)
+                if got is not None:
+                    col = base + k2d + pi * 4
+                    out[k, col : col + 4] = [*got[:3], 1.0]
+                    used.add(x3.label_id)
+    return out, used
 
 
 def _series_3d(p: Trajectory3DPayload) -> list[tuple[int, NDArray[np.float64]]]:
@@ -655,6 +747,7 @@ FRAME_ARRAYS = {
     "annotation.hand_points_3d_confidence": "hand_points_3d_confidence",
     "annotation.hand_points_3d_method": "hand_points_3d_method",
     "annotation.hand_points_3d_intrinsics": "hand_points_3d_intrinsics",
+    "annotation.wearer_arm": "wearer_arm",
 }
 
 
@@ -717,6 +810,7 @@ def write_package(
             "hand_points_3d_confidence": ep.hand_points_3d_confidence,
             "hand_points_3d_method": ep.hand_points_3d_method,
             "hand_points_3d_intrinsics": ep.hand_points_3d_intrinsics,
+            "wearer_arm": ep.wearer_arm,
         }
         if override is not None:
             arrays.update(override.extra[i])

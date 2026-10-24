@@ -64,6 +64,9 @@ lerobot:
   # 손목과 다섯 손가락 끝 (prelabel.yaml depth.hand_points가 만드는 부위 안, 온톨로지 hand_joints 안, 중복 없이.
   # 정책 대조는 tests/test_policy_consistency.py, 온톨로지 대조는 내보내기 시작 때, ADR 0044·0053)
   hand_points_3d: [wrist, thumb_tip, index_tip, middle_tip, ring_tip, pinky_tip]
+  # annotation.wearer_arm에 넣는 착용자 팔 3D 점 (Trajectory3D part, 개체 "<손>_arm", 카메라 좌표 m, ADR 0058).
+  # 온톨로지 arm_joints 안 (prelabel.yaml depth.arm_points가 만드는 부위). 팔 2D(arm3 손목·팔꿈치·어깨)는 늘 들어간다
+  arm_points_3d: [elbow]
   repo_id: dlp/export        # LeRobot 데이터셋 repo_id (허브에 올리지 않는다, 메타데이터용)
   robot_type: human_bodycam  # LeRobot 메타데이터 robot_type
   vcodec: h264               # 에피소드 영상 코덱
