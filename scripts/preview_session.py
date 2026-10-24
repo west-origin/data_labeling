@@ -464,7 +464,7 @@ LEGEND = (
 
 
 def draw_frame(
-    img: Image, t_ms: float, ov: Overlays, opts: DrawOptions, *, session_id: str, panel_h: int = 165
+    img: Image, t_ms: float, ov: Overlays, opts: DrawOptions, *, session_id: str, panel_h: int = 164
 ) -> Image:
     """원본 크기 BGR 프레임 하나에 오버레이를 그린 축소 영상(+아래 패널)을 돌려준다.
 

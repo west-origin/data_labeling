@@ -64,3 +64,4 @@ ADR은 결정 당시의 이유와 이관 조건을 기록한다. 후속 ADR이 �
 | 0055 | [ADR 0055: 장면별 도구 질의, 오탐 의심 힌트, 테스트 시점 증강(TTA)](0055-scene-vocabulary-false-positive-hints-and-tta.md) |
 | 0056 | [ADR 0056: 손 크기로 세션 초점 거리 추정, 잘라 낸 박스의 AI 확인 힌트](0056-hand-size-focal-estimate-and-ai-crop-hints.md) |
 | 0057 | [ADR 0057: 학습용 데이터 증강](0057-training-data-augmentation.md) |
+| 0058 | [ADR 0058: 착용자 팔 골격(손목 → 아래팔 → 팔꿈치)과 착용자 자신의 몸 억제](0058-wearer-arm-skeleton-and-wearer-body-suppression.md) |

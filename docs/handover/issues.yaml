@@ -845,6 +845,12 @@ issues:
   - {id: F-PAR-65, title: "손 크기 초점 거리 추정(ADR 0056)이 메트릭 깊이 모델의 화각 사전값을 되돌려 줘 초광각에서 초점을 2.4배로 냄 (기본 끔)", severity: medium, status: open, kind: code,
      files: [packages/prelabel/src/dlp_prelabel/fov.py, config/policies/prelabel.yaml], source: docs/handover/pilot-real-2026-10-22.md, see: [F-PAR-59],
      note: "pilot-real2(0.5x 초광각, 공칭 초점 약 720 px): fx 1767 px(가로 57도), 표본 140, 퍼짐 0.42로 문턱 통과. f = f0·p0/L은 깊이가 화각과 무관하다고 전제하지만 Depth Anything V2 Metric은 학습 화각을 전제로 거리를 낸다. 합성 시험은 정답 깊이라 드러나지 않았다. 기본 enabled false로 바꿨다(ADR 0056 개정). 다시 켜려면 화각을 추정·입력받는 깊이 모델과 체커보드 세션 비교가 필요하다"}
+  - {id: F-PAR-66, title: "착용자 팔 골격(arm3)과 착용자 몸 억제의 문턱(arm·wearer_suppression)을 정답 표본 없이 정해 실영상 정확도(팔꿈치 위치·보임 판정, 억제 재현·정밀도)를 모름", severity: medium, status: open, kind: product,
+     files: [config/policies/prelabel.yaml, packages/prelabel/src/dlp_prelabel/arm.py, packages/prelabel/src/dlp_prelabel/wearer_suppress.py, packages/schema/src/dlp_schema/wearer_body.py], source: docs/adr/0058-wearer-arm-skeleton-and-wearer-body-suppression.md, see: [F-PAR-60],
+     note: "합성 픽스처(dlp_fixtures.arm)로 규칙만 검사했다. 위험: 손을 맞잡은 대상자 자세를 착용자로 보거나, 머리가 화면 밖인 대상자 박스가 착용자 손목을 담고 화면 아래에 닿으면 억제될 수 있다. RTMPose는 1인칭 착용자 팔꿈치를 화면 안에 그럴듯하게 놓으므로 길이·방향 검사만으로는 틀린 팔꿈치를 다 거르지 못한다. 필요: 같은 장비 실촬영의 팔꿈치·대상자 박스 정답 표본으로 문턱을 다시 정한다 (파일럿 보고서 11절)."}
+  - {id: F-PAR-67, title: "착용자 팔·억제가 전신·객체·도구 단계 안에서 돌아, 손 트랙을 검수로 고쳐도 팔 골격과 억제 판정을 다시 하지 않음 (단계 버전에 손 입력 해시가 없음)", severity: low, status: open, kind: code,
+     files: [packages/prelabel/src/dlp_prelabel/adapters/rtmpose.py, packages/prelabel/src/dlp_prelabel/runner.py], source: docs/adr/0058-wearer-arm-skeleton-and-wearer-body-suppression.md, see: [F-PAR-66],
+     note: "정책·가중치가 바뀌면 다시 돈다. 손 트랙 ID를 단계 버전에 넣으면 손 수정 때마다 비싼 전신·도구 단계가 다시 돌아 넣지 않았다. 필요하면 팔 단계를 저장된 자세 후보로 다시 계산하는 별도 단계로 분리한다."}
   - {id: F-PAR-64, title: "MediaPipe 손 판정(Left·Right)이 한 손에서 프레임마다 바뀌어, 손별 트랙이 같은 손으로 건너뛰고 끊김이 생김 (손 판정을 프레임마다 따로 믿는 어댑터 구조)", severity: medium, status: open, kind: code,
      files: [packages/prelabel/src/dlp_prelabel/adapters/mediapipe_models.py], source: docs/handover/pilot-real-2026-10-22.md, see: [F-PAR-61],
      note: "pilot-real2: 채운 두 손 프레임의 두 손목 간격 중앙값이 손 크기의 0.08배(한 손을 두 트랙이 번갈아 잡음), 관측 두 손 프레임 중 간격이 손 크기보다 작은 68프레임의 좌우 일치는 0.76. 손목 2D 떨림 p95가 약 3(손 크기 배)인 것도 트랙이 다른 손으로 건너뛴 프레임이다. 지금은 한 프레임 안 겹침 빼기(dd1)와 다른 손 위의 채운 키프레임 빼기(dd2)만 했다. 필요: 위치 연속성으로 탐지를 트랙에 잇고(헝가리안 매칭) 손 판정은 트랙 단위로 다수결·평활해 정하는 손 추적기, 1인칭 기하(왼손은 화면 왼쪽에서 들어옴)를 약한 사전값으로."}
