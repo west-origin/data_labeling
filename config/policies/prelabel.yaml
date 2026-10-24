@@ -170,6 +170,43 @@ wearer_matching:
   min_correlation: 0.5      # 최고 상관이 이 미만이면 착용자 없음 (-1~1)
   min_overlap_samples: 20   # 두 신호가 겹치는 길이가 rate_hz 격자로 이 샘플 수보다 짧으면 비교하지 않는다
 
+# 착용자 자신의 몸 억제 (ADR 0058, dlp_schema.wearer_body · dlp_prelabel.wearer_suppress). 바디캠에서 착용자의
+# 팔·몸통을 잡은 COCO 사람 박스(objects), OWLv2 박스(tools), YOLOX→RTMPose 자세(body)를 라벨로 만들지 않고
+# 개수만 단계 요약에 남긴다. 판정: 박스(margin만큼 넓힘) 안에 착용자 손목(hand21)이 있고 다른 사람의 보이는
+# 머리 관절은 없고 아래 변이 화면 아래 bottom_band 띠 안 (자세는 손목이 착용자 손목과 일치 + 아래 띠).
+# 다른 사람(대상자)은 머리가 보이거나 손목이 착용자 손목과 다르면 남는다. 프라이버시 탐지(블러)와 무관하다.
+# 3인칭 스트림·손 트랙이 없는 스트림에는 적용하지 않는다. 문턱은 정답 표본 없이 정했다 (F-PAR-66)
+wearer_suppression:
+  enabled: true
+  stages: [objects, tools, body]
+  time_tolerance_ms: 20     # 손 키프레임을 같은 시각으로 볼 허용 오차 (30 fps 한 프레임 33 ms 미만)
+  margin: 0.1               # 박스 각 변을 10% 넓혀 손목이 경계에 걸쳐도 안으로 본다
+  bottom_band: 0.15         # 아래 변이 화면 아래 15% 안이어야 착용자 (아래팔은 화면 아래에서 들어온다)
+  track_share: 0.5          # 박스 트랙 키프레임의 절반 이상이 착용자 프레임이면 트랙째 억제
+  person_classes: [person]
+  other_min_area: 0.2       # 사람 아닌 클래스: 화면 20% 이상인 큰 박스만 (손에 든 도구는 남긴다)
+  wrist_match_palms: 1.0    # 자세 손목이 착용자 손목에서 손 크기(손목→중지 뿌리) 1배 안
+
+# 착용자 팔 골격 arm3 (손목·팔꿈치·어깨, ADR 0058, dlp_prelabel.arm). 전신 단계(body, RTMPose)가 착용자로
+# 판정한 자세와, 보이는 손 박스에서 화면 아래까지 늘린 합성 착용자 박스로 돌린 자세에서 팔 사슬을 고른다.
+# 손목은 늘 같은 손 hand21 손목(기준)이고, 사슬 손목이 그 손목과 손 크기 x wrist_match_palms 안인 사슬만
+# 쓴다 (좌우는 손 판정을 따른다: RTMPose 좌우는 1인칭에서 자주 바뀐다, 파일럿 좌우 같음 0.74).
+# 팔꿈치는 점수·화면 안(가장자리 여유)·아래팔 길이/손 크기 범위·손가락 반대 방향을 모두 통과해야 보임(2),
+# 아니면 보이지 않음(0)이다 (화면 밖 팔꿈치를 지어내지 않는다). 숫자는 파일럿 분포(아래팔/손 크기 5~95%:
+# 2.4~5.7)로 정했고 정답 표본이 없다 (F-PAR-66)
+arm:
+  enabled: true
+  frame_stride_ms: 100      # 팔 키프레임 간격 (손 키프레임 중 고른다). 합성 박스 자세 추론이 이 간격으로 돈다
+  wrist_match_palms: 1.0
+  elbow_min_score: 0.5      # RTMPose SimCC 점수 (body.keypoint_score 0.3보다 엄격)
+  shoulder_min_score: 0.7
+  edge_margin_px: 8         # 화면 가장자리 8 px 안은 화면 밖으로 본다
+  forearm_palms: [1.5, 7.0] # 화면 손목→팔꿈치 / 손 크기
+  max_hand_cos: 0.0         # 팔꿈치가 손가락 방향과 90도 이상 벌어져야 한다
+  cross_margin_palms: 0.5
+  emit_shoulder: false      # 가슴 장착 화면에는 어깨가 거의 없다 (늘 보이지 않음, 검수자가 찍을 수 있다)
+  box: {side_palms: 3.0, up_palms: 2.0}
+
 # 바디캠 손·객체를 단안 메트릭 깊이(Depth Anything V2 Metric Indoor Small)로 카메라 좌표 3D로 올린다.
 # 세션 캘리브레이션에 내부 파라미터가 없으면 default_hfov_deg로 근사한다 (액션캠 광각 기준).
 depth:
@@ -181,6 +218,9 @@ depth:
   # 손목과 다섯 손가락 끝 (hand21 번호 → 온톨로지 hand_joints: wrist, thumb_tip, index_tip, middle_tip,
   # ring_tip, pinky_tip). 이름이 없는 번호는 로더가 거부한다 (policy.HAND21_JOINTS)
   hand_points: [0, 4, 8, 12, 16, 20]
+  # 3D로 올릴 착용자 팔(arm3) 점 (ADR 0058, 온톨로지 arm_joints). 픽셀 깊이(주변 패치 중앙값)로 올린다.
+  # 손목 3D는 손 맞춤(위 hand_points의 wrist)이 맡는다. 어깨는 가슴 장착 화면에 거의 없어 넣지 않는다
+  arm_points: [elbow]
   # 맞춤이 없는 키프레임(world 없음: 사람이 고친 키프레임·예전 트랙, 또는 맞춤 실패)의 손가락 끝.
   # drop: 내지 않는다 (픽셀 깊이가 얇은 손가락 대신 배경을 읽어 수백 mm 틀린다, F-PAR-40). 손바닥 관절
   # (hand_fit.anchor_points 중 hand_points에 있는 것, 지금은 손목)은 깊이로 올린다.
@@ -251,8 +291,13 @@ depth:
     bone_tolerance: 0.25      # 손끝의 손목 거리가 세션 중앙값에서 이 비율 넘게 다르면 bone_length
     min_bone_samples: 10
     # 화각 근사처럼 배율 전체가 틀린 세션에서 표본을 대량으로 지우지 않게 reach는 downweight
-    actions: {reach: downweight, speed: drop, accel: downweight, bone_length: downweight}
+    actions: {reach: downweight, speed: drop, accel: downweight, bone_length: downweight,
+              forearm_length: downweight}
     downweight: 0.5
+    # 착용자 아래팔 (ADR 0058): 손목(손 3D)→팔꿈치 거리. 성인 아래팔(손목~팔꿈치) 약 0.22~0.30 m에 깊이
+    # 오차 여유를 둔 범위, 세션 중앙값에서 forearm_tolerance 비율 넘게 다르면 forearm_length
+    forearm_m: [0.15, 0.40]
+    forearm_tolerance: 0.25
 
 # 바디캠 6자유도 자세 (ADR 0046, dlp_prelabel.campose.ImuVisualOdometry). 동기화된 IMU 스트림(sync_method가
 # unsynced가 아님)과 메트릭 깊이 모델이 있는 세션에서만 돈다. 회전은 IMU 자이로 적분 + 가속도 기울기

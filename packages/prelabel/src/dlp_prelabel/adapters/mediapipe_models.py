@@ -32,6 +32,7 @@ from dlp_models.registry import resolve
 from dlp_prelabel.common import iou, iter_frames, model_label, strictly_increasing, track_boxes
 from dlp_prelabel.policy import PrelabelPolicy
 from dlp_prelabel.temporal import fill_gaps, filter_tracks, smooth_hand_frames
+from dlp_prelabel.wearer_suppress import WearerAware, suppress_box_tracks, wearer_tag
 from dlp_schema.episode import version_tag
 from dlp_schema.labels import (
     BoxKeyframe,
@@ -291,10 +292,12 @@ class MediaPipeHands:
         return [(f, hp.gap_fill.confidence if f.interpolated else score[f.t_ms]) for f in filled]
 
 
-class MediaPipeObjects:
+class MediaPipeObjects(WearerAware):
     """COCO 객체 탐지. 온톨로지에 대응하는 클래스만 남긴다.
 
-    COCO에 없는 청소 도구는 OWLv2 어댑터(adapters/owl_objects.py)가 맡는다.
+    COCO에 없는 청소 도구는 OWLv2 어댑터(adapters/owl_objects.py)가 맡는다. 바디캠에서는 착용자
+    자신의 팔·몸통을 잡은 박스 트랙(대부분 person)을 라벨로 만들지 않는다 (ADR 0058,
+    `wearer_suppress.suppress_box_tracks`, 착용자 증거는 러너가 `set_wearer`로 넘긴다).
     """
 
     name = "objects"
@@ -302,9 +305,12 @@ class MediaPipeObjects:
     def __init__(
         self, root: Path, policy: PrelabelPolicy, *, ontology_version: str, now: datetime
     ) -> None:
-        """가중치를 확인하고 버전을 정한다 (`mediapipe-...+rgb1+p<objects 절 해시>`)."""
+        """가중치를 확인하고 버전을 정한다.
+
+        버전: `mediapipe-...+rgb1+p<objects 절 해시>+w<wearer_suppression 절 해시>`.
+        """
         self.path, version = _model(root, policy.models.coco_objects)
-        self.version = f"{version}+rgb1+p{policy.digest('objects')}"
+        self.version = f"{version}+rgb1+p{policy.digest('objects')}{wearer_tag(policy, self.name)}"
         self.policy, self.ontology_version, self.now = policy, ontology_version, now
 
     def run(self, clip: Clip) -> list[LabelRecord]:
@@ -325,10 +331,12 @@ class MediaPipeObjects:
         detections: list[
             tuple[int, list[tuple[str, tuple[float, float, float, float], float]]]
         ] = []
+        size = (0, 0)
         with vision.ObjectDetector.create_from_options(options) as model:
             # 손 어댑터와 같은 이유로 같은 ms의 두 번째 프레임은 건너뛴다
             # (VIDEO 모드 시각 증가 조건)
             for t, img in strictly_increasing(iter_frames(clip.video)):
+                size = (int(img.shape[1]), int(img.shape[0]))
                 result = model.detect_for_video(
                     mp.Image(image_format=mp.ImageFormat.SRGB, data=img), t
                 )
@@ -349,13 +357,15 @@ class MediaPipeObjects:
                     )
                 detections.append((t, dets))
         tracks = track_boxes(detections, iou_match=op.track_iou, max_gap_ms=op.max_gap_ms)
-        return boxes_to_labels(
+        # 착용자 자신의 몸 박스 트랙은 라벨로 만들지 않는다 (ADR 0058, 요약 last_wearer에만 센다)
+        kept, self.last_wearer = suppress_box_tracks(
             filter_tracks(tracks, op.track_filter),
-            clip,
-            self.version,
-            self.ontology_version,
-            self.now,
-            prefix="objects",
+            self.wearer,
+            self.policy.wearer_suppression,
+            size,
+        )
+        return boxes_to_labels(
+            kept, clip, self.version, self.ontology_version, self.now, prefix="objects"
         )
 
 

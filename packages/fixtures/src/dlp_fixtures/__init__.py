@@ -20,6 +20,9 @@
 - `generate_checkerboard_video` (`calibration.py`): 정답 내부 파라미터로 렌더한 체커보드 영상.
   정답 = 렌더에 쓴 fx·fy·cx·cy (`dlp calib intrinsics` 시험, ADR 0045). `generate_all`은
   쓰지 않는다.
+- `generate_arm_scenario` (`arm.py`): 정답 팔꿈치 위치(일부 화면 밖)를 아는 1인칭 착용자 팔과
+  가짜 자세 모델 출력(좌우 뒤바뀐 팔 사슬), 착용자 몸·다른 사람·손에 든 도구 박스. 정답 = 팔꿈치
+  위치·화면 안 여부, 억제할 박스 (ADR 0058). 메모리에서만 쓴다.
 - `generate_all`: 위 모두를 디렉터리에 쓴다 (`dlp fixtures generate`).
 
 시간 규약: 라벨 시각은 정수 ms. 시간 구간 라벨은 마스터 타임라인, 공간 라벨 키프레임은 영상 PTS

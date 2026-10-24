@@ -22,18 +22,21 @@ import yaml
 from numpy.typing import NDArray
 
 from dlp_fixtures.actions import ENTITIES, ActionScenario, generate_action_scenario
+from dlp_fixtures.arm import ArmScenario, generate_arm_scenario
 from dlp_fixtures.camera_motion import HAND_PARTS, CameraMotionScenario, generate_camera_motion
 from dlp_fixtures.hand3d import generate_hand3d_scenario
 from dlp_fixtures.io import write_parquet
 from dlp_fixtures.video import generate_blur_scenario, write_video
 from dlp_media.ingest import ingest_session, load_manifest
 from dlp_media.storage import S3Store
+from dlp_prelabel.adapters.mediapipe_models import boxes_to_labels
 from dlp_prelabel.adapters.stubs import OraclePredictor
 from dlp_prelabel.campose import OraclePoseEstimator, is_pose_label
-from dlp_prelabel.common import Image, iter_frames
+from dlp_prelabel.common import BoxTrack, Image, iter_frames
 from dlp_prelabel.lift3d import DepthLifter, lift_tracks
 from dlp_prelabel.policy import HAND21_JOINTS, PrelabelPolicy, load_policy
 from dlp_prelabel.runner import CONTACT_PREFIX, CONTACT_STEP, pick_lift_tracks, run_prelabel
+from dlp_prelabel.wearer_suppress import WearerAware, suppress_box_tracks, wearer_tag
 from dlp_schema.db.migrate import upgrade
 from dlp_schema.db.repository import (
     get_labels,
@@ -1259,3 +1262,50 @@ def test_3d_inherits_the_approved_2d_track_and_regenerates_after_correction(
         assert x.payload.derived_from == (fixed.label_id,)
         assert x.verification.state is VerificationState.HUMAN_APPROVED
         assert list(x.payload.samples) == expected[(x.payload.entity_id, x.payload.part)]
+
+
+class _FakeObjects(WearerAware):
+    """객체 단계 흉내 (ADR 0058): 픽스처 박스 트랙에 착용자 억제를 적용해 낸다 (영상은 읽지
+    않는다)."""
+
+    name = "objects"
+
+    def __init__(self, scene: ArmScenario, policy: PrelabelPolicy) -> None:
+        self.scene, self.policy = scene, policy
+        self.version = f"fake-objects{wearer_tag(policy, self.name)}"
+
+    def run(self, clip: Clip) -> list[LabelRecord]:
+        tracks: list[BoxTrack] = []
+        for x in self.scene.boxes:
+            p = x.payload
+            assert isinstance(p, BoxTrackPayload)
+            frames = {k.t_ms: ((k.x, k.y, k.w, k.h), 0.9) for k in p.keyframes}
+            tracks.append(BoxTrack(p.class_id, frames))
+        kept, self.last_wearer = suppress_box_tracks(
+            tracks, self.wearer, self.policy.wearer_suppression, self.scene.size
+        )
+        return boxes_to_labels(kept, clip, self.version, "1.0.0", FIXED_TIME, prefix="objects")
+
+
+def test_wearer_boxes_never_become_object_labels(pg: sa.Engine, tmp_path: Path) -> None:
+    """ADR 0058: 같은 실행에서 손 단계가 낸 hand21 트랙과 전신 단계의 다른 사람 자세가 객체 단계의
+    착용자 증거가 된다. 정답(`scene.suppressed`): 착용자 몸 사람 박스·몸통을 덮은 큰 수건 박스는
+    라벨이 되지 않고 요약에만 남는다. 다른 사람 박스·손에 든 걸레는 라벨이다. 다시 돌리면 건너뛴다.
+    """
+    scene = generate_arm_scenario(2)
+    sid, raw = _bodycam_only_session(pg, tmp_path, scene.frame_times, "wearer")
+    policy, ontology = load_policy(ROOT), load_ontology(ROOT / "config/ontology/v1")
+    kinds = ("keypoint_track",)
+    hands = OraclePredictor("hands", scene.hand_labels, kinds, now=FIXED_TIME)
+    body = OraclePredictor("body", [scene.other_person], kinds, now=FIXED_TIME)
+    objects = _FakeObjects(scene, policy)
+    with pg.begin() as conn:
+        summary = run_prelabel(conn, sid, raw, [hands, body, objects], policy, ontology, FIXED_TIME)
+        again = run_prelabel(conn, sid, raw, [hands, body, objects], policy, ontology, FIXED_TIME)
+        boxes = current_labels(get_labels(conn, sid, kinds=["box_track"]))
+    classes = sorted(x.payload.class_id for x in boxes if isinstance(x.payload, BoxTrackPayload))
+    assert classes == ["person", "rag"]
+    report = summary.wearer_suppressed["bodycam/objects"]
+    assert (report.tracks, report.kept_person_tracks) == (2, 1)
+    assert dict(report.by_class) == {"person": 1, "towel": 1}
+    assert "bodycam/objects" in again.skipped and not again.wearer_suppressed

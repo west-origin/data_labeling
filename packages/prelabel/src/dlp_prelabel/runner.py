@@ -62,6 +62,7 @@ from numpy.typing import NDArray
 
 from dlp_media.imu import read_imu_table
 from dlp_media.storage import ObjectStore
+from dlp_prelabel.arm import ArmReport
 from dlp_prelabel.campose import (
     CameraPoseEstimator,
     ImuSeries,
@@ -84,6 +85,7 @@ from dlp_prelabel.lift3d import HAND21_NAMES, DepthLifter, lift_key
 from dlp_prelabel.policy import PrelabelPolicy
 from dlp_prelabel.posemath import as_rotation, rotation_problem
 from dlp_prelabel.wearer import match_wearer, wrist_speed
+from dlp_prelabel.wearer_suppress import WearerAware, WearerReport
 from dlp_prelabel.worldframe import world_label
 from dlp_schema.config import repo_root
 from dlp_schema.db.calibration_repository import session_intrinsics, session_palm
@@ -128,6 +130,7 @@ from dlp_schema.trajectory_follow import (
     active_trajectory_inheritance,
     lapsed_trajectories,
 )
+from dlp_schema.wearer_body import WearerEvidence
 from dlp_sync.policy import load_policy as load_sync_policy
 from dlp_sync.signals import glove_series, imu_series
 
@@ -227,6 +230,10 @@ class PrelabelSummary:
     lift_blocked: int = 0
     # 손 크기 초점 거리 추정 (ADR 0056): "fx <px> hfov <도> n <표본> spread <퍼짐>" 또는 None
     focal_estimate: str | None = None
+    # 착용자 몸 억제 (ADR 0058): "스트림/어댑터" → 억제 요약 (라벨로 만들지 않은 것)
+    wearer_suppressed: dict[str, WearerReport] = field(default_factory=dict[str, WearerReport])
+    # 착용자 팔 (ADR 0058): "스트림/body" → 팔 요약
+    arms: dict[str, ArmReport] = field(default_factory=dict[str, ArmReport])
 
 
 def _follow(conn: sa.Connection, session_id: str, now: datetime, summary: PrelabelSummary) -> None:
@@ -378,7 +385,13 @@ def run_prelabel(
         work = Path(tmp)
         reference = session.reference_stream.stream_id
         timeline = set(policy.timeline_predictors)
+        # 착용자 증거의 바탕 (지금 운영 라벨, 처음 필요할 때 한 번 만든다, ADR 0058)
+        current_now: list[LabelRecord] | None = None
+        fresh: list[LabelRecord] = []
         for stream in (s for s in session.streams if s.kind in VIDEO):
+            # 이번 실행에서 이 스트림에 새로 낸 라벨 (뒤 어댑터의 착용자 증거가 앞 어댑터 결과를
+            # 본다)
+            fresh = []
             for predictor in predictors:
                 key = f"{stream.stream_id}/{predictor.name}"
                 on_timeline = predictor.name in timeline
@@ -396,9 +409,15 @@ def run_prelabel(
                 ):
                     summary.skipped.append(key)
                     continue
+                if isinstance(predictor, WearerAware):
+                    if current_now is None:
+                        current_now = current_labels(existing)
+                    predictor.set_wearer(wearer_evidence(stream, current_now, fresh))
                 labels = predictor.run(
                     Clip(session_id, stream.stream_id, _fetch(raw, stream.uri, work))
                 )
+                fresh += labels
+                _wearer_summary(predictor, key, summary)
                 if stream.stream_id != reference:
                     # 목록에 없는 모델이 타임라인 구간(stream_id 없음)을 내도 기준 스트림 것만 쓴다
                     labels = [x for x in labels if x.stream_id is not None]
@@ -425,7 +444,7 @@ def run_prelabel(
         # 1단계에서 넣은 라벨을 반영해 이력·현재 라벨을 다시 읽는다 (2~4단계의 입력).
         # 세션 이력 사본은 손 키포인트 트랙 때문에 수 GB가 될 수 있다. 다음 사본을 읽기 전에 앞
         # 사본을 놓아 둘 이상을 한꺼번에 들지 않는다 (F-PMS-36)
-        del existing
+        del existing, current_now, fresh
         history = get_labels(conn, session_id)
         current = current_labels(history)
         if lifter is not None:
@@ -448,6 +467,37 @@ def run_prelabel(
     if session.lifecycle_state is LifecycleState.PRIVACY_APPROVED:
         set_lifecycle(conn, session_id, LifecycleState.PRELABELED)
     return summary
+
+
+def wearer_evidence(
+    stream: Stream, current: list[LabelRecord], fresh: list[LabelRecord]
+) -> WearerEvidence | None:
+    """어댑터에 넘길 착용자 증거 (ADR 0058). 바디캠 스트림이 아니면 None (억제하지 않는다).
+
+    같은 골격의 키포인트 트랙을 이번 실행에서 새로 냈으면(예: 손 어댑터가 방금 돌았다) 그것을 쓰고,
+    아니면 지금 운영 라벨의 그 스트림 트랙을 쓴다 (이전 버전은 곧 지워진다).
+    """
+    if stream.kind is not StreamKind.BODYCAM:
+        return None
+    sid = stream.stream_id
+    renewed = {p.skeleton for x in fresh if isinstance(p := x.payload, KeypointTrackPayload)}
+    base = [
+        x
+        for x in current
+        if x.stream_id == sid
+        and not (isinstance(x.payload, KeypointTrackPayload) and x.payload.skeleton in renewed)
+    ]
+    return WearerEvidence.from_labels([*base, *fresh], sid)
+
+
+def _wearer_summary(predictor: Predictor, key: str, summary: PrelabelSummary) -> None:
+    """어댑터가 남긴 착용자 억제·팔 요약을 실행 요약에 옮긴다."""
+    report = getattr(predictor, "last_wearer", None)
+    if isinstance(report, WearerReport):
+        summary.wearer_suppressed[key] = report
+    arm = getattr(predictor, "last_arm", None)
+    if isinstance(arm, ArmReport):
+        summary.arms[key] = arm
 
 
 def _stale(labels: list[LabelRecord], prefix: str, version: str) -> list[LabelRecord]:
@@ -500,7 +550,8 @@ def pick_hand_tracks(hand_labels: list[LabelRecord]) -> dict[Hand, KeypointTrack
 
 
 def pick_lift_tracks(current: list[LabelRecord], stream_id: str) -> list[LabelRecord]:
-    """3D 단계 입력: 그 스트림의 현재 hand21 키포인트·박스 트랙을 (개체, 트랙 종류)마다 하나 고른다.
+    """3D 단계 입력: 그 스트림의 현재 hand21·arm3 키포인트·박스 트랙을 (개체, 트랙 종류)마다 하나
+    고른다.
 
     같은 entity_id 트랙이 함께 현재 라벨일 수 있다 (승인된 이전 모델 버전 + 새 버전, 사람 트랙 +
     모델 트랙). 둘 다 넘기면 같은 (개체, 부위)에 같은 시각 표본이 두 번 들어가 3D 라벨 검증이
@@ -581,17 +632,20 @@ def drop_protected_contacts(
 
 
 def lift_keys(
-    tracks: list[LabelRecord], hand_points: Sequence[int]
+    tracks: list[LabelRecord], hand_points: Sequence[int], arm_points: Sequence[str] = ()
 ) -> set[tuple[str, str | None, str]]:
     """고른 트랙이 3D 단계에서 낼 궤적의 대상 키 (개체, 부위, 좌표계=camera).
 
-    hand21 손 트랙은 정책 hand_points 관절마다, 박스 트랙은 중심(부위 None) 하나다.
+    hand21 손 트랙은 정책 hand_points 관절마다, arm3 팔 트랙은 arm_points 점마다(ADR 0058), 박스
+    트랙은 중심(부위 None) 하나다.
     """
     camera = CoordinateFrame.CAMERA.value
     out: set[tuple[str, str | None, str]] = set()
     for t in tracks:
         p = t.payload
-        if isinstance(p, KeypointTrackPayload):
+        if isinstance(p, KeypointTrackPayload) and p.skeleton == "arm3":
+            out |= {(p.entity_id, name, camera) for name in arm_points}
+        elif isinstance(p, KeypointTrackPayload):
             out |= {(p.entity_id, HAND21_NAMES[i], camera) for i in hand_points}
         elif isinstance(p, BoxTrackPayload):
             out.add((p.entity_id, None, camera))
@@ -670,7 +724,8 @@ def _lift(
     # 접근 반복을 막는다). 입력이 모두 사라졌으면(트랙 없음) 검수 전인 이전 결과만 지운다
     lapsed = _lapsed(conn, session.session_id, history)
     inheritance = get_trajectory_inheritance(conn, session.session_id)
-    wanted = lift_keys(tracks, lifter.policy.depth.hand_points)
+    depth = lifter.policy.depth
+    wanted = lift_keys(tracks, depth.hand_points, depth.arm_points)
     blocked = wanted & blocked_lift_keys(tracks, current, inheritance, lapsed)
     if not tracks or wanted == blocked:
         summary.lift_blocked += len(blocked)

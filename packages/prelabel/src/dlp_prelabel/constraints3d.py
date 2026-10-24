@@ -15,6 +15,11 @@
   넘게 다름 (중앙값은 표본 min_bone_samples개 이상일 때만).
 손목에 붙은 표시(reach·speed·accel)는 같은 시각 손끝 표본에도 붙인다 (한 시각의 손 맞춤은 손 전체의
 배율을 함께 정하므로 손목이 튀면 손끝도 같이 튄다).
+
+착용자 팔 (`constrain_arms`, ADR 0058): 팔꿈치 표본(`<left|right>_arm`, elbow)의 같은 손 손목
+(`<left|right>_hand`, wrist) 거리가 forearm_m 범위 밖이거나, 그 세션 같은 손 중앙값에서
+forearm_tolerance 비율 넘게 다르면 forearm_length (중앙값은 표본 min_bone_samples개 이상일 때만).
+같은 시각 손목 표본이 없으면 검사하지 않는다.
 """
 
 from __future__ import annotations
@@ -138,3 +143,60 @@ def flag_counts(samples: dict[Key, list[Trajectory3DSample]]) -> dict[str, int]:
             for f in s.flags or ():
                 counts[f.value] += 1
     return dict(counts)
+
+
+def forearm_lengths(
+    wrist: Sequence[Trajectory3DSample], elbow: Sequence[Trajectory3DSample]
+) -> dict[int, float]:
+    """같은 시각 손목→팔꿈치 거리 (m). 손목 표본이 없는 시각은 빠진다."""
+    at = {s.t_ms: s for s in wrist}
+    return {s.t_ms: math.dist(_xyz(s), _xyz(at[s.t_ms])) for s in elbow if s.t_ms in at}
+
+
+def forearm_flags(
+    wrist: Sequence[Trajectory3DSample],
+    elbow: Sequence[Trajectory3DSample],
+    policy: Constraints3DPolicy,
+) -> Flags:
+    """팔꿈치 표본 시각 → forearm_length (범위 밖, 또는 세션 중앙값에서 벗어남)."""
+    lengths = forearm_lengths(wrist, elbow)
+    flags: Flags = defaultdict(set)
+    low, high = policy.forearm_m
+    median = (
+        float(np.median(list(lengths.values())))
+        if len(lengths) >= policy.min_bone_samples
+        else None
+    )
+    for t, d in lengths.items():
+        off = (
+            median is not None
+            and median > 0
+            and abs(d - median) / median > policy.forearm_tolerance
+        )
+        if not low <= d <= high or off:
+            flags[t].add(Constraint3DFlag.FOREARM_LENGTH)
+    return flags
+
+
+def constrain_arms(
+    samples: dict[Key, list[Trajectory3DSample]], policy: Constraints3DPolicy
+) -> dict[Key, list[Trajectory3DSample]]:
+    """팔꿈치 표본에 아래팔 길이 제약을 적용한다 (ADR 0058). 꺼져 있거나 팔이 없으면 그대로.
+
+    손목은 같은 손 개체 `<left|right>_hand`의 wrist 표본이다 (팔 개체 `<left|right>_arm`).
+    표본을 모두
+    뺀 팔꿈치 키는 결과에서 빠진다.
+    """
+    if not policy.enabled:
+        return samples
+    out = dict(samples)
+    for entity, part in [k for k in samples if k[0].endswith("_arm") and k[1] == "elbow"]:
+        wrist = samples.get((entity.removesuffix("_arm") + "_hand", "wrist"), [])
+        kept = _apply(
+            samples[(entity, part)], forearm_flags(wrist, samples[(entity, part)], policy), policy
+        )
+        if kept:
+            out[(entity, part)] = kept
+        else:
+            del out[(entity, part)]
+    return out

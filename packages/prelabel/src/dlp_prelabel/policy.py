@@ -10,7 +10,8 @@
   objects → `MediaPipeObjects`, open_vocab_objects → `OwlObjects`, depth → `lift3d.DepthLifter`,
   camera_pose → `campose`(바디캠 자세), world_frame → `worldframe`(월드 좌표 3D),
   contact → `runner._contacts`, wearer_matching → `runner._wearer`, timeline_predictors →
-  `runner.run_prelabel` (마스터 타임라인 구간을 내는 배포 모델).
+  `runner.run_prelabel` (마스터 타임라인 구간을 내는 배포 모델), wearer_suppression →
+  `MediaPipeObjects`·`OwlObjects`·`RtmPose`(착용자 몸 억제, ADR 0058), arm → `RtmPose`(착용자 팔).
 """
 
 from __future__ import annotations
@@ -102,6 +103,8 @@ class Constraints3DPolicy(Contract):
     """손 3D 물리 제약 (`depth.constraints`, ADR 0054, `dlp_prelabel.constraints3d`).
 
     reach_m: 카메라→손목 거리 타당 범위(m). max_speed_mps / max_accel_mps2: 손목 속도·가속도 상한.
+    forearm_m / forearm_tolerance: 착용자 아래팔(손목→팔꿈치) 길이 범위(m)와 세션 중앙값 허용 비율
+    (ADR 0058).
     max_dt_ms: 이보다 먼 이웃 표본으로는 속도·가속도를 세지 않는다. bone_tolerance: 손끝의 손목
     거리가
     세션 중앙값에서 이 비율 넘게 다르면 bone_length. min_bone_samples: 중앙값을 낼 최소 표본 수.
@@ -117,16 +120,22 @@ class Constraints3DPolicy(Contract):
     min_bone_samples: int = Field(ge=1)
     actions: dict[Constraint3DFlag, Literal["downweight", "drop"]]
     downweight: float = Field(gt=0, le=1)
+    # 착용자 아래팔 (ADR 0058): 손목(손 3D)→팔꿈치 거리 타당 범위(m)와 세션 중앙값에서 벗어남
+    # 허용 비율.
+    # 어기면 팔꿈치 표본에 forearm_length (중앙값은 min_bone_samples개 이상일 때만)
+    forearm_m: tuple[float, float]
+    forearm_tolerance: float = Field(gt=0)
 
     @model_validator(mode="after")
     def _complete(self) -> Constraints3DPolicy:
-        """모든 표시에 동작이 있고 reach_m이 0 < 하한 < 상한인지 검사한다."""
+        """모든 표시에 동작이 있고 reach_m·forearm_m이 0 < 하한 < 상한인지 검사한다."""
         missing = sorted(set(Constraint3DFlag) - set(self.actions))
         if missing:
             raise ValueError(f"depth.constraints.actions에 없는 표시: {missing}")
-        low, high = self.reach_m
-        if not 0 < low < high:
-            raise ValueError("depth.constraints.reach_m: 0 < 하한 < 상한이어야 합니다")
+        for name in ("reach_m", "forearm_m"):
+            low, high = getattr(self, name)
+            if not 0 < low < high:
+                raise ValueError(f"depth.constraints.{name}: 0 < 하한 < 상한이어야 합니다")
         return self
 
 
@@ -336,6 +345,8 @@ class DepthPolicy(Contract):
     min_depth_m: float = Field(gt=0)
     max_depth_m: float = Field(gt=0)
     hand_points: tuple[int, ...] = Field(min_length=1)
+    # 3D로 올릴 착용자 팔(arm3) 점 이름 (`ARM3_JOINTS`, 손목은 손 3D가 맡아 넣지 않는다, ADR 0058)
+    arm_points: tuple[Literal["elbow", "shoulder"], ...] = ()
     fingertip_fallback: Literal["drop", "point_depth"]
     max_intrinsics_aspect_mismatch: float = Field(ge=0)
     hand_fit: HandFitPolicy
@@ -571,6 +582,85 @@ class WearerPolicy(Contract):
     min_overlap_samples: int = Field(ge=2)
 
 
+class WearerSuppressionPolicy(Contract):
+    """착용자 자신의 몸 억제 (`wearer_suppression` 절, ADR 0058, `dlp_prelabel.wearer_suppress`).
+
+    바디캠 스트림에서 착용자 자신의 팔·몸통을 잡은 박스·자세를 라벨로 만들지 않는다. 판정 규칙은
+    `dlp_schema.wearer_body`. 3인칭 스트림·손 증거가 없는 스트림에는 적용하지 않는다. 프라이버시
+    탐지(블러)는 이 절과 무관하다 (블러를 약하게 하지 않는다).
+
+    enabled: 끄면 억제하지 않는다 (버전 해시는 그대로 들어간다).
+    stages: 억제를 적용할 어댑터 이름 (objects·tools·body). 이 어댑터 버전에 이 절의 해시가
+        들어간다.
+    time_tolerance_ms: 손 키프레임을 같은 시각으로 볼 허용 오차. margin: 박스를 넓히는 비율.
+    bottom_band: 박스·자세 아래 변이 이 화면 높이 비율의 아래 띠 안이어야 착용자로 본다.
+    track_share: 박스 트랙 키프레임 중 착용자 프레임 비율이 이 이상이면 트랙째 라벨로 만들지 않는다.
+    person_classes: 사람 클래스 (온톨로지 객체 ID). 이 클래스 박스는 착용자 프레임 규칙만 본다.
+    other_min_area: 사람 아닌 클래스(도구 등) 박스는 착용자 프레임 규칙에 더해 박스 면적이 화면의 이
+        비율 이상이어야 착용자 프레임이다 (손에 든 도구를 지우지 않게). None이면 사람 클래스만 본다.
+    wrist_match_palms: 전신 자세 손목이 착용자 손목에서 손 크기(손목→중지 뿌리 px) x 이 값 안이면
+        착용자 자세다.
+    """
+
+    enabled: bool
+    stages: tuple[Literal["objects", "tools", "body"], ...]
+    time_tolerance_ms: int = Field(ge=0)
+    margin: float = Field(ge=0)
+    bottom_band: float = Field(gt=0, le=1)
+    track_share: float = Field(gt=0, le=1)
+    person_classes: tuple[OntologyId, ...]
+    other_min_area: float | None = Field(default=None, gt=0, le=1)
+    wrist_match_palms: float = Field(gt=0)
+
+
+class ArmBoxPolicy(Contract):
+    """팔 단계의 합성 착용자 박스 (`arm.box`). 보이는 손 박스를 옆으로 side_palms, 위로 up_palms 손
+    크기만큼 넓히고 아래는 화면 끝까지 늘린다 (아래팔은 화면 아래에서 들어온다)."""
+
+    side_palms: float = Field(ge=0)
+    up_palms: float = Field(ge=0)
+
+
+class ArmPolicy(Contract):
+    """착용자 팔 골격 arm3 (`arm` 절, ADR 0058, `dlp_prelabel.arm`). 전신 어댑터(`RtmPose`)가 돈다.
+
+    enabled: 끄면 팔 트랙을 내지 않는다. frame_stride_ms: 팔 키프레임 간격 (손 키프레임 중 고른다).
+    wrist_match_palms: 자세의 팔 사슬(손목·팔꿈치·어깨) 손목이 hand21 손목에서 손 크기 x 이 값
+        안이어야
+        그 손의 팔로 쓴다. 손목은 언제나 hand21 손목이고, 일치 정도를 손목 점 신뢰도에 싣는다.
+    elbow_min_score / shoulder_min_score: 그 점 모델 점수 하한. edge_margin_px: 화면 가장자리에서 이
+        안쪽이어야 보임 (밖이거나 가장자리면 화면 밖 = 보이지 않음 0, 지어내지 않는다).
+    forearm_palms: 화면의 손목→팔꿈치 거리 / 손 크기 타당 범위. max_hand_cos: 손목→팔꿈치와
+        손목→중지
+        뿌리 방향의 코사인 상한 (팔꿈치가 손가락 쪽에 있으면 틀린 것).
+    cross_margin_palms: 두 팔꿈치가 모두 보일 때 왼팔 팔꿈치가 오른팔 팔꿈치보다 손 크기 x 이 값
+        넘게
+        오른쪽이면 좌우 충돌로 보고 둘 다 보이지 않음으로 둔다.
+    emit_shoulder: 어깨를 낼지 (가슴 장착은 어깨가 거의 화면 밖이라 기본 끔: 늘 0).
+    box: 합성 착용자 박스 (`ArmBoxPolicy`).
+    """
+
+    enabled: bool
+    frame_stride_ms: int = Field(ge=0)
+    wrist_match_palms: float = Field(gt=0)
+    elbow_min_score: float = Field(ge=0, le=1)
+    shoulder_min_score: float = Field(ge=0, le=1)
+    edge_margin_px: float = Field(ge=0)
+    forearm_palms: tuple[float, float]
+    max_hand_cos: float = Field(ge=-1, le=1)
+    cross_margin_palms: float = Field(ge=0)
+    emit_shoulder: bool
+    box: ArmBoxPolicy
+
+    @model_validator(mode="after")
+    def _range(self) -> ArmPolicy:
+        """forearm_palms가 0 < 하한 < 상한인지 검사한다."""
+        low, high = self.forearm_palms
+        if not 0 < low < high:
+            raise ValueError("arm.forearm_palms: 0 < 하한 < 상한이어야 합니다")
+        return self
+
+
 class PrelabelPolicy(Contract):
     """`config/policies/prelabel.yaml` 전체.
 
@@ -590,6 +680,8 @@ class PrelabelPolicy(Contract):
     camera_pose: CameraPosePolicy
     world_frame: WorldFramePolicy
     scene: ScenePolicy  # 장면 분류 → 도구 질의 목록 (ADR 0055)
+    wearer_suppression: WearerSuppressionPolicy  # 착용자 자신의 몸 억제 (ADR 0058)
+    arm: ArmPolicy  # 착용자 팔 골격 arm3 (ADR 0058)
     # 마스터 타임라인 구간(stream_id 없음)을 내는 예측기 이름. 기준 스트림에서 세션당 한 번만 돌린다
     timeline_predictors: tuple[str, ...] = ()
 

@@ -239,6 +239,11 @@ def _print_summary(s: PrelabelSummary) -> None:
             f"3D 궤적: 2D 트랙 검수 물려받음 {s.trajectories_inherited}, "
             f"출처 2D가 바뀌었거나 새 계산이 대신해 지움 {s.trajectories_retracted}"
         )
+    # 착용자 자신의 몸 억제와 착용자 팔 (ADR 0058). 억제한 것은 라벨이 아니라 여기에만 남는다
+    for key, report in s.wearer_suppressed.items():
+        print(f"[착용자 억제] {key}: {report.text()}")
+    for key, arm in s.arms.items():
+        print(f"[착용자 팔] {key}: {arm.text()}")
     if s.person_contacts:
         # 사람 박스 접촉은 부위(body_part)를 몰라 손 상태 라벨을 만들지 않았다 (F-PAR-03)
         print(

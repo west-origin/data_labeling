@@ -27,7 +27,7 @@ source_3d=mono_depth)이고, 관계 단계(`dlp_relations`)의 도구-표면 접
 from __future__ import annotations
 
 import math
-from collections.abc import Container, Iterable, Iterator
+from collections.abc import Container, Iterable, Iterator, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
@@ -38,11 +38,12 @@ from numpy.typing import NDArray
 from dlp_models.depth import Intrinsics, MetricDepth, sample_depth
 from dlp_models.registry import resolve
 from dlp_prelabel.common import Image, iter_frames, model_label
-from dlp_prelabel.constraints3d import constrain_hands
+from dlp_prelabel.constraints3d import constrain_arms, constrain_hands
 from dlp_prelabel.handfit import HandFit, fit_confidence, fit_hand, point_confidence
 from dlp_prelabel.policy import HAND21_JOINTS, DepthPolicy, PrelabelPolicy
 from dlp_schema.episode import version_tag
 from dlp_schema.labels import (
+    ARM3_JOINTS,
     BoxTrackPayload,
     CoordinateFrame,
     IntrinsicsSource,
@@ -115,10 +116,11 @@ def intrinsics_for(
 def lift_key(payload: LabelPayload) -> tuple[str, str] | None:
     """3D로 올리는 트랙이면 (entity_id, 트랙 종류), 아니면 None.
 
-    hand21 키포인트 트랙(관절마다 part=관절 이름)과 박스 트랙(중심, part=None)만 올린다. 같은 키의
-    트랙은 `lift_tracks`에 하나만 넘긴다 (둘이면 같은 (개체, 부위)에 표본이 두 번 들어간다).
+    hand21 키포인트 트랙(관절마다 part=관절 이름), arm3 착용자 팔 트랙(depth.arm_points마다,
+    ADR 0058)과 박스 트랙(중심, part=None)만 올린다. 같은 키의 트랙은 `lift_tracks`에 하나만
+    넘긴다 (둘이면 같은 (개체, 부위)에 표본이 두 번 들어간다).
     """
-    if isinstance(payload, KeypointTrackPayload) and payload.skeleton == "hand21":
+    if isinstance(payload, KeypointTrackPayload) and payload.skeleton in ("hand21", "arm3"):
         return (payload.entity_id, payload.kind)
     if isinstance(payload, BoxTrackPayload):
         return (payload.entity_id, payload.kind)
@@ -129,14 +131,30 @@ def lift_key(payload: LabelPayload) -> tuple[str, str] | None:
 _Point = tuple[str, str | None, float, float]
 
 
+def _arm_points(
+    p: KeypointTrackPayload, names: Sequence[str], points: dict[int, list[_Point]]
+) -> None:
+    """arm3 트랙의 보이는 점(names) → 깊이로 올릴 점 (보간 키프레임은 관측이 아니라 뺀다)."""
+    index = [(name, ARM3_JOINTS.index(name)) for name in names]
+    for f in p.keyframes:
+        if f.interpolated:
+            continue
+        for name, i in index:
+            q = f.points[i]
+            if q.visibility > 0:
+                points.setdefault(f.t_ms, []).append((p.entity_id, name, q.x, q.y))
+
+
 def _points_by_time(
     tracks: list[LabelRecord],
+    arm_points: Sequence[str] = (),
 ) -> tuple[dict[int, list[_Point]], dict[int, list[tuple[str, KeypointFrame]]]]:
-    """스트림 PTS ms → 그 시각에 올릴 박스 중심 점과 손 키프레임 (`lift_tracks` 1단계).
+    """스트림 PTS ms → 그 시각에 올릴 박스 중심·팔 점과 손 키프레임 (`lift_tracks` 1단계).
 
     Returns:
-        (박스 중심 점, (개체, 손 키프레임)). 손 관절은 시각마다 키프레임째로 넘겨 `_lift_hand`가
-        맞춤(world 있음) 또는 관절별 깊이로 올린다.
+        (박스 중심·팔 점, (개체, 손 키프레임)). 손 관절은 시각마다 키프레임째로 넘겨 `_lift_hand`가
+        맞춤(world 있음) 또는 관절별 깊이로 올린다. 팔 점(arm_points, 예: elbow)은 그 픽셀 깊이로
+        올린다 (ADR 0058).
 
     Raises:
         ValueError: 같은 (개체, 트랙 종류) 트랙이 둘 이상일 때 (F-PAR-01). 두 트랙의 표본을 한
@@ -156,7 +174,9 @@ def _points_by_time(
                 "개체마다 트랙 하나만 넘깁니다 (`runner.pick_lift_tracks`)"
             )
         seen[key] = label.label_id
-        if isinstance(p, KeypointTrackPayload):
+        if isinstance(p, KeypointTrackPayload) and p.skeleton == "arm3":
+            _arm_points(p, arm_points, points)
+        elif isinstance(p, KeypointTrackPayload):
             # 보간해 채운 키프레임은 관측이 아니라 3D로 올리지 않는다 (ADR 0054)
             for f in p.keyframes:
                 if not f.interpolated:
@@ -293,7 +313,8 @@ def hand_frames_by_time(
 ) -> dict[int, list[tuple[str, KeypointFrame]]]:
     """스트림 PTS ms → 그 시각 (개체, 손 키프레임).
 
-    hand21 트랙만 보며 `_points_by_time`과 같은 검사(같은 개체 트랙 둘이면 ValueError)를 한다.
+    hand21 트랙만 보며 `_points_by_time`과 같은 검사(같은 개체 트랙 둘이면 ValueError)를 한다
+    (arm3 트랙은 손 키프레임이 아니라 빠진다).
     """
     return _points_by_time(tracks)[1]
 
@@ -346,8 +367,8 @@ def lift_tracks_with_source(
     calib가 있어도 첫 처리 프레임과 화면비가 맞지 않으면 화각 근사를 쓰고 거짓이다 (F-PAR-44).
     처리한 프레임이 없으면 calib 유무를 그대로 돌려준다.
     """
-    # 1단계: 스트림 PTS ms → 그 시각에 올릴 박스 중심과 손 키프레임
-    points, hands = _points_by_time(tracks)
+    # 1단계: 스트림 PTS ms → 그 시각에 올릴 박스 중심·팔 점과 손 키프레임
+    points, hands = _points_by_time(tracks, policy.arm_points)
     calibrated: bool | None = None
     box_conf = point_confidence(calibrated=calib is not None, policy=policy)
     out: dict[tuple[str, str | None], list[Trajectory3DSample]] = {}
@@ -368,8 +389,9 @@ def lift_tracks_with_source(
         for entity, frame in hands.get(t, []):
             for name, xyz, method, conf in _lift_hand(frame, dmap, intr, policy, calibrated):
                 out.setdefault((entity, name), []).append(_sample(t, xyz, method, conf))
-    # 손 3D 물리 제약: 어긴 표본에 표시를 남기고 정책대로 신뢰도를 낮추거나 뺀다 (ADR 0054)
-    out = constrain_hands(out, policy.constraints)
+    # 손 3D 물리 제약: 어긴 표본에 표시를 남기고 정책대로 신뢰도를 낮추거나 뺀다 (ADR 0054).
+    # 팔꿈치는 같은 손 손목 3D와의 거리(아래팔 길이)를 본다 (ADR 0058, 손 제약을 적용한 손목 기준)
+    out = constrain_arms(constrain_hands(out, policy.constraints), policy.constraints)
     return out, calib is not None if calibrated is None else calibrated
 
 
@@ -418,7 +440,8 @@ class DepthLifter:
     `derived_from`, ADR 0048 — 3D가 2D 손 트랙 검수를 물려받는 근거. hf4: 손 모델 자세 회전
     다듬기·해상도와 무관한 상대 재투영 문턱, 맞춤 없는 손가락 끝 빼기, 화면비가 다른 캘리브레이션
     거부, F-PAR-40·42·43·44. hf5: 손 3D 물리 제약 표시·신뢰도 낮추기·튄 표본 빼기, 보간 키프레임
-    제외, ADR 0054. fe1: 캘리브레이션 없는 세션의 손 크기 초점 거리 추정, ADR 0056. 러너가 입력
+    제외, ADR 0054. fe1: 캘리브레이션 없는 세션의 손 크기 초점 거리 추정, ADR 0056. ar1: 착용자 팔
+    arm3 팔꿈치 3D(`<손>_arm`, 픽셀 깊이)와 아래팔 길이 제약, ADR 0058. 러너가 입력
     해시와 손 크기 사전값 출처 `+hp<w|p>`를 더 붙인다).
     weights_version: 깊이 가중치 버전만 (자세 단계 버전의 깊이 입력, depth 절의 손 맞춤 정책이
     바뀌어도 자세를 다시 추정하지 않게, F-PAR-53).
@@ -437,7 +460,7 @@ class DepthLifter:
         """
         self.path, version = resolve(root, policy.models.depth)
         self.weights_version = version
-        self.version = f"depth3d-{version}+hf5+fe1+p{policy.digest('depth')}"
+        self.version = f"depth3d-{version}+hf5+fe1+ar1+p{policy.digest('depth')}"
         self.policy, self.now = policy, now
         self.model: DepthModel | None = None
         # 마지막 run의 손 크기 초점 거리 추정 (없으면 None, 러너 요약용)

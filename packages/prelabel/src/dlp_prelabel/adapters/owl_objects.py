@@ -21,18 +21,20 @@ from dlp_prelabel.common import iter_frames, track_boxes
 from dlp_prelabel.policy import PrelabelPolicy
 from dlp_prelabel.scene import SceneResult, queries_for
 from dlp_prelabel.temporal import filter_tracks
+from dlp_prelabel.wearer_suppress import WearerAware, suppress_box_tracks, wearer_tag
 from dlp_schema.labels import LabelRecord
 from dlp_schema.predictor import Clip
 
 
-class OwlObjects:
+class OwlObjects(WearerAware):
     """OWLv2 도구 박스 어댑터 (name="tools").
 
     version: `owlv2-<가중치 버전>+t<토크나이저 버전>+p<open_vocab_objects·scene 절 해시>+sc<장면>`
     (장면은 `set_scene`, 기본은 정책 scene.default, ADR 0055). 장면의 질의만 묻는다
     (`scene.queries_for`). 라벨 ID는
     `<세션>-<스트림>-tools-<version_tag>-<클래스>-<순번>`, entity_id는 `ov_<클래스>_<순번>` (COCO
-    탐지 트랙과 겹치지 않게 `ov_` 접두사).
+    탐지 트랙과 겹치지 않게 `ov_` 접두사). 버전 끝에 `+w<wearer_suppression 절 해시>`: 바디캠에서
+    착용자 자신의 팔·몸통을 덮은 큰 박스 트랙은 라벨로 만들지 않는다 (ADR 0058).
     """
 
     name = "tools"
@@ -49,6 +51,7 @@ class OwlObjects:
         self.tokenizer_path, tokenizer_version = resolve(root, policy.models.open_vocab_tokenizer)
         self.base_version = (
             f"owlv2-{version}+t{tokenizer_version}+p{policy.digest('open_vocab_objects', 'scene')}"
+            f"{wearer_tag(policy, self.name)}"
         )
         self.policy, self.ontology_version, self.now = policy, ontology_version, now
         self.set_scene(SceneResult(policy.scene.default, 1.0, "fixed"))
@@ -74,7 +77,9 @@ class OwlObjects:
             tuple[int, list[tuple[str, tuple[float, float, float, float], float]]]
         ] = []
         last: int | None = None
+        size = (0, 0)
         for t, img in iter_frames(clip.video):
+            size = (int(img.shape[1]), int(img.shape[0]))
             # 마지막 추론 프레임에서 frame_stride_ms가 지나기 전 프레임은 건너뛴다 (디코드는 한다)
             if last is not None and t - last < op.frame_stride_ms:
                 continue
@@ -86,8 +91,15 @@ class OwlObjects:
             )
         # 시작 문턱·최소 길이로 짧은 오탐 트랙을 거른다 (ADR 0054)
         tracks = track_boxes(detections, iou_match=op.track_iou, max_gap_ms=op.max_gap_ms)
-        return boxes_to_labels(
+        # 착용자 자신의 팔·몸통을 덮은 큰 박스 트랙은 라벨로 만들지 않는다 (ADR 0058)
+        kept, self.last_wearer = suppress_box_tracks(
             filter_tracks(tracks, op.track_filter),
+            self.wearer,
+            self.policy.wearer_suppression,
+            size,
+        )
+        return boxes_to_labels(
+            kept,
             clip,
             self.version,
             self.ontology_version,
