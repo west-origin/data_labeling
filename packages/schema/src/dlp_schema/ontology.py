@@ -300,6 +300,8 @@ class PrivacyTarget(Term):
 #   domains·tasks·verbs·gap_types·contact_target_kinds·grasp_types·hand_roles·body_parts·postures·
 #   physical_types·state_attributes·objects·events·privacy_targets: 범주별 사전 (ID → 항목).
 #   surface_parts·hand_joints: 부분 ID 사전 (3차 검수에서 추가, 기본값 빈 사전).
+#   arm_joints: 착용자 팔 3D 궤적(`<left|right>_arm`)의 부분 ID (팔꿈치·어깨, ADR 0058, 기본값
+#     빈 사전). 손목은 손 3D(`<left|right>_hand`의 wrist)를 쓴다.
 #   materials·tactile_properties: 객체 물리 사전값(`ObjectClass.physical_priors`)의 재질·촉감 어휘
 #     (ADR 0049, 기본값 빈 사전). 라벨에는 쓰지 않는다.
 class Ontology(Contract):
@@ -325,6 +327,9 @@ class Ontology(Contract):
     )
     hand_joints: dict[OntologyId, Term] = Field(
         default_factory=dict, description="손 3D 궤적의 부분 ID (hand21 골격의 이름 붙은 점)"
+    )
+    arm_joints: dict[OntologyId, Term] = Field(
+        default_factory=dict, description="착용자 팔 3D 궤적의 부분 ID (arm3 골격, ADR 0058)"
     )
     materials: dict[OntologyId, Term] = Field(
         default_factory=dict, description="객체 물리 사전값의 재질 ID (ADR 0049)"
@@ -472,19 +477,24 @@ class Ontology(Contract):
         return found.ko if language == "ko" else found.en
 
     def known_parts(self) -> frozenset[str]:
-        """부분 ID 전체: 모든 도구의 작용부·파지부, 표면 부분, 손 관절.
+        """부분 ID 전체: 모든 도구의 작용부·파지부, 표면 부분, 손 관절, 팔 관절.
 
         3D 궤적과 관계의 part는 객체 클래스를 함께 싣지 않으므로 이 합집합으로 검사한다.
         """
         tool = {p for oid in self.objects for p in self.tool_parts(oid)}
-        return frozenset(tool) | frozenset(self.surface_parts) | frozenset(self.hand_joints)
+        return (
+            frozenset(tool)
+            | frozenset(self.surface_parts)
+            | frozenset(self.hand_joints)
+            | frozenset(self.arm_joints)
+        )
 
 
 # 이름(ko·en)이 있는 사전 범주 = `Ontology`의 사전 필드 (하위 단계는 `display_names`가 따로 넣는다)
 TERM_CATEGORIES = (
     "domains", "tasks", "verbs", "gap_types", "contact_target_kinds", "grasp_types", "hand_roles",
     "body_parts", "postures", "physical_types", "state_attributes", "objects", "events",
-    "privacy_targets", "surface_parts", "hand_joints",
+    "privacy_targets", "surface_parts", "hand_joints", "arm_joints",
 )  # fmt: skip
 
 # 물리 사전값 어휘 범주 (ADR 0049). `display_names`·번역 용어집에는 넣지 않는다 (`physics_names`).

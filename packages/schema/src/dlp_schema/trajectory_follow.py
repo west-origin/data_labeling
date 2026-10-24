@@ -9,7 +9,8 @@ ADR 0043 3절)와 같은 틀이다.
 
 출처 (`trajectory_basis`, 모두 지금 운영 현재 라벨이어야 한다)
     - 카메라 좌표 손 궤적: 모델 출처, frame=camera, part 있음, `derived_from` = (2D 트랙 하나).
-      그 2D 트랙이 hand21 키포인트 트랙이고 개체(entity_id)·스트림이 같아야 한다. 라벨은 덮어쓰지
+      그 2D 트랙이 hand21 키포인트 트랙(착용자 팔 3D `<손>_arm`이면 arm3 트랙, ADR 0058)이고
+      개체(entity_id)·스트림이 같아야 한다. 라벨은 덮어쓰지
       않으므로(고치면 새 ID) derived_from의 ID가 지금 현재 트랙이면 3D는 정확히 그 2D 내용으로
       계산된 것이다.
     - 카메라 좌표 박스 중심 궤적 (ADR 0050): 모델 출처, frame=camera, part 없음, `derived_from` =
@@ -52,7 +53,8 @@ ADR 0043 3절)와 같은 틀이다.
 
 결과는 결정적이고 멱등이다 (적용한 뒤 다시 계산하면 approve·retract가 빈다).
 
-공개 이름: `TRAJECTORY_FOLLOW_VERSION`, `CAMERA_ENTITY`, `CAMERA_POSE_REVIEW`, `TrajectoryBasis`,
+공개 이름: `TRAJECTORY_FOLLOW_VERSION`, `CAMERA_ENTITY`, `CAMERA_POSE_REVIEW`, `LIFTED_SKELETONS`,
+`TrajectoryBasis`,
 `InheritedTrajectoryReview`, `TrajectoryFollow`, `is_camera_pose`, `trajectory_basis`,
 `plan_trajectory_follow`, `active_trajectory_inheritance`, `inheritance_only_trajectory`,
 `lapsed_trajectories`, `review_basis`.
@@ -139,6 +141,10 @@ class TrajectoryFollow:
     retract: list[LabelRecord] = field(default_factory=list[LabelRecord])
 
 
+# 3D 단계가 관절마다 올리는 키포인트 골격 (손 관절 3D의 출처 hand21, 착용자 팔 3D의 출처 arm3)
+LIFTED_SKELETONS = frozenset({"hand21", "arm3"})
+
+
 def is_camera_pose(x: LabelRecord) -> bool:
     """모델 출처 카메라 자세 궤적인가 (entity camera, 자동 추정, 사람 검수 대상 아님, ADR 0050)."""
     p = x.payload
@@ -154,7 +160,8 @@ def _source_track_of(
 ) -> LabelRecord | None:
     """카메라 좌표 궤적 x의 출처 2D 트랙 (현재, 같은 개체·스트림). 아니면 None.
 
-    부위가 있으면(손 관절) hand21 키포인트 트랙, 없으면(박스 중심, ADR 0050) 박스 트랙이어야 한다.
+    부위가 있으면(손 관절·착용자 팔 관절) hand21·arm3 키포인트 트랙(ADR 0058), 없으면(박스 중심,
+    ADR 0050) 박스 트랙이어야 한다.
     """
     if p.frame is not CoordinateFrame.CAMERA or p.derived_from is None or len(p.derived_from) != 1:
         return None
@@ -167,7 +174,7 @@ def _source_track_of(
     else:
         ok = (
             isinstance(gp, KeypointTrackPayload)
-            and gp.skeleton == "hand21"
+            and gp.skeleton in LIFTED_SKELETONS
             and gp.entity_id == p.entity_id
         )
     return g if ok else None

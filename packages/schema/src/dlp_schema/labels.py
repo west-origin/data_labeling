@@ -21,7 +21,7 @@
     - 키프레임: `BoxKeyframe`, `Rle`, `MaskKeyframe`, `Keypoint`, `KeypointFrame`, `WorldPoint`,
       `Trajectory3DSample`. `without_world`(손 중심 3D 점을 뺀 사본, ADR 0044).
     - 페이로드: `*Payload` 14종과 판별 공용체 `LabelPayload`.
-    - `SKELETON_SIZES`, `SPATIAL_KINDS`, `LabelRecord`.
+    - `SKELETON_SIZES`, `ARM3_JOINTS`, `HANDED_SKELETONS`, `SPATIAL_KINDS`, `LabelRecord`.
 
 주의
     - 클래스 docstring과 Field description은 `schemas/label_record.schema.json` 등에 들어간다.
@@ -224,8 +224,14 @@ class KeypointFrame(Contract):
 
 
 # 골격 이름 → 키포인트 수.
-# hand21=MediaPipe 손, coco17=COCO 전신, wholebody133=COCO-WholeBody(RTMPose).
-SKELETON_SIZES: dict[str, int] = {"hand21": 21, "coco17": 17, "wholebody133": 133}
+# hand21=MediaPipe 손, coco17=COCO 전신, wholebody133=COCO-WholeBody(RTMPose),
+# arm3=착용자 한쪽 팔 (손목·팔꿈치·어깨, `ARM3_JOINTS`, ADR 0058).
+SKELETON_SIZES: dict[str, int] = {"hand21": 21, "coco17": 17, "wholebody133": 133, "arm3": 3}
+# arm3 골격의 점 이름 (순서 = points 순서). 손목은 같은 손 hand21 트랙의 손목(0번)을 그대로 쓴다
+# (손목 기준은 손 모델, ADR 0058). 보이지 않는 점은 visibility 0이고 좌표는 의미가 없다(손목 자리).
+ARM3_JOINTS = ("wrist", "elbow", "shoulder")
+# hand(left/right)가 필수인 골격: 손과 착용자 팔. 팔 트랙은 같은 손 hand21 트랙과 손으로 이어진다
+HANDED_SKELETONS = frozenset({"hand21", "arm3"})
 
 
 # 박스 트랙 (객체·도구 추적). entity_id: 개체 ID. class_id: 온톨로지 객체 클래스.
@@ -247,12 +253,13 @@ class MaskTrackPayload(Contract):
     keyframes: tuple[MaskKeyframe, ...] = Field(min_length=1)
 
 
-# 키포인트 트랙 (손·전신 포즈). skeleton: 골격. hand: hand21이면 필수, 전신 골격이면 보통 None
-# (전신에 hand가 있어도 검증기는 거부하지 않는다).
+# 키포인트 트랙 (손·전신 포즈·착용자 팔). skeleton: 골격. hand: hand21·arm3이면 필수
+# (`HANDED_SKELETONS`), 전신 골격이면 보통 None (전신에 hand가 있어도 검증기는 거부하지 않는다).
+# arm3(ADR 0058): 착용자 한쪽 팔. entity_id는 `<left|right>_arm`, hand는 같은 손 hand21 트랙과 같다.
 class KeypointTrackPayload(Contract):
     kind: Literal["keypoint_track"] = "keypoint_track"
     entity_id: Identifier
-    skeleton: Literal["hand21", "coco17", "wholebody133"]
+    skeleton: Literal["hand21", "coco17", "wholebody133", "arm3"]
     hand: Hand | None = None
     keyframes: tuple[KeypointFrame, ...] = Field(min_length=1)
 
@@ -262,8 +269,8 @@ class KeypointTrackPayload(Contract):
         n = SKELETON_SIZES[self.skeleton]
         if any(len(f.points) != n for f in self.keyframes):
             raise ValueError(f"{self.skeleton} 골격은 프레임마다 키포인트 {n}개가 필요합니다")
-        if self.skeleton == "hand21" and self.hand is None:
-            raise ValueError("손 골격에는 hand(left/right)가 필요합니다")
+        if self.skeleton in HANDED_SKELETONS and self.hand is None:
+            raise ValueError(f"{self.skeleton} 골격에는 hand(left/right)가 필요합니다")
         if self.skeleton != "hand21" and any(f.world is not None for f in self.keyframes):
             raise ValueError("world 점은 hand21 골격에만 둡니다")
         return self
@@ -297,6 +304,8 @@ class Constraint3DFlag(StrEnum):
     SPEED = "speed"  # 한 표본만 튄 속도
     ACCEL = "accel"  # 가속도 상한 초과
     BONE_LENGTH = "bone_length"  # 손목→손끝 거리가 세션 중앙값과 다름
+    # 팔꿈치 표본: 손목(손 3D)→팔꿈치 거리가 아래팔 길이 범위 밖이거나 세션 중앙값과 다름 (ADR 0058)
+    FOREARM_LENGTH = "forearm_length"
 
 
 # 3D 궤적 표본. t_ms: 그 영상 스트림 PTS ms. x, y, z: 위치 (미터, frame 좌표계).

@@ -149,6 +149,29 @@ def test_camera_and_world_3d_inherit_the_approved_hand_track() -> None:
     assert rec.rule_version == TRAJECTORY_FOLLOW_VERSION and rec.trajectory_label_id == "w1"
 
 
+def test_wearer_arm_3d_inherits_the_arm_track_like_hand_3d() -> None:
+    """ADR 0058: 착용자 팔꿈치 3D(`left_arm`, elbow, derived_from = arm3 트랙)는 그 arm3 트랙 검수를
+    손 3D처럼 물려받는다. 개체가 다른 2D(손 트랙)를 가리키면 출처가 아니다."""
+    arm = {"kind": "keypoint_track", "entity_id": "left_arm", "skeleton": "arm3", "hand": "left",
+           "keyframes": [{"t_ms": t, "points": [{"x": 1.0, "y": 2.0, "visibility": 2}] * 3}
+                         for t in (0, 1_000)]}  # fmt: skip
+    a1 = _reviewed(make_label(arm, label_id="a1", **MODEL), VerificationState.HUMAN_APPROVED)
+    e1 = make_label(
+        trajectory_payload("left_arm", "elbow", derived_from=("a1",)), label_id="e1", **MODEL
+    )
+    (r,) = plan_trajectory_follow([a1, e1], []).approve
+    assert (r.label_id, r.source_label_id, r.state) == (
+        "e1",
+        "a1",
+        VerificationState.HUMAN_APPROVED,
+    )
+    g1 = _reviewed(_track(), VerificationState.HUMAN_APPROVED)
+    wrong = make_label(
+        trajectory_payload("left_arm", "elbow", derived_from=("g1",)), label_id="e2", **MODEL
+    )
+    assert plan_trajectory_follow([g1, wrong], []).approve == []
+
+
 def test_sample_verified_hand_track_gives_sample_verified_and_time_never_precedes_3d() -> None:
     """표본 검증된 2D → sample_verified. 3D가 2D 검수 뒤에 생겼으면 검수 시각 = 3D 생성 시각."""
     g1 = _reviewed(_track(), VerificationState.SAMPLE_VERIFIED)

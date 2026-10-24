@@ -233,6 +233,43 @@ def test_cvat_new_hand_skeleton_takes_hand_from_label() -> None:
         assert isinstance(d.payload, KeypointTrackPayload) and d.payload.skeleton == "hand21"
 
 
+def test_cvat_wearer_arm_round_trips_and_needs_a_hand() -> None:
+    """ADR 0058: 착용자 팔 arm3(손목·팔꿈치·어깨)는 손별 라벨 `kp_arm3_<손>`으로 오가고 무손실
+    왕복한다 (보이지 않는 점의 가시성 0 포함). 손 없는 이름으로 그린 팔은 CvatFormatError다.
+
+    정답 근거: 직접 만든 팔 트랙 (3 키프레임, 팔꿈치는 둘째 키프레임에서 보이지 않음).
+    """
+    times = [0, 33, 67]
+    frames = [
+        {"t_ms": t, "points": [
+            {"x": 100.0 + t, "y": 300.0, "visibility": 2},
+            {"x": 80.0 + t, "y": 420.0, "visibility": 0 if t == 33 else 2},
+            {"x": 100.0 + t, "y": 300.0, "visibility": 0},
+        ]}
+        for t in times
+    ]  # fmt: skip
+    arm = make_label(
+        {"kind": "keypoint_track", "entity_id": "left_arm", "skeleton": "arm3", "hand": "left",
+         "keyframes": frames},
+        "arm-1", 0, 67, stream_id="bodycam",
+    )  # fmt: skip
+    assert {"kp_arm3_left", "kp_arm3_right"} <= set(KEYPOINT_LABELS)
+    schema = fake_schema(list(KEYPOINT_LABELS))
+    [track] = to_cvat_tracks([arm], times, schema)
+    assert track["label_id"] == schema.label_ids["kp_arm3_left"]
+    [same] = from_cvat_tracks([track], times, schema, "bodycam", new_box_kind="box_track")
+    assert same.payload == quantize(arm).payload and same.origin_label_id == arm.label_id
+    with pytest.raises(ValueError, match="arm3"):
+        KeypointTrackPayload.model_validate({**arm.payload.model_dump(), "hand": None})
+    legacy = fake_schema(["kp_arm3", "kp_coco17"])
+    shape = _shape(legacy.label_ids["kp_arm3"], 1, "points", points=[1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+    with pytest.raises(CvatFormatError, match="kp_arm3_left"):
+        from_cvat_tracks(
+            annotation_tracks({"shapes": [shape]}, len(times), legacy), times, legacy, "bodycam",
+            new_box_kind="box_track",
+        )  # fmt: skip
+
+
 def test_cvat_legacy_hand_label_without_hand_is_a_format_error() -> None:
     """F-REV-04: 손별 라벨 이전에 만든 프로젝트(`kp_hand21` 하나)와 호환한다.
 

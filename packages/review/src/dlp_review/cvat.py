@@ -23,6 +23,9 @@ CVAT는 프레임 번호로 주석을 저장하므로 PTS 인덱스의 프레임
 손별 라벨 이전에 만든 프로젝트는 `kp_hand21` 하나뿐이라 작업을 만들 때 빠진 라벨을 덧붙이고
 (`tasks._cvat_project`), 덧붙이기 전 작업의 `kp_hand21` 트랙은 dlp_meta의 손으로 그대로 왕복한다.
 `kp_hand21`로 새로 그려 손을 알 수 없는 골격은 CvatFormatError다 (F-REV-04).
+착용자 팔 골격(arm3, 손목·팔꿈치·어깨, ADR 0058)도 손별 라벨(`kp_arm3_left`·`kp_arm3_right`)로
+그린다. CVAT 점(points) 모양이라 점 세 개를 고치고, 보이지 않는 점은 dlp_visibility 0이다 (좌표는
+손목 자리). 손목은 같은 손 hand21 손목이 기준이다.
 
 좌표: 라벨은 원본(라벨이 가리키는 영상) 화소 좌표다. 검수 화면 영상이 다른 해상도(예: 프라이버시
 검수의 480p 프록시)이면 scale = (화면 영상 너비 / 원본 너비, 화면 영상 높이 / 원본 높이)로 보내고
@@ -49,6 +52,7 @@ from pydantic import ValidationError
 
 from dlp_review.reconcile import ReviewedItem
 from dlp_schema.labels import (
+    HANDED_SKELETONS,
     BlurTrackPayload,
     BoxKeyframe,
     BoxTrackPayload,
@@ -74,7 +78,15 @@ UNIT_SCALE: Scale = (1.0, 1.0)
 NewBoxKind = Literal["blur_track", "box_track"]
 # 작업 라벨 프로젝트의 키포인트 골격 라벨 (`kp_<골격>`, 손 골격은 `kp_hand21_<손>`).
 # 손을 라벨 이름에 넣어 검수자가 새로 그린 손 골격도 어느 손인지 알 수 있게 한다 (F-REV-04).
-KEYPOINT_LABELS = ("kp_hand21_left", "kp_hand21_right", "kp_coco17", "kp_wholebody133")
+# 착용자 팔 골격(arm3, 손목·팔꿈치·어깨, ADR 0058)도 손별 라벨이다 (`kp_arm3_<손>`).
+KEYPOINT_LABELS = (
+    "kp_hand21_left",
+    "kp_hand21_right",
+    "kp_coco17",
+    "kp_wholebody133",
+    "kp_arm3_left",
+    "kp_arm3_right",
+)
 # 손별 라벨 이전의 손 골격 라벨. 그때 만든 프로젝트·작업의 트랙만 쓴다 (손은 dlp_meta에 있다).
 LEGACY_HAND_LABEL = "kp_hand21"
 
@@ -495,11 +507,11 @@ def from_cvat_tracks(
             skeleton, hand = _keypoint_label(name)
             # 라벨 이름의 손이 메타(원래 손)보다 우선한다 (검수자가 라벨을 바꿔 손을 고친다)
             hand = hand or meta.get("hand")
-            if skeleton == "hand21" and hand is None:
+            if skeleton in HANDED_SKELETONS and hand is None:
                 frames_span = f"{shapes[0]['frame']}~{shapes[-1]['frame']}"
                 raise CvatFormatError(
-                    f"라벨 {name}의 손 골격 트랙 (프레임 {frames_span})에 손(left/right)이 "
-                    "없습니다. kp_hand21_left 또는 kp_hand21_right로 그려야 합니다"
+                    f"라벨 {name}의 {skeleton} 골격 트랙 (프레임 {frames_span})에 손(left/right)이 "
+                    f"없습니다. kp_{skeleton}_left 또는 kp_{skeleton}_right로 그려야 합니다"
                 )
             for t, s in zip(times, shapes, strict=True):
                 vis_attr = {

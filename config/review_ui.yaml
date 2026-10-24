@@ -95,6 +95,8 @@ colors:
     kp_hand21_left: "#ffd43b"
     kp_hand21_right: "#a3e635"
     kp_coco17: "#74c0fc"
+    kp_arm3_left: "#ffa94d"
+    kp_arm3_right: "#69db7c"
     cup: "#4c8dff"
     rag: "#22d3ee"
     mop: "#38d9a9"

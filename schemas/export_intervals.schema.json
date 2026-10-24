@@ -267,7 +267,8 @@
         "reach",
         "speed",
         "accel",
-        "bone_length"
+        "bone_length",
+        "forearm_length"
       ],
       "title": "Constraint3DFlag",
       "type": "string"
@@ -873,7 +874,8 @@
           "enum": [
             "hand21",
             "coco17",
-            "wholebody133"
+            "wholebody133",
+            "arm3"
           ],
           "title": "Skeleton",
           "type": "string"

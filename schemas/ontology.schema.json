@@ -584,6 +584,16 @@
   },
   "additionalProperties": false,
   "properties": {
+    "arm_joints": {
+      "description": "착용자 팔 3D 궤적의 부분 ID (arm3 골격, ADR 0058)",
+      "patternProperties": {
+        "^[a-z][a-z0-9_]{0,63}$": {
+          "$ref": "#/$defs/Term"
+        }
+      },
+      "title": "Arm Joints",
+      "type": "object"
+    },
     "body_parts": {
       "patternProperties": {
         "^[a-z][a-z0-9_]{0,63}$": {

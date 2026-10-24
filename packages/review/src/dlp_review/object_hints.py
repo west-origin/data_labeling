@@ -3,7 +3,9 @@
 규칙 (트랙마다, 정책 `review.yaml object_hints`):
 - `wearer_body` (COCO person 박스): 키프레임 중 박스(여유 margin) 안에 MediaPipe 손목(착용자 손)이
   있고 보이는 RTMPose 머리 관절은 없는 비율이 wearer_share 이상. 1인칭 화면에서 COCO 사람 박스가
-  착용자 자신의 팔·몸통을 덮는 경우다 (2026-10-22 파일럿).
+  착용자 자신의 팔·몸통을 덮는 경우다 (2026-10-22 파일럿). 판정 규칙은 프리라벨 억제(ADR 0058)와
+  같은 `dlp_schema.wearer_body.wearer_box_frame`이다 (여기서는 프레임 높이를 몰라 아래 가장자리
+  조건은 보지 않는다). 프리라벨이 이미 착용자 박스를 억제하므로 남은 것은 억제 문턱 아래 트랙이다.
 - `ai_crop_no` (ADR 0056): 사내 VLM이 블러본 조각에 그 클래스가 없다고 답함.
 - `tta_unstable` (TTA를 돌린 트랙): 좌우 뒤집기·배율 변환 화면에서 같은 자리 탐지가 다시 나온 비율의
   평균이 tta_min_support 미만 (`dlp_media.geometry.tta_support`).
@@ -14,17 +16,15 @@
 
 from __future__ import annotations
 
-import bisect
 import json
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from dlp_media.storage import ObjectStore, sha256_file
 from dlp_review.ops.policy import ObjectHintsPolicy
-from dlp_schema.labels import BoxKeyframe, BoxTrackPayload, KeypointTrackPayload, LabelRecord
-
-COCO_HEAD = (0, 1, 2, 3, 4)
+from dlp_schema.labels import BoxTrackPayload, LabelRecord
+from dlp_schema.wearer_body import WearerEvidence, wearer_box_frame
 
 
 @dataclass(frozen=True)
@@ -38,50 +38,6 @@ class ObjectHint:
     share: float
     t_start_ms: int
     t_end_ms: int
-
-
-def _index(
-    items: Iterable[tuple[int, tuple[float, float]]],
-) -> tuple[list[int], dict[int, list[tuple[float, float]]]]:
-    """(시각, 점) → (정렬 시각, 시각별 점)."""
-    data: dict[int, list[tuple[float, float]]] = {}
-    for t, p in items:
-        data.setdefault(t, []).append(p)
-    return sorted(data), data
-
-
-def _near(
-    index: tuple[list[int], dict[int, list[tuple[float, float]]]], t: int, tol: int
-) -> list[tuple[float, float]]:
-    """허용 오차 안 시각의 점."""
-    keys, data = index
-    lo, hi = bisect.bisect_left(keys, t - tol), bisect.bisect_right(keys, t + tol)
-    return [p for k in keys[lo:hi] for p in data[k]]
-
-
-def _points(
-    labels: Iterable[LabelRecord], skeleton: str, joints: Sequence[int]
-) -> list[tuple[int, tuple[float, float]]]:
-    """골격 트랙의 지정 관절(보임, 보간 키프레임 제외) 점."""
-    out: list[tuple[int, tuple[float, float]]] = []
-    for x in labels:
-        p = x.payload
-        if not (isinstance(p, KeypointTrackPayload) and p.skeleton == skeleton):
-            continue
-        for k in p.keyframes:
-            if k.interpolated:
-                continue
-            for i in joints:
-                if i < len(k.points) and k.points[i].visibility == 2:
-                    out.append((k.t_ms, (k.points[i].x, k.points[i].y)))
-    return out
-
-
-def _inside(k: BoxKeyframe, pts: Sequence[tuple[float, float]], m: float) -> bool:
-    """점 하나라도 넓힌 박스 안인가."""
-    x0, y0 = k.x - k.w * m, k.y - k.h * m
-    x1, y1 = k.x + k.w * (1 + m), k.y + k.h * (1 + m)
-    return any(x0 <= x <= x1 and y0 <= y <= y1 for x, y in pts)
 
 
 def object_hints(
@@ -99,8 +55,7 @@ def object_hints(
         ai: 박스 라벨 ID → AI 조각 확인의 의심 정도 (ADR 0056). 있으면 `ai_crop_no` 힌트.
     """
     own = [x for x in labels if x.stream_id == stream_id]
-    wrists = _index(_points(own, "hand21", (0,)))
-    heads = _index(_points(own, "coco17", COCO_HEAD))
+    evidence = WearerEvidence.from_labels(own, stream_id)
     tol, m = policy.time_tolerance_ms, policy.margin
     out: list[ObjectHint] = []
     for x in own:
@@ -111,8 +66,14 @@ def object_hints(
         frames = [k for k in p.keyframes if not k.outside]
         if p.class_id == "person" and frames:
             own_body = sum(
-                _inside(k, _near(wrists, k.t_ms, tol), m)
-                and not _inside(k, _near(heads, k.t_ms, tol), m)
+                wearer_box_frame(
+                    (k.x, k.y, k.w, k.h),
+                    evidence.hands_near(k.t_ms, tol),
+                    evidence.heads_near(k.t_ms, tol),
+                    margin=m,
+                    frame_h=None,
+                    bottom_band=1.0,
+                )
                 for k in frames
             ) / len(frames)
             if own_body >= policy.wearer_share:

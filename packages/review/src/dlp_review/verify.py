@@ -86,7 +86,11 @@ from dlp_schema.review import (
     TrajectoryInheritanceMechanism,
 )
 from dlp_schema.session import LifecycleState, PrivacyState
-from dlp_schema.trajectory_follow import TRAJECTORY_FOLLOW_VERSION, is_camera_pose
+from dlp_schema.trajectory_follow import (
+    LIFTED_SKELETONS,
+    TRAJECTORY_FOLLOW_VERSION,
+    is_camera_pose,
+)
 
 # 모델 라벨이 "사람이 확인했다"고 볼 수 있는 검증 상태.
 # SAMPLE_VERIFIED(표본 합격으로 일괄 검증)도 포함한다. 오류 삽입 정답 풀(`ops.runner.VERIFIED`)은
@@ -189,11 +193,12 @@ _Target = tuple[str | None, str, str]
 
 
 def _liftable(labels: list[LabelRecord]) -> set[tuple[str | None, str, bool]]:
-    """3D 단계가 올리는 현재 2D 트랙의 (스트림, 개체, 손 트랙인가) (hand21 손·박스 트랙)."""
+    """3D 단계가 올리는 현재 2D 트랙의 (스트림, 개체, 키포인트 트랙인가) (hand21 손·arm3 팔·박스
+    트랙, ADR 0058)."""
     out: set[tuple[str | None, str, bool]] = set()
     for x in labels:
         p = x.payload
-        if isinstance(p, KeypointTrackPayload) and p.skeleton == "hand21":
+        if isinstance(p, KeypointTrackPayload) and p.skeleton in LIFTED_SKELETONS:
             out.add((x.stream_id, p.entity_id, True))
         elif isinstance(p, BoxTrackPayload):
             out.add((x.stream_id, p.entity_id, False))

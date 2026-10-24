@@ -41,3 +41,10 @@ hand_joints:
   middle_tip: {ko: 중지 끝, en: Middle fingertip}
   ring_tip: {ko: 약지 끝, en: Ring fingertip}
   pinky_tip: {ko: 소지 끝, en: Little fingertip}
+
+# 착용자 팔 관절: 팔 3D 궤적(trajectory3d, entity `<left|right>_arm`)의 part ID (ADR 0058).
+# 2D는 arm3 골격(손목·팔꿈치·어깨)이고, 손목 3D는 손 궤적(`<left|right>_hand`의 wrist)을 쓴다.
+# 가슴 장착 1인칭에서 어깨는 거의 화면에 없어 프리라벨은 보이지 않음(0)으로 둔다 (검수자가 보이면 찍는다).
+arm_joints:
+  elbow: {ko: 팔꿈치, en: Elbow}
+  shoulder: {ko: 어깨, en: Shoulder}

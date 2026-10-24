@@ -166,9 +166,9 @@ def test_trajectory_and_relation_parts_must_be_known(ontology: Ontology) -> None
 # ---------------------------------------------------------------- 한·영 이름 (ADR 0043)
 
 # v1 사전 항목 수 (도메인 3, 작업 17, 동사 34, 공백 3, 이벤트 15, 접촉 대상 6, 파지 8, 손 역할 3,
-# 손 관절 6, 물리 유형 5, 상태 속성 6, 객체 30, 표면 부분 4, 프라이버시 대상 13, 신체 부위 26, 자세
-# 9)
-V1_TERMS = 188
+# 손 관절 6, 팔 관절 2 (ADR 0058), 물리 유형 5, 상태 속성 6, 객체 30, 표면 부분 4, 프라이버시
+# 대상 13, 신체 부위 26, 자세 9)
+V1_TERMS = 190
 
 
 def test_every_term_has_korean_and_english_names(ontology: Ontology) -> None:
