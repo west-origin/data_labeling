@@ -22,7 +22,8 @@
 - `make db-migrate` — Alembic 마이그레이션만 적용 (운영 배포 단계, 온톨로지 등록 없음)
 - `make db-upgrade` — 개발 DB에 Alembic 마이그레이션 적용 + 온톨로지 v1 등록 (온톨로지 이름을 덧붙인 뒤에도 다시 돌린다.
   `en` 없는 예전 등록은 읽을 때 `LegacyOntologyContentError`, ADR 0043). 등록된 초안의 물리 사전값이 바뀌면 승인 없이
-  종료 코드 3으로 아무것도 쓰지 않는다. 승인은 `uv run dlp ontology register 1.0.0 --accept-physical-priors` (ADR 0053)
+  종료 코드 3으로 아무것도 쓰지 않는다. 승인은 `uv run dlp ontology register 1.0.0 --accept-physical-priors` (ADR 0053).
+  사전값 없는 객체를 덧붙이는 것은 사전값 변경이 아니다 (승인 불필요, ADR 0059)
 - `make up` / `make down` / `make clean` — 개발 서비스 기동 / 중지 / 볼륨까지 삭제
 - `make health` — `dlp services check`로 서비스 헬스체크
 - `make test-services` — 실행 중인 서비스 대상 통합 테스트 (`@pytest.mark.services`, `isolated_env` 표시 테스트는 뺀다)
@@ -84,6 +85,8 @@
   오탐 의심 힌트 `dlp review hints <세션> [--tta] [--ai]`(블러: 원본 버킷 hints 파일 → 블러 검수 CVAT 이슈, 객체
   `dlp_review.object_hints`: 라벨링 CVAT 이슈, 잘라 낸 박스 AI 확인 `dlp_aireview.crops`). 라벨·블러는 바꾸지 않는다
   (ADR 0055·0056).
+  마스크(`mask_track`)는 CVAT 모양 모드 마스크로 무손실 왕복한다 (`dlp_review.cvat.to_cvat_shapes`, 원본 해상도 작업만,
+  블러 검수에서는 받지 않음, ADR 0059).
 - `packages/datasets/` (`dlp_datasets`) — 데이터셋 버전(lakeFS 커밋), 작업자·장소 단위 분할(holdout 포함), 골든셋 제안,
   사용 중지 전파, 계보 조회. `dlp dataset golden|build|withdraw`, `dlp lineage <세션>`. 정책은 `config/policies/dataset.yaml`.
 - `packages/models/` (`dlp_models`) — 모델 레지스트리(`config/models.yaml`, 해시 확인)와 공용 ONNX 런타임(OWLv2, 메트릭 깊이).
@@ -109,6 +112,10 @@
   착용자 자세·합성 착용자 박스 자세에서 고름)와 팔꿈치 3D(`<손>_arm`, 아래팔 길이 표시 `forearm_length`), 바디캠 착용자
   몸 억제(`dlp_prelabel.wearer_suppress`, 판정 규칙 `dlp_schema.wearer_body`, 객체·도구·전신 단계, 정책
   `prelabel.yaml wearer_suppression`·`arm`, ADR 0058).
+  객체·손 모양 마스크 `dlp_prelabel.masks`(SAM 2.1 tiny ONNX `dlp_models.sam2`, review 등급, 이미지 모드
+  `masks.frame_stride_ms` 간격, 프롬프트 = 현재 박스 트랙·hand21 손 트랙, 착용자 몸 박스·화면 아래 사람 박스 제외, 손은
+  class `hand`·entity `<손>_hand`, `derived_from`은 출처 기록이고 검수를 물려받지 않음, 키프레임 `score`, 보간 없음,
+  `dlp prelabel run --skip masks`, CPU stub `BoxEllipseSegmenter`, ADR 0059).
 - `packages/retarget/` (`dlp_retarget`) — 고객 로봇 리타기팅(ADR 0047): 로봇 등록(`config/robots/<ID>.yaml`, 모델 sha256,
   고객 모델 파일은 저장소 밖 `DLP_ROBOTS_DIR`), URDF 기구학, 손 → 끝단 목표·평행 그리퍼, 관절·속도 한계 IK(내장, mink는
   격리 환경 `scripts/retarget-env`), 닿지 못한 프레임은 자르지 않고 표시. `orientation_mode`는 관절 수가 아니라 구조로
@@ -162,6 +169,7 @@
   출처·접촉 객체 클래스 특징을 싣는다. 페이로드의 라벨 ID 필드(`pseudonym.LABEL_REF_FIELDS`, 예: `derived_from`)도 라벨
   가명이 된다. 손 부위 설정은 내보내기 시작 때 hand_joints와 대조한다 (ADR 0053).
   COCO `wearer_arm` 범주, LeRobot `annotation.wearer_arm`(arm3 2D + 팔꿈치 3D, ADR 0058).
+  COCO에 마스크 `segmentation`(압축 RLE)·`mask_score`·`hand`, 객체 hand 범주가 손 키포인트 범주를 겸한다 (ADR 0059).
 - `packages/ops/` (`dlp_ops`) — 운영 대시보드와 보안: 주간 운영 지표(검수 시간·수정률·자동 승인율·편향·발견율·
   잔여 블러 누락·원가, AI 1차 검수 절: 백로그·fallback·캐시 적중·장비 시간·ok 놓침 상한)와 경고, 원본 접근 월간 감사
   리포트, 원본 보관 만료 알림·결정.
@@ -243,4 +251,5 @@
   탐지·블러는 이 억제와 무관하다 (ADR 0058).
 - 팔꿈치가 화면 밖이거나 판정 검사를 통과하지 못하면 visibility 0으로 두고 위치를 지어내지 않는다. 팔 손목은 같은 손
   hand21 손목이다 (ADR 0058).
+- 모양 마스크는 프라이버시 블러와 무관하다 (블러는 박스 그대로). 착용자 팔·몸통은 마스크 프롬프트로 쓰지 않는다 (ADR 0058·0059).
 - 코드 주석과 문서는 한국어, 식별자는 영어.
