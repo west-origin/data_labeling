@@ -131,6 +131,9 @@ objects:
     physical_priors: {source: prior_estimate, material: metal, tactile: [soft], mass_kg: {min: 30.0, max: 200.0},
       static_friction: {min: 0.3, max: 0.9}, note: "질량은 프레임 포함 침대 전체, 촉감·마찰은 매트리스 덮개 기준"}}
   person: {ko: 사람, en: Person, physical_type: person, states: []}
+  # 손 영역 마스크(mask_track) 전용 클래스 (ADR 0059). 박스 탐지기는 내지 않고, 마스크 단계가 hand21 손 트랙
+  # (entity left_hand·right_hand)에서 만든다. 착용자 손은 손 라벨이다 (착용자 팔·몸통 억제 ADR 0058과 별개)
+  hand: {ko: 손, en: Hand, physical_type: person, states: []}
 
 # 표면 부분: 표면 평면을 정하는 꼭짓점 3D 궤적(trajectory3d)의 part ID.
 # corner_0 원점, corner_1 가로 끝, corner_2 대각, corner_3 세로 끝 (relations.yaml tool_surface.corner_parts)

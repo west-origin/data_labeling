@@ -916,6 +916,21 @@
           ],
           "default": null
         },
+        "score": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "마스크 모델의 품질 점수 (예측 IoU)",
+          "title": "Score"
+        },
         "t_ms": {
           "description": "마스터 타임라인 기준 시각(ms)",
           "minimum": 0,
@@ -936,6 +951,23 @@
           "pattern": "^[a-z][a-z0-9_]{0,63}$",
           "title": "Class Id",
           "type": "string"
+        },
+        "derived_from": {
+          "anyOf": [
+            {
+              "items": {
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "마스크 프롬프트가 된 입력 트랙 라벨 ID",
+          "title": "Derived From"
         },
         "entity_id": {
           "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",

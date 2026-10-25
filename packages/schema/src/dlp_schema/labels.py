@@ -137,6 +137,11 @@ class Verification(Contract):
 # ---------------------------------------------------------------- 공간 트랙
 
 
+def _drop_none(value: object) -> bool:
+    """직렬화에서 뺄 값인가 (None). 선택 필드를 더해도 예전 라벨의 JSON이 그대로이게 한다."""
+    return value is None
+
+
 # 박스 키프레임. t_ms: 그 스트림 PTS 시각(ms). x, y: 왼쪽 위 꼭짓점(px). w, h: 폭·높이(px, 0 이상).
 # outside: 이 시각부터 대상이 화면 밖·안 보임 (CVAT의 outside와 같은 뜻, 좌표는 무시).
 # 키프레임 사이 값은 소비자가 보간한다 (선형 등, 각 단계 정책).
@@ -159,10 +164,16 @@ class Rle(Contract):
 
 
 # 마스크 키프레임. t_ms: 스트림 PTS ms. rle: 마스크 (outside가 아니면 필수). outside: 안 보임.
+# 마스크는 키프레임 사이를 보간하지 않는다 (그 시각에만 유효한 모양, ADR 0059).
+# score: 마스크 모델이 낸 이 키프레임의 품질 점수 (선택, SAM 예측 IoU, ADR 0059). None이면 JSON에
+#   싣지 않는다 (예전 라벨과 같은 JSON). 검수 도구로 보내지 않는다.
 class MaskKeyframe(Contract):
     t_ms: Ms
     rle: Rle | None = None
     outside: bool = False
+    score: Confidence | None = Field(
+        default=None, exclude_if=_drop_none, description="마스크 모델의 품질 점수 (예측 IoU)"
+    )
 
     @model_validator(mode="after")
     def _check(self) -> MaskKeyframe:
@@ -187,11 +198,6 @@ class WorldPoint(Contract):
     x: float
     y: float
     z: float
-
-
-def _drop_none(value: object) -> bool:
-    """직렬화에서 뺄 값인가 (None). 선택 필드를 더해도 예전 라벨의 JSON이 그대로이게 한다."""
-    return value is None
 
 
 # 한 시각의 키포인트 묶음. points 개수는 골격 크기(`SKELETON_SIZES`)와 같아야 한다.
@@ -245,12 +251,20 @@ class BoxTrackPayload(Contract):
 
 # 마스크 트랙. part가 있으면 도구의 작용부·파지부 등 부분 마스크다
 # (그 클래스의 tool_parts 안이어야 한다, `validation.check_label`).
+# 손 마스크는 class_id `hand`(온톨로지 객체, 박스 탐지기는 내지 않는다)와 손 트랙의 entity_id
+# (`left_hand`·`right_hand`)를 쓴다 (ADR 0059).
+# derived_from: 이 마스크의 프롬프트가 된 입력 트랙 라벨 ID (선택, 박스 트랙 또는 hand21 손 트랙
+#   하나, ADR 0059). 출처 기록이고 검수를 물려받는 근거가 아니다 (마스크는 따로 검수한다). None이면
+#   JSON에 싣지 않는다 (예전 라벨과 같은 JSON).
 class MaskTrackPayload(Contract):
     kind: Literal["mask_track"] = "mask_track"
     entity_id: Identifier
     class_id: OntologyId
     part: OntologyId | None = Field(default=None, description="도구 작용부·파지부 등 부분 마스크")
     keyframes: tuple[MaskKeyframe, ...] = Field(min_length=1)
+    derived_from: tuple[Identifier, ...] | None = Field(
+        default=None, exclude_if=_drop_none, description="마스크 프롬프트가 된 입력 트랙 라벨 ID"
+    )
 
 
 # 키포인트 트랙 (손·전신 포즈·착용자 팔). skeleton: 골격. hand: hand21·arm3이면 필수

@@ -726,6 +726,26 @@ def _with(ontology: Ontology, edit: Any) -> Ontology:
     return Ontology.model_validate(data)
 
 
+def test_appending_an_object_without_priors_is_not_a_prior_change(ontology: Ontology) -> None:
+    """사전값 없는 객체를 덧붙이는 것(손 마스크 클래스 hand, ADR 0059)은 승인 없이 덧붙이기다.
+
+    회귀: 사전값 비교가 사전값 없는 객체를 None 항목으로 넣어, 새 객체 하나로 사전값 변경 거부
+    (종료 코드 3)가 났다."""
+    from dlp_schema.testing import sqlite_db
+
+    def drop_hand(d: dict[str, Any]) -> None:
+        del d["objects"]["hand"]
+
+    engine = sqlite_db()
+    try:
+        with engine.begin() as conn:
+            register_ontology(conn, _with(ontology, drop_hand))
+        with engine.begin() as conn:
+            assert register_ontology(conn, ontology) == "appended"
+    finally:
+        engine.dispose()
+
+
 def test_physical_prior_changes_are_never_silently_additive(ontology: Ontology) -> None:
     """등록된 초안의 사전값은 채우기·값 변경·상태별(by_state)·부분별(part_materials) 덮어쓰기 추가
     모두 승인 없이는 거부된다 (덧붙이기 판정이 사전 키 추가를 받아 젖은 바닥 마찰·밀대 머리 재질의

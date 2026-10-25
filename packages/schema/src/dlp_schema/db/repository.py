@@ -286,7 +286,12 @@ def _without_priors(content: Any) -> Any:
 
 
 def _priors_of(content: Any) -> dict[str, Any] | None:
-    """등록 내용의 물리 사전값 묶음 (객체 ID → 사전값(없으면 None), 재질·촉감 어휘). 비교용."""
+    """등록 내용의 물리 사전값 묶음 (사전값이 있는 객체 ID → 사전값, 재질·촉감 어휘). 비교용.
+
+    사전값이 없는 객체는 넣지 않는다: 사전값 없는 객체를 덧붙이는 것(예: 손 마스크 클래스 hand,
+    ADR 0059)은 사전값 변경이 아니다. 없던 사전값 채우기(키가 생김)와 지우기(키가 사라짐)는 그대로
+    변경이다.
+    """
     top = _as_dict(content)
     if top is None:
         return None
@@ -294,7 +299,9 @@ def _priors_of(content: Any) -> dict[str, Any] | None:
     priors: dict[str, Any] = {}
     for oid, obj in objects.items():
         d = _as_dict(obj)
-        priors[oid] = None if d is None else d.get("physical_priors")
+        value = None if d is None else d.get("physical_priors")
+        if value is not None:
+            priors[oid] = value
     return {"objects": priors, **{k: top.get(k) or {} for k in _PRIOR_VOCAB_KEYS}}
 
 

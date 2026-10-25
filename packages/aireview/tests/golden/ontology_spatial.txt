@@ -1,5 +1,5 @@
 [온톨로지 1.0.0 · 공간 라벨]
-객체 클래스(class_id): bathtub 욕조; bed 침대; bed_rail 침대 난간; bedsheet 시트; broom 빗자루; brush 솔; bucket 양동이; clothing 의류; cup 컵; diaper 기저귀; door 문; drawer 서랍; dustpan 쓰레받기; floor 바닥; glove 장갑; mirror 거울; mop 밀대; person 사람; pillow 베개; rag 걸레; sink 세면대; sponge 스펀지; spray_bottle 분무기; table 탁자; toilet 변기; toilet_brush 변기솔; towel 수건; trash_bag 쓰레기봉투; trash_bin 쓰레기통; wall 벽
+객체 클래스(class_id): bathtub 욕조; bed 침대; bed_rail 침대 난간; bedsheet 시트; broom 빗자루; brush 솔; bucket 양동이; clothing 의류; cup 컵; diaper 기저귀; door 문; drawer 서랍; dustpan 쓰레받기; floor 바닥; glove 장갑; hand 손; mirror 거울; mop 밀대; person 사람; pillow 베개; rag 걸레; sink 세면대; sponge 스펀지; spray_bottle 분무기; table 탁자; toilet 변기; toilet_brush 변기솔; towel 수건; trash_bag 쓰레기봉투; trash_bin 쓰레기통; wall 벽
 손(hand): left 왼손; right 오른손
 문제 유형(p):
 - 박스 트랙: wrong_class(물체 클래스가 다름), false_positive(없는 대상을 그림), box_misaligned(상자 위치가 어긋남), identity_switch(다른 개체로 바뀜), track_drift(추적이 밀려남), not_visible(보이지 않음), insufficient_frames(프레임이 부족함), other(기타)

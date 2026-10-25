@@ -166,9 +166,9 @@ def test_trajectory_and_relation_parts_must_be_known(ontology: Ontology) -> None
 # ---------------------------------------------------------------- 한·영 이름 (ADR 0043)
 
 # v1 사전 항목 수 (도메인 3, 작업 17, 동사 34, 공백 3, 이벤트 15, 접촉 대상 6, 파지 8, 손 역할 3,
-# 손 관절 6, 팔 관절 2 (ADR 0058), 물리 유형 5, 상태 속성 6, 객체 30, 표면 부분 4, 프라이버시
-# 대상 13, 신체 부위 26, 자세 9)
-V1_TERMS = 190
+# 손 관절 6, 팔 관절 2 (ADR 0058), 물리 유형 5, 상태 속성 6, 객체 31 (손 마스크 hand, ADR 0059),
+# 표면 부분 4, 프라이버시 대상 13, 신체 부위 26, 자세 9)
+V1_TERMS = 191
 
 
 def test_every_term_has_korean_and_english_names(ontology: Ontology) -> None:
@@ -224,13 +224,14 @@ def test_term_without_korean_name_is_rejected(ontology: Ontology) -> None:
 
 
 def test_v1_objects_carry_physical_priors(ontology: Ontology) -> None:
-    """v1 객체는 person을 빼고 모두 물리 사전값이 있고, 모두 측정값이 아닌 추정(prior_estimate)이다.
+    """v1 객체는 person·hand(손 마스크 클래스, ADR 0059)를 빼고 모두 물리 사전값이 있고, 모두
+    측정값이 아닌 추정(prior_estimate)이다.
 
     정답 근거: config/ontology/v1/objects.yaml (2026-10-17 덧붙임). 재질·촉감 이름은 표시 이름 표
     (`display_names`, 번역 용어집)에 들지 않고 `physics_names`에만 있다.
     """
     with_priors = {k for k, v in ontology.objects.items() if v.physical_priors is not None}
-    assert with_priors == set(ontology.objects) - {"person"}
+    assert with_priors == set(ontology.objects) - {"person", "hand"}
     sources = {v.physical_priors.source for v in ontology.objects.values() if v.physical_priors}
     assert sources == {PriorSource.PRIOR_ESTIMATE}
     bucket = ontology.objects["bucket"].physical_priors
