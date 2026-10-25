@@ -65,3 +65,4 @@ ADR은 결정 당시의 이유와 이관 조건을 기록한다. 후속 ADR이 �
 | 0056 | [ADR 0056: 손 크기로 세션 초점 거리 추정, 잘라 낸 박스의 AI 확인 힌트](0056-hand-size-focal-estimate-and-ai-crop-hints.md) |
 | 0057 | [ADR 0057: 학습용 데이터 증강](0057-training-data-augmentation.md) |
 | 0058 | [ADR 0058: 착용자 팔 골격(손목 → 아래팔 → 팔꿈치)과 착용자 자신의 몸 억제](0058-wearer-arm-skeleton-and-wearer-body-suppression.md) |
+| 0059 | [ADR 0059: 객체·손 모양 마스크 (SAM 2.1 tiny, 박스·손 트랙 프롬프트)](0059-object-and-hand-shape-masks-sam2.md) |

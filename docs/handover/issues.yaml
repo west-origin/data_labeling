@@ -851,6 +851,18 @@ issues:
   - {id: F-PAR-67, title: "착용자 팔·억제가 전신·객체·도구 단계 안에서 돌아, 손 트랙을 검수로 고쳐도 팔 골격과 억제 판정을 다시 하지 않음 (단계 버전에 손 입력 해시가 없음)", severity: low, status: open, kind: code,
      files: [packages/prelabel/src/dlp_prelabel/adapters/rtmpose.py, packages/prelabel/src/dlp_prelabel/runner.py], source: docs/adr/0058-wearer-arm-skeleton-and-wearer-body-suppression.md, see: [F-PAR-66],
      note: "정책·가중치가 바뀌면 다시 돈다. 손 트랙 ID를 단계 버전에 넣으면 손 수정 때마다 비싼 전신·도구 단계가 다시 돌아 넣지 않았다. 필요하면 팔 단계를 저장된 자세 후보로 다시 계산하는 별도 단계로 분리한다."}
+  - {id: F-PAR-68, title: "모양 마스크 단계(SAM 2.1 tiny)의 문턱(min_score·max_outside_ratio·min_area_ratio·손 프롬프트 넓힘)을 정답 표본 없이 정해 실영상 마스크 정확도를 모르고, 프롬프트 박스가 오탐이면 마스크도 오탐이다", severity: medium, status: open, kind: product,
+     files: [config/policies/prelabel.yaml, packages/prelabel/src/dlp_prelabel/masks.py], source: docs/adr/0059-object-and-hand-shape-masks-sam2.md, see: [F-PAR-60, F-PAR-66],
+     note: "합성 정답 모양(dlp_fixtures.shapes)에서는 IoU 0.98~1.00이다. 파일럿(보고서 12절)은 정답이 없어 박스 IoU·점수 분포만 쟀다. OWLv2 장면 무관 도구 박스(F-PAR-60)에도 SAM은 그럴듯한 모양을 내므로 점수로 거를 수 없다. 필요: 같은 장비 실촬영의 마스크 정답 표본으로 문턱과 프롬프트 트랙 신뢰도 하한(min_track_confidence)을 다시 정한다."}
+  - {id: F-PAR-69, title: "모양 마스크가 이미지 모드(frame_stride_ms 간격 키프레임)뿐이라 키프레임 사이 마스크가 없고 박스를 놓친 시각·객체는 마스크도 없음 (SAM 2 영상 전파 미사용)", severity: low, status: open, kind: code,
+     files: [packages/prelabel/src/dlp_prelabel/masks.py, packages/models/src/dlp_models/sam2.py], source: docs/adr/0059-object-and-hand-shape-masks-sam2.md, see: [F-PAR-68],
+     note: "ONNX 공개본은 영상 기억 뱅크가 없고 CPU 인코더가 프레임당 1~3초라 500 ms 간격으로 둔다. 필요: GPU 서버에서 PyTorch 격리 환경(scripts/*-env처럼 uv.lock 고정)의 SAM 2 영상 예측기를 같은 Segmenter 자리에 붙이거나, 키프레임 마스크를 광학 흐름으로 옮기는 보간."}
+  - {id: F-PAR-70, title: "모양 마스크가 LeRobot·구간 JSON 내보내기와 관계·도구-표면 접촉·커버리지 단계에 쓰이지 않음 (COCO segmentation과 CVAT만)", severity: low, status: open, kind: code,
+     files: [packages/export/src/dlp_export/lerobot.py, packages/relations/src/dlp_relations/derive.py, packages/prelabel/src/dlp_prelabel/contact.py], source: docs/adr/0059-object-and-hand-shape-masks-sam2.md, see: [F-PAR-69],
+     note: "영상 접촉은 손 관절과 박스 거리로 정한다. 손·객체 마스크 겹침(또는 경계 거리)이 박스보다 정확하지만 키프레임 간격이 500 ms라 접촉 경계 정밀도에 못 미친다. LeRobot 프레임 특징으로 넣기에 RLE가 크다(파일 경로 참조 또는 COCO 사이드카가 후보). 부분 마스크(작용부)는 tool_part_masks TODO."}
+  - {id: F-PAR-71, title: "모양 마스크 검수 운영: 검수 단위(review.yaml units.spatial)·표본·오류 삽입에 mask_track이 없고, 마스크는 박스 검수를 물려받지 않으며, CVAT에서 새로 그린 손 마스크는 어느 손인지 모름", severity: low, status: open, kind: product,
+     files: [config/policies/review.yaml, packages/review/src/dlp_review/cvat.py, packages/prelabel/src/dlp_prelabel/runner.py], source: docs/adr/0059-object-and-hand-shape-masks-sam2.md, see: [F-PAR-68],
+     note: "CVAT 라벨링 작업에는 마스크를 모양 모드로 보내고 무손실로 받지만, 표본 검증·QA 단위에 넣을지와 마스크 수정 시간(검수 비용)은 아직 정하지 않았다. derived_from은 출처 기록일 뿐이다(박스가 바뀌면 검수 전 마스크만 다시 만든다). 새 손 마스크는 entity hand_h<n>으로 들어와 COCO hand 필드가 비고, 검수자가 손별 라벨을 고를 수 있게 하려면 손별 CVAT 라벨이 필요하다."}
   - {id: F-PAR-64, title: "MediaPipe 손 판정(Left·Right)이 한 손에서 프레임마다 바뀌어, 손별 트랙이 같은 손으로 건너뛰고 끊김이 생김 (손 판정을 프레임마다 따로 믿는 어댑터 구조)", severity: medium, status: open, kind: code,
      files: [packages/prelabel/src/dlp_prelabel/adapters/mediapipe_models.py], source: docs/handover/pilot-real-2026-10-22.md, see: [F-PAR-61],
      note: "pilot-real2: 채운 두 손 프레임의 두 손목 간격 중앙값이 손 크기의 0.08배(한 손을 두 트랙이 번갈아 잡음), 관측 두 손 프레임 중 간격이 손 크기보다 작은 68프레임의 좌우 일치는 0.76. 손목 2D 떨림 p95가 약 3(손 크기 배)인 것도 트랙이 다른 손으로 건너뛴 프레임이다. 지금은 한 프레임 안 겹침 빼기(dd1)와 다른 손 위의 채운 키프레임 빼기(dd2)만 했다. 필요: 위치 연속성으로 탐지를 트랙에 잇고(헝가리안 매칭) 손 판정은 트랙 단위로 다수결·평활해 정하는 손 추적기, 1인칭 기하(왼손은 화면 왼쪽에서 들어옴)를 약한 사전값으로."}
