@@ -16,6 +16,11 @@
   트랙 신뢰도를 적는다.
 - 객체 박스 (box_track): 출처(모델 버전의 첫 토막: COCO 객체·OWLv2 등)·클래스·트랙 신뢰도.
   `--min-score` 미만 박스는 그리지 않고 패널에 출처별 개수와 많은 클래스만 적는다.
+- 모양 마스크 (mask_track, ADR 0059): 반투명 채움 + 윤곽선. 손은 왼손 초록·오른손 주황, 객체는
+  클래스마다 정해진 색(클래스 이름 해시). 마스크는 보간하지 않으므로 가장 가까운 키프레임이
+  `--mask-tol-ms` 안일 때만 그 마스크를 그린다 (표시용 유지, 기본 처리 간격의 절반). 패널에 보이는
+  마스크 수와 평균 점수를 적는다. `--extra-labels`(JSON Lines `LabelRecord`)로 DB에 쓰지 않은 마스크
+  (파일럿 구간 실행 결과)를 더 그릴 수 있다.
 - PTS 시각·범례.
 
 시각 규칙: 프레임 시각은 영상의 PTS 인덱스(`dlp_media.pts.build_pts_index`)로만 정한다 (프레임 번호
@@ -53,12 +58,15 @@ import yaml
 from numpy.typing import NDArray
 
 from dlp_media.pts import PtsIndex, build_pts_index
+from dlp_media.rle import decode_rle
 from dlp_schema.labels import (
     BlurTrackPayload,
     BoxKeyframe,
     BoxTrackPayload,
     KeypointTrackPayload,
     LabelRecord,
+    MaskTrackPayload,
+    Rle,
     Trajectory3DPayload,
 )
 
@@ -125,6 +133,17 @@ class ArmTrack:
 
 
 @dataclass(frozen=True)
+class MaskTrack:
+    """그릴 모양 마스크 트랙 (ADR 0059). hand: 손 마스크면 left/right, 객체면 None."""
+
+    label: str  # 클래스
+    hand: str | None
+    times: tuple[int, ...]
+    rles: tuple[Rle, ...]
+    scores: tuple[float | None, ...]
+
+
+@dataclass(frozen=True)
 class Samples3D:
     """한 (손, 부위) 3D 궤적 표본 (여러 궤적을 시각 순으로 합침). 팔은 부위 `arm_<점>`."""
 
@@ -148,6 +167,7 @@ class Overlays:
     hands: list[HandTrack] = field(default_factory=list)
     arms: list[ArmTrack] = field(default_factory=list)
     hand3d: dict[tuple[str, str], Samples3D] = field(default_factory=dict)
+    masks: list[MaskTrack] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -159,6 +179,8 @@ class DrawOptions:
     max_interp_ms: int = 1500
     kp_tol_ms: int = 40
     tol_3d_ms: int = 150
+    mask_tol_ms: int = 260
+    mask_alpha: float = 0.45
     width: int = 540
 
 
@@ -194,6 +216,25 @@ def _box_track(label: str, source: str, rec: LabelRecord, kfs: tuple[BoxKeyframe
         keyframes=kfs,
         times=tuple(k.t_ms for k in kfs),
     )
+
+
+def _mask_track(p: MaskTrackPayload, start_ms: int, end_ms: int) -> MaskTrack:
+    """mask_track → 그릴 마스크 (구간 근처의 보이는 키프레임만, 손은 entity `<손>_hand`)."""
+    kfs = [k for k in p.keyframes if not k.outside and k.rle is not None
+           and start_ms - 1000 <= k.t_ms <= end_ms + 1000]  # fmt: skip
+    side = p.entity_id.removesuffix("_hand")
+    hand = side if p.class_id == "hand" and side in ("left", "right") else None
+    return MaskTrack(p.class_id, hand, tuple(k.t_ms for k in kfs),
+                     tuple(k.rle for k in kfs if k.rle is not None),
+                     tuple(k.score for k in kfs))  # fmt: skip
+
+
+def class_color(name: str) -> tuple[int, int, int]:
+    """클래스 이름 → 정해진 밝은 BGR 색 (해시 색상환, 실행마다 같다)."""
+    hue = int.from_bytes(name.encode()[:8].ljust(8, b"\0"), "little") * 2654435761 % 180
+    hsv = np.array([[[hue, 200, 255]]], dtype=np.uint8)
+    b, g, r = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)[0, 0]
+    return int(b), int(g), int(r)
 
 
 Row3D = tuple[int, str, float | None, tuple[float, float, float]]
@@ -262,6 +303,8 @@ def build_overlays(
                 out.arms.append(ArmTrack(p.hand.value, tuple(f.t_ms for f in frames), arm))
             case Trajectory3DPayload():
                 _add_3d(acc3d, p)
+            case MaskTrackPayload():
+                out.masks.append(_mask_track(p, start_ms, end_ms))
             case _:
                 pass
     for key, rows in acc3d.items():
@@ -442,6 +485,45 @@ def _draw_arms(
             _text(img, "elbow", (xy[1][0] + 8, xy[1][1] + 4), color, 0.32)
 
 
+def _draw_masks(
+    img: Image, ov: Overlays, t_ms: int, opts: DrawOptions
+) -> list[tuple[MaskTrack, float | None]]:
+    """모양 마스크: 반투명 채움 + 윤곽선 (객체 먼저, 손을 위에). 그린 (트랙, 점수)를 돌려준다."""
+    h, w = img.shape[:2]
+    drawn: list[tuple[MaskTrack, float | None]] = []
+    for tr in sorted(ov.masks, key=lambda m: m.hand is not None):
+        j = _nearest(tr.times, t_ms, opts.mask_tol_ms)
+        if j is None:
+            continue
+        m = cv2.resize(decode_rle(tr.rles[j]).astype(np.uint8), (w, h),
+                       interpolation=cv2.INTER_NEAREST).astype(bool)  # fmt: skip
+        if not m.any():
+            continue
+        color = HAND_COLORS.get(tr.hand, OTHER_COLOR) if tr.hand else class_color(tr.label)
+        fill = np.array(color, dtype=np.float32)
+        img[m] = (img[m].astype(np.float32) * (1 - opts.mask_alpha) + fill * opts.mask_alpha
+                  ).astype(np.uint8)  # fmt: skip
+        contours, _ = cv2.findContours(m.astype(np.uint8), cv2.RETR_EXTERNAL,
+                                       cv2.CHAIN_APPROX_SIMPLE)  # fmt: skip
+        cv2.drawContours(img, contours, -1, color, 1, cv2.LINE_AA)
+        if tr.hand is None:
+            ys, xs = np.nonzero(m)
+            _text(img, tr.label, (int(xs.min()) + 2, int(ys.max()) - 3), color, 0.3)
+        drawn.append((tr, tr.scores[j]))
+    return drawn
+
+
+def _mask_line(drawn: list[tuple[MaskTrack, float | None]]) -> str:
+    """보이는 마스크 요약 한 줄 (객체 수, 손, 평균 점수)."""
+    objects = [d for d in drawn if d[0].hand is None]
+    hands = "".join(sorted(d[0].hand[0].upper() for d in drawn if d[0].hand))
+    scores = [s for _, s in drawn if s is not None]
+    mean = f"{float(np.mean(scores)):.2f}" if scores else "-"
+    top = ", ".join(f"{c} {n}" for c, n in
+                    collections.Counter(d[0].label for d in objects).most_common(4))  # fmt: skip
+    return f"masks: objects {len(objects)} ({top}) hands {hands or '-'} mean score {mean}"
+
+
 def _hidden_line(name: str, hidden: collections.Counter[tuple[str, str]]) -> str:
     """문턱 미만 박스 요약 한 줄 (출처 하나)."""
     rows = {k[1]: v for k, v in hidden.items() if k[0] == name}
@@ -458,13 +540,14 @@ def _blur_line(ov: Overlays, t_ms: int, opts: DrawOptions) -> str:
 
 LEGEND = (
     "hand: green=L orange=R white=fingertip | arm: sky=L yellow=R wrist->elbow (only if seen)",
+    "mask: filled+outline, hands green/orange, objects colour per class (nearest keyframe)",
     "obj: cyan=COCO yellow=OWLv2, score=track conf (wearer's own body boxes are suppressed)",
     "privacy: red=face/YN magenta=refl/RF pink=ship/QR+OV orange=doc,scr,photo,addr/OV",
 )
 
 
 def draw_frame(
-    img: Image, t_ms: float, ov: Overlays, opts: DrawOptions, *, session_id: str, panel_h: int = 164
+    img: Image, t_ms: float, ov: Overlays, opts: DrawOptions, *, session_id: str, panel_h: int = 190
 ) -> Image:
     """원본 크기 BGR 프레임 하나에 오버레이를 그린 축소 영상(+아래 패널)을 돌려준다.
 
@@ -475,6 +558,7 @@ def draw_frame(
     small = cv2.resize(img, (opts.width, vh), interpolation=cv2.INTER_AREA)
     sc = (opts.width / w0, vh / h0)
     key = round(t_ms)
+    masks = _draw_masks(small, ov, key, opts)
     _draw_boxes(small, ov.blur, key, sc, opts, blur=True)
     hidden = _draw_boxes(small, ov.objects, key, sc, opts, blur=False)
     _draw_arms(small, ov, key, sc, opts)
@@ -491,6 +575,8 @@ def draw_frame(
     for hand in ("left", "right"):
         y += 15
         _plain(panel, arm_status(ov, hand, key, opts), (6, y), ARM_COLORS[hand], 0.36)
+    y += 15
+    _plain(panel, _mask_line(masks), (6, y), (230, 230, 120), 0.34)
     y += 15
     _plain(panel, _blur_line(ov, key, opts), (6, y), (120, 120, 255), 0.34)
     for name in ("coco", "owlv2"):
@@ -624,6 +710,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--min-score", type=float, default=0.3, help="객체 박스 표시 문턱 (표시용)")
     ap.add_argument("--hold-ms", type=int, default=0, help="마지막 키프레임 뒤 박스 유지 (ms)")
     ap.add_argument("--max-interp-ms", type=int, default=1500)
+    ap.add_argument("--mask-tol-ms", type=int, default=260,
+                    help="마스크 키프레임을 보일 최대 시각 차 (ms, 표시용)")  # fmt: skip
+    ap.add_argument("--no-boxes", action="store_true", help="객체 박스를 그리지 않는다")
+    ap.add_argument("--no-privacy", action="store_true", help="프라이버시 탐지 박스 숨김")
+    ap.add_argument("--extra-labels", type=Path, action="append", default=[],
+                    help="더 그릴 라벨 JSON Lines (DB 밖 파일럿 결과)")  # fmt: skip
     ap.add_argument("--crf", type=int, default=26)
     ap.add_argument("--expect-size", default=None, help="돌린 프레임 크기 WxH (예: 1920x1080)")
     ap.add_argument("--url", default=None, help="DB URL (기본: DLP_DATABASE_URL)")
@@ -635,18 +727,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("[실패] 출력은 저장소 밖에 둡니다 (개인정보가 든 영상)")
         return 2
     labels = _load_labels(args.session_id, args.url)
+    for path in args.extra_labels:
+        with path.open(encoding="utf-8") as f:
+            labels += [LabelRecord.model_validate_json(line) for line in f if line.strip()]
     start_ms, end_ms = args.start * 1000, args.end * 1000
     ov = build_overlays(
         labels, stream_id=args.stream, start_ms=int(start_ms), end_ms=int(end_ms),
         detectors=privacy_detectors(ROOT / "config/policies/privacy.yaml"),
     )  # fmt: skip
+    if args.no_boxes:
+        ov.objects = []
+    if args.no_privacy:
+        ov.blur = []
     opts = DrawOptions(min_score=args.min_score, hold_ms=args.hold_ms,
-                       max_interp_ms=args.max_interp_ms, width=args.width)  # fmt: skip
+                       max_interp_ms=args.max_interp_ms, width=args.width,
+                       mask_tol_ms=args.mask_tol_ms)  # fmt: skip
     size = tuple(int(v) for v in args.expect_size.split("x")) if args.expect_size else None
     n = render(args.video, args.out, ov, opts, session_id=args.session_id, start_ms=start_ms,
                end_ms=end_ms, rotate=args.rotate, expect_size=size, crf=args.crf)  # type: ignore[arg-type]  # fmt: skip
     print(f"{args.out}: 프레임 {n}, 블러 트랙 {len(ov.blur)}, 객체 트랙 {len(ov.objects)}, "
-          f"손 트랙 {len(ov.hands)}")  # fmt: skip
+          f"손 트랙 {len(ov.hands)}, 마스크 트랙 {len(ov.masks)}")  # fmt: skip
     return 0
 
 

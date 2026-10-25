@@ -101,3 +101,43 @@ def test_box_interpolation_and_hold() -> None:
     assert ps.box_at(track, 50, ps.DrawOptions())[0] == 50
     assert ps.box_at(track, 150, ps.DrawOptions(hold_ms=0)) is None
     assert ps.box_at(track, 150, ps.DrawOptions(hold_ms=60))[0] == 100
+
+
+def test_masks_are_filled_translucent_with_hand_colours() -> None:
+    """마스크(ADR 0059)는 반투명 채움: 손은 왼손 초록, 객체는 클래스 색, 마스크 밖은 그대로이고
+    가장 가까운 키프레임이 mask_tol_ms 밖이면 그리지 않는다."""
+    from dlp_media.rle import encode_rle
+
+    ps = _load()
+    hand = np.zeros((240, 320), bool)
+    hand[100:140, 50:90] = True
+    cup = np.zeros((240, 320), bool)
+    cup[20:60, 200:260] = True
+    labels = [
+        make_label(
+            {"kind": "mask_track", "entity_id": e, "class_id": c,
+             "keyframes": [{"t_ms": 0, "rle": encode_rle(m).model_dump(), "score": 0.8}]},
+            label_id=f"m-{e}", t_start_ms=0, t_end_ms=0, stream_id="bodycam",
+        )
+        for e, c, m in (("left_hand", "hand", hand), ("cup_01", "cup", cup))
+    ]  # fmt: skip
+    ov = ps.build_overlays(labels, stream_id="bodycam", start_ms=0, end_ms=10)
+    assert {m.hand for m in ov.masks} == {"left", None}
+    img = np.full((240, 320, 3), 128, dtype=np.uint8)
+    opts = ps.DrawOptions(width=320, mask_tol_ms=100)
+    out = ps.draw_frame(img, 0.0, ov, opts, session_id="s")
+    green = np.array(ps.HAND_COLORS["left"], dtype=float)
+    inside = out[120, 70].astype(float)
+    expected = 128 * (1 - opts.mask_alpha) + green * opts.mask_alpha
+    assert np.abs(inside - expected).max() <= 1  # 반투명 (원본과 색의 섞임)
+    cup_px = out[40, 230].astype(float)
+    assert (
+        np.abs(
+            cup_px
+            - (128 * (1 - opts.mask_alpha) + np.array(ps.class_color("cup")) * opts.mask_alpha)
+        ).max()
+        <= 1
+    )
+    assert tuple(out[200, 300]) == (128, 128, 128)  # 마스크 밖
+    later = ps.draw_frame(img, 500.0, ov, opts, session_id="s")
+    assert tuple(later[120, 70]) == (128, 128, 128)  # 키프레임에서 너무 멀다
