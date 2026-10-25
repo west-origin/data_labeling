@@ -105,6 +105,10 @@
   `dlp_prelabel.constraints3d`(표본 `flags`), 장면 분류 `dlp_prelabel.scene`과 `dlp prelabel run <세션> --scene <장면>`
   (도구 질의를 kitchen·bathroom·bedroom·living·unknown으로 고름, ADR 0055), 손 크기 초점 거리 추정 `dlp_prelabel.fov`
   (출처 `estimated_hand_size`, 기본 끔, ADR 0056).
+  착용자 팔 골격 arm3(손목·팔꿈치·어깨, 손별 entity `<손>_arm`, 손목은 hand21 손목 기준, `dlp_prelabel.arm`, 전신 단계가
+  착용자 자세·합성 착용자 박스 자세에서 고름)와 팔꿈치 3D(`<손>_arm`, 아래팔 길이 표시 `forearm_length`), 바디캠 착용자
+  몸 억제(`dlp_prelabel.wearer_suppress`, 판정 규칙 `dlp_schema.wearer_body`, 객체·도구·전신 단계, 정책
+  `prelabel.yaml wearer_suppression`·`arm`, ADR 0058).
 - `packages/retarget/` (`dlp_retarget`) — 고객 로봇 리타기팅(ADR 0047): 로봇 등록(`config/robots/<ID>.yaml`, 모델 sha256,
   고객 모델 파일은 저장소 밖 `DLP_ROBOTS_DIR`), URDF 기구학, 손 → 끝단 목표·평행 그리퍼, 관절·속도 한계 IK(내장, mink는
   격리 환경 `scripts/retarget-env`), 닿지 못한 프레임은 자르지 않고 표시. `orientation_mode`는 관절 수가 아니라 구조로
@@ -157,6 +161,7 @@
   3D는 `lerobot.interp_max_gap_3d_ms`로 보간하고 궤적 구간 채움 비율이 낮으면 경고한다. LeRobot에 3D 방식·내부 파라미터
   출처·접촉 객체 클래스 특징을 싣는다. 페이로드의 라벨 ID 필드(`pseudonym.LABEL_REF_FIELDS`, 예: `derived_from`)도 라벨
   가명이 된다. 손 부위 설정은 내보내기 시작 때 hand_joints와 대조한다 (ADR 0053).
+  COCO `wearer_arm` 범주, LeRobot `annotation.wearer_arm`(arm3 2D + 팔꿈치 3D, ADR 0058).
 - `packages/ops/` (`dlp_ops`) — 운영 대시보드와 보안: 주간 운영 지표(검수 시간·수정률·자동 승인율·편향·발견율·
   잔여 블러 누락·원가, AI 1차 검수 절: 백로그·fallback·캐시 적중·장비 시간·ok 놓침 상한)와 경고, 원본 접근 월간 감사
   리포트, 원본 보관 만료 알림·결정.
@@ -195,6 +200,8 @@
   연동하면 표시를 지운다.
 - 라벨링한 데이터를 판매하므로 모델의 상업 사용 여부를 따진다 (ADR 0010). 새 모델은 `config/models.yaml`에 가중치
   라이선스, 직접 학습 데이터와 그 라이선스, `commercial` 분류를 적는다. 가중치가 비상업(`forbidden`)이면 쓰지 않는다.
+  데이터는 당분간 판매하지 않고 사내 모델 개발에 쓰지만(2026-10-24), 라이선스 분류·forbidden 금지·개인정보·내보내기
+  규칙은 그대로 적용한다 (ADR 0058).
 - 학습 예제는 데이터셋 버전의 학습·검증 분할에서만 뽑는다 (`dlp_train.extract`). 후보 모델의 골든셋 예측은
   DB에 쓰지 않는다. 배포는 게이트를 통과한 모델만, 프라이버시는 사람 승인 후에만 한다.
 - 각 파이프라인 단계는 멱등적인 `dlp <단계>` 하위 명령으로 만든다. 모델 버전에는 그 단계가 쓰는 정책 절의 해시를 넣는다. 모델 출처 라벨 ID에는 `version_tag(모델 버전)`을
@@ -232,4 +239,8 @@
 - 손 크기로 추정한 내부 파라미터는 `estimated_hand_size`로 밝히고 `calibrated`로 쓰거나 실제 캘리브레이션을 덮지
   않는다. 메트릭 깊이 모델의 화각 사전값을 되돌려 주므로 기본 끈다 (`depth.focal_estimate.enabled: false`, F-PAR-65).
 - 학습 증강의 입력은 데이터셋 버전의 학습·검증 분할 블러본만이다. 증강본은 라벨 이력·판매 내보내기에 넣지 않는다 (ADR 0057).
+- 1인칭 바디캠에서 착용자 자신의 팔·몸통 박스·자세는 객체·사람 라벨로 만들지 않고 단계 요약에만 센다. 프라이버시
+  탐지·블러는 이 억제와 무관하다 (ADR 0058).
+- 팔꿈치가 화면 밖이거나 판정 검사를 통과하지 못하면 visibility 0으로 두고 위치를 지어내지 않는다. 팔 손목은 같은 손
+  hand21 손목이다 (ADR 0058).
 - 코드 주석과 문서는 한국어, 식별자는 영어.
