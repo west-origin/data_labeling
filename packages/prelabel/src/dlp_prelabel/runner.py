@@ -82,6 +82,7 @@ from dlp_prelabel.contact import (
     video_contact_intervals,
 )
 from dlp_prelabel.lift3d import HAND21_NAMES, DepthLifter, lift_key
+from dlp_prelabel.masks import MaskMaker, MaskReport
 from dlp_prelabel.policy import PrelabelPolicy
 from dlp_prelabel.posemath import as_rotation, rotation_problem
 from dlp_prelabel.wearer import match_wearer, wrist_speed
@@ -115,6 +116,7 @@ from dlp_schema.labels import (
     IntrinsicsSource,
     KeypointTrackPayload,
     LabelRecord,
+    MaskTrackPayload,
     Provenance,
     Source,
     Trajectory3DPayload,
@@ -234,6 +236,11 @@ class PrelabelSummary:
     wearer_suppressed: dict[str, WearerReport] = field(default_factory=dict[str, WearerReport])
     # 착용자 팔 (ADR 0058): "스트림/body" → 팔 요약
     arms: dict[str, ArmReport] = field(default_factory=dict[str, ArmReport])
+    # 객체·손 모양 마스크 (ADR 0059): 새 mask_track 수, 단계 요약, 검수된·사람 마스크가 있어 만들지
+    # 않은 개체 수
+    masks: int = 0
+    mask_report: MaskReport | None = None
+    masks_blocked: int = 0
 
 
 def _follow(conn: sa.Connection, session_id: str, now: datetime, summary: PrelabelSummary) -> None:
@@ -338,6 +345,7 @@ def run_prelabel(
     replaced: Iterable[str] = (),
     pressure_prefixes: Sequence[str] | None = None,
     pose_estimator: CameraPoseEstimator | None = None,
+    masker: MaskMaker | None = None,
 ) -> PrelabelSummary:
     """세션 하나의 프리라벨 단계(모듈 docstring의 1~5)를 돌린다.
 
@@ -358,6 +366,8 @@ def run_prelabel(
         pose_estimator: 바디캠 자세 추정기 (None이면 깊이 단계가 있을 때 내장
             `ImuVisualOdometry`, 없으면 자세 단계를 건너뛴다). 시험은 `OraclePoseEstimator`를
             넘긴다.
+        masker: 객체·손 모양 마스크 단계 (ADR 0059, None이면 건너뛴다). 1단계 뒤 현재 박스·손
+            트랙으로 돈다 (`_masks`).
 
     Returns:
         `PrelabelSummary`.
@@ -447,8 +457,8 @@ def run_prelabel(
         del existing, current_now, fresh
         history = get_labels(conn, session_id)
         current = current_labels(history)
-        if lifter is not None:
-            summary.lifted = _lift(conn, session, history, current, raw, work, lifter, now, summary)
+        # 모양 마스크(ADR 0059)와 카메라 좌표 3D: 1단계 트랙에서 계산하는 단계
+        _track_stages(conn, session, (history, current), raw, work, (masker, lifter), now, summary)
         del history, current
         # 새 카메라 좌표 3D가 확인된 2D의 검수를 물려받은 뒤 월드 좌표 단계가 입력을 고른다
         _follow(conn, session_id, now, summary)
@@ -756,6 +766,118 @@ def _lift(
     summary.lift_blocked += len(labels) - len(kept)
     insert_labels(conn, [*retractions(stale, version, now), *kept])
     return len(kept)
+
+
+def _track_stages(
+    conn: sa.Connection,
+    session: Session,
+    labels: tuple[list[LabelRecord], list[LabelRecord]],
+    raw: ObjectStore,
+    work: Path,
+    stages: tuple[MaskMaker | None, DepthLifter | None],
+    now: datetime,
+    summary: PrelabelSummary,
+) -> None:
+    """1단계 트랙에서 계산하는 단계: 모양 마스크(`_masks`) → 카메라 좌표 3D(`_lift`).
+
+    labels: (세션 전체 이력, 현재 라벨). 두 단계는 서로의 결과를 입력으로 쓰지 않는다.
+    """
+    history, current = labels
+    masker, lifter = stages
+    if masker is not None:
+        _masks(conn, session, history, current, raw, work, masker, now, summary)
+    if lifter is not None:
+        summary.lifted = _lift(conn, session, history, current, raw, work, lifter, now, summary)
+
+
+def pick_mask_tracks(current: list[LabelRecord], stream_id: str) -> list[LabelRecord]:
+    """마스크 단계 입력: 그 스트림의 현재 박스 트랙과 hand21 손 트랙을 개체마다 하나 고른다.
+
+    같은 개체 트랙이 여럿이면 `track_rank`(사람·검수 → 최신 → 긴 구간 → 라벨 ID)로 하나만 쓴다
+    (`pick_lift_tracks`와 같은 기준). 착용자 팔(arm3)·전신 자세는 프롬프트가 아니다 (ADR 0058).
+    Returns: 고른 트랙 (라벨 ID 순).
+    """
+    best: dict[str, LabelRecord] = {}
+    for x in current:
+        p = x.payload
+        hand = isinstance(p, KeypointTrackPayload) and p.skeleton == "hand21"
+        if x.stream_id != stream_id or not (isinstance(p, BoxTrackPayload) or hand):
+            continue
+        assert isinstance(p, BoxTrackPayload | KeypointTrackPayload)
+        if p.entity_id not in best or track_rank(x) > track_rank(best[p.entity_id]):
+            best[p.entity_id] = x
+    return sorted(best.values(), key=lambda x: x.label_id)
+
+
+def protected_mask_entities(current: list[LabelRecord], stream_id: str) -> set[str]:
+    """검수된·사람 mask_track이 이미 있는 개체 (마스크 단계가 새로 만들지 않는다, ADR 0015).
+
+    부분 마스크(part 있음)는 전체 마스크와 대상이 달라 막지 않는다.
+    """
+    return {
+        x.payload.entity_id
+        for x in current
+        if x.stream_id == stream_id
+        and isinstance(x.payload, MaskTrackPayload)
+        and x.payload.part is None
+        and is_protected(x)
+    }
+
+
+def _masks(
+    conn: sa.Connection,
+    session: Session,
+    history: list[LabelRecord],
+    current: list[LabelRecord],
+    raw: ObjectStore,
+    work: Path,
+    masker: MaskMaker,
+    now: datetime,
+    summary: PrelabelSummary,
+) -> None:
+    """객체·손 모양 마스크 단계 (ADR 0059): 바디캠 박스·손 트랙을 프롬프트로 mask_track을 만든다.
+
+    멱등: 이 단계가 마지막으로 낸 버전이 지금 버전이면 다시 만들지 않는다 (`stage_version`).
+    버전(`<masker.version>+i<입력 해시>`)에는 고른 프롬프트 트랙과 착용자 증거가 되는 손 트랙의
+    라벨 ID가 들어가, 박스·손 트랙이 바뀌면(새 모델 버전, 검수자 수정) 다시 만들고 검수 전인 이전
+    마스크만 지운다. 같은 개체에 검수된·사람 마스크가 있으면 그 개체는 만들지 않는다
+    (`summary.masks_blocked`).
+    입력 트랙이 없으면 원본을 받지 않고 검수 전 이전 결과만 지운다.
+    부작용: 원본 버킷에서 바디캠 영상을 받고(이미 받았으면 그대로), `label_records`에 새 마스크와
+    이전 버전 삭제 레코드를 넣는다.
+    """
+    body = session.reference_stream
+    prefix = f"{session.session_id}-{body.stream_id}-masks-"
+    blocked = protected_mask_entities(current, body.stream_id)
+    picked = pick_mask_tracks(current, body.stream_id)
+    tracks = [
+        x
+        for x in picked
+        if isinstance(x.payload, BoxTrackPayload | KeypointTrackPayload)
+        and x.payload.entity_id not in blocked
+    ]
+    hands = [x for x in picked if isinstance(x.payload, KeypointTrackPayload)]
+    version = stage_version(
+        history, prefix, f"{masker.version}+i{input_digest([*tracks, *hands], *sorted(blocked))}"
+    )
+    if version is None:
+        return
+    stale = _stale(history, prefix, version)
+    summary.masks_blocked = len(picked) - len(tracks)
+    labels: list[LabelRecord] = []
+    if tracks:
+        labels = masker.run(
+            _fetch(raw, body.uri, work),
+            session_id=session.session_id,
+            stream_id=body.stream_id,
+            tracks=tracks,
+            ontology_version=session.ontology_version or "",
+            version=version,
+            wearer=wearer_evidence(body, current, []),
+        )
+        summary.mask_report = masker.last_report
+    insert_labels(conn, [*retractions(stale, version, now), *labels])
+    summary.masks = len(labels)
 
 
 def synced_imu(session: Session) -> Stream | None:

@@ -114,6 +114,50 @@ models:
       - 의사 깊이를 만든 Giant 교사 모델은 CC BY-NC 4.0
     commercial: review
 
+  # 객체·손 모양 마스크 (prelabel.yaml models.mask_* → masks.MaskMaker, dlp_models.sam2, ADR 0059).
+  # 공식 SAM 2.1 hiera-tiny(facebook/sam2.1-hiera-tiny, 모델 카드 license apache-2.0, revision de431c4)를
+  # onnx-community가 영상 인코더와 프롬프트 인코더·마스크 디코더로 나눠 변환한 fp32 ONNX다 (고정 revision
+  # 814a066, 변환본 카드에는 라이선스 표시가 없어 원 가중치 라이선스를 잇는 것으로 본다). 각 그래프는
+  # 가중치를 같은 디렉터리의 외부 데이터 파일(*.onnx_data)에 둔다 (파일 이름을 바꾸면 열리지 않는다).
+  # 라이선스 확인 (2026-10-25): facebookresearch/sam2 README "The SAM 2 model checkpoints, SAM 2 demo code
+  # (front-end and back-end), and SAM 2 training code are licensed under Apache 2.0", SA-V 데이터셋
+  # (sav_dataset/README.md) "released under CC BY 4.0". SAM 2 논문(arXiv 2408.00714) 학습 혼합은 SA-1B,
+  # SA-V, 사내 허가 영상(Internal), 공개 VOS(DAVIS·MOSE·YouTube-VOS)다. SA-1B는 Meta 데이터셋 페이지가
+  # "research purposes"용 제한 라이선스로 밝힌다 → 직접 학습 데이터에 연구용 조건이 있어 review (ADR 0010).
+  sam2_tiny_encoder:
+    path: data/models/sam2/vision_encoder.onnx
+    url: https://huggingface.co/onnx-community/sam2.1-hiera-tiny-ONNX/resolve/814a066640debee5a91e70aa401fb8e17e030503/onnx/vision_encoder.onnx
+    sha256: 4f30aacd3aaefbca81a0b7fe4c1fc96345570ea0a6f80ced599493d1b3be2e8c
+    license: Apache-2.0
+    training_data: &sam2_data
+      - SA-1B (SA-1B 데이터셋 연구용 라이선스, research purposes)
+      - SA-V (CC BY 4.0)
+      - Meta 사내 허가 영상 (Internal, 공개되지 않음)
+      - DAVIS, MOSE (CC BY-NC-SA 4.0), YouTube-VOS (연구용 배포, 조건 확인 필요)
+    commercial: review
+  # 인코더 가중치 (외부 데이터, 위 그래프가 같은 디렉터리에서 이 이름으로 읽는다)
+  sam2_tiny_encoder_data:
+    path: data/models/sam2/vision_encoder.onnx_data
+    url: https://huggingface.co/onnx-community/sam2.1-hiera-tiny-ONNX/resolve/814a066640debee5a91e70aa401fb8e17e030503/onnx/vision_encoder.onnx_data
+    sha256: e83df9866a5afe68ea7f0f721f18f65137fc3acbf0da1c74e946d363e09c69cc
+    license: Apache-2.0
+    training_data: *sam2_data
+    commercial: review
+  sam2_tiny_decoder:
+    path: data/models/sam2/prompt_encoder_mask_decoder.onnx
+    url: https://huggingface.co/onnx-community/sam2.1-hiera-tiny-ONNX/resolve/814a066640debee5a91e70aa401fb8e17e030503/onnx/prompt_encoder_mask_decoder.onnx
+    sha256: 874414704c5d686db7d206a35f6e15d26563d50c8c4468fccc6739bd7e491dcf
+    license: Apache-2.0
+    training_data: *sam2_data
+    commercial: review
+  sam2_tiny_decoder_data:
+    path: data/models/sam2/prompt_encoder_mask_decoder.onnx_data
+    url: https://huggingface.co/onnx-community/sam2.1-hiera-tiny-ONNX/resolve/814a066640debee5a91e70aa401fb8e17e030503/onnx/prompt_encoder_mask_decoder.onnx_data
+    sha256: e9874d900dd4134ed60eab1e97910327c2419e0b2954485d8fd6e7f1a1470f47
+    license: Apache-2.0
+    training_data: *sam2_data
+    commercial: review
+
 # 외부 추론 서버로 쓰는 모델 (가중치는 서버에 있다). 정책이 이름으로 가리키고 라이선스 검사를 받는다.
 external:
   Qwen/Qwen2.5-VL-7B-Instruct:

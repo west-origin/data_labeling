@@ -3,7 +3,8 @@
 등록하는 명령:
 - `dlp prelabel run <세션> [--store] [--url] [--skip 단계]` — 세션의 영상 스트림마다
   손(MediaPipe 21관절), 전신(RTMPose), COCO 객체(MediaPipe), 도구(OWLv2) 모델을 돌린다.
-  이어 깊이 기반 3D 궤적, 장갑·영상 접촉 구간, 3인칭 착용자 매칭을 만들어
+  이어 객체·손 모양 마스크(SAM 2.1, ADR 0059), 깊이 기반 3D 궤적, 장갑·영상 접촉 구간, 3인칭
+  착용자 매칭을 만들어
   `label_records`에 쓴다.
 
 순서: `dlp privacy approve`(가능하면 `render`도) 뒤, `dlp relations run`·`dlp actions run` 전.
@@ -45,6 +46,7 @@ from dlp_prelabel.adapters.owl_objects import OwlObjects
 from dlp_prelabel.adapters.rtmpose import RtmPose
 from dlp_prelabel.adapters.stubs import UNAVAILABLE
 from dlp_prelabel.lift3d import DepthLifter
+from dlp_prelabel.masks import MaskMaker
 from dlp_prelabel.policy import PrelabelPolicy, load_policy
 from dlp_prelabel.runner import CONTACT_STEP, PrelabelSummary, run_prelabel
 from dlp_prelabel.scene import SceneResult, VlmScene, classify_video
@@ -105,6 +107,13 @@ def cmd_run(args: argparse.Namespace) -> int:
         except ModelUnavailableError as exc:
             missing[DepthLifter.name] = str(exc)
             print(f"[모델 없음] {DepthLifter.name}: {exc}")
+    masker: MaskMaker | None = None
+    if MaskMaker.name not in args.skip and policy.masks.enabled:
+        try:
+            masker = MaskMaker.from_registry(root, policy, now=now)
+        except ModelUnavailableError as exc:
+            missing[MaskMaker.name] = str(exc)
+            print(f"[모델 없음] {MaskMaker.name}: {exc}")
     for p in UNAVAILABLE:
         print(f"[미연동] {p.name}: {p.reason}")  # TODO(real-model) 표시가 붙은 기능
     buckets = load_config(root / "config/defaults.yaml").buckets
@@ -161,6 +170,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 ontology,
                 now,
                 lifter=lifter,
+                masker=masker,
                 replaced=replaced,
                 # 접촉 단계가 쓰는 장갑 압력 채널 (접촉 모델 버전에 들어간다)
                 pressure_prefixes=load_sync_policy(
@@ -219,6 +229,10 @@ def _print_summary(s: PrelabelSummary) -> None:
     for key in s.skipped:
         print(f"{key}: 같은 모델 버전 결과가 있어 건너뜀")
     print(f"3D 궤적 {s.lifted}개, 접촉 구간 {s.contacts}개, 3인칭 착용자 {s.wearer or '-'}")
+    if s.mask_report is not None or s.masks_blocked:
+        # 객체·손 모양 마스크 (ADR 0059). 검수된·사람 마스크가 있는 개체는 새로 만들지 않는다
+        detail = s.mask_report.text() if s.mask_report is not None else "-"
+        print(f"[마스크] mask_track {s.masks}개, 보호로 건너뛴 개체 {s.masks_blocked}개: {detail}")
     if s.focal_estimate:
         print(f"[초점 거리 추정] 손 크기 기준 {s.focal_estimate} (출처 estimated_hand_size)")
     if s.lift_blocked:
@@ -266,8 +280,9 @@ def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
         "--skip",
         action="append",
         default=[],
-        choices=["hands", "body", "objects", "tools", "depth3d"],
-        help="건너뛸 단계 (여러 번 쓸 수 있다). CPU에서 tools(OWLv2)는 프레임당 수 초가 걸린다",
+        choices=["hands", "body", "objects", "tools", "depth3d", "masks"],
+        help="건너뛸 단계 (여러 번 쓸 수 있다). CPU에서 tools(OWLv2)는 프레임당 수 초, "
+        "masks(SAM 2.1)는 처리 프레임당 1~3초가 걸린다",
     )
     run.add_argument(
         "--scene",

@@ -11,7 +11,8 @@
   camera_pose → `campose`(바디캠 자세), world_frame → `worldframe`(월드 좌표 3D),
   contact → `runner._contacts`, wearer_matching → `runner._wearer`, timeline_predictors →
   `runner.run_prelabel` (마스터 타임라인 구간을 내는 배포 모델), wearer_suppression →
-  `MediaPipeObjects`·`OwlObjects`·`RtmPose`(착용자 몸 억제, ADR 0058), arm → `RtmPose`(착용자 팔).
+  `MediaPipeObjects`·`OwlObjects`·`RtmPose`(착용자 몸 억제, ADR 0058), arm → `RtmPose`(착용자 팔),
+  masks → `masks.MaskMaker`(객체·손 모양 마스크, ADR 0059).
 """
 
 from __future__ import annotations
@@ -145,6 +146,8 @@ class ModelRoles(Contract):
     - hands: 손 랜드마크. body_detector: 사람 박스(YOLOX). body: 전신 포즈(RTMPose).
     - coco_objects: COCO 객체. open_vocab: OWLv2 ONNX. open_vocab_tokenizer: OWLv2 토크나이저.
     - depth: 메트릭 깊이.
+    - mask_encoder·mask_decoder: SAM 2.1 그래프, mask_encoder_data·mask_decoder_data: 그 외부 가중치
+      파일 (ADR 0059).
 
     이 절은 어떤 `digest`에도 들어가지 않는다 (가중치가 바뀌면 `resolve`의 파일 해시로 버전이
     바뀐다).
@@ -157,6 +160,10 @@ class ModelRoles(Contract):
     open_vocab: str
     open_vocab_tokenizer: str
     depth: str
+    mask_encoder: str
+    mask_encoder_data: str
+    mask_decoder: str
+    mask_decoder_data: str
 
 
 class HandsPolicy(Contract):
@@ -661,6 +668,40 @@ class ArmPolicy(Contract):
         return self
 
 
+class MasksPolicy(Contract):
+    """객체·손 모양 마스크 (`masks`, `dlp_prelabel.masks.MaskMaker`, ADR 0059). 뜻은 YAML 주석."""
+
+    enabled: bool
+    frame_stride_ms: int = Field(ge=1)
+    box_max_gap_ms: int = Field(ge=0)
+    min_track_confidence: float = Field(ge=0, le=1)
+    exclude_classes: tuple[OntologyId, ...] = ()
+    min_box_px: float = Field(ge=0)
+    max_prompts_per_frame: int = Field(ge=1)
+    hands: bool
+    hand_class: OntologyId
+    hand_min_points: int = Field(ge=1, le=21)
+    hand_box_margin: float = Field(ge=0)
+    hand_time_tolerance_ms: int = Field(ge=0)
+    hand_point_joints: tuple[int, ...] = ()
+    min_score: float = Field(ge=0, le=1)
+    min_area_ratio: float = Field(ge=0, le=1)
+    outside_margin: float = Field(ge=0)
+    max_outside_ratio: float = Field(ge=0, le=1)
+    largest_component: bool
+    subtract_hands: bool
+    person_classes: tuple[OntologyId, ...] = ()
+    person_bottom_band: float | None = Field(default=None, ge=0, le=1)
+
+    @field_validator("hand_point_joints")
+    @classmethod
+    def _joints(cls, v: tuple[int, ...]) -> tuple[int, ...]:
+        """hand21 관절 번호(0~20)만. Raises: ValueError."""
+        if any(not 0 <= j <= 20 for j in v):
+            raise ValueError("masks.hand_point_joints: hand21 관절 번호(0~20)여야 합니다")
+        return v
+
+
 class PrelabelPolicy(Contract):
     """`config/policies/prelabel.yaml` 전체.
 
@@ -682,6 +723,7 @@ class PrelabelPolicy(Contract):
     scene: ScenePolicy  # 장면 분류 → 도구 질의 목록 (ADR 0055)
     wearer_suppression: WearerSuppressionPolicy  # 착용자 자신의 몸 억제 (ADR 0058)
     arm: ArmPolicy  # 착용자 팔 골격 arm3 (ADR 0058)
+    masks: MasksPolicy  # 객체·손 모양 마스크 (ADR 0059)
     # 마스터 타임라인 구간(stream_id 없음)을 내는 예측기 이름. 기준 스트림에서 세션당 한 번만 돌린다
     timeline_predictors: tuple[str, ...] = ()
 
