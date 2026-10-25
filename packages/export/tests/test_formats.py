@@ -394,6 +394,61 @@ def test_coco_person_boxes_work_with_keypoint_eval(
     assert ev.stats[0] == pytest.approx(1.0)
 
 
+def test_coco_masks_carry_lossless_rle_segmentation(
+    scenario: Scenario, policy: ExportPolicy, ontology: Ontology, tmp_path: Path
+) -> None:
+    """마스크(mask_track, ADR 0059)는 COCO segmentation(압축 RLE)으로 무손실 실린다.
+
+    정답: 컵 사각 마스크(12x10)와 왼손 마스크(손 범주, hand=left). pycocotools가 디코딩한 마스크가
+    원래 마스크와 같고, 정답을 예측으로 넣은 segm 평가가 AP 1이다. hand 범주는 하나(객체 hand에 손
+    키포인트를 붙임)다.
+    """
+    from dlp_media.rle import encode_rle
+
+    from .conftest import H, W
+
+    t = scenario.times
+    cup = np.zeros((H, W), bool)
+    cup[8:18, 10:22] = True
+    palm = np.zeros((H, W), bool)
+    palm[30:40, 40:52] = True
+    labels = [
+        make_label(
+            {"kind": "mask_track", "entity_id": e, "class_id": c,
+             "keyframes": [{"t_ms": t[2], "rle": encode_rle(m).model_dump(), "score": 0.9}]},
+            label_id=f"s1-mask-{e}", session_id="s1", stream_id="bodycam", t_start_ms=t[2],
+            t_end_ms=t[2], verification={"state": "human_approved", "reviewer_id": "r1",
+                                         "reviewed_at": FIXED_TIME},
+        )
+        for e, c, m in (("cup_01", "cup", cup), ("left_hand", "hand", palm))
+    ]  # fmt: skip
+    sc = Scenario(scenario.session, labels, t, scenario.labeling, scenario.render_hashes)
+    out = tmp_path / "out"
+    r = write_coco(
+        source(sc, policy), policy, ontology, sc.labeling, out, tmp_path / "w",
+        export_id="e1", now=FIXED_TIME, ids=NOIDS,
+    )  # fmt: skip
+    assert r.annotations == 2 and not r.dropped
+    with contextlib.redirect_stdout(io.StringIO()):
+        coco: Any = COCO(str(out / "coco" / "annotations.json"))
+    hand_cats = coco.getCatIds(catNms=["hand"])
+    assert len(hand_cats) == 1 and len(coco.loadCats(hand_cats)[0]["keypoints"]) == 21
+    anns = {a["label_id"]: a for a in coco.dataset["annotations"]}
+    for e, m in (("cup_01", cup), ("left_hand", palm)):
+        a = anns[f"s1-mask-{e}"]
+        assert np.array_equal(coco.annToMask(a).astype(bool), m)
+        assert a["area"] == int(m.sum()) and a["mask_score"] == 0.9
+    assert anns["s1-mask-left_hand"]["hand"] == "left"
+    assert anns["s1-mask-left_hand"]["num_keypoints"] == 0
+    dets = [{**a, "score": 1.0} for a in coco.dataset["annotations"]]
+    with contextlib.redirect_stdout(io.StringIO()):
+        ev = COCOeval(coco, coco.loadRes(dets), "segm")
+        ev.evaluate()
+        ev.accumulate()
+        ev.summarize()
+    assert ev.stats[0] == pytest.approx(1.0)
+
+
 def test_lerobot_frame_features(
     scenario: Scenario, policy: ExportPolicy, ontology: Ontology, tmp_path: Path
 ) -> None:

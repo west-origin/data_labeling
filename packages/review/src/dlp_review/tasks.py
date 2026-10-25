@@ -97,7 +97,14 @@ from dlp_review.ai_display import (
     ls_ai_results,
 )
 from dlp_review.clients import CvatClient, LabelStudioClient, cvat_task_name
-from dlp_review.cvat import KEYPOINT_LABELS, CvatSchema, Scale, label_spec, to_cvat_tracks
+from dlp_review.cvat import (
+    KEYPOINT_LABELS,
+    CvatSchema,
+    Scale,
+    label_spec,
+    to_cvat_shapes,
+    to_cvat_tracks,
+)
 from dlp_review.labelstudio import LS_KINDS, label_config, to_ls_results
 from dlp_review.object_hints import ObjectHint, read_object_hints
 from dlp_review.ontology_projects import ontology_project
@@ -851,10 +858,11 @@ class _LabelingRun:
         return rhash, marked, vkey
 
     def cvat(self, stream: Stream, marked: Path, vkey: str, rhash: str) -> ReviewTask:
-        """CVAT 공간 작업 (박스·키포인트 트랙). AI가 켜져 있으면 보인 판정을 이슈로 단다."""
+        """CVAT 공간 작업 (박스·키포인트 트랙, 모양 모드 마스크). AI가 켜져 있으면 보인 판정을
+        이슈로 단다."""
         cvat, sid = self.setup.cvat, self.session.session_id
         assert cvat is not None
-        spatial = ("box_track", "keypoint_track")
+        spatial = ("box_track", "keypoint_track", "mask_track")
         labels = self.pick(stream.stream_id, spatial)
         # 프로젝트 라벨: 온톨로지 객체 클래스 + 키포인트 골격
         # (kp_<골격>, 손 골격은 손별 kp_hand21_<손>, cvat.cvat_label_name)
@@ -870,7 +878,10 @@ class _LabelingRun:
             cvat.assign(tid, cvat_user)
         # 워터마크 영상은 블러본의 PTS·해상도를 유지하므로 라벨 좌표를 그대로(UNIT_SCALE) 보낸다
         times = frame_times(marked)
-        cvat.put_tracks(tid, to_cvat_tracks(labels, times, schema))
+        # 마스크(ADR 0059)는 모양 모드로 함께 보낸다
+        cvat.put_tracks(
+            tid, to_cvat_tracks(labels, times, schema), to_cvat_shapes(labels, times, schema)
+        )
         # 객체·도구 오탐 의심 힌트 (`dlp review hints`, 라벨링 버킷, ADR 0055). 보낸 라벨 것만
         sent = {x.label_id for x in labels}
         hints = [

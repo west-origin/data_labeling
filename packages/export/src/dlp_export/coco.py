@@ -1,4 +1,4 @@
-"""COCO (객체 박스·키포인트): 정답 키프레임 시각의 블러본 프레임을 이미지로 낸다.
+"""COCO (객체 박스·마스크·키포인트): 정답 키프레임 시각의 블러본 프레임을 이미지로 낸다.
 
 `dlp export coco <버전>`이 쓴다. 출력: `out/coco/annotations.json`과 `out/coco/images/*.jpg`.
 pycocotools로 읽고 평가할 수 있어야 한다 (테스트가 확인).
@@ -11,13 +11,16 @@ pycocotools로 읽고 평가할 수 있어야 한다 (테스트가 확인).
   그 범주에 키포인트를 붙인다), wearer_arm(arm3 착용자 팔, 주석 hand로 같은 손 hand와 잇는다,
   ADR 0058). 키포인트 범주에 든 박스만의 주석(예: person box_track)은
   num_keypoints 0과 0으로 채운 keypoints(3*K)를 가진다 (COCO 키포인트 평가가 모든 주석에서 읽는다).
+- 마스크(mask_track, ADR 0059): 키프레임마다 `segmentation`(COCO 압축 RLE, 라벨 그대로 무손실),
+  마스크에서 계산한 bbox·area, 마스크 점수(`mask_score`)를 단 주석. 손 마스크는 hand 범주(객체
+  hand)에 `hand`(left/right)를 붙인다. 마스크는 보간하지 않는다 (그 키프레임에만).
 - 주석마다 track_id(개체), label_id, 검증 상태, 출처, 모델 버전, 신뢰도를 붙인다
   (보간한 값은 넣지 않는다).
 
 시각 규약 (ADR 0019): 박스·키포인트 키프레임 시각은 그 스트림 영상의 PTS 시각이므로 마스터 시각으로
 바꾸지 않고 그대로 블러본 PTS 인덱스에서 찾는다 (3인칭 스트림도 같다). 이미지 `t_ms`도 스트림 시각.
 버린 주석 사유(`CocoResult.dropped`): keyframe_between_frames, unknown_class,
-no_visible_keypoints, unsupported_skeleton.
+no_visible_keypoints, unsupported_skeleton, mask_size_mismatch.
 """
 
 from __future__ import annotations
@@ -29,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 import cv2
+import numpy as np
 
 from dlp_export.frames import decode_frames, exact_frame
 from dlp_export.policy import ExportPolicy
@@ -36,9 +40,17 @@ from dlp_export.pseudonym import Pseudonymizer
 from dlp_export.source import ExportSource, fetch_blurred
 from dlp_media.probe import probe
 from dlp_media.pts import build_pts_index
+from dlp_media.rle import decode_rle
 from dlp_media.storage import ObjectStore
 from dlp_schema.export import physical_prior_table
-from dlp_schema.labels import ARM3_JOINTS, BoxTrackPayload, KeypointTrackPayload, LabelRecord
+from dlp_schema.labels import (
+    ARM3_JOINTS,
+    BoxTrackPayload,
+    KeypointTrackPayload,
+    LabelRecord,
+    MaskKeyframe,
+    MaskTrackPayload,
+)
 from dlp_schema.ontology import Ontology
 from dlp_schema.session import StreamKind
 
@@ -75,9 +87,10 @@ VIDEO = (StreamKind.BODYCAM, StreamKind.THIRD_PERSON)
 def categories(ontology: Ontology) -> tuple[list[dict[str, Any]], dict[str, int], dict[str, int]]:
     """(범주 목록, 객체 클래스 → ID, 골격 → ID). ID는 1부터, 같은 온톨로지면 같다.
 
-    순서: 온톨로지 객체(이름순) → (객체 person이 없으면) person 범주 → hand 범주 → wearer_arm 범주
-    (착용자 팔 arm3 손목·팔꿈치·어깨, ADR 0058).
-    person 범주(객체든 새로 만든 것이든)에 coco17 keypoints·skeleton을 붙인다.
+    순서: 온톨로지 객체(이름순) → (객체 person이 없으면) person 범주 → (객체 hand가 없으면) hand
+    범주 → wearer_arm 범주 (착용자 팔 arm3 손목·팔꿈치·어깨, ADR 0058).
+    person 범주(객체든 새로 만든 것이든)에 coco17, hand 범주(객체 hand는 손 마스크 클래스, ADR
+    0059)에 hand21 keypoints·skeleton을 붙인다.
     온톨로지 객체 범주의 `name`은 온톨로지 ID 그대로이고(기존 소비자 호환), 표시 이름
     `name_ko`·`name_en`을 덧붙인다 (COCO는 범주의 추가 키를 허용한다, ADR 0043).
     사전값이 있는 객체 범주에는 `physical_priors`(측정값 아님 `measured: false`,
@@ -108,15 +121,18 @@ def categories(ontology: Ontology) -> tuple[list[dict[str, Any]], dict[str, int]
         cat: dict[str, Any] = {"id": skel["coco17"], "name": "person", "supercategory": "person"}
         cats.append(cat)
     cat |= {"keypoints": list(COCO17), "skeleton": COCO17_SKELETON}
-    hand: dict[str, Any] = {
-        "id": len(cats) + 1,
-        "name": "hand",
-        "supercategory": "person",
+    hand_points: dict[str, Any] = {
         "keypoints": list(HAND21),
         "skeleton": [[a + 1, b + 1] for a, b in HAND21_SKELETON],
     }
-    cats.append(hand)
-    skel["hand21"] = hand["id"]
+    if "hand" in obj:
+        # 객체 hand 범주(손 마스크, ADR 0059)를 그대로 손 키포인트 범주로 쓴다 (person과 같은 방식)
+        cats[obj["hand"] - 1] |= hand_points
+        skel["hand21"] = obj["hand"]
+    else:
+        hand: dict[str, Any] = {"id": len(cats) + 1, "name": "hand", "supercategory": "person"}
+        cats.append(hand | hand_points)
+        skel["hand21"] = hand["id"]
     # 착용자 팔 (ADR 0058): 주석의 hand 필드가 같은 손 hand 주석과 잇는다
     arm: dict[str, Any] = {
         "id": len(cats) + 1,
@@ -128,6 +144,33 @@ def categories(ontology: Ontology) -> tuple[list[dict[str, Any]], dict[str, int]
     cats.append(arm)
     skel["arm3"] = arm["id"]
     return cats, obj, skel
+
+
+def mask_annotation(
+    p: MaskTrackPayload, k: MaskKeyframe, obj_ids: dict[str, int], size: tuple[int, int]
+) -> dict[str, Any] | str:
+    """마스크 키프레임 → COCO 주석 필드 (segmentation 압축 RLE, bbox·area는 마스크에서), 또는 버린
+    사유 (`unknown_class`, `mask_size_mismatch`: RLE 크기가 블러본 프레임 (높이, 너비)와 다름).
+
+    부분 마스크(part)는 `part` 필드로 싣는다. 손 마스크(class hand, entity `<손>_hand`)는 `hand`.
+    """
+    if p.class_id not in obj_ids:
+        return "unknown_class"
+    assert k.rle is not None
+    if tuple(k.rle.size) != size:
+        return "mask_size_mismatch"
+    ys, xs = np.nonzero(decode_rle(k.rle))
+    bbox = (
+        [float(xs.min()), float(ys.min()), float(xs.max() - xs.min() + 1),
+         float(ys.max() - ys.min() + 1)] if xs.size else [0.0, 0.0, 0.0, 0.0]
+    )  # fmt: skip
+    hand = p.entity_id.removesuffix("_hand")
+    return {
+        "category_id": obj_ids[p.class_id],
+        "segmentation": {"size": list(k.rle.size), "counts": k.rle.counts},
+        "bbox": bbox, "area": int(xs.size), "mask_score": k.score,
+        "part": p.part, "hand": hand if hand in ("left", "right") else None,
+    }  # fmt: skip
 
 
 def _meta(x: LabelRecord, ids: Pseudonymizer) -> dict[str, Any]:
@@ -207,7 +250,7 @@ def write_coco(  # noqa: C901
                 x
                 for x in es.labels
                 if x.stream_id == stream.stream_id
-                and isinstance(x.payload, BoxTrackPayload | KeypointTrackPayload)
+                and isinstance(x.payload, BoxTrackPayload | KeypointTrackPayload | MaskTrackPayload)
             ]
             # 공간 라벨이 없는 스트림은 블러본을 받지도 않는다
             if not spatial:
@@ -220,7 +263,7 @@ def write_coco(  # noqa: C901
             items: list[tuple[int, LabelRecord, Any]] = []  # (프레임, 라벨, 키프레임)
             for x in spatial:
                 p = x.payload
-                assert isinstance(p, BoxTrackPayload | KeypointTrackPayload)
+                assert isinstance(p, BoxTrackPayload | KeypointTrackPayload | MaskTrackPayload)
                 for k in p.keyframes:
                     # 화면 밖 표시(outside) 키프레임은 주석이 아니다 (박스만 가진 필드)
                     if getattr(k, "outside", False):
@@ -247,6 +290,16 @@ def write_coco(  # noqa: C901
                     }  # fmt: skip
                     if cid in n_points:
                         ann |= {"keypoints": [0] * (3 * n_points[cid]), "num_keypoints": 0}
+                    kept.append((f, x, ann))
+                elif isinstance(p, MaskTrackPayload):
+                    ann = mask_annotation(p, k, obj_ids, (info.height, info.width))
+                    if isinstance(ann, str):
+                        drop(ann)
+                        continue
+                    ann = base | ann | {"track_id": ids.ref(s.session_id, p.entity_id)}
+                    if ann["category_id"] in n_points:
+                        n = n_points[ann["category_id"]]
+                        ann |= {"keypoints": [0] * (3 * n), "num_keypoints": 0}
                     kept.append((f, x, ann))
                 elif isinstance(p, KeypointTrackPayload) and p.skeleton in skel_ids:
                     # COCO keypoints: [x1, y1, v1, x2, …]. 보이지 않는(v=0) 관절은 (0, 0, 0)

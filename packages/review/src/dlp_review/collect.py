@@ -57,6 +57,7 @@ from typing import TYPE_CHECKING, Any
 
 import sqlalchemy as sa
 
+from dlp_media.probe import probe
 from dlp_privacy.runner import invalidate_render, request_media_revocation
 from dlp_review import ai_collect
 from dlp_review.cvat import (
@@ -421,6 +422,9 @@ def collect_task(
             store.get_file(object_key(store, task.media_uri), video)
             # CVAT 프레임 번호 → 화면 영상 PTS ms (프레임 번호는 저장하지 않는다)
             times = frame_times(video)
+            # 새로 그린 마스크의 RLE 크기 (ADR 0059)
+            info = probe(video).video
+            size = (info.height, info.width) if info is not None else None
             scale = UNIT_SCALE
             if privacy:  # 블러 라벨은 원본 화소 좌표, 화면은 축소 프록시
                 stream = next(s for s in session.streams if s.stream_id == task.stream_id)
@@ -439,6 +443,7 @@ def collect_task(
                 task.stream_id,
                 new_box_kind="blur_track" if privacy else "box_track",
                 scale=scale,
+                frame_size=size,
             )
         except CvatFormatError as exc:
             raise TaskError(f"{task_key}: {exc}") from exc

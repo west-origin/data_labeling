@@ -282,9 +282,15 @@ class CvatClient:
         """작업 영상의 프레임 수 (CVAT 메타)."""
         return int(_check(self.http.get(f"/api/tasks/{task_id}/data/meta"))["size"])
 
-    def put_tracks(self, task_id: int, tracks: list[dict[str, Any]]) -> None:
-        """작업 주석을 트랙 목록으로 통째로 바꾼다 (모양·태그는 비운다)."""
-        body = {"version": 0, "tags": [], "shapes": [], "tracks": tracks}
+    def put_tracks(
+        self,
+        task_id: int,
+        tracks: list[dict[str, Any]],
+        shapes: list[dict[str, Any]] | None = None,
+    ) -> None:
+        """작업 주석을 트랙 목록(과 모양 목록, 마스크는 모양 모드다, ADR 0059)으로 통째로 바꾼다
+        (태그는 비운다)."""
+        body = {"version": 0, "tags": [], "shapes": shapes or [], "tracks": tracks}
         _check(self.http.put(f"/api/tasks/{task_id}/annotations", json=body))
 
     def get_tracks(self, task_id: int) -> list[dict[str, Any]]:
