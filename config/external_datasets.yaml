@@ -4,24 +4,203 @@
 #   access: open | request | signed, commercial: allowed | review | forbidden (ADR 0010과 같은 뜻, 이 데이터로
 #   학습한 가중치의 분류. forbidden은 학습에 쓰지 않는다), tasks, verified(원문 확인일, 없으면 미확인),
 #   sources(확인 근거 주소. verified가 있으면 필수).
-# 원문을 확인하기 전 항목은 verified를 비워 두고 분류를 보수적으로(review) 둔다.
+# 원문을 확인하기 전 항목은 verified를 비워 두고 분류를 보수적으로(review) 둔다. 원문 확인 결과는
+# docs/handover/public-datasets.md (2026-10-26). 학술 기관 한정(academic only)·사용자 자격 제한 약관은 법무 판단 전까지
+# review로 두지만 회사가 쓸 자격 자체가 쟁점이다 (같은 문서 법무 질문 2).
+# 원문을 열지 못해 넣지 않은 것: EgoHands, 100DOH, EGTEA Gaze+, EgoObjects(동의서 PDF), CrowdPose.
 version: 1
 datasets:
+  # ── 객체 ──
   open_images_v7:
     version: v7
     homepage: https://storage.googleapis.com/openimages/web/index.html
     annotation_license: CC BY 4.0
-    media_license: "이미지마다 Flickr 원 라이선스 (배포처 표기: CC BY 2.0)"
-    terms: "원문 확인 전. 이미지 저작권은 원 저작자에게 있다."
+    media_license: "CC BY 2.0으로 표기 (배포처가 이미지별 라이선스를 보증하지 않음)"
+    terms: "학습 제한 문구 없음. 저작자 표시 필요. 이미지 라이선스는 이용자가 확인해야 한다고 적혀 있다."
     access: open
-    commercial: review
+    commercial: allowed
     tasks: [objects]
+    verified: 2026-10-26
+    sources: [https://storage.googleapis.com/openimages/web/factsfigures_v7.html]
   lvis_v1:
     version: v1
     homepage: https://www.lvisdataset.org/
     annotation_license: CC BY 4.0
-    media_license: "COCO 2017 이미지 (Flickr 개별 CC 라이선스, CC BY-NC 계열 포함)"
-    terms: "원문 확인 전. COCO 이미지 사용은 Flickr 약관을 따른다."
+    media_license: "COCO 2017 이미지 (Flickr 개별 CC, CC BY-NC 계열 포함)"
+    terms: "학습 제한 문구 없음. 이미지는 COCO와 같아 Flickr 약관을 따른다."
     access: open
     commercial: review
     tasks: [objects]
+    verified: 2026-10-26
+    sources: [https://www.lvisdataset.org/, https://cocodataset.org/dataset/termsofuse.htm]
+  coco_2017:
+    version: "2017"
+    homepage: https://cocodataset.org/
+    annotation_license: CC BY 4.0
+    media_license: "Flickr 개별 CC 8종 (test-dev 집계로 NC 계열 약 70%)"
+    terms: "데이터셋 측이 이미지 저작권을 갖지 않고 Flickr 약관을 따른다. 책임은 이용자."
+    access: open
+    commercial: review
+    tasks: [objects, body]
+    verified: 2026-10-26
+    sources: [https://cocodataset.org/dataset/termsofuse.htm]
+  objects365:
+    version: v2
+    homepage: https://www.objects365.org/
+    annotation_license: CC BY 4.0
+    media_license: "Flickr 약관, 이미지 재배포 금지"
+    terms: "학술 목적으로만 제공 (available for the academic purpose only). 회사의 사용 자격 자체가 쟁점."
+    access: request
+    commercial: review
+    tasks: [objects]
+    verified: 2026-10-26
+    sources: [https://www.objects365.org/download.html]
+  # ── 1인칭 손 ──
+  hoi4d:
+    version: v1
+    homepage: https://hoi4d.github.io/
+    annotation_license: CC BY-NC 4.0
+    media_license: CC BY-NC 4.0
+    terms: 비상업.
+    access: open
+    commercial: review
+    tasks: [hands, actions]
+    verified: 2026-10-26
+    sources: [https://hoi4d.github.io/]
+  arctic:
+    version: v1
+    homepage: https://arctic.is.tue.mpg.de/
+    annotation_license: "MPI 비상업 과학 연구용 라이선스"
+    media_license: "MPI 비상업 과학 연구용 라이선스"
+    terms: "상업용 모델 학습을 명시적으로 금지하고 재배포도 금지. 상업 라이선스는 별도 문의."
+    access: signed
+    commercial: forbidden
+    tasks: [hands]
+    verified: 2026-10-26
+    sources: [https://arctic.is.tue.mpg.de/license.html]
+  assemblyhands:
+    version: v1
+    homepage: https://assemblyhands.github.io/
+    annotation_license: CC BY-NC 4.0
+    media_license: CC BY-NC 4.0
+    terms: 비상업.
+    access: open
+    commercial: review
+    tasks: [hands]
+    verified: 2026-10-26
+    sources: [https://assemblyhands.github.io/]
+  h2o:
+    version: v1
+    homepage: https://h2odataset.ethz.ch/
+    annotation_license: "ETH 이용약관"
+    media_license: "ETH 이용약관"
+    terms: "학술 목적만, 상업 사용 금지, 제3자 제공 금지 (동의 클릭)."
+    access: signed
+    commercial: review
+    tasks: [hands, actions]
+    verified: 2026-10-26
+    sources: [https://h2odataset.ethz.ch/]
+  freihand:
+    version: v2
+    homepage: https://lmb.informatik.uni-freiburg.de/resources/datasets/FreihandDataset.en.html
+    annotation_license: "연구용 이용약관"
+    media_license: "연구용 이용약관"
+    terms: "연구 목적만, 상업 사용 금지."
+    access: open
+    commercial: review
+    tasks: [hands]
+    verified: 2026-10-26
+    sources: [https://lmb.informatik.uni-freiburg.de/resources/datasets/FreihandDataset.en.html]
+  ho3d:
+    version: v3
+    homepage: https://github.com/shreyashampali/ho3d
+    annotation_license: "학술 연구용 이용약관"
+    media_license: "학술 연구용 이용약관"
+    terms: "교육·연구기관 연구자의 비상업 목적만, 수정·재배포·상업 사용 금지. 회사의 사용 자격 자체가 쟁점."
+    access: open
+    commercial: review
+    tasks: [hands]
+    verified: 2026-10-26
+    sources: [https://github.com/shreyashampali/ho3d]
+  dexycb:
+    version: v1
+    homepage: https://dex-ycb.github.io/
+    annotation_license: CC BY-NC 4.0
+    media_license: CC BY-NC 4.0
+    terms: 비상업.
+    access: open
+    commercial: review
+    tasks: [hands]
+    verified: 2026-10-26
+    sources: [https://dex-ycb.github.io/]
+  # ── 1인칭 행동 ──
+  epic_kitchens_100:
+    version: "100"
+    homepage: https://epic-kitchens.github.io/
+    annotation_license: CC BY-NC 4.0
+    media_license: CC BY-NC 4.0
+    terms: "비상업. 상업 라이선스는 브리스톨 대학 창구로 문의."
+    access: open
+    commercial: review
+    tasks: [actions, objects, hands]
+    verified: 2026-10-26
+    sources: [https://epic-kitchens.github.io/2025]
+  ego4d:
+    version: v2
+    homepage: https://ego4d-data.org/
+    annotation_license: "Ego4D 데이터 이용 계약 (기관별 서명)"
+    media_license: "Ego4D 데이터 이용 계약 (기관별 서명)"
+    terms: >-
+      객체·사건·장소·활동을 탐지·분류·이해하는 모델의 연구·개발·학습을 상업·비상업 제품 개발 목적으로 허용하고 학습한
+      모델의 상업 사용도 허용 (공개 초안 기준). 데이터 자체는 제품·데이터셋에 보이면 안 되고 제3자 제공·판매 금지,
+      보안 조치 필요, 위반 시 종료·사본 폐기. 서명본이 초안과 같은지는 법무 확인.
+    access: signed
+    commercial: allowed
+    tasks: [actions, hands, objects]
+    verified: 2026-10-26
+    sources: [https://ego4d-data.org/pdfs/Ego4D-Licenses-Draft.pdf, https://ego4ddataset.com/ego4d-license/]
+  ego_exo4d:
+    version: v2
+    homepage: https://ego-exo4d-data.org/
+    annotation_license: "Ego-Exo4D 데이터 이용 계약 (기관별 서명)"
+    media_license: "Ego-Exo4D 데이터 이용 계약 (기관별 서명)"
+    terms: "Ego4D와 같은 목적·IP 조항과 제약 (공개 초안 기준). 서명본 확인은 법무."
+    access: signed
+    commercial: allowed
+    tasks: [actions, hands, body]
+    verified: 2026-10-26
+    sources: [https://ego4d-data.org/pdfs/Ego-Exo4D-Model-License.pdf]
+  assembly101:
+    version: v1
+    homepage: https://assembly-101.github.io/
+    annotation_license: CC BY-NC 4.0
+    media_license: CC BY-NC 4.0
+    terms: 비상업.
+    access: open
+    commercial: review
+    tasks: [actions]
+    verified: 2026-10-26
+    sources: [https://assembly-101.github.io/]
+  holoassist:
+    version: v1
+    homepage: https://holoassist.github.io/
+    annotation_license: CDLA-Permissive-2.0
+    media_license: CDLA-Permissive-2.0
+    terms: "학습 결과물(모델 포함)의 사용·수정·공유에 제한 없음 (CDLA-P 2.0 3.1·5.4)."
+    access: open
+    commercial: allowed
+    tasks: [actions, hands]
+    verified: 2026-10-26
+    sources: [https://holoassist.github.io/, https://cdla.dev/permissive-2-0/]
+  # ── 얼굴 ──
+  wider_face:
+    version: v1
+    homepage: https://huggingface.co/datasets/CUHK-CSE/wider_face
+    annotation_license: CC BY-NC-ND 4.0
+    media_license: CC BY-NC-ND 4.0
+    terms: "비상업·변경 금지 (공식 사이트는 열지 못해 데이터 카드로 확인). 학습이 변경물 작성인지 법무 쟁점."
+    access: open
+    commercial: review
+    tasks: [privacy]
+    verified: 2026-10-26
+    sources: [https://huggingface.co/datasets/CUHK-CSE/wider_face]

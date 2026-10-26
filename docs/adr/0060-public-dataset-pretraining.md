@@ -51,9 +51,11 @@ VLM 서버로 정했고 실측 전).
 
 - 공개 데이터와 우리 데이터의 경계가 설정·검사로 고정된다. 라벨·내보내기 쪽 코드는 바뀌지 않는다.
 - 외부 GPU로 1단계를 바로 시작할 수 있다. 2단계와 실제 학습기(`dlp_train.trainers`)는 사내 GPU가 생겨야 한다.
-- 남은 일: 라이선스 표 확정(아래), `external_datasets.yaml`·검사·`scripts/pretrain-env` 구현,
+- 남은 일: `external_datasets.yaml`·검사·`scripts/pretrain-env` 구현,
   Open Images 클래스 대응표(온톨로지 ID ↔ Open Images 클래스), 1단계 노트북.
 
 ## 라이선스 표
 
-(조사 결과로 채운다)
+원문 확인 결과와 법무 질문은 [public-datasets.md](../handover/public-datasets.md), 설정은
+`config/external_datasets.yaml`(`make licenses` 표). 요약: allowed는 Open Images V7·HoloAssist와 서명 계약인
+Ego4D·Ego-Exo4D, forbidden은 ARCTIC, 나머지 1인칭 손·행동 학계 데이터는 review(비상업·학술 한정)다.
