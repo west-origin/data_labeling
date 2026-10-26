@@ -14,11 +14,12 @@
 - 블러 탐지 (blur_track): 기본은 블러를 적용하지 않고 테두리만 그린다 (오탐을 눈으로 판단하게).
   `--apply-blur`면 원본 크기 프레임에서 블러 박스를 블러본과 같은 모자이크
   (`dlp_privacy.render.apply_blur`, privacy.yaml render 값)로 덮고 테두리는 그리지 않는다
-  (밖에 보여 줄 영상용). 누락을 줄이려고 박스를 `--blur-pad` 비율만큼 넓히고, 키프레임 사이는
-  `--blur-gap-ms`까지 보간하고 마지막 키프레임 뒤로도 그만큼 유지한다. 화면 대부분을 덮는 오탐(F-PMS-31) 때문에
-  `--blur-max-area`(화면 대비 넓이)를 넘는 박스는 덮지 않을 수 있다 (`--blur-always`에 든 대상은
-  크기와 무관하게 덮는다). 사람이 승인한 블러본이 아니므로 남은 노출이 없는지 사람이 끝까지 본다.
-  대상 ID와 탐지기 이름(`config/policies/privacy.yaml targets.*.detectors`를 표시용으로만 읽음),
+  (밖에 보여 줄 영상용). 누락을 줄이려고 박스를 `--blur-pad` 비율만큼 넓히고,
+  키프레임 사이는 `--blur-gap-ms`까지 보간하고 마지막 키프레임 뒤로도 그만큼 유지한다.
+  화면 대부분을 덮는 오탐(F-PMS-31) 때문에 `--blur-max-area`(화면 대비 넓이)를 넘는
+  박스는 덮지 않을 수 있다 (`--blur-always`에 든 대상은 크기와 무관하게 덮는다).
+  사람이 승인한 블러본이 아니므로 남은 노출이 없는지 사람이 끝까지 본다.
+  테두리에는 대상 ID와 탐지기 이름(`privacy.yaml targets.*.detectors`를 표시용으로만 읽음),
   트랙 신뢰도를 적는다.
 - 객체 박스 (box_track): 출처(모델 버전의 첫 토막: COCO 객체·OWLv2 등)·클래스·트랙 신뢰도.
   `--min-score` 미만 박스는 그리지 않고 패널에 출처별 개수와 많은 클래스만 적는다.
@@ -586,9 +587,7 @@ def _hand_boxes(ov: Overlays, t_ms: int, tol_ms: int) -> list[tuple[float, float
     return out
 
 
-def _mosaic(
-    img: Image, tracks: list[BoxTrack], t_ms: int, opts: DrawOptions, ov: Overlays
-) -> None:
+def _mosaic(img: Image, tracks: list[BoxTrack], t_ms: int, opts: DrawOptions, ov: Overlays) -> None:
     """원본 크기 프레임의 블러 박스를 제자리에서 모자이크한다 (`--apply-blur`).
 
     블러본 렌더와 같은 함수(`dlp_privacy.render.apply_blur`)를 쓰되, 표시용 보간·유지
@@ -810,8 +809,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         default="",
         help="크기와 무관하게 덮을 블러 대상 (쉼표, 예: shipping_label,address_sign)",
     )
-    ap.add_argument("--blur-skip-on-hand", default="",
-                    help="중심이 손 위면 덮지 않을 블러 대상 (쉼표, 예: face,reflection)")
+    ap.add_argument(
+        "--blur-skip-on-hand",
+        default="",
+        help="중심이 손 위면 덮지 않을 블러 대상 (쉼표, 예: face,reflection)",
+    )
     ap.add_argument("--clean", action="store_true", help="진단 패널 없이 영상만 (발표용)")
     ap.add_argument("--extra-labels", type=Path, action="append", default=[],
                     help="더 그릴 라벨 JSON Lines (DB 밖 파일럿 결과)")  # fmt: skip
