@@ -1,0 +1,12 @@
+# Kaggle·Colab 기본 환경(torch·torchvision·numpy·opencv·Pillow·PyYAML·tqdm·psutil·tensorboard가 이미 있음) 위에
+# 더 설치하는 것. 버전은 PyPI에 실제로 있는 것으로 고정했다 (2026-10-26 pip index·pip download로 확인,
+# Python 3.10~3.13 manylinux x86_64 wheel 존재 확인). torch는 플랫폼 것을 쓰고 버전은 model_manifest.json에 남는다.
+# 이미 설치된 패키지는 올리거나 내리지 않도록 torch·numpy는 여기 적지 않는다.
+#   pip install -r requirements.txt
+loguru==0.7.3                    # YOLOX 로그
+tabulate==0.10.0                 # YOLOX 평가 표
+thop==0.1.1.post2209072238       # YOLOX가 import (FLOPs 계산)
+pycocotools==2.0.11              # COCO 형식 읽기·평가
+onnx==1.18.0                     # protobuf>=4.25.1 (1.23.2는 protobuf>=6.31.1을 요구해 플랫폼 패키지와 부딪칠 수 있다)
+onnxruntime==1.22.1              # 내보낸 ONNX를 PyTorch 출력과 비교 (CPU)
+ijson==3.6.0                     # LVIS json 스트리밍 파싱 (C 백엔드)

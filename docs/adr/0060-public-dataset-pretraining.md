@@ -4,8 +4,8 @@
 - 날짜: 2026-10-26
 - 관련: ADR 0010(상업 사용 분류), ADR 0016·0025(재학습 루프), ADR 0057(학습 증강), ADR 0058(사내 모델
   개발 용도), ADR 0020(원본 접근), F-PAR-60(도구 오탐), F-PAR-64(손 끊김), F-PMS-31(블러 오탐).
-- 계약 변경: 없음 (라벨·DB·내보내기 그대로). 새 설정 `config/external_datasets.yaml`, `models.yaml` 항목
-  필드 `training_datasets`(선택), 격리 학습 환경 `scripts/pretrain-env/`.
+- 계약 변경: 없음 (라벨·DB·내보내기 그대로). 새 설정 `config/external_datasets.yaml`·`config/pretrain/objects.yaml`, `models.yaml` 항목
+  필드 `training_datasets`·`base_model`(선택), 학습 도구 `scripts/pretrain/`(Kaggle·Colab 겸용 노트북).
 
 ## 배경
 
@@ -37,7 +37,9 @@ VLM 서버로 정했고 실측 전).
 6. **계산 자원.** 1단계는 공개 데이터만 쓰므로 외부 GPU(Kaggle·Colab 등)를 써도 된다. 조건:
    - 우리 데이터(원본·블러본·라벨·골든셋·작업자 정보)는 올리지 않는다. 2단계는 사내 GPU에서만 한다.
    - 노트북·데이터는 비공개로 둔다 (Kaggle 노트북 기본값 확인). 저장소 비밀값을 넣지 않는다.
-   - 환경은 `scripts/pretrain-env/uv.lock`에서 내보낸 고정 목록으로 설치하고, 실행 기록(4절)을 남긴다.
+   - 플랫폼의 torch·CUDA를 그대로 쓰고, 그 위 패키지는 `scripts/pretrain/requirements.txt`에 정확한 버전으로
+     고정한다 (uv.lock 격리 환경은 플랫폼 torch와 맞지 않아 쓰지 않는다). 실행마다 `pip freeze` 해시와 torch 판을
+     실행 기록(4절)에 남긴다.
    - 중간 체크포인트는 세션이 끊겨도 이어서 하도록 외부 저장소(Google Drive 등)에 둔다.
    - 서비스 약관(무료 계정의 사용 목적 제한)을 쓰기 전에 확인한다.
 7. **학습 코드 라이선스.** 상업 사용이 막히거나 가중치에 조건이 붙는 학습 코드(예: AGPL-3.0인 Ultralytics
@@ -51,8 +53,11 @@ VLM 서버로 정했고 실측 전).
 
 - 공개 데이터와 우리 데이터의 경계가 설정·검사로 고정된다. 라벨·내보내기 쪽 코드는 바뀌지 않는다.
 - 외부 GPU로 1단계를 바로 시작할 수 있다. 2단계와 실제 학습기(`dlp_train.trainers`)는 사내 GPU가 생겨야 한다.
-- 남은 일: `external_datasets.yaml`·검사·`scripts/pretrain-env` 구현,
-  Open Images 클래스 대응표(온톨로지 ID ↔ Open Images 클래스), 1단계 노트북.
+- 구현(2026-10-26): `external_datasets.yaml`·`dlp_models.datasets` 검사, `config/pretrain/objects.yaml`(21종),
+  `scripts/pretrain/`(데이터 만들기·YOLOX 학습·ONNX 내보내기·노트북), 프리라벨 `closed_tools` 단계(기본 끔).
+  GPU 학습·Kaggle·Colab 실행은 아직 하지 않았다.
+- 남은 일: 1단계 실제 학습, `models.yaml`에 출발 가중치(yolox_s COCO)와 결과 가중치 등록(`training_datasets`·
+  `base_model`), 골든셋 비교, 켤 때 `training.yaml objects.replaces`에 `closed_tools` 추가.
 
 ## 라이선스 표
 

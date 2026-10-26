@@ -13,9 +13,14 @@
 #   floor·wall: 면(stuff)이라 박스 탐지 대상이 아니다.
 #   clothing: Open Images Clothing은 거의 모든 사람 사진에 있어 다른 클래스를 압도하고, 1인칭에서는 착용자 옷이다.
 #   person·hand: 다른 모델(YOLOX COCO 사람, MediaPipe 손)이 맡는다.
-# 알려진 한계: LVIS는 연합 주석(federated)이라 이미지마다 모든 범주를 다 달지 않았다. 빠진 박스가 배경으로
-#   학습되지 않도록 build_objects.py가 LVIS 이미지에서는 그 이미지에 확인된 범주(positive·negative 목록)만
-#   손실에 넣는 무시 영역 정보를 함께 쓴다. Open Images도 이미지 단위 확인 라벨만 음성으로 믿는다.
+# 알려진 한계: LVIS는 연합 주석(federated)이라 이미지마다 모든 범주를 다 달지 않았다. Open Images도 이미지
+#   단위 확인 라벨만 음성으로 믿을 수 있다. build_objects.py가 이미지마다 확인된 클래스(verified_class_ids)를
+#   적고, 학습(scripts/pretrain/yolox_ext.py)은 확인 안 된 클래스를 모델이 ignore_score 이상으로 예측한 배경
+#   앵커의 objectness 손실만 뺀다 (영역 단위 무시가 아니라 근사, scripts/pretrain/README.md).
+#   여러 원래 클래스를 합친 객체(cup·table·towel·bed·sink)는 기본 규칙(--verify-rule all)에서 확인되는 이미지가
+#   드물다 (2026-10-26 전체 주석 시험 실행: cup은 Open Images 3000장 중 20장).
+# 희귀 클래스: 시험 실행에서 dustpan 10장, rag 17장, mop 30장뿐이다. 이 탐지기 성능을 기대하기 어렵고 골든셋
+#   비교에서 지면 정책 classes에서 빼 OWLv2에 남긴다.
 version: 1
 datasets: [open_images_v7, lvis_v1]
 classes:
@@ -29,7 +34,7 @@ classes:
   trash_bin:    {open_images_v7: [Waste container], lvis_v1: [trash_can]}
   pillow:       {open_images_v7: [Pillow], lvis_v1: [pillow]}
   towel:        {open_images_v7: [Towel], lvis_v1: [towel, bath_towel, hand_towel, dishtowel]}
-  cup:          {open_images_v7: [Mug, Coffee cup, Measuring cup], lvis_v1: [cup, mug, teacup, Dixie_cup]}
+  cup:          {open_images_v7: [Mug, Coffee cup, Measuring cup], lvis_v1: [cup, mug, teacup, Dixie_cup, measuring_cup]}
   door:         {open_images_v7: [Door]}
   drawer:       {open_images_v7: [Drawer], lvis_v1: [drawer]}
   diaper:       {open_images_v7: [Diaper], lvis_v1: [diaper]}
@@ -42,7 +47,7 @@ classes:
   bed:          {open_images_v7: [Bed, Infant bed], lvis_v1: [bed, bunk_bed]}
 # 데이터 만들기
 build:
-  max_images_per_class: 3000   # 데이터셋·클래스마다 상한 (Kaggle 디스크 약 20 GB 안에 들도록)
+  max_images_per_class: 3000   # 데이터셋·클래스마다 상한 (시험 실행: 약 3.8만 장, 긴 변 1024 px 저장으로 약 7 GB)
   val_fraction: 0.05           # 공개 데이터 검증 분할 (참고 지표용. 배포 판단은 우리 골든셋으로만, ADR 0060 5절)
   seed: 20261026
   min_box_px: 8                # 원본 크기에서 짧은 변이 이보다 작은 박스는 버린다
