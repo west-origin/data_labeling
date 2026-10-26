@@ -86,4 +86,7 @@ augmentation:
     motion_blur_px_max: 9   # 빠른 손 흐림 (30 fps 실영상)
     highlight_p: 0.3        # 젖은 손·스테인리스 반사광
     highlights_max: 3
+    highlight_rx_range: [0.01, 0.06]   # 반사광 타원 가로 반지름 (화면 너비 비율): 작고 납작한 점 반사
+    highlight_ry_range: [0.005, 0.03]  # 세로 반지름 (화면 높이 비율)
+    highlight_soft: 0.01               # 가장자리 흐림 폭 (화면 너비 비율, 최소 1 px)
     distortion_k1_max: 0.08 # 초광각·렌즈 차이

@@ -32,6 +32,6 @@ SAM 2, 대리 지표, 촬영 점검, 기하 변환, RLE, 블러·객체 힌트, 
 - F-AIR-34: 잘라 낸 박스 AI 확인이 VLM 설정 오류(`VlmRequestError`: 모델 불일치·재시도하지 않는 4xx)까지
   unsure로 삼켜, 설정이 틀려도 힌트 0개로 정상처럼 끝났다. 설정 오류는 올리고 CLI가 멈춘다.
 
-남은 것: 학습 증강의 반사광·흐림 상수는 코드에 근거 주석만 달았다 (정책으로 옮길지는 증강 실험 때 정한다).
+학습 증강의 반사광 크기·가장자리 흐림 폭은 정책 `training.yaml augmentation.egocentric`(`highlight_rx_range`·`highlight_ry_range`·`highlight_soft`)으로 옮겼다 (값은 그대로, 정책 해시에 들어감). 0.3 px 이하 흐림을 건너뛰는 문턱은 계산 지름길이라 코드에 둔다.
 
 검사: `make check`에서 렌더 복구 시험 하나가 한 번 실패했고 단독 재실행은 통과했다 (F-PMS-38, 후보).

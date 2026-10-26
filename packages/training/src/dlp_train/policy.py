@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 
 from dlp_eval.policy import Task
 from dlp_schema.common import Contract
@@ -73,13 +73,29 @@ class PhotometricAugment(Contract):
 
 class EgocentricAugment(Contract):
     """1인칭 증강 (`augmentation.egocentric`). motion_blur_px_max: 움직임 흐림 최대 길이(px).
-    highlight_p / highlights_max: 반사광(젖은 손·스테인리스) 확률과 최대 개수. distortion_k1_max:
-    렌즈 방사 왜곡 k1 최대 크기 (±)."""
+    highlight_p / highlights_max: 반사광(젖은 손·스테인리스) 확률과 최대 개수. highlight_rx_range /
+    highlight_ry_range: 반사광 타원 반지름 범위 (화면 너비·높이 비율, 균등 추출). highlight_soft:
+    반사광 가장자리 흐림 폭 (화면 너비 비율, 최소 1 px). distortion_k1_max: 렌즈 방사 왜곡 k1 최대
+    크기 (±)."""
 
     motion_blur_px_max: int = Field(ge=0)
     highlight_p: float = Field(ge=0, le=1)
     highlights_max: int = Field(ge=0)
+    highlight_rx_range: tuple[float, float]
+    highlight_ry_range: tuple[float, float]
+    highlight_soft: float = Field(ge=0, le=0.2)
     distortion_k1_max: float = Field(ge=0, le=0.5)
+
+    @model_validator(mode="after")
+    def _ranges(self) -> EgocentricAugment:
+        """반지름 범위는 0 < 하한 ≤ 상한 ≤ 0.5."""
+        for name in ("highlight_rx_range", "highlight_ry_range"):
+            lo, hi = getattr(self, name)
+            if not 0 < lo <= hi <= 0.5:
+                raise ValueError(
+                    f"augmentation.egocentric.{name}는 0 < 하한 ≤ 상한 ≤ 0.5여야 합니다"
+                )
+        return self
 
 
 class AugmentationPolicy(Contract):

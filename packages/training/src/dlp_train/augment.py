@@ -153,6 +153,8 @@ class Ops:
     motion_deg: float
     highlights: tuple[tuple[float, float, float, float], ...]  # (cx, cy, rx, ry) 비율
     k1: float
+    # 반사광 가장자리 흐림 폭 (화면 너비 비율, 정책 egocentric.highlight_soft)
+    highlight_soft: float = 0.01
 
 
 def _geometry(rng: np.random.Generator, policy: AugmentationPolicy, w: int, h: int) -> Transform:
@@ -193,18 +195,18 @@ def sample_ops(rng: np.random.Generator, policy: AugmentationPolicy, w: int, h: 
         jpeg_quality=int(rng.integers(jlo, jhi + 1)) if rng.random() < p.jpeg_p else None,
         motion_px=int(rng.integers(0, e.motion_blur_px_max + 1)),
         motion_deg=float(rng.uniform(0, 180)),
-        # 반사광 타원 반지름 (화면 너비·높이 비율): 가로 1~6 %, 세로 0.5~3 %의 작고 납작한 반점
-        # (젖은 표면·스테인리스의 점 반사). 정책으로 옮기지 않은 고정값
+        # 반사광 타원 (중심·반지름 모두 화면 너비·높이 비율, 반지름 범위는 정책)
         highlights=tuple(
             (
                 float(rng.uniform(0, 1)),
                 float(rng.uniform(0, 1)),
-                float(rng.uniform(0.01, 0.06)),
-                float(rng.uniform(0.005, 0.03)),
+                float(rng.uniform(*e.highlight_rx_range)),
+                float(rng.uniform(*e.highlight_ry_range)),
             )
             for _ in range(n_spec)
         ),
         k1=float(rng.uniform(-e.distortion_k1_max, e.distortion_k1_max)),
+        highlight_soft=e.highlight_soft,
     )
 
 
@@ -248,8 +250,10 @@ def _motion_blur(img: Image, px: int, deg: float) -> Image:
     return np.asarray(cv2.filter2D(img, -1, kernel), dtype=np.uint8)
 
 
-def _highlights(img: Image, spots: Sequence[tuple[float, float, float, float]]) -> Image:
-    """밝은 타원 반사광 (젖은 손·스테인리스)."""
+def _highlights(
+    img: Image, spots: Sequence[tuple[float, float, float, float]], soft: float
+) -> Image:
+    """밝은 타원 반사광 (젖은 손·스테인리스). soft: 가장자리 흐림 폭 (화면 너비 비율)."""
     if not spots:
         return img
     h, w = img.shape[:2]
@@ -257,8 +261,8 @@ def _highlights(img: Image, spots: Sequence[tuple[float, float, float, float]]) 
     for cx, cy, rx, ry in spots:
         cv2.ellipse(glow, (int(cx * w), int(cy * h)), (max(1, int(rx * w)), max(1, int(ry * h))),
                     0, 0, 360, 1.0, -1)  # fmt: skip
-    # 가장자리를 부드럽게: 흐림 폭 = 화면 너비 1 % (최소 1 px), 해상도와 무관한 비율 고정값
-    glow = cv2.GaussianBlur(glow, (0, 0), max(1.0, 0.01 * w))[..., None]
+    # 가장자리를 부드럽게: 흐림 폭 = 화면 너비 x soft (최소 1 px, 해상도와 무관한 비율)
+    glow = cv2.GaussianBlur(glow, (0, 0), max(1.0, soft * w))[..., None]
     out = img.astype(np.float32) * (1 - glow) + 255.0 * glow
     return np.clip(out, 0, 255).astype(np.uint8)
 
@@ -271,7 +275,9 @@ def _photometric(img: Image, ops: Ops) -> Image:
     # sigma 0.3 px 이하 가우스 커널은 거의 항등이라 건너뛴다 (계산만 들고 화소가 거의 그대로)
     if ops.blur_sigma > 0.3:
         out8 = np.asarray(cv2.GaussianBlur(out8, (0, 0), ops.blur_sigma), dtype=np.uint8)
-    out8 = _highlights(_motion_blur(out8, ops.motion_px, ops.motion_deg), ops.highlights)
+    out8 = _highlights(
+        _motion_blur(out8, ops.motion_px, ops.motion_deg), ops.highlights, ops.highlight_soft
+    )
     if ops.noise_std > 0:
         noise = np.random.default_rng(ops.noise_seed).normal(0, ops.noise_std, out8.shape)
         out8 = np.clip(out8.astype(np.float32) + noise, 0, 255).astype(np.uint8)

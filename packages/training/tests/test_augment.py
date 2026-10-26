@@ -171,6 +171,16 @@ def test_policy_sampling_is_deterministic_and_hashed() -> None:
     rng = np.random.default_rng(0)
     ops = sample_ops(rng, policy, W, H)
     assert ops.transform.out_w == W and ops.transform.out_h == H
+    # 반사광 크기·흐림 폭은 정책 값이다 (코드 고정값 아님)
+    e = policy.egocentric
+    assert ops.highlight_soft == e.highlight_soft
+    for _cx, _cy, rx, ry in ops.highlights:
+        assert e.highlight_rx_range[0] <= rx <= e.highlight_rx_range[1]
+        assert e.highlight_ry_range[0] <= ry <= e.highlight_ry_range[1]
+    soft = policy.model_copy(update={"egocentric": e.model_copy(update={"highlight_soft": 0.02})})
+    assert policy_digest(soft) != policy_digest(policy)
+    with pytest.raises(ValueError, match="highlight_rx_range"):
+        type(e).model_validate({**e.model_dump(), "highlight_rx_range": (0.06, 0.01)})
 
 
 def _example(split: Split) -> Example:
