@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 
 import numpy as np
+import pytest
 
 from dlp_aireview.crops import (
     CropAsk,
@@ -22,7 +23,13 @@ from dlp_aireview.crops import (
 )
 from dlp_aireview.media import BlurredFrame
 from dlp_aireview.testing import FakeCall, FakeOpenAIServer
-from dlp_models.vlm import ChatReply, ChatRequest, OpenAICompatibleChat
+from dlp_models.vlm import (
+    ChatReply,
+    ChatRequest,
+    OpenAICompatibleChat,
+    VlmContextError,
+    VlmRequestError,
+)
 
 
 def _frame(index: int) -> BlurredFrame:
@@ -101,3 +108,30 @@ def test_oracle_stub_and_outage_make_no_hints() -> None:
     )
     assert [v.answer for v in oracle + down] == ["unsure", "unsure"]
     assert to_doubts(oracle + down, 0.0) == {}
+
+
+def test_config_error_is_raised_not_hidden_as_unsure() -> None:
+    """설정 오류(모델 불일치 등)는 unsure로 삼키지 않고 올린다. 문맥 초과는 그 박스만 unsure (F-AIR-34)."""
+
+    class Wrong:
+        """늘 설정 오류인 채팅."""
+
+        def __init__(self, exc: Exception) -> None:
+            """낼 예외."""
+            self.exc = exc
+
+        def chat(self, req: ChatRequest) -> ChatReply:
+            """예외를 낸다."""
+            raise self.exc
+
+    ask = CropAsk("f1", "privacy", "face", 0, (10.0, 10.0, 20.0, 20.0))
+    with pytest.raises(VlmRequestError):
+        verify_crops(
+            [ask], [_frame(0)], VlmCropVerifier(Wrong(VlmRequestError("model")), "m", 85),
+            margin=1.0, max_side=64,
+        )  # fmt: skip
+    ctx = verify_crops(
+        [ask], [_frame(0)], VlmCropVerifier(Wrong(VlmContextError("long", status=400)), "m", 85),
+        margin=1.0, max_side=64,
+    )  # fmt: skip
+    assert [v.answer for v in ctx] == ["unsure"]

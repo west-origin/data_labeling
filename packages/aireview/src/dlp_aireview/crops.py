@@ -1,4 +1,4 @@
-"""잘라 낸 박스의 AI 확인: 블러·도구 박스 오탐 의심 힌트 (ADR 0056 2절, ADR 0040).
+"""잘라 낸 박스의 AI 확인: 블러·도구 박스 오탐 의심 힌트 (ADR 0056 3절, ADR 0040).
 
 검수자에게 보일 힌트만 낸다. 판정은 라벨도 검수 상태도 아니고 DB의 라벨·검수 기록에 쓰지 않는다
 (`dlp review hints --ai`가 힌트 파일에 `ai_crop_no` 이유로 싣는다).
@@ -27,7 +27,14 @@ import numpy as np
 from numpy.typing import NDArray
 
 from dlp_aireview.media import BlurredFrame
-from dlp_models.vlm import ChatReply, ChatRequest, ChatTurn, encode_jpeg
+from dlp_models.vlm import (
+    ChatReply,
+    ChatRequest,
+    ChatTurn,
+    VlmContextError,
+    VlmRequestError,
+    encode_jpeg,
+)
 
 Answer = Literal["yes", "no", "unsure"]
 
@@ -142,7 +149,7 @@ class OracleCropVerifier:
 
 
 class VlmCropVerifier:
-    """사내 VLM으로 묻는다 (한 박스 한 요청, JSON Schema 강제, temperature는 서버 기본)."""
+    """사내 VLM으로 묻는다 (한 박스 한 요청, JSON Schema 강제, temperature 0: `dlp_models.vlm.chat_body`)."""
 
     def __init__(self, chat: ChatClient, model: str, jpeg_quality: int) -> None:
         """chat: 사내 서버 클라이언트."""
@@ -150,7 +157,7 @@ class VlmCropVerifier:
         self.version = f"crop-vlm-{model}"
 
     def verify(self, ask: CropAsk, crop: NDArray[np.uint8]) -> CropVerdict:
-        """잘라 낸 이미지와 질문을 보낸다. 서버 오류는 그대로 올린다 (호출자가 unsure로 둔다)."""
+        """잘라 낸 이미지와 질문을 보낸다. 서버 오류는 그대로 올린다 (`verify_crops`가 가른다)."""
         image = encode_jpeg(crop, self.jpeg_quality)
         req = ChatRequest(
             system=None,
@@ -171,7 +178,13 @@ def verify_crops(
 ) -> list[CropVerdict]:
     """블러본 프레임(프레임 번호 순)마다 그 프레임의 박스를 잘라 묻는다.
 
-    서버 장애(RuntimeError)는 그 박스를 unsure로 둔다 (힌트를 만들지 않을 뿐 실패가 아니다).
+    서버 장애(`VlmUnavailableError` 등 RuntimeError)와 그 박스만의 문맥 초과(`VlmContextError`)는
+    그 박스를 unsure로 둔다 (힌트를 만들지 않을 뿐 실패가 아니다). 설정 오류(`VlmRequestError`: 모델
+    불일치·재시도하지 않는 4xx)는 다시 물어도 같아서 그대로 올린다. 삼키면 모든 박스가 조용히 unsure가
+    되어 힌트가 0개인데도 정상처럼 보인다 (F-AIR-34).
+
+    Raises:
+        VlmRequestError: 서버 설정 오류.
     """
     by_frame: dict[int, list[CropAsk]] = {}
     for a in asks:
@@ -182,13 +195,20 @@ def verify_crops(
             crop = crop_with_margin(frame.rgb, a.box, margin, max_side)
             try:
                 out.append(verifier.verify(a, crop))
+            except VlmContextError:
+                out.append(CropVerdict(a.label_id, "unsure", 0.0))
+            except VlmRequestError:
+                raise
             except RuntimeError:
                 out.append(CropVerdict(a.label_id, "unsure", 0.0))
     return out
 
 
 def to_doubts(verdicts: Iterable[CropVerdict], min_confidence: float) -> dict[str, float]:
-    """라벨 ID → 의심 정도 (no 판정 비율 x 평균 신뢰도). no가 없는 라벨은 뺀다."""
+    """라벨 ID → 의심 정도 = (신뢰도 ≥ min_confidence인 no의 비율) x (그 no들의 평균 신뢰도).
+
+    그런 no가 하나도 없는 라벨은 뺀다.
+    """
     by: dict[str, list[CropVerdict]] = {}
     for v in verdicts:
         by.setdefault(v.label_id, []).append(v)

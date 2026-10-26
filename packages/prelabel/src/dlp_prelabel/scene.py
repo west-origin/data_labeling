@@ -11,8 +11,10 @@
   - `VlmScene`: 사내 OpenAI 호환 VLM(`dlp_models.vlm`)에 블러를 씌운 프레임과 장면 목록을 보내
     JSON으로 장면·신뢰도를 받는다. 신뢰도가 `min_confidence` 미만이면 unknown. 외부 API는 쓰지
     않는다 (사내 서버 주소만, CLI가 `DLP_VLM_URL`에서 받는다).
-- `blur_boxes`: 보낼 프레임에 그 시각 운영 블러 트랙 박스를 모자이크한다. 블러 트랙이 하나도 없으면
-  (프라이버시 탐지 전) 보내지 않는다 (`SceneUnavailableError`).
+- `blur_boxes`: 보낼 프레임에 그 시각 운영 블러 트랙 박스를 모자이크한다. 블러 렌더가 가리는 곳을
+  모두 덮는다 (키프레임 사이는 직전·다음 박스의 외접 박스, 마지막 키프레임 뒤는 유지, F-PAR-72).
+  블러 트랙이 하나도 없으면(프라이버시 탐지 전) 프레임을 보내지 않고 정책 default(출처 fallback)를
+  낸다 (`classify_video`). `SceneUnavailableError`는 서버 장애일 때다.
 - `queries_for`: 장면 → 질의 문장 → 온톨로지 객체 (정책 `open_vocab_objects.scene_queries`).
 
 사람이 장면을 알면 `dlp prelabel run --scene <장면>`이 분류기보다 앞선다 (출처 manual).
@@ -151,35 +153,60 @@ def _shrink(img: Image, max_side: int) -> NDArray[np.uint8]:
     return np.asarray(out, dtype=np.uint8)
 
 
-def _box_at(keyframes: Sequence[BoxKeyframe], t_ms: int, tol_ms: int) -> BoxKeyframe | None:
-    """t_ms에 가장 가까운(tol 안) 화면 안 키프레임."""
-    best = min(keyframes, key=lambda k: abs(k.t_ms - t_ms))
-    return best if abs(best.t_ms - t_ms) <= tol_ms and not best.outside else None
+def _boxes_at(
+    keyframes: Sequence[BoxKeyframe], t_ms: int, tol_ms: int
+) -> list[tuple[float, float, float, float]]:
+    """t_ms에 가릴 박스 (x0, y0, x1, y1) 목록. 블러 렌더보다 넓게 가린다 (F-PAR-72).
+
+    렌더(`dlp_privacy.render`)는 직전 키프레임이 보이면 다음 키프레임까지 프레임 번호로 보간하고,
+    마지막 키프레임 뒤는 그 박스를 유지한다. 여기서는 프리라벨이 privacy를 import할 수 없어
+    (architecture.md 의존 표) 보간 대신 직전·다음 박스의 외접 박스를 쓴다. 선형 보간 박스는 늘 이
+    외접 박스 안이므로 렌더가 가리는 곳을 모두 덮는다. 그 밖에 tol_ms 안 가장 가까운 보이는
+    키프레임도 덮는다 (첫 키프레임 직전 프레임, 시각 반올림 차).
+    """
+    if not keyframes:
+        return []
+    out: list[tuple[float, float, float, float]] = []
+    prev = [k for k in keyframes if k.t_ms <= t_ms]
+    nxt = [k for k in keyframes if k.t_ms > t_ms]
+    if prev and not prev[-1].outside:
+        a = prev[-1]
+        x0, y0, x1, y1 = a.x, a.y, a.x + a.w, a.y + a.h
+        if nxt and not nxt[0].outside:
+            b = nxt[0]
+            x0, y0 = min(x0, b.x), min(y0, b.y)
+            x1, y1 = max(x1, b.x + b.w), max(y1, b.y + b.h)
+        out.append((x0, y0, x1, y1))
+    near = min(keyframes, key=lambda k: abs(k.t_ms - t_ms))
+    if abs(near.t_ms - t_ms) <= tol_ms and not near.outside:
+        out.append((near.x, near.y, near.x + near.w, near.y + near.h))
+    return out
 
 
 def blur_boxes(
     frame: Image, t_ms: int, blur: Iterable[LabelRecord], tol_ms: int, cell_px: int
 ) -> NDArray[np.uint8]:
-    """그 시각 블러 트랙 박스를 모자이크(cell_px 칸)한 사본."""
+    """그 시각 블러 트랙 박스를 모자이크(cell_px 칸)한 사본 (가릴 곳은 `_boxes_at`, 렌더 이상)."""
     out = np.array(frame, copy=True)
     h, w = out.shape[:2]
     for x in blur:
         p = x.payload
         if not isinstance(p, BlurTrackPayload):
             continue
-        k = _box_at(p.keyframes, t_ms, tol_ms)
-        if k is None:
-            continue
-        x0, y0 = max(0, int(k.x)), max(0, int(k.y))
-        x1, y1 = min(w, int(k.x + k.w) + 1), min(h, int(k.y + k.h) + 1)
-        if x1 <= x0 or y1 <= y0:
-            continue
-        roi = out[y0:y1, x0:x1]
-        small = cv2.resize(
-            roi, (max(1, (x1 - x0) // cell_px), max(1, (y1 - y0) // cell_px)),
-            interpolation=cv2.INTER_AREA,
-        )  # fmt: skip
-        out[y0:y1, x0:x1] = cv2.resize(small, (x1 - x0, y1 - y0), interpolation=cv2.INTER_NEAREST)
+        for bx0, by0, bx1, by1 in _boxes_at(p.keyframes, t_ms, tol_ms):
+            # 부분 픽셀도 덮도록 바깥쪽으로 정수화한다
+            x0, y0 = max(0, int(bx0)), max(0, int(by0))
+            x1, y1 = min(w, int(bx1) + 1), min(h, int(by1) + 1)
+            if x1 <= x0 or y1 <= y0:
+                continue
+            roi = out[y0:y1, x0:x1]
+            small = cv2.resize(
+                roi, (max(1, (x1 - x0) // cell_px), max(1, (y1 - y0) // cell_px)),
+                interpolation=cv2.INTER_AREA,
+            )  # fmt: skip
+            out[y0:y1, x0:x1] = cv2.resize(
+                small, (x1 - x0, y1 - y0), interpolation=cv2.INTER_NEAREST
+            )
     return out
 
 

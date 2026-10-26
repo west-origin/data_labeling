@@ -86,6 +86,28 @@ def test_labels_move_with_pixels(make: Callable[[], Transform]) -> None:
     assert _red(out) == pytest.approx(tuple(map_points(t, np.array([pt]))[0]), abs=1.5)
 
 
+@pytest.mark.parametrize(
+    "make",
+    [
+        lambda: hflip(6, 4),
+        lambda: scale(6, 4, 2.0),
+        lambda: crop_resize(6, 4, (2.0, 0.0, 3.0, 2.0)),
+    ],
+    ids=["hflip", "scale", "crop"],
+)
+def test_warp_matches_labels_to_the_pixel(make: Callable[[], Transform]) -> None:
+    """화소 중심 규약: 화소 (0, 0)의 중심 (0.5, 0.5)을 옮긴 자리에 그 화소가 정확히 간다 (F-PMS-37).
+
+    이전에는 cv2에 행렬을 그대로 넘겨 좌우 뒤집기 영상만 1 px 밀렸다 (위 시험은 2 px 허용이라 못 잡음).
+    """
+    t = make()
+    img = np.zeros((4, 6), dtype=np.uint8)
+    img[0, 2] = 255
+    out = warp_image(img, t, nearest=True)
+    x, y = map_points(t, np.array([[2.5, 0.5]]))[0]
+    assert out[int(y), int(x)] == 255
+
+
 def test_flip_semantics_and_inverse() -> None:
     """좌우 뒤집기: 손 판정이 바뀌고, 두 번 뒤집거나 역변환하면 제자리. COCO 좌우 짝은 대칭."""
     t = hflip(W, H)

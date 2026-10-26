@@ -86,8 +86,34 @@ def test_blur_boxes_mosaics_only_blur_regions() -> None:
     inside = out[50:90, 100:160]
     assert inside.std() < img[50:90, 100:160].std() / 2
     assert np.array_equal(out[100:, :], img[100:, :])
-    # 허용 오차 밖 시각이면 바꾸지 않는다
-    assert np.array_equal(blur_boxes(img, 2000, [blur], tol_ms=300, cell_px=16), img)
+    # 첫 키프레임보다 tol 넘게 앞이면 바꾸지 않는다 (렌더도 블러 없음)
+    assert np.array_equal(blur_boxes(img, 500, [blur], tol_ms=300, cell_px=16), img)
+    # 마지막 키프레임 뒤는 렌더처럼 박스를 유지한다 (F-PAR-72)
+    assert blur_boxes(img, 5000, [blur], tol_ms=300, cell_px=16)[50:90, 100:160].std() < 60
+
+
+def test_blur_boxes_cover_render_between_far_keyframes() -> None:
+    """정답: 키프레임 간격 2 s(허용 오차 300 ms의 두 배 넘음) 가운데 시각에 렌더가 그리는 보간 박스를
+    모두 가린다. 예전에는 가장 가까운 키프레임만 써서 가운데 시각은 가리지 않았다 (F-PAR-72).
+    끝 키프레임이 outside면 그 뒤는 가리지 않는다."""
+    img = np.zeros((200, 300, 3), dtype=np.uint8)
+    img[::2, ::2] = 255
+    kf = [
+        {"t_ms": 1000, "x": 20.0, "y": 50.0, "w": 40.0, "h": 40.0},
+        {"t_ms": 3000, "x": 220.0, "y": 50.0, "w": 40.0, "h": 40.0},
+        {"t_ms": 4000, "x": 220.0, "y": 50.0, "w": 40.0, "h": 40.0, "outside": True},
+    ]
+    blur = make_label(
+        {"kind": "blur_track", "target": "face", "keyframes": kf},
+        stream_id="bodycam",
+        provenance=Provenance(source=Source.MODEL, model_version="iou-1"),
+        confidence=0.5,
+        t_end_ms=4000,
+    )
+    out = blur_boxes(img, 2000, [blur], tol_ms=300, cell_px=16)
+    # 렌더 보간 박스: x 120~160, y 50~90
+    assert out[50:90, 120:160].std() < img[50:90, 120:160].std() / 2
+    assert np.array_equal(blur_boxes(img, 4500, [blur], tol_ms=300, cell_px=16), img)
 
 
 def test_scene_queries_and_owl_version() -> None:

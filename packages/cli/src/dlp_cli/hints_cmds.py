@@ -49,7 +49,7 @@ from dlp_media.pts import PtsIndex
 from dlp_media.storage import ObjectStore, store_from_spec
 from dlp_models.owlv2 import Owlv2
 from dlp_models.registry import resolve
-from dlp_models.vlm import OpenAICompatibleChat
+from dlp_models.vlm import OpenAICompatibleChat, VlmRequestError
 from dlp_prelabel.policy import load_policy as load_prelabel_policy
 from dlp_privacy import hints as privacy_hints
 from dlp_privacy.detection import FrameDetector
@@ -258,11 +258,16 @@ def _ai(
         print(f"[AI 조각 확인 건너뜀] {stream_id}: {exc}")
         return None, None
     asks = _crop_asks(own, cfg, media.pts)
-    verdicts = verify_crops(
-        asks, frames_for(media, sorted({a.frame_index for a in asks})), _verifier(root, cfg),
-        margin=cfg.margin, max_side=cfg.max_side,
-    )  # fmt: skip
-    media.path.unlink(missing_ok=True)
+    try:
+        verdicts = verify_crops(
+            asks, frames_for(media, sorted({a.frame_index for a in asks})), _verifier(root, cfg),
+            margin=cfg.margin, max_side=cfg.max_side,
+        )  # fmt: skip
+    except VlmRequestError as exc:
+        # 설정 오류는 힌트 0개로 숨기지 않고 멈춘다 (F-AIR-34)
+        raise SystemExit(f"[AI 조각 확인 실패] VLM 서버 설정 오류: {exc}") from exc
+    finally:
+        media.path.unlink(missing_ok=True)
     kinds = {a.label_id: a.kind for a in asks}
     doubts = to_doubts(verdicts, cfg.min_confidence)
     return (

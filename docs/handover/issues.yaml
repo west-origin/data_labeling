@@ -878,3 +878,12 @@ issues:
   - {id: F-SCH-26, title: "첫 실영상의 가사 장면(설거지·택배 개봉)이 v1 온톨로지 밖이라 객체·작업을 바르게 표시할 어휘가 없음 (그릇·접시·수전·택배 상자·칼/가위, 설거지 작업 없음)", severity: medium, status: open, kind: product,
      files: [config/ontology/v1/objects.yaml, config/ontology/v1/domains_tasks.yaml, config/policies/prelabel.yaml], source: docs/handover/pilot-real-2026-10-22.md, see: [F-PAR-60],
      note: "cleaning 도메인 작업은 바닥·표면·화장실·침상·쓰레기 다섯 가지다. 매니페스트 domain은 가장 가까운 cleaning으로 적었다. 촬영 범위를 온톨로지에 맞추거나(청소·돌봄 장면), 가사 작업·객체를 온톨로지 새 버전으로 더한다(ko·en 이름, 물리 사전값, ADR·이관 필요)."}
+  - {id: F-PMS-37, title: "기하 변환이 연속 픽셀 좌표 행렬을 cv2 warp(화소 중심 = 정수)에 그대로 넘겨 영상만 반~1 픽셀 어긋남 (좌우 뒤집기 1 px, 라벨은 정확)", severity: medium, status: fixed, kind: code,
+     files: [packages/media/src/dlp_media/geometry.py, packages/training/src/dlp_train/augment.py], source: docs/handover/comment-review-2026-10-26.md,
+     note: "TTA·학습 증강 공용. 기존 시험은 2 px 허용이라 못 잡았다. cv_matrix(H⁻¹·M·H, H = 0.5 이동)로 바꿔 넘긴다. 회귀: packages/media/tests/test_geometry.py::test_warp_matches_labels_to_the_pixel"}
+  - {id: F-PAR-72, title: "장면 분류가 VLM에 보내는 프레임의 블러가 가장 가까운 키프레임(300 ms 안)만 써서 키프레임 사이·마지막 뒤를 가리지 않음 (렌더보다 약함)", severity: medium, status: fixed, kind: code,
+     files: [packages/prelabel/src/dlp_prelabel/scene.py, config/policies/prelabel.yaml], source: docs/handover/comment-review-2026-10-26.md, see: [F-PAR-60],
+     note: "사내 VLM 전용. 프리라벨은 privacy를 import할 수 없어 렌더 보간 대신 직전·다음 키프레임 외접 박스(보간 박스를 늘 덮음)와 마지막 박스 유지를 쓴다. 회귀: packages/prelabel/tests/test_scene.py::test_blur_boxes_cover_render_between_far_keyframes"}
+  - {id: F-AIR-34, title: "잘라 낸 박스 AI 확인이 VLM 설정 오류(VlmRequestError)까지 unsure로 삼켜 설정이 틀려도 힌트 0개로 정상 종료", severity: low, status: fixed, kind: code,
+     files: [packages/aireview/src/dlp_aireview/crops.py, packages/cli/src/dlp_cli/hints_cmds.py], source: docs/handover/comment-review-2026-10-26.md,
+     note: "장애(VlmUnavailableError)·그 박스의 문맥 초과는 unsure, 설정 오류는 올리고 dlp review hints --ai가 멈춘다. 회귀: packages/aireview/tests/test_crops.py::test_config_error_is_raised_not_hidden_as_unsure"}

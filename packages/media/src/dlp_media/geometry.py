@@ -1,8 +1,8 @@
-"""영상 프레임 기하 변환과 라벨 좌표 변환 (테스트 시점 증강 TTA·학습 증강 공용, ADR 0055).
+"""영상 프레임 기하 변환과 라벨 좌표 변환 (테스트 시점 증강 TTA·학습 증강 공용, ADR 0055·0057).
 
 한 변환은 3x3 투영 행렬 하나(원본 픽셀 → 변환 픽셀)와 출력 크기다. 좌우 뒤집기·배율·회전·자르기·
 원근 흔들기를 모두 같은 형식으로 나타내고, 이미지(`warp_image`)·점(`map_points`)·박스(`map_box`)에
-같은 행렬을 쓴다. 그래서 픽셀과 라벨이 늘 같이 움직인다.
+같은 행렬을 쓴다. 그래서 픽셀과 라벨이 늘 같이 움직인다 (아래 좌표 규약을 지킬 때).
 
 좌우 뒤집기의 라벨 의미:
 - 손 판정: 뒤집은 화면의 오른손은 왼손 모양이다 → `Transform.flipped`이면 왼·오른을 바꾼다
@@ -10,7 +10,10 @@
 - COCO 17점: 좌우 관절 번호를 맞바꾼다 (`COCO17_FLIP`).
 - 카메라 좌표 3D: 영상 x 반전은 카메라 좌표 x 반전과 같다 (주점이 화면 가운데일 때. 아니면 근사).
 
-좌표계: 스트림 픽셀, 왼쪽 위 원점, 박스 (x, y, w, h).
+좌표계: 스트림 픽셀, 왼쪽 위 원점, 박스 (x, y, w, h). 좌표는 연속 픽셀이다: 화면 왼쪽 위 모서리가
+(0, 0)이고 화소 (i, j)의 중심은 (i + 0.5, j + 0.5)다. cv2 warp 함수는 화소 중심을 정수로 보므로 행렬을
+그대로 넘기면 영상만 반 픽셀~1 픽셀 어긋난다 (좌우 뒤집기는 정확히 1 픽셀, F-PMS-37). cv2에는 늘
+`cv_matrix`로 바꾼 행렬을 넘긴다.
 """
 
 from __future__ import annotations
@@ -105,10 +108,25 @@ def perspective(width: int, height: int, offsets: NDArray[np.float64]) -> Transf
     return Transform(m, width, height, False, "persp")
 
 
-def warp_image(image: NDArray[Any], t: Transform, *, border: int = 0) -> NDArray[Any]:
-    """이미지에 변환을 적용한다 (선형 보간, 빈 곳은 border 값)."""
+# 연속 픽셀 좌표 = cv2 화소 좌표 + 0.5
+_HALF = np.array([[1.0, 0.0, 0.5], [0.0, 1.0, 0.5], [0.0, 0.0, 1.0]])
+
+
+def cv_matrix(t: Transform) -> Matrix:
+    """cv2 warp 함수에 넘길 행렬 (화소 중심 = 정수 규약으로 바꾼 것, F-PMS-37).
+
+    연속 좌표 p = c + 0.5(c는 cv2 화소 좌표)이므로 cv2 행렬은 H⁻¹·M·H (H = 0.5 이동)다.
+    """
+    return np.linalg.inv(_HALF) @ t.matrix @ _HALF
+
+
+def warp_image(
+    image: NDArray[Any], t: Transform, *, border: int = 0, nearest: bool = False
+) -> NDArray[Any]:
+    """이미지에 변환을 적용한다 (선형 보간, nearest면 최근접(마스크용), 빈 곳은 border 값)."""
     return cv2.warpPerspective(
-        image, t.matrix, (t.out_w, t.out_h), flags=cv2.INTER_LINEAR,
+        image, cv_matrix(t), (t.out_w, t.out_h),
+        flags=cv2.INTER_NEAREST if nearest else cv2.INTER_LINEAR,
         borderMode=cv2.BORDER_CONSTANT, borderValue=border,
     )  # fmt: skip
 
@@ -203,7 +221,8 @@ class TtaSpec(Contract):
     transforms: 변환 이름 목록. "hflip"(좌우 뒤집기), "scale:<배율>"(예: "scale:0.75"),
         "rot:<도>"(반시계 회전). 원본 화면은 늘 따로 보므로 넣지 않는다.
     iou: 역변환한 탐지가 원본 박스와 같은 탐지로 볼 IoU 하한.
-    max_tracks: 한 스트림에서 TTA를 돌릴 트랙 수 상한 (점수 낮은 트랙부터). 0이면 돌리지 않는다.
+    max_tracks: 한 스트림에서 TTA를 돌릴 트랙 수 상한 (신뢰도 낮은 트랙부터, 고르는 일은 호출자
+        `dlp_cli.hints_cmds`가 한다). 0이면 돌리지 않는다.
     frames_per_track: 트랙마다 볼 키프레임 수 (트랙 안에서 고르게).
     """
 
