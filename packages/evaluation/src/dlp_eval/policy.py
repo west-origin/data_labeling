@@ -153,7 +153,8 @@ class ProxyPolicy(Contract):
     short_track_ms: int = Field(ge=0)  # 이보다 짧은 트랙·연속 구간은 "짧음"으로 센다
     gap_factor: float = Field(gt=1)  # 키프레임 간격이 중앙 간격의 이 배수를 넘으면 끊김으로 센다
     wrist_agree_scale: float = Field(gt=0)  # 손목 일치: 거리 / 손 크기(손목→중지 뿌리 px) 상한
-    face_margin: float = Field(ge=0)  # 얼굴 박스 중심을 사람 박스 안으로 볼 때 사람 박스 확장 비율
+    # 박스 확장 비율: 얼굴 중심 → 넓힌 사람 박스(near_person), 머리 관절 → 넓힌 얼굴 박스(near_head)
+    face_margin: float = Field(ge=0)
     reach_m: tuple[float, float]  # 카메라에서 손목까지 거리의 타당 범위 (m, 1인칭 팔 길이)
     max_speed_mps: float = Field(gt=0)  # 손목 3D 속도 상한 (m/s)
     max_accel_mps2: float = Field(gt=0)  # 손목 3D 가속도 상한 (m/s²)

@@ -4,6 +4,8 @@
 알리는 것이 목적이다 (2026-10-22 첫 실영상 파일럿: 30 fps, 방향 태그 오류, 렌즈 미확인, IMU 없음).
 권장 촬영 조건은 `docs/handover/capture-guide.md`. 기준 값은 `config/policies/media.yaml capture`.
 
+수집 때 영상 점검(`video_warnings`)은 바디캠 스트림만 본다 (3인칭 영상은 점검하지 않는다).
+
 점검 항목 (코드):
 - `low_fps`: 프레임레이트가 `min_fps` 미만 (빠른 손동작이 흐려지고 손 추적이 끊긴다).
 - `variable_fps`: 가변 프레임레이트 (PTS로 시각을 계산해 오류는 아니나 보간 간격이 고르지 않다).

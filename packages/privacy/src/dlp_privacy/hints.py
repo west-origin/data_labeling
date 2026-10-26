@@ -50,8 +50,10 @@ class Hint:
     label_id: str
     stream_id: str
     target: str
-    reason: str  # no_head | on_hand | short_flicker | tta_unstable
-    share: float  # 규칙에 걸린 키프레임 비율 (short_flicker·tta_unstable은 1 - 값 또는 1)
+    reason: str  # no_head | on_hand | short_flicker | tta_unstable | ai_crop_no
+    # 규칙에 걸린 키프레임 비율 (short_flicker는 1, tta_unstable은 1 - 지지 비율, ai_crop_no는 AI
+    # 조각 확인의 의심 정도)
+    share: float
     t_start_ms: int
     t_end_ms: int
 
@@ -241,14 +243,20 @@ def tta_box_support(
     iou_match: float,
 ) -> list[float]:
     """한 프레임 박스들의 TTA 지지 비율 (변환 화면마다 탐지를 다시 돌린다,
-    `geometry.tta_support`)."""
+    `geometry.tta_support`).
+
+    현재 쓰는 곳 없음. 실제 TTA 경로는 `dlp_cli.hints_cmds`(`geometry.tta_tracks`)다.
+    """
     h, w = image.shape[:2]
     views = [(t, detect(warp_image(image, t))) for t in transforms]
     return tta_support(boxes, views, w, h, iou_match)
 
 
 def pick_tta_frames(track: LabelRecord, n: int) -> list[BoxKeyframe]:
-    """트랙 안에서 고르게 n개 키프레임 (화면 안인 것만)."""
+    """트랙 안에서 고르게 n개 키프레임 (화면 안인 것만).
+
+    현재 쓰는 곳 없음. 실제 TTA 경로는 `dlp_cli.hints_cmds`(`geometry.tta_tracks`)다.
+    """
     p = track.payload
     assert isinstance(p, BlurTrackPayload)
     frames = [k for k in p.keyframes if not k.outside]

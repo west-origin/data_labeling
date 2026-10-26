@@ -887,3 +887,6 @@ issues:
   - {id: F-AIR-34, title: "잘라 낸 박스 AI 확인이 VLM 설정 오류(VlmRequestError)까지 unsure로 삼켜 설정이 틀려도 힌트 0개로 정상 종료", severity: low, status: fixed, kind: code,
      files: [packages/aireview/src/dlp_aireview/crops.py, packages/cli/src/dlp_cli/hints_cmds.py], source: docs/handover/comment-review-2026-10-26.md,
      note: "장애(VlmUnavailableError)·그 박스의 문맥 초과는 unsure, 설정 오류는 올리고 dlp review hints --ai가 멈춘다. 회귀: packages/aireview/tests/test_crops.py::test_config_error_is_raised_not_hidden_as_unsure"}
+  - {id: F-PMS-38, title: "test_rerender_repairs_damaged_release[invalid-json]이 전체 make check에서 한 번 실패(다시 렌더한 블러본 바이트가 원본과 다름), 단독·privacy 묶음 재실행은 통과", severity: low, status: candidate, kind: test,
+     files: [packages/privacy/tests/test_render_recovery.py, packages/privacy/src/dlp_privacy/render.py], source: docs/handover/comment-review-2026-10-26.md,
+     note: "2026-10-26 주석 검수 반영 뒤 make check(15분, 디스크 89%)에서 1회. 이 변경은 렌더를 건드리지 않았다. 재렌더 바이트 동일성을 전제하는 시험이라 부하 중 인코더 스레드 수에 따라 비결정적일 수 있다. 재현되면 바이트 대신 프레임 해시로 비교하거나 인코더 threads를 고정한다."}

@@ -1,8 +1,10 @@
-"""COCO 압축 RLE 마스크 부호화·복호화 (`dlp_schema.labels.Rle`, 학습 증강의 마스크 변환용).
+"""COCO 압축 RLE 마스크 부호화·복호화 (`dlp_schema.labels.Rle`, ADR 0059).
+
+마스크 프리라벨(`dlp_prelabel.masks`)·CVAT 왕복(`dlp_review.cvat`)·COCO 내보내기·학습 증강 공용이다.
 
 COCO(pycocotools) 형식: 마스크를 열 우선(Fortran 순서)으로 펼쳐 0부터 시작하는 연속 길이 목록을
-만들고, 그 목록을 6비트 문자로 줄인 문자열이다 (세 번째 값부터는 두 칸 앞 값과의 차를 적는다).
-size는 (높이, 너비).
+만들고, 그 목록을 6비트 문자로 줄인 문자열이다 (네 번째 값(인덱스 3)부터는 두 칸 앞 값과의 차를
+적는다). size는 (높이, 너비).
 """
 
 from __future__ import annotations

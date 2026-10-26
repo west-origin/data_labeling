@@ -45,7 +45,7 @@ COCO_HEAD = (0, 1, 2, 3, 4)
 COCO_WRIST = {Hand.LEFT: 9, Hand.RIGHT: 10}
 # MediaPipe hand21 관절 번호: 손목, 중지 뿌리 (손 크기 = 둘 사이 픽셀 거리)
 HAND_WRIST, HAND_MIDDLE_MCP = 0, 9
-# 손 3D 궤적 부위 (lift3d가 내는 손목·다섯 손끝)
+# 손 3D 궤적 손끝 부위 다섯 (lift3d가 낸다, 손목 wrist는 따로)
 TIPS = ("thumb_tip", "index_tip", "middle_tip", "ring_tip", "pinky_tip")
 
 Report = dict[str, Any]
@@ -381,6 +381,8 @@ def face_support(labels: Sequence[LabelRecord], policy: ProxyPolicy) -> Report:
 
     1인칭 영상에서 사람 박스·머리 관절과 떨어진 얼굴 박스는 오탐일 가능성이 높다 (싱크·손에 붙은
     얼굴). 블러 판정에는 쓰지 않는 측정값이다 (재현 우선, 프라이버시 탐지는 지우지 않는다).
+    face_margin은 둘 다에 쓴다: near_person은 얼굴 중심이 넓힌 사람 박스 안, near_head는 보이는
+    머리 관절이 넓힌 얼굴 박스 안.
     """
     people = _people(labels)
     heads = _coco_frames(labels)
@@ -579,7 +581,8 @@ def wearer_like_people(labels: Sequence[LabelRecord], policy: ProxyPolicy) -> Re
 
     키프레임 중 박스 안에 착용자 손목이 있고 다른 사람 머리 관절이 없는 비율이 wearer_share
     이상이면 착용자처럼 보인다 (프레임 높이를 몰라 아래 가장자리 조건은 보지 않는다). 프리라벨
-    억제 뒤 남은 착용자 박스의 대리 지표다.
+    억제 뒤 남은 착용자 박스의 대리 지표다. 착용자 증거는 첫 라벨의 스트림 것만 쓴다
+    (`proxy_report`에 stream_id가 없으면 여러 스트림이 섞여도 첫 라벨 스트림 증거만 본다).
     """
     evidence = WearerEvidence.from_labels(labels, labels[0].stream_id or "") if labels else None
     tracks = like = 0

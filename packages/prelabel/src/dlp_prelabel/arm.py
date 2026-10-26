@@ -6,8 +6,8 @@
 
 - 착용자로 판정한 YOLOX 박스 자세 (`dlp_schema.wearer_body.wearer_pose_frame`, coco17 트랙에서는
   빠진다).
-- 합성 착용자 박스 자세: 그 시각 보이는 손 박스를 옆·위로 손 크기만큼 넓히고 아래는 화면 끝까지
-  늘린 박스 (`synthetic_box`).
+- 합성 착용자 박스 자세: 그 시각 보이는 손 박스 합집합을 옆으로 손 크기 x box.side_palms, 위로
+  손 크기 x box.up_palms 넓히고 아래는 화면 끝까지 늘린 박스 (`synthetic_box`).
 
 이 모듈은 후보 자세의 팔 사슬(COCO 왼팔 9-7-5, 오른팔 10-8-6)에서 손마다 하나를 고른다
 (`estimate_arms`):
@@ -19,12 +19,12 @@
    싣는다 (사슬이 없으면 신뢰도 없음): 팔 모델 손목과 hand21 손목의 일치 대리 지표다.
 2. 팔꿈치 판정 (`elbow_reason`): 점수 elbow_min_score 이상, 화면 안(가장자리 edge_margin_px 여유),
    화면 아래팔 길이 / 손 크기가 forearm_palms 안, 손가락 반대 방향(손목→팔꿈치와 손목→중지
-   뿌리의 코사인 max_hand_cos 이하). 하나라도 어기면 보이지 않음(visibility 0)이고 좌표는 손목
-   자리다 (화면 밖 팔꿈치를 지어내지 않는다).
+   뿌리의 코사인 max_hand_cos 이하, 중지 뿌리가 보일 때만 검사하고 안 보이면 건너뛴다). 하나라도
+   어기면 보이지 않음(visibility 0)이고 좌표는 손목 자리다 (화면 밖 팔꿈치를 지어내지 않는다).
 3. 좌우 일관: 두 팔꿈치가 모두 보이는데 왼팔 팔꿈치가 오른팔 팔꿈치보다 손 크기 x
    cross_margin_palms 넘게 오른쪽이면 둘 다 보이지 않음으로 둔다 (side_conflict).
-4. 어깨는 emit_shoulder일 때만 같은 방식(점수 shoulder_min_score, 화면 안)으로 내고, 아니면 늘
-   보이지 않음이다 (가슴 장착 화면에는 어깨가 거의 없다).
+4. 어깨는 emit_shoulder이고 팔꿈치가 ok일 때만 같은 방식(점수 shoulder_min_score, 화면 안)으로
+   내고, 아니면 늘 보이지 않음이다 (가슴 장착 화면에는 어깨가 거의 없다).
 
 결과 트랙(`arm_tracks`)은 손마다 하나, entity_id `<left|right>_arm`, hand = 그 손, 골격 arm3
 (`dlp_schema.labels.ARM3_JOINTS`). 키프레임 시각은 그 스트림 PTS ms로 손 키프레임과 같은 시각이다.

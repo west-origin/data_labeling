@@ -72,7 +72,8 @@ class DbAccessSink:
 class FileAccessSink:
     """DB 없이 돌 때(로컬 저장소 개발·시험) 감사 기록을 JSON Lines 파일에 덧붙인다.
 
-    기록은 접근 전에 한 줄씩 쓰고 바로 flush한다 (DbAccessSink와 같은 규약, 추가만).
+    기록은 접근 전에 한 줄씩 쓰고 바로 flush한다 (DbAccessSink와 같은 규약, 추가만). flush만 하고
+    fsync는 하지 않는다: 운영체제가 죽으면 마지막 줄이 사라질 수 있다 (로컬 개발용, 운영은 DB).
     """
 
     def __init__(self, path: Path) -> None:
@@ -80,7 +81,7 @@ class FileAccessSink:
         self.path = path
 
     def record(self, event: RawAccessEvent) -> None:
-        """이벤트를 JSON 한 줄로 덧붙인다 (상위 디렉터리를 만든다)."""
+        """이벤트를 JSON 한 줄로 덧붙인다 (상위 디렉터리를 만든다, flush만·fsync 없음)."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8") as f:
             f.write(event.model_dump_json() + "\n")

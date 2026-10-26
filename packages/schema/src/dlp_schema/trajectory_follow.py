@@ -1,4 +1,4 @@
-"""3D 궤적이 그것을 계산한 2D 트랙의 검수 결과를 따른다 (F-COE-19·21·22, ADR 0048·0050).
+"""3D 궤적이 그것을 계산한 2D 트랙의 검수 결과를 따른다 (F-COE-19·21·22, ADR 0048·0050·0051·0058).
 
 3D 궤적(`Trajectory3DPayload`)은 검수 도구(CVAT·Label Studio)에 경로가 없다. 그래서 기본
 내보내기(검수 라벨만)에서 로봇 목표·손 3D 점이 비었다. 사용자가 고른 규칙은 "3D 궤적은 그것을
@@ -402,7 +402,8 @@ def inheritance_only_trajectory(
 def review_basis(x: LabelRecord, inheritance: Sequence[TrajectoryInheritance]) -> str:
     """내보내기 manifest의 검수 근거 이름.
 
-    human(사람 출처), inherited_from_2d(2D 손·박스 트랙에서 물려받음), direct(기록 없는 검수),
+    human(사람 출처), inherited_from_2d(2D 손·박스 트랙에서 물려받음. 사람이 확인한 카메라 좌표
+    3D에서 물려받은 월드 좌표 궤적도 여기에 든다), direct(기록 없는 검수),
     automatic(검수 전 카메라 자세: 사람 검수 대상이 아닌 자동 추정, ADR 0050), unreviewed(검수 전).
     """
     if x.provenance.source is Source.HUMAN:

@@ -255,6 +255,10 @@ def serve(  # noqa: C901
             self.close_connection = True
 
         def do_POST(self) -> None:  # noqa: C901
+            """웹훅 한 건: 경로·길이 검사 → 기한 안에 본문 읽기 → 서명 검증·해석 → 수집 콜백.
+
+            응답 코드는 `serve` docstring과 같다.
+            """
             if self.path not in ("/webhooks/cvat", "/webhooks/label_studio"):
                 self.reply(404)
                 return

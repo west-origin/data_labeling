@@ -8,9 +8,9 @@
 
 검사 (손 개체 `<left|right>_hand`의 카메라 좌표 표본만, 박스 중심은 보지 않는다):
 - reach: 손목의 카메라 거리가 reach_m 범위 밖.
-- speed: 손목 표본 i로 들어오는 속도와 나가는 속도가 모두 max_speed_mps 초과 (한 표본만 튄 것.
-  이웃 간격이 max_dt_ms를 넘으면 세지 않는다).
-- accel: 손목 표본 i 앞뒤 속도 차 / 간격이 max_accel_mps2 초과.
+- speed: 손목 표본 b로 들어오는 속도와 나가는 속도가 모두 max_speed_mps 초과 (한 표본만 튄 것).
+- accel: 손목 표본 b의 |v_out - v_in| / ((t_c - t_a) / 2)가 max_accel_mps2 초과 (a·c는 앞뒤 표본).
+  speed·accel 모두 앞뒤 이웃 간격 하나라도 max_dt_ms를 넘으면 세지 않는다.
 - bone_length: 손끝 표본의 손목 거리가 그 세션 같은 손·같은 손끝 중앙값에서 bone_tolerance 비율
   넘게 다름 (중앙값은 표본 min_bone_samples개 이상일 때만).
 손목에 붙은 표시(reach·speed·accel)는 같은 시각 손끝 표본에도 붙인다 (한 시각의 손 맞춤은 손 전체의
@@ -19,7 +19,8 @@
 착용자 팔 (`constrain_arms`, ADR 0058): 팔꿈치 표본(`<left|right>_arm`, elbow)의 같은 손 손목
 (`<left|right>_hand`, wrist) 거리가 forearm_m 범위 밖이거나, 그 세션 같은 손 중앙값에서
 forearm_tolerance 비율 넘게 다르면 forearm_length (중앙값은 표본 min_bone_samples개 이상일 때만).
-같은 시각 손목 표본이 없으면 검사하지 않는다.
+같은 시각 손목 표본이 없으면 검사하지 않는다. 손목은 `constrain_hands`를 거친 뒤의 표본이라
+drop된 손목 시각의 팔꿈치는 검사하지 않는다 (`lift3d`가 손 → 팔 순서로 부른다).
 """
 
 from __future__ import annotations
@@ -100,6 +101,7 @@ def _apply(
         if "drop" in actions:
             continue
         conf = s.confidence
+        # actions는 집합이라 표시가 여럿이어도 downweight는 한 번만 곱한다
         if conf is not None:
             conf = round(conf * policy.downweight ** sum(a == "downweight" for a in actions), 4)
         out.append(s.model_copy(update={"flags": tuple(sorted(found)), "confidence": conf}))
@@ -184,7 +186,7 @@ def constrain_arms(
     """팔꿈치 표본에 아래팔 길이 제약을 적용한다 (ADR 0058). 꺼져 있거나 팔이 없으면 그대로.
 
     손목은 같은 손 개체 `<left|right>_hand`의 wrist 표본이다 (팔 개체 `<left|right>_arm`).
-    표본을 모두
+    `constrain_hands` 뒤의 표본이라 drop된 손목 시각의 팔꿈치는 검사하지 않는다. 표본을 모두
     뺀 팔꿈치 키는 결과에서 빠진다.
     """
     if not policy.enabled:

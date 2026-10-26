@@ -20,8 +20,9 @@
   바꾸고 COCO 17점은 좌우 관절 번호를 맞바꾼다 (hand21 번호는 해부학 이름이라 그대로).
 - 3D 궤적(카메라 좌표): 좌우 뒤집기는 x를 뒤집고 손 개체(left_hand↔right_hand)를 바꾼다. 회전(화면
   가운데 중심)은 같은 각도로 x·y를 돌린다. 배율·자르기·원근·렌즈 왜곡은 3D를 바꾸지 않는다 (내부
-  파라미터가 바뀐 것이다). 이 근사는 주점이 화면 가운데일 때만 정확하다. 원근·렌즈 왜곡이 들어간
-  표본은 `Sample.geometry_3d_exact`가 거짓이다.
+  파라미터가 바뀐 것이다). 배율·자르기는 K를 바꾸는데 `Sample`에 바뀐 K가 없다: 증강본에서 3D를
+  투영하려면 K' = matrix · K가 필요하다. 이 근사는 주점이 화면 가운데일 때만 정확하다.
+  `Sample.geometry_3d_exact`는 원근·렌즈 왜곡이 들어갔는지만 보고(거짓) 주점 위치는 보지 않는다.
 """
 
 from __future__ import annotations
@@ -129,6 +130,7 @@ class Sample:
     keypoints: tuple[KeypointItem, ...] = ()
     masks: tuple[MaskItem, ...] = ()
     points3d: tuple[Point3DItem, ...] = ()
+    # 원근·렌즈 왜곡이 없으면 참. 주점 위치·배율·자르기로 바뀐 K는 보지 않는다 (모듈 docstring)
     geometry_3d_exact: bool = True
     ops: tuple[str, ...] = field(default=())  # 적용한 변환 이름 (기록용)
 
@@ -191,6 +193,8 @@ def sample_ops(rng: np.random.Generator, policy: AugmentationPolicy, w: int, h: 
         jpeg_quality=int(rng.integers(jlo, jhi + 1)) if rng.random() < p.jpeg_p else None,
         motion_px=int(rng.integers(0, e.motion_blur_px_max + 1)),
         motion_deg=float(rng.uniform(0, 180)),
+        # 반사광 타원 반지름 (화면 너비·높이 비율): 가로 1~6 %, 세로 0.5~3 %의 작고 납작한 반점
+        # (젖은 표면·스테인리스의 점 반사). 정책으로 옮기지 않은 고정값
         highlights=tuple(
             (
                 float(rng.uniform(0, 1)),
@@ -208,7 +212,8 @@ def sample_ops(rng: np.random.Generator, policy: AugmentationPolicy, w: int, h: 
 
 
 def _distort_points(pts: NDArray[np.float64], k1: float, w: int, h: int) -> NDArray[np.float64]:
-    """방사 왜곡 x_d = c + (x - c)(1 + k1 r²), r은 반대각선으로 정규화한 거리."""
+    """방사 왜곡 x_d = c + (x - c)(1 + k1 r²), r은 화면 중심에서 모서리까지 거리(대각선 절반)로
+    정규화한 거리."""
     c = np.array([w / 2, h / 2])
     norm = math.hypot(w / 2, h / 2)
     d = (pts - c) / norm
@@ -252,6 +257,7 @@ def _highlights(img: Image, spots: Sequence[tuple[float, float, float, float]]) 
     for cx, cy, rx, ry in spots:
         cv2.ellipse(glow, (int(cx * w), int(cy * h)), (max(1, int(rx * w)), max(1, int(ry * h))),
                     0, 0, 360, 1.0, -1)  # fmt: skip
+    # 가장자리를 부드럽게: 흐림 폭 = 화면 너비 1 % (최소 1 px), 해상도와 무관한 비율 고정값
     glow = cv2.GaussianBlur(glow, (0, 0), max(1.0, 0.01 * w))[..., None]
     out = img.astype(np.float32) * (1 - glow) + 255.0 * glow
     return np.clip(out, 0, 255).astype(np.uint8)
@@ -262,6 +268,7 @@ def _photometric(img: Image, ops: Ops) -> Image:
     out = img.astype(np.float32)
     out = (out - 128.0) * (1 + ops.contrast) + 128.0 + 255.0 * ops.brightness
     out8 = np.clip(out, 0, 255).astype(np.uint8)
+    # sigma 0.3 px 이하 가우스 커널은 거의 항등이라 건너뛴다 (계산만 들고 화소가 거의 그대로)
     if ops.blur_sigma > 0.3:
         out8 = np.asarray(cv2.GaussianBlur(out8, (0, 0), ops.blur_sigma), dtype=np.uint8)
     out8 = _highlights(_motion_blur(out8, ops.motion_px, ops.motion_deg), ops.highlights)
@@ -342,10 +349,7 @@ def augment(sample: Sample, ops: Ops) -> Sample:
     )
     masks: list[MaskItem] = []
     for m in sample.masks:
-        moved = cv2.warpPerspective(
-            m.mask.astype(np.uint8), t.matrix, (t.out_w, t.out_h), flags=cv2.INTER_NEAREST
-        )
-        warped = np.asarray(moved, dtype=np.uint8)
+        warped = np.asarray(warp_image(m.mask.astype(np.uint8), t, nearest=True), dtype=np.uint8)
         if ops.k1:
             warped = _distort_image(warped, ops.k1, nearest=True)
         masks.append(MaskItem(m.key, warped.astype(bool)))

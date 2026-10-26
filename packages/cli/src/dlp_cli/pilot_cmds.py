@@ -1,6 +1,6 @@
 """실제 영상 파일럿의 실행 전 검사. 상태를 승인하거나 라벨·세션을 DB에 쓰지 않는다.
 
-모델 해시/라이선스 정책, 실제 어댑터의 합성 한 프레임 추론, DB 마이그레이션,
+모델 해시/라이선스 정책, 실제 어댑터의 합성 짧은 영상(100 ms) 추론, DB 마이그레이션,
 검수 도구 인증/계정 연결(CVAT 일반 계정, 일반 라벨 검수자의 Label Studio 계정)을
 확인한다. --models-only는 서비스 검사를 생략한 모델 진단이다.
 --video는 로컬 입력 진단이며 저장소 감사 경로를 거치지 않는다 (media probe와 같은 용도).
@@ -53,6 +53,7 @@ class PilotPolicy(Contract):
 
 
 def load_policy(root: Path) -> PilotPolicy:
+    """`config/policies/pilot.yaml`을 읽어 검증한다."""
     data: Any = yaml.safe_load((root / "config/policies/pilot.yaml").read_text("utf-8"))
     return PilotPolicy.model_validate(data)
 
@@ -176,6 +177,10 @@ def _ls_account_check(ls: LabelStudioClient, review: ReviewOpsPolicy, labeler: s
 
 
 def cmd_check(args: argparse.Namespace) -> int:
+    """`dlp pilot check`: 모델(→ 서비스 → --video) 검사 결과를 한 줄씩 출력한다.
+
+    종료 코드: 모두 OK면 0, 하나라도 FAIL이면 1.
+    """
     root = repo_root()
     results = model_checks(root, args.profile)
     if not args.models_only:
@@ -199,6 +204,7 @@ def cmd_check(args: argparse.Namespace) -> int:
 
 
 def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:  # pyright: ignore[reportPrivateUsage]
+    """`dlp pilot check` 하위 명령을 등록한다."""
     pilot = sub.add_parser("pilot", help="실제 영상 파일럿 준비 검사")
     commands = pilot.add_subparsers(dest="pilot_command", required=True)
     check = commands.add_parser("check", help="모델·도구·검수 계정 준비 검사")

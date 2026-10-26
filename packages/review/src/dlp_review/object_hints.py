@@ -34,7 +34,7 @@ class ObjectHint:
     label_id: str
     stream_id: str
     class_id: str
-    reason: str  # wearer_body | tta_unstable
+    reason: str  # wearer_body | tta_unstable | ai_crop_no
     share: float
     t_start_ms: int
     t_end_ms: int

@@ -10,7 +10,8 @@
   (`person_bottom_band`, 손이 안 보이는 시각의 착용자 몸통)는 쓰지 않는다 (착용자 팔·몸통은 객체
   마스크가 되지 않는다, ADR 0058).
 - 손 프롬프트: 그 시각(허용 오차 안)의 관측 키프레임(보간 키프레임은 관측이 아니라 뺀다, ADR 0054)
-  에서 보이는 관절 외접 박스를 넓힌 것과 손 안쪽 양성 점(`hand_point_joints`).
+  에서 보이는 관절(visibility 2) 외접 박스를 넓힌 것과 손 안쪽 양성 점(`hand_point_joints` 중 라벨이
+  있는 것, visibility 1 이상: 가려진 관절도 넣는다).
 - 검사: 예측 IoU < min_score, 넓이 / 박스 넓이 < min_area_ratio, 넓힌 박스 밖 화소 비율 >
   max_outside_ratio(새어 나감)이면 그 키프레임을 버리고 사유를 센다. 객체 마스크에서는 같은
   프레임 손 마스크를 뺀다 (`subtract_hands`). 마스크 외접 박스와 프롬프트 박스의 IoU를 요약에
@@ -106,7 +107,10 @@ class PromptTrack:
 
     @property
     def rank(self) -> float:
-        """한 프레임 프롬프트 상한을 넘을 때 앞세울 순서 (손 먼저, 그다음 트랙 신뢰도)."""
+        """한 프레임 프롬프트 상한을 넘을 때 앞세울 순서 (클수록 앞, 손 먼저, 그다음 트랙 신뢰도).
+
+        손은 2.0이라 신뢰도(0~1) 트랙보다 늘 앞선다. 신뢰도가 없는 트랙은 1.0으로 본다.
+        """
         return 2.0 if self.is_hand else (self.record.confidence or 1.0)
 
 
@@ -208,6 +212,7 @@ def hand_prompt_at(
     f = _hand_frame(p, times, t, policy.hand_time_tolerance_ms)
     if abs(f.t_ms - t) > policy.hand_time_tolerance_ms or f.interpolated:
         return None
+    # 박스는 보이는 관절(visibility 2)만, 양성 점은 라벨이 있는 관절(visibility 1 이상, 가려짐 포함)
     seen = [q for q in f.points if q.visibility == 2]
     if len(seen) < policy.hand_min_points:
         return None

@@ -6,8 +6,9 @@ ADR 0054. 2026-10-22 첫 실영상 파일럿에서 OWLv2 도구 트랙의 약 69
 함수다 (모델·DB 없음).
 
 - `filter_tracks`: 객체·도구 박스 트랙. 시작 문턱(start_score) 이상인 탐지가 나온 뒤부터 트랙을 열고
-  (그 앞 키프레임은 버림), 탐지 문턱(정책 min_score) 이상이면 잇는다(히스테리시스). 남은 키프레임
-  수·길이가 정책보다 짧으면 버린다. 프라이버시 탐지에는 쓰지 않는다 (재현 우선, 지우지 않고 표시만:
+  (그 앞 키프레임은 버림), 남은 키프레임 수·길이가 정책보다 짧으면 버린다. 탐지 문턱(정책
+  min_score)은 이 함수가 보지 않는다: 어댑터가 탐지 때 이미 거른 뒤 잇는다 (둘을 합쳐
+  히스테리시스). 프라이버시 탐지에는 쓰지 않는다 (재현 우선, 지우지 않고 표시만:
   `dlp_privacy.hints`).
 - `OneEuro`·`smooth_hand_frames`: 손 2D를 정규화 좌표(0~1)에서 One Euro 필터로 평활한다 (느릴 때
   강하게, 빠를 때 약하게 → 정지 떨림은 줄고 빠른 동작의 지연은 작다). 끊김(reset_gap_ms 초과) 뒤에는
@@ -38,8 +39,7 @@ def filter_tracks(tracks: Sequence[BoxTrack], policy: TrackFilterPolicy) -> list
 
     트랙마다: 점수가 start_score 이상인 첫 키프레임 앞은 버린다. 그런 키프레임이 없으면 트랙을
     버린다. 남은 키프레임 수가 min_keyframes 미만이거나 길이(끝 - 시작 ms)가 min_duration_ms
-    미만이면
-    버린다.
+    미만이면 버린다. min_score는 보지 않는다 (어댑터가 이미 거른 탐지만 들어온다).
     """
     out: list[BoxTrack] = []
     for tr in tracks:
@@ -80,12 +80,15 @@ class OneEuro:
             self._x, self._dx, self._t = x.copy(), np.zeros_like(x), t_ms
             return x.copy()
         dt = (t_ms - self._t) / 1000.0
+        # 변화 속도를 d_cutoff로 평활한다
         dx = (x - self._x) / dt
         a_d = _alpha(self.d_cutoff_hz, dt)
         self._dx = a_d * dx + (1 - a_d) * self._dx
+        # 값마다 차단 주파수: 빠를수록 높아져 덜 평활한다 (`_alpha`와 같은 식, 배열)
         cutoff = self.min_cutoff_hz + self.beta * np.abs(self._dx)
         tau = 1.0 / (2 * math.pi * cutoff)
         a = 1.0 / (1.0 + tau / dt)
+        # 지수 평활: 새 값 비중 a
         self._x = a * x + (1 - a) * self._x
         self._t = t_ms
         return self._x.copy()
@@ -121,6 +124,7 @@ def smooth_hand_frames(
     filt: OneEuro | None = None
     prev: int | None = None
     for f in frames:
+        # 첫 키프레임이거나 오래 끊긴 뒤면 필터를 새로 만든다 (상태 초기화)
         if filt is None or prev is None or f.t_ms - prev > policy.reset_gap_ms:
             filt = OneEuro(policy.min_cutoff_hz, policy.beta, policy.d_cutoff_hz)
         out.append(_with_xy(f, filt(f.t_ms, _xy(f, width, height)), width, height))
@@ -135,6 +139,7 @@ def _interpolate(a: KeypointFrame, b: KeypointFrame, t: int, confidence: float) 
         Keypoint(
             x=pa.x + (pb.x - pa.x) * w,
             y=pa.y + (pb.y - pa.y) * w,
+            # 앞뒤 관절의 visibility와 무관하게 늘 1 (관측 아님)
             visibility=1,
             confidence=confidence,
         )
@@ -165,8 +170,9 @@ def fill_gaps(
         frames: 한 손의 관측 키프레임 (시각순).
         frame_times: 처리한 영상 프레임 시각 전체 (오름차순, 스트림 PTS ms). 채울 시각은 이 중
             끊김 안에 있는 것만이다 (프레임이 없는 시각은 만들지 않는다).
-        policy: max_gap_ms(이 이하 끊김만), confidence(채운 관절 신뢰도). max_gap_ms 0이면 채우지
-            않는다.
+        policy: max_gap_ms(이 이하 끊김만), confidence(채운 관절 신뢰도), max_jump_scale(앞뒤 손목
+            거리가 앞 키프레임 손 크기의 이 배를 넘으면 채우지 않음). max_gap_ms 0이면 채우지
+            않는다. 채운 관절의 visibility는 앞뒤와 무관하게 1이다.
     """
     if policy.max_gap_ms <= 0 or len(frames) < 2:
         return list(frames)
@@ -174,6 +180,7 @@ def fill_gaps(
     out: list[KeypointFrame] = [frames[0]]
     for a, b in pairwise(frames):
         if b.t_ms - a.t_ms <= policy.max_gap_ms and _plausible(a, b, policy.max_jump_scale):
+            # a 뒤 ~ b 앞의 영상 프레임 시각만 채운다
             lo, hi = np.searchsorted(times, [a.t_ms, b.t_ms], side="right")
             out.extend(
                 _interpolate(a, b, int(t), policy.confidence) for t in times[lo:hi] if t < b.t_ms

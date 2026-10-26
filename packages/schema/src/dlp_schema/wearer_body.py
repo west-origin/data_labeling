@@ -18,8 +18,9 @@ person 박스 대부분이 착용자 자신). 이 모듈은 착용자 증거(같
   착용자 자세에는 머리 관절을 보지 않는다: 1인칭 화면에서 RTMPose가 착용자 팔에 머리를 지어내
   "보임"으로 내는 일이 많다 (파일럿 일치 자세 7,083개 중 5,203개).
 
-증거의 시각은 스트림 PTS ms이고, 다른 트랙 키프레임은 허용 오차(time_tolerance_ms) 안이면 같은
-시각으로 본다. 보간한 손 키프레임(ADR 0054)은 관측이 아니라 증거로 쓰지 않는다.
+증거의 시각은 스트림 PTS ms이고, 다른 트랙 키프레임은 허용 오차 안이면 같은 시각으로 본다. 허용
+오차는 호출자가 정한다 (박스는 정책 time_tolerance_ms, 전신 어댑터 자세는 0: 같은 시각만).
+보간한 손 키프레임(ADR 0054)은 관측이 아니라 증거로 쓰지 않는다.
 
 공개 이름: `HAND_WRIST`, `HAND_MIDDLE_MCP`, `COCO_HEAD`, `COCO_WRISTS`, `Box`, `HandAt`,
 `WearerEvidence`, `hand_at`, `inside`, `wearer_box_frame`, `wearer_pose_frame`.
@@ -49,7 +50,8 @@ Point = tuple[float, float]
 class HandAt:
     """한 시각의 착용자 손 하나 (hand21 키프레임에서).
 
-    wrist: 손목 픽셀. palm_px: 손목→중지 뿌리 픽셀 거리 (1 이상, 손 크기 단위). box: 보이는 손
+    wrist: 손목 픽셀. palm_px: 손목→중지 뿌리 픽셀 거리 (1 이상, 손 크기 단위). 중지 뿌리가
+    보이지 않으면 1.0(손 크기 모름)이라 손 크기 배수 문턱은 사실상 통과하지 않는다. box: 보이는 손
     관절을 감싸는 박스. frame: 원래 키프레임 (팔 단계가 손 방향을 읽는다).
     """
 
@@ -80,12 +82,15 @@ class _Index[T]:
     keys: list[int] = field(default_factory=list[int])
 
     def add(self, t: int, item: T) -> None:
+        """시각 t에 항목 하나를 더한다 (`freeze` 전에)."""
         self.data.setdefault(t, []).append(item)
 
     def freeze(self) -> None:
+        """시각 키를 정렬한다 (다 더한 뒤 한 번, `near` 전에)."""
         self.keys = sorted(self.data)
 
     def near(self, t: int, tol: int) -> list[T]:
+        """시각 t ± tol 안 항목 전부 (시각 순)."""
         lo, hi = bisect.bisect_left(self.keys, t - tol), bisect.bisect_right(self.keys, t + tol)
         return [x for k in self.keys[lo:hi] for x in self.data[k]]
 
@@ -93,8 +98,8 @@ class _Index[T]:
 class WearerEvidence:
     """한 스트림의 착용자 증거: 시각별 착용자 손(hand21)과 다른 사람의 보이는 머리 관절(coco17).
 
-    같은 시각 허용 오차 안에서 같은 손이 둘 이상 잡히면 모두 돌려준다 (호출자가 가장 가까운 것을
-    쓴다).
+    같은 시각 허용 오차 안에서 같은 손이 둘 이상 잡히면 모두 돌려준다. 판정 함수
+    (`wearer_box_frame`·`wearer_pose_frame`)는 그중 하나라도 맞으면 참이다.
     """
 
     def __init__(

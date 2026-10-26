@@ -2,7 +2,7 @@
 
 테이블: `camera_calibrations`, `worker_hand_sizes`(+ 추정 출처 `worker_hand_size_sources`),
 무효 기록 `worker_hand_size_invalidations`, 세션 기기 연결 `session_camera_assignments`. 모두
-추가만 한다 (0022·0024 트리거).
+추가만 한다 (Alembic 리비전 0022·0024의 UPDATE·DELETE 금지 트리거).
 
 멱등: 기기 등록은 같은 기기·유효 시작의 지금 등록과 내부 파라미터가 같으면, 손 크기는 그 작업자의
 지금 쓰이는 값·출처·출처 세션이 같으면, 기기 연결은 그 세션의 최신 연결이 같은 기기면 새 행을 쓰지
@@ -87,7 +87,11 @@ def register_camera_calibration(
     """기기 캘리브레이션 한 건을 등록한다 (멱등).
 
     같은 기기·같은 valid_from의 가장 늦은 등록과 내부 파라미터가 같으면 쓰지 않고 그 등록을
-    돌려준다. 값 검사(`dlp_media.calibration.check_intrinsics`)는 호출자가 먼저 한다.
+    돌려준다. 멱등 비교는 내부 파라미터만 본다 (method·rms_px·n_views·source_sha256이 달라도 새로
+    쓰지 않는다). 값 검사(`dlp_media.calibration.check_intrinsics`)는 호출자가 먼저 한다.
+
+    호출자 트랜잭션 안에서 읽고 쓴다. 동시 등록은 직렬화하지 않으므로 같은 값이 두 행 생길 수 있다
+    (결정은 최신 등록을 쓴다).
 
     Returns:
         (등록, 새로 썼는지).
@@ -207,11 +211,15 @@ def register_hand_size(
     같은 값을 다시 등록하면 새 행을 쓴다 (무효 기록 뒤의 등록은 다시 쓰인다). 출처 세션은
     `worker_hand_size_sources`에 같은 트랜잭션으로 쓴다.
 
+    호출자 트랜잭션 안에서 읽고 쓴다. 동시 등록은 직렬화하지 않으므로 중복 행이 생길 수 있다
+    (결정은 유효한 최신 등록을 쓴다).
+
     Returns:
         (등록, 새로 썼는지).
 
     Raises:
-        pydantic.ValidationError: palm_m이 범위(0.04~0.16 m) 밖이거나, 잰 값에 출처 세션을 줄 때.
+        pydantic.ValidationError: palm_m이 범위(0.04~0.16 m) 밖이거나, 잰 값(measured)에 출처
+            세션이나 estimator를 줄 때.
     """
     sessions_used = tuple(sorted(set(source_session_ids)))
     current = hand_size_state(conn, worker_id).effective(worker_id)
