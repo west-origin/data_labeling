@@ -93,8 +93,8 @@ def test_blur_boxes_mosaics_only_blur_regions() -> None:
 
 
 def test_blur_boxes_cover_render_between_far_keyframes() -> None:
-    """정답: 키프레임 간격 2 s(허용 오차 300 ms의 두 배 넘음) 가운데 시각에 렌더가 그리는 보간 박스를
-    모두 가린다. 예전에는 가장 가까운 키프레임만 써서 가운데 시각은 가리지 않았다 (F-PAR-72).
+    """정답: 키프레임 간격 2 s(허용 오차 300 ms의 두 배 넘음) 가운데 시각에 렌더가 그리는 보간
+    박스를 모두 가린다. 예전에는 가장 가까운 키프레임만 써서 가운데 시각은 가리지 않았다 (F-PAR-72).
     끝 키프레임이 outside면 그 뒤는 가리지 않는다."""
     img = np.zeros((200, 300, 3), dtype=np.uint8)
     img[::2, ::2] = 255

@@ -149,7 +149,10 @@ class OracleCropVerifier:
 
 
 class VlmCropVerifier:
-    """사내 VLM으로 묻는다 (한 박스 한 요청, JSON Schema 강제, temperature 0: `dlp_models.vlm.chat_body`)."""
+    """사내 VLM으로 묻는다 (한 박스 한 요청, JSON Schema 강제, temperature 0).
+
+    temperature는 `dlp_models.vlm.chat_body`가 늘 0으로 넣는다.
+    """
 
     def __init__(self, chat: ChatClient, model: str, jpeg_quality: int) -> None:
         """chat: 사내 서버 클라이언트."""
@@ -179,9 +182,9 @@ def verify_crops(
     """블러본 프레임(프레임 번호 순)마다 그 프레임의 박스를 잘라 묻는다.
 
     서버 장애(`VlmUnavailableError` 등 RuntimeError)와 그 박스만의 문맥 초과(`VlmContextError`)는
-    그 박스를 unsure로 둔다 (힌트를 만들지 않을 뿐 실패가 아니다). 설정 오류(`VlmRequestError`: 모델
-    불일치·재시도하지 않는 4xx)는 다시 물어도 같아서 그대로 올린다. 삼키면 모든 박스가 조용히 unsure가
-    되어 힌트가 0개인데도 정상처럼 보인다 (F-AIR-34).
+    그 박스를 unsure로 둔다 (힌트를 만들지 않을 뿐 실패가 아니다). 설정 오류(`VlmRequestError`:
+    모델 불일치·재시도하지 않는 4xx)는 다시 물어도 같아서 그대로 올린다. 삼키면 모든 박스가 조용히
+    unsure가 되어 힌트가 0개인데도 정상처럼 보인다 (F-AIR-34).
 
     Raises:
         VlmRequestError: 서버 설정 오류.

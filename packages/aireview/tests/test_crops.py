@@ -111,7 +111,10 @@ def test_oracle_stub_and_outage_make_no_hints() -> None:
 
 
 def test_config_error_is_raised_not_hidden_as_unsure() -> None:
-    """설정 오류(모델 불일치 등)는 unsure로 삼키지 않고 올린다. 문맥 초과는 그 박스만 unsure (F-AIR-34)."""
+    """설정 오류(모델 불일치 등)는 unsure로 삼키지 않고 올린다 (F-AIR-34).
+
+    문맥 초과는 그 박스만 unsure다.
+    """
 
     class Wrong:
         """늘 설정 오류인 채팅."""
