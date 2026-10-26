@@ -205,6 +205,8 @@ class DrawOptions:
     blur_skip_on_hand: frozenset[str] = frozenset()
     # --clean: 아래 진단 패널 없이 영상만 (발표용)
     clean: bool = False
+    # --no-overlays: 라벨을 그리지 않고 (블러만 적용한) 영상만 (검수 도구 시연용 클립)
+    no_overlays: bool = False
 
 
 # ---------------------------------------------------------------- 라벨 → 그릴 거리
@@ -630,6 +632,8 @@ def draw_frame(
     small = cv2.resize(img, (opts.width, vh), interpolation=cv2.INTER_AREA)
     sc = (opts.width / w0, vh / h0)
     key = round(t_ms)
+    if opts.no_overlays:
+        return small
     masks = _draw_masks(small, ov, key, opts)
     if not opts.apply_blur:
         _draw_boxes(small, ov.blur, key, sc, opts, blur=True)
@@ -815,6 +819,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="중심이 손 위면 덮지 않을 블러 대상 (쉼표, 예: face,reflection)",
     )
     ap.add_argument("--clean", action="store_true", help="진단 패널 없이 영상만 (발표용)")
+    ap.add_argument(
+        "--no-overlays",
+        action="store_true",
+        help="라벨을 그리지 않는다 (--apply-blur와 함께: 검수 도구 시연용 클립)",
+    )
     ap.add_argument("--extra-labels", type=Path, action="append", default=[],
                     help="더 그릴 라벨 JSON Lines (DB 밖 파일럿 결과)")  # fmt: skip
     ap.add_argument("--crf", type=int, default=26)
@@ -850,7 +859,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                        blur_pad=args.blur_pad, blur_gap_ms=args.blur_gap_ms,
                        blur_min_block=render_policy.min_block_px,
                        blur_blocks=render_policy.blocks_per_box, clean=args.clean,
-                       blur_max_area=args.blur_max_area,
+                       blur_max_area=args.blur_max_area, no_overlays=args.no_overlays,
                        blur_always=frozenset(filter(None, args.blur_always.split(","))),
                        blur_skip_on_hand=frozenset(
                            filter(None, args.blur_skip_on_hand.split(",")))
