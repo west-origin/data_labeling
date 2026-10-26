@@ -7,6 +7,7 @@
 파이프라인 위치:
 - `make models` / `dlp models fetch` → `fetch`: 가중치를 `data/models/`에 받고 sha256을 확인한다.
 - `make licenses` → `ModelRegistry.violations`: 정책이 쓰는 모델의 상업 사용 분류 검사 (ADR 0010).
+  공개 데이터셋으로 1차 학습한 가중치의 분류는 `dlp_models.datasets.dataset_violations` (ADR 0060).
 - 각 어댑터(프리라벨·프라이버시) 생성자 → `resolve`: 파일 경로와 라벨에 남길 버전 문자열.
 관련: WP8, ADR 0009(실제 모델 레지스트리), ADR 0010(상업 사용).
 
@@ -54,6 +55,7 @@ class ModelFile(Contract):
     - artifact_sha256: 압축에서 꺼낸 파일의 등록 해시. ZIP 모델은 캐시 검증에도 필요하다.
     - export: 공개 ONNX가 없어 공식 가중치에서 변환하는 스크립트 (`make export-models`).
     - license / training_data / commercial: 상업 사용 판단 근거 (ADR 0010).
+    - training_datasets / base_model: 공개 데이터셋 1차 학습 가중치의 계보 (ADR 0060, 선택).
     """
 
     path: str
@@ -65,6 +67,10 @@ class ModelFile(Contract):
     license: str = Field(description="가중치 라이선스")
     training_data: tuple[str, ...] = Field(description="직접 학습·미세조정 데이터와 그 라이선스")
     commercial: Commercial
+    # 우리가 공개 데이터셋으로 1차 학습한 가중치만 적는다 (ADR 0060): 학습에 쓴 데이터셋 이름
+    # (`config/external_datasets.yaml`)과 출발 가중치 이름. 분류는 `dlp_models.datasets`가 검사한다.
+    training_datasets: tuple[str, ...] = ()
+    base_model: str | None = None
 
 
 class ExternalModel(Contract):

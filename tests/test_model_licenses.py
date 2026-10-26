@@ -64,3 +64,17 @@ def test_aireview_judge_model_is_registered_and_not_forbidden() -> None:
     assert flagged == [
         "aireview.backend.model: Qwen/Qwen2.5-VL-3B-Instruct은 상업 사용 분류가 forbidden"
     ]
+
+
+def test_pretrain_objects_config_matches_ontology_and_datasets() -> None:
+    """1차 학습 객체 클래스는 온톨로지 객체 ID이고, 쓰는 공개 데이터셋은 목록에 있고 forbidden이
+    아니다 (ADR 0060). 사람·손은 다른 모델이 맡으므로 넣지 않는다."""
+    from dlp_models.datasets import load_datasets, load_pretrain_objects, pretrain_violations
+    from dlp_schema.ontology import load_ontology
+
+    config = load_pretrain_objects(ROOT)
+    datasets = load_datasets(ROOT)
+    assert pretrain_violations(config, datasets) == []
+    objects = load_ontology(ROOT / "config" / "ontology" / "v1").objects
+    assert set(config.classes) <= set(objects)
+    assert not {"person", "hand"} & set(config.classes)

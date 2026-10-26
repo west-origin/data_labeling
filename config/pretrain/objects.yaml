@@ -1,0 +1,56 @@
+# 공개 데이터셋 1차 학습: 가사·청소·돌봄 객체 고정 클래스 탐지기 (ADR 0060).
+# 읽는 곳: scripts/pretrain/build_objects.py(학습 데이터 만들기), dlp_models.datasets(검사).
+# 학습은 파이프라인 밖(Kaggle·Colab 등)에서 공개 데이터만으로 한다. 우리 데이터는 넣지 않는다.
+#
+# classes: 온톨로지 객체 ID → 데이터셋별 원래 클래스 이름 목록 (그 이름의 박스를 이 ID로 합친다).
+#   open_images_v7: Open Images V7 boxable 클래스 표시 이름 (oidv7-class-descriptions-boxable.csv의 DisplayName).
+#   lvis_v1: LVIS v1 범주 name (COCO 2017 이미지).
+#   목록이 없는 데이터셋은 그 클래스를 내지 않는다. 두 데이터셋 모두 없으면 그 객체는 이 탐지기가 내지 않고
+#   지금처럼 OWLv2(open_vocab_objects)에 남는다.
+# 빠진 객체와 이유:
+#   toilet_brush·spray_bottle·trash_bag·bed_rail·bedsheet: 두 데이터셋에 맞는 클래스가 없다 (Bottle·Plastic bag은
+#     너무 넓다).
+#   floor·wall: 면(stuff)이라 박스 탐지 대상이 아니다.
+#   clothing: Open Images Clothing은 거의 모든 사람 사진에 있어 다른 클래스를 압도하고, 1인칭에서는 착용자 옷이다.
+#   person·hand: 다른 모델(YOLOX COCO 사람, MediaPipe 손)이 맡는다.
+# 알려진 한계: LVIS는 연합 주석(federated)이라 이미지마다 모든 범주를 다 달지 않았다. 빠진 박스가 배경으로
+#   학습되지 않도록 build_objects.py가 LVIS 이미지에서는 그 이미지에 확인된 범주(positive·negative 목록)만
+#   손실에 넣는 무시 영역 정보를 함께 쓴다. Open Images도 이미지 단위 확인 라벨만 음성으로 믿는다.
+version: 1
+datasets: [open_images_v7, lvis_v1]
+classes:
+  mop:          {lvis_v1: [mop]}
+  rag:          {lvis_v1: [dishrag]}
+  sponge:       {lvis_v1: [sponge]}
+  brush:        {lvis_v1: [scrubbing_brush]}
+  broom:        {lvis_v1: [broom]}
+  dustpan:      {lvis_v1: [dustpan]}          # LVIS 희귀(r) 범주: 표본이 10장 안팎이라 성능을 기대하기 어렵다
+  bucket:       {lvis_v1: [bucket]}
+  trash_bin:    {open_images_v7: [Waste container], lvis_v1: [trash_can]}
+  pillow:       {open_images_v7: [Pillow], lvis_v1: [pillow]}
+  towel:        {open_images_v7: [Towel], lvis_v1: [towel, bath_towel, hand_towel, dishtowel]}
+  cup:          {open_images_v7: [Mug, Coffee cup, Measuring cup], lvis_v1: [cup, mug, teacup, Dixie_cup]}
+  door:         {open_images_v7: [Door]}
+  drawer:       {open_images_v7: [Drawer], lvis_v1: [drawer]}
+  diaper:       {open_images_v7: [Diaper], lvis_v1: [diaper]}
+  glove:        {open_images_v7: [Glove], lvis_v1: [glove]}
+  sink:         {open_images_v7: [Sink], lvis_v1: [sink, kitchen_sink]}
+  toilet:       {open_images_v7: [Toilet], lvis_v1: [toilet]}
+  mirror:       {open_images_v7: [Mirror], lvis_v1: [mirror]}
+  table:        {open_images_v7: [Table, Kitchen & dining room table, Coffee table], lvis_v1: [table, dining_table, kitchen_table, coffee_table]}
+  bathtub:      {open_images_v7: [Bathtub], lvis_v1: [bathtub]}
+  bed:          {open_images_v7: [Bed, Infant bed], lvis_v1: [bed, bunk_bed]}
+# 데이터 만들기
+build:
+  max_images_per_class: 3000   # 데이터셋·클래스마다 상한 (Kaggle 디스크 약 20 GB 안에 들도록)
+  val_fraction: 0.05           # 공개 데이터 검증 분할 (참고 지표용. 배포 판단은 우리 골든셋으로만, ADR 0060 5절)
+  seed: 20261026
+  min_box_px: 8                # 원본 크기에서 짧은 변이 이보다 작은 박스는 버린다
+# 학습 (YOLOX, Apache-2.0. Ultralytics YOLO는 AGPL이라 쓰지 않는다)
+train:
+  yolox_commit: 419778480ab6ec0590e5d3831b3afb3b46ab2aa3   # Megvii-BaseDetection/YOLOX 태그 0.3.0 (git ls-remote로 확인)
+  model: yolox_s               # 출발 가중치 yolox_s.pth (COCO, config/models.yaml 분류 review와 같은 근거)
+  input_size: 640
+  epochs: 40
+  batch_size: 16               # T4 16 GB 기준
+  fp16: true

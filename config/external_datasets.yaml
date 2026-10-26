@@ -1,0 +1,27 @@
+# 공개 데이터셋 목록 (ADR 0060). 파이프라인 밖 1차 학습에만 쓴다: 라벨 이력·데이터셋 버전·골든셋·내보내기에
+# 넣지 않는다. 읽는 곳: dlp_models.datasets (make licenses가 검사).
+# 필드: version(판), homepage, download(공식 주소), annotation_license, media_license(원문 표기), terms(약관 요지),
+#   access: open | request | signed, commercial: allowed | review | forbidden (ADR 0010과 같은 뜻, 이 데이터로
+#   학습한 가중치의 분류. forbidden은 학습에 쓰지 않는다), tasks, verified(원문 확인일, 없으면 미확인),
+#   sources(확인 근거 주소. verified가 있으면 필수).
+# 원문을 확인하기 전 항목은 verified를 비워 두고 분류를 보수적으로(review) 둔다.
+version: 1
+datasets:
+  open_images_v7:
+    version: v7
+    homepage: https://storage.googleapis.com/openimages/web/index.html
+    annotation_license: CC BY 4.0
+    media_license: "이미지마다 Flickr 원 라이선스 (배포처 표기: CC BY 2.0)"
+    terms: "원문 확인 전. 이미지 저작권은 원 저작자에게 있다."
+    access: open
+    commercial: review
+    tasks: [objects]
+  lvis_v1:
+    version: v1
+    homepage: https://www.lvisdataset.org/
+    annotation_license: CC BY 4.0
+    media_license: "COCO 2017 이미지 (Flickr 개별 CC 라이선스, CC BY-NC 계열 포함)"
+    terms: "원문 확인 전. COCO 이미지 사용은 Flickr 약관을 따른다."
+    access: open
+    commercial: review
+    tasks: [objects]

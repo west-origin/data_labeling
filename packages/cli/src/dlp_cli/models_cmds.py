@@ -28,6 +28,12 @@ from pathlib import Path
 from dlp_actions.policy import load_policy as load_actions_policy
 from dlp_actions.translate_policy import load_policy as load_translate_policy
 from dlp_aireview.policy import load_policy as load_aireview_policy
+from dlp_models.datasets import (
+    dataset_violations,
+    load_datasets,
+    load_pretrain_objects,
+    pretrain_violations,
+)
 from dlp_models.registry import fetch, load_registry
 from dlp_prelabel.policy import load_policy as load_prelabel_policy
 from dlp_privacy.policy import load_policy as load_privacy_policy
@@ -93,7 +99,8 @@ def cmd_licenses(args: argparse.Namespace) -> int:
 
     표에는 레지스트리의 모든 모델(`models`: 가중치 파일, `external`: 외부 서비스·바이너리)을 싣고,
     정책이 쓰지 않는 모델은 "쓰는 곳"이 `-`다. 위반 = 정책이 쓰는데 목록에 없거나 `accept`에 없는
-    분류.
+    분류. 이어서 공개 데이터셋 표(`config/external_datasets.yaml`)를 싣고, 공개 데이터로 1차 학습한
+    가중치·학습 설정의 분류 위반(`dlp_models.datasets`, ADR 0060)도 위반에 더한다.
     """
     root = repo_root()
     registry = load_registry(root)
@@ -105,6 +112,19 @@ def cmd_licenses(args: argparse.Namespace) -> int:
         data = "; ".join(spec.training_data) or "-"
         print(f"| {name} | {where} | {spec.license} | {data} | {spec.commercial} |")
     problems = registry.violations(used)
+    # 공개 데이터셋 1차 학습 (ADR 0060): 데이터셋 표와 가중치·학습 설정 분류 검사
+    datasets = load_datasets(root)
+    print()
+    print("| 공개 데이터셋 | 판 | 주석 라이선스 | 매체 라이선스 | 접근 | 상업 사용 | 원문 확인 |")
+    print("| --- | --- | --- | --- | --- | --- | --- |")
+    for name, ds in datasets.datasets.items():
+        checked = ds.verified.isoformat() if ds.verified else "미확인"
+        print(
+            f"| {name} | {ds.version} | {ds.annotation_license} | {ds.media_license} | "
+            f"{ds.access} | {ds.commercial} | {checked} |"
+        )
+    problems += dataset_violations(registry, datasets)
+    problems += pretrain_violations(load_pretrain_objects(root), datasets)
     for p in problems:
         print(f"[위반] {p}")
     print(f"허용 분류: {', '.join(registry.accept)}")
