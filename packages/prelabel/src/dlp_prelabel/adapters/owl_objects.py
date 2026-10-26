@@ -11,6 +11,8 @@ open_vocab_objects에 있다.
 
 from __future__ import annotations
 
+import hashlib
+from collections.abc import Iterable
 from datetime import datetime
 from pathlib import Path
 
@@ -34,10 +36,15 @@ class OwlObjects(WearerAware):
     (`scene.queries_for`). 라벨 ID는
     `<세션>-<스트림>-tools-<version_tag>-<클래스>-<순번>`, entity_id는 `ov_<클래스>_<순번>` (COCO
     탐지 트랙과 겹치지 않게 `ov_` 접두사). 버전 끝에 `+w<wearer_suppression 절 해시>`: 바디캠에서
-    착용자 자신의 팔·몸통을 덮은 큰 박스 트랙은 라벨로 만들지 않는다 (ADR 0058).
+    착용자 자신의 팔·몸통을 덮은 큰 박스 트랙은 라벨로 만들지 않는다 (ADR 0058). 고정 클래스 도구
+    단계(`yolox_tools`, ADR 0060)가 맡은 클래스를 질의에서 빼면(`set_excluded_classes`) 끝에
+    `+xc<뺀 클래스 해시>`가 붙는다 (빼지 않으면 버전은 그대로다).
     """
 
     name = "tools"
+    # 다른 단계(고정 클래스 도구, ADR 0060)가 맡아 질의에서 뺀 온톨로지 클래스
+    # (`set_excluded_classes`)
+    excluded: frozenset[str] = frozenset()
 
     def __init__(
         self, root: Path, policy: PrelabelPolicy, *, ontology_version: str, now: datetime
@@ -59,7 +66,26 @@ class OwlObjects(WearerAware):
     def set_scene(self, scene: SceneResult) -> None:
         """장면을 정한다 (버전 `+sc<장면>`이 바뀐다). 러너가 멱등 판정을 하기 전에 부른다."""
         self.scene = scene
-        self.version = f"{self.base_version}+sc{scene.scene}"
+        self._set_version()
+
+    def set_excluded_classes(self, classes: Iterable[str]) -> None:
+        """이 온톨로지 클래스로 가는 질의를 묻지 않는다 (다른 단계가 맡는다, ADR 0060).
+
+        질의 대상이 아닌 클래스는 무시한다. 실제로 빠지는 클래스가 있으면 버전에 `+xc<해시>`가
+        붙는다.
+        러너가 멱등 판정을 하기 전에 부른다.
+        """
+        targets = set(self.policy.open_vocab_objects.queries.values())
+        self.excluded = frozenset(c for c in classes if c in targets)
+        self._set_version()
+
+    def _set_version(self) -> None:
+        """기본 버전 + 장면 + (빼는 클래스가 있으면) 뺀 클래스 해시."""
+        version = f"{self.base_version}+sc{self.scene.scene}"
+        if self.excluded:
+            joined = ",".join(sorted(self.excluded)).encode()
+            version += f"+xc{hashlib.sha256(joined).hexdigest()[:8]}"
+        self.version = version
 
     def run(self, clip: Clip) -> list[LabelRecord]:
         """영상 하나를 frame_stride_ms 간격으로 탐지해 박스 트랙 라벨로 돌려준다.
@@ -68,9 +94,15 @@ class OwlObjects(WearerAware):
         클래스별로 IoU 추적한다. 호출마다 ONNX 세션을 새로 연다 (스트림 하나에 한 번).
         """
         op = self.policy.open_vocab_objects
-        # 장면의 질의만 묻는다 (unknown이면 전체, ADR 0055)
-        chosen = queries_for(self.scene.scene, op)
+        # 장면의 질의만 묻는다 (unknown이면 전체, ADR 0055). 다른 단계가 맡은 클래스는 뺀다
+        # (ADR 0060)
+        chosen = {
+            q: c for q, c in queries_for(self.scene.scene, op).items() if c not in self.excluded
+        }
         queries = list(chosen)
+        if not queries:
+            self.last_wearer = None
+            return []
         model = Owlv2(self.model_path, self.tokenizer_path, queries, nms_iou=op.nms_iou)
         thresholds = [op.min_score] * len(queries)
         detections: list[

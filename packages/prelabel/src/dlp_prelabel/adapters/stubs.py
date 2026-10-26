@@ -2,6 +2,8 @@
 
 - Oracle*: 정답 라벨을 (흔들림을 넣어) 그대로 돌려준다. 실제 모델 대신 CI와 다른 모듈 개발에 쓴다.
 - Unavailable*: 실제 모델을 아직 연동하지 못한 기능. 빈 결과를 내고 이유를 남긴다.
+- `ScriptedToolDetector`: 고정 클래스 도구 탐지기(`yolox_tools.ToolDetector`)의 CPU stub. 호출
+  순서대로 정해 둔 탐지를 낸다 (어댑터·러너 시험용).
 
 CLAUDE.md 규칙: 새 모델은 공통 Predictor 어댑터와 CPU stub을 함께 둔다. 미연동 자리는
 "TODO(real-model)" 주석으로 표시한다 (`make todo-models`). 관련: WP8, ADR 0008.
@@ -9,10 +11,13 @@ CLAUDE.md 규칙: 새 모델은 공통 Predictor 어댑터와 CPU stub을 함께
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 
 import numpy as np
+from numpy.typing import NDArray
 
+from dlp_models.yolox import YoloxDetection
 from dlp_prelabel.common import model_label
 from dlp_schema.episode import version_tag
 from dlp_schema.labels import (
@@ -170,4 +175,35 @@ LOCAL_SCENE = UnavailablePredictor(
     "local_scene", "로컬 장면 분류기 미연동 (사내 VLM 또는 --scene, 없으면 unknown·전체 도구 질의)"
 )
 
-UNAVAILABLE = (TOOL_PART_MASKS, SLAM_ENGINE, LEARNED_CONTACT, LOCAL_SCENE)
+# TODO(real-model): 고정 클래스 도구 탐지 가중치 (ADR 0060). 공개 데이터
+#   (config/pretrain/objects.yaml)로 yolox_s를 미세조정한 ONNX가 아직 없다 (1단계 학습 전).
+#   어댑터(`yolox_tools.YoloxTools`)와 전후처리(`dlp_models.yolox`)는 있고, 정책
+#   `prelabel.yaml models.closed_vocab_tools`가 null이라 단계가 없다.
+#   학습·우리 골든셋 게이트 통과 뒤 models.yaml에 등록하고 정책에 이름을 넣는다.
+CLOSED_VOCAB_WEIGHTS = UnavailablePredictor(
+    "closed_vocab_weights",
+    "고정 클래스 도구 탐지(YOLOX 공개 데이터 미세조정) 가중치 없음, closed_tools 단계 꺼짐 "
+    "(ADR 0060)",
+)
+
+UNAVAILABLE = (TOOL_PART_MASKS, SLAM_ENGINE, LEARNED_CONTACT, LOCAL_SCENE, CLOSED_VOCAB_WEIGHTS)
+
+
+class ScriptedToolDetector:
+    """고정 클래스 도구 탐지기의 CPU stub: `detect`를 부른 순서대로 frames의 탐지를 낸다.
+
+    frames를 다 쓰면 빈 목록이다. 이미지는 보지 않는다. 문턱은 실제 탐지기처럼 적용한다 (클래스
+    번호의 문턱보다 낮은 탐지는 빠진다). `calls`에 받은 (이미지 크기, 문턱)을 남긴다.
+    """
+
+    def __init__(self, frames: Sequence[Sequence[YoloxDetection]]) -> None:
+        """frames: 호출마다 낼 탐지 목록 (클래스 번호는 정책 classes 순서)."""
+        self.frames = [list(f) for f in frames]
+        self.calls: list[tuple[tuple[int, int], tuple[float, ...]]] = []
+
+    def detect(self, rgb: NDArray[np.uint8], thresholds: Sequence[float]) -> list[YoloxDetection]:
+        """다음 차례 탐지 중 문턱 이상인 것."""
+        i = len(self.calls)
+        self.calls.append(((int(rgb.shape[1]), int(rgb.shape[0])), tuple(thresholds)))
+        found = self.frames[i] if i < len(self.frames) else []
+        return [d for d in found if d.score >= thresholds[d.class_index]]

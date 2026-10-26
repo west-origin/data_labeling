@@ -57,7 +57,7 @@ def used_models(root: Path) -> dict[str, str]:
     키 형식:
     - `privacy.detectors.<탐지기>.model|tokenizer` — 프라이버시 대상(`targets`)이 쓰는 탐지기와, 그
       탐지기가 다시 쓰는 하위 탐지기(`region_detector`, `face_detector`)까지 따라간다.
-    - `prelabel.models.<역할>` — 프리라벨 정책의 `models` 절 전부.
+    - `prelabel.models.<역할>` — 프리라벨 정책의 `models` 절 전부 (null로 꺼 둔 역할은 뺀다).
     - `prelabel.scene.vlm_model` — 장면 분류 VLM (사내 서버, ADR 0055).
     - `actions.vlm.model` — 행동 분류 VLM.
     - `aireview.backend.model` — AI 1차 검수 판정 VLM (WP17, ADR 0040).
@@ -86,7 +86,9 @@ def used_models(root: Path) -> dict[str, str]:
         names |= {n for n in (spec.region_detector, spec.face_detector) if n is not None}
     prelabel = load_prelabel_policy(root)
     for role, model in prelabel.models.model_dump().items():
-        used[f"prelabel.models.{role}"] = model
+        # null은 꺼 둔 역할이다 (예: closed_vocab_tools, ADR 0060). 쓰지 않는 모델은 검사하지 않는다
+        if model is not None:
+            used[f"prelabel.models.{role}"] = model
     used["prelabel.scene.vlm_model"] = prelabel.scene.vlm_model
     used["actions.vlm.model"] = load_actions_policy(root).vlm.model
     used["aireview.backend.model"] = load_aireview_policy(root).backend.model

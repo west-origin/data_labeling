@@ -131,11 +131,18 @@ def test_oracle_predictors_emit_valid_model_labels() -> None:
 
 
 def test_unavailable_features_are_explicit() -> None:
-    """미연동 기능 stub 네 개(도구 부위 마스크, 외부 SLAM 엔진, 학습 접촉 분류기, 로컬 장면
-    분류기)가 이유를 갖고 빈 결과를 내는지 본다 (TODO(real-model) 자리가 조용히 사라지지 않게).
+    """미연동 기능 stub 다섯 개(도구 부위 마스크, 외부 SLAM 엔진, 학습 접촉 분류기, 로컬 장면
+    분류기, 고정 클래스 도구 탐지 가중치)가 이유를 갖고 빈 결과를 내는지 본다 (TODO(real-model)
+    자리가 조용히 사라지지 않게).
     """
     names = {p.name for p in UNAVAILABLE}
-    assert names == {"tool_part_masks", "slam_engine", "learned_contact", "local_scene"}
+    assert names == {
+        "tool_part_masks",
+        "slam_engine",
+        "learned_contact",
+        "local_scene",
+        "closed_vocab_weights",
+    }
     assert all(p.run(Clip("s", "bodycam", Path("x.mp4"))) == [] and p.reason for p in UNAVAILABLE)
 
 
@@ -151,13 +158,14 @@ def test_missing_model_file_is_reported(tmp_path: Path) -> None:
 
 
 def test_policy_models_and_queries_exist() -> None:
-    """정책 `models`의 모든 이름이 `config/models.yaml`에 있고, OWLv2 질의의 대상 클래스가
-    온톨로지에 있는지 본다.
+    """정책 `models`의 모든 이름(꺼 둔 역할 null 제외)이 `config/models.yaml`에 있고, OWLv2 질의의
+    대상 클래스가 온톨로지에 있는지 본다.
     """
     ontology = load_ontology(ROOT / "config/ontology/v1")
     policy = load_policy(ROOT)
     registry = load_registry(ROOT)
-    assert all(name in registry.models for name in policy.models.model_dump().values())
+    names = [n for n in policy.models.model_dump().values() if n is not None]
+    assert all(name in registry.models for name in names)
     for query, cls in policy.open_vocab_objects.queries.items():
         assert cls in ontology.objects, query
 

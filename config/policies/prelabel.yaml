@@ -2,7 +2,7 @@
 # 실제 모델을 아직 연동하지 못한 곳은 "TODO(real-model)"로 표시하고 필요한 것을 적는다.
 # 저장소 전체에서 찾기: make todo-models
 #
-# 정책 해시: 각 어댑터·단계는 자기 절(hands, body, objects, open_vocab_objects, depth, contact,
+# 정책 해시: 각 어댑터·단계는 자기 절(hands, body, objects, open_vocab_objects, closed_vocab_tools, depth, contact,
 # wearer_matching)의 "파싱된 값" 해시를 모델 버전에 넣는다 (PrelabelPolicy.digest). 그 절의 값을
 # 바꾸면 다음 실행에서 그 단계가 다시 돌고, 검수 전인 이전 결과만 지운다 (검수·사람 결과는 남는다).
 # 주석·키 순서·따옴표는 해시에 영향이 없다. models 절과 timeline_predictors는 해시에 들어가지 않는다.
@@ -34,6 +34,12 @@ models:
   mask_encoder_data: sam2_tiny_encoder_data
   mask_decoder: sam2_tiny_decoder
   mask_decoder_data: sam2_tiny_decoder_data
+  # 고정 클래스 도구 탐지 YOLOX ONNX (adapters/yolox_tools.YoloxTools, 단계 이름 closed_tools, ADR 0060).
+  # null이면 그 단계를 만들지 않는다 (지금 동작 그대로). 켜려면 models.yaml에 등록한 이름(training_datasets로
+  # 상업 사용 분류를 계산한 항목)을 넣는다. 아래 closed_vocab_tools 절이 클래스·문턱이다.
+  # TODO(real-model): 공개 데이터(config/pretrain/objects.yaml)로 yolox_s를 미세조정한 ONNX 가중치. 1단계 학습
+  #   (ADR 0060 1·8절) 전이라 없다. 학습·우리 골든셋 게이트(dlp eval golden) 통과 뒤 이름을 넣는다.
+  closed_vocab_tools: null
 
 # 손 21관절 (MediaPipe HandLandmarker)
 hands:
@@ -142,6 +148,35 @@ open_vocab_objects:
     living: [a cleaning rag, a broom, a dustpan, a mop, a spray bottle, a trash bag, a trash can, a towel,
              a bucket, a sponge, a mirror]
 
+# 고정 클래스 도구·가사 객체 탐지 (YOLOX, 공개 데이터 미세조정, ADR 0060, adapters/yolox_tools.YoloxTools).
+# models.closed_vocab_tools가 null이면 이 절은 검증만 하고 쓰지 않는다 (단계 없음, 버전에도 들어가지 않는다).
+# 라벨 ID는 <세션>-<스트림>-closed_tools-..., entity_id는 cv_<클래스>_<순번> (OWLv2 tools 단계·COCO 객체와 겹치지
+# 않는다). 착용자 몸 억제는 wearer_suppression.stages의 tools를 따른다 (도구 단계 둘을 함께 뜻한다).
+# TODO(real-model): 가중치가 없어 아래 문턱은 정답 표본 없이 정했다. 우리 골든셋으로 다시 정한다 (F-PAR-60).
+closed_vocab_tools:
+  # 모델 출력 클래스 열 순서 = config/pretrain/objects.yaml classes 키 순서 (학습 데이터 만들기가 이 순서로 번호를
+  # 매긴다). 온톨로지 객체 ID여야 한다 (dlp_prelabel.policy.load_policy가 검사).
+  classes: [mop, rag, sponge, brush, broom, dustpan, bucket, trash_bin, pillow, towel, cup, door, drawer, diaper,
+            glove, sink, toilet, mirror, table, bathtub, bed]
+  input_size: 640           # 정사각 입력 한 변 (px, 32의 배수, 내보낼 때의 test_size)
+  # YOLOX tools/export_onnx.py는 --decode_in_inference를 주지 않으면(기본) 격자 상대값을 낸다 → false (격자 디코드).
+  # --decode_in_inference로 내보냈으면 true
+  decoded_output: false
+  frame_stride_ms: 200      # 추론 간격 (ms). yolox_s는 CPU 프레임당 약 0.1~0.2초라 OWLv2(500)보다 촘촘하다
+  min_score: 0.3            # 물체 점수 x 클래스 점수 문턱
+  class_min_score: {}       # 클래스별 문턱 (선택, 예: {dustpan: 0.5}). 없는 클래스는 min_score
+  nms_iou: 0.45             # 같은 클래스 NMS IoU 문턱 (YOLOX 공식 데모 값)
+  track_iou: 0.3            # 트랙 잇기 IoU 문턱
+  max_gap_ms: 600           # frame_stride_ms보다 커야 트랙이 이어진다 (지금 3배)
+  # 트랙 거르기 (ADR 0054). 200 ms 간격에서 키프레임 3개 = 400 ms 이상 연속으로 보인 것
+  track_filter:
+    start_score: 0.4
+    min_keyframes: 3
+    min_duration_ms: 400
+  # 이 단계가 돌 때 classes에 든 클래스를 OWLv2 도구 질의(open_vocab_objects.queries)에서 뺀다. 빠지는 질의가
+  # 있으면 tools 단계 버전에 +xc<빼는 클래스 해시>가 붙어 다시 돈다. --skip closed_tools면 빼지 않는다
+  replace_open_vocab_classes: true
+
 # 접촉 구간 (모델이 아닌 알고리즘, dlp_prelabel.contact). 결과는 마스터 타임라인 hand_state 라벨이다.
 # 대상 종류는 온톨로지 객체 정의로 정한다 (tool 정의 → tool, surface → fixed_surface, 그 밖 → object).
 # 사람 박스(물리 유형 person, 위 coco_to_ontology person)와의 접촉은 대상자 부위(body_part, 사람 접촉에
@@ -176,7 +211,8 @@ wearer_matching:
   min_overlap_samples: 20   # 두 신호가 겹치는 길이가 rate_hz 격자로 이 샘플 수보다 짧으면 비교하지 않는다
 
 # 착용자 자신의 몸 억제 (ADR 0058, dlp_schema.wearer_body · dlp_prelabel.wearer_suppress). 바디캠에서 착용자의
-# 팔·몸통을 잡은 COCO 사람 박스(objects), OWLv2 박스(tools), YOLOX→RTMPose 자세(body)를 라벨로 만들지 않고
+# 팔·몸통을 잡은 COCO 사람 박스(objects), 도구 박스(tools: OWLv2 tools와 고정 클래스 closed_tools 둘 다, ADR 0060),
+# YOLOX→RTMPose 자세(body)를 라벨로 만들지 않고
 # 개수만 단계 요약에 남긴다. 판정: 박스(margin만큼 넓힘) 안에 착용자 손목(hand21)이 있고 다른 사람의 보이는
 # 머리 관절은 없고 아래 변이 화면 아래 bottom_band 띠 안 (자세는 손목이 착용자 손목과 일치 + 아래 띠).
 # 다른 사람(대상자)은 머리가 보이거나 손목이 착용자 손목과 다르면 남는다. 프라이버시 탐지(블러)와 무관하다.

@@ -890,3 +890,6 @@ issues:
   - {id: F-PMS-38, title: "test_rerender_repairs_damaged_release[invalid-json]이 전체 make check에서 한 번 실패(다시 렌더한 블러본 바이트가 원본과 다름), 단독·privacy 묶음 재실행은 통과", severity: low, status: candidate, kind: test,
      files: [packages/privacy/tests/test_render_recovery.py, packages/privacy/src/dlp_privacy/render.py], source: docs/handover/comment-review-2026-10-26.md,
      note: "2026-10-26 주석 검수 반영 뒤 make check(15분, 디스크 89%)에서 1회. 이 변경은 렌더를 건드리지 않았다. 재렌더 바이트 동일성을 전제하는 시험이라 부하 중 인코더 스레드 수에 따라 비결정적일 수 있다. 재현되면 바이트 대신 프레임 해시로 비교하거나 인코더 threads를 고정한다."}
+  - {id: F-PAR-73, title: "MediaPipe 객체·OWLv2 도구 어댑터가 wearer_suppression.stages에 자기 단계가 없어도 착용자 억제를 하고 버전 태그만 빠짐 (RtmPose만 stages를 확인)", severity: low, status: candidate, kind: code,
+     files: [packages/prelabel/src/dlp_prelabel/adapters/owl_objects.py, packages/prelabel/src/dlp_prelabel/adapters/mediapipe_models.py, packages/prelabel/src/dlp_prelabel/wearer_suppress.py], source: docs/adr/0058-wearer-arm-skeleton-and-wearer-body-suppression.md, see: [F-PAR-67],
+     note: "2026-10-26 고정 클래스 도구 단계(closed_tools, ADR 0060)를 붙이며 발견. 지금 기본값은 세 단계 모두 stages에 있어 영향 없음. stages에서 objects·tools를 빼면 억제는 계속되는데 버전이 바뀌지 않아 억제 정책 변경 뒤 다시 돌지 않는다. suppress_box_tracks 호출 전에 stages를 확인하면 된다."}

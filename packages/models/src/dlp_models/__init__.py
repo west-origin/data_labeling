@@ -10,6 +10,8 @@ AI 1차 검수 `dlp aireview`, 모델 받기 `make models`)가
   상업 사용 분류 검사(`ModelRegistry.violations`, `make licenses`).
 - `onnx`: ONNX Runtime CPU 세션의 얇은 타입 래퍼(`OnnxModel`).
 - `owlv2`: OWLv2 오픈 보캐뷸러리 탐지(텍스트 질의 → 박스). 전처리·후처리(NMS) 포함.
+- `yolox`: YOLOX 고정 클래스 탐지(공개 데이터 미세조정 도구 탐지기, ADR 0060). letterbox·격자
+  디코드·클래스별 NMS 포함.
 - `depth`: Depth Anything V2 메트릭 깊이(미터)와 픽셀 → 카메라 좌표 역투영(`Intrinsics`).
 - `vlm`: OpenAI 호환 VLM 서버 공통 전송(요청 본문, 오류 분류, 백오프·재시도). 행동 분류
   (`dlp_actions`)와 AI 1차 검수(`dlp_aireview`)가 함께 쓴다 (WP17.1, ADR 0040).

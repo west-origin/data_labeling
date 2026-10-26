@@ -3,6 +3,8 @@
 등록하는 명령:
 - `dlp prelabel run <세션> [--store] [--url] [--skip 단계]` — 세션의 영상 스트림마다
   손(MediaPipe 21관절), 전신(RTMPose), COCO 객체(MediaPipe), 도구(OWLv2) 모델을 돌린다.
+  정책이 켜면(`prelabel.yaml models.closed_vocab_tools`, 기본 null) 고정 클래스 도구(YOLOX, 단계
+  `closed_tools`, ADR 0060)도 돌리고, 그 클래스를 OWLv2 질의에서 뺀다(`replace_open_vocab_classes`).
   이어 객체·손 모양 마스크(SAM 2.1, ADR 0059), 깊이 기반 3D 궤적, 장갑·영상 접촉 구간, 3인칭
   착용자 매칭을 만들어
   `label_records`에 쓴다.
@@ -45,6 +47,7 @@ from dlp_prelabel.adapters.mediapipe_models import MediaPipeHands, MediaPipeObje
 from dlp_prelabel.adapters.owl_objects import OwlObjects
 from dlp_prelabel.adapters.rtmpose import RtmPose
 from dlp_prelabel.adapters.stubs import UNAVAILABLE
+from dlp_prelabel.adapters.yolox_tools import YoloxTools, link_open_vocab
 from dlp_prelabel.lift3d import DepthLifter
 from dlp_prelabel.masks import MaskMaker
 from dlp_prelabel.policy import PrelabelPolicy, load_policy
@@ -72,7 +75,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         args.session_id: 대상 세션 (온톨로지 버전이 있어야 한다).
         args.store: `s3` 또는 `local:<디렉터리>`. 원본·MLflow 버킷을 같은 지정으로 연다.
         args.url: DB URL.
-        args.skip: 건너뛸 단계 이름 목록 (`hands`, `body`, `objects`, `tools`, `depth3d`).
+        args.skip: 건너뛸 단계 이름 목록 (`hands`, `body`, `objects`, `tools`, `closed_tools`,
+            `depth3d`, `masks`).
             각 어댑터 클래스의 `name`과 비교한다.
 
     흐름:
@@ -100,6 +104,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         except ModelUnavailableError as exc:
             missing[cls.name] = str(exc)
             print(f"[모델 없음] {cls.name}: {exc}")
+    _closed_vocab(root, policy, args.skip, (ontology.version, now), predictors, missing)
     lifter: DepthLifter | None = None
     if DepthLifter.name not in args.skip:
         try:
@@ -181,6 +186,36 @@ def cmd_run(args: argparse.Namespace) -> int:
         engine.dispose()
     _print_summary(s)
     return 0
+
+
+def _closed_vocab(
+    root: Path,
+    policy: PrelabelPolicy,
+    skip: list[str],
+    values: tuple[str, datetime],
+    predictors: list[Predictor],
+    missing: dict[str, str],
+) -> None:
+    """고정 클래스 도구 단계(ADR 0060)를 정책이 켰으면 더하고, 그 클래스를 OWLv2 질의에서 뺀다.
+
+    `models.closed_vocab_tools`가 null(기본)이거나 --skip closed_tools면 단계를 만들지 않고 OWLv2도
+    그대로다. 가중치가 없으면 `missing`에 남긴다 (실행 거부·부분 실행은 다른 모델과 같다).
+    values: (온톨로지 버전, 지금 시각).
+    """
+    if YoloxTools.name in skip:
+        return
+    ontology_version, now = values
+    try:
+        closed = YoloxTools.from_policy(root, policy, ontology_version=ontology_version, now=now)
+    except ModelUnavailableError as exc:
+        missing[YoloxTools.name] = str(exc)
+        print(f"[모델 없음] {YoloxTools.name}: {exc}")
+        return
+    if closed is None:
+        return
+    predictors.append(closed)
+    if excluded := link_open_vocab(predictors):
+        print(f"[고정 클래스 도구] OWLv2 질의에서 뺀 클래스: {', '.join(sorted(excluded))}")
 
 
 def _scene(
@@ -280,9 +315,10 @@ def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
         "--skip",
         action="append",
         default=[],
-        choices=["hands", "body", "objects", "tools", "depth3d", "masks"],
+        choices=["hands", "body", "objects", "tools", "closed_tools", "depth3d", "masks"],
         help="건너뛸 단계 (여러 번 쓸 수 있다). CPU에서 tools(OWLv2)는 프레임당 수 초, "
-        "masks(SAM 2.1)는 처리 프레임당 1~3초가 걸린다",
+        "masks(SAM 2.1)는 처리 프레임당 1~3초가 걸린다. closed_tools(고정 클래스 YOLOX)는 정책이 "
+        "켰을 때만 있다",
     )
     run.add_argument(
         "--scene",

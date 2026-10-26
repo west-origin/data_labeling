@@ -7,16 +7,20 @@
 
 절 → 쓰는 곳:
 - models → 모든 어댑터 (`config/models.yaml` 이름), hands → `MediaPipeHands`, body → `RtmPose`,
-  objects → `MediaPipeObjects`, open_vocab_objects → `OwlObjects`, depth → `lift3d.DepthLifter`,
+  objects → `MediaPipeObjects`, open_vocab_objects → `OwlObjects`, closed_vocab_tools →
+  `adapters.yolox_tools.YoloxTools`(고정 클래스 도구 탐지, ADR 0060, models.closed_vocab_tools가
+  null이면 끔), depth → `lift3d.DepthLifter`,
   camera_pose → `campose`(바디캠 자세), world_frame → `worldframe`(월드 좌표 3D),
   contact → `runner._contacts`, wearer_matching → `runner._wearer`, timeline_predictors →
   `runner.run_prelabel` (마스터 타임라인 구간을 내는 배포 모델), wearer_suppression →
-  `MediaPipeObjects`·`OwlObjects`·`RtmPose`(착용자 몸 억제, ADR 0058), arm → `RtmPose`(착용자 팔),
+  `MediaPipeObjects`·`OwlObjects`·`YoloxTools`·`RtmPose`(착용자 몸 억제, ADR 0058), arm →
+  `RtmPose`(착용자 팔),
   masks → `masks.MaskMaker`(객체·손 모양 마스크, ADR 0059).
 """
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 from pathlib import Path
@@ -28,6 +32,7 @@ from pydantic import Field, field_validator, model_validator
 from dlp_prelabel.posemath import rotation_problem
 from dlp_schema.common import Contract, OntologyId
 from dlp_schema.labels import Constraint3DFlag
+from dlp_schema.ontology import load_ontology
 
 
 class TrackFilterPolicy(Contract):
@@ -146,6 +151,8 @@ class ModelRoles(Contract):
     - hands: 손 랜드마크. body_detector: 사람 박스(YOLOX). body: 전신 포즈(RTMPose).
     - coco_objects: COCO 객체. open_vocab: OWLv2 ONNX. open_vocab_tokenizer: OWLv2 토크나이저.
     - depth: 메트릭 깊이.
+    - closed_vocab_tools: 고정 클래스 도구 탐지 YOLOX ONNX (ADR 0060). None이면 그 단계를 만들지
+      않는다 (기본, 가중치 학습 전).
     - mask_encoder·mask_decoder: SAM 2.1 그래프, mask_encoder_data·mask_decoder_data: 그 외부 가중치
       파일 (ADR 0059).
 
@@ -164,6 +171,7 @@ class ModelRoles(Contract):
     mask_encoder_data: str
     mask_decoder: str
     mask_decoder_data: str
+    closed_vocab_tools: str | None = None
 
 
 class HandsPolicy(Contract):
@@ -243,6 +251,55 @@ class OpenVocabObjectsPolicy(Contract):
             if bad or not names:
                 raise ValueError(f"scene_queries.{scene}: queries에 없는 질의 {bad} (또는 빈 목록)")
         return self
+
+
+class ClosedVocabToolsPolicy(Contract):
+    """고정 클래스 도구 탐지 정책 (`closed_vocab_tools` 절, ADR 0060, `adapters.yolox_tools`).
+
+    공개 데이터로 미세조정한 YOLOX가 정해진 클래스만 낸다. 켜고 끄는 것은
+    `models.closed_vocab_tools`(None이면 끔)이고 이 절은 늘 검증한다.
+
+    classes: 모델 출력 클래스 열 순서의 온톨로지 객체 ID (`config/pretrain/objects.yaml classes` 키
+        순서와 같다). 가중치 옆 파일이 아니라 이 목록이 이름이다. 온톨로지에 없는 ID는
+        `load_policy`가 거부한다.
+    input_size: 정사각 입력 한 변(px, 32의 배수, 내보낼 때의 test_size). decoded_output: ONNX가
+        `--decode_in_inference`로 내보낸 것인지 (False면 격자 디코드를 한다, export 기본).
+    frame_stride_ms: 추론 간격 (ms, 스트림 PTS). min_score: 기본 점수 문턱 (물체 x 클래스).
+    class_min_score: 클래스별 문턱 (선택, 없는 클래스는 min_score). nms_iou: 같은 클래스 NMS 문턱.
+    track_iou / max_gap_ms: 트랙 잇기. track_filter: 트랙 거르기 (ADR 0054).
+    replace_open_vocab_classes: 이 단계가 돌 때 classes에 든 클래스를 OWLv2 도구 질의에서 뺀다
+        (같은 도구가 두 단계에서 두 트랙으로 남지 않게).
+    """
+
+    classes: tuple[OntologyId, ...] = Field(min_length=1)
+    input_size: int = Field(ge=32)
+    decoded_output: bool
+    frame_stride_ms: int = Field(ge=0)
+    min_score: float = Field(ge=0, le=1)
+    class_min_score: dict[OntologyId, float] = Field(default_factory=dict[OntologyId, float])
+    nms_iou: float = Field(gt=0, le=1)
+    track_iou: float = Field(gt=0, le=1)
+    max_gap_ms: float = Field(ge=0)
+    track_filter: TrackFilterPolicy
+    replace_open_vocab_classes: bool
+
+    @model_validator(mode="after")
+    def _consistent(self) -> ClosedVocabToolsPolicy:
+        """classes 중복·input_size 32 배수·class_min_score 키·범위를 검사한다."""
+        if len(set(self.classes)) != len(self.classes):
+            raise ValueError("closed_vocab_tools.classes: 같은 ID가 두 번 있습니다")
+        if self.input_size % 32:
+            raise ValueError("closed_vocab_tools.input_size: 32의 배수여야 합니다 (stride 8·16·32)")
+        bad = sorted(set(self.class_min_score) - set(self.classes))
+        if bad:
+            raise ValueError(f"closed_vocab_tools.class_min_score: classes에 없는 ID {bad}")
+        if any(not 0 <= v <= 1 for v in self.class_min_score.values()):
+            raise ValueError("closed_vocab_tools.class_min_score: 0~1이어야 합니다")
+        return self
+
+    def thresholds(self) -> list[float]:
+        """classes 순서의 클래스별 점수 문턱 (없는 클래스는 min_score)."""
+        return [self.class_min_score.get(c, self.min_score) for c in self.classes]
 
 
 # hand21 번호 → 온톨로지 hand_joints 이름 (3D 궤적 part)
@@ -598,7 +655,8 @@ class WearerSuppressionPolicy(Contract):
 
     enabled: 끄면 억제하지 않는다 (버전 해시는 그대로 들어간다).
     stages: 억제를 적용할 어댑터 이름 (objects·tools·body). 이 어댑터 버전에 이 절의 해시가
-        들어간다.
+        들어간다. tools는 도구 단계 둘(OWLv2 `tools`, 고정 클래스 `closed_tools`)을 함께 뜻한다
+        (ADR 0060: 고정 클래스 단계를 더해도 이 절의 해시와 다른 단계의 버전이 바뀌지 않게).
     time_tolerance_ms: 손 키프레임을 같은 시각으로 볼 허용 오차. margin: 박스를 넓히는 비율.
     bottom_band: 박스·자세 아래 변이 이 화면 높이 비율의 아래 띠 안이어야 착용자로 본다.
     track_share: 박스 트랙 키프레임 중 착용자 프레임 비율이 이 이상이면 트랙째 라벨로 만들지 않는다.
@@ -714,6 +772,7 @@ class PrelabelPolicy(Contract):
     body: BodyPolicy
     objects: ObjectsPolicy
     open_vocab_objects: OpenVocabObjectsPolicy
+    closed_vocab_tools: ClosedVocabToolsPolicy  # 고정 클래스 도구 탐지 (ADR 0060)
     contact: ContactPolicy
     wearer_matching: WearerPolicy
     depth: DepthPolicy
@@ -746,8 +805,49 @@ class PrelabelPolicy(Contract):
 def load_policy(root: Path) -> PrelabelPolicy:
     """`<root>/config/policies/prelabel.yaml`을 읽어 검증한다.
 
+    `closed_vocab_tools.classes`는 저장소 온톨로지(`config/ontology/*/`)의 모든 판에 객체로 있어야
+    한다 (모델 출력 열의 이름이라 틀리면 라벨이 온톨로지 검사에 걸린다, ADR 0060).
+
     Raises:
-        FileNotFoundError: 파일이 없을 때. pydantic.ValidationError: 값 범위·형식이 틀릴 때.
+        FileNotFoundError: 정책 파일이나 온톨로지가 없을 때. pydantic.ValidationError: 값
+            범위·형식이 틀릴 때. ValueError: closed_vocab_tools.classes에 온톨로지에 없는 ID가
+            있을 때.
     """
     data: Any = yaml.safe_load((root / "config" / "policies" / "prelabel.yaml").read_text("utf-8"))
-    return PrelabelPolicy.model_validate(data)
+    policy = PrelabelPolicy.model_validate(data)
+    check_closed_vocab_classes(policy.closed_vocab_tools, root / "config" / "ontology")
+    return policy
+
+
+def check_closed_vocab_classes(section: ClosedVocabToolsPolicy, ontology_root: Path) -> None:
+    """고정 클래스 탐지기의 classes가 `ontology_root` 아래 모든 온톨로지 판에 객체로 있는지 본다.
+
+    Raises:
+        FileNotFoundError: 온톨로지 판(`*/manifest.yaml`)이 하나도 없을 때.
+        ValueError: 어느 판에 없는 ID가 있을 때 (판 디렉터리와 ID를 밝힌다).
+    """
+    dirs = sorted(m.parent for m in ontology_root.glob("*/manifest.yaml"))
+    if not dirs:
+        raise FileNotFoundError(
+            f"closed_vocab_tools.classes를 검사할 온톨로지가 없습니다: {ontology_root}"
+        )
+    for d in dirs:
+        objects = _ontology_objects(d, _mtimes(d))
+        bad = [c for c in section.classes if c not in objects]
+        if bad:
+            raise ValueError(f"closed_vocab_tools.classes: 온톨로지 {d.name}에 없는 객체 {bad}")
+
+
+def _mtimes(directory: Path) -> tuple[tuple[str, int], ...]:
+    """디렉터리 YAML 파일의 (이름, 수정 시각 ns). 캐시 키로 쓴다 (파일이 바뀌면 다시 읽는다)."""
+    return tuple((p.name, p.stat().st_mtime_ns) for p in sorted(directory.glob("*.yaml")))
+
+
+@functools.lru_cache(maxsize=8)
+def _ontology_objects(directory: Path, mtimes: tuple[tuple[str, int], ...]) -> frozenset[str]:
+    """온톨로지 판의 객체 ID 집합 (`load_policy`마다 온톨로지를 다시 검증하지 않게 캐시한다).
+
+    mtimes: `_mtimes(directory)` (캐시 키로만 쓴다).
+    """
+    del mtimes
+    return frozenset(load_ontology(directory).objects)
