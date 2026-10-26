@@ -11,7 +11,13 @@
   표본 수.
 - 착용자 팔 (arm3, ADR 0058): 손목 → 팔꿈치 굵은 선과 팔꿈치 점(보일 때만), 패널에 손마다 팔꿈치
   보임·점수와 같은 시각 아래팔 3D 길이(손목 3D ↔ 팔꿈치 3D, m).
-- 블러 탐지 (blur_track): 블러를 적용하지 않고 테두리만 그린다 (오탐을 눈으로 판단하게).
+- 블러 탐지 (blur_track): 기본은 블러를 적용하지 않고 테두리만 그린다 (오탐을 눈으로 판단하게).
+  `--apply-blur`면 원본 크기 프레임에서 블러 박스를 블러본과 같은 모자이크
+  (`dlp_privacy.render.apply_blur`, privacy.yaml render 값)로 덮고 테두리는 그리지 않는다
+  (밖에 보여 줄 영상용). 누락을 줄이려고 박스를 `--blur-pad` 비율만큼 넓히고, 키프레임 사이는
+  `--blur-gap-ms`까지 보간하고 마지막 키프레임 뒤로도 그만큼 유지한다. 화면 대부분을 덮는 오탐(F-PMS-31) 때문에
+  `--blur-max-area`(화면 대비 넓이)를 넘는 박스는 덮지 않을 수 있다 (`--blur-always`에 든 대상은
+  크기와 무관하게 덮는다). 사람이 승인한 블러본이 아니므로 남은 노출이 없는지 사람이 끝까지 본다.
   대상 ID와 탐지기 이름(`config/policies/privacy.yaml targets.*.detectors`를 표시용으로만 읽음),
   트랙 신뢰도를 적는다.
 - 객체 박스 (box_track): 출처(모델 버전의 첫 토막: COCO 객체·OWLv2 등)·클래스·트랙 신뢰도.
@@ -47,7 +53,7 @@ import bisect
 import collections
 import sys
 from collections.abc import Iterable, Iterator, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from pathlib import Path
 
@@ -59,6 +65,7 @@ from numpy.typing import NDArray
 
 from dlp_media.pts import PtsIndex, build_pts_index
 from dlp_media.rle import decode_rle
+from dlp_privacy.policy import load_policy as load_privacy_policy
 from dlp_schema.labels import (
     BlurTrackPayload,
     BoxKeyframe,
@@ -182,6 +189,21 @@ class DrawOptions:
     mask_tol_ms: int = 260
     mask_alpha: float = 0.45
     width: int = 540
+    # --apply-blur: 블러 박스를 모자이크로 덮는다
+    # (넓힘 비율, 보간·유지 ms, 모자이크 최소 블록·블록 수)
+    apply_blur: bool = False
+    blur_pad: float = 0.15
+    blur_gap_ms: int = 1500
+    blur_min_block: int = 6
+    blur_blocks: int = 5
+    # 화면 대비 이 넓이를 넘는 박스는 덮지 않는다 (1.0 = 모두 덮음). blur_always 대상은 예외
+    blur_max_area: float = 1.0
+    blur_always: frozenset[str] = frozenset()
+    # 이 대상의 박스는 중심이 손 위(손 키포인트 외접 박스를 30 % 넓힌 안)면 덮지 않는다
+    # (손을 얼굴로 본 오탐 F-PMS-31, 표시용. 라벨은 바꾸지 않는다)
+    blur_skip_on_hand: frozenset[str] = frozenset()
+    # --clean: 아래 진단 패널 없이 영상만 (발표용)
+    clean: bool = False
 
 
 # ---------------------------------------------------------------- 라벨 → 그릴 거리
@@ -546,6 +568,55 @@ LEGEND = (
 )
 
 
+def _hand_boxes(ov: Overlays, t_ms: int, tol_ms: int) -> list[tuple[float, float, float, float]]:
+    """그 시각 보이는 손 키포인트의 외접 박스 (x0, y0, x1, y1, 원본 픽셀, 30 % 넓힘)."""
+    out: list[tuple[float, float, float, float]] = []
+    for tr in ov.hands:
+        j = _nearest(tr.times, t_ms, tol_ms)
+        if j is None:
+            continue
+        pts = tr.points[j]
+        seen = pts[pts[:, 2] > 0]
+        if len(seen) < 3:
+            continue
+        x0, y0 = seen[:, 0].min(), seen[:, 1].min()
+        x1, y1 = seen[:, 0].max(), seen[:, 1].max()
+        px, py = (x1 - x0) * 0.3, (y1 - y0) * 0.3
+        out.append((x0 - px, y0 - py, x1 + px, y1 + py))
+    return out
+
+
+def _mosaic(
+    img: Image, tracks: list[BoxTrack], t_ms: int, opts: DrawOptions, ov: Overlays
+) -> None:
+    """원본 크기 프레임의 블러 박스를 제자리에서 모자이크한다 (`--apply-blur`).
+
+    블러본 렌더와 같은 함수(`dlp_privacy.render.apply_blur`)를 쓰되, 표시용 보간·유지
+    (`blur_gap_ms`)와 넓힘(`blur_pad`)으로 렌더보다 넓게 덮는다.
+    """
+    from dlp_privacy.geometry import Box
+    from dlp_privacy.render import apply_blur
+
+    loose = replace(opts, hold_ms=opts.blur_gap_ms, max_interp_ms=opts.blur_gap_ms)
+    frame_area = float(img.shape[0] * img.shape[1])
+    hands = _hand_boxes(ov, t_ms, 200) if opts.blur_skip_on_hand else []
+    for tr in tracks:
+        box = box_at(tr, t_ms, loose)
+        if box is None:
+            continue
+        x, y, w, h = box
+        if tr.label not in opts.blur_always and w * h > opts.blur_max_area * frame_area:
+            continue
+        cx, cy = x + w / 2, y + h / 2
+        if tr.label in opts.blur_skip_on_hand and any(
+            a <= cx <= c and b <= cy <= d for a, b, c, d in hands
+        ):
+            continue
+        px, py = w * opts.blur_pad, h * opts.blur_pad
+        apply_blur(img, Box(x - px, y - py, w + 2 * px, h + 2 * py), "mosaic",
+                   opts.blur_min_block, opts.blur_blocks)  # fmt: skip
+
+
 def draw_frame(
     img: Image, t_ms: float, ov: Overlays, opts: DrawOptions, *, session_id: str, panel_h: int = 190
 ) -> Image:
@@ -554,15 +625,20 @@ def draw_frame(
     라벨은 정수 ms로 반올림한 프레임 시각(`round(t_ms)`)으로 찾는다 (키프레임 저장 규칙과 같다).
     """
     h0, w0 = img.shape[:2]
+    if opts.apply_blur:
+        _mosaic(img, ov.blur, round(t_ms), opts, ov)
     vh = round(h0 * opts.width / w0 / 2) * 2
     small = cv2.resize(img, (opts.width, vh), interpolation=cv2.INTER_AREA)
     sc = (opts.width / w0, vh / h0)
     key = round(t_ms)
     masks = _draw_masks(small, ov, key, opts)
-    _draw_boxes(small, ov.blur, key, sc, opts, blur=True)
+    if not opts.apply_blur:
+        _draw_boxes(small, ov.blur, key, sc, opts, blur=True)
     hidden = _draw_boxes(small, ov.objects, key, sc, opts, blur=False)
     _draw_arms(small, ov, key, sc, opts)
     hands = _draw_hands(small, ov, key, sc, opts)
+    if opts.clean:
+        return small
 
     panel = np.full((panel_h, opts.width, 3), 24, dtype=np.uint8)
     y = 13
@@ -714,6 +790,29 @@ def main(argv: Sequence[str] | None = None) -> int:
                     help="마스크 키프레임을 보일 최대 시각 차 (ms, 표시용)")  # fmt: skip
     ap.add_argument("--no-boxes", action="store_true", help="객체 박스를 그리지 않는다")
     ap.add_argument("--no-privacy", action="store_true", help="프라이버시 탐지 박스 숨김")
+    ap.add_argument(
+        "--apply-blur",
+        action="store_true",
+        help="블러 박스를 모자이크로 덮는다 (밖에 보여 줄 영상용, 테두리 대신)",
+    )
+    ap.add_argument("--blur-pad", type=float, default=0.15, help="모자이크 박스 넓힘 비율")
+    ap.add_argument(
+        "--blur-gap-ms", type=int, default=1500, help="모자이크 키프레임 보간·유지 (ms)"
+    )
+    ap.add_argument(
+        "--blur-max-area",
+        type=float,
+        default=1.0,
+        help="화면 대비 이 넓이를 넘는 블러 박스는 덮지 않는다 (오탐 대비)",
+    )
+    ap.add_argument(
+        "--blur-always",
+        default="",
+        help="크기와 무관하게 덮을 블러 대상 (쉼표, 예: shipping_label,address_sign)",
+    )
+    ap.add_argument("--blur-skip-on-hand", default="",
+                    help="중심이 손 위면 덮지 않을 블러 대상 (쉼표, 예: face,reflection)")
+    ap.add_argument("--clean", action="store_true", help="진단 패널 없이 영상만 (발표용)")
     ap.add_argument("--extra-labels", type=Path, action="append", default=[],
                     help="더 그릴 라벨 JSON Lines (DB 밖 파일럿 결과)")  # fmt: skip
     ap.add_argument("--crf", type=int, default=26)
@@ -739,9 +838,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         ov.objects = []
     if args.no_privacy:
         ov.blur = []
+    if args.apply_blur and args.no_privacy:
+        print("[실패] --apply-blur와 --no-privacy는 함께 쓸 수 없습니다 (블러가 빠진다)")
+        return 2
+    render_policy = load_privacy_policy(ROOT).render
     opts = DrawOptions(min_score=args.min_score, hold_ms=args.hold_ms,
                        max_interp_ms=args.max_interp_ms, width=args.width,
-                       mask_tol_ms=args.mask_tol_ms)  # fmt: skip
+                       mask_tol_ms=args.mask_tol_ms, apply_blur=args.apply_blur,
+                       blur_pad=args.blur_pad, blur_gap_ms=args.blur_gap_ms,
+                       blur_min_block=render_policy.min_block_px,
+                       blur_blocks=render_policy.blocks_per_box, clean=args.clean,
+                       blur_max_area=args.blur_max_area,
+                       blur_always=frozenset(filter(None, args.blur_always.split(","))),
+                       blur_skip_on_hand=frozenset(
+                           filter(None, args.blur_skip_on_hand.split(",")))
+                       )  # fmt: skip
     size = tuple(int(v) for v in args.expect_size.split("x")) if args.expect_size else None
     n = render(args.video, args.out, ov, opts, session_id=args.session_id, start_ms=start_ms,
                end_ms=end_ms, rotate=args.rotate, expect_size=size, crf=args.crf)  # type: ignore[arg-type]  # fmt: skip
