@@ -28,6 +28,7 @@ from dlp_cli import (
     active_cmds,
     aireview_cmds,
     calib_cmds,
+    console_cmds,
     dataset_cmds,
     eval_cmds,
     export_cmds,
@@ -141,6 +142,7 @@ def build_parser() -> argparse.ArgumentParser:
     export_cmds.add_commands(sub)  # dlp export coco|intervals|lerobot — 내보내기 (WP15)
     robot_cmds.add_commands(sub)  # dlp robot check — 리타기팅 로봇 등록 확인 (ADR 0047)
     ops_cmds.add_commands(sub)  # dlp ops … — 운영 지표·감사·보관 (WP16)
+    console_cmds.add_commands(sub)  # dlp console serve — 브라우저 운영 콘솔 (ADR 0061)
     return parser
 
 

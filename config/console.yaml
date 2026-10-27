@@ -1,0 +1,40 @@
+# 운영 콘솔 설정 (ADR 0061). dlp_console.settings.load_console_config가 읽는다 (모르는 키는 거부).
+# 콘솔은 기존 `dlp <단계>` 명령을 작업으로 돌리는 화면이라 단계의 정책 값은 여기 두지 않는다
+# (각 단계의 config/policies/*.yaml이 그대로 쓰인다). 여기는 화면·작업 실행·업로드 사본 다루기만 정한다.
+version: 1
+
+# `dlp console serve` 기본 주소. 기본은 이 컴퓨터에서만 연다 (127.0.0.1). 다른 컴퓨터에서 열려면
+# --host로 명시하고 경고를 확인한다 (인증은 시작 때 만든 토큰 하나뿐이다, ADR 0061 4절).
+server:
+  host: 127.0.0.1
+  port: 8090
+
+# 영상 올리기. 올린 사본은 작업 디렉터리(DLP_CONSOLE_DIR, 기본 ~/.dlp-console)의 uploads/에만 둔다.
+upload:
+  max_mb: 8192                      # 한 파일 상한 (MB). 넘으면 받지 않는다
+  suffixes: [.mp4, .mov, .m4v]      # 받는 확장자 (dlp media prepare가 읽는 컨테이너)
+  # 수집(dlp ingest)이 성공하면 올린 사본·준비 사본을 지운다 (원본은 원본 버킷에 불변으로 남는다).
+  # 실패하면 다시 시도할 수 있게 남긴다 (화면의 "업로드 사본 지우기"로 지운다).
+  delete_after_ingest: true
+
+# 작업 로그 꼬리 (화면에 보이는 마지막 줄 수)
+logs:
+  tail_lines: 200
+
+# 결과 미리보기 (승인·렌더된 블러본만, 라벨러 자격 증명 서명 URL)
+preview:
+  signed_url_ttl_s: 3600            # 서명 URL 유효 시간 (초)
+  max_tracks: 400                   # 화면에 그릴 박스·손 트랙 상한 (신뢰도 높은 순)
+
+# 외부에서 학습한 가중치 가져오기 (ADR 0060 1단계 산출물 → ADR 0061 6절)
+pretrain_import:
+  # 가중치를 둘 곳 (저장소 루트 기준, data/models는 Git에 넣지 않는다)
+  models_dir: data/models/pretrain
+  # 골든셋 비교 명령. 지금 저장소에는 외부 ONNX를 예측을 DB에 쓰지 않고 골든셋으로 평가하는 명령이 없다
+  # (dlp eval golden은 DB에 있는 예측만, dlp train run은 학습기가 있어야 한다). YOLOX 학습기·로더가
+  # dlp_train에 붙으면 그 이름을 trainer에 적는다. null이면 비교 버튼은 꺼지고 이유를 보인다 (F-COE-74).
+  # 실행 명령: dlp train run objects <데이터셋 버전> --trainer <trainer> --param <키>=<값>...
+  #   params 값의 {model_name}은 가져온 가중치의 models.yaml 이름으로 바뀐다.
+  compare:
+    trainer: null
+    params: {}

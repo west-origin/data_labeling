@@ -29,6 +29,7 @@ Prefect 서비스가 기동된 것만으로 모든 작업이 영속 큐에서 �
 | 계약·온톨로지·DB | [schema](../../packages/schema/src/dlp_schema/), `db/` | `config/ontology/v1`, `schemas/`는 생성물 |
 | 데이터셋·학습·평가 | [datasets](../../packages/datasets/src/dlp_datasets/), [training](../../packages/training/src/dlp_train/), [evaluation](../../packages/evaluation/src/dlp_eval/) | `dataset.yaml`, `training.yaml`, `evaluation.yaml` |
 | 내보내기·게시 | [export runner](../../packages/export/src/dlp_export/runner.py), 같은 디렉터리의 형식별 모듈 | `config/policies/export.yaml` |
+| 운영 콘솔 (ADR 0061) | [console](../../packages/console/src/dlp_console/)의 `app.py`(API·토큰), `jobs.py`(`dlp` 명령 작업 실행·JSON Lines 기록), `steps.py`·`global_steps.py`(단계 활성 규칙·명령), `status.py`(DB 읽기 전용), `upload.py`(매니페스트), `preview.py`(블러본 서명 URL), `training.py`(회차 그래프 자료), `pretrain.py`·`imports.py`(외부 학습 가중치 가져오기), 화면 `static/`, [CLI](../../packages/cli/src/dlp_cli/console_cmds.py) | `config/console.yaml`, `config/review_ui.yaml`(테마), 안내 [operator-guide.md](operator-guide.md) |
 | 모델·합성 정답·운영·선별 | [models](../../packages/models/src/dlp_models/), [fixtures](../../packages/fixtures/src/dlp_fixtures/), [ops](../../packages/ops/src/dlp_ops/), [active](../../packages/active/src/dlp_active/) | 모델 레지스트리, 각 정책 |
 
 ## 실제 의존 관계
@@ -50,7 +51,8 @@ Prefect 서비스가 기동된 것만으로 모든 작업이 영속 큐에서 �
 | train | datasets, eval, media, schema |
 | export | datasets, media, privacy, retarget, schema |
 | ops | privacy, review, schema |
-| cli | 나머지 18개 패키지 |
+| console | media, models, review, schema |
+| cli | 나머지 19개 패키지 |
 
 `schema`에는 계약뿐 아니라 DB 구현도 함께 있다. CLI에는 연결 코드 외에 모델 선택·온톨로지 선택도
 남아 있다. 단순한 계층 구조로 가정해 파일을 옮기기 전에 [후속 과제](known-issues.md)를 확인한다.

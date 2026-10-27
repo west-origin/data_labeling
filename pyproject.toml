@@ -3,7 +3,7 @@ name = "data-labeling"
 version = "0.1.0"
 description = "1인칭 돌봄 영상 라벨링 플랫폼 (워크스페이스 루트)"
 requires-python = ">=3.12,<3.14"
-dependencies = ["dlp-actions", "dlp-active", "dlp-aireview", "dlp-cli", "dlp-datasets", "dlp-eval", "dlp-export", "dlp-fixtures", "dlp-media", "dlp-models", "dlp-ops", "dlp-prelabel", "dlp-privacy", "dlp-relations", "dlp-retarget", "dlp-review", "dlp-schema", "dlp-sync", "dlp-train"]
+dependencies = ["dlp-actions", "dlp-active", "dlp-aireview", "dlp-cli", "dlp-console", "dlp-datasets", "dlp-eval", "dlp-export", "dlp-fixtures", "dlp-media", "dlp-models", "dlp-ops", "dlp-prelabel", "dlp-privacy", "dlp-relations", "dlp-retarget", "dlp-review", "dlp-schema", "dlp-sync", "dlp-train"]
 
 [tool.uv]
 package = false
@@ -30,6 +30,7 @@ dlp-actions = { workspace = true }
 dlp-active = { workspace = true }
 dlp-aireview = { workspace = true }
 dlp-cli = { workspace = true }
+dlp-console = { workspace = true }
 dlp-datasets = { workspace = true }
 dlp-eval = { workspace = true }
 dlp-export = { workspace = true }
@@ -87,7 +88,7 @@ max-complexity = 15
 "**/migrations/versions/*.py" = ["E501"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["dlp_actions", "dlp_active", "dlp_aireview", "dlp_cli", "dlp_datasets", "dlp_eval", "dlp_export", "dlp_fixtures", "dlp_media", "dlp_models", "dlp_ops", "dlp_prelabel", "dlp_privacy", "dlp_relations", "dlp_review", "dlp_schema", "dlp_sync", "dlp_train"]
+known-first-party = ["dlp_actions", "dlp_active", "dlp_aireview", "dlp_cli", "dlp_console", "dlp_datasets", "dlp_eval", "dlp_export", "dlp_fixtures", "dlp_media", "dlp_models", "dlp_ops", "dlp_prelabel", "dlp_privacy", "dlp_relations", "dlp_review", "dlp_schema", "dlp_sync", "dlp_train"]
 
 [tool.pyright]
 include = ["packages", "tests"]

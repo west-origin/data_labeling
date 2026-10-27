@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="ko" data-mode="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>운영 콘솔</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <a class="skip" href="#main">본문으로 건너뛰기</a>
+  <header class="top">
+    <div class="brand">
+      <img id="logo" alt="" height="28">
+      <span id="brand-name">운영 콘솔</span>
+    </div>
+    <nav class="tabs" role="tablist" aria-label="화면">
+      <button role="tab" id="tab-sessions" aria-controls="view-sessions" aria-selected="true">세션</button>
+      <button role="tab" id="tab-upload" aria-controls="view-upload" aria-selected="false">영상 올리기</button>
+      <button role="tab" id="tab-training" aria-controls="view-training" aria-selected="false">학습·성과</button>
+      <button role="tab" id="tab-pretrain" aria-controls="view-pretrain" aria-selected="false">가중치 가져오기</button>
+      <button role="tab" id="tab-jobs" aria-controls="view-jobs" aria-selected="false">작업 기록</button>
+    </nav>
+    <button id="mode" class="ghost" type="button" aria-label="화면 밝기 바꾸기">화이트</button>
+  </header>
+
+  <div id="banner" class="banner" role="status" aria-live="polite" hidden></div>
+
+  <main id="main">
+    <section id="view-sessions" role="tabpanel" aria-labelledby="tab-sessions" class="split">
+      <aside class="list" aria-label="세션 목록">
+        <div class="list-head">
+          <h2>세션</h2>
+          <button id="refresh" class="ghost" type="button">새로 고침</button>
+        </div>
+        <ul id="session-list"></ul>
+        <p id="no-sessions" class="muted" hidden>아직 세션이 없습니다. "영상 올리기"에서 시작하세요.</p>
+      </aside>
+      <div id="session-detail" class="detail" aria-live="polite">
+        <p class="muted">왼쪽에서 세션을 고르세요.</p>
+      </div>
+    </section>
+
+    <section id="view-upload" role="tabpanel" aria-labelledby="tab-upload" hidden>
+      <h2>영상 올리기</h2>
+      <p class="muted">올린 영상은 이 컴퓨터의 작업 디렉터리에만 두고, 수집이 끝나면 지웁니다 (원본은 원본 저장소에 보관).
+        영상에는 개인정보가 있습니다. 촬영 동의와 현장 촬영 권한을 먼저 확인하세요.</p>
+      <form id="upload-form" class="form">
+        <label>영상 파일 <input type="file" name="file" accept=".mp4,.mov,.m4v" required></label>
+        <label>세션 ID <input name="session_id" required pattern="[A-Za-z0-9][A-Za-z0-9_.:\-]{0,127}" placeholder="예: s-20261027-kitchen01"></label>
+        <label>작업자 ID (가명) <input name="worker_id" required pattern="[A-Za-z0-9][A-Za-z0-9_.:\-]{0,127}" placeholder="예: w-01"></label>
+        <label>장소 ID (가명) <input name="site_id" required pattern="[A-Za-z0-9][A-Za-z0-9_.:\-]{0,127}" placeholder="예: site-01"></label>
+        <label>도메인 <select name="domain" id="domain-select"></select></label>
+        <label>장면 (도구 찾기 범위) <select name="scene" id="scene-select"><option value="">자동/모름</option></select></label>
+        <label>확인한 동의서 버전 <input name="consent_version" required maxlength="64" placeholder="예: consent-v2"></label>
+        <label>촬영 시각 (선택, 시간대 포함) <input name="recorded_at" placeholder="예: 2026-10-25T14:30:00+09:00"></label>
+        <label>카메라 기기 ID (선택) <input name="camera_id" pattern="[A-Za-z0-9][A-Za-z0-9_.:\-]{0,127}" placeholder="예: iphone13-ultrawide-0.5x-1080p30"></label>
+        <label>촬영 방향 회전
+          <select name="display_rotation">
+            <option value="">영상의 방향 태그 그대로</option>
+            <option value="0">0° (태그 무시)</option>
+            <option value="90">90° (반시계)</option>
+            <option value="180">180° (거꾸로 단 경우)</option>
+            <option value="270">270°</option>
+          </select>
+        </label>
+        <p class="muted small">착용자 몸·팔이 화면 아래에서 들어오지 않으면 회전을 고르세요 (가슴에 거꾸로 달았으면 보통 180°).</p>
+        <div class="row">
+          <button type="submit" class="primary">올리고 수집 시작</button>
+          <progress id="upload-progress" max="100" value="0" hidden></progress>
+        </div>
+      </form>
+    </section>
+
+    <section id="view-training" role="tabpanel" aria-labelledby="tab-training" hidden>
+      <h2>학습·성과</h2>
+      <div id="training"></div>
+    </section>
+
+    <section id="view-pretrain" role="tabpanel" aria-labelledby="tab-pretrain" hidden>
+      <h2>외부에서 학습한 가중치 가져오기</h2>
+      <div id="pretrain"></div>
+    </section>
+
+    <section id="view-jobs" role="tabpanel" aria-labelledby="tab-jobs" hidden>
+      <h2>작업 기록</h2>
+      <div id="jobs"></div>
+    </section>
+  </main>
+
+  <dialog id="log-dialog" aria-labelledby="log-title">
+    <div class="dialog-head">
+      <h3 id="log-title">작업 로그</h3>
+      <button id="log-close" type="button" class="ghost">닫기</button>
+    </div>
+    <div id="log-meta"></div>
+    <pre id="log-body" tabindex="0"></pre>
+  </dialog>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -5,7 +5,7 @@ name = "dlp-cli"
 version = "0.1.0"
 description = "dlp 명령줄 진입점"
 requires-python = ">=3.12,<3.14"
-dependencies = ["dlp-actions", "dlp-active", "dlp-aireview", "dlp-datasets", "dlp-eval", "dlp-export", "dlp-fixtures", "dlp-media", "dlp-models", "dlp-ops", "dlp-prelabel", "dlp-privacy", "dlp-relations", "dlp-retarget", "dlp-review", "dlp-schema", "dlp-sync", "dlp-train"]
+dependencies = ["dlp-actions", "dlp-active", "dlp-aireview", "dlp-console", "dlp-datasets", "dlp-eval", "dlp-export", "dlp-fixtures", "dlp-media", "dlp-models", "dlp-ops", "dlp-prelabel", "dlp-privacy", "dlp-relations", "dlp-retarget", "dlp-review", "dlp-schema", "dlp-sync", "dlp-train"]
 
 # `uv run dlp …`가 부르는 진입점
 [project.scripts]
