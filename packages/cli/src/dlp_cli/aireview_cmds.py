@@ -31,6 +31,15 @@ WP17.8)는 `aireview_eval_cmds`에 있고 여기서 함께 등록한다. 아래 
   셈법 값(align_px·text_bytes_per_token)이 지금 정책과 다르면 그 보고서용 작업량을 보고서 셈법으로
   다시 센다 (`estimate.counting_policy`). 모델·fingerprint가 다르면 경고한다.
   종료: 0 (세션이 없어도 0).
+- `dlp aireview calibrate [--since ISO] [--until ISO] [--version V …] [--out DIR] [--json] [--url]`:
+  판정 표시 보정 학습 (ADR 0062, `dlp_review.ops.ai_calibration`). 기간의 사람 판정 기록
+  (`ai_review_outcomes`) 중 대조군 행만으로 판정·종류·클래스별 지적 정밀도를 추정해 버전 붙은 보정
+  산출물 `<out>/aireview-calibration-<id>.json`(기본 `data/aireview/calibration`)을 쓰고, 보정 전후
+  지적 정밀도·재현율(같은 자료, 작업 키 2겹 교차)을 출력한다. 멱등: 같은 기간·기록이면 같은 파일이고
+  이미 있으면 다시 쓰지 않는다. 기간 기본값은 오늘 0시(UTC)까지 `fit.window_days`일. 판정 버전
+  기본은 review.yaml `ai_review.versions`(비면 aireview.yaml 지금 버전). 보정 칸이 하나도
+  없으면(표본 부족) 파일을 쓰지 않는다. review.yaml은 고치지 않는다: 출력된 `artifact` 줄을
+  사람이 넣어야 쓰인다. DB는 읽기만 한다. 종료: 0.
 
 서버 주소: `--vlm-url`(여러 번, `이름=URL` 가능) 또는 `DLP_VLM_URLS`(`spark-01=http://…,…`).
 `DLP_VLM_URL`(행동 분류 서버)은 쓰지 않는다. API 키는 `DLP_VLM_API_KEY` (Authorization 헤더로만
@@ -41,6 +50,7 @@ WP17.8)는 `aireview_eval_cmds`에 있고 여기서 함께 등록한다. 아래 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import socket
 import tempfile
@@ -48,7 +58,7 @@ import time
 from collections.abc import Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from fractions import Fraction
 from pathlib import Path
 from typing import Any
@@ -96,6 +106,7 @@ from dlp_cli.aireview_common import (
 )
 from dlp_cli.aireview_eval_cmds import add_eval_command
 from dlp_cli.aireview_run_cmds import add_run_commands
+from dlp_cli.review_config import load_review_policy
 from dlp_cli.schema_cmds import database_url
 from dlp_fixtures.aireview import AiReviewScene, aireview_scene, scene_frame
 from dlp_fixtures.video import write_video
@@ -105,6 +116,14 @@ from dlp_media.storage import store_from_spec
 from dlp_models.vlm import VlmRequestError, VlmUnavailableError
 from dlp_privacy.errors import RenderNotCurrentError
 from dlp_privacy.policy import load_policy as load_privacy_policy
+from dlp_review.ai_calibration import to_bytes as calibration_bytes
+from dlp_review.ops.ai_calibration import (
+    CalibrationEffect,
+    calibration_effect,
+    cross_checked_effect,
+    fit_calibration,
+)
+from dlp_review.ops.ai_quality import Rate, load_ai_rows
 from dlp_schema import load_config, repo_root
 from dlp_schema.aireview import AiGroup
 from dlp_schema.db.ontology_repository import get_session_ontology
@@ -574,6 +593,110 @@ def cmd_estimate(args: argparse.Namespace) -> int:
     return 0
 
 
+# ---------------------------------------------------------------- calibrate
+
+
+def _window(args: argparse.Namespace, days: int) -> tuple[datetime, datetime]:
+    """보정 기간 [since, until). until 기본 = 오늘 0시 UTC, since 기본 = until - days일."""
+    if args.until:
+        until = datetime.fromisoformat(args.until)
+    else:
+        until = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+    since = datetime.fromisoformat(args.since) if args.since else until - timedelta(days=days)
+    if since.tzinfo is None or until.tzinfo is None:
+        raise SystemExit(
+            "--since·--until은 시간대가 있는 ISO 시각이어야 합니다 (예: 2026-10-01T00:00Z)"
+        )
+    return since, until
+
+
+def _print_effect(name: str, e: CalibrationEffect) -> None:
+    """보정 전후 지적 정밀도·재현율 한 줄씩."""
+
+    def pct(rate: Rate) -> str:
+        return "-" if not rate.den else f"{rate.value:.1%} (95% 상한 {rate.upper95:.1%})"
+
+    print(f"{name}: 대조군 행 {e.rows}, 보인 지적 {e.flags_before} → {e.flags_after}")
+    print(f"  지적 정밀도 {pct(e.precision_before)} → {pct(e.precision_after)}")
+    print(f"  지적 재현율 {pct(e.recall_before)} → {pct(e.recall_after)}")
+
+
+def cmd_calibrate(args: argparse.Namespace) -> int:
+    """`dlp aireview calibrate`: 사람 판정 기록으로 판정 표시 보정을 학습한다 (모듈 docstring).
+
+    부작용: DB 읽기, 보정 산출물 파일 쓰기(없을 때만), 표준 출력.
+    """
+    root = repo_root()
+    review = load_review_policy(root).ai_review
+    fit = review.calibration.fit
+    versions = tuple(args.version or review.versions or (load_policy(root).verdict_version,))
+    since, until = _window(args, fit.window_days)
+    engine = sa.create_engine(database_url(args.url))
+    with engine.connect() as conn:
+        rows = load_ai_rows(conn, since, until)
+    engine.dispose()
+    calibration = fit_calibration(rows, fit, versions, since, until)
+    in_sample = calibration_effect(rows, calibration, versions)
+    crossed = cross_checked_effect(rows, fit, versions, since, until)
+    path: Path | None = None
+    status = "표본 부족: 보정 칸이 없어 파일을 쓰지 않습니다 (지금 동작 그대로)"
+    if calibration.cells:
+        out = Path(args.out) if args.out else root / "data" / "aireview" / "calibration"
+        path = out / f"aireview-calibration-{calibration.calibration_id}.json"
+        data = calibration_bytes(calibration)
+        if path.exists() and path.read_bytes() == data:
+            status = f"있음: {path}"
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+            status = f"씀: {path}"
+    if args.json:
+        report = {
+            "calibration": calibration.model_dump(mode="json"),
+            "path": str(path) if path else None,
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest() if path else None,
+            "effect_in_sample": in_sample.to_json(),
+            "effect_cross_checked": crossed.to_json(),
+        }
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0
+    print(f"기간 [{since.isoformat()}, {until.isoformat()}), 판정 버전 {list(versions)}")
+    print(
+        f"결과 기록 행 {calibration.source['rows']}, 대조군 행 {calibration.source['holdout_rows']}"
+    )
+    for c in calibration.cells:
+        where = "/".join(x for x in (c.verdict, c.kind, c.label_class) if x)
+        floor = f", 최소 확신도 {c.min_confidence:g}" if c.min_confidence is not None else ""
+        action = "표시" if c.show else "숨김"
+        print(
+            f"  {where}: {action}{floor} · 정밀도 {c.precision:.1%} (상한 {c.upper95:.1%}) · "
+            f"n {c.n} (유효 {c.n_eff:.1f}) · 가중 {c.weight:.3f}"
+        )
+    _print_effect("같은 자료", in_sample)
+    _print_effect("2겹 교차", crossed)
+    print(status)
+    if path is not None:
+        rel = path.relative_to(root) if path.is_relative_to(root) else path
+        sha = hashlib.sha256(path.read_bytes()).hexdigest()
+        print("review.yaml ai_review.calibration에 넣으면 검수 화면이 이 보정을 씁니다:")
+        print(f"  artifact: {{path: {rel}, sha256: {sha}}}")
+    return 0
+
+
+def _calibrate_parser(asub: Any) -> None:
+    """`calibrate` 인자."""
+    c = asub.add_parser(
+        "calibrate", help="사람 판정 기록(대조군)으로 판정 표시 보정 학습 (DB 읽기만)"
+    )
+    c.add_argument("--since", help="기간 시작 ISO 시각 (기본: until - fit.window_days일)")
+    c.add_argument("--until", help="기간 끝 ISO 시각, 제외 (기본: 오늘 0시 UTC)")
+    c.add_argument("--version", action="append", help="학습할 판정 버전 (여러 번)")
+    c.add_argument("--out", help="산출물 디렉터리 (기본: data/aireview/calibration)")
+    c.add_argument("--json", action="store_true")
+    c.add_argument("--url", help="DB URL (기본: DLP_DATABASE_URL)")
+    c.set_defaults(func=cmd_calibrate)
+
+
 # ---------------------------------------------------------------- 등록
 
 
@@ -653,7 +776,7 @@ def _estimate_parser(asub: Any) -> None:
 
 
 def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:  # pyright: ignore[reportPrivateUsage]
-    """`aireview probe|bench|estimate|run|status|show|waive|eval` 하위 명령을 등록한다."""
+    """`aireview probe|bench|estimate|run|status|show|waive|eval|calibrate` 하위 명령을 등록한다."""
     ai = sub.add_parser("aireview", help="AI 1차 검수 (로컬 VLM, 참고용)")
     asub = ai.add_subparsers(dest="aireview_command", required=True)
     p = asub.add_parser("probe", help="VLM 서버 점검 (모델·이미지 한도·구조화 출력·캐시)")
@@ -665,3 +788,4 @@ def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
     _estimate_parser(asub)
     add_run_commands(asub)
     add_eval_command(asub)
+    _calibrate_parser(asub)

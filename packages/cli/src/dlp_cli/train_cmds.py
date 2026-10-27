@@ -16,11 +16,15 @@
   사람 승인 후에만 한다 (`training.yaml`의 `deploy: approve`).
 - MLflow 레지스트리 별칭 이동(`tracker.register`)은 DB 트랜잭션 커밋 **뒤**에 한다.
   DB가 롤백되었는데 MLflow만 배포 별칭을 가리키는 일을 막기 위해서다.
-- 학습·평가는 원본 영상을 읽으므로 `raw_store(..., "train.run")` 감사 저장소를 쓴다.
+- 골든셋 평가는 원본 영상을 읽으므로 `raw_store(..., "train.run")` 감사 저장소를 쓴다.
+- 픽셀을 쓰는 학습기(`yolox`, ADR 0062)의 학습 이미지는 라벨링 버킷의 **지금 승인된 블러본**에서만
+  받는다 (`blurred_videos`: 원본 버킷 저장소 거부, 렌더 게이트 `assert_render_current`·받은 파일
+  해시 확인). 원본 버킷은 학습 이미지에 쓰지 않는다.
 
 정책 출처: `config/policies/training.yaml` (과제별 학습기·파라미터·누적 조건·배포 방식·MLflow),
 `evaluation.yaml`(게이트), `dataset.yaml`의 `lakefs` 절.
-CI·CPU에서는 `oracle-stub` 학습기를 쓴다.
+CI·CPU에서는 `oracle-stub` 학습기를 쓴다. `--trainer yolox`는 GPU 학습 서버와 격리 환경
+(`scripts/yolox-train-env`)이 필요하다 (CPU는 `--param allow_cpu=true`로 아주 작은 스모크만).
 """
 
 from __future__ import annotations
@@ -28,6 +32,7 @@ from __future__ import annotations
 import argparse
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import sqlalchemy as sa
@@ -37,13 +42,54 @@ from dlp_cli.schema_cmds import database_url
 from dlp_datasets.policy import load_policy as load_dataset_policy
 from dlp_datasets.snapshot import LakeFSSnapshotStore
 from dlp_eval.policy import load_policy as load_eval_policy
-from dlp_media.storage import store_from_spec
+from dlp_media.storage import ObjectStore, blurred_key, store_from_spec
+from dlp_privacy.errors import RenderNotCurrentError
+from dlp_privacy.policy import PrivacyPolicy
+from dlp_privacy.policy import load_policy as load_privacy_policy
+from dlp_privacy.rendering import assert_render_current, check_fetched
 from dlp_schema import load_config, repo_root
 from dlp_schema.db.repository import list_model_versions
 from dlp_schema.lineage import ModelStatus
-from dlp_train.loop import TrainingJob, deploy, raw_clips, registration, run_training_job
+from dlp_train.augment import check_blurred_store
+from dlp_train.loop import (
+    TrainingError,
+    TrainingJob,
+    deploy,
+    raw_clips,
+    registration,
+    run_training_job,
+)
 from dlp_train.policy import load_policy
 from dlp_train.tracking import MlflowTracker
+from dlp_train.trainers import TRAINERS, Trainer, YoloxTrainer
+from dlp_train.yolox_data import BlurredVideo
+
+
+def blurred_videos(
+    engine: sa.Engine, labeling: ObjectStore, privacy: PrivacyPolicy, raw_bucket: str
+) -> BlurredVideo:
+    """학습 이미지용 블러본 공급자 (yolox 학습기, ADR 0062·0057).
+
+    라벨링 버킷 저장소만 받는다 (원본 버킷이면 `AugmentationInputError`). 스트림마다 짧은 읽기
+    연결에서 지금 승인 상태·렌더 기록(`assert_render_current`)을 확인하고, 받은 파일이 그 렌더
+    기록의 파일인지(`check_fetched`) 본다. 아니면 `TrainingError` (승인 취소·블러 변경 뒤 다시
+    렌더하지 않은 블러본으로 학습하지 않는다). 받은 파일은 `<work>/<세션>__<스트림>.mp4`.
+    """
+    check_blurred_store(labeling, raw_bucket)
+
+    def fetch(session_id: str, stream_id: str, work: Path) -> Path:
+        dest = work / f"{session_id}__{stream_id}.mp4"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with engine.connect() as conn:
+                sha = assert_render_current(conn, labeling, session_id, stream_id, privacy)
+            labeling.get_file(blurred_key(session_id, stream_id), dest)
+            check_fetched(dest, sha, session_id, stream_id)
+        except RenderNotCurrentError as exc:
+            raise TrainingError(f"학습 이미지 블러본을 쓸 수 없습니다: {exc}") from exc
+        return dest
+
+    return fetch
 
 
 def _param(item: str) -> tuple[str, Any]:
@@ -94,6 +140,14 @@ def cmd_run(args: argparse.Namespace) -> int:
     )
     tracker = MlflowTracker.from_env()
     engine = sa.create_engine(database_url(args.url))
+    videos = blurred_videos(
+        engine,
+        store_from_spec(args.store, buckets.labeling),
+        load_privacy_policy(root),
+        raw_bucket=buckets.raw,
+    )
+    # 픽셀 학습기에 블러본 공급자를 넣는다 (기본 등록 객체에는 없다)
+    trainers: dict[str, Trainer] = {**TRAINERS, "yolox": YoloxTrainer(videos, root=root)}
     with engine.begin() as conn:
         r = run_training_job(
             conn,
@@ -105,6 +159,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             policy=policy,
             eval_policy=load_eval_policy(root),
             now=datetime.now(UTC),
+            trainers=trainers,
         )
     engine.dispose()
     if r.registration is not None:  # DB 커밋 뒤에 MLflow 레지스트리 별칭을 옮긴다
@@ -139,8 +194,8 @@ def cmd_approve(args: argparse.Namespace) -> int:
     `deploy`는 평가 리포트(MLflow 산출물 저장소의 `report_uri`)가 이 모델의 것이고 게이트를
     통과했으며, 적힌 비교 대상 배포 모델이 지금 배포 모델과 같을 때만 배포한다 (라이브러리 직접
     호출도 같은 검사). 그 사이 다른 모델이 배포되었으면 `TrainingError`이며 다시 평가해야 한다.
-    과제마다 배포 모델은 하나다(이전 배포는 내려간다).
-    부작용: 한 트랜잭션에서 `model_versions` 상태 갱신, 커밋 뒤 MLflow 레지스트리 별칭 이동.
+    과제마다 배포 모델은 하나다(이전 배포는 내려간다). 부작용: 한 트랜잭션에서 `model_versions` 상태
+    갱신, 커밋 뒤 MLflow 레지스트리 별칭 이동.
     """
     root = repo_root()
     buckets = load_config(root / "config/defaults.yaml").buckets

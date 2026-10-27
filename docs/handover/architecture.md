@@ -48,7 +48,7 @@ Prefect 서비스가 기동된 것만으로 모든 작업이 영속 큐에서 �
 | active | media, privacy, schema |
 | aireview | eval, media, models, privacy, schema |
 | review | eval, media, privacy, schema, sync |
-| train | datasets, eval, media, schema |
+| train | datasets, eval, media, models, prelabel, schema |
 | export | datasets, media, privacy, retarget, schema |
 | ops | privacy, review, schema |
 | console | media, models, review, schema |

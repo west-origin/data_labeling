@@ -1,0 +1,59 @@
+# YOLOX 미세조정 격리 환경 (dlp train run --trainer yolox, dlp_train.yolox, ADR 0062).
+# 작업공간 멤버가 아니다: PyTorch를 본 가상 환경에 넣지 않는다 (make install을 가볍게 둔다).
+# 모든 패키지(전이 의존성 포함)의 버전과 해시는 이 디렉터리의 uv.lock에 고정한다.
+# 바꾼 뒤에는 이 디렉터리에서 `uv lock`을 다시 한다 (실행은 --locked라 잠금 파일과 어긋나면 실패한다).
+# 이 잠금 파일의 sha256이 학습 산출물 manifest(env.lock_sha256)에 남는다.
+#
+# PyTorch는 extra로 판을 고른다 (둘은 함께 설치할 수 없다, conflicts):
+#   cpu   — CPU판 (기본, https://download.pytorch.org/whl/cpu)
+#   cu128 — CUDA 12.8판 (GPU 학습 서버, NVIDIA 드라이버가 있을 때 dlp_train.yolox가 고른다)
+# YOLOX 자체는 설치하지 않는다: 태그 0.3.0 고정 커밋(training.yaml yolox.yolox_commit)을 clone해 경로로
+# 쓴다 (scripts/pretrain/train_yolox.py와 같은 방식. setup.py의 onnx-simplifier 고정판은 빌드가 무겁다).
+# 나머지 버전은 scripts/pretrain/requirements.txt와 같다 (YOLOX가 import하는 것: loguru·tabulate·thop·psutil·
+# pycocotools·cv2·tqdm, 내보내기 확인: onnx·onnxruntime).
+[project]
+name = "dlp-yolox-train-env"
+version = "0"
+requires-python = "==3.12.*"
+dependencies = [
+    "numpy==2.2.6",
+    "opencv-python-headless==4.12.0.88",
+    "loguru==0.7.3",
+    "tabulate==0.10.0",
+    "thop==0.1.1.post2209072238",
+    "psutil==7.1.0",
+    "tqdm==4.67.1",
+    "pycocotools==2.0.11",
+    "onnx==1.18.0",
+    "onnxruntime==1.22.1",
+    "pyyaml==6.0.3",
+]
+
+[project.optional-dependencies]
+cpu = ["torch==2.11.0", "torchvision==0.26.0"]
+cu128 = ["torch==2.11.0", "torchvision==0.26.0"]
+
+[tool.uv]
+# 이 디렉터리는 설치할 패키지가 아니라 의존성 묶음일 뿐이다
+package = false
+conflicts = [[{ extra = "cpu" }, { extra = "cu128" }]]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cu128", extra = "cu128" },
+]
+torchvision = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cu128", extra = "cu128" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true

@@ -16,6 +16,7 @@ WP12, ADR 0014. `dlp review plan|assign|qa|quality|create|collect|serve`와 운�
 - `UnitsPolicy`·`PriorityPolicy`·`SamplingPolicy`·`SeedingPolicy`·`MeasurementPolicy`·
   `ReviewersPolicy`·`MediaPolicy`·`CvatPolicy`·`LabelStudioPolicy`·`WebhookPolicy`·`OrphanPolicy`·
   `AiConfidenceFloor`·`AiReviewDisplayPolicy`(AI 1차 검수 판정 사용 방식, WP17.6)·
+  `AiCalibrationPolicy`·`AiCalibrationFit`·`AiCalibrationRef`(판정 표시 보정, ADR 0062)·
   `VerifyPolicy`(완료 판정에서 뺄 자동 라벨, ADR 0050): review.yaml의 절별 모델.
 - `AutomaticLabel`: 사람 검수 대상이 아닌 자동 라벨 분류 이름 (지금은 camera_pose뿐).
 - `ReviewOpsPolicy`: 전체 정책 (review.yaml + `ratios` = defaults.yaml `review`).
@@ -244,6 +245,43 @@ class AiConfidenceFloor(Contract):
     unsure: float = Field(default=0.0, ge=0, le=1)
 
 
+class AiCalibrationRef(Contract):
+    """쓸 보정 산출물 (`ai_review.calibration.artifact`).
+
+    path: 저장소 루트 기준 파일 경로. sha256: 그 파일의 sha256 (다르면 검수 CLI가 멈춘다, 산출물
+    고정).
+    """
+
+    path: str
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class AiCalibrationFit(Contract):
+    """보정 학습 설정 (`ai_review.calibration.fit`, `dlp aireview calibrate`, ADR 0062).
+
+    - verdicts: 보정하는 판정 값 (wrong·suspect만. ok·unsure는 보정하지 않는다).
+    - min_effective_samples: 칸(판정 / 종류 / 클래스)의 대조군 유효 표본 수가 이보다 적으면 그 칸을
+      만들지 않고 더 넓은 칸이나 기본 동작(보정 없음)을 쓴다.
+    - hide_below_precision: 지적 정밀도의 한쪽 95% 상한이 이보다 낮으면 (확실히 쓸모없는 지적이면)
+      그 칸의 지적을 화면에 따로 표시하지 않는다.
+    - prior_strength: 표시 순서 가중(수축 정밀도)의 사전 표본 수.
+    - window_days: `--since`가 없을 때 기간 (일).
+    """
+
+    verdicts: tuple[Literal["wrong", "suspect"], ...] = ("suspect", "wrong")
+    min_effective_samples: float = Field(default=30.0, ge=1)
+    hide_below_precision: float = Field(default=0.15, ge=0, le=1)
+    prior_strength: float = Field(default=10.0, ge=0)
+    window_days: int = Field(default=90, ge=1)
+
+
+class AiCalibrationPolicy(Contract):
+    """AI 판정 표시 보정 (`ai_review.calibration`, ADR 0062). artifact가 없으면 보정하지 않는다."""
+
+    artifact: AiCalibrationRef | None = None
+    fit: AiCalibrationFit = Field(default_factory=AiCalibrationFit)
+
+
 class AiReviewDisplayPolicy(Contract):
     """AI 1차 검수 판정을 검수 운영에 쓰는 방식 (review.yaml `ai_review`, WP17.6, ADR 0040).
 
@@ -286,6 +324,9 @@ class AiReviewDisplayPolicy(Contract):
     # 맥락 라벨까지 지금도 현재여야 판정을 유효로 본다 (결정: false). ID가 현재인지만 보므로 맥락
     # 라벨의 승인(같은 ID의 검수 상태 변화)은 true여도 무효로 만들지 않는다
     strict_context: bool = False
+    # 판정 표시 보정 (ADR 0062): 사람 판정 기록(대조군)으로 학습한 산출물이 의심·틀림 표시만 거른다.
+    # 증가 프로필(우선순위·표본 제외·마무리 보호)과 ok는 바꾸지 않는다 (I9)
+    calibration: AiCalibrationPolicy = Field(default_factory=AiCalibrationPolicy)
 
 
 class ObjectHintsPolicy(Contract):

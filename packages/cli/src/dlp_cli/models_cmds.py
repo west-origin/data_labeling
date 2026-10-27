@@ -38,6 +38,7 @@ from dlp_models.registry import fetch, load_registry
 from dlp_prelabel.policy import load_policy as load_prelabel_policy
 from dlp_privacy.policy import load_policy as load_privacy_policy
 from dlp_schema import repo_root
+from dlp_train.policy import load_policy as load_training_policy
 
 # 변환 스크립트는 무거운 PyTorch가 필요해 프로젝트 환경과 따로 일회용 환경에서 돌린다.
 # CPU판 PyTorch 색인을 추가하고(`unsafe-best-match`로 PyPI와 섞어 고른다), 버전은 재현을 위해
@@ -62,6 +63,8 @@ def used_models(root: Path) -> dict[str, str]:
     - `actions.vlm.model` — 행동 분류 VLM.
     - `aireview.backend.model` — AI 1차 검수 판정 VLM (WP17, ADR 0040).
     - `translate.backend.model` — 설명 영어 번역 모델 (사내 서버, ADR 0043).
+    - `training.yolox.base_model`·`training.tasks.<과제>.params.base_model` — 재학습 yolox 학습기의
+      출발 가중치 (ADR 0062). 학습 모델이 이 분류를 물려받는다.
 
     인자:
         root: 저장소 루트 (`config/policies/*.yaml`을 읽는다).
@@ -93,6 +96,11 @@ def used_models(root: Path) -> dict[str, str]:
     used["actions.vlm.model"] = load_actions_policy(root).vlm.model
     used["aireview.backend.model"] = load_aireview_policy(root).backend.model
     used["translate.backend.model"] = load_translate_policy(root).backend.model
+    training = load_training_policy(root)
+    used["training.yolox.base_model"] = training.yolox.base_model
+    for task, spec in training.tasks.items():
+        if isinstance(base := spec.params.get("base_model"), str):
+            used[f"training.tasks.{task}.params.base_model"] = base
     return used
 
 

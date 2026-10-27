@@ -14,13 +14,15 @@
 
 공개 이름:
 - `REVOCATION_PENDING_EXIT`: 회수 대기가 남았을 때의 종료 코드 (4, argparse 사용 오류 2와 다르다).
-- `load_review_policy`, `ai_display_config`(AI 1차 검수 판정 사용 설정, WP17.6), `review_setup`,
+- `load_review_policy`, `ai_display_config`(AI 1차 검수 판정 사용 설정, WP17.6),
+  `display_calibration`(판정 표시 보정 산출물, ADR 0062), `review_setup`,
   `run_revocations`, `print_revocations`.
 """
 
 from __future__ import annotations
 
 import os
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -32,6 +34,7 @@ from dlp_cli.raw_access import raw_store
 from dlp_media.storage import STORE_ERRORS, S3Store
 from dlp_privacy.policy import load_policy as load_privacy_policy
 from dlp_privacy.runner import request_media_revocation
+from dlp_review.ai_calibration import AiCalibration, load_calibration
 from dlp_review.ai_display import AiDisplayConfig
 from dlp_review.clients import CvatClient, LabelStudioClient, ToolError
 from dlp_review.ops.policy import ReviewOpsPolicy, load_policy
@@ -71,9 +74,37 @@ def ai_display_config(policy: ReviewOpsPolicy) -> AiDisplayConfig | None:
     ai = policy.ai_review
     if ai.mode == "off":
         return None
-    judge = load_aireview_policy(repo_root())
-    versions = ai.versions or (judge.verdict_version,)
-    return AiDisplayConfig(policy=ai, versions=tuple(versions), targets=judge.target_rule)
+    root = repo_root()
+    judge = load_aireview_policy(root)
+    versions = tuple(ai.versions or (judge.verdict_version,))
+    return AiDisplayConfig(
+        policy=ai,
+        versions=versions,
+        targets=judge.target_rule,
+        calibration=display_calibration(root, policy, versions),
+    )
+
+
+def display_calibration(
+    root: Path, policy: ReviewOpsPolicy, versions: tuple[str, ...]
+) -> AiCalibration | None:
+    """review.yaml `ai_review.calibration.artifact`로 고정한 판정 표시 보정 (ADR 0062). 없으면 None.
+
+    파일 sha256·내용 해시가 맞지 않으면 `AiCalibrationError`로 멈춘다 (고정한 산출물이 바뀜). 허용
+    판정 버전이 산출물의 판정 버전에 다 들지 않으면(판정 모델·정책이 바뀜) 쓰지 않고 표준 오류에
+    알린다: 보정이 없으면 지적을 모두 표시하므로 검수를 줄이지 않는다.
+    """
+    ref = policy.ai_review.calibration.artifact
+    if ref is None:
+        return None
+    calibration = load_calibration(root / ref.path, ref.sha256)
+    if not set(versions) <= set(calibration.judge_versions):
+        trained, allowed = list(calibration.judge_versions), list(versions)
+        note = f"[AI 보정] {calibration.calibration_id}는 판정 버전 {trained}로 학습했습니다."
+        hint = "dlp aireview calibrate로 다시 학습"
+        print(f"{note} 지금 허용 버전 {allowed}에는 쓰지 않습니다 ({hint})", file=sys.stderr)
+        return None
+    return calibration
 
 
 def review_setup(

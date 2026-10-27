@@ -34,11 +34,17 @@ mlflow:
 #     privacy는 approve여야 한다 (검증기가 막는다)
 #   trainer·params: 기본 학습기와 하이퍼파라미터 (`dlp train run --trainer --param`으로 바꾼다)
 #     oracle-stub params: jitter_px(정답 좌표 흔들림 표준편차, px), seed, confidence(기본 0.9)
+#     yolox(objects 과제만, ADR 0062) params: 아래 yolox 절의 값을 덮는다 (base_model, epochs, batch_size,
+#       lr_per_img, warmup_iters, fp16, seed, allow_cpu, max_iters). 예: dlp train run objects <버전> --trainer yolox
 #   replaces가 있는 과제는 첫 배포 전 비교할 기본 어댑터 예측 버전(--baseline-version)이 필요하다.
-# TODO(real-model): 실제 학습기가 아직 없다. 지금은 oracle-stub(CI용)만 있다. 후보는 객체 YOLOX 미세조정,
-#   손·전신 RTMPose 미세조정, 접촉 영상 분류기(장갑 세션 정답), 블러 탐지기 미세조정이며 GPU 학습 서버가 필요하다.
+# 실제 학습기: objects의 yolox(고정 클래스 물건 탐지, prelabel.yaml closed_vocab_tools 클래스)만 있다. 기본
+#   학습기는 CI가 도는 oracle-stub 그대로다 (yolox는 GPU 학습 서버와 격리 환경이 필요하다).
+# TODO(real-model): 손·전신 RTMPose 미세조정, 접촉 영상 분류기(장갑 세션 정답), 블러 탐지기 미세조정은 아직
+#   학습기가 없다 (oracle-stub만). GPU 학습 서버가 필요하다.
+# objects: 배포되면 COCO 객체(objects)·OWLv2 도구(tools)·공개 데이터 고정 클래스 도구(closed_tools) 박스를 대신한다.
+#   첫 배포 비교는 그 셋의 골든 예측 버전을 모두 --baseline-version으로 준다 (closed_tools는 켠 경우만).
 tasks:
-  objects:  {stage: prelabel, replaces: [objects, tools], min_examples: 200, min_new_examples: 50, deploy: auto,
+  objects:  {stage: prelabel, replaces: [objects, tools, closed_tools], min_examples: 200, min_new_examples: 50, deploy: auto,
              trainer: oracle-stub, params: {jitter_px: 0.0}}
   hands:    {stage: prelabel, replaces: [hands], min_examples: 200, min_new_examples: 50, deploy: auto,
              trainer: oracle-stub, params: {jitter_px: 0.0}}
@@ -64,7 +70,8 @@ tasks:
 # 학습 증강 (ADR 0057, dlp_train.augment). 픽셀과 라벨(박스·마스크·2D 키포인트·3D 궤적·손 좌우)을 같은 변환으로
 # 함께 바꾼다. 입력은 학습·검증 분할의 블러본만 (골든·holdout·원본 버킷은 거부). 증강본은 학습 메모리 안에만 있고
 # 라벨 이력·판매 내보내기에 들어가지 않는다. 설정 해시가 학습 파라미터 augmentation으로 모델 버전·MLflow에 남는다.
-# TODO(real-model): 픽셀을 쓰는 실제 학습기가 없다 (oracle-stub은 설정 해시·사본 수만 산출물에 적는다).
+# 픽셀을 쓰는 학습기는 yolox(objects)뿐이다: 학습 분할 블러본 이미지마다 copies개 증강본을 COCO 학습 데이터에 더한다
+# (ADR 0062). oracle-stub은 설정 해시·사본 수만 산출물에 적는다.
 augmentation:
   enabled: true
   tasks: [objects, hands, body, privacy]
@@ -90,3 +97,44 @@ augmentation:
     highlight_ry_range: [0.005, 0.03]  # 세로 반지름 (화면 높이 비율)
     highlight_soft: 0.01               # 가장자리 흐림 폭 (화면 너비 비율, 최소 1 px)
     distortion_k1_max: 0.08 # 초광각·렌즈 차이
+
+# YOLOX 실제 학습기 (trainer: yolox, ADR 0062, dlp_train.yolox). 고정 클래스 물건 탐지기를 우리 검수 박스로 미세조정한다.
+# - 클래스 순서·입력 크기는 prelabel.yaml closed_vocab_tools(classes, input_size)를 그대로 쓴다 (로더가 그 어댑터의
+#   탐지기 자리에 끼운다). 그 목록 밖 클래스의 박스는 학습 주석에서 뺀다.
+# - 학습 예제: 데이터셋 버전의 학습·검증 분할, 운영 라벨, 사람이 만들었거나 승인·수정·표본 검증한 box_track
+#   (dlp_train.extract). 이미지 = 지금 승인된 블러본에서 그 키프레임 시각(PTS 인덱스)의 프레임만. 학습 분할 이미지는
+#   위 augmentation 절로 증강본(copies개)을 더한다 (objects가 augmentation.tasks에 있을 때).
+# - 실제 학습은 격리 환경(env.project, uv.lock 고정)에서 subprocess로 돈다. 본 가상 환경에는 PyTorch가 없다.
+# - 산출물: yolox-model.zip (model.onnx: decode_in_inference false + manifest.json).
+# 바꾸면 그다음 학습 실행부터 적용된다 (이 절은 모델 버전 태그에 들어가지 않지만 산출물 manifest에 남는다).
+yolox:
+  env:
+    project: scripts/yolox-train-env
+    python: "3.12"
+    cpu_extra: cpu          # PyTorch CPU판 (GPU가 없을 때)
+    cuda_extra: cu128       # nvidia-smi로 GPU가 보이면 이 판을 쓴다
+    script: scripts/yolox-train-env/finetune.py
+  yolox_commit: 419778480ab6ec0590e5d3831b3afb3b46ab2aa3   # YOLOX 태그 0.3.0 (config/pretrain/objects.yaml과 같다)
+  source_dir: data/cache/yolox/YOLOX   # YOLOX clone 위치 (Git 제외, 끝 이름은 YOLOX). 처음 한 번 GitHub에서 받는다
+  # 출발 가중치 (config/models.yaml 이름, PyTorch .pth). 공개 데이터 1차 학습 체크포인트를 등록하면(ADR 0060
+  # training_datasets·base_model) 그 이름으로 바꾼다. 학습 모델의 상업 사용 분류는 이 가중치의 분류를 물려받는다.
+  base_model: yolox_s_coco_pth
+  model: yolox_s
+  epochs: 30
+  batch_size: 16            # GPU 16 GB 기준
+  lr_per_img: 0.00015625    # 0.01 / 64 (YOLOX 기본 basic_lr_per_img). 학습률 = 이 값 x batch_size
+  warmup_iters: 100
+  fp16: true
+  workers: 2
+  opset: 11
+  seed: 0
+  jpeg_quality: 95
+  min_box_px: 4
+  timeout_s: 86400
+  # GPU가 없을 때. CPU 학습은 매우 느리다 (yolox_s 640 입력, 반복 하나에 수 초~수십 초).
+  # allowed: false면 --param allow_cpu=true 없이는 거절한다. 허용해도 아래 상한으로 자른다 (스모크 크기, 배포 기대 없음)
+  cpu:
+    allowed: false
+    max_epochs: 1
+    max_iters: 2
+    batch_size: 2

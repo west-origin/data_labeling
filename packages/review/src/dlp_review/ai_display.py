@@ -20,7 +20,8 @@
     - 대조군: 루트 배정 ID(재검수 접미사 `:resample`·`:ai-flagged`를 뗀 것), 이중 배정은 짝 표준
       배정의 루트, 배정 없는 직접 작업은 작업 키로 sha256(키|seed) < holdout_ratio → holdout.
     - 작업 라벨에 유효한 표시 판정이 없으면 no_verdicts, 있으면 shown. shown이어도 맞음(ok), 최소
-      확신도 미만, 10분당 상한·CVAT 이슈 상한을 넘은 판정은 따로 표시하지 않는다 (hidden).
+      확신도 미만, 표시 보정이 숨긴 칸(`AiDisplayConfig.calibration`, ADR 0062), 10분당 상한·CVAT
+      이슈 상한을 넘은 판정은 따로 표시하지 않는다 (hidden). 보정은 증가 프로필을 바꾸지 않는다.
     - 화면 요약은 holdout·no_verdicts·mode_excluded 모두 "AI 1차 검수: 없음"으로 같다.
     - 판정률(coverage) = 작업 라벨 중 판정 대상(`dlp_schema.aireview.is_judge_target`, 판정 실행과
       같은 조건·같은 정책 값 `AiDisplayConfig.targets`)에서 유효한 표시 판정이 있는 비율. 장갑 센서
@@ -53,6 +54,7 @@ from typing import Any
 
 import sqlalchemy as sa
 
+from dlp_review.ai_calibration import AiCalibration
 from dlp_review.clients import CvatClient
 from dlp_review.labelstudio import (
     AI_FLAGS,
@@ -75,6 +77,7 @@ from dlp_schema.aireview import (
     valid_verdicts,
 )
 from dlp_schema.db.aireview_repository import AiRunState, list_ai_units
+from dlp_schema.history import label_class
 from dlp_schema.labels import (
     BoxTrackPayload,
     KeypointTrackPayload,
@@ -151,11 +154,15 @@ class AiDisplayConfig:
         versions: 허용 판정 버전 (비어 있으면 판정을 하나도 쓰지 않는다).
         targets: 판정 대상 조건의 정책 값 (`AiReviewPolicy.target_rule`). 판정률의 분모를 판정
             실행과 같은 조건(`is_judge_target`)으로 센다.
+        calibration: 판정 표시 보정 (`dlp_review.ai_calibration`, ADR 0062). None이면 보정 없음.
+            CLI가 review.yaml `ai_review.calibration.artifact`로 고정한 산출물을 읽어 넘긴다. 따로
+            표시할 의심·틀림만 거르고 순서를 정한다 (증가 프로필·ok는 바꾸지 않는다, I9).
     """
 
     policy: AiReviewDisplayPolicy
     versions: tuple[str, ...]
     targets: AiTargetRule
+    calibration: AiCalibration | None = None
 
 
 @dataclass(frozen=True)
@@ -245,23 +252,37 @@ def _flag_time(label: LabelRecord, verdict: AiVerdict) -> int:
     return verdict.evidence_t_ms if verdict.evidence_t_ms is not None else label.t_start_ms
 
 
+def _calibrated(
+    calibration: AiCalibration | None, label: LabelRecord, verdict: AiVerdict
+) -> tuple[bool, float]:
+    """보정 (표시 허용, 표시 순서 가중). 보정이 없으면 (참, 0) = 지금 동작."""
+    if calibration is None:
+        return True, 0.0
+    v, kind, cls = verdict.verdict.value, label.kind, label_class(label)
+    return calibration.allows(v, kind, cls, verdict.confidence), calibration.weight(v, kind, cls)
+
+
 def _pick_shown(
     valid: dict[str, Judged],
     labels: Mapping[str, LabelRecord],
     policy: AiReviewDisplayPolicy,
     limit: int | None,
+    calibration: AiCalibration | None = None,
 ) -> dict[str, str]:
-    """따로 표시할 판정 {라벨 ID: 단위 ID}: 틀림·의심·판단 불가, 최소 확신도 이상, 10분당 상한,
-    작업당 상한(limit, CVAT 이슈) 안. 나쁜 것부터, 같으면 시각·라벨 ID 순."""
-    flags = [
-        (lid, v, uid)
-        for lid, (v, uid) in valid.items()
-        if v.verdict in FLAG_VALUES and _floor_ok(v, policy)
-    ]
-    flags.sort(key=lambda f: (_SEVERITY[f[1].verdict], _flag_time(labels[f[0]], f[1]), f[0]))
+    """따로 표시할 판정 {라벨 ID: 단위 ID}: 틀림·의심·판단 불가, 최소 확신도 이상, 보정이 허용한 것,
+    10분당 상한, 작업당 상한(limit, CVAT 이슈) 안. 나쁜 것부터, 같은 심각도는 보정 가중이 큰 것부터
+    (보정이 없으면 모두 0), 그다음 시각·라벨 ID 순."""
+    flags: list[tuple[str, AiVerdict, str, float]] = []
+    for lid, (v, uid) in valid.items():
+        if v.verdict not in FLAG_VALUES or not _floor_ok(v, policy):
+            continue
+        allowed, weight = _calibrated(calibration, labels[lid], v)
+        if allowed:
+            flags.append((lid, v, uid, weight))
+    flags.sort(key=lambda f: (_SEVERITY[f[1].verdict], -f[3], _flag_time(labels[f[0]], f[1]), f[0]))
     per_bucket: dict[int, int] = {}
     shown: dict[str, str] = {}
-    for lid, v, uid in flags:
+    for lid, v, uid, _weight in flags:
         if limit is not None and len(shown) >= limit:
             break
         bucket = _flag_time(labels[lid], v) // _TEN_MIN_MS
@@ -308,7 +329,7 @@ def exposure_for(
         arm = AiArm.NO_VERDICTS
     else:
         arm = AiArm.SHOWN
-        shown = _pick_shown(valid, labels, policy, limit)
+        shown = _pick_shown(valid, labels, policy, limit, cfg.calibration)
     return AiExposure(
         task_key=task.task_key, session_id=task.session_id, assignment_id=task.assignment_id,
         arm=arm, arm_key=key, versions=cfg.versions, render_hash=task.render_hash,

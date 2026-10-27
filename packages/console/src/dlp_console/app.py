@@ -64,7 +64,7 @@ class Services:
         root = settings.root
         self.buckets = load_config(root / "config" / "defaults.yaml").buckets
         self.engine = sa.create_engine(settings.env.get("DLP_DATABASE_URL", DEV_DATABASE_URL))
-        self.redactor = Redactor(self.buckets.raw, settings.env)
+        self.redactor = Redactor(raw_bucket=self.buckets.raw, env=settings.env)
         self.runner = JobRunner(settings, self.redactor)
         self.imports = ImportStore(
             root, settings.work_dir, settings.config.pretrain_import.models_dir

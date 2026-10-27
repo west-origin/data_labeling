@@ -59,6 +59,17 @@ models:
     # COCO 이미지는 Flickr 사진마다 다른 CC 라이선스이고 CC BY-NC 계열이 섞여 있다 (비상업 조건) → review
     training_data: ["COCO 2017 (주석 CC BY 4.0, 이미지는 Flickr 개별 CC 라이선스로 CC BY-NC 계열 포함)"]
     commercial: review
+  # YOLOX-s COCO PyTorch 체크포인트: 재학습 루프 yolox 학습기의 출발 가중치 (training.yaml yolox.base_model, ADR 0062).
+  # 추론에는 쓰지 않는다 (ONNX가 아니다). 학습 모델은 이 분류(review)를 물려받는다. sha256은 공식 릴리스 파일을
+  # 직접 받아 계산한 값이다 (scripts/pretrain/train_yolox.py WEIGHTS_SHA256과 같다). 공개 데이터 1차 학습(ADR 0060)
+  # 체크포인트를 쓰려면 그 .pth를 training_datasets·base_model(이 항목)과 함께 따로 등록하고 base_model을 바꾼다.
+  yolox_s_coco_pth:
+    path: data/models/yolox/yolox_s_coco.pth
+    url: https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_s.pth
+    sha256: f55ded7181e1b0c13285c56e7790b8f0e8f8db590fe4edb37f0b7f345c913a30
+    license: Apache-2.0
+    training_data: ["COCO 2017 (주석 CC BY 4.0, 이미지는 Flickr 개별 CC 라이선스로 CC BY-NC 계열 포함)"]
+    commercial: review
   # 전신 COCO 17점 (prelabel.yaml models.body → RtmPose). zip에서 end2end.onnx를 꺼낸다
   rtmpose_m_body7:
     path: data/models/rtmpose/rtmpose_m_body7_256x192.onnx

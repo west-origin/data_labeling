@@ -82,6 +82,7 @@ from dlp_schema.lineage import GoldenSet, ModelStatus, ModelVersion, TrainingRun
 from dlp_schema.predictor import Clip, Predictor
 from dlp_schema.session import LifecycleState, Session, Stream, StreamKind
 from dlp_train.augment import policy_digest
+from dlp_train.base import TrainingError as TrainingError  # 다시 내보냄 (호출자는 여기서 쓴다)
 from dlp_train.extract import load_training_data, matches
 from dlp_train.policy import TrainingPolicy
 from dlp_train.tracking import Tracker
@@ -95,11 +96,6 @@ DEPLOYED_BASELINE = "deployed_baseline"
 
 # (세션, 스트림, 작업 디렉터리) → 모델에 넣을 영상 파일
 ClipSource = Callable[[Session, Stream, Path], Path]
-
-
-class TrainingError(RuntimeError):
-    """재학습·배포를 진행할 수 없음 (정책·학습기 없음, 골든셋 누출, 해시 불일치, 승인 조건 위반
-    등)."""
 
 
 @dataclass(frozen=True)

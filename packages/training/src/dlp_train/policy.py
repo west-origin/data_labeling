@@ -114,6 +114,70 @@ class AugmentationPolicy(Contract):
     egocentric: EgocentricAugment
 
 
+class YoloxEnvPolicy(Contract):
+    """YOLOX 학습 격리 환경 (`yolox.env`).
+
+    project: uv 프로젝트 디렉터리 (저장소 루트 기준, pyproject + uv.lock). python: 환경 파이썬 판.
+    cpu_extra / cuda_extra: PyTorch 판을 고르는 extra 이름 (GPU가 있으면 cuda_extra).
+    script: 환경에서 돌리는 학습 스크립트 (저장소 루트 기준).
+    """
+
+    project: str
+    python: str
+    cpu_extra: str
+    cuda_extra: str
+    script: str
+
+
+class YoloxCpuPolicy(Contract):
+    """GPU가 없을 때 (`yolox.cpu`). allowed: 참이면 학습 파라미터 없이도 CPU로 돈다 (기본 거짓:
+    `--param allow_cpu=true`가 있어야 한다). max_epochs·max_iters·batch_size: CPU에서 쓰는 상한
+    (매우 느리므로 스모크 크기)."""
+
+    allowed: bool
+    max_epochs: int = Field(ge=1)
+    max_iters: int = Field(ge=1)
+    batch_size: int = Field(ge=1)
+
+
+class YoloxTrainingPolicy(Contract):
+    """YOLOX 실제 학습기 기본값 (`yolox` 절, ADR 0062, `dlp_train.yolox`).
+
+    클래스 순서·입력 크기는 여기 두지 않고 `prelabel.yaml closed_vocab_tools`(로더가 끼우는 어댑터의
+    정책)를 그대로 쓴다. 과제 params(`--param`)로 덮을 수 있는 키는 `dlp_train.yolox.PARAM_KEYS`.
+    """
+
+    env: YoloxEnvPolicy
+    # YOLOX 태그 0.3.0 커밋 (config/pretrain/objects.yaml train.yolox_commit과 같아야 한다)
+    yolox_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
+    source_dir: str  # YOLOX clone 위치 (저장소 루트 기준, Git 제외 data/ 아래, 끝 이름 YOLOX)
+    base_model: str  # 출발 가중치: config/models.yaml 이름 (PyTorch .pth 체크포인트)
+    model: Literal["yolox_s", "yolox_m", "yolox_l", "yolox_x"]  # 구조 (출발 가중치와 같아야 한다)
+    epochs: int = Field(ge=1)
+    batch_size: int = Field(ge=1)
+    lr_per_img: float = Field(gt=0)  # 학습률 = lr_per_img x batch_size (YOLOX basic_lr_per_img)
+    warmup_iters: int = Field(ge=0)
+    fp16: bool  # GPU에서만 쓴다
+    workers: int = Field(ge=0)
+    opset: int = Field(ge=11)
+    seed: int = Field(ge=0)
+    jpeg_quality: int = Field(ge=50, le=100)  # COCO 이미지 JPEG 품질
+    min_box_px: float = Field(ge=0)  # 짧은 변이 이보다 작은 박스는 주석에서 뺀다
+    timeout_s: int = Field(ge=60)  # 격리 환경 실행 시간 상한
+    cpu: YoloxCpuPolicy
+
+    @field_validator("source_dir")
+    @classmethod
+    def _yolox_dir(cls, v: str) -> str:
+        """clone 위치의 끝 이름은 YOLOX여야 한다.
+
+        `train_yolox.ensure_yolox`가 <상위>/YOLOX에 받는다.
+        """
+        if Path(v).name != "YOLOX":
+            raise ValueError(f"yolox.source_dir의 끝 이름은 YOLOX여야 합니다: {v}")
+        return v
+
+
 class TrainingPolicy(Contract):
     """`config/policies/training.yaml` 전체. 각 키의 의미는 YAML 주석을 본다."""
 
@@ -125,6 +189,7 @@ class TrainingPolicy(Contract):
     mlflow: MlflowPolicy
     tasks: dict[Task, TaskTraining]
     augmentation: AugmentationPolicy  # 학습 증강 (ADR 0057)
+    yolox: YoloxTrainingPolicy  # YOLOX 실제 학습기 (ADR 0062)
 
     @field_validator("splits")
     @classmethod

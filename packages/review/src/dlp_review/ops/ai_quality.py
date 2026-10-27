@@ -76,6 +76,7 @@ from dlp_schema.db.repository import (
     get_review_task,
     list_review_work,
 )
+from dlp_schema.history import label_class as class_of
 from dlp_schema.review import ReviewAssignment, ReviewMode, ReviewTask, ReviewTaskStatus
 
 # 사람이 바꾼 결과
@@ -154,6 +155,8 @@ class AiRow:
         stratum / weight: 층(표본 라벨이면 sample)과 층 모집단 가중치 (표본 = 모집단/표본 수,
             전수 = 1).
         version: 판정 단위의 판정 버전. followup: 재검수 배정의 작업. mode: 작업 배정 방식.
+        label_class: 라벨 클래스 (`dlp_schema.history.label_class`, 이력에 없으면 None). 판정 표시
+            보정의 칸에 쓴다 (`ops.ai_calibration`, ADR 0062).
     """
 
     task_key: str
@@ -173,6 +176,7 @@ class AiRow:
     version: str | None = None
     followup: bool = False
     mode: ReviewMode = ReviewMode.STANDARD
+    label_class: str | None = None
 
     @property
     def changed(self) -> bool:
@@ -504,6 +508,7 @@ class _Cache:
     units: dict[str, dict[str, AiVerdict]] = field(default_factory=dict[str, dict[str, AiVerdict]])
     versions: dict[str, str] = field(default_factory=dict[str, str])
     kinds: dict[str, dict[str, str]] = field(default_factory=dict[str, dict[str, str]])
+    classes: dict[str, dict[str, str]] = field(default_factory=dict[str, dict[str, str]])
 
     def verdict(self, unit_id: str | None, label_id: str) -> tuple[AiVerdict | None, str | None]:
         """단위의 그 라벨 판정과 단위 판정 버전."""
@@ -519,8 +524,15 @@ class _Cache:
     def kind(self, session_id: str, label_id: str) -> str | None:
         """라벨 종류 (세션 이력에서, 세션마다 한 번 읽는다)."""
         if session_id not in self.kinds:
-            self.kinds[session_id] = {x.label_id: x.kind for x in get_labels(self.conn, session_id)}
+            history = get_labels(self.conn, session_id)
+            self.kinds[session_id] = {x.label_id: x.kind for x in history}
+            self.classes[session_id] = {x.label_id: class_of(x) for x in history}
         return self.kinds[session_id].get(label_id)
+
+    def label_class(self, session_id: str, label_id: str) -> str | None:
+        """라벨 클래스 (`kind`와 같은 읽기)."""
+        self.kind(session_id, label_id)
+        return self.classes[session_id].get(label_id)
 
 
 def _rows_of(cache: _Cache, outcome: AiOutcome) -> list[AiRow]:
@@ -545,6 +557,7 @@ def _rows_of(cache: _Cache, outcome: AiOutcome) -> list[AiRow]:
                 shown=x.label_id in shown, human=x.human, decision=x.decision,
                 apply_result=x.apply_result, match=x.match, stratum=stratum, weight=weight,
                 version=version, followup=followup, mode=task.mode,
+                label_class=cache.label_class(outcome.session_id, x.label_id),
             )
         )  # fmt: skip
     return rows

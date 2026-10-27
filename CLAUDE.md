@@ -29,7 +29,9 @@
 - `make test-services` — 실행 중인 서비스 대상 통합 테스트 (`@pytest.mark.services`, `isolated_env` 표시 테스트는 뺀다)
 - `make test-isolated` — 격리된 일회용 환경(LeRobot·PyTorch CPU판)을 받는 테스트 (`@pytest.mark.isolated_env`).
   내보내기 종단 테스트는 DB도 쓰므로 `make up` 뒤에 돌린다. 환경은 `scripts/lerobot-env/uv.lock`에 고정한다
-  (바꾸면 그 디렉터리에서 `uv lock`)
+  (바꾸면 그 디렉터리에서 `uv lock`). YOLOX CPU 스모크도 포함한다 (`scripts/yolox-train-env/uv.lock`, ADR 0062)
+- `uv run dlp console serve` — 브라우저 운영 콘솔 (기본 127.0.0.1:8090, 토큰 주소 출력, 작업 기록은 `DLP_CONSOLE_DIR`,
+  기본 ~/.dlp-console). 새 컴퓨터 설치는 `scripts/install/install.sh` (Mac·Linux·WSL2, ADR 0061)
 - `make install-curation` — FiftyOne(데이터 큐레이션, 약 1 GB) 포함 설치. `make install`을 다시 하면 빠진다
 - `make coverage` — 기본 테스트의 줄 커버리지 (reports/coverage, 하한 없음)
 - `make review-scope` — 전수 검수 범위표 (추적 파일별 위험 등급·관련 미해결 문제 수, reports/review-scope.csv)
@@ -81,6 +83,9 @@
   AI 1차 검수 표시·수집(ADR 0040): `dlp_review.ai_display`(판정 → 검수 화면 표시·우선순위·표본 제외, 노출 기록·대조군),
   `dlp_review.ai_collect`(검수자가 고른 제안 적용·세션 검증·결과 기록 `ai_review_outcomes`),
   `dlp_review.ops.ai_quality`(대조군만으로, 표본 가중 지적 정밀도·재현율·ok 놓침률 95% 상한·ECE·κ). `dlp review quality --ai`.
+  판정 표시 보정 `dlp aireview calibrate`(대조군만, `dlp_review.ops.ai_calibration`, ADR 0062): 버전 붙은 산출물을
+  `review.yaml ai_review.calibration.artifact`(경로·sha256)로 고정해야 쓰인다. 의심·틀림 표시만 거르고 ok와 검수 대기열은
+  바꾸지 않는다.
   설정은 `review.yaml ai_review`(코드 기본 off).
   오탐 의심 힌트 `dlp review hints <세션> [--tta] [--ai]`(블러: 원본 버킷 hints 파일 → 블러 검수 CVAT 이슈, 객체
   `dlp_review.object_hints`: 라벨링 CVAT 이슈, 잘라 낸 박스 AI 확인 `dlp_aireview.crops`). 라벨·블러는 바꾸지 않는다
@@ -152,6 +157,15 @@
   학습 작업 템플릿, MLflow 기록, 모델 레지스트리(DB `model_versions`), 골든셋 평가·게이트 후 배포.
   `dlp train run|models|approve`. CI·CPU는 `oracle-stub` 학습기. 정책은 `config/policies/training.yaml`.
   학습 증강 `dlp_train.augment` (ADR 0057).
+  실제 학습기 `yolox`(objects, `dlp_train.yolox`·`yolox_data`, ADR 0062): 지금 승인된 블러본 키프레임 프레임 → COCO(증강
+  포함) → 격리 환경 `scripts/yolox-train-env`(uv.lock, `--extra cpu|cu128`)에서 학습 → `yolox-model.zip`(ONNX
+  decode_in_inference false + manifest). 로더는 `YoloxTools`에 끼운다(`trained-objects`). GPU가 없으면
+  `--param allow_cpu=true` 없이는 거절한다. 출발 가중치는 `training.yaml yolox.base_model`(models.yaml .pth)이고 그 분류를
+  물려받는다. 기본 학습기는 아직 `oracle-stub`이다.
+- `packages/console/` (`dlp_console`) — 운영 콘솔 (ADR 0061): 기존 `dlp` 명령을 작업으로 돌리고(셸 없음, 작업 디렉터리
+  JSON Lines 추가만) DB는 읽기만 한다. 응답·로그에 원본 위치를 싣지 않고, 미리보기는 승인·렌더된 블러본의 라벨러 서명
+  URL만 쓴다. Git이 관리하는 설정 파일은 고치지 않고 패치 미리보기만 낸다(외부 학습 가중치 가져오기). 설정
+  `config/console.yaml`. 도메인 로직을 두지 않는다 (단계 조건·권한 검사는 `dlp` 명령이 하고, 콘솔 활성 규칙은 안내용).
 - `packages/active/` (`dlp_active`) — 액티브 러닝: 클래스별 수정률 기반 세션 점수(점수 항목 플러그인 `register_term`),
   FiftyOne 연동(블러본만). `dlp active rank|fiftyone`. 정책은 `config/policies/active.yaml`.
   FiftyOne은 선택 설치(`make install-curation`).
