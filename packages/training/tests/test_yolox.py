@@ -436,6 +436,7 @@ def _bundle(tmp_path: Path, **manifest_overrides: Any) -> Path:
         "classes": list(sec.classes),
         "input_size": size,
         "commercial": "review",
+        "base_model": {"name": load_policy(ROOT).yolox.base_model, "commercial": "review"},
         "onnx": {
             "file": MODEL_FILE,
             "sha256": yolox_mod.sha256_bytes(onnx),
@@ -485,6 +486,56 @@ def test_loader_rejects_mismatched_manifest(
     ctx = LoadContext(now=FIXED_TIME, ontology_version="1.0.0")
     with pytest.raises(ModelUnavailableError, match=match):
         YoloxLoader(root=ROOT).load(_bundle(tmp_path, **override), version="v", ctx=ctx)
+
+
+def _config_root(tmp_path: Path, edit: Any) -> Path:
+    """저장소 config/를 복사하고 models.yaml을 `edit(registry dict)`로 바꾼 저장소 루트."""
+    import shutil
+
+    import yaml
+
+    root = tmp_path / "root"
+    shutil.copytree(ROOT / "config", root / "config")
+    path = root / "config" / "models.yaml"
+    reg = yaml.safe_load(path.read_text("utf-8"))
+    edit(reg)
+    path.write_text(yaml.safe_dump(reg, allow_unicode=True), "utf-8")
+    return root
+
+
+def _forbid_base(reg: dict[str, Any]) -> None:
+    reg["models"][load_policy(ROOT).yolox.base_model]["commercial"] = "forbidden"
+
+
+def _forbid_ancestor(reg: dict[str, Any]) -> None:
+    """계보 위 가중치(anc)를 forbidden으로 두고, 출발 가중치는 review로 잘못 적는다."""
+    base = load_policy(ROOT).yolox.base_model
+    reg["models"]["anc"] = dict(
+        reg["models"][base], commercial="forbidden", path="data/models/a.pth"
+    )
+    reg["models"][base]["base_model"] = "anc"
+
+
+@pytest.mark.parametrize("edit", [_forbid_base, _forbid_ancestor])
+def test_loader_rechecks_base_model_lineage_now(tmp_path: Path, edit: Any) -> None:
+    """F-ETA-22 회귀: manifest에는 학습 당시 분류(review)가 적혀 있어도, 지금 models.yaml에서 출발
+
+    가중치나 그 계보가 forbidden이면 로드하지 않는다 (학습 base_weights와 같은 기준).
+    """
+    root = _config_root(tmp_path, edit)
+    ctx = LoadContext(now=FIXED_TIME, ontology_version="1.0.0")
+    loader = YoloxLoader(root=root, detector=lambda onnx, n, policy: None)  # type: ignore[arg-type,return-value]
+    with pytest.raises(ModelUnavailableError, match="출발 가중치"):
+        loader.load(_bundle(tmp_path / "b"), version="v", ctx=ctx)
+    with pytest.raises(YoloxTrainingError, match="라이선스 위반"):
+        yolox_mod.base_weights(root, load_policy(ROOT).yolox.base_model)
+
+
+def test_loader_refuses_manifest_without_base_model(tmp_path: Path) -> None:
+    """출발 가중치 이름이 없는 manifest는 계보를 확인할 수 없어 받지 않는다."""
+    ctx = LoadContext(now=FIXED_TIME, ontology_version="1.0.0")
+    with pytest.raises(ModelUnavailableError, match="출발 가중치 이름"):
+        YoloxLoader(root=ROOT).load(_bundle(tmp_path, base_model=None), version="v", ctx=ctx)
 
 
 def test_bundle_hash_mismatch_rejected(tmp_path: Path) -> None:

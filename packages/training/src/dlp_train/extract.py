@@ -26,10 +26,10 @@ from pathlib import Path
 
 from dlp_datasets.snapshot import SnapshotStore
 from dlp_eval.policy import Task
-from dlp_eval.runner import TASK_KINDS
+from dlp_eval.runner import is_task_target
 from dlp_schema.dataset import DatasetVersion, Split
 from dlp_schema.history import Change, label_class, review_changes
-from dlp_schema.labels import HandStatePayload, KeypointTrackPayload, LabelRecord
+from dlp_schema.labels import LabelRecord
 from dlp_train.policy import TrainingPolicy
 
 
@@ -64,20 +64,13 @@ class TrainingData:
 
 
 def matches(task: Task, label: LabelRecord) -> bool:
-    """라벨이 과제의 학습·평가 대상인가 (종류, 손·전신은 골격까지).
+    """라벨이 과제의 학습·평가 대상인가 (`dlp_eval.runner.is_task_target`와 같다).
 
     - 종류가 `runner.TASK_KINDS[task]`에 있어야 한다.
     - keypoint_track은 hands면 hand21, 그 밖(body)이면 coco17 골격만.
     - hand_state는 접촉 구간(contact_target_kind != "none")만 (`harness._contacts`와 같은 기준).
     """
-    if label.kind not in TASK_KINDS[task]:
-        return False
-    p = label.payload
-    if isinstance(p, KeypointTrackPayload):
-        return p.skeleton == ("hand21" if task == "hands" else "coco17")
-    if isinstance(p, HandStatePayload):
-        return p.contact_target_kind != "none"  # 평가와 같게 접촉 구간만
-    return True
+    return is_task_target(task, label)
 
 
 def class_key(label: LabelRecord) -> str:

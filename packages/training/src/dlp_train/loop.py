@@ -38,7 +38,7 @@ from __future__ import annotations
 import hashlib
 import json
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -58,6 +58,8 @@ from dlp_eval.runner import (
     MissingPredictionsError,
     TruthLag,
     golden_sessions,
+    is_task_target,
+    load_golden,
     load_golden_merged,
     refreeze_hint,
     truth_anchor,
@@ -77,7 +79,7 @@ from dlp_schema.db.repository import (
     set_model_status,
     withdrawn_session_ids,
 )
-from dlp_schema.labels import LabelRecord
+from dlp_schema.labels import LabelRecord, Source
 from dlp_schema.lineage import GoldenSet, ModelStatus, ModelVersion, TrainingRun
 from dlp_schema.predictor import Clip, Predictor
 from dlp_schema.session import LifecycleState, Session, Stream, StreamKind
@@ -329,7 +331,7 @@ def run_training_job(  # noqa: C901
     # 배포 모델이 없으면 기본 어댑터의 DB 예측과 비교한다. 잘못 적은 버전은 예측이 비어 기존 지표가
     # 0에 가까워지고 어떤 후보든 통과하므로, 골든셋에 예측이 없는 버전이 하나라도 있으면 멈춘다.
     baseline_golden = (
-        _merged_golden(conn, version.golden_set_version, job, golden)
+        _merged_golden(conn, version.golden_set_version, job, golden, spec.replaces)
         if job.baseline_versions and not has_deployed
         else None
     )
@@ -542,13 +544,18 @@ def _frozen_golden_set(conn: sa.Connection, golden_version: str) -> GoldenSet:
 
 
 def _merged_golden(
-    conn: sa.Connection, golden_version: str, job: TrainingJob, golden: list[GoldenSession]
+    conn: sa.Connection,
+    golden_version: str,
+    job: TrainingJob,
+    golden: list[GoldenSession],
+    replaces: Sequence[str],
 ) -> list[SessionData]:
     """여러 기본 어댑터 버전의 예측을 세션별로 합친다 (대신할 어댑터 모두와 비교).
 
     `golden`은 후보 평가에 쓴 `golden_sessions` 결과다. 기존 예측도 같은 읽기(같은 세션·고정
-    정답)에서 만든다. 골든셋에 예측이 하나도 없는 버전이 있으면 TrainingError (버전을 잘못 적었거나
-    골든셋에 프리라벨을 돌리지 않았다).
+    정답)에서 만든다. 골든셋에 과제 평가 대상 예측이 하나도 없는 버전이 있으면 TrainingError
+    (버전을 잘못 적었거나 골든셋에 프리라벨을 돌리지 않았다). 대신할 어댑터 중 골든셋에 예측을 낸
+    어댑터마다 비교 버전이 있어야 한다 (`_check_baseline_coverage`, F-ETA-20).
     """
     try:
         merged = load_golden_merged(
@@ -560,7 +567,69 @@ def _merged_golden(
         )
     except MissingPredictionsError as exc:
         raise TrainingError(f"{exc} (--baseline-version)") from exc
+    if replaces:
+        _check_baseline_coverage(conn, golden_version, job, golden, replaces)
     return merged[job.task]
+
+
+def _adapter_of(label: LabelRecord, adapters: Sequence[str]) -> str | None:
+    """라벨을 낸 기본 어댑터 이름 (`adapters` 중). 알 수 없으면 None.
+
+    대신할 어댑터가 하나뿐이면 그 어댑터다. 여럿이면 프리라벨 라벨 ID 규칙으로 정한다: 영상 라벨은
+    `<세션>-<스트림>-<어댑터 이름>-`, 타임라인 라벨(스트림 없음)은 `<세션>-<어댑터 이름>-`
+    (`dlp_prelabel` 어댑터와 runner가 같은 규칙으로 단계 라벨을 찾는다).
+    """
+    if len(adapters) == 1:
+        return adapters[0]
+    base = f"{label.session_id}-" + (f"{label.stream_id}-" if label.stream_id else "")
+    for name in adapters:
+        if label.label_id.startswith(f"{base}{name}-"):
+            return name
+    return None
+
+
+def _check_baseline_coverage(
+    conn: sa.Connection,
+    golden_version: str,
+    job: TrainingJob,
+    golden: list[GoldenSession],
+    replaces: Sequence[str],
+) -> None:
+    """대신할 기본 어댑터 중 골든셋에 예측을 낸 것마다 비교 버전이 있는지 확인한다.
+
+    일부 어댑터와만 비교하면 빠진 어댑터의 예측이 기존 지표에서 빠져 기존 지표가 낮아지고, 그
+    어댑터보다 나쁜 후보도 통과해 배포되면 그 어댑터를 대신한다 (F-ETA-20). 비교 버전의 평가 대상
+    예측 중 어느 어댑터 것인지 알 수 없는 것이 있어도 멈춘다 (어댑터별 비교를 확인할 수 없다).
+    골든셋에 예측이 하나도 없는 어댑터(예: 켜지 않은 closed_tools)는 요구하지 않는다.
+
+    Raises:
+        TrainingError: 어댑터를 알 수 없는 비교 예측이 있거나, 비교 버전이 없는 어댑터가 있을 때.
+    """
+    task = job.task
+    covered: set[str] = set()
+    for v in job.baseline_versions:
+        loaded = load_golden(conn, golden_version, {task: v}, sessions=golden)[task]
+        for x in (x for sd in loaded for x in sd.pred if is_task_target(task, x)):
+            name = _adapter_of(x, replaces)
+            if name is None:
+                raise TrainingError(
+                    f"{task}: 비교 버전 {v}의 예측 {x.label_id}가 대신할 기본 어댑터 "
+                    f"{list(replaces)} 중 어느 것의 라벨인지 알 수 없습니다 "
+                    "(라벨 ID <세션>-<스트림>-<어댑터>-, --baseline-version)"
+                )
+            covered.add(name)
+    ran = {
+        _adapter_of(x, replaces)
+        for g in golden
+        for x in g.labels
+        if x.provenance.source is not Source.HUMAN and not x.retracted and is_task_target(task, x)
+    }
+    missing = sorted(a for a in ran - covered if a is not None)
+    if missing:
+        raise TrainingError(
+            f"{task}: 배포되면 기본 어댑터 {list(replaces)}를 대신하는데 골든셋에 예측이 있는 "
+            f"{missing}의 비교 버전이 없습니다 (--baseline-version으로 모두 주세요)"
+        )
 
 
 def withdrawn_sessions(

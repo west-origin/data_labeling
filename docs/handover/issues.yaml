@@ -909,8 +909,9 @@ issues:
      note: "계약 변경을 피해 ai_review_exposures에 필드를 더하지 않았다. 보정은 표시만 바꾸고 shown·hidden은 기록되므로 품질 지표는 맞다. 기간별 산출물은 review.yaml sha256 고정 이력으로 추적한다. 감사가 필요하면 노출 기록에 calibration_id(선택)를 더하는 계약 변경(ADR + Alembic + make schemas)."}
 
   # ── 전수 검사 2026-10-28 (full-inspection-2026-10-28.md, pstack swarm·interrogate) ──
-  - {id: F-ETA-19, title: "데이터셋 빌드가 지정한 골든셋만 빼고 다른 확정 골든셋 세션을 train에 넣음", severity: high, status: open, kind: code,
-     files: [packages/datasets/src/dlp_datasets/build.py], source: docs/handover/full-inspection-2026-10-28.md}
+  - {id: F-ETA-19, title: "데이터셋 빌드가 지정한 골든셋만 빼고 다른 확정 골든셋 세션을 train에 넣음", severity: high, status: fixed, kind: code,
+     files: [packages/datasets/src/dlp_datasets/build.py], source: docs/handover/full-inspection-2026-10-28.md,
+     note: "_golden_sides가 등록된 모든 골든셋(도메인 무관)을 assign_splits의 막는 쪽으로 넘긴다. 지정하지 않은 골든셋 세션과 그 작업자·장소를 공유하는 세션은 holdout. 회귀: packages/datasets/tests/test_lineage.py::test_every_confirmed_golden_set_stays_out_of_train_and_val"}
   - {id: F-REV-32, title: "CVAT 키포인트 트랙의 outside 키프레임이 모든 점이 보이는 키프레임으로 수집됨", severity: high, status: open, kind: code,
      files: [packages/review/src/dlp_review/cvat.py], source: docs/handover/full-inspection-2026-10-28.md}
   - {id: F-COE-77, title: "콘솔 가중치 가져오기가 manifest 모델 이름을 검사하지 않아 저장소 밖 파일 쓰기와 models.yaml 패치 주입", severity: high, status: fixed, kind: code,
@@ -952,12 +953,15 @@ issues:
      files: [packages/review/src/dlp_review/cvat.py], source: docs/handover/full-inspection-2026-10-28.md, see: [F-REV-04]}
   - {id: F-REV-34, title: "관계 라벨이 있으면 dlp review verify가 영영 통과하지 못함 (관계는 검수 경로가 없음)", severity: medium, status: open, kind: code,
      files: [packages/review/src/dlp_review/verify.py, config/policies/review.yaml], source: docs/handover/full-inspection-2026-10-28.md}
-  - {id: F-ETA-20, title: "replaces 과제 첫 배포가 대신할 기본 어댑터 일부와만 비교해도 통과·배포", severity: medium, status: open, kind: code,
-     files: [packages/training/src/dlp_train/loop.py], source: docs/handover/full-inspection-2026-10-28.md}
-  - {id: F-ETA-21, title: "비교 버전 예측 확인이 골격·접촉 대상을 보지 않아 PCK 0 후보가 배포됨", severity: medium, status: open, kind: code,
-     files: [packages/evaluation/src/dlp_eval/runner.py], source: docs/handover/full-inspection-2026-10-28.md}
-  - {id: F-ETA-22, title: "YOLOX 로더가 학습 당시 manifest 분류만 보고 지금 forbidden인 출발 가중치로 학습한 모델도 로드", severity: medium, status: open, kind: code,
-     files: [packages/training/src/dlp_train/yolox.py], source: docs/handover/full-inspection-2026-10-28.md}
+  - {id: F-ETA-20, title: "replaces 과제 첫 배포가 대신할 기본 어댑터 일부와만 비교해도 통과·배포", severity: medium, status: fixed, kind: code,
+     files: [packages/training/src/dlp_train/loop.py], source: docs/handover/full-inspection-2026-10-28.md,
+     note: "골든셋에 예측을 낸 replaces 어댑터마다 비교 버전이 있어야 한다(어댑터는 프리라벨 라벨 ID 접두사 규칙으로 판별, 모르면 거절). 회귀: packages/training/tests/test_loop.py::test_training_loop_gate_blocks_or_deploys"}
+  - {id: F-ETA-21, title: "비교 버전 예측 확인이 골격·접촉 대상을 보지 않아 PCK 0 후보가 배포됨", severity: medium, status: fixed, kind: code,
+     files: [packages/evaluation/src/dlp_eval/runner.py], source: docs/handover/full-inspection-2026-10-28.md,
+     note: "과제 평가 대상 판정을 dlp_eval.runner.is_task_target 하나로(학습 예제 추출도 같은 함수). 회귀: packages/evaluation/tests/test_baseline_targets.py::test_wrong_skeleton_baseline_is_refused"}
+  - {id: F-ETA-22, title: "YOLOX 로더가 학습 당시 manifest 분류만 보고 지금 forbidden인 출발 가중치로 학습한 모델도 로드", severity: medium, status: fixed, kind: code,
+     files: [packages/training/src/dlp_train/yolox.py], source: docs/handover/full-inspection-2026-10-28.md,
+     note: "base_lineage_problems가 base_model 사슬 전체의 등록·분류·데이터셋 위반(정확한 이름)·순환을 보고, 로더가 로드 때 다시 확인한다. 회귀: packages/training/tests/test_yolox.py::test_loader_rechecks_base_model_lineage_now"}
   - {id: F-COE-79, title: "콘솔을 SIGTERM으로 끄면 자식 dlp는 남는데 재시작한 콘솔이 같은 잠금의 새 작업을 받음", severity: medium, status: fixed, kind: code,
      files: [packages/console/src/dlp_console/jobs.py], source: docs/handover/full-inspection-2026-10-28.md,
      note: "자식 dlp를 새 프로세스 그룹으로 띄우고 spawned 사건에 pid·pgid를 남긴다. 콘솔 종료(lifespan) 때 그룹을 멈추고, 재시작 때 살아 있는 그룹은 adopted로 잠금을 유지한다(console.yaml jobs). SIGKILL로 죽은 콘솔의 자식은 남지만 다음 시작이 맡는다. 회귀: packages/console/tests/test_jobs.py::test_sigterm_console_keeps_lock_while_orphan_child_runs"}
@@ -1003,9 +1007,9 @@ issues:
   - {id: F-AIR-36, title: "AI 판정 ok 번호에 JSON true·\"2\"·3.0을 정수로 받아 ok로 기록", severity: low, status: open, kind: code,
      files: [packages/aireview/src/dlp_aireview/validate.py], source: docs/handover/full-inspection-2026-10-28.md,
      repro: tests/test_known_defects.py::test_ai_ok_numbers_must_be_json_integers}
-  - {id: F-ETA-23, title: "base_weights 데이터셋 위반 필터(startswith)가 출발 가중치 계보 위반을 놓침", severity: low, status: open, kind: code,
+  - {id: F-ETA-23, title: "base_weights 데이터셋 위반 필터(startswith)가 출발 가중치 계보 위반을 놓침", severity: low, status: fixed, kind: code,
      files: [packages/training/src/dlp_train/yolox.py], source: docs/handover/full-inspection-2026-10-28.md,
-     repro: tests/test_known_defects.py::test_yolox_base_weights_checks_whole_lineage}
+     note: "F-ETA-22와 같은 base_lineage_problems로 고침. 회귀: tests/test_known_defects.py::test_yolox_base_weights_checks_whole_lineage(xfail 표시 지움)"}
   - {id: F-ETA-24, title: "--param allow_cpu=False(문자열)·no가 CPU 학습을 허용, fp16=False가 참", severity: low, status: open, kind: code,
      files: [packages/training/src/dlp_train/yolox.py, packages/cli/src/dlp_cli/train_cmds.py], source: docs/handover/full-inspection-2026-10-28.md,
      repro: tests/test_known_defects.py::test_yolox_settings_reject_string_booleans}

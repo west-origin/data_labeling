@@ -25,7 +25,7 @@ from dlp_datasets.lineage import (
     withdraw_session,
 )
 from dlp_datasets.policy import DatasetPolicy, load_policy
-from dlp_datasets.snapshot import LakeFSSnapshotStore
+from dlp_datasets.snapshot import LakeFSSnapshotStore, LocalSnapshotStore
 from dlp_datasets.splitter import check_isolation, propose_golden
 from dlp_fixtures.sessions import generate_sessions
 from dlp_schema.dataset import Split
@@ -45,7 +45,7 @@ from dlp_schema.labels import LabelRecord
 from dlp_schema.lineage import GoldenSet, TrainingRun, Withdrawal
 from dlp_schema.ontology import load_ontology
 from dlp_schema.session import Domain, LifecycleState, PrivacyState
-from dlp_schema.testing import FIXED_TIME, action_payload, make_label
+from dlp_schema.testing import FIXED_TIME, action_payload, make_label, make_session
 
 pytestmark = pytest.mark.services
 ROOT = Path(__file__).resolve().parents[3]
@@ -334,6 +334,61 @@ def test_golden_session_outside_candidates_still_blocks_its_worker_and_site(
         if sp in (Split.TRAIN, Split.VAL):
             s = sessions[sid]
             assert s.worker_id != worker and s.site_id not in sites, sid
+
+
+@pytest.mark.parametrize("golden_version", [None, "gc"])
+def test_every_confirmed_golden_set_stays_out_of_train_and_val(
+    pg: sa.Engine, policy: DatasetPolicy, tmp_path: Path, golden_version: str | None
+) -> None:
+    """F-ETA-19 회귀: 지정한 골든셋 하나만이 아니라 등록된 모든 골든셋의 세션과 그 작업자·장소가
+
+    학습·검증에 들지 않는다 (지정하지 않은 골든셋 세션은 holdout).
+    정답 근거: 세션 12개(작업자·장소 각각 고유), 도메인별 골든셋 gc={s0}, gk={s6}.
+    """
+    with pg.begin() as conn:
+        register_ontology(conn, load_ontology(ROOT / "config" / "ontology" / "v1"))
+        for i in range(12):
+            s = make_session(f"s{i}", worker_id=f"w{i}", site_id=f"x{i}").model_copy(
+                update={
+                    "domain": Domain.CLEANING if i < 6 else Domain.CAREGIVING,
+                    "privacy_state": PrivacyState.APPROVED,
+                    "lifecycle_state": LifecycleState.HUMAN_VERIFIED,
+                }
+            )
+            insert_session(conn, s)
+        # s6b는 다른 골든셋 세션 s6과 작업자가 같다 → 그 작업자도 막힌다
+        insert_session(
+            conn,
+            make_session("s6b", worker_id="w6", site_id="x99").model_copy(
+                update={
+                    "domain": Domain.CAREGIVING,
+                    "privacy_state": PrivacyState.APPROVED,
+                    "lifecycle_state": LifecycleState.HUMAN_VERIFIED,
+                }
+            ),
+        )
+        for version, domain, sid in (
+            ("gc", Domain.CLEANING, "s0"),
+            ("gk", Domain.CAREGIVING, "s6"),
+        ):
+            insert_golden_set(
+                conn,
+                GoldenSet(
+                    version=version, domain=domain, session_ids=(sid,), created_at=FIXED_TIME
+                ),
+            )
+        result = build_dataset_version(
+            conn, LocalSnapshotStore(tmp_path / "snap"), policy, version_id="ds-all-golden",
+            ontology_version="1.0.0", golden_set_version=golden_version, now=FIXED_TIME,
+        )  # fmt: skip
+    splits = result.version.splits
+    assert splits["s0"] is (Split.GOLDEN if golden_version == "gc" else Split.HOLDOUT)
+    assert splits["s6"] is Split.HOLDOUT
+    assert splits["s6b"] is Split.HOLDOUT
+    assert {sp for sid, sp in splits.items() if sid not in {"s0", "s6", "s6b"}} <= {
+        Split.TRAIN,
+        Split.VAL,
+    }
 
 
 def test_golden_proposal_skips_unapproved_and_withdrawn_sessions(

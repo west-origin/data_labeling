@@ -18,8 +18,9 @@
 
 로드 (`YoloxLoader.load`, 골든셋 평가와 배포 후 프리라벨 `deployed.deployed_predictors`):
 - 묶음을 풀어 manifest 형식·ONNX sha256·클래스 순서·입력 크기(지금 prelabel 정책과 같아야 함)·상업
-  사용 분류(지금 허용 목록 안)를 확인한다. 하나라도 어긋나면 `ModelUnavailableError` (배포 단계는
-  기본 어댑터로 넘어간다).
+  사용 분류(지금 허용 목록 안)와 출발 가중치 계보의 지금 분류(`check_base_lineage`: models.yaml에서
+  forbidden이 되었거나 빠졌으면 거절)를 확인한다. 하나라도 어긋나면 `ModelUnavailableError`
+  (배포 단계는 기본 어댑터로 넘어간다).
 - `dlp_prelabel.adapters.yolox_tools.YoloxTools`의 탐지기 자리에 그 ONNX(`dlp_models.yolox.Yolox`)를
   끼운 Predictor를 돌려준다. 이름은 `trained-<과제>`(라벨 ID 접두사)이고, 추적·거르기·착용자 몸
   억제는 그 어댑터 그대로다. 골든셋 예측은 메모리에서만 쓴다 (루프가 DB에 쓰지 않는다).
@@ -40,7 +41,7 @@ import zipfile
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from dlp_models.datasets import dataset_violations, load_datasets
 from dlp_models.registry import load_registry, resolve
@@ -205,6 +206,32 @@ def settings(policy: YoloxTrainingPolicy, params: Mapping[str, Any], gpu: bool) 
     )
 
 
+def base_lineage_problems(root: Path, name: str) -> list[str]:
+    """출발 가중치 `name`과 그 계보(`base_model` 사슬)의 지금 분류 위반 (사람이 읽는 메시지).
+
+    사슬의 가중치마다 models.yaml에 있고 상업 사용 분류가 허용 목록(`accept`) 안이어야 하며,
+    공개 데이터셋 분류 위반(`dataset_violations`)이 없어야 한다. 위반 메시지는 정확히 그 가중치
+    이름(`<이름>: `)으로 고른다 (이름이 앞부분만 같은 다른 가중치의 위반을 섞지 않는다). 학습할
+    때(`base_weights`)와 로드할 때(`check_base_lineage`) 같은 기준을 쓴다 (F-ETA-22).
+    """
+    registry = load_registry(root)
+    by_model: dict[str, list[str]] = {}
+    for v in dataset_violations(registry, load_datasets(root)):
+        by_model.setdefault(v.split(": ", 1)[0], []).append(v)
+    problems: list[str] = []
+    seen: set[str] = set()
+    current: str | None = name
+    while current is not None and current not in seen:
+        seen.add(current)
+        problems += registry.violations({"training.yolox.base_model": current})
+        problems += by_model.get(current, [])
+        spec = registry.models.get(current)
+        current = spec.base_model if spec is not None else None
+    if current is not None:
+        problems.append(f"{name}: 출발 가중치 계보가 순환합니다 ({current})")
+    return problems
+
+
 def base_weights(root: Path, name: str) -> tuple[Path, dict[str, Any]]:
     """출발 가중치 경로와 manifest에 남길 계보 (이름·버전·sha256·라이선스·분류).
 
@@ -219,8 +246,7 @@ def base_weights(root: Path, name: str) -> tuple[Path, dict[str, Any]]:
         raise YoloxTrainingError(
             f"출발 가중치 {name}은 PyTorch .pth 체크포인트여야 합니다 ({spec.path})"
         )
-    problems = registry.violations({"training.yolox.base_model": name})
-    problems += [v for v in dataset_violations(registry, load_datasets(root)) if v.startswith(name)]
+    problems = base_lineage_problems(root, name)
     if problems:
         raise YoloxTrainingError(f"출발 가중치 라이선스 위반: {problems}")
     try:
@@ -510,6 +536,28 @@ def check_manifest(
         )
 
 
+def check_base_lineage(root: Path, manifest: Mapping[str, Any]) -> None:
+    """manifest의 출발 가중치가 지금 models.yaml에서도 쓸 수 있는지. 아니면 ModelUnavailableError.
+
+    manifest의 분류는 학습 당시 값이다. 그 뒤 출발 가중치(또는 그 계보의 가중치·학습 데이터셋)가
+    forbidden으로 재분류되거나 목록에서 빠지면 그 가중치로 학습한 모델도 쓰지 않는다 (F-ETA-22).
+    출발 가중치 이름이 없는 manifest는 계보를 확인할 수 없어 받지 않는다.
+    """
+    base: Any = manifest.get("base_model")
+    name: Any = None
+    if isinstance(base, dict):
+        name = cast(dict[str, Any], base).get("name")
+    if not isinstance(name, str) or not name:
+        raise ModelUnavailableError(
+            "학습 모델 manifest에 출발 가중치 이름이 없습니다 (계보 확인 불가)"
+        )
+    problems = base_lineage_problems(root, name)
+    if problems:
+        raise ModelUnavailableError(
+            f"학습 모델의 출발 가중치 {name}을 지금 분류로 쓸 수 없습니다: {problems}"
+        )
+
+
 # (ONNX 경로, 클래스 수, closed_vocab_tools 정책) → 탐지기. 테스트는 가짜를 넣는다
 DetectorFactory = Callable[[Path, int, PrelabelPolicy], ToolDetector]
 
@@ -543,6 +591,7 @@ class YoloxLoader:
         manifest, onnx = read_bundle(artifact, artifact.parent / f"{artifact.stem}-{version}")
         prelabel = load_prelabel_policy(root)
         check_manifest(manifest, prelabel, load_registry(root).accept)
+        check_base_lineage(root, manifest)
         n = len(prelabel.closed_vocab_tools.classes)
         factory = self.detector
 

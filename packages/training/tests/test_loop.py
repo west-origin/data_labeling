@@ -59,7 +59,8 @@ from dlp_train.trainers import LoadContext
 
 ROOT = Path(__file__).resolve().parents[3]
 pytestmark = pytest.mark.services
-BASE = ("base-v1",)
+# 대신할 기본 어댑터(objects·tools)마다 골든 예측 버전 (closed_tools는 골든셋에 예측이 없다)
+BASE = ("base-v1", "tools-v1")
 CLASSES = ("cup", "bucket", "mop")
 
 
@@ -125,15 +126,9 @@ def reviewed(state: VerificationState) -> Verification:
 
 
 def base_model(sid: str, lid: str, payload: dict[str, Any], **kw: Any) -> LabelRecord:
-    """기존 기본 어댑터(base-v1)가 낸 예측 라벨 (신뢰도 0.7)."""
-    return label(
-        sid,
-        lid,
-        payload,
-        provenance=Provenance(source=Source.MODEL, model_version="base-v1"),
-        confidence=0.7,
-        **kw,
-    )
+    """기존 기본 어댑터가 낸 예측 라벨 (신뢰도 0.7, 출처를 주지 않으면 base-v1)."""
+    kw.setdefault("provenance", Provenance(source=Source.MODEL, model_version="base-v1"))
+    return label(sid, lid, payload, confidence=0.7, **kw)
 
 
 def train_labels(sid: str) -> list[LabelRecord]:
@@ -152,10 +147,23 @@ def train_labels(sid: str) -> list[LabelRecord]:
 
 
 def golden_labels(sid: str) -> list[LabelRecord]:
-    """골든 세션: 사람 정답과 기존(base) 모델 예측 (많이 어긋남)."""
+    """골든 세션: 사람 정답과 기존 기본 어댑터 예측 (많이 어긋남).
+
+    cup은 COCO 객체 어댑터(objects, base-v1), bucket·mop은 도구 어댑터(tools, tools-v1)가 냈다.
+    라벨 ID는 프리라벨 규칙 `<세션>-<스트림>-<어댑터>-...`다 (비교 버전의 어댑터를 정한다).
+    """
     out = [label(sid, f"t-{c}", box(f"{c}_1", c)) for c in CLASSES]
     out.append(label(sid, "t-face", blur("face_1")))
-    out += [base_model(sid, f"b-{c}", box(f"{c}_1", c, dx=45)) for c in CLASSES]
+    out.append(base_model(sid, "bodycam-objects-b-cup", box("cup_1", "cup", dx=45)))
+    out += [
+        base_model(
+            sid,
+            f"bodycam-tools-b-{c}",
+            box(f"{c}_1", c, dx=45),
+            provenance=Provenance(source=Source.MODEL, model_version="tools-v1"),
+        )
+        for c in ("bucket", "mop")
+    ]
     return out
 
 
@@ -200,7 +208,7 @@ def test_training_loop_gate_blocks_or_deploys(engine: sa.Engine, tmp_path: Path)
     rejected → 새 예제 없으면 건너뜀 → 정확한 후보 deployed → 배포 모델보다 나쁜 후보 rejected →
     privacy 승인 대기와 승인 배포 → 배포 모델을 프리라벨 단계에 붙이기·해시 불일치 거부.
     정답 근거: oracle-stub은 골든 정답을 jitter_px만큼 흔들어 돌려주므로 흔들림 0이면 HOTA가 높고,
-    base-v1 예측은 45 px 밀려 있어 정확한 후보보다 나쁘다.
+    기본 어댑터 예측(base-v1·tools-v1)은 45 px 밀려 있어 정확한 후보보다 나쁘다.
     """
     policy = small(load_policy(ROOT))
     eval_policy = load_eval_policy(ROOT)
@@ -303,6 +311,9 @@ def test_training_loop_gate_blocks_or_deploys(engine: sa.Engine, tmp_path: Path)
     # 기본 어댑터(objects·tools)를 대신하는 과제라 비교할 기본 예측 버전 없이는 평가하지 않는다
     with pytest.raises(TrainingError, match="baseline-version"):
         run(TrainingJob("objects", "dv1", params={"jitter_px": 0.0}), 1)
+    # 대신할 어댑터 일부(objects)와만 비교하면 tools 예측이 기존 지표에서 빠지므로 멈춘다 (F-ETA-20)
+    with pytest.raises(TrainingError, match=r"\['tools'\]의 비교 버전이 없습니다"):
+        run(TrainingJob("objects", "dv1", baseline_versions=("base-v1",), force=True), 1)
     # 잘못 적은 기존 버전: 골든셋에 예측이 없으면 기존 지표가 0이 되어 아무 후보나 통과하므로 멈춘다
     with pytest.raises(TrainingError, match="base-v9"):
         run(TrainingJob("objects", "dv1", baseline_versions=(*BASE, "base-v9"), force=True), 1)
@@ -328,7 +339,8 @@ def test_training_loop_gate_blocks_or_deploys(engine: sa.Engine, tmp_path: Path)
         3,
     )
     assert r2.status == "deployed", r2.reason
-    assert r2.baseline is not None and r2.baseline.model_versions["objects"] == "base-v1"
+    assert r2.baseline is not None
+    assert r2.baseline.model_versions["objects"] == "base-v1+tools-v1"
     assert r2.candidate is not None
     assert r2.candidate.overall["objects"].metrics["hota"] > 0.9
 

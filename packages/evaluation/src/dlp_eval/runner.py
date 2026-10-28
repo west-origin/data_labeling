@@ -30,10 +30,10 @@ WP11, ADR 0013·0015·0025. 진입점: `dlp_cli.eval_cmds`(`dlp eval golden`)와
 (`dlp_train.loop`). DB는 읽기만 한다 (sessions·streams, label_records, golden_sets, withdrawals
 테이블). 원본 버킷에는 접근하지 않는다. 리포트 파일은 `write_report`가 로컬 경로에 쓴다.
 
-공개 이름: `TASK_KINDS`, `TIMELINE_TASKS`, `is_truth`, `GoldenSession`, `golden_sessions`,
-`golden_truth_ids`, `truth_anchor`, `GOLDEN_TRUTH`, `TruthLag`, `truth_lag`, `refreeze_hint`,
-`new_golden_hint`, `load_golden`, `load_golden_merged`, `MissingPredictionsError`, `report_dict`,
-`markdown`, `write_report`.
+공개 이름: `TASK_KINDS`, `TIMELINE_TASKS`, `is_task_target`, `is_truth`, `GoldenSession`,
+`golden_sessions`, `golden_truth_ids`, `truth_anchor`, `GOLDEN_TRUTH`, `TruthLag`, `truth_lag`,
+`refreeze_hint`, `new_golden_hint`, `load_golden`, `load_golden_merged`, `MissingPredictionsError`,
+`report_dict`, `markdown`, `write_report`.
 """
 
 from __future__ import annotations
@@ -58,7 +58,13 @@ from dlp_schema.db.repository import (
     withdrawn_session_ids,
 )
 from dlp_schema.episode import current_labels, non_operational_ids
-from dlp_schema.labels import LabelRecord, Source, VerificationState
+from dlp_schema.labels import (
+    HandStatePayload,
+    KeypointTrackPayload,
+    LabelRecord,
+    Source,
+    VerificationState,
+)
 from dlp_schema.lineage import GoldenSet
 from dlp_schema.session import LifecycleState, Session, StreamKind
 
@@ -75,6 +81,28 @@ TASK_KINDS: dict[Task, tuple[str, ...]] = {
     "coverage": ("coverage",),
     "privacy": ("blur_track",),
 }
+
+
+def is_task_target(task: Task, label: LabelRecord) -> bool:
+    """라벨이 과제의 평가·학습 대상인가 (종류, 손·전신은 골격까지, 접촉은 접촉 구간만).
+
+    - 종류가 `TASK_KINDS[task]`에 있어야 한다.
+    - keypoint_track은 hands면 hand21, 그 밖(body)이면 coco17 골격만 (`harness.eval_keypoints`).
+    - hand_state는 접촉 구간(contact_target_kind != "none")만 (`harness._contacts`).
+
+    학습 예제 추출(`dlp_train.extract.matches`)과 비교 버전 예측 검사(`load_golden_merged`)가
+    같은 기준을 쓴다.
+    """
+    if label.kind not in TASK_KINDS[task]:
+        return False
+    p = label.payload
+    if isinstance(p, KeypointTrackPayload):
+        return p.skeleton == ("hand21" if task == "hands" else "coco17")
+    if isinstance(p, HandStatePayload):
+        return p.contact_target_kind != "none"
+    return True
+
+
 # 마스터 타임라인 구간 라벨(stream_id 없음)로 평가하는 과제. 세션마다 한 번만 예측한다
 # (영상 스트림마다 돌리면 같은 타임라인 구간이 스트림 수만큼 겹친다, ADR 0019)
 TIMELINE_TASKS: frozenset[Task] = frozenset(
@@ -381,7 +409,8 @@ def load_golden_merged(
 ) -> dict[Task, list[SessionData]]:
     """과제마다 여러 모델 버전의 예측을 세션별로 합친다 (대신할 기본 어댑터 여럿과 비교할 때).
 
-    require_predictions: 골든셋에 예측이 하나도 없는 버전이 있으면 MissingPredictionsError.
+    require_predictions: 골든셋에 과제 평가 대상(`is_task_target`) 예측이 하나도 없는 버전이 있으면
+        MissingPredictionsError.
     기존(비교) 모델에 쓴다. 잘못 적은 버전은 예측이 비어 기존 지표가 0에 가까워지고 어떤 후보든
     통과하기 때문이다.
     sessions: 이미 읽은 `golden_sessions` 결과 (`load_golden`과 같다). None이면 처음에 한 번 읽는다.
@@ -396,10 +425,14 @@ def load_golden_merged(
         merged: dict[str, SessionData] = {}
         for v in versions:
             loaded = load_golden(conn, golden_version, {task: v}, sessions=sessions)[task]
-            if require_predictions and not any(s.pred for s in loaded):
+            # 과제가 실제로 평가하는 예측만 센다 (예: hands에 전신 coco17 버전을 주면 keypoint_track
+            # 예측은 있어도 hand21이 없어 기존 PCK가 0이 되고 어떤 후보든 통과한다, F-ETA-21)
+            if require_predictions and not any(
+                is_task_target(task, x) for s in loaded for x in s.pred
+            ):
                 raise MissingPredictionsError(
-                    f"{task}: 모델 버전 {v}의 예측이 골든셋 {golden_version}에 없습니다 "
-                    "(버전을 확인하세요. 버전 앞부분으로 고르려면 끝에 *)"
+                    f"{task}: 모델 버전 {v}의 {task} 평가 대상 예측이 골든셋 {golden_version}에 "
+                    "없습니다 (버전을 확인하세요. 버전 앞부분으로 고르려면 끝에 *)"
                 )
             for s in loaded:
                 if s.session_id in merged:

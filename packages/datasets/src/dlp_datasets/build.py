@@ -2,7 +2,8 @@
 
 1. 후보: 온톨로지 버전이 같고 프라이버시 승인된 세션 (도메인을 주면 그 도메인만).
 2. 사용 중지된 세션은 빼고 excluded_sessions에 적는다.
-3. 골든셋 세션은 golden, 나머지는 작업자·장소 단위로 train / val / holdout.
+3. 지정한 골든셋 세션은 golden, 다른 확정 골든셋 세션과 골든 쪽 작업자·장소를 공유하는 세션은
+   holdout, 나머지는 작업자·장소 단위로 train / val / holdout.
 4. 스냅샷: 포함 세션의 라벨 레코드(정책 include_label_history면 수정 이력 포함, 아니면 현재 라벨만.
    오류 삽입 레코드와 그 후손·측정 레코드 제외), 세션 메타데이터(스트림·동기화)와 매니페스트를
    커밋한다.
@@ -42,6 +43,7 @@ from dlp_schema.db.repository import (
     get_labels,
     get_session,
     insert_dataset_version,
+    list_golden_sets,
     list_session_ids,
     set_lifecycle,
     withdrawn_session_ids,
@@ -100,6 +102,43 @@ def propose_golden_set(
     return propose_golden(sessions, domain, target, exclude=ineligible, seed=seed)
 
 
+def _golden_sides(
+    conn: sa.Connection,
+    golden_set_version: str | None,
+    *,
+    domain: str | None,
+    withdrawn: set[str],
+    candidates: list[Session],
+) -> tuple[list[str], list[Session]]:
+    """(이 버전의 golden 분할 세션 ID, 작업자·장소만 골든 쪽으로 막을 세션).
+
+    확정된 골든셋은 지정한 버전 하나만이 아니라 등록된 모든 골든셋(도메인 무관)이 학습·검증에서
+    빠진다 (ADR 0007 4, F-ETA-19). 지정한 골든셋의 후보 세션만 golden 분할이 되고, 나머지 골든셋
+    세션과 후보 밖(프라이버시 미승인·다른 온톨로지·사용 중지) 골든 세션은 작업자·장소를 막는 데
+    쓴다. 후보에 든 다른 골든셋 세션은 자기 작업자가 막히므로 holdout이 된다.
+
+    Raises:
+        DatasetBuildError: 지정한 골든셋의 도메인이 `domain`과 다를 때.
+        sqlalchemy.exc.NoResultFound: 지정한 골든셋 버전이 DB에 없을 때.
+    """
+    golden: list[str] = []
+    if golden_set_version is not None:
+        g = get_golden_set(conn, golden_set_version)
+        if domain is not None and g.domain.value != domain:
+            raise DatasetBuildError(f"골든셋 {g.version}의 도메인({g.domain.value})이 다릅니다")
+        golden = [sid for sid in g.session_ids if sid not in withdrawn]
+    candidate_ids = {s.session_id for s in candidates}
+    golden_in_candidates = set(golden) & candidate_ids
+    by_id = {s.session_id: s for s in candidates}
+    blocking: dict[str, Session] = {}
+    for gs in list_golden_sets(conn):
+        for sid in gs.session_ids:
+            if sid in golden_in_candidates or sid in blocking:
+                continue
+            blocking[sid] = by_id[sid] if sid in by_id else get_session(conn, sid)
+    return golden, [blocking[sid] for sid in sorted(blocking)]
+
+
 def build_dataset_version(
     conn: sa.Connection,
     snapshots: SnapshotStore,
@@ -153,19 +192,9 @@ def build_dataset_version(
     if not candidates:
         raise DatasetBuildError("데이터셋에 넣을 세션이 없습니다")
 
-    golden: list[str] = []
-    golden_all: list[Session] = []
-    if golden_set_version is not None:
-        g = get_golden_set(conn, golden_set_version)
-        if domain is not None and g.domain.value != domain:
-            raise DatasetBuildError(f"골든셋 {g.version}의 도메인({g.domain.value})이 다릅니다")
-        golden = [sid for sid in g.session_ids if sid not in withdrawn]
-        # 골든 쪽 작업자·장소는 후보에 든 골든 세션만이 아니라 골든셋 전체에서 정한다
-        # (프라이버시 미승인·다른 온톨로지라 후보에서 빠진 골든 세션의 작업자가
-        # 학습에 들어가지 않게)
-        golden_all = [get_session(conn, sid) for sid in g.session_ids]
-    candidate_ids = {s.session_id for s in candidates}
-    outside = [s for s in golden_all if s.session_id not in candidate_ids]
+    golden, outside = _golden_sides(
+        conn, golden_set_version, domain=domain, withdrawn=withdrawn, candidates=candidates
+    )
     splits, report = assign_splits(
         candidates, golden, val_ratio=policy.val_ratio, seed=seed, golden_sessions=outside
     )

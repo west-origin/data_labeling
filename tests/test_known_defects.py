@@ -820,11 +820,6 @@ def test_ai_ok_numbers_must_be_json_integers() -> None:
     assert not any(d.verdict.value == "ok" for d in answer.items)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="F-ETA-23: base_weights의 데이터셋 위반 필터가 출발 가중치 계보 위반을 놓침",
-)
 def test_yolox_base_weights_checks_whole_lineage(tmp_path: Path) -> None:
     """출발 가중치 top의 base_model mid가 forbidden 데이터셋으로 학습됐으면 top으로도 학습을
     시작하면 안 된다 (top 자체 항목에는 위반이 없다).

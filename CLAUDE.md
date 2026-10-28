@@ -102,6 +102,7 @@
   블러 검수에서는 받지 않음, ADR 0059).
 - `packages/datasets/` (`dlp_datasets`) — 데이터셋 버전(lakeFS 커밋), 작업자·장소 단위 분할(holdout 포함), 골든셋 제안,
   사용 중지 전파, 계보 조회. `dlp dataset golden|build|withdraw`, `dlp lineage <세션>`. 정책은 `config/policies/dataset.yaml`.
+  빌드는 지정한 골든셋뿐 아니라 등록된 모든 골든셋 세션을 학습·검증에서 뺀다(지정하지 않은 골든셋은 holdout, F-ETA-19).
 - `packages/models/` (`dlp_models`) — 모델 레지스트리(`config/models.yaml`, 해시 확인)와 공용 ONNX 런타임(OWLv2, 메트릭 깊이).
 - `packages/prelabel/` (`dlp_prelabel`) — 자동 프리라벨: MediaPipe 손·COCO 객체, RTMPose 전신, OWLv2 도구, 깊이 기반 3D 궤적,
   Oracle stub, 장갑·영상 접촉, 3인칭 착용자 매칭. `dlp prelabel run <세션>`. 정책은 `config/policies/prelabel.yaml`.
@@ -165,6 +166,9 @@
   학습 작업 템플릿, MLflow 기록, 모델 레지스트리(DB `model_versions`), 골든셋 평가·게이트 후 배포.
   `dlp train run|models|approve`. CI·CPU는 `oracle-stub` 학습기. 정책은 `config/policies/training.yaml`.
   학습 증강 `dlp_train.augment` (ADR 0057).
+  replaces 과제의 첫 배포는 골든셋에 예측을 낸 기본 어댑터마다 비교 버전이 있어야 한다(어댑터는 라벨 ID 접두사로 판별,
+  F-ETA-20). 비교 예측 확인과 학습 예제 추출은 같은 과제 대상 판정 `dlp_eval.runner.is_task_target`을 쓴다 (F-ETA-21).
+  학습 모델 로더는 출발 가중치 계보의 지금 분류를 다시 본다 (F-ETA-22).
   실제 학습기 `yolox`(objects, `dlp_train.yolox`·`yolox_data`, ADR 0062): 지금 승인된 블러본 키프레임 프레임 → COCO(증강
   포함) → 격리 환경 `scripts/yolox-train-env`(uv.lock, `--extra cpu|cu128`)에서 학습 → `yolox-model.zip`(ONNX
   decode_in_inference false + manifest). 로더는 `YoloxTools`에 끼운다(`trained-objects`). GPU가 없으면

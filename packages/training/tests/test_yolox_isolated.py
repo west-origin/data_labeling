@@ -57,7 +57,15 @@ def test_cpu_smoke_trains_exports_and_loads(
     def no_base(root: Path, name: str) -> tuple[None, dict[str, Any]]:
         return None, {"name": "random-init", "commercial": "allowed"}
 
+    real_problems = yolox_mod.base_lineage_problems
+
+    def lineage(root: Path, name: str) -> list[str]:
+        # 로더는 출발 가중치 계보를 지금 models.yaml로 다시 본다 (F-ETA-22). 무작위 초기화는 목록에
+        # 없는 이 테스트 전용 이름이라 그것만 통과시킨다
+        return [] if name == "random-init" else real_problems(root, name)
+
     monkeypatch.setattr(yolox_mod, "base_weights", no_base)
+    monkeypatch.setattr(yolox_mod, "base_lineage_problems", lineage)
     payload = {
         "kind": "box_track",
         "entity_id": "bucket_1",
