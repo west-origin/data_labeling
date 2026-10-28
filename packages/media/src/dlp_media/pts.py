@@ -135,6 +135,7 @@ def build_pts_index(path: Path, stream_index: int | None = None) -> PtsIndex:
 
     Returns:
         PTS로 정렬한 인덱스 (B 프레임이 있어도 패킷 순서(디코딩 순서)가 아니라 표시 순서).
+        컨테이너가 버림 표시한 패킷(편집 목록 밖, 디코더가 프레임을 내지 않음)은 넣지 않는다.
 
     Raises:
         ValueError: 프레임이 없거나 PTS가 중복될 때 (`PtsIndex` 검증).
@@ -146,6 +147,11 @@ def build_pts_index(path: Path, stream_index: int | None = None) -> PtsIndex:
         for packet in c.demux(stream):
             if packet.pts is None:
                 continue  # 스트림 끝을 알리는 빈 패킷
+            if packet.is_discard:
+                # 편집 목록(MP4 elst) 밖 패킷: 디코더(FFmpeg)가 프레임을 내지 않는다.
+                # 인덱스에 넣으면 프레임 번호가 디코드 결과와 어긋나고 첫 PTS가 음수가 된다
+                # (F-PMS-42)
+                continue
             pts.append(packet.pts)
             key.append(packet.is_keyframe)
         time_base = to_fraction(stream.time_base)

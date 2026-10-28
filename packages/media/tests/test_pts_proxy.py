@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+import shutil
+import subprocess
 from fractions import Fraction
 from pathlib import Path
 
@@ -147,3 +149,37 @@ def test_pad_to_even_keeps_pixel_coordinates() -> None:
     assert not padded[:, 101].any() and not padded[75, :].any()
     even = np.zeros((4, 6, 3), dtype=np.uint8)
     assert pad_to_even(even) is even and even_size(6, 4) == (6, 4)
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="FFmpeg 필요")
+def test_pts_index_skips_edit_list_discarded_packets(tmp_path: Path) -> None:
+    """편집 목록으로 앞 0.5초가 잘린 MP4: 인덱스는 디코더가 내는 프레임과 같다 (F-PMS-42).
+
+    정답 근거: 10 fps 1초(프레임 10개) 영상을 -itsoffset -0.5로 다시 담으면 앞 5개 패킷의 PTS가
+    음수이고 편집 목록 밖(버림 표시)이라 FFmpeg 디코더는 뒤 5개(0·100·…·400 ms)만 낸다.
+    """
+    src, neg = tmp_path / "src.mp4", tmp_path / "neg.mp4"
+    with av.open(str(src), "w") as container:
+        stream = container.add_stream("libx264", rate=10)
+        assert isinstance(stream, av.VideoStream)
+        stream.width, stream.height, stream.pix_fmt = 64, 48, "yuv420p"
+        stream.time_base = Fraction(1, 1000)
+        stream.codec_context.time_base = stream.time_base
+        for i in range(10):
+            frame = av.VideoFrame.from_ndarray(np.full((48, 64, 3), i * 20, np.uint8), "rgb24")
+            frame.pts, frame.time_base = i * 100, stream.time_base
+            container.mux(stream.encode(frame))
+        container.mux(stream.encode(None))
+    subprocess.run(
+        ["ffmpeg", "-nostdin", "-v", "error", "-itsoffset", "-0.5", "-i", str(src),
+         "-c", "copy", "-avoid_negative_ts", "disabled", str(neg)],
+        check=True,
+    )  # fmt: skip
+    with av.open(str(neg)) as c:
+        raw = [p.pts for p in c.demux(c.streams.video[0]) if p.pts is not None]
+    assert min(raw) < 0 and len(raw) == 10  # 재현 조건: 음수 PTS 패킷이 컨테이너에 있다
+    with av.open(str(neg)) as c:
+        decoded = [float(f.time * 1000) for f in c.decode(c.streams.video[0])]
+    index = build_pts_index(neg)
+    assert decoded == [0.0, 100.0, 200.0, 300.0, 400.0]
+    assert index.ms.tolist() == decoded

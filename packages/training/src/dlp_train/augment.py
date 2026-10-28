@@ -15,13 +15,15 @@
 
 라벨 변환 (`augment`):
 - 박스·블러 박스: 네 모서리를 옮긴 외접 박스를 화면 안으로 자른다. 남지 않으면 뺀다 (화면 밖).
-- 마스크(RLE): 같은 변환으로 최근접 보간해 옮긴다.
+- 마스크(RLE): 같은 변환으로 최근접 보간해 옮긴다. 좌우 뒤집기면 손 마스크 키
+  (left_hand↔right_hand)를 바꾼다.
 - 2D 키포인트: 점을 옮기고 화면 밖으로 나간 점은 visibility 0. 좌우 뒤집기면 손 판정(left↔right)을
   바꾸고 COCO 17점은 좌우 관절 번호를 맞바꾼다 (hand21 번호는 해부학 이름이라 그대로).
-- 3D 궤적(카메라 좌표): 좌우 뒤집기는 x를 뒤집고 손 개체(left_hand↔right_hand)를 바꾼다. 회전(화면
-  가운데 중심)은 같은 각도로 x·y를 돌린다. 배율·자르기·원근·렌즈 왜곡은 3D를 바꾸지 않는다 (내부
-  파라미터가 바뀐 것이다). 배율·자르기는 K를 바꾸는데 `Sample`에 바뀐 K가 없다: 증강본에서 3D를
-  투영하려면 K' = matrix · K가 필요하다. 이 근사는 주점이 화면 가운데일 때만 정확하다.
+- 3D 궤적(카메라 좌표): 좌우 뒤집기는 x를 뒤집고 손·팔 개체(left_hand↔right_hand,
+  left_arm↔right_arm)를 바꾼다. 회전(화면 가운데 중심)은 같은 각도로 x·y를 돌린다.
+  배율·자르기·원근·렌즈 왜곡은 3D를 바꾸지 않는다 (내부 파라미터가 바뀐 것이다). 배율·자르기는
+  K를 바꾸는데 `Sample`에 바뀐 K가 없다: 증강본에서 3D를 투영하려면 K' = matrix · K가 필요하다.
+  이 근사는 주점이 화면 가운데일 때만 정확하다.
   `Sample.geometry_3d_exact`는 원근·렌즈 왜곡이 들어갔는지만 보고(거짓) 주점 위치는 보지 않는다.
 """
 
@@ -328,6 +330,22 @@ def _keypoints(item: KeypointItem, t: Transform, k1: float) -> KeypointItem:
     return KeypointItem(item.skeleton, hand, out)
 
 
+# 좌우가 있는 착용자 개체: 손(3D·마스크 `<손>_hand`)과 팔(팔꿈치 3D `<손>_arm`), ADR 0058·0059
+_SIDED_PARTS = ("hand", "arm")
+
+
+def _swap_side(name: str, t: Transform) -> str:
+    """좌우 뒤집기면 `<손>_hand`·`<손>_arm` 개체·마스크 키의 좌우를 바꾼다 (F-ETA-25).
+
+    2D 골격의 손 판정(`swap_hand`)과 같은 표본에서 어긋나지 않게 한다. 다른 이름(객체 클래스
+    등)은 그대로 둔다.
+    """
+    side, sep, part = name.partition("_")
+    if not (t.flipped and sep and part in _SIDED_PARTS):
+        return name
+    return f"{swap_hand(side, t)}_{part}"
+
+
 def _point3d(item: Point3DItem, t: Transform) -> tuple[Point3DItem, bool]:
     """카메라 좌표 3D 점 (뒤집기 x 반전·손 개체 교환, 회전은 x·y 회전). (점, 정확한가)."""
     a = t.matrix[:2, :2]
@@ -337,10 +355,7 @@ def _point3d(item: Point3DItem, t: Transform) -> tuple[Point3DItem, bool]:
         det = abs(float(np.linalg.det(a)))
         r = a / math.sqrt(det) if det > 0 else np.eye(2)
         x, y = (float(v) for v in r @ np.array([x, y]))
-    entity = item.entity
-    if t.flipped and entity in ("left_hand", "right_hand"):
-        entity = "right_hand" if entity == "left_hand" else "left_hand"
-    return Point3DItem(entity, item.part, (x, y, z)), exact
+    return Point3DItem(_swap_side(item.entity, t), item.part, (x, y, z)), exact
 
 
 def augment(sample: Sample, ops: Ops) -> Sample:
@@ -358,7 +373,7 @@ def augment(sample: Sample, ops: Ops) -> Sample:
         warped = np.asarray(warp_image(m.mask.astype(np.uint8), t, nearest=True), dtype=np.uint8)
         if ops.k1:
             warped = _distort_image(warped, ops.k1, nearest=True)
-        masks.append(MaskItem(m.key, warped.astype(bool)))
+        masks.append(MaskItem(_swap_side(m.key, t), warped.astype(bool)))
     points3d: list[Point3DItem] = []
     exact = sample.geometry_3d_exact and not ops.k1
     for p in sample.points3d:

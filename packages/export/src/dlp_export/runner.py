@@ -162,14 +162,17 @@ class _RobotRun:
     ) -> bool:
         """에피소드를 리타기팅하고 보고를 남긴다.
 
-        정책 결정이 drop이면 거짓을 돌려준다 (그 에피소드는 쓰지 않고 보고에만 남는다).
+        정책 결정이 drop이면 거짓을 돌려준다 (그 에피소드는 쓰지 않고 보고에만 남는다). 버린
+        에피소드의 보고에는 세션 가명을 싣지 않는다(`session_id` null, F-COE-76): 그 세션은
+        결과에 들어가지 않아 대응표·이력(`exports.session_ids`)·계보에 없으므로, 구매자 파일에
+        가명이 있으면 사용 중지 때 되짚을 수 없는 식별자가 남는다.
         """
         rob = retarget_session(ep, stream, es.labels, self.robot, self.policy, lp, self.solver)
         report = rob.result.report
         keep = report.decision == "keep"
         self.reports.append(
             {
-                "session_id": sid,
+                "session_id": sid if keep else None,
                 "episode_index": index if keep else None,
                 **report.model_dump(mode="json"),
             }

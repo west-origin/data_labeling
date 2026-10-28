@@ -1004,9 +1004,11 @@
           "minItems": 2,
           "prefixItems": [
             {
+              "exclusiveMinimum": 0,
               "type": "integer"
             },
             {
+              "exclusiveMinimum": 0,
               "type": "integer"
             }
           ],

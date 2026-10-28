@@ -9,6 +9,7 @@
 from datetime import datetime
 
 import sqlalchemy as sa
+from sqlalchemy.exc import NoResultFound
 
 from dlp_schema.db.tables import review_assignments, review_tasks
 from dlp_schema.review import (
@@ -230,13 +231,24 @@ def update_assignment(conn: sa.Connection, assignment_id: str, **values: object)
         **values: assignee, task_key, status(`AssignmentStatus` 또는 문자열), completed_at 중 일부.
 
     Raises:
-        ValueError: 허용되지 않은 필드를 바꾸려 할 때.
+        ValueError: 허용되지 않은 필드를 바꾸려 할 때, 또는 바꾼 값이 `ReviewAssignment` 계약을
+            어길 때 (계약 밖 status, 식별자 모양이 아닌 assignee·task_key, 시간대 없는 completed_at.
+            pydantic ValidationError는 ValueError의 하위 클래스다, F-SCH-30).
         KeyError: 배정이 없을 때.
     """
     allowed = {"assignee", "task_key", "status", "completed_at"}
     if not set(values) <= allowed:
         raise ValueError(f"바꿀 수 없는 필드: {set(values) - allowed}")
-    data = {k: (v.value if isinstance(v, AssignmentStatus) else v) for k, v in values.items()}
+    # 지금 행에 바꿀 값을 얹어 계약으로 다시 검증한 뒤, 검증된 값만 쓴다. 계약 밖 값이 저장되면
+    # 이후 `list_assignments`·`get_assignment`가 그 행 때문에 모두 실패한다 (F-SCH-30).
+    try:
+        current = get_assignment(conn, assignment_id)
+    except NoResultFound:
+        raise KeyError(assignment_id) from None
+    merged = ReviewAssignment.model_validate({**current.model_dump(), **values})
+    data: dict[str, object] = {k: getattr(merged, k) for k in values}
+    if "status" in data:
+        data["status"] = merged.status.value
     result = conn.execute(
         review_assignments.update()
         .where(review_assignments.c.assignment_id == assignment_id)

@@ -166,9 +166,9 @@ class BoxKeyframe(Contract):
 class Rle(Contract):
     """COCO 형식 RLE 마스크."""
 
-    # size: (높이, 너비) px — COCO 순서. counts: COCO 압축 RLE 문자열.
+    # size: (높이, 너비) px — COCO 순서, 둘 다 양수 (F-SCH-32). counts: COCO 압축 RLE 문자열.
 
-    size: tuple[int, int]
+    size: tuple[Annotated[int, Field(gt=0)], Annotated[int, Field(gt=0)]]
     counts: str
 
 
@@ -355,6 +355,17 @@ class Trajectory3DSample(Contract):
     flags: tuple[Constraint3DFlag, ...] | None = Field(
         default=None, exclude_if=_drop_none, description="이 표본이 어긴 물리 제약"
     )
+
+    @model_validator(mode="after")
+    def _check_quaternion(self) -> Trajectory3DSample:
+        """쿼터니언 qw·qx·qy·qz는 네 성분이 다 있거나 다 없어야 한다 (F-SCH-32).
+
+        일부만 있으면 내보내기·리타기팅이 방향을 해석할 수 없다. Raises: ValueError.
+        """
+        present = [q is not None for q in (self.qw, self.qx, self.qy, self.qz)]
+        if any(present) and not all(present):
+            raise ValueError("쿼터니언은 qw·qx·qy·qz 네 성분이 다 있거나 다 없어야 합니다")
+        return self
 
 
 class Trajectory3DPayload(Contract):

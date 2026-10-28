@@ -315,6 +315,87 @@ def test_lerobot_robot_export_end_to_end(
     assert meta["ik"]["orientation_mode"] == "full" and "hand_parts" in meta
 
 
+def test_lerobot_robot_dropped_episode_pseudonym_not_published(
+    engine: sa.Engine,
+    policy: ExportPolicy,
+    ontology: Ontology,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """리타기팅이 버린 에피소드의 세션 가명은 구매자 파일에 싣지 않는다 (F-COE-76).
+
+    정답: 세션 a만 월드 좌표 손 3D가 있고 b는 없다. `--robot so101`이면 b는 목표가 없어 버린다
+    (ADR 0053). 구매자 파일(manifest·meta)의 모든 세션 가명은 내부 대응표에 있고, b의 보고는
+    `session_id`가 null이며, 이력·계보에도 b는 없다(받지 않은 세션이라 사용 중지 대상도 아니다).
+    격리 환경 대신 쓰기·읽기 스크립트를 대역으로 바꿔 기본 서비스 테스트로 돈다.
+    """
+    from dlp_export import runner
+    from dlp_fixtures.retarget import hand_points_for_grasp, world_hand_labels
+
+    def fake_run_script(root: Path, lp: object, script: str, *args: str) -> str:
+        if script == "lerobot_write.py":
+            pkg = json.loads(Path(args[0]).read_text())
+            (Path(args[1]) / "meta").mkdir(parents=True, exist_ok=True)
+            (Path(args[1]) / "meta" / "info.json").write_text(
+                json.dumps({"n": len(pkg["episodes"])})
+            )
+            return ""
+        n_eps = json.loads((Path(args[0]) / "meta" / "info.json").read_text())["n"]
+        return json.dumps({"episodes": n_eps, "frames": 1})
+
+    monkeypatch.setattr(runner, "run_script", fake_run_script)
+    snapshots = LocalSnapshotStore(tmp_path / "snap")
+    labeling = LocalStore(tmp_path / "store", "dlp-labeling")
+    datasets = LocalStore(tmp_path / "store", "dlp-datasets")
+    times = vfr_times(np.random.default_rng(5), 800)
+    t = np.array(times, dtype=np.float64) / 1000
+    n = t.size
+    grasp = np.column_stack(
+        [0.5 + 0.05 * np.cos(2 * np.pi * t), -0.05 + 0.05 * np.sin(2 * np.pi * t), np.full(n, -0.6)]
+    )
+    pts = hand_points_for_grasp(
+        grasp, np.tile([0.7, 0.0, -0.7], (n, 1)), np.tile([0.0, 1.0, 0.0], (n, 1)), np.full(n, 0.05)
+    )
+    with engine.begin() as conn:
+        register_ontology(conn, ontology)
+        for i, sid in enumerate(("a", "b")):
+            insert_session(
+                conn,
+                make_session(sid, worker_id=f"w{i}", site_id=f"x{i}").model_copy(
+                    update={"privacy_state": PrivacyState.APPROVED}
+                ),
+            )
+            extra = world_hand_labels(sid, times, pts) if sid == "a" else []
+            insert_labels(conn, [*scenario_labels(sid, times), *extra])
+            write_blurred(labeling, sid, times, tmp_path)
+        build_dataset_version(
+            conn, snapshots, load_dataset_policy(ROOT), version_id="dv1",
+            ontology_version="1.0.0", golden_set_version=None, now=FIXED_TIME,
+        )  # fmt: skip
+    r = run_export(
+        engine, root=ROOT, version_id="dv1", fmt="lerobot", target="acme",
+        snapshots=snapshots, labeling=labeling, datasets=datasets, raw_bucket="dlp-raw",
+        policy=policy, ontology=ontology, include_unreviewed=False, splits=None,
+        now=FIXED_TIME, robot="so101", id_secret=b"k",
+    )  # fmt: skip
+    out = tmp_path / "store" / "dlp-datasets" / "exports" / r.record.export_id
+    manifest = json.loads((out / "manifest.json").read_text())
+    reports = manifest["details"]["retarget"]["episodes"]
+    assert [e["decision"] for e in reports] == ["keep", "drop"]
+    assert [e["session_id"] for e in reports] == [r.session_pseudonyms["a"], None]
+    id_map = json.loads(
+        (tmp_path / "store" / "dlp-datasets" / id_map_key(r.record.export_id)).read_text()
+    )
+    assert id_map == r.session_pseudonyms == {"a": r.session_pseudonyms["a"]}
+    assert tuple(r.record.session_ids) == ("a",)
+    # 구매자 파일 어디에도 b의 가명이 없다
+    b_alias = Pseudonymizer.for_export(r.record.export_id, b"k", enabled=True).session("b")
+    for f in out.rglob("*.json"):
+        assert b_alias not in f.read_text(), f
+    with engine.begin() as conn:
+        assert session_lineage(conn, "b").exports == []
+
+
 def test_lerobot_refuses_mixed_aspect_ratios(
     engine: sa.Engine, policy: ExportPolicy, ontology: Ontology, tmp_path: Path
 ) -> None:

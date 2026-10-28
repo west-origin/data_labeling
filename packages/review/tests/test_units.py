@@ -483,6 +483,30 @@ def test_reconcile_long_ids_stay_valid_identifiers(n: int) -> None:
     assert re.fullmatch(r"x1:r[0-9a-f]{12}", short.new_records[0].label_id)
 
 
+def test_reconcile_same_content_new_items_get_distinct_ids() -> None:
+    """F-REV-35 회귀: 같은 시각·같은 내용으로 새로 그린 항목 둘이 같은 라벨 ID를 받아 수집이
+    IntegrityError로 멈췄다.
+
+    정답 근거: 라벨은 덮어쓰지 않는다(CLAUDE.md 규칙). 도구 영역 ID가 다르면(Label Studio aa1·bb2)
+    서로 다른 ID, 영역 ID가 없어도(CVAT 새 트랙) 같은 내용 둘째는 등장 순번으로 다른 ID다.
+    같은 입력을 다시 돌리면 같은 ID(멱등)이고, 영역 ID 없는 단일 항목은 예전 해시 입력 그대로다.
+    """
+    payload = ActionPayload.model_validate(action_payload(action_id="n1"))
+
+    def ids(items: list[ReviewedItem]) -> list[str]:
+        out = reconcile([], items, session_id="s001", ontology_version="1.0.0",
+                        reviewer_id="rev1", now=FIXED_TIME)  # fmt: skip
+        return [r.label_id for r in out.new_records]
+
+    tool = [ReviewedItem(None, None, 0, 1000, payload, tool_region_id=r) for r in ("aa1", "bb2")]
+    bare = [ReviewedItem(None, None, 0, 1000, payload) for _ in range(2)]
+    for items in (tool, bare):
+        got = ids(items)
+        assert len(set(got)) == 2 and ids(items) == got
+    # 영역 ID가 없는 첫 항목 ID는 고치기 전과 같다 (기존 기록과 같은 해시)
+    assert ids(bare[:1]) == ids(bare)[:1]
+
+
 def test_reconcile_compares_against_normalized_originals() -> None:
     """좌표 반올림 왕복 값과 비교하므로 미세한 차이는 승인으로 보는지 본다.
 

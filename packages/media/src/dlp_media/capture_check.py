@@ -28,6 +28,7 @@ from typing import Any
 
 import numpy as np
 import yaml
+from numpy.typing import NDArray
 from pydantic import Field
 
 from dlp_media.imu import ImuData
@@ -157,23 +158,31 @@ def imu_warnings(imu: ImuData | None, policy: CapturePolicy) -> list[CaptureWarn
 
     정지 판정: 그 구간 자이로 크기 최댓값 <= still_gyro_rad_s, 가속도 크기 표준편차 <=
     still_acc_std_mps2. 구간에 표본이 2개 미만이면 정지로 보지 않는다.
+
+    값이 NaN인 표본(자이로 채널이 없는 GPMF 기종은 `imu_from_gpmf_payloads`가 자이로를 NaN으로
+    채운다)은 "모름"이라 그 채널 판정에서 뺀다. 한 채널에 유한한 표본이 2개 미만이면 그 채널로는
+    움직임을 주장하지 않고 남은 채널로만 정한다 (두 채널 다 모르면 경고하지 않는다, F-PMS-43).
     """
     if imu is None or imu.t_ms.size == 0:
         return [CaptureWarning("no_imu", "IMU 없음: 바디캠 자세·월드 좌표 3D를 만들 수 없다")]
     head = imu.t_ms <= imu.t_ms[0] + policy.still_start_s * 1000
+    if int(np.count_nonzero(head)) < 2 or not _still(imu, head, policy):
+        return [
+            CaptureWarning(
+                "no_still_start",
+                f"처음 {policy.still_start_s:g}초가 정지가 아니다 "
+                "(자이로 바이어스·중력 방향 추정이 약해진다)",
+            )
+        ]
+    return []
+
+
+def _still(imu: ImuData, head: NDArray[np.bool_], policy: CapturePolicy) -> bool:
+    """처음 구간(head)이 정지인지. 유한한 표본이 2개 미만인 채널은 판정에 쓰지 않는다."""
     gyro = np.linalg.norm(imu.gyro[head], axis=1)
+    gyro = gyro[np.isfinite(gyro)]
+    if gyro.size >= 2 and float(gyro.max()) > policy.still_gyro_rad_s:
+        return False
     acc = np.linalg.norm(imu.acc[head], axis=1)
-    still = (
-        gyro.size >= 2
-        and float(gyro.max()) <= policy.still_gyro_rad_s
-        and float(acc.std()) <= policy.still_acc_std_mps2
-    )
-    if still:
-        return []
-    return [
-        CaptureWarning(
-            "no_still_start",
-            f"처음 {policy.still_start_s:g}초가 정지가 아니다 "
-            "(자이로 바이어스·중력 방향 추정이 약해진다)",
-        )
-    ]
+    acc = acc[np.isfinite(acc)]
+    return not (acc.size >= 2 and float(acc.std()) > policy.still_acc_std_mps2)

@@ -68,9 +68,14 @@ _NORM = 1000
 
 
 class _Loose(BaseModel):
-    """응답 파싱용 기반 (알 수 없는 키는 오류, 값 검사는 항목별로 따로 한다)."""
+    """응답 파싱용 기반 (알 수 없는 키는 오류, 값 검사는 항목별로 따로 한다).
 
-    model_config = ConfigDict(extra="forbid")
+    strict: JSON 형이 맞아야 받는다. 번호(ok·i·f)는 JSON 정수만(true·"2"·3.0은 구조 위반),
+    확신도 c는 JSON 수만("0.5"·true는 구조 위반, 정수 0·1은 받음), 문자열 필드는 JSON 문자열만이다.
+    예전 lax 파싱은 True == 1, int("2")에 기대 모델이 쓰지 않은 ok 판정을 기록했다 (F-AIR-36).
+    """
+
+    model_config = ConfigDict(extra="forbid", strict=True)
 
 
 class RawItem(_Loose):

@@ -805,3 +805,51 @@ def test_physical_prior_changes_are_never_silently_additive(ontology: Ontology) 
             register_ontology(conn, changed, accept_physical_priors=True)
     finally:
         engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"status": "bogus"},
+        {"assignee": "bad id with spaces"},
+        {"completed_at": datetime(2026, 10, 28, 12, 0)},  # 시간대 없음
+    ],
+    ids=["status", "assignee", "naive_completed_at"],
+)
+def test_update_assignment_validates_contract(values: dict[str, Any]) -> None:
+    """회귀 (F-SCH-30): 계약 밖 값은 쓰기 전에 거부하고 행은 그대로 두며, 목록 읽기가 깨지지 않는다.
+
+    정답 근거: `ReviewAssignment`의 status는 `AssignmentStatus`, assignee는 `Identifier`,
+    completed_at은 `AwareDatetime`이다. 계약 안의 값(열거형·문자열 status, 시간대 있는 시각)은 쓴다.
+    """
+    from dlp_schema.db.review_repository import (
+        get_assignment,
+        insert_assignment,
+        list_assignments,
+        update_assignment,
+    )
+    from dlp_schema.review import AssignmentStatus, ReviewAssignment, ReviewMode
+    from dlp_schema.testing import sqlite_db
+
+    engine = sqlite_db()
+    with engine.begin() as conn:
+        insert_session(conn, make_session("s001"))
+        insert_assignment(
+            conn,
+            ReviewAssignment(
+                assignment_id="a1", session_id="s001", label_kinds=("action",),
+                mode=ReviewMode.STANDARD, priority=1.0, created_at=FIXED_TIME,
+            ),
+        )  # fmt: skip
+        with pytest.raises(ValueError):
+            update_assignment(conn, "a1", **values)
+        assert get_assignment(conn, "a1").status is AssignmentStatus.OPEN
+        assert [a.assignment_id for a in list_assignments(conn)] == ["a1"]
+        update_assignment(conn, "a1", status="open", assignee="rev01")
+        update_assignment(conn, "a1", status=AssignmentStatus.DONE, completed_at=FIXED_TIME)
+        done = get_assignment(conn, "a1")
+        assert (done.status, done.assignee) == (AssignmentStatus.DONE, "rev01")
+        assert done.completed_at == FIXED_TIME
+        with pytest.raises(KeyError):
+            update_assignment(conn, "missing", assignee="rev01")
+    engine.dispose()

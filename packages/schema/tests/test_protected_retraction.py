@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+import threading
+import time
 from datetime import timedelta
 from typing import Any
 
@@ -181,6 +183,59 @@ def test_storage_refuses_stale_child_retraction_after_parent_approval(pg: sa.Eng
         with pytest.raises(ProtectedLabelRetractionError, match=r"라벨 orig\("):
             insert_labels(conn, stale)
         assert _ids(get_labels(conn, "s001")) == {"orig", "copy"}
+
+
+def _wait_for_lock_wait(engine: sa.Engine, timeout_s: float = 5.0) -> bool:
+    """이 DB에서 행 잠금을 기다리는 백엔드가 생길 때까지 기다린다. 생기면 True."""
+    query = sa.text(
+        "SELECT count(*) FROM pg_stat_activity"
+        " WHERE datname = current_database() AND wait_event_type = 'Lock'"
+    )
+    deadline = time.monotonic() + timeout_s
+    with engine.connect() as conn:
+        while time.monotonic() < deadline:
+            if conn.execute(query).scalar_one() > 0:
+                return True
+            time.sleep(0.05)
+    return False
+
+
+@pytest.mark.services
+def test_concurrent_review_blocks_stale_retraction(pg: sa.Engine) -> None:
+    """커밋 전 승인(`record_review`)과 동시에 들어온 모델 삭제는 승인 커밋을 기다렸다가 거부된다.
+
+    회귀 (F-SCH-31): record_review가 세션 행을 잠그지 않아, 승인 트랜잭션이 커밋하기 전에 다른
+    트랜잭션의 `insert_labels`가 세션 잠금을 바로 얻고 승인 전 이력으로 검증을 통과해 승인된 라벨을
+    지웠다. 정답: 삭제 쪽은 승인 쪽 커밋까지 세션 잠금을 기다리고, 커밋된 승인을 보고 거부한다.
+    """
+    m = _model_label()
+    with pg.begin() as conn:
+        insert_labels(conn, [m])
+    stale = retractions([m], "actions-v2", FIXED_TIME)  # 검수 전 이력으로 고른 지울 후보
+    errors: list[BaseException] = []
+
+    def _retract() -> None:
+        try:
+            with pg.begin() as conn:
+                conn.execute(sa.text("SET LOCAL lock_timeout = '10s'"))
+                insert_labels(conn, stale)
+        except BaseException as exc:  # 스레드 밖에서 판정한다
+            errors.append(exc)
+
+    with pg.connect() as reviewer:
+        tx = reviewer.begin()
+        reviewer.execute(sa.text("SET LOCAL lock_timeout = '10s'"))
+        record_review(reviewer, "a1", VerificationState.HUMAN_APPROVED, "rev01", FIXED_TIME)
+        worker = threading.Thread(target=_retract)
+        worker.start()
+        blocked = _wait_for_lock_wait(pg)
+        tx.commit()
+    worker.join(timeout=15)
+    assert not worker.is_alive()
+    assert blocked, "삭제 쪽이 검수 트랜잭션의 세션 잠금을 기다리지 않았다"
+    assert len(errors) == 1 and isinstance(errors[0], ProtectedLabelRetractionError)
+    with pg.connect() as conn:
+        assert _ids(current_labels(get_labels(conn, "s001"))) == {"a1"}
 
 
 # -------------------------------- 설명 따르기의 좁은 예외 (ADR 0043 3절 규칙 6)

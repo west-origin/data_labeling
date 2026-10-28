@@ -10,8 +10,11 @@
   없는 비율이 min_share 이상. 1인칭 영상의 싱크·손에 붙은 얼굴 오탐이 여기에 걸린다. RTMPose
   트랙이 하나도 없으면 판단하지 않는다.
 - `on_hand` (얼굴만): 키프레임 중 박스 중심이 MediaPipe 손 관절 외접 박스(여유 margin) 안인 비율이
-  min_share 이상.
-- `short_flicker` (모든 대상): 트랙 길이가 short_ms 미만 (한두 프레임 깜박임, ADR 0054 2절).
+  min_share 이상. 손 외접 박스는 보이는(visibility > 0) 관절만으로 만든다 (F-PMS-47).
+- `short_flicker` (모든 대상): 관측 길이가 short_ms 미만 (한두 프레임 깜박임, ADR 0054 2절).
+  관측 길이는 화면 안 키프레임의 처음~끝 길이다. 모델 출처 트랙은 탐지 유지(첫 관측 앞·마지막
+  관측 뒤 blur_hold_ms, `tracker.track_frames`)를 앞뒤로 뺀다 (F-PMS-46). 영상 처음·끝에 닿아
+  유지가 잘린 모델 트랙은 실제보다 짧게 보여 힌트가 더 붙을 수 있다 (표시만이라 재현에는 무해).
 - `ai_crop_no` (AI 조각 확인을 돌린 트랙, ADR 0056): 사내 VLM이 블러본 조각의 주변 맥락으로 그
   대상이 아니라고 답함 (`dlp_aireview.crops`).
 - `tta_unstable` (TTA를 돌린 트랙): 좌우 뒤집기·배율 변환 화면에서 같은 자리 탐지가 다시 나온
@@ -37,7 +40,13 @@ from dlp_media.geometry import Box, Transform, tta_support, warp_image
 from dlp_media.storage import ObjectStore, sha256_file
 from dlp_privacy.policy import PrivacyHintsPolicy
 from dlp_privacy.review import ReviewSegment
-from dlp_schema.labels import BlurTrackPayload, BoxKeyframe, KeypointTrackPayload, LabelRecord
+from dlp_schema.labels import (
+    BlurTrackPayload,
+    BoxKeyframe,
+    KeypointTrackPayload,
+    LabelRecord,
+    Source,
+)
 
 COCO_HEAD = (0, 1, 2, 3, 4)
 HINT_REASON = "suspected_false_positive"
@@ -107,7 +116,11 @@ def _hands(labels: Iterable[LabelRecord]) -> _ByTime[Box]:
             for k in p.keyframes:
                 if k.interpolated:
                     continue
-                xs, ys = [q.x for q in k.points], [q.y for q in k.points]
+                # visibility 0 관절의 좌표는 의미가 없다 (F-PMS-47)
+                seen = [q for q in k.points if q.visibility > 0]
+                if not seen:
+                    continue
+                xs, ys = [q.x for q in seen], [q.y for q in seen]
                 items.append((k.t_ms, (min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys))))
     return _ByTime(items)
 
@@ -146,6 +159,22 @@ def face_rules(
     return [(r, round(s, 4)) for r, s in out if s >= policy.min_share]
 
 
+def observed_ms(track: LabelRecord, hold_ms: float) -> float:
+    """블러 트랙의 관측 길이 (ms): 화면 안 키프레임의 처음~끝. 모델 출처면 앞뒤 유지 hold_ms를 뺀다.
+
+    화면 안 키프레임이 없으면 0. 사람이 그리거나 고친 트랙에는 유지가 없어 빼지 않는다.
+    """
+    p = track.payload
+    assert isinstance(p, BlurTrackPayload)
+    shown = [k.t_ms for k in p.keyframes if not k.outside]
+    if not shown:
+        return 0.0
+    span = float(shown[-1] - shown[0])
+    if track.provenance.source is Source.MODEL:
+        span -= 2 * hold_ms
+    return max(span, 0.0)
+
+
 def privacy_hints(
     labels: Sequence[LabelRecord],
     stream_id: str,
@@ -172,7 +201,7 @@ def privacy_hints(
         found: list[tuple[str, float]] = []
         if p.target == "face":
             found += face_rules(x, heads, hands, policy)
-        if x.t_end_ms - x.t_start_ms < policy.short_ms:
+        if observed_ms(x, policy.blur_hold_ms) < policy.short_ms:
             found.append(("short_flicker", 1.0))
         if tta is not None and x.label_id in tta and tta[x.label_id] < policy.tta_min_support:
             found.append(("tta_unstable", round(1 - tta[x.label_id], 4)))

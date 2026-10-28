@@ -711,6 +711,11 @@ def record_review(
     """검수 상태만 갱신한다. 내용 수정은 새 레코드로 한다 (DB 트리거가 강제).
 
     라벨 행에서 바꿀 수 있는 유일한 경로다 (verification_state, reviewer_id, reviewed_at).
+    쓰기 전에 그 라벨의 세션 행을 잠근다(`lock_session`, F-SCH-31). 라벨 추가(`insert_labels`)도
+    같은 행을 잠그고 이력을 다시 읽어 검증하므로, 커밋 전 승인과 동시에 들어온 삭제 레코드가
+    승인을 못 본 채 검증을 통과하지 못한다. 호출자가 이미 같은 트랜잭션에서 잠갔으면 다시 잠가도
+    기다리지 않는다 (PostgreSQL 행 잠금은 같은 트랜잭션 안에서 재진입). 여러 세션의 라벨을 검수할
+    때는 호출자가 세션 ID 순서로 먼저 잠근다.
 
     Args:
         state: 새 검증 상태 (unreviewed는 거부).
@@ -725,6 +730,12 @@ def record_review(
     if state is VerificationState.UNREVIEWED:
         raise ValueError("검수 기록에는 미검수 외의 상태가 필요합니다")
     _reject_ai_reviewer(reviewer_id)
+    session_id = conn.execute(
+        sa.select(label_records.c.session_id).where(label_records.c.label_id == label_id)
+    ).scalar_one_or_none()
+    if session_id is None:
+        raise KeyError(label_id)
+    lock_session(conn, session_id)
     result = conn.execute(
         label_records.update()
         .where(label_records.c.label_id == label_id)

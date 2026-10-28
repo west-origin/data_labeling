@@ -252,6 +252,36 @@ def test_retry_condition_and_parse_failure(policy: AiReviewPolicy, ontology: Ont
 
 
 @pytest.mark.parametrize(
+    ("ok", "item"),
+    [
+        ([True, 1, 2, 3], None),
+        (["1", 2, 3], None),
+        ([1.0, 2, 3], None),
+        ([1, 2, 3], {"i": True}),
+        ([1, 2, 3], {"i": "0"}),
+        ([1, 2, 3], {"c": "0.5"}),
+        ([1, 2, 3], {"c": True}),
+        ([1, 2, 3], {"f": "1"}),
+        ([1, 2, 3], {"f": 1.0}),
+    ],
+)
+def test_numbers_must_be_json_numbers(
+    ok: list[Any], item: dict[str, Any] | None, policy: AiReviewPolicy, ontology: Ontology
+) -> None:
+    """F-AIR-36 회귀: ok·i·f는 JSON 정수만, c는 JSON 수만 받는다 (lax 파싱이 true·"2"·3.0·"0.5"를
+    받아 모델이 쓰지 않은 판정을 기록했다).
+
+    정답 근거: ADR 0040 3.2 형식 밖 값은 위반. 형이 틀리면 응답 구조 위반(파싱 실패 → 재시도)이고
+    어느 라벨도 ok로 기록하지 않는다. 정수 확신도 0·1은 JSON 수라 받는다.
+    """
+    items = [_item(0) | item] if item is not None else []
+    got = _answer(ok, items, policy=policy, ontology=ontology)
+    assert not got.parsed and not got.items
+    fine = _answer([1, 2, 3], [_item(0, c=1)], policy=policy, ontology=ontology)
+    assert fine.parsed and fine.invalid == 0 and fine.items[0].confidence == 1.0
+
+
+@pytest.mark.parametrize(
     "text",
     [
         "https://example.com 참고",

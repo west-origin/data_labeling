@@ -603,7 +603,9 @@ def _reviewed_item(
         for k in ("t_contact_start_ms", "t_contact_end_ms"):
             if meta.get(k) is not None:
                 meta[k] = min(max(meta[k], start), end)
-    return ReviewedItem(origin, stream_id, start, end, adapter.validate_python(meta))
+    payload = adapter.validate_python(meta)
+    tool_id = str(r["id"]) if r.get("id") is not None else None
+    return ReviewedItem(origin, stream_id, start, end, payload, tool_region_id=tool_id)
 
 
 def from_ls_results(results: list[dict[str, Any]], known_ids: set[str]) -> list[ReviewedItem]:

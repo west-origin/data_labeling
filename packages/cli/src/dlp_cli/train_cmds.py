@@ -96,7 +96,9 @@ def _param(item: str) -> tuple[str, Any]:
     """`--param key=value` 한 개를 (키, 값)으로 바꾼다.
 
     값은 JSON으로 해석하고(`3` → int, `true` → bool, `[1,2]` → list), 실패하면 문자열 그대로
-    둔다. `=`가 없으면 값은 빈 문자열이다.
+    둔다. `=`가 없으면 값은 빈 문자열이다. 불리언은 JSON 소문자(`true`·`false`)만 bool이 된다:
+    `False`·`no`는 문자열로 남고, 학습기가 불리언 param(yolox `allow_cpu`·`fp16`)에서 거절한다
+    (F-ETA-24).
     """
     key, _, value = item.partition("=")
     try:

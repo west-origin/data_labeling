@@ -129,8 +129,12 @@ class PrivacyHintsPolicy(Contract):
     margin: float = Field(ge=0)
     # 트랙 키프레임 중 이 비율 이상이 규칙에 걸리면 힌트 (no_head·on_hand)
     min_share: float = Field(gt=0, le=1)
-    # 이보다 짧은 트랙은 short_flicker 힌트 (ms)
+    # 관측 길이가 이보다 짧은 트랙은 short_flicker 힌트 (ms)
     short_ms: int = Field(ge=0)
+    # 모델 블러 트랙의 첫 관측 앞·마지막 관측 뒤 유지 시간 (ms). privacy.yaml에 쓰지 않는다:
+    # `load_policy`가 defaults.yaml `privacy.blur_hold_ms`로 채운다. short_flicker는 트랙 길이에서
+    # 이 유지를 앞뒤로 뺀 관측 길이로 본다 (F-PMS-46).
+    blur_hold_ms: float = Field(default=0, ge=0)
     # TTA 지지 비율 평균이 이 미만이면 tta_unstable 힌트
     tta_min_support: float = Field(ge=0, le=1)
     # 얼굴 TTA 설정 (YuNet을 변환 화면에 다시 돌린다)
@@ -179,4 +183,7 @@ def load_policy(root: Path) -> PrivacyPolicy:
     data: Any = yaml.safe_load((root / "config" / "policies" / "privacy.yaml").read_text("utf-8"))
     # defaults.yaml을 먼저 자체 모델로 검증한 뒤 dict로 붙인다 (PrivacyPolicy에서 다시 검증된다)
     data["platform"] = load_config(root / "config" / "defaults.yaml").privacy.model_dump()
+    # 힌트의 short_flicker는 탐지 유지(hold)를 뺀 관측 길이로 본다 (F-PMS-46).
+    # 값은 defaults.yaml 한 곳에서만 읽는다.
+    data["hints"]["blur_hold_ms"] = data["platform"]["blur_hold_ms"]
     return PrivacyPolicy.model_validate(data)

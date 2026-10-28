@@ -153,11 +153,30 @@ class Settings:
     extra: str  # 환경 extra (PyTorch 판)
 
 
+def _flag(params: Mapping[str, Any], key: str, default: bool) -> bool:
+    """불리언 param 하나. JSON 불리언(`true`·`false`)만 받는다 (F-ETA-24).
+
+    `--param allow_cpu=False`·`no`는 JSON 해석에 실패해 문자열이 되고, `bool("False")`는 참이다.
+    문자열·숫자를 참거짓으로 짐작하지 않고 거절한다.
+
+    Raises:
+        YoloxTrainingError: 값이 불리언이 아닐 때.
+    """
+    value = params.get(key, default)
+    if not isinstance(value, bool):
+        raise YoloxTrainingError(
+            f"yolox 파라미터 {key}는 불리언이어야 합니다 (받은 값 {value!r}). "
+            f"--param {key}=true 또는 {key}=false로 쓴다"
+        )
+    return value
+
+
 def settings(policy: YoloxTrainingPolicy, params: Mapping[str, Any], gpu: bool) -> Settings:
     """정책 yolox 절 + 과제 params → 설정.
 
     Raises:
-        YoloxTrainingError: 모르는 param, GPU가 없는데 CPU 허용이 없을 때.
+        YoloxTrainingError: 모르는 param, 불리언이 아닌 allow_cpu·fp16, GPU가 없는데 CPU 허용이
+            없을 때.
     """
     unknown = sorted(set(params) - PARAM_KEYS - _LOOP_KEYS - {"jitter_px"})
     if unknown:
@@ -165,6 +184,7 @@ def settings(policy: YoloxTrainingPolicy, params: Mapping[str, Any], gpu: bool) 
             f"yolox 학습기가 모르는 파라미터: {unknown} (허용 {sorted(PARAM_KEYS)})"
         )
     p = dict(params)
+    allow_cpu = _flag(p, "allow_cpu", False)  # GPU가 있어도 형식은 먼저 본다
     max_iters = int(p["max_iters"]) if p.get("max_iters") is not None else None
     s = Settings(
         base_model=str(p.get("base_model", policy.base_model)),
@@ -173,7 +193,7 @@ def settings(policy: YoloxTrainingPolicy, params: Mapping[str, Any], gpu: bool) 
         batch_size=int(p.get("batch_size", policy.batch_size)),
         lr_per_img=float(p.get("lr_per_img", policy.lr_per_img)),
         warmup_iters=int(p.get("warmup_iters", policy.warmup_iters)),
-        fp16=bool(p.get("fp16", policy.fp16)),
+        fp16=_flag(p, "fp16", policy.fp16),
         seed=int(p.get("seed", policy.seed)),
         max_iters=max_iters,
         device="cuda",
@@ -182,7 +202,7 @@ def settings(policy: YoloxTrainingPolicy, params: Mapping[str, Any], gpu: bool) 
     if gpu:
         return s
     cpu = policy.cpu
-    if not (cpu.allowed or bool(p.get("allow_cpu", False))):
+    if not (cpu.allowed or allow_cpu):
         raise YoloxTrainingError(
             "GPU(nvidia-smi)가 없습니다. YOLOX 학습은 GPU 학습 서버에서 돌린다. "
             f"CPU 스모크(매우 느림, epoch {cpu.max_epochs}·반복 {cpu.max_iters} 상한)는 "

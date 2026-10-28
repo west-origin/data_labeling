@@ -55,13 +55,15 @@
 - `packages/schema/` (`dlp_schema`) — 계약 타입, 온톨로지 로더·검증, 이관, 설정 로더, DB 테이블·마이그레이션·저장소.
   테스트용 객체는 `dlp_schema.testing`을 쓴다. 온톨로지 이관은 라벨 참조(`labels.LABEL_REF_FIELDS`)를 같은 배치의 새 ID로
   바꾼다 (F-SCH-29). 추가 전용 기록이 있으면 오래된 리비전(0005·0009·0011·0012)의 downgrade도 거부한다.
+  `record_review`는 라벨의 세션 행을 잠근다(여러 세션이면 호출자가 세션 ID 순서로 먼저 잠근다, F-SCH-31).
 - `packages/fixtures/` (`dlp_fixtures`) — 정답을 아는 합성 데이터: 가짜 세션, 오프셋·드리프트를 아는 동기화 신호와
   QR 슬레이트 MP4, 위치를 아는 블러 대상 VFR 영상, 경계를 아는 행동 시퀀스(손 키포인트·장갑 압력·정답 라벨).
   알고리즘 모듈의 테스트는 이 생성기로 작성하고, 생성기 출력의 정답을 기준으로 판정한다.
 - `packages/media/` (`dlp_media`) — 세션 수집: 원본 저장소(불변, 멱등), PTS 인덱스, 프록시, IMU 추출기(GPMF·사이드카),
   장갑 Parquet·HDF5 정규화. `dlp ingest <매니페스트>`로 실행한다. 수집은 업로드 전에 스트림끼리 저장소 키가 겹치는지 보고(`planned_keys`),
   원본 불변 업로드는 키가 없을 때만 원자적으로 쓴다(LocalStore 배타 링크, S3 `If-None-Match: *`, F-PMS-40).
-  `dlp calib intrinsics`는 표시 회전 태그 영상을 거부한다 (`dlp media prepare` 안내).
+  `dlp calib intrinsics`는 표시 회전 태그 영상을 거부한다 (`dlp media prepare` 안내). PTS 인덱스는 컨테이너가 버림 표시한
+  패킷(편집 목록 밖)을 넣지 않고, 그래도 첫 PTS가 음수면 수집이 업로드 전에 거부한다 (F-PMS-42).
   카메라 내부 파라미터 등록(`dlp_media.calibration`, ADR 0045): 세션 값 → 기기(`calibration.camera_id`) 등록값
   (`camera_calibrations`, 추가만) → 화각 근사 순으로 고른다. 작업자 손 크기 사전값은 `worker_hand_sizes`(추가만).
   수집 뒤 세션 → 기기 연결은 `session_camera_assignments`(추가만, `dlp calib assign`, 매니페스트 camera_id가 앞선다).
@@ -165,6 +167,7 @@
   프레임과 라벨 맥락으로 라벨마다 ok·suspect·wrong·unsure와 이유·제안을 낸다. 참고용 판정만 추가 전용 `ai_review_*` 표에
   쓴다(멱등·재개, 세션 잠금). CPU·CI는 `OracleJudge`·`FakeOpenAIServer`. 골든셋 평가(`evaluate`: 교란·이력, DB에 쓰지 않음,
   게이트 실패는 기본 경고만). `dlp aireview run|status|show|waive|estimate|bench|probe|eval`.
+  응답 파싱은 pydantic strict다(번호는 JSON 정수만, 확신도는 JSON 수만, F-AIR-36).
   정책은 `config/policies/aireview.yaml`.
 - `packages/evaluation/` (`dlp_eval`) — 지표 라이브러리(mAP·HOTA·IDF1·PCK·접촉·구간 F1·temporal mAP·ECE 등, 참조 구현과 일치 테스트),
   골든셋 평가 하네스, 하위 집단 리포트, 배포 게이트, 정답 없는 대리 지표 `dlp_eval.proxy`(`dlp ops quality-proxy <세션>`,
@@ -205,6 +208,7 @@
   출처·접촉 객체 클래스 특징을 싣는다. 페이로드의 라벨 ID 필드(`pseudonym.LABEL_REF_FIELDS`, 예: `derived_from`)도 라벨
   가명이 된다. 손 부위 설정은 내보내기 시작 때 hand_joints와 대조한다 (ADR 0053).
   COCO `wearer_arm` 범주, LeRobot `annotation.wearer_arm`(arm3 2D + 팔꿈치 3D, ADR 0058).
+  리타기팅이 버린 에피소드 보고에는 세션 가명을 싣지 않는다 (`session_id: null`, F-COE-76).
   COCO에 마스크 `segmentation`(압축 RLE)·`mask_score`·`hand`, 객체 hand 범주가 손 키포인트 범주를 겸한다 (ADR 0059).
 - `packages/ops/` (`dlp_ops`) — 운영 대시보드와 보안: 주간 운영 지표(검수 시간·수정률·자동 승인율·편향·발견율·
   잔여 블러 누락·원가, AI 1차 검수 절: 백로그·fallback·캐시 적중·장비 시간·ok 놓침 상한)와 경고, 원본 접근 월간 감사

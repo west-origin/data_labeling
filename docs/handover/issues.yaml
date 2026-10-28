@@ -975,30 +975,30 @@ issues:
   - {id: F-COE-79, title: "콘솔을 SIGTERM으로 끄면 자식 dlp는 남는데 재시작한 콘솔이 같은 잠금의 새 작업을 받음", severity: medium, status: fixed, kind: code,
      files: [packages/console/src/dlp_console/jobs.py], source: docs/handover/full-inspection-2026-10-28.md,
      note: "자식 dlp를 새 프로세스 그룹으로 띄우고 spawned 사건에 pid·pgid를 남긴다. 콘솔 종료(lifespan) 때 그룹을 멈추고, 재시작 때 살아 있는 그룹은 adopted로 잠금을 유지한다(console.yaml jobs). SIGKILL로 죽은 콘솔의 자식은 남지만 다음 시작이 맡는다. 회귀: packages/console/tests/test_jobs.py::test_sigterm_console_keeps_lock_while_orphan_child_runs"}
-  - {id: F-SCH-30, title: "update_assignment가 계약 밖 값(status·assignee·시간대 없는 시각)을 저장해 list_assignments 전체가 실패", severity: low, status: open, kind: code,
+  - {id: F-SCH-30, title: "update_assignment가 계약 밖 값(status·assignee·시간대 없는 시각)을 저장해 list_assignments 전체가 실패", severity: low, status: fixed, kind: code,
      files: [packages/schema/src/dlp_schema/db/review_repository.py], source: docs/handover/full-inspection-2026-10-28.md, see: [F-SCH-12],
-     repro: tests/test_known_defects.py::test_update_assignment_rejects_unknown_status}
-  - {id: F-SCH-31, title: "record_review가 세션을 잠그지 않아 저장 검증의 보호를 동시 트랜잭션이 뚫음 (지금 호출자는 모두 잠금 아래)", severity: low, status: open, kind: code,
+     note: "지금 행에 바꿀 값을 얹어 ReviewAssignment로 다시 검증한 값만 쓴다. 회귀: packages/schema/tests/test_db.py::test_update_assignment_validates_contract 회귀: tests/test_known_defects.py::test_update_assignment_rejects_unknown_status(xfail 표시 지움)"}
+  - {id: F-SCH-31, title: "record_review가 세션을 잠그지 않아 저장 검증의 보호를 동시 트랜잭션이 뚫음 (지금 호출자는 모두 잠금 아래)", severity: low, status: fixed, kind: code,
      files: [packages/schema/src/dlp_schema/db/repository.py], source: docs/handover/full-inspection-2026-10-28.md,
-     note: "두 트랜잭션 경합이라 서비스 없는 재현이 없다. 재현 절차는 보고서(T1 insert_labels 삭제 레코드 커밋 전 T2 record_review 커밋). 호출자 잠금 요구를 계약에 밝히거나 record_review가 세션 행을 잠근다."}
-  - {id: F-SCH-32, title: "Rle 음수 크기·쿼터니언 일부만 있는 3D 표본이 계약을 통과", severity: low, status: open, kind: code,
+     note: "record_review가 라벨의 세션 행을 lock_session으로 잠근다(같은 트랜잭션 재진입은 기다리지 않음, 여러 세션이면 호출자가 ID 순서로 먼저 잠근다). 반대 순서(삭제가 먼저 커밋)는 막지 않는다. 회귀: packages/schema/tests/test_protected_retraction.py::test_concurrent_review_blocks_stale_retraction — 두 트랜잭션 경합이라 서비스 없는 재현이 없다. 재현 절차는 보고서(T1 insert_labels 삭제 레코드 커밋 전 T2 record_review 커밋). 호출자 잠금 요구를 계약에 밝히거나 record_review가 세션 행을 잠근다."}
+  - {id: F-SCH-32, title: "Rle 음수 크기·쿼터니언 일부만 있는 3D 표본이 계약을 통과", severity: low, status: fixed, kind: code,
      files: [packages/schema/src/dlp_schema/labels.py], source: docs/handover/full-inspection-2026-10-28.md,
-     repro: tests/test_known_defects.py::test_contract_rejects_negative_rle_and_partial_quaternion}
-  - {id: F-PMS-42, title: "편집 목록으로 첫 PTS가 음수인 MP4가 경고 없이 수집되고 그 프레임은 디코드되지 않음 (prepare로도 못 고침)", severity: low, status: open, kind: code,
+     note: "Rle size 두 성분 gt=0(schemas 4개 재생성), Trajectory3DSample 쿼터니언은 넷 다 있거나 다 없어야 한다. 회귀: tests/test_known_defects.py::test_contract_rejects_negative_rle_and_partial_quaternion(xfail 표시 지움)"}
+  - {id: F-PMS-42, title: "편집 목록으로 첫 PTS가 음수인 MP4가 경고 없이 수집되고 그 프레임은 디코드되지 않음 (prepare로도 못 고침)", severity: low, status: fixed, kind: code,
      files: [packages/media/src/dlp_media/pts.py], source: docs/handover/full-inspection-2026-10-28.md,
-     note: "재현은 ffmpeg -itsoffset -0.5 ... -avoid_negative_ts disabled로 만든 영상이 필요해 xfail로 두지 않았다. 수집이 거부하거나 prepare가 편집 목록을 정규화해야 한다."}
-  - {id: F-PMS-43, title: "자이로 없는 GPMF 기종은 정지로 시작해도 no_still_start 경고", severity: low, status: open, kind: code,
+     note: "PTS 인덱스가 컨테이너가 버림 표시한 패킷(편집 목록 밖)을 넣지 않아 디코더와 같다. 그래도 첫 PTS가 음수면 수집이 업로드 전에 거부한다. 회귀: packages/media/tests/test_pts_proxy.py::test_pts_index_skips_edit_list_discarded_packets — 재현은 ffmpeg -itsoffset -0.5 ... -avoid_negative_ts disabled로 만든 영상이 필요해 xfail로 두지 않았다. 수집이 거부하거나 prepare가 편집 목록을 정규화해야 한다."}
+  - {id: F-PMS-43, title: "자이로 없는 GPMF 기종은 정지로 시작해도 no_still_start 경고", severity: low, status: fixed, kind: code,
      files: [packages/media/src/dlp_media/capture_check.py], source: docs/handover/full-inspection-2026-10-28.md,
-     repro: tests/test_known_defects.py::test_capture_check_no_gyro_does_not_claim_motion}
-  - {id: F-PMS-44, title: "decode_rle가 음수 길이 RLE를 오류 없이 받음", severity: low, status: open, kind: code,
+     note: "_still이 채널마다 유한한 표본만 보고, 유한 표본이 2개 미만인 채널로는 움직임을 주장하지 않는다. 회귀: tests/test_known_defects.py::test_capture_check_no_gyro_does_not_claim_motion(xfail 표시 지움)"}
+  - {id: F-PMS-44, title: "decode_rle가 음수 길이 RLE를 오류 없이 받음", severity: low, status: fixed, kind: code,
      files: [packages/media/src/dlp_media/rle.py], source: docs/handover/full-inspection-2026-10-28.md,
-     repro: tests/test_known_defects.py::test_decode_rle_rejects_negative_run}
-  - {id: F-PMS-46, title: "short_flicker 블러 힌트가 hold 때문에 절대 붙지 않음", severity: low, status: open, kind: code,
+     note: "음수 길이가 있으면 위치를 밝혀 ValueError. 회귀: tests/test_known_defects.py::test_decode_rle_rejects_negative_run(xfail 표시 지움)"}
+  - {id: F-PMS-46, title: "short_flicker 블러 힌트가 hold 때문에 절대 붙지 않음", severity: low, status: fixed, kind: code,
      files: [packages/privacy/src/dlp_privacy/hints.py], source: docs/handover/full-inspection-2026-10-28.md,
-     repro: tests/test_known_defects.py::test_short_flicker_hint_for_single_frame_detection}
-  - {id: F-PMS-47, title: "on_hand 블러 힌트가 보이지 않는(visibility 0) 관절 좌표를 씀", severity: low, status: open, kind: code,
+     note: "short_flicker는 화면 안 키프레임 길이에서 모델 트랙의 앞뒤 탐지 유지(2 x blur_hold_ms, load_policy가 defaults.yaml에서 채움)를 뺀 관측 길이로 본다. 회귀: tests/test_known_defects.py::test_short_flicker_hint_for_single_frame_detection(xfail 표시 지움)"}
+  - {id: F-PMS-47, title: "on_hand 블러 힌트가 보이지 않는(visibility 0) 관절 좌표를 씀", severity: low, status: fixed, kind: code,
      files: [packages/privacy/src/dlp_privacy/hints.py], source: docs/handover/full-inspection-2026-10-28.md,
-     repro: tests/test_known_defects.py::test_on_hand_hint_ignores_invisible_joints}
+     note: "on_hand 손 박스는 visibility > 0 관절만 쓴다. 회귀: tests/test_known_defects.py::test_on_hand_hint_ignores_invisible_joints(xfail 표시 지움)"}
   - {id: F-PAR-75, title: "결과 0개인 예측기·마스크 단계가 매 실행 원본을 받아 다시 돎 (멱등 깨짐)", severity: low, status: open, kind: code,
      files: [packages/prelabel/src/dlp_prelabel/runner.py], source: docs/handover/full-inspection-2026-10-28.md,
      repro: tests/test_known_defects.py::test_prelabel_empty_predictor_is_idempotent}
@@ -1011,24 +1011,24 @@ issues:
   - {id: F-PAR-79, title: "긴 세션 ID에서 3D·월드 라벨 ID가 128자를 넘어 프리라벨 전체가 롤백", severity: low, status: open, kind: code,
      files: [packages/prelabel/src/dlp_prelabel/lift3d.py, packages/prelabel/src/dlp_prelabel/worldframe.py], source: docs/handover/full-inspection-2026-10-28.md,
      repro: tests/test_known_defects.py::test_lift3d_label_ids_fit_identifier}
-  - {id: F-REV-35, title: "같은 내용으로 새로 그린 구간 둘이 같은 라벨 ID를 받아 수집이 IntegrityError", severity: low, status: open, kind: code,
+  - {id: F-REV-35, title: "같은 내용으로 새로 그린 구간 둘이 같은 라벨 ID를 받아 수집이 IntegrityError", severity: low, status: fixed, kind: code,
      files: [packages/review/src/dlp_review/reconcile.py], source: docs/handover/full-inspection-2026-10-28.md, see: [F-REV-10],
-     repro: tests/test_known_defects.py::test_new_ls_regions_with_same_content_get_distinct_ids}
-  - {id: F-AIR-36, title: "AI 판정 ok 번호에 JSON true·\"2\"·3.0을 정수로 받아 ok로 기록", severity: low, status: open, kind: code,
+     note: "새로 그린 항목(parent 없음)만 해시 입력에 도구 영역 ID와 같은 (영역, 내용)의 등장 순번을 넣는다(첫 등장·영역 ID 없음이면 예전 ID 그대로, 재수집 멱등). 회귀: tests/test_known_defects.py::test_new_ls_regions_with_same_content_get_distinct_ids(xfail 표시 지움)"}
+  - {id: F-AIR-36, title: "AI 판정 ok 번호에 JSON true·\"2\"·3.0을 정수로 받아 ok로 기록", severity: low, status: fixed, kind: code,
      files: [packages/aireview/src/dlp_aireview/validate.py], source: docs/handover/full-inspection-2026-10-28.md,
-     repro: tests/test_known_defects.py::test_ai_ok_numbers_must_be_json_integers}
+     note: "응답 파싱 모델을 pydantic strict로(번호는 JSON 정수만, 확신도는 JSON 수만). 형이 틀리면 구조 위반으로 재시도. 회귀: tests/test_known_defects.py::test_ai_ok_numbers_must_be_json_integers(xfail 표시 지움)"}
   - {id: F-ETA-23, title: "base_weights 데이터셋 위반 필터(startswith)가 출발 가중치 계보 위반을 놓침", severity: low, status: fixed, kind: code,
      files: [packages/training/src/dlp_train/yolox.py], source: docs/handover/full-inspection-2026-10-28.md,
      note: "F-ETA-22와 같은 base_lineage_problems로 고침. 회귀: tests/test_known_defects.py::test_yolox_base_weights_checks_whole_lineage(xfail 표시 지움)"}
-  - {id: F-ETA-24, title: "--param allow_cpu=False(문자열)·no가 CPU 학습을 허용, fp16=False가 참", severity: low, status: open, kind: code,
+  - {id: F-ETA-24, title: "--param allow_cpu=False(문자열)·no가 CPU 학습을 허용, fp16=False가 참", severity: low, status: fixed, kind: code,
      files: [packages/training/src/dlp_train/yolox.py, packages/cli/src/dlp_cli/train_cmds.py], source: docs/handover/full-inspection-2026-10-28.md,
-     repro: tests/test_known_defects.py::test_yolox_settings_reject_string_booleans}
-  - {id: F-ETA-25, title: "증강 좌우 뒤집기가 3D <손>_arm 개체와 손 마스크 키의 좌우를 바꾸지 않음", severity: low, status: open, kind: code,
+     note: "_flag가 불리언이 아닌 allow_cpu·fp16을 YoloxTrainingError로 거절한다. 회귀: tests/test_known_defects.py::test_yolox_settings_reject_string_booleans(xfail 표시 지움)"}
+  - {id: F-ETA-25, title: "증강 좌우 뒤집기가 3D <손>_arm 개체와 손 마스크 키의 좌우를 바꾸지 않음", severity: low, status: fixed, kind: code,
      files: [packages/training/src/dlp_train/augment.py], source: docs/handover/full-inspection-2026-10-28.md,
-     repro: tests/test_known_defects.py::test_augment_hflip_swaps_arm_and_mask_hands}
-  - {id: F-COE-76, title: "리타기팅에서 빠진 에피소드의 세션 가명이 구매자 파일에 있으나 대응표·이력·계보에 없음", severity: low, status: open, kind: code,
+     note: "_swap_side가 left|right + _hand|_arm 이름을 3D 개체와 마스크 키 모두에서 바꾼다. 회귀: tests/test_known_defects.py::test_augment_hflip_swaps_arm_and_mask_hands(xfail 표시 지움)"}
+  - {id: F-COE-76, title: "리타기팅에서 빠진 에피소드의 세션 가명이 구매자 파일에 있으나 대응표·이력·계보에 없음", severity: low, status: fixed, kind: code,
      files: [packages/export/src/dlp_export/runner.py], source: docs/handover/full-inspection-2026-10-28.md,
-     note: "재현은 내보내기 종단(pg 픽스처)이 필요해 xfail로 두지 않았다. services 시험으로 export 패키지에 둔다."}
+     note: "리타기팅이 버린 에피소드 보고에 세션 가명을 싣지 않는다(session_id null, 대응표·이력·계보는 실제로 받은 세션만). ADR 0047 개정. 회귀: packages/export/tests/test_runner.py::test_lerobot_robot_dropped_episode_pseudonym_not_published — 재현은 내보내기 종단(pg 픽스처)이 필요해 xfail로 두지 않았다. services 시험으로 export 패키지에 둔다."}
   - {id: F-COE-80, title: "업로드 사본 삭제가 세션 ID 끝 공백으로 실행 중 검사를 우회해 수집 중 사본이 지워짐", severity: low, status: fixed, kind: code,
      files: [packages/console/src/dlp_console/app.py, packages/console/src/dlp_console/upload.py], source: docs/handover/full-inspection-2026-10-28.md,
      note: "검사와 삭제가 같은 정규화 ID(_ident)를 쓴다. 회귀: tests/test_known_defects.py::test_console_delete_upload_blocks_running_session_with_trailing_space(xfail 표시 지움)"}

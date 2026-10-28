@@ -64,9 +64,16 @@ def encode_rle(mask: NDArray[np.bool_]) -> Rle:
 
 
 def decode_rle(rle: Rle) -> NDArray[np.bool_]:
-    """Rle → (높이, 너비) 불리언 마스크. 길이 합이 크기와 다르면 ValueError."""
+    """Rle → (높이, 너비) 불리언 마스크.
+
+    Raises:
+        ValueError: 길이 중 음수가 있거나(손상된 문자열, F-PMS-44) 길이 합이 크기와 다를 때.
+    """
     h, w = rle.size
     counts = _string_to_counts(rle.counts)
+    bad = next((i for i, n in enumerate(counts) if n < 0), None)
+    if bad is not None:
+        raise ValueError(f"RLE {bad}번째 길이가 음수 {counts[bad]}")
     if sum(counts) != h * w:
         raise ValueError(f"RLE 길이 합 {sum(counts)} != {h}x{w}")
     flat = np.zeros(h * w, dtype=bool)

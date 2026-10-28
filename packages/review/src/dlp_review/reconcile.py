@@ -49,6 +49,9 @@ class ReviewedItem:
     t_end_ms: int
     # 라벨 내용 (종류별 페이로드)
     payload: LabelPayload
+    # 도구 쪽 영역·트랙 ID (Label Studio 결과 id 등, 원래 라벨이 아닐 때도 남김). 새로 그린 항목의
+    # ID 해시 구분자로만 쓴다 (F-REV-35). 모르면 None
+    tool_region_id: str | None = None
 
 
 @dataclass
@@ -207,6 +210,9 @@ def reconcile(
     )
     outcome = ReviewOutcome()
     seen: set[str] = set()
+    # 새로 그린 항목의 (도구 영역 ID, 내용)별 등장 횟수
+    # (F-REV-35: 같은 내용을 두 번 그려도 ID가 갈린다)
+    drawn: dict[str, int] = {}
 
     def record(
         item: ReviewedItem, parent: LabelRecord | None, *, retracted: bool = False
@@ -232,6 +238,15 @@ def reconcile(
             sort_keys=True,
         )
         base = parent.label_id if parent else f"{session_id}-h"
+        if parent is None:
+            # 새로 그린 항목은 같은 내용이 둘일 수 있다 (F-REV-35). 도구 영역 ID와
+            # 같은 (영역 ID, 내용)의 등장 순번을 해시에 넣는다. 같은 입력을 다시 수집하면
+            # 순서가 같아 같은 ID다(멱등). 영역 ID가 없고 첫 등장이면 예전과 같은 해시 입력이다
+            key = json.dumps([item.tool_region_id, content])
+            nth = drawn.get(key, 0)
+            drawn[key] = nth + 1
+            if item.tool_region_id is not None or nth:
+                content = json.dumps([content, item.tool_region_id, nth])
         return LabelRecord(
             label_id=_new_id(base, reviewer_id, now, content),
             session_id=session_id,

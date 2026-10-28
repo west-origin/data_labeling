@@ -11,6 +11,7 @@ import os
 import uuid
 from collections.abc import Callable, Iterator
 from datetime import datetime, timedelta, timezone
+from fractions import Fraction
 from pathlib import Path
 
 import numpy as np
@@ -173,6 +174,31 @@ def test_recorded_at_required_when_container_has_none(
     manifest, base = load_manifest(write_manifest(tmp_path, sync[1], recorded_at=None))
     with pytest.raises(ValueError, match="recorded_at"):
         ingest_session(manifest, base, LocalStore(tmp_path / "store", "dlp-raw"))
+
+
+def test_ingest_rejects_negative_first_pts_before_upload(
+    sync: tuple[SyncScenario, Path],
+    tmp_path: Path,
+    write_manifest: ManifestWriter,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """디코드되는 첫 프레임 시각이 음수인 영상은 업로드 전에 거부한다 (F-PMS-42).
+
+    편집 목록 밖 패킷은 인덱스가 이미 뺀다. 그래도 음수가 남은 경우를 인덱스 대체로 만든다:
+    공간 라벨 키프레임(0 이상 ms)이 그 프레임을 가리킬 수 없다.
+    정답: ValueError, 저장소는 비어 있다.
+    """
+    from dlp_media import ingest as ingest_module
+
+    def negative(_path: Path) -> PtsIndex:
+        return PtsIndex(Fraction(1, 1000), np.array([-50, 0, 50]), np.ones(3, dtype=bool))
+
+    monkeypatch.setattr(ingest_module, "build_pts_index", negative)
+    store = LocalStore(tmp_path / "store", "dlp-raw")
+    manifest, base = load_manifest(write_manifest(tmp_path, sync[1]))
+    with pytest.raises(ValueError, match="음수"):
+        ingest_session(manifest, base, store)
+    assert not any(p.is_file() for p in (tmp_path / "store").rglob("*"))
 
 
 def test_embedded_imu_becomes_shared_clock_stream(

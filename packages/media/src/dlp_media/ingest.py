@@ -62,7 +62,7 @@ from dlp_media.glove import read_glove
 from dlp_media.imu import ImuData, extract_embedded_imu, read_imu_table
 from dlp_media.probe import MediaInfo, probe, require_upright
 from dlp_media.proxy import make_proxy
-from dlp_media.pts import build_pts_index
+from dlp_media.pts import PtsIndex, build_pts_index
 from dlp_media.storage import ObjectStore, put_immutable
 from dlp_schema.common import Contract, Identifier, SemVer
 from dlp_schema.config import ProxyConfig, load_config, repo_root
@@ -144,6 +144,25 @@ class IngestResult:
     warnings: list[CaptureWarning] = field(default_factory=list[CaptureWarning])
 
 
+def _checked_index(src: Path) -> PtsIndex:
+    """영상의 PTS 인덱스. 디코드되는 첫 프레임 시각이 음수면 업로드 전에 거부한다 (F-PMS-42).
+
+    편집 목록 밖 패킷은 인덱스가 이미 뺀다(`build_pts_index`). 그래도 음수가 남으면 공간 라벨
+    키프레임 시각(0 이상 정수 ms)으로 그 프레임을 가리킬 수 없다.
+
+    Raises:
+        ValueError: 첫 프레임 PTS가 음수일 때.
+    """
+    index = build_pts_index(src)
+    if index.pts[0] < 0:
+        raise ValueError(
+            f"{src}: 첫 프레임 시각 {float(index.ms[0]):.1f} ms가 음수입니다. 원본을 보존하고 "
+            "첫 프레임 시각이 0 이상인 사본을 만들어 수집하세요 "
+            "(예: ffmpeg -i <원본> -c copy -avoid_negative_ts make_zero <사본>.mp4)."
+        )
+    return index
+
+
 def ingest_session(  # noqa: C901
     manifest: SessionManifest,
     base_dir: Path,
@@ -169,7 +188,7 @@ def ingest_session(  # noqa: C901
         바로 뒤에 들어간다.
 
     Raises:
-        ValueError: 바디캠이 하나가 아님, 비디오 트랙 없음/표시 회전 있음,
+        ValueError: 바디캠이 하나가 아님, 비디오 트랙 없음/표시 회전 있음/첫 PTS 음수(업로드 전),
             스트림 ID끼리 저장소 키가 겹침(`planned_keys`, 업로드 전),
             recorded_at을 정할 수 없음, 센서 파일 형식 오류.
         FileNotFoundError: 매니페스트의 파일이 없을 때.
@@ -192,6 +211,7 @@ def ingest_session(  # noqa: C901
     planned_keys(manifest, base_dir)
     # 잘못된 방향의 공간 라벨을 만들기 전에 전체 영상 입력을 확인한다. 실패 시 업로드하지 않는다.
     video_info: dict[str, MediaInfo] = {}
+    indexes: dict[str, PtsIndex] = {}
     for stream in manifest.streams:
         if stream.kind in VIDEO_KINDS:
             src = base_dir / stream.path
@@ -200,6 +220,7 @@ def ingest_session(  # noqa: C901
                 raise ValueError(f"{src}: 비디오 트랙이 없습니다")
             require_upright(info)
             video_info[stream.stream_id] = info
+            indexes[stream.stream_id] = _checked_index(src)
     result_uploaded: list[str] = []
     result_skipped: list[str] = []
 
@@ -240,7 +261,7 @@ def ingest_session(  # noqa: C901
             info = video_info[ms.stream_id]
             if info.video is None:
                 raise ValueError(f"{src}: 비디오 트랙이 없습니다")
-            index = build_pts_index(src)
+            index = indexes[ms.stream_id]
             pts_uri = derived(_pts_key(prefix, ms.stream_id), index.write)
             derived(
                 _proxy_key(prefix, ms.stream_id),

@@ -339,11 +339,6 @@ def test_same_tuple_direct_review_after_inheritance_is_protected() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=pytest.fail.Exception,
-    reason="F-SCH-30: update_assignment가 계약 밖 status 문자열을 저장해 list_assignments가 깨짐",
-)
 def test_update_assignment_rejects_unknown_status() -> None:
     """배정 상태는 `AssignmentStatus` 값만이다. 계약 밖 문자열은 쓰기 전에 거부해야 한다.
 
@@ -370,11 +365,6 @@ def test_update_assignment_rejects_unknown_status() -> None:
     engine.dispose()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=pytest.fail.Exception,
-    reason="F-SCH-32: Rle 음수 크기·쿼터니언 일부만 있는 3D 표본이 계약을 통과",
-)
 @pytest.mark.parametrize(
     "payload",
     [
@@ -399,11 +389,6 @@ def test_contract_rejects_negative_rle_and_partial_quaternion(payload: dict[str,
         make_label(payload, stream_id="bodycam")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="F-PMS-43: 자이로 없는(NaN) GPMF는 정지 시작이어도 no_still_start 경고",
-)
 def test_capture_check_no_gyro_does_not_claim_motion() -> None:
     """자이로 채널이 없는 기종(`imu_from_gpmf_payloads`가 NaN으로 채움)은 회전을 판단할 수 없다.
     가속도가 정지(중력만)면 "처음 1초가 정지가 아니다"라고 경고하면 안 된다.
@@ -422,11 +407,6 @@ def test_capture_check_no_gyro_does_not_claim_motion() -> None:
     assert "no_still_start" not in [w.code for w in imu_warnings(no_gyro, policy)]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=pytest.fail.Exception,
-    reason="F-PMS-44: decode_rle가 음수 길이 RLE를 받음",
-)
 def test_decode_rle_rejects_negative_run() -> None:
     """COCO 압축 RLE "3O2"는 길이 [3, -1, 2]다. 음수 길이는 손상된 입력이라 거부해야 한다
     (지금은 조용히 빈 마스크를 낸다).
@@ -440,11 +420,6 @@ def test_decode_rle_rejects_negative_run() -> None:
         decode_rle(Rle(size=(2, 2), counts="3O2"))
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="F-PMS-46: short_flicker 힌트가 hold 200 ms 때문에 붙지 않음",
-)
 def test_short_flicker_hint_for_single_frame_detection(tmp_path: Path) -> None:
     """한 프레임에서만 잡힌 얼굴 블러 트랙(깜박임)에는 short_flicker 힌트가 붙어야 한다.
 
@@ -477,11 +452,6 @@ def test_short_flicker_hint_for_single_frame_detection(tmp_path: Path) -> None:
     assert "short_flicker" in {h.reason for h in hints}
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="F-PMS-47: on_hand 힌트가 visibility 0 관절 좌표를 씀",
-)
 def test_on_hand_hint_ignores_invisible_joints() -> None:
     """visibility 0 관절은 좌표에 의미가 없다. (0, 0)에 놓인 보이지 않는 손끝 하나 때문에 손
     외접 박스가 화면 왼쪽 위까지 넓어져 먼 얼굴(10, 10, 30, 30)을 손 위로 보면 안 된다.
@@ -755,11 +725,6 @@ def test_lift3d_label_ids_fit_identifier(monkeypatch: pytest.MonkeyPatch) -> Non
     assert out and all(len(x.label_id) <= 128 for x in out)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="F-REV-35: 같은 내용으로 새로 그린 구간 둘이 같은 라벨 ID를 받음",
-)
 def test_new_ls_regions_with_same_content_get_distinct_ids() -> None:
     """검수자가 Label Studio에서 같은 시각·같은 이벤트를 두 번 새로 그렸으면(영역 ID aa1·bb2)
     reconcile은 새 레코드 둘에 서로 다른 라벨 ID를 줘야 한다.
@@ -788,11 +753,6 @@ def test_new_ls_regions_with_same_content_get_distinct_ids() -> None:
     assert len(set(ids)) == 2
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason='F-AIR-36: AI 판정 ok 번호에 JSON true·"2"·3.0을 정수로 받아 ok로 기록',
-)
 def test_ai_ok_numbers_must_be_json_integers() -> None:
     """응답 형식의 ok는 정수 번호 목록이다. true·false·"2"·3.0은 형식이 틀린 번호라 위반(또는
     파싱 실패)이고 어느 라벨도 ok로 기록하면 안 된다.
@@ -854,11 +814,6 @@ def test_yolox_base_weights_checks_whole_lineage(tmp_path: Path) -> None:
         yolox.base_weights(root, "top")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=pytest.fail.Exception,
-    reason="F-ETA-24: --param allow_cpu=False(문자열)·no가 CPU 학습을 허용, fp16=False→True",
-)
 def test_yolox_settings_reject_string_booleans() -> None:
     """`dlp train run --param allow_cpu=False`는 JSON 해석에 실패해 문자열 "False"가 된다.
     문자열을 참으로 보아 GPU 없는 컴퓨터에서 CPU 학습을 허용하면 안 된다 (거절이 정답).
@@ -881,11 +836,6 @@ def test_yolox_settings_reject_string_booleans() -> None:
     assert fp16 is False
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="F-ETA-25: 증강 좌우 뒤집기가 3D <손>_arm 개체와 손 마스크 키를 바꾸지 않음",
-)
 def test_augment_hflip_swaps_arm_and_mask_hands() -> None:
     """좌우 뒤집기는 왼손을 오른손으로 바꾼다. 3D 손(`left_hand`)·2D 팔(arm3 left)은 바뀌는데
     3D 팔꿈치 개체 `left_arm`과 손 마스크 키 `left_hand`도 함께 바뀌어야 한다.

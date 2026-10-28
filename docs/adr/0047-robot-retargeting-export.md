@@ -125,3 +125,12 @@
   맞추지 못한다(롤은 맞춘다, ADR 0053). 배율·배치는 운영 결정이다.
   SO-101 그리퍼 열림 방향(closed 0, open 1.5 rad)은 공개 모델 문서에 정의가 없어 근사다.
 - 운영 절차: `docs/handover/robot-retargeting.md`.
+
+## 개정 (2026-10-28)
+
+- 리타기팅 정책이 버린 에피소드(`decision: drop`)의 보고(`meta/dlp_retarget.json`, manifest
+  `details.retarget.episodes`)에는 세션 가명을 싣지 않는다 (`session_id: null`, `episode_index: null`, F-COE-76).
+  그 세션은 결과에 들어가지 않아 내부 대응표·내보내기 이력(`exports.session_ids`)·계보에 없다. 가명을 실으면
+  구매자는 받지 않은 세션의 식별자를 갖게 되고, 사용 중지 때 그 가명을 되짚어 알릴 수 없다. 대응표·이력에
+  넣는 쪽은 받지 않은 세션까지 사용 중지 대상 내보내기로 만들어 택하지 않았다. 보고의 도달 통계와 결정은
+  그대로 남는다 (버린 에피소드 수와 이유는 구매자도 본다).
