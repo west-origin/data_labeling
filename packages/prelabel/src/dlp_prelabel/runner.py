@@ -154,7 +154,8 @@ CONTACT_PREFIX = "contact-heuristic-1"
 WEARER_PREFIX = "wearer-xcorr-1"
 # 카메라 자세(POSE_PREFIX-<추정기 판>)·월드 좌표(WORLD_PREFIX) 단계 버전 접두사 (ADR 0046)
 POSE_PREFIX = "campose"
-WORLD_PREFIX = "world3d-1"
+# world3d-2: 월드 표본이 카메라 좌표 표본의 물리 제약 표시(flags)를 물려받는다 (F-PAR-78)
+WORLD_PREFIX = "world3d-2"
 # 자세 입력이 더는 성립하지 않아(IMU 동기화 해제·외부 파라미터 없음·입력 변경) 이전 자세를 지울 때
 # 삭제 레코드에 남기는 model_version (어떤 자세 버전과도 같지 않아 다음 실행이 새로 만든다,
 # F-PAR-56)

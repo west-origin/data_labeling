@@ -16,7 +16,7 @@ from numpy.typing import NDArray
 
 from dlp_fixtures.video import write_video
 from dlp_models.depth import Intrinsics
-from dlp_prelabel.common import Image, model_label
+from dlp_prelabel.common import Image, fit_label_id, model_label
 from dlp_prelabel.lift3d import DepthLifter, intrinsics_for, lift_tracks
 from dlp_prelabel.policy import PrelabelPolicy, load_policy
 from dlp_prelabel.runner import pick_lift_tracks
@@ -266,3 +266,23 @@ def test_coexisting_hand_versions_lift_from_the_reviewed_track(tmp_path: Path) -
         assert {(s.x, s.z) for s in x.payload.samples} == {(-0.5, 1.0)}
         # 올린 2D 트랙이 출처로 남는다 (3D가 그 트랙의 검수를 물려받는 근거, ADR 0048)
         assert x.payload.derived_from == ("left-v1",)
+
+
+def test_fit_label_id_keeps_short_ids_and_stage_prefix() -> None:
+    """짧은 ID는 그대로(재실행 멱등), 긴 ID는 128자 안·단계 접두사 유지·결정적·구별 (F-PAR-79)."""
+    short = fit_label_id("s1-bodycam-3d-", "abcd1234-right_hand-wrist")
+    assert short == "s1-bodycam-3d-abcd1234-right_hand-wrist"
+    prefix = f"{'S' * 100}-bodycam-3d-"
+    a = fit_label_id(prefix, "abcd1234-right_hand-index_tip")
+    b = fit_label_id(prefix, "abcd1234-right_hand-thumb_tip")
+    assert len(a) <= 128 and len(b) <= 128
+    assert a.startswith(prefix) and b.startswith(prefix)
+    assert a != b
+    assert a == fit_label_id(prefix, "abcd1234-right_hand-index_tip")
+    # 2D 손 ID(`<세션>-bodycam-hands-<태그 8자>-right`)가 128자 안인 가장 긴 세션 ID에서도 월드
+    # 접두사 뒤에 줄인 해시가 들어간다
+    sid = "S" * (128 - len("-bodycam-hands-abcd1234-right"))
+    world = fit_label_id(f"{sid}-bodycam-world3d-", "abcd1234-right_hand-wrist")
+    assert len(world) <= 128 and world.startswith(f"{sid}-bodycam-world3d-h")
+    with pytest.raises(ValueError, match="접두사"):
+        fit_label_id("S" * 120 + "-3d-", "abcd1234-right_hand-wrist")

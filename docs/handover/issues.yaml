@@ -891,10 +891,9 @@ issues:
   - {id: F-PMS-38, title: "test_rerender_repairs_damaged_release[invalid-json]이 전체 make check에서 한 번 실패(다시 렌더한 블러본 바이트가 원본과 다름), 단독·privacy 묶음 재실행은 통과", severity: low, status: candidate, kind: test,
      files: [packages/privacy/tests/test_render_recovery.py, packages/privacy/src/dlp_privacy/render.py], source: docs/handover/comment-review-2026-10-26.md,
      note: "2026-10-26 주석 검수 반영 뒤 make check(15분, 디스크 89%)에서 1회. 이 변경은 렌더를 건드리지 않았다. 재렌더 바이트 동일성을 전제하는 시험이라 부하 중 인코더 스레드 수에 따라 비결정적일 수 있다. 재현되면 바이트 대신 프레임 해시로 비교하거나 인코더 threads를 고정한다."}
-  - {id: F-PAR-73, title: "MediaPipe 객체·OWLv2 도구 어댑터가 wearer_suppression.stages에 자기 단계가 없어도 착용자 억제를 하고 버전 태그만 빠짐 (RtmPose만 stages를 확인)", severity: low, status: open, kind: code,
+  - {id: F-PAR-73, title: "MediaPipe 객체·OWLv2 도구 어댑터가 wearer_suppression.stages에 자기 단계가 없어도 착용자 억제를 하고 버전 태그만 빠짐 (RtmPose만 stages를 확인)", severity: low, status: fixed, kind: code,
      files: [packages/prelabel/src/dlp_prelabel/adapters/owl_objects.py, packages/prelabel/src/dlp_prelabel/adapters/mediapipe_models.py, packages/prelabel/src/dlp_prelabel/wearer_suppress.py], source: docs/adr/0058-wearer-arm-skeleton-and-wearer-body-suppression.md, see: [F-PAR-67],
-     repro: tests/test_known_defects.py::test_wearer_suppression_respects_stages,
-     note: "2026-10-28 전수 검사에서 재현(open). 2026-10-26 고정 클래스 도구 단계(closed_tools, ADR 0060)를 붙이며 발견. 지금 기본값은 세 단계 모두 stages에 있어 영향 없음. stages에서 objects·tools를 빼면 억제는 계속되는데 버전이 바뀌지 않아 억제 정책 변경 뒤 다시 돌지 않는다. suppress_box_tracks 호출 전에 stages를 확인하면 된다."}
+     note: "객체·OWLv2 어댑터가 self.name in wearer_suppression.stages일 때만 억제한다(yolox_tools와 같다). ADR 0058 개정. 회귀: tests/test_known_defects.py::test_wearer_suppression_respects_stages(xfail 표시 지움) — 2026-10-28 전수 검사에서 재현(open). 2026-10-26 고정 클래스 도구 단계(closed_tools, ADR 0060)를 붙이며 발견. 지금 기본값은 세 단계 모두 stages에 있어 영향 없음. stages에서 objects·tools를 빼면 억제는 계속되는데 버전이 바뀌지 않아 억제 정책 변경 뒤 다시 돌지 않는다. suppress_box_tracks 호출 전에 stages를 확인하면 된다."}
   - {id: F-COE-74, title: "외부에서 학습한 ONNX(ADR 0060 1단계)를 예측을 DB에 쓰지 않고 골든셋으로 평가하는 명령이 없어 운영 콘솔의 골든셋 비교 버튼이 꺼져 있음", severity: medium, status: open, kind: product,
      files: [packages/console/src/dlp_console/app.py, config/console.yaml, packages/cli/src/dlp_cli/eval_cmds.py, packages/training/src/dlp_train/trainers.py], source: docs/adr/0061-operator-console.md, see: [F-PAR-60],
      note: "dlp eval golden은 DB에 있는 예측만 평가하고, dlp train run은 학습기가 후보를 만들어야 골든셋 게이트에 건다. 2026-10-27 작업 중인 yolox 학습기(dlp_train.yolox)는 .pth 출발 가중치(base_model)를 우리 검수 박스로 다듬는 2단계 경로라, Colab에서 받은 ONNX를 그대로 평가하지 않는다. Colab 체크포인트(.pth)를 training_datasets·base_model과 함께 등록하면 compare.trainer: yolox, params: {base_model: <그 이름>}으로 학습 루프 게이트 비교가 된다(콘솔 가져오기는 지금 ONNX만 받는다). 가져온 ONNX 자체의 골든셋 평가(예측 DB 미기록)가 필요하면 평가 전용 명령이 필요하다. 주의: training.yaml objects.deploy가 auto라 게이트 통과가 곧 배포다(비교만 하려면 approve 또는 평가 전용 경로가 필요)."}
@@ -1002,15 +1001,15 @@ issues:
   - {id: F-PAR-75, title: "결과 0개인 예측기·마스크 단계가 매 실행 원본을 받아 다시 돎 (멱등 깨짐)", severity: low, status: open, kind: code,
      files: [packages/prelabel/src/dlp_prelabel/runner.py], source: docs/handover/full-inspection-2026-10-28.md,
      repro: tests/test_known_defects.py::test_prelabel_empty_predictor_is_idempotent}
-  - {id: F-PAR-76, title: "OWLv2 버전이 scene 절 전체를 해시해 VLM 시간 제한만 바꿔도 재실행", severity: low, status: open, kind: code,
+  - {id: F-PAR-76, title: "OWLv2 버전이 scene 절 전체를 해시해 VLM 시간 제한만 바꿔도 재실행", severity: low, status: fixed, kind: code,
      files: [packages/prelabel/src/dlp_prelabel/adapters/owl_objects.py], source: docs/handover/full-inspection-2026-10-28.md,
-     repro: tests/test_known_defects.py::test_owl_version_ignores_scene_timeout}
-  - {id: F-PAR-78, title: "월드 좌표 변환이 표본의 물리 제약 표시(flags)를 버림", severity: low, status: open, kind: code,
+     note: "OWLv2 버전은 open_vocab_objects 해시와 +sc<장면>만 쓴다(첫 실행 한 번 재실행). ADR 0055 개정. 회귀: tests/test_known_defects.py::test_owl_version_ignores_scene_timeout(xfail 표시 지움)"}
+  - {id: F-PAR-78, title: "월드 좌표 변환이 표본의 물리 제약 표시(flags)를 버림", severity: low, status: fixed, kind: code,
      files: [packages/prelabel/src/dlp_prelabel/worldframe.py], source: docs/handover/full-inspection-2026-10-28.md, see: [F-PAR-63],
-     repro: tests/test_known_defects.py::test_world_samples_keep_constraint_flags}
-  - {id: F-PAR-79, title: "긴 세션 ID에서 3D·월드 라벨 ID가 128자를 넘어 프리라벨 전체가 롤백", severity: low, status: open, kind: code,
+     note: "to_world_samples가 flags를 넘긴다. WORLD_PREFIX world3d-2(검수 전 월드 결과 재생성). ADR 0046 개정. 회귀: tests/test_known_defects.py::test_world_samples_keep_constraint_flags(xfail 표시 지움)"}
+  - {id: F-PAR-79, title: "긴 세션 ID에서 3D·월드 라벨 ID가 128자를 넘어 프리라벨 전체가 롤백", severity: low, status: fixed, kind: code,
      files: [packages/prelabel/src/dlp_prelabel/lift3d.py, packages/prelabel/src/dlp_prelabel/worldframe.py], source: docs/handover/full-inspection-2026-10-28.md,
-     repro: tests/test_known_defects.py::test_lift3d_label_ids_fit_identifier}
+     note: "fit_label_id가 128자를 넘는 3D·월드 ID를 단계 접두사를 지키고 해시로 줄인다(짧은 ID는 그대로). 회귀: packages/prelabel/tests/test_lift3d.py::test_fit_label_id_keeps_short_ids_and_stage_prefix 회귀: tests/test_known_defects.py::test_lift3d_label_ids_fit_identifier(xfail 표시 지움)"}
   - {id: F-REV-35, title: "같은 내용으로 새로 그린 구간 둘이 같은 라벨 ID를 받아 수집이 IntegrityError", severity: low, status: fixed, kind: code,
      files: [packages/review/src/dlp_review/reconcile.py], source: docs/handover/full-inspection-2026-10-28.md, see: [F-REV-10],
      note: "새로 그린 항목(parent 없음)만 해시 입력에 도구 영역 ID와 같은 (영역, 내용)의 등장 순번을 넣는다(첫 등장·영역 ID 없음이면 예전 ID 그대로, 재수집 멱등). 회귀: tests/test_known_defects.py::test_new_ls_regions_with_same_content_get_distinct_ids(xfail 표시 지움)"}

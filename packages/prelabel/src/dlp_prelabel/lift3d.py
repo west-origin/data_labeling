@@ -37,7 +37,7 @@ from numpy.typing import NDArray
 
 from dlp_models.depth import Intrinsics, MetricDepth, sample_depth
 from dlp_models.registry import resolve
-from dlp_prelabel.common import Image, iter_frames, model_label
+from dlp_prelabel.common import Image, fit_label_id, iter_frames, model_label
 from dlp_prelabel.constraints3d import constrain_arms, constrain_hands
 from dlp_prelabel.handfit import HandFit, fit_confidence, fit_hand, point_confidence
 from dlp_prelabel.policy import HAND21_JOINTS, DepthPolicy, PrelabelPolicy
@@ -512,7 +512,8 @@ class DepthLifter:
 
         Returns:
             (개체, 부위)마다 trajectory3d 라벨 하나. ID는
-            `<세션>-<스트림>-3d-<version_tag>-<개체>-<부위|center>`. 표본마다 방식·신뢰도를 싣고,
+            `<세션>-<스트림>-3d-<version_tag>-<개체>-<부위|center>` (128자를 넘으면
+            `common.fit_label_id`로 접두사 뒤를 해시로 줄인다). 표본마다 방식·신뢰도를 싣고,
             라벨 신뢰도는 표본 신뢰도의 평균(소수 셋째 자리)이다. `derived_from`은 그 개체를 올린
             입력 트랙의 라벨 ID 하나다 (ADR 0048: 손 3D가 그 2D 트랙의 검수를 물려받는 근거).
             DB에는 쓰지 않는다 (러너가 쓴다).
@@ -558,7 +559,9 @@ class DepthLifter:
             tag = version_tag(model_version)
             out.append(
                 model_label(
-                    label_id=f"{session_id}-{stream_id}-3d-{tag}-{entity}-{part or 'center'}",
+                    label_id=fit_label_id(
+                        f"{session_id}-{stream_id}-3d-", f"{tag}-{entity}-{part or 'center'}"
+                    ),
                     session_id=session_id,
                     stream_id=stream_id,
                     t_start_ms=ss[0].t_ms,

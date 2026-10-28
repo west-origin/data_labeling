@@ -22,7 +22,7 @@ from datetime import datetime
 import numpy as np
 
 from dlp_prelabel.campose import Mat3, PoseSample, Vec3
-from dlp_prelabel.common import model_label
+from dlp_prelabel.common import fit_label_id, model_label
 from dlp_prelabel.lift3d import mean_confidence
 from dlp_prelabel.posemath import slerp
 from dlp_schema.episode import version_tag
@@ -79,6 +79,8 @@ def to_world_samples(
                 z=round(float(xyz[2]), 4),
                 method=s.method,
                 confidence=round(conf, 3),
+                # 물리 제약 표시는 표본의 성질이라 좌표계를 바꿔도 남긴다 (F-PAR-78)
+                flags=s.flags,
             )
         )
     return out
@@ -95,7 +97,8 @@ def world_label(
 ) -> LabelRecord | None:
     """카메라 좌표 궤적 라벨 하나 → 월드 좌표 궤적 라벨 (바꾼 표본이 없으면 None).
 
-    ID: `<세션>-<스트림>-world3d-<version_tag>-<개체>-<부위|center>`.
+    ID: `<세션>-<스트림>-world3d-<version_tag>-<개체>-<부위|center>` (128자를 넘으면
+    `common.fit_label_id`로 접두사 뒤를 해시로 줄인다).
 
     Raises:
         ValueError: camera가 카메라 좌표 trajectory3d가 아닐 때.
@@ -117,9 +120,9 @@ def world_label(
     )
     stream = camera.stream_id or ""
     return model_label(
-        label_id=(
-            f"{camera.session_id}-{stream}-world3d-{version_tag(version)}-"
-            f"{p.entity_id}-{p.part or 'center'}"
+        label_id=fit_label_id(
+            f"{camera.session_id}-{stream}-world3d-",
+            f"{version_tag(version)}-{p.entity_id}-{p.part or 'center'}",
         ),
         session_id=camera.session_id,
         stream_id=stream,

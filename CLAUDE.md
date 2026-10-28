@@ -131,6 +131,7 @@
   `dlp_prelabel.constraints3d`(표본 `flags`), 장면 분류 `dlp_prelabel.scene`과 `dlp prelabel run <세션> --scene <장면>`
   (도구 질의를 kitchen·bathroom·bedroom·living·unknown으로 고름, ADR 0055), 손 크기 초점 거리 추정 `dlp_prelabel.fov`
   (출처 `estimated_hand_size`, 기본 끔, ADR 0056).
+  3D·월드 라벨 ID는 128자를 넘으면 단계 접두사를 지키고 해시로 줄인다 (`dlp_prelabel.common.fit_label_id`, F-PAR-79).
   착용자 팔 골격 arm3(손목·팔꿈치·어깨, 손별 entity `<손>_arm`, 손목은 hand21 손목 기준, `dlp_prelabel.arm`, 전신 단계가
   착용자 자세·합성 착용자 박스 자세에서 고름)와 팔꿈치 3D(`<손>_arm`, 아래팔 길이 표시 `forearm_length`), 바디캠 착용자
   몸 억제(`dlp_prelabel.wearer_suppress`, 판정 규칙 `dlp_schema.wearer_body`, 객체·도구·전신 단계, 정책

@@ -31,9 +31,11 @@ from dlp_schema.predictor import Clip
 class OwlObjects(WearerAware):
     """OWLv2 도구 박스 어댑터 (name="tools").
 
-    version: `owlv2-<가중치 버전>+t<토크나이저 버전>+p<open_vocab_objects·scene 절 해시>+sc<장면>`
+    version: `owlv2-<가중치 버전>+t<토크나이저 버전>+p<open_vocab_objects 절 해시>+sc<장면>`
     (장면은 `set_scene`, 기본은 정책 scene.default, ADR 0055). 장면의 질의만 묻는다
-    (`scene.queries_for`). 라벨 ID는
+    (`scene.queries_for`). 질의 선택은 장면 이름과 open_vocab_objects(queries·scene_queries)만으로
+    정해지므로 scene 절(분류기·VLM 시간 제한·표본 프레임 등)은 해시에 넣지 않는다. 분류 결과가
+    바뀌면 `+sc<장면>`이 바뀐다 (F-PAR-76). 라벨 ID는
     `<세션>-<스트림>-tools-<version_tag>-<클래스>-<순번>`, entity_id는 `ov_<클래스>_<순번>` (COCO
     탐지 트랙과 겹치지 않게 `ov_` 접두사). 버전 끝에 `+w<wearer_suppression 절 해시>`: 바디캠에서
     착용자 자신의 팔·몸통을 덮은 큰 박스 트랙은 라벨로 만들지 않는다 (ADR 0058). 고정 클래스 도구
@@ -57,7 +59,7 @@ class OwlObjects(WearerAware):
         self.model_path, version = resolve(root, policy.models.open_vocab)
         self.tokenizer_path, tokenizer_version = resolve(root, policy.models.open_vocab_tokenizer)
         self.base_version = (
-            f"owlv2-{version}+t{tokenizer_version}+p{policy.digest('open_vocab_objects', 'scene')}"
+            f"owlv2-{version}+t{tokenizer_version}+p{policy.digest('open_vocab_objects')}"
             f"{wearer_tag(policy, self.name)}"
         )
         self.policy, self.ontology_version, self.now = policy, ontology_version, now
@@ -123,13 +125,12 @@ class OwlObjects(WearerAware):
             )
         # 시작 문턱·최소 길이로 짧은 오탐 트랙을 거른다 (ADR 0054)
         tracks = track_boxes(detections, iou_match=op.track_iou, max_gap_ms=op.max_gap_ms)
-        # 착용자 자신의 팔·몸통을 덮은 큰 박스 트랙은 라벨로 만들지 않는다 (ADR 0058)
-        kept, self.last_wearer = suppress_box_tracks(
-            filter_tracks(tracks, op.track_filter),
-            self.wearer,
-            self.policy.wearer_suppression,
-            size,
-        )
+        # 착용자 자신의 팔·몸통을 덮은 큰 박스 트랙은 라벨로 만들지 않는다 (ADR 0058). 버전
+        # 태그(`wearer_tag`)와 같은 조건(stages에 tools)일 때만 억제한다 (F-PAR-73)
+        kept, self.last_wearer = filter_tracks(tracks, op.track_filter), None
+        ws = self.policy.wearer_suppression
+        if self.name in ws.stages:
+            kept, self.last_wearer = suppress_box_tracks(kept, self.wearer, ws, size)
         return boxes_to_labels(
             kept,
             clip,

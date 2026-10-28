@@ -357,13 +357,12 @@ class MediaPipeObjects(WearerAware):
                     )
                 detections.append((t, dets))
         tracks = track_boxes(detections, iou_match=op.track_iou, max_gap_ms=op.max_gap_ms)
-        # 착용자 자신의 몸 박스 트랙은 라벨로 만들지 않는다 (ADR 0058, 요약 last_wearer에만 센다)
-        kept, self.last_wearer = suppress_box_tracks(
-            filter_tracks(tracks, op.track_filter),
-            self.wearer,
-            self.policy.wearer_suppression,
-            size,
-        )
+        # 착용자 자신의 몸 박스 트랙은 라벨로 만들지 않는다 (ADR 0058, 요약 last_wearer에만 센다).
+        # 버전 태그(`wearer_tag`)와 같은 조건(stages에 objects)일 때만 억제한다 (F-PAR-73)
+        kept, self.last_wearer = filter_tracks(tracks, op.track_filter), None
+        ws = self.policy.wearer_suppression
+        if self.name in ws.stages:
+            kept, self.last_wearer = suppress_box_tracks(kept, self.wearer, ws, size)
         return boxes_to_labels(
             kept, clip, self.version, self.ontology_version, self.now, prefix="objects"
         )

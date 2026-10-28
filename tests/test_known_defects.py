@@ -520,11 +520,6 @@ def _arm_tracks_setup(
     return scene, video, evidence, sid
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="F-PAR-73: 객체·OWLv2 어댑터가 wearer_suppression.stages에 자기 단계가 없어도 억제",
-)
 @pytest.mark.parametrize("which", ["objects", "tools"])
 def test_wearer_suppression_respects_stages(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, which: str
@@ -629,11 +624,6 @@ def test_prelabel_empty_predictor_is_idempotent(tmp_path: Path) -> None:
     assert calls == ["s1"]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="F-PAR-76: OWLv2 버전에 scene 절 전체 해시가 들어가 VLM timeout만 바꿔도 재실행",
-)
 def test_owl_version_ignores_scene_timeout() -> None:
     """장면이 같고 도구 질의가 같으면 OWLv2 도구 단계 버전도 같아야 한다. 장면 분류 VLM의 시간
     제한은 결과에 영향이 없다.
@@ -656,11 +646,6 @@ def test_owl_version_ignores_scene_timeout() -> None:
     assert a.version == b.version
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="F-PAR-78: 월드 좌표 변환이 표본 flags를 버림",
-)
 def test_world_samples_keep_constraint_flags() -> None:
     """카메라 좌표 표본의 물리 제약 표시(`flags`, 예: reach)는 좌표계를 바꿔도 남아야 한다.
 
@@ -682,11 +667,6 @@ def test_world_samples_keep_constraint_flags() -> None:
     assert [w.flags for w in world] == [c.flags for c in cam]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=ValidationError,
-    reason="F-PAR-79: 긴 세션 ID에서 3D 라벨 ID가 128자를 넘어 ValidationError",
-)
 def test_lift3d_label_ids_fit_identifier(monkeypatch: pytest.MonkeyPatch) -> None:
     """손 2D 트랙 ID가 Identifier(128자) 안이면 그 3D 단계 라벨 ID도 128자 안이어야 한다.
 

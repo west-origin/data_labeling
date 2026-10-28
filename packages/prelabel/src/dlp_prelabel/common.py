@@ -8,6 +8,7 @@
 - `input_digest`: 단계 입력(라벨 ID 집합 등)의 짧은 해시. 모델 버전에 붙여 입력 변화를 감지한다.
 - `iou`, `BoxTrack`, `track_boxes`: 프레임별 탐지를 IoU 탐욕 매칭으로 트랙에 잇는다.
 - `model_label`: 모델 출처(`Source.MODEL`) `LabelRecord`를 만든다.
+- `fit_label_id`: 긴 세션 ID에서도 단계 라벨 ID를 128자 안으로 결정적으로 줄인다 (단계 접두사 유지).
 
 주의: 공간 라벨 키프레임 시각은 그 스트림 영상의 PTS ms다 (마스터 타임라인이 아니다, ADR 0019).
 """
@@ -28,6 +29,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from dlp_media.probe import to_fraction
+from dlp_schema.common import IDENTIFIER_MAX
 from dlp_schema.labels import Evidence, LabelPayload, LabelRecord, Provenance, Source
 
 # (H, W, 3) RGB uint8 프레임. OpenCV(BGR)가 아니다
@@ -182,6 +184,41 @@ def track_boxes(
                 used.add(best)
                 open_tracks[best].frames[t] = (box, score)
     return tracks
+
+
+# 축약 ID 해시의 최소 길이 (16진 자릿수)
+_MIN_DIGEST = 8
+
+
+def fit_label_id(prefix: str, rest: str) -> str:
+    """단계 라벨 ID `<prefix><rest>`를 Identifier 길이(128자) 안으로 맞춘다 (F-PAR-79).
+
+    길이 안이면 그대로다 (이미 쓴 짧은 ID는 바뀌지 않아 재실행 멱등이 유지된다). 넘으면 단계 접두사
+    (`<세션>-<스트림>-3d-` 등, 러너가 단계 레코드를 고르는 기준)는 그대로 두고 나머지 앞부분 +
+    `h<전체 ID의 sha256 16자(자리가 모자라면 8자까지)>`로 줄인다. 결정적이라 같은 입력은 같은
+    ID다. `dlp_schema.common.derived_id`와 같은 방식이지만 접두사를 지킨다.
+
+    Args:
+        prefix: 단계 라벨 ID 접두사 (러너의 `_stale`·`stage_version`이 보는 것).
+        rest: 접두사 뒤 (`<version_tag>-<개체>-<부위>` 등).
+
+    Raises:
+        ValueError: 접두사만으로 해시를 붙일 자리가 없을 때 (세션 ID가 너무 긴 경우).
+    """
+    full = prefix + rest
+    if len(full) <= IDENTIFIER_MAX:
+        return full
+    available = IDENTIFIER_MAX - len(prefix)
+    # 해시는 16자가 기본이고, 접두사가 길어 자리가 모자라면 8자까지 줄인다 (2D 단계 ID가 통과한
+    # 세션 ID면 3D·월드 접두사 뒤에 8자 해시 자리는 남는다)
+    if available < 1 + _MIN_DIGEST:
+        raise ValueError(f"라벨 ID 접두사가 너무 깁니다 ({len(prefix)}자): {prefix[:40]}…")
+    digest = hashlib.sha256(full.encode()).hexdigest()[: min(16, available - 1)]
+    tail = "h" + digest
+    room = available - len(tail)
+    # 남는 자리에는 나머지 앞부분(버전 태그 등)과 구분자를 둔다. 자리가 1자 이하면 해시만
+    head = rest[: room - 1] + "-" if room >= 2 else ""
+    return prefix + head + tail
 
 
 def model_label(
