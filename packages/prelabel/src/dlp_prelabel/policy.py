@@ -750,6 +750,7 @@ class MasksPolicy(Contract):
     subtract_hands: bool
     person_classes: tuple[OntologyId, ...] = ()
     person_bottom_band: float | None = Field(default=None, ge=0, le=1)
+    protect_match_iou: float = Field(ge=0, le=1)
 
     @field_validator("hand_point_joints")
     @classmethod

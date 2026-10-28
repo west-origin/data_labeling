@@ -52,7 +52,13 @@ from dlp_media.calibration import load_policy as load_calibration_policy
 from dlp_media.storage import ObjectStore, sha256_file
 from dlp_prelabel.common import iter_frames
 from dlp_prelabel.lift3d import DepthLifter, DepthModel
-from dlp_prelabel.palm import PalmEstimate, estimate_palm, palm_samples, usable_hand_times
+from dlp_prelabel.palm import (
+    CalibrationMismatchError,
+    PalmEstimate,
+    estimate_palm,
+    palm_samples,
+    usable_hand_times,
+)
 from dlp_prelabel.policy import PrelabelPolicy, load_policy
 from dlp_prelabel.runner import pick_lift_tracks
 from dlp_schema import repo_root
@@ -368,6 +374,8 @@ def _session_samples(conn: sa.Connection, session_id: str, inp: _EstimateInputs)
 
     원본(감사 대상)은 표본을 낼 수 있을 때만 받는다: 캘리브레이션이 있고, 손 3D 점(world)이 있는 손
     키프레임이 있고, 원본 객체가 있을 때. 존재 확인(head)은 내용을 읽지 않아 감사 기록이 없다.
+    캘리브레이션 화면비가 영상과 다르면(3D 단계가 화각 근사로 떨어진다) 깊이 추론 전에 건너뛴다
+    (영상 크기는 받아서 열어 봐야 알아 원본 접근은 남는다, F-PAR-77).
     """
     session = get_session(conn, session_id)
     intr = session_intrinsics(conn, session)
@@ -386,6 +394,10 @@ def _session_samples(conn: sa.Connection, session_id: str, inp: _EstimateInputs)
     inp.raw.get_file(key, video)
     try:
         samples = palm_samples(iter_frames(video), inp.depth, tracks, intr.intrinsics, inp.policy)
+    except CalibrationMismatchError as e:
+        # 3D 단계라면 화각 근사로 떨어질 세션: 손 크기를 잴 수 없어 건너뛴다 (F-PAR-77)
+        print(f"{session_id}: {e} ({intr.origin}), 건너뜀")
+        return []
     finally:
         video.unlink(missing_ok=True)
     print(f"{session_id}: 표본 {len(samples)}개 ({intr.origin})")

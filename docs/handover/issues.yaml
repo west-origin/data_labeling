@@ -933,10 +933,12 @@ issues:
      files: [packages/media/src/dlp_media/calibration.py], source: docs/handover/full-inspection-2026-10-28.md}
   - {id: F-PMS-45, title: "OWLv2 간격 캐시 프레임을 관측으로 취급해 움직이는 문서가 블러·검수 우선 구간에서 빠짐", severity: medium, status: open, kind: code,
      files: [packages/privacy/src/dlp_privacy/detectors/open_vocab.py, packages/privacy/src/dlp_privacy/tracker.py, packages/privacy/src/dlp_privacy/review.py], source: docs/handover/full-inspection-2026-10-28.md}
-  - {id: F-PAR-74, title: "버전이 바뀌면 entity 번호 재사용으로 마스크 단계가 새 개체 마스크를 빠뜨리거나 중복", severity: medium, status: open, kind: code,
-     files: [packages/prelabel/src/dlp_prelabel/runner.py, packages/prelabel/src/dlp_prelabel/masks.py], source: docs/handover/full-inspection-2026-10-28.md}
-  - {id: F-PAR-77, title: "palm-estimate가 화면비가 다른 캘리브레이션 세션을 화각 근사로 재서 작업자 손 크기를 틀리게 등록", severity: medium, status: open, kind: code,
-     files: [packages/prelabel/src/dlp_prelabel/palm.py, packages/cli/src/dlp_cli/calib_cmds.py], source: docs/handover/full-inspection-2026-10-28.md, see: [F-PAR-44]}
+  - {id: F-PAR-74, title: "버전이 바뀌면 entity 번호 재사용으로 마스크 단계가 새 개체 마스크를 빠뜨리거나 중복", severity: medium, status: fixed, kind: code,
+     files: [packages/prelabel/src/dlp_prelabel/runner.py, packages/prelabel/src/dlp_prelabel/masks.py], source: docs/handover/full-inspection-2026-10-28.md,
+     note: "프롬프트는 현재 박스 트랙마다 하나(라벨 ID 기준), 손은 손마다 하나. 검수 마스크 보호는 derived_from·parent 조상으로, 출처를 잃은 것은 같은 클래스·외접 박스 IoU 중앙값 masks.protect_match_iou 이상일 때만. 같은 entity_id 프롬프트가 여럿이면 라벨 ID에 트랙 ID 해시 8자. ADR 0059 개정. 회귀: packages/prelabel/tests/test_masks.py::test_masks_follow_box_tracks_not_reused_entity_numbers"}
+  - {id: F-PAR-77, title: "palm-estimate가 화면비가 다른 캘리브레이션 세션을 화각 근사로 재서 작업자 손 크기를 틀리게 등록", severity: medium, status: fixed, kind: code,
+     files: [packages/prelabel/src/dlp_prelabel/palm.py, packages/cli/src/dlp_cli/calib_cmds.py], source: docs/handover/full-inspection-2026-10-28.md, see: [F-PAR-44],
+     note: "palm_samples가 깊이 추론 전에 lift3d.calibration_fits로 화면비를 보고 CalibrationMismatchError, palm-estimate는 그 세션을 이유와 함께 건너뛰고 출처 세션에도 넣지 않는다. ADR 0045 개정. 회귀: packages/cli/tests/test_calib_palm_estimate.py::test_estimate_skips_session_whose_calibration_aspect_differs"}
   - {id: F-PAR-80, title: "dlp actions run이 쓰기 직전에 승인 보류·사용 중지·렌더 변경을 다시 보지 않음", severity: medium, status: fixed, kind: code,
      files: [packages/actions/src/dlp_actions/runner.py, packages/cli/src/dlp_cli/actions_cmds.py], source: docs/handover/full-inspection-2026-10-28.md, see: [F-PAR-23],
      note: "쓰기 직전 세션 잠금 아래 write_blocker(렌더 해시 포함), 막히면 쓰지 않고 종료 코드 3. 회귀: packages/actions/tests/test_runner_write_check.py::test_run_writes_nothing_when_held_withdrawn_or_unapproved_while_asking"}

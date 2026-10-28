@@ -49,6 +49,7 @@ from dlp_schema.db.repository import (
 from dlp_schema.labels import KeypointTrackPayload, without_world
 from dlp_schema.lineage import Withdrawal
 from dlp_schema.ontology import load_ontology
+from dlp_schema.session import CameraIntrinsics
 from dlp_schema.testing import FIXED_TIME, sqlite_db
 
 
@@ -286,3 +287,26 @@ def test_reviewed_only_uses_only_reviewed_hand_tracks(
     assert world.estimate("--reviewed-only") == calib_cmds.EXIT_NO_SAMPLES
     assert "hand3d-003: 손 3D 점(world)" in capsys.readouterr().out
     assert world.raw_reads() == []
+
+
+def test_estimate_skips_session_whose_calibration_aspect_differs(
+    world: _World, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """F-PAR-77: 기기 캘리브레이션이 다른 화면비(16:9 1920x1080)에서 잰 것이면 3D 단계는 화각 근사로
+    떨어진다. 화각 근사로는 손 크기를 잴 수 없어 그 세션(007)은 이유를 알리고 건너뛰며, 등록값은
+    캘리브레이션이 맞는 003 표본만으로 정한다 (예전에는 화각 근사 표본이 섞여 틀린 값을 등록했다).
+    """
+    other = _ingest(world, tmp_path, 7, "cam-b", no_world=False)
+    eng = sqlite_db(world.url, create=False)
+    with eng.begin() as conn:
+        wide = CameraIntrinsics(width=1920, height=1080, fx=780.0, fy=780.0, cx=960.0, cy=540.0)
+        register_camera_calibration(conn, "cam-b", wide, method=CalibrationMethod.IMPORTED,
+                                    now=FIXED_TIME)  # fmt: skip
+    eng.dispose()
+    assert world.estimate("--apply") == 0
+    out = capsys.readouterr().out
+    assert f"{other}: 캘리브레이션 1920x1080의 화면비가 영상 320x240와 달라" in out
+    with sqlite_db(world.url, create=False).connect() as conn:
+        [h] = get_worker_hand_sizes(conn, "w01")
+    assert h.source_session_ids == ("hand3d-003",)
+    assert h.palm_m == pytest.approx(0.072, abs=5e-4)

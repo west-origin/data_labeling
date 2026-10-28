@@ -119,3 +119,12 @@ ADR 0044의 손가락 끝 3D는 세 가지가 비어 있었다.
   (`--override-measured`), 수집 뒤 세션 기기 연결(`dlp calib assign`), 체커보드 퇴화·파일 값 검사.
   아래 3절의 "가장 늦은 등록"은 "유효한 등록 중 가장 늦은 것"으로 읽는다. 결과 절의 "그 기기의 모든
   세션"은 매니페스트 camera_id 또는 연결 기록이 있는 세션이다.
+
+## 개정 (2026-10-28): palm-estimate는 화면비가 맞는 캘리브레이션 세션만 (F-PAR-77)
+
+- 캘리브레이션이 있어도 영상 화면비가 달라 3D 단계가 화각 근사로 떨어질 세션(`lift3d.calibration_fits`,
+  `depth.max_intrinsics_aspect_mismatch`)은 손 크기를 잴 수 없다. 예전 `palm_samples`는 조용히 화각 근사로
+  재 틀린 작업자 손 크기를 등록할 수 있었다.
+- `palm_samples`는 첫 프레임 크기로 검사해 깊이 추론 전에 `CalibrationMismatchError`를 내고,
+  `dlp calib palm-estimate`는 그 세션을 이유와 함께 건너뛴다 (출처 세션에도 넣지 않는다). 영상 크기는 받아서
+  열어 봐야 알아 그 세션의 원본 접근 기록은 남는다.

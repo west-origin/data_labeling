@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 from itertools import pairwise
 from pathlib import Path
 from typing import Any
@@ -23,7 +24,9 @@ from dlp_media.ingest import ingest_session, load_manifest
 from dlp_media.rle import decode_rle, encode_rle
 from dlp_media.storage import LocalStore
 from dlp_models.sam2 import MaskResult
+from dlp_prelabel.adapters.mediapipe_models import boxes_to_labels
 from dlp_prelabel.adapters.stubs import OraclePredictor
+from dlp_prelabel.common import BoxTrack
 from dlp_prelabel.masks import BoxEllipseSegmenter, MaskMaker, check_mask
 from dlp_prelabel.policy import PrelabelPolicy, load_policy
 from dlp_prelabel.runner import pick_mask_tracks, run_prelabel
@@ -41,7 +44,7 @@ from dlp_schema.labels import (
     VerificationState,
 )
 from dlp_schema.ontology import Ontology, load_ontology
-from dlp_schema.predictor import ModelUnavailableError
+from dlp_schema.predictor import Clip, ModelUnavailableError
 from dlp_schema.testing import FIXED_TIME, make_label, sqlite_db
 from dlp_schema.validation import check_label
 from dlp_schema.wearer_body import WearerEvidence
@@ -288,3 +291,91 @@ def test_person_box_at_the_bottom_edge_is_skipped_without_hand_evidence(
     entities = {x.payload.entity_id for x in labels if isinstance(x.payload, MaskTrackPayload)}
     assert entities == {"person_02"}
     assert maker.last_report is not None and maker.last_report.wearer_skipped > 0
+
+
+class _Buckets:
+    """정해진 박스 트랙을 내는 객체 예측기 (`boxes_to_labels`: 버전마다 첫 등장 순 번호)."""
+
+    name = "objects"
+
+    def __init__(self, version: str, tracks: list[BoxTrack]) -> None:
+        """version: 모델 버전. tracks: 낼 박스 트랙."""
+        self.version, self.tracks = version, tracks
+
+    def run(self, clip: Clip) -> list[LabelRecord]:
+        """박스 트랙 → box_track 라벨."""
+        return boxes_to_labels(
+            self.tracks, clip, self.version, "1.0.0", FIXED_TIME, prefix="objects"
+        )
+
+
+def _bucket(x: float, times: list[int], start: int) -> BoxTrack:
+    """x 위치에 멈춰 있는 양동이 박스 트랙 (start ms부터)."""
+    return BoxTrack("bucket", {t: ((x, 100.0, 60.0, 60.0), 0.9) for t in times if t >= start})
+
+
+def _x0(x: LabelRecord) -> float:
+    """박스 트랙 첫 키프레임 x."""
+    assert isinstance(x.payload, BoxTrackPayload)
+    return x.payload.keyframes[0].x
+
+
+def _reuse_runs(
+    tmp_path: Path, policy: PrelabelPolicy, ontology: Ontology, approve: str
+) -> tuple[list[LabelRecord], list[LabelRecord], int]:
+    """개체 A(x=40)만 본 v1 → approve("box"|"mask")를 승인 → B(x=220)를 먼저, A를 늦게 본 v2.
+
+    v2에서 B가 bucket_01, A가 bucket_02가 된다 (entity 번호 재사용, F-PAR-74).
+    Returns: (현재 박스 트랙, 현재 마스크, v2 masks_blocked).
+    """
+    sc = generate_shape_scenario(0)
+    engine, raw = _session(tmp_path, ontology, sc)
+    times = sc.frame_times
+    with engine.begin() as conn:
+        maker = MaskMaker(policy, BoxEllipseSegmenter(), "stub", now=FIXED_TIME)
+        v1 = _Buckets("objs-v1", [_bucket(40.0, times, 0)])
+        run_prelabel(conn, "shapes", raw, [v1], policy, ontology, FIXED_TIME, masker=maker)
+        kind = "box_track" if approve == "box" else "mask_track"
+        (target,) = current_labels(get_labels(conn, "shapes", kinds=[kind]))
+        record_review(conn, target.label_id, VerificationState.HUMAN_APPROVED, "rev01", FIXED_TIME)
+    later = FIXED_TIME + timedelta(minutes=1)
+    with engine.begin() as conn:
+        maker = MaskMaker(policy, BoxEllipseSegmenter(), "stub", now=later)
+        v2 = _Buckets("objs-v2", [_bucket(220.0, times, 0), _bucket(40.0, times, times[1])])
+        s = run_prelabel(conn, "shapes", raw, [v2], policy, ontology, later, masker=maker)
+        cur = current_labels(get_labels(conn, "shapes"))
+    boxes = [x for x in cur if isinstance(x.payload, BoxTrackPayload)]
+    masks = [x for x in cur if isinstance(x.payload, MaskTrackPayload)]
+    assert all(check_label(x, ontology) == [] for x in masks)
+    return boxes, masks, s.masks_blocked
+
+
+def test_masks_follow_box_tracks_not_reused_entity_numbers(
+    tmp_path: Path, policy: PrelabelPolicy, ontology: Ontology
+) -> None:
+    """F-PAR-74: 승인된 v1 bucket_01(A)이 남아도 v2 bucket_01(B)이 마스크를 받고, 현재 박스 트랙마다
+    마스크가 정확히 하나(derived_from)다. 같은 entity_id 두 마스크의 라벨 ID는 겹치지 않는다."""
+    boxes, masks, _ = _reuse_runs(tmp_path, policy, ontology, approve="box")
+    assert sorted(_x0(x) for x in boxes) == [40.0, 40.0, 220.0]
+    sources = [
+        d
+        for m in masks
+        if isinstance(m.payload, MaskTrackPayload)
+        for d in m.payload.derived_from or ()
+    ]
+    assert sorted(sources) == sorted(x.label_id for x in boxes)
+    assert len({m.label_id for m in masks}) == len(masks) == 3
+
+
+def test_reviewed_mask_protects_its_object_not_its_old_entity_number(
+    tmp_path: Path, policy: PrelabelPolicy, ontology: Ontology
+) -> None:
+    """F-PAR-74: v1 A 마스크(bucket_01)를 승인하면 v2에서 같은 자리의 A(bucket_02)만 막고, 번호만
+    같은 B(bucket_01)는 마스크를 받는다 (예전에는 B가 막히고 A 마스크가 하나 더 생겼다)."""
+    boxes, masks, blocked = _reuse_runs(tmp_path, policy, ontology, approve="mask")
+    by_id = {x.label_id: x for x in boxes}
+    assert sorted(_x0(x) for x in boxes) == [40.0, 220.0]
+    new = [m for m in masks if m.verification.state is VerificationState.UNREVIEWED]
+    assert blocked == 1 and len(masks) == 2 and len(new) == 1
+    assert isinstance(new[0].payload, MaskTrackPayload) and new[0].payload.derived_from
+    assert _x0(by_id[new[0].payload.derived_from[0]]) == 220.0

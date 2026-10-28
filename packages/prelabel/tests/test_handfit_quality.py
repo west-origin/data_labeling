@@ -21,7 +21,7 @@ from numpy.typing import NDArray
 from dlp_fixtures.hand3d import Hand3DScenario, generate_hand3d_scenario
 from dlp_prelabel.handfit import HandFit, fit_confidence
 from dlp_prelabel.lift3d import lift_tracks, mean_confidence, with_palm
-from dlp_prelabel.palm import estimate_palm, palm_samples
+from dlp_prelabel.palm import CalibrationMismatchError, estimate_palm, palm_samples
 from dlp_prelabel.policy import HAND21_JOINTS, DepthPolicy, PrelabelPolicy, load_policy
 from dlp_schema.labels import (
     KeypointTrackPayload,
@@ -30,6 +30,7 @@ from dlp_schema.labels import (
     Trajectory3DSample,
     without_world,
 )
+from dlp_schema.session import CameraIntrinsics
 
 ROOT = Path(__file__).resolve().parents[3]
 JOINT_OF = {name: i for i, name in HAND21_JOINTS.items()}
@@ -183,3 +184,23 @@ def test_palm_samples_skip_depth_where_hand_has_no_world() -> None:
     assert palm_samples(s.frames(), depth, bare, s.intrinsics, policy) == []
     assert depth.calls == 0
     assert len(palm_samples(s.frames(), depth, s.labels, s.intrinsics, policy)) == 20
+
+
+def test_palm_samples_refuse_calibration_of_another_aspect() -> None:
+    """F-PAR-77: 캘리브레이션 화면비(16:9)가 영상(320x240, 4:3)과 다르면 `depth_frames`는 화각
+    근사로 떨어진다. 화각 근사로는 손 크기를 잴 수 없어 깊이를 추론하기 전에 멈춘다. 같은 화면비의
+    축소(1280x960 → 320x240)는 그대로 잰다.
+    """
+    policy = _prelabel()
+    s = generate_hand3d_scenario(3, hand_scale=0.8, n_frames=20)
+    wide = CameraIntrinsics(width=1920, height=1080, fx=780.0, fy=780.0, cx=960.0, cy=540.0)
+    depth = _CountingDepth(s)
+    with pytest.raises(CalibrationMismatchError, match="1920x1080"):
+        palm_samples(s.frames(), depth, s.labels, wide, policy)
+    assert depth.calls == 0
+    k = s.intrinsics
+    big = k.model_copy(
+        update={"width": k.width * 4, "height": k.height * 4, "fx": k.fx * 4, "fy": k.fy * 4,
+                "cx": k.cx * 4, "cy": k.cy * 4}
+    )  # fmt: skip
+    assert len(palm_samples(s.frames(), depth, s.labels, big, policy)) == 20

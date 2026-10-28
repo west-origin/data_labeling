@@ -5,7 +5,9 @@
     깊이를 섞어 정한다. 사전값이 성인 평균(`reference_palm_m` 0.09 m)이면 손이 작거나 큰 작업자는
     그만큼(약 ±10%) 멀거나 가깝게 놓인다. 캘리브레이션된 내부 파라미터가 있는 세션에서 깊이만으로
     정한 배율(`HandFit.palm_from_depth`)은 사전값과 무관하게 손바닥 길이를 잰다. 화각 근사(초점 거리
-    추정)로는 크기를 잴 수 없어 캘리브레이션 없는 세션은 쓰지 않는다.
+    추정)로는 크기를 잴 수 없어 캘리브레이션 없는 세션은 쓰지 않는다. 캘리브레이션이 있어도 영상
+    화면비가 달라 3D 단계가 화각 근사로 떨어질 세션(`lift3d.calibration_fits`, F-PAR-44)도 쓰지
+    않는다 (`CalibrationMismatchError`, F-PAR-77).
 
 어떻게
     품질이 좋은 시각(`palm_estimate` 정책: 재투영 RMS, 보이는 관절 수, 값 범위)만 모아 중앙값을
@@ -21,17 +23,24 @@
       섞이면 중앙값이 치우친다 (합성 실험: 손 크기 1.4배인 손이 30% 이상 섞이면 3~16%). 손 트랙
       검수가 끝난 뒤 `--reviewed-only`(승인·표본 검증한 손 트랙만)로 돌리는 것을 권한다 (F-PMS-27).
 
-공개 이름: `usable_hand_times`, `palm_samples`, `PalmEstimate`, `estimate_palm`.
+공개 이름: `usable_hand_times`, `palm_samples`, `CalibrationMismatchError`, `PalmEstimate`,
+`estimate_palm`.
 """
 
 from __future__ import annotations
 
 import statistics
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 
 from dlp_prelabel.common import Image
-from dlp_prelabel.lift3d import DepthModel, depth_frames, hand_fit_of, hand_frames_by_time
+from dlp_prelabel.lift3d import (
+    DepthModel,
+    calibration_fits,
+    depth_frames,
+    hand_fit_of,
+    hand_frames_by_time,
+)
 from dlp_prelabel.policy import PrelabelPolicy
 from dlp_schema.labels import LabelRecord
 from dlp_schema.session import CameraIntrinsics
@@ -45,6 +54,37 @@ def usable_hand_times(tracks: list[LabelRecord]) -> set[int]:
     """
     hands = hand_frames_by_time(tracks)
     return {t for t, frames in hands.items() if any(f.world is not None for _, f in frames)}
+
+
+class CalibrationMismatchError(ValueError):
+    """캘리브레이션 화면비가 영상과 달라 쓸 수 없다 (화각 근사로는 손 크기를 잴 수 없다).
+
+    F-PAR-77: 예전에는 조용히 화각 근사로 재 틀린 작업자 손 크기를 등록했다.
+    """
+
+
+def _calibrated_frames(
+    frames: Iterable[tuple[int, Image]], calib: CameraIntrinsics, max_aspect_mismatch: float
+) -> Iterator[tuple[int, Image]]:
+    """프레임을 그대로 넘기되, 첫 프레임 크기에 캘리브레이션이 맞지 않으면 깊이 추론 전에 멈춘다.
+
+    `depth_frames`(`intrinsics_for`)는 화면비가 다르면 조용히 화각 근사로 떨어진다. 손 크기는
+    캘리브레이션된 내부 파라미터로만 잴 수 있어 여기서 막는다.
+
+    Raises:
+        CalibrationMismatchError: 첫 프레임 크기와 캘리브레이션 화면비가 허용 오차 밖일 때.
+    """
+    first = True
+    for t, img in frames:
+        if first:
+            h, w = img.shape[0], img.shape[1]
+            if not calibration_fits(calib, w, h, max_aspect_mismatch):
+                raise CalibrationMismatchError(
+                    f"캘리브레이션 {calib.width}x{calib.height}의 화면비가 영상 {w}x{h}와 달라 "
+                    "화각 근사로 떨어진다 (손 크기를 잴 수 없다)"
+                )
+            first = False
+        yield t, img
 
 
 def palm_samples(
@@ -61,11 +101,16 @@ def palm_samples(
         depth: 깊이 추론기.
         tracks: 3D 단계와 같은 입력 트랙 (`runner.pick_lift_tracks`). world가 있는 hand21 키프레임만
             쓴다 (박스는 무시).
-        calib: 캘리브레이션된 내부 파라미터 (없는 세션은 호출하지 않는다).
+        calib: 캘리브레이션된 내부 파라미터 (없는 세션은 호출하지 않는다). 영상 화면비와 맞아야
+            한다 (`depth.max_intrinsics_aspect_mismatch`).
         policy: 프리라벨 정책 (`depth` 절의 깊이 범위·간격·맞춤, `palm_estimate` 절의 품질 기준).
 
     Returns:
         품질 기준을 통과한 시각마다 손 하나의 값 (등장 순).
+
+    Raises:
+        CalibrationMismatchError: calib 화면비가 영상과 달라 3D 단계라면 화각 근사로 떨어질 때
+            (깊이를 추론하기 전에 멈춘다, F-PAR-77).
     """
     est = policy.palm_estimate
     lo, hi = est.palm_range_m
@@ -73,7 +118,8 @@ def palm_samples(
     # world 없는 시각은 맞춤이 None이라 깊이 추론만 낭비한다
     wanted = usable_hand_times(tracks)
     out: list[float] = []
-    for t, dmap, intr in depth_frames(frames, wanted, depth, calib, policy.depth):
+    checked = _calibrated_frames(frames, calib, policy.depth.max_intrinsics_aspect_mismatch)
+    for t, dmap, intr in depth_frames(checked, wanted, depth, calib, policy.depth):
         for _, frame in hands[t]:
             fit = hand_fit_of(frame, dmap, intr, policy.depth)
             if (

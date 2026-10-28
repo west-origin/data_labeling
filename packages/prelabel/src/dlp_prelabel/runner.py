@@ -82,8 +82,8 @@ from dlp_prelabel.contact import (
     video_contact_intervals,
 )
 from dlp_prelabel.lift3d import HAND21_NAMES, DepthLifter, lift_key
-from dlp_prelabel.masks import MaskMaker, MaskReport
-from dlp_prelabel.policy import PrelabelPolicy
+from dlp_prelabel.masks import MaskMaker, MaskReport, mask_covers_box
+from dlp_prelabel.policy import MasksPolicy, PrelabelPolicy
 from dlp_prelabel.posemath import as_rotation, rotation_problem
 from dlp_prelabel.wearer import match_wearer, wrist_speed
 from dlp_prelabel.wearer_suppress import WearerAware, WearerReport
@@ -791,37 +791,88 @@ def _track_stages(
 
 
 def pick_mask_tracks(current: list[LabelRecord], stream_id: str) -> list[LabelRecord]:
-    """마스크 단계 입력: 그 스트림의 현재 박스 트랙과 hand21 손 트랙을 개체마다 하나 고른다.
+    """마스크 단계 입력: 그 스트림의 현재 박스 트랙 전부와 hand21 손 트랙을 손마다 하나 고른다.
 
-    같은 개체 트랙이 여럿이면 `track_rank`(사람·검수 → 최신 → 긴 구간 → 라벨 ID)로 하나만 쓴다
+    박스 트랙은 entity_id로 묶지 않는다: 박스 번호(`<클래스>_<nn>`)는 모델 버전마다 첫 등장 순으로
+    다시 매겨 승인된 이전 버전 트랙과 새 버전 트랙이 같은 번호로 다른 개체를 가리킬 수 있다
+    (F-PAR-74). 그래서 현재 박스 트랙마다(라벨 ID 기준) 프롬프트를 하나씩 쓴다 (마스크는
+    `derived_from`으로 그 트랙을 가리킨다). 손 entity(`left_hand`·`right_hand`)는 버전과 무관한
+    같은 손이므로 `track_rank`(사람·검수 → 최신 → 긴 구간 → 라벨 ID)로 하나만 쓴다
     (`pick_lift_tracks`와 같은 기준). 착용자 팔(arm3)·전신 자세는 프롬프트가 아니다 (ADR 0058).
     Returns: 고른 트랙 (라벨 ID 순).
     """
-    best: dict[str, LabelRecord] = {}
+    boxes: list[LabelRecord] = []
+    hands: dict[str, LabelRecord] = {}
     for x in current:
         p = x.payload
-        hand = isinstance(p, KeypointTrackPayload) and p.skeleton == "hand21"
-        if x.stream_id != stream_id or not (isinstance(p, BoxTrackPayload) or hand):
+        if x.stream_id != stream_id:
             continue
-        assert isinstance(p, BoxTrackPayload | KeypointTrackPayload)
-        if p.entity_id not in best or track_rank(x) > track_rank(best[p.entity_id]):
-            best[p.entity_id] = x
-    return sorted(best.values(), key=lambda x: x.label_id)
+        if isinstance(p, BoxTrackPayload):
+            boxes.append(x)
+        elif (
+            isinstance(p, KeypointTrackPayload)
+            and p.skeleton == "hand21"
+            and (p.entity_id not in hands or track_rank(x) > track_rank(hands[p.entity_id]))
+        ):
+            hands[p.entity_id] = x
+    return sorted([*boxes, *hands.values()], key=lambda x: x.label_id)
 
 
-def protected_mask_entities(current: list[LabelRecord], stream_id: str) -> set[str]:
-    """검수된·사람 mask_track이 이미 있는 개체 (마스크 단계가 새로 만들지 않는다, ADR 0015).
+def _lineage(x: LabelRecord, by_id: dict[str, LabelRecord]) -> set[str]:
+    """라벨과 그 조상(parent_label_id를 따라간 이전 판)의 라벨 ID."""
+    out: set[str] = set()
+    cur: LabelRecord | None = x
+    while cur is not None and cur.label_id not in out:
+        out.add(cur.label_id)
+        cur = by_id.get(cur.parent_label_id) if cur.parent_label_id else None
+    return out
 
+
+def blocked_mask_tracks(
+    picked: list[LabelRecord],
+    history: list[LabelRecord],
+    current: list[LabelRecord],
+    stream_id: str,
+    policy: MasksPolicy,
+) -> set[str]:
+    """검수된·사람 전체 mask_track이 이미 덮는 프롬프트 트랙의 라벨 ID (새로 만들지 않는다).
+
+    어떤 단계도 보호 라벨을 지우지 않고 같은 대상을 다시 만들지 않는다 (ADR 0015).
+    - 손 트랙: 손 entity(`left_hand`·`right_hand`)는 같은 손이므로 같은 entity_id 보호 마스크가
+      있으면 막는다.
+    - 박스 트랙: 박스 번호(entity_id)는 버전마다 다시 매겨 다른 개체를 가리킬 수 있어 쓰지 않는다
+      (F-PAR-74). 보호 마스크의 `derived_from`이 그 트랙이나 조상(사람이 고치기 전 판)이면 막는다.
+      출처가 어느 현재 트랙의 조상도 아닌 보호 마스크(새 박스 버전으로 출처가 지워졌거나 출처 없이
+      그린 것)는 같은 클래스이고 공간이 겹치는(`masks.mask_covers_box`) 박스 트랙을 막는다.
     부분 마스크(part 있음)는 전체 마스크와 대상이 달라 막지 않는다.
     """
-    return {
-        x.payload.entity_id
+    masks = [
+        x.payload
         for x in current
         if x.stream_id == stream_id
         and isinstance(x.payload, MaskTrackPayload)
         and x.payload.part is None
         and is_protected(x)
-    }
+    ]
+    by_id = {x.label_id: x for x in history}
+    lineage = {x.label_id: _lineage(x, by_id) for x in picked}
+    reached = {i for ids in lineage.values() for i in ids}
+    sources = {d for m in masks for d in m.derived_from or ()}
+    orphans = [m for m in masks if not reached & set(m.derived_from or ())]
+    entities = {m.entity_id for m in masks}
+    out: set[str] = set()
+    for x in picked:
+        p = x.payload
+        if isinstance(p, KeypointTrackPayload):
+            hit = p.entity_id in entities
+        else:
+            assert isinstance(p, BoxTrackPayload)
+            hit = bool(lineage[x.label_id] & sources) or any(
+                mask_covers_box(m, p, policy) for m in orphans
+            )
+        if hit:
+            out.add(x.label_id)
+    return out
 
 
 def _masks(
@@ -840,22 +891,18 @@ def _masks(
     멱등: 이 단계가 마지막으로 낸 버전이 지금 버전이면 다시 만들지 않는다 (`stage_version`).
     버전(`<masker.version>+i<입력 해시>`)에는 고른 프롬프트 트랙과 착용자 증거가 되는 손 트랙의
     라벨 ID가 들어가, 박스·손 트랙이 바뀌면(새 모델 버전, 검수자 수정) 다시 만들고 검수 전인 이전
-    마스크만 지운다. 같은 개체에 검수된·사람 마스크가 있으면 그 개체는 만들지 않는다
-    (`summary.masks_blocked`).
+    마스크만 지운다. 프롬프트 트랙에 검수된·사람 마스크가 이미 있으면 그 트랙은 만들지 않는다
+    (`blocked_mask_tracks`, `summary.masks_blocked`). 프롬프트는 박스 트랙 라벨 ID 기준이라 버전마다
+    다시 매기는 박스 번호(entity_id)가 겹쳐도 흔들리지 않는다 (F-PAR-74).
     입력 트랙이 없으면 원본을 받지 않고 검수 전 이전 결과만 지운다.
     부작용: 원본 버킷에서 바디캠 영상을 받고(이미 받았으면 그대로), `label_records`에 새 마스크와
     이전 버전 삭제 레코드를 넣는다.
     """
     body = session.reference_stream
     prefix = f"{session.session_id}-{body.stream_id}-masks-"
-    blocked = protected_mask_entities(current, body.stream_id)
     picked = pick_mask_tracks(current, body.stream_id)
-    tracks = [
-        x
-        for x in picked
-        if isinstance(x.payload, BoxTrackPayload | KeypointTrackPayload)
-        and x.payload.entity_id not in blocked
-    ]
+    blocked = blocked_mask_tracks(picked, history, current, body.stream_id, masker.policy.masks)
+    tracks = [x for x in picked if x.label_id not in blocked]
     hands = [x for x in picked if isinstance(x.payload, KeypointTrackPayload)]
     version = stage_version(
         history, prefix, f"{masker.version}+i{input_digest([*tracks, *hands], *sorted(blocked))}"

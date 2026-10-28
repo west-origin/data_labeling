@@ -64,7 +64,7 @@
   수집 뒤 세션 → 기기 연결은 `session_camera_assignments`(추가만, `dlp calib assign`, 매니페스트 camera_id가 앞선다).
   작업자 손 크기는 유효한 등록 중 최신 → 정책 순이다. 무효 기록 `worker_hand_size_invalidations`(`dlp calib palm-revoke`,
   동의 철회·삭제 요구)와, 추정 출처 세션(`worker_hand_size_sources`)이 사용 중지된 추정은 결정에서 빠진다 (ADR 0052).
-  `palm-estimate`는 잰 값을 `--override-measured` 없이 덮지 않는다. 캘리브레이션은 보드 기울기·타당 범위 검사
+  `palm-estimate`는 잰 값을 `--override-measured` 없이 덮지 않는다고, 화면비가 다른 캘리브레이션 세션은 이유를 알리고 건너뛴다 (F-PAR-77). 캘리브레이션은 보드 기울기·타당 범위 검사
   (`calibration.yaml`)를 통과해야 등록한다. 화면비가 다른 캘리브레이션은 쓰지 않고 화각 근사로 떨어진다.
   `dlp calib intrinsics|import|assign|show|palm|palm-estimate|palm-revoke`. 정책은 `config/policies/calibration.yaml`.
   촬영 점검 경고 `dlp_media.capture_check`(prepare·ingest, 기준 `media.yaml capture`, 가이드 `docs/handover/capture-guide.md`),
@@ -126,7 +126,7 @@
   몸 억제(`dlp_prelabel.wearer_suppress`, 판정 규칙 `dlp_schema.wearer_body`, 객체·도구·전신 단계, 정책
   `prelabel.yaml wearer_suppression`·`arm`, ADR 0058).
   객체·손 모양 마스크 `dlp_prelabel.masks`(SAM 2.1 tiny ONNX `dlp_models.sam2`, review 등급, 이미지 모드
-  `masks.frame_stride_ms` 간격, 프롬프트 = 현재 박스 트랙·hand21 손 트랙, 착용자 몸 박스·화면 아래 사람 박스 제외, 손은
+  `masks.frame_stride_ms` 간격, 프롬프트 = 현재 박스 트랙마다 하나(박스 번호 재사용 무관, 검수 마스크 보호는 `derived_from`·조상, F-PAR-74)·hand21 손 트랙, 착용자 몸 박스·화면 아래 사람 박스 제외, 손은
   class `hand`·entity `<손>_hand`, `derived_from`은 출처 기록이고 검수를 물려받지 않음, 키프레임 `score`, 보간 없음,
   `dlp prelabel run --skip masks`, CPU stub `BoxEllipseSegmenter`, ADR 0059).
 - `packages/retarget/` (`dlp_retarget`) — 고객 로봇 리타기팅(ADR 0047): 로봇 등록(`config/robots/<ID>.yaml`, 모델 sha256,

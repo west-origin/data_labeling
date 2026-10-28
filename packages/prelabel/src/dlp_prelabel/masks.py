@@ -18,7 +18,8 @@
   남긴다.
 - 출력: 프롬프트 트랙마다 mask_track 하나 (entity·class는 프롬프트 트랙, 손은 `hand_class`),
   `derived_from` = 프롬프트 트랙 라벨 ID, 키프레임마다 COCO RLE와 예측 IoU(`score`), 라벨 신뢰도는
-  키프레임 점수 평균. 라벨 ID `<세션>-<스트림>-masks-<version_tag>-<개체>`.
+  키프레임 점수 평균. 라벨 ID `<세션>-<스트림>-masks-<version_tag>-<개체>` (같은 entity_id 프롬프트
+  트랙이 여럿이면 `<개체>-<트랙 라벨 ID 해시>`, `assign_slots`, F-PAR-74).
 
 파이프라인 위치: `runner._masks`가 입력 트랙을 골라(`pick_mask_tracks`) 부른다. 프라이버시 블러와
 무관하다 (블러는 박스 그대로이고 마스크로 바꾸지 않는다). 시간: 키프레임 시각은 바디캠 PTS ms다.
@@ -33,7 +34,7 @@ import hashlib
 import time
 from collections import Counter
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Protocol
@@ -42,7 +43,7 @@ import cv2
 import numpy as np
 from numpy.typing import NDArray
 
-from dlp_media.rle import encode_rle
+from dlp_media.rle import decode_rle, encode_rle
 from dlp_models.registry import resolve
 from dlp_models.sam2 import Box, MaskResult, Prompt
 from dlp_prelabel.common import Image, iter_frames, model_label, strictly_increasing
@@ -104,6 +105,15 @@ class PromptTrack:
     class_id: str
     is_hand: bool
     times: tuple[int, ...]  # 키프레임 시각 (오름차순)
+    # 마스크 칸 이름 (라벨 ID 끝, 개체별 키프레임 묶음 키). 비면 entity_id. 서로 다른 프롬프트
+    # 트랙이 같은 entity_id를 쓰면(모델 버전마다 다시 매기는 박스 번호, F-PAR-74) 트랙 라벨 ID
+    # 해시를 붙여 구분한다 (`assign_slots`)
+    key: str = ""
+
+    @property
+    def slot(self) -> str:
+        """마스크 칸 이름 (`key`, 없으면 entity_id)."""
+        return self.key or self.entity_id
 
     @property
     def rank(self) -> float:
@@ -169,6 +179,45 @@ def mask_source(x: LabelRecord, policy: MasksPolicy) -> PromptTrack | None:
         times = tuple(f.t_ms for f in p.keyframes)
         return PromptTrack(x, p.entity_id, policy.hand_class, True, times)
     return None
+
+
+def assign_slots(sources: Sequence[PromptTrack]) -> list[PromptTrack]:
+    """프롬프트 트랙마다 겹치지 않는 마스크 칸 이름을 붙인다 (입력 순서 유지).
+
+    entity_id가 하나뿐이면 그대로 쓰고, 여럿이 같은 entity_id면(승인된 이전 버전 박스 트랙과 새 버전
+    트랙의 번호가 겹칠 때, F-PAR-74) `<개체>-<트랙 라벨 ID sha256 앞 8자>`로 구분한다. 마스크 라벨의
+    entity_id는 프롬프트 트랙 그대로이고, 어느 트랙에서 왔는지는 `derived_from`이 정한다.
+    """
+    counts = Counter(s.entity_id for s in sources)
+    return [
+        s
+        if counts[s.entity_id] == 1
+        else replace(s, key=f"{s.entity_id}-{_short_hash(s.record.label_id)}")
+        for s in sources
+    ]
+
+
+def _short_hash(text: str) -> str:
+    """문자열 sha256 앞 8자."""
+    return hashlib.sha256(text.encode()).hexdigest()[:8]
+
+
+def mask_covers_box(mask: MaskTrackPayload, box: BoxTrackPayload, policy: MasksPolicy) -> bool:
+    """마스크 트랙이 박스 트랙과 같은 개체를 덮는가 (같은 클래스, 외접 박스 IoU 중앙값 기준).
+
+    마스크 키프레임마다 그 시각 박스(`box_at`, 보간 포함)와 마스크 외접 박스의 IoU를 재고, 잴 수
+    있는 키프레임 IoU 중앙값이 `protect_match_iou` 이상이면 참. 잴 키프레임이 없으면 거짓.
+    박스 번호(entity_id)는 버전마다 다시 매겨 쓰지 않는다 (F-PAR-74).
+    """
+    if mask.class_id != box.class_id:
+        return False
+    times = tuple(k.t_ms for k in box.keyframes)
+    ious: list[float] = []
+    for k in mask.keyframes:
+        b = box_at(box, times, k.t_ms, policy.box_max_gap_ms)
+        if b is not None and k.rle is not None:
+            ious.append(box_iou(mask_bbox(decode_rle(k.rle)), b))
+    return bool(ious) and float(np.median(ious)) >= policy.protect_match_iou
 
 
 def _lerp(a: BoxKeyframe, b: BoxKeyframe, t: int) -> Box:
@@ -375,7 +424,7 @@ def _span(sources: Sequence[PromptTrack]) -> tuple[int, int] | None:
 
 @dataclass
 class MaskRun:
-    """`make_masks` 결과: 개체 → 마스크 키프레임 목록, 요약."""
+    """`make_masks` 결과: 마스크 칸(`PromptTrack.slot`) → 마스크 키프레임 목록, 요약."""
 
     keyframes: dict[str, list[MaskKeyframe]]
     report: MaskReport
@@ -441,7 +490,7 @@ def _keep(
         report.masks += 1
         ious = report.hand_box_iou if s.is_hand else report.box_iou
         ious.append(round(box_iou(mask_bbox(mask), prompt.box), 4))
-        out.setdefault(s.entity_id, []).append(
+        out.setdefault(s.slot, []).append(
             MaskKeyframe(t_ms=t, rle=encode_rle(mask), score=round(r.score, 4))
         )
 
@@ -456,20 +505,23 @@ def mask_labels(
     version: str,
     now: datetime,
 ) -> list[LabelRecord]:
-    """개체별 키프레임 → mask_track 라벨 (개체 순). 신뢰도는 키프레임 점수 평균."""
-    by_entity = {s.entity_id: s for s in sources}
+    """칸별 키프레임 → mask_track 라벨 (칸 이름 순). 신뢰도는 키프레임 점수 평균.
+
+    entity_id·class_id는 프롬프트 트랙, `derived_from`은 그 트랙 라벨 ID, 라벨 ID 끝은 칸 이름이다.
+    """
+    by_slot = {s.slot: s for s in sources}
     tag = version_tag(version)
     labels: list[LabelRecord] = []
-    for entity, kfs in sorted(run.keyframes.items()):
-        s = by_entity[entity]
+    for slot, kfs in sorted(run.keyframes.items()):
+        s = by_slot[slot]
         scores = [k.score for k in kfs if k.score is not None]
         payload = MaskTrackPayload(
-            entity_id=entity, class_id=s.class_id, keyframes=tuple(kfs),
+            entity_id=s.entity_id, class_id=s.class_id, keyframes=tuple(kfs),
             derived_from=(s.record.label_id,),
         )  # fmt: skip
         labels.append(
             model_label(
-                label_id=f"{session_id}-{stream_id}-masks-{tag}-{entity}",
+                label_id=f"{session_id}-{stream_id}-masks-{tag}-{slot}",
                 session_id=session_id,
                 stream_id=stream_id,
                 t_start_ms=kfs[0].t_ms,
@@ -555,12 +607,14 @@ class MaskMaker:
 
         Args:
             video: 바디캠 영상 로컬 경로.
-            tracks: 프롬프트 트랙 (`pick_mask_tracks`, 개체마다 하나).
+            tracks: 프롬프트 트랙 (`pick_mask_tracks`: 박스 트랙마다, 손은 손마다 하나).
             version: 라벨 모델 버전 (러너가 입력 해시를 붙여 넘긴다, 기본 `self.version`).
             wearer: 착용자 증거 (있으면 박스 프롬프트의 착용자 몸 판정에 쓴다).
             frames: 시험·파일럿용 프레임 순회 (기본 `iter_frames(video)`).
         """
-        sources = [s for x in tracks if (s := mask_source(x, self.policy.masks)) is not None]
+        sources = assign_slots(
+            [s for x in tracks if (s := mask_source(x, self.policy.masks)) is not None]
+        )
         wpolicy = self.policy.wearer_suppression
         use = wearer is not None and not wearer.empty and wpolicy.enabled
         guard = (wearer, wpolicy) if use and wearer is not None else None
