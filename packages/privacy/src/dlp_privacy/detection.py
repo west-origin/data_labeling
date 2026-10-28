@@ -36,6 +36,9 @@ class Detection:
     score: float
     # 낸 탐지기 이름 (정책 detectors의 키). 탐지기 불일치(disagreement) 판정에 쓴다.
     detector: str
+    # 이 프레임에서 추론하지 않고 앞 추론 결과를 되풀이한 것 (OWLv2 간격 캐시). 관측이 아니다:
+    # 트래커는 관측으로 잇지 않고 다음 추론까지 블러를 유지하는 근거로만 쓴다 (F-PMS-45).
+    cached: bool = False
 
 
 @runtime_checkable

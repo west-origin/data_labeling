@@ -2,8 +2,9 @@
 
 모든 프레임을 순회하지만 모든 탐지기가 매 프레임 추론하는 것은 아니다.
 느린 탐지기(오픈 보캐뷸러리)는 정책의 frame_stride_ms 간격으로만 추론하고
-그 사이 프레임에 마지막 결과를 둔다.
-유지한 결과가 움직임이나 새 대상의 출현을 모두 포착하지는 못하므로 사람 검수가 필요하다.
+그 사이 프레임에 마지막 결과를 캐시 표시(`Detection.cached`)로 둔다. 트래커는 캐시를 관측으로 잇지
+않고, 실측 사이를 보간(앞뒤 박스의 외접 박스)·유지로 덮어 그 프레임을 track_gap 검수 구간에 넣는다
+(F-PMS-45). 간격 사이의 움직임이나 새 대상의 출현을 모두 포착하지는 못하므로 사람 검수가 필요하다.
 설정된 탐지기가 하나도 없는 대상은 영상 전체를 no_detector 검수 구간으로 내보낸다
 (사람이 전부 본다).
 
@@ -58,7 +59,9 @@ from dlp_schema.labels import (
 )
 
 # 트래커 알고리즘 버전. 트래커 코드(tracker.py) 동작을 바꾸면 올린다 (모델 버전 → 재탐지).
-TRACKER_VERSION = "iou-tracker-1"
+# iou-tracker-2: 간격 캐시(Detection.cached)를 관측으로 쓰지 않고 유지 근거로만 쓰며, 보간 박스를
+# 앞뒤 관측 박스의 외접 박스로 넓혔다 (F-PMS-45).
+TRACKER_VERSION = "iou-tracker-2"
 
 
 def used_detectors(
@@ -125,7 +128,7 @@ def detection_policy_digest(policy: PrivacyPolicy) -> str:
 def model_version(detectors: dict[str, FrameDetector], policy: PrivacyPolicy) -> str:
     """탐지 모델 버전 문자열.
 
-    형식: `iou-tracker-1+<이름>:<탐지기 버전>,...+p<정책 해시 8자>` (이름순). 이 문자열이
+    형식: `iou-tracker-2+<이름>:<탐지기 버전>,...+p<정책 해시 8자>` (이름순). 이 문자열이
     blur_track 라벨의 `provenance.model_version`이 되고, `runner.detect_session`은 같은 버전의
     완료 세대의 활성 버전 집합이 같으면 스트림을 건너뛴다 (멱등). 외부 0건 표시만 남으면
     DB 완료 기록으로 복구하고 새 검수를 요구한다. 정책 복귀는 새 세대로 탐지한다 (ADR 0033).

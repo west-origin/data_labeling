@@ -31,14 +31,23 @@ from dlp_schema.labels import (
 from dlp_schema.review import ReviewTask
 from dlp_schema.session import (
     Calibration,
+    CameraIntrinsics,
     LifecycleState,
     PrivacyDetectionRun,
     PrivacyHoldEvent,
     Session,
+    Stream,
     StreamKind,
     can_transition,
 )
-from dlp_schema.testing import FIXED_TIME, action_payload, make_label, make_session
+from dlp_schema.testing import (
+    FIXED_TIME,
+    action_payload,
+    hand_track_payload,
+    make_label,
+    make_session,
+    trajectory_payload,
+)
 
 # 공용 페이로드 예시 (모든 kind 하나씩). PAYLOADS의 순서를 인덱스로 참조하는 테스트가 있다.
 BOX = {"kind": "box_track", "entity_id": "rag_01", "class_id": "rag",
@@ -407,3 +416,70 @@ def test_review_task_detection_generation_contract() -> None:
     assert ReviewTask.model_validate_json(linked.model_dump_json()) == linked
     with pytest.raises(ValidationError):
         ReviewTask.model_validate({**values, "privacy_detection_id": 0})
+
+
+_NON_FINITE = [float("nan"), float("inf"), float("-inf")]
+
+
+def _box(v: float, field: str, kind: str = "box_track") -> dict[str, Any]:
+    """키프레임 하나의 박스·블러 트랙 페이로드 (`field`만 `v`)."""
+    frame: dict[str, Any] = {"t_ms": 0, "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0, field: v}
+    head = {"entity_id": "rag_01", "class_id": "rag"} if kind == "box_track" else {"target": "face"}
+    return {"kind": kind, **head, "keyframes": [frame]}
+
+
+@pytest.mark.parametrize("bad", _NON_FINITE)
+@pytest.mark.parametrize(
+    ("field", "kind"), [("x", "box_track"), ("w", "box_track"), ("y", "blur_track")]
+)
+def test_box_payload_rejects_non_finite(field: str, kind: str, bad: float) -> None:
+    """박스·블러 좌표의 NaN·±Inf는 검증 오류다 (JSONB 배치 실패 방지, F-SCH-27)."""
+    with pytest.raises(ValidationError, match="finite"):
+        make_label(_box(bad, field, kind), stream_id="bodycam")
+
+
+@pytest.mark.parametrize("bad", _NON_FINITE)
+@pytest.mark.parametrize("field", ["x", "z", "qw"])
+def test_trajectory_sample_rejects_non_finite(field: str, bad: float) -> None:
+    """3D 궤적 표본의 좌표·자세 사원수도 유한 실수만 받는다 (F-SCH-27)."""
+    payload = trajectory_payload()
+    payload["samples"][0][field] = bad
+    with pytest.raises(ValidationError, match="finite"):
+        make_label(payload, stream_id="bodycam")
+
+
+def test_keypoint_and_world_reject_non_finite() -> None:
+    """2D 키포인트와 손 중심 3D 점(world)도 NaN·Inf를 받지 않는다 (F-SCH-27)."""
+    payload = hand_track_payload()
+    payload["keyframes"][0]["points"][0]["x"] = float("nan")
+    with pytest.raises(ValidationError, match="finite"):
+        make_label(payload, stream_id="bodycam")
+    payload = hand_track_payload()
+    world = [{"x": 0.0, "y": 0.0, "z": 0.0} for _ in range(21)]
+    world[3]["z"] = float("inf")
+    payload["keyframes"][0]["world"] = world
+    with pytest.raises(ValidationError, match="finite"):
+        make_label(payload, stream_id="bodycam")
+
+
+@pytest.mark.parametrize("bad", _NON_FINITE)
+@pytest.mark.parametrize(
+    "field", ["offset_ms", "clock_scale", "manual_adjustment_ms", "sample_rate_hz"]
+)
+def test_stream_sync_fields_reject_non_finite(field: str, bad: float) -> None:
+    """스트림 동기화 실수(오프셋·배율·사람 조정·표본화율)는 유한해야 한다 (F-SCH-27)."""
+    with pytest.raises(ValidationError):
+        Stream.model_validate(
+            {"stream_id": "imu", "kind": "imu", "uri": "s3://dlp-raw/s001/imu.parquet", field: bad}
+        )
+
+
+def test_intrinsics_reject_non_finite() -> None:
+    """카메라 내부 파라미터와 왜곡 계수도 유한해야 한다 (F-SCH-27)."""
+    base: dict[str, Any] = {"width": 640, "height": 480, "fx": 500.0, "fy": 500.0}
+    with pytest.raises(ValidationError, match="finite"):
+        CameraIntrinsics.model_validate({**base, "cx": float("nan"), "cy": 240.0})
+    with pytest.raises(ValidationError, match="finite"):
+        CameraIntrinsics.model_validate(
+            {**base, "cx": 320.0, "cy": 240.0, "distortion": [0.0, float("inf")]}
+        )

@@ -13,7 +13,14 @@ from typing import Any
 from dlp_schema.labels import LabelRecord, Provenance, Source, Verification, VerificationState
 from dlp_schema.migration import MigrationResult, OntologyMigration, migrate_labels
 from dlp_schema.ontology import Ontology
-from dlp_schema.testing import FIXED_TIME, action_payload, make_label
+from dlp_schema.testing import (
+    FIXED_TIME,
+    action_payload,
+    hand_track_payload,
+    make_label,
+    trajectory_payload,
+)
+from dlp_schema.trajectory_follow import plan_trajectory_follow
 
 MIGRATION = OntologyMigration(from_version="1.0.0", to_version="1.1.0")
 
@@ -165,3 +172,68 @@ def test_already_migrated_context_is_grouped_the_same_way(target_ontology: Ontol
     second = _run(labels, target_ontology)
     assert second.needs_review == ()
     assert _parents(second) == {"sk", "seed-as1-0001"}
+
+
+_MODEL: dict[str, Any] = {
+    "provenance": Provenance(source=Source.MODEL, model_version="m1"),
+    "confidence": 0.9,
+}
+
+
+def test_label_refs_follow_migrated_ids(target_ontology: Ontology) -> None:
+    """번역의 source_label_id와 3D의 derived_from이 같은 배치의 이관된 새 ID를 가리킨다 (F-SCH-29).
+
+    이관된 2D를 사람이 승인하면 이관된 3D가 그 검수를 물려받는다 (궤적 따르기 계획에 들어간다).
+    """
+    desc = {"kind": "description", "segment_id": "a001"}
+    ko = make_label({**desc, "text": "걸레를 잡는다"}, label_id="d-ko", **_MODEL)
+    en = make_label(
+        {**desc, "text": "grasp rag", "language": "en", "source_label_id": "d-ko"},
+        label_id="d-en",
+        **_MODEL,
+    )
+    hand = make_label(hand_track_payload(), label_id="h2d", stream_id="bodycam", **_MODEL)
+    t3 = make_label(
+        trajectory_payload(derived_from=["h2d"]), label_id="t3d", stream_id="bodycam", **_MODEL
+    )
+    result = migrate_labels(
+        [ko, en, hand, t3], MIGRATION, FIXED_TIME, target_ontology=target_ontology
+    )
+    assert result.needs_review == ()
+    new = {x.parent_label_id: x for x in result.migrated}
+    en_payload = new["d-en"].payload
+    t3_payload = new["t3d"].payload
+    assert en_payload.kind == "description" and t3_payload.kind == "trajectory3d"
+    assert en_payload.source_label_id == new["d-ko"].label_id
+    assert t3_payload.derived_from == (new["h2d"].label_id,)
+    # 이관된 2D를 승인하면 이관된 3D가 물려받는다
+    approved = new["h2d"].model_copy(
+        update={
+            "verification": Verification(
+                state=VerificationState.HUMAN_APPROVED, reviewer_id="rev1", reviewed_at=FIXED_TIME
+            )
+        }
+    )
+    history = [ko, en, hand, t3, *(x for x in result.migrated if x.parent_label_id != "h2d")]
+    plan = plan_trajectory_follow([*history, approved], [])
+    assert [r.label_id for r in plan.approve] == [new["t3d"].label_id]
+
+
+def test_label_refs_to_unmigrated_label_keep_old_id(target_ontology: Ontology) -> None:
+    """재검수로 빠져 새 레코드가 없는 라벨을 가리키는 참조는 옛 ID(여전히 현재 라벨) 그대로다."""
+    box = {"kind": "box_track", "entity_id": "rag_01", "class_id": "rag",
+           "keyframes": [{"t_ms": 0, "x": 1, "y": 2, "w": 3, "h": 4}]}  # fmt: skip
+    b = make_label(box, label_id="b2d", stream_id="bodycam", **_MODEL)
+    t3 = make_label(
+        trajectory_payload("rag_01", None, derived_from=["b2d"]),
+        label_id="t3d",
+        stream_id="bodycam",
+        **_MODEL,
+    )
+    removing = OntologyMigration(
+        from_version="1.0.0", to_version="1.1.0", removed={"objects": ("rag",)}
+    )
+    result = migrate_labels([b, t3], removing, FIXED_TIME, target_ontology=target_ontology)
+    assert [r[0] for r in result.needs_review] == ["b2d"]
+    (moved,) = result.migrated
+    assert moved.payload.kind == "trajectory3d" and moved.payload.derived_from == ("b2d",)

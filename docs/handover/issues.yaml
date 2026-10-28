@@ -921,20 +921,27 @@ issues:
   - {id: F-COE-78, title: "preview_session.py --apply-blur가 렌더가 덮는 프레임(먼 키프레임 사이·마지막 뒤)을 덮지 않음", severity: high, status: fixed, kind: code,
      files: [scripts/preview_session.py, packages/privacy/src/dlp_privacy/render.py], source: docs/handover/full-inspection-2026-10-28.md,
      note: "모자이크는 렌더(dlp_privacy.render)와 같은 박스 규칙(간격 무관 보간·마지막 뒤 유지)과 표시용 박스의 외접 박스를 --blur-pad로 넓혀 쓴다. 표시 테두리용 box_at은 그대로다. --blur-max-area·--blur-skip-on-hand는 운영자가 켜면 여전히 뺄 수 있다. 회귀: tests/test_preview_session.py::test_apply_blur_covers_every_frame_the_render_covers"}
-  - {id: F-SCH-27, title: "계약이 NaN·Inf 실수를 받아 라벨 배치가 JSONB 오류로 실패하고 dlp sync adjust nan이 DB에 저장됨", severity: medium, status: open, kind: code,
-     files: [packages/schema/src/dlp_schema/labels.py, packages/schema/src/dlp_schema/session.py, packages/cli/src/dlp_cli/sync_cmds.py], source: docs/handover/full-inspection-2026-10-28.md}
-  - {id: F-SCH-28, title: "0005·0009·0011·0012 downgrade가 추가 전용 감사 기록을 확인 없이 지움", severity: medium, status: open, kind: code,
-     files: [packages/schema/src/dlp_schema/db/migrations/versions/0009_ops_records.py, packages/schema/src/dlp_schema/db/migrations/versions/0011_session_lifecycle_events.py, packages/schema/src/dlp_schema/db/migrations/versions/0012_privacy_detection_and_deployment.py], source: docs/handover/full-inspection-2026-10-28.md}
-  - {id: F-SCH-29, title: "migrate_labels가 라벨 사이 참조(source_label_id·derived_from)를 대체된 옛 ID로 둠", severity: medium, status: open, kind: code,
-     files: [packages/schema/src/dlp_schema/migration.py], source: docs/handover/full-inspection-2026-10-28.md}
-  - {id: F-PMS-39, title: "스트림마다 파생 파일 키가 겹칠 수 있고 수집이 내용 확인 없이 남의 파일을 등록함", severity: medium, status: open, kind: code,
-     files: [packages/media/src/dlp_media/ingest.py], source: docs/handover/full-inspection-2026-10-28.md}
-  - {id: F-PMS-40, title: "원본 불변 업로드(put_immutable)에 경합: 동시에 다른 내용 둘이 모두 성공", severity: medium, status: open, kind: code,
-     files: [packages/media/src/dlp_media/storage.py], source: docs/handover/full-inspection-2026-10-28.md}
-  - {id: F-PMS-41, title: "체커보드 캘리브레이션이 표시 회전 태그를 무시해 세션 픽셀과 다른 좌표계 값을 등록", severity: medium, status: open, kind: code,
-     files: [packages/media/src/dlp_media/calibration.py], source: docs/handover/full-inspection-2026-10-28.md}
-  - {id: F-PMS-45, title: "OWLv2 간격 캐시 프레임을 관측으로 취급해 움직이는 문서가 블러·검수 우선 구간에서 빠짐", severity: medium, status: open, kind: code,
-     files: [packages/privacy/src/dlp_privacy/detectors/open_vocab.py, packages/privacy/src/dlp_privacy/tracker.py, packages/privacy/src/dlp_privacy/review.py], source: docs/handover/full-inspection-2026-10-28.md}
+  - {id: F-SCH-27, title: "계약이 NaN·Inf 실수를 받아 라벨 배치가 JSONB 오류로 실패하고 dlp sync adjust nan이 DB에 저장됨", severity: medium, status: fixed, kind: code,
+     files: [packages/schema/src/dlp_schema/labels.py, packages/schema/src/dlp_schema/session.py, packages/cli/src/dlp_cli/sync_cmds.py], source: docs/handover/full-inspection-2026-10-28.md,
+     note: "계약 실수 필드(박스·키포인트·3D·내부 파라미터·스트림 동기화)를 dlp_schema.common.FiniteFloat(allow_inf_nan=False)로. dlp sync adjust는 비유한 값을 DB 열기 전에 종료 코드 2. JSON Schema 출력은 같다. 회귀: packages/schema/tests/test_contracts.py::test_box_payload_rejects_non_finite, packages/sync/tests/test_runner.py::test_adjust_non_finite_leaves_db_unchanged"}
+  - {id: F-SCH-28, title: "0005·0009·0011·0012 downgrade가 추가 전용 감사 기록을 확인 없이 지움", severity: medium, status: fixed, kind: code,
+     files: [packages/schema/src/dlp_schema/db/migrations/versions/0009_ops_records.py, packages/schema/src/dlp_schema/db/migrations/versions/0011_session_lifecycle_events.py, packages/schema/src/dlp_schema/db/migrations/versions/0012_privacy_detection_and_deployment.py], source: docs/handover/full-inspection-2026-10-28.md,
+     note: "기록이 하나라도 있으면 0005(measurement·review_assignments)·0009·0011·0012 downgrade가 RuntimeError로 거부한다(0017·0022·0024와 같다). 회귀: packages/schema/tests/test_migration_downgrade_guards.py::test_raw_access_log_blocks_downgrade_of_0009"}
+  - {id: F-SCH-29, title: "migrate_labels가 라벨 사이 참조(source_label_id·derived_from)를 대체된 옛 ID로 둠", severity: medium, status: fixed, kind: code,
+     files: [packages/schema/src/dlp_schema/migration.py], source: docs/handover/full-inspection-2026-10-28.md,
+     note: "migrate_labels가 같은 배치에서 새 ID로 바뀐 라벨을 가리키는 참조(dlp_schema.labels.LABEL_REF_FIELDS)를 새 ID로 바꾸고 다시 검증한다. dlp_export.pseudonym.LABEL_REF_FIELDS와 목록이 둘이다(일치 검사 없음). 회귀: packages/schema/tests/test_migration_sets.py::test_label_refs_follow_migrated_ids"}
+  - {id: F-PMS-39, title: "스트림마다 파생 파일 키가 겹칠 수 있고 수집이 내용 확인 없이 남의 파일을 등록함", severity: medium, status: fixed, kind: code,
+     files: [packages/media/src/dlp_media/ingest.py], source: docs/handover/full-inspection-2026-10-28.md,
+     note: "planned_keys가 업로드 전에 모든 원본·파생 키와 내장 IMU ID를 계획해 겹치면 ValueError. 이미 겹친 채 수집된 예전 세션은 찾지 않는다. 회귀: packages/media/tests/test_ingest.py::test_stream_ids_whose_keys_collide_are_rejected_before_upload"}
+  - {id: F-PMS-40, title: "원본 불변 업로드(put_immutable)에 경합: 동시에 다른 내용 둘이 모두 성공", severity: medium, status: fixed, kind: code,
+     files: [packages/media/src/dlp_media/storage.py], source: docs/handover/full-inspection-2026-10-28.md,
+     note: "CreateOnlyStore: LocalStore는 임시 파일 + os.link 배타 생성, S3는 If-None-Match: *(SeaweedFS 4.48 실측: 동시 4개 중 하나만 성공), 쓴 뒤 해시를 다시 대조. 회귀: packages/media/tests/test_sensors_storage.py::test_local_store_concurrent_different_contents_have_one_winner, ::test_s3_concurrent_different_contents_have_one_winner"}
+  - {id: F-PMS-41, title: "체커보드 캘리브레이션이 표시 회전 태그를 무시해 세션 픽셀과 다른 좌표계 값을 등록", severity: medium, status: fixed, kind: code,
+     files: [packages/media/src/dlp_media/calibration.py], source: docs/handover/full-inspection-2026-10-28.md,
+     note: "find_views가 require_upright로 회전 태그 영상을 거부하고 dlp media prepare를 안내한다(수집과 같은 정책). 회귀: packages/media/tests/test_calibration.py::test_display_rotation_tagged_board_video_is_rejected_until_prepared"}
+  - {id: F-PMS-45, title: "OWLv2 간격 캐시 프레임을 관측으로 취급해 움직이는 문서가 블러·검수 우선 구간에서 빠짐", severity: medium, status: fixed, kind: code,
+     files: [packages/privacy/src/dlp_privacy/detectors/open_vocab.py, packages/privacy/src/dlp_privacy/tracker.py, packages/privacy/src/dlp_privacy/review.py], source: docs/handover/full-inspection-2026-10-28.md,
+     note: "Detection.cached: 추론하지 않은 프레임의 캐시 결과는 관측이 아니라 유지 근거다. 관측 사이는 앞뒤 관측 외접 박스, 캐시로 유지되던 트랙은 다시 추론한 프레임에서 중심이 가장 가까운 같은 대상 관측에 잇는다(iou-tracker-2, 기존 세션 재탐지). 재현 노출 프레임 32/91 → 0. ADR 0009 개정. 회귀: packages/privacy/tests/test_gate.py::test_open_vocab_stride_frames_are_not_observations"}
   - {id: F-PAR-74, title: "버전이 바뀌면 entity 번호 재사용으로 마스크 단계가 새 개체 마스크를 빠뜨리거나 중복", severity: medium, status: fixed, kind: code,
      files: [packages/prelabel/src/dlp_prelabel/runner.py, packages/prelabel/src/dlp_prelabel/masks.py], source: docs/handover/full-inspection-2026-10-28.md,
      note: "프롬프트는 현재 박스 트랙마다 하나(라벨 ID 기준), 손은 손마다 하나. 검수 마스크 보호는 derived_from·parent 조상으로, 출처를 잃은 것은 같은 클래스·외접 박스 IoU 중앙값 masks.protect_match_iou 이상일 때만. 같은 entity_id 프롬프트가 여럿이면 라벨 ID에 트랙 ID 해시 8자. ADR 0059 개정. 회귀: packages/prelabel/tests/test_masks.py::test_masks_follow_box_tracks_not_reused_entity_numbers"}

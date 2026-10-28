@@ -18,6 +18,7 @@
 주요 공개 이름
     - `Ms`: 0 이상 정수 ms.
     - `Confidence`: 0~1 실수 (모델 신뢰도, 동기화 신뢰도 등).
+    - `FiniteFloat`: 유한 실수 (NaN·±Inf 거부). 계약의 좌표·오프셋 등 실수 필드에 쓴다.
     - `Identifier`: 세션·라벨·스트림 등 일반 ID (영숫자로 시작, 최대 128자).
     - `OntologyId`: 온톨로지 사전 키 (소문자 snake_case, 최대 64자).
     - `SemVer`: `X.Y.Z` 형식 버전 (온톨로지 버전 등).
@@ -38,6 +39,10 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 Ms = Annotated[int, Field(ge=0, description="마스터 타임라인 기준 시각(ms)")]
 # 확률 형태의 신뢰도. 0.0(전혀 믿지 않음) ~ 1.0(확실).
 Confidence = Annotated[float, Field(ge=0.0, le=1.0)]
+# 유한 실수. NaN·±Inf를 검증 오류로 낸다 (F-SCH-27). JSONB는 NaN·Inf를 담지 못해 배치 전체가
+# 실패하고, 동기화 오프셋에 NaN이 들어가면 마스터 시각이 NaN이 된다.
+# JSON Schema 출력은 바뀌지 않는다.
+FiniteFloat = Annotated[float, Field(allow_inf_nan=False)]
 # 일반 식별자. 첫 글자는 영숫자, 이후 영숫자와 `_ . : -`, 전체 1~128자.
 # `:`를 허용하는 이유: 파생 ID(`<base>:<suffix>`)와 검수 작업 키(`cvat:42`)를 담기 위해서다.
 Identifier = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")]

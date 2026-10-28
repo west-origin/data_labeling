@@ -71,7 +71,17 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """배포 색인과 탐지 기록을 제거한다. 공용 트리거 함수는 이전 리비전 소유다."""
+    """배포 색인과 탐지 기록을 제거한다. 공용 트리거 함수는 이전 리비전 소유다.
+
+    탐지 완료 기록이 하나라도 있으면 거부한다. 추가 전용 기록이고, 지우면 프라이버시 단계가
+    최신 완료 세대(ADR 0033)를 잃는다 (F-SCH-28).
+    """
+    count = op.get_bind().execute(sa.text(f"SELECT count(*) FROM {TABLE}")).scalar_one()
+    if count:
+        raise RuntimeError(
+            f"프라이버시 탐지 완료 기록 {count}개가 있어 0012를 되돌릴 수 없습니다 "
+            "(추가 전용 기록과 활성 탐지 세대를 잃는다)"
+        )
     op.drop_index(INDEX, table_name="model_versions")
     op.drop_index("ix_privacy_detection_runs_session_stream", table_name=TABLE)
     op.drop_table(TABLE)

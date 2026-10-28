@@ -53,12 +53,15 @@
 - `packages/cli/` (`dlp_cli`) — `dlp` 명령줄 진입점. 하위 명령마다 `<단계>_cmds.py`가 정책·저장소·DB를 엮어 각 패키지의
   실행 함수를 부른다. 모델 선택·온톨로지 선택 로직도 일부 남아 있다. 신규 도메인 로직은 각 패키지에 둔다.
 - `packages/schema/` (`dlp_schema`) — 계약 타입, 온톨로지 로더·검증, 이관, 설정 로더, DB 테이블·마이그레이션·저장소.
-  테스트용 객체는 `dlp_schema.testing`을 쓴다.
+  테스트용 객체는 `dlp_schema.testing`을 쓴다. 온톨로지 이관은 라벨 참조(`labels.LABEL_REF_FIELDS`)를 같은 배치의 새 ID로
+  바꾼다 (F-SCH-29). 추가 전용 기록이 있으면 오래된 리비전(0005·0009·0011·0012)의 downgrade도 거부한다.
 - `packages/fixtures/` (`dlp_fixtures`) — 정답을 아는 합성 데이터: 가짜 세션, 오프셋·드리프트를 아는 동기화 신호와
   QR 슬레이트 MP4, 위치를 아는 블러 대상 VFR 영상, 경계를 아는 행동 시퀀스(손 키포인트·장갑 압력·정답 라벨).
   알고리즘 모듈의 테스트는 이 생성기로 작성하고, 생성기 출력의 정답을 기준으로 판정한다.
 - `packages/media/` (`dlp_media`) — 세션 수집: 원본 저장소(불변, 멱등), PTS 인덱스, 프록시, IMU 추출기(GPMF·사이드카),
-  장갑 Parquet·HDF5 정규화. `dlp ingest <매니페스트>`로 실행한다.
+  장갑 Parquet·HDF5 정규화. `dlp ingest <매니페스트>`로 실행한다. 수집은 업로드 전에 스트림끼리 저장소 키가 겹치는지 보고(`planned_keys`),
+  원본 불변 업로드는 키가 없을 때만 원자적으로 쓴다(LocalStore 배타 링크, S3 `If-None-Match: *`, F-PMS-40).
+  `dlp calib intrinsics`는 표시 회전 태그 영상을 거부한다 (`dlp media prepare` 안내).
   카메라 내부 파라미터 등록(`dlp_media.calibration`, ADR 0045): 세션 값 → 기기(`calibration.camera_id`) 등록값
   (`camera_calibrations`, 추가만) → 화각 근사 순으로 고른다. 작업자 손 크기 사전값은 `worker_hand_sizes`(추가만).
   수집 뒤 세션 → 기기 연결은 `session_camera_assignments`(추가만, `dlp calib assign`, 매니페스트 camera_id가 앞선다).
@@ -78,6 +81,8 @@
   별도 트랜잭션의 세션 잠금 아래 그 보류가 아직 유효할 때만 쓴다).
   `dlp privacy detect|approve|render|audit-sample|hold`. 정책은 `config/policies/privacy.yaml`.
   블러 오탐 의심 힌트 `dlp_privacy.hints` (ADR 0055).
+  OWLv2 간격 캐시 프레임은 관측이 아니다(`Detection.cached`). 트래커는 실측 사이를 외접 박스·유지로 덮고 검수 우선
+  구간(track_gap)에 넣는다 (iou-tracker-2, ADR 0009 개정, F-PMS-45).
 - `packages/review/` (`dlp_review`) — 검수 도구 연동: CVAT·Label Studio 변환기(무손실 왕복), 작업 생성, reconcile(검수 결과 →
   라벨 이력), 웹훅 수집, 라벨러 워터마크, 역할 경계, 배포 매체 회수 실행기(`dlp_review.revoke`).
   `dlp review create|collect|verify|serve|register-webhooks|revoke|refresh-urls` (verify: 검수가 끝난 세션을 human_verified로. 설명·3D 궤적 따르기를 먼저 적용하고, `review.yaml verify.automatic`(기본 `camera_pose`·`relation`·`coverage`, 모델 출처만, ADR 0011 개정)의 자동 라벨은 검수 전이어도 완료를 막지 않는다(검수 상태는 그대로), ADR 0050, 출처 2D가 바뀌어 지운 3D를 지금 2D로 다시 만들기 전에는 완료를 막고 `dlp prelabel run`을 안내한다(`verify.require_current_3d`, ADR 0051),
@@ -228,6 +233,7 @@
   계약 변경은 ADR + Alembic 마이그레이션 + 계약 테스트 + `make schemas`를 함께 한다.
 - DB 스키마는 `dlp_schema/db/tables.py`와 새 Alembic 리비전을 함께 바꾼다. 테스트가 둘의 일치를 검사한다.
 - 모든 datetime은 시간대 정보가 있어야 한다 (UTC 권장).
+- 계약의 실수 필드는 `dlp_schema.common.FiniteFloat`로 NaN·±Inf를 거부한다 (F-SCH-27).
 - 영상 시각은 PTS 인덱스로만 계산한다. 프레임 번호에 프레임 간격을 곱해 계산하지 않는다.
 - 원본 버킷(`dlp-raw`) URI를 일반 라벨러 경로(블러본, 검수 작업, 내보내기)에 노출하지 않는다.
   `dlp_review.roles.check_stage_uris`로 검사하고, 라벨러용 URL은 라벨러 자격 증명(라벨링 버킷 읽기 전용)으로 서명한다.

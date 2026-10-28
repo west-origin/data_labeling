@@ -427,6 +427,77 @@ def test_open_vocab_detector_runs_every_stride_and_holds_results() -> None:
     assert fake.calls == 4
 
 
+class PanningDocOwl:
+    """흰 문서 화소의 외접 박스를 내는 완벽한 가짜 OWLv2 (추론한 프레임에서는 틀리지 않는다)."""
+
+    def __init__(self) -> None:
+        """질의 하나."""
+        self.queries = ["a printed document"]
+
+    def detect(self, image: np.ndarray, thresholds: list[float]) -> list[OwlDetection]:
+        """문서 색(250) 화소의 외접 박스, 원점수 0.9."""
+        ys, xs = np.nonzero(np.all(np.abs(image.astype(int) - 250) < 30, axis=2))
+        if not len(xs):
+            return []
+        x, y = float(xs.min()), float(ys.min())
+        return [OwlDetection(0, (x, y, float(xs.max()) - x + 1, float(ys.max()) - y + 1), 0.9)]
+
+
+def test_open_vocab_stride_frames_are_not_observations(
+    policy: PrivacyPolicy, tmp_path: Path
+) -> None:
+    """간격(frame_stride_ms) 사이 캐시 프레임은 관측이 아니다 (F-PMS-45).
+
+    바디캠이 돌아 문서가 화면에서 120 px/s로 흐른다. 예전에는 캐시 박스를 관측으로 이어 붙여 움직인
+    문서가 최대 55% 블러 밖이었고 그 프레임이 검수 우선 구간에도 없었다. 정답: 실측(추론 프레임)만
+    observed, 그 사이 프레임은 실측 사이를 덮는 박스(보간·유지)로 블러하고 track_gap 구간에 든다.
+    블러본에서 문서 화소가 5% 넘게 남는 프레임이 없다.
+    """
+    times = list(range(0, 3000, 33))
+
+    def doc_at(t: int) -> tuple[int, int, int, int]:
+        return int(20 + 0.12 * t), 100, 60, 40
+
+    frames: list[tuple[int, np.ndarray]] = []
+    for t in times:
+        img = np.full((240, 320, 3), 70, np.uint8)
+        x, y, bw, bh = doc_at(t)
+        img[y : y + bh, x : min(x + bw, 320)] = 250
+        frames.append((t, img))
+    src = tmp_path / "pan.mp4"
+    write_video(src, frames, width=320, height=240)
+    stride = policy.detectors["open_vocab"].frame_stride_ms
+    det = OpenVocabDetector(
+        "open_vocab", PanningDocOwl(), ["document"], version="perfect",
+        frame_stride_ms=stride, score_threshold=0.1, score_full=0.4,
+    )  # fmt: skip
+    p = oracle_policy(policy, {"document": ["open_vocab"]})
+    result = detect_video(
+        src, session_id="s", stream_id="bodycam", detectors={"open_vocab": det},
+        missing_detectors={}, policy=p, ontology_version="1.0.0", now=FIXED_TIME,
+    )  # fmt: skip
+    inferred = {times[0]}
+    for t in times:
+        if t - max(inferred) >= stride:
+            inferred.add(t)
+    gaps = [s for s in result.segments if s.reason == "track_gap"]
+    for t in times:
+        if t not in inferred and doc_at(t)[0] < 320:
+            assert any(s.t_start_ms <= t <= s.t_end_ms for s in gaps), t
+    dst = tmp_path / "pan-blur.mp4"
+    render_blurred(src, dst, result.labels, mode="solid", min_block_px=6, blocks_per_box=5,
+                   encoder_rate=30, crf=18)  # fmt: skip
+    with av.open(str(dst)) as c:
+        st = c.streams.video[0]
+        for f in c.decode(st):
+            assert f.pts is not None
+            t = round(float(f.pts * st.time_base * 1000))
+            x, y, bw, bh = doc_at(t)
+            region = f.to_ndarray(format="rgb24").astype(int)[y : y + bh, x : min(x + bw, 320)]
+            exposed = float((np.abs(region - 250).max(axis=2) < 30).mean()) if region.size else 0.0
+            assert exposed <= 0.05, (t, exposed)
+
+
 def test_pipeline_resets_open_vocab_cache_per_video(
     policy: PrivacyPolicy, blur: tuple[BlurScenario, Path]
 ) -> None:

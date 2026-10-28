@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+import shutil
+import subprocess
 from pathlib import Path
 
 import cv2
@@ -25,6 +27,8 @@ from dlp_media.calibration import (
     load_intrinsics_file,
     load_policy,
 )
+from dlp_media.prepare import load_policy as load_prepare_policy
+from dlp_media.prepare import prepare_video
 from dlp_schema.session import CameraIntrinsics
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -46,6 +50,31 @@ def test_checkerboard_video_recovers_known_intrinsics(tmp_path: Path) -> None:
     assert got.rms_px < 0.3 and got.n_views >= policy.min_views
     assert max(abs(d) for d in k.distortion) < 0.05 and k.distortion[4] == 0.0  # k3 고정
     assert calibrate_video(tmp_path / "board.mp4", board, policy) == got
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="FFmpeg 필요")
+def test_display_rotation_tagged_board_video_is_rejected_until_prepared(tmp_path: Path) -> None:
+    """표시 회전 태그가 있는 보드 영상은 캘리브레이션하지 않는다 (F-PMS-41).
+
+    수집·prepare는 회전 영상을 거부하거나 똑바른 픽셀로 바꾸는데, 캘리브레이션만 저장 픽셀로 풀어
+    세션 영상과 축이 다른(90°면 가로·세로가 바뀐) 내부 파라미터를 등록했다. 정답: 태그 영상은
+    CalibrationError("dlp media prepare" 안내), prepare한 사본은 표시 방향 크기(480x640)로 풀린다.
+    """
+    s = generate_checkerboard_video(tmp_path / "board.mp4", 0)
+    board = BoardSpec(*s.inner_corners, s.square_m)
+    policy = load_policy(ROOT)
+    tagged = tmp_path / "tagged.mp4"
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-display_rotation", "90", "-i", str(tmp_path / "board.mp4"),
+         "-c", "copy", str(tagged)],
+        check=True,
+    )  # fmt: skip
+    with pytest.raises(CalibrationError, match="dlp media prepare"):
+        calibrate_video(tagged, board, policy)
+    ready = tmp_path / "ready.mp4"
+    prepare_video(tagged, ready, load_prepare_policy(ROOT))
+    k = calibrate_video(ready, board, policy).intrinsics
+    assert (k.width, k.height) == (s.intrinsics.height, s.intrinsics.width)
 
 
 def test_too_few_board_views_or_wrong_board_fail(tmp_path: Path) -> None:
@@ -181,12 +210,12 @@ def _ros(model: str | None, k: list[float], dist: list[float]) -> str:
         ("ros_uncal.yaml", _ros("plumb_bob", [0.0] * 9, [0.0] * 5), "미보정"),
         ("ros_fish.yaml", _ros("equidistant", _ROS_K, [0.1, 0.0, 0.0, 0.0]), "왜곡 모델"),
         ("neg.yaml", _OWN.replace("fx: 500", "fx: -160"), "양수"),
-        ("nan.yaml", _OWN.replace("fx: 500", "fx: .nan"), "유한"),
+        ("nan.yaml", _OWN.replace("fx: 500", "fx: .nan"), "유한|finite"),
         ("out.yaml", _OWN.replace("cx: 320", "cx: 3200"), "밖"),
         (
             "inf.json",
             '{"width": 640, "height": 480, "fx": Infinity, "fy": 1, "cx": 1, "cy": 1}',
-            "유한",
+            "유한|finite",
         ),
         ("fish.yaml", _OWN + "distortion_model: fisheye\n", "지원하지"),
         ("broken.yaml", "fx: [1, 2\n", "파싱"),

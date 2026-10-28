@@ -115,3 +115,21 @@ def test_ingest_then_sync_updates_db_and_writes_report(
     with pg.begin() as conn:
         reingest = ingest_session(*load_manifest(tmp_path / "m.yaml"), store, conn)
     assert reingest.db == "unchanged"
+
+
+def test_adjust_non_finite_leaves_db_unchanged(pg: sa.Engine) -> None:
+    """`adjust`에 NaN을 넣으면 계약 검증으로 실패하고 DB 스트림 값은 그대로다 (F-SCH-27)."""
+    from dlp_schema.db.repository import insert_session, register_ontology
+    from dlp_schema.ontology import load_ontology
+    from dlp_schema.testing import make_session
+
+    root = Path(__file__).resolve().parents[3]
+    with pg.begin() as conn:
+        register_ontology(conn, load_ontology(root / "config" / "ontology" / "v1"))
+        insert_session(conn, make_session())
+    with pg.connect() as conn:
+        before = get_session(conn, "s001")
+    with pytest.raises(ValueError, match="finite"), pg.begin() as conn:
+        adjust(conn, "s001", "imu", float("nan"))
+    with pg.connect() as conn:
+        assert get_session(conn, "s001") == before

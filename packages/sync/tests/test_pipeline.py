@@ -274,3 +274,14 @@ def test_failed_resync_keeps_previous_fit(build: Callable[..., Built], policy: S
     assert _chosen(report, "glove_right") is None
     assert again.stream("glove_right") == adjusted.stream("glove_right")
     assert again.stream("third_person") == synced.stream("third_person")
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_manual_adjustment_is_rejected(
+    build: Callable[..., Built], policy: SyncPolicy, bad: float
+) -> None:
+    """NaN·±Inf 조정값은 계약 검증 오류로 거부된다 (마스터 시각이 NaN이 되지 않게, F-SCH-27)."""
+    _, session, media = build()
+    synced, _ = synchronize(session, media, policy)
+    with pytest.raises(ValueError, match="finite"):
+        apply_manual_adjustment(synced, "third_person", bad)

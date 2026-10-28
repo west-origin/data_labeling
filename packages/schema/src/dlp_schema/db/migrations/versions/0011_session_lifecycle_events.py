@@ -67,7 +67,16 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """트리거를 지우고 전이 기록 테이블을 지운다 (함수는 0009·0010 소유라 남긴다)."""
+    """트리거를 지우고 전이 기록 테이블을 지운다 (함수는 0009·0010 소유라 남긴다).
+
+    기록이 하나라도 있으면 거부한다. 수명 주기 전이 기록은 추가 전용 감사 기록이다 (F-SCH-28).
+    """
+    count = op.get_bind().execute(sa.text(f"SELECT count(*) FROM {TABLE}")).scalar_one()
+    if count:
+        raise RuntimeError(
+            f"수명 주기 전이 기록 {count}개가 있어 0011을 되돌릴 수 없습니다 "
+            "(추가 전용 감사 기록을 잃는다)"
+        )
     if op.get_bind().dialect.name == "postgresql":
         op.execute(f"DROP TRIGGER IF EXISTS {TABLE}_no_truncate ON {TABLE}")
         op.execute(f"DROP TRIGGER IF EXISTS {TABLE}_append_only ON {TABLE}")

@@ -31,7 +31,7 @@ from typing import Annotated, Literal
 
 from pydantic import AwareDatetime, Field, StringConstraints, model_validator
 
-from dlp_schema.common import Confidence, Contract, Identifier, Ms, SemVer
+from dlp_schema.common import Confidence, Contract, FiniteFloat, Identifier, Ms, SemVer
 
 
 # 작업 도메인. 온톨로지 domains의 키와 같다 (cleaning=청소, caregiving=요양돌봄, nursing=간호).
@@ -122,12 +122,12 @@ def can_transition(current: LifecycleState, target: LifecycleState) -> bool:
 class CameraIntrinsics(Contract):
     width: int = Field(gt=0)
     height: int = Field(gt=0)
-    fx: float
-    fy: float
-    cx: float
-    cy: float
+    fx: FiniteFloat
+    fy: FiniteFloat
+    cx: FiniteFloat
+    cy: FiniteFloat
     distortion_model: str = "opencv"
-    distortion: tuple[float, ...] = ()
+    distortion: tuple[FiniteFloat, ...] = ()
 
 
 def _drop_none(value: object) -> bool:
@@ -151,11 +151,11 @@ class Calibration(Contract):
     camera_id: Identifier | None = Field(
         default=None, exclude_if=_drop_none, description="바디캠 기기 ID (등록된 캘리브레이션 조회)"
     )
-    camera_imu_extrinsics: tuple[tuple[float, ...], ...] | None = Field(
+    camera_imu_extrinsics: tuple[tuple[FiniteFloat, ...], ...] | None = Field(
         default=None, description="IMU→카메라 4x4 변환 행렬"
     )
     glove_model: str | None = None
-    glove_calibration: dict[str, float] = Field(default_factory=dict)
+    glove_calibration: dict[str, FiniteFloat] = Field(default_factory=dict)
 
 
 class Stream(Contract):
@@ -176,13 +176,13 @@ class Stream(Contract):
     stream_id: Identifier
     kind: StreamKind
     uri: str
-    sample_rate_hz: float | None = Field(default=None, gt=0)
+    sample_rate_hz: FiniteFloat | None = Field(default=None, gt=0)
     pts_index_uri: str | None = None
-    offset_ms: float = 0.0
-    clock_scale: float = Field(default=1.0, gt=0)
+    offset_ms: FiniteFloat = 0.0
+    clock_scale: FiniteFloat = Field(default=1.0, gt=0)
     sync_method: SyncMethod = SyncMethod.UNSYNCED
     sync_confidence: Confidence | None = None
-    manual_adjustment_ms: float = 0.0
+    manual_adjustment_ms: FiniteFloat = 0.0
 
     @property
     def is_identity_clock(self) -> bool:

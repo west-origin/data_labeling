@@ -32,6 +32,7 @@ WP3, ADR 0003·0020. 진입점: `dlp ingest <매니페스트>` (`dlp_cli.media_c
 
 - `SessionManifest` / `ManifestStream` / `load_manifest`: 매니페스트 계약과 로더.
 - `ingest_session`: 수집 본체. `IngestResult` 반환.
+- `planned_keys`: 수집이 쓸 저장소 키 계획 (스트림끼리 키가 겹치면 업로드 전 ValueError, F-PMS-39).
 - `SessionConflictError`: 같은 세션 ID가 다른 내용으로 이미 등록됨.
 """
 
@@ -169,6 +170,7 @@ def ingest_session(  # noqa: C901
 
     Raises:
         ValueError: 바디캠이 하나가 아님, 비디오 트랙 없음/표시 회전 있음,
+            스트림 ID끼리 저장소 키가 겹침(`planned_keys`, 업로드 전),
             recorded_at을 정할 수 없음, 센서 파일 형식 오류.
         FileNotFoundError: 매니페스트의 파일이 없을 때.
         ImmutableObjectError: 원본 키에 다른 내용이 이미 있을 때 (원본 파일이 바뀌었다).
@@ -185,6 +187,9 @@ def ingest_session(  # noqa: C901
     kinds = [s.kind for s in manifest.streams]
     if kinds.count(StreamKind.BODYCAM) != 1:
         raise ValueError("매니페스트에는 바디캠 스트림이 정확히 하나 있어야 합니다")
+    # 스트림 ID에 '.'이 허용되어 `bodycam.pts` 장갑의 정규화 키가 바디캠 PTS 인덱스 키와 같아질 수
+    # 있다. 파생 파일은 있으면 내용 확인 없이 건너뛰므로 겹치면 남의 파일을 가리킨다 (F-PMS-39).
+    planned_keys(manifest, base_dir)
     # 잘못된 방향의 공간 라벨을 만들기 전에 전체 영상 입력을 확인한다. 실패 시 업로드하지 않는다.
     video_info: dict[str, MediaInfo] = {}
     for stream in manifest.streams:
@@ -228,7 +233,7 @@ def ingest_session(  # noqa: C901
         if not src.is_file():
             raise FileNotFoundError(src)
         # 1) 원본 업로드 (불변)
-        raw_uri = put(f"{prefix}/raw/{ms.stream_id}{src.suffix}", src)
+        raw_uri = put(_raw_key(prefix, ms.stream_id, src), src)
 
         if ms.kind in VIDEO_KINDS:
             # 2) 영상: PTS 인덱스와 프록시
@@ -236,9 +241,9 @@ def ingest_session(  # noqa: C901
             if info.video is None:
                 raise ValueError(f"{src}: 비디오 트랙이 없습니다")
             index = build_pts_index(src)
-            pts_uri = derived(f"{prefix}/derived/{ms.stream_id}.pts.parquet", index.write)
+            pts_uri = derived(_pts_key(prefix, ms.stream_id), index.write)
             derived(
-                f"{prefix}/derived/{ms.stream_id}.proxy.mp4",
+                _proxy_key(prefix, ms.stream_id),
                 lambda out, s=src: make_proxy(s, out, proxy_cfg),
             )
             is_body = ms.kind is StreamKind.BODYCAM
@@ -270,7 +275,7 @@ def ingest_session(  # noqa: C901
         elif ms.kind in GLOVE_KINDS:
             # 4) 장갑: 정규화 Parquet이 스트림 uri가 된다 (원본은 raw/에 따로 보관)
             glove = read_glove(src)
-            uri = derived(f"{prefix}/derived/{ms.stream_id}.parquet", glove.write)
+            uri = derived(_table_key(prefix, ms.stream_id), glove.write)
             streams.append(
                 Stream(
                     stream_id=ms.stream_id,
@@ -305,6 +310,64 @@ def ingest_session(  # noqa: C901
     return result
 
 
+# 바디캠 내장 IMU로 만드는 스트림 ID (매니페스트에 IMU 스트림이 없을 때만)
+EMBEDDED_IMU_ID = "imu"
+
+
+def _raw_key(prefix: str, stream_id: str, src: Path) -> str:
+    """원본 키 `<prefix>/raw/<스트림><확장자>`."""
+    return f"{prefix}/raw/{stream_id}{src.suffix}"
+
+
+def _pts_key(prefix: str, stream_id: str) -> str:
+    """영상 PTS 인덱스 키."""
+    return f"{prefix}/derived/{stream_id}.pts.parquet"
+
+
+def _proxy_key(prefix: str, stream_id: str) -> str:
+    """영상 프록시 키."""
+    return f"{prefix}/derived/{stream_id}.proxy.mp4"
+
+
+def _table_key(prefix: str, stream_id: str) -> str:
+    """센서(IMU·장갑) 정규화 Parquet 키."""
+    return f"{prefix}/derived/{stream_id}.parquet"
+
+
+def planned_keys(manifest: SessionManifest, base_dir: Path) -> dict[str, str]:
+    """수집이 쓸 수 있는 저장소 키 → 그 키를 쓰는 스트림 ID. 겹치면 업로드 전에 거부한다.
+
+    원본 키와 파생 키(PTS 인덱스·프록시·정규화 Parquet)를 모두 계획한다. 매니페스트에 IMU 스트림이
+    없으면 바디캠 내장 IMU 스트림(`EMBEDDED_IMU_ID`)의 ID·키도 미리 잡는다
+    (추출 여부는 아직 모른다).
+
+    Raises:
+        ValueError: 스트림 ID가 겹치거나, 서로 다른 스트림의 키가 같을 때 (F-PMS-39).
+    """
+    prefix = f"sessions/{manifest.session_id}"
+    owners: dict[str, str] = {}
+    ids: list[str] = [s.stream_id for s in manifest.streams]
+    if StreamKind.IMU not in {s.kind for s in manifest.streams}:
+        ids.append(EMBEDDED_IMU_ID)
+        owners[_table_key(prefix, EMBEDDED_IMU_ID)] = f"{EMBEDDED_IMU_ID}(내장 IMU)"
+    dup = sorted({i for i in ids if ids.count(i) > 1})
+    if dup:
+        raise ValueError(f"스트림 ID가 겹칩니다: {', '.join(dup)} (내장 IMU는 '{EMBEDDED_IMU_ID}')")
+    for ms in manifest.streams:
+        keys = [_raw_key(prefix, ms.stream_id, base_dir / ms.path)]
+        if ms.kind in VIDEO_KINDS:
+            keys += [_pts_key(prefix, ms.stream_id), _proxy_key(prefix, ms.stream_id)]
+        elif ms.kind is StreamKind.IMU or ms.kind in GLOVE_KINDS:
+            keys.append(_table_key(prefix, ms.stream_id))
+        for key in keys:
+            if (other := owners.setdefault(key, ms.stream_id)) != ms.stream_id:
+                raise ValueError(
+                    f"스트림 {other}와 {ms.stream_id}의 저장소 키가 겹칩니다: {key} "
+                    "(스트림 ID를 바꾸세요)"
+                )
+    return owners
+
+
 def _root() -> Path:
     """이 파일에서 위로 찾은 저장소 루트."""
     return repo_root(Path(__file__).parent)
@@ -324,7 +387,7 @@ def _imu_stream(
     sync: SyncMethod,
 ) -> Stream:
     """IMU 정규화 Parquet을 (없으면) 만들고 그것을 가리키는 IMU 스트림을 만든다."""
-    uri = derived(f"{prefix}/derived/{stream_id}.parquet", imu.write)
+    uri = derived(_table_key(prefix, stream_id), imu.write)
     return Stream(
         stream_id=stream_id,
         kind=StreamKind.IMU,

@@ -1,8 +1,10 @@
 """오픈 보캐뷸러리 탐지 (OWLv2): 문서·화면·사진물·문패·송장과 반사면 영역.
 
 CPU에서 프레임당 수 초가 걸려 frame_stride_ms마다 한 번만 추론한다. 그 사이 프레임에는 마지막
-추론 결과를 그대로 돌려준다. 같은 시각에 여러 번 불려도(대상 탐지 + reflection 탐지기의 영역
-탐지) 추론은 한 번이다. 파이프라인은 프레임을 시간 순서로 넘긴다는 가정에 기댄다.
+추론 결과를 `cached=True`로 표시해 돌려준다 (관측이 아니다. 트래커가 실측 사이를 보간·유지로 덮고
+그 프레임을 검수 우선 구간에 넣는다, F-PMS-45). 같은 시각에 여러 번 불려도(대상 탐지 + reflection
+탐지기의 영역 탐지) 추론은 한 번이고 그 시각의 결과는 관측이다. 파이프라인은 프레임을 시간 순서로
+넘긴다는 가정에 기댄다.
 
 WP5, ADR 0009. 모델 실행은 `dlp_models.owlv2.Owlv2`(공용 ONNX 런타임)가 한다. 정책:
 privacy.yaml `detectors.open_vocab` (model, tokenizer, frame_stride_ms, score_threshold, score_full,
@@ -88,7 +90,7 @@ class OpenVocabDetector:
         """추론할 때가 됐으면 추론하고, 아니면 캐시를 쓴다. 신뢰도가 문턱 이상인 것만 낸다.
 
         문턱은 캐시에 매번 적용하므로 같은 시각에 다른 문턱으로 불러도(reflection 탐지기 등)
-        추론을 다시 하지 않는다.
+        추론을 다시 하지 않는다. 추론한 시각이 아닌 프레임의 결과는 `cached=True`다.
         """
         due = (
             self._last_run is None
@@ -98,4 +100,9 @@ class OpenVocabDetector:
         if due:
             self._cache = self._infer(image)
             self._last_run = t_ms
-        return [Detection(tg, box, s, self.name) for tg, box, s in self._cache if s >= threshold]
+        cached = t_ms != self._last_run
+        return [
+            Detection(tg, box, s, self.name, cached=cached)
+            for tg, box, s in self._cache
+            if s >= threshold
+        ]

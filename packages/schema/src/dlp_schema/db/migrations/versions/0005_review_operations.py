@@ -101,7 +101,27 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """트리거 함수를 0001 정의로 되돌린 뒤(measurement 열을 지우기 전에) 추가한 것을 지운다."""
+    """트리거 함수를 0001 정의로 되돌린 뒤(measurement 열을 지우기 전에) 추가한 것을 지운다.
+
+    배정 기록이나 measurement가 적힌 라벨이 있으면 거부한다 (F-SCH-28). measurement 열을 지우면
+    블라인드·이중 측정 레코드가 운영 라벨로 보여 학습·내보내기에 섞이고, 배정을 지우면 그 측정의
+    근거(누가 어떤 방식으로 맡았는지)를 잃는다.
+    """
+    bind = op.get_bind()
+    assignments = bind.execute(sa.text("SELECT count(*) FROM review_assignments")).scalar_one()
+    if assignments:
+        raise RuntimeError(
+            f"검수 배정 기록 {assignments}개가 있어 0005를 되돌릴 수 없습니다 "
+            "(블라인드·이중·QA 배정 근거를 잃는다)"
+        )
+    measured = bind.execute(
+        sa.text("SELECT count(*) FROM label_records WHERE measurement IS NOT NULL")
+    ).scalar_one()
+    if measured:
+        raise RuntimeError(
+            f"measurement가 적힌 라벨 {measured}개가 있어 0005를 되돌릴 수 없습니다 "
+            "(측정 레코드가 운영 라벨로 섞인다)"
+        )
     if op.get_bind().dialect.name == "postgresql":
         op.execute(PREVIOUS_FUNCTION)
     op.drop_index("ix_review_assignments_queue", table_name="review_assignments")

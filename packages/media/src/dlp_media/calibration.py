@@ -54,6 +54,7 @@ import yaml
 from numpy.typing import NDArray
 from pydantic import Field
 
+from dlp_media.probe import probe, require_upright
 from dlp_schema.common import Contract
 from dlp_schema.session import CameraIntrinsics
 
@@ -146,6 +147,26 @@ def _gray_frames(path: Path, every_ms: int) -> Iterator[tuple[int, NDArray[np.ui
             yield t, np.asarray(frame.to_ndarray(format="gray"), np.uint8)
 
 
+def _require_upright(path: Path) -> None:
+    """표시 회전 태그가 있는 영상은 거부한다 (F-PMS-41).
+
+    디코더는 태그를 적용하지 않은 저장 픽셀을 낸다. 수집(`require_upright`)은 그런 세션 영상을
+    거부하고 `dlp media prepare`가 표시 방향으로 돌린 사본을 만들므로, 세션의 공간 라벨은 늘 표시
+    방향 픽셀이다. 캘리브레이션만 저장 픽셀로 풀면 90°에서는 가로·세로와 fx·fy, 180°에서는 주점이
+    세션 영상과 맞지 않는다. 같은 정규화를 거친 사본으로 캘리브레이션하게 한다.
+
+    Raises:
+        CalibrationError: 회전 태그가 있을 때 (prepare 안내).
+    """
+    try:
+        require_upright(probe(path))
+    except ValueError as exc:
+        raise CalibrationError(
+            f"{exc} 캘리브레이션 영상도 세션 영상과 같은 방향이어야 합니다: "
+            f"`dlp media prepare {path} --out <똑바른 사본.mp4>`로 정규화한 사본을 쓰세요."
+        ) from exc
+
+
 def find_views(
     path: Path, board: BoardSpec, policy: IntrinsicsCalibrationPolicy
 ) -> tuple[list[tuple[int, NDArray[np.float32]]], tuple[int, int]]:
@@ -153,7 +174,11 @@ def find_views(
 
     앞서 채택한 장면과 코너 평균 이동이 `min_motion_px`보다 작으면 건너뛴다 (보드를 멈춘 동안의 같은
     자세를 여러 번 넣으면 최소제곱이 그 자세에 치우친다).
+
+    Raises:
+        CalibrationError: 표시 회전 태그가 있을 때 (`_require_upright`).
     """
+    _require_upright(path)
     views: list[tuple[int, NDArray[np.float32]]] = []
     size = (0, 0)
     for t, gray in _gray_frames(path, policy.sample_every_ms):

@@ -99,6 +99,39 @@ def test_changed_raw_file_is_rejected(
         ingest_session(manifest, base, store)
 
 
+@pytest.mark.parametrize("glove_first", [False, True])
+def test_stream_ids_whose_keys_collide_are_rejected_before_upload(
+    sync: tuple[SyncScenario, Path],
+    tmp_path: Path,
+    write_manifest: ManifestWriter,
+    glove_first: bool,
+) -> None:
+    """스트림 ID `bodycam.pts`의 장갑 정규화 키(`bodycam.pts.parquet`)는 바디캠 PTS 키와 같다.
+
+    예전에는 먼저 올린 쪽을 다른 스트림이 내용 확인 없이 가리켰다 (F-PMS-39). 정답: 순서와 관계없이
+    업로드 전에 ValueError, 저장소에는 아무것도 없다. 같은 스트림 ID 둘, 내장 IMU와 겹치는 `imu`도
+    같은 검사로 거부한다.
+    """
+    store = LocalStore(tmp_path / "store", "dlp-raw")
+    body = {"stream_id": "bodycam", "kind": "bodycam", "path": str(sync[1] / "bodycam.mp4")}
+    glove = {
+        "stream_id": "bodycam.pts",
+        "kind": "glove_right",
+        "path": str(sync[1] / "glove_right.parquet"),
+    }
+    streams = [glove, body] if glove_first else [body, glove]
+    manifest, base = load_manifest(write_manifest(tmp_path, sync[1], streams=streams))
+    with pytest.raises(ValueError, match=r"bodycam\.pts\.parquet"):
+        ingest_session(manifest, base, store)
+    assert not store.root.exists() or not any(store.root.rglob("*"))
+
+    for other in (dict(glove, stream_id="bodycam"), dict(glove, stream_id="imu")):
+        manifest, base = load_manifest(write_manifest(tmp_path, sync[1], streams=[body, other]))
+        with pytest.raises(ValueError, match="겹칩니다"):
+            ingest_session(manifest, base, store)
+    assert not store.root.exists() or not any(store.root.rglob("*"))
+
+
 def test_reingest_same_instant_other_offset_is_unchanged(
     sync: tuple[SyncScenario, Path], tmp_path: Path, write_manifest: ManifestWriter
 ) -> None:

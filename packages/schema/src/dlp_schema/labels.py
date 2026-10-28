@@ -21,7 +21,8 @@
     - 키프레임: `BoxKeyframe`, `Rle`, `MaskKeyframe`, `Keypoint`, `KeypointFrame`, `WorldPoint`,
       `Trajectory3DSample`. `without_world`(손 중심 3D 점을 뺀 사본, ADR 0044).
     - 페이로드: `*Payload` 14종과 판별 공용체 `LabelPayload`.
-    - `SKELETON_SIZES`, `ARM3_JOINTS`, `HANDED_SKELETONS`, `SPATIAL_KINDS`, `LabelRecord`.
+    - `SKELETON_SIZES`, `ARM3_JOINTS`, `HANDED_SKELETONS`, `SPATIAL_KINDS`, `LABEL_REF_FIELDS`,
+      `LabelRecord`.
 
 주의
     - 클래스 docstring과 Field description은 `schemas/label_record.schema.json` 등에 들어간다.
@@ -36,7 +37,15 @@ from typing import Annotated, Literal
 
 from pydantic import AwareDatetime, Field, model_validator
 
-from dlp_schema.common import Confidence, Contract, Identifier, Ms, OntologyId, SemVer
+from dlp_schema.common import (
+    Confidence,
+    Contract,
+    FiniteFloat,
+    Identifier,
+    Ms,
+    OntologyId,
+    SemVer,
+)
 
 # ---------------------------------------------------------------- 공통 메타데이터
 
@@ -147,10 +156,10 @@ def _drop_none(value: object) -> bool:
 # 키프레임 사이 값은 소비자가 보간한다 (선형 등, 각 단계 정책).
 class BoxKeyframe(Contract):
     t_ms: Ms
-    x: float
-    y: float
-    w: float = Field(ge=0)
-    h: float = Field(ge=0)
+    x: FiniteFloat
+    y: FiniteFloat
+    w: FiniteFloat = Field(ge=0)
+    h: FiniteFloat = Field(ge=0)
     outside: bool = False
 
 
@@ -186,8 +195,8 @@ class MaskKeyframe(Contract):
 # 키포인트 하나. x, y: 픽셀 좌표. visibility: COCO 규약 (0 없음, 1 가려짐, 2 보임).
 # confidence: 모델 신뢰도 (선택).
 class Keypoint(Contract):
-    x: float
-    y: float
+    x: FiniteFloat
+    y: FiniteFloat
     visibility: Literal[0, 1, 2] = Field(description="0 라벨 없음, 1 가려짐, 2 보임")
     confidence: Confidence | None = None
 
@@ -195,9 +204,9 @@ class Keypoint(Contract):
 # 손 모델의 손 중심 3D 점 (미터). 좌표축은 카메라와 같은 방향(X 오른쪽, Y 아래, Z 앞)이고 원점은
 # 손의 대략적인 기하 중심이다 (MediaPipe hand_world_landmarks, ADR 0044). 카메라 좌표가 아니다.
 class WorldPoint(Contract):
-    x: float
-    y: float
-    z: float
+    x: FiniteFloat
+    y: FiniteFloat
+    z: FiniteFloat
 
 
 # 한 시각의 키포인트 묶음. points 개수는 골격 크기(`SKELETON_SIZES`)와 같아야 한다.
@@ -330,13 +339,13 @@ class Constraint3DFlag(StrEnum):
 #   신뢰도를 낮춘다. None이면 JSON에 싣지 않는다.
 class Trajectory3DSample(Contract):
     t_ms: Ms
-    x: float
-    y: float
-    z: float
-    qw: float | None = None
-    qx: float | None = None
-    qy: float | None = None
-    qz: float | None = None
+    x: FiniteFloat
+    y: FiniteFloat
+    z: FiniteFloat
+    qw: FiniteFloat | None = None
+    qx: FiniteFloat | None = None
+    qy: FiniteFloat | None = None
+    qz: FiniteFloat | None = None
     method: Lift3DMethod | None = Field(
         default=None, exclude_if=_drop_none, description="이 표본을 얻은 추정 방식"
     )
@@ -583,6 +592,12 @@ LabelPayload = Annotated[
 SPATIAL_KINDS = frozenset(
     {"box_track", "mask_track", "keypoint_track", "blur_track", "trajectory3d"}
 )
+
+# 페이로드에서 다른 라벨의 label_id를 담는 필드 (값은 ID 하나 또는 ID 튜플).
+#   source_label_id: 번역 설명의 원문 (ADR 0043). derived_from: 3D 궤적·마스크의 입력 라벨
+#   (ADR 0046·0059). 온톨로지 이관(`migration.migrate_labels`)이 같은 배치의 새 ID로 바꾼다.
+#   `dlp_export.pseudonym.LABEL_REF_FIELDS`와 같은 집합이어야 한다.
+LABEL_REF_FIELDS = frozenset({"source_label_id", "derived_from"})
 
 
 # ---------------------------------------------------------------- 라벨 레코드

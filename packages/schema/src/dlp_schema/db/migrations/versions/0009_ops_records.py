@@ -116,7 +116,19 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """트리거·함수를 지우고 운영 기록 테이블을 지운다 (감사 기록이 사라진다)."""
+    """트리거·함수를 지우고 운영 기록 테이블을 지운다. 기록이 하나라도 있으면 거부한다.
+
+    네 테이블은 추가만 하는 감사·운영 기록이다 (원본 접근, 검수 작업 시간, 잔여 누락 감사,
+    보관 결정). 지우면 감사 근거를 잃으므로 비어 있을 때만 되돌린다 (F-SCH-28, 0017과 같은 방식).
+    """
+    bind = op.get_bind()
+    for table in TABLES:
+        count = bind.execute(sa.text(f"SELECT count(*) FROM {table}")).scalar_one()
+        if count:
+            raise RuntimeError(
+                f"{table}에 기록 {count}개가 있어 0009를 되돌릴 수 없습니다 "
+                "(추가 전용 감사·운영 기록을 잃는다)"
+            )
     if op.get_bind().dialect.name == "postgresql":
         for table in TABLES:
             op.execute(f"DROP TRIGGER IF EXISTS {table}_append_only ON {table}")

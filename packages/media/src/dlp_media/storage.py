@@ -22,6 +22,9 @@ WP3·WP16, ADR 0003·0020. 모든 단계가 이 프로토콜(`ObjectStore`)로 �
 - `S3Store`: S3 호환 (개발은 SeaweedFS, `s3://<버킷>/<키>`).
 - `store_from_spec`: CLI `--store` 값('s3' | 'local:<디렉터리>')으로 저장소를 만든다.
 - `put_immutable`: 불변 업로드 (원본 수집용). `sha256_file`: 파일 해시.
+- `CreateOnlyStore`: 키가 없을 때만 원자적으로 쓰는 저장소 (`LocalStore`: 임시 파일 + 배타 링크,
+  `S3Store`: 조건부 쓰기 `If-None-Match: *`, 원본 감사 저장소는 감싼 저장소에 넘긴다).
+  동시에 같은 키로 다른 내용이 와도 하나만 올라간다 (F-PMS-40).
 - `DeletableStore`: 삭제할 수 있는 저장소 (`LocalStore`, `S3Store`). 회수 실행기만 쓴다.
 - `ListableStore`, `ListedObject`: 접두사로 객체를 나열할 수 있는 저장소와 그 결과
   (`LocalStore`, `S3Store`). DB 기록 없이 남은 라벨링 버킷 사본(고아)을 찾는 `dlp_review.orphans`만
@@ -34,6 +37,8 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+import tempfile
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -44,6 +49,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 
 if TYPE_CHECKING:
     from mypy_boto3_s3 import S3Client
+    from mypy_boto3_s3.type_defs import CompletedPartTypeDef
 
 
 # 저장소 호출 실패로 볼 예외 (S3 응답·연결 오류, 로컬 파일 오류). 실패를 모아 보고할 때 쓴다.
@@ -85,6 +91,18 @@ class ObjectStore(Protocol):
 
     def get_file(self, key: str, dest: Path) -> None:
         """키의 객체를 로컬 dest에 받는다. 없으면 예외 (구현마다 종류가 다르다)."""
+        ...
+
+
+@runtime_checkable
+class CreateOnlyStore(ObjectStore, Protocol):
+    """키가 없을 때만 원자적으로 쓰는 저장소 (`put_immutable`이 먼저 쓴다, F-PMS-40)."""
+
+    def put_file_new(self, key: str, path: Path, sha256: str) -> bool:
+        """키가 없으면 올리고 True, 이미 있으면 아무것도 쓰지 않고 False.
+
+        확인과 쓰기 사이에 다른 쓰기가 끼어들 수 없다 (동시에 여러 개가 와도 True는 하나).
+        """
         ...
 
 
@@ -135,23 +153,53 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+# 원자적 생성에서 진 쪽이 승자의 해시 기록을 기다리는 횟수·간격 (LocalStore는 객체를 먼저 만들고
+# 해시 옆 파일을 곧바로 쓴다. 그 사이에 head하면 해시가 아직 없다)
+_HASH_WAIT_TRIES = 20
+_HASH_WAIT_S = 0.05
+
+
 def put_immutable(store: ObjectStore, key: str, path: Path) -> bool:
     """올렸으면 True, 같은 내용이 이미 있어 건너뛰었으면 False.
 
     원본 수집(`ingest.ingest_session`)이 쓴다. 기존 객체의 기록된 sha256과 비교하므로, 해시 기록이
     없는 기존 객체(None)는 "다른 내용"으로 본다.
 
+    동시 쓰기 (F-PMS-40): `CreateOnlyStore`면 키가 없을 때만 원자적으로 쓴다 (SeaweedFS 4.48은
+    `If-None-Match: *`를 지키는 것을 실측했다: 동시 8개 중 하나만 성공, 나머지 412). 그렇지 않은
+    저장소는 head → 쓰기 사이를 막을 수 없으므로 쓴 뒤 다시 head해 기록된 해시가 내 것인지 본다.
+    덮인 쪽은 ImmutableObjectError를 낸다 (먼저 쓴 내용은 이미 덮였을 수 있다 → 그 저장소는 원본에
+    쓰지 않는다). 어느 경우든 쓴 뒤 해시를 다시 대조한다.
+
     Raises:
-        ImmutableObjectError: 같은 키에 다른 내용이 이미 있을 때.
+        ImmutableObjectError: 같은 키에 다른 내용이 이미 있을 때
+            (동시에 다른 내용이 먼저 올라간 때 포함).
     """
     digest = sha256_file(path)
     existing = store.head(key)
-    if existing is not None:
-        if existing.sha256 == digest:
-            return False
-        raise ImmutableObjectError(f"{store.uri(key)}에 다른 내용이 이미 있습니다")
-    store.put_file(key, path, digest)
-    return True
+    if existing is None:
+        if isinstance(store, CreateOnlyStore):
+            created = store.put_file_new(key, path, digest)
+        else:
+            store.put_file(key, path, digest)
+            created = True
+        existing = _head_with_hash(store, key)
+        if created and existing is not None and existing.sha256 == digest:
+            return True
+    if existing is not None and existing.sha256 == digest:
+        return False
+    raise ImmutableObjectError(f"{store.uri(key)}에 다른 내용이 이미 있습니다")
+
+
+def _head_with_hash(store: ObjectStore, key: str) -> StoredObject | None:
+    """head하되, 객체는 있고 해시 기록이 아직 없으면 잠깐 기다려 다시 본다 (위 상수)."""
+    head = store.head(key)
+    for _ in range(_HASH_WAIT_TRIES):
+        if head is None or head.sha256 is not None:
+            break
+        time.sleep(_HASH_WAIT_S)
+        head = store.head(key)
+    return head
 
 
 class LocalStore:
@@ -197,6 +245,31 @@ class LocalStore:
         shutil.copyfile(path, dest)
         dest.with_name(dest.name + ".sha256").write_text(sha256)
 
+    def put_file_new(self, key: str, path: Path, sha256: str) -> bool:
+        """없을 때만 쓴다: 같은 디렉터리의 임시 파일에 복사한 뒤 `os.link`로 배타 생성한다.
+
+        `os.link`는 대상이 있으면 FileExistsError라 확인과 생성이 한 번의 시스템 호출이다. 해시 옆
+        파일은 이긴 쪽만 객체를 만든 뒤 쓴다 (그 사이 head는 sha256=None을 볼 수 있다,
+        `put_immutable`이 잠깐 기다린다).
+        """
+        dest = self._path(key)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(dir=dest.parent, prefix=f".{dest.name}.", suffix=".tmp")
+        os.close(fd)
+        tmp = Path(tmp_name)
+        try:
+            shutil.copyfile(path, tmp)
+            try:
+                os.link(tmp, dest)
+            except FileExistsError:
+                return False
+        finally:
+            tmp.unlink(missing_ok=True)
+        side_tmp = tmp.with_name(tmp.name + ".sha256")
+        side_tmp.write_text(sha256)
+        side_tmp.replace(dest.with_name(dest.name + ".sha256"))
+        return True
+
     def get_file(self, key: str, dest: Path) -> None:
         """파일을 dest로 복사한다. 없으면 FileNotFoundError."""
         shutil.copyfile(self._path(key), dest)
@@ -217,6 +290,8 @@ class LocalStore:
         out: list[ListedObject] = []
         for path in self.root.rglob("*"):
             key = path.relative_to(self.root).as_posix()
+            if path.name.startswith(".") and ".tmp" in path.name:
+                continue  # put_file_new의 쓰는 중 임시 파일
             sidecar = path.suffix == ".sha256" and path.with_name(path.stem).is_file()
             if not path.is_file() or sidecar or not key.startswith(prefix):
                 continue
@@ -305,6 +380,59 @@ class S3Store:
             str(path), self.bucket, key, ExtraArgs={"Metadata": {"sha256": sha256}}
         )
 
+    def put_file_new(
+        self, key: str, path: Path, sha256: str, *, part_size: int | None = None
+    ) -> bool:
+        """조건부 쓰기(`If-None-Match: *`): 키가 없을 때만 만든다. 이미 있으면(412) False.
+
+        boto3 전송 관리자(`upload_file`)는 이 조건을 넘기지 못해 직접 요청한다. 조각 크기 이하는
+        PutObject 한 번, 그보다 크면 분할 업로드를 하고 완료 요청에 조건을 건다 (조건이 실패하면
+        분할 업로드를 버린다). part_size: 조각 크기 바이트 (테스트용, 기본 `_PART_SIZE`).
+        """
+        part = part_size or _PART_SIZE
+        meta = {"sha256": sha256}
+        try:
+            if path.stat().st_size <= part:
+                with path.open("rb") as f:
+                    self.client.put_object(
+                        Bucket=self.bucket, Key=key, Body=f, Metadata=meta, IfNoneMatch="*"
+                    )
+            else:
+                self._multipart_new(key, path, meta, part)
+        except ClientError as exc:
+            if _precondition_failed(exc):
+                return False
+            raise
+        return True
+
+    def _multipart_new(self, key: str, path: Path, meta: dict[str, str], part: int) -> None:
+        """분할 업로드 후 `If-None-Match: *`로 완료한다. 실패하면 업로드를 버리고 다시 던진다."""
+        upload_id = self.client.create_multipart_upload(Bucket=self.bucket, Key=key, Metadata=meta)[
+            "UploadId"
+        ]
+        try:
+            parts: list[CompletedPartTypeDef] = []
+            with path.open("rb") as f:
+                for number, chunk in enumerate(iter(lambda: f.read(part), b""), start=1):
+                    resp = self.client.upload_part(
+                        Bucket=self.bucket,
+                        Key=key,
+                        UploadId=upload_id,
+                        PartNumber=number,
+                        Body=chunk,
+                    )
+                    parts.append({"ETag": resp["ETag"], "PartNumber": number})
+            self.client.complete_multipart_upload(
+                Bucket=self.bucket,
+                Key=key,
+                UploadId=upload_id,
+                MultipartUpload={"Parts": parts},
+                IfNoneMatch="*",
+            )
+        except BaseException:
+            self.client.abort_multipart_upload(Bucket=self.bucket, Key=key, UploadId=upload_id)
+            raise
+
     def get_file(self, key: str, dest: Path) -> None:
         """내려받는다. 없으면 botocore ClientError."""
         self.client.download_file(self.bucket, key, str(dest))
@@ -328,6 +456,18 @@ class S3Store:
                 if key is not None and size is not None and at is not None:
                     out.append(ListedObject(key, size, at))
         return sorted(out, key=lambda o: o.key)
+
+
+# S3 조건부 쓰기 조각 크기: 이 이하는 PutObject 한 번, 넘으면 이 크기 조각으로 분할 업로드
+# (S3 조각 수 상한 10000 → 최대 약 1.25 TB, 조각 하나를 메모리에 읽는다)
+_PART_SIZE = 128 << 20
+
+
+def _precondition_failed(exc: ClientError) -> bool:
+    """조건부 쓰기가 "이미 있음"으로 거절됐는지 (412 PreconditionFailed, 동시 경합의 409 포함)."""
+    code = exc.response.get("Error", {}).get("Code")
+    status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+    return code in ("PreconditionFailed", "ConditionalRequestConflict") or status == 412
 
 
 def store_from_spec(spec: str, bucket: str) -> ObjectStore:

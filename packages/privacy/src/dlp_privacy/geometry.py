@@ -63,6 +63,13 @@ class Box:
             return None
         return Box(x1, y1, x2 - x1, y2 - y1)
 
+    def hull(self, other: Box) -> Box:
+        """두 박스를 모두 덮는 가장 작은 박스 (외접 박스)."""
+        x1, y1 = min(self.x, other.x), min(self.y, other.y)
+        x2 = max(self.x + self.w, other.x + other.w)
+        y2 = max(self.y + self.h, other.y + other.h)
+        return Box(x1, y1, x2 - x1, y2 - y1)
+
     def lerp(self, other: Box, s: float) -> Box:
         """self(s=0)에서 other(s=1)까지 x·y·w·h를 각각 선형 보간한다. s는 범위를 자르지 않는다."""
         return Box(

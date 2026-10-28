@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 
 import sqlalchemy as sa
 
@@ -64,14 +65,30 @@ def cmd_sync_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _finite_ms(text: str) -> float:
+    """`adjustment_ms` 인자 형식: 유한 실수만 받는다 (NaN·±Inf는 인자 오류, F-SCH-27).
+
+    계약(`Stream.manual_adjustment_ms`)도 유한 실수만 받지만, 명령줄에서 먼저 막아
+    DB를 열기 전에 종료 코드 2로 끝낸다.
+    """
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"실수가 아닙니다: {text}") from None
+    if not math.isfinite(value):
+        raise argparse.ArgumentTypeError(f"유한한 실수여야 합니다: {text}")
+    return value
+
+
 def cmd_sync_adjust(args: argparse.Namespace) -> int:
     """`dlp sync adjust <세션> <스트림> <ms>`: 사람이 검수 화면에서 정한 오프셋 미세 조정값을
     기록한다.
 
     인자:
-        args.adjustment_ms: 조정값(ms). 명령줄에서는 실수로 받는다 (`dlp_sync.runner.adjust`의
-            시그니처가 float). 자동 오프셋에 더해지는 값이다. 자동으로 맞추지 못한(unsynced)
-            스트림이면 사람이 오프셋 전체를 정한 것으로 보고 방법을 `manual`로 바꾼다.
+        args.adjustment_ms: 조정값(ms). 명령줄에서는 유한 실수로 받는다 (`dlp_sync.runner.adjust`의
+            시그니처가 float, NaN·Inf는 인자 오류로 종료 코드 2). 자동 오프셋에 더해지는 값이다.
+            자동으로 맞추지 못한(unsynced) 스트림이면 사람이 오프셋 전체를 정한 것으로 보고
+            방법을 `manual`로 바꾼다.
 
     예외: 기준 스트림(바디캠, `reference`)을 조정하려 하면 `ValueError`.
     부작용: 한 트랜잭션에서 해당 스트림의 동기화 필드(`manual_adjustment_ms` 등)를 갱신한다.
@@ -97,6 +114,6 @@ def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
     adj = sync_sub.add_parser("adjust", help="사람이 정한 미세 조정값 기록")
     adj.add_argument("session_id")
     adj.add_argument("stream_id")
-    adj.add_argument("adjustment_ms", type=float)
+    adj.add_argument("adjustment_ms", type=_finite_ms)
     adj.add_argument("--url", help="DB URL (기본: DLP_DATABASE_URL)")
     adj.set_defaults(func=cmd_sync_adjust)

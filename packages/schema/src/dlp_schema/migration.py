@@ -15,6 +15,11 @@
 그대로 쓰므로 섞어 검사하면 ID 중복이 되어 운영 라벨까지 재검수로 갔다 (F-SCH-03). 한 묶음이
 깨지면 그 묶음의 이번 배치만 재검수로 돌린다.
 
+라벨 사이 참조(`labels.LABEL_REF_FIELDS`: 번역 설명의 source_label_id, 3D 궤적·마스크의
+derived_from)는 같은 배치에서 이관되어 남은 라벨을 가리키면 새 ID로 바꾼다 (F-SCH-29). 옛 ID로
+두면 이관된 번역이 이관 전 원문을, 이관된 3D가 이관 전 2D를 가리켜, 새 2D 검수를 3D가 물려받지
+못한다. 이관되지 못한(재검수로 간) 라벨을 가리키는 참조는 그대로 둔다 (그 라벨이 여전히 현재 라벨).
+
 부분 ID(parts: 도구 작용부·파지부, 표면 부분, 손 관절)는 mask_track·trajectory3d의 part와
 relation의 subject_part·object_part에서 바꾼다.
 
@@ -44,14 +49,14 @@ from __future__ import annotations
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import yaml
 from pydantic import Field, ValidationError
 
 from dlp_schema.common import Contract, OntologyId, SemVer, derived_id
 from dlp_schema.episode import current_labels, non_operational_ids
-from dlp_schema.labels import LabelRecord, Verification
+from dlp_schema.labels import LABEL_REF_FIELDS, LabelRecord, Verification
 from dlp_schema.ontology import Ontology
 from dlp_schema.validation import check_label, check_label_set
 
@@ -199,7 +204,47 @@ def migrate_labels(
         except ValidationError as exc:
             review.append((label.label_id, f"이관 후 검증 실패: {exc.error_count()}건"))
     kept, broken = _check_sets(labels, migrated, migration, target_ontology)
-    return MigrationResult(migrated=tuple(kept), needs_review=tuple([*review, *broken]))
+    return MigrationResult(migrated=tuple(_relink(kept)), needs_review=tuple([*review, *broken]))
+
+
+def _relink(kept: list[LabelRecord]) -> list[LabelRecord]:
+    """이관 레코드의 라벨 참조(`LABEL_REF_FIELDS`)를 같은 배치의 새 ID로 바꾼다 (F-SCH-29).
+
+    구간·부분 검사(`_check_sets`)를 통과해 남은 레코드만 대응표에 넣는다. 재검수로 빠진 라벨은
+    새 레코드가 없으니 옛 ID(여전히 현재 라벨)를 그대로 가리킨다. 바뀐 페이로드는 다시 검증한다.
+
+    Args:
+        kept: 남긴 이관 레코드 (parent_label_id = 원래 라벨).
+
+    Returns:
+        같은 순서의 레코드. 참조가 바뀐 것만 새 객체다.
+    """
+    renamed = {x.parent_label_id: x.label_id for x in kept if x.parent_label_id is not None}
+    out: list[LabelRecord] = []
+    for label in kept:
+        payload: dict[str, Any] = label.payload.model_dump(mode="json")
+        changed = {
+            field: new
+            for field in LABEL_REF_FIELDS & payload.keys()
+            if (new := _renamed_ref(payload[field], renamed)) is not None
+        }
+        if changed:
+            record = label.model_dump(mode="json")
+            record["payload"] = {**payload, **changed}
+            label = LabelRecord.model_validate(record)
+        out.append(label)
+    return out
+
+
+def _renamed_ref(value: object, renamed: dict[str, str]) -> str | list[str] | None:
+    """참조 값(ID 하나 또는 ID 목록)을 대응표로 바꾼 값. 바뀐 것이 없으면 None."""
+    if isinstance(value, str):
+        return renamed.get(value)
+    if isinstance(value, list):
+        ids = [str(v) for v in cast(list[object], value)]
+        if any(v in renamed for v in ids):
+            return [renamed.get(v, v) for v in ids]
+    return None
 
 
 # 오류 삽입 사본 ID 형식: `seed-<배정>-NNNN`(사본, `dlp_review.ops.seeding.seed_prefix`)과

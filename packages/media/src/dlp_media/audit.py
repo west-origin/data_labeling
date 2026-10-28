@@ -32,7 +32,7 @@ from typing import Protocol
 
 import sqlalchemy as sa
 
-from dlp_media.storage import ObjectStore, StoredObject
+from dlp_media.storage import CreateOnlyStore, ObjectStore, StoredObject
 from dlp_schema.db.repository import insert_raw_access
 from dlp_schema.ops import RawAccessEvent, RawAction
 
@@ -159,6 +159,20 @@ class AuditedStore:
         """write 기록 후 올린다."""
         self._log("write", key)
         self.inner.put_file(key, path, sha256)
+
+    def put_file_new(self, key: str, path: Path, sha256: str) -> bool:
+        """write 기록 후, 키가 없을 때만 올린다 (`CreateOnlyStore`, F-PMS-40).
+
+        감싼 저장소가 원자적 생성을 하지 못하면 head 뒤 덮어쓰기로 대신한다. 이때 경합은
+        `put_immutable`의 쓰기 뒤 해시 대조가 잡는다.
+        """
+        self._log("write", key)
+        if isinstance(self.inner, CreateOnlyStore):
+            return self.inner.put_file_new(key, path, sha256)
+        if self.inner.head(key) is not None:
+            return False
+        self.inner.put_file(key, path, sha256)
+        return True
 
     def get_file(self, key: str, dest: Path) -> None:
         """read 기록 후 내려받는다."""
