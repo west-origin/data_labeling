@@ -28,7 +28,8 @@ F-PAR-73(하)은 기존 후보(출처 ADR 0058)를 확정한 것이라 아래 �
 ## 처리
 
 상·중 22건은 이 검사 직후 고쳤다 (회귀 시험은 레지스트리 note). 하는 open으로 두고, 서비스 없이 재현되는 것은
-`tests/test_known_defects.py`에 strict xfail로 고정했다. 각 항목의 상태와 회귀 시험은 `docs/handover/issues.yaml`이
+`tests/test_known_defects.py`에 strict xfail로 고정했다. F-ETA-23(하)은 F-ETA-22와 같은 함수로 함께 고쳐 fixed다.
+서비스가 필요한 F-SCH-31·F-PMS-42·F-COE-76은 재현 절차만 note에 적었다. 각 항목의 상태와 회귀 시험은 `docs/handover/issues.yaml`이
 단일 출처다.
 
 ### 상
@@ -97,4 +98,5 @@ F-PAR-73(하, 기존 후보)은 재현되어 open으로 바꿨다.
 
 - 개발 DB에 시험 세션 `swarm-s2-nan`의 세션·스트림 3행이 남았다 (추가 전용 감사 트리거·외래 키 때문에 지울 수
   없음). 조정값은 0으로 되돌렸다.
-- 투자 데모용으로 `preview_session.py --apply-blur`로 만든 영상은 F-COE-78 때문에 다시 확인했다 (저장소 밖 자료).
+- 투자 데모용으로 `preview_session.py --apply-blur`로 만든 영상은 F-COE-78 때문에 고친 도구로 다시 만들어 비교했다
+  (저장소 밖 자료). 세 구간 모두 바이트까지 같아 영향이 없었다 (키프레임이 블러 간격 안에 촘촘했다).
