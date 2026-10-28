@@ -141,3 +141,83 @@ def test_masks_are_filled_translucent_with_hand_colours() -> None:
     assert tuple(out[200, 300]) == (128, 128, 128)  # 마스크 밖
     later = ps.draw_frame(img, 500.0, ov, opts, session_id="s")
     assert tuple(later[120, 70]) == (128, 128, 128)  # 키프레임에서 너무 멀다
+
+
+def _blur(label_id: str, kfs: list[dict[str, object]]) -> LabelRecord:
+    return make_label(
+        {"kind": "blur_track", "target": "face", "keyframes": kfs},
+        label_id=label_id, t_start_ms=int(kfs[0]["t_ms"]),  # type: ignore[arg-type]
+        t_end_ms=int(kfs[-1]["t_ms"]), stream_id="bodycam",  # type: ignore[arg-type]
+    )  # fmt: skip
+
+
+def _contains(outer: tuple[float, ...], inner: tuple[float, ...]) -> bool:
+    ox, oy, ow, oh = outer
+    ix, iy, iw, ih = inner
+    eps = 1e-6
+    return (
+        ox <= ix + eps and oy <= iy + eps and ox + ow >= ix + iw - eps and oy + oh >= iy + ih - eps
+    )
+
+
+def test_apply_blur_covers_every_frame_the_render_covers() -> None:
+    """F-COE-78: --apply-blur는 블러본 렌더가 덮는 프레임을 모두 (그 박스를 포함해) 덮는다.
+
+    키프레임 사이 간격이 blur_gap_ms보다 길어도(렌더는 간격과 무관하게 보간), 마지막 키프레임
+    뒤 오래 지나도(렌더는 유지), 트랙이 구간 시작 2초 전에 끝났어도 덮는다. VFR 프레임 시각.
+    """
+    from dlp_privacy.render import blur_tracks
+
+    ps = _load()
+    kfs: list[dict[str, object]] = [
+        {"t_ms": 0, "x": 10, "y": 10, "w": 50, "h": 50},
+        {"t_ms": 4000, "x": 200, "y": 90, "w": 70, "h": 40},  # 4 s 간격 (blur_gap 1.5 s보다 길다)
+        {"t_ms": 4500, "x": 210, "y": 95, "w": 70, "h": 40},
+        {"t_ms": 5000, "x": 0, "y": 0, "w": 1, "h": 1, "outside": True},
+        {"t_ms": 6000, "x": 100, "y": 100, "w": 30, "h": 30},  # 다시 나타나 끝까지 유지
+    ]
+    rec = _blur("b1", kfs)
+    # VFR: 33 ms와 50 ms 간격이 섞인 프레임 시각
+    grid: set[int] = set()
+    t = 0
+    while t <= 12000:
+        grid.add(t)
+        t += 33 if (t // 1000) % 2 == 0 else 50
+    grid |= {int(k["t_ms"]) for k in kfs}  # type: ignore[call-overload]
+    frame_times = sorted(grid)
+    (rt,) = blur_tracks([rec], frame_times)
+    # 구간 [9000, 12000]: 트랙은 6000 ms에 끝났다 (예전에는 2초 넘게 앞이라 버렸다)
+    late = ps.build_overlays([rec], stream_id="bodycam", start_ms=9000, end_ms=12000)
+    assert len(late.blur) == 1
+    ov = ps.build_overlays([rec], stream_id="bodycam", start_ms=0, end_ms=12000)
+    ps.attach_render_boxes(ov, frame_times)
+    opts = ps.DrawOptions(apply_blur=True)
+    missed: list[int] = []
+    for t in frame_times:
+        want = rt.box_at(t)
+        if want is None:
+            continue
+        got = ps.blur_cover_at(ov.blur[0], t, opts, ov.blur_render[0])
+        if got is None or not _contains(got, (want.x, want.y, want.w, want.h)):
+            missed.append(t)
+        # 렌더 트랙을 붙이지 않은 경로(키프레임 시각만)도 렌더가 덮는 프레임은 덮는다
+        if ps.blur_cover_at(ov.blur[0], t, opts) is None:
+            missed.append(-t)
+    assert missed == []
+    # outside 구간은 렌더도 덮지 않는다 (표시용 유지는 outside를 넘지 않는다)
+    assert rt.box_at(5500) is None
+
+
+def test_apply_blur_mosaics_long_gap_frame() -> None:
+    """키프레임 간격 4 s 한가운데 프레임도 실제로 모자이크된다 (draw_frame 경로)."""
+    ps = _load()
+    rec = _blur("b1", [{"t_ms": 0, "x": 40, "y": 40, "w": 80, "h": 80},
+                       {"t_ms": 4000, "x": 40, "y": 40, "w": 80, "h": 80}])  # fmt: skip
+    ov = ps.build_overlays([rec], stream_id="bodycam", start_ms=0, end_ms=8000)
+    rng = np.random.default_rng(0)
+    for t in (2000.0, 7000.0):  # 간격 가운데, 마지막 키프레임 3 s 뒤
+        img = rng.integers(0, 255, (240, 320, 3), dtype=np.uint8)
+        before = img.copy()
+        ps.draw_frame(img, t, ov, ps.DrawOptions(width=320, apply_blur=True, clean=True),
+                      session_id="s")  # fmt: skip
+        assert not np.array_equal(img[40:120, 40:120], before[40:120, 40:120]), t

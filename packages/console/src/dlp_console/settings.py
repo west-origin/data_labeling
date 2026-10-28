@@ -43,6 +43,13 @@ class LogsConfig(Contract):
     tail_lines: int = Field(ge=10, le=5000)
 
 
+class JobsConfig(Contract):
+    """자식 `dlp` 프로세스 다루기 (F-COE-79)."""
+
+    stop_grace_s: float = Field(default=10.0, gt=0, le=600)
+    orphan_poll_s: float = Field(default=2.0, gt=0, le=60)
+
+
 class PreviewConfig(Contract):
     signed_url_ttl_s: int = Field(ge=60, le=7 * 24 * 3600)
     max_tracks: int = Field(ge=1)
@@ -65,6 +72,7 @@ class ConsoleConfig(Contract):
     server: ServerConfig
     upload: UploadConfig
     logs: LogsConfig
+    jobs: JobsConfig = Field(default_factory=JobsConfig)
     preview: PreviewConfig
     pretrain_import: PretrainImportConfig
 

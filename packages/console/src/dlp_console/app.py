@@ -12,8 +12,8 @@ from __future__ import annotations
 import json
 import os
 import secrets
-from collections.abc import Awaitable, Callable, Generator
-from contextlib import contextmanager
+from collections.abc import AsyncGenerator, Awaitable, Callable, Generator
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import Annotated, Any, cast
 
@@ -200,7 +200,16 @@ def create_app(
 ) -> FastAPI:
     """콘솔 앱을 만든다. services를 주지 않으면 실제 DB·S3를 쓴다."""
     svc = services or Services(settings)
-    app = FastAPI(title="dlp 운영 콘솔", docs_url=None, redoc_url=None, openapi_url=None)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
+        yield
+        # 콘솔 종료(SIGTERM·Ctrl-C → uvicorn 종료): 자식 dlp 그룹을 멈추고 interrupted로 남긴다
+        svc.runner.shutdown()
+
+    app = FastAPI(
+        title="dlp 운영 콘솔", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan
+    )
     app.state.services = svc
     allowed = {"127.0.0.1", "localhost", "::1", "testserver", bind_host}
 

@@ -15,7 +15,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from dlp_console.pretrain import ImportPlan, build_plan, sha256_file
+from dlp_console.pretrain import (
+    MODEL_NAME,
+    SHA256,
+    ImportPlan,
+    build_plan,
+    dest_inside,
+    sha256_file,
+)
 from dlp_console.steps import IDENT, ParamError
 
 FILES = ("model.onnx", "model_manifest.json", "data_manifest.json")
@@ -61,6 +68,7 @@ class ImportStore:
         plan = self.plan(import_id)
         if not plan.get("ok"):
             raise ParamError("검사를 모두 통과한 가져오기만 확인할 수 있습니다")
+        self._check_target(plan)
         dest = self.root / str(plan["dest"])
         if dest.exists() and sha256_file(dest) != plan["onnx_sha256"]:
             raise ParamError(f"같은 자리에 다른 파일이 있습니다: {plan['dest']}")
@@ -87,6 +95,20 @@ class ImportStore:
         with self.log.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
         return {**record, "next": self.next_commands(import_id)}
+
+    def _check_target(self, plan: dict[str, Any]) -> None:
+        """계획의 이름·경로를 다시 본다 (F-COE-77): 식별자 모양 이름, models_dir 안의 경로."""
+        name, dest, sha = plan.get("model_name"), plan.get("dest"), plan.get("onnx_sha256")
+        if not (isinstance(name, str) and MODEL_NAME.match(name)):
+            raise ParamError("가져오기 계획의 모델 이름이 올바르지 않습니다")
+        if not (isinstance(sha, str) and SHA256.match(sha)):
+            raise ParamError("가져오기 계획의 sha256이 올바르지 않습니다")
+        if not (
+            isinstance(dest, str)
+            and dest == f"{self.models_dir.rstrip('/')}/{name}.onnx"
+            and dest_inside(self.root, self.models_dir, dest)
+        ):
+            raise ParamError("가중치 경로가 가져오기 디렉터리 밖입니다")
 
     def next_commands(self, import_id: str) -> list[str]:
         """확인 뒤 운영자가 터미널에서 할 일 (설정 파일은 콘솔이 고치지 않는다)."""

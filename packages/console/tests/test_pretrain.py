@@ -11,6 +11,7 @@ import pytest
 import yaml
 
 from dlp_console.imports import ImportStore
+from dlp_console.pretrain import entries_yaml, plan_entries
 from dlp_console.steps import ParamError
 from dlp_models.datasets import load_pretrain_objects
 from dlp_schema import repo_root
@@ -49,7 +50,8 @@ def _bundle(directory: Path, **change: Any) -> tuple[Path, Path, Path]:
             "classes": classes,
         },
     }
-    model["onnx"].update(change.pop("onnx", {}))  # type: ignore[union-attr]
+    for part in ("onnx", "train_settings", "start_weights"):
+        model[part].update(change.pop(part, {}))  # type: ignore[union-attr]
     model_path = directory / "model_manifest.json"
     model_path.write_text(json.dumps(model), "utf-8")
     return onnx, model_path, data_path
@@ -117,6 +119,75 @@ def test_bad_bundles_fail_and_cannot_be_confirmed(
     assert failed in {c.name for c in plan.checks if not c.ok}
     with pytest.raises(ParamError):
         store.confirm(import_id, "tester")
+
+
+INJECTED_ARCH = (
+    "yolox_s\n  injected_model:\n    path: data/models/x.onnx\n    url: https://evil.example/x\n"
+    "    sha256: '00'\n    license: forbidden-license\n    commercial: allowed\n  #"
+)
+
+
+@pytest.mark.parametrize(
+    ("change", "failed"),
+    [
+        ({"train_settings": {"model": "../../../../tmp/x"}}, "구조 이름 (train_settings.model)"),
+        ({"train_settings": {"model": INJECTED_ARCH}}, "구조 이름 (train_settings.model)"),
+        ({"train_settings": {"model": ["yolox_s"]}}, "구조 이름 (train_settings.model)"),
+        ({"start_weights": {"url": "https://evil.example/a b\nc"}}, "출발 가중치 형식"),
+        ({"start_weights": {"url": "file:///etc/passwd"}}, "출발 가중치 형식"),
+        ({"start_weights": {"sha256": "ab\n" * 20}}, "출발 가중치 형식"),
+    ],
+)
+def test_manifest_strings_cannot_escape_or_inject(
+    fake_root: Path, tmp_path: Path, change: dict[str, Any], failed: str
+) -> None:
+    """F-COE-77: 구조 이름·출발 가중치 문자열은 경로 이탈·models.yaml 주입을 만들지 못한다."""
+    store, import_id, path = _store(fake_root, tmp_path)
+    _bundle(path, **change)
+    plan = store.check(import_id)
+    assert not plan.ok
+    assert failed in {c.name for c in plan.checks if not c.ok}
+    assert "injected_model" not in plan.models_patch
+    with pytest.raises(ParamError):
+        store.confirm(import_id, "tester")
+    assert not (tmp_path / "tmp").exists()
+
+
+@pytest.mark.parametrize("arch", ["../../../../tmp/x", INJECTED_ARCH, "/abs", "Yolox"])
+def test_plan_entries_rejects_bad_arch(arch: str) -> None:
+    """함수 수준 재현 (F-COE-77): 이전에는 dest가 저장소 밖이고 위반 목록이 비었다."""
+    model = {"train_settings": {"model": arch}, "start_weights": {"sha256": YOLOX_S_SHA}}
+    data = {"datasets": {"open_images_v7": {"version": "v7"}}}
+    name, dest, entries, _, problems = plan_entries(
+        repo_root(), model, data, "a" * 64, "data/models/pretrain"
+    )
+    assert (name, dest, entries) == ("", "", {})
+    assert problems
+
+
+def test_plan_entries_rejects_models_dir_outside_root() -> None:
+    model = {"train_settings": {"model": "yolox_s"}, "start_weights": {"sha256": YOLOX_S_SHA}}
+    data = {"datasets": {"open_images_v7": {"version": "v7"}}}
+    *_, problems = plan_entries(repo_root(), model, data, "a" * 64, "../outside")
+    assert problems
+
+
+def test_confirm_rechecks_tampered_plan_dest(fake_root: Path, tmp_path: Path) -> None:
+    """plan.json의 dest를 바꿔도 confirm은 models_dir 밖에 쓰지 않는다."""
+    store, import_id, path = _store(fake_root, tmp_path)
+    _bundle(path)
+    assert store.check(import_id).ok
+    plan = json.loads((path / "plan.json").read_text("utf-8"))
+    plan["dest"] = "../../escape.onnx"
+    (path / "plan.json").write_text(json.dumps(plan), "utf-8")
+    with pytest.raises(ParamError):
+        store.confirm(import_id, "tester")
+    assert not (tmp_path / "escape.onnx").exists()
+
+
+def test_entries_yaml_note_cannot_break_comment() -> None:
+    text = entries_yaml({"m": {"path": "p", "_note": "a\n  evil: 1\n#"}})
+    assert yaml.safe_load("models:\n" + text) == {"models": {"m": {"path": "p"}}}
 
 
 def test_compare_is_disabled_without_trainer(client: Api, tmp_path: Path) -> None:

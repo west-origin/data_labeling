@@ -23,6 +23,7 @@ from __future__ import annotations
 import difflib
 import hashlib
 import json
+import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, cast
@@ -46,6 +47,15 @@ BASE_TRAINING_DATA = (
     "COCO 2017 (주석 CC BY 4.0, 이미지는 Flickr 개별 CC 라이선스로 CC BY-NC 계열 포함)"
 )
 BASE_COMMERCIAL: Commercial = "review"
+# manifest `train_settings.model`(구조 이름, 예: yolox_s). models.yaml 키·가중치 파일 이름에 그대로
+# 들어가므로 영어 snake_case 식별자만 받는다 (F-COE-77: 경로 이탈·YAML 주입 방지).
+ARCH = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+# models.yaml 키 (가져온 모델 이름 = `<구조>_objects_pretrain_<해시 8자>`)
+MODEL_NAME = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
+SHA256 = re.compile(r"^[a-f0-9]{64}$")
+# 출발 가중치 url: 공개 https 주소만 (공백·제어 문자 없음)
+BASE_URL = re.compile(r"^https://[!-~]{1,2000}$")
+DEFAULT_ARCH = "yolox_s"
 
 
 @dataclass(frozen=True)
@@ -100,6 +110,32 @@ def _dict(value: Any) -> dict[str, Any]:
 
 def _list(value: Any) -> list[Any]:
     return cast(list[Any], value) if isinstance(value, list) else []
+
+
+def manifest_arch(model: dict[str, Any]) -> str | None:
+    """`train_settings.model` 값. 식별자 모양이 아니면 None (빠지면 기본 yolox_s)."""
+    value = _dict(model.get("train_settings")).get("model", DEFAULT_ARCH)
+    return value if isinstance(value, str) and ARCH.match(value) else None
+
+
+def _manifest_checks(model: dict[str, Any]) -> list[Check]:
+    """설정 파일·경로에 들어가는 manifest 문자열의 모양 (F-COE-77)."""
+    start = _dict(model.get("start_weights"))
+    url = start.get("url")
+    return [
+        Check(
+            "구조 이름 (train_settings.model)",
+            manifest_arch(model) is not None,
+            f"{ARCH.pattern} 모양만 받는다 (경로·줄바꿈 금지)",
+        ),
+        Check(
+            "출발 가중치 형식",
+            isinstance(start.get("sha256"), str)
+            and bool(SHA256.match(str(start.get("sha256"))))
+            and (url is None or (isinstance(url, str) and bool(BASE_URL.match(url)))),
+            "start_weights.sha256은 소문자 16진수 64자, url은 공백 없는 https 주소",
+        ),
+    ]
 
 
 def _closed_tools_policy(root: Path) -> dict[str, Any]:
@@ -218,14 +254,14 @@ def check_bundle(
         *_hash_checks(model, onnx_sha, sha256_file(data_manifest)),
         *_class_checks(root, model, data),
         *_dataset_checks(root, data),
+        *_manifest_checks(model),
         base_check(root, model),
     ]
     return checks, model, data, onnx_sha
 
 
-def _base_entry(model: dict[str, Any], base_name: str) -> dict[str, Any]:
+def _base_entry(model: dict[str, Any], base_name: str, arch: str) -> dict[str, Any]:
     start = _dict(model.get("start_weights"))
-    arch = str(_dict(model.get("train_settings")).get("model", "yolox_s"))
     return {
         "path": f"data/models/yolox/{arch}_coco.pth",
         "url": start.get("url"),
@@ -252,7 +288,9 @@ def _base_name(known: dict[str, Any], model: dict[str, Any], arch: str) -> str:
 def base_check(root: Path, model: dict[str, Any]) -> Check:
     """출발 가중치가 등록된 항목과 다른 파일이 아닌가 (같은 이름에 다른 sha256이면 실패)."""
     known = _dict(_dict(_yaml(root / "config" / "models.yaml")).get("models"))
-    arch = str(_dict(model.get("train_settings")).get("model", "yolox_s"))
+    arch = manifest_arch(model)
+    if arch is None:
+        return Check("출발 가중치 등록", False, "구조 이름이 올바르지 않아 확인하지 못함")
     name = _base_name(known, model, arch)
     sha = _dict(model.get("start_weights")).get("sha256")
     registered = _dict(known.get(name)).get("sha256")
@@ -265,16 +303,24 @@ def base_check(root: Path, model: dict[str, Any]) -> Check:
 def plan_entries(
     root: Path, model: dict[str, Any], data: dict[str, Any], onnx_sha: str, models_dir: str
 ) -> tuple[str, str, dict[str, dict[str, Any]], str, list[str]]:
-    """(모델 이름, 가중치 경로, 새 models.yaml 항목들, 분류, 위반 메시지)."""
+    """(모델 이름, 가중치 경로, 새 models.yaml 항목들, 분류, 위반 메시지).
+
+    구조 이름이 식별자 모양이 아니거나 가중치 경로가 `models_dir` 밖이면 항목 없이 위반만 돌려준다
+    (F-COE-77).
+    """
     raw = _dict(_yaml(root / "config" / "models.yaml"))
     known = _dict(raw.get("models"))
-    arch = str(_dict(model.get("train_settings")).get("model", "yolox_s"))
+    arch = manifest_arch(model)
+    if arch is None or not SHA256.match(onnx_sha):
+        return "", "", {}, BASE_COMMERCIAL, ["train_settings.model이 식별자 모양이 아닙니다"]
     base_name = _base_name(known, model, arch)
     name = f"{arch}_objects_pretrain_{onnx_sha[:8]}"
     dest = f"{models_dir.rstrip('/')}/{name}.onnx"
+    if not dest_inside(root, models_dir, dest):
+        return "", "", {}, BASE_COMMERCIAL, [f"가중치 경로가 {models_dir} 밖입니다"]
     entries: dict[str, dict[str, Any]] = {}
     if base_name not in known:
-        entries[base_name] = _base_entry(model, base_name)
+        entries[base_name] = _base_entry(model, base_name, arch)
     registry_ds = load_datasets(root)
     names = dataset_names(data)
     floor: list[Commercial] = [
@@ -298,6 +344,16 @@ def plan_entries(
     }
     problems = _license_problems(raw, entries, registry_ds)
     return name, dest, entries, commercial, problems
+
+
+def dest_inside(root: Path, models_dir: str, dest: str) -> bool:
+    """`dest`(저장소 루트 기준)가 resolve 뒤 `models_dir` 안이고 그 디렉터리가 저장소 안인가."""
+    if Path(dest).is_absolute() or Path(models_dir).is_absolute():
+        return False
+    base = root.resolve()
+    folder = (base / models_dir).resolve()
+    target = (base / dest).resolve()
+    return folder.is_relative_to(base) and target.is_relative_to(folder) and target != folder
 
 
 def _dataset_label(data: dict[str, Any], name: str) -> str:
@@ -330,7 +386,8 @@ def entries_yaml(entries: dict[str, dict[str, Any]]) -> str:
     for name, entry in entries.items():
         note = entry.get("_note")
         if note:
-            lines.append(f"  # {note}")
+            # 주석 한 줄에 줄바꿈·제어 문자가 섞이면 YAML 본문이 된다 (F-COE-77): 공백으로 바꾼다
+            lines.append("  # " + "".join(c if c.isprintable() else " " for c in str(note)))
         body = yaml.safe_dump({name: _clean(entry)}, allow_unicode=True, sort_keys=False)
         lines += ["  " + x for x in body.splitlines()]
     return "\n".join(lines) + "\n"
@@ -394,6 +451,8 @@ def build_plan(
     )
     plan.model_name, plan.dest, plan.entries = name, dest, entries
     plan.commercial, plan.license_problems = commercial, problems
+    if not entries:
+        return plan
     plan.models_patch = models_patch(root, entries)
     plan.activation_patch = activation_patch(root, name)
     if not training_replaces_closed_tools(root):

@@ -14,8 +14,11 @@
 - 블러 탐지 (blur_track): 기본은 블러를 적용하지 않고 테두리만 그린다 (오탐을 눈으로 판단하게).
   `--apply-blur`면 원본 크기 프레임에서 블러 박스를 블러본과 같은 모자이크
   (`dlp_privacy.render.apply_blur`, privacy.yaml render 값)로 덮고 테두리는 그리지 않는다
-  (밖에 보여 줄 영상용). 누락을 줄이려고 박스를 `--blur-pad` 비율만큼 넓히고,
-  키프레임 사이는 `--blur-gap-ms`까지 보간하고 마지막 키프레임 뒤로도 그만큼 유지한다.
+  (밖에 보여 줄 영상용). 덮는 범위는 블러본 렌더가 덮는 범위를 늘 포함한다 (F-COE-78): 프레임마다
+  렌더의 박스 규칙(`dlp_privacy.render.blur_tracks`의 `box_at`: outside가 아닌 키프레임 사이는
+  간격과 무관하게 보간, 마지막 키프레임 뒤에도 유지)으로 구한 박스와 표시용 박스(키프레임 사이
+  `--blur-gap-ms`까지 보간, 마지막 키프레임 뒤로 그만큼 유지)를 합친 외접 박스를 `--blur-pad`
+  비율만큼 넓혀 덮는다.
   화면 대부분을 덮는 오탐(F-PMS-31) 때문에 `--blur-max-area`(화면 대비 넓이)를 넘는
   박스는 덮지 않을 수 있다 (`--blur-always`에 든 대상은 크기와 무관하게 덮는다).
   사람이 승인한 블러본이 아니므로 남은 노출이 없는지 사람이 끝까지 본다.
@@ -57,6 +60,7 @@ from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from pathlib import Path
+from typing import Protocol
 
 import av
 import cv2
@@ -66,6 +70,7 @@ from numpy.typing import NDArray
 
 from dlp_media.pts import PtsIndex, build_pts_index
 from dlp_media.rle import decode_rle
+from dlp_privacy.geometry import Box
 from dlp_privacy.policy import load_policy as load_privacy_policy
 from dlp_schema.labels import (
     BlurTrackPayload,
@@ -118,6 +123,14 @@ class BoxTrack:
     t_end_ms: int
     keyframes: tuple[BoxKeyframe, ...]
     times: tuple[int, ...]
+    # 원 라벨 (블러 트랙만: 렌더 규칙 박스를 `dlp_privacy.render.blur_tracks`로 구한다)
+    record: LabelRecord | None = field(default=None, compare=False, repr=False)
+
+
+class RenderBoxes(Protocol):
+    """블러본 렌더의 트랙 (`dlp_privacy.render.blur_tracks` 결과 하나)."""
+
+    def box_at(self, t_ms: int) -> Box | None: ...
 
 
 @dataclass(frozen=True)
@@ -176,6 +189,9 @@ class Overlays:
     arms: list[ArmTrack] = field(default_factory=list)
     hand3d: dict[tuple[str, str], Samples3D] = field(default_factory=dict)
     masks: list[MaskTrack] = field(default_factory=list)
+    # blur와 같은 순서의 렌더 규칙 트랙 (`attach_render_boxes`).
+    # 없으면 _mosaic이 키프레임 시각을 프레임으로 보고 만든다
+    blur_render: list[RenderBoxes | None] = field(default_factory=list[RenderBoxes | None])
 
 
 @dataclass(frozen=True)
@@ -231,7 +247,14 @@ def privacy_detectors(path: Path) -> dict[str, str]:
     return {str(k): "+".join(v.get("detectors") or []) for k, v in targets.items()}
 
 
-def _box_track(label: str, source: str, rec: LabelRecord, kfs: tuple[BoxKeyframe, ...]) -> BoxTrack:
+def _box_track(
+    label: str,
+    source: str,
+    rec: LabelRecord,
+    kfs: tuple[BoxKeyframe, ...],
+    *,
+    keep_record: bool = False,
+) -> BoxTrack:
     return BoxTrack(
         label=label,
         source=source,
@@ -240,6 +263,7 @@ def _box_track(label: str, source: str, rec: LabelRecord, kfs: tuple[BoxKeyframe
         t_end_ms=rec.t_end_ms,
         keyframes=kfs,
         times=tuple(k.t_ms for k in kfs),
+        record=rec if keep_record else None,
     )
 
 
@@ -300,12 +324,18 @@ def build_overlays(
     out = Overlays()
     acc3d: dict[tuple[str, str], list[Row3D]] = collections.defaultdict(list)
     for rec in labels:
-        if rec.stream_id != stream_id or rec.t_end_ms < start_ms - 2000 or rec.t_start_ms > end_ms:
+        if rec.stream_id != stream_id or rec.t_start_ms > end_ms:
             continue
         p = rec.payload
+        # 블러는 렌더가 마지막 키프레임 뒤에도 박스를 유지하므로 구간 앞에서 끝난 트랙도
+        # 둔다 (F-COE-78)
+        if rec.t_end_ms < start_ms - 2000 and not isinstance(p, BlurTrackPayload):
+            continue
         match p:
             case BlurTrackPayload():
-                out.blur.append(_box_track(p.target, det.get(p.target, "?"), rec, p.keyframes))
+                out.blur.append(
+                    _box_track(p.target, det.get(p.target, "?"), rec, p.keyframes, keep_record=True)
+                )
             case BoxTrackPayload():
                 src = _source_name(rec.provenance.model_version)
                 out.objects.append(_box_track(p.class_id, src, rec, p.keyframes))
@@ -366,6 +396,51 @@ def box_at(
     if t_ms - a.t_ms > opts.hold_ms:
         return None
     return (a.x, a.y, a.w, a.h)
+
+
+def attach_render_boxes(ov: Overlays, frame_times: Sequence[int]) -> None:
+    """블러 트랙마다 블러본 렌더와 같은 박스 규칙 트랙을 붙인다 (F-COE-78).
+
+    frame_times: 그 영상 전체 프레임 시각 (PTS 인덱스 ms를 반올림한 정수, 렌더와 같은 식).
+    """
+    from dlp_privacy.render import blur_tracks
+
+    built = iter(
+        blur_tracks([tr.record for tr in ov.blur if tr.record is not None], list(frame_times))
+    )
+    ov.blur_render = [next(built) if tr.record is not None else None for tr in ov.blur]
+
+
+def _render_box(
+    tr: BoxTrack, rt: RenderBoxes | None, t_ms: int
+) -> tuple[float, float, float, float] | None:
+    """렌더 규칙 박스 (x, y, w, h). 렌더 트랙이 없으면 키프레임 시각을 프레임으로 보고 만든다."""
+    if rt is None:
+        from dlp_privacy.render import blur_tracks
+
+        if tr.record is None:
+            return None
+        rt = blur_tracks([tr.record], sorted(set(tr.times)))[0]
+    box = rt.box_at(t_ms)
+    return None if box is None else (box.x, box.y, box.w, box.h)
+
+
+def blur_cover_at(
+    tr: BoxTrack, t_ms: int, opts: DrawOptions, rt: RenderBoxes | None = None
+) -> tuple[float, float, float, float] | None:
+    """`--apply-blur`가 덮을 박스 (넓힘 전, x, y, w, h). 렌더가 덮는 프레임은 늘 덮는다.
+
+    렌더 규칙 박스와 표시용 박스(`blur_gap_ms`까지 보간·유지)의 외접 박스.
+    """
+    loose = replace(opts, hold_ms=opts.blur_gap_ms, max_interp_ms=opts.blur_gap_ms)
+    boxes = [b for b in (_render_box(tr, rt, t_ms), box_at(tr, t_ms, loose)) if b is not None]
+    if not boxes:
+        return None
+    x0 = min(b[0] for b in boxes)
+    y0 = min(b[1] for b in boxes)
+    x1 = max(b[0] + b[2] for b in boxes)
+    y1 = max(b[1] + b[3] for b in boxes)
+    return (x0, y0, x1 - x0, y1 - y0)
 
 
 def _nearest(times: Sequence[int], t_ms: float, tol: float) -> int | None:
@@ -592,17 +667,16 @@ def _hand_boxes(ov: Overlays, t_ms: int, tol_ms: int) -> list[tuple[float, float
 def _mosaic(img: Image, tracks: list[BoxTrack], t_ms: int, opts: DrawOptions, ov: Overlays) -> None:
     """원본 크기 프레임의 블러 박스를 제자리에서 모자이크한다 (`--apply-blur`).
 
-    블러본 렌더와 같은 함수(`dlp_privacy.render.apply_blur`)를 쓰되, 표시용 보간·유지
-    (`blur_gap_ms`)와 넓힘(`blur_pad`)으로 렌더보다 넓게 덮는다.
+    블러본 렌더와 같은 함수(`dlp_privacy.render.apply_blur`)와 같은 박스 규칙(`blur_cover_at`)을
+    쓰고, 표시용 보간·유지(`blur_gap_ms`)와 넓힘(`blur_pad`)으로 렌더보다 넓게 덮는다.
     """
-    from dlp_privacy.geometry import Box
     from dlp_privacy.render import apply_blur
 
-    loose = replace(opts, hold_ms=opts.blur_gap_ms, max_interp_ms=opts.blur_gap_ms)
     frame_area = float(img.shape[0] * img.shape[1])
     hands = _hand_boxes(ov, t_ms, 200) if opts.blur_skip_on_hand else []
-    for tr in tracks:
-        box = box_at(tr, t_ms, loose)
+    aligned = ov.blur_render if tracks is ov.blur and len(ov.blur_render) == len(tracks) else []
+    for k, tr in enumerate(tracks):
+        box = blur_cover_at(tr, t_ms, opts, aligned[k] if aligned else None)
         if box is None:
             continue
         x, y, w, h = box
@@ -730,6 +804,9 @@ def render(
     """
     index = build_pts_index(video)
     tb = index.time_base
+    if opts.apply_blur:
+        # 렌더(render_blurred)와 같은 프레임 시각: PTS ms를 반올림한 정수
+        attach_render_boxes(ov, [round(float(x)) for x in index.ms])
     n = 0
     with av.open(str(out), "w") as oc:
         vs = oc.add_stream("libx264", rate=30)

@@ -7,14 +7,22 @@ ADR 0061 2절.
   남기고, 읽을 때 접어서 만든다. 로그는 `logs/<작업 ID>.log`.
 - 같은 잠금 키(세션 하나, 또는 데이터셋·학습 같은 전역 단계)의 작업이 돌고 있으면 새 작업을 받지
   않는다 (`JobConflictError`). 단계 명령은 멱등이라 끝난 뒤 다시 눌러도 안전하다.
-- 콘솔이 꺼져 끝 사건이 없는 작업은 다음 시작 때 interrupted로 남긴다 (자식 프로세스 결과는 모른다).
+- 명령마다 자식을 새 프로세스 그룹(새 세션)으로 띄우고 `spawned` 사건에 pid·pgid를 남긴다
+  (F-COE-79).
+- 콘솔이 꺼질 때(`shutdown`, uvicorn 종료 = SIGTERM·Ctrl-C) 돌고 있는 자식 그룹에 SIGTERM, 기다려도
+  남으면 SIGKILL을 보내고 그 작업을 interrupted로 남긴다.
+- 끝 사건 없이 다음 시작을 맞은 작업: 마지막 자식 그룹이 아직 살아 있으면(SIGKILL 등으로 콘솔만
+  죽은 경우) `adopted` 사건을 남기고 실행 중으로 둔다 (잠금 유지). 그 그룹이 끝나면 interrupted로
+  남긴다. 그룹이 없으면 바로 interrupted다 (자식 프로세스 결과는 모른다).
 - `cleanup`: 모든 명령이 성공했을 때만 지울 파일 (업로드 사본).
 """
 
 from __future__ import annotations
 
 import json
+import os
 import shlex
+import signal
 import subprocess
 import threading
 import uuid
@@ -63,6 +71,8 @@ class Job:
     failed_command: int | None = None
     finished_at: str | None = None
     cleanup: tuple[str, ...] = field(default=())
+    pid: int | None = None  # 마지막으로 띄운 자식 (spawned 사건)
+    pgid: int | None = None
 
     def display_commands(self) -> list[str]:
         """화면용 명령 줄 (`dlp …`)."""
@@ -92,6 +102,8 @@ class JobRunner:
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._threads: dict[str, threading.Thread] = {}
+        self._procs: dict[str, subprocess.Popen[bytes]] = {}
+        self._stopping = threading.Event()
         self._jobs: dict[str, Job] = self._fold()
         self._recover()
 
@@ -114,11 +126,34 @@ class JobRunner:
         return jobs
 
     def _recover(self) -> None:
+        """앞 콘솔이 끝 사건 없이 남긴 작업: 자식 그룹이 살아 있으면 맡고, 없으면 interrupted."""
         for job in list(self._jobs.values()):
-            if job.status is JobStatus.RUNNING:
-                ev = {"event": "interrupted", "job_id": job.job_id, "at": _now()}
+            if job.status is not JobStatus.RUNNING:
+                continue
+            if job.pgid is not None and group_alive(job.pgid):
+                ev = {"event": "adopted", "job_id": job.job_id, "at": _now(), "pgid": job.pgid}
                 self._append(ev)
-                _apply(self._jobs, ev)
+                thread = threading.Thread(
+                    target=self._watch_orphan, args=(job.job_id, job.pgid), daemon=True
+                )
+                self._threads[job.job_id] = thread
+                thread.start()
+                continue
+            self._interrupt(job.job_id)
+
+    def _interrupt(self, job_id: str) -> None:
+        ev = {"event": "interrupted", "job_id": job_id, "at": _now()}
+        self._append(ev)
+        _apply(self._jobs, ev)
+
+    def _watch_orphan(self, job_id: str, pgid: int) -> None:
+        """앞 콘솔의 자식 그룹이 끝날 때까지 잠금을 쥐고 있다가 interrupted로 남긴다."""
+        poll = self.settings.config.jobs.orphan_poll_s
+        while group_alive(pgid):
+            if self._stopping.wait(poll):
+                return  # 콘솔이 꺼진다: 다음 시작이 다시 본다
+        with self._lock:
+            self._interrupt(job_id)
 
     # ── 조회 ──
     def jobs(self, session_id: str | None = None) -> list[Job]:
@@ -200,6 +235,27 @@ class JobRunner:
         thread.start()
         return job
 
+    def shutdown(self) -> None:
+        """콘솔 종료: 돌고 있는 자식 그룹을 멈추고 그 작업을 interrupted로 남긴다 (F-COE-79).
+
+        SIGTERM을 보내고 `jobs.stop_grace_s`만큼 기다린 뒤 남은 그룹에 SIGKILL. 앞 콘솔에서 맡은
+        그룹(adopted)은 건드리지 않는다 (다음 시작이 다시 맡는다).
+        """
+        self._stopping.set()
+        with self._lock:
+            procs = list(self._procs.values())
+        for proc in procs:
+            signal_group(proc.pid, signal.SIGTERM)
+        grace = self.settings.config.jobs.stop_grace_s
+        for proc in procs:
+            try:
+                proc.wait(grace)
+            except subprocess.TimeoutExpired:
+                signal_group(proc.pid, signal.SIGKILL)
+                proc.wait()
+        for thread in list(self._threads.values()):
+            thread.join(grace)
+
     def wait(self, job_id: str, timeout: float | None = None) -> Job | None:
         """작업 스레드가 끝날 때까지 기다린다 (시험·종료용)."""
         thread = self._threads.get(job_id)
@@ -211,13 +267,22 @@ class JobRunner:
         code, failed = 0, None
         with self.log_path(job.job_id).open("a", encoding="utf-8") as log:
             for i, cmd in enumerate(job.commands):
+                if self._stopping.is_set():
+                    break
                 log.write(f"$ dlp {shlex.join(cmd)}\n")
                 log.flush()
-                code = self._run_one(cmd, log)
+                code = self._run_one(job.job_id, cmd, log)
+                if self._stopping.is_set():
+                    log.write("[콘솔 종료로 멈춤]\n")
+                    break
                 if code != 0:
                     failed = i
                     log.write(f"[종료 코드 {code}]\n")
                     break
+        if self._stopping.is_set():
+            with self._lock:
+                self._interrupt(job.job_id)
+            return
         if code == 0:
             for p in job.cleanup:
                 Path(p).unlink(missing_ok=True)
@@ -234,22 +299,61 @@ class JobRunner:
             self._append(ev)
             _apply(self._jobs, ev)
 
-    def _run_one(self, cmd: Sequence[str], log: Any) -> int:
-        """명령 하나를 돌려 종료 코드를 낸다. 시작하지 못하면 로그에 이유를 쓰고 LAUNCH_FAILED."""
+    def _run_one(self, job_id: str, cmd: Sequence[str], log: Any) -> int:
+        """명령 하나를 돌려 종료 코드를 낸다. 시작하지 못하면 로그에 이유를 쓰고 LAUNCH_FAILED.
+
+        자식은 새 세션(= 새 프로세스 그룹, pgid = pid)으로 띄우고 pid·pgid를 `spawned` 사건으로
+        남긴다. 콘솔 종료 때 그룹째 멈추고, 다음 시작이 살아 있는 그룹을 알아보게 한다.
+        """
+        with self._lock:
+            if self._stopping.is_set():
+                return LAUNCH_FAILED
+            try:
+                proc = subprocess.Popen(  # 고정 접두 + 콘솔이 만든 인자 목록, 셸 없음
+                    [*self.settings.dlp_argv, *cmd],
+                    cwd=self.settings.root,
+                    env=self.settings.child_env(),
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+            except OSError as exc:
+                log.write(f"명령을 시작하지 못했습니다: {exc}\n")
+                return LAUNCH_FAILED
+            self._procs[job_id] = proc
+            ev = {"event": "spawned", "job_id": job_id, "at": _now(), "pid": proc.pid,
+                  "pgid": proc.pid}  # fmt: skip
+            self._append(ev)
+            _apply(self._jobs, ev)
         try:
-            proc = subprocess.run(  # 고정 접두 + 콘솔이 만든 인자 목록, 셸 없음
-                [*self.settings.dlp_argv, *cmd],
-                cwd=self.settings.root,
-                env=self.settings.child_env(),
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                stdin=subprocess.DEVNULL,
-                check=False,
-            )
-        except OSError as exc:
-            log.write(f"명령을 시작하지 못했습니다: {exc}\n")
-            return LAUNCH_FAILED
-        return proc.returncode
+            return proc.wait()
+        finally:
+            with self._lock:
+                self._procs.pop(job_id, None)
+
+
+def group_alive(pgid: int) -> bool:
+    """그 프로세스 그룹에 프로세스가 남아 있는가 (신호 0). 다른 사용자의 그룹이면 있다고 본다."""
+    if pgid <= 1:
+        return False
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def signal_group(pgid: int, sig: signal.Signals) -> None:
+    """그룹에 신호를 보낸다 (이미 없으면 조용히 넘어간다). 콘솔 자신의 그룹에는 보내지 않는다."""
+    if pgid <= 1 or pgid == os.getpgrp():
+        return
+    try:
+        os.killpg(pgid, sig)
+    except (ProcessLookupError, PermissionError):
+        return
 
 
 def _job_record(job: Job) -> dict[str, Any]:
@@ -281,5 +385,7 @@ def _apply(jobs: dict[str, Job], ev: dict[str, Any]) -> None:
             failed_command=ev.get("failed_command"),
             finished_at=ev.get("at"),
         )
+    elif kind == "spawned":
+        jobs[job.job_id] = replace(job, pid=ev.get("pid"), pgid=ev.get("pgid"))
     elif kind == "interrupted":
         jobs[job.job_id] = replace(job, status=JobStatus.INTERRUPTED, finished_at=ev.get("at"))

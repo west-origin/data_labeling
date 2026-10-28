@@ -21,6 +21,14 @@ upload:
 logs:
   tail_lines: 200
 
+# 자식 `dlp` 프로세스 (각 명령은 새 프로세스 그룹으로 돌고 pid·pgid를 jobs.jsonl에 남긴다, F-COE-79)
+jobs:
+  # 콘솔이 SIGTERM·Ctrl-C로 꺼질 때 자식 그룹에 SIGTERM을 보내고 이만큼 기다린 뒤 SIGKILL (초)
+  stop_grace_s: 10
+  # 콘솔이 다시 켜졌을 때 앞 콘솔의 자식 그룹이 살아 있으면 그 작업을 실행 중(잠금 유지)으로 두고
+  # 이 간격으로 끝났는지 본다 (초). 끝나면 interrupted로 남긴다 (종료 코드는 모른다)
+  orphan_poll_s: 2
+
 # 결과 미리보기 (승인·렌더된 블러본만, 라벨러 자격 증명 서명 URL)
 preview:
   signed_url_ttl_s: 3600            # 서명 URL 유효 시간 (초)

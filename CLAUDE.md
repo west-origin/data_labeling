@@ -172,7 +172,9 @@
   물려받는다. 기본 학습기는 아직 `oracle-stub`이다.
 - `packages/console/` (`dlp_console`) — 운영 콘솔 (ADR 0061): 기존 `dlp` 명령을 작업으로 돌리고(셸 없음, 작업 디렉터리
   JSON Lines 추가만) DB는 읽기만 한다. 응답·로그에 원본 위치를 싣지 않고, 미리보기는 승인·렌더된 블러본의 라벨러 서명
-  URL만 쓴다. Git이 관리하는 설정 파일은 고치지 않고 패치 미리보기만 낸다(외부 학습 가중치 가져오기). 설정
+  URL만 쓴다. Git이 관리하는 설정 파일은 고치지 않고 패치 미리보기만 낸다(외부 학습 가중치 가져오기: 구조 이름은 식별자 모양만, 가중치 경로는 models_dir 안인지
+  confirm에서 다시 본다). 자식 `dlp`는 새 프로세스 그룹으로 돌고(pid·pgid 기록) 콘솔 종료 때 멈추며, 재시작 때 살아 있는
+  그룹은 잠금을 유지한다 (`console.yaml jobs`). 설정
   `config/console.yaml`. 도메인 로직을 두지 않는다 (단계 조건·권한 검사는 `dlp` 명령이 하고, 콘솔 활성 규칙은 안내용).
 - `packages/active/` (`dlp_active`) — 액티브 러닝: 클래스별 수정률 기반 세션 점수(점수 항목 플러그인 `register_term`),
   FiftyOne 연동(블러본만). `dlp active rank|fiftyone`. 정책은 `config/policies/active.yaml`.
