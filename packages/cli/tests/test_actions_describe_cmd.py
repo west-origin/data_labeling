@@ -104,8 +104,8 @@ def test_describe_pending_regenerates_once(
                    label_id="td"),
     ]  # fmt: skip
 
-    def oracle(*_: object) -> OracleVlm:
-        return OracleVlm(truth)
+    def oracle(*_: object) -> tuple[OracleVlm, int]:
+        return OracleVlm(truth), 0
 
     monkeypatch.setattr(actions_cmds, "_client", oracle)
     assert actions_cmds.cmd_describe(_args(url, pending=True)) == 0
@@ -178,8 +178,8 @@ def test_describe_pending_sees_inherited_descriptions_of_changed_actions(
     policy = load_policy(repo_root())
     assert actions_cmds.describe_pending(url, policy, "oracle-vlm-1") == ["s001", "s003"]
 
-    def oracle(*_: object) -> OracleVlm:
-        return _truth()
+    def oracle(*_: object) -> tuple[OracleVlm, int]:
+        return _truth(), 0
 
     monkeypatch.setattr(actions_cmds, "_client", oracle)
     assert actions_cmds.cmd_describe(_args(url, pending=True)) == 0

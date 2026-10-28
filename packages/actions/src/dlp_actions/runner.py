@@ -24,6 +24,12 @@ track_rank`: 사람·검수 → 최신 → 긴 구간 → 라벨 ID)로 하나�
 입력은 `current_labels()`(운영 라벨)에서 고르고, 다시 돌릴지는 전체 이력(`get_labels`)으로 정한다.
 작업량 추정용 `vlm_request_count`(손마다 후보 구간 수, 순수 함수)는 같은 트랙·접촉 선택
 (`hand_track_labels`, `hand_contacts`)을 쓴다 (`dlp aireview estimate --include-actions`).
+잠금 (F-PAR-80·81): 이력 읽기·블러본 받기·VLM 호출은 세션을 잠그지 않는다. 쓰기 직전에 세션을
+잠그고 (1) 사용 중지·승인 보류·(프레임을 보냈으면) 블러본 렌더 해시를 다시 본다
+(`dlp_actions.write_check.write_blocker`, 설명 재생성·번역과 같은 확인). 막히면 아무것도 쓰지 않고
+`blocked`로 알린다. (2) 이력을 다시 읽어 지울 것(검수 전 우리 것)·남길 것(보호 구간)을 다시
+계획한다. 묻는 동안 검수자가 고친 행동은 보호 구간이 되어 새 결과와 겹치지 않는다. 그 사이 입력이
+바뀌어 버전이 달라졌으면 쓰지 않는다 (다시 실행).
 DB: `label_records` 테이블 읽기·쓰기(추가만).
 저장소: 라벨링 버킷의 블러본 읽기(원본 버킷은 읽지 않는다).
 트랜잭션은 호출자(CLI)가 연다.
@@ -40,14 +46,16 @@ from pathlib import Path
 
 import sqlalchemy as sa
 
-from dlp_actions.pipeline import segment_count, segment_hand
+from dlp_actions.pipeline import HandResult, segment_count, segment_hand
 from dlp_actions.policy import ActionsPolicy
 from dlp_actions.translate import is_machine_translation
 from dlp_actions.vlm import VlmClient
-from dlp_media.storage import ObjectStore, blurred_key
+from dlp_actions.write_check import fetch_current_blurred, write_blocker
+from dlp_media.storage import ObjectStore
+from dlp_privacy.policy import PrivacyPolicy
 from dlp_privacy.policy import load_policy as load_privacy_policy
-from dlp_privacy.runner import assert_render_current, check_fetched
 from dlp_schema import repo_root
+from dlp_schema.db.locks import lock_session
 from dlp_schema.db.repository import get_labels, get_session, insert_labels
 from dlp_schema.episode import current_labels, pick_hand_track_labels, retractions, version_tag
 from dlp_schema.labels import (
@@ -83,12 +91,15 @@ class ActionsSummary:
             또는 트랙이 사라진 손이면 retracted_without_track).
         skipped: 같은 버전 결과가 있어 건너뛴 손.
         retracted: 이번에 쓴 삭제 레코드 수.
+        blocked: 쓰기 직전 확인(사용 중지·승인 보류·렌더 변경·입력 변경)이 막은 이유. 있으면
+            아무것도 쓰지 않았다 (F-PAR-80·81).
     """
 
     version: str
     hands: dict[str, dict[str, int]] = field(default_factory=dict[str, dict[str, int]])
     skipped: list[str] = field(default_factory=list[str])
     retracted: int = 0
+    blocked: str | None = None
 
 
 def _hand_of(x: LabelRecord) -> Hand | None:
@@ -261,6 +272,137 @@ def vlm_request_count(
     }
 
 
+@dataclass(frozen=True)
+class _Inputs:
+    """한 시점의 이력으로 본 이 단계의 입력과 지울·남길 레코드 판단 재료 (`_read_inputs`).
+
+    실행 시작 때 한 번(무엇을 물을지), 쓰기 직전 세션 잠금 아래 한 번 더(무엇을 쓰고 지울지,
+    F-PAR-81) 만든다.
+    """
+
+    session: Session
+    # 전체 이력 (재실행 판단)
+    labels: list[LabelRecord]
+    # 운영 라벨 (입력·지울 후보·보호 판단)
+    current: list[LabelRecord]
+    # 손 → 고른 hand21 트랙
+    tracks: dict[Hand, KeypointTrackPayload]
+    # VLM에 줄 대상 후보 개체 ID
+    entities: tuple[str, ...]
+    # 이번 모델 버전
+    version: str
+    # 행동 ID → 이 단계의 설명과 그 기계 번역 (행동을 지우면 둘 다 지운다)
+    descriptions_by_action: dict[str, list[LabelRecord]]
+    # 설명이 검수된(사람이 고쳤거나 승인·표본 검증한) 행동 ID (그 행동은 지우지 않는다)
+    reviewed_descriptions: frozenset[str]
+
+    def described(self, x: LabelRecord) -> bool:
+        """설명이 검수된 행동인지 (그 행동은 지우지 않는다: 지우면 설명이 고아가 된다)."""
+        p = x.payload
+        return isinstance(p, ActionPayload) and p.action_id in self.reviewed_descriptions
+
+    def mine_of(self, hand: Hand) -> list[LabelRecord]:
+        """이 단계가 낸 그 손의 검수 전 현재 행동·공백 (설명이 검수된 행동은 뺀다)."""
+        return [
+            x
+            for x in self.current
+            if _ours(x)
+            and _hand_of(x) is hand
+            and x.verification.state is VerificationState.UNREVIEWED
+            and not self.described(x)
+        ]
+
+    def protected_of(self, hand: Hand) -> list[LabelRecord]:
+        """남길 그 손의 행동·공백 (사람 출처, 검수됨, 설명이 검수된 행동)."""
+        return [
+            x
+            for x in self.current
+            if _hand_of(x) is hand
+            and (
+                x.provenance.source is Source.HUMAN
+                or x.verification.state is not VerificationState.UNREVIEWED
+                or self.described(x)
+            )
+        ]
+
+    def with_descriptions(self, mine: list[LabelRecord]) -> list[LabelRecord]:
+        """지울 행동에 딸린 검수 전 설명(과 그 영어 번역)까지."""
+        return mine + [
+            d
+            for x in mine
+            if isinstance(x.payload, ActionPayload)
+            for d in self.descriptions_by_action.get(x.payload.action_id, [])
+            if d.verification.state is VerificationState.UNREVIEWED
+        ]
+
+    def done(self, hand: Hand) -> bool:
+        """이 버전을 그 손에 낸 적이 있는지 (멱등: 있으면 건너뛴다).
+
+        검수자가 모두 고쳤거나 다른 버전으로 바뀌었어도 건너뛴다. 예전 버전으로 되돌려도 다시
+        만들지 않는다. 다시 만들려면 버전을 바꾼다.
+        """
+        return any(
+            x.provenance.model_version == self.version and _hand_of(x) is hand for x in self.labels
+        )
+
+    def orphans(self) -> list[Hand]:
+        """이 단계 라벨은 있는데 손 트랙이 사라진 손 (예: 손 모델이 그 손을 더 찾지 못함)."""
+        ours = {h for x in self.current if _ours(x) and (h := _hand_of(x)) is not None}
+        return sorted(ours - set(self.tracks))
+
+
+def _read_inputs(
+    conn: sa.Connection, session_id: str, vlm_version: str, policy: ActionsPolicy
+) -> _Inputs:
+    """지금 이력에서 입력·모델 버전·판단 재료를 만든다 (모듈 docstring의 규칙)."""
+    session = get_session(conn, session_id)
+    labels = get_labels(conn, session_id)
+    # 입력은 운영 라벨(current)에서, 재실행 판단은 전체 이력(labels)으로 한다
+    current = current_labels(labels)
+    picked = hand_track_labels(current, session.reference_stream.stream_id)
+    object_labels = [
+        x for x in current if isinstance(x.payload, BoxTrackPayload | MaskTrackPayload)
+    ]
+    state_labels = [x for x in current if isinstance(x.payload, HandStatePayload)]
+    # 모델 버전 = 정책 해시 + VLM 버전 + 입력 라벨 ID 집합 해시. 손 트랙은 실제로 쓰는 고른
+    # 트랙만 넣는다: 승인은 라벨 ID를 바꾸지 않으므로, 모든 트랙 ID를 넣으면 승인으로 고르는
+    # 트랙이 바뀌어도 버전이 같아 다시 돌지 않는다
+    inputs = input_digest([*picked.values(), *object_labels, *state_labels])
+    # 대상 후보: 객체 트랙 개체와 손 상태의 접촉 대상 (대상을 모르는 접촉 표시 ID는 뺀다)
+    candidates = {
+        x.payload.entity_id
+        for x in object_labels
+        if isinstance(x.payload, BoxTrackPayload | MaskTrackPayload)
+    } | {
+        x.payload.target_id
+        for x in state_labels
+        if isinstance(x.payload, HandStatePayload) and x.payload.target_id
+    }
+    descriptions_by_action: dict[str, list[LabelRecord]] = {}
+    for x in current:
+        if isinstance(x.payload, DescriptionPayload) and (_ours(x) or is_machine_translation(x)):
+            descriptions_by_action.setdefault(x.payload.segment_id, []).append(x)
+    reviewed = frozenset(
+        x.payload.segment_id
+        for x in current
+        if isinstance(x.payload, DescriptionPayload)
+        and (
+            x.provenance.source is Source.HUMAN
+            or x.verification.state is not VerificationState.UNREVIEWED
+        )
+    )
+    return _Inputs(
+        session=session,
+        labels=labels,
+        current=current,
+        tracks={hand: _track(x) for hand, x in picked.items()},
+        entities=tuple(sorted(candidates - set(policy.unresolved_entity_ids))),
+        version=f"{PREFIX}{policy.digest}+{vlm_version}+i{inputs}",
+        descriptions_by_action=descriptions_by_action,
+        reviewed_descriptions=reviewed,
+    )
+
+
 def run_actions(
     conn: sa.Connection,
     session_id: str,
@@ -283,165 +425,116 @@ def run_actions(
             묻는다 (테스트·오라클).
 
     Returns:
-        `ActionsSummary`.
+        `ActionsSummary`. 쓰기 직전 확인이 막았으면 `blocked`에 이유가 있고 아무것도 쓰지 않았다.
 
     Raises:
         VlmUnavailableError: VLM 서버가 백오프 후에도 응답하지 않을 때 (아무것도 쓰지 않도록
             호출자가 트랜잭션을 되돌린다).
         RenderNotCurrentError: 블러본이 지금 승인된 블러 라벨로 렌더한 것이 아닐 때 (ADR 0024).
 
-    부작용: `label_records`에 삭제 레코드와 새 라벨을 추가한다.
+    부작용: `label_records`에 삭제 레코드와 새 라벨을 추가한다 (세션 잠금 아래).
     라벨링 버킷에서 블러본을 임시 디렉터리로 받는다.
     """
-    session = get_session(conn, session_id)
-    labels = get_labels(conn, session_id)
-    # 입력은 운영 라벨(current)에서, 재실행 판단은 전체 이력(labels)으로 한다
-    current = current_labels(labels)
-    body = session.reference_stream
-    picked = hand_track_labels(current, body.stream_id)
-    tracks = {hand: _track(x) for hand, x in picked.items()}
-    object_labels = [
-        x for x in current if isinstance(x.payload, BoxTrackPayload | MaskTrackPayload)
-    ]
-    state_labels = [x for x in current if isinstance(x.payload, HandStatePayload)]
-    # 모델 버전 = 정책 해시 + VLM 버전 + 입력 라벨 ID 집합 해시. 손 트랙은 실제로 쓰는 고른
-    # 트랙만 넣는다: 승인은 라벨 ID를 바꾸지 않으므로, 모든 트랙 ID를 넣으면 승인으로 고르는
-    # 트랙이 바뀌어도 버전이 같아 다시 돌지 않는다
-    inputs = input_digest([*picked.values(), *object_labels, *state_labels])
-    version = f"{PREFIX}{policy.digest}+{client.version}+i{inputs}"
-    summary = ActionsSummary(version)
-    unresolved = set(policy.unresolved_entity_ids)
-    # 대상 후보: 객체 트랙 개체와 손 상태의 접촉 대상 (대상을 모르는 접촉 표시 ID는 뺀다)
-    entities = tuple(
-        sorted(
-            (
-                {
-                    x.payload.entity_id
-                    for x in object_labels
-                    if isinstance(x.payload, BoxTrackPayload | MaskTrackPayload)
-                }
-                | {
-                    x.payload.target_id
-                    for x in state_labels
-                    if isinstance(x.payload, HandStatePayload) and x.payload.target_id
-                }
+    first = _read_inputs(conn, session_id, client.version, policy)
+    summary = ActionsSummary(first.version)
+    # 사용 중지·승인 보류 세션은 묻지 않는다 (쓰기 직전에 한 번 더 본다)
+    summary.blocked = write_blocker(conn, session_id)
+    if summary.blocked is not None:
+        return summary
+    stream_id = first.session.reference_stream.stream_id
+    results: dict[Hand, HandResult] = {}
+    render: tuple[str, str, PrivacyPolicy] | None = None
+    with tempfile.TemporaryDirectory() as tmp:
+        video: Path | None = None
+        if labeling is not None:
+            # VLM에는 블러본만 보낸다 (원본 프레임이 VLM 서버로 나가지 않게,
+            # 설명 초안에 개인정보가 들어가지 않게). 블러본은 프라이버시 승인 후 렌더된다.
+            # 지금 승인된 블러 라벨로 렌더한 블러본이 아니면 멈춘다 (ADR 0024)
+            privacy = load_privacy_policy(repo_root())
+            video, before = fetch_current_blurred(
+                conn, labeling, session_id, stream_id, Path(tmp), privacy
             )
-            - unresolved
+            render = (stream_id, before, privacy)
+        # VLM 호출은 세션을 잠그지 않는다 (긴 잠금을 피한다)
+        for hand, track in sorted(first.tracks.items()):
+            if first.done(hand):
+                continue
+            results[hand] = segment_hand(
+                session_id=session_id,
+                stream_id=stream_id,
+                video=video,
+                hand=hand,
+                track=track,
+                contacts=hand_contacts(first.current, hand),
+                entities=first.entities,
+                start_ms=0,
+                end_ms=first.session.duration_ms,
+                client=client,
+                ontology=ontology,
+                policy=policy,
+                model_version=first.version,
+                ontology_version=first.session.ontology_version or ontology.version,
+                now=now,
+            )
+    _write(conn, session_id, first.version, client.version, policy, results, render, now, summary)
+    return summary
+
+
+def _write(
+    conn: sa.Connection,
+    session_id: str,
+    version: str,
+    vlm_version: str,
+    policy: ActionsPolicy,
+    results: dict[Hand, HandResult],
+    render: tuple[str, str, PrivacyPolicy] | None,
+    now: datetime,
+    summary: ActionsSummary,
+) -> None:
+    """세션을 잠그고 쓰기 직전 확인을 한 뒤(막히면 아무것도 쓰지 않음, F-PAR-80), 지금 이력으로
+    지울 것·남길 것을 다시 계획해 쓴다 (F-PAR-81).
+
+    묻는 동안 검수자가 고친 행동(사람 레코드)·승인한 행동은 보호 구간이 되어 새 결과 중 겹치는
+    것은 버리고 빈 곳은 미상으로 채운다 (`keep_protected`, 공백 0·겹침 없음). 그 사이 입력이 바뀌어
+    버전이 달라졌으면 지난 입력으로 만든 결과이므로 쓰지 않는다 (다시 실행).
+    """
+    lock_session(conn, session_id)
+    summary.blocked = write_blocker(conn, session_id, render)
+    if summary.blocked is not None:
+        return
+    fresh = _read_inputs(conn, session_id, vlm_version, policy)
+    if fresh.version != version:
+        summary.blocked = (
+            f"{session_id}: 묻는 동안 행동 단계 입력(손 트랙·손 상태·객체 트랙)이 바뀌었습니다. "
+            "다시 실행하세요"
         )
-    )
-    # 행동마다 이 단계의 설명과 그 기계 번역(영어 형제, ADR 0043). 행동을 지우면 둘 다 지운다
-    descriptions_by_action: dict[str, list[LabelRecord]] = {}
-    for x in current:
-        if isinstance(x.payload, DescriptionPayload) and (_ours(x) or is_machine_translation(x)):
-            descriptions_by_action.setdefault(x.payload.segment_id, []).append(x)
-    # 설명이 검수된(사람이 고쳤거나 승인·표본 검증한) 행동.
-    # 행동을 지우면 설명이 고아가 되므로 남긴다
-    reviewed_descriptions = {
-        x.payload.segment_id
-        for x in current
-        if isinstance(x.payload, DescriptionPayload)
-        and (
-            x.provenance.source is Source.HUMAN
-            or x.verification.state is not VerificationState.UNREVIEWED
-        )
-    }
-
-    def described(x: LabelRecord) -> bool:
-        """설명이 검수된 행동인지 (그 행동은 지우지 않는다)."""
-        return isinstance(x.payload, ActionPayload) and x.payload.action_id in reviewed_descriptions
-
-    def mine_of(hand: Hand) -> list[LabelRecord]:
-        """이 단계가 낸 그 손의 검수 전 현재 행동·공백 (설명이 검수된 행동은 뺀다)."""
-        return [
-            x
-            for x in current
-            if _ours(x)
-            and _hand_of(x) is hand
-            and x.verification.state is VerificationState.UNREVIEWED
-            and not described(x)
-        ]
-
-    def with_descriptions(mine: list[LabelRecord]) -> list[LabelRecord]:
-        """지울 행동에 딸린 검수 전 설명(과 그 영어 번역)까지."""
-        return mine + [
-            d
-            for x in mine
-            if isinstance(x.payload, ActionPayload)
-            for d in descriptions_by_action.get(x.payload.action_id, [])
-            if d.verification.state is VerificationState.UNREVIEWED
-        ]
-
-    # 손 트랙이 사라진 손 (예: 손 모델 버전이 바뀌어 그 손을 더 찾지 못함): 새로 만들 입력이
-    # 없으므로 이 단계가 냈던 검수 전 행동·공백·설명만 지운다. 검수된 것과 사람 레코드는 남긴다.
-    orphans = {h for x in current if _ours(x) and (h := _hand_of(x)) is not None} - set(tracks)
-    for hand in sorted(orphans):
-        removed = retractions(with_descriptions(mine_of(hand)), version, now)
+        return
+    # 손 트랙이 사라진 손: 새로 만들 입력이 없으므로 이 단계가 냈던 검수 전 행동·공백·설명만
+    # 지운다. 검수된 것과 사람 레코드는 남긴다
+    for hand in fresh.orphans():
+        removed = retractions(fresh.with_descriptions(fresh.mine_of(hand)), version, now)
         if removed:
             insert_labels(conn, removed)
             summary.retracted += len(removed)
             summary.hands[hand.value] = {"retracted_without_track": len(removed)}
-
-    with tempfile.TemporaryDirectory() as tmp:
-        video: Path | None = None
-        if labeling is not None:
-            video = Path(tmp) / "bodycam.mp4"
-            # VLM에는 블러본만 보낸다 (원본 프레임이 VLM 서버로 나가지 않게,
-            # 설명 초안에 개인정보가 들어가지 않게). 블러본은 프라이버시 승인 후 렌더된다.
-            # 지금 승인된 블러 라벨로 렌더한 블러본이 아니면 멈춘다 (ADR 0024)
-            rendered = assert_render_current(
-                conn, labeling, session_id, body.stream_id, load_privacy_policy(repo_root())
-            )
-            labeling.get_file(blurred_key(session_id, body.stream_id), video)
-            check_fetched(video, rendered, session_id, body.stream_id)
-        for hand, track in sorted(tracks.items()):
-            # 지울 후보(검수 전 우리 것)와 남길 것(사람·검수됨·설명이 검수된 행동)
-            mine = mine_of(hand)
-            protected = [
-                x
-                for x in current
-                if _hand_of(x) is hand
-                and (
-                    x.provenance.source is Source.HUMAN
-                    or x.verification.state is not VerificationState.UNREVIEWED
-                    or described(x)
-                )
-            ]
-            # 멱등: 이 버전을 낸 적이 있으면 건너뛴다 (검수자가 모두 고쳤거나 다른 버전으로
-            # 바뀌었어도). 예전 버전으로 되돌려도 다시 만들지 않는다. 다시 만들려면 버전을 바꾼다.
-            if any(x.provenance.model_version == version and _hand_of(x) is hand for x in labels):
-                summary.skipped.append(hand.value)
-                continue
-            stale = with_descriptions(mine)
-            contacts = hand_contacts(current, hand)
-            result = segment_hand(
-                session_id=session_id,
-                stream_id=body.stream_id,
-                video=video,
-                hand=hand,
-                track=track,
-                contacts=contacts,
-                entities=entities,
-                start_ms=0,
-                end_ms=session.duration_ms,
-                client=client,
-                ontology=ontology,
-                policy=policy,
-                model_version=version,
-                ontology_version=session.ontology_version or ontology.version,
-                now=now,
-            )
-            # 보호 구간과 겹치는 새 결과는 버리고 빈 곳은 미상으로 채운다.
-            # 이전 버전의 검수 전 결과는 삭제 레코드로 지운다
-            new = keep_protected(result.labels, protected, hand, version, now)
-            removed = retractions(stale, version, now)
-            insert_labels(conn, [*removed, *new])
-            summary.retracted += len(removed)
-            summary.hands[hand.value] = {
-                "candidates": len(result.candidates),
-                "segments": len(result.classified),
-                "actions": sum(isinstance(x.payload, ActionPayload) for x in new),
-                "gaps": sum(isinstance(x.payload, GapPayload) for x in new),
-                "kept_reviewed": len(protected),
-                "unknown_fallbacks": result.fallbacks,
-            }
-    return summary
+    for hand in sorted(fresh.tracks):
+        result = results.get(hand)
+        # 그 사이 같은 버전이 쓰였으면(동시 실행) 건너뛴다. 버전이 같으면 물은 손과 같다
+        if fresh.done(hand) or result is None:
+            summary.skipped.append(hand.value)
+            continue
+        protected = fresh.protected_of(hand)
+        # 보호 구간과 겹치는 새 결과는 버리고 빈 곳은 미상으로 채운다.
+        # 이전 버전의 검수 전 결과는 삭제 레코드로 지운다
+        new = keep_protected(result.labels, protected, hand, version, now)
+        removed = retractions(fresh.with_descriptions(fresh.mine_of(hand)), version, now)
+        insert_labels(conn, [*removed, *new])
+        summary.retracted += len(removed)
+        summary.hands[hand.value] = {
+            "candidates": len(result.candidates),
+            "segments": len(result.classified),
+            "actions": sum(isinstance(x.payload, ActionPayload) for x in new),
+            "gaps": sum(isinstance(x.payload, GapPayload) for x in new),
+            "kept_reviewed": len(protected),
+            "unknown_fallbacks": result.fallbacks,
+        }

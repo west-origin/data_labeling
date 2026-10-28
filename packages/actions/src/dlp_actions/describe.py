@@ -64,12 +64,11 @@ from pydantic import Field, ValidationError
 from dlp_actions.policy import ActionsPolicy
 from dlp_actions.runner import input_digest
 from dlp_actions.vlm import SegmentRequest, VlmClient
-from dlp_actions.write_check import write_blocker
-from dlp_media.storage import ObjectStore, blurred_key
+from dlp_actions.write_check import fetch_current_blurred, write_blocker
+from dlp_media.storage import ObjectStore
 from dlp_models.vlm import ask_validated, with_backoff
 from dlp_privacy.policy import PrivacyPolicy
 from dlp_privacy.policy import load_policy as load_privacy_policy
-from dlp_privacy.runner import assert_render_current, check_fetched, expected_render_hash
 from dlp_schema import repo_root
 from dlp_schema.common import Contract, derived_id
 from dlp_schema.db.description_repository import apply_description_follow
@@ -490,27 +489,6 @@ def _record(
     )
 
 
-def _fetch_video(
-    conn: sa.Connection,
-    labeling: ObjectStore,
-    session_id: str,
-    stream_id: str,
-    work: Path,
-    privacy: PrivacyPolicy,
-) -> tuple[Path, str]:
-    """지금 승인된 렌더의 블러본을 받는다 (ADR 0024, 아니면 RenderNotCurrentError).
-
-    Returns:
-        (받은 파일, 받을 때의 렌더 해시). 해시는 쓰기 직전 확인이 다시 비교한다 (F-PAR-23).
-    """
-    video = work / f"{stream_id}.mp4"
-    before = expected_render_hash(conn, session_id, stream_id, privacy)
-    rendered = assert_render_current(conn, labeling, session_id, stream_id, privacy)
-    labeling.get_file(blurred_key(session_id, stream_id), video)
-    check_fetched(video, rendered, session_id, stream_id)
-    return video, before
-
-
 def describe_session(
     conn: sa.Connection,
     session_id: str,
@@ -555,7 +533,9 @@ def describe_session(
         video: Path | None = None
         if labeling is not None:
             privacy = load_privacy_policy(repo_root())
-            video, before = _fetch_video(conn, labeling, session_id, stream_id, Path(tmp), privacy)
+            video, before = fetch_current_blurred(
+                conn, labeling, session_id, stream_id, Path(tmp), privacy
+            )
             render = (stream_id, before, privacy)
         for t in plan.targets:
             request = describe_request(t, session_id, stream_id, video)

@@ -80,6 +80,9 @@ class VlmPolicy(Contract):
     # 서버 오류·시간 초과 뒤 다시 묻기 전 대기(초). 길이가 재시도 횟수다. 결과에 영향이 없어
     # 정책 해시(모델 버전)에 넣지 않는다
     unavailable_backoff_s: tuple[float, ...] = ()
+    # 사내 대역 CIDR (서버 주소가 밖이면 보내지 않는다, F-PAR-82). 결과에 영향이 없어 정책 해시에
+    # 넣지 않는다
+    internal_hosts: tuple[str, ...] = Field(min_length=1)
 
 
 class ActionsPolicy(Contract):
@@ -99,9 +102,12 @@ class ActionsPolicy(Contract):
         """정책 해시 (sha256 앞 12자). 모델 버전에 들어간다.
 
         파싱된 값(`model_dump(mode="json")`)을 키 정렬 JSON으로 만들어 해시하므로 YAML
-        주석·순서·서식은 영향이 없다. `vlm.unavailable_backoff_s`는 결과를 바꾸지 않아 뺀다.
+        주석·순서·서식은 영향이 없다. `vlm.unavailable_backoff_s`·`vlm.internal_hosts`는 결과를
+        바꾸지 않아 뺀다.
         """
-        data = self.model_dump(mode="json", exclude={"vlm": {"unavailable_backoff_s"}})
+        data = self.model_dump(
+            mode="json", exclude={"vlm": {"unavailable_backoff_s", "internal_hosts"}}
+        )
         content = json.dumps(data, sort_keys=True)
         return hashlib.sha256(content.encode()).hexdigest()[:12]
 

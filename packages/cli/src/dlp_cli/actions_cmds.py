@@ -26,8 +26,11 @@ VLM에는 블러본만 보낸다 (라벨링 버킷에서 읽고 원본 버킷에
 - 2: VLM 서버 주소가 없음 (`--vlm-url`/`DLP_VLM_URL`). 모든 구간을 미상으로 채우면 검수 부담만
   늘어서 아무것도 만들지 않는다.
 - 3: VLM 서버 장애. 트랜잭션이 되돌려져 아무것도 쓰지 않았으므로 서버 복구 뒤 다시 실행한다.
+  블러본이 지금 승인된 렌더가 아니거나(ADR 0024), 쓰기 직전 세션 잠금 아래 확인(사용 중지·승인
+  보류·렌더 변경, 묻는 동안 입력 변경)이 막았을 때도 3이다 (아무것도 쓰지 않았다, F-PAR-23·80).
 - 5: VLM 설정 오류 (4xx: 인증 실패, 없는 모델, 잘못된 요청 등. 다시 물어도 같아 재시도하지 않는다).
   트랜잭션이 되돌려져 아무것도 쓰지 않았다. 서버 주소·모델·키를 고친 뒤 다시 실행한다 (WP17.1).
+  VLM 주소가 사내 대역(`actions.yaml vlm.internal_hosts`) 밖이어도 5다 (보내지 않는다, F-PAR-82).
 
 정책 출처: `config/policies/actions.yaml` (`vlm` 절: 모델, 구간당 프레임 수, 최대 변 px, 제한 시간).
 CI·CPU 테스트는 `OracleVlm` stub을 직접 쓴다 (이 명령은 실제 서버용).
@@ -51,6 +54,7 @@ from dlp_actions.describe import (
 from dlp_actions.policy import ActionsPolicy, load_policy
 from dlp_actions.runner import run_actions
 from dlp_actions.vlm import VlmRequestError, VlmUnavailableError
+from dlp_aireview.backend import check_hosts
 from dlp_cli.ontology_access import session_ontology
 from dlp_cli.schema_cmds import database_url
 from dlp_cli.translate_cmds import translate_after_actions
@@ -72,16 +76,17 @@ def cmd_run(args: argparse.Namespace) -> int:
         args.store: 라벨링 버킷 저장소 지정 (`s3` 또는 `local:<디렉터리>`), 블러본을 읽는다.
         args.url: DB URL.
 
-    반환: 0 성공 / 2 VLM 주소 없음 / 3 VLM 장애 / 5 VLM 설정 오류 (모듈 docstring 참고).
+    반환: 0 성공 / 2 VLM 주소 없음 / 3 VLM 장애·블러본이 지금 승인된 렌더가 아님·쓰기 직전 확인이
+    막음 / 5 VLM 설정 오류·사내 대역 밖 주소 (모듈 docstring 참고).
     부작용: 한 트랜잭션에서 `label_records`에 action·gap·description 레코드와 이전 버전 철회
     레코드 INSERT, VLM 서버 HTTP 호출, 라벨링 버킷 읽기.
     온톨로지는 세션 버전의 DB 등록 사전을 읽는다.
     """
     root = repo_root()
     policy = load_policy(root)
-    client = _client(args.vlm_url, policy)
+    client, code = _client(args.vlm_url, policy)
     if client is None:
-        return NO_URL
+        return code
     ontology = session_ontology(args.url, args.session_id)
     # 블러본만 읽는다 (라벨링 버킷)
     labeling = store_from_spec(
@@ -98,6 +103,10 @@ def cmd_run(args: argparse.Namespace) -> int:
             f"[VLM 서버 장애] {args.session_id}: 아무것도 쓰지 않았습니다. 다시 실행하세요 ({exc})"
         )
         return 3
+    except RenderNotCurrentError as exc:
+        # 블러본이 지금 승인된 렌더가 아니다 (ADR 0024). 프레임을 읽기 전에 멈췄다
+        print(f"[다시 실행] {args.session_id}: 아무것도 쓰지 않았습니다 ({exc})")
+        return UNAVAILABLE
     except VlmRequestError as exc:
         # 4xx 설정 오류: 다시 물어도 같다. 트랜잭션이 되돌려져 아무것도 쓰지 않았다
         print(
@@ -107,6 +116,11 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 5
     finally:
         engine.dispose()
+    if s.blocked is not None:
+        # 쓰기 직전 확인(사용 중지·승인 보류·렌더 변경·입력 변경)이 막았다 (F-PAR-80·81).
+        # 설명 재생성·번역도 돌리지 않는다
+        print(f"[쓰지 않음] {args.session_id}: 쓰기 직전 확인이 막았습니다 ({s.blocked})")
+        return UNAVAILABLE
     for hand, counts in s.hands.items():
         print(f"{hand}: " + ", ".join(f"{k} {v}" for k, v in counts.items()))
     for hand in s.skipped:
@@ -121,8 +135,12 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
-def _client(vlm_url: str | None, policy: ActionsPolicy) -> OpenAICompatibleVlm | None:
-    """행동 VLM 클라이언트 (사내 OpenAI 호환 서버). 주소가 없으면 안내를 출력하고 None."""
+def _client(vlm_url: str | None, policy: ActionsPolicy) -> tuple[OpenAICompatibleVlm | None, int]:
+    """행동 VLM 클라이언트 (사내 OpenAI 호환 서버)와 (만들지 못했으면) 종료 코드.
+
+    주소가 없으면 안내를 출력하고 (None, 2). 사내 대역(`actions.yaml vlm.internal_hosts`) 밖이면
+    보내지 않고 (None, 5) (F-PAR-82, 번역·판정·힌트와 같은 `check_hosts` 규칙).
+    """
     url = vlm_url or os.environ.get("DLP_VLM_URL")
     if not url:
         # TODO(real-model): VLM 서버(OpenAI 호환, GPU 또는 CPU용 llama.cpp)가 없으면 행동 구간·
@@ -131,9 +149,13 @@ def _client(vlm_url: str | None, policy: ActionsPolicy) -> OpenAICompatibleVlm |
             "[미연동] VLM 서버 주소가 없습니다 (--vlm-url 또는 DLP_VLM_URL). "
             "행동 구간·설명을 만들지 않습니다."
         )
-        return None
+        return None, NO_URL
     vlm = policy.vlm
-    return OpenAICompatibleVlm(
+    outside = check_hosts({"actions-vlm": url}, vlm.internal_hosts)
+    if outside:
+        print(f"[설정 오류] 사내 대역 밖 주소에는 보내지 않습니다: {'; '.join(outside)}")
+        return None, CONFIG
+    client = OpenAICompatibleVlm(
         url,
         vlm.model,
         frames=vlm.frames_per_segment,
@@ -142,6 +164,7 @@ def _client(vlm_url: str | None, policy: ActionsPolicy) -> OpenAICompatibleVlm |
         # 서버 API 키 (services/vlm, docs/handover/vlm-server.md). 출력·기록하지 않는다
         api_key=os.environ.get("DLP_VLM_API_KEY") or None,
     )
+    return client, OK
 
 
 def describe_one(
@@ -225,9 +248,9 @@ def cmd_describe(args: argparse.Namespace) -> int:
         return CONFIG
     root = repo_root()
     policy = load_policy(root)
-    client = _client(args.vlm_url, policy)
+    client, code = _client(args.vlm_url, policy)
     if client is None:
-        return NO_URL
+        return code
     labeling = store_from_spec(
         args.store, load_config(root / "config/defaults.yaml").buckets.labeling
     )
