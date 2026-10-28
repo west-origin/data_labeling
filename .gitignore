@@ -27,3 +27,6 @@ data/
 *.parquet
 *.h5
 reports/
+
+# Claude Code 작업 트리 (세션 임시)
+.claude/worktrees/
