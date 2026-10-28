@@ -29,6 +29,8 @@ CVAT는 프레임 번호로 주석을 저장하므로 PTS 인덱스의 프레임
 손별 라벨 이전에 만든 프로젝트는 `kp_hand21` 하나뿐이라 작업을 만들 때 빠진 라벨을 덧붙이고
 (`tasks._cvat_project`), 덧붙이기 전 작업의 `kp_hand21` 트랙은 dlp_meta의 손으로 그대로 왕복한다.
 `kp_hand21`로 새로 그려 손을 알 수 없는 골격은 CvatFormatError다 (F-REV-04).
+손이 있는 골격의 개체 ID는 손에서 정한다 (`<손>_hand`·`<손>_arm`, F-REV-33). 모든 점이 보이지
+않는(visibility 0) 키포인트 키프레임은 화면 밖(outside)으로 오간다 (F-REV-32).
 착용자 팔 골격(arm3, 손목·팔꿈치·어깨, ADR 0058)도 손별 라벨(`kp_arm3_left`·`kp_arm3_right`)로
 그린다. CVAT 점(points) 모양이라 점 세 개를 고치고, 보이지 않는 점은 dlp_visibility 0이다 (좌표는
 손목 자리). 손목은 같은 손 hand21 손목이 기준이다.
@@ -45,7 +47,8 @@ WP6, ADR 0006(무손실 왕복), ADR 0019(키프레임 시각 = 스트림 PTS ms
 
 공개 이름: `CVAT_KINDS`, `TRACK_ATTRS`, `SHAPE_ATTRS`, `PRECISION`, `Scale`, `UNIT_SCALE`,
 `NewBoxKind`, `KEYPOINT_LABELS`, `LEGACY_HAND_LABEL`, `label_spec`, `CvatSchema`, `CvatFormatError`,
-`annotation_tracks`, `quantize`, `cvat_label_name`, `to_cvat_tracks`, `from_cvat_tracks`.
+`annotation_tracks`, `quantize`, `cvat_label_name`, `to_cvat_tracks`, `from_cvat_tracks`,
+`handed_entity_id`, `handed_entity_mismatches`.
 """
 
 from __future__ import annotations
@@ -66,6 +69,7 @@ from dlp_schema.labels import (
     BlurTrackPayload,
     BoxKeyframe,
     BoxTrackPayload,
+    Hand,
     Keypoint,
     KeypointFrame,
     KeypointTrackPayload,
@@ -502,9 +506,10 @@ def to_cvat_tracks(
             meta |= {"entity_id": p.entity_id, "skeleton": p.skeleton, "hand": p.hand}
             vis_id = schema.attr_ids[(name, "dlp_visibility")]
             for f in p.keyframes:
-                # 점 목록을 [x1, y1, x2, y2, …]로 펼친다
+                # 점 목록을 [x1, y1, x2, y2, …]로 펼친다. 모든 점이 보이지 않는(visibility 0)
+                # 키프레임은 화면 밖(outside)으로 보낸다 (돌아오면 다시 모두 0, F-REV-32)
                 pts = [c for pt in f.points for c in _point_to(pt, scale)]
-                shape = _shape(frame_of, f.t_ms, "points", pts, False)
+                shape = _shape(frame_of, f.t_ms, "points", pts, _all_hidden(f))
                 shape["attributes"] = [
                     {"spec_id": vis_id, "value": ",".join(str(pt.visibility) for pt in f.points)}
                 ]
@@ -616,8 +621,10 @@ def from_cvat_tracks(
     - scale: 화면 영상 화소 / 라벨 화소 (돌아올 때 나눈다).
 
     반환: `ReviewedItem` 목록 (트랙 순서). 구간은 첫·마지막 모양의 프레임 시각이다.
-    새로 그린 박스·키포인트 트랙의 개체 ID는 `<라벨 이름>_h<트랙 순번>`이다.
-    키포인트 가시성 속성이 없으면 모든 점을 2(보임)로 둔다. 키포인트의 골격·손은 라벨 이름
+    새로 그린 박스·키포인트 트랙의 개체 ID는 `<라벨 이름>_h<트랙 순번>`이다. 손이 있는 골격
+    (hand21·arm3)은 메타와 관계없이 늘 손에서 정한다 (`handed_entity_id`, F-REV-33).
+    키포인트 가시성 속성이 없으면 모든 점을 2(보임)로 둔다. 화면 밖(outside) 키포인트 키프레임은
+    모든 점이 0(라벨 없음)이다 (F-REV-32). 키포인트의 골격·손은 라벨 이름
     (`kp_<골격>[_<손>]`)에서 읽고, 이름에 손이 없으면 dlp_meta의 손을 쓴다.
     예외: 모양 없는 트랙, 지원하지 않는 모양, 영상 밖 프레임, 모르는 라벨·속성 ID, 손을 알 수
     없는 손 골격(`kp_hand21`로 새로 그림), 골격과 맞지 않는 점 수면 `CvatFormatError`.
@@ -727,6 +734,11 @@ def _keypoint_payload(
         pts = s["points"]
         # 점별 가시성 "2,2,1,…" (없으면 점 수만큼 2). 점 수와 맞지 않으면 CvatFormatError
         vis = _visibility(vis_attr.get("dlp_visibility", ""), len(pts) // 2, name, s)
+        if s.get("outside"):
+            # 화면 밖(outside) 키프레임: CVAT는 직전 모양(좌표·속성)을 복사해 두므로 좌표는 그대로
+            # 두고 모든 점을 라벨 없음(0)으로 본다. 계약에 키포인트 outside가 없고, 0인 점은 3D로
+            # 올리지 않으며 내보내기에서도 빈 값이다 (F-REV-32)
+            vis = [0] * len(vis)
         frames.append(
             KeypointFrame(
                 t_ms=t,
@@ -740,9 +752,12 @@ def _keypoint_payload(
                 ),
             )
         )
+    # 손이 있는 골격(hand21·arm3)의 개체 ID는 손에서 정한다 (`<손>_hand`·`<손>_arm`, 3D 승격·
+    # 내보내기의 규약). 라벨을 바꿔 손을 고쳐도, 새로 그려도 같다 (F-REV-33)
+    entity = handed_entity_id(skeleton, hand) or meta.get("entity_id") or f"{name}_h{n}"
     try:
         return KeypointTrackPayload(
-            entity_id=meta.get("entity_id") or f"{name}_h{n}",
+            entity_id=entity,
             skeleton=skeleton,  # type: ignore[arg-type]
             hand=hand,  # type: ignore[arg-type]
             keyframes=tuple(frames),
@@ -754,3 +769,43 @@ def _keypoint_payload(
             f"{shapes[-1]['frame']})을 옮길 수 없습니다: "
             + "; ".join(str(x["msg"]) for x in e.errors())
         ) from e
+
+
+def _all_hidden(frame: KeypointFrame) -> bool:
+    """모든 점이 보이지 않는(visibility 0) 키프레임인가 (CVAT outside로 오간다)."""
+    return all(pt.visibility == 0 for pt in frame.points)
+
+
+# 손이 있는 골격 → 개체 ID 접미사 (`<손>_hand`·`<손>_arm`, ADR 0044·0058)
+_HANDED_ENTITY_SUFFIX = {"hand21": "hand", "arm3": "arm"}
+
+
+def handed_entity_id(skeleton: str, hand: Hand | str | None) -> str | None:
+    """손이 있는 골격(hand21·arm3)의 규약 개체 ID (`left_hand`, `right_arm` 등).
+
+    다른 골격이거나 손을 모르면 None. 3D 승격(`dlp_prelabel.lift3d.lift_key`)과 LeRobot 내보내기가
+    이 ID로 손·팔을 찾는다.
+    """
+    suffix = _HANDED_ENTITY_SUFFIX.get(skeleton)
+    if suffix is None or hand is None:
+        return None
+    return f"{Hand(hand).value}_{suffix}"
+
+
+def handed_entity_mismatches(labels: Iterable[LabelRecord]) -> list[str]:
+    """손이 있는 골격 키포인트 라벨 중 개체 ID가 손과 맞지 않는 것의 설명 목록 (없으면 빈 목록).
+
+    수집이 저장 전에 검사한다 (`collect.collect_task`, F-REV-33).
+    """
+    out: list[str] = []
+    for label in labels:
+        p = label.payload
+        if not isinstance(p, KeypointTrackPayload):
+            continue
+        want = handed_entity_id(p.skeleton, p.hand)
+        if want is not None and p.entity_id != want:
+            out.append(
+                f"{label.label_id}: {p.skeleton} 골격의 개체 ID {p.entity_id}가 손 규약 {want}와 "
+                "다릅니다"
+            )
+    return out

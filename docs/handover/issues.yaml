@@ -912,8 +912,9 @@ issues:
   - {id: F-ETA-19, title: "데이터셋 빌드가 지정한 골든셋만 빼고 다른 확정 골든셋 세션을 train에 넣음", severity: high, status: fixed, kind: code,
      files: [packages/datasets/src/dlp_datasets/build.py], source: docs/handover/full-inspection-2026-10-28.md,
      note: "_golden_sides가 등록된 모든 골든셋(도메인 무관)을 assign_splits의 막는 쪽으로 넘긴다. 지정하지 않은 골든셋 세션과 그 작업자·장소를 공유하는 세션은 holdout. 회귀: packages/datasets/tests/test_lineage.py::test_every_confirmed_golden_set_stays_out_of_train_and_val"}
-  - {id: F-REV-32, title: "CVAT 키포인트 트랙의 outside 키프레임이 모든 점이 보이는 키프레임으로 수집됨", severity: high, status: open, kind: code,
-     files: [packages/review/src/dlp_review/cvat.py], source: docs/handover/full-inspection-2026-10-28.md}
+  - {id: F-REV-32, title: "CVAT 키포인트 트랙의 outside 키프레임이 모든 점이 보이는 키프레임으로 수집됨", severity: high, status: fixed, kind: code,
+     files: [packages/review/src/dlp_review/cvat.py], source: docs/handover/full-inspection-2026-10-28.md,
+     note: "받을 때 outside 키프레임의 모든 점을 visibility 0으로, 보낼 때 모든 점이 0인 키프레임을 outside로 보내 무손실 왕복. 계약에 키포인트 outside 필드는 없다. 회귀: packages/review/tests/test_units.py::test_cvat_outside_keypoint_keyframe_is_not_visible"}
   - {id: F-COE-77, title: "콘솔 가중치 가져오기가 manifest 모델 이름을 검사하지 않아 저장소 밖 파일 쓰기와 models.yaml 패치 주입", severity: high, status: fixed, kind: code,
      files: [packages/console/src/dlp_console/pretrain.py, packages/console/src/dlp_console/imports.py], source: docs/handover/full-inspection-2026-10-28.md,
      note: "구조 이름은 ^[a-z][a-z0-9_]{0,63}$, start_weights sha256·https url 형식 검사, 가중치 경로는 resolve 뒤 models_dir(저장소 안) 안, confirm이 plan을 다시 검사한다. 회귀: packages/console/tests/test_pretrain.py::test_manifest_strings_cannot_escape_or_inject"}
@@ -949,10 +950,12 @@ issues:
   - {id: F-PAR-82, title: "행동·설명 재생성 VLM 주소에 사내 대역 검사가 없음", severity: medium, status: fixed, kind: code,
      files: [packages/cli/src/dlp_cli/actions_cmds.py, config/policies/actions.yaml], source: docs/handover/full-inspection-2026-10-28.md,
      note: "actions.yaml vlm.internal_hosts(모델 버전 해시 밖) 밖이면 종료 코드 5. aireview·translate·actions에 같은 목록이 셋 있다. 회귀: packages/cli/tests/test_actions_run_cmd.py::test_run_and_describe_exit_5_for_outside_url"}
-  - {id: F-REV-33, title: "라벨을 바꿔 손을 고치거나 새로 그린 손 골격의 entity_id가 <손>_hand 규약과 어긋나 2D·3D 손이 엇갈림", severity: medium, status: open, kind: code,
-     files: [packages/review/src/dlp_review/cvat.py], source: docs/handover/full-inspection-2026-10-28.md, see: [F-REV-04]}
-  - {id: F-REV-34, title: "관계 라벨이 있으면 dlp review verify가 영영 통과하지 못함 (관계는 검수 경로가 없음)", severity: medium, status: open, kind: code,
-     files: [packages/review/src/dlp_review/verify.py, config/policies/review.yaml], source: docs/handover/full-inspection-2026-10-28.md}
+  - {id: F-REV-33, title: "라벨을 바꿔 손을 고치거나 새로 그린 손 골격의 entity_id가 <손>_hand 규약과 어긋나 2D·3D 손이 엇갈림", severity: medium, status: fixed, kind: code,
+     files: [packages/review/src/dlp_review/cvat.py], source: docs/handover/full-inspection-2026-10-28.md, see: [F-REV-04],
+     note: "hand21·arm3의 entity_id는 수집 때 손에서 정한다(<손>_hand·<손>_arm, handed_entity_id), collect가 저장 전에 어긋남을 TaskError로 막는다. 회귀: packages/review/tests/test_units.py::test_cvat_hand_entity_follows_hand_and_skeleton"}
+  - {id: F-REV-34, title: "관계 라벨이 있으면 dlp review verify가 영영 통과하지 못함 (관계는 검수 경로가 없음)", severity: medium, status: fixed, kind: code,
+     files: [packages/review/src/dlp_review/verify.py, config/policies/review.yaml], source: docs/handover/full-inspection-2026-10-28.md,
+     note: "review.yaml verify.automatic 기본을 camera_pose·relation·coverage로(모델 출처만). 검수 상태는 그대로라 기본 내보내기에는 모델 관계·커버리지가 들어가지 않는다. ADR 0011·0050 개정. 회귀: packages/review/tests/test_verify.py::test_rule_derived_relations_do_not_block_verify"}
   - {id: F-ETA-20, title: "replaces 과제 첫 배포가 대신할 기본 어댑터 일부와만 비교해도 통과·배포", severity: medium, status: fixed, kind: code,
      files: [packages/training/src/dlp_train/loop.py], source: docs/handover/full-inspection-2026-10-28.md,
      note: "골든셋에 예측을 낸 replaces 어댑터마다 비교 버전이 있어야 한다(어댑터는 프리라벨 라벨 ID 접두사 규칙으로 판별, 모르면 거절). 회귀: packages/training/tests/test_loop.py::test_training_loop_gate_blocks_or_deploys"}

@@ -43,7 +43,8 @@ media:
 
 # 검수 단위: 세션 × 스트림 × 라벨 종류 묶음. 묶음마다 검수 도구가 다르다.
 # 도구가 보여 주는 종류만 쓴다 (보여 주지 않는 종류를 표본으로 뽑으면 판정이 끝나지 않는다).
-# 관계·설명은 아직 검수 도구 화면이 없어 단위에 넣지 않는다.
+# 관계·커버리지·설명은 아직 검수 도구 화면이 없어 단위에 넣지 않는다 (설명은 행동 검수를 물려받고,
+# 관계·커버리지는 verify.automatic으로 완료를 막지 않는다).
 # 허용 값: spatial ⊆ (box_track, keypoint_track), temporal ⊆ dlp_review.labelstudio.LS_KINDS.
 # 벗어나면 정책 로드가 실패한다 (UnitsPolicy 검증).
 units:
@@ -146,9 +147,11 @@ verify:
   # 사람 검수 대상이 아닌 자동 라벨. 검수 도구 경로가 없고 물려받을 2D도 없어, 여기 있으면 검수 전이어도
   # 완료를 막지 않는다 (검수 상태는 바꾸지 않는다: 기본 내보내기(검수 라벨만)에 그 라벨 자체는 들어가지
   # 않고, 그 값으로 계산한 월드 좌표 3D를 내보내면 manifest가 camera_pose: automatic_unreviewed로 밝힌다).
-  # 값: camera_pose (모델 출처 카메라 자세 궤적, entity camera, dlp_prelabel.campose). 빼면 자세가 있는
-  # 세션은 검수 경로가 없어 완료되지 못한다.
-  automatic: [camera_pose]
+  # 값: camera_pose (모델 출처 카메라 자세 궤적, entity camera, dlp_prelabel.campose), relation·coverage
+  # (dlp relations run이 손 상태·3D 궤적에서 규칙으로 도출한 모델 관계·커버리지, ADR 0011 개정, F-REV-34.
+  # 검수 전이라 기본 내보내기에는 들어가지 않는다). 빼면 그 라벨이 있는 세션은 검수 경로가 없어 완료되지
+  # 못한다.
+  automatic: [camera_pose, relation, coverage]
   # 출처 2D가 바뀌어 궤적 따르기가 지운(또는 검수 전인 채 낡은) 3D 궤적을 고친 2D로 다시 만들기 전에는 완료를
   # 막고 `dlp prelabel run <세션>`을 안내한다 (F-COE-30). 2D 승인 뒤 고쳤든 승인 전에 고쳤든 같은 판정이다.
   # 깊이 모델이 없어 3D를 다시 만들 수 없는 운영에서만 false로 둔다 (그러면 그 손·박스 3D 없이 완료된다)

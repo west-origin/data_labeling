@@ -18,7 +18,7 @@ WP12, ADR 0014. `dlp review plan|assign|qa|quality|create|collect|serve`와 운�
   `AiConfidenceFloor`·`AiReviewDisplayPolicy`(AI 1차 검수 판정 사용 방식, WP17.6)·
   `AiCalibrationPolicy`·`AiCalibrationFit`·`AiCalibrationRef`(판정 표시 보정, ADR 0062)·
   `VerifyPolicy`(완료 판정에서 뺄 자동 라벨, ADR 0050): review.yaml의 절별 모델.
-- `AutomaticLabel`: 사람 검수 대상이 아닌 자동 라벨 분류 이름 (지금은 camera_pose뿐).
+- `AutomaticLabel`: 사람 검수 대상이 아닌 자동 라벨 분류 이름 (camera_pose, relation, coverage).
 - `ReviewOpsPolicy`: 전체 정책 (review.yaml + `ratios` = defaults.yaml `review`).
 - `load_policy`: 저장소 루트에서 정책을 읽어 검증한다.
 
@@ -47,8 +47,9 @@ from dlp_schema.config import ReviewConfig, load_config
 ErrorType = Literal["boundary_shift", "class_swap", "blur_deletion"]
 
 # 사람 검수 대상이 아닌 자동 라벨 분류 (ADR 0050). camera_pose: 모델 출처 카메라 자세 궤적
-# (`dlp_schema.trajectory_follow.is_camera_pose`, entity camera)
-AutomaticLabel = Literal["camera_pose"]
+# (`dlp_schema.trajectory_follow.is_camera_pose`, entity camera). relation·coverage: 규칙 엔진
+# (`dlp relations run`)이 손 상태·3D 궤적에서 도출하는 모델 출처 관계·커버리지 (ADR 0011 개정)
+AutomaticLabel = Literal["camera_pose", "relation", "coverage"]
 
 
 # CVAT 작업 라벨(공간) 검수 화면이 보여 주는 라벨 종류. 블러(blur_track)는 프라이버시 검수 단위라
@@ -375,7 +376,7 @@ class VerifyPolicy(Contract):
         수 없는 운영에서만 끈다.
     """
 
-    automatic: tuple[AutomaticLabel, ...] = ("camera_pose",)
+    automatic: tuple[AutomaticLabel, ...] = ("camera_pose", "relation", "coverage")
     require_current_3d: bool = True
 
 

@@ -66,6 +66,7 @@ from dlp_review.cvat import (
     CvatSchema,
     annotation_tracks,
     from_cvat_tracks,
+    handed_entity_mismatches,
     quantize,
 )
 from dlp_review.labelstudio import LsFormatError, from_ls_results
@@ -466,6 +467,10 @@ def collect_task(
     # 사람이 명시적으로 적용한 AI 제안만 반영하고(I6), 세션 검증에 걸리면 AI 적용만 되돌린다
     applied = ai_collect.apply_decisions(ai, reviewed, decisions, normalize=normalize)
     outcome = ai_collect.settle(ai, replay(applied), replay)
+    # 손·팔 골격의 개체 ID가 손 규약(`<손>_hand`·`<손>_arm`)과 다르면 3D 승격·내보내기가 그 트랙을
+    # 다른 손으로 본다. 변환기가 손에서 정하므로 여기 걸리면 내부 오류다 (F-REV-33)
+    if mismatched := handed_entity_mismatches(outcome.new_records):
+        raise TaskError(f"{task_key}: " + "; ".join(mismatched))
     insert_labels(conn, outcome.new_records)
     for label_id in outcome.approved:
         record_review(conn, label_id, VerificationState.HUMAN_APPROVED, reviewer_id, now)

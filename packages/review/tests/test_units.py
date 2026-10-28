@@ -37,6 +37,7 @@ from dlp_review.cvat import (
     annotation_tracks,
     cvat_label_name,
     from_cvat_tracks,
+    handed_entity_mismatches,
     label_spec,
     quantize,
     to_cvat_tracks,
@@ -73,6 +74,8 @@ from dlp_schema.labels import (
     GapPayload,
     Hand,
     HandStatePayload,
+    Keypoint,
+    KeypointFrame,
     KeypointTrackPayload,
     Provenance,
     Source,
@@ -1223,3 +1226,78 @@ def test_arm_without_visible_elbows_does_not_block_completion() -> None:
     for current, blocked in ((arm("a2", 2), True), (arm("a2", 0), False)):
         history = [arm("a1", 2), elbow, *gone, current]
         assert bool(trajectory_gaps("s001", history, [current])) is blocked
+
+
+def _kp_frames(n: int, times: list[int], vis: int = 2) -> tuple[KeypointFrame, ...]:
+    """시험용 키포인트 키프레임 (점 n개, 자리 값 좌표, 가시성 vis)."""
+    points = tuple(Keypoint(x=10.0 + i, y=20.0 + i, visibility=vis) for i in range(n))  # type: ignore[arg-type]
+    return tuple(KeypointFrame(t_ms=t, points=points) for t in times)
+
+
+def test_cvat_outside_keypoint_keyframe_is_not_visible() -> None:
+    """F-REV-32 회귀: 검수자가 CVAT에서 키포인트 트랙을 화면 밖(outside)으로 끝낸 키프레임이 "모든
+    점이 보임" 키프레임으로 수집됐다 (CVAT는 직전 모양을 복사해 outside=True로 저장한다).
+
+    정답 근거: 직접 만든 손 트랙 (0·33 ms, 모든 점 보임). 67 ms에 outside 키프레임을 붙이면 그
+    키프레임의 모든 점은 visibility 0(라벨 없음)이다. 모든 점이 0인 키프레임은 outside로 보내
+    무손실 왕복한다.
+    """
+    times = [0, 33, 67, 100]
+    schema = fake_schema(list(KEYPOINT_LABELS))
+    hand = make_label(
+        KeypointTrackPayload(entity_id="left_hand", skeleton="hand21", hand=Hand.LEFT,
+                             keyframes=_kp_frames(21, [0, 33])),
+        "k1", 0, 33, stream_id="bodycam",
+    )  # fmt: skip
+    [track] = to_cvat_tracks([hand], times, schema)
+    ended = {**track["shapes"][-1], "frame": 2, "outside": True}
+    track["shapes"].append(ended)
+    [item] = from_cvat_tracks([track], times, schema, "bodycam", new_box_kind="box_track")
+    assert isinstance(item.payload, KeypointTrackPayload)
+    assert [sorted({q.visibility for q in f.points}) for f in item.payload.keyframes] == [
+        [2], [2], [0]
+    ]  # fmt: skip
+    assert (item.t_start_ms, item.t_end_ms) == (0, 67)
+
+    # 수집한 사람 레코드(outside 키프레임 포함)를 다시 보내도 무손실 왕복한다
+    back = make_label(item.payload, "k2", 0, 67, stream_id="bodycam")
+    [sent] = to_cvat_tracks([back], times, schema)
+    assert [s["outside"] for s in sent["shapes"]] == [False, False, True]
+    [again] = from_cvat_tracks([sent], times, schema, "bodycam", new_box_kind="box_track")
+    assert again.payload == quantize(back).payload
+
+
+def test_cvat_hand_entity_follows_hand_and_skeleton() -> None:
+    """F-REV-33 회귀: 라벨을 바꿔 손을 고치면 개체 ID가 원래 손(`left_hand`)으로 남고, 새로 그린
+    손 골격은 `kp_hand21_right_h0` 같은 ID가 돼 3D 승격·LeRobot의 `<손>_hand`·`<손>_arm` 규약과
+    어긋났다.
+
+    정답 근거: 직접 만든 왼손 hand21·arm3 트랙. 라벨을 오른손으로 바꾸거나 메타 없이 새로 그리면
+    개체 ID는 `right_hand`·`right_arm`이고, 규약과 어긋난 레코드는 `handed_entity_mismatches`가
+    짚는다.
+    """
+    times = [0, 33]
+    schema = fake_schema(list(KEYPOINT_LABELS))
+    for skeleton, n, suffix in (("hand21", 21, "hand"), ("arm3", 3, "arm")):
+        label = make_label(
+            KeypointTrackPayload(entity_id=f"left_{suffix}", skeleton=skeleton, hand=Hand.LEFT,  # type: ignore[arg-type]
+                                 keyframes=_kp_frames(n, [0])),
+            "k1", 0, 0, stream_id="bodycam",
+        )  # fmt: skip
+        [track] = to_cvat_tracks([label], times, schema)
+        right = schema.label_ids[f"kp_{skeleton}_right"]
+        swapped = {**track, "label_id": right}
+        drawn: dict[str, Any] = {**track, "label_id": right, "attributes": []}
+        items = from_cvat_tracks(
+            [swapped, drawn], times, schema, "bodycam", new_box_kind="box_track"
+        )
+        for item in items:
+            assert isinstance(item.payload, KeypointTrackPayload)
+            assert (item.payload.hand, item.payload.entity_id) == (Hand.RIGHT, f"right_{suffix}")
+        [same] = from_cvat_tracks([track], times, schema, "bodycam", new_box_kind="box_track")
+        assert same.payload == quantize(label).payload
+        bad = label.model_copy(
+            update={"payload": label.payload.model_copy(update={"entity_id": f"right_{suffix}"})}
+        )
+        assert handed_entity_mismatches([label]) == []
+        assert [m for m in handed_entity_mismatches([bad]) if f"left_{suffix}" in m]

@@ -44,3 +44,21 @@
   (`TODO(real-model)`, relations.yaml).
 - 표면을 평면 사각형으로 본다. 변기 안쪽처럼 굽은 표면은 평면 여러 개나 메시가 필요하다.
 - 지지·포함(support, contain) 관계 중 객체끼리의 것(탁자 위 컵, 양동이 속 걸레)은 아직 규칙 입력이 없다.
+
+## 개정 (2026-10-28): 관계·커버리지는 검수 완료를 막지 않는 자동 라벨이다 (F-REV-34)
+
+- 문제: `dlp relations run`이 만든 관계·커버리지(모델 출처)는 CVAT·Label Studio 어디에도 화면이 없어
+  검수 상태를 얻을 길이 없는데, `dlp review verify`는 현재 운영 모델 라벨이 모두 검수되기를 요구했다.
+  관계가 하나라도 있는 세션은 영영 human_verified가 되지 못했다.
+- 결정: 관계·커버리지는 검수된 입력(손 상태 구간·2D 검수를 물려받은 3D 궤적)에서 규칙(`derived_by` =
+  규칙 ID)으로 도출하는 파생물로 보고, 카메라 자세와 같은 자동 라벨 목록 `review.yaml verify.automatic`
+  (ADR 0050)에 분류 `relation`·`coverage`를 더한다. 저장소 값과 코드 기본값 모두
+  `[camera_pose, relation, coverage]`다. 모델 출처만 해당하고(사람이 만든 관계는 원래 검수된 것),
+  목록에서 빼면 다시 완료를 막는다. `dlp review verify` 출력의 자동 라벨 수에 함께 센다.
+- 검수 상태는 바꾸지 않는다 (unreviewed 그대로). 그래서 내보내기 동작도 바뀌지 않는다: 기본 내보내기
+  (`export.yaml label_states`, 사람·검수 라벨만)에는 모델 관계·커버리지가 들어가지 않고
+  `--include-unreviewed`일 때만 들어간다. 관계에서 오는 LeRobot 도구-표면 접촉 특징도 기본 내보내기에서는
+  비어 있다. 관계를 기본 내보내기에 넣으려면 입력 검수를 물려받는 규칙(설명 따르기, ADR 0043 3절과 같은
+  명시 기록)이 따로 필요하다 (이번 개정 범위 밖).
+- 구현: `dlp_review.ops.policy.AutomaticLabel`, `dlp_review.verify.automatic_label`.
+  회귀 테스트 `packages/review/tests/test_verify.py::test_rule_derived_relations_do_not_block_verify`.

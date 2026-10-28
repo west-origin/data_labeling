@@ -26,7 +26,9 @@
   2D가 검수 전인 3D는 계속 완료를 막는다. 카메라 자세(entity camera, 자동 추정)는 사람 검수
   대상이 아니라 review.yaml `verify.automatic`에 camera_pose가 있으면(기본) 검수 전이어도 완료를
   막지 않는다 (F-COE-21, ADR 0050. 검수 상태는 그대로이고 내보내기 manifest가
-  automatic_unreviewed로 밝힌다).
+  automatic_unreviewed로 밝힌다). 규칙 엔진(`dlp relations run`)이 도출한 모델 관계·커버리지도
+  검수 도구 화면이 없어 `verify.automatic`에 relation·coverage가 있으면(기본) 막지 않는다
+  (F-REV-34, ADR 0011 개정. 검수 상태는 그대로라 기본 내보내기에는 들어가지 않는다).
 - 3D 궤적이 지금 2D와 맞다 (review.yaml `verify.require_current_3d`, 기본 참, F-COE-30): 궤적
   따르기가 출처 2D가 바뀌어 지운 3D의 대상(스트림, 개체, 좌표계)에 지금 2D로 계산한 3D가 없는데
   3D 단계가 올릴 2D 트랙(hand21 손·박스)이 있으면 막고 `dlp prelabel run <세션>`을 안내한다. 검수
@@ -124,8 +126,18 @@ class VerifyResult:
     automatic_unreviewed: int = 0
 
 
+# 규칙 엔진이 도출하는 모델 라벨 종류 (분류 이름 = 라벨 종류, ADR 0011 개정)
+_DERIVED_KINDS = frozenset({"relation", "coverage"})
+
+
 def automatic_label(x: LabelRecord, automatic: tuple[AutomaticLabel, ...]) -> bool:
-    """x가 사람 검수 대상이 아닌 자동 라벨인가 (review.yaml verify.automatic, ADR 0050)."""
+    """x가 사람 검수 대상이 아닌 자동 라벨인가 (review.yaml verify.automatic, ADR 0050).
+
+    camera_pose: 모델 출처 카메라 자세. relation·coverage: 모델 출처(`dlp relations run`) 관계·
+    커버리지 (검수 도구 화면이 없고 검수된 입력에서 규칙으로 도출한다, ADR 0011 개정, F-REV-34).
+    """
+    if x.kind in _DERIVED_KINDS:
+        return x.kind in automatic and x.provenance.source is Source.MODEL
     return "camera_pose" in automatic and is_camera_pose(x)
 
 
@@ -287,7 +299,9 @@ def _automatic_unreviewed(
     """검수 전이지만 자동 라벨이라 완료를 막지 않는 현재 운영 라벨 수 (출력용)."""
     return sum(
         1
-        for x in current_labels(get_labels(conn, session_id, kinds=["trajectory3d"]))
+        for x in current_labels(
+            get_labels(conn, session_id, kinds=["trajectory3d", *sorted(_DERIVED_KINDS)])
+        )
         if x.verification.state is VerificationState.UNREVIEWED and automatic_label(x, automatic)
     )
 

@@ -103,3 +103,9 @@ ADR 0048 뒤 남은 두 문제.
    ADR 0048 배포 2단계의 `dlp prelabel run`(생애주기 무관, 같은 실행에서 궤적 따르기 적용)이 메운다
    (F-COE-33).
 3. 데이터셋 버전을 다시 만든 뒤 내보낸다 (스냅샷의 라벨이 새 상태여야 한다).
+
+## 개정 (2026-10-28): verify.automatic에 relation·coverage
+
+- `verify.automatic`의 분류에 `relation`·`coverage`(모델 출처, `dlp relations run`)를 더한다. 기본값은
+  `[camera_pose, relation, coverage]`다. 검수 상태·내보내기 동작은 그대로다. 근거와 한계는 ADR 0011 개정
+  (2026-10-28, F-REV-34).

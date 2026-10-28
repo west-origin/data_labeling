@@ -389,8 +389,9 @@ def cmd_verify(args: argparse.Namespace) -> int:
     _print_trajectories(result.trajectories_approved, result.trajectories_retracted)
     if result.automatic_unreviewed:
         print(
-            f"  자동 라벨(카메라 자세) {result.automatic_unreviewed}개: 사람 검수 대상이 아니라 "
-            "완료를 막지 않음 (검수 전 그대로, 내보내기 manifest에 automatic_unreviewed, ADR 0050)"
+            f"  자동 라벨(카메라 자세·규칙 관계·커버리지) {result.automatic_unreviewed}개: "
+            "사람 검수 대상이 아니라 완료를 막지 않음 (검수 전 그대로, 내보내기 manifest에 "
+            "automatic_unreviewed, ADR 0050·0011)"
         )
     if result.already:
         print(f"{args.session_id}: 이미 검수 완료 단계")

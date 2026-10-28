@@ -145,3 +145,35 @@ def test_cli_verify_actor_defaults_to_current_actor(
     with pg.connect() as conn:
         last = list_lifecycle_events(conn, "s002")[-1]
     assert last.to_state is LifecycleState.HUMAN_VERIFIED and last.actor == "os-user"
+
+
+def test_rule_derived_relations_do_not_block_verify(pg: sa.Engine) -> None:
+    """F-REV-34 회귀: 관계·커버리지(`dlp relations run`, 모델 출처)는 어떤 검수 도구로도 가지 않는데
+    검수 상태를 요구해 관계가 있는 세션은 `dlp review verify`를 영영 통과하지 못했다.
+
+    review.yaml `verify.automatic`(기본 relation·coverage 포함)에 있으면 검수 전이어도 막지 않고,
+    검수 상태는 그대로다. 목록에서 빼면 다시 막는다.
+    정답 근거: 사람이 만든 행동 1개 + 모델 관계·커버리지 각 1개, 블러 승인, 작업 없음.
+    """
+    model = Provenance(source=Source.MODEL, model_version="relations-abc")
+    later = FIXED_TIME + timedelta(days=1)
+    with pg.begin() as conn:
+        insert_session(conn, make_session("s001"))
+        set_privacy_state(conn, "s001", PrivacyState.APPROVED)
+        set_lifecycle(conn, "s001", LifecycleState.PRIVACY_APPROVED)
+        set_lifecycle(conn, "s001", LifecycleState.PRELABELED)
+        relation = make_label(
+            {"kind": "relation", "subject_id": "right_hand", "predicate": "grasp",
+             "object_id": "rag_01", "derived_by": "hand-grasp"},
+            label_id="rel1", t_start_ms=0, t_end_ms=1000, provenance=model, confidence=0.9,
+        )  # fmt: skip
+        coverage = make_label(
+            {"kind": "coverage", "surface_id": "table_01", "tool_id": "rag_01", "ratio": 0.5},
+            label_id="cov1", t_start_ms=0, t_end_ms=1000, provenance=model, confidence=0.9,
+        )  # fmt: skip
+        insert_labels(conn, [make_label(action_payload(), label_id="a1"), relation, coverage])
+        blocked = verify_session(conn, "s001", later, "lead", automatic=("camera_pose",))
+        assert not blocked.verified and "검수하지 않은 모델 라벨 2개" in blocked.reasons[0]
+        result = verify_session(conn, "s001", later, "lead")
+        assert result.verified, result.reasons
+        assert result.automatic_unreviewed == 2

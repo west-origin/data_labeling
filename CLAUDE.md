@@ -80,7 +80,7 @@
   블러 오탐 의심 힌트 `dlp_privacy.hints` (ADR 0055).
 - `packages/review/` (`dlp_review`) — 검수 도구 연동: CVAT·Label Studio 변환기(무손실 왕복), 작업 생성, reconcile(검수 결과 →
   라벨 이력), 웹훅 수집, 라벨러 워터마크, 역할 경계, 배포 매체 회수 실행기(`dlp_review.revoke`).
-  `dlp review create|collect|verify|serve|register-webhooks|revoke|refresh-urls` (verify: 검수가 끝난 세션을 human_verified로. 설명·3D 궤적 따르기를 먼저 적용하고, `review.yaml verify.automatic`(기본 `camera_pose`)의 자동 라벨은 검수 전이어도 완료를 막지 않는다(검수 상태는 그대로), ADR 0050, 출처 2D가 바뀌어 지운 3D를 지금 2D로 다시 만들기 전에는 완료를 막고 `dlp prelabel run`을 안내한다(`verify.require_current_3d`, ADR 0051),
+  `dlp review create|collect|verify|serve|register-webhooks|revoke|refresh-urls` (verify: 검수가 끝난 세션을 human_verified로. 설명·3D 궤적 따르기를 먼저 적용하고, `review.yaml verify.automatic`(기본 `camera_pose`·`relation`·`coverage`, 모델 출처만, ADR 0011 개정)의 자동 라벨은 검수 전이어도 완료를 막지 않는다(검수 상태는 그대로), ADR 0050, 출처 2D가 바뀌어 지운 3D를 지금 2D로 다시 만들기 전에는 완료를 막고 `dlp prelabel run`을 안내한다(`verify.require_current_3d`, ADR 0051),
   revoke: 블러가 바뀐 뒤 이미 배포한 라벨링 매체 회수, 대기가 남으면 종료 코드 4, ADR 0039. `revoke --orphans`: DB 기록 없이
   남은 도구 작업·사본 정리(기본 보고만, `--apply`일 때 삭제). refresh-urls: 열린 Label Studio 작업의 서명 URL 다시 서명).
   Label Studio 결과는 담당자 계정(`review.yaml label_studio.users`)이 낸 주석만 받는다.
@@ -98,6 +98,8 @@
   오탐 의심 힌트 `dlp review hints <세션> [--tta] [--ai]`(블러: 원본 버킷 hints 파일 → 블러 검수 CVAT 이슈, 객체
   `dlp_review.object_hints`: 라벨링 CVAT 이슈, 잘라 낸 박스 AI 확인 `dlp_aireview.crops`). 라벨·블러는 바꾸지 않는다
   (ADR 0055·0056).
+  손이 있는 골격(hand21·arm3)의 entity_id는 수집 때 손에서 정하고(`<손>_hand`·`<손>_arm`), 모든 점이 visibility 0인
+  키포인트 키프레임은 CVAT outside로 오간다 (F-REV-32·33).
   마스크(`mask_track`)는 CVAT 모양 모드 마스크로 무손실 왕복한다 (`dlp_review.cvat.to_cvat_shapes`, 원본 해상도 작업만,
   블러 검수에서는 받지 않음, ADR 0059).
 - `packages/datasets/` (`dlp_datasets`) — 데이터셋 버전(lakeFS 커밋), 작업자·장소 단위 분할(holdout 포함), 골든셋 제안,
