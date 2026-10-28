@@ -891,9 +891,10 @@ issues:
   - {id: F-PMS-38, title: "test_rerender_repairs_damaged_release[invalid-json]이 전체 make check에서 한 번 실패(다시 렌더한 블러본 바이트가 원본과 다름), 단독·privacy 묶음 재실행은 통과", severity: low, status: candidate, kind: test,
      files: [packages/privacy/tests/test_render_recovery.py, packages/privacy/src/dlp_privacy/render.py], source: docs/handover/comment-review-2026-10-26.md,
      note: "2026-10-26 주석 검수 반영 뒤 make check(15분, 디스크 89%)에서 1회. 이 변경은 렌더를 건드리지 않았다. 재렌더 바이트 동일성을 전제하는 시험이라 부하 중 인코더 스레드 수에 따라 비결정적일 수 있다. 재현되면 바이트 대신 프레임 해시로 비교하거나 인코더 threads를 고정한다."}
-  - {id: F-PAR-73, title: "MediaPipe 객체·OWLv2 도구 어댑터가 wearer_suppression.stages에 자기 단계가 없어도 착용자 억제를 하고 버전 태그만 빠짐 (RtmPose만 stages를 확인)", severity: low, status: candidate, kind: code,
+  - {id: F-PAR-73, title: "MediaPipe 객체·OWLv2 도구 어댑터가 wearer_suppression.stages에 자기 단계가 없어도 착용자 억제를 하고 버전 태그만 빠짐 (RtmPose만 stages를 확인)", severity: low, status: open, kind: code,
      files: [packages/prelabel/src/dlp_prelabel/adapters/owl_objects.py, packages/prelabel/src/dlp_prelabel/adapters/mediapipe_models.py, packages/prelabel/src/dlp_prelabel/wearer_suppress.py], source: docs/adr/0058-wearer-arm-skeleton-and-wearer-body-suppression.md, see: [F-PAR-67],
-     note: "2026-10-26 고정 클래스 도구 단계(closed_tools, ADR 0060)를 붙이며 발견. 지금 기본값은 세 단계 모두 stages에 있어 영향 없음. stages에서 objects·tools를 빼면 억제는 계속되는데 버전이 바뀌지 않아 억제 정책 변경 뒤 다시 돌지 않는다. suppress_box_tracks 호출 전에 stages를 확인하면 된다."}
+     repro: tests/test_known_defects.py::test_wearer_suppression_respects_stages,
+     note: "2026-10-28 전수 검사에서 재현(open). 2026-10-26 고정 클래스 도구 단계(closed_tools, ADR 0060)를 붙이며 발견. 지금 기본값은 세 단계 모두 stages에 있어 영향 없음. stages에서 objects·tools를 빼면 억제는 계속되는데 버전이 바뀌지 않아 억제 정책 변경 뒤 다시 돌지 않는다. suppress_box_tracks 호출 전에 stages를 확인하면 된다."}
   - {id: F-COE-74, title: "외부에서 학습한 ONNX(ADR 0060 1단계)를 예측을 DB에 쓰지 않고 골든셋으로 평가하는 명령이 없어 운영 콘솔의 골든셋 비교 버튼이 꺼져 있음", severity: medium, status: open, kind: product,
      files: [packages/console/src/dlp_console/app.py, config/console.yaml, packages/cli/src/dlp_cli/eval_cmds.py, packages/training/src/dlp_train/trainers.py], source: docs/adr/0061-operator-console.md, see: [F-PAR-60],
      note: "dlp eval golden은 DB에 있는 예측만 평가하고, dlp train run은 학습기가 후보를 만들어야 골든셋 게이트에 건다. 2026-10-27 작업 중인 yolox 학습기(dlp_train.yolox)는 .pth 출발 가중치(base_model)를 우리 검수 박스로 다듬는 2단계 경로라, Colab에서 받은 ONNX를 그대로 평가하지 않는다. Colab 체크포인트(.pth)를 training_datasets·base_model과 함께 등록하면 compare.trainer: yolox, params: {base_model: <그 이름>}으로 학습 루프 게이트 비교가 된다(콘솔 가져오기는 지금 ONNX만 받는다). 가져온 ONNX 자체의 골든셋 평가(예측 DB 미기록)가 필요하면 평가 전용 명령이 필요하다. 주의: training.yaml objects.deploy가 auto라 게이트 통과가 곧 배포다(비교만 하려면 approve 또는 평가 전용 경로가 필요)."}
@@ -906,3 +907,121 @@ issues:
   - {id: F-AIR-35, title: "AI 판정 표시 보정(review.yaml ai_review.calibration)을 쓴 작업의 노출 기록에 어느 보정(calibration_id)을 썼는지 남지 않는다", severity: low, status: open, kind: code,
      files: [packages/review/src/dlp_review/ai_display.py, packages/review/src/dlp_review/ai_calibration.py], source: docs/adr/0062-real-retraining-loop.md,
      note: "계약 변경을 피해 ai_review_exposures에 필드를 더하지 않았다. 보정은 표시만 바꾸고 shown·hidden은 기록되므로 품질 지표는 맞다. 기간별 산출물은 review.yaml sha256 고정 이력으로 추적한다. 감사가 필요하면 노출 기록에 calibration_id(선택)를 더하는 계약 변경(ADR + Alembic + make schemas)."}
+
+  # ── 전수 검사 2026-10-28 (full-inspection-2026-10-28.md, pstack swarm·interrogate) ──
+  - {id: F-ETA-19, title: "데이터셋 빌드가 지정한 골든셋만 빼고 다른 확정 골든셋 세션을 train에 넣음", severity: high, status: open, kind: code,
+     files: [packages/datasets/src/dlp_datasets/build.py], source: docs/handover/full-inspection-2026-10-28.md}
+  - {id: F-REV-32, title: "CVAT 키포인트 트랙의 outside 키프레임이 모든 점이 보이는 키프레임으로 수집됨", severity: high, status: open, kind: code,
+     files: [packages/review/src/dlp_review/cvat.py], source: docs/handover/full-inspection-2026-10-28.md}
+  - {id: F-COE-77, title: "콘솔 가중치 가져오기가 manifest 모델 이름을 검사하지 않아 저장소 밖 파일 쓰기와 models.yaml 패치 주입", severity: high, status: open, kind: code,
+     files: [packages/console/src/dlp_console/pretrain.py, packages/console/src/dlp_console/imports.py], source: docs/handover/full-inspection-2026-10-28.md}
+  - {id: F-COE-78, title: "preview_session.py --apply-blur가 렌더가 덮는 프레임(먼 키프레임 사이·마지막 뒤)을 덮지 않음", severity: high, status: open, kind: code,
+     files: [scripts/preview_session.py, packages/privacy/src/dlp_privacy/render.py], source: docs/handover/full-inspection-2026-10-28.md}
+  - {id: F-SCH-27, title: "계약이 NaN·Inf 실수를 받아 라벨 배치가 JSONB 오류로 실패하고 dlp sync adjust nan이 DB에 저장됨", severity: medium, status: open, kind: code,
+     files: [packages/schema/src/dlp_schema/labels.py, packages/schema/src/dlp_schema/session.py, packages/cli/src/dlp_cli/sync_cmds.py], source: docs/handover/full-inspection-2026-10-28.md}
+  - {id: F-SCH-28, title: "0005·0009·0011·0012 downgrade가 추가 전용 감사 기록을 확인 없이 지움", severity: medium, status: open, kind: code,
+     files: [packages/schema/src/dlp_schema/db/migrations/versions/0009_ops_records.py, packages/schema/src/dlp_schema/db/migrations/versions/0011_session_lifecycle_events.py, packages/schema/src/dlp_schema/db/migrations/versions/0012_privacy_detection_and_deployment.py], source: docs/handover/full-inspection-2026-10-28.md}
+  - {id: F-SCH-29, title: "migrate_labels가 라벨 사이 참조(source_label_id·derived_from)를 대체된 옛 ID로 둠", severity: medium, status: open, kind: code,
+     files: [packages/schema/src/dlp_schema/migration.py], source: docs/handover/full-inspection-2026-10-28.md}
+  - {id: F-PMS-39, title: "스트림마다 파생 파일 키가 겹칠 수 있고 수집이 내용 확인 없이 남의 파일을 등록함", severity: medium, status: open, kind: code,
+     files: [packages/media/src/dlp_media/ingest.py], source: docs/handover/full-inspection-2026-10-28.md}
+  - {id: F-PMS-40, title: "원본 불변 업로드(put_immutable)에 경합: 동시에 다른 내용 둘이 모두 성공", severity: medium, status: open, kind: code,
+     files: [packages/media/src/dlp_media/storage.py], source: docs/handover/full-inspection-2026-10-28.md}
+  - {id: F-PMS-41, title: "체커보드 캘리브레이션이 표시 회전 태그를 무시해 세션 픽셀과 다른 좌표계 값을 등록", severity: medium, status: open, kind: code,
+     files: [packages/media/src/dlp_media/calibration.py], source: docs/handover/full-inspection-2026-10-28.md}
+  - {id: F-PMS-45, title: "OWLv2 간격 캐시 프레임을 관측으로 취급해 움직이는 문서가 블러·검수 우선 구간에서 빠짐", severity: medium, status: open, kind: code,
+     files: [packages/privacy/src/dlp_privacy/detectors/open_vocab.py, packages/privacy/src/dlp_privacy/tracker.py, packages/privacy/src/dlp_privacy/review.py], source: docs/handover/full-inspection-2026-10-28.md}
+  - {id: F-PAR-74, title: "버전이 바뀌면 entity 번호 재사용으로 마스크 단계가 새 개체 마스크를 빠뜨리거나 중복", severity: medium, status: open, kind: code,
+     files: [packages/prelabel/src/dlp_prelabel/runner.py, packages/prelabel/src/dlp_prelabel/masks.py], source: docs/handover/full-inspection-2026-10-28.md}
+  - {id: F-PAR-77, title: "palm-estimate가 화면비가 다른 캘리브레이션 세션을 화각 근사로 재서 작업자 손 크기를 틀리게 등록", severity: medium, status: open, kind: code,
+     files: [packages/prelabel/src/dlp_prelabel/palm.py, packages/cli/src/dlp_cli/calib_cmds.py], source: docs/handover/full-inspection-2026-10-28.md, see: [F-PAR-44]}
+  - {id: F-PAR-80, title: "dlp actions run이 쓰기 직전에 승인 보류·사용 중지·렌더 변경을 다시 보지 않음", severity: medium, status: fixed, kind: code,
+     files: [packages/actions/src/dlp_actions/runner.py, packages/cli/src/dlp_cli/actions_cmds.py], source: docs/handover/full-inspection-2026-10-28.md, see: [F-PAR-23],
+     note: "쓰기 직전 세션 잠금 아래 write_blocker(렌더 해시 포함), 막히면 쓰지 않고 종료 코드 3. 회귀: packages/actions/tests/test_runner_write_check.py::test_run_writes_nothing_when_held_withdrawn_or_unapproved_while_asking"}
+  - {id: F-PAR-81, title: "버전 교체 재실행 중 검수자가 행동을 고치면 같은 손·시간에 행동 두 개가 현재 라벨로 남음", severity: medium, status: fixed, kind: code,
+     files: [packages/actions/src/dlp_actions/runner.py], source: docs/handover/full-inspection-2026-10-28.md,
+     note: "VLM 호출은 잠금 밖, 쓰기 직전 잠금 아래 이력을 다시 읽어 보호 구간·삭제를 다시 계획한다. 묻는 동안 입력이 바뀌어 버전이 달라졌으면 쓰지 않는다. 회귀: packages/actions/tests/test_runner_write_check.py::test_human_fix_while_rerun_asks_is_protected_without_overlap"}
+  - {id: F-PAR-82, title: "행동·설명 재생성 VLM 주소에 사내 대역 검사가 없음", severity: medium, status: fixed, kind: code,
+     files: [packages/cli/src/dlp_cli/actions_cmds.py, config/policies/actions.yaml], source: docs/handover/full-inspection-2026-10-28.md,
+     note: "actions.yaml vlm.internal_hosts(모델 버전 해시 밖) 밖이면 종료 코드 5. aireview·translate·actions에 같은 목록이 셋 있다. 회귀: packages/cli/tests/test_actions_run_cmd.py::test_run_and_describe_exit_5_for_outside_url"}
+  - {id: F-REV-33, title: "라벨을 바꿔 손을 고치거나 새로 그린 손 골격의 entity_id가 <손>_hand 규약과 어긋나 2D·3D 손이 엇갈림", severity: medium, status: open, kind: code,
+     files: [packages/review/src/dlp_review/cvat.py], source: docs/handover/full-inspection-2026-10-28.md, see: [F-REV-04]}
+  - {id: F-REV-34, title: "관계 라벨이 있으면 dlp review verify가 영영 통과하지 못함 (관계는 검수 경로가 없음)", severity: medium, status: open, kind: code,
+     files: [packages/review/src/dlp_review/verify.py, config/policies/review.yaml], source: docs/handover/full-inspection-2026-10-28.md}
+  - {id: F-ETA-20, title: "replaces 과제 첫 배포가 대신할 기본 어댑터 일부와만 비교해도 통과·배포", severity: medium, status: open, kind: code,
+     files: [packages/training/src/dlp_train/loop.py], source: docs/handover/full-inspection-2026-10-28.md}
+  - {id: F-ETA-21, title: "비교 버전 예측 확인이 골격·접촉 대상을 보지 않아 PCK 0 후보가 배포됨", severity: medium, status: open, kind: code,
+     files: [packages/evaluation/src/dlp_eval/runner.py], source: docs/handover/full-inspection-2026-10-28.md}
+  - {id: F-ETA-22, title: "YOLOX 로더가 학습 당시 manifest 분류만 보고 지금 forbidden인 출발 가중치로 학습한 모델도 로드", severity: medium, status: open, kind: code,
+     files: [packages/training/src/dlp_train/yolox.py], source: docs/handover/full-inspection-2026-10-28.md}
+  - {id: F-COE-79, title: "콘솔을 SIGTERM으로 끄면 자식 dlp는 남는데 재시작한 콘솔이 같은 잠금의 새 작업을 받음", severity: medium, status: open, kind: code,
+     files: [packages/console/src/dlp_console/jobs.py], source: docs/handover/full-inspection-2026-10-28.md}
+  - {id: F-SCH-30, title: "update_assignment가 계약 밖 값(status·assignee·시간대 없는 시각)을 저장해 list_assignments 전체가 실패", severity: low, status: open, kind: code,
+     files: [packages/schema/src/dlp_schema/db/review_repository.py], source: docs/handover/full-inspection-2026-10-28.md, see: [F-SCH-12],
+     repro: tests/test_known_defects.py::test_update_assignment_rejects_unknown_status}
+  - {id: F-SCH-31, title: "record_review가 세션을 잠그지 않아 저장 검증의 보호를 동시 트랜잭션이 뚫음 (지금 호출자는 모두 잠금 아래)", severity: low, status: open, kind: code,
+     files: [packages/schema/src/dlp_schema/db/repository.py], source: docs/handover/full-inspection-2026-10-28.md,
+     note: "두 트랜잭션 경합이라 서비스 없는 재현이 없다. 재현 절차는 보고서(T1 insert_labels 삭제 레코드 커밋 전 T2 record_review 커밋). 호출자 잠금 요구를 계약에 밝히거나 record_review가 세션 행을 잠근다."}
+  - {id: F-SCH-32, title: "Rle 음수 크기·쿼터니언 일부만 있는 3D 표본이 계약을 통과", severity: low, status: open, kind: code,
+     files: [packages/schema/src/dlp_schema/labels.py], source: docs/handover/full-inspection-2026-10-28.md,
+     repro: tests/test_known_defects.py::test_contract_rejects_negative_rle_and_partial_quaternion}
+  - {id: F-PMS-42, title: "편집 목록으로 첫 PTS가 음수인 MP4가 경고 없이 수집되고 그 프레임은 디코드되지 않음 (prepare로도 못 고침)", severity: low, status: open, kind: code,
+     files: [packages/media/src/dlp_media/pts.py], source: docs/handover/full-inspection-2026-10-28.md,
+     note: "재현은 ffmpeg -itsoffset -0.5 ... -avoid_negative_ts disabled로 만든 영상이 필요해 xfail로 두지 않았다. 수집이 거부하거나 prepare가 편집 목록을 정규화해야 한다."}
+  - {id: F-PMS-43, title: "자이로 없는 GPMF 기종은 정지로 시작해도 no_still_start 경고", severity: low, status: open, kind: code,
+     files: [packages/media/src/dlp_media/capture_check.py], source: docs/handover/full-inspection-2026-10-28.md,
+     repro: tests/test_known_defects.py::test_capture_check_no_gyro_does_not_claim_motion}
+  - {id: F-PMS-44, title: "decode_rle가 음수 길이 RLE를 오류 없이 받음", severity: low, status: open, kind: code,
+     files: [packages/media/src/dlp_media/rle.py], source: docs/handover/full-inspection-2026-10-28.md,
+     repro: tests/test_known_defects.py::test_decode_rle_rejects_negative_run}
+  - {id: F-PMS-46, title: "short_flicker 블러 힌트가 hold 때문에 절대 붙지 않음", severity: low, status: open, kind: code,
+     files: [packages/privacy/src/dlp_privacy/hints.py], source: docs/handover/full-inspection-2026-10-28.md,
+     repro: tests/test_known_defects.py::test_short_flicker_hint_for_single_frame_detection}
+  - {id: F-PMS-47, title: "on_hand 블러 힌트가 보이지 않는(visibility 0) 관절 좌표를 씀", severity: low, status: open, kind: code,
+     files: [packages/privacy/src/dlp_privacy/hints.py], source: docs/handover/full-inspection-2026-10-28.md,
+     repro: tests/test_known_defects.py::test_on_hand_hint_ignores_invisible_joints}
+  - {id: F-PAR-75, title: "결과 0개인 예측기·마스크 단계가 매 실행 원본을 받아 다시 돎 (멱등 깨짐)", severity: low, status: open, kind: code,
+     files: [packages/prelabel/src/dlp_prelabel/runner.py], source: docs/handover/full-inspection-2026-10-28.md,
+     repro: tests/test_known_defects.py::test_prelabel_empty_predictor_is_idempotent}
+  - {id: F-PAR-76, title: "OWLv2 버전이 scene 절 전체를 해시해 VLM 시간 제한만 바꿔도 재실행", severity: low, status: open, kind: code,
+     files: [packages/prelabel/src/dlp_prelabel/adapters/owl_objects.py], source: docs/handover/full-inspection-2026-10-28.md,
+     repro: tests/test_known_defects.py::test_owl_version_ignores_scene_timeout}
+  - {id: F-PAR-78, title: "월드 좌표 변환이 표본의 물리 제약 표시(flags)를 버림", severity: low, status: open, kind: code,
+     files: [packages/prelabel/src/dlp_prelabel/worldframe.py], source: docs/handover/full-inspection-2026-10-28.md, see: [F-PAR-63],
+     repro: tests/test_known_defects.py::test_world_samples_keep_constraint_flags}
+  - {id: F-PAR-79, title: "긴 세션 ID에서 3D·월드 라벨 ID가 128자를 넘어 프리라벨 전체가 롤백", severity: low, status: open, kind: code,
+     files: [packages/prelabel/src/dlp_prelabel/lift3d.py, packages/prelabel/src/dlp_prelabel/worldframe.py], source: docs/handover/full-inspection-2026-10-28.md,
+     repro: tests/test_known_defects.py::test_lift3d_label_ids_fit_identifier}
+  - {id: F-REV-35, title: "같은 내용으로 새로 그린 구간 둘이 같은 라벨 ID를 받아 수집이 IntegrityError", severity: low, status: open, kind: code,
+     files: [packages/review/src/dlp_review/reconcile.py], source: docs/handover/full-inspection-2026-10-28.md, see: [F-REV-10],
+     repro: tests/test_known_defects.py::test_new_ls_regions_with_same_content_get_distinct_ids}
+  - {id: F-AIR-36, title: "AI 판정 ok 번호에 JSON true·\"2\"·3.0을 정수로 받아 ok로 기록", severity: low, status: open, kind: code,
+     files: [packages/aireview/src/dlp_aireview/validate.py], source: docs/handover/full-inspection-2026-10-28.md,
+     repro: tests/test_known_defects.py::test_ai_ok_numbers_must_be_json_integers}
+  - {id: F-ETA-23, title: "base_weights 데이터셋 위반 필터(startswith)가 출발 가중치 계보 위반을 놓침", severity: low, status: open, kind: code,
+     files: [packages/training/src/dlp_train/yolox.py], source: docs/handover/full-inspection-2026-10-28.md,
+     repro: tests/test_known_defects.py::test_yolox_base_weights_checks_whole_lineage}
+  - {id: F-ETA-24, title: "--param allow_cpu=False(문자열)·no가 CPU 학습을 허용, fp16=False가 참", severity: low, status: open, kind: code,
+     files: [packages/training/src/dlp_train/yolox.py, packages/cli/src/dlp_cli/train_cmds.py], source: docs/handover/full-inspection-2026-10-28.md,
+     repro: tests/test_known_defects.py::test_yolox_settings_reject_string_booleans}
+  - {id: F-ETA-25, title: "증강 좌우 뒤집기가 3D <손>_arm 개체와 손 마스크 키의 좌우를 바꾸지 않음", severity: low, status: open, kind: code,
+     files: [packages/training/src/dlp_train/augment.py], source: docs/handover/full-inspection-2026-10-28.md,
+     repro: tests/test_known_defects.py::test_augment_hflip_swaps_arm_and_mask_hands}
+  - {id: F-COE-76, title: "리타기팅에서 빠진 에피소드의 세션 가명이 구매자 파일에 있으나 대응표·이력·계보에 없음", severity: low, status: open, kind: code,
+     files: [packages/export/src/dlp_export/runner.py], source: docs/handover/full-inspection-2026-10-28.md,
+     note: "재현은 내보내기 종단(pg 픽스처)이 필요해 xfail로 두지 않았다. services 시험으로 export 패키지에 둔다."}
+  - {id: F-COE-80, title: "업로드 사본 삭제가 세션 ID 끝 공백으로 실행 중 검사를 우회해 수집 중 사본이 지워짐", severity: low, status: open, kind: code,
+     files: [packages/console/src/dlp_console/app.py, packages/console/src/dlp_console/upload.py], source: docs/handover/full-inspection-2026-10-28.md,
+     repro: tests/test_known_defects.py::test_console_delete_upload_blocks_running_session_with_trailing_space}
+  - {id: F-COE-81, title: "콘솔 Host 검사가 ADR 0061과 다름 (원격·IPv6 거부, testserver 허용, 비ASCII 토큰 500)", severity: low, status: open, kind: code,
+     files: [packages/console/src/dlp_console/app.py], source: docs/handover/full-inspection-2026-10-28.md,
+     repro: tests/test_known_defects.py::test_console_host_check}
+  - {id: F-COE-82, title: "CLI가 쓰는 원본 접근 purpose 셋이 ops.yaml service_purposes에 없어 월간 감사에 표시됨", severity: low, status: open, kind: code,
+     files: [config/policies/ops.yaml, packages/cli/src/dlp_cli/hints_cmds.py], source: docs/handover/full-inspection-2026-10-28.md,
+     repro: tests/test_known_defects.py::test_cli_raw_store_purposes_are_service_purposes}
+  - {id: F-COE-83, title: "업로드 폼이 동의서 버전을 64자에서 조용히 자름", severity: low, status: open, kind: code,
+     files: [packages/console/src/dlp_console/upload.py], source: docs/handover/full-inspection-2026-10-28.md,
+     repro: tests/test_known_defects.py::test_console_upload_does_not_truncate_consent_version}
+  - {id: F-COE-84, title: "콘솔 전역 단계 API가 잘못된 JSON 본문·1e400에 500", severity: low, status: open, kind: code,
+     files: [packages/console/src/dlp_console/app.py, packages/console/src/dlp_console/global_steps.py], source: docs/handover/full-inspection-2026-10-28.md,
+     repro: tests/test_known_defects.py::test_console_global_step_bad_json_is_400}
