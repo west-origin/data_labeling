@@ -96,8 +96,10 @@ from dlp_aireview.sensors import SensorContext
 from dlp_cli.aireview_common import (
     CONFIG,
     UNAVAILABLE,
+    add_model_arg,
     add_url_arg,
     flagged_spans,
+    judge_policy,
     no_url,
     parse_groups,
     parse_ints,
@@ -184,7 +186,7 @@ def cmd_probe(args: argparse.Namespace) -> int:
     부작용: VLM 서버에 점검 요청 (사내 주소일 때만), `--out`이면 보고서 JSON 파일.
     """
     root = repo_root()
-    policy = load_policy(root)
+    policy = judge_policy(load_policy(root), args)
     try:
         endpoints = vlm_endpoints(args)
     except ValueError as exc:
@@ -397,7 +399,7 @@ def cmd_bench(args: argparse.Namespace) -> int:
     MP4, 세션 입력이면 라벨링 버킷 블러본 읽기(임시 디렉터리).
     """
     root = repo_root()
-    policy = load_policy(root)
+    policy = judge_policy(load_policy(root), args)
     picked = _pick_endpoint(args)
     if isinstance(picked, int):
         return picked
@@ -735,6 +737,7 @@ def _bench_parser(asub: Any) -> None:
     b.add_argument("--seed", type=int, default=0)
     b.add_argument("--device", help="장비 이름 (기본: 엔드포인트 이름)")
     b.add_argument("--out", help="보고서 JSON (기본 reports/aireview-bench/<장비>-<시각>.json)")
+    add_model_arg(b)
     b.set_defaults(func=cmd_bench)
 
 
@@ -783,6 +786,7 @@ def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
     add_url_arg(p)
     p.add_argument("--ontology-version", default=_SYNTHETIC_ONTOLOGY)
     p.add_argument("--out", help="보고서 JSON 파일")
+    add_model_arg(p)
     p.set_defaults(func=cmd_probe)
     _bench_parser(asub)
     _estimate_parser(asub)

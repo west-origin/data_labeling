@@ -27,7 +27,9 @@ from dlp_schema.aireview import (
     AiSuggestion,
     AiVerdict,
     AiVerdictValue,
+    split_verdict_ids,
     valid_verdicts,
+    valid_verdicts_by_version,
     worst,
 )
 from dlp_schema.db import tables
@@ -40,6 +42,7 @@ from dlp_schema.labels import (
     Verification,
     VerificationState,
 )
+from dlp_schema.review import ReviewReason
 from dlp_schema.testing import (
     FIXED_TIME,
     action_payload,
@@ -247,6 +250,53 @@ def test_valid_verdicts_two_profiles() -> None:
     assert set(strict) == {"l1"}
     assert valid_verdicts(units, current, versions=[], render_hashes=None) == {}
     assert AiProblem.RESPONSE_INVALID.value == "response_invalid"
+
+
+def test_valid_verdicts_by_version_and_panel_split() -> None:
+    """판정단(ADR 0063): 버전별 유효한 판정은 `valid_verdicts`와 같은 조건(렌더·검수 상태)이고
+    버전마다 따로 가장 나쁜 것이다. 갈림 = 버전 둘 이상이 판정했고 ok와 ok 아님이 섞임.
+
+    정답 근거: l1은 A ok / B wrong(갈림), l2는 A suspect / B wrong(둘 다 ok 아님), l3은 A ok / B ok,
+    l4는 A만 ok, l5는 B의 wrong이 낡은 렌더라 표시 프로필에서는 A ok 하나뿐(갈림 아님)이고 증가
+    프로필에서는 갈림이다. l6은 검수된 라벨이라 판정이 유효하지 않다.
+    """
+    other = "aireview-0123456789ab+vlm-vllm-sr/d3-turbo"
+    labels = [_model_label(f"l{i}") for i in range(1, 6)]
+    reviewed = _model_label("l6").model_copy(
+        update={
+            "verification": Verification(
+                state=VerificationState.HUMAN_APPROVED, reviewer_id="r1", reviewed_at=FIXED_TIME
+            )
+        }
+    )
+    a = _unit("air-" + "a" * 24, [_verdict("l1", "ok"), _verdict("l2", "suspect"),
+              _verdict("l3", "ok"), _verdict("l4", "ok"), _verdict("l5", "ok"),
+              _verdict("l6", "ok")])  # fmt: skip
+    b = _unit("air-" + "b" * 24, [_verdict("l1", "wrong"), _verdict("l2", "wrong"),
+              _verdict("l3", "ok"), _verdict("l6", "wrong")], version=other)  # fmt: skip
+    b_stale = _unit("air-" + "c" * 24, [_verdict("l5", "wrong")], version=other, render_hash=H2)
+    units = [a, b, b_stale]
+    current = [*labels, reviewed]
+    both = [VERSION, other]
+    escalate = valid_verdicts_by_version(units, current, versions=both, render_hashes=None)
+    values = {k: {ver: v.verdict.value for ver, (v, _) in d.items()} for k, d in escalate.items()}
+    assert values == {
+        "l1": {VERSION: "ok", other: "wrong"}, "l2": {VERSION: "suspect", other: "wrong"},
+        "l3": {VERSION: "ok", other: "ok"}, "l4": {VERSION: "ok"},
+        "l5": {VERSION: "ok", other: "wrong"},
+    }  # fmt: skip
+    assert split_verdict_ids(escalate) == {"l1", "l5"}
+    shown = valid_verdicts_by_version(units, current, versions=both, render_hashes={"bodycam": H1})
+    assert split_verdict_ids(shown) == {"l1"}
+    # 버전 하나만 허용하면 갈림이 없다. 합친 가장 나쁜 판정은 valid_verdicts와 같다
+    only_a = valid_verdicts_by_version(units, current, versions=[VERSION], render_hashes=None)
+    assert split_verdict_ids(only_a) == set()
+    merged = valid_verdicts(units, current, versions=both, render_hashes=None)
+    rank = {"ok": 0, "unsure": 1, "suspect": 2, "wrong": 3}
+    for label_id, per_version in escalate.items():
+        top = max((v.verdict.value for v, _ in per_version.values()), key=rank.__getitem__)
+        assert merged[label_id][0].verdict.value == top
+    assert ReviewReason.AI_DISAGREEMENT.value == "ai_disagreement"
 
 
 def test_ok_and_unsure_verdicts_never_carry_suggestions() -> None:

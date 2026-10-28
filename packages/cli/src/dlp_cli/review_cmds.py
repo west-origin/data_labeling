@@ -719,7 +719,9 @@ def cmd_queue(args: argparse.Namespace) -> int:
     with engine.connect() as conn:
         queue = list_assignments(conn, status=AssignmentStatus.OPEN)
     engine.dispose()
-    ai_reasons = {r.value for r in REASONS.values()} | {ReviewReason.AI_MISSING.value}
+    ai_reasons = {r.value for r in REASONS.values()} | {
+        ReviewReason.AI_MISSING.value, ReviewReason.AI_DISAGREEMENT.value,
+    }  # fmt: skip
     for a in queue[: args.limit]:
         ai = sum(1 for f in a.flagged if f.reason.value in ai_reasons)
         note = f"  AI 지적 {ai}" if ai else ""

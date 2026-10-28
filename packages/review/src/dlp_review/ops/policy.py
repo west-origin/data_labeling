@@ -283,6 +283,22 @@ class AiCalibrationPolicy(Contract):
     fit: AiCalibrationFit = Field(default_factory=AiCalibrationFit)
 
 
+class AiDisagreementPolicy(Contract):
+    """판정단 불일치 (`ai_review.disagreement`, ADR 0063, `dlp_review.ai_display`).
+
+    허용 판정 버전(`ai_review.versions`, 판정 모델마다 다르다) 중 둘 이상이 같은 라벨을 유효하게
+    판정했고 ok와 ok 아님이 갈리면 그 라벨 구간에 `ai_disagreement` 사유를 단다 (증가 프로필, 렌더
+    무관). 사람 검수를 늘리는 쪽으로만 쓴다: 우선순위(`priority.weights.ai_disagreement`)와 표본
+    제외. AI끼리 ok로 같아도 아무것도 줄지 않는다 (ADR 0040 I9).
+
+    - enabled: 켜기 (기본 끔. 골든 평가로 사람의 오류 발견이 느는지 본 뒤 켠다, ADR 0063 결정 4).
+    - sampling_exclude: 갈린 라벨을 표본 검수 묶음에서 빼고 반드시 검수한다 (마무리 보호도 같다).
+    """
+
+    enabled: bool = False
+    sampling_exclude: bool = True
+
+
 class AiReviewDisplayPolicy(Contract):
     """AI 1차 검수 판정을 검수 운영에 쓰는 방식 (review.yaml `ai_review`, WP17.6, ADR 0040).
 
@@ -328,6 +344,8 @@ class AiReviewDisplayPolicy(Contract):
     # 판정 표시 보정 (ADR 0062): 사람 판정 기록(대조군)으로 학습한 산출물이 의심·틀림 표시만 거른다.
     # 증가 프로필(우선순위·표본 제외·마무리 보호)과 ok는 바꾸지 않는다 (I9)
     calibration: AiCalibrationPolicy = Field(default_factory=AiCalibrationPolicy)
+    # 판정단 불일치 (ADR 0063): 허용 버전끼리 ok와 ok 아님이 갈린 라벨을 먼저 보고 표본에서 뺀다
+    disagreement: AiDisagreementPolicy = Field(default_factory=AiDisagreementPolicy)
 
 
 class ObjectHintsPolicy(Contract):

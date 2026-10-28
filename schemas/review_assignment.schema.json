@@ -124,7 +124,8 @@
         "ai_wrong",
         "ai_suspect",
         "ai_unsure",
-        "ai_missing"
+        "ai_missing",
+        "ai_disagreement"
       ],
       "title": "ReviewReason",
       "type": "string"

@@ -244,7 +244,8 @@ def plan_session(
     - ai: AI 1차 검수 판정 사용 설정 (`ReviewSetup.ai`, WP17.6). 있으면 작업 라벨 계획에서 세션
       잠금 뒤 증가 프로필(렌더 무관)의 유효한 판정으로 우선순위 사유(AI_WRONG·AI_SUSPECT·
       AI_UNSURE, 가중치 `priority.weights`)를 더하고, `ai_review.sampling_exclude` 판정의 라벨을
-      표본 묶음에서 뺀다 (반드시 검수). 블러 계획에는 쓰지 않는다 (I2).
+      표본 묶음에서 뺀다 (반드시 검수). `ai_review.disagreement`를 켜면 판정단이 갈린 라벨에
+      AI_DISAGREEMENT 사유를 더하고 표본에서 뺀다 (ADR 0063). 블러 계획에는 쓰지 않는다 (I2).
 
     반환: 이번에 삽입한 배정 (이미 같은 ID가 있으면 건너뛰므로 다시 부르면 빈 목록).
     예외: privacy이고 권한자가 아닌 후보가 있으면 `AccessError`.
@@ -259,7 +260,7 @@ def plan_session(
     known = known_classes(conn, session_id)
     glove = any(s.kind in (StreamKind.GLOVE_LEFT, StreamKind.GLOVE_RIGHT) for s in session.streams)
     view = load_ai_view(conn, session_id, current, None, ai) if ai and not privacy else None
-    exclude = escalated_ids(view.escalate, ai.policy) if view and ai else set[str]()
+    exclude = escalated_ids(view.escalate, ai.policy, view.disagree) if view and ai else set[str]()
     planned: list[PlannedUnit] = []
     previous = list_assignments(conn, session_id=session_id)
     for unit in units_for(session, policy, privacy=privacy):
@@ -276,7 +277,8 @@ def plan_session(
             generation = gen
         flagged = flag_unit(labels, policy, known_classes=known, glove_session=glove)
         if view is not None and ai is not None:
-            flagged = merge_spans([*flagged, *ai_flagged_spans(view.escalate, labels, ai.policy)])
+            ai_spans = ai_flagged_spans(view.escalate, labels, ai.policy, view.disagree)
+            flagged = merge_spans([*flagged, *ai_spans])
         sample: tuple[str, ...] = ()
         withheld: tuple[str, ...] = ()
         if not privacy:  # 블러는 종료 조건 전까지 전수 검수한다

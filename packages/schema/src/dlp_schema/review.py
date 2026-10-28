@@ -85,6 +85,9 @@ class ReviewReason(StrEnum):
     AI_SUSPECT = "ai_suspect"  # AI 판정: 의심
     AI_UNSURE = "ai_unsure"  # AI 판정: 판단 불가
     AI_MISSING = "ai_missing"  # AI 누락 후보 (v1 기본 끔)
+    # 판정단 불일치: 허용 버전(판정 모델) 둘 이상이 같은 라벨을 ok와 ok 아님으로 갈라 판정했다
+    # (ADR 0063, review.yaml ai_review.disagreement). 사람 검수를 늘리는 쪽으로만 쓴다
+    AI_DISAGREEMENT = "ai_disagreement"
 
 
 class FlaggedSpan(Contract):

@@ -12,7 +12,11 @@
 - 절별 모델: `BackendPolicy`, `KindsPolicy`, `SelectionPolicy`, `PendingPolicy`, `TemporalPolicy`,
   `SpatialPolicy`, `CropPolicy`, `SensorPolicy`, `ImagePolicy`, `ResponsePolicy`, `SuggestPolicy`,
   `EstimatePolicy`, `GatePolicy`, `ServerPolicy`.
-- `load_policy`: 저장소 루트 → `AiReviewPolicy`.
+- `load_policy`: 저장소 루트 → `AiReviewPolicy` (`model`을 주면 판정단에서 고른 정책).
+- 판정단 (ADR 0063): `PanelModel`(`backend.panel` 항목), `panel_models`, `select_model`. 판정단
+  목록은 digest에 들지 않고, 고른 모델의 값이 `backend.model`·`served_name`·`fingerprint`로
+  옮겨져 버전이 모델마다 달라진다. 판정단 모델은 로드 때 `config/models.yaml` 라이선스 검사를
+  받는다.
 
 `Contract`라 알 수 없는 키는 적재 오류다. 결정으로 고정한 값은 검증기로 막는다: 블러 트랙 판정 금지
 (I2), 장갑 센서 출처 판정 제외, 외부 백엔드 금지(`server.allow_external`), 행동·사이 구간·손 상태
@@ -30,6 +34,7 @@ import yaml
 from pydantic import Field, model_validator
 
 from dlp_aireview.perturb import KINDS as PERTURB_KINDS
+from dlp_models.registry import load_registry
 from dlp_schema.aireview import REASON_MAX, AiTargetRule
 from dlp_schema.common import Contract
 from dlp_schema.review import ReviewReason
@@ -46,6 +51,9 @@ SPATIAL_KINDS = ("box_track", "keypoint_track")
 DELETABLE_KINDS = ("event", "box_track", "keypoint_track")
 # digest에서 빼는 절 (요청 본문·결과를 바꾸지 않는 절만)
 _NOT_HASHED = {"selection", "kinds", "pending", "server", "gate", "estimate"}
+# digest에서 빼는 값 (pydantic exclude 형식): 위 절 + 판정단 후보 목록(`backend.panel`). 고른 모델은
+# backend.model·served_name·fingerprint로 옮겨져 digest에 들어간다
+_DIGEST_EXCLUDE: dict[str, Any] = {name: True for name in _NOT_HASHED} | {"backend": {"panel"}}
 # flagged 선택에 쓸 수 없는 사유: AI 판정 자신이 만든 사유 (판정이 다음 판정의 대상을 고르는 순환)
 _AI_REASONS = frozenset(
     {
@@ -53,12 +61,24 @@ _AI_REASONS = frozenset(
         ReviewReason.AI_SUSPECT,
         ReviewReason.AI_UNSURE,
         ReviewReason.AI_MISSING,
+        ReviewReason.AI_DISAGREEMENT,
     }
 )
 
 
+class PanelModel(Contract):
+    """`backend.panel`의 판정단 모델 하나 (ADR 0063). 고르면 `backend`의 같은 이름 필드를 바꾼다."""
+
+    # 정책 모델 (config/models.yaml 이름, 로드 때와 make licenses가 검사)
+    model: str = Field(min_length=1)
+    # 서버에 등록된 이름 (없으면 model)
+    served_name: str | None = None
+    # 엔진·양자화·가중치 revision
+    fingerprint: str = Field(min_length=1)
+
+
 class BackendPolicy(Contract):
-    """`backend`: 판정 모델과 요청 형식 (모두 digest에 들어간다)."""
+    """`backend`: 판정 모델과 요청 형식 (`panel`만 빼고 digest에 들어간다)."""
 
     # 지금 허용하는 유일한 백엔드 (사내 OpenAI 호환 서버). 외부 백엔드는 별도 ADR + 코드 변경.
     kind: Literal["openai_compatible"]
@@ -77,6 +97,19 @@ class BackendPolicy(Contract):
     schema_profile: Literal["portable", "full"]
     # 생성 토큰 상한
     max_tokens: int = Field(ge=64)
+    # 판정단 (ADR 0063): `--model <이름>`으로 고를 수 있는 모델. 비면 `model` 하나뿐이다 (지금과
+    # 같다).
+    # digest에 들어가지 않는다: 후보를 더하거나 빼도 판정 버전이 그대로이고, 고른 모델의 값은
+    # 위 model·served_name·fingerprint로 옮겨져 digest·버전에 들어간다 (`select_model`)
+    panel: tuple[PanelModel, ...] = ()
+
+    @model_validator(mode="after")
+    def _check(self) -> BackendPolicy:
+        """판정단 모델 이름은 겹치지 않는다. Raises: ValueError."""
+        names = [m.model for m in self.panel]
+        if len(set(names)) != len(names):
+            raise ValueError(f"backend.panel에 같은 모델이 두 번 있습니다: {names}")
+        return self
 
 
 class KindsPolicy(Contract):
@@ -346,10 +379,10 @@ class AiReviewPolicy(Contract):
     def digest(self) -> str:
         """판정 버전에 들어가는 해시 (sha256 앞 12자).
 
-        파싱값(`model_dump(mode="json")`)에서 digest 제외 절을 빼고 키 정렬 JSON으로 해시하므로
-        YAML 주석·순서·서식은 영향이 없다.
+        파싱값(`model_dump(mode="json")`)에서 digest 제외 절과 판정단 후보 목록(`backend.panel`)을
+        빼고 키 정렬 JSON으로 해시하므로 YAML 주석·순서·서식은 영향이 없다.
         """
-        data = self.model_dump(mode="json", exclude=_NOT_HASHED)
+        data = self.model_dump(mode="json", exclude=_DIGEST_EXCLUDE)
         content = json.dumps(data, sort_keys=True, ensure_ascii=False)
         return hashlib.sha256(content.encode()).hexdigest()[:12]
 
@@ -381,13 +414,64 @@ class AiReviewPolicy(Contract):
         return self.backend.served_name or self.backend.model
 
 
-def load_policy(root: Path, path: Path | None = None) -> AiReviewPolicy:
+def panel_models(policy: AiReviewPolicy) -> tuple[str, ...]:
+    """고를 수 있는 판정 모델 이름: `backend.model`과 판정단(`backend.panel`) 모델 (순서 유지)."""
+    return tuple(dict.fromkeys((policy.backend.model, *(m.model for m in policy.backend.panel))))
+
+
+def select_model(policy: AiReviewPolicy, name: str) -> AiReviewPolicy:
+    """판정단에서 모델 하나를 고른 정책 (ADR 0063).
+
+    `backend.model`과 같은 이름이면 그대로 돌려준다. 판정단 모델이면 `backend`의 model·served_name·
+    fingerprint를 그 값으로 바꾼 사본이다 (나머지 요청 형식은 같아서 판정 버전
+    `aireview-<digest>+vlm-<model>`이 모델 값만큼 달라진다. 판정단 목록은 digest에 들지 않는다).
+
+    Raises:
+        ValueError: `backend.model`도 판정단 모델도 아닌 이름.
+    """
+    if name == policy.backend.model:
+        return policy
+    picked = next((m for m in policy.backend.panel if m.model == name), None)
+    if picked is None:
+        raise ValueError(
+            f"판정단(aireview.yaml backend.panel)에 없는 모델: {name} "
+            f"(고를 수 있는 모델: {', '.join(panel_models(policy))})"
+        )
+    backend = policy.backend.model_copy(update=picked.model_dump())
+    return policy.model_copy(update={"backend": backend})
+
+
+def _check_panel_licenses(root: Path, policy: AiReviewPolicy) -> None:
+    """판정단 모델이 `config/models.yaml`에 있고 허용 분류(`accept`)인지 (`make licenses`와 같은
+    검사).
+
+    판정단이 비면 레지스트리를 읽지 않는다. Raises: ValueError (위반), OSError (레지스트리 없음).
+    """
+    if not policy.backend.panel:
+        return
+    registry = load_registry(root)
+    used = {f"aireview.backend.panel.{m.model}": m.model for m in policy.backend.panel}
+    problems = registry.violations(used)
+    if problems:
+        raise ValueError("판정단 모델 라이선스 위반: " + "; ".join(problems))
+
+
+def load_policy(
+    root: Path, path: Path | None = None, *, model: str | None = None
+) -> AiReviewPolicy:
     """`<root>/config/policies/aireview.yaml`(또는 `path`)을 읽어 검증한다.
+
+    판정단(`backend.panel`)이 있으면 그 모델들의 라이선스를 `<root>/config/models.yaml`로 검사한다
+    (목록에 없거나 허용 분류가 아니면 로드 오류). `model`을 주면 판정단에서 그 모델을 고른 정책을
+    돌려준다 (`select_model`, `dlp aireview run|bench|probe|eval --model`).
 
     Raises:
         OSError: 파일이 없을 때.
         pydantic.ValidationError: 키가 없거나, 모르는 키가 있거나, 값이 범위·결정을 벗어날 때.
+        ValueError: 판정단 모델 라이선스 위반, 또는 `model`이 고를 수 없는 이름일 때.
     """
     source = path if path is not None else root / "config" / "policies" / "aireview.yaml"
     data: Any = yaml.safe_load(source.read_text("utf-8"))
-    return AiReviewPolicy.model_validate(data)
+    policy = AiReviewPolicy.model_validate(data)
+    _check_panel_licenses(root, policy)
+    return policy if model is None else select_model(policy, model)

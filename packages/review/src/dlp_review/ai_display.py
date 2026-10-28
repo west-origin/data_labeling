@@ -37,6 +37,7 @@
     - CVAT(1단계, 프로젝트 변경 없음): `issue_text`, `issue_frame`, `issue_position`,
       `cvat_ai_issues`.
     - 운영: `ai_flagged_spans`(우선순위 사유), `escalated_ids`(표본 제외·마무리 보호 대상),
+      판정단 불일치(`AiView.disagree`, `ai_review.disagreement`, 사유 AI_DISAGREEMENT, ADR 0063),
       `GateDecision`·`required_gate`(required 모드의 배정 게이트, CLI `dlp review plan`).
 
 시각: 시간 라벨 판정의 근거 시각은 마스터 ms, 공간 라벨은 그 스트림 PTS ms다 (ADR 0019). 화면의
@@ -74,7 +75,9 @@ from dlp_schema.aireview import (
     AiVerdict,
     AiVerdictValue,
     is_judge_target,
+    split_verdict_ids,
     valid_verdicts,
+    valid_verdicts_by_version,
 )
 from dlp_schema.db.aireview_repository import AiRunState, list_ai_units
 from dlp_schema.history import label_class
@@ -172,10 +175,13 @@ class AiView:
     Attributes:
         display: 표시 프로필 (렌더 해시 일치). 렌더 해시를 모르면 빈 사전.
         escalate: 증가 프로필 (렌더 무관).
+        disagree: 판정단이 갈린 라벨 (증가 프로필, ADR 0063). `ai_review.disagreement.enabled`가
+            아니면 비어 있다. 갈린 라벨은 ok 아닌 판정이 있어 `escalate`에도 있다.
     """
 
     display: dict[str, Judged]
     escalate: dict[str, Judged]
+    disagree: frozenset[str] = frozenset()
 
 
 def load_ai_view(
@@ -210,7 +216,14 @@ def load_ai_view(
     escalate = valid_verdicts(
         units, current, versions=cfg.versions, render_hashes=None, strict_context=strict
     )
-    return AiView(display=display, escalate=escalate)
+    disagree: frozenset[str] = frozenset()
+    if cfg.policy.disagreement.enabled:
+        # 판정단 불일치 (ADR 0063): 증가 프로필과 같은 유효성 조건으로 버전마다 따로 본다
+        per_version = valid_verdicts_by_version(
+            units, current, versions=cfg.versions, render_hashes=None, strict_context=strict
+        )
+        disagree = frozenset(split_verdict_ids(per_version))
+    return AiView(display=display, escalate=escalate, disagree=disagree)
 
 
 # ---------------------------------------------------------------- 노출 집단
@@ -637,32 +650,50 @@ def cvat_ai_issues(
 # ---------------------------------------------------------------- 운영 (증가 프로필)
 
 
-def escalated_ids(escalate: Mapping[str, Judged], policy: AiReviewDisplayPolicy) -> set[str]:
+def escalated_ids(
+    escalate: Mapping[str, Judged],
+    policy: AiReviewDisplayPolicy,
+    disagree: Collection[str] = (),
+) -> set[str]:
     """표본 묶음에서 뺄(그리고 마무리에서 표본 검증하지 않을) 라벨: 증가 프로필의 판정 값이
-    `sampling_exclude` 안. AI의 ok는 아무것도 빼지 않는다 (I9)."""
+    `sampling_exclude` 안이거나, 판정단이 갈린 라벨(`disagree`, `disagreement.sampling_exclude`일
+    때, ADR 0063). AI의 ok는 아무것도 빼지 않는다 (I9)."""
     keep = set(policy.sampling_exclude)
-    return {lid for lid, (v, _) in escalate.items() if v.verdict.value in keep}
+    out = {lid for lid, (v, _) in escalate.items() if v.verdict.value in keep}
+    if policy.disagreement.enabled and policy.disagreement.sampling_exclude:
+        out |= set(disagree)
+    return out
+
+
+def _span(
+    x: LabelRecord, verdict: AiVerdict, reason: ReviewReason, policy: AiReviewDisplayPolicy
+) -> FlaggedSpan:
+    """라벨 하나의 AI 사유 구간 (`span_cap_ms`보다 길면 근거 시각 주변 그 길이)."""
+    start, end = flag_range(x, verdict, policy.span_cap_ms, policy.span_cap_ms)
+    return FlaggedSpan(reason=reason, t_start_ms=start, t_end_ms=end, label_ids=(x.label_id,))
 
 
 def ai_flagged_spans(
     escalate: Mapping[str, Judged],
     labels: Iterable[LabelRecord],
     policy: AiReviewDisplayPolicy,
+    disagree: Collection[str] = (),
 ) -> list[FlaggedSpan]:
     """우선순위 사유 구간 (AI_WRONG·AI_SUSPECT·AI_UNSURE): 증가 프로필 판정이 붙은 라벨의 구간,
-    `span_cap_ms`보다 길면 근거 시각 주변 그 길이로 자른다. 가중치는 `priority.weights.ai_*`."""
+    `span_cap_ms`보다 길면 근거 시각 주변 그 길이로 자른다. 가중치는 `priority.weights.ai_*`.
+
+    `disagreement.enabled`면 판정단이 갈린 라벨(`disagree`)에 AI_DISAGREEMENT 구간을 더한다 (같은
+    방식, 근거 시각은 증가 프로필의 가장 나쁜 판정, ADR 0063)."""
+    split = set(disagree) if policy.disagreement.enabled else set[str]()
     spans: list[FlaggedSpan] = []
     for x in labels:
         judged = escalate.get(x.label_id)
-        if judged is None or judged[0].verdict not in REASONS:
+        if judged is None:
             continue
-        start, end = flag_range(x, judged[0], policy.span_cap_ms, policy.span_cap_ms)
-        spans.append(
-            FlaggedSpan(
-                reason=REASONS[judged[0].verdict], t_start_ms=start, t_end_ms=end,
-                label_ids=(x.label_id,),
-            )
-        )  # fmt: skip
+        if judged[0].verdict in REASONS:
+            spans.append(_span(x, judged[0], REASONS[judged[0].verdict], policy))
+        if x.label_id in split:
+            spans.append(_span(x, judged[0], ReviewReason.AI_DISAGREEMENT, policy))
     return spans
 
 

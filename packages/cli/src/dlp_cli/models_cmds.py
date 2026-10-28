@@ -62,6 +62,7 @@ def used_models(root: Path) -> dict[str, str]:
     - `prelabel.scene.vlm_model` — 장면 분류 VLM (사내 서버, ADR 0055).
     - `actions.vlm.model` — 행동 분류 VLM.
     - `aireview.backend.model` — AI 1차 검수 판정 VLM (WP17, ADR 0040).
+    - `aireview.backend.panel.<모델>` — 판정단 모델 (`--model`로 고른다, ADR 0063).
     - `translate.backend.model` — 설명 영어 번역 모델 (사내 서버, ADR 0043).
     - `training.yolox.base_model`·`training.tasks.<과제>.params.base_model` — 재학습 yolox 학습기의
       출발 가중치 (ADR 0062). 학습 모델이 이 분류를 물려받는다.
@@ -94,7 +95,10 @@ def used_models(root: Path) -> dict[str, str]:
             used[f"prelabel.models.{role}"] = model
     used["prelabel.scene.vlm_model"] = prelabel.scene.vlm_model
     used["actions.vlm.model"] = load_actions_policy(root).vlm.model
-    used["aireview.backend.model"] = load_aireview_policy(root).backend.model
+    aireview = load_aireview_policy(root)
+    used["aireview.backend.model"] = aireview.backend.model
+    for member in aireview.backend.panel:  # 판정단 모델 (ADR 0063, --model로 고른다)
+        used[f"aireview.backend.panel.{member.model}"] = member.model
     used["translate.backend.model"] = load_translate_policy(root).backend.model
     training = load_training_policy(root)
     used["training.yolox.base_model"] = training.yolox.base_model

@@ -19,7 +19,8 @@
       `db.aireview_repository`.
     - `AI_REVIEWER_PREFIX`: AI 판정 실행자 접두사. 이 검수자 ID로는 검수 상태를 기록할 수 없다.
     - `PARTIAL_COMPLETION`, `is_full_completion`: 좁힌 실행의 completed 마감 표시와 판별.
-    - 순수 함수: `worst`(한 라벨의 여러 판정 중 가장 나쁜 것), `valid_verdicts`(지금 유효한 판정).
+    - 순수 함수: `worst`(한 라벨의 여러 판정 중 가장 나쁜 것), `valid_verdicts`(지금 유효한 판정),
+      `valid_verdicts_by_version`(버전별 유효한 판정), `split_verdict_ids`(판정단 불일치, ADR 0063).
     - 판정 대상 조건(판정 실행과 검수 화면 판정률이 같이 쓴다): `AiTargetRule`(정책에서 오는 값),
       `is_judge_target`, `glove_derived`(장갑 센서에서 나온 라벨), `raw_access_event`(원본 접근
       이벤트).
@@ -664,6 +665,36 @@ def _is_open_target(label: LabelRecord) -> bool:
     )
 
 
+def _valid_candidates(
+    units: Iterable[AiReviewUnit],
+    current: Sequence[LabelRecord],
+    *,
+    versions: Collection[str],
+    render_hashes: Mapping[str, str] | None,
+    strict_context: bool,
+    ontology_digest: str | None,
+) -> Iterable[tuple[AiVerdict, AiReviewUnit]]:
+    """`valid_verdicts` 조건 1~5를 통과한 (판정, 단위) (라벨마다 여럿일 수 있다)."""
+    by_id = {x.label_id: x for x in current}
+    allowed = set(versions)
+    for unit in units:
+        if unit.version not in allowed:
+            continue
+        if render_hashes is not None and render_hashes.get(unit.stream_id) != unit.render_hash:
+            continue
+        if ontology_digest is not None and unit.ontology_digest != ontology_digest:
+            continue
+        if strict_context and any(
+            i not in by_id for i in (*unit.target_label_ids, *unit.context_label_ids)
+        ):
+            continue
+        for verdict in unit.verdicts:
+            label = by_id.get(verdict.label_id)
+            if label is None or not _is_open_target(label):
+                continue
+            yield verdict, unit
+
+
 def valid_verdicts(
     units: Iterable[AiReviewUnit],
     current: Sequence[LabelRecord],
@@ -696,27 +727,58 @@ def valid_verdicts(
         ontology_digest: 지금 세션 온톨로지의 내용 해시 (`dlp_schema.ontology.ontology_digest`).
             None이면 보지 않는다.
     """
-    by_id = {x.label_id: x for x in current}
-    allowed = set(versions)
     found: dict[str, list[tuple[AiVerdict, AiReviewUnit]]] = {}
-    for unit in units:
-        if unit.version not in allowed:
-            continue
-        if render_hashes is not None and render_hashes.get(unit.stream_id) != unit.render_hash:
-            continue
-        if ontology_digest is not None and unit.ontology_digest != ontology_digest:
-            continue
-        if strict_context and any(
-            i not in by_id for i in (*unit.target_label_ids, *unit.context_label_ids)
-        ):
-            continue
-        for verdict in unit.verdicts:
-            label = by_id.get(verdict.label_id)
-            if label is None or not _is_open_target(label):
-                continue
-            found.setdefault(verdict.label_id, []).append((verdict, unit))
+    for verdict, unit in _valid_candidates(
+        units, current, versions=versions, render_hashes=render_hashes,
+        strict_context=strict_context, ontology_digest=ontology_digest,
+    ):  # fmt: skip
+        found.setdefault(verdict.label_id, []).append((verdict, unit))
     out: dict[str, tuple[AiVerdict, str]] = {}
     for label_id, candidates in found.items():
         verdict, unit = worst(candidates)
         out[label_id] = (verdict, unit.unit_id)
+    return out
+
+
+def valid_verdicts_by_version(
+    units: Iterable[AiReviewUnit],
+    current: Sequence[LabelRecord],
+    *,
+    versions: Collection[str],
+    render_hashes: Mapping[str, str] | None,
+    strict_context: bool = False,
+    ontology_digest: str | None = None,
+) -> dict[str, dict[str, tuple[AiVerdict, str]]]:
+    """버전별 유효한 판정: 라벨 ID → {판정 버전 → (그 버전에서 가장 나쁜 판정, 그 단위 ID)}.
+
+    유효성 조건은 `valid_verdicts`의 1~5와 같고(같은 내부 함수), 6(`worst`)만 버전마다 따로 한다.
+    판정단(ADR 0063)의 모델마다 판정 버전이 달라(`aireview-<digest>+vlm-<model>`), 모델 사이의
+    불일치(`split_verdict_ids`)를 본다. 인자는 `valid_verdicts`와 같다.
+    """
+    found: dict[str, dict[str, list[tuple[AiVerdict, AiReviewUnit]]]] = {}
+    for verdict, unit in _valid_candidates(
+        units, current, versions=versions, render_hashes=render_hashes,
+        strict_context=strict_context, ontology_digest=ontology_digest,
+    ):  # fmt: skip
+        found.setdefault(verdict.label_id, {}).setdefault(unit.version, []).append((verdict, unit))
+    out: dict[str, dict[str, tuple[AiVerdict, str]]] = {}
+    for label_id, per_version in found.items():
+        out[label_id] = {}
+        for version, candidates in per_version.items():
+            verdict, unit = worst(candidates)
+            out[label_id][version] = (verdict, unit.unit_id)
+    return out
+
+
+def split_verdict_ids(by_version: Mapping[str, Mapping[str, tuple[AiVerdict, str]]]) -> set[str]:
+    """판정단이 갈린 라벨: 버전 둘 이상이 판정했고 ok와 ok 아님(suspect·wrong·unsure)이 섞였다.
+
+    ok 아님끼리(예: suspect와 wrong)는 갈린 것이 아니다. 한 버전만 판정한 라벨도 아니다. AI끼리 ok로
+    같아도 아무것도 하지 않는다 (사람 검수를 줄이는 쪽으로 쓰지 않는다, ADR 0063 결정 3).
+    """
+    out: set[str] = set()
+    for label_id, per_version in by_version.items():
+        oks = {v.verdict is AiVerdictValue.OK for v, _ in per_version.values()}
+        if len(per_version) >= 2 and oks == {True, False}:
+            out.add(label_id)
     return out

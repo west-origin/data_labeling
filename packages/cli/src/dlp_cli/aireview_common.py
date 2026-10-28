@@ -4,6 +4,8 @@
   `vlm_api_key`(`DLP_VLM_API_KEY`, 출력·기록하지 않는다), `no_url`(주소 없음 안내, 종료 2).
   `DLP_VLM_URL`(행동 분류 서버)은 쓰지 않는다 (판정 모델이 달라 늘 서버 모델 불일치가 난다).
 - 인자 형식: `parse_ints`(`1,8,16`), `parse_groups`(`temporal,spatial`), `add_url_arg`.
+- 판정단 모델 고르기 (ADR 0063): `add_model_arg`(`--model`), `judge_policy`(고른 판정 정책, 고를 수
+  없는 모델이면 종료 5).
 - `flagged_spans`: flagged 선택 모드의 우선순위 사유 구간 (검수 운영 정책의 `flag_unit`, 검수
   단위마다, `DLP_REVIEW_POLICY_FILE` 반영).
 - 종료 코드 상수: `NO_URL`(2), `UNAVAILABLE`(3), `CONFIG`(5).
@@ -17,6 +19,7 @@ import os
 import sqlalchemy as sa
 
 from dlp_aireview.backend import parse_endpoints
+from dlp_aireview.policy import AiReviewPolicy, select_model
 from dlp_cli.review_config import load_review_policy
 from dlp_review.ops.priority import flag_unit, units_for
 from dlp_review.ops.runner import known_classes
@@ -82,6 +85,30 @@ def add_url_arg(p: argparse.ArgumentParser) -> None:
         "--vlm-url", action="append",
         help="AI 검수 VLM 서버 (여러 번, 이름=URL 가능. 기본: DLP_VLM_URLS)",
     )  # fmt: skip
+
+
+def add_model_arg(p: argparse.ArgumentParser) -> None:
+    """판정단 모델 인자 (`aireview.yaml backend.panel`, ADR 0063)."""
+    p.add_argument(
+        "--model",
+        help="판정 모델 (aireview.yaml backend.model 또는 backend.panel의 model, 기본 model)",
+    )
+
+
+def judge_policy(policy: AiReviewPolicy, args: argparse.Namespace) -> AiReviewPolicy:
+    """판정 정책: `--model`이 있으면 판정단에서 그 모델을 고른 정책 (`select_model`).
+
+    `policy`는 각 명령 모듈의 `load_policy(root)`로 읽은 정책이다 (판정단 라이선스 검사는 로드가
+    한다). 고를 수 없는 모델은 아무것도 하기 전에 `SystemExit(5)`로 알린다.
+    """
+    name = getattr(args, "model", None)
+    if name is None:
+        return policy
+    try:
+        return select_model(policy, name)
+    except ValueError as exc:
+        print(f"[설정 오류] {exc}")
+        raise SystemExit(CONFIG) from exc
 
 
 def flagged_spans(

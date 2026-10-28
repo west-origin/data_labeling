@@ -61,7 +61,14 @@ from dlp_aireview.media import MediaBoundaryError
 from dlp_aireview.perturb import KINDS
 from dlp_aireview.policy import AiReviewPolicy, load_policy
 from dlp_aireview.runner import RunInput, RunOptions, SessionNotReadyError
-from dlp_cli.aireview_common import CONFIG, UNAVAILABLE, add_url_arg, parse_groups
+from dlp_cli.aireview_common import (
+    CONFIG,
+    UNAVAILABLE,
+    add_model_arg,
+    add_url_arg,
+    judge_policy,
+    parse_groups,
+)
 from dlp_cli.aireview_run_cmds import open_pool
 from dlp_cli.schema_cmds import database_url
 from dlp_eval.runner import (
@@ -296,7 +303,7 @@ def cmd_eval(args: argparse.Namespace) -> int:
     """`dlp aireview eval` (모듈 docstring). 부작용: VLM 서버 호출(사내 주소만), 라벨링 버킷 블러본
     읽기(임시 디렉터리), 보고서 JSON 파일. DB에는 쓰지 않는다."""
     root = repo_root()
-    policy = load_policy(root)
+    policy = judge_policy(load_policy(root), args)
     opened = open_pool(args, policy)
     if isinstance(opened, int):
         return opened
@@ -341,4 +348,5 @@ def add_eval_command(asub: Any) -> None:
     e.add_argument("--store", default="s3", help="라벨링 버킷 ('s3' 또는 'local:<디렉터리>')")
     e.add_argument("--url", help="DB URL (기본: DLP_DATABASE_URL)")
     add_url_arg(e)
+    add_model_arg(e)
     e.set_defaults(func=cmd_eval)

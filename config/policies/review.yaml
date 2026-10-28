@@ -73,6 +73,8 @@ priority:
     ai_suspect: 2.5
     ai_missing: 2.0                   # 누락 후보 (v1 기본 끔, 표시·우선순위는 후속 F-AIR-08)
     ai_unsure: 0.5
+    # 판정단 불일치 (ADR 0063, ai_review.disagreement가 켜져 있을 때만 붙는다): 허용 버전끼리 ok와 ok 아님이 갈린 라벨
+    ai_disagreement: 3.0
   # 0 이상. 사유가 있는 단위보다 뒤로 가도록 작은 값을 둔다.
   routine_priority: 0.1               # 사유가 없는 단위의 기본 우선순위
 
@@ -216,6 +218,14 @@ ai_review:
       hide_below_precision: 0.15  # 지적 정밀도 한쪽 95% 상한이 이보다 낮은 칸만 숨긴다
       prior_strength: 10          # 표시 순서 가중(수축 정밀도)의 사전 표본 수
       window_days: 90             # --since가 없을 때 기간
+  # 판정단 불일치 (ADR 0063, dlp_review.ai_display). 허용 버전(versions, 판정 모델마다 버전이 다르다:
+  # aireview.yaml backend.panel, dlp aireview run --model) 중 둘 이상이 같은 라벨을 유효하게(증가 프로필,
+  # 렌더 무관) 판정했고 ok와 ok 아님(suspect·wrong·unsure)이 갈리면 그 라벨 구간에 ai_disagreement 사유를
+  # 단다 (가중치 priority.weights.ai_disagreement). 사람 검수를 늘리는 쪽으로만 쓴다: AI끼리 ok로 같아도
+  # 표본·우선순위는 줄지 않는다 (I9). 골든 평가(dlp aireview eval)로 사람의 오류 발견이 느는지 본 뒤 켠다.
+  disagreement:
+    enabled: false
+    sampling_exclude: true    # 갈린 라벨을 표본 묶음에서 빼고 반드시 검수한다 (마무리 보호도 같다)
 
 # 객체·도구 오탐 의심 힌트 (ADR 0055, dlp_review.object_hints, dlp review hints). 라벨을 바꾸지 않고 라벨링
 # CVAT 작업에 이슈로 표시만 한다 (cvat.hint_issue_limit개까지).

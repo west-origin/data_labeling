@@ -8,13 +8,22 @@ gate·estimate)을 바꿔도 그대로이고, 판정 결과를 바꾸는 절을 
 from __future__ import annotations
 
 import re
+import shutil
+from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 from pydantic import ValidationError
 
 from dlp_actions.policy import load_policy as load_actions_policy
-from dlp_aireview.policy import PROMPT_VERSION, AiReviewPolicy
+from dlp_aireview.policy import (
+    PROMPT_VERSION,
+    AiReviewPolicy,
+    load_policy,
+    panel_models,
+    select_model,
+)
 
 from .conftest import ROOT, with_policy
 
@@ -88,6 +97,8 @@ def test_digest_follows_result_sections(
         ("backend", {"kind": "anthropic"}, "kind"),
         ("selection", {"reasons": ["low_confidense"]}, "reasons"),
         ("selection", {"reasons": ["low_confidence", "ai_wrong"]}, "AI 판정 사유"),
+        ("selection", {"reasons": ["ai_disagreement"]}, "AI 판정 사유"),
+        ("backend", {"panel": [{"model": "m", "fingerprint": "f"}] * 2}, "두 번"),
         ("server", {"max_context_splits": 2}, "max_context_splits"),
         ("gate", {"inject": {"verb_swapp": 0.1}}, "모르는 교란 종류"),
         ("gate", {"inject": {"verb_swap": 1.5}}, "0~1"),
@@ -110,3 +121,79 @@ def test_unknown_key_and_prompt_version_mismatch(policy: AiReviewPolicy) -> None
         AiReviewPolicy.model_validate(data | {"unknown": 1})
     with pytest.raises(ValidationError, match="prompt_version"):
         AiReviewPolicy.model_validate(data | {"prompt_version": PROMPT_VERSION + 1})
+
+
+# ---------------------------------------------------------------- 판정단 (ADR 0063)
+
+D3 = {"model": "vllm-sr/d3-turbo", "served_name": "d3-turbo", "fingerprint": "vllm-bf16-r1"}
+AMOS = {"model": "mukaddamzaid/amos-1-large", "fingerprint": "vllm-bf16"}
+
+
+def test_repo_panel_is_empty_by_default(policy: AiReviewPolicy) -> None:
+    """저장소 정책의 판정단은 비어 있다 (운영 동작 불변): 고를 수 있는 모델은 backend.model 하나."""
+    assert policy.backend.panel == ()
+    assert panel_models(policy) == (policy.backend.model,)
+    assert select_model(policy, policy.backend.model) is policy
+
+
+def test_panel_list_is_not_hashed_and_selecting_changes_version(policy: AiReviewPolicy) -> None:
+    """판정단 목록은 digest에 들지 않는다 (후보를 더해도 지금 버전 그대로). 판정단 모델을 고르면
+    backend.model·served_name·fingerprint만 바뀌고 버전이 `+vlm-<그 모델>`로 달라진다. 요청 형식
+    (프레임·응답 등)은 같다."""
+    paneled = with_policy(policy, backend={"panel": [D3, AMOS]})
+    assert paneled.digest == policy.digest and paneled.verdict_version == policy.verdict_version
+    d3 = select_model(paneled, "vllm-sr/d3-turbo")
+    assert d3.verdict_version.endswith("+vlm-vllm-sr/d3-turbo")
+    assert d3.verdict_version != policy.verdict_version
+    assert d3.served_model == "d3-turbo" and d3.backend.fingerprint == "vllm-bf16-r1"
+    assert d3.backend.model_dump(exclude={"model", "served_name", "fingerprint"}) == (
+        paneled.backend.model_dump(exclude={"model", "served_name", "fingerprint"})
+    )
+    assert d3.model_dump(exclude={"backend"}) == policy.model_dump(exclude={"backend"})
+    amos = select_model(paneled, "mukaddamzaid/amos-1-large")
+    assert amos.served_model == "mukaddamzaid/amos-1-large"
+    assert len({policy.verdict_version, d3.verdict_version, amos.verdict_version}) == 3
+    # 같은 판정단에서 같은 모델을 다시 고르면 같은 버전 (멱등·재개)
+    assert select_model(paneled, "vllm-sr/d3-turbo").verdict_version == d3.verdict_version
+
+
+def test_select_model_outside_panel_is_refused(policy: AiReviewPolicy) -> None:
+    """판정단에 없는 모델은 고를 수 없다 (고를 수 있는 이름을 알린다)."""
+    paneled = with_policy(policy, backend={"panel": [D3]})
+    with pytest.raises(ValueError, match=r"판정단.*없는 모델: other/model"):
+        select_model(paneled, "other/model")
+    with pytest.raises(ValueError, match="vllm-sr/d3-turbo"):
+        select_model(paneled, "mukaddamzaid/amos-1-large")
+
+
+def _tmp_root(tmp_path: Path, panel: list[dict[str, Any]]) -> Path:
+    """판정단을 넣은 aireview.yaml과 저장소 models.yaml을 둔 임시 저장소 루트."""
+    (tmp_path / "config" / "policies").mkdir(parents=True)
+    shutil.copy(ROOT / "config" / "models.yaml", tmp_path / "config" / "models.yaml")
+    data = yaml.safe_load((ROOT / "config/policies/aireview.yaml").read_text("utf-8"))
+    data["backend"]["panel"] = panel
+    text = yaml.safe_dump(data, allow_unicode=True)
+    (tmp_path / "config" / "policies" / "aireview.yaml").write_text(text, "utf-8")
+    return tmp_path
+
+
+def test_load_checks_panel_licenses_and_selects(tmp_path: Path, policy: AiReviewPolicy) -> None:
+    """판정단 모델은 로드 때 models.yaml 라이선스 검사를 받는다: 등록된 review 모델은 통과하고
+    `model`로 고를 수 있다. 목록에 없는 모델·forbidden 모델은 로드 오류다 (make licenses와 같은
+    검사)."""
+    root = _tmp_root(tmp_path / "ok", [D3, AMOS])
+    loaded = load_policy(root)
+    assert loaded.verdict_version == policy.verdict_version
+    assert load_policy(root, model="vllm-sr/d3-turbo").verdict_version.endswith(
+        "+vlm-vllm-sr/d3-turbo"
+    )
+    with pytest.raises(ValueError, match="없는 모델"):
+        load_policy(root, model="nope/model")
+    unknown = _tmp_root(tmp_path / "unknown", [{"model": "nope/model", "fingerprint": "x"}])
+    with pytest.raises(ValueError, match="모델 목록에 없는 nope/model"):
+        load_policy(unknown)
+    forbidden = _tmp_root(
+        tmp_path / "forbidden", [{"model": "Qwen/Qwen2.5-VL-3B-Instruct", "fingerprint": "x"}]
+    )
+    with pytest.raises(ValueError, match="forbidden"):
+        load_policy(forbidden)

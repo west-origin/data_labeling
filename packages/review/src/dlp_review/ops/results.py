@@ -94,9 +94,9 @@ def _ai_protected(
         return set(), []
     current = current_labels(labels)
     view = load_ai_view(conn, a.session_id, current, None, ai)
-    flagged = escalated_ids(view.escalate, ai.policy) & set(to_verify)
+    flagged = escalated_ids(view.escalate, ai.policy, view.disagree) & set(to_verify)
     rows = [x for x in current if x.label_id in flagged]
-    return flagged, ai_flagged_spans(view.escalate, rows, ai.policy)
+    return flagged, ai_flagged_spans(view.escalate, rows, ai.policy, view.disagree)
 
 
 def _ai_excluded(
@@ -108,13 +108,18 @@ def _ai_excluded(
     """계획이 AI 지적으로 표본 묶음에서 뺀 라벨 (배정의 AI 사유 구간에서 되읽는다).
 
     계획(`runner._sample`)은 증가 프로필 판정이 `sampling_exclude`인 라벨을 묶음에서 빼고, 같은
-    판정의 AI 사유 구간(AI_WRONG·AI_SUSPECT·AI_UNSURE)을 배정 flagged에 남긴다. 그중 계획 때 묶음
-    후보였던 라벨(`sampling.lots` 조건: 모델 출처, high_confidence 이상, 계획 때 미검수 = 지금
-    미검수이거나 배정을 만든 뒤 검수됨)만 고른다. ai가 없으면(지금 끔) 모든 AI 사유를 본다 (계획
-    때 켜져 있었을 수 있다, 보수적).
+    판정의 AI 사유 구간(AI_WRONG·AI_SUSPECT·AI_UNSURE, 판정단 불일치 AI_DISAGREEMENT)을 배정
+    flagged에 남긴다. 그중 계획 때 묶음 후보였던 라벨(`sampling.lots` 조건: 모델 출처,
+    high_confidence 이상, 계획 때 미검수 = 지금 미검수이거나 배정을 만든 뒤 검수됨)만 고른다. ai가
+    없으면(지금 끔) 모든 AI 사유를 본다 (계획 때 켜져 있었을 수 있다, 보수적). 판정단 불일치는 지금
+    `disagreement`가 꺼져 있어도 같은 이유로 보고, 켜져 있고 `sampling_exclude`가 거짓일 때만 뺀다.
     """
     keep = set(ai.policy.sampling_exclude) if ai is not None else {v.value for v in REASONS}
     reasons = {r for v, r in REASONS.items() if v.value in keep}
+    # 판정단 불일치로 뺀 라벨 (ADR 0063). 지금 끔이면 계획 때 켜져 있었을 수 있어 본다 (보수적)
+    split = ai.policy.disagreement if ai is not None else None
+    if split is None or not split.enabled or split.sampling_exclude:
+        reasons.add(ReviewReason.AI_DISAGREEMENT)
     by_id = {x.label_id: x for x in labels}
     out: list[str] = []
     for span in a.flagged:

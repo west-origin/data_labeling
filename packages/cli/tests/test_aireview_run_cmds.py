@@ -746,3 +746,69 @@ def test_max_minutes_must_be_positive(world: World, minutes: str) -> None:
     with pytest.raises(SystemExit) as caught:
         main(["aireview", "run", "s1", "--max-minutes", minutes, *world.args])
     assert caught.value.code == 2
+
+
+# ---------------------------------------------------------------- 판정단 --model (ADR 0063)
+
+D3 = "vllm-sr/d3-turbo"
+
+
+def _with_panel(monkeypatch: pytest.MonkeyPatch) -> AiReviewPolicy:
+    """`dlp aireview run|status`가 읽는 정책에 판정단 모델 d3(서버 이름 d3-turbo)을 더한다."""
+    original = load_aireview_policy
+
+    def load(root: Path) -> AiReviewPolicy:
+        data = original(root).model_dump()
+        data["backend"]["panel"] = [
+            {"model": D3, "served_name": "d3-turbo", "fingerprint": "vllm-bf16"}
+        ]
+        return AiReviewPolicy.model_validate(data)
+
+    monkeypatch.setattr(aireview_run_cmds, "load_policy", load)
+    return load(repo_root())
+
+
+def test_model_picks_panel_version_and_keeps_both(
+    world: World, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--model`으로 판정단 모델을 고르면 요청 본문 model이 그 서버 이름이고 단위 버전이
+    `+vlm-<그 모델>`이다. 기본 모델 판정과 따로 쌓여(멱등·재개도 모델마다) 둘 다 남는다. 판정단
+    목록 자체는 기본 버전을 바꾸지 않는다."""
+    world.add("s1")
+    policy = _with_panel(monkeypatch)
+    base = load_aireview_policy(repo_root()).verdict_version
+    assert policy.verdict_version == base
+    with FakeOpenAIServer(MODEL) as server:
+        url = ["--vlm-url", f"spark-01={server.url}"]
+        assert main(["aireview", "run", "s1", *url, *world.args]) == 0
+    with FakeOpenAIServer("d3-turbo") as server:
+        url = ["--vlm-url", f"spark-02={server.url}"]
+        assert main(["aireview", "run", "s1", "--model", D3, *url, *world.args]) == 0
+        assert {c.body["model"] for c in server.chat_calls} == {"d3-turbo"}
+        calls = len(server.chat_calls)
+        assert main(["aireview", "run", "s1", "--model", D3, *url, *world.args]) == 0
+        assert len(server.chat_calls) == calls  # 같은 모델 재실행은 할 일 없음
+    with world.engine.connect() as conn:
+        versions = {u.version for u in list_ai_units(conn, "s1")}
+        runs = list_ai_runs(conn, "s1")
+    d3 = f"+vlm-{D3}"
+    assert len(versions) == 2 and base in versions and any(v.endswith(d3) for v in versions)
+    assert {r.backend.model for r in runs} == {MODEL, D3}
+    capsys.readouterr()
+    assert main(["aireview", "status", "s1", "--model", D3, "--url", world.url]) == 0
+    assert d3 in capsys.readouterr().out
+
+
+def test_model_outside_panel_exits_5_and_writes_nothing(
+    world: World, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """판정단에 없는 모델은 서버를 부르기 전에 종료 5 (고를 수 있는 모델을 알린다)."""
+    world.add("s1")
+    _with_panel(monkeypatch)
+    with FakeOpenAIServer(MODEL) as server, pytest.raises(SystemExit) as exc:
+        main(["aireview", "run", "s1", "--model", "other/model", "--vlm-url", server.url,
+              *world.args])  # fmt: skip
+    assert exc.value.code == 5 and not server.chat_calls
+    out = capsys.readouterr().out
+    assert "판정단(aireview.yaml backend.panel)에 없는 모델: other/model" in out and D3 in out
+    assert world.units("s1") == 0

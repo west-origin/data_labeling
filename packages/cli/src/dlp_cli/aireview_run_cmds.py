@@ -96,8 +96,10 @@ from dlp_aireview.status import SessionStatus, pending_sessions, session_status
 from dlp_cli.aireview_common import (
     CONFIG,
     UNAVAILABLE,
+    add_model_arg,
     add_url_arg,
     flagged_spans,
+    judge_policy,
     no_url,
     parse_groups,
     vlm_api_key,
@@ -517,8 +519,9 @@ def _narrowed(args: argparse.Namespace, base: AiReviewPolicy) -> str | None:
 
 
 def _run_policy(args: argparse.Namespace) -> AiReviewPolicy:
-    """정책 (`--mode`면 선택 모드만 바꾼 사본, 판정 버전은 그대로)."""
-    policy = load_policy(repo_root())
+    """정책 (`--model`이면 판정단에서 고른 모델, `--mode`면 선택 모드만 바꾼 사본. 선택 모드는 판정
+    버전을 바꾸지 않는다)."""
+    policy = judge_policy(load_policy(repo_root()), args)
     if args.mode:
         data = policy.model_dump()
         data["selection"]["mode"] = args.mode
@@ -716,7 +719,7 @@ def _json_default(value: object) -> str:
 def cmd_status(args: argparse.Namespace) -> int:
     """`dlp aireview status` (모듈 docstring). 부작용: 없음 (DB 읽기, 잠금은 보기만)."""
     _check_status_args(args)
-    policy = load_policy(repo_root())
+    policy = judge_policy(load_policy(repo_root()), args)
     privacy = load_privacy_policy(repo_root())
     groups = frozenset(args.groups) if args.groups else None
     engine = sa.create_engine(database_url(args.url))
@@ -925,6 +928,7 @@ def _run_parser(asub: Any) -> None:
     r.add_argument("--debug-dir", help="형식이 맞지 않던 응답 원문을 남길 로컬 디렉터리")
     r.add_argument("--json-progress", action="store_true", help="진행 줄을 JSON Lines로")
     r.add_argument("--url", help="DB URL (기본: DLP_DATABASE_URL)")
+    add_model_arg(r)
     r.set_defaults(func=cmd_run)
 
 
@@ -938,6 +942,7 @@ def add_run_commands(asub: Any) -> None:
     s.add_argument("--groups", type=parse_groups)
     s.add_argument("--json", action="store_true")
     s.add_argument("--url", help="DB URL (기본: DLP_DATABASE_URL)")
+    add_model_arg(s)
     s.set_defaults(func=cmd_status)
     w = asub.add_parser("show", help="판정 단위 감사 기록 (<unit_id> | <세션>:<라벨 ID>)")
     w.add_argument("ref")
