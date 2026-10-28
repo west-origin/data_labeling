@@ -55,6 +55,13 @@ audit:
     # 작업자 손 크기 추정 (ADR 0045): 캘리브레이션된 세션의 바디캠 영상에서 깊이 모델로 손바닥 길이를 잰다
     # (프리라벨 3D 단계와 같은 접근 통제된 서버, 결과는 숫자 하나만 DB에 남는다).
     - calib.palm_estimate
+    # 프라이버시 감사 (WP16): 3인칭 등 바디캠이 아닌 스트림의 길이를 재려고 원본 영상을 읽는다
+    # (`dlp privacy audit-sample` 후보 선정, `dlp ops privacy-audit` 기록). raw_access.py의 파이프라인 기본 경로.
+    - privacy.audit-sample
+    - ops.privacy-audit
+    # 오탐 의심 힌트 (ADR 0055): 블러 힌트 파일을 원본 버킷에 쓰고, --tta면 원본 프레임으로 다시 탐지한다
+    # (결과는 검수 화면 표시만, 라벨·블러는 바꾸지 않는다).
+    - review.hints
   # 원본을 볼 수 있는 사람 = config/policies/review.yaml reviewers.privacy + 아래
   # 원본 버킷 이름·용도 문자열이 아니라 사람 ID(DLP_ACTOR, 검수 담당자 ID)를 적는다. 예: 감사인, 보안 담당
   raw_viewers: []

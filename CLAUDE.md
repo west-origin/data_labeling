@@ -67,7 +67,7 @@
   수집 뒤 세션 → 기기 연결은 `session_camera_assignments`(추가만, `dlp calib assign`, 매니페스트 camera_id가 앞선다).
   작업자 손 크기는 유효한 등록 중 최신 → 정책 순이다. 무효 기록 `worker_hand_size_invalidations`(`dlp calib palm-revoke`,
   동의 철회·삭제 요구)와, 추정 출처 세션(`worker_hand_size_sources`)이 사용 중지된 추정은 결정에서 빠진다 (ADR 0052).
-  `palm-estimate`는 잰 값을 `--override-measured` 없이 덮지 않는다고, 화면비가 다른 캘리브레이션 세션은 이유를 알리고 건너뛴다 (F-PAR-77). 캘리브레이션은 보드 기울기·타당 범위 검사
+  `palm-estimate`는 잰 값을 `--override-measured` 없이 덮지 않고, 화면비가 다른 캘리브레이션 세션은 이유를 알리고 건너뛴다 (F-PAR-77). 캘리브레이션은 보드 기울기·타당 범위 검사
   (`calibration.yaml`)를 통과해야 등록한다. 화면비가 다른 캘리브레이션은 쓰지 않고 화각 근사로 떨어진다.
   `dlp calib intrinsics|import|assign|show|palm|palm-estimate|palm-revoke`. 정책은 `config/policies/calibration.yaml`.
   촬영 점검 경고 `dlp_media.capture_check`(prepare·ingest, 기준 `media.yaml capture`, 가이드 `docs/handover/capture-guide.md`),
@@ -185,7 +185,8 @@
   JSON Lines 추가만) DB는 읽기만 한다. 응답·로그에 원본 위치를 싣지 않고, 미리보기는 승인·렌더된 블러본의 라벨러 서명
   URL만 쓴다. Git이 관리하는 설정 파일은 고치지 않고 패치 미리보기만 낸다(외부 학습 가중치 가져오기: 구조 이름은 식별자 모양만, 가중치 경로는 models_dir 안인지
   confirm에서 다시 본다). 자식 `dlp`는 새 프로세스 그룹으로 돌고(pid·pgid 기록) 콘솔 종료 때 멈추며, 재시작 때 살아 있는
-  그룹은 잠금을 유지한다 (`console.yaml jobs`). 설정
+  그룹은 잠금을 유지한다 (`console.yaml jobs`). Host는 묶은 주소·localhost만 받고(모든 주소에 묶으면 IP 리터럴만 더,
+  시험은 `create_app(extra_hosts=…)`), 단계 API 본문 오류는 400이다 (F-COE-81·84). 설정
   `config/console.yaml`. 도메인 로직을 두지 않는다 (단계 조건·권한 검사는 `dlp` 명령이 하고, 콘솔 활성 규칙은 안내용).
 - `packages/active/` (`dlp_active`) — 액티브 러닝: 클래스별 수정률 기반 세션 점수(점수 항목 플러그인 `register_term`),
   FiftyOne 연동(블러본만). `dlp active rank|fiftyone`. 정책은 `config/policies/active.yaml`.

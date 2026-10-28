@@ -9,10 +9,12 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
+import math
 import os
 import secrets
-from collections.abc import AsyncGenerator, Awaitable, Callable, Generator
+from collections.abc import AsyncGenerator, Awaitable, Callable, Generator, Iterable
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import Annotated, Any, cast
@@ -52,6 +54,9 @@ from dlp_schema.db.repository import list_golden_sets
 
 STATIC = Path(__file__).parent / "static"
 TOKEN_HEADER = "x-console-token"
+# Host 머리글로 늘 받는 이름 (이 컴퓨터) / 모든 주소에 묶는 값 (--allow-remote)
+LOCAL_NAMES = frozenset({"127.0.0.1", "localhost", "::1"})
+WILDCARD_BINDS = frozenset({"0.0.0.0", "::"})
 # DLP_DATABASE_URL이 없을 때 (`dlp` CLI 기본값과 같은 개발 DB, .env.example)
 DEV_DATABASE_URL = "postgresql+psycopg://dlp:dlp-dev-password@localhost:5432/dlp"
 
@@ -190,15 +195,58 @@ def _theme(root: Path) -> dict[str, Any]:
     }
 
 
-def _host_ok(request: Request, allowed: set[str]) -> bool:
-    host = (request.headers.get("host") or "").split(":")[0].strip("[]")
-    return host in allowed
+def host_name(header: str) -> str:
+    """Host 머리글 → 이름 (포트를 떼고 소문자, IPv6 `[::1]:8090` → `::1`, IP는 표준형)."""
+    text = header.strip().lower()
+    if text.startswith("["):
+        name = text[1 : text.find("]")] if "]" in text else ""
+    elif text.count(":") == 1:
+        name = text.split(":", 1)[0]
+    else:
+        name = text
+    try:
+        return str(ipaddress.ip_address(name))
+    except ValueError:
+        return name
+
+
+def _is_ip(name: str) -> bool:
+    try:
+        ipaddress.ip_address(name)
+    except ValueError:
+        return False
+    return True
+
+
+def host_allowed(header: str, bind_host: str, extra: frozenset[str] = frozenset()) -> bool:
+    """Host 머리글 검사 (ADR 0061 4절: 묶은 주소·localhost만, DNS 재바인딩 방지).
+
+    - localhost·127.0.0.1·::1과 묶은 주소(IP는 표준형으로 비교)를 받는다.
+    - 모든 주소(0.0.0.0·::)에 묶었으면(`--allow-remote`) 묶은 주소는 이 컴퓨터의 어느 주소든이라
+      IP 리터럴 Host를 모두 받는다. 도메인 이름 Host는 받지 않는다 (재바인딩 공격은 공격자 도메인
+      이름으로 온다. IP 리터럴 Host는 그 IP를 주소창에 연 같은 출처뿐이다).
+    - `extra`: 앱을 만들 때 준 이름 (시험 도구의 `testserver` 등, 운영 서버는 비움).
+    """
+    name = host_name(header)
+    if not name:
+        return False
+    bound = host_name(bind_host)
+    if name in LOCAL_NAMES or name == bound or name in extra:
+        return True
+    return bound in WILDCARD_BINDS and _is_ip(name)
 
 
 def create_app(
-    settings: ConsoleSettings, services: Services | None = None, bind_host: str = "127.0.0.1"
+    settings: ConsoleSettings,
+    services: Services | None = None,
+    bind_host: str = "127.0.0.1",
+    extra_hosts: Iterable[str] = (),
 ) -> FastAPI:
-    """콘솔 앱을 만든다. services를 주지 않으면 실제 DB·S3를 쓴다."""
+    """콘솔 앱을 만든다. services를 주지 않으면 실제 DB·S3를 쓴다.
+
+    extra_hosts: Host 검사에서 더 받을 이름. 시험 도구(TestClient `testserver`)만 쓴다. 운영
+    서버(`server.serve`)는 주지 않는다 (F-COE-81).
+    """
     svc = services or Services(settings)
 
     @asynccontextmanager
@@ -211,17 +259,18 @@ def create_app(
         title="dlp 운영 콘솔", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan
     )
     app.state.services = svc
-    allowed = {"127.0.0.1", "localhost", "::1", "testserver", bind_host}
+    extra = frozenset(host_name(h) for h in extra_hosts)
 
     @app.middleware("http")
     async def guard(
         request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
-        if not _host_ok(request, allowed):
+        if not host_allowed(request.headers.get("host") or "", bind_host, extra):
             return JSONResponse({"detail": "허용하지 않은 Host"}, status_code=400)
         if request.url.path.startswith("/api/"):
-            token = request.headers.get(TOKEN_HEADER, "")
-            if not secrets.compare_digest(token, settings.token):
+            # 바이트로 비교한다: str의 compare_digest는 비ASCII 문자에 TypeError(500)를 낸다
+            token = request.headers.get(TOKEN_HEADER, "").encode("utf-8")
+            if not secrets.compare_digest(token, settings.token.encode("utf-8")):
                 return JSONResponse({"detail": "콘솔 토큰이 없거나 틀립니다"}, status_code=401)
         response = await call_next(request)
         response.headers["Cache-Control"] = "no-store"
@@ -284,7 +333,7 @@ def _session_routes(app: FastAPI, svc: Services) -> None:
 
     @app.post("/api/sessions/{session_id}/steps/{step_id}")
     async def run_step(session_id: str, step_id: str, request: Request) -> dict[str, Any]:
-        params: dict[str, Any] = await request.json() if await request.body() else {}
+        params = await _json_params(request)
         with svc.connect() as conn:
             state = _state(svc, conn, session_id)
         if step_id == "prelabel" and not params.get("scene"):
@@ -343,9 +392,11 @@ def _session_routes(app: FastAPI, svc: Services) -> None:
 
     @app.delete("/api/uploads/{session_id}")
     def delete_upload(session_id: str) -> dict[str, Any]:
-        if svc.runner.running(f"session:{session_id}") is not None:
+        # 실행 중 검사와 삭제가 같은 정규화 값을 쓴다 (올리기도 strip한 ID로 잠근다, F-COE-80)
+        sid = _ident(session_id, "세션 ID")
+        if svc.runner.running(f"session:{sid}") is not None:
             raise HTTPException(409, "작업이 끝난 뒤 지우세요")
-        return {"removed": remove_upload(svc.settings.work_dir, session_id)}
+        return {"removed": remove_upload(svc.settings.work_dir, sid)}
 
 
 def _job_routes(app: FastAPI, svc: Services) -> None:
@@ -369,7 +420,7 @@ def _global_routes(app: FastAPI, svc: Services) -> None:
 
     @app.post("/api/global/{step_id}")
     async def run_global(step_id: str, request: Request) -> dict[str, Any]:
-        params: dict[str, Any] = await request.json() if await request.body() else {}
+        params = await _json_params(request)
         try:
             step, commands = build_global(gctx(), step_id, params)
         except ValueError as exc:
@@ -432,7 +483,7 @@ def _pretrain_routes(app: FastAPI, svc: Services) -> None:
 
     @app.post("/api/pretrain/{import_id}/compare")
     async def run_compare(import_id: str, request: Request) -> dict[str, Any]:
-        params: dict[str, Any] = await request.json() if await request.body() else {}
+        params = await _json_params(request)
         if not compare.trainer:
             raise ParamError(
                 "골든셋 비교 학습기가 아직 없습니다 "
@@ -457,6 +508,34 @@ def _pretrain_routes(app: FastAPI, svc: Services) -> None:
         return _submit(
             svc, "가져온 가중치 골든셋 비교", "pretrain_compare", [cmd], lock="global:train"
         )
+
+
+def _finite_float(text: str) -> float:
+    value = float(text)
+    if not math.isfinite(value):
+        raise ParamError(f"숫자가 범위를 벗어났습니다: {text}")
+    return value
+
+
+def _reject_constant(text: str) -> Any:
+    raise ParamError(f"숫자가 아닙니다: {text}")
+
+
+async def _json_params(request: Request) -> dict[str, Any]:
+    """요청 본문 JSON 객체 → 단계 값 (비면 {}). 잘못된 JSON·객체가 아님·NaN·무한대(1e400)는
+    ParamError(400)다 (F-COE-84)."""
+    body = await request.body()
+    if not body:
+        return {}
+    try:
+        data: Any = json.loads(body, parse_float=_finite_float, parse_constant=_reject_constant)
+    except ParamError:
+        raise
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise ParamError("요청 본문이 올바른 JSON이 아닙니다") from exc
+    if not isinstance(data, dict):
+        raise ParamError("요청 본문은 JSON 객체여야 합니다")
+    return cast(dict[str, Any], data)
 
 
 def _ident(value: Any, name: str) -> str:

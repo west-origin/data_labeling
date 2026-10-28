@@ -932,11 +932,6 @@ def _console(tmp_path: Path, bind: str = "127.0.0.1") -> tuple[Any, Any, str]:
     return TestClient(app, raise_server_exceptions=False), services, settings.token
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="F-COE-80: 업로드 사본 삭제 API가 세션 ID 끝 공백으로 실행 중 검사를 우회",
-)
 def test_console_delete_upload_blocks_running_session_with_trailing_space(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -958,11 +953,6 @@ def test_console_delete_upload_blocks_running_session_with_trailing_space(
     assert (services.settings.work_dir / "uploads" / "s1").is_dir()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="F-COE-81: 콘솔 Host 검사가 원격·[::1]·testserver·비ASCII 토큰을 잘못 다룸",
-)
 def test_console_host_check(tmp_path: Path) -> None:
     """콘솔 Host 검사(ADR 0061 4절: 묶은 주소·localhost만)의 네 경우.
 
@@ -986,11 +976,6 @@ def test_console_host_check(tmp_path: Path) -> None:
     assert got == {"remote": 200, "ipv6": 200, "testserver": 400, "token": 401}
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="F-COE-82: CLI raw_store purpose 셋이 ops.yaml service_purposes에 없음",
-)
 def test_cli_raw_store_purposes_are_service_purposes() -> None:
     """`dlp` 명령이 원본 감사 저장소를 여는 목적(purpose)은 모두 ops.yaml
     `audit.service_purposes`에 있어야 한다. 없으면 서비스 계정의 정상 파이프라인 읽기
@@ -1009,11 +994,6 @@ def test_cli_raw_store_purposes_are_service_purposes() -> None:
     assert sorted(used - set(load_ops_policy(ROOT).audit.service_purposes)) == []
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="F-COE-83: 업로드 폼 동의서 버전을 64자에서 조용히 자름",
-)
 def test_console_upload_does_not_truncate_consent_version() -> None:
     """확인한 동의서 버전은 동의의 근거라 다른 값으로 바꿔 적으면 안 된다. 너무 길면 거부하고
     (ParamError), 받으면 그대로 적어야 한다.
@@ -1033,11 +1013,6 @@ def test_console_upload_does_not_truncate_consent_version() -> None:
     assert manifest.consent_version == long_version
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="F-COE-84: 콘솔 전역 단계 API가 잘못된 JSON·1e400에 500",
-)
 def test_console_global_step_bad_json_is_400(tmp_path: Path) -> None:
     """`POST /api/global/<단계>`의 본문이 JSON이 아니거나 숫자가 범위 밖(1e400 → inf)이면
     입력 오류(400)다. 서버 오류(500)가 아니다.

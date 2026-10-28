@@ -21,14 +21,16 @@ from pathlib import Path
 from typing import Any, BinaryIO
 
 import yaml
+from pydantic import TypeAdapter, ValidationError
 
 from dlp_console.steps import IDENT, ParamError
 from dlp_media.ingest import ManifestStream, SessionManifest
-from dlp_schema.session import Calibration, Domain, StreamKind
+from dlp_schema.session import Calibration, ConsentVersion, Domain, StreamKind
 
 # 표시 방향을 사람이 고칠 때의 각도 (dlp media prepare --display-rotation, 90의 배수)
 ROTATIONS = (0, 90, 180, 270)
 CHUNK = 1024 * 1024
+CONSENT_VERSION: TypeAdapter[str] = TypeAdapter(ConsentVersion)
 
 
 @dataclass(frozen=True)
@@ -78,8 +80,17 @@ def _rotation(value: str) -> int | None:
 
 def build_manifest(form: UploadForm, prepared_name: str) -> SessionManifest:
     """폼 → 매니페스트 (수집 모델로 검증). 예외: ParamError."""
-    if not form.consent_version.strip():
+    consent = form.consent_version.strip()
+    if not consent:
         raise ParamError("확인한 동의서 버전을 적어야 합니다 (영상만으로 동의를 추정하지 않습니다)")
+    # 동의의 근거라 자르거나 바꾸지 않는다.
+    # 계약 길이(ConsentVersion, DB VARCHAR(64))를 넘으면 거부한다 (F-COE-83).
+    try:
+        CONSENT_VERSION.validate_python(consent)
+    except ValidationError as exc:
+        raise ParamError(
+            "동의서 버전이 너무 깁니다 (64자 이하, 확인한 값을 그대로 적으세요)"
+        ) from exc
     try:
         domain = Domain(form.domain.strip())
     except ValueError as exc:
@@ -98,7 +109,7 @@ def build_manifest(form: UploadForm, prepared_name: str) -> SessionManifest:
         domain=domain,
         worker_id=_ident(form.worker_id, "작업자 ID"),
         site_id=_ident(form.site_id, "장소 ID"),
-        consent_version=form.consent_version.strip()[:64],
+        consent_version=consent,
         recorded_at=recorded,
         calibration=Calibration(camera_id=_ident(camera, "카메라 ID") if camera else None),
         ontology_version="1.0.0",

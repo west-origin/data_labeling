@@ -122,7 +122,7 @@ class Api:
 
 @pytest.fixture
 def client(settings: ConsoleSettings, services: FakeServices) -> Iterator[Api]:
-    app = create_app(settings, services)
+    app = create_app(settings, services, extra_hosts=("testserver",))
     test_client: Any = TestClient(app)
     with test_client as c:
         yield Api(c, settings.token)

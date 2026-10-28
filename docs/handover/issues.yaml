@@ -1029,18 +1029,18 @@ issues:
   - {id: F-COE-76, title: "리타기팅에서 빠진 에피소드의 세션 가명이 구매자 파일에 있으나 대응표·이력·계보에 없음", severity: low, status: open, kind: code,
      files: [packages/export/src/dlp_export/runner.py], source: docs/handover/full-inspection-2026-10-28.md,
      note: "재현은 내보내기 종단(pg 픽스처)이 필요해 xfail로 두지 않았다. services 시험으로 export 패키지에 둔다."}
-  - {id: F-COE-80, title: "업로드 사본 삭제가 세션 ID 끝 공백으로 실행 중 검사를 우회해 수집 중 사본이 지워짐", severity: low, status: open, kind: code,
+  - {id: F-COE-80, title: "업로드 사본 삭제가 세션 ID 끝 공백으로 실행 중 검사를 우회해 수집 중 사본이 지워짐", severity: low, status: fixed, kind: code,
      files: [packages/console/src/dlp_console/app.py, packages/console/src/dlp_console/upload.py], source: docs/handover/full-inspection-2026-10-28.md,
-     repro: tests/test_known_defects.py::test_console_delete_upload_blocks_running_session_with_trailing_space}
-  - {id: F-COE-81, title: "콘솔 Host 검사가 ADR 0061과 다름 (원격·IPv6 거부, testserver 허용, 비ASCII 토큰 500)", severity: low, status: open, kind: code,
+     note: "검사와 삭제가 같은 정규화 ID(_ident)를 쓴다. 회귀: tests/test_known_defects.py::test_console_delete_upload_blocks_running_session_with_trailing_space(xfail 표시 지움)"}
+  - {id: F-COE-81, title: "콘솔 Host 검사가 ADR 0061과 다름 (원격·IPv6 거부, testserver 허용, 비ASCII 토큰 500)", severity: low, status: fixed, kind: code,
      files: [packages/console/src/dlp_console/app.py], source: docs/handover/full-inspection-2026-10-28.md,
-     repro: tests/test_known_defects.py::test_console_host_check}
-  - {id: F-COE-82, title: "CLI가 쓰는 원본 접근 purpose 셋이 ops.yaml service_purposes에 없어 월간 감사에 표시됨", severity: low, status: open, kind: code,
+     note: "host_name이 포트를 떼고 IP를 표준형으로, 묶은 주소·localhost만(0.0.0.0·::이면 IP 리터럴만 더), testserver는 시험 앱 extra_hosts로만, 토큰은 utf-8 바이트 비교. ADR 0061 개정. 회귀: tests/test_known_defects.py::test_console_host_check(xfail 표시 지움)"}
+  - {id: F-COE-82, title: "CLI가 쓰는 원본 접근 purpose 셋이 ops.yaml service_purposes에 없어 월간 감사에 표시됨", severity: low, status: fixed, kind: code,
      files: [config/policies/ops.yaml, packages/cli/src/dlp_cli/hints_cmds.py], source: docs/handover/full-inspection-2026-10-28.md,
-     repro: tests/test_known_defects.py::test_cli_raw_store_purposes_are_service_purposes}
-  - {id: F-COE-83, title: "업로드 폼이 동의서 버전을 64자에서 조용히 자름", severity: low, status: open, kind: code,
+     note: "ops.yaml audit.service_purposes에 ops.privacy-audit·privacy.audit-sample·review.hints. 회귀: tests/test_known_defects.py::test_cli_raw_store_purposes_are_service_purposes(xfail 표시 지움)"}
+  - {id: F-COE-83, title: "업로드 폼이 동의서 버전을 64자에서 조용히 자름", severity: low, status: fixed, kind: code,
      files: [packages/console/src/dlp_console/upload.py], source: docs/handover/full-inspection-2026-10-28.md,
-     repro: tests/test_known_defects.py::test_console_upload_does_not_truncate_consent_version}
-  - {id: F-COE-84, title: "콘솔 전역 단계 API가 잘못된 JSON 본문·1e400에 500", severity: low, status: open, kind: code,
+     note: "계약 ConsentVersion으로 검증하고 길면 ParamError(400). 회귀: tests/test_known_defects.py::test_console_upload_does_not_truncate_consent_version(xfail 표시 지움)"}
+  - {id: F-COE-84, title: "콘솔 전역 단계 API가 잘못된 JSON 본문·1e400에 500", severity: low, status: fixed, kind: code,
      files: [packages/console/src/dlp_console/app.py, packages/console/src/dlp_console/global_steps.py], source: docs/handover/full-inspection-2026-10-28.md,
-     repro: tests/test_known_defects.py::test_console_global_step_bad_json_is_400}
+     note: "_json_params가 잘못된 JSON·객체 아닌 본문·NaN·무한대를 ParamError(400)로, ops_weekly int 변환 실패도. 회귀: tests/test_known_defects.py::test_console_global_step_bad_json_is_400(xfail 표시 지움)"}

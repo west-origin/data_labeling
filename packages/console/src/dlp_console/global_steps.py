@@ -99,7 +99,10 @@ def cmd_review_quality(_ctx: GlobalContext, _p: Params) -> list[list[str]]:
 
 
 def cmd_ops_weekly(ctx: GlobalContext, p: Params) -> list[list[str]]:
-    weeks = int(p.get("weeks") or 8)
+    try:
+        weeks = int(p.get("weeks") or 8)
+    except (TypeError, ValueError, OverflowError) as exc:  # 문자열·무한대 등
+        raise ParamError("주 수는 1~52입니다") from exc
     if not 1 <= weeks <= 52:
         raise ParamError("주 수는 1~52입니다")
     out = ctx.reports_dir / f"weekly-{_stamp()}.md"
