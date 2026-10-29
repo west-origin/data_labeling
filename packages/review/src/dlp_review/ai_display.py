@@ -23,15 +23,21 @@
       확신도 미만, 표시 보정이 숨긴 칸(`AiDisplayConfig.calibration`, ADR 0062), 10분당 상한·CVAT
       이슈 상한을 넘은 판정은 따로 표시하지 않는다 (hidden). 보정은 증가 프로필을 바꾸지 않는다.
     - 화면 요약은 holdout·no_verdicts·mode_excluded 모두 "AI 1차 검수: 없음"으로 같다.
+    - 판정단 불일치 표시 (`ai_review.disagreement.enabled`, ADR 0063): 보인 판정(shown) 중 표시
+      프로필에서 허용 버전끼리 ok와 ok 아님이 갈린 라벨의 메모(Label Studio)·이슈(CVAT)에
+      `AI 판정단 의견이 갈림: <모델> 맞음 / <모델> 의심`을 덧붙이고 요약에 그 수를 센다. 새
+      결과·이슈를 만들지 않으므로 노출 기록·CVAT 이슈 상한·대조군 규칙이 그대로다 (shown이 아닌
+      집단에는 안 보인다). 모델 이름은 판정 버전의 `+vlm-<모델>`이다 (`judge_model`).
     - 판정률(coverage) = 작업 라벨 중 판정 대상(`dlp_schema.aireview.is_judge_target`, 판정 실행과
       같은 조건·같은 정책 값 `AiDisplayConfig.targets`)에서 유효한 표시 판정이 있는 비율. 장갑 센서
       출처 라벨·너무 긴 상위 구간·원본 접근 이벤트처럼 판정하지 않는 라벨은 분모에 들지 않는다.
 
 공개 이름
-    - `AiDisplayConfig`, `AiView`, `load_ai_view`.
+    - `AiDisplayConfig`, `AiView`, `load_ai_view`, `Opinions`·`split_opinions`(판정단 불일치 의견).
     - `root_assignment_id`, `arm_key`, `is_holdout`, `exposure_for`.
-    - 글·범위: `summary_text`, `suggestion_text`, `note_text`, `master_clock`, `flag_range`,
-      `flag_region_id`. 상수 `VERDICT_KO`, `PROBLEM_KO`, `FIELD_KO`, `REASONS`(판정 → 사유).
+    - 글·범위: `summary_text`, `suggestion_text`, `note_text`, `split_text`, `judge_model`,
+      `master_clock`, `flag_range`, `flag_region_id`. 상수 `VERDICT_KO`, `PROBLEM_KO`,
+      `FIELD_KO`, `REASONS`(판정 → 사유).
     - Label Studio: `ls_ai_results`(예측), `ls_label_decisions`(검수자 결정 → 라벨 ID별, AI 구간에
       붙은 결정을 원 라벨로 되돌린다).
     - CVAT(1단계, 프로젝트 변경 없음): `issue_text`, `issue_frame`, `issue_position`,
@@ -49,7 +55,7 @@ from __future__ import annotations
 import bisect
 import hashlib
 from collections.abc import Collection, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -92,6 +98,10 @@ from dlp_schema.review import FlaggedSpan, ReviewAssignment, ReviewMode, ReviewR
 
 # 라벨 하나의 유효한 판정: (가장 나쁜 판정, 그 단위 ID)
 Judged = tuple[AiVerdict, str]
+# 판정단이 갈린 라벨의 모델별 의견: ((모델 표시 이름, 그 버전의 가장 나쁜 판정 값), ...)
+Opinions = tuple[tuple[str, AiVerdictValue], ...]
+# 판정 버전에서 모델 이름 앞의 구분자 (`aireview-<digest>+vlm-<model>`)
+_VLM_SEP = "+vlm-"
 # 재검수 배정 접미사 (`ops.results.finish_assignment`가 붙인다). 대조군은 접미사를 뗀 루트로 정한다
 RESAMPLE_SUFFIXES = (":resample", ":ai-flagged")
 # 따로 표시하는 판정 값 (ok는 요약 개수로만 보인다)
@@ -177,11 +187,15 @@ class AiView:
         escalate: 증가 프로필 (렌더 무관).
         disagree: 판정단이 갈린 라벨 (증가 프로필, ADR 0063). `ai_review.disagreement.enabled`가
             아니면 비어 있다. 갈린 라벨은 ok 아닌 판정이 있어 `escalate`에도 있다.
+        display_split: 표시 프로필(렌더 해시·온톨로지 일치)에서 판정단이 갈린 라벨 → 모델별 의견
+            (허용 버전 순서). 화면 표시(`split_text`)에만 쓴다. 꺼짐이거나 렌더 해시를 모르면 빈
+            사전이다 (표시와 같은 fail-closed).
     """
 
     display: dict[str, Judged]
     escalate: dict[str, Judged]
     disagree: frozenset[str] = frozenset()
+    display_split: Mapping[str, Opinions] = field(default_factory=dict[str, Opinions])
 
 
 def load_ai_view(
@@ -216,14 +230,56 @@ def load_ai_view(
     escalate = valid_verdicts(
         units, current, versions=cfg.versions, render_hashes=None, strict_context=strict
     )
-    disagree: frozenset[str] = frozenset()
-    if cfg.policy.disagreement.enabled:
-        # 판정단 불일치 (ADR 0063): 증가 프로필과 같은 유효성 조건으로 버전마다 따로 본다
-        per_version = valid_verdicts_by_version(
-            units, current, versions=cfg.versions, render_hashes=None, strict_context=strict
-        )
-        disagree = frozenset(split_verdict_ids(per_version))
-    return AiView(display=display, escalate=escalate, disagree=disagree)
+    if not cfg.policy.disagreement.enabled:
+        return AiView(display=display, escalate=escalate)
+    # 판정단 불일치 (ADR 0063): 증가 프로필과 같은 유효성 조건으로 버전마다 따로 본다
+    per_version = valid_verdicts_by_version(
+        units, current, versions=cfg.versions, render_hashes=None, strict_context=strict
+    )
+    disagree = frozenset(split_verdict_ids(per_version))
+    shown_split: dict[str, Opinions] = {}
+    if render_hashes is not None:
+        # 화면 표시는 표시 프로필과 같은 조건(렌더 해시·온톨로지)으로만 (I10, fail-closed)
+        per_display = valid_verdicts_by_version(
+            units, current, versions=cfg.versions, render_hashes=render_hashes,
+            strict_context=strict,
+            ontology_digest=ontology_digest(ontology) if ontology is not None else None,
+        )  # fmt: skip
+        shown_split = split_opinions(per_display, cfg.versions)
+    return AiView(display=display, escalate=escalate, disagree=disagree, display_split=shown_split)
+
+
+def judge_model(version: str) -> str:
+    """판정 버전 `aireview-<digest>+vlm-<model>` → 모델 이름 (형식이 다르면 버전 그대로)."""
+    _, sep, model = version.partition(_VLM_SEP)
+    return model if sep and model else version
+
+
+def split_opinions(
+    by_version: Mapping[str, Mapping[str, Judged]], versions: Sequence[str]
+) -> dict[str, Opinions]:
+    """판정단이 갈린 라벨(`split_verdict_ids`) → 모델별 의견 (허용 버전 순서, 그다음 버전 이름).
+
+    같은 모델의 버전 둘(정책 digest만 다름)이 함께 허용되면 이름 뒤에 `(<digest 앞 6자>)`를 붙여
+    가른다.
+    """
+    order = {v: i for i, v in enumerate(versions)}
+    out: dict[str, Opinions] = {}
+    for lid in sorted(split_verdict_ids(by_version)):
+        per = by_version[lid]
+        ordered = sorted(per, key=lambda v: (order.get(v, len(order)), v))
+        names = [judge_model(v) for v in ordered]
+        pairs = zip(ordered, names, strict=True)
+        out[lid] = tuple((_judge_name(v, n, names), per[v][0].verdict) for v, n in pairs)
+    return out
+
+
+def _judge_name(version: str, name: str, names: Sequence[str]) -> str:
+    """화면의 모델 이름 (같은 이름이 둘 이상이면 digest 앞 6자를 붙인다)."""
+    if names.count(name) < 2:
+        return name
+    digest = version.removeprefix("aireview-").partition(_VLM_SEP)[0]
+    return f"{name}({digest[:6]})"
 
 
 # ---------------------------------------------------------------- 노출 집단
@@ -374,7 +430,21 @@ def summary_text(exposure: AiExposure, view: AiView) -> str:
     hidden_flags = sum(counts[v] for v in FLAG_VALUES) - len(exposure.shown)
     if hidden_flags > 0:
         text += f" · 표시 상한·확신도로 숨긴 지적 {hidden_flags}"
+    split = sum(1 for lid in exposure.shown if lid in view.display_split)
+    if split:
+        text += f" · 판정단 의견 갈림 {split}"
     return text
+
+
+def split_text(opinions: Opinions) -> str:
+    """판정단 불일치 한 줄 (예: `AI 판정단 의견이 갈림: Qwen3-VL 맞음 / d3-turbo 의심`)."""
+    return "AI 판정단 의견이 갈림: " + " / ".join(f"{m} {VERDICT_KO[v]}" for m, v in opinions)
+
+
+def _with_split(text: str, label_id: str, view: AiView) -> str:
+    """보인 판정의 글에 판정단 불일치(표시 프로필에서 갈렸을 때만)를 덧붙인다."""
+    opinions = view.display_split.get(label_id)
+    return text if opinions is None else f"{text} · {split_text(opinions)}"
 
 
 def _terms(field: str, o: Ontology) -> Mapping[str, Any]:
@@ -483,7 +553,9 @@ def ls_ai_results(
     hotkeys: Mapping[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Label Studio 예측에 더할 AI 결과: 작업 요약 하나 + 보인 판정마다 AI 구간(readonly)과 라벨
-    구간 메모. 프리라벨 결과(`to_ls_results`)는 건드리지 않는다 (더하기만 한다)."""
+    구간 메모. 프리라벨 결과(`to_ls_results`)는 건드리지 않는다 (더하기만 한다).
+
+    판정단이 갈린 보인 판정은 그 메모 끝에 `split_text`를 덧붙인다 (새 결과를 만들지 않는다)."""
     out: list[dict[str, Any]] = [{
         "id": "ai-summary", "from_name": AI_SUMMARY, "to_name": TO_NAME, "type": "textarea",
         "value": {"text": [summary_text(exposure, view)]},
@@ -501,7 +573,7 @@ def ls_ai_results(
         })  # fmt: skip
         out.append({
             "id": lid, "from_name": AI_NOTE, "to_name": TO_NAME, "type": "textarea",
-            "value": {"text": [note_text(label, verdict, o, hotkeys)]},
+            "value": {"text": [_with_split(note_text(label, verdict, o, hotkeys), lid, view)]},
         })  # fmt: skip
     return out
 
@@ -623,7 +695,8 @@ def cvat_ai_issues(
 
     프레임은 근거 시각(스트림 PTS)에 화면에 떠 있는 프레임이고, 그 프레임을 담은 job에 단다 (못
     찾으면 첫 job, 블러 검수 이슈 `tasks._segment_issues`와 같은 방식). 수집은 주석만 읽으므로
-    이슈는 결과에 영향이 없다. 부작용: CVAT 이슈 생성.
+    이슈는 결과에 영향이 없다. 판정단이 갈린 보인 판정은 같은 이슈 끝에 `split_text`를 덧붙인다
+    (이슈 수·상한 그대로). 부작용: CVAT 이슈 생성.
     """
     if not exposure.shown or not times:
         return 0
@@ -640,9 +713,8 @@ def cvat_ai_issues(
         job = next(
             (j for j in jobs if int(j["start_frame"]) <= frame <= int(j["stop_frame"])), jobs[0]
         )
-        cvat.add_issue(
-            int(job["id"]), frame, issue_position(label, t), issue_text(label, verdict, o)
-        )
+        message = _with_split(issue_text(label, verdict, o), lid, view)
+        cvat.add_issue(int(job["id"]), frame, issue_position(label, t), message)
         made += 1
     return made
 

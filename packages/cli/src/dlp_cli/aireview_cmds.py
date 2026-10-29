@@ -25,21 +25,26 @@ WP17.8)는 `aireview_eval_cmds`에 있고 여기서 함께 등록한다. 아래 
   6 세션 입력의 전제 실패(승인 전·보류·사용 중지·렌더 게이트).
 - `dlp aireview estimate [<세션>… | --prelabeled] [--mode all|flagged] [--bench REPORT …]
   [--hours-per-day H] [--rerun-margin R] [--utilization U] [--decode-workers N] [--include-actions]
-  [--actions-req-s X] [--json] [--url]`: 작업량·장비 대수 추정 (`dlp_aireview.estimate`). DB를
-  읽기만 한다 (서버 불필요). 가정 값의 기본은 `aireview.yaml estimate`. flagged 모드의 우선순위
-  사유는 검수 운영 정책(`DLP_REVIEW_POLICY_FILE` 반영)의 `flag_unit`으로 계산한다. 벤치 보고서의
-  셈법 값(align_px·text_bytes_per_token)이 지금 정책과 다르면 그 보고서용 작업량을 보고서 셈법으로
-  다시 센다 (`estimate.counting_policy`). 모델·fingerprint가 다르면 경고한다.
-  종료: 0 (세션이 없어도 0).
-- `dlp aireview calibrate [--since ISO] [--until ISO] [--version V …] [--out DIR] [--json] [--url]`:
-  판정 표시 보정 학습 (ADR 0062, `dlp_review.ops.ai_calibration`). 기간의 사람 판정 기록
-  (`ai_review_outcomes`) 중 대조군 행만으로 판정·종류·클래스별 지적 정밀도를 추정해 버전 붙은 보정
-  산출물 `<out>/aireview-calibration-<id>.json`(기본 `data/aireview/calibration`)을 쓰고, 보정 전후
-  지적 정밀도·재현율(같은 자료, 작업 키 2겹 교차)을 출력한다. 멱등: 같은 기간·기록이면 같은 파일이고
-  이미 있으면 다시 쓰지 않는다. 기간 기본값은 오늘 0시(UTC)까지 `fit.window_days`일. 판정 버전
-  기본은 review.yaml `ai_review.versions`(비면 aireview.yaml 지금 버전). 보정 칸이 하나도
-  없으면(표본 부족) 파일을 쓰지 않는다. review.yaml은 고치지 않는다: 출력된 `artifact` 줄을
-  사람이 넣어야 쓰인다. DB는 읽기만 한다. 종료: 0.
+  [--actions-req-s X] [--model M] [--json] [--url]`: 작업량·장비 대수 추정
+  (`dlp_aireview.estimate`). DB를 읽기만 한다 (서버 불필요). 가정 값의 기본은
+  `aireview.yaml estimate`. flagged 모드의 우선순위 사유는 검수 운영 정책
+  (`DLP_REVIEW_POLICY_FILE` 반영)의 `flag_unit`으로 계산한다. 벤치 보고서의 셈법 값
+  (align_px·text_bytes_per_token)이 지금 정책과 다르면 그 보고서용 작업량을 보고서 셈법으로 다시
+  센다 (`estimate.counting_policy`). 모델·fingerprint가 다르면 경고한다. `--model`은 판정단
+  모델(ADR 0063)을 고른 정책으로 센다 (run과 같은 선택).
+  종료: 0 (세션이 없어도 0) / 5 고를 수 없는 모델.
+- `dlp aireview calibrate [--since ISO] [--until ISO] [--version V … | --model M] [--out DIR]
+  [--json] [--url]`: 판정 표시 보정 학습 (ADR 0062, `dlp_review.ops.ai_calibration`). 기간의
+  사람 판정 기록(`ai_review_outcomes`) 중 대조군 행만으로 판정·종류·클래스별 지적 정밀도를 추정해
+  버전 붙은 보정 산출물 `<out>/aireview-calibration-<id>.json`(기본 `data/aireview/calibration`)을
+  쓰고, 보정 전후 지적 정밀도·재현율(같은 자료, 작업 키 2겹 교차)을 출력한다. 멱등: 같은 기간·
+  기록이면 같은 파일이고 이미 있으면 다시 쓰지 않는다. 기간 기본값은 오늘 0시(UTC)까지
+  `fit.window_days`일. 판정 버전 기본은 review.yaml `ai_review.versions`(비면 aireview.yaml 지금
+  버전). `--model`(판정단 모델, ADR 0063, run과 같은 선택)이면 그 모델의 판정만 배운다:
+  `ai_review.versions` 중 그 모델의 버전(`+vlm-<모델>`), 없으면 그 모델의 지금 버전. `--version`을
+  주면 그것이 앞선다. 보정 칸이 하나도 없으면(표본 부족) 파일을 쓰지 않는다. review.yaml은 고치지
+  않는다: 출력된 `artifact` 줄을 사람이 넣어야 쓰인다. DB는 읽기만 한다. 종료: 0 / 5 고를 수 없는
+  모델.
 
 서버 주소: `--vlm-url`(여러 번, `이름=URL` 가능) 또는 `DLP_VLM_URLS`(`spark-01=http://…,…`).
 `DLP_VLM_URL`(행동 분류 서버)은 쓰지 않는다. API 키는 `DLP_VLM_API_KEY` (Authorization 헤더로만
@@ -119,6 +124,7 @@ from dlp_models.vlm import VlmRequestError, VlmUnavailableError
 from dlp_privacy.errors import RenderNotCurrentError
 from dlp_privacy.policy import load_policy as load_privacy_policy
 from dlp_review.ai_calibration import to_bytes as calibration_bytes
+from dlp_review.ai_display import judge_model
 from dlp_review.ops.ai_calibration import (
     CalibrationEffect,
     calibration_effect,
@@ -558,7 +564,7 @@ def cmd_estimate(args: argparse.Namespace) -> int:
     부작용: 없음 (DB 읽기, 표준 출력).
     """
     root = repo_root()
-    policy = load_policy(root)
+    policy = judge_policy(load_policy(root), args)
     if args.mode:
         data = policy.model_dump()
         data["selection"]["mode"] = args.mode
@@ -623,6 +629,23 @@ def _print_effect(name: str, e: CalibrationEffect) -> None:
     print(f"  지적 재현율 {pct(e.recall_before)} → {pct(e.recall_after)}")
 
 
+def _calibrate_versions(
+    args: argparse.Namespace, root: Path, allowed: Sequence[str]
+) -> tuple[str, ...]:
+    """보정을 배울 판정 버전: `--version` > `--model`(허용 버전 중 그 모델 것, 없으면 그 모델의
+    지금 버전) > review.yaml `ai_review.versions` > aireview.yaml 지금 버전.
+
+    고를 수 없는 `--model`은 `SystemExit(5)` (`judge_policy`).
+    """
+    if args.version:
+        return tuple(args.version)
+    policy = judge_policy(load_policy(root), args)
+    if args.model is not None:
+        mine = tuple(v for v in allowed if judge_model(v) == policy.backend.model)
+        return mine or (policy.verdict_version,)
+    return tuple(allowed) or (policy.verdict_version,)
+
+
 def cmd_calibrate(args: argparse.Namespace) -> int:
     """`dlp aireview calibrate`: 사람 판정 기록으로 판정 표시 보정을 학습한다 (모듈 docstring).
 
@@ -631,7 +654,7 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
     root = repo_root()
     review = load_review_policy(root).ai_review
     fit = review.calibration.fit
-    versions = tuple(args.version or review.versions or (load_policy(root).verdict_version,))
+    versions = _calibrate_versions(args, root, review.versions)
     since, until = _window(args, fit.window_days)
     engine = sa.create_engine(database_url(args.url))
     with engine.connect() as conn:
@@ -694,6 +717,7 @@ def _calibrate_parser(asub: Any) -> None:
     c.add_argument("--until", help="기간 끝 ISO 시각, 제외 (기본: 오늘 0시 UTC)")
     c.add_argument("--version", action="append", help="학습할 판정 버전 (여러 번)")
     c.add_argument("--out", help="산출물 디렉터리 (기본: data/aireview/calibration)")
+    add_model_arg(c)
     c.add_argument("--json", action="store_true")
     c.add_argument("--url", help="DB URL (기본: DLP_DATABASE_URL)")
     c.set_defaults(func=cmd_calibrate)
@@ -775,6 +799,7 @@ def _estimate_parser(asub: Any) -> None:
     e.add_argument("--actions-req-s", type=float, help="행동 VLM 장비 1대 지속 요청/s (실측)")
     e.add_argument("--json", action="store_true")
     e.add_argument("--url", help="DB URL (기본: DLP_DATABASE_URL)")
+    add_model_arg(e)
     e.set_defaults(func=cmd_estimate)
 
 

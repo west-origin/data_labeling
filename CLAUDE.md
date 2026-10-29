@@ -104,6 +104,8 @@
   설정은 `review.yaml ai_review`(코드 기본 off).
   판정단 불일치 `ai_review.disagreement`(기본 끔, ADR 0063): 허용 버전 둘 이상이 같은 라벨을 ok와 ok 아님으로 가르면
   `ai_disagreement` 사유 구간·표본 제외(`dlp_schema.aireview.valid_verdicts_by_version`·`split_verdict_ids`). 줄이는 쪽으로는 쓰지 않는다.
+  켜면 보인 판정의 메모(LS)·이슈(CVAT) 끝에 `AI 판정단 의견이 갈림: <모델> 맞음 / <모델> 틀림`을 덧붙인다(표시 프로필,
+  `dlp_review.ai_display.split_text`, 새 결과·이슈가 아니라 노출 기록·이슈 상한·대조군 규칙 그대로).
   오탐 의심 힌트 `dlp review hints <세션> [--tta] [--ai]`(블러: 원본 버킷 hints 파일 → 블러 검수 CVAT 이슈, 객체
   `dlp_review.object_hints`: 라벨링 CVAT 이슈, 잘라 낸 박스 AI 확인 `dlp_aireview.crops`). 라벨·블러는 바꾸지 않는다
   (ADR 0055·0056).
@@ -171,7 +173,7 @@
   쓴다(멱등·재개, 세션 잠금). CPU·CI는 `OracleJudge`·`FakeOpenAIServer`. 골든셋 평가(`evaluate`: 교란·이력, DB에 쓰지 않음,
   게이트 실패는 기본 경고만). `dlp aireview run|status|show|waive|estimate|bench|probe|eval`.
   응답 파싱은 pydantic strict다(번호는 JSON 정수만, 확신도는 JSON 수만, F-AIR-36).
-  판정단(ADR 0063): `backend.panel`의 모델을 `dlp aireview run|status|bench|probe|eval --model <이름>`으로 골라
+  판정단(ADR 0063): `backend.panel`의 모델을 `dlp aireview run|status|show|estimate|calibrate|bench|probe|eval --model <이름>`으로 골라
   모델마다 따로 판정한다(병렬, 서로의 판정을 보지 않음, 버전 `+vlm-<모델>`, 판정단 목록은 digest 밖, 판정단 모델은
   로드 때 models.yaml 라이선스 검사). 기본 판정단은 비어 있다.
   정책은 `config/policies/aireview.yaml`.

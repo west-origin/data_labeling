@@ -371,3 +371,42 @@ def test_estimate_assumption_args_are_validated_like_policy(
     args = ["aireview", "estimate", "--prelabeled", "--url", db_url, "--bench", str(bench), *extra]
     with pytest.raises(SystemExit, match=f"추정 가정 값 오류: {extra[0]}"):
         main(args)
+
+
+# ---------------------------------------------------------------- 판정단 --model (ADR 0063)
+
+D3 = "vllm-sr/d3-turbo"
+
+
+def _with_panel(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`dlp aireview estimate|calibrate`가 읽는 정책에 판정단 모델 d3를 더한다."""
+    original = load_policy
+
+    def load(root: Path) -> AiReviewPolicy:
+        data = original(root).model_dump()
+        data["backend"]["panel"] = [
+            {"model": D3, "served_name": "d3-turbo", "fingerprint": "vllm-bf16"}
+        ]
+        return AiReviewPolicy.model_validate(data)
+
+    monkeypatch.setattr(aireview_cmds, "load_policy", load)
+
+
+def test_estimate_model_uses_panel_policy_and_rejects_unknown(
+    db_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:  # fmt: skip
+    """`estimate --model`은 판정단 모델을 고른 정책으로 센다: 기본 모델로 잰 벤치 보고서와 모델이
+    달라 경고가 붙는다 (기본은 경고 없음). 판정단에 없는 모델은 종료 5."""
+    _with_panel(monkeypatch)
+    bench = _bench_file(tmp_path)
+    args = ["aireview", "estimate", "e1", "--url", db_url, "--bench", str(bench), "--json"]
+    assert main(args) == 0
+    [plain] = json.loads(capsys.readouterr().out)["capacity"]
+    assert not any("model:" in w for w in plain["warnings"])
+    assert main([*args, "--model", D3]) == 0
+    [picked] = json.loads(capsys.readouterr().out)["capacity"]
+    assert any(f"model: 보고서 {MODEL} ≠ 지금 정책 {D3}" in w for w in picked["warnings"])
+    with pytest.raises(SystemExit) as exc:
+        main([*args, "--model", "other/model"])
+    assert exc.value.code == 5

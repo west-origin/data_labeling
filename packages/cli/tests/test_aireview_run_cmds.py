@@ -812,3 +812,33 @@ def test_model_outside_panel_exits_5_and_writes_nothing(
     out = capsys.readouterr().out
     assert "판정단(aireview.yaml backend.panel)에 없는 모델: other/model" in out and D3 in out
     assert world.units("s1") == 0
+
+
+def test_show_model_reports_that_models_valid_verdict(
+    world: World, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`show <세션>:<라벨> --model`은 그 모델의 지금 버전으로 유효한 판정을 고른다 (단위 목록은 모든
+    버전). 기본은 backend.model 버전이다. 판정단에 없는 모델은 DB를 읽기 전에 종료 5."""
+    world.add("s1")
+    _with_panel(monkeypatch)
+    with FakeOpenAIServer(MODEL) as server:
+        assert main(["aireview", "run", "s1", "--vlm-url", server.url, *world.args]) == 0
+    with FakeOpenAIServer("d3-turbo") as server:
+        assert main(["aireview", "run", "s1", "--model", D3, "--vlm-url", server.url,
+                     *world.args]) == 0  # fmt: skip
+    with world.engine.connect() as conn:
+        units = list_ai_units(conn, "s1")
+    d3_unit = next(u for u in units if u.version.endswith(f"+vlm-{D3}"))
+    label = d3_unit.target_label_ids[0]
+    capsys.readouterr()
+    assert main(["aireview", "show", f"s1:{label}", "--model", D3, "--url", world.url]) == 0
+    picked = json.loads(capsys.readouterr().out)
+    assert picked["version"] == d3_unit.version and picked["valid"]["unit_id"] == d3_unit.unit_id
+    assert {r["version"] for r in picked["units"]} == {u.version for u in units}
+    assert main(["aireview", "show", f"s1:{label}", "--url", world.url]) == 0
+    default = json.loads(capsys.readouterr().out)
+    assert default["version"] != d3_unit.version and default["valid"]["unit_id"] != d3_unit.unit_id
+    with pytest.raises(SystemExit) as exc:
+        main(["aireview", "show", f"s1:{label}", "--model", "other/model", "--url", world.url])
+    assert exc.value.code == 5
+    assert "판정단(aireview.yaml backend.panel)에 없는 모델: other/model" in capsys.readouterr().out

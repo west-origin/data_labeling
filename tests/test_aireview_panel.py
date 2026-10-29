@@ -10,6 +10,8 @@
 검수 운영(`load_ai_view`, `ai_flagged_spans`, `escalated_ids`)이 두 버전을 허용하면 그 행동에만
 AI_DISAGREEMENT가 붙고 표본 제외 대상이 된다. 꺼짐·한 버전만 허용이면 붙지 않는다. 두 모델이
 ok로 같은 라벨은 표본 제외도 사유도 없다 (사람 검수를 줄이지 않는다, ADR 0040 I9).
+검수 화면용 표시 프로필(지금 렌더 해시·세션 온톨로지)도 그 행동에만 모델별 의견("AI 판정단
+의견이 갈림: <A> 맞음 / <B> 틀림")을 낸다.
 
 정답 근거: 바꾼 정답 라벨 ID, 가짜 서버의 기본 답(ok), 판정 버전 문자열.
 """
@@ -30,10 +32,18 @@ from dlp_fixtures.video import write_video
 from dlp_media.storage import LocalStore, blurred_key, sha256_file
 from dlp_privacy.policy import load_policy as load_privacy_policy
 from dlp_privacy.rendering import RenderMeta, expected_render_hash, write_render_meta
-from dlp_review.ai_display import AiDisplayConfig, ai_flagged_spans, escalated_ids, load_ai_view
+from dlp_review.ai_display import (
+    AiDisplayConfig,
+    ai_flagged_spans,
+    escalated_ids,
+    load_ai_view,
+    split_text,
+)
 from dlp_review.ops.policy import AiReviewDisplayPolicy
 from dlp_schema import load_config, repo_root
+from dlp_schema.aireview import AiVerdictValue
 from dlp_schema.db.aireview_repository import list_ai_units
+from dlp_schema.db.ontology_repository import get_session_ontology
 from dlp_schema.db.repository import get_labels, insert_labels, insert_session, register_ontology
 from dlp_schema.episode import current_labels
 from dlp_schema.labels import ActionPayload, LabelRecord
@@ -143,3 +153,16 @@ def test_two_panel_models_flag_only_the_split_label(tmp_path: Path) -> None:
     assert _ops_view(engine, _cfg(both, base, enabled=False))[:2] == (set(), set())
     only_a = _ops_view(engine, _cfg((model_a.verdict_version,), base, enabled=True))
     assert only_a[:3] == (set(), set(), set())
+    # 검수 화면 (표시 프로필: 지금 렌더 해시·세션 온톨로지): 갈린 행동에만 모델별 의견
+    with engine.connect() as conn:
+        current = current_labels(get_labels(conn, SID))
+        hashes = {s: expected_render_hash(conn, SID, s, privacy) for s in ("bodycam", "tp1")}
+        view = load_ai_view(
+            conn, SID, current, hashes, _cfg(both, base, enabled=True),
+            ontology=get_session_ontology(conn, SID),
+        )  # fmt: skip
+    opinions = ((model_a.backend.model, AiVerdictValue.OK), (D3["model"], AiVerdictValue.WRONG))
+    assert view.display_split == {target.label_id: opinions}
+    assert split_text(opinions) == (
+        f"AI 판정단 의견이 갈림: {model_a.backend.model} 맞음 / vllm-sr/d3-turbo 틀림"
+    )

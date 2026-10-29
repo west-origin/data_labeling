@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 
+from dlp_aireview.policy import AiReviewPolicy, load_policy, select_model
 from dlp_cli import aireview_cmds
 from dlp_cli.main import main
 from dlp_cli.review_config import display_calibration, load_review_policy
@@ -99,3 +100,55 @@ def test_calibrate_without_enough_samples_writes_nothing(
     assert main(["aireview", "calibrate", *ARGS, "--out", str(tmp_path)]) == 0
     assert "표본 부족" in capsys.readouterr().out
     assert not list(tmp_path.iterdir())
+
+
+# ---------------------------------------------------------------- 판정단 --model (ADR 0063)
+
+D3 = "vllm-sr/d3-turbo"
+
+
+def _with_panel(monkeypatch: pytest.MonkeyPatch) -> str:
+    """정책에 판정단 모델 d3를 더하고 그 모델의 지금 판정 버전을 돌려준다."""
+    original = load_policy
+
+    def load(root: Path) -> AiReviewPolicy:
+        data = original(root).model_dump()
+        data["backend"]["panel"] = [
+            {"model": D3, "served_name": "d3-turbo", "fingerprint": "vllm-bf16"}
+        ]
+        return AiReviewPolicy.model_validate(data)
+
+    monkeypatch.setattr(aireview_cmds, "load_policy", load)
+    return select_model(load(repo_root()), D3).verdict_version
+
+
+def test_calibrate_model_learns_only_that_models_versions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--model`이면 그 모델의 판정만 배운다: review.yaml 허용 버전 중 그 모델 것, 없으면 그 모델의
+    지금 버전. `--version`이 앞선다. 판정단에 없는 모델은 DB를 읽기 전에 종료 5."""
+    d3_now = _with_panel(monkeypatch)
+    _patch(monkeypatch, _rows())
+    window = ["--until", "2026-10-01T00:00:00+00:00", "--url", "sqlite://", "--json"]
+    out = ["--out", str(tmp_path)]
+
+    def judged(*extra: str) -> list[str]:
+        assert main(["aireview", "calibrate", *window, *out, *extra]) == 0
+        return list(json.loads(capsys.readouterr().out)["calibration"]["judge_versions"])
+
+    assert judged("--model", D3) == [d3_now]  # review.yaml versions가 비어 지금 버전
+    assert judged("--model", D3, "--version", AI_VERSION) == [AI_VERSION]
+    old_d3 = f"aireview-ffffffffffff+vlm-{D3}"
+    review = load_review_policy(repo_root())
+    ai = review.ai_review.model_copy(update={"versions": (AI_VERSION, old_d3)})
+    pinned = review.model_copy(update={"ai_review": ai})
+
+    def review_policy(root: Path) -> ReviewOpsPolicy:
+        return pinned
+
+    monkeypatch.setattr(aireview_cmds, "load_review_policy", review_policy)
+    assert judged("--model", D3) == [old_d3]
+    assert judged() == [AI_VERSION, old_d3]
+    with pytest.raises(SystemExit) as exc:
+        main(["aireview", "calibrate", *window, *out, "--model", "other/model"])
+    assert exc.value.code == 5

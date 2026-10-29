@@ -37,9 +37,11 @@
   처리량 기반 남은 시간, 백로그(영상 시간). started만 있고 실행 중이 아니면 "중단 추정"이다.
   실행 중인지는 `pg_locks`만 읽어 본다 (잠금을 잡지 않는다, `aireview_lock_held`).
   종료 0 (없는 세션을 주면 1).
-- `dlp aireview show <unit_id> | <세션>:<label_id> [--url]`: 감사 기록 전체 (프레임 PTS·sha,
-  렌더 해시, 프롬프트 다이제스트, 판정, 응답 sha, 서버 모델, 엔드포인트 이름, 실행자). 라벨을
-  주면 그 라벨이 대상으로 든 단위들과 지금 유효한(표시 프로필) 판정. 종료 0 (없으면 1).
+- `dlp aireview show <unit_id> | <세션>:<label_id> [--model M] [--url]`: 감사 기록 전체 (프레임
+  PTS·sha, 렌더 해시, 프롬프트 다이제스트, 판정, 응답 sha, 서버 모델, 엔드포인트 이름, 실행자).
+  라벨을 주면 그 라벨이 대상으로 든 단위들(모든 버전)과 지금 유효한(표시 프로필) 판정. 유효한
+  판정은 지금 버전, `--model`(판정단 모델, ADR 0063, run과 같은 선택)이면 그 모델의 지금 버전
+  기준이다 (`version`). 종료 0 (없으면 1) / 5 고를 수 없는 모델.
 - `dlp aireview waive <세션> --reason TEXT [--url]`: required 모드(`review.yaml ai_review.mode`,
   WP17.6)에서 이 세션의 AI 단계를 건너뛰기로 한 결정을 남긴다 (`waived` 이벤트, 사유
   `manual: <사유>`, 실행자 `DLP_ACTOR`). 종료 0 (세션이 없으면 1).
@@ -820,7 +822,10 @@ def _label_record(
         if v.label_id == label_id
     ]  # fmt: skip
     shown = None if found is None else {"unit_id": found[1], **found[0].model_dump(mode="json")}
-    return {"session_id": session_id, "label_id": label_id, "valid": shown, "units": rows}
+    return {
+        "session_id": session_id, "label_id": label_id, "version": policy.verdict_version,
+        "valid": shown, "units": rows,
+    }  # fmt: skip
 
 
 def _render_now(conn: sa.Connection, session_id: str, stream_id: str) -> str:
@@ -830,7 +835,7 @@ def _render_now(conn: sa.Connection, session_id: str, stream_id: str) -> str:
 
 def cmd_show(args: argparse.Namespace) -> int:
     """`dlp aireview show` (모듈 docstring). 부작용: 없음 (DB 읽기)."""
-    policy = load_policy(repo_root())
+    policy = judge_policy(load_policy(repo_root()), args)
     engine = sa.create_engine(database_url(args.url))
     try:
         with engine.connect() as conn:
@@ -947,6 +952,7 @@ def add_run_commands(asub: Any) -> None:
     w = asub.add_parser("show", help="판정 단위 감사 기록 (<unit_id> | <세션>:<라벨 ID>)")
     w.add_argument("ref")
     w.add_argument("--url", help="DB URL (기본: DLP_DATABASE_URL)")
+    add_model_arg(w)
     w.set_defaults(func=cmd_show)
     v = asub.add_parser("waive", help="required 모드에서 이 세션의 AI 단계를 건너뛴다")
     v.add_argument("session_id")

@@ -216,13 +216,17 @@ def _temporal(pg: sa.Engine, sid: str) -> list[LabelRecord]:
     return labels
 
 
-def _judge(pg: sa.Engine, sid: str, verdicts: list[AiVerdict], **unit: Any) -> None:
-    """판정 실행 하나와 단위 하나를 넣는다 (렌더 해시 = 그 스트림의 지금 렌더 해시)."""
+def _judge(
+    pg: sa.Engine, sid: str, verdicts: list[AiVerdict], *, version: str = AI_VERSION, **unit: Any
+) -> None:
+    """판정 실행 하나와 단위 하나를 넣는다 (렌더 해시 = 그 스트림의 지금 렌더 해시, 판정 버전)."""
     stream = unit.get("stream_id", "bodycam")
+    unit["version"] = version
     with pg.begin() as conn:
         rhash = expected_render_hash(conn, sid, stream, load_policy(ROOT))
         run_id = "air-run-" + uuid.uuid4().hex[:24]
-        insert_ai_run(conn, make_ai_run(sid, run_id, render_hashes={stream: rhash}))
+        run = make_ai_run(sid, run_id, render_hashes={stream: rhash}, version=version)
+        insert_ai_run(conn, run)
         uid = "air-" + uuid.uuid4().hex[:24]
         unit.setdefault("render_hash", rhash)
         # 표시 프로필은 지금 세션 온톨로지 내용 해시로 판정한 단위만 쓴다 (F-AIR-32)
@@ -456,3 +460,54 @@ def test_cvat_gets_ai_issues_without_project_changes(
     assert (item.label_id, item.human, item.decision, item.apply_result, item.match) == (
         track.label_id, AiHumanAction.APPROVED, AiDecision.NONE, None, "none",
     )  # fmt: skip
+
+
+def test_label_studio_shows_judge_panel_split_only_to_shown_arm(
+    pg: sa.Engine, setup: ReviewSetup, tmp_path: Path
+) -> None:
+    """판정단 불일치 (ADR 0063): 모델 A ok / 모델 B wrong으로 갈린 행동의 라벨 구간 메모 끝에
+    "AI 판정단 의견이 갈림: <A> 맞음 / <B> 틀림"이 붙고 요약에 그 수가 든다 (AI 컨트롤·예측 결과
+    수는 끔일 때와 같다). 노출 기록은 같은 shown·hidden으로 남는다. 대조군 작업에는 AI 메모·구간이
+    없고 요약은 "없음"이며 노출 기록은 holdout이다."""
+    sid, _ = _approved_session(pg, setup, tmp_path)
+    actions = [x for x in _temporal(pg, sid) if x.kind == "action"]
+    split, agreed = actions[0].label_id, actions[1].label_id
+    model_b = "aireview-0123456789ab+vlm-vllm-sr/d3-turbo"
+    _judge(pg, sid, [make_ai_verdict(split, "ok"), make_ai_verdict(agreed, "suspect")])
+    _judge(pg, sid, [make_ai_verdict(split, "wrong"), make_ai_verdict(agreed, "wrong")],
+           version=model_b)  # fmt: skip
+    versions = (AI_VERSION, model_b)
+
+    def on(enabled: bool, holdout: float = 0.0) -> ReviewSetup:
+        policy = AiReviewDisplayPolicy.model_validate({
+            "mode": "advisory", "holdout_ratio": holdout, "disagreement": {"enabled": enabled},
+        })  # fmt: skip
+        return replace(setup, ai=AiDisplayConfig(policy, versions, AI_TARGET_RULE))
+
+    off_task = _ls_task(pg, on(False), sid, "labeler01")
+    on_task = _ls_task(pg, on(True), sid, "labeler02")
+    held_task = _ls_task(pg, on(True, holdout=1.0), sid, "labeler01")
+    off, with_split = _predictions(setup, off_task), _predictions(setup, on_task)
+    assert len(off) == len(with_split)
+    notes = {r["id"]: r["value"]["text"][0] for r in with_split if r["from_name"] == AI_NOTE}
+    opinion = "AI 판정단 의견이 갈림: Qwen/Qwen3-VL-8B-Instruct 맞음 / vllm-sr/d3-turbo 틀림"
+    assert notes[split].startswith("[틀림 · 참고]") and notes[split].endswith(opinion)
+    assert "판정단" not in notes[agreed]  # suspect / wrong은 갈림이 아니다
+    [summary] = [r["value"]["text"][0] for r in with_split if r["from_name"] == AI_SUMMARY]
+    assert summary.endswith("판정단 의견 갈림 1")
+    assert not any("판정단" in str(r["value"]) for r in off)
+    held = _predictions(setup, held_task)
+    assert not [r for r in held if r["from_name"] in {AI_NOTE, AI_FLAGS}]
+    assert [r["value"]["text"] for r in held if r["from_name"] == AI_SUMMARY] == [
+        ["AI 1차 검수: 없음"]
+    ]
+    assert not any("판정단" in str(r["value"]) for r in held)
+    with pg.connect() as conn:
+        off_e = get_ai_exposure(conn, off_task.task_key)
+        on_e = get_ai_exposure(conn, on_task.task_key)
+        held_e = get_ai_exposure(conn, held_task.task_key)
+    assert off_e is not None and on_e is not None and held_e is not None
+    assert on_e.arm is AiArm.SHOWN and set(on_e.shown) == {split, agreed}
+    assert (on_e.shown, on_e.hidden) == (off_e.shown, off_e.hidden)
+    assert on_e.versions == versions
+    assert held_e.arm is AiArm.HOLDOUT and held_e.shown == {}
