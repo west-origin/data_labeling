@@ -1046,3 +1046,6 @@ issues:
   - {id: F-PAR-83, title: "3인칭 착용자 매칭 단계는 버전에 입력(3인칭 인물 트랙) 해시가 없어, 매칭이 안 되면 매 실행 IMU를 다시 받는다 (F-PAR-75 실행 기록에서 제외)", severity: low, status: candidate, kind: code,
      files: [packages/prelabel/src/dlp_prelabel/runner.py], source: docs/adr/0015-audit-fixes.md, see: [F-PAR-75],
      note: "2026-10-29 F-PAR-75 수정 중 발견. 실행 기록을 남기면 새 인물 트랙이 와도 다시 돌지 않게 되므로 먼저 버전에 입력 해시를 넣어야 한다. 재현 전 후보."}
+  - {id: F-AIR-37, title: "판정단 후보(d3-turbo·Amos 1)는 OpenAI 호환 채팅이 아닌 System One 결정 API라 지금 판정 백엔드·backend.panel로 부를 수 없음", severity: medium, status: open, kind: product,
+     files: [packages/aireview/src/dlp_aireview/backend.py, config/policies/aireview.yaml, config/models.yaml], source: docs/adr/0063-decision-model-judge-panel.md,
+     note: "2026-10-29 모델 카드 원문 확인. 결정 API 백엔드(판정 질문 → 선택지 확률 → 확신도) 어댑터와 CPU stub, 원격 코드 revision 고정·검토가 필요하다 (ADR 0063 개정)."}

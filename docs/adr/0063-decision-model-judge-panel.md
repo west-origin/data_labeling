@@ -56,3 +56,15 @@ AI 판정과 사람의 처리는 이미 쌓인다: `ai_review_*`(판정·이유�
   같음), `disagreement` 기본 끔이라 운영 동작은 바뀌지 않는다.
 - 남은 일: 후보 모델 카드·revision 확인, Spark에서 bench·골든 eval, 결과에 따라 `ai_review.versions`·`disagreement`
   켜기, 검수 판정 과제 ADR.
+
+## 개정 (2026-10-29): 후보 모델 카드 확인
+
+- 모델 카드 원문을 확인했다: d3-turbo(revision a0f3e9e)·Amos 1 Large(revision d67e051, 기반 Qwen3.8-27B revision
+  1d4bf0f) 모두 Apache-2.0, 학습 데이터 미공개 → `commercial: review` 그대로.
+- 둘 다 OpenAI 호환 채팅 모델이 아니다. 텍스트를 생성하지 않고 질문마다 선택지 확률을 내는 "System One" 결정 API
+  (`/v1/systemone`)를 쓰고, 직접 띄우려면 `trust_remote_code`(d3-turbo: vllm-sr engine, Amos: 자체 `amos.serve`)가
+  필요하다. 그래서 지금 판정 백엔드(`backend.kind: openai_compatible`)와 `backend.panel`로는 부를 수 없다 (F-AIR-37).
+  붙이려면 결정 API 백엔드(질문을 ok·suspect·wrong·unsure 선택지 질문으로 바꾸고 확률을 확신도로 받는 어댑터)를
+  별도로 만든다. 원격 코드는 revision에 고정해 검토한 뒤 사내 서버에서만 돌린다.
+- 장비: d3-turbo는 vllm-sr engine(카드 예시는 AMD MI325X), Amos 1 Large는 80 GB GPU 기준이다. Mac(Apple Silicon)용
+  공식 실행 경로는 카드에 없다.

@@ -205,20 +205,20 @@ external:
     license: Apache-2.0
     training_data: ["공개되지 않음 (모델 카드에 학습 데이터 출처 명시 없음)"]
     commercial: review
-  # 의사결정 모델 판정단 후보 (ADR 0063). 2026-10-28 웹 검색으로 가중치 라이선스(Apache-2.0)만 확인했다.
-  # 이 세션은 huggingface.co에 접속하지 못해 모델 카드 원문·revision·학습 데이터를 보지 못했다 → 서버에 올리기 전에
-  # 모델 카드 cardData.license·LICENSE 파일·revision을 확인하고 이 주석에 revision을 적는다. 학습 데이터 미공개라 review.
-  vllm-sr/d3-turbo:                   # 27B 다중 모달 결정 모델 (Decision 3.0, 영상 추적·객체 위치), revision 미확인
+  # 의사결정 모델 판정단 후보 (ADR 0063). 2026-10-29 Hugging Face 모델 카드 원문(API cardData)으로 확인했다:
+  # 가중치 Apache-2.0, 학습 데이터 미공개 → review. 둘 다 OpenAI 호환 채팅 모델이 아니라 "System One" 결정 API
+  # (텍스트를 생성하지 않고 선택지별 확률을 낸다, trust_remote_code)라서 지금 판정 백엔드(openai_compatible)로는
+  # 부를 수 없다 (F-AIR-37). 원격 코드는 아래 revision에 고정해 검토한 뒤에만 돌린다.
+  vllm-sr/d3-turbo:                   # 27B 다중 모달 결정 모델 (Decision 3.0, 영상 추적·객체 위치), revision a0f3e9e
     served_by: 사내 OpenAI 호환 VLM 서버 (DGX Spark vLLM), config/policies/aireview.yaml backend.panel
     license: Apache-2.0
-    training_data: ["공개되지 않음 (2차 자료 기준, 모델 카드 원문 미확인)"]
+    training_data: ["공개되지 않음 (모델 카드에 학습 데이터 출처 명시 없음)"]
     commercial: review
-  mukaddamzaid/amos-1-large:          # 27B 이미지 결정 모델 (선택지 확률·박스 출력, Qwen3.8-27B 기반), revision 미확인
+  mukaddamzaid/amos-1-large:          # 27B 이미지 결정 모델 (선택지 확률·박스 출력, Qwen3.8-27B 미세조정), revision d67e051
     served_by: 사내 OpenAI 호환 VLM 서버 (DGX Spark vLLM), config/policies/aireview.yaml backend.panel
     license: Apache-2.0
-    # 기반 모델 Qwen3.8-27B의 라이선스가 2026-08 기준 공표되지 않았다 (2차 자료). 미세조정 가중치의 Apache-2.0이
-    # 기반 모델 조건을 덮는지 확인 전에는 allowed로 두지 않는다.
-    training_data: ["공개되지 않음 (기반 모델 Qwen3.8-27B 라이선스 미확인)"]
+    # 기반 모델 Qwen/Qwen3.8-27B도 모델 카드 license apache-2.0 (revision 1d4bf0f, 2026-10-29 확인). 80 GB GPU 기준.
+    training_data: ["공개되지 않음 (모델 카드에 학습 데이터 출처 명시 없음, 기반 Qwen3.8-27B도 미공개)"]
     commercial: review
   # 쓰지 않는다: 모델 카드 license_name qwen-research (비상업 연구 라이선스, revision 6628554).
   # actions.yaml 주석과 같은 판단을 표에 남긴다. accept에 forbidden이 없어 정책이 쓰면 make licenses가 실패한다.
