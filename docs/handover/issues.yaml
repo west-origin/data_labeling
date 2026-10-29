@@ -1043,3 +1043,6 @@ issues:
   - {id: F-COE-84, title: "콘솔 전역 단계 API가 잘못된 JSON 본문·1e400에 500", severity: low, status: fixed, kind: code,
      files: [packages/console/src/dlp_console/app.py, packages/console/src/dlp_console/global_steps.py], source: docs/handover/full-inspection-2026-10-28.md,
      note: "_json_params가 잘못된 JSON·객체 아닌 본문·NaN·무한대를 ParamError(400)로, ops_weekly int 변환 실패도. 회귀: tests/test_known_defects.py::test_console_global_step_bad_json_is_400(xfail 표시 지움)"}
+  - {id: F-PAR-83, title: "3인칭 착용자 매칭 단계는 버전에 입력(3인칭 인물 트랙) 해시가 없어, 매칭이 안 되면 매 실행 IMU를 다시 받는다 (F-PAR-75 실행 기록에서 제외)", severity: low, status: candidate, kind: code,
+     files: [packages/prelabel/src/dlp_prelabel/runner.py], source: docs/adr/0015-audit-fixes.md, see: [F-PAR-75],
+     note: "2026-10-29 F-PAR-75 수정 중 발견. 실행 기록을 남기면 새 인물 트랙이 와도 다시 돌지 않게 되므로 먼저 버전에 입력 해시를 넣어야 한다. 재현 전 후보."}

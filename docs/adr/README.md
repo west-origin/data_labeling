@@ -69,3 +69,5 @@ ADR은 결정 당시의 이유와 이관 조건을 기록한다. 후속 ADR이 �
 | 0060 | [ADR 0060: 공개 데이터셋으로 프리라벨 모델 1차 학습 (제안)](0060-public-dataset-pretraining.md) |
 | 0061 | [ADR 0061: 운영 콘솔과 설치 스크립트 (제안)](0061-operator-console.md) |
 | 0062 | [ADR 0062: 재학습 루프의 실제 학습기 (YOLOX 물건 탐지)와 AI 검수 판정 표시 보정 (제안)](0062-real-retraining-loop.md) |
+| 0063 | [ADR 0063: 의사결정 모델 판정단과 검수 판정 모델 학습 (제안)](0063-decision-model-judge-panel.md) |
+| 0064 | [ADR 0064: 검수 판정 모델 학습 과제 (`aireview`) (제안)](0064-review-judge-training-task.md) |
