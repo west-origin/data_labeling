@@ -5,6 +5,7 @@ WP13, ADR 0016. `load_policy(root)`가 YAML을 읽어 `TrainingPolicy`로 검증
 - 학습 분할에 골든·holdout을 넣을 수 없다 (`_no_golden`).
 - 블러(privacy) 과제는 `deploy: approve`여야 한다 (`_privacy_needs_approval`, 사람 승인 후 배포).
 - 미검수(unreviewed) 상태는 학습 예제가 될 수 없다 (`_reviewed`).
+또 replaces는 실제로 대신할 수 있는 단계 이름만 받는다 (`_known_replaces`, F-ETA-27).
 
 과제 키는 평가 과제(`dlp_eval.policy.Task`)와 같다. 이 정책은 모델 버전 해시에 들어가지 않는다
 (모델 버전 태그는 `loop._short`가 과제·데이터셋 버전·학습기·파라미터·시각으로 만든다).
@@ -23,6 +24,14 @@ from dlp_schema.common import Contract
 from dlp_schema.dataset import Split
 from dlp_schema.labels import VerificationState
 
+# replaces에 쓸 수 있는 이름: 프리라벨 기본 Predictor의 `name`(`dlp_train.deployed.Deployed.apply`가
+# 이 이름으로 뺀다)과 접촉 단계(`dlp_prelabel.runner.CONTACT_STEP`, 프리라벨이 따로 건너뛴다).
+# 마스크(MaskMaker "masks")·3D(DepthLifter "depth3d")·카메라 자세는 Predictor가 아니라 빼는
+# 경로가 없고, 프라이버시·행동 단계는 replaces를 읽지 않는다 (블러는 탐지기 합집합). 그런 이름을
+# 적으면 배포 모델과 기본 단계가 함께 돌므로 적재 오류로 막는다. 어댑터를 더하면 여기에도 더한다
+# (packages/training/tests/test_policy.py가 어댑터 이름과 대조한다).
+PRELABEL_REPLACEABLE = frozenset({"hands", "body", "objects", "tools", "closed_tools", "contact"})
+
 
 class MlflowPolicy(Contract):
     """MLflow 이름 규칙 (`mlflow` 절)."""
@@ -38,7 +47,8 @@ class TaskTraining(Contract):
     # 배포 모델 연결 단계: prelabel(프리라벨 Predictor), privacy(블러 탐지기).
     # actions는 예약 값이며 현재 행동 실행 경로에서는 배포 모델을 읽지 않는다.
     stage: Literal["prelabel", "privacy", "actions"]
-    # 배포되면 빼는 기본 어댑터 이름 (Predictor.name). 비어 있으면 기본 어댑터에 더한다
+    # 배포되면 빼는 기본 어댑터 이름 (Predictor.name 또는 contact). 비어 있으면 기본 어댑터에
+    # 더한다. stage prelabel만 쓸 수 있고 이름은 PRELABEL_REPLACEABLE 안이어야 한다
     replaces: tuple[str, ...] = ()
     min_examples: int = Field(ge=1)  # 학습을 시작할 최소 예제 수
     min_new_examples: int = Field(ge=0)  # 직전 학습(모든 상태) 대비 새로 늘어야 할 예제 수
@@ -206,6 +216,23 @@ class TrainingPolicy(Contract):
         """privacy 과제가 `deploy: approve`가 아니면 ValueError (블러는 사람 승인 후에만 배포)."""
         if "privacy" in v and v["privacy"].deploy != "approve":
             raise ValueError("블러(privacy) 모델은 사람 승인 후에만 배포한다 (deploy: approve)")
+        return v
+
+    @field_validator("tasks")
+    @classmethod
+    def _known_replaces(cls, v: dict[Task, TaskTraining]) -> dict[Task, TaskTraining]:
+        """replaces가 대신할 수 없는 이름이면 ValueError (효과 없이 기본 단계와 함께 돈다)."""
+        for task, spec in v.items():
+            if spec.replaces and spec.stage != "prelabel":
+                raise ValueError(
+                    f"tasks.{task}: stage {spec.stage}는 replaces를 읽지 않습니다 (비워 둔다)"
+                )
+            unknown = sorted(set(spec.replaces) - PRELABEL_REPLACEABLE)
+            if unknown:
+                raise ValueError(
+                    f"tasks.{task}.replaces: 대신할 수 없는 이름 {unknown} "
+                    f"(가능한 이름: {sorted(PRELABEL_REPLACEABLE)})"
+                )
         return v
 
     @field_validator("trainable_states")

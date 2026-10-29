@@ -262,8 +262,8 @@ def run_training_job(  # noqa: C901
         `LoopResult`. skipped면 DB·MLflow에 아무것도 쓰지 않는다.
 
     Raises:
-        TrainingError: 정책·학습기·로더가 없음, 골든셋 없는 데이터셋 버전, 정답을 고정하지 않은
-            이전 형식 골든셋(ADR 0041), 골든셋 세션 누출,
+        TrainingError: 정책·게이트 규칙·학습기·로더가 없음, 골든셋 없는 데이터셋 버전, 정답을
+            고정하지 않은 이전 형식 골든셋(ADR 0041), 골든셋 세션 누출,
             replaces 과제인데 비교 버전 없음, 비교 버전의 골든 예측 없음, 배포 모델 로더 없음,
             산출물 해시 불일치.
     """
@@ -272,6 +272,11 @@ def run_training_job(  # noqa: C901
     spec = policy.tasks.get(job.task)
     if spec is None:
         raise TrainingError(f"{job.task}: 학습 정책이 없습니다 (config/policies/training.yaml)")
+    if job.task not in eval_policy.gate:
+        # 규칙이 없으면 게이트(decide)가 경고만 남기고 통과로 보아 평가 없이 배포된다 (F-ETA-26)
+        raise TrainingError(
+            f"{job.task}: 배포 게이트 규칙이 없습니다 (config/policies/evaluation.yaml gate)"
+        )
     trainer_name = job.trainer or spec.trainer
     trainer, loader = trainers.get(trainer_name), loaders.get(trainer_name)
     if trainer is None or loader is None:

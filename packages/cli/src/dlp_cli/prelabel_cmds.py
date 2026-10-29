@@ -149,9 +149,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                     "부분 실행은 --allow-missing-models로만 허용합니다."
                 )
                 return 1
-            # 배포된 재학습 접촉 모델(hand_state)을 불러왔으면 기본 접촉 단계를 대신한다.
-            # 둘 다 돌면 같은 접촉이 두 번 남는다 (training.yaml contact.replaces에 contact가 있으면
-            # deployed.replaces로도 들어온다)
+            # OWLv2 도구 질의를 장면 어휘로 고른다 (ADR 0055)
             for p in predictors:
                 if isinstance(p, OwlObjects):
                     scene = _scene(args, conn, raw, policy, Path(tmp))
@@ -159,6 +157,9 @@ def cmd_run(args: argparse.Namespace) -> int:
                     print(
                         f"[장면] {scene.scene} (출처 {scene.source}, 신뢰도 {scene.confidence:.2f})"
                     )
+            # 배포된 재학습 접촉 모델(hand_state)을 불러왔으면 기본 접촉 단계를 대신한다.
+            # 둘 다 돌면 같은 접촉이 두 번 남는다 (training.yaml contact.replaces에 contact가 있으면
+            # deployed.replaces로도 들어온다)
             contact_models = list_model_versions(conn, CONTACT_TASK, ModelStatus.DEPLOYED)
             loaded = {p.version for p in deployed.predictors}
             if contact_models and contact_models[-1].model_version in loaded:

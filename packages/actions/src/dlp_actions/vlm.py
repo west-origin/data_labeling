@@ -144,6 +144,10 @@ def response_schema(ontology: Ontology, entities: tuple[str, ...]) -> dict[str, 
 def build_prompt(request: SegmentRequest, ontology: Ontology) -> str:
     """한국어 프롬프트: 구간, 손, 접촉 여부, 원시 동작 목록(ID: 한국어), 사이 구간 종류 목록, 개체
     후보, 설명 작성 규칙, "JSON 하나만" 지시. "모르면 unknown, idle로 고르지 않는다"를 명시한다.
+
+    문구(`classify` 재시도 문구 포함)를 바꾸면 `dlp_actions.policy.PROMPT_VERSION`과 actions.yaml
+    prompt_version을 올린다. 문구는 정책 해시에 들어가지 않아, 올리지 않으면 `dlp actions run`이
+    같은 버전으로 보고 다시 돌지 않는다 (F-PAR-84).
     """
     verbs = "\n".join(
         f"- {v}: {spec.ko}"

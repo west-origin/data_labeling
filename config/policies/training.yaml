@@ -24,10 +24,14 @@ mlflow:
   registered_model_prefix: dlp-       # MLflow 모델 레지스트리 이름 = 접두 + 과제 (DB 레지스트리의 사본)
   deployed_alias: deployed            # 배포 버전에 붙이는 MLflow 별칭
 
-# 과제별 학습 작업 템플릿.
+# 과제별 학습 작업 템플릿. 과제마다 evaluation.yaml gate 규칙이 있어야 한다 (없으면 `dlp train run`이
+#   학습 전에 거절한다. 규칙 없이는 게이트가 통과로 보아 deploy: auto가 평가 없이 배포된다, F-ETA-26).
 #   stage: 배포 모델 연결 단계 (prelabel: 프리라벨 Predictor, privacy: 블러 탐지기).
 #     actions는 예약 값이며 현재 행동 실행 경로에는 연결되지 않았다.
-#   replaces: 배포되면 대신하는 기본 어댑터 이름 (Predictor.name). 프라이버시는 탐지기 합집합이라 빼지 않는다
+#   replaces: 배포되면 대신하는 기본 어댑터 이름. stage prelabel만 쓰고, 이름은 프리라벨 기본 Predictor.name
+#     (hands·body·objects·tools·closed_tools)이나 접촉 단계 contact만 받는다 (그 밖은 적재 오류,
+#     dlp_train.policy.PRELABEL_REPLACEABLE, F-ETA-27). 마스크(masks)·3D(depth3d)는 Predictor가 아니라 뺄
+#     경로가 없다 (받으면 배포 모델과 기본 단계가 함께 돈다). 프라이버시는 탐지기 합집합이라 빼지 않는다 (비워 둔다)
 #   min_examples: 학습을 시작할 최소 예제 수, min_new_examples: 직전 학습 대비 새로 늘어야 할 예제 수
 #     (직전 = 상태와 상관없이 그 과제의 가장 최근 모델 버전. --force로 무시한다)
 #   deploy: auto(게이트 통과 시 바로 배포) | approve(게이트 통과 후 사람이 `dlp train approve`)

@@ -952,3 +952,91 @@ def test_console_global_step_bad_json_is_400(tmp_path: Path) -> None:
         for body in ("{bad", '{"weeks": 1e400}')
     ]
     assert codes == [400, 400]
+
+
+def test_actions_prompt_version_is_in_model_version(monkeypatch: pytest.MonkeyPatch) -> None:
+    """VLM 프롬프트 문구는 결과를 바꾼다. 문구를 바꾸고 틀 버전을 올리면 행동·설명 모델 버전이
+    바뀌어 다음 실행이 다시 돌아야 하고, 정책의 prompt_version이 코드와 다르면 적재 오류여야 한다.
+    지금 틀(1)에서는 기존 버전 문자열이 그대로여야 한다 (기존 세션이 전부 다시 돌지 않게).
+
+    근거: ADR 0012(모델 버전 = 정책 해시 + VLM 버전), 번역·AI 검수의 PROMPT_VERSION 대조
+    (translate_policy·aireview policy).
+    """
+    import yaml
+
+    import dlp_actions.policy as ap
+    from dlp_actions.describe import describe_version
+
+    assert getattr(ap, "PROMPT_VERSION", None) == 1, "프롬프트 틀 버전 상수가 없다"
+    p = ap.load_policy(ROOT)
+    stamp = "stamp"
+    assert getattr(p, stamp, None) == p.digest  # 지금 틀은 버전을 바꾸지 않는다
+    data = yaml.safe_load((ROOT / "config/policies/actions.yaml").read_text("utf-8"))
+    data["prompt_version"] = 2
+    try:
+        ap.ActionsPolicy.model_validate(data)
+        mismatch_accepted = True
+    except ValidationError:
+        mismatch_accepted = False
+    assert not mismatch_accepted
+    monkeypatch.setattr(ap, "PROMPT_VERSION", 2)
+    bumped = ap.ActionsPolicy.model_validate(data)
+    assert getattr(bumped, stamp) != p.digest
+    assert describe_version(bumped, "vlm") != describe_version(p, "vlm")
+
+
+def test_training_refuses_task_without_gate_rule() -> None:
+    """evaluation.yaml gate에 과제 규칙이 없으면 `dlp_eval.gate.decide`는 경고만 남기고 통과로
+    본다. 재학습 루프는 그 결과로 deploy: auto 과제를 배포하므로, 규칙이 없는 과제는 학습 전에
+    거절해야 한다 (DB에 닿기 전에).
+
+    근거: ADR 0016(게이트를 통과한 모델만 배포), CLAUDE.md "배포는 게이트를 통과한 모델만".
+    """
+    from dlp_eval.policy import load_policy as load_eval_policy
+    from dlp_train.loop import TrainingError, TrainingJob, run_training_job
+    from dlp_train.policy import load_policy as load_training_policy
+
+    class NoDb:
+        """DB를 쓰면 실패한다 (거절은 DB 읽기 전에 해야 한다)."""
+
+        def __getattr__(self, name: str) -> Any:
+            raise AssertionError(f"게이트 규칙 확인 전에 DB({name})를 썼다")
+
+    ep = load_eval_policy(ROOT)
+    ep = ep.model_copy(update={"gate": {k: v for k, v in ep.gate.items() if k != "hands"}})
+    with pytest.raises(TrainingError, match="게이트"):
+        run_training_job(
+            NoDb(),  # type: ignore[arg-type]
+            TrainingJob("hands", "dv1"),
+            snapshots=NoDb(),  # type: ignore[arg-type]
+            artifacts=NoDb(),  # type: ignore[arg-type]
+            tracker=NoDb(),  # type: ignore[arg-type]
+            clips=NoDb(),  # type: ignore[arg-type]
+            policy=load_training_policy(ROOT),
+            eval_policy=ep,
+            now=FIXED_TIME,
+        )
+
+
+@pytest.mark.parametrize(
+    ("task", "replaces"), [("objects", ["masks"]), ("hands", ["hand"]), ("privacy", ["yunet"])]
+)
+def test_training_policy_rejects_unknown_replaces(task: str, replaces: list[str]) -> None:
+    """replaces는 프리라벨 Predictor 이름(또는 접촉 단계 contact)과 비교해 기본 어댑터를 뺀다.
+    마스크(MaskMaker)·3D처럼 Predictor가 아닌 단계, 오타, replaces를 읽지 않는 단계(privacy)에
+    적은 이름은 아무 효과가 없어 배포 모델과 기본 어댑터가 함께 돈다. 적재 오류여야 한다.
+
+    근거: ADR 0016(배포 모델이 기본 어댑터를 대신), dlp_train.deployed.Deployed.apply.
+    """
+    import yaml
+
+    from dlp_train.policy import TrainingPolicy
+
+    data = yaml.safe_load((ROOT / "config/policies/training.yaml").read_text("utf-8"))
+    data["tasks"][task]["replaces"] = replaces
+    try:
+        TrainingPolicy.model_validate(data)
+        accepted = True
+    except ValidationError:
+        accepted = False
+    assert not accepted

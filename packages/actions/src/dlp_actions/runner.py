@@ -5,7 +5,7 @@ action·gap·description 레코드를 쓴다. 트랙이 사라진 손은 이 모
 VLM 서버가 재시도(백오프) 후에도 응답하지 않은 구간이 있으면 VlmUnavailableError로 세션 전체를
 멈춘다 (호출자의 트랜잭션이 되돌려져 아무것도 쓰지 않으므로 다시 실행하면 처음부터 한다).
 서버 장애를 미상으로 채워 정상 버전으로 쓰면 재실행이 건너뛰어 미상이 영구히 남기 때문이다.
-model_version은 "actions-<정책 해시>+<VLM 버전>+i<입력 해시>"다.
+model_version은 "actions-<정책 표시>+<VLM 버전>+i<입력 해시>"다 (정책 표시 = `ActionsPolicy.stamp`).
 입력 해시는 이 단계가 읽는 현재 라벨(손마다 고른 바디캠 hand21 트랙, 손 상태, 객체 트랙)의 ID 집합
 해시다. 같은 손 트랙이 여럿이면 프리라벨 접촉·3D 단계와 같은 공용 순위(`dlp_schema.episode.
 track_rank`: 사람·검수 → 최신 → 긴 구간 → 라벨 ID)로 하나를 고른다 (F-PAR-04).
@@ -397,7 +397,7 @@ def _read_inputs(
         current=current,
         tracks={hand: _track(x) for hand, x in picked.items()},
         entities=tuple(sorted(candidates - set(policy.unresolved_entity_ids))),
-        version=f"{PREFIX}{policy.digest}+{vlm_version}+i{inputs}",
+        version=f"{PREFIX}{policy.stamp}+{vlm_version}+i{inputs}",
         descriptions_by_action=descriptions_by_action,
         reviewed_descriptions=reviewed,
     )
@@ -419,7 +419,7 @@ def run_actions(
         session_id: 세션 ID.
         client: VLM 클라이언트 (`version`이 모델 버전에 들어간다).
         ontology: 온톨로지.
-        policy: 행동 구간 정책 (`digest`가 모델 버전에 들어간다).
+        policy: 행동 구간 정책 (`stamp`가 모델 버전에 들어간다).
         now: 생성 시각 (시간대 필수).
         labeling: 라벨링 버킷 저장소. 주면 블러본을 받아 VLM에 프레임을 보낸다. None이면 프레임 없이
             묻는다 (테스트·오라클).

@@ -211,7 +211,8 @@ class EvaluationPolicy(Contract):
     proxy: ProxyPolicy  # 정답 없는 품질 대리 지표 기준 (`dlp_eval.proxy`, `dlp ops quality-proxy`)
     # 하위 집단 리포트 축 (값은 `runner.golden_sessions`가 정한다)
     subgroups: tuple[Literal["glove", "site"], ...]
-    gate: dict[Task, GateRule]  # 과제 → 배포 규칙 (없는 과제는 판정하지 않고 경고)
+    # 과제 → 배포 규칙. 없는 과제는 판정하지 않고 경고, 재학습 루프는 학습 전에 거절한다
+    gate: dict[Task, GateRule]
 
     @model_validator(mode="after")
     def _check_gate_metrics(self) -> EvaluationPolicy:

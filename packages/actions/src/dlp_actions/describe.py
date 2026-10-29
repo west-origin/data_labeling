@@ -26,7 +26,7 @@
     서버 장애는 정책 백오프 뒤 `VlmUnavailableError`를 올린다 (호출자가 트랜잭션을 되돌린다).
 
 기록과 출처 (감사)
-    설명 레코드 = 모델 출처, `model_version` = `describe-<행동 정책 해시>+<VLM 버전>`
+    설명 레코드 = 모델 출처, `model_version` = `describe-<행동 정책 표시 stamp>+<VLM 버전>`
     (`describe_version`, 접두사 `dlp_schema.description_follow.REGENERATED_PREFIX`), 근거 INFERRED,
     stream_id 없음(마스터 타임라인), 구간 = 주인 레코드 구간의 합. 라벨 ID =
     `derived_id(action_id, "ko<version_tag>-i<주인 라벨 ID 해시>")`라 같은 버전·같은 고친 레코드면
@@ -153,7 +153,7 @@ class DescribeSummary:
 
 def describe_version(policy: ActionsPolicy, vlm_version: str) -> str:
     """설명 버전 `describe-<행동 정책 해시>+<VLM 버전>`."""
-    return f"{REGENERATED_PREFIX}{policy.digest}+{vlm_version}"
+    return f"{REGENERATED_PREFIX}{policy.stamp}+{vlm_version}"
 
 
 def description_id(action_id: str, owners: Sequence[LabelRecord], version: str) -> str:
@@ -383,7 +383,11 @@ def _states(ontology: Ontology, states: dict[str, str]) -> str:
 
 
 def describe_prompt(target: DescribeTarget, ontology: Ontology) -> str:
-    """한국어 프롬프트: 검수자가 확정한 손마다 의미 필드 전부, 설명 작성 규칙."""
+    """한국어 프롬프트: 검수자가 확정한 손마다 의미 필드 전부, 설명 작성 규칙.
+
+    문구(`ask_description` 재시도 문구 포함)를 바꾸면 `dlp_actions.policy.PROMPT_VERSION`과
+    actions.yaml prompt_version을 올린다 (설명 버전에 들어간다, F-PAR-84).
+    """
     start, end = _span(target)
     lines: list[str] = []
     for a in _actions(target):

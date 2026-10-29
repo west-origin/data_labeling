@@ -362,6 +362,18 @@ def test_backoff_is_not_part_of_the_policy_digest(policy: ActionsPolicy) -> None
     assert slower.digest == policy.digest and policy.vlm.unavailable_backoff_s
 
 
+def test_prompt_version_keeps_existing_model_version(policy: ActionsPolicy) -> None:
+    """첫 프롬프트 틀 버전(1)은 정책 해시·버전 문자열을 바꾸지 않는다 (기존 세션이 다시 돌지 않게).
+
+    정답 근거: prompt_version 키가 없던 저장소 actions.yaml의 해시 6bc9c0790f56 (기존 라벨의 버전
+    문자열). 정책 값을 바꿔 해시가 바뀌면 이 기대값도 함께 고친다 (F-PAR-84).
+    """
+    assert policy.prompt_version == 1
+    assert policy.digest == "6bc9c0790f56" and policy.stamp == policy.digest
+    other = policy.model_copy(update={"prompt_version": 2})
+    assert other.digest == policy.digest and other.stamp == f"{policy.digest}+pv2"
+
+
 @pytest.mark.parametrize("seed", [0, 3])
 def test_vlm_request_count_matches_segment_hand(
     seed: int, ontology: Ontology, policy: ActionsPolicy

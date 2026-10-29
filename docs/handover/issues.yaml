@@ -1049,3 +1049,12 @@ issues:
   - {id: F-AIR-37, title: "판정단 후보(d3-turbo·Amos 1)는 OpenAI 호환 채팅이 아닌 System One 결정 API라 지금 판정 백엔드·backend.panel로 부를 수 없음", severity: medium, status: open, kind: product,
      files: [packages/aireview/src/dlp_aireview/backend.py, config/policies/aireview.yaml, config/models.yaml], source: docs/adr/0063-decision-model-judge-panel.md,
      note: "2026-10-29 모델 카드 원문 확인. 결정 API 백엔드(판정 질문 → 선택지 확률 → 확신도) 어댑터와 CPU stub, 원격 코드 revision 고정·검토가 필요하다 (ADR 0063 개정)."}
+  - {id: F-PAR-84, title: "행동 분류·설명 재생성 VLM 프롬프트 문구가 모델 버전에 들어가지 않아 문구를 바꿔도 dlp actions run|describe가 다시 돌지 않음", severity: low, status: fixed, kind: code,
+     files: [packages/actions/src/dlp_actions/policy.py, packages/actions/src/dlp_actions/vlm.py, packages/actions/src/dlp_actions/describe.py, packages/actions/src/dlp_actions/runner.py, config/policies/actions.yaml], source: docs/adr/0012-two-stage-action-segmentation.md,
+     note: "코드 PROMPT_VERSION과 actions.yaml prompt_version 대조(다르면 적재 오류), 버전에는 ActionsPolicy.stamp(해시 + 틀 버전이 1이 아니면 +pv<n>). prompt_version은 해시 밖이라 지금 버전 문자열은 그대로다. 회귀: tests/test_known_defects.py::test_actions_prompt_version_is_in_model_version(xfail 표시 지움), packages/actions/tests/test_actions.py::test_prompt_version_keeps_existing_model_version"}
+  - {id: F-ETA-26, title: "evaluation.yaml gate에 규칙이 없는 과제를 게이트가 통과로 보아 deploy auto면 평가 없이 배포", severity: medium, status: fixed, kind: code,
+     files: [packages/training/src/dlp_train/loop.py, packages/evaluation/src/dlp_eval/gate.py, config/policies/training.yaml, config/policies/evaluation.yaml], source: docs/adr/0016-retraining-loop.md,
+     note: "run_training_job이 DB를 읽기 전에 게이트 규칙 없는 과제를 TrainingError로 거절한다 (dlp eval golden의 경고 동작은 그대로). 지금 저장소 training.yaml 과제는 모두 규칙이 있다. 회귀: tests/test_known_defects.py::test_training_refuses_task_without_gate_rule(xfail 표시 지움), packages/training/tests/test_policy.py::test_every_training_task_has_a_gate_rule"}
+  - {id: F-ETA-27, title: "training.yaml replaces에 대신할 수 없는 이름(masks·depth3d·오타, privacy 단계)을 적어도 적재되어 배포 모델과 기본 단계가 함께 돔", severity: low, status: fixed, kind: code,
+     files: [packages/training/src/dlp_train/policy.py, config/policies/training.yaml], source: docs/adr/0016-retraining-loop.md,
+     note: "TrainingPolicy._known_replaces: stage prelabel만, 이름은 PRELABEL_REPLACEABLE(프리라벨 기본 Predictor 이름 + contact) 안. 마스크 대체는 지원하지 않는다. 회귀: tests/test_known_defects.py::test_training_policy_rejects_unknown_replaces(xfail 표시 지움), packages/training/tests/test_policy.py::test_replaceable_names_match_prelabel_adapters"}
