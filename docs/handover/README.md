@@ -4,6 +4,16 @@
 만드는 Python CLI 플랫폼이다. 검수 화면은 CVAT·Label Studio를 사용한다. 현재 인수 범위는
 **단일 운영 환경의 파일럿**이며, 여러 고객을 받는 SaaS의 인증·격리·운영 보장은 추가 구현이 필요하다.
 
+## 첫날 읽을 5개
+
+순서대로 읽는다. 나머지는 아래 [더 읽을 것](#더-읽을-것과-문서의-책임)에서 필요할 때 찾는다.
+
+1. [인수 기준](acceptance.md) — 무엇을 끝내야 인수되는지(범위·결과물 형식·검사)부터 알아야 나머지를 읽는 깊이를 정할 수 있다.
+2. [구조 지도](architecture.md) — 코드를 어디서 읽을지, 패키지 의존 표, 상태·시간·원본 경계, 용어와 패키지 상세가 있다.
+3. [불변 조건과 강제 수단](invariants.md) — 어떤 규칙이 트리거·테스트로 막히고 어떤 규칙이 문서뿐인지 알려 준다.
+4. [변경 및 복구 안내](change-guide.md) — 바꿀 때 함께 고칠 파일·테스트와 실패·재시도·잠금의 복구 방법이다.
+5. [CLAUDE.md "규칙" 절](../../CLAUDE.md#규칙) — 라벨 덮어쓰기 금지·원본 노출 금지·분할·라이선스 등 어떤 변경도 어기면 안 되는 약속이다.
+
 **데이터 용도 (2026-10-24 사용자 결정):** 라벨링한 데이터는 당분간 판매하지 않고 **사내 모델 개발**에
 쓴다. 이것은 문서상의 용도 변경일 뿐이다. 모델 상업 사용 분류(ADR 0010, `forbidden` 가중치 금지),
 원본·개인정보 경계(ADR 0020·0021), 내보내기 규칙(블러본만·가명·검수 라벨 기본, ADR 0027)은 그대로
@@ -31,9 +41,9 @@ flowchart LR
 
 이 그림은 운영 순서다. 추론 단계가 모두 블러본을 읽는다는 뜻은 아니다. 서버 내 프리라벨은
 감사 경로로 원본을 읽고, 일반 검수자·행동 VLM·큐레이션·내보내기는 승인된 블러본을 사용한다.
-실제 재학습기는 아직 연결되지 않았다.
+objects 과제만 실제 학습기(yolox, ADR 0062)가 있고 기본 학습기와 나머지 과제는 oracle-stub이다.
 
-## 현재 상태: 2026-10-11 기준
+## 현재 상태 (마지막 갱신 2026-10-29)
 
 | 영역 | 구현·확인된 범위 | 인수자가 추가 확인할 것 |
 | --- | --- | --- |
@@ -55,44 +65,7 @@ flowchart LR
 현재 테스트 결과는 [남은 과제](known-issues.md), 확정·후보 문제의 단일 목록은 [레지스트리](issues.yaml)가 기준이다.
 테스트 통과와 실영상 정확도·상용 서비스 준비 완료는 별개의 판단이다.
 
-## 블러가 바뀐 뒤 라벨링 작업 회수와 재생성
-
-승인 뒤 블러 재검수·재탐지·렌더 정책 변경으로 블러본이 바뀌면, 이미 배포한 라벨링 작업
-(CVAT 워터마크 사본, Label Studio 서명 URL)은 그 커밋에서 회수 요청되고 커밋 뒤 끊긴다
-([ADR 0039](../adr/0039-revoke-labeling-media-on-blur-change.md)).
-
-1. 수집(웹훅 수집이면 `dlp review serve` 서버 로그)·탐지·렌더 출력의 회수 내용과 다시 만들 명령을
-   본다. 대기가 남으면 종료 코드 4다. `dlp review revoke <세션>`으로 다시 실행한다
-   (cron: `dlp review revoke --pending`, 10분마다. 미리보기는 `--pending --dry-run`).
-   Label Studio 작업의 서명 URL은 `review.yaml media.signed_url_ttl_s`(기본 7일) 뒤 만료되므로
-   `dlp review refresh-urls`도 cron으로 하루 한 번 돌린다 (열린 작업만 다시 서명, 실패하면 종료 코드 1).
-2. 남은 블러 검수 → `dlp privacy approve` → `dlp privacy render`.
-3. AI 1차 검수를 쓰면(`review.yaml ai_review.mode`가 off가 아님) 먼저 `dlp aireview run <세션>`: 이전
-   판정은 렌더 해시가 달라 새 작업에 보이지 않는다 (ADR 0040 I10, 수집 출력의 안내에도 들어간다).
-   그다음 출력된 배정마다 `dlp review assign <배정>`, 배정 없는 작업은
-   `dlp review create <세션> --stage labeling --assignee <담당자> --stream <스트림> --tool <도구>`.
-   출력을 놓쳤으면 `dlp review verify <세션>`이 다시 만들 배정·직접 작업 명령을 보인다.
-4. 검수·수집 → 배정 완료 → `dlp review verify <세션>`.
-
-배포 직후에는 렌더 해시가 없는 구 작업을 `dlp review revoke <세션> --dry-run --include-legacy`로
-확인하고 필요하면 `--include-legacy`로 회수한다. 라벨러가 노출을 신고하면
-`dlp privacy hold <세션> --reason <신고>`로 승인을 보류한다 (승인 해제·렌더 무효·배포된 라벨링 작업
-전부 회수, 보류 중 승인·라벨링 작업 생성 거부). 블러 검수·수집 뒤 `--release --reason <조치>`로
-해제하고 `dlp privacy approve` → `render`로 재승인한다 ([ADR 0042](../adr/0042-privacy-approval-hold.md)).
-한 스트림·작업만 끊을 때는 `dlp review revoke <세션> --stream <스트림> --all --reason incident`(작업을
-알면 `--task <작업 키> --reason incident`). DB 회수 밖의 노출(라벨러 자격 증명 교체, CVAT·Label Studio
-내보내기 기록 확인, 내려받기 경로 차단)은 ADR 0039 "사고 대응" 절차이고 문서뿐이다. 운영 배포 전과
-월간 감사 때 `dlp services check --security`로 라벨링 버킷 버전 관리 꺼짐과 라벨러 키 범위(라벨링
-버킷 읽기만)를 확인한다 (F-REV-19). 작업 생성이 실패해 DB 기록 없이 남은 도구
-작업·사본(고아)은 `dlp review revoke --orphans`로 보고, 확인한 뒤 `--orphans --apply`로 지운다
-(이 플랫폼 이름 규칙에 맞고 나이 하한 `review.yaml orphans.min_age_s`가 지난 것만, F-REV-15).
-세션을 사용 중지하면(`dlp dataset withdraw`) 그 세션의 배포된 라벨링 작업이 같은 커밋에서 회수
-요청되고 명령이 커밋 뒤 회수를 실행한다 (대기가 남으면 4). 그 세션에는 새 검수 작업을 만들지 않는다
-(F-REV-17). `privacy.yaml render` 절은 화질(crf)만 바꿔도
-렌더 해시가 바뀌어 다시 렌더하는 세션의 라벨링 작업이 모두 회수되므로, 진행 중 라벨링이 없을 때
-바꾼다.
-
-## 읽는 순서와 문서의 책임
+## 더 읽을 것과 문서의 책임
 
 | 목적 | 문서 |
 | --- | --- |
@@ -131,3 +104,40 @@ flowchart LR
 계획 문서는 요구사항, ADR은 결정 당시의 기록이다. 현재 구현 상태는 이 안내와 코드로 확인한다.
 새 변경은 상태표·관련 과제·변경 안내를 함께 갱신한다. 환경별 로그와 보고서(`reports/`, Git 제외)는
 보조 증거로 보관하고, 인수에 필요한 결론은 이 디렉터리에 남긴다.
+
+## 블러가 바뀐 뒤 라벨링 작업 회수와 재생성
+
+승인 뒤 블러 재검수·재탐지·렌더 정책 변경으로 블러본이 바뀌면, 이미 배포한 라벨링 작업
+(CVAT 워터마크 사본, Label Studio 서명 URL)은 그 커밋에서 회수 요청되고 커밋 뒤 끊긴다
+([ADR 0039](../adr/0039-revoke-labeling-media-on-blur-change.md)).
+
+1. 수집(웹훅 수집이면 `dlp review serve` 서버 로그)·탐지·렌더 출력의 회수 내용과 다시 만들 명령을
+   본다. 대기가 남으면 종료 코드 4다. `dlp review revoke <세션>`으로 다시 실행한다
+   (cron: `dlp review revoke --pending`, 10분마다. 미리보기는 `--pending --dry-run`).
+   Label Studio 작업의 서명 URL은 `review.yaml media.signed_url_ttl_s`(기본 7일) 뒤 만료되므로
+   `dlp review refresh-urls`도 cron으로 하루 한 번 돌린다 (열린 작업만 다시 서명, 실패하면 종료 코드 1).
+2. 남은 블러 검수 → `dlp privacy approve` → `dlp privacy render`.
+3. AI 1차 검수를 쓰면(`review.yaml ai_review.mode`가 off가 아님) 먼저 `dlp aireview run <세션>`: 이전
+   판정은 렌더 해시가 달라 새 작업에 보이지 않는다 (ADR 0040 I10, 수집 출력의 안내에도 들어간다).
+   그다음 출력된 배정마다 `dlp review assign <배정>`, 배정 없는 작업은
+   `dlp review create <세션> --stage labeling --assignee <담당자> --stream <스트림> --tool <도구>`.
+   출력을 놓쳤으면 `dlp review verify <세션>`이 다시 만들 배정·직접 작업 명령을 보인다.
+4. 검수·수집 → 배정 완료 → `dlp review verify <세션>`.
+
+배포 직후에는 렌더 해시가 없는 구 작업을 `dlp review revoke <세션> --dry-run --include-legacy`로
+확인하고 필요하면 `--include-legacy`로 회수한다. 라벨러가 노출을 신고하면
+`dlp privacy hold <세션> --reason <신고>`로 승인을 보류한다 (승인 해제·렌더 무효·배포된 라벨링 작업
+전부 회수, 보류 중 승인·라벨링 작업 생성 거부). 블러 검수·수집 뒤 `--release --reason <조치>`로
+해제하고 `dlp privacy approve` → `render`로 재승인한다 ([ADR 0042](../adr/0042-privacy-approval-hold.md)).
+한 스트림·작업만 끊을 때는 `dlp review revoke <세션> --stream <스트림> --all --reason incident`(작업을
+알면 `--task <작업 키> --reason incident`). DB 회수 밖의 노출(라벨러 자격 증명 교체, CVAT·Label Studio
+내보내기 기록 확인, 내려받기 경로 차단)은 ADR 0039 "사고 대응" 절차이고 문서뿐이다. 운영 배포 전과
+월간 감사 때 `dlp services check --security`로 라벨링 버킷 버전 관리 꺼짐과 라벨러 키 범위(라벨링
+버킷 읽기만)를 확인한다 (F-REV-19). 작업 생성이 실패해 DB 기록 없이 남은 도구
+작업·사본(고아)은 `dlp review revoke --orphans`로 보고, 확인한 뒤 `--orphans --apply`로 지운다
+(이 플랫폼 이름 규칙에 맞고 나이 하한 `review.yaml orphans.min_age_s`가 지난 것만, F-REV-15).
+세션을 사용 중지하면(`dlp dataset withdraw`) 그 세션의 배포된 라벨링 작업이 같은 커밋에서 회수
+요청되고 명령이 커밋 뒤 회수를 실행한다 (대기가 남으면 4). 그 세션에는 새 검수 작업을 만들지 않는다
+(F-REV-17). `privacy.yaml render` 절은 화질(crf)만 바꿔도
+렌더 해시가 바뀌어 다시 렌더하는 세션의 라벨링 작업이 모두 회수되므로, 진행 중 라벨링이 없을 때
+바꾼다.
