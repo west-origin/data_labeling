@@ -234,13 +234,13 @@ def test_labels_are_immutable_except_review(pg: sa.Engine) -> None:
             conn.execute(sa.text(statement))
 
 
-# TRUNCATE를 막아야 하는 추가 전용 테이블 (0010~0012, 0017, 0021, 0022, 0023, 0024)
+# TRUNCATE를 막아야 하는 추가 전용 테이블 (0010~0012, 0017, 0021, 0022, 0023, 0024, 0025)
 APPEND_ONLY_TABLES = (
     "label_records", "raw_access_log", "review_work", "privacy_audits", "retention_decisions",
     "session_lifecycle_events", "privacy_detection_runs", "privacy_holds",
     "description_inheritance", "camera_calibrations", "worker_hand_sizes",
     "trajectory_inheritance", "worker_hand_size_sources", "worker_hand_size_invalidations",
-    "session_camera_assignments",
+    "session_camera_assignments", "prelabel_stage_runs",
 )  # fmt: skip
 
 
@@ -627,6 +627,61 @@ def test_trajectory_inheritance_is_append_only_and_blocks_downgrade(pg: sa.Engin
     pg.dispose()
     with pytest.raises(RuntimeError, match="0023"):
         downgrade(url, "0022")
+
+
+@pytest.mark.services
+def test_prelabel_stage_runs_are_append_only_and_block_downgrade(pg: sa.Engine) -> None:
+    """프리라벨 단계 실행 기록(0025, ADR 0015 개정, F-PAR-75)은 결과 0개도 남고, 수정·삭제할 수
+    없으며, 기록이 있으면 0025를 되돌릴 수 없다."""
+    from dlp_schema.db.prelabel_repository import (
+        list_prelabel_stage_runs,
+        record_prelabel_stage_run,
+    )
+
+    with pg.begin() as conn:
+        rec = record_prelabel_stage_run(conn, "s001", "bodycam", "hands", "h-1", 0, FIXED_TIME)
+    with pg.connect() as conn:
+        assert list_prelabel_stage_runs(conn, "s001", stage="hands") == [rec]
+    for statement in (
+        "UPDATE prelabel_stage_runs SET produced = 1",
+        "DELETE FROM prelabel_stage_runs",
+    ):
+        with pytest.raises(DBAPIError, match="prelabel_stage_runs"), pg.begin() as conn:
+            conn.execute(sa.text(statement))
+    url = pg.url.render_as_string(hide_password=False)
+    pg.dispose()
+    with pytest.raises(RuntimeError, match="0025"):
+        downgrade(url, "0024")
+
+
+def test_prelabel_stage_run_roundtrip_and_contract() -> None:
+    """SQLite에서도 실행 기록이 시간대·일련번호와 함께 돌아오고, 스트림·단계로 거른다. 결과 수가
+    음수이거나 시각에 시간대가 없으면 쓰지 않는다 (정답: 넣은 값)."""
+    from pydantic import ValidationError
+
+    from dlp_schema.db.prelabel_repository import (
+        list_prelabel_stage_runs,
+        record_prelabel_stage_run,
+    )
+    from dlp_schema.db.repository import insert_session
+    from dlp_schema.testing import sqlite_db
+
+    engine = sqlite_db()
+    with engine.begin() as conn:
+        insert_session(conn, make_session())
+        a = record_prelabel_stage_run(conn, "s001", "bodycam", "hands", "h-1", 0, FIXED_TIME)
+        b = record_prelabel_stage_run(conn, "s001", "bodycam", "masks", "m-1", 3, FIXED_TIME)
+        with pytest.raises(ValidationError):
+            record_prelabel_stage_run(conn, "s001", "bodycam", "masks", "m-1", -1, FIXED_TIME)
+        with pytest.raises(ValidationError):
+            naive = FIXED_TIME.replace(tzinfo=None)
+            record_prelabel_stage_run(conn, "s001", "bodycam", "masks", "m-1", 0, naive)
+    with engine.connect() as conn:
+        assert list_prelabel_stage_runs(conn, "s001") == [a, b]
+        assert list_prelabel_stage_runs(conn, "s001", stream_id="bodycam", stage="masks") == [b]
+        assert list_prelabel_stage_runs(conn, "s001", stage="contact") == []
+    engine.dispose()
+    assert a.event_id < b.event_id and a.at == FIXED_TIME
 
 
 def test_adding_english_names_to_registered_draft_is_additive(ontology: Ontology) -> None:

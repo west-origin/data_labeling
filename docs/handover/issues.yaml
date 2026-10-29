@@ -998,9 +998,9 @@ issues:
   - {id: F-PMS-47, title: "on_hand 블러 힌트가 보이지 않는(visibility 0) 관절 좌표를 씀", severity: low, status: fixed, kind: code,
      files: [packages/privacy/src/dlp_privacy/hints.py], source: docs/handover/full-inspection-2026-10-28.md,
      note: "on_hand 손 박스는 visibility > 0 관절만 쓴다. 회귀: tests/test_known_defects.py::test_on_hand_hint_ignores_invisible_joints(xfail 표시 지움)"}
-  - {id: F-PAR-75, title: "결과 0개인 예측기·마스크 단계가 매 실행 원본을 받아 다시 돎 (멱등 깨짐)", severity: low, status: open, kind: code,
+  - {id: F-PAR-75, title: "결과 0개인 예측기·마스크 단계가 매 실행 원본을 받아 다시 돎 (멱등 깨짐)", severity: low, status: fixed, kind: code,
      files: [packages/prelabel/src/dlp_prelabel/runner.py], source: docs/handover/full-inspection-2026-10-28.md,
-     repro: tests/test_known_defects.py::test_prelabel_empty_predictor_is_idempotent}
+     note: "추가 전용 단계 실행 기록 prelabel_stage_runs(Alembic 0025, 계약 PrelabelStageRun)를 라벨과 같은 트랜잭션에 결과 0개도 남기고, 1단계 예측기·접촉·stage_version(마스크·3D·자세·월드)이 라벨 이력과 함께 본다. 착용자 매칭은 버전에 입력이 없어 제외. ADR 0015 개정. 회귀: packages/prelabel/tests/test_masks.py::test_runner_mask_stage_with_no_masks_does_not_rerun 회귀: tests/test_known_defects.py::test_prelabel_empty_predictor_is_idempotent(xfail 표시 지움)"}
   - {id: F-PAR-76, title: "OWLv2 버전이 scene 절 전체를 해시해 VLM 시간 제한만 바꿔도 재실행", severity: low, status: fixed, kind: code,
      files: [packages/prelabel/src/dlp_prelabel/adapters/owl_objects.py], source: docs/handover/full-inspection-2026-10-28.md,
      note: "OWLv2 버전은 open_vocab_objects 해시와 +sc<장면>만 쓴다(첫 실행 한 번 재실행). ADR 0055 개정. 회귀: tests/test_known_defects.py::test_owl_version_ignores_scene_timeout(xfail 표시 지움)"}

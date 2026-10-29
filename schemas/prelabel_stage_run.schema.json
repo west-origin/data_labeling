@@ -1,0 +1,57 @@
+{
+  "additionalProperties": false,
+  "description": "프리라벨 단계 실행 기록 하나 (결과 0개 포함, 추가 전용. ADR 0015 개정, F-PAR-75).\n\n단계(예측기 이름 또는 masks·3d·campose·world3d·contact)가 그 버전으로 계산을 마쳤다는 증거다.\n결과가 0개면 라벨 이력에 그 버전이 남지 않아, 이 기록이 없으면 매 실행 원본을 다시 받고\n다시 돌았다. 다시 돌릴지는 라벨 이력과 이 기록을 함께 보고 정한다 (`dlp_prelabel.runner`).\n라벨이 아니다 (`label_records`와 따로, 같은 트랜잭션에서 쓴다).",
+  "properties": {
+    "at": {
+      "format": "date-time",
+      "title": "At",
+      "type": "string"
+    },
+    "event_id": {
+      "description": "DB가 매기는 일련번호",
+      "minimum": 1,
+      "title": "Event Id",
+      "type": "integer"
+    },
+    "model_version": {
+      "description": "단계가 계산에 쓴 버전 (재실행 세대 `+r<n>` 포함, 라벨의 model_version과 같다)",
+      "minLength": 1,
+      "title": "Model Version",
+      "type": "string"
+    },
+    "produced": {
+      "description": "이 실행이 새로 넣은 결과 라벨 수 (0 가능)",
+      "minimum": 0,
+      "title": "Produced",
+      "type": "integer"
+    },
+    "session_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Session Id",
+      "type": "string"
+    },
+    "stage": {
+      "description": "예측기 이름 또는 단계 이름 (masks·3d·campose 등)",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Stage",
+      "type": "string"
+    },
+    "stream_id": {
+      "description": "단계를 돌린 영상 스트림 (타임라인 단계·접촉은 기준 스트림)",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+      "title": "Stream Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "event_id",
+    "session_id",
+    "stream_id",
+    "stage",
+    "model_version",
+    "produced",
+    "at"
+  ],
+  "title": "PrelabelStageRun",
+  "type": "object"
+}

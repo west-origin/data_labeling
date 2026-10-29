@@ -47,7 +47,13 @@ from dlp_schema.review import (
     ReviewTask,
     TrajectoryInheritance,
 )
-from dlp_schema.session import LifecycleEvent, PrivacyDetectionRun, PrivacyHoldEvent, Session
+from dlp_schema.session import (
+    LifecycleEvent,
+    PrelabelStageRun,
+    PrivacyDetectionRun,
+    PrivacyHoldEvent,
+    Session,
+)
 
 # 생성할 스키마 목록. 키가 파일 이름이 된다 (`<키>.schema.json`).
 # 새 최상위 계약을 추가하면 여기에 등록하고 `make schemas`로 파일을 만든다.
@@ -56,6 +62,8 @@ CONTRACTS: dict[str, type[BaseModel]] = {
     "lifecycle_event": LifecycleEvent,
     "privacy_detection_run": PrivacyDetectionRun,
     "privacy_hold_event": PrivacyHoldEvent,
+    # 프리라벨 단계 실행 기록 (결과 0개 포함, ADR 0015 개정, 추가 전용 표)
+    "prelabel_stage_run": PrelabelStageRun,
     "label_record": LabelRecord,
     "episode_graph": EpisodeGraph,
     "dataset_version": DatasetVersion,

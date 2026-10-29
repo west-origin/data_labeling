@@ -379,3 +379,61 @@ def test_reviewed_mask_protects_its_object_not_its_old_entity_number(
     assert blocked == 1 and len(masks) == 2 and len(new) == 1
     assert isinstance(new[0].payload, MaskTrackPayload) and new[0].payload.derived_from
     assert _x0(by_id[new[0].payload.derived_from[0]]) == 220.0
+
+
+class _NothingSegmenter:
+    """마스크를 하나도 내지 않는 분할기 (부른 횟수를 센다). 결과 0개 단계의 멱등 확인용."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def predict(self, image: Any, prompts: Any) -> list[MaskResult | None]:
+        """프롬프트마다 None (마스크 없음)."""
+        self.calls += 1
+        return [None for _ in prompts]
+
+
+def test_runner_mask_stage_with_no_masks_does_not_rerun(
+    tmp_path: Path, policy: PrelabelPolicy, ontology: Ontology
+) -> None:
+    """F-PAR-75: 마스크가 0개로 끝난 실행도 단계 실행 기록을 남겨, 같은 입력·같은 버전으로 다시
+    부르면 원본을 받거나 분할기를 다시 부르지 않는다. 박스 입력이 바뀌면(새 박스 모델 버전) 다시
+    돈다.
+
+    근거: CLAUDE.md "각 파이프라인 단계는 멱등적인 `dlp <단계>`". 라벨 이력에만 기대면 결과 0개인
+    버전은 흔적이 없어 매 실행 다시 돌았다.
+    """
+    from dlp_schema.db.prelabel_repository import list_prelabel_stage_runs
+
+    sc = generate_shape_scenario(0)
+    engine, raw = _session(tmp_path, ontology, sc)
+    segmenter = _NothingSegmenter()
+    maker = MaskMaker(policy, segmenter, "stub", now=FIXED_TIME)
+
+    def predictors(jitter: float) -> list[Any]:
+        """손·객체 Oracle (jitter가 바뀌면 박스 모델 버전이 바뀐다)."""
+        return [
+            OraclePredictor("hands", sc.labels, ("keypoint_track",), now=FIXED_TIME),
+            OraclePredictor("objects", sc.labels, ("box_track",), jitter_px=jitter, now=FIXED_TIME),
+        ]
+
+    with engine.begin() as conn:
+        first = run_prelabel(
+            conn, "shapes", raw, predictors(0.0), policy, ontology, FIXED_TIME, masker=maker
+        )
+    calls = segmenter.calls
+    assert first.masks == 0 and calls > 0
+    with engine.begin() as conn:
+        again = run_prelabel(
+            conn, "shapes", raw, predictors(0.0), policy, ontology, FIXED_TIME, masker=maker
+        )
+        runs = list_prelabel_stage_runs(conn, "shapes", stage="masks")
+        assert _masks(conn) == []
+    assert again.masks == 0 and again.mask_report is None and segmenter.calls == calls
+    assert [(r.stream_id, r.produced) for r in runs] == [("bodycam", 0)]
+    later = FIXED_TIME + timedelta(minutes=1)
+    with engine.begin() as conn:
+        run_prelabel(conn, "shapes", raw, predictors(0.5), policy, ontology, later, masker=maker)
+        runs = list_prelabel_stage_runs(conn, "shapes", stage="masks")
+    assert segmenter.calls > calls and len(runs) == 2
+    assert runs[0].model_version != runs[1].model_version

@@ -30,6 +30,8 @@
       삭제·TRUNCATE 금지 (0022, ADR 0045).
     - worker_hand_size_sources, worker_hand_size_invalidations, session_camera_assignments: 손 크기
       추정 출처 세션·손 크기 무효 기록·세션 기기 연결, 수정·삭제·TRUNCATE 금지 (0024, ADR 0052).
+    - prelabel_stage_runs: 결과 0개를 포함한 프리라벨 단계 실행 기록, 수정·삭제·TRUNCATE 금지
+      (0025, ADR 0015 개정, F-PAR-75).
 
 열 규약
     - 시각(`Ts`)은 모두 `TIMESTAMP WITH TIME ZONE`. 파이썬 쪽도 시간대 있는 datetime만 쓴다.
@@ -166,6 +168,30 @@ privacy_detection_runs = sa.Table(
     ),
     sa.UniqueConstraint("event_id", "session_id", "stream_id"),
     sa.Index("ix_privacy_detection_runs_session_stream", "session_id", "stream_id"),
+)
+
+# 프리라벨 단계 실행 기록 (`PrelabelStageRun`, 0025, ADR 0015 개정). 결과가 0개여도 그 버전으로
+# 계산을 마쳤다는 증거를 남겨, 같은 버전으로 다시 원본을 받고 돌지 않게 한다 (F-PAR-75).
+# 색인 (session_id, stream_id, stage): 단계마다 실행 기록 조회.
+prelabel_stage_runs = sa.Table(
+    "prelabel_stage_runs",
+    metadata,
+    sa.Column(
+        "event_id",
+        sa.BigInteger().with_variant(sa.Integer(), "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    ),
+    sa.Column("session_id", sa.String(128), nullable=False),
+    sa.Column("stream_id", sa.String(128), nullable=False),
+    sa.Column("stage", sa.String(128), nullable=False),
+    sa.Column("model_version", sa.Text(), nullable=False),
+    sa.Column("produced", sa.Integer(), nullable=False),
+    sa.Column("at", Ts, nullable=False),
+    sa.ForeignKeyConstraint(
+        ["session_id", "stream_id"], ["streams.session_id", "streams.stream_id"]
+    ),
+    sa.Index("ix_prelabel_stage_runs_session_stage", "session_id", "stream_id", "stage"),
 )
 
 # 프라이버시 승인 보류·해제 기록 (`PrivacyHoldEvent`, ADR 0042). 추가만 한다 (0017 트리거).

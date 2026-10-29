@@ -21,6 +21,7 @@
     - `CameraIntrinsics`, `Calibration`, `Stream`, `Session`, `LifecycleEvent`.
     - `PrivacyDetectionRun`: 탐지 완료 세대. `PrivacyHoldEvent`, `HoldAction`: 사고 대응 승인
       보류·해제 기록 (ADR 0042).
+    - `PrelabelStageRun`: 프리라벨 단계 실행 기록 (결과 0개 포함, ADR 0015 개정, F-PAR-75).
     - `ConsentVersion`: 동의서 버전 문자열 타입.
 """
 
@@ -309,6 +310,28 @@ class PrivacyDetectionRun(Contract):
     model_versions: tuple[Annotated[str, StringConstraints(min_length=1)], ...] = Field(
         min_length=1
     )
+    at: AwareDatetime
+
+
+class PrelabelStageRun(Contract):
+    """프리라벨 단계 실행 기록 하나 (결과 0개 포함, 추가 전용. ADR 0015 개정, F-PAR-75).
+
+    단계(예측기 이름 또는 masks·3d·campose·world3d·contact)가 그 버전으로 계산을 마쳤다는 증거다.
+    결과가 0개면 라벨 이력에 그 버전이 남지 않아, 이 기록이 없으면 매 실행 원본을 다시 받고
+    다시 돌았다. 다시 돌릴지는 라벨 이력과 이 기록을 함께 보고 정한다 (`dlp_prelabel.runner`).
+    라벨이 아니다 (`label_records`와 따로, 같은 트랜잭션에서 쓴다).
+    """
+
+    event_id: int = Field(ge=1, description="DB가 매기는 일련번호")
+    session_id: Identifier
+    stream_id: Identifier = Field(
+        description="단계를 돌린 영상 스트림 (타임라인 단계·접촉은 기준 스트림)"
+    )
+    stage: Identifier = Field(description="예측기 이름 또는 단계 이름 (masks·3d·campose 등)")
+    model_version: Annotated[str, StringConstraints(min_length=1)] = Field(
+        description="단계가 계산에 쓴 버전 (재실행 세대 `+r<n>` 포함, 라벨의 model_version과 같다)"
+    )
+    produced: int = Field(ge=0, description="이 실행이 새로 넣은 결과 라벨 수 (0 가능)")
     at: AwareDatetime
 
 

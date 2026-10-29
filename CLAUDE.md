@@ -129,7 +129,8 @@
   ADR 0046). 3D 궤적(손 관절·박스 중심, 카메라·월드 좌표)은 `derived_from`의 2D 트랙 검수를 물려받고
   (`dlp_schema.trajectory_follow`, 기록 `trajectory_inheritance`, ADR 0048·0050), 물려받기만 한 3D의 출처가 바뀌거나
   같은 2D에서 입력이 바뀌어 새로 계산한 3D가 생기면 궤적 따르기가 지운다(새 3D가 같은 검수를 물려받는다, ADR 0051).
-  단계는 마지막으로 낸 버전으로 다시 돌릴지 정한다(입력이 되돌아오면 `+r<n>`으로 다시 만듦). 3D·월드 단계 뒤와 수집·`dlp review verify`에서 적용한다(세션 잠금, 멱등). 카메라 자세
+  단계는 마지막으로 낸 버전으로 다시 돌릴지 정한다(입력이 되돌아오면 `+r<n>`으로 다시 만듦). 결과 0개인 실행도 추가 전용 실행 기록
+  `prelabel_stage_runs`(Alembic 0025)를 남기고 다시 돌릴지는 라벨 이력과 함께 본다 (F-PAR-75, ADR 0015 개정). 3D·월드 단계 뒤와 수집·`dlp review verify`에서 적용한다(세션 잠금, 멱등). 카메라 자세
   (entity `camera`)는 사람 검수 대상이 아닌 자동 라벨이다.
   시간 일관성 `dlp_prelabel.temporal`(박스 트랙 거르기·손 One Euro 평활·짧은 끊김 보간, ADR 0054), 손 3D 물리 제약
   `dlp_prelabel.constraints3d`(표본 `flags`), 장면 분류 `dlp_prelabel.scene`과 `dlp prelabel run <세션> --scene <장면>`

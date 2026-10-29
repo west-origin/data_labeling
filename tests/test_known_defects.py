@@ -565,11 +565,6 @@ def test_wearer_suppression_respects_stages(
     assert got == expected  # 단계 목록에 없으니 억제하지 않은 결과와 같다
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="F-PAR-75: 결과 0개인 예측기 단계가 매 실행 다시 돎",
-)
 def test_prelabel_empty_predictor_is_idempotent(tmp_path: Path) -> None:
     """같은 입력·같은 버전으로 두 번 돌리면 두 번째는 예측기를 다시 부르지 않는다. 결과가 0개인
     예측기(손이 한 번도 안 보인 영상)도 마찬가지다.

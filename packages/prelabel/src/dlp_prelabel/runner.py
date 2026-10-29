@@ -35,6 +35,9 @@
    단계마다 "다시 돌릴지"는 그 단계가 마지막으로 낸 버전으로 정한다 (`stage_version`, F-PAR-54):
    입력이 A → B → A로 되돌아오면 A를 다시 만든다 (이전 A의 라벨 ID와 겹치지 않게 버전 끝에
    재실행 세대 `+r<n>`). 막혀 쓸 것이 없으면 원본을 받지 않고 건너뛴다 (`summary.lift_blocked`).
+   결과가 0개인 실행도 단계 실행 기록(`prelabel_stage_runs`, 라벨과 같은 트랜잭션)을 남기고, 다시
+   돌릴지는 라벨 이력과 이 기록을 함께 보고 정한다 (F-PAR-75, ADR 0015 개정): 같은 버전으로 이미
+   돈 단계는 결과가 0개였어도 원본을 받지 않고 건너뛴다.
 6. 프라이버시 승인 상태의 세션은 생애주기를 prelabeled로 옮긴다.
 
 진입점: `dlp prelabel run <세션>` (`dlp_cli.prelabel_cmds`)이 어댑터·깊이 단계를 만들고, 원본
@@ -42,6 +45,7 @@
 트랜잭션에서 부른다.
 
 부작용 요약: DB `label_records`에 새 레코드(모델 라벨, 삭제 레코드)만 추가한다 (덮어쓰지 않음).
+단계를 실제로 돌리면 `prelabel_stage_runs`에 실행 기록을 하나 추가한다 (결과 0개 포함).
 생애주기 기록 (`set_lifecycle`). 원본 버킷에서 영상·장갑·IMU 파일을 임시 디렉터리로 받는다.
 접근 기록은 넘겨받은 저장소가 남긴다. 관련: WP8, ADR 0015, 0019, 0026.
 """
@@ -90,6 +94,7 @@ from dlp_prelabel.wearer_suppress import WearerAware, WearerReport
 from dlp_prelabel.worldframe import world_label
 from dlp_schema.config import repo_root
 from dlp_schema.db.calibration_repository import session_intrinsics, session_palm
+from dlp_schema.db.prelabel_repository import list_prelabel_stage_runs, record_prelabel_stage_run
 from dlp_schema.db.repository import (
     get_labels,
     get_session,
@@ -126,7 +131,14 @@ from dlp_schema.labels import (
 from dlp_schema.ontology import Ontology
 from dlp_schema.predictor import Clip, Predictor
 from dlp_schema.review import TrajectoryInheritance, TrajectoryInheritanceMechanism
-from dlp_schema.session import LifecycleState, Session, Stream, StreamKind, SyncMethod
+from dlp_schema.session import (
+    LifecycleState,
+    PrelabelStageRun,
+    Session,
+    Stream,
+    StreamKind,
+    SyncMethod,
+)
 from dlp_schema.trajectory_follow import (
     TRAJECTORY_FOLLOW_VERSION,
     active_trajectory_inheritance,
@@ -171,6 +183,13 @@ PERSON_PHYSICAL_TYPE = "person"
 # replaced에 이 이름이 있으면 배포된 재학습 접촉 모델이 기본 접촉 단계(장갑·영상 휴리스틱)를
 # 대신한다 (training.yaml contact.replaces)
 CONTACT_STEP = "contact"
+# 단계 실행 기록(`prelabel_stage_runs`)의 단계 이름. 예측기는 어댑터 이름(`Predictor.name`)을 쓴다.
+# 접촉은 마스터 타임라인 단계라 기준 스트림으로 기록한다 (F-PAR-75)
+MASKS_STAGE = "masks"
+LIFT_STAGE = "3d"
+POSE_STAGE = "campose"
+WORLD_STAGE = "world3d"
+CONTACT_STAGE = "contact"
 
 
 def contact_version(policy: PrelabelPolicy, inputs: str) -> str:
@@ -290,36 +309,71 @@ def _stage_records(history: list[LabelRecord], prefix: str) -> list[LabelRecord]
     ]
 
 
-def stage_version(history: list[LabelRecord], prefix: str, version: str) -> str | None:
-    """다시 돌릴지와 쓸 버전 (멱등·되돌림 판정, F-PAR-54). None이면 건너뛴다.
+def stage_version(
+    history: list[LabelRecord],
+    prefix: str,
+    version: str,
+    runs: Sequence[PrelabelStageRun] = (),
+) -> str | None:
+    """다시 돌릴지와 쓸 버전 (멱등·되돌림 판정, F-PAR-54·75). None이면 건너뛴다.
 
-    단계가 마지막으로 쓴 레코드들(가장 늦은 created_at, `_stage_records`)에 같은 버전이 있으면
-    지금 결과가 이 입력의 결과이므로 건너뛴다 (검수자가 그 결과를 고치거나 지웠어도 되살리지
-    않는다). "이력 어디든 같은 버전이 있으면 건너뜀"이면 입력이 A → B → A로 되돌아올 때 B 입력의
-    결과가 남았다. 이전에 낸 적 있는 버전을 다시 만들면 라벨 ID가 이전 것과 겹치지 않게 버전 끝에
-    재실행 세대 `+r<n>`(n = 그 버전으로 이미 쓴 세대 수)을 붙인다.
+    단계가 마지막으로 쓴 것(가장 늦은 시각의 레코드 `_stage_records`와 단계 실행 기록 `runs`)에
+    같은 버전이 있으면 지금 결과가 이 입력의 결과이므로 건너뛴다 (검수자가 그 결과를 고치거나
+    지웠어도 되살리지 않는다). 실행 기록은 결과가 0개라 라벨이 남지 않은 실행을 덮는다 (F-PAR-75).
+    "이력 어디든 같은 버전이 있으면 건너뜀"이면 입력이 A → B → A로 되돌아올 때 B 입력의 결과가
+    남았다. 이전에 낸 적 있는 버전을 다시 만들면 라벨 ID가 이전 것과 겹치지 않게 버전 끝에 재실행
+    세대 `+r<n>`(n = 그 버전으로 이미 쓴(돈) 세대 수)을 붙인다.
 
     Args:
         history: 세션 전체 이력.
         prefix: 단계 라벨 ID 접두사 (`<세션>-<스트림>-3d-` 등).
         version: 지금 입력으로 정한 단계 버전 (세대 표시 없음).
+        runs: 그 단계의 실행 기록 (`list_prelabel_stage_runs`, 그 스트림·단계만).
     """
-    records = _stage_records(history, prefix)
-    if not records:
+    done = [
+        (x.created_at, x.provenance.model_version or "") for x in _stage_records(history, prefix)
+    ]
+    done += [(r.at, r.model_version) for r in runs]
+    if not done:
         return version
-    latest = max(x.created_at for x in records)
-    if any(
-        _base_version(x.provenance.model_version) == version
-        for x in records
-        if x.created_at == latest
-    ):
+    latest = max(at for at, _ in done)
+    if any(_base_version(v) == version for at, v in done if at == latest):
         return None
-    used = {
-        x.provenance.model_version
-        for x in records
-        if _base_version(x.provenance.model_version) == version
-    }
+    used = {v for _, v in done if _base_version(v) == version}
     return version if not used else f"{version}+r{len(used)}"
+
+
+def _stage_runs(
+    conn: sa.Connection, session_id: str, stream_id: str, stage: str
+) -> list[PrelabelStageRun]:
+    """그 스트림·단계의 실행 기록 (`stage_version` 입력)."""
+    return list_prelabel_stage_runs(conn, session_id, stream_id=stream_id, stage=stage)
+
+
+def _predictor_done(
+    existing: list[LabelRecord],
+    runs: list[PrelabelStageRun],
+    stream_id: str,
+    predictor: Predictor,
+    on_timeline: bool,
+) -> bool:
+    """1단계 멱등 판정: 이 스트림(타임라인 모델이면 stream_id 없는 구간)에 같은 버전 라벨이 이력에
+    있거나, 같은 버전으로 돈 실행 기록이 있으면(결과 0개 포함, F-PAR-75) 이미 돌았다.
+
+    검수자가 그 결과를 모두 고치거나 지웠어도 되살리지 않는다.
+    """
+    if any(
+        r.stream_id == stream_id
+        and r.stage == predictor.name
+        and r.model_version == predictor.version
+        for r in runs
+    ):
+        return True
+    return any(
+        (x.stream_id == stream_id or (on_timeline and x.stream_id is None))
+        and x.provenance.model_version == predictor.version
+        for x in existing
+    )
 
 
 def _fetch(store: ObjectStore, uri: str, work: Path) -> Path:
@@ -391,6 +445,9 @@ def run_prelabel(
     summary = PrelabelSummary()
     # 전체 이력 (삭제·수정된 것 포함). 다시 돌릴지는 현재 라벨이 아니라 이력으로 정한다 (ADR 0015)
     existing = get_labels(conn, session_id)
+    # 결과 0개를 포함한 단계 실행 기록 (F-PAR-75). 1단계는 스트림·예측기마다 한 번만 쓰므로 처음에
+    # 한 번 읽는다
+    runs = list_prelabel_stage_runs(conn, session_id)
     # 원본 파일은 임시 디렉터리에만 받고 끝나면 지운다 (로컬에 남기지 않는다)
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp)
@@ -410,14 +467,8 @@ def run_prelabel(
                 # (바디캠)에서만 돌린다. 스트림마다 돌리면 같은 구간이 스트림 수만큼 겹쳐 남는다
                 if on_timeline and stream.stream_id != reference:
                     continue
-                # 멱등: 이 스트림(타임라인 모델이면 stream_id 없는 구간)에 같은 버전 라벨이 이력에
-                # 있으면 건너뛴다.
-                # 검수자가 그 결과를 모두 고치거나 지웠어도 되살리지 않는다
-                if any(
-                    (x.stream_id == stream.stream_id or (on_timeline and x.stream_id is None))
-                    and x.provenance.model_version == predictor.version
-                    for x in existing
-                ):
+                # 멱등: 같은 버전 라벨이나 실행 기록이 있으면 건너뛴다 (`_predictor_done`)
+                if _predictor_done(existing, runs, stream.stream_id, predictor, on_timeline):
                     summary.skipped.append(key)
                     continue
                 if isinstance(predictor, WearerAware):
@@ -436,6 +487,11 @@ def run_prelabel(
                 prefix = f"{session_id}-{stream.stream_id}-{predictor.name}-"
                 stale = _stale(existing, prefix, predictor.version)
                 insert_labels(conn, [*retractions(stale, predictor.version, now), *labels])
+                # 결과가 0개여도 이 버전으로 돌았다는 기록을 남긴다 (F-PAR-75)
+                record_prelabel_stage_run(
+                    conn, session_id, stream.stream_id, predictor.name, predictor.version,
+                    len(labels), now,
+                )  # fmt: skip
                 summary.produced[key] = len(labels)
                 summary.retracted += len(stale)
         # 배포 모델이 대신하는 기본 어댑터(접촉 제외)의 검수 전 라벨: 버전과 상관없이 모두 지운다
@@ -455,7 +511,7 @@ def run_prelabel(
         # 1단계에서 넣은 라벨을 반영해 이력·현재 라벨을 다시 읽는다 (2~4단계의 입력).
         # 세션 이력 사본은 손 키포인트 트랙 때문에 수 GB가 될 수 있다. 다음 사본을 읽기 전에 앞
         # 사본을 놓아 둘 이상을 한꺼번에 들지 않는다 (F-PMS-36)
-        del existing, current_now, fresh
+        del existing, current_now, fresh, runs
         history = get_labels(conn, session_id)
         current = current_labels(history)
         # 모양 마스크(ADR 0059)와 카메라 좌표 3D: 1단계 트랙에서 계산하는 단계
@@ -714,8 +770,8 @@ def _lift(
     입력: 기준 스트림(바디캠)의 현재 hand21 키포인트·박스 트랙 (모델·사람 출처 모두)을 (개체, 트랙
     종류)마다 하나씩 고른 것 (`pick_lift_tracks`, F-PAR-01). 출력 라벨 ID 접두사는
     `<세션>-<바디캠>-3d-`. Returns: 새로 넣은 3D 궤적 수.
-    부작용: 원본 버킷에서 바디캠 영상을 받고, `label_records`에 새 궤적과 이전 버전 삭제 레코드를
-    넣는다.
+    부작용: 원본 버킷에서 바디캠 영상을 받고, `label_records`에 새 궤적과 이전 버전 삭제 레코드를,
+    `prelabel_stage_runs`에 실행 기록(결과 0개 포함, F-PAR-75)을 넣는다.
     """
     body = session.reference_stream
     prefix = f"{session.session_id}-{body.stream_id}-3d-"
@@ -727,7 +783,12 @@ def _lift(
     intr = session_intrinsics(conn, session)
     palm = session_palm(conn, session)
     digest = input_digest(tracks, intr.digest_input(), palm.digest_input())
-    version = stage_version(history, prefix, f"{lifter.version}+i{digest}+hp{palm.source}")
+    version = stage_version(
+        history,
+        prefix,
+        f"{lifter.version}+i{digest}+hp{palm.source}",
+        _stage_runs(conn, session.session_id, body.stream_id, LIFT_STAGE),
+    )
     if version is None:
         return 0
     stale = _stale(history, prefix, version)
@@ -766,6 +827,11 @@ def _lift(
     )
     summary.lift_blocked += len(labels) - len(kept)
     insert_labels(conn, [*retractions(stale, version, now), *kept])
+    # 깊이를 돌린 실행은 결과가 0개여도 기록한다 (F-PAR-75). 위의 '모두 막힘' 조기 반환은 원본을
+    # 받지 않으므로 기록하지 않는다 (보호 3D가 풀리면 다음 실행이 만든다)
+    record_prelabel_stage_run(
+        conn, session.session_id, body.stream_id, LIFT_STAGE, version, len(kept), now
+    )
     return len(kept)
 
 
@@ -889,7 +955,8 @@ def _masks(
 ) -> None:
     """객체·손 모양 마스크 단계 (ADR 0059): 바디캠 박스·손 트랙을 프롬프트로 mask_track을 만든다.
 
-    멱등: 이 단계가 마지막으로 낸 버전이 지금 버전이면 다시 만들지 않는다 (`stage_version`).
+    멱등: 이 단계가 마지막으로 낸 버전이 지금 버전이면 다시 만들지 않는다 (`stage_version`, 결과
+    0개로 끝난 실행은 단계 실행 기록으로 판정한다, F-PAR-75).
     버전(`<masker.version>+i<입력 해시>`)에는 고른 프롬프트 트랙과 착용자 증거가 되는 손 트랙의
     라벨 ID가 들어가, 박스·손 트랙이 바뀌면(새 모델 버전, 검수자 수정) 다시 만들고 검수 전인 이전
     마스크만 지운다. 프롬프트 트랙에 검수된·사람 마스크가 이미 있으면 그 트랙은 만들지 않는다
@@ -897,7 +964,7 @@ def _masks(
     다시 매기는 박스 번호(entity_id)가 겹쳐도 흔들리지 않는다 (F-PAR-74).
     입력 트랙이 없으면 원본을 받지 않고 검수 전 이전 결과만 지운다.
     부작용: 원본 버킷에서 바디캠 영상을 받고(이미 받았으면 그대로), `label_records`에 새 마스크와
-    이전 버전 삭제 레코드를 넣는다.
+    이전 버전 삭제 레코드를, `prelabel_stage_runs`에 실행 기록을 넣는다.
     """
     body = session.reference_stream
     prefix = f"{session.session_id}-{body.stream_id}-masks-"
@@ -906,7 +973,10 @@ def _masks(
     tracks = [x for x in picked if x.label_id not in blocked]
     hands = [x for x in picked if isinstance(x.payload, KeypointTrackPayload)]
     version = stage_version(
-        history, prefix, f"{masker.version}+i{input_digest([*tracks, *hands], *sorted(blocked))}"
+        history,
+        prefix,
+        f"{masker.version}+i{input_digest([*tracks, *hands], *sorted(blocked))}",
+        _stage_runs(conn, session.session_id, body.stream_id, MASKS_STAGE),
     )
     if version is None:
         return
@@ -925,6 +995,10 @@ def _masks(
         )
         summary.mask_report = masker.last_report
     insert_labels(conn, [*retractions(stale, version, now), *labels])
+    # 결과가 0개여도(SAM이 못 찾음, 입력 트랙 없음) 이 버전으로 돌았다고 기록한다 (F-PAR-75)
+    record_prelabel_stage_run(
+        conn, session.session_id, body.stream_id, MASKS_STAGE, version, len(labels), now
+    )
     summary.masks = len(labels)
 
 
@@ -1002,7 +1076,7 @@ def pick_world_inputs(
 class _PoseStage:
     """자세·월드 좌표 단계 (모듈 docstring 5).
 
-    둘 다 멱등이다 (같은 버전이 이력에 있으면 건너뛴다).
+    둘 다 멱등이다 (같은 버전이 이력이나 단계 실행 기록에 있으면 건너뛴다, F-PAR-75).
     """
 
     conn: sa.Connection
@@ -1077,6 +1151,18 @@ class _PoseStage:
         lead = "[자세 낡음] IMU 동기화·캘리브레이션이 바뀌어 " if n else ""
         self._skip(f"{lead}{f'이전 자세 {n}개를 지웠습니다. ' if n else ''}{note}")
 
+    def _runs(self, stage: str) -> list[PrelabelStageRun]:
+        """기준 스트림에서 그 단계의 실행 기록 (`stage_version` 입력)."""
+        body = self.session.reference_stream.stream_id
+        return _stage_runs(self.conn, self.session.session_id, body, stage)
+
+    def _ran(self, stage: str, version: str, produced: int) -> None:
+        """그 버전으로 계산을 마쳤다고 기록한다 (결과 0개·추정 실패 포함, F-PAR-75)."""
+        body = self.session.reference_stream.stream_id
+        record_prelabel_stage_run(
+            self.conn, self.session.session_id, body, stage, version, produced, self.now
+        )
+
     def _prefix(self) -> str:
         """자세 라벨 ID 접두사."""
         return f"{self.session.session_id}-{self.session.reference_stream.stream_id}-campose-"
@@ -1115,13 +1201,17 @@ class _PoseStage:
             hfov_deg=d.default_hfov_deg,
             max_aspect_mismatch=d.max_intrinsics_aspect_mismatch,
         )
-        version = stage_version(history, self._prefix(), self._version(est, sensors, lifter))
+        version = stage_version(
+            history, self._prefix(), self._version(est, sensors, lifter), self._runs(POSE_STAGE)
+        )
         if version is None:
             return None
         stale = _stale(history, self._prefix(), version)
         track = self._estimate(est, imu, r_ci, lifter)
         if isinstance(track, str):
             n = self._retract(stale, version)
+            # 같은 입력이면 추정도 같은 이유로 실패한다: 다시 원본을 받지 않게 기록한다
+            self._ran(POSE_STAGE, version, 0)
             return self._skip(f"자세 추정 실패{f'(이전 자세 {n}개를 지움)' if n else ''}: {track}")
         label = pose_label(
             track, session_id=session.session_id, stream_id=body.stream_id, version=version,
@@ -1130,12 +1220,14 @@ class _PoseStage:
         )  # fmt: skip
         if label is None:
             n = self._retract(stale, version)
+            self._ran(POSE_STAGE, version, 0)
             gone = f" (이전 자세 {n}개를 지움)" if n else ""
             return self._skip(f"자세 표본이 0개입니다 (IMU가 영상 구간을 덮지 않음 등){gone}")
         current = current_labels(history)
         lapsed = _lapsed(self.conn, session.session_id, history, [label])
         new = drop_protected_trajectories([label], current, lapsed)
         insert_labels(self.conn, [*retractions(stale, version, self.now), *new])
+        self._ran(POSE_STAGE, version, len(new))
         self.summary.poses = len(track.samples) if new else 0
         self.summary.pose_lost_at_ms = track.lost_at_ms
         return None
@@ -1192,6 +1284,7 @@ class _PoseStage:
             history,
             prefix,
             f"{WORLD_PREFIX}+p{self.policy.digest('world_frame')}+i{input_digest(inputs)}",
+            self._runs(WORLD_STAGE),
         )
         if version is None:
             return
@@ -1209,6 +1302,7 @@ class _PoseStage:
         )
         if stale or labels:
             insert_labels(self.conn, [*retractions(stale, version, self.now), *labels])
+        self._ran(WORLD_STAGE, version, len(labels))
         self.summary.world = len(labels)
 
 
@@ -1262,7 +1356,8 @@ def _contacts(
     """접촉 단계: 바디캠 손·박스 트랙과 동기화된 장갑으로 손마다 접촉 구간을 만들어 hand_state로
     쓴다 (결과 수를 summary에 적는다).
 
-    멱등: 이력에 이 버전이 있으면 (검수자가 모두 고쳤거나 지웠어도) 다시 만들지 않는다. 정책(contact
+    멱등: 이력이나 단계 실행 기록(결과 0개 포함, F-PAR-75)에 이 버전이 있으면 (검수자가 모두
+    고쳤거나 지웠어도) 다시 만들지 않는다. 정책(contact
     절)이나 입력(손·객체 트랙, 장갑 동기화, 압력 채널 접두사)이 바뀌면 버전이 바뀌어 다시 만들고,
     검수 전인 이전 버전 접촉만 지운다. 같은 손의 검수된·사람 손 상태와 겹치는 새 구간은 버린다.
 
@@ -1308,7 +1403,10 @@ def _contacts(
             "pressure_prefixes=" + ",".join(pressure_prefixes),
         ),
     )
-    if any(x.provenance.model_version == version for x in history):
+    runs = _stage_runs(conn, session.session_id, session.reference_stream.stream_id, CONTACT_STAGE)
+    if any(x.provenance.model_version == version for x in history) or any(
+        r.model_version == version for r in runs
+    ):
         return
     stale = _stale(history, f"{session.session_id}-contact-", version)
     # 손마다 트랙 하나만 쓴다. 같은 손 트랙이 여럿이면 정해진 순서로 하나를 고른다
@@ -1346,6 +1444,10 @@ def _contacts(
                 continue
             labels.append(contact_label(session, version, hand, i, c, kind, policy, now))
     insert_labels(conn, [*retractions(stale, version, now), *labels])
+    # 접촉이 0개여도 이 버전으로 돌았다고 기록한다 (장갑을 다시 받지 않게, F-PAR-75)
+    record_prelabel_stage_run(
+        conn, session.session_id, body, CONTACT_STAGE, version, len(labels), now
+    )
     summary.contacts = len(labels)
 
 
