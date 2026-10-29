@@ -70,7 +70,11 @@ class VerificationState(StrEnum):
     # 높은 신뢰도 묶음의 표본이 합격해 묶음 전체가 검증된 것으로 봄
     SAMPLE_VERIFIED = "sample_verified"
     HUMAN_APPROVED = "human_approved"  # 사람이 그대로 승인
-    HUMAN_CORRECTED = "human_corrected"  # 사람이 고친 결과 레코드 (또는 고친 사람이 확인한 레코드)
+    # 검수 수집(`dlp_review.reconcile`)에서 사람이 고치거나 새로 그린 결과 레코드와 지운 라벨의 삭제
+    # (retracted) 레코드, 검수자가 적용한 AI 제안 레코드(`dlp_review.ai_collect`). 모두 사람 출처다.
+    # 검수 물려받기(3D 궤적·설명)는 출처가 고쳐졌어도 이 상태가 아니라 human_approved(또는
+    # sample_verified)를 준다 (`trajectory_follow`·`description_follow`).
+    HUMAN_CORRECTED = "human_corrected"
 
 
 # 3D 궤적 좌표계.
@@ -443,6 +447,11 @@ class ActionPayload(Contract):
     #   접촉 시각은 비접촉 동작·연속 접촉 중간이면 None.
     # contact_held: Field description 참고.
     # pre_state / post_state: 행동 전·후 대상 상태 (상태 속성 ID → 값 ID).
+    # 필드를 더하면 번지는 곳: `dlp_schema.description_follow.meaning`이 시각 필드(TIME_FIELDS) 밖의
+    #   모든 필드를 의미로 보므로 새 필드만 바뀌어도 의미 변경이 되어 검수 전 설명이 지워지고 재생성
+    #   대상이 된다(시각 성격이면 TIME_FIELDS에 넣는다). 페이로드가 구간 JSON(`dlp_schema.export`)에
+    #   그대로 실리므로 형식 버전 INTERVAL_FORMAT_VERSION을 올린다.
+    #   설명 재생성 요청의 의미 필드 `dlp_actions.describe.MEANING_FIELDS`도 같이 본다.
 
     kind: Literal["action"] = "action"
     action_id: Identifier
@@ -577,9 +586,22 @@ class DescriptionPayload(Contract):
     )
 
 
-# 페이로드 판별 공용체: JSON의 "kind" 값으로 어느 타입인지 정한다. 새 종류를 더하면 여기,
-# SPATIAL_KINDS(공간이면), history.label_class, episode.entity_refs, validation.check_label,
-# migration._FIELDS를 함께 본다.
+# 페이로드 판별 공용체: JSON의 "kind" 값으로 어느 타입인지 정한다. 새 종류를 더하면 아래를 함께
+# 본다.
+#   이 패키지: SPATIAL_KINDS(공간이면), LABEL_REF_FIELDS(다른 라벨 ID를 담으면),
+#     history.label_class, episode.entity_refs, validation.check_label, migration._FIELDS(온톨로지
+#     ID 필드), testing(예시 생성기), tests/test_contracts.py PAYLOADS(빠지면 그 테스트가 실패한다).
+#   검수 경로: dlp_review.labelstudio.LS_KINDS(시간 구간) 또는 dlp_review.cvat.CVAT_KINDS와
+#     dlp_review.ops.policy.CVAT_KINDS(공간), review.yaml units. 검수 화면이 없는 모델 출처 종류는
+#     review.yaml verify.automatic(dlp_review.ops.policy.AutomaticLabel·verify.automatic_label)에
+#     넣지 않으면 `dlp review verify`가 "검수하지 않은 모델 라벨"로 세션 완료를 막는다.
+#   AI 1차 검수 대상이면: dlp_schema.aireview.AiLabelKind, dlp_aireview.policy TEMPORAL_KINDS·
+#     SPATIAL_KINDS, dlp_aireview.schema(종류별 문제·제안 필드), aireview.yaml kinds.
+#   그 밖: dlp_active.select.NO_REVIEW_PATH_KINDS(검수 경로가 없으면), dlp_eval.runner(평가 과제
+#     대상이면), 내보내기 형식(export.yaml intervals.kinds·excluded_kinds, COCO·LeRobot은 종류별
+#     변환).
+#   DB label_records.kind는 CHECK 없는 문자열(String(32))이고 페이로드는 JSON 열이라 Alembic
+#   마이그레이션은 필요 없다. 계약 변경이므로 ADR·계약 테스트·`make schemas`는 함께 한다.
 LabelPayload = Annotated[
     BoxTrackPayload
     | MaskTrackPayload

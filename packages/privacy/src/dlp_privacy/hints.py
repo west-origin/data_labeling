@@ -68,7 +68,11 @@ class Hint:
 
 
 def _expand(x: float, y: float, w: float, h: float, m: float) -> tuple[float, float, float, float]:
-    """각 변을 m 비율 넓힌 (x0, y0, x1, y1)."""
+    """각 변을 m 비율 넓힌 (x0, y0, x1, y1). 가로·세로는 합계 2m 늘어난다.
+
+    privacy.yaml `hints.margin`이 m이다. `targets.<대상>.margin`(합계 비율, 양쪽에 절반씩,
+    `geometry.Box.padded`)과 뜻이 달라 같은 값이면 여기가 두 배로 넓다.
+    """
     return (x - w * m, y - h * m, x + w * (1 + m), y + h * (1 + m))
 
 

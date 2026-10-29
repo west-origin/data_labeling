@@ -38,7 +38,7 @@ AI 1차 검수(WP17.6, ADR 0040): `AI_FLAGS`, `AI_SUMMARY`, `AI_NOTE`, `AI_DECIS
 
 이벤트 속성(심각도, 관련 행동·개체 ID)은 구간에 딸린 입력란(perRegion)으로 주고받는다. 온톨로지가
 요구하는 속성을 화면에서 채울 수 없으면 새로 그린 이벤트가 저장 검증에서 거부되고 작업 수집 전체가
-롤백되므로(Codex 수정본 검수, 2026-10-11) 입력란을 둔다. 손 상태의 접촉 대상 ID·대상자 부위도 같은
+롤백되므로 입력란을 둔다. 손 상태의 접촉 대상 ID·대상자 부위도 같은
 이유로 입력란을 둔다 (F-REV-03): 새로 그린 도구·객체·대상자 접촉, 접촉 대상 종류를 바꾼 구간.
 손 상태 입력란은 프리라벨로 미리 채우지 않는다 (현재 값은 구간 메타 JSON에 보인다). 채운 입력란만
 원래 값을 덮어쓰고, 비어 있으면 원래 값을 둔다. 접촉 대상 종류를 바꾸면 새 종류에 둘 수 없는 필드를
@@ -78,6 +78,8 @@ FROM_NAME, TO_NAME = "labels", "ts"
 # 이벤트 구간마다 붙는 입력란 (perRegion 컨트롤 이름 = EventPayload 필드 이름).
 # 온톨로지가 이벤트에 심각도·관련 행동·관련 개체를 요구하므로(events.yaml), 검수자가 화면에서 새로
 # 그린 이벤트도 이 값을 채울 수 있어야 저장 검증(`insert_labels`)을 통과한다.
+# 심각도 선택지(1·2·3)는 계약 `EventPayload.severity`(Literal[1, 2, 3])와 같아 설정 XML에 고정으로
+# 둔다. 정책으로 옮기지 않은 값이며, 계약을 바꾸면 `label_config`의 Choice도 함께 바꾼다.
 EVENT_SEVERITY = "severity"
 EVENT_TEXT_FIELDS = ("related_action_id", "related_entity_id")
 # 손 상태 구간마다 붙는 입력란 (perRegion 컨트롤 이름 = HandStatePayload 필드 이름).
@@ -255,8 +257,8 @@ def _ai_controls(theme: UiTheme | None) -> tuple[str, str]:
     구간을 고르면 보이는 칸은 고른 구간의 컨트롤로 가른다 (Label Studio `whenTagName`은 고른 구간의
     라벨 컨트롤 이름과 비교한다): 라벨 구간(`labels`)이면 AI 메모와 결정, AI 구간(`ai_flags`)이면
     안내 한 줄(`AI_REGION_HINT`). AI 구간에 메모·결정 칸을 보이면 "지적 없음" 자리 글이 보이고
-    결정이 AI 구간 id에 붙어 헷갈린다 (WP17.6 검증). 단축키는 칸이 숨어도 눌리므로, AI 구간에서 누른
-    결정은 수집이 원 라벨로 되돌린다 (`ai_display.ls_label_decisions`).
+    결정이 AI 구간 id에 붙어 검수자가 어느 라벨에 대한 결정인지 알 수 없다. 단축키는 칸이 숨어도
+    눌리므로, AI 구간에서 누른 결정은 수집이 원 라벨로 되돌린다 (`ai_display.ls_label_decisions`).
     """
     colors = theme.ai.colors.model_dump() if theme is not None else {}
     keys = theme.ai.hotkeys.model_dump() if theme is not None else {}
@@ -536,7 +538,7 @@ class LsFormatError(ValueError):
     """Label Studio 결과를 우리 라벨로 옮길 수 없다. 옮길 수 없는 구간마다 영역 ID·시각·라벨 이름·
     이유를 담는다. 수집하지 않는다 (`collect.collect_task`가 `TaskError`로 바꾼다).
 
-    ValueError의 하위 클래스라 예전처럼 ValueError를 잡는 호출자와도 호환된다.
+    ValueError의 하위 클래스라 변환 실패를 ValueError로 잡는 호출자도 그대로 잡는다.
     """
 
 

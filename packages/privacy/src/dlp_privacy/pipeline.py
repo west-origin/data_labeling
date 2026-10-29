@@ -86,7 +86,8 @@ def used_detectors(
 def detection_policy_digest(policy: PrivacyPolicy) -> str:
     """탐지 결과(블러 라벨·검수 우선 구간)를 정하는 정책 값의 짧은 해시.
 
-    문턱·대상(여유·탐지기)·트래커·블러 유지 시간·검수 점수·쓰는 탐지기 설정(질의, NMS 등)이
+    문턱·대상(여유·탐지기)·트래커·블러 유지 시간·검수 점수·검수 우선순위(`review_priority`, 순서
+    포함)·쓰는 탐지기 설정(질의, NMS 등)이
     바뀌면 모델 버전이 달라져 다시 탐지한다 (ADR 0019 프리라벨과 같은 규칙, ADR 0024).
     렌더 설정은 블러본 해시(render_hash)가 따로 맡는다.
 

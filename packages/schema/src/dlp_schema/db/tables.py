@@ -10,6 +10,9 @@
       메타데이터를 비교해 다르면 실패한다.
     - 계약(`dlp_schema` Pydantic 타입)을 바꾸면 ADR + 마이그레이션 + 계약 테스트 + `make schemas`를
       함께 한다.
+    - 마이그레이션은 열·제약·색인이 바뀔 때만 필요하다. 라벨 페이로드(`label_records.payload`
+      JSON) 안 필드나 새 라벨 종류(`kind`는 CHECK 없는 문자열)는 테이블 모양을 바꾸지 않아
+      리비전이 필요 없다.
 
 불변·추가 전용 테이블 (PostgreSQL 트리거, SQLite 테스트 DB에는 트리거 없음)
     - label_records: 검수 상태 열(verification_state, reviewer_id, reviewed_at) 외 수정 금지, 삭제

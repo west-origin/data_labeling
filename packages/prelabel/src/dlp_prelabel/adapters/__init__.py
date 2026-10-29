@@ -1,6 +1,6 @@
 """Predictor 어댑터.
 
-실제 모델(MediaPipe, RTMPose, OWLv2)과 CPU용 stub이 같은 인터페이스를 따른다.
+실제 모델(MediaPipe, RTMPose, OWLv2, YOLOX)과 CPU용 stub이 같은 인터페이스를 따른다.
 
 인터페이스(`dlp_schema.predictor.Predictor`): 속성 `name`(라벨 ID 접두사이자 러너의 단계 이름),
 `version`(모델 출처 라벨의 `model_version`), 메서드 `run(Clip) -> list[LabelRecord]`. `version`에는
@@ -9,8 +9,11 @@
 
 - `mediapipe_models`: `MediaPipeHands`(손 21관절, hand21), `MediaPipeObjects`(COCO 객체 박스).
 - `rtmpose`: `RtmPose`(YOLOX 사람 탐지 → RTMPose 전신 coco17).
-- `owl_objects`: `OwlObjects`(OWLv2 오픈 보캐뷸러리 도구 박스).
-- `stubs`: `OraclePredictor`(정답 재출력, CI용), `UnavailablePredictor`(미연동 기능 자리).
+- `owl_objects`: `OwlObjects`(OWLv2 오픈 보캐뷸러리 도구 박스, 단계 `tools`).
+- `yolox_tools`: `YoloxTools`(고정 클래스 도구 박스, 단계 `closed_tools`, ADR 0060·0062),
+  탐지기 인터페이스 `ToolDetector`(실제 `dlp_models.yolox.Yolox`).
+- `stubs`: `OraclePredictor`(정답 재출력, CI용), `UnavailablePredictor`(미연동 기능 자리, 목록
+  `UNAVAILABLE`), `ScriptedToolDetector`(`ToolDetector`의 CPU stub, 정해 둔 탐지를 차례로 냄).
 
 라벨 ID 형식: `<세션>-<스트림>-<name>-<version_tag(version)>-<순번 등>`. 러너는
 `<세션>-<스트림>-<name>-` 접두사로 같은 어댑터의 이전 버전을 찾으므로 이 형식을 지켜야 한다.

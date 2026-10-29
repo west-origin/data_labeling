@@ -66,7 +66,10 @@ class Predictor(Protocol):
     """자동 모델 어댑터의 구조적 인터페이스 (상속 없이 같은 속성·메서드만 있으면 된다).
 
     Attributes:
-        name: 어댑터 이름 (예: `mediapipe_hands`, `oracle_stub`).
+        name: 단계 이름이자 라벨 ID 접두사 `<세션>-<스트림>-<name>-` (프리라벨 예: `hands`,
+            `objects`, `tools`, `body`, `closed_tools`). 모델 이름이 아니라 역할이다. 러너가 이
+            접두사로 같은 단계의 이전 버전을 찾아 지우므로, 한 이름이 다른 이름 + `-`로 시작하면
+            두 단계가 서로의 결과를 지운다 (`dlp_prelabel.adapters.yolox_tools` 참고).
         version: 모델 버전 문자열. 정책 절 해시를 붙여 정책이 바뀌면 버전도 바뀌게 한다 (CLAUDE.md).
     """
 

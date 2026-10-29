@@ -174,7 +174,12 @@ def mask_annotation(
 
 
 def _meta(x: LabelRecord, ids: Pseudonymizer) -> dict[str, Any]:
-    """주석에 붙이는 출처 정보 (라벨 ID는 가명, 검수자 ID는 넣지 않는다)."""
+    """주석에 붙이는 출처 정보 (라벨 ID는 가명, 검수자 ID는 넣지 않는다).
+
+    AI 1차 검수 판정·제안이나 AI 제안에서 왔다는 기원은 넣지 않는다 (판정은 라벨도 검수도 아니고
+    내보내기에 섞이지 않는다, ADR 0040 I4). 검수·출처 근거 필드를 더하면 manifest
+    `verification_policy`(`dlp_export.runner`)에도 그 뜻을 적어 소비자가 기준을 알 수 있게 한다.
+    """
     return {
         "label_id": ids.label(x.label_id),
         "verification": x.verification.state.value,

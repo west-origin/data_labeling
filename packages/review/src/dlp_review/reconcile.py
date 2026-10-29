@@ -171,8 +171,8 @@ def _new_id(base: str, reviewer: str, now: datetime, content: str) -> str:
 
     128자(`Identifier` 최대)를 넘으면 `dlp_schema.common.derived_id`처럼 base 앞부분 + base 해시로
     줄인다: `<base 앞부분>:h<sha256 16자>:r<해시 12자>`. base가 영숫자로 시작하므로 결과도
-    `Identifier` 규칙을 지킨다. 회귀(F-REV-05, A-09): 예전에는 뒤쪽 128자만 남겨 `-`·`:`로 시작하는
-    잘못된 ID가 생겨 수집이 ValidationError로 멈췄다. 128자 이하이면 예전과 같은 ID다.
+    `Identifier` 규칙을 지킨다. 뒤쪽 128자만 남기면 `-`·`:`로 시작하는 잘못된 ID가 생겨 수집이
+    ValidationError로 멈추므로 앞부분을 남긴다 (F-REV-05). 128자 이하이면 줄이지 않는다.
     """
     digest = hashlib.sha256(f"{base}|{reviewer}|{now.isoformat()}|{content}".encode()).hexdigest()
     return derived_id(base, f"r{digest[:12]}")
@@ -188,9 +188,10 @@ def reconcile(
     now: datetime,
     normalize: Callable[[LabelRecord], LabelRecord] | None = None,
 ) -> ReviewOutcome:
-    """normalize: 도구로 보낼 때 적용한 변환 (예: CVAT 좌표 반올림). 비교는 그 결과와 한다.
+    """검수 도구에서 돌아온 항목을 원래 라벨과 비교해 승인·수정·추가·삭제로 나눈다.
 
     인자:
+    - normalize: 도구로 보낼 때 적용한 변환 (예: CVAT 좌표 반올림). 비교는 그 결과와 한다.
     - originals: 작업에 실제로 보낸 원래 라벨 (`ReviewTask.sent_label_ids`로 찾은 레코드).
       블라인드·이중 작업은 빈 목록이라 돌아온 모든 항목이 "새로 그린 것"이 된다.
     - reviewed: 도구에서 돌아온 항목.
@@ -241,7 +242,8 @@ def reconcile(
         if parent is None:
             # 새로 그린 항목은 같은 내용이 둘일 수 있다 (F-REV-35). 도구 영역 ID와
             # 같은 (영역 ID, 내용)의 등장 순번을 해시에 넣는다. 같은 입력을 다시 수집하면
-            # 순서가 같아 같은 ID다(멱등). 영역 ID가 없고 첫 등장이면 예전과 같은 해시 입력이다
+            # 순서가 같아 같은 ID다(멱등). 영역 ID가 없고 첫 등장이면 해시 입력을 바꾸지 않아
+            # 이미 수집한 ID와 같다
             key = json.dumps([item.tool_region_id, content])
             nth = drawn.get(key, 0)
             drawn[key] = nth + 1

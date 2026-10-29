@@ -61,7 +61,9 @@ class Step:
     help: str  # 무엇을 하는지·실패 때 기본 안내
     judge: Callable[[StepContext], Verdict]
     command: Callable[[StepContext, Params], list[list[str]]]
-    inputs: tuple[str, ...] = ()  # 화면 입력 칸 이름 (assignee, scene, quick, tool)
+    # 화면 입력 칸 이름 (privacy_assignee, assignee, scene, quick, tool). 새 이름을 쓰면
+    # static/app.js `inputFor`(이름별 칸 그리기)에도 추가해야 화면에 칸이 나온다.
+    inputs: tuple[str, ...] = ()
     confirm: str | None = None  # 누르기 전에 묻는 말
     links: tuple[str, ...] = field(default=())  # 보일 검수 작업 단계 (privacy, labeling)
 

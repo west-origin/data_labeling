@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, get_args
 
 import pytest
 from pydantic import ValidationError
@@ -19,6 +19,7 @@ from dlp_schema.labels import (
     SPATIAL_KINDS,
     IntrinsicsSource,
     KeypointTrackPayload,
+    LabelPayload,
     LabelRecord,
     Lift3DMethod,
     Provenance,
@@ -139,6 +140,18 @@ def test_every_payload_kind_roundtrips_through_json(payload: dict[str, Any]) -> 
     again = LabelRecord.model_validate_json(label.model_dump_json())
     assert again == label
     assert again.kind == payload["kind"]
+
+
+def test_payload_examples_cover_every_label_kind() -> None:
+    """PAYLOADS가 LabelPayload의 모든 종류를 하나씩 덮는다.
+
+    새 페이로드 종류를 더하고 예시를 빠뜨리면 위 왕복 테스트가 그 종류를 보지 못하므로 여기서
+    막는다.
+    정답 근거: 판별 공용체 멤버의 kind 리터럴 기본값.
+    """
+    union = get_args(get_args(LabelPayload)[0])
+    kinds = {m.model_fields["kind"].default for m in union}
+    assert sorted(p["kind"] for p in PAYLOADS) == sorted(kinds)
 
 
 def test_unknown_fields_and_payload_kinds_are_rejected() -> None:
