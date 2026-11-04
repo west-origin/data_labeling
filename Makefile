@@ -44,6 +44,10 @@ coverage:
 review-scope:
 	uv run python scripts/review_scope.py
 
+# 패키지별 docstring·주석 양 (공개 대상 비율, 빠진 위치는 --list). 문장이 맞는지는 판단하지 않는다.
+doc-coverage:
+	uv run python scripts/doc_coverage.py
+
 # 계약 타입(dlp_schema)을 바꾼 뒤 schemas/*.schema.json을 다시 만든다 (직접 편집 금지).
 # 계약 변경은 ADR + Alembic 마이그레이션 + 계약 테스트와 함께 한다.
 schemas:
@@ -80,7 +84,7 @@ db-upgrade: db-migrate
 	uv run dlp ontology register 1.0.0
 
 # 파일이 아닌 명령 대상 (같은 이름의 파일이 있어도 항상 실행)
-.PHONY: install install-curation test-isolated lint fmt typecheck test contracts schemas ui-theme coverage review-scope models export-models todo-models licenses fixtures db-migrate db-upgrade check env up down ps logs health test-services \
+.PHONY: install install-curation test-isolated lint fmt typecheck test contracts schemas ui-theme coverage review-scope doc-coverage models export-models todo-models licenses fixtures db-migrate db-upgrade check env up down ps logs health test-services \
         cvat-up cvat-down cvat-superuser clean
 
 # 작업공간 의존성 설치 (uv.lock 그대로, --locked: 잠금 파일과 pyproject가 어긋나면 실패).

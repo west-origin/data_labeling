@@ -1,0 +1,4 @@
+ts	phase	decision	why	evidence	result
+2026-11-04T03:34:33Z	frame	목표를 정함: 새 개발자가 한눈에 구조 파악, 전수 검수, 자세한 docstring, 주석 자체 검수	사용자 요청(2026-11-04), pstack figure-it-out으로 진행	대화 요청	open
+2026-11-04T03:34:34Z	frame	주석 깊이는 docstring에 담고 줄 해설 주석은 쓰지 않기로 함	pstack 주석 규칙(이유만)과 사용자 요청(아주 자세히)을 함께 만족시키는 방법	pstack poteto-mode Comments 절	decided
+2026-11-04T03:34:35Z	harness	docstring·주석 측정 스크립트를 만들고 기준선을 잼	주석 작업 전후를 숫자로 비교하려고	scripts/doc_coverage.py, make doc-coverage	기준선 공개 대상 3002/3215 = 93.4%
