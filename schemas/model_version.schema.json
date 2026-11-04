@@ -1,6 +1,7 @@
 {
   "$defs": {
     "ModelStatus": {
+      "description": "재학습 모델 버전의 상태.\n\n전이는 candidate → passed(사람 승인 대기) → deployed → retired, 또는 candidate → rejected다.\n`config/policies/training.yaml`의 과제별 `deploy`가 auto면 passed를 건너뛰고 바로 deployed가\n된다. approve면 `dlp train approve`가 passed를 deployed로 바꾼다.\n\n- candidate: 학습만 끝났다 (평가 전).\n- passed: 게이트를 통과했고 사람의 배포 승인을 기다린다 (정책 deploy: approve).\n- deployed: 게이트를 통과해 배포됐다. 과제마다 하나다.\n- rejected: 게이트를 통과하지 못했다.\n- retired: 배포됐다가 새 모델로 바뀌었다.",
       "enum": [
         "candidate",
         "passed",
@@ -13,7 +14,7 @@
     }
   },
   "additionalProperties": false,
-  "description": "재학습한 모델 버전 (레지스트리). 학습 실행 하나가 모델 버전 하나를 만든다.",
+  "description": "재학습한 모델 버전 (레지스트리). 학습 실행 하나가 모델 버전 하나를 만든다.\n\n- model_version: 모델 버전 ID (DB 기본 키).\n- task, run_id, trainer, artifact_uri: 평가 과제, 학습 실행, 학습기 이름, 산출물 위치.\n- sha256: 산출물(가중치) 파일의 SHA-256 (소문자 16진 64자). 배포 때 무결성 확인에 쓴다.\n- train_examples: 학습 예제 수.\n- status: 현재 상태 (`ModelStatus`).\n- report_uri: 골든셋 평가·게이트 리포트 위치. 평가 전이면 None.\n- created_at: 등록 시각.\n- decided_at: 게이트 판정 또는 은퇴 시각. candidate일 때만 None이어야 한다 (검증기).",
   "properties": {
     "artifact_uri": {
       "description": "가중치·설정 파일 위치 (학습 산출물 버킷)",

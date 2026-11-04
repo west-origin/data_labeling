@@ -64,28 +64,46 @@ from dlp_schema.labels import (
 )
 
 
-# 에피소드 그래프 개체 종류.
 class EntityKind(StrEnum):
-    HAND = "hand"  # 작업자의 손 (예: left_hand, right_hand)
-    OBJECT = "object"  # 일반 객체
-    TOOL = "tool"  # 도구 (작용부·파지부가 있는 객체)
-    PERSON = "person"  # 대상자 등 사람
-    SURFACE = "surface"  # 처리 대상 표면 (청결·커버리지 기록)
-    CAMERA = "camera"  # 카메라 (자세 궤적의 entity_id="camera")
+    """에피소드 그래프의 개체 종류.
+
+    - hand: 작업자의 손 (예: left_hand, right_hand).
+    - object: 일반 객체.
+    - tool: 도구 (작용부·파지부가 있는 객체).
+    - person: 대상자 등 사람.
+    - surface: 처리 대상 표면 (청결·커버리지 기록).
+    - camera: 카메라 (자세 궤적의 entity_id="camera").
+    """
+
+    HAND = "hand"
+    OBJECT = "object"
+    TOOL = "tool"
+    PERSON = "person"
+    SURFACE = "surface"
+    CAMERA = "camera"
 
 
-# 개체 하나. entity_id: 세션 안에서 고유한 개체 ID (예: rag_01). class_id: 온톨로지 객체 클래스
-# (손·카메라는 None 가능).
 class Entity(Contract):
+    """에피소드 그래프의 개체 하나.
+
+    - entity_id: 세션 안에서 고유한 개체 ID (예: rag_01). 라벨의 entity_id·target_id 등이 가리킨다.
+    - kind: 개체 종류.
+    - class_id: 온톨로지 객체 클래스 ID. 손·카메라는 None일 수 있다.
+    """
+
     entity_id: Identifier
     kind: EntityKind
     class_id: OntologyId | None = None
 
 
-# 객체 상태 전이 (object_state 구간들에서 도출, 저장하지 않는다).
-#   entity_id / attribute: 개체와 상태 속성. from_value → to_value: 바뀌기 전·후 값.
-#   t_ms: 새 값 구간이 시작한 시각 (마스터 타임라인 ms).
 class StateTransition(Contract):
+    """객체 상태 전이 하나. object_state 구간들에서 도출하고 저장하지 않는다.
+
+    - entity_id, attribute: 개체 ID와 상태 속성 ID.
+    - from_value, to_value: 바뀌기 전과 후의 값 ID.
+    - t_ms: 새 값 구간이 시작한 시각 (마스터 타임라인 ms).
+    """
+
     entity_id: Identifier
     attribute: OntologyId
     from_value: OntologyId
@@ -93,16 +111,20 @@ class StateTransition(Contract):
     t_ms: Ms
 
 
-# 에피소드 하나 (세션의 한 구간).
-#   episode_id / session_id / ontology_version: 식별과 온톨로지 버전 (모든 라벨이 같은
-#     세션·버전이어야 한다).
-#   t_start_ms / t_end_ms: 에피소드 구간 (마스터 ms).
-#     라벨은 이 구간과 겹쳐야 한다 (걸치는 것은 허용).
-#   entities: 개체 목록 (ID 중복 금지). labels: 현재 라벨
-#     (삭제 레코드 금지, 개체 참조는 entities 안).
-# 주의: 공간 라벨 구간은 스트림 PTS ms라, 바디캠이 아닌 스트림의 공간 라벨을 넣으면 구간 비교가
-# 어긋날 수 있다.
 class EpisodeGraph(Contract):
+    """에피소드 하나 (세션의 한 구간)의 개체와 현재 라벨.
+
+    - episode_id, session_id, ontology_version: 식별자와 온톨로지 버전. 모든 라벨이 같은 세션과
+      버전이어야 한다.
+    - t_start_ms, t_end_ms: 에피소드 구간 (마스터 타임라인 ms). 라벨은 이 구간과 겹쳐야 한다
+      (걸치는 것은 허용).
+    - entities: 개체 목록 (ID 중복 금지).
+    - labels: 현재 라벨. 삭제 레코드는 넣지 않고, 라벨의 개체 참조는 entities 안이어야 한다.
+
+    공간 라벨 구간은 그 스트림의 PTS ms라서, 바디캠이 아닌 스트림의 공간 라벨을 넣으면 구간
+    비교가 어긋날 수 있다.
+    """
+
     episode_id: Identifier
     session_id: Identifier
     ontology_version: SemVer
@@ -345,7 +367,7 @@ def track_rank(x: LabelRecord) -> tuple[bool, datetime, int, str]:
 
     같은 대상 트랙이 함께 현재 라벨일 수 있다 (사람이 새로 그린 트랙과 모델 트랙, 승인된 이전 모델
     버전과 새 버전). 프리라벨 접촉(`dlp_prelabel.runner.pick_hand_tracks`)·3D(`pick_lift_tracks`)
-    단계와 행동 단계(`dlp_actions.runner.run_actions`)가 함께 쓴다 (F-PAR-04: 행동 단계만 조회
+    단계와 행동 단계(`dlp_actions.runner.hand_track_labels`)가 함께 쓴다 (F-PAR-04: 행동 단계만 조회
     순서상 마지막 트랙을 써 기준이 달랐다). 차례로:
 
     1. 사람이 만들었거나 검수된 트랙 (`is_protected`): 사람이 확인한 위치가 가장 믿을 만하다.

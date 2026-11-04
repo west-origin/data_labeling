@@ -25,8 +25,10 @@
       `LabelRecord`.
 
 주의
-    - 클래스 docstring과 Field description은 `schemas/label_record.schema.json` 등에 들어간다.
-      바꾸면 `make schemas`가 필요하므로 설명 보강은 `#` 주석으로 한다.
+    - 클래스 docstring과 Field description은 `schemas/label_record.schema.json` 등의
+      description이 된다. 다른 언어·검수 도구가 그 파일만 보고 필드 뜻을 알도록 필드 의미,
+      단위, 좌표계는 docstring에 쓴다. 바꾼 뒤에는 `make schemas`로 다시 만들어야
+      `make contracts`가 통과한다.
     - 좌표 단위: 박스·키포인트 x, y, w, h는 그 스트림 영상의 픽셀 좌표(왼쪽 위 원점)로 쓴다.
 """
 
@@ -50,73 +52,122 @@ from dlp_schema.common import (
 # ---------------------------------------------------------------- 공통 메타데이터
 
 
-# 라벨 출처.
 class Source(StrEnum):
-    HUMAN = "human"  # 사람이 만들거나 고친 라벨
-    MODEL = "model"  # 자동 모델 (model_version·confidence 필수)
-    SENSOR = "sensor"  # 센서에서 바로 얻은 라벨 (예: 장갑 압력 접촉, sensor_id 필수)
+    """라벨을 만든 주체.
+
+    - human: 사람이 만들거나 고친 라벨.
+    - model: 자동 모델. `Provenance.model_version`과 `LabelRecord.confidence`가 필수다.
+    - sensor: 센서에서 바로 얻은 라벨 (예: 장갑 압력 접촉). `Provenance.sensor_id`가 필수다.
+    """
+
+    HUMAN = "human"
+    MODEL = "model"
+    SENSOR = "sensor"
 
 
-# 근거 수준.
 class Evidence(StrEnum):
-    OBSERVED = "observed"  # 영상·센서에서 직접 보임 (기본값)
-    INFERRED = "inferred"  # 가려짐 등으로 앞뒤 맥락에서 추정
-    UNKNOWN = "unknown"  # 판단 불가
+    """라벨 내용의 근거 수준.
+
+    - observed: 영상·센서에서 직접 보인다 (기본값).
+    - inferred: 가려짐 등으로 보이지 않아 앞뒤 맥락에서 추정했다.
+    - unknown: 판단할 수 없다.
+    """
+
+    OBSERVED = "observed"
+    INFERRED = "inferred"
+    UNKNOWN = "unknown"
 
 
-# 검증 상태. DB에서 바꿀 수 있는 유일한 라벨 열 묶음이다 (`db.repository.record_review`).
 class VerificationState(StrEnum):
-    UNREVIEWED = "unreviewed"  # 검수 전
-    # 높은 신뢰도 묶음의 표본이 합격해 묶음 전체가 검증된 것으로 봄
+    """라벨의 검수 상태.
+
+    DB에서 바꿀 수 있는 유일한 라벨 열 묶음이다 (`db.repository.record_review`).
+
+    - unreviewed: 검수 전.
+    - sample_verified: 높은 신뢰도 묶음의 표본이 합격해 묶음 전체를 검증된 것으로 본다.
+    - human_approved: 사람이 그대로 승인했다.
+    - human_corrected: 검수 수집(`dlp_review.reconcile`)에서 사람이 고치거나 새로 그린 결과
+      레코드, 지운 라벨의 삭제(retracted) 레코드, 검수자가 적용한 AI 제안 레코드
+      (`dlp_review.ai_collect`). 모두 사람 출처다. 검수 물려받기(3D 궤적·설명)는 출처가 고쳐졌어도
+      이 상태가 아니라 human_approved(또는 sample_verified)를 준다
+      (`trajectory_follow`·`description_follow`).
+    """
+
+    UNREVIEWED = "unreviewed"
     SAMPLE_VERIFIED = "sample_verified"
-    HUMAN_APPROVED = "human_approved"  # 사람이 그대로 승인
-    # 검수 수집(`dlp_review.reconcile`)에서 사람이 고치거나 새로 그린 결과 레코드와 지운 라벨의 삭제
-    # (retracted) 레코드, 검수자가 적용한 AI 제안 레코드(`dlp_review.ai_collect`). 모두 사람 출처다.
-    # 검수 물려받기(3D 궤적·설명)는 출처가 고쳐졌어도 이 상태가 아니라 human_approved(또는
-    # sample_verified)를 준다 (`trajectory_follow`·`description_follow`).
+    HUMAN_APPROVED = "human_approved"
     HUMAN_CORRECTED = "human_corrected"
 
 
-# 3D 궤적 좌표계.
 class CoordinateFrame(StrEnum):
-    CAMERA = "camera"  # 그 시각 카메라 좌표계 (단안 깊이 결과)
-    BODY = "body"  # 작업자 몸 기준 좌표계
-    WORLD = "world"  # 세션 고정 월드 좌표계 (SLAM 결과)
+    """3D 궤적 좌표계.
+
+    - camera: 그 시각의 카메라 좌표계 (단안 깊이 결과).
+    - body: 작업자 몸 기준 좌표계.
+    - world: 세션에 고정된 월드 좌표계 (SLAM 결과). 축 정의는 `Trajectory3DPayload` 참고.
+    """
+
+    CAMERA = "camera"
+    BODY = "body"
+    WORLD = "world"
 
 
-# 3D 값을 얻은 방법.
 class Source3D(StrEnum):
-    MONO_DEPTH = "mono_depth"  # 단안 메트릭 깊이 추정
-    VISUAL_SLAM = "visual_slam"  # 영상 SLAM
-    VISUAL_INERTIAL_SLAM = "visual_inertial_slam"  # 영상 + IMU SLAM
-    MULTI_VIEW = "multi_view"  # 여러 카메라 삼각측량
+    """3D 값을 얻은 방법.
+
+    - mono_depth: 단안 메트릭 깊이 추정.
+    - visual_slam: 영상 SLAM.
+    - visual_inertial_slam: 영상과 IMU를 함께 쓴 SLAM.
+    - multi_view: 여러 카메라 삼각측량.
+    """
+
+    MONO_DEPTH = "mono_depth"
+    VISUAL_SLAM = "visual_slam"
+    VISUAL_INERTIAL_SLAM = "visual_inertial_slam"
+    MULTI_VIEW = "multi_view"
 
 
-# 3D 표본 하나를 얻은 추정 방식 (단안 깊이 결과, ADR 0045).
 class Lift3DMethod(StrEnum):
-    HAND_FIT = "hand_fit"  # 손 중심 3D 점 + 2D + 손바닥 깊이·손 크기 사전값 맞춤 (ADR 0044)
-    POINT_DEPTH = "point_depth"  # 그 픽셀의 깊이로 역투영 (관절별 깊이, 박스 중심)
+    """단안 깊이 결과에서 3D 표본 하나를 얻은 추정 방식 (ADR 0045).
+
+    - hand_fit: 손 중심 3D 점, 2D 점, 손바닥 깊이, 손 크기 사전값을 함께 맞춘다 (ADR 0044).
+    - point_depth: 그 픽셀의 깊이로 역투영한다 (관절별 깊이, 박스 중심).
+    """
+
+    HAND_FIT = "hand_fit"
+    POINT_DEPTH = "point_depth"
 
 
-# 3D로 올릴 때 쓴 카메라 내부 파라미터의 출처 (ADR 0045).
 class IntrinsicsSource(StrEnum):
-    CALIBRATED = "calibrated"  # 세션 캘리브레이션 또는 등록된 카메라 캘리브레이션
-    HFOV_APPROX = "hfov_approx"  # 캘리브레이션 없음: 정책 기본 화각 근사
-    # 캘리브레이션 없음: 손 크기 사전값과 메트릭 깊이로 세션 초점 거리를 추정 (ADR 0056)
+    """2D를 3D로 올릴 때 쓴 카메라 내부 파라미터의 출처 (ADR 0045).
+
+    - calibrated: 세션 캘리브레이션 또는 등록된 카메라 캘리브레이션.
+    - hfov_approx: 캘리브레이션이 없어 정책의 기본 화각으로 근사했다.
+    - estimated_hand_size: 캘리브레이션이 없어 손 크기 사전값과 메트릭 깊이로 세션 초점 거리를
+      추정했다 (ADR 0056). calibrated로 쓰지 않고 실제 캘리브레이션을 덮지 않는다.
+    """
+
+    CALIBRATED = "calibrated"
+    HFOV_APPROX = "hfov_approx"
     ESTIMATED_HAND_SIZE = "estimated_hand_size"
 
 
-# 작업자의 왼손·오른손 (작업자 기준. 영상의 좌우와 다를 수 있다).
 class Hand(StrEnum):
+    """작업자의 왼손·오른손. 작업자 기준이라 영상의 좌우와 다를 수 있다."""
+
     LEFT = "left"
     RIGHT = "right"
 
 
-# 라벨 출처 정보.
-#   source: 출처.
-#   model_version: 모델 버전 (source=model이면 필수, 정책 해시 포함 가능, 길이 제한 없음).
-#   sensor_id: 센서 ID (source=sensor면 필수).
 class Provenance(Contract):
+    """라벨 출처 정보.
+
+    - source: 출처 (`Source`).
+    - model_version: 모델 버전. source=model이면 필수다. 정책 해시가 들어갈 수 있고 길이 제한이
+      없다.
+    - sensor_id: 센서 ID. source=sensor면 필수다.
+    """
+
     source: Source
     model_version: str | None = None
     sensor_id: str | None = None
@@ -131,8 +182,13 @@ class Provenance(Contract):
         return self
 
 
-# 검수 정보. state가 unreviewed가 아니면 reviewer_id와 reviewed_at(시간대 필수)이 있어야 한다.
 class Verification(Contract):
+    """라벨의 검수 정보.
+
+    state가 unreviewed가 아니면 reviewer_id(검수자 ID)와 reviewed_at(검수 시각, 시간대 필수)이
+    있어야 한다. 검수자 ID는 어떤 내보내기에도 넣지 않는다.
+    """
+
     state: VerificationState = VerificationState.UNREVIEWED
     reviewer_id: Identifier | None = None
     reviewed_at: AwareDatetime | None = None
@@ -155,10 +211,18 @@ def _drop_none(value: object) -> bool:
     return value is None
 
 
-# 박스 키프레임. t_ms: 그 스트림 PTS 시각(ms). x, y: 왼쪽 위 꼭짓점(px). w, h: 폭·높이(px, 0 이상).
-# outside: 이 시각부터 대상이 화면 밖·안 보임 (CVAT의 outside와 같은 뜻, 좌표는 무시).
-# 키프레임 사이 값은 소비자가 보간한다 (선형 등, 각 단계 정책).
 class BoxKeyframe(Contract):
+    """박스 키프레임 하나.
+
+    - t_ms: 그 스트림 영상의 PTS 시각 (ms).
+    - x, y: 박스 왼쪽 위 꼭짓점 (px, 영상 왼쪽 위 원점).
+    - w, h: 폭과 높이 (px, 0 이상).
+    - outside: 이 시각부터 대상이 화면 밖이거나 보이지 않는다 (CVAT의 outside와 같은 뜻).
+      True면 좌표는 무시한다.
+
+    키프레임 사이 값은 소비자가 보간한다 (선형 등, 각 단계 정책).
+    """
+
     t_ms: Ms
     x: FiniteFloat
     y: FiniteFloat
@@ -168,19 +232,28 @@ class BoxKeyframe(Contract):
 
 
 class Rle(Contract):
-    """COCO 형식 RLE 마스크."""
+    """COCO 형식 RLE 마스크.
 
-    # size: (높이, 너비) px — COCO 순서, 둘 다 양수 (F-SCH-32). counts: COCO 압축 RLE 문자열.
+    - size: (높이, 너비) px. COCO 순서이고 둘 다 양수다 (F-SCH-32).
+    - counts: COCO 압축 RLE 문자열.
+    """
 
     size: tuple[Annotated[int, Field(gt=0)], Annotated[int, Field(gt=0)]]
     counts: str
 
 
-# 마스크 키프레임. t_ms: 스트림 PTS ms. rle: 마스크 (outside가 아니면 필수). outside: 안 보임.
-# 마스크는 키프레임 사이를 보간하지 않는다 (그 시각에만 유효한 모양, ADR 0059).
-# score: 마스크 모델이 낸 이 키프레임의 품질 점수 (선택, SAM 예측 IoU, ADR 0059). None이면 JSON에
-#   싣지 않는다 (예전 라벨과 같은 JSON). 검수 도구로 보내지 않는다.
 class MaskKeyframe(Contract):
+    """마스크 키프레임 하나.
+
+    - t_ms: 그 스트림 영상의 PTS 시각 (ms).
+    - rle: 마스크 모양. outside가 아니면 필수다.
+    - outside: 이 시각에 대상이 보이지 않는다.
+    - score: 마스크 모델이 낸 이 키프레임의 품질 점수 (선택, SAM 예측 IoU, ADR 0059). None이면
+      JSON에 싣지 않아 예전 라벨과 JSON이 같다. 검수 도구로 보내지 않는다.
+
+    마스크는 키프레임 사이를 보간하지 않는다. 그 시각에만 유효한 모양이다 (ADR 0059).
+    """
+
     t_ms: Ms
     rle: Rle | None = None
     outside: bool = False
@@ -196,33 +269,47 @@ class MaskKeyframe(Contract):
         return self
 
 
-# 키포인트 하나. x, y: 픽셀 좌표. visibility: COCO 규약 (0 없음, 1 가려짐, 2 보임).
-# confidence: 모델 신뢰도 (선택).
 class Keypoint(Contract):
+    """2D 키포인트 하나.
+
+    - x, y: 그 스트림 영상의 픽셀 좌표 (왼쪽 위 원점).
+    - visibility: COCO 규약. 0 라벨 없음, 1 가려짐, 2 보임.
+    - confidence: 모델 신뢰도 (선택, 0~1).
+    """
+
     x: FiniteFloat
     y: FiniteFloat
     visibility: Literal[0, 1, 2] = Field(description="0 라벨 없음, 1 가려짐, 2 보임")
     confidence: Confidence | None = None
 
 
-# 손 모델의 손 중심 3D 점 (미터). 좌표축은 카메라와 같은 방향(X 오른쪽, Y 아래, Z 앞)이고 원점은
-# 손의 대략적인 기하 중심이다 (MediaPipe hand_world_landmarks, ADR 0044). 카메라 좌표가 아니다.
 class WorldPoint(Contract):
+    """손 모델이 낸 손 중심 3D 점 하나 (m).
+
+    좌표축은 카메라와 같은 방향(X 오른쪽, Y 아래, Z 앞)이고 원점은 손의 대략적인 기하 중심이다
+    (MediaPipe hand_world_landmarks, ADR 0044). 카메라 좌표가 아니라 손 모양 정보다.
+    """
+
     x: FiniteFloat
     y: FiniteFloat
     z: FiniteFloat
 
 
-# 한 시각의 키포인트 묶음. points 개수는 골격 크기(`SKELETON_SIZES`)와 같아야 한다.
-# world: 손 모델이 낸 손 중심 3D 점 (선택, hand21만, points와 같은 순서·개수, ADR 0044). 손 모양
-#   정보이고 검수 대상이 아니다. 검수 도구는 2D만 보이므로 사람이 새로 그린 트랙에는 없고, 사람이
-#   고친 트랙은 2D가 parent의 양자화 2D와 같은 키프레임에만 parent의 world를 지닌다
-#   (`without_world`, `dlp_review.reconcile.keep_unchanged_world`, ADR 0044 1절 개정). None이면
-#   JSON에 싣지 않는다 (예전 라벨과 같은 JSON).
-# interpolated: 앞뒤 관측 사이를 보간해 채운 키프레임이면 True (선택, ADR 0054). 관측이 아니다.
-#   None이면 JSON에 싣지 않는다 (예전 라벨과 같은 JSON). 검수 도구로 보내지 않는다 (world와 같은
-#   규칙).
 class KeypointFrame(Contract):
+    """한 시각의 키포인트 묶음.
+
+    - t_ms: 그 스트림 영상의 PTS 시각 (ms).
+    - points: 키포인트. 개수는 골격 크기(`SKELETON_SIZES`)와 같아야 한다 (트랙이 검사한다).
+    - world: 손 모델이 낸 손 중심 3D 점 (선택, hand21만, points와 같은 순서와 개수, ADR 0044).
+      손 모양 정보이고 검수 대상이 아니다. 검수 도구는 2D만 보이므로 사람이 새로 그린 트랙에는 없다.
+      사람이 고친 트랙은 2D가 parent의 양자화 2D와 같은 키프레임에만 parent의 world를 지닌다
+      (`without_world`, `dlp_review.reconcile.keep_unchanged_world`, ADR 0044 1절 개정).
+    - interpolated: 앞뒤 관측 사이를 보간해 채운 키프레임이면 True (선택, ADR 0054). 관측이 아니라서
+      3D로 올리지 않는다. 검수 도구로 보내지 않는다 (world와 같은 규칙).
+
+    world와 interpolated는 None이면 JSON에 싣지 않아 예전 라벨과 JSON이 같다.
+    """
+
     t_ms: Ms
     points: tuple[Keypoint, ...]
     world: tuple[WorldPoint, ...] | None = Field(
@@ -253,23 +340,36 @@ ARM3_JOINTS = ("wrist", "elbow", "shoulder")
 HANDED_SKELETONS = frozenset({"hand21", "arm3"})
 
 
-# 박스 트랙 (객체·도구 추적). entity_id: 개체 ID. class_id: 온톨로지 객체 클래스.
-# keyframes: 1개 이상.
 class BoxTrackPayload(Contract):
+    """박스 트랙 (객체·도구 추적).
+
+    - entity_id: 개체 ID. 세션 안에서 물체 하나를 가리키고, 손 상태·행동의 target_id 같은 필드가
+      이 값을 참조한다.
+    - class_id: 온톨로지 객체 클래스 ID.
+    - keyframes: 1개 이상, 시각 오름차순 (`LabelRecord`가 검사한다).
+    """
+
     kind: Literal["box_track"] = "box_track"
     entity_id: Identifier
     class_id: OntologyId
     keyframes: tuple[BoxKeyframe, ...] = Field(min_length=1)
 
 
-# 마스크 트랙. part가 있으면 도구의 작용부·파지부 등 부분 마스크다
-# (그 클래스의 tool_parts 안이어야 한다, `validation.check_label`).
-# 손 마스크는 class_id `hand`(온톨로지 객체, 박스 탐지기는 내지 않는다)와 손 트랙의 entity_id
-# (`left_hand`·`right_hand`)를 쓴다 (ADR 0059).
-# derived_from: 이 마스크의 프롬프트가 된 입력 트랙 라벨 ID (선택, 박스 트랙 또는 hand21 손 트랙
-#   하나, ADR 0059). 출처 기록이고 검수를 물려받는 근거가 아니다 (마스크는 따로 검수한다). None이면
-#   JSON에 싣지 않는다 (예전 라벨과 같은 JSON).
 class MaskTrackPayload(Contract):
+    """마스크 트랙 (객체·도구·손의 모양).
+
+    - entity_id, class_id: 박스 트랙과 같은 뜻. 손 마스크는 class_id `hand`(온톨로지 객체, 박스
+      탐지기는 내지 않는다)와 손 트랙의 entity_id(`left_hand`·`right_hand`)를 쓴다 (ADR 0059).
+    - part: 있으면 도구의 작용부·파지부 등 부분 마스크다. 그 클래스의 tool_parts 안이어야 한다
+      (`validation.check_label`).
+    - keyframes: 1개 이상.
+    - derived_from: 이 마스크의 프롬프트가 된 입력 트랙 라벨 ID (선택, 박스 트랙 또는 hand21 손 트랙
+      하나, ADR 0059). 출처 기록일 뿐 검수를 물려받는 근거가 아니다 (마스크는 따로 검수한다).
+      None이면 JSON에 싣지 않는다.
+
+    모양 마스크는 프라이버시 블러와 무관하다 (블러는 `BlurTrackPayload` 박스 그대로).
+    """
+
     kind: Literal["mask_track"] = "mask_track"
     entity_id: Identifier
     class_id: OntologyId
@@ -280,10 +380,16 @@ class MaskTrackPayload(Contract):
     )
 
 
-# 키포인트 트랙 (손·전신 포즈·착용자 팔). skeleton: 골격. hand: hand21·arm3이면 필수
-# (`HANDED_SKELETONS`), 전신 골격이면 보통 None (전신에 hand가 있어도 검증기는 거부하지 않는다).
-# arm3(ADR 0058): 착용자 한쪽 팔. entity_id는 `<left|right>_arm`, hand는 같은 손 hand21 트랙과 같다.
 class KeypointTrackPayload(Contract):
+    """키포인트 트랙 (손, 전신 자세, 착용자 팔).
+
+    - entity_id: 개체 ID. arm3면 `<left|right>_arm`이다.
+    - skeleton: 골격 이름 (`SKELETON_SIZES`). 프레임마다 points 수가 골격 크기와 같아야 한다.
+    - hand: hand21·arm3이면 필수다 (`HANDED_SKELETONS`). 전신 골격이면 보통 None이지만 있어도
+      검증기는 거부하지 않는다. arm3의 hand는 같은 손 hand21 트랙과 같다 (ADR 0058).
+    - keyframes: 1개 이상. world 점은 hand21 골격에만 둘 수 있다.
+    """
+
     kind: Literal["keypoint_track"] = "keypoint_track"
     entity_id: Identifier
     skeleton: Literal["hand21", "coco17", "wholebody133", "arm3"]
@@ -316,32 +422,51 @@ def without_world(payload: KeypointTrackPayload) -> KeypointTrackPayload:
     return payload.model_copy(update={"keyframes": frames})
 
 
-# 블러 트랙 (프라이버시 게이트 출력). target: 프라이버시 대상 ID. keyframes: 가릴 박스.
-# 어떤 내보내기에도 넣지 않는다 (`export.ExportedLabel`). 블러 검수는 원본 접근 권한자만 한다.
 class BlurTrackPayload(Contract):
+    """블러 트랙 (프라이버시 게이트 출력).
+
+    - target: 프라이버시 사전의 대상 ID (얼굴 등).
+    - keyframes: 가릴 박스. 1개 이상.
+
+    어떤 내보내기에도 넣지 않는다 (`export.ExportedLabel`). 블러 검수는 원본 접근 권한자만 한다.
+    """
+
     kind: Literal["blur_track"] = "blur_track"
     target: OntologyId = Field(description="프라이버시 사전의 대상 ID")
     keyframes: tuple[BoxKeyframe, ...] = Field(min_length=1)
 
 
 class Constraint3DFlag(StrEnum):
-    """3D 표본이 어긴 물리 제약 (ADR 0054, `dlp_prelabel.constraints3d`)."""
+    """3D 표본이 어긴 물리 제약 (ADR 0054, `dlp_prelabel.constraints3d`).
 
-    REACH = "reach"  # 카메라→손목 거리가 팔 길이 범위 밖
-    SPEED = "speed"  # 한 표본만 튄 속도
-    ACCEL = "accel"  # 가속도 상한 초과
-    BONE_LENGTH = "bone_length"  # 손목→손끝 거리가 세션 중앙값과 다름
-    # 팔꿈치 표본: 손목(손 3D)→팔꿈치 거리가 아래팔 길이 범위 밖이거나 세션 중앙값과 다름 (ADR 0058)
+    - reach: 카메라에서 손목까지 거리가 팔 길이 범위 밖이다.
+    - speed: 이 표본 하나만 속도가 튄다.
+    - accel: 가속도 상한을 넘었다.
+    - bone_length: 손목에서 손끝까지 거리가 세션 중앙값과 다르다.
+    - forearm_length: 팔꿈치 표본에서 손목(손 3D)과 팔꿈치 사이 거리가 아래팔 길이 범위 밖이거나
+      세션 중앙값과 다르다 (ADR 0058).
+    """
+
+    REACH = "reach"
+    SPEED = "speed"
+    ACCEL = "accel"
+    BONE_LENGTH = "bone_length"
     FOREARM_LENGTH = "forearm_length"
 
 
-# 3D 궤적 표본. t_ms: 그 영상 스트림 PTS ms. x, y, z: 위치 (미터, frame 좌표계).
-# qw, qx, qy, qz: 방향 쿼터니언 (카메라 자세처럼 회전이 있을 때만, 없으면 모두 None).
-# method / confidence: 이 표본을 얻은 추정 방식과 그 품질로 정한 신뢰도 (선택, ADR 0045). None이면
-#   JSON에 싣지 않는다 (예전 라벨과 같은 JSON·해시).
-# flags: 이 표본이 어긴 손 3D 물리 제약 (선택, ADR 0054). 어겨도 정책이 drop이 아니면 표본을 남기고
-#   신뢰도를 낮춘다. None이면 JSON에 싣지 않는다.
 class Trajectory3DSample(Contract):
+    """3D 궤적 표본 하나.
+
+    - t_ms: 3D를 들어 올린 영상 스트림의 PTS 시각 (ms).
+    - x, y, z: 위치 (m, 궤적의 frame 좌표계).
+    - qw, qx, qy, qz: 방향 쿼터니언. 카메라 자세처럼 회전이 있을 때만 넷 다 두고, 없으면 넷 다 None.
+    - method, confidence: 이 표본을 얻은 추정 방식과 그 품질로 정한 신뢰도 (선택, ADR 0045).
+    - flags: 이 표본이 어긴 손 3D 물리 제약 (선택, ADR 0054). 어겨도 정책이 drop이 아니면 표본을
+      남기고 신뢰도를 낮춘다.
+
+    method, confidence, flags는 None이면 JSON에 싣지 않아 예전 라벨과 JSON·해시가 같다.
+    """
+
     t_ms: Ms
     x: FiniteFloat
     y: FiniteFloat
@@ -373,19 +498,25 @@ class Trajectory3DSample(Contract):
 
 
 class Trajectory3DPayload(Contract):
-    """3D 궤적. 카메라 자세는 entity_id="camera"에 회전(쿼터니언)까지 기록한다."""
+    """3D 궤적. 카메라 자세는 entity_id="camera"에 회전(쿼터니언)까지 기록한다.
 
-    # entity_id: 개체 ID ("camera"면 카메라 자세). part: 부분 ID (작용부, 표면 꼭짓점, 손 관절 등,
-    #   `Ontology.known_parts` 안). None이면 개체 전체(중심).
-    # frame: 좌표계. source_3d: 3D를 얻은 방법. samples: 1개 이상.
+    - entity_id: 개체 ID. "camera"면 카메라 자세다.
+    - part: 부분 ID (작용부, 표면 꼭짓점, 손 관절 등, `Ontology.known_parts` 안). None이면 개체
+      전체(중심)다.
+    - frame: 좌표계. source_3d: 3D를 얻은 방법. samples: 1개 이상, 시각 오름차순.
+    - intrinsics: 단안 깊이로 올릴 때 쓴 내부 파라미터의 출처 (선택, ADR 0045). 궤적 안 모든 표본이
+      같은 출처를 쓴다.
+    - derived_from: 이 궤적을 계산한 입력 라벨 ID (선택, ADR 0046). 카메라 좌표 궤적은
+      (2D 트랙 하나), 월드 좌표 궤적은 (카메라 좌표 궤적, 카메라 자세 궤적) 순이다. 궤적 따르기
+      (`trajectory_follow`)가 이 출처로 2D 검수 물려받기를 정한다.
 
-    # intrinsics: 단안 깊이로 올릴 때 쓴 내부 파라미터의 출처 (선택, 궤적 안 모든 표본이 같다,
-    #   ADR 0045). None이면 JSON에 싣지 않는다.
-    # derived_from: 이 궤적을 계산한 입력 라벨 ID (선택, ADR 0046). 월드 좌표 궤적은 (카메라 좌표
-    #   궤적, 카메라 자세 궤적) 순이다. None이면 JSON에 싣지 않는다 (예전 라벨과 같은 JSON).
-    # 카메라 자세 (entity_id="camera", frame=world, ADR 0046): 표본 x·y·z는 세션 월드 좌표의 카메라
-    #   중심(m), qw·qx·qy·qz는 카메라 좌표 → 월드 좌표 회전 (해밀턴 단위 쿼터니언). 월드 좌표는 중력
-    #   정렬(Z 위), 원점은 첫 자세의 카메라 중심, X는 첫 자세 광축의 수평 성분이다.
+    intrinsics와 derived_from은 None이면 JSON에 싣지 않아 예전 라벨과 JSON이 같다.
+
+    카메라 자세(entity_id="camera", frame=world, ADR 0046)에서 표본 x·y·z는 세션 월드 좌표의
+    카메라 중심(m)이고 qw·qx·qy·qz는 카메라 좌표에서 월드 좌표로 가는 회전(해밀턴 단위
+    쿼터니언)이다. 월드 좌표는 중력 정렬(Z 위)이고, 원점은 첫 자세의 카메라 중심, X는 첫 자세
+    광축의 수평 성분이다.
+    """
 
     kind: Literal["trajectory3d"] = "trajectory3d"
     entity_id: Identifier
@@ -405,12 +536,15 @@ class Trajectory3DPayload(Contract):
 
 
 class HandStatePayload(Contract):
-    """손 상태 구간. 값이 바뀌는 시각(변화점)마다 새 구간을 만든다."""
+    """손 상태 구간. 값이 바뀌는 시각(변화점)마다 새 구간을 만든다.
 
-    # hand: 어느 손. contact_target_kind: 접촉 대상 종류 (온톨로지 contact_target_kinds).
-    # target_id: 접촉한 개체 ID (object·tool·fixed_surface면 필수, none이면 비워야 한다).
-    # body_part: 대상자 신체 부위 (person이면 필수). grasp_type: 파지 유형 (none이면 비워야 한다).
-    # role: 손 역할 (active 주동 / assist 보조 / inactive).
+    - hand: 어느 손.
+    - contact_target_kind: 접촉 대상 종류 (온톨로지 contact_target_kinds의 ID).
+    - target_id: 접촉한 개체 ID. object·tool·fixed_surface면 필수, none이면 비워야 한다.
+    - body_part: 대상자 신체 부위. person이면 필수, none이면 비워야 한다.
+    - grasp_type: 파지 유형. none이면 비워야 한다.
+    - role: 손 역할 (온톨로지 hand_roles의 ID. active 주동, assist 보조·고정, inactive 비활동).
+    """
 
     kind: Literal["hand_state"] = "hand_state"
     hand: Hand
@@ -437,16 +571,19 @@ class HandStatePayload(Contract):
 
 
 class ActionPayload(Contract):
-    """원시 동작 하나 (손별). 양손 행동은 두 손 트랙에 같은 action_id로 기록한다."""
+    """원시 동작 하나 (손별). 양손 행동은 두 손 트랙에 같은 action_id로 기록한다.
 
-    # action_id: 행동 ID (양손이면 두 레코드가 공유). hand: 어느 손. verb: 원시 동작 동사 ID.
-    # target_id / target_body_part / tool_id: 대상 개체, 대상자 신체 부위, 쓴 도구 개체 (선택).
-    # direction: 자유 텍스트 방향 (선택).
-    # 시각 4개 (마스터 ms): t_approach_ms(접근 시작 = 라벨 t_start_ms) <= t_contact_start_ms <=
-    #   t_contact_end_ms <= t_end_ms(= 라벨 t_end_ms).
-    #   접촉 시각은 비접촉 동작·연속 접촉 중간이면 None.
-    # contact_held: Field description 참고.
-    # pre_state / post_state: 행동 전·후 대상 상태 (상태 속성 ID → 값 ID).
+    - action_id: 행동 ID. 양손 행동이면 두 레코드가 공유한다.
+    - hand: 어느 손. verb: 원시 동작 동사 ID.
+    - target_id, target_body_part, tool_id: 대상 개체, 대상자 신체 부위, 쓴 도구 개체 (선택).
+    - direction: 자유 텍스트 방향 (선택).
+    - 시각 4개 (마스터 타임라인 ms): t_approach_ms(접근 시작, 라벨 t_start_ms와 같다) <=
+      t_contact_start_ms <= t_contact_end_ms <= t_end_ms(라벨 t_end_ms와 같다). 접촉 시각은 비접촉
+      동작이거나 연속 접촉의 중간이면 None.
+    - contact_held: 연속 접촉 묶음의 중간·끝 행동이면 True (접촉 시작이 앞 행동에 있다).
+    - pre_state, post_state: 행동 전·후 대상 상태 (상태 속성 ID → 값 ID).
+    """
+
     # 필드를 더하면 번지는 곳: `dlp_schema.description_follow.meaning`이 시각 필드(TIME_FIELDS) 밖의
     #   모든 필드를 의미로 보므로 새 필드만 바뀌어도 의미 변경이 되어 검수 전 설명이 지워지고 재생성
     #   대상이 된다(시각 성격이면 TIME_FIELDS에 넣는다). 페이로드가 구간 JSON(`dlp_schema.export`)에
@@ -487,18 +624,26 @@ class ActionPayload(Contract):
         return self
 
 
-# 상위 구간 수준.
 class SegmentLevel(StrEnum):
-    SKILL = "skill"  # 기술 (ref_id = skill·human_skill 동사)
-    SUBSTEP = "substep"  # 작업의 하위 단계 (ref_id = 하위 단계 ID)
-    TASK = "task"  # 작업 (ref_id = 작업 ID)
+    """상위 구간의 수준.
+
+    - skill: 기술. ref_id는 skill·human_skill 수준 동사 ID다.
+    - substep: 작업의 하위 단계. ref_id는 하위 단계 ID다.
+    - task: 작업. ref_id는 작업 ID다.
+    """
+
+    SKILL = "skill"
+    SUBSTEP = "substep"
+    TASK = "task"
 
 
 class SegmentPayload(Contract):
-    """원시 동작을 묶는 상위 구간 (기술, 하위 단계, 작업)."""
+    """원시 동작을 묶는 상위 구간 (기술, 하위 단계, 작업).
 
-    # segment_id: 구간 ID (description 라벨이 참조). level / ref_id: 수준과 참조 사전 ID.
-    # child_ids: 묶인 하위 구간·행동의 ID (action_id 또는 segment_id).
+    - segment_id: 구간 ID. description 라벨이 이 값으로 구간을 가리킨다.
+    - level, ref_id: 수준과 그 수준의 참조 사전 ID (`SegmentLevel`).
+    - child_ids: 묶인 하위 구간·행동의 ID (action_id 또는 segment_id).
+    """
 
     kind: Literal["segment"] = "segment"
     segment_id: Identifier
@@ -507,19 +652,25 @@ class SegmentPayload(Contract):
     child_ids: tuple[Identifier, ...] = ()
 
 
-# 공백 구간 (행동 사이를 채운다. 타임라인에 빈 시간을 두지 않는다).
-# hand: 어느 손 (양손 공통이면 None). gap_type: idle(대기) / unknown(미상) / out_of_scope(범위 외).
 class GapPayload(Contract):
+    """공백 구간. 행동 사이를 채워 타임라인에 빈 시간을 두지 않는다.
+
+    - hand: 어느 손. 양손 공통이면 None.
+    - gap_type: 공백 종류 ID (idle 대기, unknown 미상, out_of_scope 범위 외).
+    """
+
     kind: Literal["gap"] = "gap"
     hand: Hand | None = None
     gap_type: OntologyId
 
 
 class ObjectStatePayload(Contract):
-    """객체 상태가 유지되는 구간. 상태 전이는 같은 객체·속성의 연속 구간에서 도출한다."""
+    """객체 상태가 유지되는 구간. 상태 전이는 같은 객체·속성의 연속 구간에서 도출한다.
 
-    # entity_id: 개체 ID. class_id: 객체 클래스. attribute: 상태 속성 (그 클래스의 states 안).
-    # value: 그 속성의 값.
+    - entity_id: 개체 ID. class_id: 객체 클래스 ID.
+    - attribute: 상태 속성 ID (그 클래스의 states 안).
+    - value: 그 속성의 값 ID.
+    """
 
     kind: Literal["object_state"] = "object_state"
     entity_id: Identifier
@@ -528,20 +679,31 @@ class ObjectStatePayload(Contract):
     value: OntologyId
 
 
-# 표면 커버리지 (`dlp relations run`). surface_id: 표면 개체. tool_id: 처리한 도구 (선택).
-# ratio: 라벨 구간 동안 도구 작용부가 지나간 표면 면적 비율 (0~1).
 class CoveragePayload(Contract):
+    """표면 커버리지 (`dlp relations run` 출력).
+
+    - surface_id: 표면 개체 ID.
+    - tool_id: 표면을 처리한 도구 개체 ID (선택).
+    - ratio: 라벨 구간 동안 도구 작용부가 지나간 표면 면적 비율 (0~1).
+    """
+
     kind: Literal["coverage"] = "coverage"
     surface_id: Identifier
     tool_id: Identifier | None = None
     ratio: float = Field(ge=0.0, le=1.0)
 
 
-# 이벤트 (실패·안전·감염 관리). event_type: 이벤트 ID. severity: 심각도 1~3 (사전이 요구하면 필수).
-# related_action_id / related_entity_id: 관련 행동·개체
-# (사전 requires_action / requires_object면 필수).
-# 시점 이벤트(form=point)는 라벨 t_start_ms == t_end_ms.
 class EventPayload(Contract):
+    """이벤트 (실패, 안전, 감염 관리).
+
+    - event_type: 이벤트 사전 ID.
+    - severity: 심각도 1~3. 사전이 요구하면 필수다.
+    - related_action_id, related_entity_id: 관련 행동 ID와 개체 ID. 사전 항목이
+      requires_action·requires_object면 각각 필수다.
+
+    시점 이벤트(사전 form=point)는 라벨의 t_start_ms와 t_end_ms가 같다.
+    """
+
     kind: Literal["event"] = "event"
     event_type: OntologyId
     severity: Literal[1, 2, 3] | None = None
@@ -549,18 +711,24 @@ class EventPayload(Contract):
     related_entity_id: Identifier | None = None
 
 
-# 관계 술어 (주체 -술어-> 대상).
 class RelationPredicate(StrEnum):
+    """관계 술어. 관계는 "주체 -술어-> 대상" 방향으로 읽는다 (예: 손 grasp 걸레)."""
+
     GRASP = "grasp"
     CONTACT = "contact"
     SUPPORT = "support"
     CONTAIN = "contain"
 
 
-# 관계 (`dlp relations run`의 규칙 엔진 출력 등). subject_id/object_id: 주체·대상 개체.
-# subject_part/object_part: 부분 ID (예: 걸레의 cloth_face).
-# derived_by: 도출 규칙 ID (사람이 그렸으면 None).
 class RelationPayload(Contract):
+    """두 개체 사이 관계 (`dlp relations run`의 규칙 엔진 출력 등).
+
+    - subject_id, object_id: 주체와 대상 개체 ID.
+    - subject_part, object_part: 부분 ID (선택, 예: 걸레의 cloth_face).
+    - predicate: 관계 술어.
+    - derived_by: 관계를 도출한 규칙 ID. 사람이 그렸으면 None.
+    """
+
     kind: Literal["relation"] = "relation"
     subject_id: Identifier
     subject_part: OntologyId | None = None
@@ -570,13 +738,20 @@ class RelationPayload(Contract):
     derived_by: str | None = Field(default=None, description="관계를 도출한 규칙 ID")
 
 
-# 자연어 설명 (VLM 또는 사람). segment_id: 설명하는 상위 구간·행동 ID. text: 설명.
-# language: 언어 코드 (기본 ko). source_label_id: 번역이면 원문 설명 라벨 ID (ADR 0043).
-#   한국어 설명마다 영어 번역을 별도 레코드로 둔다 (`dlp_actions.translate`). 번역은 원문의 수정이
-#   아니라서 parent_label_id를 쓰지 않는다: parent로 이으면 `current_labels`가 원문을 현재 라벨에서
-#   빼 버린다. 원문과 번역이 둘 다 운영 라벨이고, 번역은 이 필드로 원문 레코드를 가리킨다.
-#   원문이 고쳐지면(새 레코드) 이 값이 현재 원문과 달라져 낡은 번역으로 판정된다.
 class DescriptionPayload(Contract):
+    """자연어 설명 (VLM 또는 사람).
+
+    - segment_id: 설명하는 상위 구간·행동의 ID.
+    - text: 설명 문장 (빈 문자열 금지).
+    - language: 언어 코드 (기본 ko).
+    - source_label_id: 번역 레코드면 원문 설명의 라벨 ID (ADR 0043). 원문이면 None.
+
+    한국어 설명마다 영어 번역을 별도 레코드로 둔다 (`dlp_actions.translate`). 번역은 원문의 수정이
+    아니라서 parent_label_id를 쓰지 않는다. parent로 이으면 `current_labels`가 원문을 현재 라벨에서
+    빼 버린다. 원문과 번역은 둘 다 운영 라벨이고, 번역은 source_label_id로 원문 레코드를 가리킨다.
+    원문이 고쳐지면(새 레코드) 이 값이 현재 원문 ID와 달라져 낡은 번역으로 판정된다.
+    """
+
     kind: Literal["description"] = "description"
     segment_id: Identifier
     text: str = Field(min_length=1)
@@ -636,20 +811,28 @@ LABEL_REF_FIELDS = frozenset({"source_label_id", "derived_from"})
 # ---------------------------------------------------------------- 라벨 레코드
 
 
-# 라벨 레코드 하나 (DB label_records 한 행).
-#   label_id: 라벨 ID. 모델 출처는 `version_tag(모델 버전)`을 넣어 버전마다 다르게 만든다.
-#   session_id: 세션. stream_id: Field description 참고.
-#   t_start_ms / t_end_ms: 라벨 구간 (시작 <= 끝). 공간 라벨은 스트림 PTS ms, 시간 구간 라벨은
-#     마스터 ms.
-#   ontology_version: 따르는 온톨로지 버전 (DB FK).
-#   provenance / evidence / confidence: 출처, 근거, 신뢰도 (모델 출처면 confidence 필수).
-#   verification: 검수 상태 (DB에서 이것만 바꿀 수 있다).
-#   parent_label_id: 고친(또는 지운) 이전 레코드. 처음 레코드면 None.
-#   retracted / seeded_error / measurement: Field description 참고.
-#     운영 라벨 판정은 `episode.current_labels`.
-#   created_at: 레코드 생성 시각 (시간대 필수).
-#   payload: 종류별 내용.
 class LabelRecord(Contract):
+    """라벨 레코드 하나 (DB label_records 한 행).
+
+    라벨은 덮어쓰지 않는다. 수정은 새 레코드를 만들고 parent_label_id로 이전 레코드를 가리키며,
+    삭제(오탐 제거)는 retracted=True인 새 레코드다.
+
+    - label_id: 라벨 ID. 모델 출처는 `version_tag(모델 버전)`을 넣어 버전마다 다르게 만든다.
+    - session_id: 세션 ID. stream_id: 공간 라벨이 그려진 스트림 (공간 라벨에는 필수).
+    - t_start_ms, t_end_ms: 라벨 구간 (시작 <= 끝). 공간 라벨은 그 스트림의 PTS ms, 시간 구간 라벨은
+      마스터 타임라인 ms다.
+    - ontology_version: 따르는 온톨로지 버전 (DB FK).
+    - provenance, evidence, confidence: 출처, 근거, 신뢰도 (0~1). 모델 출처면 confidence가 필수다.
+    - verification: 검수 상태. DB에서 바꿀 수 있는 것은 이 열 묶음뿐이다.
+    - parent_label_id: 고친(또는 지운) 이전 레코드 ID. 처음 레코드면 None.
+    - retracted: parent 라벨을 삭제하는 레코드.
+    - seeded_error: 오류 삽입 과제용 레코드. 운영 라벨이 아니라 학습·내보내기에서 뺀다.
+    - measurement: 측정용 레코드 (blind 블라인드 과제, double 이중 라벨링의 두 번째 라벨).
+      운영 라벨이 아니다. 운영 라벨 판정은 `episode.current_labels`가 한다.
+    - created_at: 레코드 생성 시각 (시간대 필수).
+    - payload: 종류별 내용 (`kind`로 구별).
+    """
+
     label_id: Identifier
     session_id: Identifier
     stream_id: Identifier | None = Field(

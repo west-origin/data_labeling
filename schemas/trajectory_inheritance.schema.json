@@ -11,6 +11,7 @@
       "type": "string"
     },
     "VerificationState": {
+      "description": "라벨의 검수 상태.\n\nDB에서 바꿀 수 있는 유일한 라벨 열 묶음이다 (`db.repository.record_review`).\n\n- unreviewed: 검수 전.\n- sample_verified: 높은 신뢰도 묶음의 표본이 합격해 묶음 전체를 검증된 것으로 본다.\n- human_approved: 사람이 그대로 승인했다.\n- human_corrected: 검수 수집(`dlp_review.reconcile`)에서 사람이 고치거나 새로 그린 결과\n  레코드, 지운 라벨의 삭제(retracted) 레코드, 검수자가 적용한 AI 제안 레코드\n  (`dlp_review.ai_collect`). 모두 사람 출처다. 검수 물려받기(3D 궤적·설명)는 출처가 고쳐졌어도\n  이 상태가 아니라 human_approved(또는 sample_verified)를 준다\n  (`trajectory_follow`·`description_follow`).",
       "enum": [
         "unreviewed",
         "sample_verified",

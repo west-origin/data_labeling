@@ -23,7 +23,7 @@
       "type": "string"
     },
     "duration_ms": {
-      "description": "마스터 타임라인 기준 시각(ms)",
+      "description": "시각(ms). 시간 구간 라벨은 마스터 타임라인, 공간 라벨은 그 스트림 PTS 기준",
       "minimum": 0,
       "title": "Duration Ms",
       "type": "integer"

@@ -2,7 +2,7 @@
   "$defs": {
     "ActionPayload": {
       "additionalProperties": false,
-      "description": "원시 동작 하나 (손별). 양손 행동은 두 손 트랙에 같은 action_id로 기록한다.",
+      "description": "원시 동작 하나 (손별). 양손 행동은 두 손 트랙에 같은 action_id로 기록한다.\n\n- action_id: 행동 ID. 양손 행동이면 두 레코드가 공유한다.\n- hand: 어느 손. verb: 원시 동작 동사 ID.\n- target_id, target_body_part, tool_id: 대상 개체, 대상자 신체 부위, 쓴 도구 개체 (선택).\n- direction: 자유 텍스트 방향 (선택).\n- 시각 4개 (마스터 타임라인 ms): t_approach_ms(접근 시작, 라벨 t_start_ms와 같다) <=\n  t_contact_start_ms <= t_contact_end_ms <= t_end_ms(라벨 t_end_ms와 같다). 접촉 시각은 비접촉\n  동작이거나 연속 접촉의 중간이면 None.\n- contact_held: 연속 접촉 묶음의 중간·끝 행동이면 True (접촉 시작이 앞 행동에 있다).\n- pre_state, post_state: 행동 전·후 대상 상태 (상태 속성 ID → 값 ID).",
       "properties": {
         "action_id": {
           "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
@@ -57,7 +57,7 @@
           "type": "object"
         },
         "t_approach_ms": {
-          "description": "마스터 타임라인 기준 시각(ms)",
+          "description": "시각(ms). 시간 구간 라벨은 마스터 타임라인, 공간 라벨은 그 스트림 PTS 기준",
           "minimum": 0,
           "title": "T Approach Ms",
           "type": "integer"
@@ -65,7 +65,7 @@
         "t_contact_end_ms": {
           "anyOf": [
             {
-              "description": "마스터 타임라인 기준 시각(ms)",
+              "description": "시각(ms). 시간 구간 라벨은 마스터 타임라인, 공간 라벨은 그 스트림 PTS 기준",
               "minimum": 0,
               "type": "integer"
             },
@@ -79,7 +79,7 @@
         "t_contact_start_ms": {
           "anyOf": [
             {
-              "description": "마스터 타임라인 기준 시각(ms)",
+              "description": "시각(ms). 시간 구간 라벨은 마스터 타임라인, 공간 라벨은 그 스트림 PTS 기준",
               "minimum": 0,
               "type": "integer"
             },
@@ -91,7 +91,7 @@
           "title": "T Contact Start Ms"
         },
         "t_end_ms": {
-          "description": "마스터 타임라인 기준 시각(ms)",
+          "description": "시각(ms). 시간 구간 라벨은 마스터 타임라인, 공간 라벨은 그 스트림 PTS 기준",
           "minimum": 0,
           "title": "T End Ms",
           "type": "integer"
@@ -153,6 +153,7 @@
     },
     "BlurTrackPayload": {
       "additionalProperties": false,
+      "description": "블러 트랙 (프라이버시 게이트 출력).\n\n- target: 프라이버시 사전의 대상 ID (얼굴 등).\n- keyframes: 가릴 박스. 1개 이상.\n\n어떤 내보내기에도 넣지 않는다 (`export.ExportedLabel`). 블러 검수는 원본 접근 권한자만 한다.",
       "properties": {
         "keyframes": {
           "items": {
@@ -184,6 +185,7 @@
     },
     "BoxKeyframe": {
       "additionalProperties": false,
+      "description": "박스 키프레임 하나.\n\n- t_ms: 그 스트림 영상의 PTS 시각 (ms).\n- x, y: 박스 왼쪽 위 꼭짓점 (px, 영상 왼쪽 위 원점).\n- w, h: 폭과 높이 (px, 0 이상).\n- outside: 이 시각부터 대상이 화면 밖이거나 보이지 않는다 (CVAT의 outside와 같은 뜻).\n  True면 좌표는 무시한다.\n\n키프레임 사이 값은 소비자가 보간한다 (선형 등, 각 단계 정책).",
       "properties": {
         "h": {
           "minimum": 0,
@@ -196,7 +198,7 @@
           "type": "boolean"
         },
         "t_ms": {
-          "description": "마스터 타임라인 기준 시각(ms)",
+          "description": "시각(ms). 시간 구간 라벨은 마스터 타임라인, 공간 라벨은 그 스트림 PTS 기준",
           "minimum": 0,
           "title": "T Ms",
           "type": "integer"
@@ -227,6 +229,7 @@
     },
     "BoxTrackPayload": {
       "additionalProperties": false,
+      "description": "박스 트랙 (객체·도구 추적).\n\n- entity_id: 개체 ID. 세션 안에서 물체 하나를 가리키고, 손 상태·행동의 target_id 같은 필드가\n  이 값을 참조한다.\n- class_id: 온톨로지 객체 클래스 ID.\n- keyframes: 1개 이상, 시각 오름차순 (`LabelRecord`가 검사한다).",
       "properties": {
         "class_id": {
           "pattern": "^[a-z][a-z0-9_]{0,63}$",
@@ -262,7 +265,7 @@
       "type": "object"
     },
     "Constraint3DFlag": {
-      "description": "3D 표본이 어긴 물리 제약 (ADR 0054, `dlp_prelabel.constraints3d`).",
+      "description": "3D 표본이 어긴 물리 제약 (ADR 0054, `dlp_prelabel.constraints3d`).\n\n- reach: 카메라에서 손목까지 거리가 팔 길이 범위 밖이다.\n- speed: 이 표본 하나만 속도가 튄다.\n- accel: 가속도 상한을 넘었다.\n- bone_length: 손목에서 손끝까지 거리가 세션 중앙값과 다르다.\n- forearm_length: 팔꿈치 표본에서 손목(손 3D)과 팔꿈치 사이 거리가 아래팔 길이 범위 밖이거나\n  세션 중앙값과 다르다 (ADR 0058).",
       "enum": [
         "reach",
         "speed",
@@ -274,6 +277,7 @@
       "type": "string"
     },
     "CoordinateFrame": {
+      "description": "3D 궤적 좌표계.\n\n- camera: 그 시각의 카메라 좌표계 (단안 깊이 결과).\n- body: 작업자 몸 기준 좌표계.\n- world: 세션에 고정된 월드 좌표계 (SLAM 결과). 축 정의는 `Trajectory3DPayload` 참고.",
       "enum": [
         "camera",
         "body",
@@ -284,6 +288,7 @@
     },
     "CoveragePayload": {
       "additionalProperties": false,
+      "description": "표면 커버리지 (`dlp relations run` 출력).\n\n- surface_id: 표면 개체 ID.\n- tool_id: 표면을 처리한 도구 개체 ID (선택).\n- ratio: 라벨 구간 동안 도구 작용부가 지나간 표면 면적 비율 (0~1).",
       "properties": {
         "kind": {
           "const": "coverage",
@@ -325,6 +330,7 @@
     },
     "DescriptionPayload": {
       "additionalProperties": false,
+      "description": "자연어 설명 (VLM 또는 사람).\n\n- segment_id: 설명하는 상위 구간·행동의 ID.\n- text: 설명 문장 (빈 문자열 금지).\n- language: 언어 코드 (기본 ko).\n- source_label_id: 번역 레코드면 원문 설명의 라벨 ID (ADR 0043). 원문이면 None.\n\n한국어 설명마다 영어 번역을 별도 레코드로 둔다 (`dlp_actions.translate`). 번역은 원문의 수정이\n아니라서 parent_label_id를 쓰지 않는다. parent로 이으면 `current_labels`가 원문을 현재 라벨에서\n빼 버린다. 원문과 번역은 둘 다 운영 라벨이고, 번역은 source_label_id로 원문 레코드를 가리킨다.\n원문이 고쳐지면(새 레코드) 이 값이 현재 원문 ID와 달라져 낡은 번역으로 판정된다.",
       "properties": {
         "kind": {
           "const": "description",
@@ -370,6 +376,7 @@
       "type": "object"
     },
     "Domain": {
+      "description": "작업 도메인. 온톨로지 domains의 키와 같다.\n\ncleaning 청소, caregiving 요양돌봄, nursing 간호.",
       "enum": [
         "cleaning",
         "caregiving",
@@ -380,6 +387,7 @@
     },
     "EventPayload": {
       "additionalProperties": false,
+      "description": "이벤트 (실패, 안전, 감염 관리).\n\n- event_type: 이벤트 사전 ID.\n- severity: 심각도 1~3. 사전이 요구하면 필수다.\n- related_action_id, related_entity_id: 관련 행동 ID와 개체 ID. 사전 항목이\n  requires_action·requires_object면 각각 필수다.\n\n시점 이벤트(사전 form=point)는 라벨의 t_start_ms와 t_end_ms가 같다.",
       "properties": {
         "event_type": {
           "pattern": "^[a-z][a-z0-9_]{0,63}$",
@@ -444,6 +452,7 @@
     },
     "ExportedLabel": {
       "additionalProperties": false,
+      "description": "내보낸 라벨 하나. 내부 `LabelRecord`에서 검수자 ID, 부모 ID, 측정 표시 등 내부 정보를 뺐다.\n\n- label_id: 가명 라벨 ID (내보내기마다 다르다).\n- stream_id: 공간 라벨이 그려진 스트림. 시간 구간 라벨이면 None.\n- t_start_ms, t_end_ms: 구간. 시간 구간 라벨은 마스터 타임라인 ms, 공간 라벨은 그 스트림의\n  PTS ms다.\n- verification: 검수 상태. 구매자가 품질 수준으로 거를 수 있게 그대로 둔다.\n- source: 출처 (human, model, sensor).\n- model_version: 모델 출처일 때 모델 버전. 아니면 None.\n- confidence: 모델 신뢰도 (0~1). 사람 라벨이면 보통 None.\n- payload: 종류별 내용. blur_track은 검증기가 거부한다.",
       "properties": {
         "confidence": {
           "anyOf": [
@@ -561,13 +570,13 @@
           "title": "Stream Id"
         },
         "t_end_ms": {
-          "description": "마스터 타임라인 기준 시각(ms)",
+          "description": "시각(ms). 시간 구간 라벨은 마스터 타임라인, 공간 라벨은 그 스트림 PTS 기준",
           "minimum": 0,
           "title": "T End Ms",
           "type": "integer"
         },
         "t_start_ms": {
-          "description": "마스터 타임라인 기준 시각(ms)",
+          "description": "시각(ms). 시간 구간 라벨은 마스터 타임라인, 공간 라벨은 그 스트림 PTS 기준",
           "minimum": 0,
           "title": "T Start Ms",
           "type": "integer"
@@ -589,6 +598,7 @@
     },
     "ExportedStream": {
       "additionalProperties": false,
+      "description": "내보낸 스트림 하나.\n\n- stream_id: 스트림 ID. 가명이 아니라 세션 안에서만 의미가 있는 이름이다 (예: bodycam).\n- kind: 스트림 종류.\n- video: 내보내기 묶음 안의 블러본 영상 상대 경로. 영상을 함께 내보내지 않으면 None.",
       "properties": {
         "kind": {
           "$ref": "#/$defs/StreamKind"
@@ -621,6 +631,7 @@
     },
     "GapPayload": {
       "additionalProperties": false,
+      "description": "공백 구간. 행동 사이를 채워 타임라인에 빈 시간을 두지 않는다.\n\n- hand: 어느 손. 양손 공통이면 None.\n- gap_type: 공백 종류 ID (idle 대기, unknown 미상, out_of_scope 범위 외).",
       "properties": {
         "gap_type": {
           "pattern": "^[a-z][a-z0-9_]{0,63}$",
@@ -652,6 +663,7 @@
       "type": "object"
     },
     "Hand": {
+      "description": "작업자의 왼손·오른손. 작업자 기준이라 영상의 좌우와 다를 수 있다.",
       "enum": [
         "left",
         "right"
@@ -661,7 +673,7 @@
     },
     "HandStatePayload": {
       "additionalProperties": false,
-      "description": "손 상태 구간. 값이 바뀌는 시각(변화점)마다 새 구간을 만든다.",
+      "description": "손 상태 구간. 값이 바뀌는 시각(변화점)마다 새 구간을 만든다.\n\n- hand: 어느 손.\n- contact_target_kind: 접촉 대상 종류 (온톨로지 contact_target_kinds의 ID).\n- target_id: 접촉한 개체 ID. object·tool·fixed_surface면 필수, none이면 비워야 한다.\n- body_part: 대상자 신체 부위. person이면 필수, none이면 비워야 한다.\n- grasp_type: 파지 유형. none이면 비워야 한다.\n- role: 손 역할 (온톨로지 hand_roles의 ID. active 주동, assist 보조·고정, inactive 비활동).",
       "properties": {
         "body_part": {
           "anyOf": [
@@ -731,6 +743,7 @@
       "type": "object"
     },
     "IntrinsicsSource": {
+      "description": "2D를 3D로 올릴 때 쓴 카메라 내부 파라미터의 출처 (ADR 0045).\n\n- calibrated: 세션 캘리브레이션 또는 등록된 카메라 캘리브레이션.\n- hfov_approx: 캘리브레이션이 없어 정책의 기본 화각으로 근사했다.\n- estimated_hand_size: 캘리브레이션이 없어 손 크기 사전값과 메트릭 깊이로 세션 초점 거리를\n  추정했다 (ADR 0056). calibrated로 쓰지 않고 실제 캘리브레이션을 덮지 않는다.",
       "enum": [
         "calibrated",
         "hfov_approx",
@@ -741,6 +754,7 @@
     },
     "Keypoint": {
       "additionalProperties": false,
+      "description": "2D 키포인트 하나.\n\n- x, y: 그 스트림 영상의 픽셀 좌표 (왼쪽 위 원점).\n- visibility: COCO 규약. 0 라벨 없음, 1 가려짐, 2 보임.\n- confidence: 모델 신뢰도 (선택, 0~1).",
       "properties": {
         "confidence": {
           "anyOf": [
@@ -785,6 +799,7 @@
     },
     "KeypointFrame": {
       "additionalProperties": false,
+      "description": "한 시각의 키포인트 묶음.\n\n- t_ms: 그 스트림 영상의 PTS 시각 (ms).\n- points: 키포인트. 개수는 골격 크기(`SKELETON_SIZES`)와 같아야 한다 (트랙이 검사한다).\n- world: 손 모델이 낸 손 중심 3D 점 (선택, hand21만, points와 같은 순서와 개수, ADR 0044).\n  손 모양 정보이고 검수 대상이 아니다. 검수 도구는 2D만 보이므로 사람이 새로 그린 트랙에는 없다.\n  사람이 고친 트랙은 2D가 parent의 양자화 2D와 같은 키프레임에만 parent의 world를 지닌다\n  (`without_world`, `dlp_review.reconcile.keep_unchanged_world`, ADR 0044 1절 개정).\n- interpolated: 앞뒤 관측 사이를 보간해 채운 키프레임이면 True (선택, ADR 0054). 관측이 아니라서\n  3D로 올리지 않는다. 검수 도구로 보내지 않는다 (world와 같은 규칙).\n\nworld와 interpolated는 None이면 JSON에 싣지 않아 예전 라벨과 JSON이 같다.",
       "properties": {
         "interpolated": {
           "anyOf": [
@@ -808,7 +823,7 @@
           "type": "array"
         },
         "t_ms": {
-          "description": "마스터 타임라인 기준 시각(ms)",
+          "description": "시각(ms). 시간 구간 라벨은 마스터 타임라인, 공간 라벨은 그 스트림 PTS 기준",
           "minimum": 0,
           "title": "T Ms",
           "type": "integer"
@@ -839,6 +854,7 @@
     },
     "KeypointTrackPayload": {
       "additionalProperties": false,
+      "description": "키포인트 트랙 (손, 전신 자세, 착용자 팔).\n\n- entity_id: 개체 ID. arm3면 `<left|right>_arm`이다.\n- skeleton: 골격 이름 (`SKELETON_SIZES`). 프레임마다 points 수가 골격 크기와 같아야 한다.\n- hand: hand21·arm3이면 필수다 (`HANDED_SKELETONS`). 전신 골격이면 보통 None이지만 있어도\n  검증기는 거부하지 않는다. arm3의 hand는 같은 손 hand21 트랙과 같다 (ADR 0058).\n- keyframes: 1개 이상. world 점은 hand21 골격에만 둘 수 있다.",
       "properties": {
         "entity_id": {
           "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
@@ -890,6 +906,7 @@
       "type": "object"
     },
     "Lift3DMethod": {
+      "description": "단안 깊이 결과에서 3D 표본 하나를 얻은 추정 방식 (ADR 0045).\n\n- hand_fit: 손 중심 3D 점, 2D 점, 손바닥 깊이, 손 크기 사전값을 함께 맞춘다 (ADR 0044).\n- point_depth: 그 픽셀의 깊이로 역투영한다 (관절별 깊이, 박스 중심).",
       "enum": [
         "hand_fit",
         "point_depth"
@@ -899,6 +916,7 @@
     },
     "MaskKeyframe": {
       "additionalProperties": false,
+      "description": "마스크 키프레임 하나.\n\n- t_ms: 그 스트림 영상의 PTS 시각 (ms).\n- rle: 마스크 모양. outside가 아니면 필수다.\n- outside: 이 시각에 대상이 보이지 않는다.\n- score: 마스크 모델이 낸 이 키프레임의 품질 점수 (선택, SAM 예측 IoU, ADR 0059). None이면\n  JSON에 싣지 않아 예전 라벨과 JSON이 같다. 검수 도구로 보내지 않는다.\n\n마스크는 키프레임 사이를 보간하지 않는다. 그 시각에만 유효한 모양이다 (ADR 0059).",
       "properties": {
         "outside": {
           "default": false,
@@ -932,7 +950,7 @@
           "title": "Score"
         },
         "t_ms": {
-          "description": "마스터 타임라인 기준 시각(ms)",
+          "description": "시각(ms). 시간 구간 라벨은 마스터 타임라인, 공간 라벨은 그 스트림 PTS 기준",
           "minimum": 0,
           "title": "T Ms",
           "type": "integer"
@@ -946,6 +964,7 @@
     },
     "MaskTrackPayload": {
       "additionalProperties": false,
+      "description": "마스크 트랙 (객체·도구·손의 모양).\n\n- entity_id, class_id: 박스 트랙과 같은 뜻. 손 마스크는 class_id `hand`(온톨로지 객체, 박스\n  탐지기는 내지 않는다)와 손 트랙의 entity_id(`left_hand`·`right_hand`)를 쓴다 (ADR 0059).\n- part: 있으면 도구의 작용부·파지부 등 부분 마스크다. 그 클래스의 tool_parts 안이어야 한다\n  (`validation.check_label`).\n- keyframes: 1개 이상.\n- derived_from: 이 마스크의 프롬프트가 된 입력 트랙 라벨 ID (선택, 박스 트랙 또는 hand21 손 트랙\n  하나, ADR 0059). 출처 기록일 뿐 검수를 물려받는 근거가 아니다 (마스크는 따로 검수한다).\n  None이면 JSON에 싣지 않는다.\n\n모양 마스크는 프라이버시 블러와 무관하다 (블러는 `BlurTrackPayload` 박스 그대로).",
       "properties": {
         "class_id": {
           "pattern": "^[a-z][a-z0-9_]{0,63}$",
@@ -1013,7 +1032,7 @@
     },
     "ObjectStatePayload": {
       "additionalProperties": false,
-      "description": "객체 상태가 유지되는 구간. 상태 전이는 같은 객체·속성의 연속 구간에서 도출한다.",
+      "description": "객체 상태가 유지되는 구간. 상태 전이는 같은 객체·속성의 연속 구간에서 도출한다.\n\n- entity_id: 개체 ID. class_id: 객체 클래스 ID.\n- attribute: 상태 속성 ID (그 클래스의 states 안).\n- value: 그 속성의 값 ID.",
       "properties": {
         "attribute": {
           "pattern": "^[a-z][a-z0-9_]{0,63}$",
@@ -1053,7 +1072,7 @@
     },
     "PhysicalPriorTable": {
       "additionalProperties": false,
-      "description": "온톨로지 객체 클래스의 물리 사전값 표. 측정값이 아니라 사전값이다 (measured는 늘 false).",
+      "description": "온톨로지 객체 클래스의 물리 사전값 표. 측정값이 아니라 사전값이다 (measured는 늘 false).\n\n- measured: 늘 false. 영상 속 물체를 잰 값이 아님을 소비자가 기계적으로 확인하게 한다.\n- conventions: 단위, 상대면, 상태별 범위의 뜻 (`PHYSICAL_PRIOR_CONVENTIONS`, 영어).\n- materials, tactile_properties: 재질·촉감 ID → 한·영 표시 이름.\n- objects: 객체 클래스 ID → 물리 사전값. 사전값이 있는 클래스만 싣고, 각자 source가\n  prior_*다.\n- content_sha256: materials·tactile_properties·objects의 내용 해시. 같은 온톨로지 버전의\n  초안에서 사전값을 승인해 고칠 수 있으므로(ADR 0053) 받는 쪽이 납품 사이에 표가 바뀌었는지\n  가린다.",
       "properties": {
         "content_sha256": {
           "default": "",
@@ -1109,7 +1128,7 @@
     },
     "PhysicalPriors": {
       "additionalProperties": false,
-      "description": "객체 클래스의 물리 사전값 (재질·촉감·질량·정지 마찰 계수). 측정값이 아니라 사전값(prior)이다.\n\n클래스의 흔한 실물 범위를 넓게 잡은 값이며, 영상 속 특정 물체를 잰 값이 아니다. 내보내기는\n`measured: false`와 출처(source)를 함께 싣는다 (ADR 0049).",
+      "description": "객체 클래스의 물리 사전값 (재질·촉감·질량·정지 마찰 계수). 측정값이 아니라 사전값(prior)이다.\n\n클래스의 흔한 실물 범위를 넓게 잡은 값이며, 영상 속 특정 물체를 잰 값이 아니다. 내보내기는\n`measured: false`와 출처(source)를 함께 싣는다 (ADR 0049).\n\n- source: 수치 사전값의 출처 (필수).\n- note: 근거·가정 메모 (선택, 한국어). prior_literature면 출처를 반드시 적는다.\n- material: 대표 재질 ID (materials의 키).\n- part_materials: 도구 부분 ID → 재질 ID. 그 객체의 작용부·파지부 중 대표 재질과 다른 부분만\n  적는다.\n- tactile: 촉감 속성 ID 목록 (tactile_properties의 키, 중복 금지).\n- mass_kg: 질량 범위 (kg). by_state로 상태별 범위를 둔다 (예: fill_state).\n- static_friction: 정지 마찰 계수 범위 (무차원). 상대면은 건조한 맨손 피부, 니트릴 장갑, 고무\n  그리퍼 패드를 함께 보는 넓은 범위이고, 젖은 경우는 by_state(wetness)로 따로 적는다. 물체 쪽\n  면은 도구면 손으로 쥐는 파지부(grip_parts), 아니면 주 접촉면이다 (촉감도 같다).",
       "properties": {
         "mass_kg": {
           "anyOf": [
@@ -1214,6 +1233,7 @@
       "type": "object"
     },
     "PriorSource": {
+      "description": "물리 사전값의 출처.\n\n둘 다 측정값이 아니다. 이 세션이나 이 물체를 잰 값이 아니라 클래스의 일반 범위다.\n\n- prior_literature: 문헌, 제품 사양, 표준 표에서 옮긴 범위. 출처를 note에 적는다.\n- prior_estimate: 일반 지식으로 잡은 넓은 추정 범위 (전문가 검토 전).",
       "enum": [
         "prior_literature",
         "prior_estimate"
@@ -1223,6 +1243,7 @@
     },
     "RelationPayload": {
       "additionalProperties": false,
+      "description": "두 개체 사이 관계 (`dlp relations run`의 규칙 엔진 출력 등).\n\n- subject_id, object_id: 주체와 대상 개체 ID.\n- subject_part, object_part: 부분 ID (선택, 예: 걸레의 cloth_face).\n- predicate: 관계 술어.\n- derived_by: 관계를 도출한 규칙 ID. 사람이 그렸으면 None.",
       "properties": {
         "derived_by": {
           "anyOf": [
@@ -1292,6 +1313,7 @@
       "type": "object"
     },
     "RelationPredicate": {
+      "description": "관계 술어. 관계는 \"주체 -술어-> 대상\" 방향으로 읽는다 (예: 손 grasp 걸레).",
       "enum": [
         "grasp",
         "contact",
@@ -1303,7 +1325,7 @@
     },
     "Rle": {
       "additionalProperties": false,
-      "description": "COCO 형식 RLE 마스크.",
+      "description": "COCO 형식 RLE 마스크.\n\n- size: (높이, 너비) px. COCO 순서이고 둘 다 양수다 (F-SCH-32).\n- counts: COCO 압축 RLE 문자열.",
       "properties": {
         "counts": {
           "title": "Counts",
@@ -1334,6 +1356,7 @@
       "type": "object"
     },
     "SegmentLevel": {
+      "description": "상위 구간의 수준.\n\n- skill: 기술. ref_id는 skill·human_skill 수준 동사 ID다.\n- substep: 작업의 하위 단계. ref_id는 하위 단계 ID다.\n- task: 작업. ref_id는 작업 ID다.",
       "enum": [
         "skill",
         "substep",
@@ -1344,7 +1367,7 @@
     },
     "SegmentPayload": {
       "additionalProperties": false,
-      "description": "원시 동작을 묶는 상위 구간 (기술, 하위 단계, 작업).",
+      "description": "원시 동작을 묶는 상위 구간 (기술, 하위 단계, 작업).\n\n- segment_id: 구간 ID. description 라벨이 이 값으로 구간을 가리킨다.\n- level, ref_id: 수준과 그 수준의 참조 사전 ID (`SegmentLevel`).\n- child_ids: 묶인 하위 구간·행동의 ID (action_id 또는 segment_id).",
       "properties": {
         "child_ids": {
           "default": [],
@@ -1385,6 +1408,7 @@
       "type": "object"
     },
     "Source": {
+      "description": "라벨을 만든 주체.\n\n- human: 사람이 만들거나 고친 라벨.\n- model: 자동 모델. `Provenance.model_version`과 `LabelRecord.confidence`가 필수다.\n- sensor: 센서에서 바로 얻은 라벨 (예: 장갑 압력 접촉). `Provenance.sensor_id`가 필수다.",
       "enum": [
         "human",
         "model",
@@ -1394,6 +1418,7 @@
       "type": "string"
     },
     "Source3D": {
+      "description": "3D 값을 얻은 방법.\n\n- mono_depth: 단안 메트릭 깊이 추정.\n- visual_slam: 영상 SLAM.\n- visual_inertial_slam: 영상과 IMU를 함께 쓴 SLAM.\n- multi_view: 여러 카메라 삼각측량.",
       "enum": [
         "mono_depth",
         "visual_slam",
@@ -1404,6 +1429,7 @@
       "type": "string"
     },
     "Split": {
+      "description": "세션이 데이터셋 버전에서 어디에 쓰이는지.\n\n값은 DB dataset_split_assignments.split에 그대로 저장된다.\n\n- golden: 골든셋. 평가 전용이고 학습에 쓰지 않는다.\n- train: 학습.\n- val: 검증 (학습 중 조기 종료·모델 선택용).\n- holdout: 골든셋과 작업자·장소를 공유하거나, 학습·검증 경계에 걸쳐 어느 쪽에도 넣을 수 없는\n  세션. 정보 누수를 막으려고 학습·검증·평가 어디에도 쓰지 않는다.",
       "enum": [
         "golden",
         "train",
@@ -1451,6 +1477,7 @@
       "type": "object"
     },
     "StreamKind": {
+      "description": "스트림 종류. 세션에는 bodycam이 정확히 하나 있어야 한다 (`Session` 검증기).\n\n- bodycam: 1인칭 바디캠 영상. 기준 스트림이다.\n- imu: 관성 센서. 보통 바디캠 내장이고 GPMF 등에서 추출한다.\n- third_person: 3인칭 고정 카메라 영상.\n- glove_left, glove_right: 왼손·오른손 센서 장갑 (압력 등).\n- audio: 별도로 녹음한 오디오.",
       "enum": [
         "bodycam",
         "imu",
@@ -1464,6 +1491,7 @@
     },
     "TermName": {
       "additionalProperties": false,
+      "description": "사전 항목 하나의 한·영 표시 이름 (`Ontology.display_names`).\n\n내보내기 구간 JSON의 `term_names` 값이기도 하다 (`dlp_schema.export.IntervalFile`).",
       "properties": {
         "en": {
           "minLength": 1,
@@ -1485,7 +1513,7 @@
     },
     "Trajectory3DPayload": {
       "additionalProperties": false,
-      "description": "3D 궤적. 카메라 자세는 entity_id=\"camera\"에 회전(쿼터니언)까지 기록한다.",
+      "description": "3D 궤적. 카메라 자세는 entity_id=\"camera\"에 회전(쿼터니언)까지 기록한다.\n\n- entity_id: 개체 ID. \"camera\"면 카메라 자세다.\n- part: 부분 ID (작용부, 표면 꼭짓점, 손 관절 등, `Ontology.known_parts` 안). None이면 개체\n  전체(중심)다.\n- frame: 좌표계. source_3d: 3D를 얻은 방법. samples: 1개 이상, 시각 오름차순.\n- intrinsics: 단안 깊이로 올릴 때 쓴 내부 파라미터의 출처 (선택, ADR 0045). 궤적 안 모든 표본이\n  같은 출처를 쓴다.\n- derived_from: 이 궤적을 계산한 입력 라벨 ID (선택, ADR 0046). 카메라 좌표 궤적은\n  (2D 트랙 하나), 월드 좌표 궤적은 (카메라 좌표 궤적, 카메라 자세 궤적) 순이다. 궤적 따르기\n  (`trajectory_follow`)가 이 출처로 2D 검수 물려받기를 정한다.\n\nintrinsics와 derived_from은 None이면 JSON에 싣지 않아 예전 라벨과 JSON이 같다.\n\n카메라 자세(entity_id=\"camera\", frame=world, ADR 0046)에서 표본 x·y·z는 세션 월드 좌표의\n카메라 중심(m)이고 qw·qx·qy·qz는 카메라 좌표에서 월드 좌표로 가는 회전(해밀턴 단위\n쿼터니언)이다. 월드 좌표는 중력 정렬(Z 위)이고, 원점은 첫 자세의 카메라 중심, X는 첫 자세\n광축의 수평 성분이다.",
       "properties": {
         "derived_from": {
           "anyOf": [
@@ -1566,6 +1594,7 @@
     },
     "Trajectory3DSample": {
       "additionalProperties": false,
+      "description": "3D 궤적 표본 하나.\n\n- t_ms: 3D를 들어 올린 영상 스트림의 PTS 시각 (ms).\n- x, y, z: 위치 (m, 궤적의 frame 좌표계).\n- qw, qx, qy, qz: 방향 쿼터니언. 카메라 자세처럼 회전이 있을 때만 넷 다 두고, 없으면 넷 다 None.\n- method, confidence: 이 표본을 얻은 추정 방식과 그 품질로 정한 신뢰도 (선택, ADR 0045).\n- flags: 이 표본이 어긴 손 3D 물리 제약 (선택, ADR 0054). 어겨도 정책이 drop이 아니면 표본을\n  남기고 신뢰도를 낮춘다.\n\nmethod, confidence, flags는 None이면 JSON에 싣지 않아 예전 라벨과 JSON·해시가 같다.",
       "properties": {
         "confidence": {
           "anyOf": [
@@ -1659,7 +1688,7 @@
           "title": "Qz"
         },
         "t_ms": {
-          "description": "마스터 타임라인 기준 시각(ms)",
+          "description": "시각(ms). 시간 구간 라벨은 마스터 타임라인, 공간 라벨은 그 스트림 PTS 기준",
           "minimum": 0,
           "title": "T Ms",
           "type": "integer"
@@ -1687,6 +1716,7 @@
       "type": "object"
     },
     "VerificationState": {
+      "description": "라벨의 검수 상태.\n\nDB에서 바꿀 수 있는 유일한 라벨 열 묶음이다 (`db.repository.record_review`).\n\n- unreviewed: 검수 전.\n- sample_verified: 높은 신뢰도 묶음의 표본이 합격해 묶음 전체를 검증된 것으로 본다.\n- human_approved: 사람이 그대로 승인했다.\n- human_corrected: 검수 수집(`dlp_review.reconcile`)에서 사람이 고치거나 새로 그린 결과\n  레코드, 지운 라벨의 삭제(retracted) 레코드, 검수자가 적용한 AI 제안 레코드\n  (`dlp_review.ai_collect`). 모두 사람 출처다. 검수 물려받기(3D 궤적·설명)는 출처가 고쳐졌어도\n  이 상태가 아니라 human_approved(또는 sample_verified)를 준다\n  (`trajectory_follow`·`description_follow`).",
       "enum": [
         "unreviewed",
         "sample_verified",
@@ -1698,6 +1728,7 @@
     },
     "WorldPoint": {
       "additionalProperties": false,
+      "description": "손 모델이 낸 손 중심 3D 점 하나 (m).\n\n좌표축은 카메라와 같은 방향(X 오른쪽, Y 아래, Z 앞)이고 원점은 손의 대략적인 기하 중심이다\n(MediaPipe hand_world_landmarks, ADR 0044). 카메라 좌표가 아니라 손 모양 정보다.",
       "properties": {
         "x": {
           "title": "X",
@@ -1722,7 +1753,7 @@
     }
   },
   "additionalProperties": false,
-  "description": "세션 하나의 시간 구간 라벨.\n\n행동, 상위 구간, 공백, 손 상태, 객체 상태, 이벤트, 관계, 커버리지, 설명.",
+  "description": "세션 하나의 시간 구간 라벨.\n\n행동, 상위 구간, 공백, 손 상태, 객체 상태, 이벤트, 관계, 커버리지, 설명.\n\n- format, format_version: 파일 형식 식별자와 버전. 구매자 쪽 파서가 확인한다.\n- export_id: 내보내기 ID (DB exports.export_id). 가명 키를 유도하는 재료이기도 하다.\n- dataset_version_id: 출처 데이터셋 버전.\n- ontology_version: 라벨이 따르는 온톨로지 버전.\n- session_id, worker_id, site_id: 가명 (내보내기마다 다른 HMAC).\n- split: 이 세션이 데이터셋 버전에서 속한 분할.\n- domain: 세션 도메인 (청소, 요양돌봄, 간호).\n- duration_ms: 세션 길이 (마스터 타임라인 ms).\n- streams: 내보낸 스트림 목록.\n- labels: 내보낸 라벨 목록 (블러 라벨 없음).\n- exported_at: 내보낸 시각 (시간대 필수).\n- term_names: 온톨로지 사전 항목의 한·영 표시 이름. 키는 \"<범주>:<ID>\"다 (예: \"verbs:grasp\",\n  `Ontology.display_names`). 페이로드에는 ID만 있으므로 사람이 읽는 이름은 이 표로 찾는다\n  (형식 1.1, ADR 0043). 설명(description) 라벨은 언어마다 한 레코드다 (language ko, en).\n- physical_priors: 객체 물리 사전값 표 (형식 1.2, ADR 0049). 측정값이 아니다 (measured false).",
   "properties": {
     "dataset_version_id": {
       "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
@@ -1733,7 +1764,7 @@
       "$ref": "#/$defs/Domain"
     },
     "duration_ms": {
-      "description": "마스터 타임라인 기준 시각(ms)",
+      "description": "시각(ms). 시간 구간 라벨은 마스터 타임라인, 공간 라벨은 그 스트림 PTS 기준",
       "minimum": 0,
       "title": "Duration Ms",
       "type": "integer"

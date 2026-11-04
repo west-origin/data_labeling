@@ -1,6 +1,7 @@
 {
   "$defs": {
     "AssignmentStatus": {
+      "description": "배정 상태.\n\nopen은 아직 검수 중(또는 작업 생성 전), done은 결과 수집 완료(completed_at 기록)다.",
       "enum": [
         "open",
         "done"
@@ -10,7 +11,7 @@
     },
     "FlaggedSpan": {
       "additionalProperties": false,
-      "description": "검수 단위 안에서 먼저 볼 구간.",
+      "description": "검수 단위 안에서 먼저 볼 구간.\n\n- reason: 먼저 볼 사유.\n- t_start_ms, t_end_ms: 구간 (ms, 라벨 시각 규약을 따른다).\n- label_ids: 이 구간을 표시하게 만든 라벨 (없으면 빈 튜플).",
       "properties": {
         "label_ids": {
           "default": [],
@@ -25,13 +26,13 @@
           "$ref": "#/$defs/ReviewReason"
         },
         "t_end_ms": {
-          "description": "마스터 타임라인 기준 시각(ms)",
+          "description": "시각(ms). 시간 구간 라벨은 마스터 타임라인, 공간 라벨은 그 스트림 PTS 기준",
           "minimum": 0,
           "title": "T End Ms",
           "type": "integer"
         },
         "t_start_ms": {
-          "description": "마스터 타임라인 기준 시각(ms)",
+          "description": "시각(ms). 시간 구간 라벨은 마스터 타임라인, 공간 라벨은 그 스트림 PTS 기준",
           "minimum": 0,
           "title": "T Start Ms",
           "type": "integer"
@@ -47,6 +48,7 @@
     },
     "InjectedError": {
       "additionalProperties": false,
+      "description": "오류 삽입 과제(seeded_error)에서 넣은 오류 하나. 검수자가 이것을 고쳤는지로 발견율을 잰다.\n\n- error_type: boundary_shift(경계 이동), class_swap(클래스 바꾸기), blur_deletion(블러 트랙\n  삭제).\n- original_label_id: 오류를 넣은 원래 라벨.\n- seeded_label_id: 오류를 넣은 사본 라벨 (seeded_error=True). 블러 삭제는 사본 없이 원래를\n  빼므로 None.\n- detail: 오류 세부 (예: 이동량 ms, 바꾼 클래스). 값은 문자열, 정수, 실수만.",
       "properties": {
         "detail": {
           "additionalProperties": {
@@ -102,7 +104,7 @@
       "type": "object"
     },
     "ReviewMode": {
-      "description": "검수 방식. 블라인드·이중의 결과는 측정용 레코드, 오류 삽입 과제의 결과는 학습에서 빠진다.",
+      "description": "검수 방식. 블라인드·이중의 결과는 측정용 레코드, 오류 삽입 과제의 결과는 학습에서 빠진다.\n\n- standard: 프리라벨을 고친다 (운영 라벨).\n- blind: 프리라벨 없이 처음부터 한다 (프리라벨 편향 측정).\n- seeded_error: 정답에 오류를 넣은 사본을 고친다 (검수자 발견율 측정).\n- double: 같은 구간을 다른 라벨러가 한 번 더 한다 (일치도 측정).\n- qa: 선임 재검수 (운영 라벨).",
       "enum": [
         "standard",
         "blind",
@@ -114,6 +116,7 @@
       "type": "string"
     },
     "ReviewReason": {
+      "description": "검수 우선순위 사유 (`FlaggedSpan.reason`).\n\n정책 `config/policies/review.yaml`의 우선순위 가중치와 대응한다.\n\n- low_confidence: 모델 신뢰도가 임계값보다 낮다.\n- model_disagreement: 모델끼리 결과가 다르다.\n- new_object: 처음 보는(드문) 객체 클래스다.\n- contact_mismatch: 장갑 센서 접촉과 영상 기반 접촉이 다르다.\n- sample: 높은 신뢰도 묶음의 표본 검수다.\n- routine: 사유 없는 일반 검수다.\n- ai_wrong, ai_suspect, ai_unsure: AI 1차 검수 판정이 틀림, 의심, 판단 불가로 지적한 구간\n  (WP17, ADR 0040).\n- ai_missing: AI 누락 후보 (v1 기본 끔).\n- ai_disagreement: 판정단 불일치. 허용 버전(판정 모델) 둘 이상이 같은 라벨을 ok와 ok 아님으로\n  갈라 판정했다 (ADR 0063, review.yaml ai_review.disagreement).\n\nai_* 사유는 참고용이고 사람 검수를 늘리는 쪽으로만 쓴다.",
       "enum": [
         "low_confidence",
         "model_disagreement",
@@ -132,7 +135,7 @@
     }
   },
   "additionalProperties": false,
-  "description": "검수 단위(세션, 스트림, 라벨 종류 묶음)의 배정.\n\n우선순위·방식·담당자와 오류 삽입 기록을 남긴다.",
+  "description": "검수 단위(세션, 스트림, 라벨 종류 묶음)의 배정.\n\n우선순위·방식·담당자와 오류 삽입 기록을 남긴다.\n\n- assignment_id: 배정 ID.\n- session_id, stream_id: 검수 대상 세션과 스트림. 시간 구간 라벨만이면 stream_id가 None일 수\n  있다.\n- label_kinds: 검수할 라벨 종류 (예: [\"action\", \"gap\"]). 1개 이상.\n- mode: 검수 방식.\n- priority: 우선순위 점수. 클수록 먼저다 (`list_assignments`가 이 순으로 정렬).\n- flagged: 먼저 볼 구간 목록.\n- assignee: 담당 검수자. 배정 전이면 None.\n- pair_id: 블라인드·이중·QA 배정이 짝을 이루는 표준 배정.\n- injected: 오류 삽입 기록 (mode=seeded_error일 때).\n- sample_label_ids, withheld_label_ids: 높은 신뢰도 묶음의 표본과, 작업에 넣지 않은 나머지.\n  표본이 합격하면 나머지가 표본 검증이 된다.\n- only_label_ids: 비어 있지 않으면 작업에 이 라벨만 넣는다 (불합격 묶음 재검수).\n- task_key: 이 배정으로 만든 검수 작업 키. 작업 생성 전이면 None.\n- status, created_at, completed_at: 배정 상태와 시각.\n\nDB에서 바꿀 수 있는 필드는 assignee, task_key, status, completed_at뿐이다\n(`db.repository.update_assignment`).",
   "properties": {
     "assignee": {
       "anyOf": [

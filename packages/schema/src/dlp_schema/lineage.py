@@ -29,19 +29,21 @@ from dlp_schema.session import Domain
 
 
 class GoldenSet(Contract):
-    """도메인별 골든셋 버전. 학습에 절대 쓰지 않는 평가 기준 세션과 고정한 정답 라벨."""
+    """도메인별 골든셋 버전. 학습에 절대 쓰지 않는 평가 기준 세션과 고정한 정답 라벨.
 
-    # version: 골든셋 버전 ID (최대 128자, dataset_versions.golden_set_version이 참조).
-    # domain: 도메인 (골든셋은 도메인마다 따로 둔다).
-    # session_ids: 골든셋에 든 세션 (1개 이상).
-    # created_at: 만든 시각.
-    # note: 사람이 남기는 설명 (선택).
-    # truth_label_ids: 이 버전의 정답으로 고정한 라벨 레코드 ID (만들 때 세션들의 현재 정답,
-    #   `dlp_eval.runner.golden_truth_ids`). 라벨 레코드는 내용이 불변이고 지워지지 않으므로 ID로
-    #   같은 정답을 다시 읽는다. 정답을 고치면 새 골든 버전을 만든다 (`dlp dataset golden --from`).
-    #   None이면 정답을 고정하지 않은 이전 형식이다: 평가는 현재 라벨로 정답을 읽고 리포트에
-    #   고정되지 않았다고 남기며, 재학습 루프는 쓰지 않는다 (ADR 0041). 빈 튜플은 "정답 없음"으로
-    #   고정한 것이다 (라벨링 전에 세션만 정한 버전).
+    - version: 골든셋 버전 ID (최대 128자, dataset_versions.golden_set_version이 참조한다).
+    - domain: 도메인. 골든셋은 도메인마다 따로 둔다.
+    - session_ids: 골든셋에 든 세션 (1개 이상).
+    - created_at: 만든 시각.
+    - note: 사람이 남기는 설명 (기본 빈 문자열).
+    - truth_label_ids: 이 버전의 정답으로 고정한 라벨 레코드 ID. 만들 때 세션들의 현재 정답이다
+      (`dlp_eval.runner.golden_truth_ids`). 라벨 레코드는 내용이 불변이고 지워지지 않으므로 ID로
+      같은 정답을 다시 읽는다. 정답을 고치면 새 골든 버전을 만든다 (`dlp dataset golden --from`).
+      None이면 정답을 고정하지 않은 이전 형식이다. 평가는 현재 라벨로 정답을 읽고 리포트에
+      고정되지 않았다고 남기며, 재학습 루프는 쓰지 않는다 (ADR 0041). 빈 튜플은 "정답 없음"으로
+      고정한 것이다 (라벨링 전에 세션만 정한 버전).
+    """
+
     version: Identifier
     domain: Domain
     session_ids: tuple[Identifier, ...] = Field(min_length=1)
@@ -61,13 +63,16 @@ class GoldenSet(Contract):
         return self
 
 
-# 학습 실행 하나 (데이터셋 버전 하나에서 모델 하나를 학습).
-#   run_id: 실행 ID.
-#   dataset_version_id: 학습 데이터를 뽑은 데이터셋 버전 (DB FK → dataset_versions).
-#   model_name / model_version: 학습기 이름과 결과 모델 버전 문자열.
-#   mlflow_run_id: MLflow 실행 ID. MLflow에 기록하지 않았으면 None.
-#   created_at: 실행 시각.
 class TrainingRun(Contract):
+    """학습 실행 하나 (데이터셋 버전 하나에서 모델 하나를 학습).
+
+    - run_id: 실행 ID.
+    - dataset_version_id: 학습 데이터를 뽑은 데이터셋 버전 (DB FK → dataset_versions).
+    - model_name, model_version: 학습기 이름과 결과 모델 버전 문자열.
+    - mlflow_run_id: MLflow 실행 ID. MLflow에 기록하지 않았으면 None.
+    - created_at: 실행 시각.
+    """
+
     run_id: Identifier
     dataset_version_id: Identifier
     model_name: str
@@ -76,28 +81,40 @@ class TrainingRun(Contract):
     created_at: AwareDatetime
 
 
-# 재학습 모델 버전의 상태. 전이: candidate → passed(사람 승인 대기) → deployed → retired,
-# 또는 candidate → rejected. `config/policies/training.yaml`의 과제별 `deploy`가 auto면
-# passed를 건너뛰고 바로 deployed가 된다 (approve면 `dlp train approve`가 passed → deployed).
 class ModelStatus(StrEnum):
-    CANDIDATE = "candidate"  # 학습만 끝남 (평가 전)
-    PASSED = "passed"  # 게이트 통과, 사람의 배포 승인 대기 (정책 deploy: approve)
-    DEPLOYED = "deployed"  # 게이트 통과, 과제마다 하나
-    REJECTED = "rejected"  # 게이트 실패
-    RETIRED = "retired"  # 배포됐다가 새 모델로 바뀜
+    """재학습 모델 버전의 상태.
+
+    전이는 candidate → passed(사람 승인 대기) → deployed → retired, 또는 candidate → rejected다.
+    `config/policies/training.yaml`의 과제별 `deploy`가 auto면 passed를 건너뛰고 바로 deployed가
+    된다. approve면 `dlp train approve`가 passed를 deployed로 바꾼다.
+
+    - candidate: 학습만 끝났다 (평가 전).
+    - passed: 게이트를 통과했고 사람의 배포 승인을 기다린다 (정책 deploy: approve).
+    - deployed: 게이트를 통과해 배포됐다. 과제마다 하나다.
+    - rejected: 게이트를 통과하지 못했다.
+    - retired: 배포됐다가 새 모델로 바뀌었다.
+    """
+
+    CANDIDATE = "candidate"
+    PASSED = "passed"
+    DEPLOYED = "deployed"
+    REJECTED = "rejected"
+    RETIRED = "retired"
 
 
 class ModelVersion(Contract):
-    """재학습한 모델 버전 (레지스트리). 학습 실행 하나가 모델 버전 하나를 만든다."""
+    """재학습한 모델 버전 (레지스트리). 학습 실행 하나가 모델 버전 하나를 만든다.
 
-    # model_version: 모델 버전 ID (DB 기본 키).
-    # task / run_id / trainer / artifact_uri: Field description 참고.
-    # sha256: 산출물(가중치) 파일의 SHA-256 (소문자 16진 64자). 배포 때 무결성 확인에 쓴다.
-    # train_examples: 학습 예제 수.
-    # status: 현재 상태 (ModelStatus).
-    # report_uri: 골든셋 평가·게이트 리포트 위치. 평가 전이면 None.
-    # created_at: 등록 시각.
-    # decided_at: 게이트 판정·은퇴 시각. candidate일 때만 None이어야 한다 (검증기).
+    - model_version: 모델 버전 ID (DB 기본 키).
+    - task, run_id, trainer, artifact_uri: 평가 과제, 학습 실행, 학습기 이름, 산출물 위치.
+    - sha256: 산출물(가중치) 파일의 SHA-256 (소문자 16진 64자). 배포 때 무결성 확인에 쓴다.
+    - train_examples: 학습 예제 수.
+    - status: 현재 상태 (`ModelStatus`).
+    - report_uri: 골든셋 평가·게이트 리포트 위치. 평가 전이면 None.
+    - created_at: 등록 시각.
+    - decided_at: 게이트 판정 또는 은퇴 시각. candidate일 때만 None이어야 한다 (검증기).
+    """
+
     model_version: Identifier
     task: Identifier = Field(
         description="평가 과제 (objects, hands, body, contact, actions, privacy 등)"
@@ -124,17 +141,24 @@ class ModelVersion(Contract):
         return self
 
 
-# 내보내기 이력 하나 (DB exports). 내보낸 파일을 올리기 전에 따로 커밋한다 (CLAUDE.md).
-#   export_id: 내보내기 ID. 가명 HMAC 키 유도의 재료.
-#   dataset_version_id: 출처 데이터셋 버전.
-#   target / format / session_ids / label_states: Field description 참고.
-#   uri: 내보낸 결과 위치 (datasets 버킷 등. 원본 버킷 URI는 넣지 않는다).
-#   created_at: 내보낸 시각.
 class ExportRecord(Contract):
+    """내보내기 이력 하나 (DB exports).
+
+    내보낸 파일을 올리기 전에 이 기록을 따로 커밋한다 (`dlp_export.runner`).
+
+    - export_id: 내보내기 ID. 가명 HMAC 키를 유도하는 재료다.
+    - dataset_version_id: 출처 데이터셋 버전.
+    - target, format: 받는 쪽과 형식 이름.
+    - uri: 내보낸 결과 위치 (datasets 버킷 등). 원본 버킷 URI는 넣지 않는다.
+    - session_ids: 실제로 내보낸 세션 (사용 중지 제외 후, 내부 ID).
+    - label_states: 내보낸 라벨의 검수 상태 정책.
+    - created_at: 내보낸 시각.
+    """
+
     export_id: Identifier
     dataset_version_id: Identifier
     target: str = Field(description="내보낸 곳 (구매자, 내부 학습 등)")
-    format: str = Field(description="coco, interval_json, lerobot 등")
+    format: str = Field(description="coco, intervals, lerobot 등")
     uri: str
     session_ids: tuple[Identifier, ...] = Field(
         description="실제로 내보낸 세션 (사용 중지 제외 후)"
@@ -147,11 +171,15 @@ class ExportRecord(Contract):
     created_at: AwareDatetime
 
 
-# 세션 사용 중지 기록 (동의 철회 등). DB에서 session_id가 기본 키라 세션당 한 번만 기록된다.
-#   session_id: 중지한 세션.
-#   reason: 사유 (비어 있으면 안 된다).
-#   withdrawn_at: 중지 시각. 이후 데이터셋 버전·내보내기에서 이 세션은 빠진다 (dlp_datasets 전파).
 class Withdrawal(Contract):
+    """세션 사용 중지 기록 (동의 철회 등). DB에서 session_id가 기본 키라 세션당 한 번만 기록된다.
+
+    - session_id: 중지한 세션.
+    - reason: 사유 (빈 문자열 금지).
+    - withdrawn_at: 중지 시각. 이후 데이터셋 버전과 내보내기에서 이 세션은 빠진다 (`dlp_datasets`가
+      전파한다).
+    """
+
     session_id: Identifier
     reason: str = Field(min_length=1)
     withdrawn_at: AwareDatetime

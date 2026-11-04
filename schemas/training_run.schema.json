@@ -1,5 +1,6 @@
 {
   "additionalProperties": false,
+  "description": "학습 실행 하나 (데이터셋 버전 하나에서 모델 하나를 학습).\n\n- run_id: 실행 ID.\n- dataset_version_id: 학습 데이터를 뽑은 데이터셋 버전 (DB FK → dataset_versions).\n- model_name, model_version: 학습기 이름과 결과 모델 버전 문자열.\n- mlflow_run_id: MLflow 실행 ID. MLflow에 기록하지 않았으면 None.\n- created_at: 실행 시각.",
   "properties": {
     "created_at": {
       "format": "date-time",

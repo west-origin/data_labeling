@@ -1,6 +1,7 @@
 {
   "$defs": {
     "Domain": {
+      "description": "작업 도메인. 온톨로지 domains의 키와 같다.\n\ncleaning 청소, caregiving 요양돌봄, nursing 간호.",
       "enum": [
         "cleaning",
         "caregiving",
@@ -11,7 +12,7 @@
     }
   },
   "additionalProperties": false,
-  "description": "도메인별 골든셋 버전. 학습에 절대 쓰지 않는 평가 기준 세션과 고정한 정답 라벨.",
+  "description": "도메인별 골든셋 버전. 학습에 절대 쓰지 않는 평가 기준 세션과 고정한 정답 라벨.\n\n- version: 골든셋 버전 ID (최대 128자, dataset_versions.golden_set_version이 참조한다).\n- domain: 도메인. 골든셋은 도메인마다 따로 둔다.\n- session_ids: 골든셋에 든 세션 (1개 이상).\n- created_at: 만든 시각.\n- note: 사람이 남기는 설명 (기본 빈 문자열).\n- truth_label_ids: 이 버전의 정답으로 고정한 라벨 레코드 ID. 만들 때 세션들의 현재 정답이다\n  (`dlp_eval.runner.golden_truth_ids`). 라벨 레코드는 내용이 불변이고 지워지지 않으므로 ID로\n  같은 정답을 다시 읽는다. 정답을 고치면 새 골든 버전을 만든다 (`dlp dataset golden --from`).\n  None이면 정답을 고정하지 않은 이전 형식이다. 평가는 현재 라벨로 정답을 읽고 리포트에\n  고정되지 않았다고 남기며, 재학습 루프는 쓰지 않는다 (ADR 0041). 빈 튜플은 \"정답 없음\"으로\n  고정한 것이다 (라벨링 전에 세션만 정한 버전).",
   "properties": {
     "created_at": {
       "format": "date-time",

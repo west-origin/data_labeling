@@ -29,13 +29,18 @@ from pydantic import Field
 from dlp_schema.common import Contract, OntologyId
 
 
-# defaults.yaml `infrastructure`: 인프라 구성 요소 선택 (기준 문서 "미결정 사항"의 기본값).
-#   object_store: 객체 저장소 구현. data_versioning: 데이터셋 버전 도구.
-#   annotation_tools: hybrid(CVAT+Label Studio) | cvat_only. orchestrator: 워크플로 실행기.
-#   experiment_tracking: 실험 기록 (현재 mlflow만).
-# 현재 코드는 이 절을 검증만 하고 분기에 쓰지 않는다 (구현은
-# seaweedfs·lakefs·hybrid·prefect·mlflow 기준).
 class InfrastructureConfig(Contract):
+    """defaults.yaml `infrastructure`: 인프라 구성 요소 선택 (기준 문서 "미결정 사항"의 기본값).
+
+    - object_store: 객체 저장소 구현.
+    - data_versioning: 데이터셋 버전 도구.
+    - annotation_tools: hybrid(CVAT + Label Studio) 또는 cvat_only.
+    - orchestrator: 워크플로 실행기.
+    - experiment_tracking: 실험 기록 도구 (mlflow만).
+    """
+
+    # 현재 코드는 이 절을 검증만 하고 분기에 쓰지 않는다 (구현은
+    # seaweedfs·lakefs·hybrid·prefect·mlflow 기준).
     object_store: Literal["seaweedfs", "minio"]
     data_versioning: Literal["lakefs", "dvc"]
     annotation_tools: Literal["hybrid", "cvat_only"]
@@ -43,12 +48,18 @@ class InfrastructureConfig(Contract):
     experiment_tracking: Literal["mlflow"]
 
 
-# defaults.yaml `buckets`: 객체 저장소 버킷 이름.
-#   raw: 원본(블러 전)과 그 파생물(PTS 인덱스, 검수용 프록시 영상, 정규화 Parquet). 프록시도 블러 전
-#     영상이다. 원본 권한자·학습 서버만 접근, 모든 접근은 감사 기록 (ADR 0003·0020).
-#   labeling: 승인된 블러본·렌더 기록·워터마크 검수 영상·시계열 CSV (일반 라벨러 읽기 전용).
-#   datasets: 데이터셋 버전·내보내기. mlflow: 학습 산출물.
 class BucketsConfig(Contract):
+    """defaults.yaml `buckets`: 객체 저장소 버킷 이름.
+
+    - raw: 원본(블러 전)과 그 파생물(PTS 인덱스, 검수용 프록시 영상, 정규화 Parquet). 프록시도
+      블러 전 영상이다. 원본 권한자와 학습 서버만 접근하고 모든 접근은 감사 기록에 남는다
+      (ADR 0003·0020).
+    - labeling: 승인된 블러본, 렌더 기록, 워터마크 검수 영상, 시계열 CSV. 일반 라벨러는 읽기만
+      한다.
+    - datasets: 데이터셋 버전과 내보내기.
+    - mlflow: 학습 산출물.
+    """
+
     raw: str
     labeling: str
     datasets: str
@@ -56,11 +67,13 @@ class BucketsConfig(Contract):
 
 
 class ProxyConfig(Contract):
-    """검수 화면용 프록시 영상 인코딩 설정."""
+    """검수 화면용 프록시 영상 인코딩 설정.
 
-    # max_height: 출력 높이 상한(px, 짝수). 원본이 더 높으면 이 높이로 줄인다.
-    # crf: libx264 CRF (0~51, 낮을수록 고화질·큰 파일).
-    # keyframe_ms: 키프레임 간격(ms, 0보다 큼). 짧을수록 스크러빙이 빠르고 파일이 커진다.
+    - max_height: 출력 높이 상한 (px, 짝수). 원본이 더 높으면 이 높이로 줄인다.
+    - crf: libx264 CRF (0~51). 낮을수록 화질이 높고 파일이 크다.
+    - keyframe_ms: 키프레임 간격 (ms, 0보다 크다). 짧을수록 스크러빙이 빠르고 파일이 커진다.
+    """
+
     max_height: int = Field(
         ge=2,
         multiple_of=2,
@@ -70,28 +83,36 @@ class ProxyConfig(Contract):
     keyframe_ms: int = Field(gt=0)
 
 
-# defaults.yaml `media`: 수집 단계(`dlp ingest`) 설정.
 class MediaConfig(Contract):
+    """defaults.yaml `media`: 수집 단계(`dlp ingest`) 설정. proxy: 프록시 영상 인코딩."""
+
     proxy: ProxyConfig
 
 
-# defaults.yaml `privacy.full_review_exit`: 블러 전수 검수를 끝내고 표본 감사로 넘어가는 조건.
-#   weeks_below_target: 잔여 누락률이 목표 아래로 유지되어야 하는 연속 주 수 (양수).
-#   audit_sample_ratio: 전수 검수를 끝낸 뒤 감사할 표본 비율 (0 초과 1 이하).
 class FullReviewExit(Contract):
+    """defaults.yaml `privacy.full_review_exit`: 블러 전수 검수를 끝내고 표본 감사로 넘어가는 조건.
+
+    - weeks_below_target: 잔여 누락률이 목표 아래로 유지되어야 하는 연속 주 수 (양수).
+    - audit_sample_ratio: 전수 검수를 끝낸 뒤 감사할 표본 비율 (0 초과 1 이하).
+    """
+
     weeks_below_target: int = Field(gt=0)
     audit_sample_ratio: float = Field(gt=0, le=1)
 
 
-# defaults.yaml `privacy`: 프라이버시 게이트 공통 기본값 (세부는 config/policies/privacy.yaml).
-#   blur_hold_ms: 탐지가 끊겨도 블러를 유지하는 시간(ms, 0 이상).
-#   render_mode: 렌더 방식 (mosaic | solid).
-#   strip_audio_in_release: 블러본(공개본)에서 오디오를 뺄지.
-#   extra_targets_v1: 필수 외에 활성화할 확장 블러 대상 (온톨로지 privacy_targets의
-#     required: false 키). 현재 프라이버시 패키지는 이 값을 읽지 않는다 (탐지 대상은
-#     config/policies/privacy.yaml이 정한다).
-#   full_review_exit: 전수 검수 종료 조건.
 class PrivacyConfig(Contract):
+    """defaults.yaml `privacy`: 프라이버시 게이트 공통 기본값 (세부는 config/policies/privacy.yaml).
+
+    - blur_hold_ms: 탐지가 끊겨도 블러를 유지하는 시간 (ms, 0 이상).
+    - render_mode: 렌더 방식 (mosaic 또는 solid).
+    - strip_audio_in_release: 블러본(공개본)에서 오디오를 뺄지.
+    - extra_targets_v1: 필수 외에 켤 확장 블러 대상 (온톨로지 privacy_targets의 required: false
+      키).
+    - full_review_exit: 전수 검수 종료 조건.
+    """
+
+    # extra_targets_v1은 현재 프라이버시 패키지가 읽지 않는다 (탐지 대상은
+    # config/policies/privacy.yaml이 정한다).
     blur_hold_ms: int = Field(ge=0)
     render_mode: Literal["mosaic", "solid"]
     strip_audio_in_release: bool
@@ -99,54 +120,74 @@ class PrivacyConfig(Contract):
     full_review_exit: FullReviewExit
 
 
-# defaults.yaml `review`: 검수 운영 비율 (0~1). `dlp_review.ops.policy`가 review.yaml과 합쳐 쓴다.
-#   qa_sample_ratio: 선임 QA 재검수 표본 비율.
-#   double_annotation_ratio: 이중 라벨링(일치도 측정) 비율.
-#   blind_task_ratio: 프리라벨 없이 처음부터 하는 블라인드 과제 비율 (프리라벨 편향 측정).
-#   seeded_error_task_ratio: 오류 삽입 과제 비율 (검수자 발견율 측정).
 class ReviewConfig(Contract):
+    """defaults.yaml `review`: 검수 운영 비율 (모두 0~1).
+
+    `dlp_review.ops.policy`가 review.yaml과 합쳐 쓴다.
+
+    - qa_sample_ratio: 선임 QA 재검수 표본 비율.
+    - double_annotation_ratio: 이중 라벨링(일치도 측정) 비율.
+    - blind_task_ratio: 프리라벨 없이 처음부터 하는 블라인드 과제 비율 (프리라벨 편향 측정).
+    - seeded_error_task_ratio: 오류 삽입 과제 비율 (검수자 발견율 측정).
+    """
+
     qa_sample_ratio: float = Field(ge=0, le=1)
     double_annotation_ratio: float = Field(ge=0, le=1)
     blind_task_ratio: float = Field(ge=0, le=1)
     seeded_error_task_ratio: float = Field(ge=0, le=1)
 
 
-# defaults.yaml `golden_set`: 골든셋 구성 기본값.
-#   min_instances_per_class: 클래스마다 골든셋에 있어야 하는 최소 인스턴스 수 (양수).
-#   split_unit: 분할 누수 방지 단위. 여기 든 속성(worker_id, site_id)이 같은 세션은 같은
-#     분할로 간다.
-# 주의: 현재 코드(`dlp_datasets.splitter` 등)는 이 절을 읽지 않는다. 분할기는 작업자·장소 둘 다를
-# 항상 기준으로 쓰고, 골든셋 클래스 최소 수도 이 값으로 검사하지 않는다.
 class GoldenSetConfig(Contract):
+    """defaults.yaml `golden_set`: 골든셋 구성 기본값.
+
+    - min_instances_per_class: 클래스마다 골든셋에 있어야 하는 최소 인스턴스 수 (양수).
+    - split_unit: 분할 누수 방지 단위. 여기 든 속성(worker_id, site_id)이 같은 세션은 같은 분할로
+      간다.
+    """
+
+    # 주의: 현재 코드(`dlp_datasets.splitter` 등)는 이 절을 읽지 않는다. 분할기는 작업자·장소 둘
+    # 다를 항상 기준으로 쓰고, 골든셋 클래스 최소 수도 이 값으로 검사하지 않는다.
     min_instances_per_class: int = Field(gt=0)
     split_unit: tuple[Literal["worker_id", "site_id"], ...] = Field(min_length=1)
 
 
-# defaults.yaml `export`: 내보내기 기본. include_unreviewed가
-# false면 미검수 모델 라벨을 빼고 내보낸다.
 class ExportConfig(Contract):
+    """defaults.yaml `export`: 내보내기 기본값.
+
+    include_unreviewed가 false면 미검수 모델 라벨을 빼고 내보낸다. true거나 명령의
+    `--include-unreviewed`를 주면 넣는다.
+    """
+
     include_unreviewed: bool
 
 
-# defaults.yaml `retention`: 원본 보관 기간(일, 양수). None이면 미정이라 만료 알림을 내지 않는다.
 class RetentionConfig(Contract):
+    """defaults.yaml `retention`: 원본 보관 기간.
+
+    raw_retention_days: 보관 일수 (양수). None이면 미정이라 만료 알림을 내지 않는다.
+    """
+
     raw_retention_days: int | None = Field(default=None, gt=0)
 
 
-# defaults.yaml `success_criteria`: 운영 성공 기준 (None = 아직 미정, 경고를 내지 않는다).
-#   review_minutes_per_video_hour: 영상 1시간당 검수 분 목표.
-#   residual_blur_miss_per_hour_max: 영상 1시간당 잔여 블러 누락 허용 상한.
-#   boundary_agreement_min: 행동 경계 일치율 하한 (0~1로 쓰는 것을 전제).
-# 현재 코드에서 읽는 것은 residual_blur_miss_per_hour_max뿐이다
-# (`dlp privacy audit-sample`의 전수 검수 종료 판정).
 class SuccessCriteria(Contract):
+    """defaults.yaml `success_criteria`: 운영 성공 기준. None은 아직 미정이라 경고를 내지 않는다.
+
+    - review_minutes_per_video_hour: 영상 1시간당 검수 분 목표.
+    - residual_blur_miss_per_hour_max: 영상 1시간당 잔여 블러 누락 허용 상한.
+    - boundary_agreement_min: 행동 경계 일치율 하한 (0~1).
+    """
+
+    # 현재 코드에서 읽는 것은 residual_blur_miss_per_hour_max뿐이다
+    # (`dlp privacy audit-sample`의 전수 검수 종료 판정).
     review_minutes_per_video_hour: float | None = None
     residual_blur_miss_per_hour_max: float | None = None
     boundary_agreement_min: float | None = None
 
 
-# config/defaults.yaml 전체. version은 파일 형식 버전(현재 1)이다.
 class PlatformConfig(Contract):
+    """config/defaults.yaml 전체. version은 파일 형식 버전(현재 1)이고 나머지는 절별 설정이다."""
+
     version: int
     infrastructure: InfrastructureConfig
     buckets: BucketsConfig

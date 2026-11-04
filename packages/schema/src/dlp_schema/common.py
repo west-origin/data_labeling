@@ -11,9 +11,7 @@
       마스터 타임라인(= 기준 스트림인 바디캠 시계) ms.
     - 공간 라벨(박스·마스크·키포인트·블러 트랙, 3D 궤적)의 키프레임과 그 라벨의 구간은 그 스트림
       영상의 PTS 시각 ms. 바디캠은 마스터 시계 그 자체라 두 시각이 같다.
-    `Ms`의 Field description은 "마스터 타임라인 기준"이라고 쓰여 있지만, 위 규약에 따라 공간
-    라벨에서는 스트림 PTS 시각을 뜻한다 (description은
-    JSON Schema에 들어가므로 여기서 바꾸지 않는다).
+    `Ms`의 Field description도 이 두 기준을 함께 적는다 (JSON Schema에 들어간다).
 
 주요 공개 이름
     - `Ms`: 0 이상 정수 ms.
@@ -36,7 +34,13 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 # 정수 ms 시각. 음수는 허용하지 않는다 (세션 시작 = 0).
 # 시간 구간 라벨은 마스터 타임라인, 공간 라벨은 스트림 PTS 기준이다 (모듈 docstring 참고, ADR 0019).
-Ms = Annotated[int, Field(ge=0, description="마스터 타임라인 기준 시각(ms)")]
+Ms = Annotated[
+    int,
+    Field(
+        ge=0,
+        description="시각(ms). 시간 구간 라벨은 마스터 타임라인, 공간 라벨은 그 스트림 PTS 기준",
+    ),
+]
 # 확률 형태의 신뢰도. 0.0(전혀 믿지 않음) ~ 1.0(확실).
 Confidence = Annotated[float, Field(ge=0.0, le=1.0)]
 # 유한 실수. NaN·±Inf를 검증 오류로 낸다 (F-SCH-27). JSONB는 NaN·Inf를 담지 못해 배치 전체가
@@ -97,5 +101,6 @@ class Contract(BaseModel):
     #   중첩 dict/list까지 동결하지는 않는다. 불변 이력은 저장 경로와 DB 트리거도 함께 지킨다.
     #   주의: `model_copy(update=...)`는 검증을 다시 하지 않는다. 검증이 필요하면 `model_validate`.
     # use_enum_values=False: 열거형 필드는 문자열이 아니라 열거형 멤버로 보관한다 (`is` 비교 가능).
-    # 하위 클래스의 클래스 docstring은 생성 JSON Schema의 description이 되므로 함부로 바꾸지 않는다.
+    # 하위 클래스의 클래스 docstring은 생성 JSON Schema의 description이 된다. 필드 의미·단위는
+    # docstring에 쓰고, 바꾼 뒤에는 `make schemas`로 schemas/를 다시 만든다.
     model_config = ConfigDict(extra="forbid", frozen=True, use_enum_values=False)

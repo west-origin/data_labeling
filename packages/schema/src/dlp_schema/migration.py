@@ -1,9 +1,9 @@
 """온톨로지 버전 간 라벨 이관.
 
 매핑 표(config/ontology/migrations/<from>__<to>.yaml)로 ID를 바꾼다. 원본 라벨은 두고
-새 버전의 새 레코드를 만들며(parent_label_id로 연결), 목적지 사전으로 의미를 검사하고
-검증 상태는 미검수로 되돌린다. 잘못된 목적지 ID는 needs_review로 반환한다.
-골든셋은 이관 후 재검수를 거쳐야 평가에 쓸 수 있기 때문이다.
+새 버전의 새 레코드를 만들며(parent_label_id로 연결), 목적지 사전으로 의미를 검사한다.
+검증 상태는 미검수로 되돌린다. 골든셋은 이관 후 재검수를 거쳐야 평가에 쓸 수 있기 때문이다.
+잘못된 목적지 ID나 삭제된 ID를 가진 라벨은 이관하지 않고 needs_review로 반환한다.
 
 입력은 세션의 전체 수정 이력이어도 된다. 이관 대상은 이력의 현재 라벨뿐이다
 (`current_labels(operational=False)`): 이미 수정된 레코드, 삭제된 레코드, 삭제 레코드 자체를
@@ -106,12 +106,17 @@ _SEGMENT_CATEGORY: dict[str, Category] = {
 }
 
 
-# 온톨로지 버전 간 매핑 표 (config/ontology/migrations/<from>__<to>.yaml).
-#   from_version / to_version: 이관 전·후 온톨로지 버전.
-#   renames: 범주 → {옛 ID: 새 ID}. 목록에 없는 ID는 그대로 둔다.
-#   removed: 범주 → 새 버전에서 없어진 ID. 이런 값을 가진
-#     라벨은 이관하지 않고 needs_review로 보낸다.
 class OntologyMigration(Contract):
+    """온톨로지 버전 간 매핑 표 (config/ontology/migrations/<from>__<to>.yaml 한 파일).
+
+    - from_version, to_version: 이관 전과 후의 온톨로지 버전.
+    - renames: 범주 → {옛 ID: 새 ID}. 목록에 없는 ID는 그대로 둔다.
+    - removed: 범주 → 새 버전에서 없어진 ID. 이런 값을 가진 라벨은 이관하지 않고 needs_review로
+      보낸다.
+
+    범주는 `Category` 값만 쓸 수 있다 (대부분 `Ontology`의 같은 이름 사전, substeps와 parts는 예외).
+    """
+
     from_version: SemVer
     to_version: SemVer
     renames: dict[Category, dict[OntologyId, OntologyId]] = Field(default={})
@@ -120,10 +125,14 @@ class OntologyMigration(Contract):
     )
 
 
-# 이관 결과.
-#   migrated: 새 버전의 새 레코드 (parent_label_id = 원래 라벨, 검증 상태 미검수).
-#   needs_review: (원래 label_id, 사유) — 이관하지 못해 사람이 다시 라벨링·확인할 라벨.
 class MigrationResult(Contract):
+    """라벨 이관 결과.
+
+    - migrated: 새 버전의 새 레코드. parent_label_id는 원래 라벨이고 검증 상태는 미검수다.
+      DB에 쓰지 않았다 (호출자가 `insert_labels`로 저장한다).
+    - needs_review: (원래 label_id, 사유). 이관하지 못해 사람이 다시 라벨링하거나 확인할 라벨이다.
+    """
+
     migrated: tuple[LabelRecord, ...]
     needs_review: tuple[tuple[str, str], ...] = Field(description="(label_id, 사유)")
 

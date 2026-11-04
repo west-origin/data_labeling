@@ -29,7 +29,8 @@ DB 등록
 
 주의
     - 사전 키는 `OntologyId`(소문자 snake_case) 형식이어야 한다.
-    - 클래스 docstring·Field description은 `schemas/ontology.schema.json`에 들어간다.
+    - 클래스 docstring·Field description은 `schemas/ontology.schema.json`의 description이 된다.
+      바꾼 뒤에는 `make schemas`로 다시 만든다.
 """
 
 from __future__ import annotations
@@ -49,58 +50,93 @@ from dlp_schema.common import Contract, OntologyId, SemVer
 DisplayName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
 
-# 사전 항목의 공통 필드. ko: 사람이 읽는 한국어 이름 (필수). en: 영어 이름 (필수, ADR 0043).
-# description: 보충 설명 (선택, 한국어). ID는 언어와 무관한 영어 snake_case이고 라벨에는 ID만
-# 저장한다. ko·en은 화면·내보내기·번역 용어집에 쓰는 표시 이름이다.
 class Term(Contract):
+    """사전 항목의 공통 필드.
+
+    - ko: 사람이 읽는 한국어 이름 (필수, 빈칸 금지).
+    - en: 영어 이름 (필수, 빈칸 금지, ADR 0043).
+    - description: 보충 설명 (선택, 한국어).
+
+    ID(사전 키)는 언어와 무관한 영어 snake_case이고 라벨에는 ID만 저장한다. ko·en은 화면,
+    내보내기, 번역 용어집에 쓰는 표시 이름이다.
+    """
+
     ko: DisplayName
     en: DisplayName
     description: str | None = None
 
 
-# 사전 항목 하나의 한·영 표시 이름 (`Ontology.display_names`). 내보내기 구간 JSON의 `term_names`
-# 값이기도 하다 (`dlp_schema.export.IntervalFile`).
 class TermName(Contract):
+    """사전 항목 하나의 한·영 표시 이름 (`Ontology.display_names`).
+
+    내보내기 구간 JSON의 `term_names` 값이기도 하다 (`dlp_schema.export.IntervalFile`).
+    """
+
     ko: DisplayName
     en: DisplayName
 
 
-# 도메인 (청소·요양돌봄·간호). phase: 기준 문서 로드맵의 도입 단계 (A/B/C).
 class DomainTerm(Term):
+    """도메인 (청소, 요양돌봄, 간호). phase: 기준 문서 로드맵의 도입 단계 (A, B, C)."""
+
     phase: str
 
 
-# 작업. domain: 속한 도메인 ID (domains의 키여야 한다).
-# substeps: 하위 단계 ID → 항목. 하위 단계 ID는 작업 사이에서도 고유해야 한다 (Ontology 검증기).
 class TaskTerm(Term):
+    """작업.
+
+    - domain: 속한 도메인 ID (domains의 키여야 한다).
+    - substeps: 하위 단계 ID → 항목. 하위 단계 ID는 작업 사이에서도 고유해야 한다 (`Ontology`
+      검증기).
+    """
+
     domain: OntologyId
     substeps: dict[OntologyId, Term] = Field(default_factory=dict)
 
 
-# 동사 수준. 행동(action) 라벨에는 primitive만 쓴다. skill·human_skill은 상위 구간(segment
-# level=skill)의 ref_id로 쓴다 (`validation.check_label`).
 class VerbLevel(StrEnum):
-    PRIMITIVE = "primitive"  # 원시 동작 (라벨 단위: 잡다, 놓다, 밀다 ...)
-    SKILL = "skill"  # 원시 동작을 묶은 기술 (닦다, 열다 ...)
-    HUMAN_SKILL = "human_skill"  # 사람 대상 기술 (굴리다, 일으키다 ..., Phase B부터)
+    """동사 수준.
+
+    행동(action) 라벨에는 primitive만 쓴다. skill·human_skill은 상위 구간(segment level=skill)의
+    ref_id로 쓴다 (`validation.check_label`).
+
+    - primitive: 원시 동작. 라벨 단위다 (잡다, 놓다, 밀다 등).
+    - skill: 원시 동작을 묶은 기술 (닦다, 열다 등).
+    - human_skill: 사람 대상 기술 (굴리다, 일으키다 등, Phase B부터).
+    """
+
+    PRIMITIVE = "primitive"
+    SKILL = "skill"
+    HUMAN_SKILL = "human_skill"
 
 
-# 동사. level: 수준. contactless: 접촉 없이 하는 동사(예: inspect). 이런 동사의 행동 라벨에는
-# 접촉 시작 시각이 있으면 안 된다.
 class VerbTerm(Term):
+    """동사.
+
+    - level: 동사 수준.
+    - contactless: 접촉 없이 하는 동사 (예: inspect). 이런 동사의 행동 라벨에는 접촉 시작 시각이
+      있으면 안 된다.
+    """
+
     level: VerbLevel
     contactless: bool = False
 
 
-# 객체 상태 속성 (예: cleanliness). values: 허용 값 ID (2개 이상, 예: dirty, clean).
 class StateAttribute(Term):
+    """객체 상태 속성 (예: cleanliness). values: 허용 값 ID (2개 이상, 예: dirty, clean)."""
+
     values: tuple[OntologyId, ...] = Field(min_length=2)
 
 
-# 도구의 부분. working_parts: 작용부 (표면에 닿아 일하는 부분, 예: mop_head).
-# grip_parts: 파지부 (손으로 쥐는 부분, 예: handle).
-# 둘 다 1개 이상. 부분 마스크·관계의 part ID가 된다.
 class ToolSpec(Contract):
+    """도구의 부분 정의.
+
+    - working_parts: 작용부. 표면에 닿아 일하는 부분이다 (예: mop_head).
+    - grip_parts: 파지부. 손으로 쥐는 부분이다 (예: handle).
+
+    둘 다 1개 이상이다. 부분 마스크와 관계의 part ID가 된다.
+    """
+
     working_parts: tuple[OntologyId, ...] = Field(min_length=1)
     grip_parts: tuple[OntologyId, ...] = Field(min_length=1)
 
@@ -108,10 +144,17 @@ class ToolSpec(Contract):
 # ---------------------------------------------------------------- 물리 사전값 (ADR 0049)
 
 
-# 물리 사전값의 출처. 둘 다 측정값이 아니다 (이 세션·이 물체를 잰 값이 아니라 클래스의 일반 범위).
 class PriorSource(StrEnum):
-    PRIOR_LITERATURE = "prior_literature"  # 문헌·제품 사양·표준 표에서 옮긴 범위 (출처를 note에)
-    PRIOR_ESTIMATE = "prior_estimate"  # 일반 지식으로 잡은 넓은 추정 범위 (전문가 검토 전)
+    """물리 사전값의 출처.
+
+    둘 다 측정값이 아니다. 이 세션이나 이 물체를 잰 값이 아니라 클래스의 일반 범위다.
+
+    - prior_literature: 문헌, 제품 사양, 표준 표에서 옮긴 범위. 출처를 note에 적는다.
+    - prior_estimate: 일반 지식으로 잡은 넓은 추정 범위 (전문가 검토 전).
+    """
+
+    PRIOR_LITERATURE = "prior_literature"
+    PRIOR_ESTIMATE = "prior_estimate"
 
 
 class PriorRange(Contract):
@@ -202,18 +245,19 @@ class PhysicalPriors(Contract):
 
     클래스의 흔한 실물 범위를 넓게 잡은 값이며, 영상 속 특정 물체를 잰 값이 아니다. 내보내기는
     `measured: false`와 출처(source)를 함께 싣는다 (ADR 0049).
+
+    - source: 수치 사전값의 출처 (필수).
+    - note: 근거·가정 메모 (선택, 한국어). prior_literature면 출처를 반드시 적는다.
+    - material: 대표 재질 ID (materials의 키).
+    - part_materials: 도구 부분 ID → 재질 ID. 그 객체의 작용부·파지부 중 대표 재질과 다른 부분만
+      적는다.
+    - tactile: 촉감 속성 ID 목록 (tactile_properties의 키, 중복 금지).
+    - mass_kg: 질량 범위 (kg). by_state로 상태별 범위를 둔다 (예: fill_state).
+    - static_friction: 정지 마찰 계수 범위 (무차원). 상대면은 건조한 맨손 피부, 니트릴 장갑, 고무
+      그리퍼 패드를 함께 보는 넓은 범위이고, 젖은 경우는 by_state(wetness)로 따로 적는다. 물체 쪽
+      면은 도구면 손으로 쥐는 파지부(grip_parts), 아니면 주 접촉면이다 (촉감도 같다).
     """
 
-    # 필드:
-    #   source: 수치 사전값의 출처 (필수). note: 근거·가정 메모 (선택, 한국어. prior_literature면
-    #     출처 필수).
-    #   material: 대표 재질 ID (materials의 키). part_materials: 도구 부분 ID → 재질 ID (그 객체의
-    #     작용부·파지부만, 대표 재질과 다른 부분만 적는다).
-    #   tactile: 촉감 속성 ID 목록 (tactile_properties의 키, 중복 금지).
-    #   mass_kg: 질량 범위 (kg). by_state로 상태별 범위 (예: fill_state).
-    #   static_friction: 정지 마찰 계수 범위 (무차원). 상대면은 건조한 맨손 피부·니트릴 장갑·고무
-    #     그리퍼 패드를 함께 보는 넓은 범위이고, 젖은 경우는 by_state(wetness)로 따로 적는다. 물체
-    #     쪽 면은 도구면 손으로 쥐는 파지부(grip_parts), 아니면 주 접촉면이다 (촉감도 같다).
     source: PriorSource = Field(description="수치 사전값의 출처 (prior_*: 측정값이 아님)")
     note: str | None = None
     material: OntologyId | None = None
@@ -259,13 +303,17 @@ class PhysicalPriors(Contract):
         return self
 
 
-# 객체 클래스.
-#   physical_type: 물리 유형 ID (physical_types의 키).
-#   states: 이 클래스가 가질 수 있는 상태 속성 ID (state_attributes의 키).
-#   tool: 도구면 부분 정의, 아니면 None.
-#   surface: 처리 대상 표면인지 (청결 상태·커버리지 기록 대상).
-#   physical_priors: 물리 사전값 (선택, ADR 0049). 측정값이 아니다.
 class ObjectClass(Term):
+    """객체 클래스.
+
+    - physical_type: 물리 유형 ID (physical_types의 키).
+    - states: 이 클래스가 가질 수 있는 상태 속성 ID (state_attributes의 키).
+    - tool: 도구면 부분 정의, 아니면 None.
+    - surface: 처리 대상 표면인지 (청결 상태·커버리지 기록 대상).
+    - physical_priors: 물리 사전값 (선택, ADR 0049). 측정값이 아니다. 물리 유형이 person·
+      fluid_powder면 두지 않는다 (`NO_PRIOR_PHYSICAL_TYPES`).
+    """
+
     physical_type: OntologyId
     states: tuple[OntologyId, ...] = ()
     tool: ToolSpec | None = None
@@ -275,12 +323,18 @@ class ObjectClass(Term):
     )
 
 
-# 이벤트 유형.
-#   category: 분류 (실패·재시도 / 작업자 안전 / 대상자 안전 / 감염 관리).
-#   form: point(시점: t_start == t_end) | interval(구간).
-#   severity: 라벨에 심각도(1~3)가 필수인지. requires_action: related_action_id 필수인지.
-#   requires_object: related_entity_id 필수인지. raw_access: Field description 참고.
 class EventTerm(Term):
+    """이벤트 유형.
+
+    - category: 분류 (failure_retry 실패·재시도, worker_safety 작업자 안전, subject_safety 대상자
+      안전, infection_control 감염 관리).
+    - form: point(시점, 라벨 t_start_ms == t_end_ms) 또는 interval(구간).
+    - severity: 라벨에 심각도(1~3)가 필수인지.
+    - requires_action: 라벨에 related_action_id가 필수인지.
+    - requires_object: 라벨에 related_entity_id가 필수인지.
+    - raw_access: 원본 접근 권한자만 기록하는 이벤트인지 (표정 등).
+    """
+
     category: Literal["failure_retry", "worker_safety", "subject_safety", "infection_control"]
     form: Literal["point", "interval"]
     severity: bool = False
@@ -289,22 +343,31 @@ class EventTerm(Term):
     raw_access: bool = Field(default=False, description="원본 접근 권한자만 기록 (표정 등)")
 
 
-# 프라이버시(블러) 대상. required: v1 필수 대상인지. false는 확장 후보.
 class PrivacyTarget(Term):
+    """프라이버시(블러) 대상. required: v1 필수 대상인지. false는 확장 후보다.
+
+    실제 탐지 대상과 탐지기 설정은 정책 `config/policies/privacy.yaml`이 정한다.
+    """
+
     required: bool
 
 
-# 온톨로지 한 버전의 사전 전체. 필드 이름 = YAML 최상위 키.
-#   version / status: manifest.yaml의 버전과 상태 (draft=초안, 덧붙이기 허용 / frozen=확정).
-#   provisional: 파일럿 후 확정할 범주 이름 (설명용, 동작에 영향 없음).
-#   domains·tasks·verbs·gap_types·contact_target_kinds·grasp_types·hand_roles·body_parts·postures·
-#   physical_types·state_attributes·objects·events·privacy_targets: 범주별 사전 (ID → 항목).
-#   surface_parts·hand_joints: 부분 ID 사전 (3차 검수에서 추가, 기본값 빈 사전).
-#   arm_joints: 착용자 팔 3D 궤적(`<left|right>_arm`)의 부분 ID (팔꿈치·어깨, ADR 0058, 기본값
-#     빈 사전). 손목은 손 3D(`<left|right>_hand`의 wrist)를 쓴다.
-#   materials·tactile_properties: 객체 물리 사전값(`ObjectClass.physical_priors`)의 재질·촉감 어휘
-#     (ADR 0049, 기본값 빈 사전). 라벨에는 쓰지 않는다.
 class Ontology(Contract):
+    """온톨로지 한 버전의 사전 전체. 필드 이름이 곧 YAML 최상위 키다.
+
+    - version, status: manifest.yaml의 버전과 상태. draft는 초안이라 같은 버전에 새 ID를
+      덧붙일 수 있고, frozen은 확정이다.
+    - provisional: 파일럿 후 확정할 범주 이름. 설명용이고 코드가 읽지 않는다.
+    - domains, tasks, verbs, gap_types, contact_target_kinds, grasp_types, hand_roles, body_parts,
+      postures, physical_types, state_attributes, objects, events, privacy_targets: 범주별 사전
+      (ID → 항목).
+    - surface_parts, hand_joints: 표면·손 3D 궤적의 부분 ID 사전 (기본값 빈 사전).
+    - arm_joints: 착용자 팔 3D 궤적(`<left|right>_arm`)의 부분 ID (팔꿈치·어깨, ADR 0058, 기본값
+      빈 사전). 손목은 손 3D(`<left|right>_hand`의 wrist)를 쓴다.
+    - materials, tactile_properties: 객체 물리 사전값(`ObjectClass.physical_priors`)의 재질·촉감
+      어휘 (ADR 0049, 기본값 빈 사전). 라벨에는 쓰지 않는다.
+    """
+
     version: SemVer
     status: Literal["draft", "frozen"]
     provisional: tuple[str, ...] = ()

@@ -1,7 +1,7 @@
 {
   "$defs": {
     "LifecycleState": {
-      "description": "한 방향으로만 이동한다. 어느 단계에서든 withdrawn으로 빠질 수 있다.",
+      "description": "세션 생애주기 상태. 한 방향으로만 이동한다. 어느 단계에서든 withdrawn으로 빠질 수 있다.\n\n전이 규칙은 `can_transition`, 정상 순서는 `LIFECYCLE_ORDER`다.\n\n- raw_ingested: 원본 수집·등록 완료 (`dlp ingest`).\n- privacy_approved: 블러를 사람이 승인했다 (`dlp privacy approve`).\n- prelabeled: 자동 프리라벨 완료 (`dlp prelabel run`).\n- human_verified: 사람 검수 완료 판정 (`dlp review verify`, ADR 0029).\n- split_assigned: 데이터셋 버전의 분할에 배정했다 (`dlp dataset build`).\n- exported: 내보내기에 포함됐다 (`dlp export ...`).\n- withdrawn: 사용 중지 (`dlp dataset withdraw`). 끝 상태이고 되돌릴 수 없다.",
       "enum": [
         "raw_ingested",
         "privacy_approved",

@@ -34,8 +34,9 @@
     - 라벨은 불변이다. `record_review` 외에 라벨 행을 바꾸는 함수는 없고, DB 트리거도 막는다.
     - `record_review`·`insert_labels`는 AI 판정 실행자(`aireview:` 접두사) 검수자 ID를 거부한다
       (AI 판정은 검수가 아니다, ADR 0040 I3).
-    - `insert_labels`는 세션 버전의 DB 사전으로 의미 검증한다. 오류 삽입·이력 삭제는 별도 규칙이다.
-      클래스·참조가 해당 온톨로지에 유효한지는 호출 경로에서 별도로 검증해야 한다.
+    - `insert_labels`는 세션 잠금 아래 세션 버전의 DB 사전으로 배치 전체를 검증한 뒤 저장한다
+      (`label_validation.validate_session_labels`: ID·클래스 의미, 구간·부분 참조, 보호 라벨 삭제
+      거부). 오류 삽입·이력 삭제는 별도 규칙이다.
     - 운영 기록 표와 session_lifecycle_events는 추가만 한다
       (DB 트리거가 UPDATE·DELETE·TRUNCATE를 막는다).
     - `get_*` 단건 조회와 `set_lifecycle`은 행이 없으면 SQLAlchemy `NoResultFound`를 던진다.

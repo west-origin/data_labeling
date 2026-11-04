@@ -1,4 +1,26 @@
-"""세션 저장 전 순수 검증. 잠금·조회·INSERT는 저장소가 맡는다."""
+"""라벨 배치를 저장하기 전 세션 단위 순수 검증. 잠금·조회·INSERT는 저장소가 맡는다.
+
+위치
+    `db.repository.insert_labels`가 세션을 잠근 뒤 그 세션의 등록 온톨로지, 최신 이력
+    (`get_labels`), 필요하면 물려받기 기록을 읽어 `validate_session_labels`를 부르고, 통과해야
+    INSERT한다. AI 제안 적용(`dlp_review.ai_collect`)도 쓰기 전에 같은 함수로 미리 검사한다.
+    이 모듈은 DB를 읽거나 쓰지 않는다.
+
+검사하는 것
+    - 새 라벨(삭제 아님)의 온톨로지 버전이 세션 사전 버전과 같다.
+    - 새 라벨의 의미(`validation.validate_label`). seeded_error 레코드는 의미 오류를 허용한다.
+    - 삭제 레코드는 부모의 페이로드·온톨로지 버전을 그대로 복사한다. 새 오류를 삭제로 위장하지
+      못하게 한다.
+    - 자동 단계(사람 출처가 아닌) 삭제는 사람이 확인한 라벨(`PROTECTED_STATES`)과, 사람이 확인한
+      조상의 마지막 현재 후손을 지우지 못한다 (`ProtectedLabelRetractionError`, ADR 0015·0019,
+      F-SCH-02). 예외는 설명 따르기와 궤적 따르기의 좁은 경우 둘뿐이다 (ADR 0043·0050·0051).
+    - 저장 후 운영 현재 라벨 집합의 구간·부분 참조 (`validation.check_label_set`).
+
+주요 이름
+    - `PROTECTED_STATES`: 자동 단계가 지울 수 없는 검수 상태.
+    - `ProtectedLabelRetractionError`: 보호 라벨 삭제 거부 오류.
+    - `validate_session_labels`: 위 검사를 모두 한다.
+"""
 
 from collections.abc import Sequence
 
@@ -81,6 +103,19 @@ def validate_session_labels(
     `history`는 호출자가 세션 잠금 아래에서 읽은 최신 이력이어야 한다. `inheritance`(설명)·
     `trajectory_inheritance`(3D 궤적)는 같은 잠금 아래 읽은 세션의 물려받기 기록이다 (예외 판정에만
     쓴다. 비면 그 예외가 없다).
+
+    Args:
+        ontology: 세션에 등록된 온톨로지 사전.
+        history: 저장 전 세션 라벨 이력 전체.
+        incoming: 이번에 저장할 같은 세션의 새 레코드. 비면 아무것도 검사하지 않는다.
+        inheritance: 설명 물려받기 기록 (`description_inheritance`).
+        trajectory_inheritance: 3D 궤적 물려받기 기록 (`trajectory_inheritance`).
+
+    Raises:
+        OntologyViolationError: 버전 불일치, 의미 오류, 삭제 레코드의 부모·페이로드 불일치,
+            저장 후 현재 라벨 집합의 위반.
+        ProtectedLabelRetractionError: 자동 단계가 사람이 확인한 라벨이나 그 마지막 현재 후손을
+            지우려 할 때.
     """
     if not incoming:
         return
@@ -136,6 +171,7 @@ class _FollowExemption:
     def __init__(
         self, history: list[LabelRecord], inheritance: Sequence[DescriptionInheritance]
     ) -> None:
+        """잠금 아래 읽은 이력과 설명 물려받기 기록을 받는다. 계획은 아직 계산하지 않는다."""
         self.history = history
         self.inheritance = inheritance
         self._planned: set[str] | None = None
@@ -172,6 +208,7 @@ class _TrajectoryExemption:
     def __init__(
         self, history: list[LabelRecord], inheritance: Sequence[TrajectoryInheritance]
     ) -> None:
+        """잠금 아래 읽은 이력과 궤적 물려받기 기록을 받는다. 계획은 아직 계산하지 않는다."""
         self.history = history
         self.inheritance = inheritance
         self._planned: set[str] | None = None

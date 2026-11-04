@@ -11,6 +11,7 @@
     },
     "CameraIntrinsics": {
       "additionalProperties": false,
+      "description": "카메라 내부 파라미터 (핀홀 모델, 픽셀 단위).\n\n- width, height: 영상 해상도 (px, 양수).\n- fx, fy: 초점 거리 (px).\n- cx, cy: 주점 (px).\n- distortion_model: 왜곡 모델 이름 (기본 \"opencv\").\n- distortion: 그 모델의 왜곡 계수 (예: k1, k2, p1, p2, k3). 비어 있으면 왜곡 없음이다.",
       "properties": {
         "cx": {
           "title": "Cx",

@@ -35,55 +35,94 @@ from pydantic import AwareDatetime, Field, StringConstraints, model_validator
 from dlp_schema.common import Confidence, Contract, FiniteFloat, Identifier, Ms, SemVer
 
 
-# 작업 도메인. 온톨로지 domains의 키와 같다 (cleaning=청소, caregiving=요양돌봄, nursing=간호).
 class Domain(StrEnum):
+    """작업 도메인. 온톨로지 domains의 키와 같다.
+
+    cleaning 청소, caregiving 요양돌봄, nursing 간호.
+    """
+
     CLEANING = "cleaning"
     CAREGIVING = "caregiving"
     NURSING = "nursing"
 
 
-# 스트림 종류. 세션에는 bodycam이 정확히 하나 있어야 한다 (`Session` 검증기).
 class StreamKind(StrEnum):
-    BODYCAM = "bodycam"  # 1인칭 바디캠 영상 (기준 스트림)
-    IMU = "imu"  # 관성 센서 (보통 바디캠 내장, GPMF 등에서 추출)
-    THIRD_PERSON = "third_person"  # 3인칭 고정 카메라 영상
-    GLOVE_LEFT = "glove_left"  # 왼손 센서 장갑 (압력 등)
-    GLOVE_RIGHT = "glove_right"  # 오른손 센서 장갑
-    AUDIO = "audio"  # 별도 녹음 오디오
+    """스트림 종류. 세션에는 bodycam이 정확히 하나 있어야 한다 (`Session` 검증기).
+
+    - bodycam: 1인칭 바디캠 영상. 기준 스트림이다.
+    - imu: 관성 센서. 보통 바디캠 내장이고 GPMF 등에서 추출한다.
+    - third_person: 3인칭 고정 카메라 영상.
+    - glove_left, glove_right: 왼손·오른손 센서 장갑 (압력 등).
+    - audio: 별도로 녹음한 오디오.
+    """
+
+    BODYCAM = "bodycam"
+    IMU = "imu"
+    THIRD_PERSON = "third_person"
+    GLOVE_LEFT = "glove_left"
+    GLOVE_RIGHT = "glove_right"
+    AUDIO = "audio"
 
 
-# 스트림을 마스터 타임라인에 맞춘 방법 (`dlp sync run`이
-# 정책 `config/policies/sync.yaml` 우선순위로 고른다).
 class SyncMethod(StrEnum):
-    REFERENCE = "reference"  # 기준 스트림(바디캠) 자신
-    SHARED_CLOCK = "shared_clock"  # 바디캠과 같은 시계 (IMU, 내장 오디오)
-    QR_SLATE = "qr_slate"  # 화면에 띄운 시각 QR(슬레이트)을 두 영상에서 읽어 맞춤
-    TAP_EVENT = "tap_event"  # 두드림(오디오 피크·장갑 압력 스파이크) 시점을 맞춤
-    AUDIO_XCORR = "audio_xcorr"  # 오디오 상호상관
-    MOTION_XCORR = "motion_xcorr"  # 운동 신호(IMU·장갑) 상호상관
-    MANUAL = "manual"  # 사람이 직접 맞춤 (`dlp sync adjust`)
-    UNSYNCED = "unsynced"  # 아직 맞추지 못함 (기본값)
+    """스트림을 마스터 타임라인에 맞춘 방법.
+
+    `dlp sync run`이 정책 `config/policies/sync.yaml`의 우선순위로 고른다.
+
+    - reference: 기준 스트림(바디캠) 자신. 바디캠만 쓸 수 있다.
+    - shared_clock: 바디캠과 같은 시계 (IMU, 내장 오디오).
+    - qr_slate: 화면에 띄운 시각 QR(슬레이트)을 두 영상에서 읽어 맞췄다.
+    - tap_event: 두드림(오디오 피크, 장갑 압력 스파이크) 시점을 맞췄다.
+    - audio_xcorr: 오디오 상호상관.
+    - motion_xcorr: 운동 신호(IMU, 장갑) 상호상관.
+    - manual: 사람이 직접 맞췄다 (`dlp sync adjust`).
+    - unsynced: 아직 맞추지 못했다 (기본값).
+    """
+
+    REFERENCE = "reference"
+    SHARED_CLOCK = "shared_clock"
+    QR_SLATE = "qr_slate"
+    TAP_EVENT = "tap_event"
+    AUDIO_XCORR = "audio_xcorr"
+    MOTION_XCORR = "motion_xcorr"
+    MANUAL = "manual"
+    UNSYNCED = "unsynced"
 
 
-# 세션의 프라이버시 게이트 상태 (`dlp privacy detect|approve|render`).
 class PrivacyState(StrEnum):
-    PENDING = "pending"  # 탐지 전
-    AUTO_BLURRED = "auto_blurred"  # 자동 탐지·블러 트랙 생성, 사람 승인 전
-    # 원본 접근 권한자가 블러를 승인함 (이후 블러본을 일반 라벨러에게 보여 줄 수 있다)
+    """세션의 프라이버시 게이트 상태 (`dlp privacy detect|approve|render`).
+
+    - pending: 탐지 전.
+    - auto_blurred: 자동 탐지로 블러 트랙을 만들었고 사람 승인 전이다.
+    - approved: 원본 접근 권한자가 블러를 승인했다. 이후 블러본을 일반 라벨러에게 보여 줄 수 있다.
+    """
+
+    PENDING = "pending"
+    AUTO_BLURRED = "auto_blurred"
     APPROVED = "approved"
 
 
 class LifecycleState(StrEnum):
-    """한 방향으로만 이동한다. 어느 단계에서든 withdrawn으로 빠질 수 있다."""
+    """세션 생애주기 상태. 한 방향으로만 이동한다. 어느 단계에서든 withdrawn으로 빠질 수 있다.
 
-    # 클래스 docstring은 JSON Schema description이므로 바꾸지 않고 여기 주석으로 보강한다.
-    RAW_INGESTED = "raw_ingested"  # 원본 수집·등록 완료 (`dlp ingest`)
-    PRIVACY_APPROVED = "privacy_approved"  # 블러 사람 승인 (`dlp privacy approve`)
-    PRELABELED = "prelabeled"  # 자동 프리라벨 완료 (`dlp prelabel run`)
-    HUMAN_VERIFIED = "human_verified"  # 사람 검수 완료 판정 (`dlp review verify`, ADR 0029)
-    SPLIT_ASSIGNED = "split_assigned"  # 데이터셋 버전의 분할에 배정 (`dlp dataset build`)
-    EXPORTED = "exported"  # 내보내기에 포함됨 (`dlp export ...`)
-    WITHDRAWN = "withdrawn"  # 사용 중지 (`dlp dataset withdraw`). 끝 상태, 되돌릴 수 없다
+    전이 규칙은 `can_transition`, 정상 순서는 `LIFECYCLE_ORDER`다.
+
+    - raw_ingested: 원본 수집·등록 완료 (`dlp ingest`).
+    - privacy_approved: 블러를 사람이 승인했다 (`dlp privacy approve`).
+    - prelabeled: 자동 프리라벨 완료 (`dlp prelabel run`).
+    - human_verified: 사람 검수 완료 판정 (`dlp review verify`, ADR 0029).
+    - split_assigned: 데이터셋 버전의 분할에 배정했다 (`dlp dataset build`).
+    - exported: 내보내기에 포함됐다 (`dlp export ...`).
+    - withdrawn: 사용 중지 (`dlp dataset withdraw`). 끝 상태이고 되돌릴 수 없다.
+    """
+
+    RAW_INGESTED = "raw_ingested"
+    PRIVACY_APPROVED = "privacy_approved"
+    PRELABELED = "prelabeled"
+    HUMAN_VERIFIED = "human_verified"
+    SPLIT_ASSIGNED = "split_assigned"
+    EXPORTED = "exported"
+    WITHDRAWN = "withdrawn"
 
 
 # withdrawn을 뺀 정상 진행 순서. `can_transition`이 인덱스 차이로 "한 칸 앞"을 판정한다.
@@ -116,11 +155,16 @@ def can_transition(current: LifecycleState, target: LifecycleState) -> bool:
     return LIFECYCLE_ORDER.index(target) - LIFECYCLE_ORDER.index(current) in (0, 1)
 
 
-# 카메라 내부 파라미터 (핀홀 모델, 픽셀 단위).
-#   width / height: 영상 해상도(px). fx, fy: 초점 거리(px). cx, cy: 주점(px).
-#   distortion_model: 왜곡 모델 이름 (기본 "opencv").
-#   distortion: 그 모델의 왜곡 계수 (예: k1, k2, p1, p2, k3).
 class CameraIntrinsics(Contract):
+    """카메라 내부 파라미터 (핀홀 모델, 픽셀 단위).
+
+    - width, height: 영상 해상도 (px, 양수).
+    - fx, fy: 초점 거리 (px).
+    - cx, cy: 주점 (px).
+    - distortion_model: 왜곡 모델 이름 (기본 "opencv").
+    - distortion: 그 모델의 왜곡 계수 (예: k1, k2, p1, p2, k3). 비어 있으면 왜곡 없음이다.
+    """
+
     width: int = Field(gt=0)
     height: int = Field(gt=0)
     fx: FiniteFloat
@@ -137,15 +181,18 @@ def _drop_none(value: object) -> bool:
 
 
 class Calibration(Contract):
-    """세션 단위 캘리브레이션. 장착 위치가 바뀔 수 있어 세션마다 기록한다."""
+    """세션 단위 캘리브레이션. 장착 위치가 바뀔 수 있어 세션마다 기록한다.
 
-    # mount_position: 바디캠 장착 위치 (예: 가슴, 머리). 모르면 None.
-    # intrinsics: 바디캠 내부 파라미터. 없으면 깊이·3D 단계가 정책 기본값을 쓴다.
-    # camera_imu_extrinsics: IMU 좌표계 → 카메라 좌표계 4x4 동차 변환 (행 우선 중첩 튜플).
-    # glove_model: 장갑 기종 이름. glove_calibration: 장갑 보정 값 (이름 → 값, 기종별).
-    # camera_id: 바디캠 기기 ID (선택, ADR 0045). intrinsics가 없으면 3D 단계가 이 기기의 등록된
-    #   캘리브레이션(`dlp calib intrinsics|import`, DB camera_calibrations)을 쓴다. None이면 JSON에
-    #   싣지 않는다 (예전 세션과 같은 JSON).
+    - mount_position: 바디캠 장착 위치 (예: 가슴, 머리). 모르면 None.
+    - intrinsics: 바디캠 내부 파라미터. 없으면 3D 단계가 camera_id의 등록된 캘리브레이션을 찾고,
+      그것도 없으면 정책 기본 화각 근사를 쓴다.
+    - camera_id: 바디캠 기기 ID (선택, ADR 0045). 등록된 캘리브레이션(`dlp calib
+      intrinsics|import`, DB camera_calibrations)을 찾는 키다. None이면 JSON에 싣지 않아 예전
+      세션과 JSON이 같다.
+    - camera_imu_extrinsics: IMU 좌표계에서 카메라 좌표계로 가는 4x4 동차 변환 (행 우선 중첩 튜플).
+    - glove_model: 장갑 기종 이름.
+    - glove_calibration: 장갑 보정 값 (이름 → 값, 기종별).
+    """
 
     mount_position: str | None = None
     intrinsics: CameraIntrinsics | None = None
@@ -160,19 +207,22 @@ class Calibration(Contract):
 
 
 class Stream(Contract):
-    """세션 안의 스트림 하나. 기준 시각 = offset_ms + 스트림 시각 * clock_scale."""
+    """세션 안의 스트림 하나.
 
-    # 위 docstring(JSON Schema description)은 manual_adjustment_ms를 생략했다. 실제 변환은
-    # `to_master_ms`: master = offset_ms + manual_adjustment_ms + stream_ms * clock_scale.
-    # stream_id: 세션 안에서 고유한 스트림 이름 (예: bodycam, imu, tp1).
-    # kind: 스트림 종류.
-    # uri: 원본 위치 (원본 버킷 `dlp-raw`. 일반 라벨러 경로에 노출 금지).
-    # sample_rate_hz: 표본화 주파수 (IMU·장갑·오디오). 영상은 VFR이라 보통 None (PTS 인덱스를 쓴다).
-    # pts_index_uri: 영상 PTS 인덱스 위치 (`dlp ingest`가 만든다). 영상 시각은 이것으로만 계산한다.
-    # offset_ms: 동기화 오프셋 (ms, 실수). clock_scale: 시계 배율(드리프트 보정, 0보다 큼).
-    # sync_method / sync_confidence: 동기화 방법과 신뢰도(0~1, 모르면 None).
-    # manual_adjustment_ms: 사람 미세 조정 (`dlp sync adjust`,
-    # ms). 자동 동기화를 다시 해도 따로 보존된다.
+    마스터 시각 = offset_ms + manual_adjustment_ms + 스트림 시각 * clock_scale (`to_master_ms`).
+
+    - stream_id: 세션 안에서 고유한 스트림 이름 (예: bodycam, imu, tp1).
+    - kind: 스트림 종류.
+    - uri: 원본 위치 (원본 버킷 `dlp-raw`). 일반 라벨러 경로에 노출하지 않는다.
+    - sample_rate_hz: 표본화 주파수 (IMU, 장갑, 오디오). 영상은 VFR이라 보통 None이고 PTS 인덱스를
+      쓴다.
+    - pts_index_uri: 영상 PTS 인덱스 위치 (`dlp ingest`가 만든다). 영상 시각은 이것으로만 계산한다.
+    - offset_ms: 동기화 오프셋 (ms, 실수).
+    - clock_scale: 시계 배율 (드리프트 보정, 0보다 크다).
+    - sync_method, sync_confidence: 동기화 방법과 신뢰도 (0~1, 모르면 None).
+    - manual_adjustment_ms: 사람 미세 조정 (ms, `dlp sync adjust`). 자동 동기화를 다시 해도 따로
+      보존된다.
+    """
 
     stream_id: Identifier
     kind: StreamKind
@@ -210,17 +260,22 @@ class Stream(Contract):
 ConsentVersion = Annotated[str, StringConstraints(min_length=1, max_length=64)]
 
 
-# 녹화 세션 하나.
-#   session_id: 세션 ID. domain: 도메인.
-#   worker_id / site_id: 가명 작업자·장소 ID (분할 누수 방지 단위).
-#   consent_version: 동의서 버전. recorded_at: 녹화 시작 시각 (시간대 필수).
-#   duration_ms: 세션 길이 (마스터 타임라인 ms).
-#   streams: 스트림 목록 (순서는 DB streams.position으로 보존된다). 바디캠 정확히 하나.
-#   calibration: 세션 캘리브레이션 (기본 빈 값).
-#   privacy_state / lifecycle_state: 현재 상태. DB에서는 전용 함수로만 바꾼다
-#     (`set_privacy_state`, `set_lifecycle`).
-#   ontology_version: 이 세션 라벨이 따르는 온톨로지 버전 (DB FK). 아직 없으면 None.
 class Session(Contract):
+    """녹화 세션 하나 (작업자 한 명의 한 번 작업).
+
+    - session_id: 세션 ID. domain: 작업 도메인.
+    - worker_id, site_id: 가명 작업자 ID와 장소 ID. 골든·학습·검증 분할이 겹치지 않게 나누는
+      단위다.
+    - consent_version: 동의서 버전. recorded_at: 녹화 시작 시각 (시간대 필수).
+    - duration_ms: 세션 길이 (마스터 타임라인 ms).
+    - streams: 스트림 목록. 순서는 DB streams.position으로 보존된다. 바디캠이 정확히 하나 있고,
+      그 sync_method는 reference, 시계는 항등이다.
+    - calibration: 세션 캘리브레이션 (기본 빈 값).
+    - privacy_state, lifecycle_state: 현재 상태. DB에서는 전용 함수(`set_privacy_state`,
+      `set_lifecycle`)로만 바꾼다.
+    - ontology_version: 이 세션 라벨이 따르는 온톨로지 버전 (DB FK). 아직 없으면 None.
+    """
+
     session_id: Identifier
     domain: Domain
     worker_id: Identifier = Field(description="가명 작업자 ID")

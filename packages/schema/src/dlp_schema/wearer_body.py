@@ -105,6 +105,12 @@ class WearerEvidence:
     def __init__(
         self, hands: Iterable[tuple[int, HandAt]], heads: Iterable[tuple[int, Point]] = ()
     ) -> None:
+        """증거를 시각(스트림 PTS ms) 색인에 넣는다. 라벨에서 만들 때는 `from_labels`를 쓴다.
+
+        Args:
+            hands: (시각, 착용자 손) 쌍 (`hand_at` 결과).
+            heads: (시각, 다른 사람의 보이는 머리 관절 픽셀 좌표) 쌍.
+        """
         self._hands: _Index[HandAt] = _Index()
         self._heads: _Index[Point] = _Index()
         for t, h in hands:

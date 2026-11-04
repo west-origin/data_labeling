@@ -11,8 +11,8 @@
 
 `--fail-under 100`을 주면 공개 함수·클래스·모듈 중 하나라도 docstring이 없을 때
 종료 코드 1로 끝나고, 빠진 위치(파일:줄 이름)를 출력한다.
-계약 클래스 일부는 docstring이 JSON Schema 설명으로 들어가서 `#` 주석을 쓰는
-관례가 있었다(dlp_schema.labels 머리말). 이 기준에서는 그런 클래스도 빠진 것으로 센다.
+계약 클래스의 docstring은 JSON Schema description이 된다. 설명은 `#` 주석이 아니라
+docstring으로 쓰고, 바꾼 뒤에는 `make schemas`로 스키마를 다시 만든다.
 """
 
 from __future__ import annotations

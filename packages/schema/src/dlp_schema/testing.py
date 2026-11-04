@@ -318,6 +318,7 @@ class _AwareSqliteDateTime(SQLITE_DATETIME):
         base = super().bind_processor(dialect)
 
         def process(value: Any) -> Any:
+            """시간대 있는 값만 UTC로 바꾸고 시간대를 뗀다. 나머지는 그대로 넘긴다."""
             if isinstance(value, datetime) and value.tzinfo is not None:
                 value = value.astimezone(UTC).replace(tzinfo=None)
             return base(value) if base is not None else value
@@ -329,6 +330,7 @@ class _AwareSqliteDateTime(SQLITE_DATETIME):
         base = super().result_processor(dialect, coltype)
 
         def process(value: Any) -> Any:
+            """기본 처리 뒤 datetime이면 UTC 시간대를 붙인다."""
             out = base(value) if base is not None else value
             return out.replace(tzinfo=UTC) if isinstance(out, datetime) else out
 

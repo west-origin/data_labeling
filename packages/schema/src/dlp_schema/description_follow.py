@@ -209,6 +209,7 @@ class _Baseline:
     """
 
     def __init__(self, labels: list[LabelRecord], by_id: dict[str, LabelRecord]) -> None:
+        """labels는 오류 삽입·측정 계보를 뺀 이력, by_id는 전체 이력의 ID 색인이다."""
         self.operational, self.by_id = labels, by_id
         self._at: dict[datetime, list[LabelRecord]] = {}
 

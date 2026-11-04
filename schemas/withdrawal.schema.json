@@ -1,5 +1,6 @@
 {
   "additionalProperties": false,
+  "description": "세션 사용 중지 기록 (동의 철회 등). DB에서 session_id가 기본 키라 세션당 한 번만 기록된다.\n\n- session_id: 중지한 세션.\n- reason: 사유 (빈 문자열 금지).\n- withdrawn_at: 중지 시각. 이후 데이터셋 버전과 내보내기에서 이 세션은 빠진다 (`dlp_datasets`가\n  전파한다).",
   "properties": {
     "reason": {
       "minLength": 1,
