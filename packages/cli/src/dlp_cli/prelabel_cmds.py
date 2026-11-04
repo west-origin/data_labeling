@@ -25,8 +25,8 @@
     `training.yaml`(배포 과제), `config/defaults.yaml buckets`, `config/models.yaml`.
     원본 버킷: 영상·장갑 데이터를 읽는다 (장면 VLM 분류면 기준 스트림 영상도). 감사 저장소
     `raw_store(..., "prelabel.run")`. MLflow 버킷은 같은 `--store` 지정으로 연다.
-    종료 코드: 0, 선택한 모델을 준비하지 못해 실행을 거부하면 1, `--scene`이 정책 장면 목록에 없으면
-    1(`SystemExit`).
+    종료 코드: 0, 선택한 모델을 준비하지 못해 실행을 거부하면 1, `--scene`이 정책 장면 목록에 없거나
+    장면 분류 VLM 주소가 사내 대역 밖이면 1(`SystemExit`, F-PAR-89).
 
 멱등성 (ADR 0015·0019): 같은 모델 버전 결과가 전체 이력(`get_labels`)에 있으면 그 (스트림, 모델)은
 건너뛴다. 버전이 바뀌면 검수 전인 이전 버전 라벨만 `retractions()`로 지우고 새로 쓴다. 검수자가

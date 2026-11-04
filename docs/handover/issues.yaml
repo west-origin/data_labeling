@@ -1130,3 +1130,6 @@ issues:
   - {id: F-COE-89, title: "콘솔 가중치 가져오기 검사(/api/pretrain/check) 업로드에 크기 상한이 없어 디스크를 채울 수 있음 (영상 업로드는 upload.max_mb)", severity: low, status: candidate, kind: code,
      files: [packages/console/src/dlp_console/app.py, packages/console/src/dlp_console/pretrain.py], source: docs/handover/full-inspection-2026-11-04.md,
      note: "swarm s9 미증명 의심과 P3에서 같은 지적. 실행 재현 전 후보."}
+  - {id: F-ETA-32, title: "골든 평가 예측(dlp_eval.runner._predictions)이 사람 출처만 빼서 센서 출처 레코드도 모델 예측으로 셈 (버전 * 이면 model_version 없는 센서 레코드까지)", severity: low, status: candidate, kind: code,
+     files: [packages/evaluation/src/dlp_eval/runner.py], source: docs/handover/full-inspection-2026-11-04.md,
+     note: "주석 검수(P4)에서 함수 호출로 확인(scratchpad 탐침). 지금 Source.SENSOR 레코드를 만드는 코드가 없어 잠재. 장갑 센서 접촉 연동 전에 예측을 모델 출처로 좁힌다."}
