@@ -6,7 +6,7 @@ WP17.8)는 `aireview_eval_cmds`에 있고 여기서 함께 등록한다. 아래 
 `docs/handover/vlm-server.md`의 "처리량 재기와 대수 정하기"다.
 
 등록하는 명령
-- `dlp aireview probe [--vlm-url URL …] [--ontology-version V] [--out FILE]`: 서버 점검
+- `dlp aireview probe [--vlm-url URL …] [--ontology-version V] [--out FILE] [--model M]`: 서버 점검
   (`dlp_aireview.probe`). 엔드포인트마다 점검 결과·권고를 출력한다.
   종료: 0 통과 / 2 주소 없음 / 3 서버 장애 / 5 설정 불일치(사내 주소 아님, 모델 없음·불일치, 키,
   구조화 출력 미강제, 이미지 수 한도 등). 여러 엔드포인트면 가장 심각한 코드(5 > 3).
@@ -14,8 +14,8 @@ WP17.8)는 `aireview_eval_cmds`에 있고 여기서 함께 등록한다. 아래 
   [--concurrency 1,8,…] [--frames N,…] [--side PX,…] [--groups …] [--requests 200] [--warmup 10]
   [--ttft 10] [--cache-probe] [--no-capacity] [--decode-tokens 256] [--decode]
   [--decode-seconds 20] [--scene-units 40] [--frame-size WxH] [--seed 0] [--device NAME]
-  [--out FILE] [--store s3] [--url]`: 처리량 벤치 (`dlp_aireview.bench`). 입력은 기본이 합성
-  장면(`dlp_fixtures.aireview`, 영상·사람·글자 없음)이고, `session:<id>`면 그 세션의 승인된
+  [--out FILE] [--store s3] [--url] [--model M]`: 처리량 벤치 (`dlp_aireview.bench`). 입력은 기본이
+  합성 장면(`dlp_fixtures.aireview`, 영상·사람·글자 없음)이고, `session:<id>`면 그 세션의 승인된
   블러본(`open_blurred` 게이트, 장갑 문장 없음, DB·라벨링 버킷 읽기만)이다.
   `--frames`·`--side`는 지금 정책 값에 더할 후보다 (정책 값은 늘 잰다, 주지 않으면 정책 값만).
   무릎 동시성에서 프리필·생성 용량도 따로 잰다 (`--no-capacity`로 끈다). 보고서는
@@ -32,7 +32,7 @@ WP17.8)는 `aireview_eval_cmds`에 있고 여기서 함께 등록한다. 아래 
   (align_px·text_bytes_per_token)이 지금 정책과 다르면 그 보고서용 작업량을 보고서 셈법으로 다시
   센다 (`estimate.counting_policy`). 모델·fingerprint가 다르면 경고한다. `--model`은 판정단
   모델(ADR 0063)을 고른 정책으로 센다 (run과 같은 선택).
-  종료: 0 (세션이 없어도 0) / 5 고를 수 없는 모델.
+  종료: 0 (세션이 없어도 0) / 1 가정 값이 범위 밖(`SystemExit` 메시지) / 5 고를 수 없는 모델.
 - `dlp aireview calibrate [--since ISO] [--until ISO] [--version V … | --model M] [--out DIR]
   [--json] [--url]`: 판정 표시 보정 학습 (ADR 0062, `dlp_review.ops.ai_calibration`). 기간의
   사람 판정 기록(`ai_review_outcomes`) 중 대조군 행만으로 판정·종류·클래스별 지적 정밀도를 추정해
@@ -43,13 +43,21 @@ WP17.8)는 `aireview_eval_cmds`에 있고 여기서 함께 등록한다. 아래 
   버전). `--model`(판정단 모델, ADR 0063, run과 같은 선택)이면 그 모델의 판정만 배운다:
   `ai_review.versions` 중 그 모델의 버전(`+vlm-<모델>`), 없으면 그 모델의 지금 버전. `--version`을
   주면 그것이 앞선다. 보정 칸이 하나도 없으면(표본 부족) 파일을 쓰지 않는다. review.yaml은 고치지
-  않는다: 출력된 `artifact` 줄을 사람이 넣어야 쓰인다. DB는 읽기만 한다. 종료: 0 / 5 고를 수 없는
-  모델.
+  않는다: 출력된 `artifact` 줄을 사람이 넣어야 쓰인다. DB는 읽기만 한다. 종료: 0 / 1 `--since`·
+  `--until`에 시간대가 없음 / 5 고를 수 없는 모델.
 
 서버 주소: `--vlm-url`(여러 번, `이름=URL` 가능) 또는 `DLP_VLM_URLS`(`spark-01=http://…,…`).
 `DLP_VLM_URL`(행동 분류 서버)은 쓰지 않는다. API 키는 `DLP_VLM_API_KEY` (Authorization 헤더로만
 보내고 출력·기록하지 않는다). 주소는 사내 대역(`aireview.yaml server.internal_hosts`)이어야
 한다 (I7).
+
+공통: 인자 오류와 잘못된 형식 값(`--frame-size` 등)은 argparse가 종료 코드 2로 끝낸다 (주소 없음과
+같은 값이다). `--model`은 판정단 모델(`aireview.yaml backend.panel`)을 고른다 (`aireview_common.
+judge_policy`, 고를 수 없으면 5). 읽는 정책: `config/policies/aireview.yaml`, `estimate`는
+`actions.yaml` (`--include-actions`)과 `review.yaml`(flagged 모드 사유,
+`aireview_common.flagged_spans`), `calibrate`는 `review.yaml ai_review`.
+원본 버킷: 이 모듈의 어떤 명령도 접근하지 않는다 (`bench --source session:<id>`는 라벨링 버킷의
+승인된 블러본만 읽고 원본 버킷 이름은 게이트 확인에만 쓴다).
 """
 
 from __future__ import annotations
@@ -228,6 +236,7 @@ def _scene_input(scene: AiReviewScene, ontology: Ontology) -> BenchInput:
     }
 
     def frames(stream: str, idx: Sequence[int]) -> list[Any]:
+        """스트림의 프레임 번호들에 해당하는 합성 프레임을 그린다."""
         return [scene_frame(scene, stream, scene.frame_times[i]) for i in idx]
 
     return BenchInput(
@@ -370,6 +379,7 @@ def _session_input(
         engine.dispose()
 
     def frames(stream: str, idx: Sequence[int]) -> list[Any]:
+        """승인된 블러본에서 디코드한 프레임들의 RGB 배열."""
         return [f.rgb for f in inp.frames(stream, idx)]
 
     return BenchInput(
@@ -622,6 +632,7 @@ def _print_effect(name: str, e: CalibrationEffect) -> None:
     """보정 전후 지적 정밀도·재현율 한 줄씩."""
 
     def pct(rate: Rate) -> str:
+        """비율과 95% 상한 문자열. 분모가 0이면 `-`."""
         return "-" if not rate.den else f"{rate.value:.1%} (95% 상한 {rate.upper95:.1%})"
 
     print(f"{name}: 대조군 행 {e.rows}, 보인 지적 {e.flags_before} → {e.flags_after}")

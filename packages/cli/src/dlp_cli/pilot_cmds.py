@@ -1,10 +1,32 @@
-"""실제 영상 파일럿의 실행 전 검사. 상태를 승인하거나 라벨·세션을 DB에 쓰지 않는다.
+"""실제 영상 파일럿의 실행 전 준비 검사 (`dlp pilot check`).
 
-모델 해시/라이선스 정책, 실제 어댑터의 합성 짧은 영상(100 ms) 추론, DB 마이그레이션,
-검수 도구 인증/계정 연결(CVAT 일반 계정, 일반 라벨 검수자의 Label Studio 계정)을
-확인한다. --models-only는 서비스 검사를 생략한 모델 진단이다.
---video는 로컬 입력 진단이며 저장소 감사 경로를 거치지 않는다 (media probe와 같은 용도).
-실제 영상의 정확도·사람 검수 완료·재학습 성능 향상은 이 검사로 입증되지 않는다.
+실제 영상을 처음 돌리기 전에 모델·서비스·검수 계정이 갖춰졌는지 한 번에 본다. 상태를 승인하거나
+라벨·세션을 DB에 쓰지 않는다. 실제 영상의 정확도, 사람 검수 완료, 재학습 성능 향상은 이 검사로
+입증되지 않는다.
+
+하위 명령 (인자 오류는 argparse가 종료 코드 2로 끝낸다):
+
+`dlp pilot check [--profile hands|cleaning] [--models-only] [--video PATH] [--url URL]`
+    세 묶음을 차례로 검사하고 `[OK]`·`[FAIL]` 한 줄씩 출력한다.
+    1. 모델 (`model_checks`). `pilot.yaml profiles.<profile>`(기본 `cleaning`)의 어댑터와 모든
+       프라이버시 탐지기가 쓰는 모델의 라이선스 위반(`dlp_models.registry.load_registry`), 가중치
+       해시 (`dlp_models.registry.resolve`)를 본다. 모두 통과하면 100 ms 합성 영상으로 어댑터 추론과
+       계약 검사(`check_label`), 탐지기 초기화(`dlp_privacy.detectors.build_detectors`)까지 돌린다.
+    2. 서비스 (`service_checks`, `--models-only`면 생략). 개발 서비스 응답(CVAT 포함), DB
+       Alembic 리비전이 head인지, `review.yaml reviewers.privacy`가 비어 있지 않은지, 원본 검수자와
+       `pilot.yaml labeler`의 CVAT 일반 계정 연결, Label Studio 서비스 인증과 검수 계정 연결을 본다.
+    3. 입력 영상 (`--video`가 있을 때). 로컬 파일을 `dlp_media.probe.probe`로 열어 비디오 트랙,
+       회전 메타데이터(`require_upright`), PTS 인덱스를 확인한다. 저장소 감사 경로를 거치지 않는
+       로컬 진단이다 (`dlp media probe`와 같은 용도). 업로드·세션 등록은 없다.
+    읽는 정책: `config/policies/pilot.yaml`, `prelabel.yaml`, `privacy.yaml`, `review.yaml`,
+    `config/models.yaml`. 원본 버킷: 접근하지 않는다.
+    종료 코드: 0 모두 OK, 1 하나라도 FAIL. 프로필의 어댑터 이름이 잘못되면 `ValueError`로
+    종료 코드 1이다.
+
+공개 이름:
+- `PilotPolicy`, `load_policy(root)` — `pilot.yaml` 계약과 로더.
+- `model_checks(root, profile)`, `service_checks(root, url)` — 위 1·2단계 검사 목록.
+- `cmd_check`, `add_commands` — 실행 함수와 등록.
 """
 
 from __future__ import annotations

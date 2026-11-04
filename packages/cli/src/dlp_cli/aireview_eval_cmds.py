@@ -3,12 +3,15 @@
 `aireview_cmds.add_commands`가 등록한다.
 
 `dlp aireview eval --golden <버전> [--mode perturb|history] [--inject verb_swap=0.1,…] [--seed N]
-[--groups …] [--vlm-url URL …] [--store s3] [--gate] [--out FILE] [--url]`
+[--groups …] [--vlm-url URL …] [--store s3] [--gate] [--out FILE] [--url] [--model M]`
     - 세션은 `dlp_eval.runner.golden_sessions`(사용 중지 제외)로 고르고, 사례는
       `dlp_aireview.evaluate.perturb_case`(기본, 골든 정답을 메모리에서 교란, 비율은 `--inject` 또는
       `aireview.yaml gate.inject`) 또는 `history_case`(사람이 검수한 과거 모델 레코드)로 만든다.
     - 프레임은 운영과 같은 블러본 게이트(`open_blurred`)로만 얻고 판정은 실행기(`run_session`)로
-      하되 기록은 메모리다 (AI 표·라벨 이력에 쓰지 않는다). 장갑 원본은 읽지 않는다.
+      하되 기록은 메모리다 (AI 표·라벨 이력에 쓰지 않는다). 장갑 원본은 읽지 않는다. 원본 버킷에는
+      접근하지 않는다 (원본 버킷 이름은 블러본 게이트 확인에만 쓴다).
+    - 읽는 정책: `aireview.yaml`(`gate`, 판정 정책, `--model`이면 판정단 모델), `actions.yaml`,
+      `privacy.yaml`, `config/defaults.yaml buckets`.
     - 선택 모드(`aireview.yaml selection.mode`)는 쓰지 않는다 (대상을 모두 판정). `--groups`면 그
       묶음 창에 든 대상만 분모에 넣는다 (`evaluate.restrict_groups`). 판정이 없는 대상은 미판정
       (계획했지만 장애·중단)과 미계획으로 나눠 센다.
@@ -216,6 +219,7 @@ def _print_report(report: EvalReport, out: Path, gate: bool) -> None:
     """평가 요약 출력."""
 
     def pct(v: float | None) -> str:
+        """비율을 백분율 문자열로. 값이 없으면 `-`."""
         return "-" if v is None else f"{v:.1%}"
 
     print(

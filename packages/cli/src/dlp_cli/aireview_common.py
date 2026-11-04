@@ -1,4 +1,4 @@
-"""AI 1차 검수 명령의 공용 도우미 (`aireview_cmds`·`aireview_run_cmds`, WP17).
+"""AI 1차 검수 명령의 공용 도우미 (`aireview_cmds`·`aireview_run_cmds`·`aireview_eval_cmds`, WP17).
 
 - 서버 주소: `vlm_endpoints`(`--vlm-url` 여러 번 또는 `DLP_VLM_URLS`, `이름=URL` 가능),
   `vlm_api_key`(`DLP_VLM_API_KEY`, 출력·기록하지 않는다), `no_url`(주소 없음 안내, 종료 2).
@@ -6,8 +6,8 @@
 - 인자 형식: `parse_ints`(`1,8,16`), `parse_groups`(`temporal,spatial`), `add_url_arg`.
 - 판정단 모델 고르기 (ADR 0063): `add_model_arg`(`--model`), `judge_policy`(고른 판정 정책, 고를 수
   없는 모델이면 종료 5).
-- `flagged_spans`: flagged 선택 모드의 우선순위 사유 구간 (검수 운영 정책의 `flag_unit`, 검수
-  단위마다, `DLP_REVIEW_POLICY_FILE` 반영).
+- `flagged_spans`: flagged 선택 모드의 우선순위 사유 구간. 검수 운영 정책(`load_review_policy`,
+  `DLP_REVIEW_POLICY_FILE` 반영)으로 검수 단위마다 `dlp_review.ops.priority.flag_unit`을 부른다.
 - 종료 코드 상수: `NO_URL`(2), `UNAVAILABLE`(3), `CONFIG`(5).
 """
 

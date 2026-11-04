@@ -1,37 +1,54 @@
 """데이터셋·계보 하위 명령 (WP7, ADR 0007).
 
-등록하는 명령:
-- `dlp dataset golden --domain <도메인> [--create 버전] [--from 버전]` — 도메인 골든셋 후보를
-  제안한다. `--create`를 주면 그 이름으로 골든셋을 확정해 DB `golden_sets`에 쓰고, 그 순간의 정답
-  라벨 ID를 고정한다 (사람이 확정, ADR 0041). `--from`은 기존 버전의 세션으로 정답을 다시 고정한
-  새 버전을 만든다 (정답 수정은 새 골든 버전). `--from`이면 `--domain`은 생략할 수 있다 (원본
-  골든셋 도메인, 주면 일치 검사).
-- `dlp dataset build <버전 ID> [--golden] [--domain]` — 데이터셋 버전을 만든다.
-  작업자·장소 단위 분할(골든·학습·검증·holdout) → 라벨·세션·매니페스트를 lakeFS에 커밋 →
-  DB `dataset_versions`에 기록.
-- `dlp dataset withdraw <세션> --reason` — 세션 사용 중지(동의 철회·삭제 요청).
-  이후 버전·내보내기에서 자동 제외되고, 이미 들어간 곳을 출력한다. 같은 커밋에서 배포된 검수 작업
-  매체 회수를 요청하고 커밋 뒤 회수 실행기를 돌린다 (ADR 0039, F-REV-17, 대기가 남으면 종료 코드 4).
-- `dlp lineage <세션>` — 세션 계보: 골든셋 → 데이터셋 버전 → 학습 실행 → 내보내기 (읽기 전용).
-
 순서: `dataset golden --create`(도메인마다 처음 한 번, 프라이버시 승인 세션에서 제안해 세션을
 정한다. 이때 고정되는 정답은 라벨링 전이라 비어 있을 수 있다) → 사람이 처음부터 라벨링 → 검수
 완료(`dlp review verify`) → `dataset golden --from <버전> --create <새 버전>`(정답 고정) →
-`dataset build --golden <새 버전>` → `dlp train run` / `dlp eval golden` / `dlp export …`.
+`dataset build --golden <새 버전>` → `dlp train run`, `dlp eval golden`, `dlp export …`.
 라벨링 전에 고정한 버전(정답 0개)이나 고정 뒤 정답이 바뀐 버전을 `dataset build --golden`·
-`eval golden`에 주면 경고하고 다시 고정하는 명령을 안내한다. 골든셋 세션이 모두 사용 중지되었으면
-`--from`이 거부되므로 새 골든셋 제안(`--domain <도메인> --create`)을 안내한다.
-빌드 후보는 프라이버시 승인 세션 전체이고, `split_assigned`로 옮기는 것은 검수 완료 세션뿐이다
-(ADR 0031).
+`eval golden`에 주면 경고하고 다시 고정하는 명령을 안내한다. 빌드 후보는 프라이버시 승인 세션
+전체이고, `split_assigned`로 옮기는 것은 검수 완료 세션뿐이다 (ADR 0031).
 
 정책 출처: `config/policies/dataset.yaml` (`golden_sessions_per_domain`, `eligible_privacy_state`,
-`include_label_history`, `val_ratio`, `lakefs` 절).
+`include_label_history`, `val_ratio`, `lakefs` 절). 이 모듈의 어떤 명령도 원본 버킷을 읽거나 쓰지
+않는다 (`withdraw`의 회수 실행기는 원본 버킷 이름만 쓴다).
 
-주의:
-- 골든·학습·검증 사이에 작업자나 장소가 겹치면 안 된다. 분할은 `dlp_datasets.splitter`로만 만든다
-  (`build_dataset_version`이 겹침을 검사해 `DatasetBuildError`).
-- 오류 삽입·측정 레코드는 스냅샷에서 뺀다 (`non_operational_ids`).
-- 도메인 선택지와 기본 온톨로지 버전(`1.0.0`)이 명령줄 정의에 하드코딩되어 있다 (리팩토링 후보).
+공통: 네 명령 모두 `--url`(DB URL, `database_url` 규칙)을 받는다. 인자 오류는 argparse가 종료 코드
+2로 끝낸다. `SystemExit("메시지")`와 잡지 않은 예외는 종료 코드 1이다.
+
+하위 명령:
+
+`dlp dataset golden [--domain cleaning|caregiving|nursing] [--count N] [--create VERSION]
+[--from VERSION] [--note TEXT] [--ontology-version V] [--seed N] [--url URL]`
+    도메인 골든셋 후보를 제안한다 (`dlp_datasets.build.propose_golden_set`). `--create`면 그
+    이름으로 확정해 `golden_sets`에 쓰고 그 순간의 정답 라벨 ID를 고정한다
+    (`dlp_eval.runner.golden_truth_ids`, 사람이 확정, ADR 0041). `--from`은 기존 버전의 세션(사용
+    중지 제외)으로 정답을 다시 고정한 새 버전을 만든다 (`--create` 필수, `--domain`은 생략하거나
+    원본과 같아야 한다). `--count` 기본은 정책 값, `--ontology-version` 기본 `1.0.0`, `--seed` 기본
+    0. 종료 코드: 0. `--from`에 `--create`가 없거나, `--from` 없이 `--domain`이 없거나, 도메인이
+       다르거나, 골든셋 세션이 모두 사용 중지됐으면
+    1(`SystemExit`). 같은 버전이 이미 있으면 DB 오류로 1.
+
+`dlp dataset build <version_id> [--ontology-version V] [--golden VERSION] [--domain D]
+[--parent VERSION] [--seed N] [--url URL]`
+    데이터셋 버전을 만든다 (`dlp_datasets.build.build_dataset_version`). 작업자·장소 단위 분할
+    (골든·학습·검증·holdout) → 라벨·세션·매니페스트를 lakeFS `datasets/<버전>`에 커밋 →
+    `dataset_versions`에 기록한다. lakeFS 접속은 `DLP_LAKEFS_*` 환경 변수다. 종료 코드: 0, 빌드 거절
+    (`DatasetBuildError`: 같은 버전 ID, 후보 없음, 분할 누수 등)이면 stderr에 문구를 내고 1.
+
+`dlp dataset withdraw <session_id> --reason TEXT [--actor NAME] [--url URL]`
+    세션을 사용 중지한다 (`dlp_datasets.lineage.withdraw_session`, 동의 철회·삭제 요청). 이후 버전·
+    내보내기에서 자동 제외되고, 이미 들어간 곳을 출력한다. 같은 커밋에서 배포된 검수 작업 매체
+    회수를 요청하고 커밋 뒤 회수 실행기를 돌린다 (ADR 0039, F-REV-17). 종료 코드: 0, 회수 대기가
+    남으면 `REVOCATION_PENDING_EXIT`(4, 사용 중지는 이미 커밋됐다).
+
+`dlp lineage <session_id> [--url URL]`
+    세션 계보(골든셋 → 데이터셋 버전 → 학습 실행 → 내보내기, 손 크기 추정 출처)를 출력한다
+    (`dlp_datasets.lineage.session_lineage`). 읽기만 한다. 종료 코드: 0.
+
+불변 조건: 골든·학습·검증 사이에 작업자나 장소가 겹치면 안 된다. 분할은 `dlp_datasets.splitter`로만
+만든다 (`build_dataset_version`이 겹침을 검사해 `DatasetBuildError`). 오류 삽입·측정 레코드는
+스냅샷에서 뺀다 (`non_operational_ids`). 도메인 선택지와 기본 온톨로지 버전(`1.0.0`)이 명령줄 정의에
+하드코딩되어 있다 (리팩토링 후보).
 """
 
 from __future__ import annotations

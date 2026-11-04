@@ -1,13 +1,18 @@
 """운영 콘솔 하위 명령 (ADR 0061).
 
-등록하는 명령:
-- `dlp console serve [--host 127.0.0.1] [--port 8090] [--allow-remote]` — 브라우저 운영 콘솔을
-  띄운다. 콘솔은 기존 `dlp <단계>` 명령을 작업으로 돌리고 상태·결과를 보이는 화면이다
-  (`dlp_console`). 기본은 이 컴퓨터에서만 연다. 다른 주소는 `--allow-remote`가 있어야 하고 경고를
-  찍는다.
+콘솔은 기존 `dlp <단계>` 명령을 작업으로 돌리고 상태·결과를 보이는 화면이다 (`dlp_console`). DB는
+읽기만 하고 도메인 로직을 두지 않는다. 이 명령 자체는 원본 버킷에 접근하지 않는다 (콘솔이 돌리는
+`dlp` 명령은 각자의 감사 경로를 따른다).
 
-반환: Ctrl-C로 끝나면 0, 허용 없이 외부 주소에 묶으려 하면 2. 작업 상태·로그·업로드 사본은
-`DLP_CONSOLE_DIR`(기본 ~/.dlp-console)에 남는다.
+하위 명령 (인자 오류는 argparse가 종료 코드 2로 끝낸다):
+
+`dlp console serve [--host HOST] [--port PORT] [--allow-remote]`
+    브라우저 운영 콘솔을 띄운다 (`dlp_console.server.serve`, uvicorn, Ctrl-C로 끝낸다). `.env` 값을
+    이 프로세스 환경 변수에 넣는다(이미 있는 변수는 그대로). `--host`·`--port` 기본은
+    `config/console.yaml server`(127.0.0.1:8090)다. 127.0.0.1·localhost·::1 밖의 주소는
+    `--allow-remote`가 있어야 묶고 경고를 찍는다 (토큰 하나뿐, 암호화 없음). 시작할 때 토큰이 든
+    주소를 출력한다. 작업 상태·로그·업로드 사본은 `DLP_CONSOLE_DIR`(기본 ~/.dlp-console)에 남는다.
+    종료 코드: 0 서버가 끝남, 2 허용 없이 외부 주소에 묶으려 함(`RemoteBindError`).
 """
 
 from __future__ import annotations

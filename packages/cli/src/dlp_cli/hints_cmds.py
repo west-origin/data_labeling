@@ -1,19 +1,32 @@
-"""오탐 의심 힌트 하위 명령 `dlp review hints <세션>` (ADR 0055).
+"""오탐 의심 힌트 하위 명령 `dlp review hints <세션>` (ADR 0055·0056).
 
 블러·객체·도구 라벨을 바꾸지 않고, 검수 화면에 "오탐 의심" 이슈로 달 힌트를 계산해 저장한다.
-- 블러: `dlp_privacy.hints` 규칙(머리 관절 없음·손 위·짧은 깜박임) + `--tta`면 YuNet을 좌우
-  뒤집기·배율 화면에 다시 돌린 지지 비율. 원본 버킷 `derived/privacy_review/<스트림>.hints.json`.
-  블러 검수 작업 생성(`dlp review create --stage privacy`)이 누락 위험 구간 이슈 다음에 따로 단다
-  (`review.yaml cvat.hint_issue_limit`).
-- 객체·도구: `dlp_review.object_hints` 규칙(착용자 몸의 사람 박스) + `--tta`면 OWLv2 도구 트랙
-  일부의 지지 비율. 라벨링 버킷 `sessions/<세션>/hints/<스트림>.objects.json`. 라벨링 CVAT 작업
-  생성이 단다.
+프라이버시 탐지는 이 힌트로 지우거나 바꾸지 않는다 (오탐 의심은 화면 표시로만 쓴다). 입력은 운영
+라벨(`current_labels`)이다. `review_cmds.add_commands`가 `add_review_commands`로 등록한다.
 
-입력은 운영 라벨(`current_labels`)이다. `--tta`는 원본 영상을 감사 저장소로 받는다 (원본 접근 기록).
-OWLv2 TTA는 CPU 프레임당 수 초라 `review.yaml object_hints.tta.max_tracks`로 줄인다.
-`--ai`는 지금 승인된 블러본에서 박스를 잘라 사내 VLM(`DLP_VLM_URL`, 사내 주소 검사)에 묻고 no 답을
-`ai_crop_no` 힌트로 싣는다 (ADR 0056, 판정은 라벨·검수 상태가 아니다. 서버 주소가 없으면 stub이 모두
-unsure라 힌트가 생기지 않는다). 승인된 블러본이 없으면 그 스트림은 건너뛴다. 반환: 항상 0.
+하위 명령 (인자 오류는 argparse가 종료 코드 2로 끝낸다):
+
+`dlp review hints <session_id> [--tta] [--ai] [--store SPEC] [--url URL] [--out JSON]`
+    영상 스트림마다 두 종류 힌트를 계산해 쓴다.
+    - 블러: `dlp_privacy.hints.privacy_hints` 규칙(머리 관절 없음, 손 위, 짧은 깜박임). 결과는 원본
+      버킷 `derived/privacy_review/<스트림>.hints.json`(`write_hint_segments`)이다. 블러 검수 작업
+      생성(`dlp review create --stage privacy`)이 누락 위험 구간 이슈 다음에 따로 단다
+      (`review.yaml cvat.hint_issue_limit`).
+    - 객체·도구: `dlp_review.object_hints.object_hints` 규칙(착용자 몸의 사람 박스). 결과는 라벨링
+      버킷 `sessions/<세션>/hints/<스트림>.objects.json`이다. 라벨링 CVAT 작업 생성이 단다.
+    `--tta`면 원본 영상을 받아 YuNet 얼굴 탐지기를 좌우 뒤집기·배율 화면에 다시 돌리고, OWLv2 도구
+    트랙 일부(`review.yaml object_hints.tta.max_tracks`, CPU 프레임당 수 초)도 다시 돌려 지지 비율을
+    더한다 (`dlp_media.geometry.tta_tracks`). `--ai`면 지금 승인된 블러본
+    (`dlp_aireview.media.open_blurred`)에서 박스를 잘라 사내 VLM(`DLP_VLM_URL`)에 묻고 no 답을
+    `ai_crop_no` 힌트로 싣는다. 판정은 라벨도 검수 상태도 아니다. `DLP_VLM_URL`이 없으면 stub이 모두
+    unsure라 힌트가 생기지 않고, 승인된 블러본이 없는 스트림은 건너뛴다. `--out`은 요약 JSON
+    파일이다. 읽는 정책: `privacy.yaml`(`hints`), `review.yaml`(`object_hints`, `--ai`면 `ai_crops`,
+    `load_review_policy`), `--tta`면 `prelabel.yaml`, `--ai`면 `aireview.yaml`(사내 주소 목록).
+    원본 버킷: 늘 블러 힌트 파일을 쓰고, `--tta`면 원본 영상도 읽는다. 감사 저장소
+    `raw_store(..., "review.hints")`.
+    종료 코드: 0. `review.yaml`에 `object_hints` 절(또는 `--ai`일 때 `ai_crops` 절)이 없을 때,
+    `DLP_VLM_URL`이 사내 대역 밖일 때, VLM 서버 설정 오류(F-AIR-34)일 때는 `SystemExit` 메시지와
+    함께 1이다.
 """
 
 from __future__ import annotations
@@ -104,6 +117,7 @@ def face_tta_detector(det: FrameDetector, threshold: float) -> Detector:
     """
 
     def detect(img: NDArray[np.uint8]) -> list[tuple[str, Box]]:
+        """한 프레임(RGB)의 얼굴 박스 목록. 이름은 늘 `face`다."""
         return [
             ("face", (d.box.x, d.box.y, d.box.w, d.box.h))
             for d in det.detect(img, 0, threshold)
@@ -124,13 +138,18 @@ def _tool_detector(root: Path) -> Detector:
     thresholds = [op.min_score] * len(queries)
 
     def detect(img: NDArray[np.uint8]) -> list[tuple[str, Box]]:
+        """한 프레임의 (도구 클래스, 박스) 목록. 클래스는 질의 문장의 온톨로지 객체 ID다."""
         return [(op.queries[queries[d.query_index]], d.box) for d in model.detect(img, thresholds)]
 
     return detect
 
 
 def cmd_hints(args: argparse.Namespace) -> int:
-    """`dlp review hints <세션> [--tta] [--out]`: 오탐 의심 힌트를 계산해 저장한다 (모듈 설명)."""
+    """`dlp review hints <세션>`: 오탐 의심 힌트를 계산해 저장한다 (인자·출력은 모듈 설명).
+
+    부작용: 원본 버킷에 블러 힌트 파일 쓰기(감사 기록), 라벨링 버킷에 객체 힌트 파일 쓰기. DB는
+    읽기만 한다. `--ai`면 사내 VLM 서버에 블러본 조각을 보낸다.
+    """
     root = repo_root()
     privacy, review = load_privacy_policy(root), load_review_policy(root)
     if review.object_hints is None:

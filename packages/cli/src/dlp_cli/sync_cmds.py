@@ -1,22 +1,25 @@
 """동기화 하위 명령 (WP4, ADR 0004·0022·0028).
 
-등록하는 명령:
-- `dlp sync run <세션> [--store] [--url]` — 세션의 모든 스트림을 바디캠(기준 스트림) 시계에 맞춘다.
-  QR 슬레이트 → 두드림 → 오디오·운동 상호상관 순의 방법 우선순위와 드리프트 보정은
-  `config/policies/sync.yaml`을 따른다. 결과(오프셋 ms, `clock_scale`, 방법, 신뢰도)를 DB
-  `sessions`의 스트림에 쓰고, 보고서를 원본 버킷 `sessions/<세션>/derived/sync_report.json`에
-  덮어쓴다.
-- `dlp sync adjust <세션> <스트림> <ms>` — 사람이 정한 미세 조정값을 기록한다 (자동 결과 위에
-  더해짐).
+세션의 모든 스트림을 바디캠(기준 스트림) 시계에 맞춘다. 순서는 `dlp ingest` 다음, `dlp privacy
+detect` 전이다. 마스터 타임라인이 정해져야 시간 구간 라벨을 다룰 수 있다 (ADR 0019).
 
-순서: `dlp ingest` 다음, `dlp privacy detect` 전에 돈다 (마스터 타임라인이 정해져야 시간 구간 라벨을
-다룰 수 있다, ADR 0019).
+하위 명령 (인자 오류는 argparse가 종료 코드 2로 끝낸다. 잡지 않은 예외는 종료 코드 1이다):
 
-주의:
-- 원본 스트림 파일을 내려받으므로 원본 접근이다. 저장소는 `raw_store(..., "sync.run")` 감사 저장소로
-  만든다.
-- 다시 돌려도 바뀐 스트림만 DB에 쓴다 (멱등). 수동 조정값(`manual_adjustment_ms`)은 재동기화해도
-  유지된다 (`dlp_sync.pipeline` 규약).
+`dlp sync run <session_id> [--store s3|local:DIR] [--url URL]`
+    QR 슬레이트, 두드림, 오디오·운동 상호상관 순의 방법 우선순위와 드리프트 보정으로 동기화한다
+    (`dlp_sync.runner.run_sync`). 결과(오프셋 ms, `clock_scale`, 방법, 신뢰도)를 DB `sessions`의
+    스트림에 쓰고, 보고서를 `sessions/<세션>/derived/sync_report.json`에 덮어쓴다.
+    읽는 정책: `config/policies/sync.yaml`. 원본 버킷: 원본 스트림 파일을 읽고 보고서를 쓴다.
+    저장소는 `raw_store(..., "sync.run")` 감사 저장소다. `--store` 기본은 `s3`.
+    다시 돌려도 결과가 바뀐 스트림만 DB에 쓴다(멱등). 수동 조정값은 재동기화해도 유지된다.
+    종료 코드: 0. 스트림 URI가 그 저장소 버킷에 없으면 `ValueError`로 종료 코드 1이다.
+
+`dlp sync adjust <session_id> <stream_id> <adjustment_ms> [--url URL]`
+    사람이 정한 미세 조정값(ms)을 `manual_adjustment_ms`로 기록한다 (`dlp_sync.runner.adjust`).
+    자동 오프셋에 더해지는 값이고, 이전 조정값에 누적하지 않고 바꾼다. 자동으로 맞추지 못한
+    (unsynced) 스트림이면 방법을 `manual`로 바꾸고 이 값을 오프셋 전체로 쓴다. `adjustment_ms`는
+    유한 실수만 받는다 (NaN·±Inf는 DB를 열기 전에 종료 코드 2). 원본 버킷: 접근하지 않는다.
+    종료 코드: 0. 기준 스트림을 조정하면 `ValueError`, 없는 스트림이면 `KeyError`로 종료 코드 1이다.
 """
 
 from __future__ import annotations
@@ -81,16 +84,17 @@ def _finite_ms(text: str) -> float:
 
 
 def cmd_sync_adjust(args: argparse.Namespace) -> int:
-    """`dlp sync adjust <세션> <스트림> <ms>`: 사람이 검수 화면에서 정한 오프셋 미세 조정값을
-    기록한다.
+    """`dlp sync adjust <세션> <스트림> <ms>`: 사람이 정한 오프셋 미세 조정값을 기록한다.
 
     인자:
         args.adjustment_ms: 조정값(ms). 명령줄에서는 유한 실수로 받는다 (`dlp_sync.runner.adjust`의
-            시그니처가 float, NaN·Inf는 인자 오류로 종료 코드 2). 자동 오프셋에 더해지는 값이다.
+            시그니처가 float, NaN·Inf는 인자 오류로 종료 코드 2). 자동 오프셋에 더해지는 값이며
+            이전 조정값에 누적하지 않고 바꾼다.
             자동으로 맞추지 못한(unsynced) 스트림이면 사람이 오프셋 전체를 정한 것으로 보고
             방법을 `manual`로 바꾼다.
 
-    예외: 기준 스트림(바디캠, `reference`)을 조정하려 하면 `ValueError`.
+    예외: 기준 스트림(바디캠, `reference`)을 조정하려 하면 `ValueError`, 세션에 없는 스트림이면
+    `KeyError`.
     부작용: 한 트랜잭션에서 해당 스트림의 동기화 필드(`manual_adjustment_ms` 등)를 갱신한다.
     원본 파일은 읽지 않으므로 감사 기록이 없다.
     """

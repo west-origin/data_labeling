@@ -1,26 +1,28 @@
 """골든셋 평가 하위 명령 (WP11, ADR 0013·0025).
 
-등록하는 명령:
-- `dlp eval golden <골든셋 버전> --model <과제>=<버전> … [--baseline …] [--out]` — DB에 있는 모델
-  출처 라벨(예측)을 골든셋의 사람 정답과 비교해 과제별 지표(mAP·HOTA·PCK·구간 F1 등)와 하위 집단
-  리포트를 만들고, 배포 게이트(절대 기준 + 기존 모델 대비 회귀)를 판정한다.
+DB에 이미 기록된 모델 출처 라벨(예측)을 골든셋의 사람 정답과 비교해 과제별 지표(mAP·HOTA·PCK·구간
+F1 등)와 하위 집단 리포트를 만들고 배포 게이트(절대 기준 + 기존 모델 대비 회귀)를 판정한다. DB는
+읽기만 하고 원본 버킷에는 접근하지 않는다. 재학습 후보 모델의 골든셋 평가는 `dlp train run`이 하며,
+그 예측은 DB에 쓰지 않는다.
 
-입력 → 출력: DB `golden_sets`·`label_records` → `<out>`(JSON)과 같은 이름의 `.md` 리포트.
-정답은 골든 버전에 고정한 라벨이며, JSON 리포트의 `golden_truth`에 고정 여부와 정답 라벨 ID 해시를
-남긴다 (ADR 0041). 근거와 평가 입력은 골든셋을 한 번 읽은 같은 결과에서 만든다. 고정하지 않은 이전
-형식 골든셋은 현재 라벨로 평가하고 경고를 출력한다. 고정한 정답이 비었거나 지금 정답과 다르면
-(라벨링 전에 고정, 고정 뒤 수정) 고정한 정답으로 평가하되 경고하고 `--from`으로 다시 고정하라고
-안내한다.
-종료 코드: 게이트 통과 0, 실패 1. 형식 오류는 `SystemExit` 메시지.
+하위 명령 (인자 오류는 argparse가 종료 코드 2로 끝낸다):
 
-주의:
-- 이 명령은 DB에 이미 기록된 예측만 평가한다(읽기 전용). 재학습 후보 모델의 골든셋 평가는
-  `dlp train run`이 하며, 그 예측은 DB에 쓰지 않는다.
-- `--baseline`을 잘못 적으면 예측이 비어 기존 지표가 0이 되고 어떤 후보든 통과하므로,
-  기존 모델은 `require_predictions=True`로 읽어 예측이 없으면 실패시킨다.
-
-정책 출처: `config/policies/evaluation.yaml` (과제별 지표·임계값·게이트). 게이트에 모르는 지표
-이름을 적으면 정책을 읽을 때 실패한다 (`dlp_eval.policy.TASK_METRICS`, ADR 0031).
+`dlp eval golden <golden> --model TASK=VERSION [--model ...] [--baseline TASK=VERSION ...]
+[--out PATH] [--url URL]`
+    `<golden>` 골든셋 버전의 세션을 한 번 읽어(`dlp_eval.runner.golden_sessions`) 정답 근거
+    (`truth_anchor`)와 후보·기존 평가 입력을 모두 그 결과에서 만든다 (`load_golden_merged`). 평가는
+    `dlp_eval.harness.evaluate`, 게이트는 `dlp_eval.gate.decide`다. 과제는 `dlp_eval.policy.TASKS`
+    중 하나이고, 한 과제를 여러 번 주면 예측을 세션별로 합친다. 버전 끝의 `*`는 앞부분 일치다 (세션
+    입력 해시가 붙는 접촉·행동·3D 궤적·관계 버전). `--baseline`을 잘못 적으면 예측이 비어 어떤
+    후보든 통과하므로 기존 모델은 `require_predictions=True`로 읽어 예측이 없으면 실패시킨다.
+    `--out`(기본 `reports/eval.json`)에 JSON을, 같은 이름의 `.md`에 리포트를 쓴다.
+    정답은 골든 버전에 고정한 라벨이며, JSON 리포트의 `golden_truth`에 고정 여부와 정답 라벨 ID
+    해시를 남긴다 (ADR 0041). 고정하지 않은 이전 형식 골든셋은 현재 라벨로 평가하고 경고한다. 고정한
+    정답이 비었거나 지금 정답과 다르면 고정한 정답으로 평가하되 경고하고 `--from`으로 다시
+    고정하라고 안내한다. 읽는 정책: `config/policies/evaluation.yaml`(과제별 지표·임계값·게이트,
+    모르는 지표 이름은 정책을 읽을 때 실패, `dlp_eval.policy.TASK_METRICS`, ADR 0031).
+    종료 코드: 0 게이트 통과, 1 게이트 실패. `--model`·`--baseline` 형식 오류·모르는 과제, 기존 모델
+    예측 없음도 `SystemExit` 메시지와 함께 1이다.
 """
 
 from __future__ import annotations

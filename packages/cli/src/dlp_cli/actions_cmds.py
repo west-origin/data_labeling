@@ -1,39 +1,48 @@
-"""행동 구간 하위 명령 (WP10, ADR 0012·0026).
-
-등록하는 명령:
-- `dlp actions run <세션> [--vlm-url] [--store] [--url] [--translate-url] [--no-translate]` — 바디캠
-  손마다 2단 구조로 행동 구간을 만든다. 1단: 손목 속도·접촉 신호로 경계 후보. 2단: OpenAI 호환 VLM이
-  온톨로지 안에서 분류·설명(JSON Schema 강제, 재시도 뒤 실패하면 미상). 마지막으로 인접 동일 분류를
-  병합하고 빈 시간을 미상 공백으로 채운다(타임라인 공백 0).
-  행동 트랜잭션을 커밋한 뒤 한국어 설명의 영어 번역을 최선 노력으로 만든다
-  (`dlp_cli.translate_cmds.translate_after_actions`, ADR 0043). 번역 실패·서버 미연동은 행동 결과와
-  종료 코드에 영향이 없고, 남은 설명은 `dlp translate run --pending`이 채운다.
-
-- `dlp actions describe <세션> | --pending [--vlm-url] [--store] [--url] [--translate-url]
-  [--no-translate]` — 사람이 의미를 고친 행동(동사·대상·도구·손, 양손 중 한 손 삭제)의 한국어 설명을
-  같은 VLM으로 다시 만든다 (`dlp_actions.describe`, ADR 0043 3절). 고친 동사·대상으로 묶은 설명만
-  묻고, 고친 행동의 검수를 물려받는다. 커밋 뒤 그 세션의 영어 번역을 최선 노력으로 만든다.
-  `--pending`은 다시 만들 설명이 있는 세션을 모두 처리한다 (검수 수집 뒤 cron). `dlp actions run`도
-  행동 커밋 뒤 같은 세션에 최선 노력으로 돌린다 (실패해도 run의 결과·종료 코드 불변).
+"""행동 구간 하위 명령 (WP10, ADR 0012·0026·0043).
 
 순서: `dlp prelabel run`·`dlp relations run` 뒤, 검수 배정(`dlp review plan`) 전.
-`dlp actions describe --pending`은 검수 수집(`dlp review collect`·웹훅) 뒤.
-VLM에는 블러본만 보낸다 (라벨링 버킷에서 읽고 원본 버킷에는 접근하지 않는다).
-시간 구간은 마스터 타임라인 정수 ms다 (ADR 0019).
+`dlp actions describe --pending`은 검수 수집(`dlp review collect`·웹훅) 뒤 (cron). VLM에는 블러본만
+보낸다. 두 명령 모두 라벨링 버킷에서 블러본을 읽고 원본 버킷에는 접근하지 않는다. 시간 구간은 마스터
+타임라인 정수 ms다 (ADR 0019).
 
-종료 코드:
-- 0: 성공 (같은 버전 결과가 있으면 그 손은 건너뜀, 멱등).
-- 2: VLM 서버 주소가 없음 (`--vlm-url`/`DLP_VLM_URL`). 모든 구간을 미상으로 채우면 검수 부담만
-  늘어서 아무것도 만들지 않는다.
-- 3: VLM 서버 장애. 트랜잭션이 되돌려져 아무것도 쓰지 않았으므로 서버 복구 뒤 다시 실행한다.
-  블러본이 지금 승인된 렌더가 아니거나(ADR 0024), 쓰기 직전 세션 잠금 아래 확인(사용 중지·승인
-  보류·렌더 변경, 묻는 동안 입력 변경)이 막았을 때도 3이다 (아무것도 쓰지 않았다, F-PAR-23·80).
-- 5: VLM 설정 오류 (4xx: 인증 실패, 없는 모델, 잘못된 요청 등. 다시 물어도 같아 재시도하지 않는다).
-  트랜잭션이 되돌려져 아무것도 쓰지 않았다. 서버 주소·모델·키를 고친 뒤 다시 실행한다 (WP17.1).
-  VLM 주소가 사내 대역(`actions.yaml vlm.internal_hosts`) 밖이어도 5다 (보내지 않는다, F-PAR-82).
+정책 출처: `config/policies/actions.yaml`(`vlm` 절: 모델, 구간당 프레임 수, 최대 변 px, 제한 시간,
+`internal_hosts`), `config/defaults.yaml buckets.labeling`. 커밋 뒤 번역은 `translate.yaml`을
+읽는다. CI·CPU 테스트는 `OracleVlm` stub을 직접 쓴다 (이 명령은 실제 서버용).
 
-정책 출처: `config/policies/actions.yaml` (`vlm` 절: 모델, 구간당 프레임 수, 최대 변 px, 제한 시간).
-CI·CPU 테스트는 `OracleVlm` stub을 직접 쓴다 (이 명령은 실제 서버용).
+공통 인자: `--vlm-url`(OpenAI 호환 VLM, 기본 `DLP_VLM_URL`, 키는 `DLP_VLM_API_KEY`), `--store`
+(라벨링 버킷 지정, `s3` 기본 또는 `local:<디렉터리>`), `--url`(DB URL), `--translate-url`(사내 번역
+서버, 기본 `DLP_TRANSLATE_URL`), `--no-translate`(끝에 영어 번역을 돌리지 않는다). 인자 오류는
+argparse가 종료 코드 2로 끝낸다 (VLM 주소 없음과 같은 값이다).
+
+종료 코드 (두 명령 공통):
+- 0 (`OK`): 성공. 같은 버전 결과가 있으면 그 손은 건너뛴다(멱등).
+- 2 (`NO_URL`): VLM 서버 주소가 없음. 모든 구간을 미상으로 채우면 검수 부담만 늘어서 아무것도
+  만들지 않는다.
+- 3 (`UNAVAILABLE`): VLM 서버 장애, 블러본이 지금 승인된 렌더가 아님(ADR 0024), 쓰기 직전 세션 잠금
+  아래 확인(사용 중지·승인 보류·렌더 변경, 묻는 동안 입력 변경)이 막음 (F-PAR-23·80). 그 세션은
+  아무것도 쓰지 않았으므로 원인을 고친 뒤 다시 실행한다.
+- 5 (`CONFIG`): VLM 설정 오류(4xx: 인증 실패, 없는 모델, 잘못된 요청 등, 재시도하지 않는다) 또는
+  VLM 주소가 사내 대역(`actions.yaml vlm.internal_hosts`) 밖 (보내지 않는다, F-PAR-82). `describe`에
+  세션과 `--pending`을 둘 다 주거나 둘 다 주지 않아도 5다.
+
+하위 명령:
+
+`dlp actions run <session_id> [--vlm-url URL] [--store SPEC] [--url URL] [--translate-url URL]
+[--no-translate]`
+    바디캠 손마다 2단 구조로 행동 구간을 만든다 (`dlp_actions.runner.run_actions`). 1단은 손목
+    속도·접촉 신호로 경계 후보, 2단은 VLM이 온톨로지 안에서 분류·설명(JSON Schema 강제, 재시도 뒤
+    실패하면 미상)이다. 마지막으로 인접 동일 분류를 병합하고 빈 시간을 미상 공백으로 채운다
+    (타임라인 공백 0). 행동 트랜잭션을 커밋한 뒤 같은 세션의 설명 재생성(`describe`와 같은 일)과
+    영어 번역(`dlp_cli.translate_cmds.translate_after_actions`)을 최선 노력으로 돌린다. 둘의 실패는
+    행동 결과와 종료 코드에 영향이 없고, 남은 번역은 `dlp translate run --pending`이 채운다.
+
+`dlp actions describe [session_id] [--pending] [--vlm-url URL] [--store SPEC] [--url URL]
+[--translate-url URL] [--no-translate]`
+    사람이 의미를 고친 행동(동사·대상·도구·손, 양손 중 한 손 삭제)의 한국어 설명을 같은 VLM으로 다시
+    만든다 (`dlp_actions.describe.describe_session`, ADR 0043 3절). 고친 동사·대상으로 묶은 설명만
+    묻고, 고친 행동의 검수를 물려받는다. `--pending`은 다시 만들 설명이 있는 세션을 모두 처리한다.
+    세션 하나가 3이어도 나머지 세션을 계속 처리하고 가장 나쁜 코드를 돌려준다. 5는 그 자리에서
+    멈춘다. 설명을 만든 세션은 커밋 뒤 영어 번역을 최선 노력으로 만든다.
 """
 
 from __future__ import annotations
@@ -75,6 +84,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             서버 API 키는 환경 변수 `DLP_VLM_API_KEY`(있을 때만 Authorization 헤더).
         args.store: 라벨링 버킷 저장소 지정 (`s3` 또는 `local:<디렉터리>`), 블러본을 읽는다.
         args.url: DB URL.
+        args.translate_url: 사내 번역 서버 URL. 없으면 `DLP_TRANSLATE_URL`.
+        args.no_translate: 참이면 커밋 뒤 영어 번역을 돌리지 않는다.
 
     반환: 0 성공 / 2 VLM 주소 없음 / 3 VLM 장애·블러본이 지금 승인된 렌더가 아님·쓰기 직전 확인이
     막음 / 5 VLM 설정 오류·사내 대역 밖 주소 (모듈 docstring 참고).
@@ -246,7 +257,8 @@ def cmd_describe(args: argparse.Namespace) -> int:
 
     반환: 0 성공(위반으로 못 만든 설명은 다음 실행이 다시 묻는다) / 2 VLM 주소 없음 / 3 VLM 장애·
     블러본이 지금 승인된 렌더가 아님·쓰기 직전 확인(사용 중지·승인 보류·렌더 변경, F-PAR-23)이 막음
-    (그 세션은 아무것도 쓰지 않았다) / 5 VLM 설정 오류.
+    (그 세션은 아무것도 쓰지 않았다, 다음 세션은 계속 처리) / 5 VLM 설정 오류이거나 세션과
+    `--pending` 중 정확히 하나를 주지 않음.
     부작용: 세션마다 한 트랜잭션에서 `label_records` 설명·삭제 레코드 추가와 검수 상태 기록, VLM
     호출, 라벨링 버킷 블러본 읽기. 커밋 뒤 번역(최선 노력, `--no-translate`면 하지 않는다).
     """

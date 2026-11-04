@@ -1,31 +1,36 @@
 """자동 프리라벨 하위 명령 (WP8, ADR 0008·0009·0026).
 
-등록하는 명령:
-- `dlp prelabel run <세션> [--store] [--url] [--skip 단계]` — 세션의 영상 스트림마다
-  손(MediaPipe 21관절), 전신(RTMPose), COCO 객체(MediaPipe), 도구(OWLv2) 모델을 돌린다.
-  정책이 켜면(`prelabel.yaml models.closed_vocab_tools`, 기본 null) 고정 클래스 도구(YOLOX, 단계
-  `closed_tools`, ADR 0060)도 돌리고, 그 클래스를 OWLv2 질의에서 뺀다(`replace_open_vocab_classes`).
-  이어 객체·손 모양 마스크(SAM 2.1, ADR 0059), 깊이 기반 3D 궤적, 장갑·영상 접촉 구간, 3인칭
-  착용자 매칭을 만들어
-  `label_records`에 쓴다.
-
 순서: `dlp privacy approve`(가능하면 `render`도) 뒤, `dlp relations run`·`dlp actions run` 전.
-`privacy_approved` 세션이면 끝에 생애주기를 `prelabeled`로 옮긴다.
+`privacy_approved` 세션이면 끝에 생애주기를 `prelabeled`로 옮긴다. 라벨 ID에는 `version_tag(모델
+버전)`이 들어가고, 모델 버전에는 정책 절 해시가 들어간다.
 
-입력 → 출력: 원본 버킷 영상·장갑 데이터(감사 기록 `prelabel.run`) → 모델 출처 라벨.
-라벨 ID에는 `version_tag(모델 버전)`이 들어가고, 모델 버전에는 정책 절 해시가 들어간다.
+하위 명령 (인자 오류는 argparse가 종료 코드 2로 끝낸다. 잡지 않은 예외는 종료 코드 1이다):
 
-멱등성 (ADR 0015·0019):
-- 같은 모델 버전 결과가 전체 이력(`get_labels`)에 있으면 그 (스트림, 모델)은 건너뛴다.
-- 버전이 바뀌면 검수 전인 이전 버전 라벨만 `retractions()`로 지우고 새로 쓴다.
-- 검수자가 승인·표본 검증한 라벨은 지우지 않는다.
+`dlp prelabel run <session_id> [--store SPEC] [--url URL] [--skip STEP ...] [--scene LABEL]
+[--allow-missing-models]`
+    세션의 영상 스트림마다 손(MediaPipe 21관절), 전신(RTMPose), COCO 객체(MediaPipe), 도구(OWLv2)
+    모델을 돌린다 (`dlp_prelabel.runner.run_prelabel`). 정책이 켜면(`prelabel.yaml
+    models.closed_vocab_tools`, 기본 null) 고정 클래스 도구(YOLOX, 단계 `closed_tools`, ADR 0060)도
+    돌리고 그 클래스를 OWLv2 질의에서 뺀다. 이어 객체·손 모양 마스크(SAM 2.1, ADR 0059), 깊이 기반
+    3D 궤적, 장갑·영상 접촉 구간, 3인칭 착용자 매칭을 만들어 `label_records`에 쓴다.
+    - `--skip`(반복): `hands`, `body`, `objects`, `tools`, `closed_tools`, `depth3d`, `masks`.
+    - `--scene`: OWLv2 질의를 고를 장면(`prelabel.yaml scene.labels` 중 하나). 없으면 정책 분류기
+      (`fixed`, 또는 `DLP_VLM_URL`의 VLM에 운영 블러 박스를 모자이크한 기준 스트림 프레임을 보낸다,
+      ADR 0055). VLM 주소가 없으면 정책 기본 장면이다.
+    - `--allow-missing-models`: 준비되지 않은 모델을 뺀 부분 실행을 허용한다. 기본은 쓰기 전에 실패.
+    재학습 모델: 게이트를 통과해 배포된 모델(`stage=prelabel`)이 있으면 `training.yaml`의
+    `replaces`에 적힌 기본 어댑터 대신 쓴다 (`dlp_train.deployed.deployed_predictors`). 배포된 접촉
+    모델을 실제로 불러왔으면 기본 접촉 단계(`CONTACT_STEP`)도 건너뛴다.
+    읽는 정책: `config/policies/prelabel.yaml`(모델·임계값), `sync.yaml glove.pressure_prefixes`,
+    `training.yaml`(배포 과제), `config/defaults.yaml buckets`, `config/models.yaml`.
+    원본 버킷: 영상·장갑 데이터를 읽는다 (장면 VLM 분류면 기준 스트림 영상도). 감사 저장소
+    `raw_store(..., "prelabel.run")`. MLflow 버킷은 같은 `--store` 지정으로 연다.
+    종료 코드: 0, 선택한 모델을 준비하지 못해 실행을 거부하면 1, `--scene`이 정책 장면 목록에 없으면
+    1(`SystemExit`).
 
-재학습 모델: 게이트를 통과해 배포된 모델(`stage=prelabel`)이 있으면 `training.yaml`의
-`replaces`에 적힌 기본 어댑터 대신 쓴다. 배포된 접촉 모델을 실제로 불러왔으면 기본 접촉 단계
-(`CONTACT_STEP`)도 건너뛴다.
-
-정책 출처: `config/policies/prelabel.yaml`(모델·임계값), `sync.yaml`의 `glove.pressure_prefixes`,
-`training.yaml`(배포 과제).
+멱등성 (ADR 0015·0019): 같은 모델 버전 결과가 전체 이력(`get_labels`)에 있으면 그 (스트림, 모델)은
+건너뛴다. 버전이 바뀌면 검수 전인 이전 버전 라벨만 `retractions()`로 지우고 새로 쓴다. 검수자가
+승인·표본 검증한 라벨은 지우지 않는다.
 """
 
 from __future__ import annotations
@@ -38,6 +43,8 @@ from pathlib import Path
 
 import sqlalchemy as sa
 
+from dlp_actions.policy import load_policy as load_actions_policy
+from dlp_aireview.backend import check_hosts
 from dlp_cli.ontology_access import session_ontology
 from dlp_cli.raw_access import raw_store
 from dlp_cli.schema_cmds import database_url
@@ -76,15 +83,18 @@ def cmd_run(args: argparse.Namespace) -> int:
         args.store: `s3` 또는 `local:<디렉터리>`. 원본·MLflow 버킷을 같은 지정으로 연다.
         args.url: DB URL.
         args.skip: 건너뛸 단계 이름 목록 (`hands`, `body`, `objects`, `tools`, `closed_tools`,
-            `depth3d`, `masks`).
-            각 어댑터 클래스의 `name`과 비교한다.
+            `depth3d`, `masks`). 각 어댑터 클래스의 `name`과 비교한다.
+        args.scene: 도구 단계 장면을 사람이 정한 값 (`_scene`).
+        args.allow_missing_models: 참이면 준비되지 않은 모델을 뺀 부분 실행을 허용한다.
 
     흐름:
     1. 기본 어댑터를 만든다. 가중치가 없으면 `[모델 없음]`으로 알린다.
        아직 실제 모델이 없는 기능(`UNAVAILABLE`)은 `[미연동]`으로 알린다.
     2. 배포된 재학습 모델을 불러 `deployed.apply`로 기본 어댑터를 바꾼다.
     3. 선택한 모델을 준비하지 못하면 쓰기 전에 실패한다. 부분 실행은 --allow-missing-models로만
-       허용한다. `run_prelabel`이 스트림·모델마다 라벨을 쓰고 요약을 돌려준다.
+       허용한다.
+    4. OWLv2가 있으면 장면을 정한다 (`_scene`).
+    5. `run_prelabel`이 스트림·모델마다 라벨을 쓰고 요약을 돌려준다.
 
     반환: 성공 0, 선택한 모델 미준비 1.
     부작용: 한 트랜잭션에서 `label_records` INSERT(철회 레코드 포함)·세션 생애주기 갱신,
@@ -229,7 +239,9 @@ def _scene(
     """도구 단계의 장면 (ADR 0055): --scene(사람) → 정책 분류기(fixed | 사내 VLM).
 
     VLM은 기준 스트림 원본을 감사 저장소로 받아, 운영 블러 트랙 박스를 모자이크한 프레임만 보낸다.
-    서버 주소(`DLP_VLM_URL`)가 없으면 정책 기본 장면(출처 fallback)이다.
+    서버 주소(`DLP_VLM_URL`)가 없으면 정책 기본 장면(출처 fallback)이다. 주소가 사내 대역
+    (`actions.yaml vlm.internal_hosts`, 같은 `DLP_VLM_URL`을 쓰는 행동 VLM과 같은 목록) 밖이면
+    원본을 받기 전에 SystemExit로 멈춘다 (외부 API 금지, F-PAR-89).
     """
     sp = policy.scene
     if args.scene:
@@ -240,6 +252,9 @@ def _scene(
     if sp.classifier == "fixed" or not url:
         source = "fixed" if sp.classifier == "fixed" else "fallback"
         return SceneResult(sp.default, 1.0 if source == "fixed" else 0.0, source)
+    outside = check_hosts({"scene-vlm": url}, load_actions_policy(repo_root()).vlm.internal_hosts)
+    if outside:
+        raise SystemExit(f"[설정 오류] 사내 대역 밖 주소에는 보내지 않습니다: {'; '.join(outside)}")
     session = get_session(conn, args.session_id)
     stream = session.reference_stream
     blur = [

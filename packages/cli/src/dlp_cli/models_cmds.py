@@ -1,22 +1,38 @@
-"""모델 가중치 내려받기·변환과 라이선스 검사 (config/models.yaml, ADR 0009·0010). 가중치는 저장소에
-넣지 않는다.
+"""모델 가중치 내려받기·변환과 라이선스 검사 (`config/models.yaml`, ADR 0009·0010).
 
-등록하는 명령:
-- `dlp models fetch [이름...]` — `config/models.yaml`의 가중치를 `data/models/`에 받고 sha256을
-  확인한다 (`make models`). 변환형 모델(`export` 지정)은 받지 않고 "변환 필요"만 알린다.
-- `dlp models export` — 공개 ONNX가 없는 모델(메트릭 깊이 등)을 공식 가중치에서 ONNX로 변환한다
-  (`make export-models`). 무거운 PyTorch가 필요해 일회용 `uv run --no-project` 환경에서 돈다.
-- `dlp models licenses` — 정책이 쓰는 모델의 가중치 라이선스·학습 데이터·상업 사용 분류
-  표(Markdown)를 출력하고, 허용 분류가 아닌 모델이 있으면 실패한다 (`make licenses`, `make check`에
-  포함).
+가중치는 저장소에 넣지 않고 `data/models/`에 받는다. 라벨링 데이터를 판매할 수 있으므로 가중치가
+비상업(`forbidden`)이면 쓰지 않는다 (ADR 0010). 새 모델을 정책에 넣으면 `config/models.yaml`에
+라이선스·학습 데이터·`commercial`을 함께 적어야 `licenses`가 통과한다. 이 모듈의 어떤 명령도 DB와
+원본 버킷에 접근하지 않는다.
+
+하위 명령 (인자 오류는 argparse가 종료 코드 2로 끝낸다):
+
+`dlp models fetch [names ...]`
+    레지스트리(`config/models.yaml models`)의 가중치를 받고 sha256을 확인한다
+    (`dlp_models.registry.fetch`, `make models`). 이름이 없으면 전부. 이미 있고 해시가 맞으면
+    건너뛴다(멱등). 변환형 모델(`export` 지정)은 받지 않고 "변환 필요"만 알린다.
+    종료 코드: 0, 1 목록에 없는 이름이 있거나 하나라도 `[실패]`(해시 불일치). 네트워크 오류는
+    예외로 1이다.
+
+`dlp models export`
+    공개 ONNX가 없는 모델(메트릭 깊이 등) 중 결과 파일이 없는 것을 공식 가중치에서 변환한다
+    (`make export-models`). 일회용 PyTorch CPU 환경(`EXPORT_ENV`, `uv run --no-project`)에서
+    `scripts/export_*.py`를 실행한다. 변환 결과의 해시는 확인하지 않는다. 종료 코드: 0, 변환
+    스크립트 실패는 `subprocess.CalledProcessError`로 1.
+
+`dlp models licenses`
+    레지스트리의 모든 모델과 공개 데이터셋(`config/external_datasets.yaml`)의 라이선스·상업 사용
+    표를 Markdown으로 출력한다 (`make licenses`, `make contracts`·`make check`에 포함). 위반은
+    정책이 쓰는데 목록에 없거나 `accept`에 없는 분류(`ModelRegistry.violations`), 그리고 공개
+    데이터로 1차 학습한 가중치·학습 설정의 분류 위반(`dlp_models.datasets.dataset_violations`,
+    `pretrain_violations`, `config/pretrain/objects.yaml`, ADR 0060)이다. 종료 코드: 0 위반 없음, 1
+    위반 있음.
 
 공개 함수:
-- `used_models(root)` — 정책 YAML(privacy·prelabel·actions·aireview·translate)이 실제로 쓰는
-  모델을 "쓰는 곳 → 모델 이름"으로 모은다. `tests/test_model_licenses.py`도 이 함수를 쓴다.
-
-주의: 라벨링 데이터를 판매하므로 가중치가 비상업(`forbidden`)이면 쓰지 않는다 (ADR 0010). 새 모델을
-정책에 넣으면 `config/models.yaml`에 라이선스·학습 데이터·`commercial`을 함께 적어야 `licenses`가
-통과한다.
+- `used_models(root)` — 정책 YAML(privacy·prelabel·actions·aireview·translate·training)이 실제로
+  쓰는 모델을 "쓰는 곳 → 모델 이름"으로 모은다. `tests/test_model_licenses.py`와 `dlp pilot check`도
+  이 함수를 쓴다.
+- `cmd_fetch`, `cmd_export`, `cmd_licenses`, `add_commands` — 실행 함수와 등록.
 """
 
 from __future__ import annotations
@@ -151,7 +167,8 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     인자:
         args.names: 받을 모델 이름 목록. 비어 있으면 레지스트리 `models` 전부.
 
-    반환: 하나라도 `[실패]`(해시 불일치)면 1, 아니면 0. 네트워크 오류는 예외로 끝난다.
+    반환: 목록에 없는 이름이 있거나 하나라도 `[실패]`(해시 불일치)면 1, 아니면 0. 네트워크 오류는
+    예외로 끝난다.
     부작용: `<저장소>/<spec.path>`(보통 `data/models/…`)에 파일 쓰기. 이미 있고 해시가 맞으면
     건너뛴다(멱등).
     """
@@ -173,8 +190,9 @@ def cmd_fetch(args: argparse.Namespace) -> int:
 
 
 def cmd_export(args: argparse.Namespace) -> int:
-    """`dlp models export`: 변환형 모델(`spec.export` 스크립트 지정) 중 결과 파일이 없는 것을
-        변환한다.
+    """`dlp models export`: 변환형 모델 중 결과 파일이 없는 것을 변환한다.
+
+    변환형 모델은 `spec.export`에 변환 스크립트가 지정된 모델이다.
 
     부작용: 일회용 PyTorch 환경(`EXPORT_ENV`)에서 `scripts/export_*.py`를 실행해 `spec.path`에
     ONNX를 쓴다. 이미 파일이 있으면 건너뛴다. 변환 결과의 해시는 여기서 확인하지 않는다.

@@ -1,19 +1,47 @@
 """스키마·온톨로지·DB 하위 명령 (WP1, ADR 0002).
 
-등록하는 명령:
-- `dlp schema export [--out] [--check]` — 계약 타입(`dlp_schema`)에서 JSON
-  Schema(`schemas/*.schema.json`)를
-  만든다. `--check`는 파일이 코드와 일치하는지만 본다 (`make schemas` / `make contracts`).
-- `dlp ontology validate [--root]` — `config/ontology/*/manifest.yaml`의 모든 온톨로지 버전을
-  검증한다.
-- `dlp ontology register <버전> [--accept-physical-priors]` — 온톨로지 버전을 DB(`ontology_versions`
-  테이블)에 등록한다. 등록된 초안의 물리 사전값이 바뀌면 승인 옵션이 있어야 한다 (ADR 0053).
-- `dlp db upgrade [revision]` — Alembic 마이그레이션 적용 (`make db-upgrade`).
+계약 타입과 온톨로지를 파일·DB에 맞춰 두는 명령들이다. 다른 단계보다 먼저 돈다 (`make db-upgrade`가
+`db upgrade`와 `ontology register 1.0.0`을 차례로 부른다). 이 모듈의 어떤 명령도 원본 버킷에
+접근하지 않는다. 정책 YAML(`config/policies/`)도 읽지 않는다.
+
+공통: `--url`은 DB URL이고 `database_url` 규칙을 따른다. 인자 오류는 argparse가 종료 코드 2로
+끝낸다. 잡지 않은 예외는 트레이스백과 함께 종료 코드 1로 끝난다.
+
+하위 명령:
+
+`dlp schema export [--out DIR] [--check]`
+    계약 타입(`dlp_schema`)에서 JSON Schema(`schemas/*.schema.json`)를 쓴다
+    (`dlp_schema.jsonschema.write_schemas`, `make schemas`). `--check`는 쓰지 않고 낡은 파일만
+    `[STALE]`로 출력한다 (`stale_schemas`, `make contracts`). `--out` 기본은 `<저장소>/schemas`.
+    종료 코드: 0 성공 또는 모두 최신, 1 `--check`에서 낡은 파일이 있음. DB를 쓰지 않는다.
+
+`dlp ontology validate [--root DIR]`
+    `<root>/*/manifest.yaml`이 있는 모든 온톨로지 버전을 `dlp_schema.load_ontology`로 불러 검증한다.
+    `--root` 기본은 `config/ontology`. 종료 코드: 0 모두 통과, 1 온톨로지가 없거나 하나라도 실패.
+    DB를 쓰지 않는다.
+
+`dlp ontology register <version> [--root DIR] [--url URL] [--accept-physical-priors]`
+    온톨로지 한 버전을 `ontology_versions`에 등록한다
+    (`dlp_schema.db.repository.register_ontology`). 같은 내용이면 아무것도 하지 않고(멱등), 초안에
+    키를 덧붙이기만 했으면 내용을 바꾼다 (ADR 0028). 등록된 초안의 물리 사전값이 바뀌면
+    `--accept-physical-priors`가 있어야 쓴다 (ADR 0053). 종료 코드: 0 등록 또는 변경 없음, 3
+    사전값이 달라졌는데 승인 옵션이 없음(아무것도 쓰지 않는다). 그 밖의 허용되지 않는 변경은
+    `register_ontology`의 `ValueError`로 종료 코드 1이다.
+
+`dlp ontology audit [--session ID] [--url URL]`
+    기존 운영 라벨(`current_labels`)을 세션에 기록된 온톨로지 사전과 대조한다
+    (`dlp_schema.validation.check_label`, `check_label_set`). `--session`이 없으면 모든 세션을 본다.
+    읽기만 한다. 종료 코드: 0 위반 없음, 1 위반 세션이 하나 이상.
+
+`dlp db upgrade [revision] [--url URL]`
+    Alembic 마이그레이션을 `revision`(기본 `head`)까지 적용한다 (`dlp_schema.db.migrate.upgrade`).
+    이미 적용된 리비전은 건너뛴다(멱등). 종료 코드: 0.
 
 공개 함수:
 - `database_url(explicit)` — 모든 `*_cmds.py`가 공유하는 DB URL 결정 규칙
-  (`--url` > 환경 변수 `DLP_DATABASE_URL` > 개발용 기본값).
+  (`--url` > 환경 변수 `DLP_DATABASE_URL` > 개발용 기본값 `DEFAULT_DATABASE_URL`).
 - `cmd_*` — 각 하위 명령의 실행 함수 (반환값은 종료 코드).
+- `add_commands(sub)` — 위 하위 명령을 최상위 파서에 등록한다.
 
 주의: 계약 타입을 바꾼 뒤에는 `make schemas`로 재생성해야 `make contracts`(= `schema export
 --check`)가 통과한다.
@@ -60,8 +88,7 @@ def database_url(explicit: str | None) -> str:
 
 
 def cmd_schema_export(args: argparse.Namespace) -> int:
-    """`dlp schema export`: 계약 타입의 JSON Schema 파일을 쓰거나(기본) 최신인지
-        검사한다(`--check`).
+    """`dlp schema export`: 계약 타입의 JSON Schema 파일을 쓰거나 최신인지 검사한다.
 
     인자:
         args.out: 출력 디렉터리. None이면 `<저장소>/schemas`.
@@ -168,7 +195,18 @@ def cmd_ontology_register(args: argparse.Namespace) -> int:
 
 
 def cmd_ontology_audit(args: argparse.Namespace) -> int:
-    """기존 운영 라벨을 현재 세션 사전과 대조한다. 이력·사전·DB를 수정하지 않는다."""
+    """`dlp ontology audit`: 기존 운영 라벨을 세션에 기록된 온톨로지 사전과 대조한다.
+
+    인자:
+        args.session_id: 한 세션만 검사한다. None이면 DB의 모든 세션.
+        args.url: DB URL (`database_url` 규칙).
+
+    세션 하나에서 사전을 못 찾거나(`NoResultFound`) 사전이 깨졌으면(`ValueError`) 그 오류를 그
+    세션의 위반으로 세고 다음 세션으로 넘어간다.
+
+    반환: 위반 세션이 하나라도 있으면 1, 없으면 0.
+    부작용: 없음. 이력·사전·DB를 수정하지 않는다 (읽기 연결만 연다).
+    """
     engine = sa.create_engine(database_url(args.url))
     checked = failed = 0
     try:

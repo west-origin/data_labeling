@@ -4,18 +4,21 @@
 등록하는 명령
 - `dlp aireview run <세션>… | --pending [--limit N] [--parallel-sessions K] [--vlm-url URL …]
   [--store s3] [--groups …] [--mode all|flagged] [--max-minutes M] [--no-sensor] [--dry-run]
-  [--debug-dir DIR] [--json-progress] [--url]`: 계획 → 판정 → AI 표 기록 (`dlp_aireview.runner`).
+  [--debug-dir DIR] [--json-progress] [--url] [--model M]`: 계획 → 판정 → AI 표 기록
+  (`dlp_aireview.runner.run_from_db`).
   멱등이고 재개된다 (기록된 단위는 다시 묻지 않는다). `--dry-run`은 계획만 센다 (서버 불필요,
   블러본 게이트는 거친다. 손 상태 대상이 있으면 단위 키의 센서 해시를 위해 장갑 Parquet은 읽는다).
   끝나면 세션마다 실행 요약 JSON 한 줄을 표준 출력에, 진행 줄은 표준 오류에 쓴다
   (`--json-progress`면 JSON Lines).
   종료 코드
   - 0: 완료, 할 일 없음, 계획만.
+  - 1: 인자 조합 오류(세션과 `--pending`을 함께, `--pending` 없이 `--limit`, `SystemExit` 메시지).
   - 1: 세션 실행 중 예상하지 못한 오류 (버그·DB 오류. aborted:error를 남기고, 다음 세션은 계속한다).
   - 2: 서버 주소 없음 (아무것도 쓰지 않음).
   - 3: 서버 장애로 중단 (완료한 단위는 남는다. 시작 전 모든 엔드포인트가 응답하지 않으면 아무것도
     쓰지 않음).
-  - 5: 설정·라이선스 불일치 (4xx, 서버 모델이 정책 모델과 다름, 사내 주소 아님, 원본 버킷 저장소).
+  - 5: 설정·라이선스 불일치 (4xx, 서버 모델이 정책 모델과 다름, 사내 주소 아님, 원본 버킷 저장소,
+    고를 수 없는 `--model`), 또는 세션도 `--pending`도 주지 않음.
   - 6: 세션 전제 실패 (승인 전, 승인 보류, 사용 중지, 렌더 게이트, 장갑 Parquet 없음) 또는 실행 중
     블러 변경·사용 중지·승인 보류.
   - 7: 다른 실행기가 그 세션을 처리 중.
@@ -32,11 +35,11 @@
   기록자) 쥐므로 연결 풀을 K에 맞춰 키운다 (`engine_options`). K는 PostgreSQL `max_connections`의
   절반보다 작게 둔다.
   4는 회수 대기(`dlp review revoke`)의 코드라 쓰지 않는다.
-- `dlp aireview status [<세션>… | --pending | --all] [--groups …] [--json] [--url]`: 세션별
-  판정 버전, 판정률(판정된 대상/계획 대상), 단위·fallback 수, 판정 분포, 마지막 이벤트, 최근
+- `dlp aireview status [<세션>… | --pending | --all] [--groups …] [--json] [--url] [--model M]`:
+  세션별 판정 버전, 판정률(판정된 대상/계획 대상), 단위·fallback 수, 판정 분포, 마지막 이벤트, 최근
   처리량 기반 남은 시간, 백로그(영상 시간). started만 있고 실행 중이 아니면 "중단 추정"이다.
   실행 중인지는 `pg_locks`만 읽어 본다 (잠금을 잡지 않는다, `aireview_lock_held`).
-  종료 0 (없는 세션을 주면 1).
+  종료 0 (없는 세션을 주거나 대상 고르기를 둘 이상 주면 1).
 - `dlp aireview show <unit_id> | <세션>:<label_id> [--model M] [--url]`: 감사 기록 전체 (프레임
   PTS·sha, 렌더 해시, 프롬프트 다이제스트, 판정, 응답 sha, 서버 모델, 엔드포인트 이름, 실행자).
   라벨을 주면 그 라벨이 대상으로 든 단위들(모든 버전)과 지금 유효한(표시 프로필) 판정. 유효한
@@ -44,11 +47,20 @@
   기준이다 (`version`). 종료 0 (없으면 1) / 5 고를 수 없는 모델.
 - `dlp aireview waive <세션> --reason TEXT [--url]`: required 모드(`review.yaml ai_review.mode`,
   WP17.6)에서 이 세션의 AI 단계를 건너뛰기로 한 결정을 남긴다 (`waived` 이벤트, 사유
-  `manual: <사유>`, 실행자 `DLP_ACTOR`). 종료 0 (세션이 없으면 1).
+  `manual: <사유>`, 실행자 `current_actor()`: `DLP_ACTOR`, 없으면 OS 사용자). 종료 0 (세션이 없으면
+  1, 사유가 공백뿐이면 5).
 
 원본 접근: 장갑 접촉 문장(프리라벨과 같은 `glove_contact_intervals`, 같은 입력)을 위해 장갑
 Parquet만 감사 원본 저장소(`raw_store`, 용도 `aireview.run`)로 읽는다. 손 상태 대상이 있고 센서를
 켰을 때만 읽는다. 판정 프레임은 라벨링 버킷의 승인된 블러본에서만 얻는다 (`open_blurred`).
+`status`·`show`·`waive`는 DB만 쓴다.
+
+공통: 인자 오류와 잘못된 형식 값(`--limit`, `--max-minutes`, `--groups`)은 argparse가 종료 코드 2로
+끝낸다 (서버 주소 없음과 같은 값이다). 서버 주소는 `--vlm-url`(반복) 또는 `DLP_VLM_URLS`다. 읽는
+정책: `config/policies/aireview.yaml`(판정 정책·사내 주소), `sync.yaml glove.pressure_prefixes`,
+`actions.yaml vlm.model`(판정 모델과 같으면 자기 검수 경고), `privacy.yaml`(블러본 게이트),
+`config/defaults.yaml buckets`. 판정은 라벨도 검수 상태도 아니다 (ADR 0040). 추가 전용 `ai_review_*`
+표에만 쓰고 `label_records`· `record_review`에는 쓰지 않는다.
 """
 
 from __future__ import annotations
@@ -165,6 +177,7 @@ class _NoServer:
     """계획만(`--dry-run`) 하는 실행의 백엔드: 부르면 버그다."""
 
     def __init__(self, policy: AiReviewPolicy) -> None:
+        """정책의 백엔드 설명만 담는다 (엔드포인트 없음)."""
         b = policy.backend
         self.info = BackendInfo(kind=b.kind, model=b.model, fingerprint=b.fingerprint, endpoints=())
 
@@ -297,9 +310,11 @@ def _sensor_source(args: argparse.Namespace) -> _Sensor | None:
     raw = raw_store(args.store, args.url, "aireview.run")
 
     def compute(session: Session) -> SensorContext:
+        """세션의 장갑 접촉 문맥 (원본 장갑 Parquet 읽기, 감사 기록)."""
         return glove_context(session, raw, glove, prefixes)
 
     def check(session: Session) -> None:
+        """세션에 동기화된 장갑 Parquet이 있는지 확인한다 (`check_gloves`)."""
         check_gloves(session, raw)
 
     return _Sensor(compute, check)

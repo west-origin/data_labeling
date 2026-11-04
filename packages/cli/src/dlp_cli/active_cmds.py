@@ -1,15 +1,26 @@
 """액티브 러닝 하위 명령 (WP14, ADR 0017).
 
-등록하는 명령:
-- `dlp active rank [--limit] [--json]` — 검수 결과에서 클래스별 수정률(검수자가 고친 비율)을
-  계산하고, 그 클래스가 많이 나오는 검수 대기 세션에 높은 점수를 준다. 다음에 검수할 세션
-  순위를 출력한다. 점수 항목은 `dlp_active.terms.register_term`으로 플러그인처럼 붙인다.
-- `dlp active fiftyone [--limit] [--name] [--cache]` — 고른 세션을 FiftyOne 데이터셋으로 올려
-  눈으로 큐레이션한다. 블러본만 쓴다 (라벨링 버킷). FiftyOne은 선택 설치(`make install-curation`).
+검수가 어느 정도 쌓인 뒤 주기적으로 돌려 `dlp review plan` 대상 세션을 고른다. 두 명령 모두 DB를
+읽기만 하고 원본 버킷에는 접근하지 않는다. 정책 출처: `config/policies/active.yaml`(`select` 개수,
+점수 항목 가중치, `fiftyone.dataset_prefix`).
 
-순서: 검수가 어느 정도 쌓인 뒤 주기적으로 돌려 `dlp review plan` 대상 세션을 고른다.
-정책 출처: `config/policies/active.yaml` (`select` 개수, 점수 항목 가중치,
-`fiftyone.dataset_prefix`). 두 명령 모두 DB를 읽기만 한다.
+공통: `--url`은 DB URL이다. 인자 오류는 argparse가 종료 코드 2로 끝낸다.
+
+하위 명령:
+
+`dlp active rank [--limit N] [--json] [--url URL]`
+    검수 결과에서 클래스별 수정률(검수자가 고친 비율)을 계산하고, 그 클래스가 많이 나오는 검수 대기
+    세션에 높은 점수를 줘 다음에 검수할 세션 순위를 출력한다 (`dlp_active.select.rank_sessions`).
+    점수 항목은 `dlp_active.terms.register_term`으로 붙인다. `--limit` 기본은 정책 `select`,
+    `--json`은 순위 목록만 JSON으로 낸다. 종료 코드: 0.
+
+`dlp active fiftyone [--limit N] [--name NAME] [--cache DIR] [--store SPEC] [--url URL]`
+    순위 상위 세션의 블러본 프레임·라벨을 FiftyOne 데이터셋으로 만든다
+    (`dlp_active.curation.build_samples`, `push_to_fiftyone`). 같은 이름이면 덮어쓴다. 블러본은
+    라벨링 버킷(`--store`, 기본 `s3`)에서 `--cache`(기본 `data/fiftyone`)로 받는다. 블러본이 없는
+    세션은 `[건너뜀]`으로 알린다. FiftyOne은 선택 설치(`make install-curation`)다.
+    종료 코드: 0. 설정에서 라벨링 버킷과 원본 버킷이 같으면 `SystemExit`로 1(원본을 큐레이션 도구에
+    노출하지 않는 방어), FiftyOne이 없으면 `CurationUnavailableError`로 1.
 """
 
 from __future__ import annotations

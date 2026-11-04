@@ -1,75 +1,136 @@
 """검수 도구 연동·검수 운영 하위 명령 (WP6·WP12, ADR 0006·0014·0023·0024·0029).
 
-등록하는 명령 (`dlp review …`):
-- 도구 연동 (WP6, `dlp_review.tasks`·`collect`·`webhook`·`verify`)
-  - `create <세션> --stage privacy|labeling --assignee [--stream S…] [--tool T]` — 세션의 검수
-    작업을 CVAT(공간 라벨·블러)와 Label Studio(시간 구간)에 만든다. 블러 검수 담당자는
-    `review.yaml reviewers.privacy`의 원본 접근 권한자여야 한다. 라벨링은 먼저 회수 대기를
-    실행하고, 세션에 대기가 하나라도 남으면(대상이 아닌 스트림 포함) 만들지 않는다 (종료 코드 4).
-  - `collect <작업 키> --reviewer` — 끝난 작업의 결과를 라벨 이력으로 들여온다 (reconcile:
-    승인·수정·삭제·추가 → 새 `LabelRecord` + `parent_label_id`). 이미 수집했거나 회수한 작업이면
-    아무것도 하지 않는다(멱등). 블러가 바뀌면 커밋 뒤 배포 매체를 회수하고 다시 만들 명령을 보인다.
-  - `serve [--port]` — CVAT·Label Studio 웹훅을 받아 끝난 작업을 자동 수집하는 HTTP 서버.
-    수집 결과(회수한 작업·다시 만들 명령 포함)는 `collect`와 같이 서버 로그에 남는다. 담당자의 도구
-    계정(`cvat.users`, `label_studio.users`)이 아닌 사람의 제출은 받지 않는다 (F-REV-06).
-  - `revoke [<세션>] [--stream] [--task --reason] [--all --reason] [--include-legacy] [--dry-run]
-    [--pending] [--mark-tool-gone KEY --note]` — 블러가 바뀐 뒤 이미 배포한 라벨링 매체를
-    회수한다 (ADR 0039). 세션 경로는 늘 sweep을 하고 `--task`·`--all`은 그 위에 수동 요청을 더한다.
-    대기가 남으면 종료 코드 4 (cron `--pending`의 경보).
-    `revoke --orphans [<세션>] [--apply]` — DB 롤백으로 기록 없이 남은 도구 작업·라벨링 버킷 사본
-    (고아)을 이름 규칙과 DB로 찾는다 (`dlp_review.orphans`, F-REV-15). 기본은 보고만 하고
-    `--apply`일 때만 지운다. 나이 하한은 `review.yaml orphans.min_age_s`. 고아가 남거나 확인하지
-    못한 채널이 있으면 종료 코드 4.
-  - `register-webhooks <url_base>` — 검수 프로젝트에 웹훅을 등록한다.
-  - `refresh-urls [--session S…]` — 열린 Label Studio 작업의 영상·시계열 서명 URL을 정책 유효 시간
-    (`media.signed_url_ttl_s`)으로 다시 서명한다 (F-REV-08, cron으로 유효 시간보다 짧은 주기).
-    수집·회수한 작업과 매체가 낡은 작업은 갱신하지 않는다. 갱신하지 못한 작업이 있으면 종료 코드 1.
-  - `verify <세션>` — 검수가 끝난 세션을 `prelabeled → human_verified`로 옮긴다 (ADR 0029).
-  - `ui-theme [--check]` — `config/review_ui.yaml`로 CVAT 테마 색 파일을 다시 만든다 (ADR 0038,
-    `make ui-theme`). `--check`는 파일을 쓰지 않고 다르면 1로 끝난다.
-- 운영 로직 (WP12, `dlp_review.ops`)
-  - `plan <세션> --reviewer …` — 우선순위·표본 검증·블라인드·이중·오류 삽입 배정을 계획해 DB에 쓴다.
-    AI 1차 검수(`review.yaml ai_review`, WP17.6)가 켜져 있으면 판정 지적을 우선순위 사유로 더하고
-    표본 묶음에서 뺀다. required면 판정이 끝나지 않은 세션의 배정을 미룬다 (`AI_PENDING_EXIT` 6).
-  - `assign <배정 ID> [--assignee]` — 배정 하나의 검수 도구 작업을 만든다 (멱등). 담당자 없는
-    배정은 `--assignee`로 담당자를 정해야 만든다 (없으면 종료 코드 1, F-REV-07).
-  - `qa` — 끝난 표준 배정에서 QA 재검수 배정을 뽑는다. 선임(`reviewers.senior`)이 없거나 원래
-    담당자뿐이면 담당자를 비워 둔다. 그 배정은 `reviewers.senior`에 원래 담당자가 아닌 선임을 넣은
-    뒤 `assign --assignee <그 선임>`으로 만든다 (QA 담당자는 선임이고 짝 배정 담당자가 아니어야
-    한다).
-  - `queue [--limit]` — 열린 배정을 우선순위 높은 순으로 보여 준다 (AI 지적 사유 수 포함).
-  - `quality` — 오류 삽입 발견율, 이중 라벨 일치도(카파·구간 F1·경계 F1), 프리라벨 편향.
-    `--ai`면 AI 1차 검수 판정 품질(대조군 기준 지적 정밀도·재현율·층화 ok 놓침률과 상한, 제안
-    적용, 자동화 편향·오류 삽입 누출, WP17.8), `--ai-thresholds`면 표시 최소 확신도 조안.
-
 정상 순서: (프리라벨·관계·행동·`dlp aireview run` 뒤) `plan` → `assign`(또는 `create`) → 검수 →
-`collect`/`serve` → `qa` → `verify` → `dlp dataset build`. 블러 검수는 `dlp privacy detect` 뒤
-`create --stage privacy` (또는 `plan --privacy`) → `collect` → `dlp privacy approve`.
+`collect`·`serve` → `qa` → `verify` → `dlp dataset build`. 블러 검수는 `dlp privacy detect` 뒤
+`create --stage privacy`(또는 `plan --privacy`) → `collect` → `dlp privacy approve`.
 
-정책 출처: 기본은 `config/policies/review.yaml` (우선순위·표본·측정 비율, `reviewers.privacy`,
-`cvat.users`, `label_studio.users`, 미디어).
-CLI에서는 `DLP_REVIEW_POLICY_FILE`로 정책 파일을 바꿀 수 있다. 검수 정책을
-읽는 하위 명령은 모두 `review_config.load_review_policy` 하나로 읽는다. 저장소·도구 설정(`_setup`)을
-쓰는 명령(create·collect·serve·assign·register-webhooks·refresh-urls)은 정책을 한 번 읽어
-`_setup`과 자기 몫(원본 검수자, 수집·배정 마무리, 웹훅 검수자 확인, 서명 URL 유효 시간 출력)에 같은
-객체를 넘긴다. 그래서 `ReviewSetup`의 CVAT·Label Studio 계정 연결(`cvat_policy`,
-`label_studio_policy`)·매체(`media_policy`)도 고른 파일의 값이다 (라이브러리 지연 로더의 Git
-기본값이 아니다, F-REV-01). `plan`·`qa`·`quality`는 같은 로더로 정책만 읽고, `queue`·`verify`는
-검수 정책을 쓰지 않는다. 매체 회수만 하는 `revoke`도 검수 정책을 읽지 않는다 (회수 실행기는 정책
-값을 쓰지 않는다. 정책 파일이 깨져도 낡은 라벨링 매체를 지운다). 예외는 `revoke --orphans`로, 나이
-하한(`orphans.min_age_s`)을 고른 정책 파일에서 엄격히 읽는다. 정책을 읽는 명령에서는
-`orphans.min_age_s`·`media.signed_url_ttl_s`가 모두 필수 키다 (이전에 복사한 정책 파일에 없으면 그
-명령들이 `Field required`로 멈춘다. 기본 review.yaml 값을 옮겨 적는다).
+공통: `--url`은 DB URL(`database_url` 규칙)이다. 인자 오류와 잘못된 형식 값(`--since`, `--until`,
+`--ai-thresholds`)은 argparse가 종료 코드 2로 끝낸다. 인자 조합 오류 같은 `SystemExit("메시지")`와
+잡지 않은 예외(`TaskError`, `AccessError`, 도구 접속 오류 등)는 종료 코드 1이다. 회수 대기가 남으면
+`REVOCATION_PENDING_EXIT`(4)다.
 
-주의:
-- `_setup`(`review_config.review_setup`)이 원본 저장소를 `raw_store("s3", …, "review.<명령>")` 감사
-  저장소로 만든다 (블러 검수 작업은 원본 영상을 CVAT에 올린다, ADR 0020). 일반 라벨링 작업은
-  블러본만 쓰고, 라벨러용 서명 URL은 라벨러 자격 증명(라벨링 버킷 읽기 전용)으로 만든다.
-- 매체 회수(ADR 0039): 블러를 바꾼 트랜잭션이 회수 요청을 같은 커밋에 남기고, 명령은 커밋 뒤
-  `review_config.run_revocations`로 라벨링 버킷 사본 → CVAT → Label Studio 순으로 끊는다.
-- 블라인드·이중 측정 레코드(`measurement`)와 오류 삽입 레코드는 운영 라벨이 아니다
-  (`current_labels()`).
-- 검수자가 승인·표본 검증한 라벨은 어떤 단계도 지우지 않는다 (ADR 0015, 0019).
+원본 버킷: `create`·`collect`·`serve`·`assign`·`refresh-urls`·`register-webhooks`는 `_setup`
+(`review_config.review_setup`)으로 원본 저장소를 `raw_store("s3", …, "review.<명령>")` 감사 저장소로
+만든다. 실제로 원본을 읽는 것은 블러 검수 작업 생성(원본 영상과 탐지 산출물을 CVAT에 올린다),
+라벨링 작업 생성(시계열 CSV용 장갑·IMU Parquet), 블러 작업 수집(프록시 좌표 배율을 재려고 원본
+해상도를 읽는다)이다. `refresh-urls`와 `register-webhooks`는 원본 버킷 이름만 쓴다. 일반 라벨링
+작업은 블러본만 쓰고, 라벨러용 서명 URL은 라벨러 자격 증명(라벨링 버킷 읽기 전용)으로 만든다 (ADR
+0020).
+
+정책 출처: 기본은 `config/policies/review.yaml`(우선순위·표본·측정 비율, `reviewers.privacy`,
+`cvat.users`, `label_studio.users`, `media`, `orphans`, `ai_review`)이고, `DLP_REVIEW_POLICY_FILE`로
+파일을 바꿀 수 있다. 검수 정책을 읽는 명령은 모두 `review_config.load_review_policy` 하나로 읽는다.
+`_setup`을 쓰는 명령은 정책을 한 번 읽어 `_setup`과 자기 몫(원본 검수자, 수집·배정 마무리, 웹훅
+검수자 확인, 서명 URL 유효 시간 출력)에 같은 객체를 넘긴다. 그래서 `ReviewSetup`의 계정 연결과
+매체 설정도 고른 파일의 값이다 (라이브러리 지연 로더의 Git 기본값이 아니다, F-REV-01). `queue`는
+검수 정책을 쓰지 않는다. 매체 회수만 하는 `revoke`도 검수 정책을 읽지 않는다 (정책 파일이 깨져도
+낡은 라벨링 매체를 지운다). 예외는 `revoke --orphans`로, `orphans.min_age_s`를 고른 정책 파일에서
+엄격히 읽는다. 정책을 읽는 명령에서는 `orphans.min_age_s`·`media.signed_url_ttl_s`가 필수 키다
+(이전에 복사한 정책 파일에 없으면 `Field required`로 멈춘다. 기본 review.yaml 값을 옮겨 적는다).
+
+하위 명령, 도구 연동 (WP6, `dlp_review.tasks`·`collect`·`webhook`·`verify`):
+
+`dlp review create <session_id> --stage privacy|labeling --assignee ID [--no-cvat] [--no-ls]
+[--stream S ...] [--tool cvat|label_studio] [--url URL]`
+    세션의 검수 작업을 CVAT(공간 라벨·블러)와 Label Studio(시간 구간)에 만든다
+    (`dlp_review.tasks.create_privacy_tasks`, `create_labeling_tasks`). 블러 검수 담당자는
+    `review.yaml reviewers.privacy`의 원본 접근 권한자여야 한다 (아니면 원본을 올리기 전에 거부).
+    라벨링은 프라이버시 승인 세션만 되고, 먼저 sweep과 회수 대기를 실행한다. 세션에 대기가 하나라도
+    남으면(`--stream`으로 고르지 않은 스트림 포함) 만들지 않는다. `--stream`(반복)·`--tool`은 회수한
+    작업만 다시 만들 때 좁힌다. `--no-cvat`·`--no-ls`는 그 도구 클라이언트를 만들지 않는다.
+    종료 코드: 0, 회수 대기가 남으면 4.
+
+`dlp review collect <task_key> --reviewer ID [--url URL]`
+    끝난 작업(`cvat:<id>`, `label_studio:<id>`)의 결과를 라벨 이력으로 들여온다
+    (`dlp_review.collect.collect_task`). 승인·수정·삭제·추가는 새 `LabelRecord` +
+    `parent_label_id`가 된다. 이미 수집했거나 회수한 작업이면 아무것도 하지 않는다(멱등). 블러가
+    바뀌면 같은 커밋에 회수를 요청하고, 커밋 뒤 회수 대기를 실행한다. 종료 코드: 0, 회수 대기가
+    남으면 4. 담당자와 다른 검수자면 `TaskError`로 1.
+
+`dlp review serve [--port N] [--url URL]`
+    CVAT·Label Studio 웹훅을 받아 끝난 작업을 자동 수집하는 HTTP 서버다 (`dlp_review.webhook.serve`,
+    기본 포트 8765, 바인드 주소는 `review.yaml webhook`). 담당자의 도구 계정(`cvat.users`,
+    `label_studio.users`)이 아닌 사람의 제출은 받지 않는다 (F-REV-06). 수집 결과는 `collect`와 같이
+    서버 로그에 남는다. 회수 대기가 남으면 그 웹훅에 503으로 답한다. 블로킹이며 Ctrl-C로 끝낸다.
+    종료 코드: 0, `DLP_WEBHOOK_SECRET`이 없으면 1.
+
+`dlp review revoke [session_id] [--stream S ...] [--task KEY ... --reason R] [--all --reason R]
+[--include-legacy] [--dry-run] [--pending] [--mark-tool-gone KEY --note N] [--orphans [--apply]]
+[--url URL]`
+    블러가 바뀐 뒤 이미 배포한 라벨링 매체를 회수한다 (ADR 0039, `dlp_privacy.runner.
+    request_media_revocation`, `review_config.run_revocations`). 세션 경로는 늘 sweep(렌더 해시가
+    다른 작업)을 하고 `--task`·`--all`은 그 위에 수동 요청을 더한다. `--pending`은 대기가 있는 모든
+    세션을 실행한다 (cron 경보). `--mark-tool-gone`은 확인할 수 없는 도구 작업을 사유와 함께 완료로
+    표시한다 (`dlp_review.revoke.mark_tool_gone`). `--orphans`는 DB 롤백으로 기록 없이 남은 도구
+    작업·라벨링 버킷 사본(고아)을 찾고(`dlp_review.orphans.find_orphans`, F-REV-15), `--apply`일
+    때만 지운다 (나이 하한 `review.yaml orphans.min_age_s`). 원본 버킷: 읽지 않는다.
+    종료 코드: 0, 대기가 남으면 4. `--orphans`는 고아가 남거나 확인하지 못한 채널이 있으면
+    보고만이어도 4다. 세션·`--pending`의 `--dry-run`은 늘 0이다. 인자 조합이 맞지 않거나 `--task`
+    키를 요청할 수 없으면 1(`SystemExit`).
+
+`dlp review refresh-urls [--session S ...] [--url URL]`
+    열린 Label Studio 작업의 영상·시계열 서명 URL을 `media.signed_url_ttl_s`로 다시 서명한다
+    (`dlp_review.refresh.refresh_session_urls`, F-REV-08, cron으로 유효 시간보다 짧은 주기).
+    수집·회수한 작업과 매체가 낡은 작업은 갱신하지 않는다. CVAT에는 접속하지 않는다. 종료 코드: 0,
+    갱신하지 못한 작업이 있으면 1.
+
+`dlp review register-webhooks <url_base>`
+    CVAT 블러·공간 프로젝트와 Label Studio 시간 구간 프로젝트(구 프로젝트와 온톨로지별 프로젝트)에
+    `<url_base>/webhooks/cvat|label_studio`를 등록한다. 매번 POST하므로 다시 돌리면 중복 등록된다
+    (멱등 아님). `--url`이 없어 DB는 `DLP_DATABASE_URL`(없으면 개발 기본값)이다. 종료 코드: 0,
+    `DLP_WEBHOOK_SECRET`이 없으면 1.
+
+`dlp review verify <session_id> [--actor NAME] [--url URL]`
+    검수가 끝난 세션을 `prelabeled → human_verified`로 옮긴다 (`dlp_review.verify.verify_session`,
+    ADR 0029). 같은 트랜잭션에서 설명·3D 궤적 따르기 규칙(ADR 0043·0048)을 적용한다. 자동 라벨
+    분류는 `review.yaml verify.automatic`이다. 원본 버킷: 접근하지 않는다. 종료 코드: 0 이미
+    완료이거나 이번에 완료, 1 아직 조건 미달(이유를 출력한다).
+
+`dlp review hints <session_id> ...`
+    오탐 의심 힌트. 인자·종료 코드·원본 접근은 `hints_cmds` 모듈 설명에 있다.
+
+`dlp review ui-theme [--check]`
+    `config/review_ui.yaml`로 CVAT 테마 색 파일(`dlp_review.ui_theme.TOKENS_FILE`)을 다시 만든다
+    (ADR 0038, `make ui-theme`). `--check`는 쓰지 않고 비교만 한다 (`make contracts`). DB·원본
+    버킷에 접근하지 않는다. 종료 코드: 0 썼거나 같음, 1 `--check`에서 다름.
+
+하위 명령, 운영 로직 (WP12, `dlp_review.ops`):
+
+`dlp review plan <session_id> --reviewer ID [--reviewer ID ...] [--seed-golden VER ...] [--privacy]
+[--seed N] [--url URL]`
+    우선순위·표본 검증·블라인드·이중·오류 삽입 배정을 계획해 `review_assignments`에 쓴다
+    (`dlp_review.ops.runner.plan_session`). 이미 계획한 단위는 만들지 않는다(멱등, 같은 시드면 같은
+    계획). `--seed-golden`은 오류 삽입 원천 골든셋 버전, `--privacy`는 블러 검수 단위(전수)
+    계획이다. AI 1차 검수(`review.yaml ai_review`, WP17.6)가 켜져 있으면 판정 지적을 우선순위 사유로
+    더하고 표본 묶음에서 뺀다. required면 판정이 끝나지 않은 세션의 배정을 미룬다. 원본 버킷:
+    접근하지 않는다. 종료 코드: 0, required 게이트로 미루면 `AI_PENDING_EXIT`(6).
+
+`dlp review assign <assignment_id> [--assignee ID] [--url URL]`
+    배정 하나의 검수 도구 작업을 만든다 (`dlp_review.ops.runner.create_assignment_tasks`, 멱등).
+    담당자 없는 배정은 `--assignee`로 정해야 만든다 (`assign_reviewer`, F-REV-07). 작업 라벨 배정은
+    `create`처럼 먼저 회수 대기를 실행한다. 종료 코드: 0, 담당자가 없거나 정한 담당자가 규칙에 맞지
+    않으면 `NO_ASSIGNEE_EXIT`(1), 회수 대기가 남으면 4.
+
+`dlp review qa [--seed N] [--url URL]`
+    끝난 표준 배정에서 정책 비율만큼 QA 재검수 배정을 뽑는다 (`dlp_review.ops.assign.plan_qa`).
+    선임(`reviewers.senior`)이 없거나 원래 담당자뿐이면 담당자를 비워 두고, `reviewers.senior`를
+    고친 뒤 `assign --assignee <그 선임>`으로 만들라고 출력한다. 종료 코드: 0.
+
+`dlp review queue [--limit N] [--url URL]`
+    열린 배정을 우선순위 높은 순으로 최대 `--limit`(기본 50)개 출력한다 (AI 지적 사유 수 포함).
+    읽기만 한다. 종료 코드: 0.
+
+`dlp review quality [--ai] [--since ISO] [--until ISO] [--ai-thresholds P] [--json] [--url URL]`
+    오류 삽입 발견율, 이중 라벨 일치도(카파·구간 F1·경계 F1), 프리라벨 편향을 출력한다
+    (`dlp_review.ops.runner.quality_report`). `--ai`면 AI 1차 검수 판정 품질(대조군 기준, WP17.8),
+    `--ai-thresholds`면 목표 정밀도를 만족하는 표시 최소 확신도 조안, `--json`이면 AI 절을 JSON으로
+    낸다. 읽기만 한다. 종료 코드: 0, AI 전용 인자를 `--ai` 없이 주거나 `--since`가 `--until`보다
+    늦으면 1.
+
+불변 조건: 매체 회수는 블러를 바꾼 트랜잭션이 회수 요청을 같은 커밋에 남기고, 명령은 커밋 뒤
+라벨링 버킷 사본 → CVAT → Label Studio 순으로 끊는다. 블라인드·이중 측정 레코드(`measurement`)와
+오류 삽입 레코드는 운영 라벨이 아니다 (`current_labels()`). 검수자가 승인·표본 검증한 라벨은 어떤
+단계도 지우지 않는다 (ADR 0015, 0019).
 """
 
 from __future__ import annotations
@@ -491,6 +552,7 @@ def cmd_register(args: argparse.Namespace) -> int:
 
     CVAT의 블러(`PRIVACY_PROJECT`)·공간(`SPATIAL_PROJECT`) 프로젝트와 Label Studio의 시간 구간
     (`TEMPORAL_PROJECT`) 프로젝트가 있으면 각각 `<url_base>/webhooks/cvat|label_studio`를 등록한다.
+    DB에 등록된 온톨로지 버전마다의 프로젝트(`ontology_project`)도 같은 방식으로 등록한다.
     프로젝트가 아직 없으면 조용히 건너뛴다. 클라이언트는 기존 웹훅을 확인하지 않고 매번 POST하므로
     다시 돌리면 같은 웹훅이 중복 등록된다 (멱등 아님).
     """
@@ -1149,7 +1211,7 @@ def cmd_ui_theme(args: argparse.Namespace) -> int:
 
 
 def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:  # pyright: ignore[reportPrivateUsage]
-    """`review` 하위 명령 묶음을 등록한다 (도구 연동 7개 + 운영 5개 + 화면 테마 1개)."""
+    """`review` 하위 명령 묶음을 등록한다 (도구 연동 7개, 운영 5개, 화면 테마 1개, 힌트 1개)."""
     review = sub.add_parser("review", help="검수 도구 연동")
     rsub = review.add_subparsers(dest="review_command", required=True)
     hints_cmds.add_review_commands(rsub)  # dlp review hints (ADR 0055)

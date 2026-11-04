@@ -1118,3 +1118,15 @@ issues:
   - {id: F-PAR-88, title: "손 크기 초점 추정을 켜면 3D 결과가 palm_estimate 값에 따르는데 3D 단계 버전에는 그 절 해시가 없음", severity: low, status: fixed, kind: code,
      files: [packages/prelabel/src/dlp_prelabel/lift3d.py], source: docs/handover/full-inspection-2026-11-04.md,
      note: "lift_policy_digest: focal_estimate가 켜졌을 때만 palm_estimate 절도 해시 (기본 버전 문자열 그대로). 회귀: packages/prelabel/tests/test_lift3d.py::test_lift_version_digest_includes_palm_estimate_only_with_focal_estimate"}
+  - {id: F-PAR-89, title: "장면 분류 VLM(prelabel scene classifier: vlm)이 DLP_VLM_URL의 사내 대역 검사 없이 원본에서 만든 모자이크 프레임을 보냄", severity: medium, status: fixed, kind: code,
+     files: [packages/cli/src/dlp_cli/prelabel_cmds.py], source: docs/handover/full-inspection-2026-11-04.md,
+     note: "주석 단계(P3)에서 발견. 기본은 classifier: fixed라 운영 영향 없음. 원본을 받기 전에 actions.yaml vlm.internal_hosts로 check_hosts, 밖이면 SystemExit. 회귀: packages/cli/tests/test_prelabel_scene_hosts.py (수정 전 실패 확인)"}
+  - {id: F-PAR-90, title: "행동·설명 VLM 버전이 vlm-<모델 이름>뿐이라 같은 이름으로 엔진·양자화·가중치 revision을 바꿔도 다시 돌지 않음 (AI 검수는 fingerprint로 구분)", severity: low, status: candidate, kind: code,
+     files: [packages/actions/src/dlp_actions/clients.py, config/policies/actions.yaml], source: docs/handover/full-inspection-2026-11-04.md,
+     note: "주석 단계(P3) 코드 읽기로 발견, 실행 재현 전 후보. aireview.yaml backend.fingerprint와 같은 항목을 actions.yaml vlm에 두는 안."}
+  - {id: F-PAR-91, title: "마스크 프롬프트 트랙 순위 PromptTrack.rank가 confidence 0.0을 1.0으로 보아(or 1.0) 신뢰도 0 트랙이 앞섬", severity: low, status: candidate, kind: code,
+     files: [packages/prelabel/src/dlp_prelabel/masks.py], source: docs/handover/full-inspection-2026-11-04.md,
+     note: "주석 단계(P3) 코드 읽기로 발견, 실행 재현 전 후보."}
+  - {id: F-COE-89, title: "콘솔 가중치 가져오기 검사(/api/pretrain/check) 업로드에 크기 상한이 없어 디스크를 채울 수 있음 (영상 업로드는 upload.max_mb)", severity: low, status: candidate, kind: code,
+     files: [packages/console/src/dlp_console/app.py, packages/console/src/dlp_console/pretrain.py], source: docs/handover/full-inspection-2026-11-04.md,
+     note: "swarm s9 미증명 의심과 P3에서 같은 지적. 실행 재현 전 후보."}

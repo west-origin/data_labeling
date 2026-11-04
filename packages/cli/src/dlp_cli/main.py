@@ -9,7 +9,17 @@
 - `build_parser()` — 모든 하위 명령이 등록된 `ArgumentParser`.
 - `main(argv)` — 진입점. 0이면 성공, 그 밖의 값은 실패(명령마다 의미가 다르다).
 
-이 모듈이 직접 구현하는 명령은 `dlp services check`(개발 서비스 헬스체크, `make health`) 하나다.
+이 모듈이 직접 구현하는 명령은 하나다.
+
+`dlp services check [--include-cvat] [--timeout SEC] [--security]`
+    docker compose 개발 서비스가 응답하는지 점검한다 (`dlp_cli.health.run_checks`, `make health`).
+    `--include-cvat`은 CVAT도, `--timeout`(기본 3.0초)은 서비스별 제한 시간이다. `--security`는
+    라벨링 버킷 버전 관리 꺼짐과 라벨러 자격 증명 범위를 함께 본다 (`dlp_media.storage_checks`,
+    F-REV-19). 읽는 설정: `config/defaults.yaml buckets`(`--security`). DB에 쓰지 않는다. 원본 버킷:
+    객체 내용을 읽지 않는다. 다만 `--security`는 서비스 키로 다른 버킷(원본 포함)의 키 하나를
+    목록으로 찾고 라벨러 키로 그 객체의 HEAD를 시도한다(거부돼야 한다). 이 목록 조회는 감사 저장소를
+    거치지 않는다. 종료 코드: 0 모든 점검 성공, 1 하나라도 실패. 인자 오류는 argparse가 2로 끝낸다.
+
 등록 순서는 `--help` 출력 순서일 뿐 실행 순서와는 무관하다. 세션 하나의 정상 운영 순서는 ingest →
 sync run → privacy detect → (블러 검수) → privacy approve → privacy render → prelabel run →
 relations run → actions run → review create/collect/verify → dataset build → train/eval →

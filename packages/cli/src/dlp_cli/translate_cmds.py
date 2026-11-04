@@ -1,30 +1,32 @@
 """설명 라벨 영어 번역 하위 명령 (ADR 0043).
 
-등록하는 명령:
-- `dlp translate run <세션> [--translate-url] [--url]` — 세션의 현재 한국어 설명마다 영어 번역
-  레코드를
-  만든다 (멱등, `dlp_actions.translate.run_translate`).
-- `dlp translate run --pending` — 번역이 하나도 없는 한국어 설명이 남은 세션을 모두 처리한다 (서버
-  장애로
-  밀린 것, 사람이 쓰거나 고친 설명 포함).
-- `dlp translate pending [--url]` — 번역 대기 세션과 원문 수만 보인다 (서버에 묻지 않는다).
+번역은 수정이 아니라 별도 운영 라벨이다. 영어 설명 레코드는 parent가 아니라
+`DescriptionPayload.source_label_id`로 한국어 원문을 가리킨다. DB와 번역 서버만 쓰고 원본 버킷·
+라벨링 버킷에는 접근하지 않는다.
 
-자동 실행: `dlp actions run`이 행동 트랜잭션을 커밋한 뒤 `translate_after_actions`로 그 세션을
-번역한다
-(실패해도 행동 결과·종료 코드에 영향이 없다). 검수 도구(Label Studio·CVAT)는 설명 라벨을 다루지
-않으므로
-검수 수집 뒤 자동 번역 고리는 없다. 사람이 DB에 쓴 설명은 `--pending`이 채운다.
+자동 실행: `dlp actions run`(행동 커밋 뒤)과 `dlp actions describe`(설명을 다시 만든 세션)가
+`translate_after_actions`로 그 세션을 번역한다. 실패해도 행동 결과·종료 코드에 영향이 없다. 검수
+도구(Label Studio·CVAT)는 설명 라벨을 다루지 않으므로 사람이 DB에 쓰거나 고친 설명과 서버 장애로
+밀린 설명은 `dlp translate run --pending`이 채운다.
 
-번역 서버: 사내 OpenAI 호환 서버만 (`--translate-url` 또는 `DLP_TRANSLATE_URL`, 키
-`DLP_VLM_API_KEY`).
-주소는 `translate.yaml server.internal_hosts` 대역 안이어야 한다
-(`dlp_aireview.backend.check_hosts`).
+번역 서버: 사내 OpenAI 호환 서버만이다 (`--translate-url` 또는 `DLP_TRANSLATE_URL`, 키
+`DLP_VLM_API_KEY`). 주소는 `translate.yaml server.internal_hosts` 대역 안이어야 한다
+(`dlp_aireview.backend.check_hosts`). 정책 출처: `config/policies/translate.yaml`.
 
-종료 코드 (`run`):
-- 0: 남은 대기 없음.
-- 2: 번역 서버 주소가 없음 (아무것도 쓰지 않았다).
-- 3: 서버 장애·응답 위반으로 번역하지 못한 설명이 남음 (번역한 것은 썼다. 다시 실행한다).
-- 5: 설정 오류 (사내 대역 밖 주소, 4xx 응답).
+하위 명령 (인자 오류는 argparse가 종료 코드 2로 끝낸다. 주소 없음과 같은 값이다):
+
+`dlp translate run [session_id] [--pending] [--translate-url URL] [--url URL]`
+    세션의 현재 한국어 설명마다 영어 번역 레코드를 만든다 (`dlp_actions.translate.run_translate`,
+    멱등, 세션마다 한 트랜잭션). `--pending`은 번역이 하나도 없는 한국어 설명이 남은 세션을 모두
+    처리하고 가장 나쁜 코드를 돌려준다. 세션과 `--pending` 중 정확히 하나를 준다.
+    종료 코드: 0 (`OK`) 남은 대기 없음, 2 (`NO_URL`) 번역 서버 주소가 없음(아무것도 쓰지 않았다),
+    3 (`PENDING`) 서버 장애·응답 위반·쓰기 직전 확인으로 번역하지 못한 설명이 남음(번역한 것은
+    썼다. 쓰기 직전 확인이 막았으면 그 세션은 아무것도 쓰지 않았다. 다시 실행한다), 5 (`CONFIG`)
+    사내 대역 밖 주소·4xx 응답, 또는 세션과 `--pending`을 둘 다 주거나 둘 다 주지 않음.
+
+`dlp translate pending [--url URL]`
+    번역 대기 세션과 원문 수만 보인다 (`pending_sessions`, 서버에 묻지 않는다).
+    종료 코드: 0 대기 없음, 3 대기가 있음.
 """
 
 from __future__ import annotations

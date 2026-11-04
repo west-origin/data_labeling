@@ -1,24 +1,42 @@
 """미디어·수집 하위 명령 (WP3, ADR 0003).
 
-등록하는 명령:
-- `dlp media probe <파일>` — PyAV(ffprobe와 같은 libav)로 컨테이너·스트림 정보를 출력하는 진단
-  도구.
-- `dlp media pts-index <파일> --out <parquet>` — 영상의 PTS 인덱스를 만든다 (진단·디버그용).
-- `dlp media prepare <파일> --out <mp4>` — 픽셀 방향·PTS를 검증한 별도 사본을 만든다.
-- `dlp ingest <매니페스트> [--store] [--url] [--no-db]` — 세션 수집: 원본을 원본 버킷에
-  불변·멱등으로 올리고, PTS 인덱스·프록시·IMU·장갑 정규화본 같은 파생 파일을 만들고, `sessions`
-  테이블에 세션을 등록한다. 파이프라인의 첫 단계다.
+`dlp ingest`는 파이프라인의 첫 단계다. 세션 매니페스트(YAML·JSON, 스트림 파일 경로 포함)를 받아
+원본을 원본 버킷 `sessions/<세션>/raw/…`에 불변·멱등으로 올리고, 파생 파일(PTS 인덱스, 프록시,
+IMU·장갑 정규화본)을 `sessions/<세션>/derived/…`에 만들고, DB `sessions`(스트림 포함)에 세션을
+등록한다. `media probe|prepare|pts-index`는 로컬 파일 진단 도구다. 저장소 세션을 수집하거나 DB
+감사를 대신하지 않는다.
 
-입력 → 출력: 세션 매니페스트(YAML/JSON, 스트림 파일 경로 포함) → 원본 버킷 `sessions/<세션>/raw/…`,
-`sessions/<세션>/derived/…` + DB `sessions`(스트림 포함).
+하위 명령 (인자 오류는 argparse가 종료 코드 2로 끝낸다. 잡지 않은 예외는 종료 코드 1이다):
 
-주의:
-- 수집의 원본 저장소는 `dlp_cli.raw_access`의 감사 저장소로 만든다 (ADR 0020). 수집도 원본 쓰기라
-  `raw_access_log`(또는 `--no-db`일 때 로컬 `raw_access.jsonl`)에 기록이 남는다.
-  로컬 진단 명령(probe·prepare·pts-index)은 저장소 세션을 수집하거나 DB 감사를 대신하지 않는다.
-- 같은 매니페스트를 다시 수집하면 이미 있는 원본·파생 파일은 건너뛰고, DB의 세션이 같은 내용이면
-  `unchanged`, 다르면 `SessionConflictError`로 실패한다 (멱등).
-- 영상 시간은 PTS 인덱스로만 계산한다 (프레임 번호 * 간격 금지).
+`dlp media probe <file>`
+    PyAV(ffprobe와 같은 libav)로 컨테이너 형식, 길이(ms), 생성 시각, 비디오·오디오·데이터 트랙을
+    출력한다 (`dlp_media.probe.probe`). 종료 코드: 0. 원본 버킷: 접근하지 않는다(로컬 파일).
+
+`dlp media prepare <file> --out MP4 [--display-rotation DEG]`
+    픽셀 방향을 바로 세우고 PTS를 보존한 별도 사본을 만든다 (`dlp_media.prepare.prepare_video`).
+    `--display-rotation`은 표시 회전 태그 대신 쓸 반시계 각도(90의 배수, 저장 픽셀 기준)다. 이어서
+    촬영 점검 경고(`dlp_media.capture_check.prepare_warnings`)를 찍는다. 경고는 막지 않는다.
+    읽는 정책: `config/policies/media.yaml`(정규화 절과 `capture`). 종료 코드: 0.
+    원본 파일과 기존 출력은 건드리지 않고 DB에 등록하지 않는다. 원본 버킷: 접근하지 않는다.
+
+`dlp media pts-index <file> --out PARQUET`
+    프레임별 PTS 인덱스를 Parquet로 쓴다 (`dlp_media.pts.build_pts_index`). 수집이 같은 함수로
+    `derived/<스트림>.pts.parquet`를 만드므로 로컬 확인용이다. 종료 코드: 0.
+
+`dlp ingest <manifest> [--store s3|local:DIR] [--url URL] [--no-db]`
+    세션 하나를 수집한다 (`dlp_media.ingest.load_manifest`, `ingest_session`). `--store` 기본은
+    `s3`다. 업로드와 DB 등록은 한 트랜잭션 블록 안에서 한다. 업로드 뒤 등록이 실패해도 원본은 불변
+    키로 남으므로, 다시 돌리면 업로드는 건너뛰고 등록만 다시 시도한다.
+    읽는 설정: `config/defaults.yaml media.proxy`, `config/policies/media.yaml capture`.
+    원본 버킷: 쓴다. 저장소는 `raw_store(..., "media.ingest")` 감사 저장소라 접근마다
+    `raw_access_log`에 기록이 남는다. `--no-db`면 `raw_store_offline`(로컬 저장소만, S3면
+    `SystemExit`)이고 기록은 `<디렉터리>/raw_access.jsonl`에 남는다.
+    종료 코드: 0. 매니페스트 오류(`ValueError`), 파일 누락(`FileNotFoundError`), 원본 키 충돌
+    (`ImmutableObjectError`), 세션 충돌(`SessionConflictError`)은 예외로 종료 코드 1이다.
+
+멱등성: 같은 매니페스트를 다시 수집하면 이미 있는 원본·파생 파일은 건너뛰고, DB의 세션이 같은
+내용이면 `unchanged`, 다르면 `SessionConflictError`로 실패한다. 영상 시간은 PTS 인덱스로만 계산한다
+(프레임 번호에 간격을 곱하지 않는다).
 """
 
 from __future__ import annotations

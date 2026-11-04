@@ -1,30 +1,44 @@
 """재학습 하위 명령 (WP13, ADR 0016·0025).
 
-등록하는 명령:
-- `dlp train run <과제> <데이터셋 버전>` — 재학습 루프 한 바퀴. 데이터셋 버전의 학습·검증 분할에서
-  학습 예제를 뽑고(`dlp_train.extract`, 자동 원본과 수정본 차이 포함), 누적 조건(`min_examples`,
-  `min_new_examples`)을 만족하면 학습한다. 후보를 골든셋으로 평가해 게이트를 판정한 뒤
-  정책의 `deploy` 방식에 따라 자동 배포하거나 `passed`(사람 승인 대기)로 둔다.
-- `dlp train models [--task] [--status]` — DB `model_versions` 레지스트리 목록 (읽기 전용).
-- `dlp train approve <모델 버전>` — 게이트를 통과한(`passed`) 모델을 사람이 배포 승인한다.
+순서: `dlp dataset build` 뒤. 배포된 모델은 다음 `dlp prelabel run`·`dlp privacy detect`부터 쓰인다
+(`dlp_train.deployed`). 후보 모델의 골든셋 예측은 DB에 쓰지 않는다. 배포는 게이트를 통과한 모델만,
+프라이버시 과제는 사람 승인 뒤에만 한다 (`training.yaml`의 `deploy: approve`). MLflow 레지스트리
+별칭 이동(`tracker.register`)은 DB 트랜잭션 커밋 **뒤**에 한다. DB가 롤백됐는데 MLflow만 배포 별칭을
+가리키는 일을 막기 위해서다.
 
-순서: `dlp dataset build` 뒤. 배포된 모델은 다음 `dlp prelabel run` / `dlp privacy detect`부터
-쓰인다 (`dlp_train.deployed`).
+정책 출처: `config/policies/training.yaml`(과제별 학습기·파라미터·누적 조건·배포 방식·MLflow),
+`evaluation.yaml`(게이트), `dataset.yaml lakefs`, `privacy.yaml`(블러본 렌더 게이트),
+`config/defaults.yaml buckets`. CI·CPU에서는 `oracle-stub` 학습기를 쓴다. `--trainer yolox`는 GPU
+학습 서버와 격리 환경(`scripts/yolox-train-env`)이 필요하다 (CPU는 `--param allow_cpu=true`로 아주
+작은 스모크만).
 
-주의:
-- 후보 모델의 골든셋 예측은 DB에 쓰지 않는다. 배포는 게이트를 통과한 모델만, 프라이버시 과제는
-  사람 승인 후에만 한다 (`training.yaml`의 `deploy: approve`).
-- MLflow 레지스트리 별칭 이동(`tracker.register`)은 DB 트랜잭션 커밋 **뒤**에 한다.
-  DB가 롤백되었는데 MLflow만 배포 별칭을 가리키는 일을 막기 위해서다.
-- 골든셋 평가는 원본 영상을 읽으므로 `raw_store(..., "train.run")` 감사 저장소를 쓴다.
-- 픽셀을 쓰는 학습기(`yolox`, ADR 0062)의 학습 이미지는 라벨링 버킷의 **지금 승인된 블러본**에서만
-  받는다 (`blurred_videos`: 원본 버킷 저장소 거부, 렌더 게이트 `assert_render_current`·받은 파일
-  해시 확인). 원본 버킷은 학습 이미지에 쓰지 않는다.
+공통: `--store`는 `s3`(기본) 또는 `local:<디렉터리>`, `--url`은 DB URL이다. 인자 오류는 argparse가
+종료 코드 2로 끝낸다. 잡지 않은 예외(`TrainingError` 등)는 종료 코드 1이다.
 
-정책 출처: `config/policies/training.yaml` (과제별 학습기·파라미터·누적 조건·배포 방식·MLflow),
-`evaluation.yaml`(게이트), `dataset.yaml`의 `lakefs` 절.
-CI·CPU에서는 `oracle-stub` 학습기를 쓴다. `--trainer yolox`는 GPU 학습 서버와 격리 환경
-(`scripts/yolox-train-env`)이 필요하다 (CPU는 `--param allow_cpu=true`로 아주 작은 스모크만).
+하위 명령:
+
+`dlp train run <task> <dataset_version> [--trainer NAME] [--param KEY=VALUE ...]
+[--baseline-version VERSION ...] [--force] [--store SPEC] [--url URL]`
+    재학습 루프 한 바퀴 (`dlp_train.loop.run_training_job`). `task`는 `objects`, `hands`, `body`,
+    `contact`, `actions`, `privacy` 중 하나다. 데이터셋 버전의 학습·검증 분할에서 학습 예제를 뽑고
+    (`dlp_train.extract`, 자동 원본과 수정본 차이 포함), 누적 조건(`min_examples`,
+    `min_new_examples`, `--force`면 무시)을 만족하면 학습한다. 후보를 골든셋으로 평가해 게이트를
+    판정한 뒤 정책의 `deploy` 방식에 따라 자동 배포하거나 `passed`(사람 승인 대기)로 둔다. `--param`
+    값은 JSON으로 해석하고 실패하면 문자열이다. `--baseline-version`은 배포 모델이 아직 없을 때
+    비교할 DB 예측의 모델 버전이다.
+    원본 버킷: 골든셋 평가가 원본 영상을 읽는다. 감사 저장소 `raw_store(..., "train.run")`. 픽셀을
+    쓰는 학습기(`yolox`, ADR 0062)의 학습 이미지는 라벨링 버킷의 지금 승인된 블러본에서만 받는다
+    (`blurred_videos`: 원본 버킷 저장소 거부, 렌더 게이트·받은 파일 해시 확인).
+    종료 코드: 0 (`skipped`, `passed`, `deployed`), 1 게이트 실패(`rejected`).
+
+`dlp train models [--task TASK] [--status STATUS] [--url URL]`
+    DB `model_versions` 레지스트리 목록을 출력한다. 읽기만 한다. 종료 코드: 0.
+
+`dlp train approve <model_version> [--store SPEC] [--url URL]`
+    게이트를 통과한(`passed`) 모델을 사람이 배포 승인한다 (`dlp_train.loop.deploy`). 평가 리포트
+    (`--store`의 MLflow 산출물 버킷)가 이 모델의 것이고 게이트를 통과했으며 적힌 비교 대상 배포
+    모델이 지금 배포 모델과 같을 때만 배포한다. 원본 버킷: 접근하지 않는다. 종료 코드: 0, 조건이
+    맞지 않으면 `TrainingError`로 1.
 """
 
 from __future__ import annotations
@@ -78,6 +92,7 @@ def blurred_videos(
     check_blurred_store(labeling, raw_bucket)
 
     def fetch(session_id: str, stream_id: str, work: Path) -> Path:
+        """스트림 하나의 승인된 블러본을 `work`에 받아 경로를 돌려준다."""
         dest = work / f"{session_id}__{stream_id}.mp4"
         dest.parent.mkdir(parents=True, exist_ok=True)
         try:

@@ -1,25 +1,34 @@
 """내보내기 하위 명령 (WP15, ADR 0018·0021·0027·0029).
 
-등록하는 명령:
-- `dlp export coco|intervals|lerobot <데이터셋 버전> --target <받는 곳>` — 데이터셋 버전 스냅샷에서
-  COCO(블러본 프레임 + 박스·마스크·키포인트), 구간 JSON(`dlp_schema.export`), LeRobot v3.0
-  에피소드를 만들어 데이터셋 버킷에 올린다. LeRobot은 격리된 일회용 환경에서 공식 API로 쓰고
-  읽어 검증한다 (`scripts/lerobot_write.py`, `scripts/lerobot_check.py`).
-
-순서: `dlp dataset build` 뒤 (보통 `dlp review verify`로 검수 완료된 세션).
-내보낸 세션 중 `split_assigned`인 것만 생애주기가 `exported`로 전이된다 (검수 완료 전 세션은
-그대로, ADR 0029).
+순서: `dlp dataset build` 뒤 (보통 `dlp review verify`로 검수 완료된 세션). 내보낸 세션 중
+`split_assigned`인 것만 생애주기가 `exported`로 전이된다 (검수 완료 전 세션은 그대로, ADR 0029).
 
 규칙 (CLAUDE.md, ADR 0018·0021):
 - 기본은 사람이 만들거나 승인·수정·표본 검증한 라벨만 넣는다. 미검수는 `--include-unreviewed` 또는
   `config/defaults.yaml export.include_unreviewed`로만 넣는다.
-- 블러 라벨·원본 위치·검수자 ID는 어떤 형식에도 넣지 않는다. 블러본만 쓰고 원본 버킷을
-  읽거나 쓰지 않는다 (`run_export`가 버킷 이름을 비교해 거부).
-- 작업자·장소·세션·라벨 ID는 내보내기마다 다른 가명(HMAC, 키 = `DLP_EXPORT_ID_SECRET` +
-  내보내기 ID)으로 바꾼다. 개발용 비밀값은 `DLP_ENV=dev`에서만 받는다.
+- 블러 라벨·원본 위치·검수자 ID는 어떤 형식에도 넣지 않는다. 블러본만 쓰고 원본 버킷을 읽거나 쓰지
+  않는다 (`run_export`가 버킷 이름을 비교해 거부).
+- 작업자·장소·세션·라벨 ID는 내보내기마다 다른 가명(HMAC, 키 = `DLP_EXPORT_ID_SECRET` + 내보내기
+  ID)으로 바꾼다. 개발용 비밀값은 `DLP_ENV=dev`에서만 받는다.
 - 내보내기 이력(`exports`)은 올리기 전에 따로 커밋한다 (`run_export`가 트랜잭션을 연다).
 
-정책 출처: `config/policies/export.yaml` (`ids`, `splits`, `excluded_kinds`, 형식별 설정).
+정책 출처: `config/policies/export.yaml`(`ids`, `splits`, `excluded_kinds`, 형식별 설정),
+`dataset.yaml lakefs`, `config/defaults.yaml`(`buckets`, `export.include_unreviewed`), `--robot`이면
+`retarget.yaml`과 로봇 설정.
+
+하위 명령 (인자 오류는 argparse가 종료 코드 2로 끝낸다):
+
+`dlp export coco|intervals|lerobot <dataset_version> --target NAME [--include-unreviewed]
+[--split golden|train|val|holdout ...] [--store SPEC] [--url URL] [--robot ID]`
+    데이터셋 버전 스냅샷에서 COCO(블러본 프레임 + 박스·마스크·키포인트), 구간 JSON
+    (`dlp_schema.export`), LeRobot v3.0 에피소드를 만들어 데이터셋 버킷에 올린다
+    (`dlp_export.runner.run_export`). LeRobot은 격리된 일회용 환경에서 공식 API로 쓰고 읽어 검증한다
+    (`scripts/lerobot_write.py`, `scripts/lerobot_check.py`). `--target`은 받는 곳 이름(내보내기
+    ID와 이력에 들어간다), `--split`(반복) 기본은 정책 `splits`, `--store`(기본 `s3`)는
+    라벨링·데이터셋 버킷 지정이다. `--robot`은 lerobot에서만 쓰고 사람 손을 그 로봇 관절 궤적으로
+    옮긴다 (`config/robots/<ID>.yaml` 또는 `DLP_ROBOTS_DIR`, ADR 0047). 원본 버킷: 접근하지 않는다.
+    종료 코드: 0 성공, 2 가명 비밀값이 운영 환경에서 개발용 값(`check_secret`). `ExportError`(내보낼
+    세션 없음, 원본 버킷 사용, lerobot이 아닌 형식에 `--robot` 등)는 예외로 1이다.
 """
 
 from __future__ import annotations

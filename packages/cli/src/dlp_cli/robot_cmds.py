@@ -1,9 +1,17 @@
-"""`dlp robot check <ID>`: 로봇 등록 확인 (ADR 0047).
+"""로봇 등록 확인 하위 명령 (ADR 0047).
 
-`config/robots/<ID>.yaml`(또는 `DLP_ROBOTS_DIR`, 고객 로봇)을 읽어 모델 파일 sha256, 기준 → 끝
-링크 연쇄의 관절 목록, 그리퍼 관절을 검사하고, 영점 자세의 끝단 위치·접근·닫힘 축과 최대 팔 길이를
-보인다. 운영자는 이 출력으로 접근·닫힘 축과 배치를 정한다 (`docs/handover/robot-retargeting.md`).
-DB·저장소를 쓰지 않는다.
+`dlp export lerobot --robot <ID>` 전에 고객 로봇 설정이 맞는지 본다. 운영자는 이 출력으로 접근·닫힘
+축과 배치를 정한다 (`docs/handover/robot-retargeting.md`). DB·저장소·원본 버킷에 접근하지 않는다.
+
+하위 명령 (인자 오류는 argparse가 종료 코드 2로 끝낸다):
+
+`dlp robot check <robot_id>`
+    `config/robots/<ID>.yaml`(또는 `DLP_ROBOTS_DIR`, 고객 로봇)을
+    `dlp_retarget.robot.load_robot`으로 읽어 모델 파일 sha256, 기준 → 끝 링크 연쇄의 관절 목록,
+    그리퍼 관절을 검사하고, 영점 자세의 끝단 위치·접근·닫힘 축과 최대 팔
+    길이(`dlp_retarget.retarget.max_reach`)를 보인다. 읽는 정책:
+    `config/policies/retarget.yaml`(풀이기 이름 출력). 종료 코드: 0 정상, 1 설정·모델 확인 실패
+    (`RobotError`, `UrdfError`, `ValueError`, 이유를 출력한다).
 """
 
 from __future__ import annotations

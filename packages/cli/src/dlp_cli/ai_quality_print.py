@@ -133,6 +133,7 @@ def _rate_json(r: Rate) -> dict[str, Any]:
     """비율 → JSON (NaN은 null)."""
 
     def clean(v: float) -> float | None:
+        """NaN(분모 0)을 JSON null로 바꾼다."""
         return None if math.isnan(v) else v
 
     return {
@@ -156,6 +157,7 @@ def ai_quality_json(q: AiQuality) -> dict[str, Any]:
     a, e = q.agreement, q.exposure
 
     def clean(v: float) -> float | None:
+        """NaN(분모 0)을 JSON null로 바꾼다."""
         return None if math.isnan(v) else v
 
     apply = a.apply

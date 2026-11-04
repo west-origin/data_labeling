@@ -1,37 +1,72 @@
 """프라이버시 게이트 하위 명령 (WP5, ADR 0005·0023·0024).
 
-등록하는 명령 (정상 순서):
-1. `dlp privacy detect <세션>` — 블러 대상(얼굴, 문서·화면, 반사면, QR·바코드 등)을 자동 탐지해
-   블러 트랙 라벨(`blur_track`, `LabelRecord`)과 검수 우선 구간을 만든다. 쓸 수 있는 탐지기가 없는
-   대상은 "전수 검수 필요"로 표시한다.
-2. (검수) `dlp review create --stage privacy` → 원본 접근 권한자가 블러 검수 → `dlp review collect`.
-3. `dlp privacy approve <세션>` — 모든 운영 블러 라벨의 사람 검수와 영상 스트림별 최신 탐지
-   세대의 검수 수집을 확인한 뒤 승인한다. 블러가 0개여도 스트림 검수는 필요하다.
-4. `dlp privacy render <세션>` — 승인된 세션의 블러본(모자이크, 오디오 제거)을 라벨링 버킷에
-   렌더한다. 이후 단계(프리라벨 검수 화면, 내보내기)는 이 블러본만 쓴다.
-- `dlp privacy audit-sample [--week]` — 매주 승인된 블러본에서 잔여 누락 감사 표본을 뽑고, 최근 주
-  누락률로 블러 검수 방식(전수/표본)을 판정한다. 감사 결과 입력은 `dlp ops privacy-audit`.
-- `dlp privacy hold <세션> --reason [--actor]` — 사고 대응(노출 신고) 중 승인을 보류한다: 승인 해제,
-  렌더 기록 무효, 배포된 라벨링 작업 전부 회수 요청(커밋 뒤 실행). 보류 중에는 승인이 거부된다.
-  `--release`는 해제 기록만 남기고, 재승인(approve → render)을 다시 거친다 (ADR 0042, F-REV-18).
+정상 순서는 `detect` → (블러 검수: `dlp review create --stage privacy`, 원본 접근 권한자가 검수,
+`dlp review collect`) → `approve` → `render`다. 이후 단계(프리라벨 검수 화면, 내보내기)는 렌더한
+블러본만 쓴다. 프라이버시 배포는 사람 승인 뒤에만 한다.
 
 정책 출처: `config/policies/privacy.yaml`(탐지기·대상·렌더), `config/defaults.yaml`의
-`privacy.full_review_exit`(표본 감사 비율, 연속 주 수)와
-`success_criteria.residual_blur_miss_per_hour_max`.
+`privacy.full_review_exit`(표본 감사 비율, 연속 주 수),
+`success_criteria.residual_blur_miss_per_hour_max`, `buckets`(원본·라벨링·MLflow 버킷 이름).
 
-주의:
-- `detect`·`render`는 원본 영상을 읽으므로 `raw_store` 감사 저장소를 쓴다 (ADR 0020). 블러본은
-  반드시 라벨링 버킷에 쓴다 (원본 버킷이면 `render_session`이 거부).
-- 프라이버시 배포는 사람 승인 후에만 한다. `detect`는 게이트를 통과하고 승인된 재학습 블러 모델이
-  있으면 `strict=True`로 불러 탐지기 결과와 합집합으로 쓴다 (못 부르면 조용히 넘어가지 않고 실패).
-- 블러가 바뀌면(탐지 결과가 바뀐 스트림) 같은 트랜잭션에서 이미 배포한 라벨링 작업 매체에 회수를
-  요청하고, 커밋 뒤 `review_config.run_revocations`로 라벨링 버킷 사본·도구 작업을 지운다
-  (ADR 0039). `render`도 같은 트랜잭션에서 렌더 해시가 지금과 다른 작업에 회수를 요청한다
-  (렌더 정책 변경 등 알려지지 않은 경로의 백스톱). 대기가 남으면 종료 코드 4.
-- 결과가 0개여도 DB에 완료 탐지 세대를 남긴다. 최신 완료 세대의 활성 버전 집합이 같으면
-  건너뛴다. 과거 버전으로 복귀하면 새 세대다. DB 이력 없이 원본 버킷의 0건 탐지 표시만 있으면
-  완료 세대를 복구하고 새 검수를 요구한다 (ADR 0033).
-  블러 라벨의 키프레임 시각은 그 스트림의 PTS 시각(정수 ms)이다 (ADR 0019).
+공통: `--url`은 DB URL(`database_url` 규칙), `--store`는 `s3`(기본) 또는 `local:<디렉터리>`다.
+인자 오류는 argparse가 종료 코드 2로 끝낸다. 게이트 위반(`PrivacyGateError`)과 그 밖의 잡지 않은
+예외는 종료 코드 1이다. 커밋 뒤 회수 대기가 남으면 `REVOCATION_PENDING_EXIT`(4,
+`review_config.print_revocations`)다.
+
+하위 명령:
+
+`dlp privacy detect <session_id> [--url URL] [--store SPEC]`
+    블러 대상(얼굴, 문서·화면, 반사면, QR·바코드 등)을 탐지해 `blur_track` 라벨과 완료 탐지 세대를
+    쓰고 검수 우선 구간 JSON을 만든다 (`dlp_privacy.runner.detect_session`). 쓸 수 있는 탐지기가
+    없는 대상은 실패가 아니라 "전수 검수 필요"로 출력한다. 게이트를 통과하고 사람이 승인한 재학습
+    블러 모델이 있으면 `dlp_train.deployed.deployed_predictors(strict=True)`로 불러 합집합으로 쓴다.
+    못 부르면 조용히 넘어가지 않고 실패한다. 블러가 바뀐 스트림은 같은 트랜잭션에서 배포된 라벨링
+    작업에 회수를 요청하고, 커밋 뒤 `review_config.run_revocations`로 사본·도구 작업을 지운다
+    (ADR 0039). 읽는 정책: `privacy.yaml`, `training.yaml`, `defaults.yaml`.
+    원본 버킷: 원본 영상을 읽고 검수 우선 구간·0건 탐지 표시를 쓴다. 감사 저장소
+    `raw_store(..., "privacy.detect")`. 종료 코드: 0, 회수 대기가 남으면 4.
+
+`dlp privacy approve <session_id> [--url URL]`
+    탐지가 실행됐고, 영상 스트림마다 마지막 탐지 뒤의 블러 검수 작업이 수집됐고, 현재 블러 라벨이
+    모두 사람 검수(승인·수정, 표본 검증만으로는 안 된다)를 거쳤으면 승인한다
+    (`dlp_privacy.runner.approve_session`). 블러가 0개여도 스트림 검수는 필요하다. 저장소를 쓰지
+    않아서 `--store`가 없다. 원본 버킷: 접근하지 않는다. 종료 코드: 0, 조건 미달은
+    `PrivacyGateError`로 1.
+
+`dlp privacy render <session_id> [--url URL] [--store SPEC]`
+    승인된 세션의 블러본(모자이크, 오디오 제거)을 라벨링 버킷에 렌더한다
+    (`dlp_privacy.runner.render_session`). 같은 블러 라벨 집합·렌더 정책이면 건너뛴다(멱등). 같은
+    트랜잭션에서 렌더 해시가 지금 블러본과 다른 라벨링 작업에 회수를 요청한다
+    (`request_media_revocation`, 알려지지 않은 경로의 백스톱). 읽는 정책: `privacy.yaml render`,
+    `defaults.yaml buckets`. 원본 버킷: 원본 영상을 읽는다. 감사 저장소
+    `raw_store(..., "privacy.render")`. 블러본은 반드시 라벨링 버킷에 쓴다 (원본 버킷이면
+    `render_session`이 거부). 종료 코드: 0, 회수 대기가 남으면 4, 승인 전·버킷 같음·오디오를 남기는
+    정책이면 `PrivacyGateError`로 1.
+
+`dlp privacy audit-sample [--week YYYY-Www] [--url URL] [--store SPEC]`
+    그 주(기본 이번 주, UTC) 승인된 블러본에서 잔여 누락 감사 표본을 결정적으로 뽑고, 최근
+    `weeks_below_target`주의 누락률로 블러 검수 방식(전수·표본)을 판정한다
+    (`dlp_privacy.audit.audit_candidates`, `select_audit_sample`, `weekly_miss_rates`,
+    `review_mode`). 감사 결과 입력은 `dlp ops privacy-audit`. DB는 읽기만 한다. 원본 버킷: 바디캠이
+    아닌 후보가 있을 때만 PTS 인덱스를 읽는다. 감사 저장소 `raw_store(..., "privacy.audit-sample")`.
+    종료 코드: 항상 0 (판정은 출력으로만 알린다).
+
+`dlp privacy hold <session_id> --reason TEXT [--release] [--actor NAME] [--url URL] [--store SPEC]`
+    사고 대응(노출 신고) 중 승인을 보류한다 (`dlp_privacy.hold.hold_session`, ADR 0042, F-REV-18).
+    보류 기록(추가만), 승인 해제, 모든 영상 스트림의 배포된 라벨링 작업 회수 요청을 저장소와
+    무관하게 먼저 커밋한다. 커밋 뒤 라벨링 버킷의 렌더 기록을 무효로 두고(`invalidate_hold_renders`)
+    회수 실행기를 돌린다. 보류 중에는 승인이 거부된다. `--release`는 해제 기록만 남기고
+    (`release_hold`), 재승인(approve → render)은 다시 거친다. 행위자는 `--actor`, 없으면
+    `DLP_ACTOR`, 그것도 없으면 OS 사용자. 원본 버킷: 접근하지 않는다.
+    종료 코드: 0, 회수 대기가 남으면 4, 렌더 기록 무효화나 회수 실행기 준비가 실패하면
+    `HOLD_RENDER_PENDING_EXIT`(5, 보류는 커밋됐고 같은 명령을 다시 실행한다). 보류 중이 아닌데
+    해제하면 `PrivacyGateError`, 사유가 비면 `ValueError`로 1.
+
+탐지 세대 규칙: 결과가 0개여도 DB에 완료 탐지 세대를 남긴다. 최신 완료 세대의 활성 버전 집합이
+같으면 건너뛴다. 과거 버전으로 복귀하면 새 세대다. DB 이력 없이 원본 버킷의 0건 탐지 표시만 있으면
+완료 세대를 복구하고 새 검수를 요구한다 (ADR 0033). 블러 라벨의 키프레임 시각은 그 스트림의 PTS 시각
+(정수 ms)이다 (ADR 0019). 렌더 해시에는 `privacy.yaml render` 절 전체가 들어가므로 블러와 무관한
+인코더 설정만 바꿔도 해시 있는 라벨링 작업이 모두 회수된다.
 """
 
 from __future__ import annotations

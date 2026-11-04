@@ -1,32 +1,71 @@
 """카메라 내부 파라미터·작업자 손 크기 등록 하위 명령 (ADR 0045, 0052).
 
-기기 캘리브레이션:
-- `dlp calib intrinsics <기기> <체커보드 영상> --board 8x6 --square-mm 25 [--valid-from ISO |
-  --supersede <등록 ID>]` — 그 기기로 체커보드만 찍은 로컬 영상에서 OpenCV로 내부 파라미터를 구해
-  DB `camera_calibrations`에 등록한다 (`config/policies/calibration.yaml`: 장면 수·RMS·보드 기울기·
-  타당 범위). `--dry-run`이면 결과만 보이고 쓰지 않는다.
-- `dlp calib import <기기> <파일> [--valid-from ISO | --supersede <등록 ID>]` — 알려진 캘리브레이션
-  파일(이 저장소 형식, OpenCV FileStorage, ROS camera_info)을 같은 값 검사 뒤 등록한다.
-- `dlp calib assign <기기> [<세션>...] [--worker W [--since ISO] [--until ISO]] --reason R` —
-  매니페스트에 camera_id가 없던(이미 수집한) 세션을 기기에 잇는다 (`session_camera_assignments`).
+3D 단계(`dlp prelabel run`)가 쓰는 카메라 내부 파라미터와 작업자 손 크기를 등록·무효화·조회한다.
+등록·무효·연결 뒤 `dlp prelabel run <세션>`을 다시 돌리면 3D 단계 입력 해시가 바뀌어 검수 전 3D만 새
+값으로 다시 만든다 (검수된 3D는 남는다). 모든 등록은 추가 전용이다. 같은 값을 다시 등록하면 쓰지
+않는다(멱등. 기기는 같은 유효 시작, 작업자는 지금 쓰이는 값·출처·출처 세션, 기기 연결은 지금 기기
+비교). 작업자 ID는 DB에만 남고 내보내기에 넣지 않는다.
 
-작업자 손 크기:
-- `dlp calib palm <작업자> <손바닥 m> [--allow-unknown-worker]` — 잰 손바닥 길이(손목 → 중지 MCP).
-  세션이 없는 작업자 ID는 오타로 보고 거부한다 (첫 녹화 전 등록은 옵션).
-- `dlp calib palm-estimate <작업자> [--apply [--override-measured]] [--reviewed-only]` — 그 작업자의
-  캘리브레이션된 세션 바디캠에서 깊이 모델로 손바닥 길이를 추정한다 (원본 영상, 감사 기록
-  `calib.palm_estimate`). `--apply`일 때만 등록하고, 지금 쓰이는 값이 잰 값이면 명시 옵션 없이는
-  덮지 않는다. 표본을 낸 세션 ID와 추정기 판을 함께 남긴다.
-- `dlp calib palm-revoke <작업자> --reason R [--record <등록 ID>]` — 손 크기 등록을 무효로 한다
-  (동의 철회·삭제 요구·잘못 잰 값). 행을 지우지 않고 무효 기록을 더한다 (추가 전용).
-- `dlp calib show [--camera 기기] [--worker 작업자] [--session 세션]` — 등록 이력과 지금 쓰는 값.
+공통: `--url`은 DB URL(`database_url` 규칙)이다. 인자 오류와 잘못된 형식 값(`--board`, 시간대 없는
+ISO 시각)은 argparse가 종료 코드 2로 끝낸다. 이 모듈의 명령은 입력 거부에도 종료 코드 2를 쓴다
+(argparse 사용 오류와 같은 값이다). `--valid-from`과 `--supersede`는 함께 쓸 수 없다.
 
-멱등성: 같은 값을 다시 등록하면 쓰지 않는다 (기기는 같은 유효 시작, 작업자는 지금 쓰이는 값·출처·
-출처 세션, 기기 연결은 지금 기기 비교). 등록·무효·연결 뒤 `dlp prelabel run <세션>`을 다시 돌리면 3D
-단계 입력 해시가 바뀌어 검수 전 3D만 새 값으로 다시 만든다 (검수된 3D는 남는다).
+하위 명령, 기기 캘리브레이션 (DB `camera_calibrations`, `session_camera_assignments`):
 
-체커보드 영상·캘리브레이션 파일은 원본 버킷이 아닌 로컬 파일이다 (보드만 찍는다, 절차는
-`docs/handover/camera-calibration.md`). 작업자 ID는 DB에만 남고 내보내기에 넣지 않는다.
+`dlp calib intrinsics <camera_id> <path> --board COLSxROWS --square-mm MM [--dry-run]
+[--valid-from ISO | --supersede ID] [--url URL]`
+    그 기기로 체커보드만 찍은 로컬 영상에서 OpenCV로 내부 파라미터를 구해 등록한다
+    (`dlp_media.calibration.calibrate_video`, `dlp_schema.db.calibration_repository.
+    register_camera_calibration`). `--board`는 안쪽 코너 수(3 이상), `--square-mm`은 보드 좌표
+    단위로만 쓴다. `--dry-run`이면 결과만 보이고 쓰지 않는다. `--supersede`는 그 등록의 유효 시작을
+    그대로 써서 바로잡는다. 읽는 정책: `config/policies/calibration.yaml`(장면 수·RMS·보드
+    기울기·타당 범위). 종료 코드: 0, 캘리브레이션 실패 또는 `--supersede` 대상이 그 기기 등록이 아님
+    2.
+
+`dlp calib import <camera_id> <path> [--valid-from ISO | --supersede ID] [--url URL]`
+    알려진 캘리브레이션 파일(이 저장소 YAML·JSON, OpenCV FileStorage, ROS camera_info)을 같은 값
+    검사(`dlp_media.calibration.load_intrinsics_file`) 뒤 등록한다. 읽는 정책: `calibration.yaml`.
+    종료 코드: 0, 형식·값 오류(파싱, 모르는 키, 미보정·어안, 타당 범위 밖) 또는 `--supersede` 대상
+    없음 2.
+
+`dlp calib assign <camera_id> [session_ids ...] [--worker W [--since ISO] [--until ISO]] --reason R
+[--url URL]`
+    매니페스트에 camera_id가 없던(이미 수집한) 세션을 기기에 잇는다
+    (`calibration_repository.assign_session_camera`). `--worker`는 그 작업자의 세션 전부를 녹화 시각
+    [`--since`, `--until`) 범위로 고른다. 충돌이 하나라도 있으면 아무것도 쓰지 않는다.
+    종료 코드: 0, 대상 없음·없는 세션·매니페스트의 다른 기기와 충돌 2.
+
+하위 명령, 작업자 손 크기 (DB `worker_hand_sizes`, `worker_hand_size_sources`,
+`worker_hand_size_invalidations`):
+
+`dlp calib palm <worker_id> <palm_m> [--allow-unknown-worker] [--url URL]`
+    잰 손바닥 길이(손목 → 중지 MCP, m)를 등록한다 (`register_hand_size`, 출처 `measured`). 세션이
+    없는 작업자 ID는 오타로 보고 거부한다 (첫 녹화 전 등록은 `--allow-unknown-worker`).
+    종료 코드: 0, 세션이 없는 작업자 ID 2.
+
+`dlp calib palm-estimate <worker_id> [--apply [--override-measured]] [--reviewed-only] [--store
+SPEC] [--url URL]`
+    그 작업자의 캘리브레이션된 세션 바디캠에서 깊이 모델로 손바닥 길이를 추정한다
+    (`dlp_prelabel.palm.palm_samples`, `estimate_palm`). 사용 중지·원본 삭제 결정 세션은 뺀다.
+    `--apply`일 때만 출처 `estimated`로 등록하고, 지금 쓰이는 값이 잰 값이면 `--override-measured`
+    없이는 덮지 않는다. 표본을 낸 세션 ID와 추정기 판을 함께 남긴다. `--reviewed-only`는 승인·표본
+    검증한 손 트랙만 쓴다. 읽는 정책: `prelabel.yaml`(`depth`, `palm_estimate`),
+    `config/models.yaml`. 원본 버킷: 표본을 낼 수 있는 세션의 바디캠 영상을 읽는다. 감사 저장소
+    `raw_store(..., "calib.palm_estimate")`. 종료 코드: 0 추정(·등록), `EXIT_MODEL_MISSING`(1) 깊이
+    모델 없음, `EXIT_NO_SAMPLES`(3) 세션 없음·표본 부족, `EXIT_MEASURED_EXISTS`(4) 잰 값이 쓰이고
+    있어 거부, `EXIT_WITHDRAWN_DURING_RUN`(5) 추정 중 출처 세션 사용 중지. 0이 아니면 아무것도 쓰지
+    않는다.
+
+`dlp calib palm-revoke <worker_id> --reason R [--record ID] [--url URL]`
+    손 크기 등록을 무효로 한다 (`invalidate_hand_sizes`, 동의 철회·삭제 요구·잘못 잰 값). 행을
+    지우지 않고 무효 기록을 더한다. `--record`가 없으면 그 작업자의 지금까지 모든 등록이다.
+    종료 코드: 0(무효로 할 등록이 없어 건너뛴 경우 포함), 그 작업자의 등록이 아닌 ID 2.
+
+`dlp calib show [--camera ID] [--worker ID] [--session ID] [--url URL]`
+    등록 이력과 지금 쓰는 값을 출력한다. 읽기만 한다. 종료 코드: 0.
+
+원본 버킷: `palm-estimate`만 접근한다. 체커보드 영상·캘리브레이션 파일은 원본 버킷이 아닌 로컬
+파일이다 (보드만 찍는다, 절차는 `docs/handover/camera-calibration.md`).
 """
 
 from __future__ import annotations
@@ -121,6 +160,7 @@ def _when(text: str) -> datetime:
 
 
 def _describe(k: CameraIntrinsics) -> str:
+    """내부 파라미터 한 줄 요약 (해상도, 초점 거리·주점 px, 왜곡 모델과 계수)."""
     return (
         f"{k.width}x{k.height} fx {k.fx:.2f} fy {k.fy:.2f} cx {k.cx:.2f} cy {k.cy:.2f} "
         f"왜곡 {k.distortion_model} {list(k.distortion)}"
@@ -420,6 +460,7 @@ def _candidate_sessions(conn: sa.Connection, worker_id: str) -> list[str] | None
 
 
 def _describe_hand_size(h: WorkerHandSize | None) -> str:
+    """손 크기 한 줄 요약. 등록이 없으면 정책 기본값을 쓴다는 뜻이다."""
     if h is None:
         return "정책 기본값"
     return f"{h.palm_m:.4f} m ({h.source.value}, {h.record_id})"
@@ -559,6 +600,7 @@ def cmd_palm_revoke(args: argparse.Namespace) -> int:
 
 
 def _show_camera(conn: sa.Connection, camera: str) -> None:
+    """기기의 등록 이력. 지금 시각에 쓰이는 등록에 `*`를 붙인다."""
     records = get_camera_calibrations(conn, camera)
     now_used = effective_calibration(records, camera, datetime.now(UTC))
     for r in records:
@@ -568,6 +610,7 @@ def _show_camera(conn: sa.Connection, camera: str) -> None:
 
 
 def _show_worker(conn: sa.Connection, worker: str) -> None:
+    """작업자의 손 크기 등록과 무효 기록. 지금 쓰이는 등록에 `*`, 쓰지 않는 등록에 이유를 붙인다."""
     state = hand_size_state(conn, worker)
     current = state.effective(worker)
     for h in state.records:
@@ -587,6 +630,7 @@ def _show_worker(conn: sa.Connection, worker: str) -> None:
 
 
 def _show_session(conn: sa.Connection, session_id: str) -> None:
+    """세션의 기기 연결 기록과 지금 쓰는 내부 파라미터 출처·손 크기."""
     session = get_session(conn, session_id)
     for a in get_camera_assignments(conn, session_id):
         print(f"  연결 {a.assignment_id} → {a.camera_id} ({a.created_at.isoformat()}): {a.reason}")
@@ -622,6 +666,7 @@ def _add_calibration_target(p: argparse.ArgumentParser) -> None:
 
 
 def _add_camera_commands(csub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:  # pyright: ignore[reportPrivateUsage]
+    """기기 캘리브레이션 명령(`intrinsics`, `import`, `assign`)을 등록한다."""
     intr = csub.add_parser("intrinsics", help="체커보드 영상으로 내부 파라미터를 구해 등록")
     intr.add_argument("camera_id")
     intr.add_argument("path", type=Path, help="그 기기로 체커보드만 찍은 로컬 영상")
@@ -652,6 +697,7 @@ def _add_camera_commands(csub: argparse._SubParsersAction[argparse.ArgumentParse
 
 
 def _add_palm_commands(csub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:  # pyright: ignore[reportPrivateUsage]
+    """작업자 손 크기 명령(`palm`, `palm-estimate`, `palm-revoke`)을 등록한다."""
     palm = csub.add_parser("palm", help="잰 손바닥 길이(손목→중지 MCP, m) 등록")
     palm.add_argument("worker_id")
     palm.add_argument("palm_m", type=float)

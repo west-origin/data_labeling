@@ -1,17 +1,19 @@
 """관계 도출·커버리지 하위 명령 (WP9, ADR 0011·0026).
 
-등록하는 명령:
-- `dlp relations run <세션>` — YAML 규칙(`config/policies/relations.yaml`)으로 현재 라벨에서
-  관계(손-객체 접촉, 도구-표면 접촉 등)를 만들고, 도구 작용부 3D 궤적을 표면 평면에 투영해
-  표면 커버리지를 계산한다. 결과는 `label_records`에 쓴다.
+순서: `dlp prelabel run` 뒤(접촉·3D 궤적이 입력), `dlp actions run`·검수 전. 검수에서 접촉이
+고쳐지면 다시 돌린다. DB만 읽고 쓰며 원본 버킷에는 접근하지 않는다.
 
-순서: `dlp prelabel run` 뒤(접촉·3D 궤적이 입력), `dlp actions run`·검수 전.
-검수에서 접촉이 고쳐지면 다시 돌린다.
+하위 명령 (인자 오류는 argparse가 종료 코드 2로 끝낸다. 잡지 않은 예외는 종료 코드 1이다):
 
-멱등성: 모델 버전은 `relations-<정책 해시>`이고 각 관계의 `derived_by`에는 규칙 ID가 들어간다.
-다시 돌리면 같은 결과는 유지하고 달라진 것만 새로 쓰거나 삭제 표시한다(규칙을 바꿔도 차이만
-반영). 검수자가 고치거나 지운 관계는 다시 넣지 않는다.
-DB만 읽고 쓰며 원본 버킷에는 접근하지 않는다.
+`dlp relations run <session_id> [--url URL]`
+    YAML 규칙으로 현재 라벨에서 관계(손-객체 접촉, 도구-표면 접촉 등)를 만들고, 도구 작용부 3D
+    궤적을 표면 평면에 투영해 표면 커버리지를 계산한다 (`dlp_relations.runner.run_relations`).
+    결과는 `label_records`에 쓴다. 온톨로지는 세션 버전의 DB 등록 사전이다. 읽는 정책:
+    `config/policies/relations.yaml`. 종료 코드: 0.
+
+멱등성: 모델 버전은 `relations-<정책 해시>`이고 각 관계의 `derived_by`에는 규칙 ID가 들어간다. 다시
+돌리면 같은 결과는 유지하고 달라진 것만 새로 쓰거나 삭제 표시한다(규칙을 바꿔도 차이만 반영).
+검수자가 고치거나 지운 관계는 다시 넣지 않는다.
 """
 
 from __future__ import annotations

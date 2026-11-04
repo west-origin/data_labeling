@@ -1,34 +1,65 @@
 """운영 대시보드와 보안 하위 명령 (WP16, ADR 0020·0021).
 
-등록하는 명령 (`dlp ops …`):
-- `weekly [--week] [--weeks] [--out]` — 주간 운영 지표(검수 시간, 수정률, 자동 승인율, 프리라벨
-  편향, 오류 삽입 발견율, 잔여 블러 누락률, 에피소드당 원가)와 경고. 최근 N주를 한 표로 낸다.
-  `review.yaml ai_review.mode`가 off가 아니면 AI 1차 검수 절(대조군 지적 정밀도·층화 ok 놓침률
-  상한·백로그·fallback율·캐시 적중률 등, WP17.8)과 그 경고(`ops.yaml alerts.ai_*`)도 낸다.
-- `audit-report <YYYY-MM> [--fail-on-flags]` — 원본 접근(`raw_access_log`) 월간 감사 리포트.
-  권한 없는 접근·업무 시간 밖 접근 같은 확인할 것(flags)을 표시한다.
-- `retention [--today] [--all]` — 원본 보관 기간 만료 알림 (기간은 `defaults.yaml`
-  `retention.raw_retention_days`, 아직 미정이면 알림만 없음). 세션이 모두 사용 중지된 작업자의 지금
-  쓰이는 손 크기 등록도 알린다 (ADR 0052, `dlp calib palm-revoke`).
-- `retention-decide <세션> extend|delete [--until] --reason` — 보관 연장·삭제 결정을 기록한다.
-  실제 삭제는 이 명령이 하지 않는다 (`RETENTION_NOTE` 참고).
-- `log-work <세션> --reviewer --stage --minutes` — 도구가 재지 않는 검수 작업 시간을 손으로
-  기록한다.
-- `privacy-audit <세션> <스트림> --misses` — 잔여 블러 누락 감사 결과를 기록한다 (길이는 그
-  스트림의 길이). 감사자는 그 스트림의 블러 검수자와 달라야 한다. 감사 표본은
-  `dlp privacy audit-sample`로 뽑는다.
-- `quality-proxy <세션> [--stream] [--out]` — 정답 없는 품질 대리 지표 (`dlp_eval.proxy`, 기준
-  `evaluation.yaml proxy`): 짧은 트랙·깜박임·프레임당 탐지 수, 모델 사이 불일치, 손 좌우·화면 위치,
-  손 3D 물리 위반. 읽기 전용.
+지표·감사·보관 계산 로직은 `dlp_ops` 패키지에 있고, 이 모듈은 정책·DB를 엮어 출력한다. 운영·감사
+기록 테이블(`review_work`, `privacy_audits`, `retention_decisions`)은 추가만 한다 (ADR 0020, 0021).
+주기는 `weekly` 매주, `audit-report` 매월, `retention` 매주 정도다. 저장소에 예약 실행 설정은 없고
+운영자가 cron 등으로 건다.
 
-주기: `weekly`는 매주, `audit-report`는 매월, `retention`은 매주 정도 (저장소에 예약 실행 설정은
-없다 — 운영자가 cron 등으로 건다).
-운영·감사 기록 테이블(`review_work`, `privacy_audits`, `retention_decisions`)은 추가만 한다
-(ADR 0020, 0021). 지표 계산 로직은 `dlp_ops` 패키지에 있다.
+정책 출처: `config/policies/ops.yaml`(경고 임계값, 원가, 감사 규칙, 보관 알림 일수), 검수 정책
+(`review_config.load_review_policy`: 기본 `review.yaml`, `DLP_REVIEW_POLICY_FILE`로 바꿀 수 있다.
+`reviewers.privacy`는 원본 접근 권한자, `ai_review`는 AI 절), `config/defaults.yaml`
+(`retention.raw_retention_days`), `evaluation.yaml proxy`(대리 지표 기준).
 
-정책 출처: `config/policies/ops.yaml` (경고 임계값, 원가, 감사 규칙, 보관 알림 일수),
-기본 `config/policies/review.yaml`(`reviewers.privacy`: 원본 접근 권한자). 검수 정책은 CLI에서
-`DLP_REVIEW_POLICY_FILE`로 다른 파일을 지정할 수 있다.
+공통: `--url`은 DB URL이다. 인자 오류(`--weeks`가 1~52 밖 등)는 argparse가 종료 코드 2로 끝낸다.
+`SystemExit("메시지")`와 잡지 않은 예외(없는 세션, 계약 검증 `ValidationError` 등)는 종료 코드
+1이다.
+
+하위 명령:
+
+`dlp ops weekly [--week YYYY-Www] [--weeks N] [--out PATH] [--url URL]`
+    최근 N주(기본 8, 마지막 주 기본 이번 주)의 주간 운영 지표(검수 시간, 수정률, 자동 승인율,
+    프리라벨 편향, 오류 삽입 발견율, 잔여 블러 누락률, 에피소드당 원가)와 경고를 한 표로 낸다
+    (`dlp_ops.metrics`). `review.yaml ai_review.mode`가 off가 아니면 AI 1차 검수 절(대조군 지적
+    정밀도·층화 ok 놓침률 상한·백로그·fallback율·캐시 적중률 등, WP17.8)과 그 경고
+    (`ops.yaml alerts.ai_*`)도 낸다. `--out`이면 `.md`와 옆에 `.json`을 쓴다. 읽기만 한다.
+    종료 코드: 0 (경고가 있어도 실패로 보지 않는다).
+
+`dlp ops audit-report <month> [--out PATH] [--fail-on-flags] [--url URL]`
+    `raw_access_log`(원본 접근 기록)의 월간(`YYYY-MM`) 감사 리포트다 (`dlp_ops.audit`). 권한 없는
+    접근, 업무 시간 밖 접근 같은 확인할 것(flags)을 표시한다. 읽기만 한다.
+    종료 코드: 0, `--fail-on-flags`이고 확인할 것이 있으면 1.
+
+`dlp ops retention [--today YYYY-MM-DD] [--all] [--url URL]`
+    원본 보관 기간 만료를 세션별로 알린다 (`dlp_ops.retention.retention_status`). 기간은
+    `defaults.yaml retention.raw_retention_days`이고, 아직 미정이면 만료 알림이 없다. 세션이 모두
+    사용 중지된 작업자의 지금 쓰이는 손 크기 등록도 알린다 (ADR 0052, `dlp calib palm-revoke`).
+    `--all`은 알림 없는 세션도 보인다. 읽기만 한다. 종료 코드: 0.
+
+`dlp ops retention-decide <session_id> extend|delete [--until YYYY-MM-DD] --reason TEXT [--url URL]`
+    보관 연장·삭제 결정을 `retention_decisions`에 기록한다 (결정자 `current_actor()`). `extend`는
+    `--until`이 필요하고 `delete`는 없어야 한다 (틀리면 `ValidationError`로 1). 실제 삭제는 이
+    명령이 하지 않는다 (`RETENTION_NOTE`). 종료 코드: 0.
+
+`dlp ops log-work <session_id> --reviewer ID --stage privacy|labeling|qa --minutes M
+[--video-ms MS] [--task-key KEY] [--at ISO] [--url URL]`
+    도구가 재지 않는 검수 작업 시간을 `review_work`에 손으로 기록한다. `--video-ms` 기본은 세션
+    길이, `--at` 기본은 지금이고 그 시각이 속한 주의 지표에 들어간다. 종료 코드: 0, `--at`이
+    미래이거나 `--task-key` 접두사를 모르면 1.
+
+`dlp ops privacy-audit <session_id> <stream_id> --misses N [--auditor NAME] [--url URL] [--store
+SPEC]`
+    잔여 블러 누락 감사 결과를 `privacy_audits`에 기록한다. 감사 표본은 `dlp privacy audit-sample`로
+    뽑는다. 감사자(기본 `current_actor()`)는 그 스트림의 블러 검수자와 달라야 한다. 길이는 그
+    스트림의 길이다 (`dlp_privacy.audit.stream_duration_ms`). 원본 버킷: 바디캠이 아니면 PTS
+    인덱스를 읽는다. 감사 저장소 `raw_store(..., "ops.privacy-audit")`. 종료 코드: 0, 영상 스트림이
+    아니거나 블러 검수자를 확인할 수 없거나 감사자가 검수자와 같으면 1.
+
+`dlp ops quality-proxy <session> [--stream ID] [--out PATH] [--url URL]`
+    정답 없는 품질 대리 지표다 (`dlp_eval.proxy`, 기준 `evaluation.yaml proxy`). 짧은 트랙·깜박임·
+    프레임당 탐지 수, 모델 사이 불일치, 손 좌우·화면 위치, 손 3D 물리 위반을 낸다. 입력은 운영 라벨,
+    `--stream` 기본은 기준 스트림이다. 읽기만 한다. 종료 코드: 0.
+
+원본 버킷: `privacy-audit`만 접근한다. 나머지 명령은 DB만 읽거나 쓴다.
 """
 
 from __future__ import annotations
@@ -219,7 +250,6 @@ def _aware(text: str) -> datetime:
 
 
 def cmd_log_work(args: argparse.Namespace) -> int:
-    # 검수한 시각(--at)의 주에 센다. 나중에 몰아서 기록해도 그 주의 지표에 들어간다
     """`dlp ops log-work <세션>`: 검수 작업 시간을 `review_work`에 기록한다 (추가만).
 
     인자:
@@ -233,6 +263,7 @@ def cmd_log_work(args: argparse.Namespace) -> int:
 
     부작용: 한 트랜잭션에서 `review_work` INSERT. 세션이 없으면 DB 조회 오류.
     """
+    # 검수한 시각(--at)의 주에 센다. 나중에 몰아서 기록해도 그 주의 지표에 들어간다
     at = _aware(args.at) if args.at else datetime.now(UTC)
     if at > datetime.now(UTC):
         raise SystemExit(f"--at이 미래입니다: {at.isoformat()}")
