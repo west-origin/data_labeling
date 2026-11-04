@@ -91,10 +91,14 @@ class PretrainImportConfig(Contract):
     """외부 가중치 가져오기.
 
     - models_dir: 가중치를 둘 디렉터리 (저장소 루트 기준 상대 경로, 저장소 안이어야 한다).
+    - max_mb: ONNX 한 파일 상한 (MB). manifest_max_kb: manifest JSON 한 파일 상한 (KB).
+      넘으면 그 가져오기 디렉터리를 지우고 400이다 (F-COE-89).
     - compare: 골든셋 비교 명령 설정.
     """
 
     models_dir: str
+    max_mb: int = Field(ge=1)
+    manifest_max_kb: int = Field(ge=1)
     compare: CompareConfig
 
 

@@ -1124,12 +1124,12 @@ issues:
   - {id: F-PAR-90, title: "행동·설명 VLM 버전이 vlm-<모델 이름>뿐이라 같은 이름으로 엔진·양자화·가중치 revision을 바꿔도 다시 돌지 않음 (AI 검수는 fingerprint로 구분)", severity: low, status: candidate, kind: code,
      files: [packages/actions/src/dlp_actions/clients.py, config/policies/actions.yaml], source: docs/handover/full-inspection-2026-11-04.md,
      note: "주석 단계(P3) 코드 읽기로 발견, 실행 재현 전 후보. aireview.yaml backend.fingerprint와 같은 항목을 actions.yaml vlm에 두는 안."}
-  - {id: F-PAR-91, title: "마스크 프롬프트 트랙 순위 PromptTrack.rank가 confidence 0.0을 1.0으로 보아(or 1.0) 신뢰도 0 트랙이 앞섬", severity: low, status: candidate, kind: code,
+  - {id: F-PAR-91, title: "마스크 프롬프트 트랙 순위 PromptTrack.rank가 confidence 0.0을 1.0으로 보아(or 1.0) 신뢰도 0 트랙이 앞섬", severity: low, status: fixed, kind: code,
      files: [packages/prelabel/src/dlp_prelabel/masks.py], source: docs/handover/full-inspection-2026-11-04.md,
-     note: "주석 단계(P3) 코드 읽기로 발견, 실행 재현 전 후보."}
-  - {id: F-COE-89, title: "콘솔 가중치 가져오기 검사(/api/pretrain/check) 업로드에 크기 상한이 없어 디스크를 채울 수 있음 (영상 업로드는 upload.max_mb)", severity: low, status: candidate, kind: code,
-     files: [packages/console/src/dlp_console/app.py, packages/console/src/dlp_console/pretrain.py], source: docs/handover/full-inspection-2026-11-04.md,
-     note: "swarm s9 미증명 의심과 P3에서 같은 지적. 실행 재현 전 후보."}
-  - {id: F-ETA-32, title: "골든 평가 예측(dlp_eval.runner._predictions)이 사람 출처만 빼서 센서 출처 레코드도 모델 예측으로 셈 (버전 * 이면 model_version 없는 센서 레코드까지)", severity: low, status: candidate, kind: code,
+     note: "주석 단계(P3)에서 발견, 2026-11-04 재현. confidence가 None일 때만 1.0, 0.0은 그대로. 회귀: packages/prelabel/tests/test_mask_prompt_rank.py::test_zero_confidence_track_ranks_last_f_par_91 (수정 전 실패 확인)"}
+  - {id: F-COE-89, title: "콘솔 가중치 가져오기 검사(/api/pretrain/check) 업로드에 크기 상한이 없어 디스크를 채울 수 있음 (영상 업로드는 upload.max_mb)", severity: low, status: fixed, kind: code,
+     files: [packages/console/src/dlp_console/app.py, packages/console/src/dlp_console/upload.py, packages/console/src/dlp_console/settings.py, config/console.yaml], source: docs/handover/full-inspection-2026-11-04.md,
+     note: "2026-11-04 재현(상한 넘는 파일 200으로 저장). console.yaml pretrain_import.max_mb(2048, 단일 ONNX protobuf 한계 2 GB)·manifest_max_kb(256), 넘으면 가져오기 디렉터리를 지우고 400. multipart 본문을 받는 동안의 임시 디스크는 영상 올리기와 같이 막지 못한다. 회귀: packages/console/tests/test_pretrain.py::test_oversized_onnx_is_rejected_and_not_stored_f_coe_89 외 2개"}
+  - {id: F-ETA-32, title: "골든 평가 예측(dlp_eval.runner._predictions)이 사람 출처만 빼서 센서 출처 레코드도 모델 예측으로 셈 (버전 * 이면 model_version 없는 센서 레코드까지)", severity: low, status: fixed, kind: code,
      files: [packages/evaluation/src/dlp_eval/runner.py], source: docs/handover/full-inspection-2026-11-04.md,
-     note: "주석 검수(P4)에서 함수 호출로 확인(scratchpad 탐침). 지금 Source.SENSOR 레코드를 만드는 코드가 없어 잠재. 장갑 센서 접촉 연동 전에 예측을 모델 출처로 좁힌다."}
+     note: "주석 검수(P4)에서 발견, 2026-11-04 재현. 예측을 모델 출처(Source.MODEL)로 좁혔다. 회귀: packages/evaluation/tests/test_prediction_source.py::test_sensor_records_are_not_predictions_f_eta_32 (수정 전 실패 확인)"}

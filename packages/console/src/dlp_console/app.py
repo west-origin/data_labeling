@@ -37,6 +37,7 @@ import json
 import math
 import os
 import secrets
+import shutil
 from collections.abc import AsyncGenerator, Awaitable, Callable, Generator, Iterable
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
@@ -67,7 +68,7 @@ from dlp_console.status import (
 )
 from dlp_console.steps import IDENT, STEPS_BY_ID, ParamError, StepContext, build_command, evaluate
 from dlp_console.training import ReportCache, latest_weekly, policy_trainers, rounds
-from dlp_console.upload import UploadForm, prepare_upload, remove_upload
+from dlp_console.upload import UploadForm, prepare_upload, remove_upload, save_stream
 from dlp_media.storage import S3Store
 from dlp_privacy.policy import load_policy as load_privacy_policy
 from dlp_privacy.rendering import assert_render_current
@@ -629,12 +630,22 @@ def _pretrain_routes(app: FastAPI, svc: Services) -> None:
         새 가져오기 디렉터리(`<작업 디렉터리>/pretrain/<가져오기 ID>/`)에 ONNX와 두 manifest를
         저장하고 `ImportStore.check`로 검사·적용 미리보기를 만든다. 작업을 시작하지 않고 설정
         파일도 고치지 않는다. 검사 실패도 200이며 응답의 `ok`·`checks`가 이유를 보인다.
+        파일마다 크기 상한(ONNX `pretrain_import.max_mb`, manifest `manifest_max_kb`)을 두어
+        작업 디렉터리 디스크를 지킨다 (F-COE-89).
+
+        Raises:
+            ParamError: 한 파일이라도 상한을 넘음 (400, 가져오기 디렉터리째 지운다).
         """
+        cfg = svc.settings.config.pretrain_import
+        limits = (cfg.max_mb * 1024 * 1024, cfg.manifest_max_kb * 1024, cfg.manifest_max_kb * 1024)
         import_id, path = svc.imports.new_dir()
-        for name, upload in zip(FILES, (onnx, model_manifest, data_manifest), strict=True):
-            with (path / name).open("wb") as f:
-                while chunk := upload.file.read(1024 * 1024):
-                    f.write(chunk)
+        uploads = (onnx, model_manifest, data_manifest)
+        for name, upload, limit in zip(FILES, uploads, limits, strict=True):
+            try:
+                save_stream(upload.file, path / name, limit)
+            except ParamError as exc:
+                shutil.rmtree(path, ignore_errors=True)
+                raise ParamError(f"{name}: {exc}") from exc
         return svc.imports.check(import_id).public()
 
     @app.post("/api/pretrain/{import_id}/confirm")

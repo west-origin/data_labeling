@@ -14,9 +14,9 @@ DB에서 정답·예측을 모아 지표·하위 집단·게이트 리포트를 
   안내한다.
 - 정답 근거와 평가 입력은 같은 읽기에서 만든다: `golden_sessions`를 한 번 읽어 `truth_anchor`와
   `load_golden`·`load_golden_merged`(`sessions=`)에 함께 넘긴다.
-- 예측: 과제별로 지정한 model_version이 붙은, 사람 출처가 아닌 레코드(모델 출처, 그리고
-  `model_version`을 단 센서 출처). 삭제를 기록한 레코드(`retracted`) 자체와 사람 출처 레코드는
-  넣지 않는다. 나중에 검수자가 고쳤어도 모델이 낸 원래 레코드로 평가한다. 버전이 `*`로 끝나면
+- 예측: 과제별로 지정한 model_version의 모델 출처 레코드. 사람·센서 출처 레코드와 삭제를 기록한
+  레코드(`retracted`) 자체는 넣지 않는다 (센서 레코드에 model_version이 붙어도 모델 예측이 아니다,
+  F-ETA-32). 나중에 검수자가 고쳤어도 모델이 낸 원래 레코드로 평가한다. 버전이 `*`로 끝나면
   그 앞부분으로 시작하는 버전의 레코드 중 새 모델 버전이 지우지(retractions) 않은 것을 평가한다.
   검수자가 지우거나 고친 모델 레코드도 그대로 예측이다 (검수자가 지운 오탐이 사라지면 안 된다).
 - 오류 삽입 사본·측정 레코드와 그 후손은 예측에서 뺀다.
@@ -331,14 +331,15 @@ def _predictions(
             버전을 주면 그 버전이 낸 레코드를 나중에 다른 버전이 지웠어도 그대로 평가한다.
 
     Returns:
-        사람 출처·삭제 레코드를 뺀, 버전이 맞는 레코드 (이력 순서).
+        모델 출처이고 삭제 레코드가 아닌, 버전이 맞는 레코드 (이력 순서). 사람·센서 출처는 뺀다
+        (센서 레코드에 model_version이 붙어도 모델 예측이 아니다, F-ETA-32).
     """
     prefix = version[:-1] if version.endswith("*") else None
     out: list[LabelRecord] = []
     for x in labels:
         if (
             x.kind not in kinds
-            or x.provenance.source is Source.HUMAN
+            or x.provenance.source is not Source.MODEL
             or x.retracted
             or x.label_id in excluded
         ):

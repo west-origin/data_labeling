@@ -38,6 +38,12 @@ preview:
 pretrain_import:
   # 가중치를 둘 곳 (저장소 루트 기준, data/models는 Git에 넣지 않는다)
   models_dir: data/models/pretrain
+  # 올린 파일 한 개 상한. 넘으면 받던 가져오기 디렉터리째 지우고 받지 않는다 (F-COE-89).
+  # ONNX는 단일 파일이 protobuf 한계(2 GB)를 넘을 수 없어 이보다 큰 것은 정상 단일 ONNX가 아니다
+  # (YOLOX-X도 수백 MB). 외부 데이터 파일로 나눈 ONNX는 이 화면이 받지 않는다.
+  max_mb: 2048
+  # manifest JSON 두 개는 클래스 목록·해시·학습 설정뿐이라 수 KB다. 넉넉히 두되 ONNX와 따로 작게 막는다.
+  manifest_max_kb: 256
   # 골든셋 비교 명령. 지금 저장소에는 외부 ONNX를 예측을 DB에 쓰지 않고 골든셋으로 평가하는 명령이 없다
   # (dlp eval golden은 DB에 있는 예측만, dlp train run은 학습기가 있어야 한다). YOLOX 학습기·로더가
   # dlp_train에 붙으면 그 이름을 trainer에 적는다. null이면 비교 버튼은 꺼지고 이유를 보인다 (F-COE-74).

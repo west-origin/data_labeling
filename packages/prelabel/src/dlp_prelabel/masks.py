@@ -133,9 +133,13 @@ class PromptTrack:
     def rank(self) -> float:
         """한 프레임 프롬프트 상한을 넘을 때 앞세울 순서 (클수록 앞, 손 먼저, 그다음 트랙 신뢰도).
 
-        손은 2.0이라 신뢰도(0~1) 트랙보다 늘 앞선다. 신뢰도가 없는 트랙은 1.0으로 본다.
+        손은 2.0이라 신뢰도(0~1) 트랙보다 늘 앞선다. 신뢰도가 없는(None) 트랙만 1.0으로 본다.
+        신뢰도 0.0은 0.0 그대로다 (`or`로 쓰면 0.0이 1.0이 되어 가장 앞선다, F-PAR-91).
         """
-        return 2.0 if self.is_hand else (self.record.confidence or 1.0)
+        if self.is_hand:
+            return 2.0
+        conf = self.record.confidence
+        return 1.0 if conf is None else conf
 
 
 @dataclass

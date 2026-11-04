@@ -12,6 +12,7 @@ import yaml
 
 from dlp_console.imports import ImportStore
 from dlp_console.pretrain import entries_yaml, plan_entries
+from dlp_console.settings import ConsoleSettings
 from dlp_console.steps import ParamError
 from dlp_models.datasets import load_pretrain_objects
 from dlp_schema import repo_root
@@ -227,3 +228,56 @@ def test_confirm_without_plan_is_param_error_f_coe_86(client: Api, services: Fak
     import_id, _path = services.imports.new_dir()
     res = client.post(f"/api/pretrain/{import_id}/confirm")
     assert res.status_code == 400 and "검사 결과가 없는" in res.json()["detail"]
+
+
+def _limit(settings: ConsoleSettings, **update: int) -> None:
+    """가져오기 크기 상한을 바꾼 설정으로 갈아 끼운다 (라우트는 요청 때 설정을 읽는다)."""
+    pretrain = settings.config.pretrain_import.model_copy(update=update)
+    settings.config = settings.config.model_copy(update={"pretrain_import": pretrain})
+
+
+def _files(onnx: bytes, model: bytes, data: bytes) -> dict[str, tuple[str, bytes, str]]:
+    return {
+        "onnx": ("model.onnx", onnx, "application/octet-stream"),
+        "model_manifest": ("model_manifest.json", model, "application/json"),
+        "data_manifest": ("data_manifest.json", data, "application/json"),
+    }
+
+
+def test_oversized_onnx_is_rejected_and_not_stored_f_coe_89(
+    client: Api, settings: ConsoleSettings, tmp_path: Path
+) -> None:
+    """F-COE-89: 상한(`pretrain_import.max_mb`)을 넘는 ONNX는 400이고 디렉터리가 남지 않는다."""
+    _limit(settings, max_mb=1)
+    _onnx, model, data = _bundle(tmp_path)
+    big = b"\0" * (1024 * 1024 + 1)
+    res = client.post(
+        "/api/pretrain/check", files=_files(big, model.read_bytes(), data.read_bytes())
+    )
+    assert res.status_code == 400 and "model.onnx" in res.json()["detail"]
+    assert list((settings.work_dir / "pretrain").iterdir()) == []
+
+
+def test_oversized_manifest_is_rejected_and_not_stored_f_coe_89(
+    client: Api, settings: ConsoleSettings, tmp_path: Path
+) -> None:
+    """F-COE-89: manifest는 따로 작은 상한(`manifest_max_kb`)을 둔다. 넘으면 ONNX까지 지운다."""
+    _limit(settings, manifest_max_kb=1)
+    onnx, model, _data = _bundle(tmp_path)
+    data = json.dumps({"pad": "x" * 2048}).encode()
+    files = _files(onnx.read_bytes(), model.read_bytes(), data)
+    res = client.post("/api/pretrain/check", files=files)
+    assert res.status_code == 400 and "data_manifest.json" in res.json()["detail"]
+    assert list((settings.work_dir / "pretrain").iterdir()) == []
+
+
+def test_bundle_within_limits_is_checked_f_coe_89(
+    client: Api, settings: ConsoleSettings, tmp_path: Path
+) -> None:
+    """F-COE-89: 상한 안의 묶음은 그대로 검사한다 (상한은 정확히 그 크기까지 받는다)."""
+    _limit(settings, max_mb=1, manifest_max_kb=1)
+    _onnx, model, data = _bundle(tmp_path)
+    assert len(model.read_bytes()) <= 1024 and len(data.read_bytes()) <= 1024
+    files = _files(b"\0" * (1024 * 1024), model.read_bytes(), data.read_bytes())
+    res = client.post("/api/pretrain/check", files=files)
+    assert res.status_code == 200

@@ -146,7 +146,10 @@ def manifest_yaml(manifest: SessionManifest) -> str:
 
 
 def save_stream(src: BinaryIO, dest: Path, max_bytes: int) -> int:
-    """업로드 본문을 파일로 쓴다. 상한을 넘으면 지우고 ParamError."""
+    """업로드 본문을 조각마다 세며 파일로 쓴다. 상한을 넘으면 지우고 ParamError.
+
+    끝까지 쓴 뒤 크기를 보지 않고 넘는 순간 멈춰, 큰 본문이 작업 디렉터리 디스크를 채우지 않게 한다.
+    """
     written = 0
     with dest.open("wb") as f:
         while chunk := src.read(CHUNK):
@@ -154,9 +157,14 @@ def save_stream(src: BinaryIO, dest: Path, max_bytes: int) -> int:
             if written > max_bytes:
                 f.close()
                 dest.unlink(missing_ok=True)
-                raise ParamError(f"파일이 상한({max_bytes // CHUNK} MB)보다 큽니다")
+                raise ParamError(f"파일이 상한({_size_text(max_bytes)})보다 큽니다")
             f.write(chunk)
     return written
+
+
+def _size_text(n: int) -> str:
+    """상한 바이트 → 안내 문구 (MB로 나누어떨어지면 MB, 아니면 KB)."""
+    return f"{n // CHUNK} MB" if n % CHUNK == 0 else f"{n // 1024} KB"
 
 
 def prepare_upload(
