@@ -88,7 +88,8 @@ class Entity(Contract):
 
     - entity_id: 세션 안에서 고유한 개체 ID (예: rag_01). 라벨의 entity_id·target_id 등이 가리킨다.
     - kind: 개체 종류.
-    - class_id: 온톨로지 객체 클래스 ID. 손·카메라는 None일 수 있다.
+    - class_id: 온톨로지 객체 클래스 ID (선택). 손·카메라는 보통 None이다. 검증기는 다른 종류의
+      None도 거부하지 않고, 값이 있으면 사전에 있는지만 본다 (`validation.validate_episode`).
     """
 
     entity_id: Identifier

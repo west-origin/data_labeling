@@ -13,8 +13,9 @@
 검수 화면과 블러본의 박스가 달라진다.
 
 WP5. `rendering.render_session`(`dlp privacy render`, `runner`가 재수출)이 승인된 세션의 운영 블러
-라벨로 부른다. 입력은 로컬 원본 영상, 출력은 로컬 블러본 파일이다 (라벨링 버킷 업로드는 runner가
-한다). 홀수 크기 원본은 오른쪽·아래를 검은 화소로 덧대 짝수 크기로 쓴다 (좌표 유지, F-PMS-02).
+라벨로 부른다. 입력은 로컬 원본 영상, 출력은 로컬 블러본 파일이다 (라벨링 버킷 업로드는
+`rendering.render_session`이 한다). 홀수 크기 원본은 오른쪽·아래를 검은 화소로 덧대 짝수 크기로
+쓴다 (좌표 유지, F-PMS-02).
 정책 값: privacy.yaml `render`(min_block_px, blocks_per_box, encoder_rate, crf),
 defaults.yaml `privacy.render_mode`. 이 값과 라벨 집합이 `rendering.render_hash`를 정한다.
 블러는 라벨의 박스 영역 그대로다 (모양 마스크를 쓰지 않는다, ADR 0059). 이 모듈은 승인 여부를 보지

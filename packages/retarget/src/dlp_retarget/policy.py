@@ -24,7 +24,8 @@ class SolverName(StrEnum):
     풀이기 이름과 판은 리타기팅 판(`retarget_version`)에 들어간다. 두 풀이기는 오차·도달·속도 한계를
     같은 규칙(`ik.frame_errors`, `ik.limit_step`)으로 정하므로 바꿔도 판정 기준은 같다.
 
-    - `dls`: 내장 감쇠 최소제곱 (numpy, CPU, `dlp_retarget.ik.DlsIkSolver`). 기본값이다.
+    - `dls`: 내장 감쇠 최소제곱 (numpy, CPU, `dlp_retarget.ik.DlsIkSolver`). 저장소
+      `retarget.yaml`이 쓰는 값이다 (필드 기본값은 없다).
     - `mink`: mink(MuJoCo) 격리 환경 (`dlp_retarget.mink.MinkIkSolver`). `retarget.yaml mink`의
       환경이 있어야 한다.
     """

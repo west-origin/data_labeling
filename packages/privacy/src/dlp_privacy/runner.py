@@ -10,8 +10,9 @@ WP5, ADR 0005·0019·0023·0024. CLI `dlp_cli.privacy_cmds`가 DB 연결과 저�
 - `approve_session` (`dlp privacy approve`): 승인 조건을 확인하고 APPROVED로. 승인 보류 중이면
   거부한다 (`dlp_privacy.hold`, `dlp privacy hold`, ADR 0042).
 - `render_session` (`dlp privacy render`): 승인된 세션의 블러본과 렌더 기록을 라벨링 버킷에 쓴다.
-- `assert_render_current` / `check_fetched`: 블러본 소비자(검수 작업 생성, 행동 VLM, 큐레이션,
-  내보내기)가 쓰기 전에 부르는 확인 (ADR 0024).
+- `assert_render_current` / `check_fetched`: 블러본 소비자(검수 작업 생성, 행동 VLM, AI 1차 검수,
+  큐레이션, 학습)가 쓰기 전에 부르는 확인 (ADR 0024). 내보내기는 같은 판정을
+  `expected_render_hash`·`check_render_meta`·`check_fetched`로 한다.
 - `invalidate_render`: 블러가 바뀐 스트림의 렌더 기록을 무효로 만든다 (dlp_review의 블러 검수
   수집도 부른다).
 - `stale_media_tasks` / `request_media_revocation` (`revocation`): 블러가 바뀐 스트림의 이미 배포한
