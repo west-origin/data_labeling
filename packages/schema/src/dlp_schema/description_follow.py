@@ -246,15 +246,19 @@ def _changed(
     now: Sequence[LabelRecord], base: dict[str, LabelRecord] | None, by_id: dict[str, LabelRecord]
 ) -> bool:
     """규칙 3·3b: 현재 주인의 의미가 기준과 다르거나, 기준에서 나오지 않은 주인이 생겼거나, 기준
-    레코드 중 현재 후손이 없는 것이 있다 (부분 삭제)."""
+    레코드 중 현재 후손이 없는 것이 있다 (부분 삭제).
+
+    의미는 가장 가까운 기준 조상과 비교하고, 도달 표시는 사슬 위 기준 레코드 모두에 한다. 온톨로지
+    이관은 같은 model_version의 자식을 만들어 옛 레코드와 이관본이 함께 기준이 되는데, 옛 레코드도
+    이관본을 거쳐 현재 후손이 있으므로 부분 삭제가 아니다 (F-SCH-33)."""
     if base is None:
         return any(meaning(o) != meaning(_root(o, by_id)) for o in now)
     reached: set[str] = set()
     for o in now:
-        ancestor = next((a for a in _chain(o, by_id) if a.label_id in base), None)
-        if ancestor is None or meaning(o) != meaning(ancestor):
+        in_base = [a for a in _chain(o, by_id) if a.label_id in base]
+        if not in_base or meaning(o) != meaning(in_base[0]):
             return True
-        reached.add(ancestor.label_id)
+        reached.update(a.label_id for a in in_base)
     return bool(set(base) - reached)
 
 

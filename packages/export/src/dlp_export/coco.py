@@ -15,7 +15,8 @@ pycocotools로 읽고 평가할 수 있어야 한다 (테스트가 확인).
   마스크에서 계산한 bbox·area, 마스크 점수(`mask_score`)를 단 주석. 손 마스크는 hand 범주(객체
   hand)에 `hand`(left/right)를 붙인다. 마스크는 보간하지 않는다 (그 키프레임에만).
 - 주석마다 track_id(개체), label_id, 검증 상태, 출처, 모델 버전, 신뢰도를 붙인다
-  (보간한 값은 넣지 않는다).
+  (보간한 값은 넣지 않는다). 보간해 채운 손 키프레임(`interpolated`, ADR 0054)은 관측이 아니라
+  주석도 이미지도 만들지 않는다 (F-PAR-63).
 
 시각 규약 (ADR 0019): 박스·키포인트 키프레임 시각은 그 스트림 영상의 PTS 시각이므로 마스터 시각으로
 바꾸지 않고 그대로 블러본 PTS 인덱스에서 찾는다 (3인칭 스트림도 같다). 이미지 `t_ms`도 스트림 시각.
@@ -270,8 +271,9 @@ def write_coco(  # noqa: C901
                 p = x.payload
                 assert isinstance(p, BoxTrackPayload | KeypointTrackPayload | MaskTrackPayload)
                 for k in p.keyframes:
-                    # 화면 밖 표시(outside) 키프레임은 주석이 아니다 (박스만 가진 필드)
-                    if getattr(k, "outside", False):
+                    # 화면 밖 표시(outside, 박스만)와 보간해 채운 손 키프레임(interpolated,
+                    # 키포인트만, ADR 0054)은 관측이 아니라 주석으로 내지 않는다 (F-PAR-63)
+                    if getattr(k, "outside", False) or getattr(k, "interpolated", False):
                         continue
                     f = exact_frame(index, k.t_ms, policy.coco.frame_tolerance_ms)
                     if f is None:

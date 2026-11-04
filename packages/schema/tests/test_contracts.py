@@ -14,6 +14,7 @@ from typing import Any, get_args
 import pytest
 from pydantic import ValidationError
 
+from dlp_schema.calibration import CameraCalibration
 from dlp_schema.export import ExportedLabel
 from dlp_schema.labels import (
     SPATIAL_KINDS,
@@ -29,7 +30,8 @@ from dlp_schema.labels import (
     VerificationState,
     without_world,
 )
-from dlp_schema.review import ReviewTask
+from dlp_schema.ops import ReviewWork
+from dlp_schema.review import InjectedError, ReviewAssignment, ReviewTask
 from dlp_schema.session import (
     Calibration,
     CameraIntrinsics,
@@ -496,3 +498,46 @@ def test_intrinsics_reject_non_finite() -> None:
         CameraIntrinsics.model_validate(
             {**base, "cx": 320.0, "cy": 240.0, "distortion": [0.0, float("inf")]}
         )
+
+
+_BASE_NUMERIC: dict[str, tuple[type[Any], dict[str, Any]]] = {
+    "priority": (
+        ReviewAssignment,
+        {"assignment_id": "a1", "session_id": "s001", "label_kinds": ["action"],
+         "mode": "standard", "priority": 1.0, "created_at": FIXED_TIME},
+    ),
+    "seconds": (
+        ReviewWork,
+        {"work_id": "w1", "session_id": "s001", "reviewer": "r1", "stage": "labeling",
+         "seconds": 1.0, "video_ms": 1000, "source": "manual", "recorded_at": FIXED_TIME},
+    ),
+    "rms_px": (
+        CameraCalibration,
+        {"calibration_id": "c1", "camera_id": "cam1", "method": "imported", "rms_px": 0.3,
+         "intrinsics": {"width": 640, "height": 480, "fx": 500.0, "fy": 500.0, "cx": 320.0,
+                        "cy": 240.0},
+         "created_at": FIXED_TIME},
+    ),
+}  # fmt: skip
+
+
+@pytest.mark.parametrize("bad", _NON_FINITE)
+@pytest.mark.parametrize("field", sorted(_BASE_NUMERIC))
+def test_ops_review_calibration_floats_reject_non_finite(field: str, bad: float) -> None:
+    """검수 배정 우선순위·작업 시간·캘리브레이션 RMS도 유한해야 한다 (F-SCH-34).
+
+    NaN 우선순위는 정렬을 깨고, +Inf 작업 시간은 ge=0을 통과해 운영 지표를 무한대로 만든다.
+    """
+    model, base = _BASE_NUMERIC[field]
+    model.model_validate(base)
+    with pytest.raises(ValidationError, match="finite"):
+        model.model_validate({**base, field: bad})
+
+
+@pytest.mark.parametrize("bad", _NON_FINITE)
+def test_injected_error_detail_rejects_non_finite(bad: float) -> None:
+    """오류 삽입 세부값의 실수도 유한해야 한다. NaN은 JSONB 저장에서 DB 오류가 된다 (F-SCH-34)."""
+    base: dict[str, Any] = {"error_type": "boundary_shift", "original_label_id": "x"}
+    assert InjectedError.model_validate({**base, "detail": {"shift": 1.5, "to": "b", "n": 2}})
+    with pytest.raises(ValidationError, match="finite"):
+        InjectedError.model_validate({**base, "detail": {"shift": bad}})

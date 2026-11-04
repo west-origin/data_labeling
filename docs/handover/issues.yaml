@@ -255,9 +255,9 @@ issues:
      repro: tests/test_known_defects.py::test_privacy_detect_tolerates_frames_rounding_to_same_ms}
   - {id: F-PMS-06, title: GPMF 패킷 하나가 잘리면 세션 수집 전체 실패, severity: low, status: open, kind: code,
      files: [packages/media/src/dlp_media/imu.py], source: docs/handover/full-review-2026-10-11.md}
-  - {id: F-PMS-07, title: NaN이 섞인 장갑·IMU 시각이 단조 검사를 통과, severity: low, status: open, kind: code,
-     files: [packages/media/src/dlp_media/glove.py, packages/media/src/dlp_media/imu.py], source: docs/handover/full-review-2026-10-11.md,
-     repro: tests/test_known_defects.py::test_glove_times_with_nan_rejected}
+  - {id: F-PMS-07, title: NaN이 섞인 장갑·IMU 시각이 단조 검사를 통과, severity: low, status: fixed, kind: code,
+     files: [packages/media/src/dlp_media/glove.py, packages/media/src/dlp_media/imu.py, packages/media/src/dlp_media/ingest.py], source: docs/handover/full-review-2026-10-11.md,
+     note: "2026-11-04 재현: inf 시각은 끝까지 통과, NaN은 업로드 뒤 실패해 원본 키가 잠김. 시각 비유한이면 ValueError, 수집은 업로드 전에 모든 센서 파일을 읽어 검증한다. 회귀: tests/test_known_defects.py::test_glove_times_with_nan_rejected(xfail 표시 지움), packages/media/tests/test_ingest.py::test_bad_sensor_file_is_rejected_before_any_upload"}
   - {id: F-PMS-08, title: 회전 영상 거부 메시지가 없어진 문서 절을 안내, severity: low, status: open, kind: comment,
      files: [packages/media/src/dlp_media/probe.py], source: docs/handover/full-review-2026-10-11.md}
   - {id: F-PMS-09, title: 탐지기 값이 비면 오류라는 주석과 달리 기본값으로 대체, severity: low, status: open, kind: comment,
@@ -830,7 +830,7 @@ issues:
      note: "MediaPipe 판정은 손 모양 좌우성 기준이라 카메라를 등진 사람은 그대로, 마주 본 사람은 뒤집어야 맞다. Clip에 스트림 종류가 없어 어댑터는 스트림마다 다르게 정하지 못한다. 3인칭 스트림의 손 트랙은 착용자 매칭 외 하위 단계 입력이 아니어서 영향은 작다. 필요하면 스트림 종류별 정책과 사람 방향(RTMPose 어깨 좌우)으로 정한다."}
   - {id: F-PAR-63, title: "손 3D 물리 제약 표시(Trajectory3DSample.flags)와 보간 키프레임 표시(KeypointFrame.interpolated)가 내보내기 형식에 실리지 않음 (낮춘 3D 신뢰도만 실리고, 채운 손 키프레임은 visibility 1로 나감)", severity: low, status: open, kind: code,
      files: [packages/export/src/dlp_export/lerobot.py, packages/export/src/dlp_export/coco.py, packages/schema/src/dlp_schema/labels.py], source: docs/adr/0054-prelabel-temporal-consistency-and-hand-3d-constraints.md, see: [F-PAR-60],
-     note: "ADR 0054에서 라벨에는 남겼으나 LeRobot·COCO·구간 JSON 형식은 바꾸지 않았다. 구매자가 관측과 보간을 구분하려면 LeRobot 손 2D 특징에 보간 여부, 3D 특징에 제약 표시 비트를 더한다 (내보내기 형식 변경, ADR)."}
+     note: "ADR 0054에서 라벨에는 남겼으나 LeRobot·COCO·구간 JSON 형식은 바꾸지 않았다. 2026-11-04: 보간 손 키프레임은 이제 내보내지 않는다(COCO는 건너뛰고 LeRobot은 없는 시각처럼, 회귀 packages/export/tests/test_formats.py::test_interpolated_hand_keyframes_are_not_exported_as_observations). 남은 것은 3D 물리 제약 표시(flags)를 형식에 싣는 일 (내보내기 형식 변경, ADR)."}
   - {id: F-REV-30, title: "웹훅 시험 test_partial_body_times_out_and_releases_connection이 CPU 부하에서 간헐 실패 (503 응답 뒤 서버가 연결을 먼저 닫아 클라이언트 본문 전송이 BrokenPipeError)", severity: low, status: fixed, kind: test,
      files: [packages/review/tests/test_webhook_http.py], source: docs/handover/pilot-real-2026-10-22.md,
      note: "2026-10-23 make check 중 실영상 프리라벨(CPU 4코어 포화)과 함께 돌 때 한 번 실패, 단독 재실행은 통과. 시험의 post()가 본문을 보내는 동안 서버가 503을 먼저 보내고 닫으면 BrokenPipe가 난다. 고침(2026-10-23): 시험의 post()가 소켓으로 직접 보내고, 보내기가 BrokenPipe·ConnectionReset으로 끝나도 서버가 보낸 응답을 읽으며 응답 없이 끊기면 두 번까지 다시 보낸다. 서버 동작은 바꾸지 않았다 (시험의 경합)."}
@@ -1043,9 +1043,9 @@ issues:
   - {id: F-COE-84, title: "콘솔 전역 단계 API가 잘못된 JSON 본문·1e400에 500", severity: low, status: fixed, kind: code,
      files: [packages/console/src/dlp_console/app.py, packages/console/src/dlp_console/global_steps.py], source: docs/handover/full-inspection-2026-10-28.md,
      note: "_json_params가 잘못된 JSON·객체 아닌 본문·NaN·무한대를 ParamError(400)로, ops_weekly int 변환 실패도. 회귀: tests/test_known_defects.py::test_console_global_step_bad_json_is_400(xfail 표시 지움)"}
-  - {id: F-PAR-83, title: "3인칭 착용자 매칭 단계는 버전에 입력(3인칭 인물 트랙) 해시가 없어, 매칭이 안 되면 매 실행 IMU를 다시 받는다 (F-PAR-75 실행 기록에서 제외)", severity: low, status: candidate, kind: code,
+  - {id: F-PAR-83, title: "3인칭 착용자 매칭 단계는 버전에 입력(3인칭 인물 트랙) 해시가 없어, 매칭이 안 되면 매 실행 IMU를 다시 받는다 (F-PAR-75 실행 기록에서 제외)", severity: low, status: fixed, kind: code,
      files: [packages/prelabel/src/dlp_prelabel/runner.py], source: docs/adr/0015-audit-fixes.md, see: [F-PAR-75],
-     note: "2026-10-29 F-PAR-75 수정 중 발견. 실행 기록을 남기면 새 인물 트랙이 와도 다시 돌지 않게 되므로 먼저 버전에 입력 해시를 넣어야 한다. 재현 전 후보."}
+     note: "2026-10-29 F-PAR-75 수정 중 발견, 2026-11-04 재현. 착용자 실행 버전 = wearer_version + 입력 해시(인물 트랙·3인칭·IMU 스트림), prelabel_stage_runs(단계 wearer)로 같은 입력이면 원본을 받지 않는다. 회귀: packages/prelabel/tests/test_runner_rerun.py::test_unmatched_wearer_is_not_refetched_until_person_tracks_change"}
   - {id: F-AIR-37, title: "판정단 후보(d3-turbo·Amos 1)는 OpenAI 호환 채팅이 아닌 System One 결정 API라 지금 판정 백엔드·backend.panel로 부를 수 없음", severity: medium, status: open, kind: product,
      files: [packages/aireview/src/dlp_aireview/backend.py, config/policies/aireview.yaml, config/models.yaml], source: docs/adr/0063-decision-model-judge-panel.md,
      note: "2026-10-29 모델 카드 원문 확인. 결정 API 백엔드(판정 질문 → 선택지 확률 → 확신도) 어댑터와 CPU stub, 원격 코드 revision 고정·검토가 필요하다 (ADR 0063 개정)."}
@@ -1058,3 +1058,63 @@ issues:
   - {id: F-ETA-27, title: "training.yaml replaces에 대신할 수 없는 이름(masks·depth3d·오타, privacy 단계)을 적어도 적재되어 배포 모델과 기본 단계가 함께 돔", severity: low, status: fixed, kind: code,
      files: [packages/training/src/dlp_train/policy.py, config/policies/training.yaml], source: docs/adr/0016-retraining-loop.md,
      note: "TrainingPolicy._known_replaces: stage prelabel만, 이름은 PRELABEL_REPLACEABLE(프리라벨 기본 Predictor 이름 + contact) 안. 마스크 대체는 지원하지 않는다. 회귀: tests/test_known_defects.py::test_training_policy_rejects_unknown_replaces(xfail 표시 지움), packages/training/tests/test_policy.py::test_replaceable_names_match_prelabel_adapters"}
+  - {id: F-SCH-33, title: "온톨로지 이관 뒤 설명 따르기가 같은 모델 버전의 옛 행동과 이관본을 함께 기준으로 잡아, 의미가 같은 모델 설명을 부분 삭제로 보고 지움", severity: low, status: fixed, kind: code,
+     files: [packages/schema/src/dlp_schema/description_follow.py], source: docs/handover/full-inspection-2026-11-04.md,
+     note: "_changed가 사슬 위 가장 가까운 기준 조상에만 도달 표시를 해 옛 행동이 현재 후손이 없는 것으로 잡혔다. 도달 표시를 사슬 위 기준 레코드 모두에 한다 (의미 비교는 가장 가까운 조상). 회귀: packages/schema/tests/test_description_follow.py::test_migrated_copy_is_not_a_partial_delete, ::test_partial_delete_after_migration_still_retracts"}
+  - {id: F-SCH-34, title: "F-SCH-27 범위 밖 계약 실수 필드(배정 우선순위, 오류 삽입 detail, 작업 시간, 캘리브레이션 rms_px)가 NaN·Inf를 받음", severity: low, status: fixed, kind: code,
+     files: [packages/schema/src/dlp_schema/review.py, packages/schema/src/dlp_schema/ops.py, packages/schema/src/dlp_schema/calibration.py], source: docs/handover/full-inspection-2026-11-04.md, see: [F-SCH-27],
+     note: "FiniteFloat로 바꿨다 (JSON Schema는 같음). 이미 DB에 비유한 값이 있으면 읽을 때 ValidationError. 회귀: packages/schema/tests/test_contracts.py::test_ops_review_calibration_floats_reject_non_finite, ::test_injected_error_detail_rejects_non_finite"}
+  - {id: F-PMS-48, title: "IMU 가속도 표본 하나가 NaN이면 동기화 신호 전체가 NaN이 되어 두드림 짝짓기 실패라는 틀린 사유로 동기화가 실패", severity: low, status: fixed, kind: code,
+     files: [packages/media/src/dlp_media/imu.py, packages/sync/src/dlp_sync/signals.py], source: docs/handover/full-inspection-2026-11-04.md,
+     note: "수집에서 비유한 가속도를 업로드 전에 ValueError로 거부(자이로 NaN은 그대로 허용), imu_series는 이전 정규화본을 위해 비유한 표본을 빼고 중앙값을 낸다. 회귀: packages/media/tests/test_sensors_storage.py::test_sensor_times_and_acceleration_must_be_finite, packages/sync/tests/test_units.py::test_imu_series_drops_non_finite_samples"}
+  - {id: F-PMS-49, title: "탐지기 둘 중 하나가 간격 캐시일 때 관측이 트랙에 붙으면 캐시 유지 근거가 지워져, 캐시로 잡힌 송장이 승인 블러본에 노출", severity: medium, status: fixed, kind: code,
+     files: [packages/privacy/src/dlp_privacy/tracker.py, packages/privacy/src/dlp_privacy/pipeline.py], source: docs/handover/full-inspection-2026-11-04.md, see: [F-PMS-45],
+     note: "Track이 캐시 박스를 프레임별로 남기고 렌더 박스에 외접으로 더한다. 트래커 버전 iou-tracker-3 (기존 세션 재탐지·블러 재검수). 재현 퍼즈 3000시드 실패 17 → 0. 회귀: packages/privacy/tests/test_tracker_cover.py"}
+  - {id: F-ETA-28, title: "학습 증강 3D 좌우 뒤집기가 원근 변환이 합성되면(정책 기본) 빠지고 손·팔 이름만 바뀜", severity: low, status: fixed, kind: code,
+     files: [packages/training/src/dlp_train/augment.py], source: docs/handover/full-inspection-2026-11-04.md, see: [F-ETA-25],
+     note: "Ops.perspective로 원근을 밝히고 아핀 부분 inv(P)·M의 뒤집기·회전을 3D에 적용, 밝히지 않은 비아핀은 ValueError. 회귀: packages/training/tests/test_augment.py::test_flip_with_perspective_still_flips_3d, ::test_policy_flips_keep_3d_side_consistent"}
+  - {id: F-ETA-29, title: "contact 게이트 max_drop_by의 contact_end_error_ms가 guards에 없어 무시되어 종료 오차가 크게 나빠진 후보도 통과", severity: medium, status: fixed, kind: code,
+     files: [config/policies/evaluation.yaml, packages/evaluation/src/dlp_eval/policy.py], source: docs/handover/full-inspection-2026-11-04.md,
+     note: "guards에 더했고, 정책 적재가 primary·guards 밖 max_drop_by 키를 오류로 낸다. 회귀: packages/evaluation/tests/test_harness.py::test_max_drop_by_metric_outside_guards_fails_at_policy_load, ::test_contact_end_error_regression_blocks_gate"}
+  - {id: F-ETA-30, title: "평가 하네스가 outside 키프레임 직전 구간을 없음으로 보아(계약·블러 렌더·학습 데이터와 반대) blur_recall·HOTA가 낮게 나옴", severity: medium, status: fixed, kind: code,
+     files: [packages/evaluation/src/dlp_eval/harness.py], source: docs/handover/full-inspection-2026-11-04.md,
+     note: "다음 키프레임만 outside면 그 시각까지 앞 박스를 유지(max_gap과 무관, 렌더·yolox_data와 같음). 회귀: packages/evaluation/tests/test_harness.py::test_outside_keyframe_holds_box_until_its_time"}
+  - {id: F-ETA-31, title: "같은 버전 ID로 dlp dataset build를 다시 돌리면 lakeFS 스냅샷을 먼저 커밋한 뒤 DB IntegrityError traceback", severity: low, status: fixed, kind: code,
+     files: [packages/datasets/src/dlp_datasets/build.py, packages/cli/src/dlp_cli/dataset_cmds.py], source: docs/handover/full-inspection-2026-11-04.md,
+     note: "스냅샷 커밋 전에 버전 존재를 확인해 DatasetBuildError, CLI는 오류 문구와 종료 코드 1. 같은 ID 동시 빌드 경합은 남는다. 회귀: packages/datasets/tests/test_build_duplicate.py, packages/cli/tests/test_dataset_build_cmd.py"}
+  - {id: F-REV-36, title: "오류 삽입 배정 ID·사본 라벨 ID가 두 세션 ID를 이어 붙여 128자를 넘어 dlp review plan 전체가 실패 (재검수·QA·작업 ID도 검증 없이 길어짐)", severity: medium, status: fixed, kind: code,
+     files: [packages/review/src/dlp_review/ops/assign.py, packages/review/src/dlp_review/ops/seeding.py, packages/review/src/dlp_review/ops/results.py, packages/review/src/dlp_review/ops/selection.py, packages/review/src/dlp_review/collect.py], source: docs/handover/full-inspection-2026-11-04.md, see: [F-PAR-79, F-REV-05],
+     note: "derived_id로 길이 안에 맞춘다 (길이 안 ID는 예전 형식 그대로). 회귀: packages/review/tests/test_long_ids.py"}
+  - {id: F-REV-37, title: "검수자가 Label Studio에서 행동을 지우면 손 타임라인에 빈 시간이 생기는데 verify가 통과시키고 내보내기에 실림 (타임라인 공백 0 위반)", severity: medium, status: fixed, kind: code,
+     files: [packages/review/src/dlp_review/verify.py], source: docs/handover/full-inspection-2026-11-04.md,
+     note: "verify가 행동 라벨이 있는 손마다 [0, 세션 길이]를 action·gap으로 덮는지 보고 빈 시간을 이유로 막는다. 회귀: packages/review/tests/test_timeline_gaps.py, tests/test_end_to_end.py(정답 마지막 구간을 세션 길이까지)"}
+  - {id: F-PAR-85, title: "같은 온톨로지 버전에 원시 동작을 덧붙여 프롬프트·응답 스키마가 바뀌어도 행동·설명 모델 버전이 같아 다시 돌지 않음", severity: medium, status: fixed, kind: code,
+     files: [packages/actions/src/dlp_actions/vlm.py, packages/actions/src/dlp_actions/runner.py, packages/actions/src/dlp_actions/describe.py, packages/cli/src/dlp_cli/actions_cmds.py], source: docs/handover/full-inspection-2026-11-04.md, see: [F-PAR-84, F-AIR-32],
+     note: "버전에 프롬프트가 읽는 온톨로지 범주만의 해시(+o<8자>)를 넣는다. 배포 뒤 첫 실행이 기존 세션을 한 번 다시 돈다(검수 라벨은 보호). 회귀: packages/actions/tests/test_runner.py::test_appended_primitive_in_same_ontology_version_reruns, packages/actions/tests/test_describe.py::test_describe_version_follows_prompt_ontology_content"}
+  - {id: F-AIR-38, title: "행동 VLM·설명 재생성·조각 확인 응답이 수가 아닌 확신도(true, 문자열)를 받아 기록", severity: low, status: fixed, kind: code,
+     files: [packages/actions/src/dlp_actions/vlm.py, packages/actions/src/dlp_actions/describe.py, packages/aireview/src/dlp_aireview/crops.py], source: docs/handover/full-inspection-2026-11-04.md, see: [F-AIR-36],
+     note: "StrictFloat·strict 파싱. 행동·설명은 스키마 위반으로 재시도, 조각은 unsure 신뢰도 0. 회귀: packages/actions/tests/test_actions.py::test_non_number_confidence_is_a_schema_violation, packages/aireview/tests/test_crops.py::test_parse_verdict_rejects_non_number_confidence"}
+  - {id: F-AIR-39, title: "화면 밖 박스 하나가 너비 0 조각을 만들어 cv2.error로 dlp review hints --ai 조각 확인 전체를 멈춤", severity: low, status: fixed, kind: code,
+     files: [packages/aireview/src/dlp_aireview/crops.py], source: docs/handover/full-inspection-2026-11-04.md,
+     note: "crop_with_margin이 화면과 겹치지 않으면 None, 그 박스만 unsure로 두고 나머지를 묻는다. 회귀: packages/aireview/tests/test_crops.py::test_off_screen_box_is_unsure_and_the_rest_are_asked"}
+  - {id: F-COE-85, title: "콘솔 결과 보기가 사용 중지 세션과 무효가 된(또는 렌더 정책이 바뀐) 이전 블러본에도 서명 URL을 냄", severity: medium, status: fixed, kind: code,
+     files: [packages/console/src/dlp_console/app.py, packages/console/src/dlp_console/preview.py, packages/console/src/dlp_console/status.py], source: docs/handover/full-inspection-2026-11-04.md,
+     note: "사용 중지는 409, 서명 전에 dlp_privacy.rendering.assert_render_current(의존 표 console → privacy 추가). 회귀: packages/console/tests/test_app.py::test_preview_refused_for_withdrawn_session_f_coe_85, ::test_rendered_rejects_blur_made_under_old_render_policy_f_coe_85"}
+  - {id: F-COE-86, title: "가중치 가져오기 검사가 객체가 아닌 manifest JSON에 500, 그 가져오기의 확인도 500", severity: low, status: fixed, kind: code,
+     files: [packages/console/src/dlp_console/pretrain.py, packages/console/src/dlp_console/imports.py], source: docs/handover/full-inspection-2026-11-04.md, see: [F-COE-84],
+     note: "실패 검사 manifest JSON, plan 없는 확인은 400. 회귀: packages/console/tests/test_pretrain.py::test_non_object_manifest_fails_check_f_coe_86"}
+  - {id: F-COE-87, title: "dlp console serve --allow-remote를 IPv6 주소로 띄우면 괄호 없는 주소를 출력", severity: low, status: fixed, kind: code,
+     files: [packages/console/src/dlp_console/server.py], source: docs/handover/full-inspection-2026-11-04.md, see: [F-COE-81],
+     note: "IPv6 리터럴을 대괄호로 감싼다. 회귀: packages/console/tests/test_server.py::test_ipv6_literal_is_bracketed_f_coe_87"}
+  - {id: F-COE-88, title: "dlp ops weekly --weeks 0·음수가 빈 표로 종료 코드 0", severity: low, status: fixed, kind: code,
+     files: [packages/cli/src/dlp_cli/ops_cmds.py], source: docs/handover/full-inspection-2026-11-04.md,
+     note: "1~52만 받는다(콘솔과 같음), 아니면 인자 오류 종료 코드 2. 회귀: packages/cli/tests/test_ops_weekly_args.py"}
+  - {id: F-PAR-86, title: "긴 세션 ID에서 마스크·착용자 팔·착용자 사본 라벨 ID가 128자를 넘어 프리라벨 트랜잭션 전체가 롤백 (F-PAR-79가 3D·월드에만 적용됨)", severity: low, status: fixed, kind: code,
+     files: [packages/prelabel/src/dlp_prelabel/masks.py, packages/prelabel/src/dlp_prelabel/arm.py, packages/prelabel/src/dlp_prelabel/runner.py, packages/prelabel/src/dlp_prelabel/common.py], source: docs/handover/full-inspection-2026-11-04.md, see: [F-PAR-79],
+     note: "fit_label_id·fit_suffixed_id로 단계 접두사를 지킨 채 128자 안으로 (짧은 ID는 그대로). 회귀: packages/prelabel/tests/test_long_label_ids.py"}
+  - {id: F-PAR-87, title: "3D 단계가 (개체, 종류)마다 트랙 하나만 골라, 번호를 재사용한 새 버전 박스 트랙(다른 물체)의 3D가 빠짐", severity: low, status: fixed, kind: code,
+     files: [packages/prelabel/src/dlp_prelabel/runner.py, packages/prelabel/src/dlp_prelabel/lift3d.py, packages/prelabel/src/dlp_prelabel/worldframe.py], source: docs/handover/full-inspection-2026-11-04.md, see: [F-PAR-74],
+     note: "박스 트랙은 모두 넘기고 같은 번호가 여럿이면 <개체>-<트랙 해시 8자> 칸으로 3D·월드 라벨을 가른다 (박스 하나면 ID 그대로). 3D 보호 판정은 아직 (개체, 부위, 좌표계) 기준. 회귀: packages/prelabel/tests/test_lift3d.py::test_same_numbered_box_tracks_lift_to_separate_trajectories, test_runner_units.py::test_world_inputs_keep_same_numbered_box_trajectories_from_different_tracks"}
+  - {id: F-PAR-88, title: "손 크기 초점 추정을 켜면 3D 결과가 palm_estimate 값에 따르는데 3D 단계 버전에는 그 절 해시가 없음", severity: low, status: fixed, kind: code,
+     files: [packages/prelabel/src/dlp_prelabel/lift3d.py], source: docs/handover/full-inspection-2026-11-04.md,
+     note: "lift_policy_digest: focal_estimate가 켜졌을 때만 palm_estimate 절도 해시 (기본 버전 문자열 그대로). 회귀: packages/prelabel/tests/test_lift3d.py::test_lift_version_digest_includes_palm_estimate_only_with_focal_estimate"}

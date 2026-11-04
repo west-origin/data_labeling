@@ -21,7 +21,9 @@
   바꾸고 COCO 17점은 좌우 관절 번호를 맞바꾼다 (hand21 번호는 해부학 이름이라 그대로).
 - 3D 궤적(카메라 좌표): 좌우 뒤집기는 x를 뒤집고 손·팔 개체(left_hand↔right_hand,
   left_arm↔right_arm)를 바꾼다. 회전(화면 가운데 중심)은 같은 각도로 x·y를 돌린다.
-  배율·자르기·원근·렌즈 왜곡은 3D를 바꾸지 않는다 (내부 파라미터가 바뀐 것이다). 배율·자르기는
+  배율·자르기·원근·렌즈 왜곡은 3D를 바꾸지 않는다 (내부 파라미터가 바뀐 것이다). 그래서 3D는
+  원근(`Ops.perspective`)을 걷어 낸 아핀 부분의 뒤집기·회전을 원근 여부와 무관하게 따른다. 원근이
+  섞였다고 뒤집기를 빼면 개체 이름만 바뀌고 x는 그대로 남는다 (F-ETA-28). 배율·자르기는
   K를 바꾸는데 `Sample`에 바뀐 K가 없다: 증강본에서 3D를 투영하려면 K' = matrix · K가 필요하다.
   이 근사는 주점이 화면 가운데일 때만 정확하다.
   `Sample.geometry_3d_exact`는 원근·렌즈 왜곡이 들어갔는지만 보고(거짓) 주점 위치는 보지 않는다.
@@ -157,10 +159,15 @@ class Ops:
     k1: float
     # 반사광 가장자리 흐림 폭 (화면 너비 비율, 정책 egocentric.highlight_soft)
     highlight_soft: float = 0.01
+    # transform 끝에 합성한 원근 흔들기 (없으면 None). 3D 점은 이를 걷어 낸 아핀 부분만 따른다
+    # (F-ETA-28)
+    perspective: Transform | None = None
 
 
-def _geometry(rng: np.random.Generator, policy: AugmentationPolicy, w: int, h: int) -> Transform:
-    """기하 변환 하나 (뒤집기 → 회전 → 배율·자르기 → 원근 순 합성)."""
+def _geometry(
+    rng: np.random.Generator, policy: AugmentationPolicy, w: int, h: int
+) -> tuple[Transform, Transform | None]:
+    """기하 변환 하나 (뒤집기 → 회전 → 배율·자르기 → 원근 순 합성). (전체, 원근 또는 None)."""
     g = policy.geometric
     t = identity(w, h)
     if rng.random() < g.hflip_p:
@@ -176,10 +183,11 @@ def _geometry(rng: np.random.Generator, policy: AugmentationPolicy, w: int, h: i
             float(rng.uniform(min(0.0, h - ch), max(0.0, h - ch))),
         )
         t = t.then(crop_resize(w, h, (x0, y0, cw, ch)))
-    if g.perspective_frac > 0:
-        offsets = rng.uniform(-g.perspective_frac, g.perspective_frac, (4, 2)) * [w, h]
-        t = t.then(perspective(w, h, offsets))
-    return t
+    if g.perspective_frac <= 0:
+        return t, None
+    offsets = rng.uniform(-g.perspective_frac, g.perspective_frac, (4, 2)) * [w, h]
+    p = perspective(w, h, offsets)
+    return t.then(p), p
 
 
 def sample_ops(rng: np.random.Generator, policy: AugmentationPolicy, w: int, h: int) -> Ops:
@@ -187,8 +195,10 @@ def sample_ops(rng: np.random.Generator, policy: AugmentationPolicy, w: int, h: 
     p, e = policy.photometric, policy.egocentric
     jlo, jhi = p.jpeg_quality_range
     n_spec = int(rng.integers(0, e.highlights_max + 1)) if rng.random() < e.highlight_p else 0
+    transform, persp = _geometry(rng, policy, w, h)
     return Ops(
-        transform=_geometry(rng, policy, w, h),
+        transform=transform,
+        perspective=persp,
         brightness=float(rng.uniform(-p.brightness, p.brightness)),
         contrast=float(rng.uniform(-p.contrast, p.contrast)),
         blur_sigma=float(rng.uniform(0, p.blur_sigma_max)),
@@ -346,16 +356,28 @@ def _swap_side(name: str, t: Transform) -> str:
     return f"{swap_hand(side, t)}_{part}"
 
 
-def _point3d(item: Point3DItem, t: Transform) -> tuple[Point3DItem, bool]:
-    """카메라 좌표 3D 점 (뒤집기 x 반전·손 개체 교환, 회전은 x·y 회전). (점, 정확한가)."""
-    a = t.matrix[:2, :2]
-    exact = bool(np.allclose(t.matrix[2], [0, 0, 1]))
+def _point3d(item: Point3DItem, ops: Ops) -> tuple[Point3DItem, bool]:
+    """카메라 좌표 3D 점 (뒤집기 x 반전·손 개체 교환, 회전은 x·y 회전). (점, 정확한가).
+
+    좌우 뒤집기·회전은 원근 여부와 무관하게 원근을 걷어 낸 아핀 부분으로 늘 적용한다. 원근은 3D를
+    바꾸지 않으니 정확하지 않다고만 표시한다 (F-ETA-28: 이름만 바꾸고 x를 두면 좌우가 어긋난다).
+
+    Raises:
+        ValueError: `Ops.perspective`로 밝히지 않은 원근이 transform에 섞여 있을 때 (아핀 부분을
+            가를 수 없다).
+    """
+    m = ops.transform.matrix
+    if ops.perspective is not None:
+        m = np.linalg.inv(ops.perspective.matrix) @ m
+    if not np.allclose(m[2], [0, 0, 1]):
+        raise ValueError("원근이 섞인 변환은 Ops.perspective로 원근 부분을 밝혀야 합니다")
+    a = m[:2, :2]
+    det = abs(float(np.linalg.det(a)))
+    r = a / math.sqrt(det) if det > 0 else np.eye(2)
     x, y, z = item.xyz
-    if exact:
-        det = abs(float(np.linalg.det(a)))
-        r = a / math.sqrt(det) if det > 0 else np.eye(2)
-        x, y = (float(v) for v in r @ np.array([x, y]))
-    return Point3DItem(_swap_side(item.entity, t), item.part, (x, y, z)), exact
+    x, y = (float(v) for v in r @ np.array([x, y]))
+    entity = _swap_side(item.entity, ops.transform)
+    return Point3DItem(entity, item.part, (x, y, z)), ops.perspective is None
 
 
 def augment(sample: Sample, ops: Ops) -> Sample:
@@ -377,7 +399,7 @@ def augment(sample: Sample, ops: Ops) -> Sample:
     points3d: list[Point3DItem] = []
     exact = sample.geometry_3d_exact and not ops.k1
     for p in sample.points3d:
-        q, ok = _point3d(p, t)
+        q, ok = _point3d(p, ops)
         points3d.append(q)
         exact = exact and ok
     return Sample(

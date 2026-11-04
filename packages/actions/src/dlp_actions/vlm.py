@@ -12,11 +12,13 @@
   두 오류와 백오프·재시도 규칙은 공통 모듈 `dlp_models.vlm`에 있고 여기서 다시 내보낸다.
 
 주요 항목: `SegmentRequest`(구간 요청), `VlmAnswer`(응답 형식), `Classified`(결과), `VlmClient`
-(클라이언트 프로토콜), `response_schema`, `build_prompt`, `validate_answer`, `classify`.
+(클라이언트 프로토콜), `response_schema`, `build_prompt`, `validate_answer`, `classify`,
+`PROMPT_ONTOLOGY`·`ontology_part_digest`(모델 버전에 넣는 온톨로지 부분 해시, F-PAR-85).
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from collections.abc import Callable, Sequence
@@ -24,7 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
-from pydantic import Field, ValidationError
+from pydantic import Field, StrictFloat, ValidationError
 
 from dlp_models.vlm import VlmRequestError as VlmRequestError
 from dlp_models.vlm import VlmUnavailableError as VlmUnavailableError
@@ -61,7 +63,8 @@ class VlmAnswer(Contract):
     """VLM 응답 형식. 온톨로지 값 검사는 validate_answer가 한다.
 
     label=action이면 verb(원시 동작)·target_id·tool_id, label=gap이면 gap_type을 쓴다.
-    description은 한국어 한 문장(200자 이하), confidence는 0~1 또는 없음.
+    description은 한국어 한 문장(200자 이하), confidence는 0~1 JSON 수 또는 없음. true·"0.95"는
+    스키마 위반이다 (재시도). lax 변환은 모델이 쓰지 않은 확신도를 기록한다 (F-AIR-38).
     """
 
     label: Literal["action", "gap"]
@@ -70,7 +73,7 @@ class VlmAnswer(Contract):
     target_id: str | None = None
     tool_id: str | None = None
     description: str | None = Field(default=None, max_length=200)
-    confidence: float | None = Field(default=None, ge=0, le=1)
+    confidence: StrictFloat | None = Field(default=None, ge=0, le=1)
 
 
 @dataclass
@@ -114,6 +117,22 @@ class VlmClient(Protocol):
             VlmRequestError: 설정 오류 (4xx). 재시도하지 않는다.
         """
         ...
+
+
+# 프롬프트·응답 스키마·응답 검사가 읽는 온톨로지 범주. 이 목록 밖 범주를 쓰기 시작하면 여기에 더한다
+PROMPT_ONTOLOGY = ("verbs", "gap_types")
+
+
+def ontology_part_digest(ontology: Ontology, parts: Sequence[str]) -> str:
+    """온톨로지 범주 `parts`의 내용 해시 (sha256 앞 8자, 키 정렬 JSON).
+
+    같은 버전에 draft로 원시 동작을 덧붙이면 프롬프트·스키마가 바뀌는데 버전 번호는 그대로라, 이
+    해시를 모델 버전에 넣어야 다시 묻는다 (F-PAR-85). 쓰지 않는 범주(객체·블러 대상 등)를 덧붙여도
+    다시 묻지 않게 쓰는 범주만 넣는다.
+    """
+    part = ontology.model_dump(mode="json", include=set(parts))
+    content = json.dumps(part, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(content.encode()).hexdigest()[:8]
 
 
 def response_schema(ontology: Ontology, entities: tuple[str, ...]) -> dict[str, Any]:

@@ -9,6 +9,9 @@
 - `iou`, `BoxTrack`, `track_boxes`: 프레임별 탐지를 IoU 탐욕 매칭으로 트랙에 잇는다.
 - `model_label`: 모델 출처(`Source.MODEL`) `LabelRecord`를 만든다.
 - `fit_label_id`: 긴 세션 ID에서도 단계 라벨 ID를 128자 안으로 결정적으로 줄인다 (단계 접두사 유지).
+  `fit_suffixed_id`: 다른 라벨 ID에 접미사를 붙인 ID(착용자 사본 등)를 같은 방식으로 맞춘다.
+- `distinct_slots`: 같은 entity_id를 쓰는 트랙(모델 버전마다 다시 매기는 박스 번호)을 라벨 ID 해시로
+  구분한 칸 이름 (마스크·3D 라벨 ID 끝).
 
 주의: 공간 라벨 키프레임 시각은 그 스트림 영상의 PTS ms다 (마스터 타임라인이 아니다, ADR 0019).
 """
@@ -19,7 +22,8 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Iterable, Iterator
+from collections import Counter
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -260,3 +264,30 @@ def model_label(
         created_at=now,
         payload=payload,
     )
+
+
+def fit_suffixed_id(base: str, suffix: str) -> str:
+    """라벨 ID `<base><suffix>`를 128자 안으로 맞춘다 (`fit_label_id`, F-PAR-86).
+
+    base는 다른 라벨의 ID라(착용자 사본의 원래 트랙 등) 그 자체가 128자에 가까울 수 있다. 해시 자리
+    (최소 8자 + 구분자)를 뺀 만큼 base 앞부분을 접두사로 지킨다: base의 단계 접두사는 base보다 버전
+    태그 이상 짧으므로 남아, 그 단계의 `_stale`·`stage_version`이 계속 고른다. 짧으면 그대로다.
+    """
+    keep = IDENTIFIER_MAX - 1 - _MIN_DIGEST
+    return fit_label_id(base[:keep], base[keep:] + suffix)
+
+
+def distinct_slots(tracks: Sequence[tuple[str, str]]) -> dict[str, str]:
+    """(라벨 ID, entity_id) → 라벨 ID별 칸 이름 (라벨 ID 끝·개체별 묶음 키, F-PAR-74·87).
+
+    entity_id가 하나뿐이면 그대로 쓰고(이미 쓴 ID가 바뀌지 않는다), 여럿이 같은 entity_id면 박스
+    번호를 모델 버전마다 다시 매겨 다른 개체일 수 있으므로 `<개체>-<라벨 ID sha256 앞 8자>`로
+    구분한다.
+    """
+    counts = Counter(entity for _, entity in tracks)
+    return {
+        label_id: entity
+        if counts[entity] == 1
+        else f"{entity}-{hashlib.sha256(label_id.encode()).hexdigest()[:8]}"
+        for label_id, entity in tracks
+    }

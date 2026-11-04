@@ -33,6 +33,9 @@ from dlp_schema.testing import FIXED_TIME, action_payload, make_label, make_sess
 
 pytestmark = pytest.mark.services
 ROOT = Path(__file__).resolve().parents[3]
+# 장면의 행동 하나(`action_payload`, 0~1000ms)가 손 타임라인 전체를 덮도록 세션 길이를
+# 맞춘다 (F-REV-37)
+ACTION_END_MS = 1000
 
 
 @pytest.fixture
@@ -76,7 +79,7 @@ def test_verify_refuses_until_review_is_done_then_records_transition(pg: sa.Engi
     model = Provenance(source=Source.MODEL, model_version="actions-v1")
     later = FIXED_TIME + timedelta(days=3)
     with pg.begin() as conn:
-        insert_session(conn, make_session("s001"))
+        insert_session(conn, make_session("s001", duration_ms=ACTION_END_MS))
         # 프리라벨 전 단계면 거부
         early = verify_session(conn, "s001", later, "lead")
         assert not early.verified and "프리라벨 전" in early.reasons[0]
@@ -132,7 +135,7 @@ def test_cli_verify_actor_defaults_to_current_actor(
     from dlp_cli.main import main
 
     with pg.begin() as conn:
-        insert_session(conn, make_session("s002"))
+        insert_session(conn, make_session("s002", duration_ms=ACTION_END_MS))
         set_privacy_state(conn, "s002", PrivacyState.APPROVED)
         set_lifecycle(conn, "s002", LifecycleState.PRIVACY_APPROVED)
         set_lifecycle(conn, "s002", LifecycleState.PRELABELED)
@@ -158,7 +161,7 @@ def test_rule_derived_relations_do_not_block_verify(pg: sa.Engine) -> None:
     model = Provenance(source=Source.MODEL, model_version="relations-abc")
     later = FIXED_TIME + timedelta(days=1)
     with pg.begin() as conn:
-        insert_session(conn, make_session("s001"))
+        insert_session(conn, make_session("s001", duration_ms=ACTION_END_MS))
         set_privacy_state(conn, "s001", PrivacyState.APPROVED)
         set_lifecycle(conn, "s001", LifecycleState.PRIVACY_APPROVED)
         set_lifecycle(conn, "s001", LifecycleState.PRELABELED)

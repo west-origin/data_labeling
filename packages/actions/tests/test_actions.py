@@ -178,6 +178,19 @@ def test_invalid_answers_are_rejected(raw: str, message: str, ontology: Ontology
     assert answer is None and any(message in e for e in errors)
 
 
+@pytest.mark.parametrize("confidence", [True, "0.95"])
+def test_non_number_confidence_is_a_schema_violation(confidence: Any, ontology: Ontology) -> None:
+    """F-AIR-38 회귀: confidence가 JSON 수가 아니면(true, "0.95") 스키마 위반이라 다시 묻는다.
+    정수 1은 JSON 수라 받는다."""
+    raw = {"label": "gap", "gap_type": "idle", "description": None}
+    answer, errors = validate_answer(
+        json.dumps(raw | {"confidence": confidence}), ontology, _request()
+    )
+    assert answer is None and any("스키마 위반" in e and "confidence" in e for e in errors)
+    ok, _ = validate_answer(json.dumps(raw | {"confidence": 1}), ontology, _request())
+    assert ok is not None and ok.confidence == 1.0
+
+
 def test_retry_then_fallback_to_unknown_not_idle(ontology: Ontology) -> None:
     """한 번 틀리면 다시 물어 정답을 받고(시도 2), 세 번 모두 틀리면 대기(idle)가 아니라
     미상(unknown)으로 대체하는지(fallback, 호출 3번) 검증한다.

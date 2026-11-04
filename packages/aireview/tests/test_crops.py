@@ -7,12 +7,14 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import numpy as np
 import pytest
 
 from dlp_aireview.crops import (
     CropAsk,
+    CropVerdict,
     OracleCropVerifier,
     VlmCropVerifier,
     crop_with_margin,
@@ -43,9 +45,14 @@ def test_crop_with_margin_and_prompts() -> None:
     블러 질문은 가운데가 모자이크라고 알린다.
     """
     rgb = np.zeros((480, 640, 3), dtype=np.uint8)
-    assert crop_with_margin(rgb, (100, 100, 50, 40), 1.0, 1000).shape[:2] == (121, 151)
-    assert max(crop_with_margin(rgb, (100, 100, 50, 40), 1.0, 64).shape[:2]) == 64
-    assert crop_with_margin(rgb, (600, 450, 80, 80), 1.0, 1000).shape[:2] == (110, 120)
+    wide, small = (
+        crop_with_margin(rgb, (100, 100, 50, 40), 1.0, 1000),
+        crop_with_margin(rgb, (100, 100, 50, 40), 1.0, 64),
+    )
+    edge = crop_with_margin(rgb, (600, 450, 80, 80), 1.0, 1000)
+    assert wide is not None and small is not None and edge is not None
+    assert wide.shape[:2] == (121, 151) and max(small.shape[:2]) == 64
+    assert edge.shape[:2] == (110, 120)
     face = CropAsk("f1", "privacy", "face", 0, (1, 1, 1, 1))
     assert "pixelated" in prompt_for(face) and "face" in prompt_for(face)
     assert "pixelated" not in prompt_for(CropAsk("t1", "object", "toilet_brush", 0, (1, 1, 1, 1)))
@@ -138,3 +145,38 @@ def test_config_error_is_raised_not_hidden_as_unsure() -> None:
         margin=1.0, max_side=64,
     )  # fmt: skip
     assert [v.answer for v in ctx] == ["unsure"]
+
+
+def test_off_screen_box_is_unsure_and_the_rest_are_asked() -> None:
+    """F-AIR-39 회귀: 계약상 유효한(outside=False) 박스가 화면과 겹치지 않으면 빈 조각이라 그 박스만
+    unsure(신뢰도 0)이고 묻지 않는다. 같은 프레임의 다른 박스는 그대로 묻는다 (명령 전체가 멈추지
+    않는다)."""
+    asked: list[tuple[str, tuple[int, ...]]] = []
+
+    class Recording:
+        version = "rec"
+
+        def verify(self, ask: CropAsk, crop: np.ndarray[Any, Any]) -> CropVerdict:
+            asked.append((ask.label_id, crop.shape))
+            return CropVerdict(ask.label_id, "no", 0.9)
+
+    rgb = np.zeros((100, 200, 3), dtype=np.uint8)
+    assert crop_with_margin(rgb, (250, 10, 20, 20), 0.2, 64) is None
+    asks = [
+        CropAsk("off", "object", "rag", 0, (250.0, 10.0, 20.0, 20.0)),
+        CropAsk("on", "object", "rag", 0, (10.0, 10.0, 20.0, 20.0)),
+    ]
+    frame = BlurredFrame("bodycam", 0, 0, rgb)
+    out = verify_crops(asks, [frame], Recording(), margin=0.2, max_side=64)
+    assert out == [CropVerdict("off", "unsure", 0.0), CropVerdict("on", "no", 0.9)]
+    assert [label for label, _ in asked] == ["on"]
+
+
+@pytest.mark.parametrize("confidence", ["true", '"0.95"', "1.5", "null"])
+def test_parse_verdict_rejects_non_number_confidence(confidence: str) -> None:
+    """F-AIR-38 회귀: 확신도가 JSON 수(0~1)가 아니면(true, "0.95", 범위 밖, null) unsure·신뢰도
+    0이다. lax 변환은 true를 1.0으로 읽어 모델이 쓰지 않은 no 확신도로 힌트를 만들었다. 정수 1은
+    받는다."""
+    content = f'{{"answer": "no", "confidence": {confidence}}}'
+    assert parse_verdict("x", content) == CropVerdict("x", "unsure", 0.0)
+    assert parse_verdict("x", '{"answer": "no", "confidence": 1}') == CropVerdict("x", "no", 1.0)

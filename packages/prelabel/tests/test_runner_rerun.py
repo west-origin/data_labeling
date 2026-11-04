@@ -27,7 +27,7 @@ from numpy.typing import NDArray
 from dlp_fixtures.camera_motion import CameraMotionScenario, generate_camera_motion
 from dlp_fixtures.hand3d import Hand3DScenario, generate_hand3d_scenario
 from dlp_fixtures.io import write_parquet
-from dlp_fixtures.video import write_video
+from dlp_fixtures.video import generate_blur_scenario, write_video
 from dlp_media.ingest import ingest_session, load_manifest
 from dlp_media.storage import LocalStore
 from dlp_prelabel.adapters.stubs import OraclePredictor
@@ -56,14 +56,17 @@ from dlp_schema.episode import current_labels
 from dlp_schema.labels import (
     CoordinateFrame,
     IntrinsicsSource,
+    Keypoint,
+    KeypointFrame,
+    KeypointTrackPayload,
     LabelRecord,
     Trajectory3DPayload,
     VerificationState,
 )
 from dlp_schema.ontology import Ontology, load_ontology
-from dlp_schema.predictor import Predictor
+from dlp_schema.predictor import Clip, Predictor
 from dlp_schema.session import SyncMethod
-from dlp_schema.testing import FIXED_TIME, make_session, sqlite_db
+from dlp_schema.testing import FIXED_TIME, make_label, make_session, sqlite_db
 from dlp_schema.trajectory_follow import TRAJECTORY_FOLLOW_VERSION
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -592,3 +595,79 @@ def test_pose_is_not_re_estimated_when_only_the_hand_fit_policy_changes(
         [pose] = _poses(conn)
     assert all(c > 0 for c in counts)
     assert (pose.provenance.model_version or "").endswith("+r1")
+
+
+def _person(entity: str, seed: int, **kw: Any) -> LabelRecord:
+    """3인칭 coco17 인물 트랙 (0~5 s 33 ms 간격, 두 손목이 무작위로 걷는다: IMU와 상관 없음)."""
+    rng = np.random.default_rng(seed)
+    t = np.arange(0, 5_000, 33)
+    x = np.cumsum(rng.normal(0, 3, t.size)) + 100
+    frames: list[KeypointFrame] = []
+    for i, tm in enumerate(t):
+        pts = [Keypoint(x=50.0, y=50.0, visibility=2) for _ in range(17)]
+        pts[9] = pts[10] = Keypoint(x=float(x[i]), y=120.0, visibility=2)
+        frames.append(KeypointFrame(t_ms=int(tm), points=tuple(pts)))
+    payload = KeypointTrackPayload(entity_id=entity, skeleton="coco17", keyframes=tuple(frames))
+    return make_label(
+        payload, label_id=f"gt-{entity}", stream_id="third", t_start_ms=0, t_end_ms=int(t[-1]), **kw
+    )
+
+
+class _ThirdOnly(OraclePredictor):
+    """3인칭 스트림에만 정답 인물 트랙을 내는 전신 예측기."""
+
+    def run(self, clip: Clip) -> list[LabelRecord]:
+        """3인칭이면 정답 트랙, 아니면 없음."""
+        return super().run(clip) if clip.stream_id == "third" else []
+
+
+def test_unmatched_wearer_is_not_refetched_until_person_tracks_change(
+    tmp_path: Path, ontology: Ontology, policy: PrelabelPolicy
+) -> None:
+    """F-PAR-83 회귀: 착용자를 못 찾은 세션을 같은 입력으로 다시 돌리면 원본 IMU를 받지 않는다
+    (매칭이 없으면 라벨이 남지 않아, 예전에는 매 실행 원본에 다시 접근했다). 3인칭 인물 트랙이
+    바뀌면(사람이 새 트랙을 그림) 입력 해시가 바뀌어 다시 찾는다.
+
+    정답 근거: IMU는 중력 + 잡음, 인물 손목은 무작위 걷기라 상관이 문턱 아래다 (매칭 없음).
+    """
+    engine = _db(tmp_path, ontology)
+    imu_t = np.arange(0, 5_000, 5.0)
+    z = np.zeros(imu_t.size)
+    az = 9.81 + np.random.default_rng(9).normal(0, 0.5, imu_t.size)
+    write_parquet(
+        tmp_path / "imu.parquet",
+        {"t_ms": imu_t, "ax": z, "ay": z, "az": az, "gx": z, "gy": z, "gz": z},
+    )
+    v = generate_blur_scenario(1)
+    v.write(tmp_path / "bodycam.mp4")
+    v.write(tmp_path / "third.mp4")
+    raw = _ingest(engine, tmp_path, {"session_id": "wear", "streams": [
+        {"stream_id": "bodycam", "kind": "bodycam", "path": "bodycam.mp4"},
+        {"stream_id": "third", "kind": "third_person", "path": "third.mp4"},
+        {"stream_id": "imu", "kind": "imu", "path": "imu.parquet"},
+    ]})  # fmt: skip
+    with engine.begin() as conn:
+        s = get_session(conn, "wear")
+        update_stream_sync(
+            conn, "wear", s.stream("third").model_copy(update={"sync_method": SyncMethod.TAP_EVENT})
+        )
+        update_stream_sync(
+            conn,
+            "wear",
+            s.stream("imu").model_copy(update={"sync_method": SyncMethod.SHARED_CLOCK}),
+        )
+    people = [_person("a", 1), _person("b", 2)]
+    body = _ThirdOnly("body", people, ("keypoint_track",), now=FIXED_TIME)
+    with engine.begin() as conn:
+        first = run_prelabel(conn, "wear", raw, [body], policy, ontology, _at(1))
+    assert first.wearer is None and len(first.wearer_scores) == 2
+    gets = raw.gets
+    with engine.begin() as conn:
+        second = run_prelabel(conn, "wear", raw, [body], policy, ontology, _at(2))
+    assert second.wearer is None and raw.gets == gets
+    drawn = _person("c", 3, session_id="wear", created_at=_at(3))
+    with engine.begin() as conn:
+        insert_labels(conn, [drawn])
+        third = run_prelabel(conn, "wear", raw, [body], policy, ontology, _at(4))
+    assert raw.gets == gets + 1
+    assert "gt-c" in third.wearer_scores

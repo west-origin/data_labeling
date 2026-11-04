@@ -25,6 +25,8 @@ from dlp_schema.labels import (
     Verification,
     VerificationState,
 )
+from dlp_schema.migration import OntologyMigration, migrate_labels
+from dlp_schema.ontology import Ontology
 from dlp_schema.review import DescriptionInheritance, InheritanceMechanism
 from dlp_schema.testing import FIXED_TIME, action_payload, make_label
 
@@ -186,6 +188,36 @@ def test_bimanual_partial_deletion_retracts_description() -> None:
     history = [approved, left, _deleted(left, "l-gone"), _desc(), _desc("den", source="d")]
     plan = plan_description_follow(history, ())
     assert (plan.approve, _ids(plan.retract)) == ([], ["d", "den"])
+
+
+def _migrated(history: list[LabelRecord], target: Ontology) -> list[LabelRecord]:
+    """이력 뒤에 온톨로지 1.0.0 → target 이관 레코드를 붙인 이력."""
+    migration = OntologyMigration(from_version="1.0.0", to_version=target.version)
+    res = migrate_labels(history, migration, T2, target_ontology=target)
+    assert res.needs_review == ()
+    return [*history, *res.migrated]
+
+
+def test_migrated_copy_is_not_a_partial_delete(target_ontology: Ontology) -> None:
+    """F-SCH-33: 온톨로지 이관은 행동·설명을 같은 model_version의 새 레코드(parent = 옛 레코드)로
+    복사한다. 옛 행동과 이관 행동이 함께 비교 기준이 되어도 옛 행동은 이관 행동이라는 현재 후손이
+    있으므로 부분 삭제(규칙 3b)가 아니다.
+
+    정답: 이관 전후 모두 지울 설명이 없다.
+    """
+    history = [_action("a1"), _desc("d1")]
+    assert _ids(plan_description_follow(history, ()).retract) == []
+    after = _migrated(history, target_ontology)
+    assert _ids(plan_description_follow(after, ()).retract) == []
+
+
+def test_partial_delete_after_migration_still_retracts(target_ontology: Ontology) -> None:
+    """F-SCH-33 경계: 이관 뒤 양손 행동의 한 손(이관본)을 지우면 그 가지에는 현재 후손이 없다 →
+    이관된 설명을 지운다 (규칙 3b는 이관 뒤에도 그대로)."""
+    history = _migrated([_action("r"), _action("l", hand="left"), _desc()], target_ontology)
+    left = next(x for x in history if x.label_id == "l:v1.1.0")
+    plan = plan_description_follow([*history, _deleted(left, "l-gone", T2)], ())
+    assert _ids(plan.retract) == ["d:v1.1.0"]
 
 
 def test_baseline_is_the_stage_run_that_made_the_description() -> None:

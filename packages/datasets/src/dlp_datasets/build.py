@@ -18,7 +18,8 @@
 - 분할은 `dlp_datasets.splitter`로만 만들고, 결과를 `check_isolation`으로 다시 검사해 겹치면
   실패한다.
 - 스냅샷 커밋(lakeFS)은 DB 트랜잭션 밖의 부작용이다. 그 뒤 DB 쓰기가 실패해 트랜잭션이 롤백되면
-  어떤 버전도 가리키지 않는 커밋이 lakeFS에 남는다 (무해하지만 정리 대상).
+  어떤 버전도 가리키지 않는 커밋이 lakeFS에 남는다 (무해하지만 정리 대상). 그래서 같은 버전 ID가
+  이미 있으면 커밋 전에 거절한다 (F-ETA-31).
 - 호출자가 트랜잭션을 연다 (`engine.begin()`). DB 쓰기: `dataset_versions`·분할 배정
   (`insert_dataset_version`), 생애주기 (`set_lifecycle`: sessions·session_lifecycle_events).
 """
@@ -33,12 +34,14 @@ from datetime import datetime
 from pathlib import Path
 
 import sqlalchemy as sa
+from sqlalchemy.exc import NoResultFound
 
 from dlp_datasets.policy import DatasetPolicy
 from dlp_datasets.snapshot import SnapshotStore
 from dlp_datasets.splitter import SplitReport, assign_splits, check_isolation, propose_golden
 from dlp_schema.dataset import DatasetVersion, Split
 from dlp_schema.db.repository import (
+    get_dataset_version,
     get_golden_set,
     get_labels,
     get_session,
@@ -53,7 +56,7 @@ from dlp_schema.session import LifecycleState, Session
 
 
 class DatasetBuildError(RuntimeError):
-    """데이터셋 버전을 만들 수 없다 (후보 없음, 골든셋 도메인 불일치, 분할 누수)."""
+    """데이터셋 버전을 만들 수 없다 (버전 ID 중복, 후보 없음, 골든셋 도메인 불일치, 분할 누수)."""
 
 
 @dataclass(frozen=True)
@@ -139,6 +142,15 @@ def _golden_sides(
     return golden, [blocking[sid] for sid in sorted(blocking)]
 
 
+def _version_exists(conn: sa.Connection, version_id: str) -> bool:
+    """`dataset_versions`에 version_id가 있는지."""
+    try:
+        get_dataset_version(conn, version_id)
+    except NoResultFound:
+        return False
+    return True
+
+
 def build_dataset_version(
     conn: sa.Connection,
     snapshots: SnapshotStore,
@@ -158,7 +170,8 @@ def build_dataset_version(
         conn: 호출자가 연 트랜잭션 연결.
         snapshots: 스냅샷 저장소 (lakeFS 또는 로컬).
         policy: 데이터셋 정책.
-        version_id: 새 버전 ID (이미 있으면 DB 삽입에서 실패).
+        version_id: 새 버전 ID. 이미 있으면 스냅샷을 커밋하기 전에 거절한다 (커밋은 DB
+            트랜잭션과 함께 롤백되지 않아 고아 스냅샷이 남기 때문, F-ETA-31).
         ontology_version: 이 온톨로지 버전의 세션만 넣는다.
         golden_set_version: 골든셋 버전 (None이면 골든 분할 없음).
         domain: 주면 그 도메인 세션만.
@@ -170,11 +183,16 @@ def build_dataset_version(
         `BuildResult`.
 
     Raises:
-        DatasetBuildError: 후보가 없을 때, 골든셋 도메인이 `domain`과 다를 때, 분할 사이
-            작업자·장소가 겹칠 때.
+        DatasetBuildError: 같은 버전 ID가 이미 있을 때, 후보가 없을 때, 골든셋 도메인이
+            `domain`과 다를 때, 분할 사이 작업자·장소가 겹칠 때.
         sqlalchemy.exc.NoResultFound: 골든셋 버전이 DB에 없을 때.
         SnapshotError: 스냅샷 커밋 실패.
     """
+    if _version_exists(conn, version_id):
+        raise DatasetBuildError(
+            f"데이터셋 버전 {version_id}이(가) 이미 있습니다. "
+            "버전은 바꾸지 않으므로 새 버전 ID를 주세요"
+        )
     withdrawn = withdrawn_session_ids(conn)
     candidates: list[Session] = []
     excluded: list[str] = []

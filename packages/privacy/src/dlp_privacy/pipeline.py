@@ -61,7 +61,9 @@ from dlp_schema.labels import (
 # 트래커 알고리즘 버전. 트래커 코드(tracker.py) 동작을 바꾸면 올린다 (모델 버전 → 재탐지).
 # iou-tracker-2: 간격 캐시(Detection.cached)를 관측으로 쓰지 않고 유지 근거로만 쓰며, 보간 박스를
 # 앞뒤 관측 박스의 외접 박스로 넓혔다 (F-PMS-45).
-TRACKER_VERSION = "iou-tracker-2"
+# iou-tracker-3: 관측이 뒤에 붙어도 캐시 유지 근거를 버리지 않고, 그 프레임 렌더 박스에 캐시 박스를
+# 외접으로 더한다 (탐지기 둘 중 하나가 간격 캐시일 때 노출, F-PMS-49).
+TRACKER_VERSION = "iou-tracker-3"
 
 
 def used_detectors(
@@ -129,7 +131,7 @@ def detection_policy_digest(policy: PrivacyPolicy) -> str:
 def model_version(detectors: dict[str, FrameDetector], policy: PrivacyPolicy) -> str:
     """탐지 모델 버전 문자열.
 
-    형식: `iou-tracker-2+<이름>:<탐지기 버전>,...+p<정책 해시 8자>` (이름순). 이 문자열이
+    형식: `iou-tracker-3+<이름>:<탐지기 버전>,...+p<정책 해시 8자>` (이름순). 이 문자열이
     blur_track 라벨의 `provenance.model_version`이 되고, `runner.detect_session`은 같은 버전의
     완료 세대의 활성 버전 집합이 같으면 스트림을 건너뛴다 (멱등). 외부 0건 표시만 남으면
     DB 완료 기록으로 복구하고 새 검수를 요구한다. 정책 복귀는 새 세대로 탐지한다 (ADR 0033).

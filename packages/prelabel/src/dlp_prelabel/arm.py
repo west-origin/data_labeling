@@ -44,7 +44,7 @@ from datetime import datetime
 import numpy as np
 from numpy.typing import NDArray
 
-from dlp_prelabel.common import model_label
+from dlp_prelabel.common import fit_label_id, model_label
 from dlp_prelabel.policy import ArmBoxPolicy, ArmPolicy
 from dlp_schema.episode import version_tag
 from dlp_schema.labels import (
@@ -277,8 +277,9 @@ def arm_tracks(
 ) -> list[LabelRecord]:
     """손마다 arm3 키포인트 트랙 하나 (보이는 팔꿈치가 없으면 내지 않는다).
 
-    라벨 ID `<세션>-<스트림>-<prefix>-<version_tag>-arm-<손>`, entity_id `<손>_arm`. 신뢰도는 보이는
-    팔꿈치 점수의 평균.
+    라벨 ID `<세션>-<스트림>-<prefix>-<version_tag>-arm-<손>` (128자를 넘으면
+    `common.fit_label_id`로 접두사 뒤를 해시로 줄인다: 전신 트랙 ID가 통과한 세션에서 롤백되지
+    않게, F-PAR-86), entity_id `<손>_arm`. 신뢰도는 보이는 팔꿈치 점수의 평균.
     """
     out: list[LabelRecord] = []
     for hand in sorted(frames, key=lambda h: h.value):
@@ -294,7 +295,10 @@ def arm_tracks(
         )
         out.append(
             model_label(
-                label_id=f"{clip.session_id}-{clip.stream_id}-{prefix}-{version_tag(version)}-arm-{hand.value}",
+                label_id=fit_label_id(
+                    f"{clip.session_id}-{clip.stream_id}-{prefix}-",
+                    f"{version_tag(version)}-arm-{hand.value}",
+                ),
                 session_id=clip.session_id,
                 stream_id=clip.stream_id,
                 t_start_ms=fs[0].t_ms,

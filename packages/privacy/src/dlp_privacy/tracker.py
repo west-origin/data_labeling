@@ -3,9 +3,10 @@
 1. 같은 프레임·같은 대상의 여러 탐지기 결과가 겹치면 하나로 합친다 (박스는 합집합, 재현율 우선).
    간격 캐시(`Detection.cached`)만으로 된 묶음은 관측이 아니다 (F-PMS-45).
 2. 대상별로 IoU 탐욕 매칭으로 트랙을 잇는다. max_gap_ms보다 오래 끊기면 새 트랙이다. 캐시만인
-   묶음은 같은 대상 트랙의 마지막 박스와 맞으면 그 트랙의 유지 근거(`Track.held_until`)가 된다.
+   묶음은 같은 대상 트랙의 마지막 박스와 맞으면 그 트랙의 캐시 근거(`Track.cached`)가 된다.
 3. 트랙 안의 관측 사이 프레임은 앞뒤 관측 박스를 모두 덮는 외접 박스로 가린다 (간격 캐시 사이에
-   움직인 대상도 덮게, 재현율 우선. 보간 구간은 검수 우선 구간이 된다).
+   움직인 대상도 덮게, 재현율 우선. 보간 구간은 검수 우선 구간이 된다). 캐시 근거가 있는 프레임은
+   그 캐시 박스도 함께 덮는다 (렌더 박스가 그 프레임의 모든 탐지를 덮어야 한다, F-PMS-49).
 4. 마지막 관측(캐시 유지 근거가 있으면 그 마지막 시각) 뒤 hold_ms 동안 마지막 박스를 유지한다
    (가려지거나 놓쳐도 노출되지 않게).
    처리가 오프라인이므로 첫 관측 앞으로도 hold_ms만큼 첫 박스를 미리 둔다. 탐지기가 대상이
@@ -49,20 +50,35 @@ class Track:
 
     target: str
     obs: dict[int, Observation] = field(default_factory=dict[int, Observation])
-    # 마지막 관측 뒤 간격 캐시가 이 트랙을 가리킨 마지막 시각 (다음 추론 전까지 대상이 있다고 본다)
-    held_until: int | None = None
-    # 그 캐시 박스들의 외접 박스
-    held_box: Box | None = None
+    # 간격 캐시 묶음이 이 트랙을 가리킨 프레임 시각(ms) → 그 캐시 박스들의 외접 박스.
+    # 관측이 아니지만 그 프레임 렌더 박스가 덮어야 하는 탐지다. 뒤에 관측이 붙어도 지우지 않는다
+    # (F-PMS-49).
+    cached: dict[int, Box] = field(default_factory=dict[int, Box])
 
     def add(self, t_ms: int, o: Observation) -> None:
-        """관측을 붙인다. 앞서 모은 캐시 유지 근거는 새 관측 앞이므로 버린다."""
+        """관측을 붙인다."""
         self.obs[t_ms] = o
-        self.held_until, self.held_box = None, None
 
     def hold(self, t_ms: int, box: Box) -> None:
-        """간격 캐시 묶음을 유지 근거로 더한다 (마지막 관측 뒤만)."""
-        self.held_until = t_ms
-        self.held_box = box if self.held_box is None else self.held_box.hull(box)
+        """간격 캐시 묶음을 캐시 근거로 더한다 (같은 프레임에 여럿이면 외접 박스)."""
+        prev = self.cached.get(t_ms)
+        self.cached[t_ms] = box if prev is None else prev.hull(box)
+
+    @property
+    def held_until(self) -> int | None:
+        """마지막 관측 뒤 캐시 근거의 마지막 시각 (없으면 None). 그때까지 대상이 있다고 본다."""
+        after = [t for t in self.cached if t > self.last_t]
+        return max(after) if after else None
+
+    @property
+    def held_box(self) -> Box | None:
+        """마지막 관측 뒤 캐시 박스들의 외접 박스 (유지 박스에 더한다). 없으면 None."""
+        last = self.last_t
+        out: Box | None = None
+        for t, b in self.cached.items():
+            if t > last:
+                out = b if out is None else out.hull(b)
+        return out
 
     @property
     def last_t(self) -> int:
@@ -132,9 +148,10 @@ def build_tracks(
        프레임인) 같은 대상 트랙 중 마지막 박스 중심이 가장 가까운 트랙에 잇는다. 간격 사이에 대상이
        제 크기 넘게 움직이면 IoU로는 못 잇기 때문이다. 그런 트랙도 없으면 새 트랙을 연다.
     4. 간격 캐시만인 묶음(`fresh=False`)은 관측으로 붙이지 않는다. 같은 대상 트랙 중 마지막 관측이
-       그 시각 이전이고 마지막 박스와 IoU가 가장 큰(iou_match 이상) 트랙의 유지 근거로 삼는다
-       (`Track.hold`). 맞는 트랙이 없으면(정상이라면 없다: 캐시는 앞 추론의 관측을 되풀이한다)
-       탐지를 버리지 않도록 관측으로 새 트랙을 연다.
+       그 시각 이전이고 마지막 박스와 IoU가 가장 큰(iou_match 이상) 트랙의 캐시 근거로 삼는다
+       (`Track.hold`, 뒤에 관측이 붙어도 그 프레임 렌더 박스에 남는다, F-PMS-49). 맞는 트랙이
+       없으면(정상이라면 없다: 캐시는 앞 추론의 관측을 되풀이한다) 탐지를 버리지 않도록 관측으로
+       새 트랙을 연다.
 
     Args:
         frames: (프레임 시각 ms, 탐지) 목록, 시각 증가 순.
@@ -225,7 +242,8 @@ def track_frames(
 
     마지막 관측 뒤 간격 캐시 유지 근거(`Track.held_until`)가 있으면 그 시각 + hold_ms까지 유지하고,
     유지 박스는 마지막 관측 박스와 캐시 박스의 외접 박스다. 관측 사이는 앞뒤 관측 박스의 외접
-    박스다 (F-PMS-45).
+    박스다 (F-PMS-45). 캐시 근거가 있는 프레임은 그 캐시 박스를 더 덮는다 (관측 사이에 낀 캐시도
+    렌더에서 빠지지 않게, F-PMS-49).
 
     Args:
         track: 트랙 (관측이 하나 이상).
@@ -269,6 +287,8 @@ def track_frames(
             after = min(x for x in times if x > t)
             box = track.obs[before].box.hull(track.obs[after].box)
             kind, score, dets = "interpolated", None, frozenset[str]()
+        if t in track.cached:
+            box = box.hull(track.cached[t])
         clipped = box.padded(margin).clipped(width, height)
         out.append(TrackFrame(t, clipped, kind if clipped else "outside", score, dets))
     return out

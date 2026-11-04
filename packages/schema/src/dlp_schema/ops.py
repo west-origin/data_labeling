@@ -23,7 +23,7 @@ from typing import Literal
 
 from pydantic import AwareDatetime, Field, model_validator
 
-from dlp_schema.common import Contract, Identifier, Ms
+from dlp_schema.common import Contract, FiniteFloat, Identifier, Ms
 
 # 원본 버킷 접근 종류. read=내려받기, presign=서명 URL 발급, write=올리기,
 # grant=검수 도구 사용자에게 원본을 제공하려는 시도 (업로드·열람 성공 기록이 아님).
@@ -69,7 +69,7 @@ class ReviewWork(Contract):
     session_id: Identifier
     reviewer: Identifier
     stage: Literal["privacy", "labeling", "qa"]
-    seconds: float = Field(ge=0)
+    seconds: FiniteFloat = Field(ge=0)
     video_ms: Ms = Field(description="검수한 영상 길이")
     source: Literal["label_studio", "cvat", "manual"]
     recorded_at: AwareDatetime

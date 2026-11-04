@@ -21,6 +21,8 @@
 - observation.state (float32): 손 21관절 2D(정규화 x, y, COCO 보임 v: 0 없음·1 가려짐·2 보임)
   + 손 3D 점(카메라 좌표 x, y, z, 있음) + 쥔 도구 작용부 3D(x, y, z, 있음).
   2D 키포인트는 interp_max_gap_ms, 3D 궤적은 interp_max_gap_3d_ms 안에서만 선형 보간한다.
+  프리라벨이 보간해 채운 손 2D 키프레임(`interpolated`, ADR 0054)은 관측이 아니라 키프레임이 없는
+  것으로 본다 (F-PAR-63).
 - action (float32): 다음 프레임의 observation.state (사람 시연 데이터의 관례, 마지막은 그대로).
 - annotation.hand_state (int64): 손마다 [접촉, 접촉 대상 종류, 파지 유형, 역할]
   (어휘 번호, 라벨 없음 -1).
@@ -437,7 +439,8 @@ def build_episode(  # noqa: C901
             and x.stream_id == stream.stream_id
         ):
             # 키프레임마다 (21, 3) 배열 [x/가로, y/세로, v]. 보이지 않는(v=0) 관절은 NaN으로 두어
-            # 보간 때 "라벨 없음"이 퍼지게 한다
+            # 보간 때 "라벨 없음"이 퍼지게 한다. 보간해 채운 키프레임(interpolated)은 관측이 아니라
+            # 빼서 키프레임이 없는 시각과 같이 다룬다 (ADR 0054, F-PAR-63)
             series = [
                 (
                     f.t_ms,
@@ -449,6 +452,7 @@ def build_episode(  # noqa: C901
                     ),
                 )
                 for f in sorted(p.keyframes, key=lambda f: f.t_ms)
+                if not f.interpolated
             ]
             kp2d[p.hand].append((series, x))
     # 3D 궤적: (개체, 부분) → 이 스트림의 궤적들 (등급 높은·새 것부터, 시각마다 값이 있는 첫 것)

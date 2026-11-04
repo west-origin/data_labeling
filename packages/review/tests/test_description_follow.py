@@ -267,13 +267,17 @@ def test_descriptions_follow_approve_time_fix_verb_change_and_delete(
 def test_unreviewed_action_keeps_its_descriptions_blocking_verify(engine: sa.Engine) -> None:
     """행동이 검수 전이면 설명도 기다리고, verify는 계속 막는다. 행동을 승인하면 풀린다.
 
-    정답: 행동 a1만 있는 세션. 검수 전에는 verify 이유에 미검수 모델 라벨 3개(a1·d1·d1en),
+    정답: 행동 a1만 있는 세션 (세션 길이 = a1 끝, 손 타임라인 공백 0). 검수 전에는 verify 이유에
+    미검수 모델 라벨 3개(a1·d1·d1en),
     a1을 승인한 뒤(이 규칙 전 검수를 흉내 내 record_review로 직접) verify가 설명을 메워
     human_verified로 옮긴다.
     """
     a1 = _owners()["a1"]
     with engine.begin() as conn:
-        insert_session(conn, make_session(SID, privacy_state=PrivacyState.APPROVED))
+        insert_session(
+            conn,
+            make_session(SID, privacy_state=PrivacyState.APPROVED, duration_ms=a1.t_end_ms),
+        )
         set_lifecycle(conn, SID, LifecycleState.PRIVACY_APPROVED)
         set_lifecycle(conn, SID, LifecycleState.PRELABELED)
         insert_labels(conn, [a1, *_descriptions()[:2]])

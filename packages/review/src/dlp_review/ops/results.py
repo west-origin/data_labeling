@@ -24,6 +24,7 @@ from dlp_review.ops.measure import Agreement, DetectionRate, agreement, as_items
 from dlp_review.ops.policy import ReviewOpsPolicy
 from dlp_review.ops.sampling import judge
 from dlp_review.ops.seeding import detected
+from dlp_schema.common import derived_id
 from dlp_schema.db.repository import (
     get_assignment,
     get_labels,
@@ -67,10 +68,13 @@ def _follow_up(
     a: ReviewAssignment, suffix: str, only: tuple[str, ...], flagged: tuple[FlaggedSpan, ...],
     now: datetime,
 ) -> ReviewAssignment:  # fmt: skip
-    """보류 라벨만 다시 보는 재검수 배정 (`<배정>:<suffix>`, 우선순위 +1, 표본 없음)."""
+    """보류 라벨만 다시 보는 재검수 배정 (`<배정>:<suffix>`, 우선순위 +1, 표본 없음).
+
+    model_copy는 검증하지 않으므로 ID는 `derived_id`로 128자 안에 맞춘다 (F-REV-36).
+    """
     return a.model_copy(
         update={
-            "assignment_id": f"{a.assignment_id}:{suffix}", "flagged": flagged,
+            "assignment_id": derived_id(a.assignment_id, suffix), "flagged": flagged,
             "sample_label_ids": (), "withheld_label_ids": (), "only_label_ids": only,
             "task_key": None, "status": AssignmentStatus.OPEN, "created_at": now,
             "completed_at": None, "priority": a.priority + 1.0,

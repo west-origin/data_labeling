@@ -82,6 +82,7 @@ from dlp_review.tasks import (
 )
 from dlp_review.verify import reissue_slot
 from dlp_schema.aireview import AiDecision
+from dlp_schema.common import derived_id
 from dlp_schema.db.description_repository import apply_description_follow
 from dlp_schema.db.repository import (
     get_assignment,
@@ -138,12 +139,13 @@ def _seeded_new_id(assignment_id: str, label_id: str) -> str:
     """오류 삽입 과제에서 검수자가 새로 그린 레코드 ID. 배정의 사본 접두사를 붙여 발견 판정을
     그 배정으로 한정한다 (dlp_review.ops.seeding.detected).
 
-    형식: `seed-<배정>-new-<reconcile이 만든 ID의 sha256 앞 16자>` (결정적이라 재수집해도 같다).
+    형식: `<seed_new_prefix(배정)>new-<reconcile이 만든 ID의 sha256 앞 16자>` (결정적이라 재수집해도
+    같다). 긴 배정 ID는 접두사를 줄여 128자 안에 둔다 (F-REV-36).
     """
-    from dlp_review.ops.seeding import seed_prefix  # 순환 import를 피한다
+    from dlp_review.ops.seeding import seed_new_prefix  # 순환 import를 피한다
 
     digest = hashlib.sha256(label_id.encode()).hexdigest()[:16]
-    return f"{seed_prefix(assignment_id)}new-{digest}"
+    return f"{seed_new_prefix(assignment_id)}new-{digest}"
 
 
 def _after_blur_change(
@@ -251,7 +253,7 @@ def _label_studio_reviewed(
         insert_review_work(
             conn,
             ReviewWork(
-                work_id=f"{task.task_key}:work", task_key=task.task_key,
+                work_id=derived_id(task.task_key, "work"), task_key=task.task_key,
                 session_id=task.session_id, reviewer=reviewer_id, stage=task.stage.value,
                 seconds=seconds, video_ms=session.duration_ms, source="label_studio",
                 recorded_at=now,

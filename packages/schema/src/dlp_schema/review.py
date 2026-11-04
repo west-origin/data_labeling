@@ -34,7 +34,7 @@ from typing import Literal
 
 from pydantic import AwareDatetime, Field, model_validator
 
-from dlp_schema.common import Contract, Identifier, Ms
+from dlp_schema.common import Contract, FiniteFloat, Identifier, Ms
 from dlp_schema.labels import VerificationState
 
 
@@ -115,7 +115,9 @@ class InjectedError(Contract):
     seeded_label_id: Identifier | None = Field(
         default=None, description="오류를 넣은 사본. 블러 삭제는 사본이 없다"
     )
-    detail: dict[str, str | int | float] = Field(default_factory=dict[str, str | int | float])
+    detail: dict[str, str | int | FiniteFloat] = Field(
+        default_factory=dict[str, str | int | FiniteFloat]
+    )
 
 
 # 배정 상태. open=아직 검수 중(또는 작업 생성 전), done=검수 결과 수집 완료 (completed_at 기록).
@@ -149,7 +151,7 @@ class ReviewAssignment(Contract):
     stream_id: Identifier | None = None
     label_kinds: tuple[str, ...] = Field(min_length=1)
     mode: ReviewMode
-    priority: float = Field(description="클수록 먼저")
+    priority: FiniteFloat = Field(description="클수록 먼저")
     flagged: tuple[FlaggedSpan, ...] = ()
     assignee: Identifier | None = None
     pair_id: Identifier | None = Field(

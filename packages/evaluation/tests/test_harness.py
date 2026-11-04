@@ -18,7 +18,7 @@ import yaml
 from pydantic import ValidationError
 
 from dlp_eval.gate import decide
-from dlp_eval.harness import EvalReport, SessionData, evaluate
+from dlp_eval.harness import EvalReport, SessionData, TaskReport, evaluate
 from dlp_eval.policy import EvaluationPolicy, Task, is_class_metric, load_policy, task_metrics
 from dlp_fixtures.actions import generate_action_scenario
 from dlp_fixtures.wiping import generate_wiping_scenario
@@ -255,7 +255,6 @@ def test_gate_direction_for_error_metrics(policy: EvaluationPolicy) -> None:
 
 def test_gate_uses_per_metric_drop_for_ms_errors(policy: EvaluationPolicy) -> None:
     """ms 오차 지표는 max_drop_by(20 ms)로 판정한다: +15 ms 통과, +25 ms 실패."""
-    from dlp_eval.harness import TaskReport
 
     def report(error_ms: float) -> EvalReport:
         """접촉 지표만 든 최소 리포트 (시작 오차만 바꾼다)."""
@@ -354,7 +353,7 @@ def _objects(truth: list[LabelRecord], pred: list[LabelRecord], policy: Evaluati
 
 
 def test_sparse_truth_keyframes_are_interpolated(policy: EvaluationPolicy) -> None:
-    """성긴 사람 정답 키프레임은 간격 제한 없이 보간하고, 화면 밖 키프레임 사이는 정답이 없다."""
+    """성긴 사람 정답 키프레임은 간격 제한 없이 보간하고, 화면 밖 키프레임부터는 정답이 없다."""
 
     # 사람 정답은 키프레임이 성기고 트랙마다 시각이 다르다 (CVAT가 사이를 보간한다).
     # 컵은 0·400·800 ms, 걸레는 200·600·1000 ms에만 키프레임이 있다. 둘 다 등속 이동.
@@ -380,8 +379,8 @@ def test_sparse_truth_keyframes_are_interpolated(policy: EvaluationPolicy) -> No
     m = _objects(truth, pred, policy)
     assert m["hota"] == pytest.approx(1.0) and m["map"] == pytest.approx(1.0)
     assert m["idf1"] == 1.0 and m["mota"] == 1.0
-    # 화면 밖 키프레임이 끼면 그 사이는 정답이 없다: 컵이 400 ms에 화면 밖이면 200·600 ms에는 컵이
-    # 없으므로, 그 시각의 컵 예측은 오탐이다
+    # 화면 밖 키프레임은 "이 시각부터 안 보임"이다 (F-ETA-30): 컵이 400 ms에 화면 밖이면 [0, 400)은
+    # 0 ms 박스를 유지하고 [400, 800)에는 컵이 없다. 600 ms의 컵 예측은 오탐이다
     hidden = [_track("t-cup", "cup_01", "cup", [(t, cup(t)) for t in (0, 400, 800)],
                      outside=frozenset({400})), truth[1]]  # fmt: skip
     m2 = _objects(hidden, pred, policy)
@@ -453,6 +452,42 @@ def test_privacy_sparse_truth_is_interpolated(policy: EvaluationPolicy) -> None:
     # 200 ms의 얼굴 정답(보간)도 있고 예측과 같은 자리라 재현·정밀 모두 1
     assert report.overall["privacy"].class_counts == {"face": 3, "document": 3}
     assert m["blur_recall"] == 1.0 and m["blur_precision"] == 1.0
+
+
+def test_outside_keyframe_holds_box_until_its_time(policy: EvaluationPolicy) -> None:
+    """F-ETA-30: 다음 키프레임이 outside면 그 시각 직전까지 앞 박스가 보인다 (계약·렌더와 같다).
+
+    예전에는 [보이는 키프레임, outside) 사이를 없음으로 보아 그 사이 정확한 예측을 오탐으로 셌다.
+    """
+    truth = [
+        _track("t-cup", "cup_01", "cup", [(0, 10.0), (1000, 10.0)], outside=frozenset({1000})),
+        _track("t-rag", "rag_01", "rag", [(t, 200.0) for t in (0, 500, 900)]),
+    ]
+    pred = as_model(
+        [
+            _track("p-cup", "c", "cup", [(t, 10.0) for t in range(0, 1001, 100)],
+                   outside=frozenset({1000})),
+            _track("p-rag", "r", "rag", [(t, 200.0) for t in (0, 500, 900)]),
+        ]
+    )  # fmt: skip
+    m = _objects(truth, pred, policy)
+    assert m["hota"] == pytest.approx(1.0) and m["mota"] == 1.0 and m["idf1"] == 1.0
+
+    def blur(label_id: str, times: list[int]) -> LabelRecord:
+        """0 ms부터 보이고 1000 ms부터 안 보이는 얼굴 블러 (times는 보이는 키프레임 시각)."""
+        keyframes = [{"t_ms": t, "x": 10, "y": 10, "w": 40, "h": 40} for t in times]
+        keyframes.append({"t_ms": 1000, "x": 0, "y": 0, "w": 0, "h": 0, "outside": True})
+        return make_label(
+            {"kind": "blur_track", "target": "face", "keyframes": keyframes},
+            label_id=label_id, stream_id="bodycam", t_start_ms=0, t_end_ms=1000,
+        )  # fmt: skip
+
+    # 예측 블러는 0 ms 키프레임 하나 + 1000 ms outside: 렌더는 [0, 1000)을 덮는다 (간격 제한 없음)
+    report = evaluate(
+        {"privacy": [SessionData("s001", [blur("t1", [0, 500])], as_model([blur("p1", [0])]))]},
+        policy, golden_version="g", model_versions={"privacy": "m1"},
+    )  # fmt: skip
+    assert report.overall["privacy"].metrics["blur_recall"] == 1.0
 
 
 def test_coverage_error_hand_computed(policy: EvaluationPolicy) -> None:
@@ -614,6 +649,40 @@ def test_gate_metric_typo_fails_at_policy_load(task: str, key: str, value: Any, 
     data["gate"][task][key] = value
     with pytest.raises(ValidationError, match=bad):
         EvaluationPolicy.model_validate(data)
+
+
+def test_max_drop_by_metric_outside_guards_fails_at_policy_load() -> None:
+    """F-ETA-29: 허용 하락(max_drop_by)만 있고 guards에 없는 지표는 정책을 읽을 때 실패한다.
+
+    게이트는 primary·guards만 비교하므로, 그대로 두면 그 지표가 아무리 나빠져도 통과한다.
+    """
+    data = _policy_yaml()
+    data["gate"]["contact"]["guards"] = [
+        "contact_end_f1",
+        "contact_start_error_ms",
+        "grasp_macro_f1",
+    ]
+    with pytest.raises(ValidationError, match="contact_end_error_ms"):
+        EvaluationPolicy.model_validate(data)
+
+
+def test_contact_end_error_regression_blocks_gate(policy: EvaluationPolicy) -> None:
+    """F-ETA-29: 저장소 정책에서 접촉 종료 오차가 허용(20 ms)보다 나빠진 후보는 게이트가 막는다."""
+
+    def report(end_error_ms: float) -> EvalReport:
+        metrics = {
+            "contact_start_f1": 0.9,
+            "contact_end_f1": 0.9,
+            "contact_start_error_ms": 30.0,
+            "contact_end_error_ms": end_error_ms,
+            "grasp_macro_f1": 0.8,
+        }
+        return EvalReport("g1", {"contact": "m"}, {"contact": TaskReport(metrics, {}, [], 3)}, {})
+
+    assert decide(report(45.0), report(30.0), policy).passed
+    worse = decide(report(140.0), report(30.0), policy)
+    assert not worse.passed
+    assert any("contact_end_error_ms" in r for r in worse.tasks["contact"].reasons)
 
 
 def test_segment_metric_names_follow_segment_iou() -> None:

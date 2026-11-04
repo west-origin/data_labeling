@@ -26,9 +26,10 @@
     서버 장애는 정책 백오프 뒤 `VlmUnavailableError`를 올린다 (호출자가 트랜잭션을 되돌린다).
 
 기록과 출처 (감사)
-    설명 레코드 = 모델 출처, `model_version` = `describe-<행동 정책 표시 stamp>+<VLM 버전>`
-    (`describe_version`, 접두사 `dlp_schema.description_follow.REGENERATED_PREFIX`), 근거 INFERRED,
-    stream_id 없음(마스터 타임라인), 구간 = 주인 레코드 구간의 합. 라벨 ID =
+    설명 레코드 = 모델 출처, `model_version` =
+    `describe-<행동 정책 표시 stamp>+<VLM 버전>+o<온톨로지 부분 해시>` (`describe_version`,
+    접두사 `dlp_schema.description_follow.REGENERATED_PREFIX`),
+    근거 INFERRED, stream_id 없음(마스터 타임라인), 구간 = 주인 레코드 구간의 합. 라벨 ID =
     `derived_id(action_id, "ko<version_tag>-i<주인 라벨 ID 해시>")`라 같은 버전·같은 고친 레코드면
     같다. 쓴 뒤 `apply_description_follow`로 고친 행동의 검수를 물려받는다 (사용자 정책 "행동을
     승인할 때 같이"): 검수자 = 행동 검수자, 검수 시각 = 설명 생성 시각. 그래서 이 설명은
@@ -59,11 +60,11 @@ from pathlib import Path
 from typing import Any, Literal
 
 import sqlalchemy as sa
-from pydantic import Field, ValidationError
+from pydantic import Field, StrictFloat, ValidationError
 
 from dlp_actions.policy import ActionsPolicy
 from dlp_actions.runner import input_digest
-from dlp_actions.vlm import SegmentRequest, VlmClient
+from dlp_actions.vlm import SegmentRequest, VlmClient, ontology_part_digest
 from dlp_actions.write_check import fetch_current_blurred, write_blocker
 from dlp_media.storage import ObjectStore
 from dlp_models.vlm import ask_validated, with_backoff
@@ -151,9 +152,18 @@ class DescribeSummary:
     blocked: str | None = None
 
 
-def describe_version(policy: ActionsPolicy, vlm_version: str) -> str:
-    """설명 버전 `describe-<행동 정책 해시>+<VLM 버전>`."""
-    return f"{REGENERATED_PREFIX}{policy.stamp}+{vlm_version}"
+# 설명 프롬프트(`describe_prompt`)가 읽는 온톨로지 범주. 다른 범주를 읽기 시작하면 여기에 더한다
+DESCRIBE_ONTOLOGY = ("verbs", "body_parts", "state_attributes")
+
+
+def describe_version(policy: ActionsPolicy, vlm_version: str, ontology: Ontology) -> str:
+    """설명 버전 `describe-<행동 정책 해시>+<VLM 버전>+o<온톨로지 부분 해시>`.
+
+    같은 온톨로지 버전에 draft로 동작·부위·상태 이름을 덧붙이면 프롬프트가 바뀌므로 그 범주의 내용
+    해시를 넣어 다시 만든다 (F-PAR-85, `dlp_actions.vlm.ontology_part_digest`).
+    """
+    digest = ontology_part_digest(ontology, DESCRIBE_ONTOLOGY)
+    return f"{REGENERATED_PREFIX}{policy.stamp}+{vlm_version}+o{digest}"
 
 
 def description_id(action_id: str, owners: Sequence[LabelRecord], version: str) -> str:
@@ -304,12 +314,15 @@ class HandMeaning(Contract):
 
 
 class DescribeAnswer(Contract):
-    """설명 재생성 응답: label=action, 손마다 확정 의미, 한국어 한 문장 설명(1~200자), 신뢰도."""
+    """설명 재생성 응답: label=action, 손마다 확정 의미, 한국어 한 문장 설명(1~200자), 신뢰도.
+
+    신뢰도는 JSON 수만 받는다 (true·"0.95"는 위반이라 다시 묻는다, F-AIR-38).
+    """
 
     label: Literal["action"]
     hands: list[HandMeaning]
     description: str = Field(min_length=1, max_length=200)
-    confidence: float | None = Field(default=None, ge=0, le=1)
+    confidence: StrictFloat | None = Field(default=None, ge=0, le=1)
 
 
 def confirmed(target: DescribeTarget) -> list[dict[str, Any]]:
@@ -507,7 +520,8 @@ def describe_session(
     Args:
         conn: 열린 트랜잭션의 DB 연결 (호출자가 커밋·롤백한다).
         client: 행동 단계 VLM 클라이언트 (`version`이 설명 버전에 들어간다).
-        ontology: 세션 온톨로지 (동작 한국어 이름).
+        ontology: 세션 온톨로지 (동작 한국어 이름. 프롬프트가 읽는 범주의 해시가 설명 버전에
+            들어간다).
         policy: 행동 정책 (해시가 설명 버전에 들어간다, VLM 재시도·백오프·기본 신뢰도).
         now: 생성 시각 (시간대 필수).
         labeling: 라벨링 버킷. 주면 블러본 프레임을 보낸다. None이면 프레임 없이 묻는다 (테스트).
@@ -521,7 +535,7 @@ def describe_session(
 
     부작용: `label_records`에 설명·삭제 레코드 추가, 설명 따르기(검수 상태 기록·삭제). VLM 호출.
     """
-    version = describe_version(policy, client.version)
+    version = describe_version(policy, client.version, ontology)
     summary = DescribeSummary(version)
     plan = plan_session_describe(conn, session_id, version)
     summary.waiting, summary.deleted = plan.waiting, plan.deleted

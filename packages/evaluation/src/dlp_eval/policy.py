@@ -221,9 +221,12 @@ class EvaluationPolicy(Contract):
         게이트(`gate._compare`)는 리포트에 없는 지표를 NaN으로 보고, 후보·기존이 모두 NaN이면 그
         비교를 건너뛴다. 그래서 YAML에 지표 이름을 잘못 적으면(예: "hotaa", segment_iou를 바꾸고
         primary를 그대로 둔 "segment_f1_0.5") 그 지표의 하락이 조용히 통과된다. 읽을 때 막는다.
+        `max_drop_by` 키는 primary나 guards에도 있어야 한다. 게이트는 그 둘만 비교하므로 허용 하락만
+        적고 guards에서 빠진 지표는 아무리 나빠져도 통과된다 (F-ETA-29).
 
         Raises:
-            ValueError: 모르는 지표 이름이 있을 때 (pydantic이 ValidationError로 감싼다).
+            ValueError: 모르는 지표 이름이 있거나 `max_drop_by` 키가 primary·guards에 없을 때
+                (pydantic이 ValidationError로 감싼다).
         """
         problems: list[str] = []
         for task, rule in self.gate.items():
@@ -231,9 +234,14 @@ class EvaluationPolicy(Contract):
             named = [rule.primary, *rule.guards, *rule.max_drop_by]
             unknown = sorted({m for m in named if m not in known and not is_class_metric(task, m)})
             if unknown:
-                problems.append(f"gate.{task}: {unknown} (가능한 지표: {sorted(known)})")
+                problems.append(
+                    f"gate.{task}: 모르는 지표 {unknown} (가능한 지표: {sorted(known)})"
+                )
+            unchecked = sorted(set(rule.max_drop_by) - {rule.primary, *rule.guards})
+            if unchecked:
+                problems.append(f"gate.{task}: max_drop_by에만 있고 guards에 없는 지표 {unchecked}")
         if problems:
-            raise ValueError("게이트 규칙에 모르는 지표 이름: " + "; ".join(problems))
+            raise ValueError("게이트 규칙 지표 이름 오류: " + "; ".join(problems))
         return self
 
 

@@ -304,6 +304,7 @@ def test_synthetic_session_end_to_end(pg: sa.Engine, tmp_path: Path) -> None:
         reviewed = Verification(
             state=VerificationState.HUMAN_CORRECTED, reviewer_id="labeler-1", reviewed_at=now
         )
+        session_end = get_session(conn, sid).duration_ms
         timeline = [
             x for x in current_labels(get_labels(conn, sid, kinds=["action", "gap", "description"]))
             if x.provenance.source is Source.MODEL
@@ -323,8 +324,19 @@ def test_synthetic_session_end_to_end(pg: sa.Engine, tmp_path: Path) -> None:
                 )
                 for x in timeline
             ]
+            # 픽스처 정답은 마지막 프레임 시각(duration_ms)에서 끝나지만 세션 길이는 PTS 인덱스로
+            # 마지막 프레임 표시 간격까지 포함한다. 사람이 끝까지 채운 것처럼 마지막 구간을 늘린다
+            # (verify의 타임라인 빈 시간 검사, F-REV-37).
             + [
-                x.model_copy(update={"label_id": f"{x.label_id}-h", "verification": reviewed})
+                x.model_copy(
+                    update={
+                        "label_id": f"{x.label_id}-h",
+                        "verification": reviewed,
+                        "t_end_ms": session_end
+                        if x.t_end_ms == actions.duration_ms
+                        else x.t_end_ms,
+                    }
+                )
                 for x in truth_segments
             ],
         )

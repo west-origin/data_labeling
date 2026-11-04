@@ -25,6 +25,7 @@ from typing import Any, Literal, Protocol
 import cv2
 import numpy as np
 from numpy.typing import NDArray
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from dlp_aireview.media import BlurredFrame
 from dlp_models.vlm import (
@@ -79,13 +80,19 @@ class CropVerifier(Protocol):
 
 def crop_with_margin(
     rgb: NDArray[np.uint8], box: tuple[float, float, float, float], margin: float, max_side: int
-) -> NDArray[np.uint8]:
-    """박스를 각 변 margin 비율 넓혀 자른다 (화면 안으로 자름, 긴 변 max_side 이하)."""
+) -> NDArray[np.uint8] | None:
+    """박스를 각 변 margin 비율 넓혀 자른다 (화면 안으로 자름, 긴 변 max_side 이하).
+
+    넓힌 박스가 화면과 겹치지 않으면 None이다. 계약상 박스(outside=False)도 화면 밖 좌표일 수 있고,
+    빈 조각은 물을 픽셀이 없어 JPEG 인코딩이 실패한다 (F-AIR-39).
+    """
     h, w = rgb.shape[:2]
     x, y, bw, bh = box
     x0, y0 = max(0, int(x - bw * margin)), max(0, int(y - bh * margin))
     x1, y1 = min(w, int(x + bw * (1 + margin)) + 1), min(h, int(y + bh * (1 + margin)) + 1)
-    out = np.ascontiguousarray(rgb[y0 : max(y1, y0 + 1), x0 : max(x1, x0 + 1)])
+    if x1 <= x0 or y1 <= y0:
+        return None
+    out = np.ascontiguousarray(rgb[y0:y1, x0:x1])
     side = max(out.shape[:2])
     if side > max_side:
         s = max_side / side
@@ -123,16 +130,26 @@ def prompt_for(ask: CropAsk) -> str:
     )
 
 
+class _RawVerdict(BaseModel):
+    """응답 파싱용. strict: answer는 JSON 문자열, confidence는 JSON 수만 받는다.
+
+    lax 변환은 true를 1.0, "0.95"를 0.95로 바꿔 모델이 쓰지 않은 확신도로 힌트를 만들었다 (F-AIR-38,
+    판정 응답의 F-AIR-36과 같은 규칙).
+    """
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    answer: Answer
+    confidence: float = Field(ge=0, le=1)
+
+
 def parse_verdict(label_id: str, content: str) -> CropVerdict:
     """응답 → 판정. 형식이 틀리면 unsure (신뢰도 0)."""
     try:
-        data: Any = json.loads(content)
-        answer, conf = str(data["answer"]), float(data["confidence"])
-    except (ValueError, KeyError, TypeError):
+        raw = _RawVerdict.model_validate(json.loads(content))
+    except (ValueError, ValidationError):
         return CropVerdict(label_id, "unsure", 0.0)
-    if answer not in ("yes", "no", "unsure") or not 0 <= conf <= 1:
-        return CropVerdict(label_id, "unsure", 0.0)
-    return CropVerdict(label_id, answer, conf)  # type: ignore[arg-type]
+    return CropVerdict(label_id, raw.answer, raw.confidence)
 
 
 class OracleCropVerifier:
@@ -181,10 +198,11 @@ def verify_crops(
 ) -> list[CropVerdict]:
     """블러본 프레임(프레임 번호 순)마다 그 프레임의 박스를 잘라 묻는다.
 
-    서버 장애(`VlmUnavailableError` 등 RuntimeError)와 그 박스만의 문맥 초과(`VlmContextError`)는
-    그 박스를 unsure로 둔다 (힌트를 만들지 않을 뿐 실패가 아니다). 설정 오류(`VlmRequestError`:
-    모델 불일치·재시도하지 않는 4xx)는 다시 물어도 같아서 그대로 올린다. 삼키면 모든 박스가 조용히
-    unsure가 되어 힌트가 0개인데도 정상처럼 보인다 (F-AIR-34).
+    화면과 겹치지 않는 박스(빈 조각, F-AIR-39), 서버 장애(`VlmUnavailableError` 등 RuntimeError)와
+    그 박스만의 문맥 초과(`VlmContextError`)는 그 박스를 unsure로 둔다 (힌트를 만들지 않을 뿐 실패가
+    아니다). 설정 오류(`VlmRequestError`: 모델 불일치·재시도하지 않는 4xx)는 다시 물어도 같아서
+    그대로 올린다. 삼키면 모든 박스가 조용히 unsure가 되어 힌트가 0개인데도 정상처럼 보인다
+    (F-AIR-34).
 
     Raises:
         VlmRequestError: 서버 설정 오류.
@@ -196,6 +214,9 @@ def verify_crops(
     for frame in frames:
         for a in by_frame.get(frame.index, []):
             crop = crop_with_margin(frame.rgb, a.box, margin, max_side)
+            if crop is None:
+                out.append(CropVerdict(a.label_id, "unsure", 0.0))
+                continue
             try:
                 out.append(verifier.verify(a, crop))
             except VlmContextError:

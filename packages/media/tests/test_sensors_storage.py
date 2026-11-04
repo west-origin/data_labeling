@@ -15,8 +15,8 @@ import pytest
 
 from dlp_fixtures.sync import SyncScenario
 from dlp_media.audit import AuditedStore, MemorySink
-from dlp_media.glove import read_glove
-from dlp_media.imu import read_imu_table
+from dlp_media.glove import GloveData, read_glove
+from dlp_media.imu import ImuData, read_imu_table
 from dlp_media.storage import (
     DeletableStore,
     ImmutableObjectError,
@@ -104,6 +104,29 @@ def test_glove_parquet_and_hdf5(sync: tuple[SyncScenario, Path], tmp_path: Path)
         f["pressure"] = np.zeros((3, 2))
     with pytest.raises(ValueError, match="시각 열"):
         read_glove(tmp_path / "notime.h5")
+
+
+@pytest.mark.parametrize("bad", [np.nan, np.inf, -np.inf])
+def test_sensor_times_and_acceleration_must_be_finite(bad: float) -> None:
+    """F-PMS-07·F-PMS-48: IMU·장갑 시각과 IMU 가속도의 NaN·무한대는 생성 시 ValueError다.
+
+    NaN 시각은 순증가 검사(np.diff <= 0)를 그냥 통과했고, 가속도 NaN 하나는 동기화 신호 전체를
+    NaN으로 만들었다. 자이로 NaN은 자이로 없는 기종 표시라 그대로 받는다.
+    """
+    t = np.arange(4, dtype=np.float64) * 5.0
+    acc = np.tile([0.0, 0.0, 9.8], (4, 1))
+    gyro = np.zeros((4, 3))
+    ImuData(t, acc, np.full((4, 3), np.nan), source="test")
+    bad_t = t.copy()
+    bad_t[2] = bad
+    with pytest.raises(ValueError, match="IMU 시각"):
+        ImuData(bad_t, acc, gyro, source="test")
+    bad_acc = acc.copy()
+    bad_acc[1, 0] = bad
+    with pytest.raises(ValueError, match="IMU 가속도"):
+        ImuData(t, bad_acc, gyro, source="test")
+    with pytest.raises(ValueError, match="장갑 시각"):
+        GloveData(bad_t, {"pressure_0": np.ones(4)}, source="parquet")
 
 
 def test_local_store_is_immutable_and_idempotent(tmp_path: Path) -> None:

@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import sqlalchemy as sa
 
-from dlp_review.ops.seeding import seed_prefix
+from dlp_review.ops.seeding import seeded_owned
 from dlp_review.tasks import Selector, current_for_review
 from dlp_schema.db.repository import get_labels
 from dlp_schema.episode import current_labels
@@ -63,14 +63,13 @@ def assignment_selector(conn: sa.Connection, a: ReviewAssignment) -> Selector:
 
         사본은 `seeded_error=True`라 운영 라벨이 아니므로 `operational=False`로 이력을 펼친다.
         """
-        prefix = seed_prefix(a.assignment_id)
         labels = current_labels(
             get_labels(conn, a.session_id, kinds=list(kinds)), operational=False
         )
         return [
             x
             for x in labels
-            if x.label_id.startswith(prefix)
+            if seeded_owned(x.label_id, a.assignment_id)
             and (stream_id is None or x.stream_id in (stream_id, None))
         ]
 

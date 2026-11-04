@@ -17,6 +17,9 @@ WP12, ADR 0014. `ops.runner.plan_session`(`dlp review plan`)이 `plan`을, `dlp 
 - `<단위 ID>:<방식>[:<세대>]` (표준·블라인드·이중).
 - 오류 삽입: `<원천 단위 ID>:seeded_error:<대상 단위 ID의 ':'를 '.'로>[.<세대>]`.
 - QA: `<표준 배정 ID>:qa`, 재검수: `<배정 ID>:resample` (runner).
+- 128자(`Identifier`, DB VARCHAR(128))를 넘으면 `dlp_schema.common.derived_id`로 줄인다 (F-REV-36):
+  앞부분 + 해시라 결정적이고, 길이 안의 ID는 그대로라 기존 배정 행과 계속 맞는다. 오류 삽입은 두
+  단위 ID를 이어 붙여 길어지므로 길이를 넘으면 대상 표시를 `h<해시>`로 바꾼다.
 """
 
 from __future__ import annotations
@@ -29,6 +32,7 @@ from datetime import datetime
 
 from dlp_review.ops.policy import ReviewOpsPolicy
 from dlp_review.ops.priority import Unit
+from dlp_schema.common import IDENTIFIER_MAX, derived_id
 from dlp_schema.review import AssignmentStatus, FlaggedSpan, ReviewAssignment, ReviewMode
 
 
@@ -43,9 +47,14 @@ def draw(seed: int, key: str, mode: str) -> float:
 
 
 def assignment_id(unit: Unit, mode: ReviewMode, tag: str = "") -> str:
-    """배정 ID `"<단위 ID>:<방식>[:<tag>]"`. tag는 입력 세대 또는 오류 삽입 대상 표시."""
-    suffix = f":{tag}" if tag else ""
-    return f"{unit.unit_id}:{mode.value}{suffix}"
+    """배정 ID `"<단위 ID>:<방식>[:<tag>]"`. tag는 입력 세대 또는 오류 삽입 대상 표시.
+
+    128자를 넘으면 tag를 `h<sha256 16자>`로 바꾸고 `derived_id`로 줄인다 (모듈 docstring, F-REV-36).
+    """
+    suffix = f"{mode.value}:{tag}" if tag else mode.value
+    if tag and len(unit.unit_id) + 1 + len(suffix) > IDENTIFIER_MAX:
+        suffix = f"{mode.value}:h{hashlib.sha256(tag.encode()).hexdigest()[:16]}"
+    return derived_id(unit.unit_id, suffix)
 
 
 @dataclass(frozen=True)
@@ -200,10 +209,10 @@ def plan_qa(
     - seed: 뽑기 시드 (배정 ID별로 결정적).
     - now: 새 QA 배정 `created_at`.
 
-    반환: QA 배정 목록 (ID `<표준 배정 ID>:qa`, pair_id = 원래 배정). 선임 중 원래 담당자가 아닌
-    사람에게 고르게 준다. 선임이 없거나 원래 담당자뿐이면 담당자가 None이다 — 그 배정은 작업을
-    만들지 않고 `runner.assign_reviewer`(`dlp review assign --assignee`)로 담당자를 정한 뒤 만든다
-    (F-REV-07). DB에 쓰지 않는다.
+    반환: QA 배정 목록 (ID `derived_id(<표준 배정 ID>, "qa")`, pair_id = 원래 배정). 선임 중
+    원래 담당자가 아닌 사람에게 고르게 준다. 선임이 없거나 원래 담당자뿐이면 담당자가 None이다 —
+    그 배정은 작업을 만들지 않고 `runner.assign_reviewer`(`dlp review assign --assignee`)로
+    담당자를 정한 뒤 만든다 (F-REV-07). DB에 쓰지 않는다.
     """
     seniors = Loads(policy.reviewers.senior)
     out: list[ReviewAssignment] = []
@@ -218,7 +227,7 @@ def plan_qa(
         out.append(
             a.model_copy(
                 update={
-                    "assignment_id": f"{a.assignment_id}:qa",
+                    "assignment_id": derived_id(a.assignment_id, "qa"),
                     "mode": ReviewMode.QA,
                     "assignee": seniors.pick({a.assignee} if a.assignee else None),
                     "pair_id": a.assignment_id,

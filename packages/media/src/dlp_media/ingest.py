@@ -1,6 +1,8 @@
 """세션 수집.
 
-매니페스트(세션 메타데이터 + 스트림별 로컬 파일)를 받아 다음을 한다.
+매니페스트(세션 메타데이터 + 스트림별 로컬 파일)를 받아 다음을 한다. 업로드 전에 모든 스트림 파일
+(영상 방향·PTS, 내장 IMU, IMU 사이드카, 장갑)을 읽고 검증해, 형식·값 오류면 아무것도 올리지 않는다
+(원본 키가 불변이라 잘못된 파일이 올라가면 고친 파일로 다시 수집할 수 없다, F-PMS-07).
 
 1. 원본 파일을 원본 버킷에 올린다 (`sessions/<세션>/raw/<스트림><확장자>`). 불변이며 멱등이다.
 2. 영상 스트림: PTS 인덱스와 프록시 영상을 만들어 `sessions/<세션>/derived/`에 둔다.
@@ -40,7 +42,7 @@ from __future__ import annotations
 
 import tempfile
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC
 from pathlib import Path
 from typing import Any
@@ -58,7 +60,7 @@ from dlp_media.capture_check import (
     load_capture_policy,
     video_warnings,
 )
-from dlp_media.glove import read_glove
+from dlp_media.glove import GloveData, read_glove
 from dlp_media.imu import ImuData, extract_embedded_imu, read_imu_table
 from dlp_media.probe import MediaInfo, probe, require_upright
 from dlp_media.proxy import make_proxy
@@ -163,7 +165,56 @@ def _checked_index(src: Path) -> PtsIndex:
     return index
 
 
-def ingest_session(  # noqa: C901
+@dataclass(frozen=True)
+class _Inputs:
+    """업로드 전에 읽고 검증한 입력 (`_read_inputs`)."""
+
+    video_info: dict[str, MediaInfo]
+    indexes: dict[str, PtsIndex]
+    # 바디캠 내장 IMU (매니페스트에 IMU 스트림이 있거나 쓸 만한 샘플이 없으면 None)
+    embedded_imu: ImuData | None
+    imus: dict[str, ImuData]
+    gloves: dict[str, GloveData]
+
+
+def _source(ms: ManifestStream, base_dir: Path) -> Path:
+    """매니페스트 스트림의 로컬 파일 (상대 경로는 base_dir 기준)."""
+    return Path(ms.path) if Path(ms.path).is_absolute() else base_dir / ms.path
+
+
+def _read_inputs(manifest: SessionManifest, base_dir: Path) -> _Inputs:
+    """모든 스트림 파일을 업로드 전에 읽고 검증한다.
+
+    원본 키는 불변이라 업로드 뒤에 형식 오류로 실패하면 고친 파일을 같은 키로 다시 올릴 수 없다
+    (F-PMS-07). 그래서 영상 방향·PTS, 내장 IMU, IMU 사이드카, 장갑 파일을 먼저 모두 읽는다.
+
+    Raises:
+        FileNotFoundError: 파일이 없을 때.
+        ValueError: 비디오 트랙 없음·표시 회전·첫 PTS 음수, 센서 파일 형식·값 오류.
+    """
+    out = _Inputs({}, {}, None, {}, {})
+    has_imu = any(s.kind is StreamKind.IMU for s in manifest.streams)
+    for ms in manifest.streams:
+        src = _source(ms, base_dir)
+        if not src.is_file():
+            raise FileNotFoundError(src)
+        if ms.kind in VIDEO_KINDS:
+            info = probe(src)
+            if info.video is None:
+                raise ValueError(f"{src}: 비디오 트랙이 없습니다")
+            require_upright(info)
+            out.video_info[ms.stream_id] = info
+            out.indexes[ms.stream_id] = _checked_index(src)
+            if ms.kind is StreamKind.BODYCAM and not has_imu:
+                out = replace(out, embedded_imu=extract_embedded_imu(src, info))
+        elif ms.kind is StreamKind.IMU:
+            out.imus[ms.stream_id] = read_imu_table(src)
+        elif ms.kind in GLOVE_KINDS:
+            out.gloves[ms.stream_id] = read_glove(src)
+    return out
+
+
+def ingest_session(
     manifest: SessionManifest,
     base_dir: Path,
     raw: ObjectStore,
@@ -190,8 +241,8 @@ def ingest_session(  # noqa: C901
     Raises:
         ValueError: 바디캠이 하나가 아님, 비디오 트랙 없음/표시 회전 있음/첫 PTS 음수(업로드 전),
             스트림 ID끼리 저장소 키가 겹침(`planned_keys`, 업로드 전),
-            recorded_at을 정할 수 없음, 센서 파일 형식 오류.
-        FileNotFoundError: 매니페스트의 파일이 없을 때.
+            recorded_at을 정할 수 없음, 센서 파일 형식·값 오류(업로드 전, `_read_inputs`).
+        FileNotFoundError: 매니페스트의 파일이 없을 때 (업로드 전).
         ImmutableObjectError: 원본 키에 다른 내용이 이미 있을 때 (원본 파일이 바뀌었다).
         SessionConflictError: DB에 같은 세션이 다른 내용으로 있을 때.
 
@@ -209,18 +260,7 @@ def ingest_session(  # noqa: C901
     # 스트림 ID에 '.'이 허용되어 `bodycam.pts` 장갑의 정규화 키가 바디캠 PTS 인덱스 키와 같아질 수
     # 있다. 파생 파일은 있으면 내용 확인 없이 건너뛰므로 겹치면 남의 파일을 가리킨다 (F-PMS-39).
     planned_keys(manifest, base_dir)
-    # 잘못된 방향의 공간 라벨을 만들기 전에 전체 영상 입력을 확인한다. 실패 시 업로드하지 않는다.
-    video_info: dict[str, MediaInfo] = {}
-    indexes: dict[str, PtsIndex] = {}
-    for stream in manifest.streams:
-        if stream.kind in VIDEO_KINDS:
-            src = base_dir / stream.path
-            info = probe(src)
-            if info.video is None:
-                raise ValueError(f"{src}: 비디오 트랙이 없습니다")
-            require_upright(info)
-            video_info[stream.stream_id] = info
-            indexes[stream.stream_id] = _checked_index(src)
+    inputs = _read_inputs(manifest, base_dir)
     result_uploaded: list[str] = []
     result_skipped: list[str] = []
 
@@ -246,22 +286,17 @@ def ingest_session(  # noqa: C901
     streams: list[Stream] = []
     duration_ms = 0.0  # 바디캠 길이 (ms, 실수) → 세션 길이
     recorded_at = manifest.recorded_at
-    has_imu = StreamKind.IMU in kinds
 
     # 주의: 반복 변수 ms는 "manifest stream"이다 (밀리초가 아니다)
     for ms in manifest.streams:
-        src = Path(ms.path) if Path(ms.path).is_absolute() else base_dir / ms.path
-        if not src.is_file():
-            raise FileNotFoundError(src)
+        src = _source(ms, base_dir)
         # 1) 원본 업로드 (불변)
         raw_uri = put(_raw_key(prefix, ms.stream_id, src), src)
 
         if ms.kind in VIDEO_KINDS:
             # 2) 영상: PTS 인덱스와 프록시
-            info = video_info[ms.stream_id]
-            if info.video is None:
-                raise ValueError(f"{src}: 비디오 트랙이 없습니다")
-            index = indexes[ms.stream_id]
+            info = inputs.video_info[ms.stream_id]
+            index = inputs.indexes[ms.stream_id]
             pts_uri = derived(_pts_key(prefix, ms.stream_id), index.write)
             derived(
                 _proxy_key(prefix, ms.stream_id),
@@ -283,19 +318,19 @@ def ingest_session(  # noqa: C901
                 recorded_at = recorded_at or info.creation_time
                 warnings += video_warnings(info, index, capture_cfg)
                 # 3) 바디캠 내장 IMU: 같은 시계이므로 SHARED_CLOCK
-                if not has_imu and (imu := extract_embedded_imu(src, info)) is not None:
+                if (imu := inputs.embedded_imu) is not None:
                     imu_seen = imu
                     streams.append(
                         _imu_stream("imu", imu, derived, prefix, SyncMethod.SHARED_CLOCK)
                     )
         elif ms.kind is StreamKind.IMU:
             # 4) IMU 사이드카: 다른 시계일 수 있어 동기화 전
-            imu = read_imu_table(src)
+            imu = inputs.imus[ms.stream_id]
             imu_seen = imu_seen or imu
             streams.append(_imu_stream(ms.stream_id, imu, derived, prefix, SyncMethod.UNSYNCED))
         elif ms.kind in GLOVE_KINDS:
             # 4) 장갑: 정규화 Parquet이 스트림 uri가 된다 (원본은 raw/에 따로 보관)
-            glove = read_glove(src)
+            glove = inputs.gloves[ms.stream_id]
             uri = derived(_table_key(prefix, ms.stream_id), glove.write)
             streams.append(
                 Stream(

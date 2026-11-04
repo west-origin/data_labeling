@@ -77,7 +77,13 @@ from dlp_prelabel.campose import (
     pose_label,
     pose_samples,
 )
-from dlp_prelabel.common import input_digest, iter_frames, model_label
+from dlp_prelabel.common import (
+    distinct_slots,
+    fit_suffixed_id,
+    input_digest,
+    iter_frames,
+    model_label,
+)
 from dlp_prelabel.contact import (
     ContactInterval,
     clip_to_session,
@@ -190,6 +196,7 @@ LIFT_STAGE = "3d"
 POSE_STAGE = "campose"
 WORLD_STAGE = "world3d"
 CONTACT_STAGE = "contact"
+WEARER_STAGE = "wearer"
 
 
 def contact_version(policy: PrelabelPolicy, inputs: str) -> str:
@@ -214,6 +221,19 @@ def default_pressure_prefixes() -> tuple[str, ...]:
 def wearer_version(policy: PrelabelPolicy) -> str:
     """착용자 매칭 모델 버전: `wearer-xcorr-1+p<wearer_matching 절 해시>`."""
     return f"{WEARER_PREFIX}+p{policy.digest('wearer_matching')}"
+
+
+def wearer_run_version(
+    policy: PrelabelPolicy, people: Iterable[LabelRecord], third: Stream, imu: Stream
+) -> str:
+    """착용자 매칭 실행 버전: `<wearer_version>+i<입력 해시>` (실행 기록 `prelabel_stage_runs` 키).
+
+    입력은 3인칭 coco17 인물 트랙(라벨 ID), 3인칭 스트림(마스터 시각 변환)과 IMU 스트림(원본 위치·
+    동기화)이다. 매칭이 없으면 라벨이 남지 않아, 이 버전의 실행 기록이 없으면 매 실행 원본 IMU를
+    다시 받았다 (F-PAR-83). 인물 트랙이 바뀌면 해시가 바뀌어 다시 찾는다.
+    """
+    digest = input_digest(people, third.model_dump_json(), imu.model_dump_json())
+    return f"{wearer_version(policy)}+i{digest}"
 
 
 @dataclass
@@ -617,15 +637,17 @@ def pick_hand_tracks(hand_labels: list[LabelRecord]) -> dict[Hand, KeypointTrack
 
 
 def pick_lift_tracks(current: list[LabelRecord], stream_id: str) -> list[LabelRecord]:
-    """3D 단계 입력: 그 스트림의 현재 hand21·arm3 키포인트·박스 트랙을 (개체, 트랙 종류)마다 하나
-    고른다.
+    """3D 단계 입력: 그 스트림의 현재 박스 트랙 전부와 hand21·arm3 키포인트 트랙을 (개체, 트랙
+    종류)마다 하나 고른다.
 
-    같은 entity_id 트랙이 함께 현재 라벨일 수 있다 (승인된 이전 모델 버전 + 새 버전, 사람 트랙 +
-    모델 트랙). 둘 다 넘기면 같은 (개체, 부위)에 같은 시각 표본이 두 번 들어가 3D 라벨 검증이
-    실패하고 프리라벨 트랜잭션 전체가 롤백됐다 (F-PAR-01). `pick_hand_tracks`와 같은 순서
-    (`dlp_schema.episode.track_rank`: 사람·검수 → 최신 → 긴 구간 → 라벨 ID)로 하나를 고르고, 트랙을
-    섞지 않는다.
-    3D로 올리지 않는 트랙(coco17 등, `lift3d.lift_key`가 None)은 빠진다.
+    박스 트랙은 entity_id로 묶지 않는다: 박스 번호(`<클래스>_<nn>`)는 모델 버전마다 첫 등장 순으로
+    다시 매겨 승인된 이전 버전 트랙과 새 버전 트랙이 같은 번호로 다른 개체를 가리킬 수 있다. 하나만
+    고르면 새 버전 개체의 3D가 빠졌다 (F-PAR-87, 마스크 단계 F-PAR-74와 같은 원인). 박스 트랙마다
+    (라벨 ID 기준) 궤적을 따로 만든다 (`lift3d.lift_slots`가 라벨 ID 끝을 구분한다).
+    손·팔 entity(`left_hand`·`right_arm` 등)는 버전과 무관한 같은 손이고, 둘을 넘기면 같은 (개체,
+    부위)에 같은 시각 표본이 두 번 들어간다 (F-PAR-01). 그래서 `pick_hand_tracks`와 같은 순서
+    (`dlp_schema.episode.track_rank`: 사람·검수 → 최신 → 긴 구간 → 라벨 ID)로 하나를 고르고 트랙을
+    섞지 않는다. 3D로 올리지 않는 트랙(coco17 등, `lift3d.lift_key`가 None)은 빠진다.
 
     Args:
         current: 세션 현재 라벨.
@@ -634,12 +656,17 @@ def pick_lift_tracks(current: list[LabelRecord], stream_id: str) -> list[LabelRe
     Returns:
         고른 트랙 레코드 (라벨 ID 순). 3D 단계의 입력 해시도 이 목록으로 만든다 (실제로 쓰는 트랙).
     """
+    boxes: list[LabelRecord] = []
     best: dict[tuple[str, str], LabelRecord] = {}
     for x in current:
         key = lift_key(x.payload) if x.stream_id == stream_id else None
-        if key is not None and (key not in best or track_rank(x) > track_rank(best[key])):
+        if key is None:
+            continue
+        if isinstance(x.payload, BoxTrackPayload):
+            boxes.append(x)
+        elif key not in best or track_rank(x) > track_rank(best[key]):
             best[key] = x
-    return sorted(best.values(), key=lambda x: x.label_id)
+    return sorted([*boxes, *best.values()], key=lambda x: x.label_id)
 
 
 def _is_wearer(x: LabelRecord) -> bool:
@@ -1043,16 +1070,18 @@ def imu_to_camera(
 def pick_world_inputs(
     current: list[LabelRecord], stream_id: str, lapsed: frozenset[str]
 ) -> tuple[LabelRecord | None, list[LabelRecord]]:
-    """월드 좌표 단계 입력: (현재 카메라 자세 하나, 카메라 좌표 궤적 (개체, 부위)마다 하나).
+    """월드 좌표 단계 입력: (현재 카메라 자세 하나, 카메라 좌표 궤적 대상마다 하나).
 
-    여럿이면 `track_rank`(사람·검수 → 최신 → 긴 구간 → 라벨 ID)로 고른다. 자세는 그 스트림의
+    대상은 (개체, 부위)이고, 박스 중심 궤적(부위 None)은 출처 박스 트랙(`derived_from`)까지다: 박스
+    번호는 버전마다 다시 매겨 같은 번호의 다른 개체 궤적이 함께 현재일 수 있다 (F-PAR-87). 여럿이면
+    `track_rank`(사람·검수 → 최신 → 긴 구간 → 라벨 ID)로 고른다. 자세는 그 스트림의
     entity_id="camera"·frame=world 궤적, 카메라 좌표 궤적은 그 스트림의 frame=camera 궤적이다.
     출처 2D가 바뀌어 물려받음이 끊긴 궤적(lapsed, ADR 0048)은 고르지 않는다 (낡은 3D다). 검수자가
     없는 사람 출처 카메라 좌표 궤적도 고르지 않는다: 그 월드 좌표는 물려받을 검수가 없어 검수
     경로가 없는 채 완료 판정을 영구히 막는다 (F-PAR-58).
     """
     pose: LabelRecord | None = None
-    cams: dict[tuple[str, str | None], LabelRecord] = {}
+    cams: dict[tuple[str, str | None, str | None], LabelRecord] = {}
     for x in current:
         p = x.payload
         if (
@@ -1066,7 +1095,8 @@ def pick_world_inputs(
             if pose is None or track_rank(x) > track_rank(pose):
                 pose = x
         elif p.frame is CoordinateFrame.CAMERA:
-            key = (p.entity_id, p.part)
+            box = p.derived_from[0] if p.part is None and p.derived_from else None
+            key = (p.entity_id, p.part, box)
             if key not in cams or track_rank(x) > track_rank(cams[key]):
                 cams[key] = x
     return pose, sorted(cams.values(), key=lambda x: x.label_id)
@@ -1293,8 +1323,12 @@ class _PoseStage:
         if pose is not None and cams:
             poses = pose_samples(pose)
             gap = self.policy.world_frame.max_pose_gap_ms
+            slots = _world_slots(cams)
             for cam in cams:
-                lbl = world_label(cam, pose, poses, version=version, max_gap_ms=gap, now=self.now)
+                lbl = world_label(
+                    cam, pose, poses, version=version, max_gap_ms=gap, now=self.now,
+                    slot=slots.get(cam.label_id),
+                )  # fmt: skip
                 if lbl is not None:
                     labels.append(lbl)
         labels = drop_protected_trajectories(
@@ -1304,6 +1338,19 @@ class _PoseStage:
             insert_labels(self.conn, [*retractions(stale, version, self.now), *labels])
         self._ran(WORLD_STAGE, version, len(labels))
         self.summary.world = len(labels)
+
+
+def _world_slots(cams: Sequence[LabelRecord]) -> dict[str, str]:
+    """박스 중심 카메라 좌표 궤적 라벨 ID → 월드 좌표 라벨 ID의 칸 (같은 번호가 여럿이면 구분).
+
+    손 관절 궤적은 (개체, 부위)마다 하나라 칸이 필요 없다 (개체 그대로). F-PAR-87.
+    """
+    boxes = [
+        (c.label_id, c.payload.entity_id)
+        for c in cams
+        if isinstance(c.payload, Trajectory3DPayload) and c.payload.part is None
+    ]
+    return distinct_slots(boxes)
 
 
 def _has_live_wearer(history: list[LabelRecord]) -> bool:
@@ -1511,7 +1558,10 @@ def _wearer(
     조건: 3인칭 스트림이 있고 동기화됨, 공유 시계(SHARED_CLOCK) IMU 스트림이 있음, 살아 있는 착용자
     레코드가 없음, 3인칭 coco17 트랙이 있음. 하나라도 아니면 아무것도 하지 않는다. IMU 시각은 공유
     시계라 변환 없이 쓰고, 3인칭 손목 속도 시각은 `to_master_ms`로 마스터에 맞춘다.
-    부작용: 원본 버킷에서 IMU Parquet을 받고, `label_records`에 착용자 사본 하나를 넣는다.
+    같은 입력(`wearer_run_version`)으로 이미 돈 실행 기록이 있으면 원본을 받지 않고 건너뛴다
+    (매칭이 없어 라벨이 남지 않은 실행 포함, F-PAR-83).
+    부작용: 원본 버킷에서 IMU Parquet을 받고, `label_records`에 착용자 사본 하나를,
+    `prelabel_stage_runs`에 실행 기록(결과 0개 포함)을 넣는다.
     """
     third = next((s for s in session.streams if s.kind is StreamKind.THIRD_PERSON), None)
     imu = next(
@@ -1539,6 +1589,39 @@ def _wearer(
     }
     if not people:
         return
+    version = wearer_run_version(policy, people.values(), third, imu)
+    runs = _stage_runs(conn, session.session_id, third.stream_id, WEARER_STAGE)
+    if any(r.model_version == version for r in runs):
+        return
+    found = _match_wearer(people, third, imu, raw, work, policy, summary)
+    if found is not None:
+        original, correlation = found
+        insert_labels(conn, [wearer_copy(original, correlation, version, now)])
+        summary.wearer = original.label_id
+    record_prelabel_stage_run(
+        conn,
+        session.session_id,
+        third.stream_id,
+        WEARER_STAGE,
+        version,
+        int(found is not None),
+        now,
+    )
+
+
+def _match_wearer(
+    people: dict[str, LabelRecord],
+    third: Stream,
+    imu: Stream,
+    raw: ObjectStore,
+    work: Path,
+    policy: PrelabelPolicy,
+    summary: PrelabelSummary,
+) -> tuple[LabelRecord, float] | None:
+    """원본 IMU와 인물 트랙 손목 속도의 상관으로 착용자를 찾는다 (점수는 summary에 적는다).
+
+    Returns: (착용자 인물 트랙, 상관). 못 찾으면 None.
+    """
     # IMU는 공유 시계(SHARED_CLOCK)라 시각을 그대로 기준 신호로 쓴다 (|가속도 크기 - 그 중앙값|,
     # `dlp_sync.signals.imu_series`)
     ref = imu_series(_fetch(raw, imu.uri, work))
@@ -1557,10 +1640,8 @@ def _wearer(
     )
     summary.wearer_scores = match.scores
     if match.entity_id is None:
-        return
-    original = people[match.entity_id]
-    insert_labels(conn, [wearer_copy(original, match.correlation, wearer_version(policy), now)])
-    summary.wearer = match.entity_id
+        return None
+    return people[match.entity_id], match.correlation
 
 
 def wearer_copy(
@@ -1571,12 +1652,14 @@ def wearer_copy(
     모델 출력이다: 원래 트랙의 출처(사람이 고친 트랙이면 HUMAN)와 검수 상태를 물려받지 않는다.
     물려받으면 검수 전 모델 판단이 사람 라벨로 내보내지고, 모델 단계가 지울 수도 없다.
 
-    ID는 `<원래 ID>:wearer`, 신뢰도는 상관(음수면 0), 증거는 INFERRED (ADR 0026).
+    ID는 `<원래 ID>:wearer` (128자를 넘으면 `common.fit_suffixed_id`로 원래 ID 앞부분을 지키며
+    해시로 줄인다, F-PAR-86), 신뢰도는 상관(음수면 0), 증거는 INFERRED (ADR 0026).
+    `model_copy`는 검증하지 않으므로 ID 길이를 여기서 맞춰야 DB 넣기가 실패하지 않는다.
     """
     assert isinstance(original.payload, KeypointTrackPayload)
     return original.model_copy(
         update={
-            "label_id": f"{original.label_id}:wearer",
+            "label_id": fit_suffixed_id(original.label_id, ":wearer"),
             "parent_label_id": original.label_id,
             "payload": original.payload.model_copy(update={"entity_id": "wearer"}),
             "provenance": Provenance(source=Source.MODEL, model_version=version),

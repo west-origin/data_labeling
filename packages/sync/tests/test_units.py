@@ -18,7 +18,7 @@ from dlp_media.tables import write_parquet
 from dlp_schema.session import StreamKind
 from dlp_sync.anchors import Anchor, FitError, fit_clock
 from dlp_sync.policy import SyncPolicy
-from dlp_sync.signals import glove_pressure_prefixes, glove_series
+from dlp_sync.signals import glove_pressure_prefixes, glove_series, imu_series
 from dlp_sync.taps import DoubleTap, detect_double_taps, match_taps
 from dlp_sync.xcorr import correlate, find_peak
 
@@ -155,3 +155,31 @@ def test_glove_series_sums_only_pressure_channels(policy: SyncPolicy, tmp_path: 
     # 압력 채널이 없으면 다른 채널을 합치지 않고, 채널 목록과 정책 위치를 알려 준다
     with pytest.raises(ValueError, match=r"압력 채널.*ax, pressure_0.*glove\.pressure_prefixes"):
         glove_series(path, ("force",))
+
+
+def test_imu_series_drops_non_finite_samples(tmp_path: Path) -> None:
+    """F-PMS-48: 이전에 수집된 정규화본의 가속도·시각 NaN 표본은 신호에서 빠진다.
+
+    예전에는 가속도 NaN 하나로 중앙값이 NaN이 되어 신호 전체가 NaN이었고 두드림을 짝짓지 못했다.
+    정답: 가속도 크기 9.8(중력)인 표본 10개 중 NaN 가속도 하나·NaN 시각 하나를 뺀 8개, 값은
+    충격 표본만 20 - 9.8 = 10.2이고 나머지는 0. 자이로 NaN은 보지 않는다.
+    """
+    t = np.arange(0.0, 50.0, 5.0)
+    az = np.full(t.size, 9.8)
+    az[4] = 20.0
+    ax = np.zeros(t.size)
+    ax[2] = np.nan
+    t_bad = t.copy()
+    t_bad[7] = np.nan
+    path = tmp_path / "imu.parquet"
+    write_parquet(
+        path,
+        {"t_ms": t_bad, "ax": ax, "ay": np.zeros(t.size), "az": az,
+         "gx": np.full(t.size, np.nan), "gy": np.zeros(t.size), "gz": np.zeros(t.size)},
+        {},
+    )  # fmt: skip
+    series = imu_series(path)
+    assert np.array_equal(series.t_ms, np.delete(t, [2, 7]))
+    expected = np.zeros(8)
+    expected[3] = 10.2
+    assert np.allclose(series.values, expected)

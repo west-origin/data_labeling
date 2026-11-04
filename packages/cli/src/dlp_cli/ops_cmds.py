@@ -103,7 +103,7 @@ def cmd_weekly(args: argparse.Namespace) -> int:
 
     인자:
         args.week: 마지막 주 (ISO 주 `YYYY-Www`). None이면 지금(UTC)이 속한 주.
-        args.weeks: 몇 주를 거슬러 볼지.
+        args.weeks: 몇 주를 거슬러 볼지 (1~52, 파서가 검사한다).
         args.out: 리포트 파일 경로 (없으면 표준 출력).
 
     경고(`alerts`)는 여러 주 추세를 보고 `ops.yaml`의 임계값으로 정한다.
@@ -360,6 +360,21 @@ def cmd_quality_proxy(args: argparse.Namespace) -> int:
     return 0
 
 
+def _weeks(text: str) -> int:
+    """`--weeks` 값. 1~52만 받는다 (0·음수는 빈 표가 성공처럼 보여서, 콘솔과 같은 범위, F-COE-88).
+
+    Raises:
+        argparse.ArgumentTypeError: 정수가 아니거나 범위 밖일 때 (argparse가 종료 코드 2로 끝낸다).
+    """
+    try:
+        n = int(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"정수가 아닙니다: {text}") from exc
+    if not 1 <= n <= 52:
+        raise argparse.ArgumentTypeError(f"1~52 사이여야 합니다: {text}")
+    return n
+
+
 def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:  # pyright: ignore[reportPrivateUsage]
     """`ops` 하위 명령(weekly·audit-report·retention·retention-decide·log-work·privacy-audit·
     quality-proxy)을 등록한다.
@@ -368,7 +383,7 @@ def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
     osub = ops.add_subparsers(dest="ops_command", required=True)
     w = osub.add_parser("weekly", help="주간 운영 지표 (최근 여러 주와 경고)")
     w.add_argument("--week", help="마지막 주 (예: 2026-W41, 기본: 이번 주)")
-    w.add_argument("--weeks", type=int, default=8)
+    w.add_argument("--weeks", type=_weeks, default=8, help="볼 주 수 (1~52, 기본 8)")
     w.add_argument("--out", help="리포트 파일 (.md, 옆에 .json)")
     w.add_argument("--url")
     w.set_defaults(func=cmd_weekly)

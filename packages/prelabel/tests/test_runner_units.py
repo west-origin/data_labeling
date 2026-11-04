@@ -14,6 +14,7 @@ from dlp_prelabel.policy import load_policy
 from dlp_prelabel.runner import (
     WEARER_PREFIX,
     _has_live_wearer,  # pyright: ignore[reportPrivateUsage]
+    _world_slots,  # pyright: ignore[reportPrivateUsage]
     contact_label,
     contact_target_kind,
     drop_protected_contacts,
@@ -271,15 +272,18 @@ def _box_track(label_id: str, entity: str, x: float, **kw: Any) -> LabelRecord:
     return make_label(payload, label_id, 0, 1_000, stream_id="bodycam", **kw)
 
 
-def test_lift_inputs_are_one_track_per_entity() -> None:
-    """F-PAR-01 회귀: 3D 입력은 바디캠의 (개체, 트랙 종류)마다 트랙 하나다.
+def test_lift_inputs_are_one_keypoint_track_per_entity_and_every_box_track() -> None:
+    """F-PAR-01·87 회귀: 3D 입력은 바디캠의 (개체, 트랙 종류)마다 키포인트 트랙 하나와 박스 트랙
+    전부다.
 
     시나리오: 왼손은 승인된 이전 버전(x=3)과 더 새 모델 버전(x=2)이 같은 entity_id로 함께 현재
-    라벨이다. 버킷 박스도 사람 트랙(x=7)과 더 새 모델 트랙(x=8)이 같은 entity_id다. 예전에는 둘을
-    모두 넘겨 같은 (개체, 부위)에 같은 시각 표본이 두 번 들어가 3D 라벨 검증이 실패했다.
+    라벨이다. 버킷 박스도 사람 트랙(x=7)과 더 새 모델 트랙(x=8)이 같은 entity_id다. 예전에는 손 둘을
+    모두 넘겨 같은 (개체, 부위)에 같은 시각 표본이 두 번 들어가 3D 라벨 검증이 실패했다 (F-PAR-01).
+    박스 번호는 버전마다 다시 매겨 같은 번호가 다른 개체일 수 있어 하나만 고르면 새 개체의 3D가
+    빠졌다 (F-PAR-87).
 
     정답: 손은 `pick_hand_tracks`와 같은 순서(사람·검수 → 최신 → 긴 구간 → ID)로 승인 트랙, 박스는
-    사람 트랙. 오른손·걸레처럼 하나뿐인 것은 그대로, 3D로 올리지 않는 coco17 트랙과 다른 스트림
+    둘 다. 오른손·걸레처럼 하나뿐인 것은 그대로, 3D로 올리지 않는 coco17 트랙과 다른 스트림
     트랙은 빠진다. 입력 순서를 뒤집어도 같다.
     """
     later = {"created_at": FIXED_TIME + timedelta(days=1)}
@@ -296,7 +300,9 @@ def test_lift_inputs_are_one_track_per_entity() -> None:
     labels = [reviewed, newer, right, human_box, model_box, rag, body, third]
     for order in (labels, labels[::-1]):
         picked = pick_lift_tracks(order, "bodycam")
-        assert [x.label_id for x in picked] == ["bucket-fix", "left-v1", "rag-v1", "right-v2"]
+        assert [x.label_id for x in picked] == [
+            "bucket-fix", "bucket-v2", "left-v1", "rag-v1", "right-v2",
+        ]  # fmt: skip
     assert pick_lift_tracks([body, third], "bodycam") == []
 
 
@@ -316,3 +322,30 @@ def test_person_box_contacts_get_no_contact_kind() -> None:
     assert contact_target_kind("bucket", ontology) == "object"
     assert contact_target_kind(None, ontology) == "object"  # 장갑만 잡은 접촉 (대상 모름)
     assert contact_target_kind("not_in_ontology", ontology) == "object"
+
+
+def test_world_inputs_keep_same_numbered_box_trajectories_from_different_tracks() -> None:
+    """F-PAR-87 회귀: 박스 번호를 다시 매겨 같은 cup_01인 두 박스 트랙의 카메라 좌표 중심 궤적은
+    월드 좌표 입력으로 둘 다 고르고, 월드 좌표 라벨 ID 칸이 갈린다. 같은 박스 트랙에서 나온 궤적
+    둘이나 같은 손 관절 궤적 둘은 예전처럼 하나만 고른다 (`track_rank`).
+    """
+
+    def box(label_id: str, source: str, **kw: Any) -> LabelRecord:
+        """출처 박스 트랙이 source인 cup_01 중심 궤적."""
+        x = _traj(label_id, "cup_01", None, **kw)
+        assert isinstance(x.payload, Trajectory3DPayload)
+        payload = x.payload.model_copy(update={"derived_from": (source,)})
+        return x.model_copy(update={"payload": payload})
+
+    later = {"created_at": FIXED_TIME + timedelta(days=1)}
+    a_old = box("a-old", "box-a", verification=APPROVED)
+    a_new = box("a-new", "box-a", **later)
+    b = box("b", "box-b", **later)
+    wrists = [_traj("w1", "right_hand", "wrist"), _traj("w2", "right_hand", "wrist", **later)]
+    _, cams = pick_world_inputs([a_old, a_new, b, *wrists], "bodycam", frozenset())
+    assert [x.label_id for x in cams] == ["a-old", "b", "w2"]
+    slots = _world_slots(cams)
+    assert set(slots) == {"a-old", "b"}
+    assert len(set(slots.values())) == 2
+    assert all(v.startswith("cup_01-") for v in slots.values())
+    assert _world_slots([a_old]) == {"a-old": "cup_01"}

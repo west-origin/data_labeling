@@ -46,7 +46,14 @@ from numpy.typing import NDArray
 from dlp_media.rle import decode_rle, encode_rle
 from dlp_models.registry import resolve
 from dlp_models.sam2 import Box, MaskResult, Prompt
-from dlp_prelabel.common import Image, iter_frames, model_label, strictly_increasing
+from dlp_prelabel.common import (
+    Image,
+    distinct_slots,
+    fit_label_id,
+    iter_frames,
+    model_label,
+    strictly_increasing,
+)
 from dlp_prelabel.policy import MasksPolicy, PrelabelPolicy, WearerSuppressionPolicy
 from dlp_prelabel.wearer_suppress import box_frame_is_wearer
 from dlp_schema.episode import version_tag
@@ -188,18 +195,8 @@ def assign_slots(sources: Sequence[PromptTrack]) -> list[PromptTrack]:
     트랙의 번호가 겹칠 때, F-PAR-74) `<개체>-<트랙 라벨 ID sha256 앞 8자>`로 구분한다. 마스크 라벨의
     entity_id는 프롬프트 트랙 그대로이고, 어느 트랙에서 왔는지는 `derived_from`이 정한다.
     """
-    counts = Counter(s.entity_id for s in sources)
-    return [
-        s
-        if counts[s.entity_id] == 1
-        else replace(s, key=f"{s.entity_id}-{_short_hash(s.record.label_id)}")
-        for s in sources
-    ]
-
-
-def _short_hash(text: str) -> str:
-    """문자열 sha256 앞 8자."""
-    return hashlib.sha256(text.encode()).hexdigest()[:8]
+    slots = distinct_slots([(s.record.label_id, s.entity_id) for s in sources])
+    return [replace(s, key=slots[s.record.label_id]) for s in sources]
 
 
 def mask_covers_box(mask: MaskTrackPayload, box: BoxTrackPayload, policy: MasksPolicy) -> bool:
@@ -508,6 +505,8 @@ def mask_labels(
     """칸별 키프레임 → mask_track 라벨 (칸 이름 순). 신뢰도는 키프레임 점수 평균.
 
     entity_id·class_id는 프롬프트 트랙, `derived_from`은 그 트랙 라벨 ID, 라벨 ID 끝은 칸 이름이다.
+    128자를 넘으면 `common.fit_label_id`로 접두사 뒤를 해시로 줄인다 (손 트랙 ID가 통과한 세션에서
+    롤백되지 않게, F-PAR-86).
     """
     by_slot = {s.slot: s for s in sources}
     tag = version_tag(version)
@@ -521,7 +520,7 @@ def mask_labels(
         )  # fmt: skip
         labels.append(
             model_label(
-                label_id=f"{session_id}-{stream_id}-masks-{tag}-{slot}",
+                label_id=fit_label_id(f"{session_id}-{stream_id}-masks-", f"{tag}-{slot}"),
                 session_id=session_id,
                 stream_id=stream_id,
                 t_start_ms=kfs[0].t_ms,

@@ -35,8 +35,8 @@ class GloveData:
     """정규화된 장갑 데이터.
 
     Raises (생성 시):
-        ValueError: 샘플 2개 미만, 시각이 순증가가 아님, 채널 길이가 다름, NaN·무한대 값,
-            채널이 없음.
+        ValueError: 샘플 2개 미만, 시각에 NaN·무한대, 시각이 순증가가 아님, 채널 길이가 다름,
+            채널에 NaN·무한대 값, 채널이 없음.
     """
 
     # 샘플 시각 (장갑 시계 ms, 순증가)
@@ -47,9 +47,14 @@ class GloveData:
     source: str
 
     def __post_init__(self) -> None:
-        """길이·순서·유한값을 검사한다."""
+        """길이·순서·유한값을 검사한다.
+
+        NaN 시각은 순증가 검사(np.diff <= 0)를 그냥 통과하므로 유한값을 따로 먼저 본다.
+        """
         if self.t_ms.size < 2:
             raise ValueError("장갑 샘플이 너무 적습니다")
+        if not np.all(np.isfinite(self.t_ms)):
+            raise ValueError("장갑 시각에 유한하지 않은 값(NaN·무한대)이 있습니다")
         if np.any(np.diff(self.t_ms) <= 0):
             raise ValueError("장갑 시각이 증가하지 않습니다")
         for name, values in self.channels.items():

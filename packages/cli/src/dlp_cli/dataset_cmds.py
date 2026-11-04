@@ -37,13 +37,14 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from datetime import UTC, datetime
 
 import sqlalchemy as sa
 
 from dlp_cli.review_config import print_revocations, run_revocations
 from dlp_cli.schema_cmds import database_url
-from dlp_datasets.build import build_dataset_version, propose_golden_set
+from dlp_datasets.build import DatasetBuildError, build_dataset_version, propose_golden_set
 from dlp_datasets.lineage import session_lineage, withdraw_session
 from dlp_datasets.policy import load_policy
 from dlp_datasets.snapshot import LakeFSSnapshotStore
@@ -195,6 +196,8 @@ def cmd_build(args: argparse.Namespace) -> int:
     버전), `--seed`(분할 시드).
     환경 변수: lakeFS 접속(`LakeFSSnapshotStore.from_env`, `.env.example`의 `DLP_LAKEFS_*`).
     부작용: lakeFS 커밋(외부 서비스), DB 쓰기. lakeFS 커밋 뒤 DB 트랜잭션이 실패하면 커밋은 남는다.
+    반환: 0, 빌드를 거절하면(`DatasetBuildError`: 같은 버전 ID가 이미 있음, 후보 없음, 분할 누수 등)
+    오류 문구를 stderr에 내고 1 (사용자 입력 문제라 traceback을 내지 않는다, F-ETA-31).
     """
     root = repo_root()
     policy = load_policy(root)
@@ -203,19 +206,24 @@ def cmd_build(args: argparse.Namespace) -> int:
         repository=lp.repository, branch=lp.branch, storage_namespace=lp.storage_namespace
     )
     engine = _engine(args)
-    with engine.begin() as conn:
-        result = build_dataset_version(
-            conn,
-            snapshots,
-            policy,
-            version_id=args.version_id,
-            ontology_version=args.ontology_version,
-            golden_set_version=args.golden,
-            domain=args.domain,
-            parent_version_id=args.parent,
-            seed=args.seed,
-            now=datetime.now(UTC),
-        )
+    try:
+        with engine.begin() as conn:
+            result = build_dataset_version(
+                conn,
+                snapshots,
+                policy,
+                version_id=args.version_id,
+                ontology_version=args.ontology_version,
+                golden_set_version=args.golden,
+                domain=args.domain,
+                parent_version_id=args.parent,
+                seed=args.seed,
+                now=datetime.now(UTC),
+            )
+    except DatasetBuildError as e:
+        engine.dispose()
+        print(f"오류: {e}", file=sys.stderr)
+        return 1
     if args.golden:
         with engine.connect() as conn:
             _warn_truth_lag(conn, args.golden)

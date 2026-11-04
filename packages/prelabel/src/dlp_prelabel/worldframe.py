@@ -94,10 +94,12 @@ def world_label(
     version: str,
     max_gap_ms: int,
     now: datetime,
+    slot: str | None = None,
 ) -> LabelRecord | None:
     """카메라 좌표 궤적 라벨 하나 → 월드 좌표 궤적 라벨 (바꾼 표본이 없으면 None).
 
-    ID: `<세션>-<스트림>-world3d-<version_tag>-<개체>-<부위|center>` (128자를 넘으면
+    ID: `<세션>-<스트림>-world3d-<version_tag>-<칸>-<부위|center>` (칸은 slot, 없으면 개체. 같은
+    번호 박스 궤적이 여럿이면 러너가 구분한 칸을 넘긴다, F-PAR-87. 128자를 넘으면
     `common.fit_label_id`로 접두사 뒤를 해시로 줄인다).
 
     Raises:
@@ -122,7 +124,7 @@ def world_label(
     return model_label(
         label_id=fit_label_id(
             f"{camera.session_id}-{stream}-world3d-",
-            f"{version_tag(version)}-{p.entity_id}-{p.part or 'center'}",
+            f"{version_tag(version)}-{slot or p.entity_id}-{p.part or 'center'}",
         ),
         session_id=camera.session_id,
         stream_id=stream,

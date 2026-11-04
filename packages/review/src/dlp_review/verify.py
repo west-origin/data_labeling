@@ -34,6 +34,10 @@
   3D 단계가 올릴 2D 트랙(hand21 손·박스)이 있으면 막고 `dlp prelabel run <세션>`을 안내한다. 검수
   전인 채 출처 2D가 바뀐 낡은 3D도 같은 안내를 붙인다. 2D를 승인 뒤 고쳤든(물려받은 3D가 지워짐)
   승인 전에 고쳤든(낡은 3D가 검수 전으로 남음) 같은 판정이다.
+- 손별 행동 타임라인에 빈 시간이 없다 (ADR 0012 "타임라인 공백 0", F-REV-37): 현재 action·gap
+  라벨이 있는 손마다, 그 손의 action·gap과 양손 공통 gap(hand None)이 행동 단계가 덮는 구간
+  [0, 세션 길이]를 빈틈없이 덮는다. 검수 도구에서 행동을 지우면 그 시간이 비므로 검수자가 행동이나
+  공백으로 채울 때까지 막고, 빈 구간을 손·시각으로 알린다. 행동 라벨이 없는 손은 보지 않는다.
 - 블러를 뺀 현재 운영 라벨이 하나 이상 있다 (빈 세션은 완료가 아니다).
 
 관련: ADR 0028(생애주기 기록), ADR 0029(검수 완료 판정 명령).
@@ -44,6 +48,7 @@
 - `reissue_slot`: 회수된 직접 작업을 다시 만드는 단위 (담당자, 스트림, 도구). 수집 출력과 공유한다.
 - `automatic_label`: 사람 검수 대상이 아닌 자동 라벨인가 (review.yaml verify.automatic, ADR 0050).
 - `verification_gaps`: 완료를 막는 이유 목록 (읽기만).
+- `timeline_gaps`: 손별 행동 타임라인의 빈 시간 이유 (순수 함수).
 - `verify_session`: 조건을 보고 생애주기를 옮긴다 (DB 쓰기, 멱등).
 """
 
@@ -72,7 +77,10 @@ from dlp_schema.db.repository import (
 from dlp_schema.db.trajectory_repository import apply_trajectory_follow
 from dlp_schema.episode import current_labels
 from dlp_schema.labels import (
+    ActionPayload,
     BoxTrackPayload,
+    GapPayload,
+    Hand,
     KeypointTrackPayload,
     LabelRecord,
     Source,
@@ -190,9 +198,57 @@ def verification_gaps(
     ]
     if pending:
         reasons.append(f"검수하지 않은 모델 라벨 {len(pending)}개 (예: {pending[0]})")
+    reasons += timeline_gaps(session.duration_ms, labels)
     if _require_current_3d(require_current_3d):
         reasons += trajectory_gaps(session_id, history, labels)
     return reasons
+
+
+def timeline_gaps(duration_ms: int, labels: list[LabelRecord]) -> list[str]:
+    """손별 행동 타임라인의 빈 시간 이유 (모듈 docstring의 타임라인 조건, F-REV-37).
+
+    행동 단계는 손마다 [0, 세션 길이]를 action·gap으로 빈틈없이 채운다. 검수에서 행동이 지워져
+    생긴 빈 시간이 그대로 내보내기에 실리지 않게 완료를 막는다.
+
+    Args:
+        duration_ms: 세션 길이 (마스터 타임라인 ms, 행동 단계가 덮는 구간의 끝).
+        labels: 현재 운영 라벨.
+
+    Returns:
+        빈 시간이 있는 손마다 한 문장 (손 이름 순). 없으면 빈 목록.
+    """
+    spans: dict[Hand | None, list[tuple[int, int]]] = {}
+    for x in labels:
+        p = x.payload
+        if isinstance(p, ActionPayload | GapPayload):
+            spans.setdefault(p.hand, []).append((x.t_start_ms, x.t_end_ms))
+    shared = spans.pop(None, [])
+    reasons: list[str] = []
+    for hand in sorted(h for h in spans if h is not None):
+        holes = _uncovered(duration_ms, spans[hand] + shared)
+        if holes:
+            # 메시지가 길어지지 않게 앞 5곳만 보여 준다
+            shown = ", ".join(f"{s}~{e}ms" for s, e in holes[:5])
+            reasons.append(
+                f"{hand.value} 손 행동 타임라인 빈 시간 {len(holes)}곳: {shown} "
+                "(검수 도구에서 행동이나 공백으로 채운다)"
+            )
+    return reasons
+
+
+def _uncovered(duration_ms: int, spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """[0, duration_ms]에서 spans가 덮지 않는 조각들 (시각 순)."""
+    out: list[tuple[int, int]] = []
+    cur = 0
+    for start, end in sorted(spans):
+        if start > cur:
+            out.append((cur, min(start, duration_ms)))
+        cur = max(cur, end)
+        if cur >= duration_ms:
+            break
+    if cur < duration_ms:
+        out.append((cur, duration_ms))
+    return [(s, e) for s, e in out if s < e]
 
 
 def _require_current_3d(value: bool | None) -> bool:

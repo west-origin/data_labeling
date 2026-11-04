@@ -17,7 +17,7 @@ from numpy.typing import NDArray
 from dlp_fixtures.video import write_video
 from dlp_models.depth import Intrinsics
 from dlp_prelabel.common import Image, fit_label_id, model_label
-from dlp_prelabel.lift3d import DepthLifter, intrinsics_for, lift_tracks
+from dlp_prelabel.lift3d import DepthLifter, intrinsics_for, lift_policy_digest, lift_tracks
 from dlp_prelabel.policy import PrelabelPolicy, load_policy
 from dlp_prelabel.runner import pick_lift_tracks
 from dlp_schema.labels import (
@@ -286,3 +286,79 @@ def test_fit_label_id_keeps_short_ids_and_stage_prefix() -> None:
     assert len(world) <= 128 and world.startswith(f"{sid}-bodycam-world3d-h")
     with pytest.raises(ValueError, match="접두사"):
         fit_label_id("S" * 120 + "-3d-", "abcd1234-right_hand-wrist")
+
+
+def _cup(label_id: str, x: float, **kw: object) -> LabelRecord:
+    """entity_id cup_01 박스 트랙 (0~800 ms 200 ms 간격, 왼쪽 위 (x, 100), 40x40 px)."""
+    payload = BoxTrackPayload(
+        entity_id="cup_01",
+        class_id="cup",
+        keyframes=tuple(BoxKeyframe(t_ms=t, x=x, y=100, w=40, h=40) for t in range(0, 1_000, 200)),
+    )
+    label = model_label(
+        label_id=label_id, session_id="s", stream_id="bodycam", t_start_ms=0, t_end_ms=800,
+        ontology_version="1.0.0", model_version="m", confidence=0.9, payload=payload, now=NOW,
+    )  # fmt: skip
+    return label.model_copy(update=kw)
+
+
+def test_same_numbered_box_tracks_lift_to_separate_trajectories(tmp_path: Path) -> None:
+    """F-PAR-87 회귀: 승인된 이전 버전 cup_01(물체 A, 왼쪽)과 새 버전 cup_01(물체 B, 오른쪽)이
+    함께 현재 라벨이면 둘 다 3D로 올리고 궤적을 섞지 않는다 (박스 번호는 버전마다 다시 매긴다).
+
+    정답 근거: A 중심 (60, 120)은 왼쪽 절반이라 z=1, B 중심 (260, 120)은 오른쪽 절반이라 z=2.
+    두 궤적은 entity_id가 같고 출처(`derived_from`)가 각 트랙이며, 라벨 ID 끝은 트랙 ID 해시로
+    갈린다. 박스가 하나뿐이면 예전 ID(`<개체>-center`) 그대로다.
+    """
+    video = tmp_path / "bodycam.mp4"
+    write_video(
+        video,
+        ((t, np.zeros((H, W, 3), dtype=np.uint8)) for t in range(0, 1_000, 100)),
+        width=W,
+        height=H,
+    )
+    approved = Verification(
+        state=VerificationState.HUMAN_APPROVED, reviewer_id="rev01", reviewed_at=NOW
+    )
+    a = _cup("s-bodycam-objects-old-cup_01", 40.0, verification=approved)
+    b = _cup("s-bodycam-objects-new-cup_01", 240.0, created_at=NOW.replace(day=8))
+    lifter = PlaneLifter(load_policy(ROOT))
+    calib = CameraIntrinsics(width=W, height=H, fx=160, fy=160, cx=160, cy=120)
+    tracks = pick_lift_tracks([a, b], "bodycam")
+    assert [t.label_id for t in tracks] == [b.label_id, a.label_id]
+    labels = lifter.run(
+        video, session_id="s", stream_id="bodycam", tracks=tracks, calib=calib,
+        ontology_version="1.0.0", version="v",
+    )  # fmt: skip
+    depth_of: dict[str, set[float]] = {}
+    for x in labels:
+        assert isinstance(x.payload, Trajectory3DPayload)
+        assert x.payload.entity_id == "cup_01" and x.payload.part is None
+        assert x.payload.derived_from is not None
+        depth_of[x.payload.derived_from[0]] = {round(q.z, 3) for q in x.payload.samples}
+        assert x.label_id.startswith("s-bodycam-3d-") and x.label_id.endswith("-center")
+    assert depth_of == {a.label_id: {1.0}, b.label_id: {2.0}}
+    assert len({x.label_id for x in labels}) == 2
+    [single] = lifter.run(
+        video, session_id="s", stream_id="bodycam", tracks=[a], calib=calib,
+        ontology_version="1.0.0", version="v",
+    )  # fmt: skip
+    assert single.label_id.endswith("-cup_01-center")
+
+
+def test_lift_version_digest_includes_palm_estimate_only_with_focal_estimate() -> None:
+    """F-PAR-88 회귀: 손 크기 초점 추정이 켜지면 palm_estimate 문턱이 3D 결과를 바꾸므로 3D 단계
+    버전 해시에 들어간다. 꺼져 있으면(기본) 결과와 무관해 예전과 같은 depth 절 해시다."""
+    base = load_policy(ROOT)
+    assert not base.depth.focal_estimate.enabled
+    assert lift_policy_digest(base) == base.digest("depth")
+
+    def palm(p: PrelabelPolicy) -> PrelabelPolicy:
+        """palm_estimate 재투영 문턱만 바꾼 사본."""
+        est = p.palm_estimate.model_copy(update={"max_reprojection_ratio": 0.0001})
+        return p.model_copy(update={"palm_estimate": est})
+
+    assert lift_policy_digest(palm(base)) == lift_policy_digest(base)
+    fe = base.depth.focal_estimate.model_copy(update={"enabled": True})
+    on = base.model_copy(update={"depth": base.depth.model_copy(update={"focal_estimate": fe})})
+    assert lift_policy_digest(palm(on)) != lift_policy_digest(on)

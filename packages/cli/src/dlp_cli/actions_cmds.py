@@ -61,7 +61,7 @@ from dlp_cli.translate_cmds import translate_after_actions
 from dlp_media.storage import ObjectStore, store_from_spec
 from dlp_privacy.errors import RenderNotCurrentError
 from dlp_schema import load_config, repo_root
-from dlp_schema.db.repository import list_session_ids
+from dlp_schema.db.repository import get_session_ontology, list_session_ids
 
 # 종료 코드 (모듈 docstring)
 OK, NO_URL, UNAVAILABLE, CONFIG = 0, 2, 3, 5
@@ -220,15 +220,22 @@ def _describe_after_run(
 
 
 def describe_pending(db_url: str | None, policy: ActionsPolicy, vlm_version: str) -> list[str]:
-    """설명을 다시 만들 고친 행동이 있는 세션 (서버에 묻지 않는다, ID 순)."""
-    version = describe_version(policy, vlm_version)
+    """설명을 다시 만들 고친 행동이 있는 세션 (서버에 묻지 않는다, ID 순).
+
+    설명 버전에는 세션 온톨로지 중 프롬프트가 읽는 부분의 해시가 들어가므로(F-PAR-85)
+    세션마다 계산한다.
+    """
     engine = sa.create_engine(database_url(db_url))
     try:
         with engine.connect() as conn:
             return [
                 sid
                 for sid in list_session_ids(conn)
-                if plan_session_describe(conn, sid, version).targets
+                if plan_session_describe(
+                    conn,
+                    sid,
+                    describe_version(policy, vlm_version, get_session_ontology(conn, sid)),
+                ).targets
             ]
     finally:
         engine.dispose()

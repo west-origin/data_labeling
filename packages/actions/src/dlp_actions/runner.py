@@ -5,7 +5,9 @@ action·gap·description 레코드를 쓴다. 트랙이 사라진 손은 이 모
 VLM 서버가 재시도(백오프) 후에도 응답하지 않은 구간이 있으면 VlmUnavailableError로 세션 전체를
 멈춘다 (호출자의 트랜잭션이 되돌려져 아무것도 쓰지 않으므로 다시 실행하면 처음부터 한다).
 서버 장애를 미상으로 채워 정상 버전으로 쓰면 재실행이 건너뛰어 미상이 영구히 남기 때문이다.
-model_version은 "actions-<정책 표시>+<VLM 버전>+i<입력 해시>"다 (정책 표시 = `ActionsPolicy.stamp`).
+model_version은 "actions-<정책 표시>+<VLM 버전>+o<온톨로지 부분 해시>+i<입력 해시>"다 (정책 표시 =
+`ActionsPolicy.stamp`). 온톨로지 부분 해시는 프롬프트·응답 스키마가 읽는 범주(`dlp_actions.vlm.
+PROMPT_ONTOLOGY`)의 내용 해시다: 같은 온톨로지 버전에 원시 동작을 덧붙여도 다시 묻는다 (F-PAR-85).
 입력 해시는 이 단계가 읽는 현재 라벨(손마다 고른 바디캠 hand21 트랙, 손 상태, 객체 트랙)의 ID 집합
 해시다. 같은 손 트랙이 여럿이면 프리라벨 접촉·3D 단계와 같은 공용 순위(`dlp_schema.episode.
 track_rank`: 사람·검수 → 최신 → 긴 구간 → 라벨 ID)로 하나를 고른다 (F-PAR-04).
@@ -49,7 +51,7 @@ import sqlalchemy as sa
 from dlp_actions.pipeline import HandResult, segment_count, segment_hand
 from dlp_actions.policy import ActionsPolicy
 from dlp_actions.translate import is_machine_translation
-from dlp_actions.vlm import VlmClient
+from dlp_actions.vlm import PROMPT_ONTOLOGY, VlmClient, ontology_part_digest
 from dlp_actions.write_check import fetch_current_blurred, write_blocker
 from dlp_media.storage import ObjectStore
 from dlp_privacy.policy import PrivacyPolicy
@@ -352,7 +354,11 @@ class _Inputs:
 
 
 def _read_inputs(
-    conn: sa.Connection, session_id: str, vlm_version: str, policy: ActionsPolicy
+    conn: sa.Connection,
+    session_id: str,
+    vlm_version: str,
+    policy: ActionsPolicy,
+    ontology: Ontology,
 ) -> _Inputs:
     """지금 이력에서 입력·모델 버전·판단 재료를 만든다 (모듈 docstring의 규칙)."""
     session = get_session(conn, session_id)
@@ -364,9 +370,9 @@ def _read_inputs(
         x for x in current if isinstance(x.payload, BoxTrackPayload | MaskTrackPayload)
     ]
     state_labels = [x for x in current if isinstance(x.payload, HandStatePayload)]
-    # 모델 버전 = 정책 해시 + VLM 버전 + 입력 라벨 ID 집합 해시. 손 트랙은 실제로 쓰는 고른
-    # 트랙만 넣는다: 승인은 라벨 ID를 바꾸지 않으므로, 모든 트랙 ID를 넣으면 승인으로 고르는
-    # 트랙이 바뀌어도 버전이 같아 다시 돌지 않는다
+    # 모델 버전 = 정책 해시 + VLM 버전 + 프롬프트 온톨로지 부분 해시 + 입력 라벨 ID 집합 해시.
+    # 손 트랙은 실제로 쓰는 고른 트랙만 넣는다: 승인은 라벨 ID를 바꾸지 않으므로, 모든 트랙 ID를
+    # 넣으면 승인으로 고르는 트랙이 바뀌어도 버전이 같아 다시 돌지 않는다
     inputs = input_digest([*picked.values(), *object_labels, *state_labels])
     # 대상 후보: 객체 트랙 개체와 손 상태의 접촉 대상 (대상을 모르는 접촉 표시 ID는 뺀다)
     candidates = {
@@ -397,7 +403,10 @@ def _read_inputs(
         current=current,
         tracks={hand: _track(x) for hand, x in picked.items()},
         entities=tuple(sorted(candidates - set(policy.unresolved_entity_ids))),
-        version=f"{PREFIX}{policy.stamp}+{vlm_version}+i{inputs}",
+        version=(
+            f"{PREFIX}{policy.stamp}+{vlm_version}"
+            f"+o{ontology_part_digest(ontology, PROMPT_ONTOLOGY)}+i{inputs}"
+        ),
         descriptions_by_action=descriptions_by_action,
         reviewed_descriptions=reviewed,
     )
@@ -418,7 +427,7 @@ def run_actions(
         conn: 열린 트랜잭션의 DB 연결 (호출자가 커밋·롤백한다).
         session_id: 세션 ID.
         client: VLM 클라이언트 (`version`이 모델 버전에 들어간다).
-        ontology: 온톨로지.
+        ontology: 온톨로지 (프롬프트가 읽는 범주의 해시가 모델 버전에 들어간다).
         policy: 행동 구간 정책 (`stamp`가 모델 버전에 들어간다).
         now: 생성 시각 (시간대 필수).
         labeling: 라벨링 버킷 저장소. 주면 블러본을 받아 VLM에 프레임을 보낸다. None이면 프레임 없이
@@ -435,7 +444,7 @@ def run_actions(
     부작용: `label_records`에 삭제 레코드와 새 라벨을 추가한다 (세션 잠금 아래).
     라벨링 버킷에서 블러본을 임시 디렉터리로 받는다.
     """
-    first = _read_inputs(conn, session_id, client.version, policy)
+    first = _read_inputs(conn, session_id, client.version, policy, ontology)
     summary = ActionsSummary(first.version)
     # 사용 중지·승인 보류 세션은 묻지 않는다 (쓰기 직전에 한 번 더 본다)
     summary.blocked = write_blocker(conn, session_id)
@@ -476,7 +485,8 @@ def run_actions(
                 ontology_version=first.session.ontology_version or ontology.version,
                 now=now,
             )
-    _write(conn, session_id, first.version, client.version, policy, results, render, now, summary)
+    inputs = (client.version, policy, ontology)
+    _write(conn, session_id, first.version, inputs, results, render, now, summary)
     return summary
 
 
@@ -484,8 +494,7 @@ def _write(
     conn: sa.Connection,
     session_id: str,
     version: str,
-    vlm_version: str,
-    policy: ActionsPolicy,
+    inputs: tuple[str, ActionsPolicy, Ontology],
     results: dict[Hand, HandResult],
     render: tuple[str, str, PrivacyPolicy] | None,
     now: datetime,
@@ -496,13 +505,14 @@ def _write(
 
     묻는 동안 검수자가 고친 행동(사람 레코드)·승인한 행동은 보호 구간이 되어 새 결과 중 겹치는
     것은 버리고 빈 곳은 미상으로 채운다 (`keep_protected`, 공백 0·겹침 없음). 그 사이 입력이 바뀌어
-    버전이 달라졌으면 지난 입력으로 만든 결과이므로 쓰지 않는다 (다시 실행).
+    버전이 달라졌으면 지난 입력으로 만든 결과이므로 쓰지 않는다 (다시 실행). `inputs`는 버전을 다시
+    계산할 (VLM 버전, 정책, 온톨로지)다.
     """
     lock_session(conn, session_id)
     summary.blocked = write_blocker(conn, session_id, render)
     if summary.blocked is not None:
         return
-    fresh = _read_inputs(conn, session_id, vlm_version, policy)
+    fresh = _read_inputs(conn, session_id, *inputs)
     if fresh.version != version:
         summary.blocked = (
             f"{session_id}: 묻는 동안 행동 단계 입력(손 트랙·손 상태·객체 트랙)이 바뀌었습니다. "

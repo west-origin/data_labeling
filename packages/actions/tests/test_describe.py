@@ -18,9 +18,11 @@ from typing import Any
 
 import pytest
 import sqlalchemy as sa
+from pydantic import ValidationError
 
 from dlp_actions.clients import OracleVlm
 from dlp_actions.describe import (
+    DescribeAnswer,
     DescribeTarget,
     describe_schema,
     describe_session,
@@ -169,7 +171,7 @@ def test_meaning_correction_regenerates_and_inherits_approval(
     vlm = _oracle(fix)
     s = _describe(db, ontology, policy, vlm)
     assert s.described == ["a001"] and s.fallbacks == [] and s.inherited == 1
-    assert s.version == describe_version(policy, vlm.version)
+    assert s.version == describe_version(policy, vlm.version, ontology)
     (d,) = _descriptions(db)
     p = d.payload
     assert isinstance(p, DescriptionPayload)
@@ -456,3 +458,41 @@ def test_final_write_check_passes_when_nothing_changed(
     with db.begin() as conn:
         s = describe_session(conn, SID, _oracle(fix), ontology, policy, T2, labeling)
     assert s.described == ["a001"] and s.blocked is None
+
+
+@pytest.mark.parametrize("confidence", [True, "0.97"])
+def test_describe_answer_rejects_non_number_confidence(confidence: Any) -> None:
+    """F-AIR-38 회귀: 설명 응답의 confidence가 JSON 수가 아니면(true, "0.97") 형식 위반이다
+    (다시 묻는다). 정수 1은 받는다."""
+    raw: dict[str, Any] = {"label": "action", "hands": [], "description": "x"}
+    with pytest.raises(ValidationError):
+        DescribeAnswer.model_validate(raw | {"confidence": confidence})
+    assert DescribeAnswer.model_validate(raw | {"confidence": 1}).confidence == 1.0
+
+
+def _with(ontology: Ontology, category: str, key: str, entry: dict[str, Any]) -> Ontology:
+    """같은 버전에 항목 하나를 draft로 덧붙인 온톨로지."""
+    data = ontology.model_dump(mode="json")
+    data[category][key] = entry
+    return Ontology.model_validate(data)
+
+
+def test_describe_version_follows_prompt_ontology_content(
+    ontology: Ontology, policy: ActionsPolicy
+) -> None:
+    """F-PAR-85 회귀: 같은 온톨로지 버전에 프롬프트가 읽는 동작·부위·상태 이름을 덧붙이면 설명
+    버전이 바뀌어 다시 만들고, 읽지 않는 범주(객체)를 덧붙이면 그대로다. 같은 내용이면 버전이
+    같다."""
+    base = describe_version(policy, "vlm", ontology)
+    assert describe_version(policy, "vlm", load_ontology(ROOT / "config/ontology/v1")) == base
+    data = ontology.model_dump(mode="json")
+    changed = [
+        _with(ontology, "verbs", "grip", {"ko": "잡기", "en": "grip", "level": "primitive"}),
+        _with(ontology, "body_parts", "x_part", next(iter(data["body_parts"].values()))),
+        _with(
+            ontology, "state_attributes", "x_state", next(iter(data["state_attributes"].values()))
+        ),
+    ]
+    assert all(describe_version(policy, "vlm", o) != base for o in changed)
+    obj = _with(ontology, "objects", "x_object", next(iter(data["objects"].values())))
+    assert describe_version(policy, "vlm", obj) == base

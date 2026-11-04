@@ -192,7 +192,8 @@ TTA·학습 증강 공용 기하 변환 `dlp_media.geometry`, COCO RLE `dlp_medi
 `dlp privacy detect|approve|render|audit-sample|hold`. 정책은 `config/policies/privacy.yaml`.
 블러 오탐 의심 힌트 `dlp_privacy.hints` (ADR 0055).
 OWLv2 간격 캐시 프레임은 관측이 아니다(`Detection.cached`). 트래커는 실측 사이를 외접 박스·유지로 덮고 검수 우선
-구간(track_gap)에 넣는다 (iou-tracker-2, ADR 0009 개정, F-PMS-45).
+구간(track_gap)에 넣는다 (iou-tracker-2, ADR 0009 개정, F-PMS-45). 관측이 뒤에 붙어도 캐시 박스는 그 프레임
+렌더 박스에 외접으로 남는다 (iou-tracker-3, F-PMS-49).
 
 ### `packages/review/` (`dlp_review`)
 

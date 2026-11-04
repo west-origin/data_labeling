@@ -25,6 +25,7 @@ from dlp_media.ingest import SessionConflictError, ingest_session, load_manifest
 from dlp_media.probe import MediaInfo
 from dlp_media.pts import PtsIndex
 from dlp_media.storage import ImmutableObjectError, LocalStore, S3Store
+from dlp_media.tables import read_parquet, write_parquet
 from dlp_schema.db.migrate import upgrade
 from dlp_schema.db.repository import (
     get_session,
@@ -85,7 +86,10 @@ def test_ingest_builds_session_and_is_idempotent(
 def test_changed_raw_file_is_rejected(
     sync: tuple[SyncScenario, Path], tmp_path: Path, write_manifest: ManifestWriter
 ) -> None:
-    """같은 스트림 원본 파일 내용이 바뀌면 다시 수집할 때 ImmutableObjectError."""
+    """같은 스트림 원본 파일 내용이 바뀌면 다시 수집할 때 ImmutableObjectError.
+
+    바뀐 파일도 올바른 장갑 Parquet이다 (깨진 파일은 업로드 전 읽기에서 먼저 실패한다, F-PMS-07).
+    """
     store = LocalStore(tmp_path / "store", "dlp-raw")
     glove = tmp_path / "glove.parquet"
     glove.write_bytes((sync[1] / "glove_right.parquet").read_bytes())
@@ -95,9 +99,49 @@ def test_changed_raw_file_is_rejected(
     ]
     manifest, base = load_manifest(write_manifest(tmp_path, sync[1], streams=streams))
     ingest_session(manifest, base, store)
-    glove.write_bytes(glove.read_bytes() + b"\x00")
+    cols, meta = read_parquet(glove)
+    write_parquet(glove, {**cols, "pressure_0": np.asarray(cols["pressure_0"]) + 1.0}, meta)
     with pytest.raises(ImmutableObjectError):
         ingest_session(manifest, base, store)
+
+
+@pytest.mark.parametrize("sensor", ["imu_csv_blank_time", "glove_inf_time"])
+def test_bad_sensor_file_is_rejected_before_any_upload(
+    sync: tuple[SyncScenario, Path],
+    tmp_path: Path,
+    write_manifest: ManifestWriter,
+    sensor: str,
+) -> None:
+    """F-PMS-07: 센서 파일의 시각 빈 칸(NaN)·inf는 업로드 전에 ValueError다.
+
+    예전에는 바디캠과 그 센서 원본을 올린 뒤에 실패해 원본 키가 잠겼고, 고친 파일로 다시 수집하면
+    ImmutableObjectError였다 (inf는 아예 통과했다). 정답: 저장소에 아무것도 없고, 고친 파일로
+    같은 경로에 다시 수집하면 성공한다.
+    """
+    store = LocalStore(tmp_path / "store", "dlp-raw")
+    body = {"stream_id": "bodycam", "kind": "bodycam", "path": str(sync[1] / "bodycam.mp4")}
+    if sensor == "imu_csv_blank_time":
+        src = tmp_path / "imu.csv"
+        good = "t_ms,ax,ay,az,gx,gy,gz\n" + "".join(f"{i * 5},0,0,9.8,0,0,0\n" for i in range(50))
+        broken = good.replace("\n50,", "\n,", 1)
+        stream = {"stream_id": "imu_side", "kind": "imu", "path": str(src)}
+    else:
+        src = tmp_path / "glove.parquet"
+        cols, meta = read_parquet(sync[1] / "glove_right.parquet")
+        t = np.asarray(cols["t_ms"], dtype=np.float64)
+        write_parquet(src, {**cols, "t_ms": np.append(t[:-1], np.inf)}, meta)
+        broken = src.read_bytes()
+        write_parquet(src, cols, meta)
+        good = src.read_bytes()
+        stream = {"stream_id": "glove_right", "kind": "glove_right", "path": str(src)}
+    manifest, base = load_manifest(write_manifest(tmp_path, sync[1], streams=[body, stream]))
+    write = src.write_text if isinstance(broken, str) else src.write_bytes
+    write(broken)  # pyright: ignore[reportArgumentType]
+    with pytest.raises(ValueError, match="시각에 유한하지 않은"):
+        ingest_session(manifest, base, store)
+    assert not store.root.exists() or not any(store.root.rglob("*"))
+    write(good)  # pyright: ignore[reportArgumentType]
+    assert ingest_session(manifest, base, store).session.stream(stream["stream_id"])
 
 
 @pytest.mark.parametrize("glove_first", [False, True])

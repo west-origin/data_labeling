@@ -179,6 +179,10 @@ def _repo_pressure_prefixes() -> tuple[str, ...]:
 def imu_series(path: Path) -> Series:
     """정규화된 IMU Parquet → 가속도 크기에서 중력(중앙값)을 뺀 절댓값.
 
+    시각이나 가속도가 유한하지 않은 표본은 뺀다. 수집은 이제 그런 표본을 거부하지만 이전에 수집한
+    정규화본에는 남아 있을 수 있고, 하나만 있어도 중앙값과 보간이 신호 전체를 NaN으로 만든다
+    (F-PMS-48). `Series`는 불균일 시계열이라 표본을 빼도 된다. 자이로는 보지 않는다.
+
     Args:
         path: 정규화된 IMU Parquet (열 `t_ms`, `ax`, `ay`, `az`).
 
@@ -190,5 +194,8 @@ def imu_series(path: Path) -> Series:
     """
     cols, _ = read_parquet(path)
     acc = np.stack([np.asarray(cols[c], dtype=np.float64) for c in ("ax", "ay", "az")], axis=1)
+    t = np.asarray(cols["t_ms"], dtype=np.float64)
     mag = np.linalg.norm(acc, axis=1)
-    return Series(np.asarray(cols["t_ms"], dtype=np.float64), np.abs(mag - np.median(mag)))
+    keep = np.isfinite(t) & np.isfinite(mag)
+    t, mag = t[keep], mag[keep]
+    return Series(t, np.abs(mag - np.median(mag)))

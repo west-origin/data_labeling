@@ -9,3 +9,4 @@ ts	phase	decision	why	evidence	result
 2026-11-04T03:51:35Z	structure	README 신규 개발자 퀴즈 통과(12문항 중 README만으로 11, 1문항 CLAUDE.md 보충) → 지적 5건 반영	pstack teach: 처음 보는 사람이 문서만으로 답할 수 있어야 함; 기준 9/10	sonnet 퀴즈 에이전트(문서만 읽기), mermaid 11.4.1 렌더 5/5 OK	pass
 2026-11-04T03:51:35Z	inspect	swarm 6/10 구역 재실행 검증: 신규 결함 12건+기존 2건 재현	interrogate: 실행으로 다시 얻은 출력만 남김	scratchpad/swarm2/verified.md	pending fix
 2026-11-04T04:00:03Z	inspect	10/10 구역 재실행 검증 완료: 신규 23건(중 8·하 15) + 기존 3건(F-PMS-07, F-PAR-63, F-PAR-83) → 파일이 겹치지 않는 8개 수정 묶음으로 병렬 수정	interrogate 통과분만 수정; 묶음은 패키지 경계로 나눠 동시 편집 충돌 방지; issues.yaml은 조정자만 씀	scratchpad/swarm2/verified.md, fix_brief.md	fixing
+2026-11-04T04:38:10Z	inspect	검증된 결함 20건+기존 3건 수정, issues.yaml 등록, 보고서 full-inspection-2026-11-04.md	8개 수정 묶음 완료, 재현 스크립트 수정 후 의도 출력 확인, 트래커 iou-tracker-3	make check: 1879 passed 7 xfailed EXIT 0	fixed

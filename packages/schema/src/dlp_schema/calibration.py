@@ -41,7 +41,7 @@ from enum import StrEnum
 
 from pydantic import AwareDatetime, Field, model_validator
 
-from dlp_schema.common import Contract, Identifier
+from dlp_schema.common import Contract, FiniteFloat, Identifier
 from dlp_schema.session import CameraIntrinsics, Session
 
 
@@ -69,7 +69,7 @@ class CameraCalibration(Contract):
     camera_id: Identifier
     intrinsics: CameraIntrinsics
     method: CalibrationMethod
-    rms_px: float | None = Field(default=None, ge=0)
+    rms_px: FiniteFloat | None = Field(default=None, ge=0)
     n_views: int | None = Field(default=None, ge=1)
     source_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     valid_from: AwareDatetime | None = None

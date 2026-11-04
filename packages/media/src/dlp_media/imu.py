@@ -44,8 +44,11 @@ IMU_COLUMNS = ("ax", "ay", "az", "gx", "gy", "gz")
 class ImuData:
     """IMU 샘플 (시각 증가 순).
 
+    자이로는 NaN을 허용한다 (자이로 없는 기종). 시각·가속도는 유한해야 한다: 가속도 NaN 하나가
+    동기화 신호 전체를 NaN으로 만들고, NaN 시각은 순증가 검사(np.diff <= 0)를 그냥 통과한다.
+
     Raises (생성 시):
-        ValueError: 배열 길이가 맞지 않거나 시각이 순증가가 아닐 때.
+        ValueError: 배열 길이가 맞지 않음, 시각·가속도에 NaN·무한대, 시각이 순증가가 아님.
     """
 
     # 샘플 시각 (그 카메라 시계 ms)
@@ -56,10 +59,14 @@ class ImuData:
     source: str
 
     def __post_init__(self) -> None:
-        """모양과 시각 순서를 검사한다 (빈 데이터는 허용)."""
+        """모양·유한값·시각 순서를 검사한다 (빈 데이터는 허용)."""
         n = self.t_ms.size
         if self.acc.shape != (n, 3) or self.gyro.shape != (n, 3):
             raise ValueError("IMU 배열 길이가 맞지 않습니다")
+        if not np.all(np.isfinite(self.t_ms)):
+            raise ValueError("IMU 시각에 유한하지 않은 값(빈 칸·NaN·무한대)이 있습니다")
+        if not np.all(np.isfinite(self.acc)):
+            raise ValueError("IMU 가속도에 유한하지 않은 값(빈 칸·NaN·무한대)이 있습니다")
         if n and np.any(np.diff(self.t_ms) <= 0):
             raise ValueError("IMU 시각이 증가하지 않습니다")
 

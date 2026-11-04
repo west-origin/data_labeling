@@ -3,9 +3,10 @@
 과제와 라벨 종류:
 - objects: box_track → mAP(0.50:0.95), AP50, AP75, HOTA, IDF1, MOTA, ECE, 클래스별 AP.
   정답 키프레임 시각(모든 정답 트랙의 합집합)에서 비교한다. 사람 정답은 키프레임이 성기다 (CVAT가
-  사이를 보간한다). 그래서 정답 트랙은 자기 키프레임 사이를 간격 제한 없이 선형 보간하고 (화면 밖
-  키프레임이 끼면 그 사이는 없음), 예측은 과제별 max_interp_ms 이내에서만 보간한다 (프리라벨
-  트래커가 한 트랙으로 잇는 끊김 이상, evaluation.yaml).
+  사이를 보간한다). 그래서 정답 트랙은 자기 키프레임 사이를 간격 제한 없이 선형 보간하고, 예측은
+  과제별 max_interp_ms 이내에서만 보간한다 (프리라벨 트래커가 한 트랙으로 잇는 끊김 이상,
+  evaluation.yaml). 다음 키프레임이 화면 밖(outside)이면 그 시각 직전까지 앞 박스를 유지한다
+  (계약 "이 시각부터 안 보임", 블러 렌더·학습 데이터와 같은 규칙, F-ETA-30).
 - hands / body: keypoint_track(hand21 / coco17) → PCK. 정답 시각마다 손은 같은 스트림의 같은 쪽
   손끼리 관절 거리로, 전신은 같은 스트림에서 보이는 관절 박스 IoU로 일대일 맞춘다 (헝가리안).
 - contact: hand_state(접촉 대상 있음) → 접촉 시작·종료 F1과 오차(ms), 파지 유형 macro F1.
@@ -118,8 +119,10 @@ def _interp(
 ) -> NDArray[np.float64] | None:
     """키프레임 (시각, 값 또는 화면 밖 None)에서 시각 t의 값.
 
-    두 키프레임 사이는 선형 보간한다. 어느 한쪽이 화면 밖이거나 간격이 max_gap보다 크면 None이고,
-    첫 키프레임 앞·마지막 키프레임 뒤는 None이다.
+    두 키프레임 사이는 선형 보간한다. 앞 키프레임이 화면 밖이거나 간격이 max_gap보다 크면
+    None이다. 다음 키프레임만 화면 밖이면 앞 값을 간격과 무관하게 유지한다. outside는 "이 시각부터
+    안 보임"이라 그 전까지는 보인다 (계약 `BoxKeyframe.outside`, `dlp_privacy.render`와
+    `dlp_train.yolox_data.box_at`이 같은 규칙, F-ETA-30). 첫 키프레임 앞·마지막 뒤는 None이다.
 
     Args:
         keyframes: 시각 오름차순 (스트림 PTS ms, 값). 값은 박스 [x, y, w, h] 또는 관절 (K, 3) 배열.
@@ -137,7 +140,11 @@ def _interp(
     if i == 0 or i == len(times):
         return None
     (t0, v0), (t1, v1) = keyframes[i - 1], keyframes[i]
-    if v0 is None or v1 is None or t1 - t0 > max_gap:
+    if v0 is None:
+        return None
+    if v1 is None:
+        return v0
+    if t1 - t0 > max_gap:
         return None
     w = (t - t0) / (t1 - t0)
     return v0 * (1 - w) + v1 * w

@@ -67,9 +67,9 @@ def _sample() -> Sample:
     )
 
 
-def _ops(t: Transform, k1: float = 0.0) -> Ops:
-    """기하 변환만 (광학 효과 없음)."""
-    return Ops(t, 0.0, 0.0, 0.0, 0.0, 0, None, 0, 0.0, (), k1)
+def _ops(t: Transform, k1: float = 0.0, persp: Transform | None = None) -> Ops:
+    """기하 변환만 (광학 효과 없음). persp는 t 끝에 합성한 원근 부분."""
+    return Ops(t, 0.0, 0.0, 0.0, 0.0, 0, None, 0, 0.0, (), k1, perspective=persp)
 
 
 def _white(img: np.ndarray) -> tuple[float, float, float, float]:
@@ -102,7 +102,8 @@ TRANSFORMS = {
 def test_labels_follow_pixels(name: str) -> None:
     """변환마다 박스는 흰 사각형을 덮고, 마스크는 흰 화소와 거의 같고, 손목 점은 빨간 점이다."""
     k1 = 0.08 if name == "distortion" else 0.0
-    out = augment(_sample(), _ops(TRANSFORMS[name](), k1))
+    t = TRANSFORMS[name]()
+    out = augment(_sample(), _ops(t, k1, persp=t if name == "perspective" else None))
     [box] = out.boxes
     found = _white(out.image)
     assert box.box[0] <= found[0] + 2 and box.box[1] <= found[1] + 2
@@ -136,8 +137,44 @@ def test_rotation_moves_3d_consistently() -> None:
     v = F * p.xyz[1] / p.xyz[2] + H / 2
     assert (u, v) == pytest.approx(_red(out.image), abs=1.5)
     offsets = np.array([[6, 4], [-5, 3], [-4, -6], [5, -3]], float)
-    persp = augment(_sample(), _ops(perspective(W, H, offsets)))
+    warp = perspective(W, H, offsets)
+    persp = augment(_sample(), _ops(warp, persp=warp))
     assert not persp.geometry_3d_exact  # 원근은 3D를 바꾸지 않고 정확하지 않다고 표시한다
+    assert persp.points3d[0].xyz == pytest.approx(_sample().points3d[0].xyz)
+
+
+def test_flip_with_perspective_still_flips_3d() -> None:
+    """F-ETA-28: 원근이 섞여도 뒤집기는 3D x를 뒤집고 손 개체를 바꾼다 (이름과 좌표가 같이 간다)."""
+    s = _sample()
+    offsets = np.array([[6, 4], [-5, 3], [-4, -6], [5, -3]], float)
+    warp = perspective(W, H, offsets)
+    out = augment(s, _ops(hflip(W, H).then(warp), persp=warp))
+    [p] = out.points3d
+    assert p.entity == "left_hand"
+    assert p.xyz == pytest.approx((-s.points3d[0].xyz[0], *s.points3d[0].xyz[1:]))
+    assert not out.geometry_3d_exact
+
+
+def test_undeclared_perspective_is_rejected_for_3d() -> None:
+    """F-ETA-28: 원근을 `Ops.perspective`로 밝히지 않으면 3D 아핀 부분을 가를 수 없어 거부한다."""
+    warp = perspective(W, H, np.array([[6, 4], [-5, 3], [-4, -6], [5, -3]], float))
+    with pytest.raises(ValueError, match=r"Ops\.perspective"):
+        augment(_sample(), _ops(hflip(W, H).then(warp)))
+
+
+def test_policy_flips_keep_3d_side_consistent() -> None:
+    """F-ETA-28: 정책 그대로(원근 켬) 증강한 사본마다 손 개체 좌우와 x 부호가 함께 바뀐다."""
+    policy = load_policy(ROOT).augmentation
+    assert policy.geometric.perspective_frac > 0
+    s = _sample()
+    x0 = s.points3d[0].xyz[0]
+    outs = augment_examples([s] * 20, policy)
+    flipped = [o for o in outs if "hflip" in o.ops[-1]]
+    assert flipped and len(flipped) < len(outs)
+    for o in outs:
+        [p] = o.points3d
+        assert (p.entity == "left_hand") == ("hflip" in o.ops[-1])
+        assert (p.xyz[0] * x0 < 0) == (p.entity == "left_hand")
 
 
 def test_cropped_out_points_and_boxes() -> None:
@@ -150,7 +187,19 @@ def test_cropped_out_points_and_boxes() -> None:
 def test_photometric_changes_pixels_not_labels() -> None:
     """광학·1인칭 효과(밝기·대비·흐림·잡음·JPEG·움직임 흐림·반사광)는 라벨을 바꾸지 않는다."""
     s = _sample()
-    ops = Ops(identity(W, H), 0.1, 0.2, 1.0, 5.0, 3, 60, 7, 30.0, ((0.5, 0.5, 0.05, 0.02),), 0.0)
+    ops = Ops(
+        identity(W, H),
+        0.1,
+        0.2,
+        1.0,
+        5.0,
+        3,
+        60,
+        7,
+        30.0,
+        ((0.5, 0.5, 0.05, 0.02),),
+        0.0,
+    )
     out = augment(s, ops)
     assert not np.array_equal(out.image, s.image)
     assert out.boxes == s.boxes

@@ -48,7 +48,7 @@ from dlp_schema.labels import DescriptionPayload, VerificationState
 from dlp_schema.ontology import Ontology
 from dlp_schema.testing import FIXED_TIME, action_payload, make_label
 
-from .conftest import ROOT, Scenario, model
+from .conftest import ROOT, Scenario, hand21, model
 
 NOIDS = Pseudonymizer(None)  # 가명 처리 없이 (내부 ID를 그대로 확인하는 테스트)
 
@@ -998,3 +998,49 @@ def test_unknown_hand_part_fails_before_export(policy: ExportPolicy, ontology: O
     bad = rp.model_copy(update={"hand_parts": rp.hand_parts.model_copy(update={"index": "indx"})})
     with pytest.raises(ExportError, match="indx"):
         check_hand_parts(ontology, policy.lerobot, bad)
+
+
+def test_interpolated_hand_keyframes_are_not_exported_as_observations(
+    scenario: Scenario, policy: ExportPolicy, ontology: Ontology, tmp_path: Path
+) -> None:
+    """F-PAR-63: 보간해 채운 손 키프레임(`interpolated`, ADR 0054)은 관측이 아니다.
+
+    시나리오: 왼손 hand21 트랙에 관측 키프레임 t[2]·t[3]·t[8]·t[9]와 그 사이 보간 키프레임 t[5].
+    정답: COCO는 관측 시각 이미지·주석만 낸다. LeRobot은 t[5]를 키프레임이 없는 것으로 보아
+    t[3]~t[8] 간격(208 ms)이 보간 한도(200 ms)를 넘으므로 t[5]에 왼손 2D가 없다(v 0).
+    t[2]~t[3] 사이는 관측끼리 보간해 v 2.
+    """
+    t = scenario.times
+    assert t[8] - t[3] > policy.lerobot.interp_max_gap_ms >= max(t[5] - t[3], t[8] - t[5])
+    observed = [{"t_ms": t[i], "points": hand21(10 + i, 20)} for i in (2, 3, 8, 9)]
+    filled = {"t_ms": t[5], "points": hand21(15, 20), "interpolated": True}
+    left = make_label(
+        {"kind": "keypoint_track", "entity_id": "left_hand", "skeleton": "hand21", "hand": "left",
+         "keyframes": sorted([*observed, filled], key=lambda f: f["t_ms"])},
+        label_id="s1-kp-left", session_id="s1", stream_id="bodycam", t_start_ms=t[2],
+        t_end_ms=t[9],
+    )  # fmt: skip
+    sc = Scenario(scenario.session, [left], t, scenario.labeling, scenario.render_hashes)
+    out = tmp_path / "out"
+    r = write_coco(
+        source(sc, policy), policy, ontology, sc.labeling, out, tmp_path / "w",
+        export_id="e1", now=FIXED_TIME, ids=NOIDS,
+    )  # fmt: skip
+    data = json.loads((out / "coco" / "annotations.json").read_text())
+    assert sorted(img["t_ms"] for img in data["images"]) == [t[2], t[3], t[8], t[9]]
+    assert r.annotations == 4
+
+    video = tmp_path / "v.mp4"
+    sc.labeling.get_file("sessions/s1/blurred/bodycam.mp4", video)
+    ep = build_episode(
+        sc.session, sc.session.streams[0], build_pts_index(video), (64, 48),
+        source(sc, policy).sessions[0].labels, Vocab.from_ontology(ontology), policy.lerobot,
+    )  # fmt: skip
+    col = {n: i for i, n in enumerate(state_names(policy.lerobot))}
+
+    def wrist_v(ms: float) -> float:
+        """마스터 시각 ms에 가장 가까운 프레임의 왼손 손목 보임 값."""
+        return float(ep.state[int(np.argmin(np.abs(ep.times_ms - ms))), col["left.wrist.v"]])
+
+    assert wrist_v((t[2] + t[3]) / 2) == 2.0
+    assert wrist_v(t[5]) == 0.0

@@ -17,10 +17,12 @@ frame_stride_ms마다 깊이 맵을 만들고, 그 프레임에 있는 손 키�
   모드) 그 캘리브레이션을 쓰지 않고 화각 근사로 떨어지며 표본·궤적 출처도 hfov_approx다
   (`intrinsics_for`, F-PAR-44).
 
-파이프라인 위치: `runner._lift`가 바디캠의 현재 hand21 손·박스 트랙을 (개체, 트랙 종류)마다 하나씩
-골라(`runner.pick_lift_tracks`) 넘겨 부른다. 결과는 trajectory3d 라벨 (frame=camera,
-source_3d=mono_depth)이고, 관계 단계(`dlp_relations`)의 도구-표면 접촉이 쓴다. 정책:
-`prelabel.yaml depth`, 모델: `config/models.yaml depth_metric_indoor_small` (ADR 0010: review).
+파이프라인 위치: `runner._lift`가 바디캠의 현재 박스 트랙 전부와 hand21 손·arm3 팔 트랙을 (개체,
+트랙 종류)마다 하나씩 골라(`runner.pick_lift_tracks`) 넘겨 부른다. 같은 entity_id 박스
+트랙(버전마다 다시 매기는 번호)은 라벨 ID 끝으로 구분한 궤적을 따로 낸다 (`lift_slots`, F-PAR-87).
+결과는 trajectory3d 라벨 (frame=camera, source_3d=mono_depth)이고, 관계 단계(`dlp_relations`)의
+도구-표면 접촉이 쓴다. 정책: `prelabel.yaml depth`, 모델:
+`config/models.yaml depth_metric_indoor_small` (ADR 0010: review).
 시간: 3D 샘플 시각은 바디캠 스트림 PTS ms다 (공간 라벨 규약, ADR 0019).
 """
 
@@ -37,7 +39,7 @@ from numpy.typing import NDArray
 
 from dlp_models.depth import Intrinsics, MetricDepth, sample_depth
 from dlp_models.registry import resolve
-from dlp_prelabel.common import Image, fit_label_id, iter_frames, model_label
+from dlp_prelabel.common import Image, distinct_slots, fit_label_id, iter_frames, model_label
 from dlp_prelabel.constraints3d import constrain_arms, constrain_hands
 from dlp_prelabel.handfit import HandFit, fit_confidence, fit_hand, point_confidence
 from dlp_prelabel.policy import HAND21_JOINTS, DepthPolicy, PrelabelPolicy
@@ -117,8 +119,9 @@ def lift_key(payload: LabelPayload) -> tuple[str, str] | None:
     """3D로 올리는 트랙이면 (entity_id, 트랙 종류), 아니면 None.
 
     hand21 키포인트 트랙(관절마다 part=관절 이름), arm3 착용자 팔 트랙(depth.arm_points마다,
-    ADR 0058)과 박스 트랙(중심, part=None)만 올린다. 같은 키의 트랙은 `lift_tracks`에 하나만
-    넘긴다 (둘이면 같은 (개체, 부위)에 표본이 두 번 들어간다).
+    ADR 0058)과 박스 트랙(중심, part=None)만 올린다. 같은 키의 키포인트 트랙은 `lift_tracks`에
+    하나만 넘긴다 (둘이면 같은 (개체, 부위)에 표본이 두 번 들어간다). 박스 트랙은 같은 키여도 모두
+    넘긴다 (`lift_slots`가 구분한다, F-PAR-87).
     """
     if isinstance(payload, KeypointTrackPayload) and payload.skeleton in ("hand21", "arm3"):
         return (payload.entity_id, payload.kind)
@@ -127,8 +130,23 @@ def lift_key(payload: LabelPayload) -> tuple[str, str] | None:
     return None
 
 
-# 깊이만으로 올릴 점: (개체, 부위, u, v 픽셀). 부위 None은 박스 중심
+# 깊이만으로 올릴 점: (칸, 부위, u, v 픽셀). 부위 None은 박스 중심. 칸은 `lift_slots`
 _Point = tuple[str, str | None, float, float]
+
+
+def lift_slots(tracks: Sequence[LabelRecord]) -> dict[str, str]:
+    """입력 트랙 라벨 ID → 궤적 칸 이름 (표본 묶음 키·3D 라벨 ID 끝의 개체 자리).
+
+    키포인트 트랙은 entity_id 그대로다 (개체마다 하나). 박스 트랙은 entity_id가 하나뿐이면 그대로,
+    여럿이면 `<개체>-<라벨 ID 해시>`다 (`common.distinct_slots`): 승인된 이전 버전 박스와 새 버전
+    박스가 번호만 같은 다른 개체일 수 있어 궤적을 섞거나 하나를 버리지 않는다 (F-PAR-87).
+    """
+    boxes = [
+        (t.label_id, t.payload.entity_id) for t in tracks if isinstance(t.payload, BoxTrackPayload)
+    ]
+    keys = {t.label_id: lift_key(t.payload) for t in tracks}
+    out = {label_id: key[0] for label_id, key in keys.items() if key is not None}
+    return out | distinct_slots(boxes)
 
 
 def _arm_points(
@@ -157,17 +175,21 @@ def _points_by_time(
         올린다 (ADR 0058).
 
     Raises:
-        ValueError: 같은 (개체, 트랙 종류) 트랙이 둘 이상일 때 (F-PAR-01). 두 트랙의 표본을 한
-            궤적에 섞지 않는다. 러너는 `runner.pick_lift_tracks`로 하나만 고른다.
+        ValueError: 같은 (개체, 트랙 종류) 키포인트 트랙이 둘 이상일 때 (F-PAR-01). 두 트랙의
+            표본을 한 궤적에 섞지 않는다. 러너는 `runner.pick_lift_tracks`로 하나만 고른다. 박스
+            트랙은 칸(`lift_slots`)으로 나뉘어 겹치지 않는다.
     """
     seen: dict[tuple[str, str], str] = {}
     points: dict[int, list[_Point]] = {}
     hands: dict[int, list[tuple[str, KeypointFrame]]] = {}
+    slots = lift_slots(tracks)
     for label in tracks:
         p = label.payload
         key = lift_key(p)
         if key is None:
             continue
+        if isinstance(p, BoxTrackPayload):
+            key = (slots[label.label_id], p.kind)
         if key in seen:
             raise ValueError(
                 f"{key[0]}: 같은 개체의 {key[1]} 트랙이 둘입니다 ({seen[key]}, {label.label_id}). "
@@ -187,7 +209,7 @@ def _points_by_time(
                     # 박스는 중심 한 점만 올린다 (part=None). 박스 좌표는 왼쪽 위 (x, y)와 크기 (w,
                     # h) px
                     cx, cy = k.x + k.w / 2, k.y + k.h / 2
-                    points.setdefault(k.t_ms, []).append((p.entity_id, None, cx, cy))
+                    points.setdefault(k.t_ms, []).append((key[0], None, cx, cy))
     return points, hands
 
 
@@ -326,7 +348,7 @@ def lift_tracks(
     calib: CameraIntrinsics | None,
     policy: DepthPolicy,
 ) -> dict[tuple[str, str | None], list[Trajectory3DSample]]:
-    """(entity_id, part) → 3D 샘플. tracks는 hand21 키포인트 트랙과 박스 트랙.
+    """(칸, part) → 3D 샘플. tracks는 hand21 키포인트 트랙과 박스 트랙 (칸은 `lift_slots`).
 
     hand21 트랙은 `policy.hand_points` 관절마다 part=관절 이름(예: "wrist", "pinky_tip"), 박스
     트랙은 화면 밖이 아닌 키프레임의 박스 중심을 part=None으로 올린다. 손 관절은 키프레임에 world가
@@ -340,17 +362,18 @@ def lift_tracks(
         frames: (스트림 PTS ms, RGB 프레임) 순회 (`common.iter_frames`).
         depth: 깊이 추론기 (프레임마다 미터 깊이 맵).
         tracks: 바디캠 현재 라벨 중 키포인트·박스 트랙 (`lift_key`가 None인 것은 무시).
-            (개체, 트랙 종류)마다 하나여야 한다 (러너는 `runner.pick_lift_tracks`로 고른다).
+            키포인트는 (개체, 트랙 종류)마다 하나여야 한다 (러너는 `runner.pick_lift_tracks`로
+            고른다). 박스 트랙은 같은 entity_id가 여럿이어도 칸으로 나뉜다.
         calib: 카메라 내부 파라미터 (세션 또는 등록된 캘리브레이션, None이면 화각 근사). 첫 처리
             프레임 크기로 한 번 정한다.
         policy: `prelabel.yaml depth` (작업자 손 크기 사전값은 `hand_fit.reference_palm_m`을 바꾼
             사본으로 넘긴다).
 
     Returns:
-        (entity_id, part) → 시각 순(중복 없음) `Trajectory3DSample` (카메라 좌표 m, 소수 넷째 자리).
+        (칸, part) → 시각 순(중복 없음) `Trajectory3DSample` (카메라 좌표 m, 소수 넷째 자리).
 
     Raises:
-        ValueError: 같은 (개체, 트랙 종류) 트랙이 둘 이상일 때 (F-PAR-01).
+        ValueError: 같은 (개체, 트랙 종류) 키포인트 트랙이 둘 이상일 때 (F-PAR-01).
     """
     return lift_tracks_with_source(frames, depth, tracks, calib, policy)[0]
 
@@ -395,12 +418,32 @@ def lift_tracks_with_source(
     return out, calib is not None if calibrated is None else calibrated
 
 
-def _source_of(
-    inputs: dict[tuple[str, bool], str], entity: str, part: str | None
-) -> tuple[str, ...] | None:
-    """(개체, 부위) 궤적을 올린 입력 트랙 ID (손 관절이면 손 트랙, 박스 중심이면 박스 트랙)."""
-    found = inputs.get((entity, part is not None))
-    return None if found is None else (found,)
+def _inputs(tracks: Sequence[LabelRecord]) -> dict[tuple[str, bool], tuple[str, str]]:
+    """(칸, 키포인트 트랙인가) → (entity_id, 그 칸을 올린 입력 트랙 라벨 ID).
+
+    같은 칸 이름의 손·박스 트랙이 함께 오면 part로 가른다 (손·팔은 부위 이름, 박스는 None).
+    """
+    slots = lift_slots(tracks)
+    return {
+        (slots[t.label_id], isinstance(t.payload, KeypointTrackPayload)): (
+            t.payload.entity_id,
+            t.label_id,
+        )
+        for t in tracks
+        if t.label_id in slots and isinstance(t.payload, KeypointTrackPayload | BoxTrackPayload)
+    }
+
+
+def lift_policy_digest(policy: PrelabelPolicy) -> str:
+    """3D 단계 버전의 정책 해시: depth 절, 손 크기 초점 추정이 켜졌으면 palm_estimate 절도.
+
+    초점 추정(`fov.focal_samples`)은 palm_estimate 문턱으로 손 맞춤을 거르므로 그 값이 3D 결과를
+    바꾼다. 빼면 문턱을 바꿔도 재실행되지 않았다 (F-PAR-88). 꺼져 있으면(기본) 결과와 무관해 예전과
+    같은 depth 해시만 쓴다 (기존 버전 문자열이 바뀌어 다시 돌지 않게).
+    """
+    if policy.depth.focal_estimate.enabled:
+        return policy.digest("depth", "palm_estimate")
+    return policy.digest("depth")
 
 
 def with_palm(policy: DepthPolicy, palm_m: float | None) -> DepthPolicy:
@@ -435,7 +478,8 @@ def mean_confidence(samples: Iterable[Trajectory3DSample]) -> float:
 class DepthLifter:
     """메트릭 깊이 3D 단계. 러너가 Predictor 목록과 따로 부른다 (입력이 영상 + 다른 라벨이다).
 
-    name: "depth3d". version: `depth3d-<가중치 버전>+hf4+p<depth 절 해시>` (hf1: 손 중심 3D 점
+    name: "depth3d". version: `depth3d-<가중치 버전>+hf5+fe1+ar1+p<정책 해시>` (정책 해시는
+    `lift_policy_digest`: depth 절, 초점 추정이 켜졌으면 palm_estimate 절도. hf1: 손 중심 3D 점
     맞춤 판, ADR 0044. hf2: 표본별 방식·신뢰도, ADR 0045. hf3: 궤적마다 입력 트랙 ID
     `derived_from`, ADR 0048 — 3D가 2D 손 트랙 검수를 물려받는 근거. hf4: 손 모델 자세 회전
     다듬기·해상도와 무관한 상대 재투영 문턱, 맞춤 없는 손가락 끝 빼기, 화면비가 다른 캘리브레이션
@@ -460,7 +504,7 @@ class DepthLifter:
         """
         self.path, version = resolve(root, policy.models.depth)
         self.weights_version = version
-        self.version = f"depth3d-{version}+hf5+fe1+ar1+p{policy.digest('depth')}"
+        self.version = f"depth3d-{version}+hf5+fe1+ar1+p{lift_policy_digest(policy)}"
         self.policy, self.now = policy, now
         self.model: DepthModel | None = None
         # 마지막 run의 손 크기 초점 거리 추정 (없으면 None, 러너 요약용)
@@ -502,7 +546,7 @@ class DepthLifter:
         Args:
             video: 바디캠 영상 로컬 경로.
             session_id, stream_id: 라벨의 세션·스트림 (바디캠).
-            tracks: 올릴 손·박스 트랙. (개체, 트랙 종류)마다 하나 (`lift_tracks` 참고).
+            tracks: 올릴 손·박스 트랙. 키포인트는 (개체, 트랙 종류)마다 하나 (`lift_tracks` 참고).
             calib: 카메라 내부 파라미터 (세션 또는 등록된 캘리브레이션,
                 `calibration_repository.session_intrinsics`). None이거나 영상과 화면비가 맞지
                 않으면 화각 근사이고 페이로드 intrinsics는 hfov_approx다 (F-PAR-44).
@@ -511,15 +555,17 @@ class DepthLifter:
             palm_m: 작업자 손 크기 사전값 (m, None이면 정책 `hand_fit.reference_palm_m`, ADR 0045).
 
         Returns:
-            (개체, 부위)마다 trajectory3d 라벨 하나. ID는
-            `<세션>-<스트림>-3d-<version_tag>-<개체>-<부위|center>` (128자를 넘으면
+            (칸, 부위)마다 trajectory3d 라벨 하나. ID는
+            `<세션>-<스트림>-3d-<version_tag>-<칸>-<부위|center>` (칸은 `lift_slots`: 보통 개체,
+            같은 번호 박스 트랙이 여럿이면 `<개체>-<트랙 ID 해시>`, F-PAR-87. 128자를 넘으면
             `common.fit_label_id`로 접두사 뒤를 해시로 줄인다). 표본마다 방식·신뢰도를 싣고,
             라벨 신뢰도는 표본 신뢰도의 평균(소수 셋째 자리)이다. `derived_from`은 그 개체를 올린
             입력 트랙의 라벨 ID 하나다 (ADR 0048: 손 3D가 그 2D 트랙의 검수를 물려받는 근거).
             DB에는 쓰지 않는다 (러너가 쓴다).
 
         Raises:
-            ValueError: tracks에 같은 (개체, 트랙 종류) 트랙이 둘 이상일 때 (`lift_tracks`).
+            ValueError: tracks에 같은 (개체, 트랙 종류) 키포인트 트랙이 둘 이상일 때
+                (`lift_tracks`).
         """
         # 러너는 입력 해시를 붙인 버전을 넘긴다 (라벨 ID의 version_tag도 이 버전으로 만든다)
         model_version = version or self.version
@@ -535,18 +581,10 @@ class DepthLifter:
         if self.last_focal is not None and used:
             intrinsics = IntrinsicsSource.ESTIMATED_HAND_SIZE
             samples = _scale_confidence(samples, policy.sample_confidence.estimated_hand_size)
-        # 개체 → 올린 입력 트랙 (같은 개체의 손·박스 트랙이 함께 오면 part로 가른다: 손은 관절 이름,
-        # 박스는 None)
-        inputs = {
-            (t.payload.entity_id, isinstance(t.payload, KeypointTrackPayload)): t.label_id
-            for t in tracks
-            if lift_key(t.payload) is not None
-            and isinstance(t.payload, KeypointTrackPayload | BoxTrackPayload)
-        }
         out: list[LabelRecord] = []
-        for (entity, part), ss in sorted(
-            samples.items(), key=lambda kv: (kv[0][0], kv[0][1] or "")
-        ):
+        inputs = _inputs(tracks)
+        for (slot, part), ss in sorted(samples.items(), key=lambda kv: (kv[0][0], kv[0][1] or "")):
+            entity, source = inputs.get((slot, part is not None), (slot, None))
             payload = Trajectory3DPayload(
                 entity_id=entity,
                 part=part,
@@ -554,13 +592,13 @@ class DepthLifter:
                 source_3d=Source3D.MONO_DEPTH,
                 samples=tuple(ss),
                 intrinsics=intrinsics,
-                derived_from=_source_of(inputs, entity, part),
+                derived_from=None if source is None else (source,),
             )
             tag = version_tag(model_version)
             out.append(
                 model_label(
                     label_id=fit_label_id(
-                        f"{session_id}-{stream_id}-3d-", f"{tag}-{entity}-{part or 'center'}"
+                        f"{session_id}-{stream_id}-3d-", f"{tag}-{slot}-{part or 'center'}"
                     ),
                     session_id=session_id,
                     stream_id=stream_id,

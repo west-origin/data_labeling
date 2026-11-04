@@ -154,11 +154,6 @@ def test_privacy_detect_tolerates_frames_rounding_to_same_ms(tmp_path: Path) -> 
     assert result.labels
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=pytest.fail.Exception,
-    reason="F-PMS-07: NaN이 섞인 장갑 시각을 받아들임",
-)
 def test_glove_times_with_nan_rejected() -> None:
     """시각에 NaN이 있으면 단조 증가 검사가 무력해진다. 수집 초기에 거부해야 한다.
 
@@ -957,7 +952,7 @@ def test_console_global_step_bad_json_is_400(tmp_path: Path) -> None:
 def test_actions_prompt_version_is_in_model_version(monkeypatch: pytest.MonkeyPatch) -> None:
     """VLM 프롬프트 문구는 결과를 바꾼다. 문구를 바꾸고 틀 버전을 올리면 행동·설명 모델 버전이
     바뀌어 다음 실행이 다시 돌아야 하고, 정책의 prompt_version이 코드와 다르면 적재 오류여야 한다.
-    지금 틀(1)에서는 기존 버전 문자열이 그대로여야 한다 (기존 세션이 전부 다시 돌지 않게).
+    지금 틀(1)에서는 정책 stamp가 해시 그대로여야 한다 (설명 버전의 온톨로지 부분은 F-PAR-85).
 
     근거: ADR 0012(모델 버전 = 정책 해시 + VLM 버전), 번역·AI 검수의 PROMPT_VERSION 대조
     (translate_policy·aireview policy).
@@ -982,7 +977,10 @@ def test_actions_prompt_version_is_in_model_version(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(ap, "PROMPT_VERSION", 2)
     bumped = ap.ActionsPolicy.model_validate(data)
     assert getattr(bumped, stamp) != p.digest
-    assert describe_version(bumped, "vlm") != describe_version(p, "vlm")
+    from dlp_schema.ontology import load_ontology
+
+    onto = load_ontology(ROOT / "config/ontology/v1")
+    assert describe_version(bumped, "vlm", onto) != describe_version(p, "vlm", onto)
 
 
 def test_training_refuses_task_without_gate_rule() -> None:

@@ -26,7 +26,7 @@ from dlp_actions.runner import run_actions
 from dlp_actions.translate import run_translate
 from dlp_actions.translate_policy import load_policy as load_translate_policy
 from dlp_actions.translators import GlossaryStubTranslator
-from dlp_actions.vlm import SegmentRequest, VlmUnavailableError
+from dlp_actions.vlm import SegmentRequest, VlmClient, VlmUnavailableError
 from dlp_fixtures.actions import generate_action_scenario
 from dlp_fixtures.video import write_video
 from dlp_media.storage import LocalStore, sha256_file
@@ -52,7 +52,7 @@ from dlp_schema.labels import (
     Source,
     VerificationState,
 )
-from dlp_schema.ontology import load_ontology
+from dlp_schema.ontology import Ontology, load_ontology
 from dlp_schema.session import PrivacyState
 from dlp_schema.testing import FIXED_TIME, make_session
 
@@ -479,3 +479,46 @@ def test_same_hand_tracks_follow_the_prelabel_track_rank(pg: sa.Engine) -> None:
     assert {x.provenance.model_version for x in timeline} == {second.version}
     # 3) 같은 입력이면 건너뛴다
     assert third.skipped == ["right"] and third.version == second.version
+
+
+def _appended(ontology: Ontology, category: str, key: str, entry: dict[str, Any]) -> Ontology:
+    """같은 버전에 항목 하나를 draft로 덧붙인 온톨로지."""
+    data = ontology.model_dump(mode="json")
+    data[category][key] = entry
+    return Ontology.model_validate(data)
+
+
+class _CountingVlm(OracleVlm):
+    """물은 구간 수를 센다."""
+
+    def __init__(self, truth: list[LabelRecord]) -> None:
+        super().__init__(truth)
+        self.asked = 0
+
+    def complete(self, request: SegmentRequest, prompt: str, schema: dict[str, Any]) -> str:
+        self.asked += 1
+        return super().complete(request, prompt, schema)
+
+
+def test_appended_primitive_in_same_ontology_version_reruns(pg: sa.Engine) -> None:
+    """F-PAR-85 회귀: 같은 온톨로지 버전에 원시 동작을 덧붙이면 프롬프트·응답 스키마가 바뀌므로
+    모델 버전이 바뀌어 다시 묻는다. 프롬프트가 읽지 않는 범주(객체)를 덧붙이면 다시 묻지 않는다."""
+    v1 = load_ontology(ROOT / "config/ontology/v1")
+    verb = _appended(v1, "verbs", "grip", {"ko": "잡기", "en": "grip", "level": "primitive"})
+    obj_key, obj_entry = next(iter(v1.model_dump(mode="json")["objects"].items()))
+    obj = _appended(verb, "objects", f"{obj_key}_extra", obj_entry)
+    policy = load_policy(ROOT)
+    truth = [x for x in SCENARIO.labels if isinstance(x.payload, ActionPayload | GapPayload)]
+
+    def run(ontology: Ontology) -> tuple[str, int]:
+        client = _CountingVlm(truth)
+        vlm: VlmClient = client
+        with pg.begin() as conn:
+            summary = run_actions(conn, SID, vlm, ontology, policy, FIXED_TIME)
+        return summary.version, client.asked
+
+    first, _ = run(v1)
+    after_verb, asked_verb = run(verb)
+    after_obj, asked_obj = run(obj)
+    assert after_verb != first and asked_verb > 0
+    assert after_obj == after_verb and asked_obj == 0

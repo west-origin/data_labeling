@@ -17,7 +17,8 @@ WP12, ADR 0014·0015(감사 정정). 정책은 `config/policies/review.yaml` `se
 흐름: `ops.runner.plan_session`이 오류 삽입 배정을 계획할 때 `seed_labels`로 사본을 만들어 DB에
 넣고, 수집(`collect.collect_task`) 뒤 `ops.runner.quality_report`가 `detected`로 발견율을 센다.
 
-공개 이름: `INTERVAL_TYPES`, `seed_prefix`, `SeededTask`, `seed_labels`, `detected`.
+공개 이름: `INTERVAL_TYPES`, `seed_prefix`, `seed_new_prefix`, `seeded_owned`, `SeededTask`,
+`seed_labels`, `detected`.
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from datetime import datetime
 import numpy as np
 
 from dlp_review.ops.policy import ErrorType, SeedingPolicy
+from dlp_schema.common import IDENTIFIER_MAX
 from dlp_schema.labels import (
     ActionPayload,
     BlurTrackPayload,
@@ -58,13 +60,44 @@ INTERVAL_TYPES = (
 )
 
 
-def seed_prefix(assignment_id: str) -> str:
-    """오류 삽입 배정의 사본 ID 접두사 `"seed-<배정 ID>-"`.
+# 배정 부분을 그대로 두는 최대 길이: 사본(`-0000`)은 4자, 새로 그린 레코드(`-new-` + 해시 16자)는
+# 20자 꼬리를 붙여도 128자 안이어야 한다
+_COPY_BODY_MAX = IDENTIFIER_MAX - len("seed-") - len("-") - 4
+_NEW_BODY_MAX = IDENTIFIER_MAX - len("seed-") - len("-") - len("new-") - 16
+# 긴 배정 ID를 줄인 길이 (앞부분 + `:h` + 해시 16자). 검수 결과 레코드(`derived_id(사본, r..)`)가
+# 사본 ID를 줄여도 접두사가 남도록 짧게 둔다
+_SHORT_BODY = 90
 
-    사본(`seed-<배정>-0000`…)과 수집 때 새로 그린 레코드(`seed-<배정>-new-<해시>`)가 이 접두사를
-    쓴다. 선택(`ops.selection`)과 발견 판정이 이 접두사로 그 배정의 레코드를 가린다.
+
+def _prefix(assignment_id: str, keep_max: int) -> str:
+    """`seed-<배정 부분>-`. 배정 ID가 keep_max보다 길면 `<앞부분>:h<sha256 16자>`로 줄인다."""
+    body = assignment_id
+    if len(body) > keep_max:
+        digest = hashlib.sha256(assignment_id.encode()).hexdigest()[:16]
+        body = f"{assignment_id[: _SHORT_BODY - 18]}:h{digest}"
+    return f"seed-{body}-"
+
+
+def seed_prefix(assignment_id: str) -> str:
+    """오류 삽입 배정의 사본 ID 접두사 `"seed-<배정 ID>-"` (사본 `seed-<배정>-0000`…).
+
+    사본 ID가 128자를 넘을 만큼 배정 ID가 길면 배정 부분을 `<앞부분>:h<해시>`로 줄인다
+    (결정적, F-REV-36). 길이 안이면 그대로라 기존 사본 ID와 계속 맞는다.
     """
-    return f"seed-{assignment_id}-"
+    return _prefix(assignment_id, _COPY_BODY_MAX)
+
+
+def seed_new_prefix(assignment_id: str) -> str:
+    """수집 때 검수자가 새로 그린 레코드(`<접두사>new-<해시>`)의 접두사.
+
+    꼬리가 사본보다 길어 줄이는 기준이 다르다. 짧은 배정 ID는 `seed_prefix`와 같다 (F-REV-36).
+    """
+    return _prefix(assignment_id, _NEW_BODY_MAX)
+
+
+def seeded_owned(label_id: str, assignment_id: str) -> bool:
+    """레코드가 그 오류 삽입 배정의 것(사본·새로 그린 레코드, 그 검수 결과)인가 (ID 접두사로)."""
+    return label_id.startswith((seed_prefix(assignment_id), seed_new_prefix(assignment_id)))
 
 
 def _rng(seed: int, assignment_id: str) -> np.random.Generator:
@@ -262,11 +295,10 @@ def detected(
         # (같은 세션의 다른 배정·스트림에서 그린 블러로 발견을 인정하지 않는다)
         aid = error.detail.get("assignment_id")
         # 예전 기록(detail에 배정 ID가 없음)은 접두사 검사 없이 판정한다
-        prefix = seed_prefix(str(aid)) if aid else None
         return any(
             x.parent_label_id is None
             and x.stream_id == original.stream_id
-            and (prefix is None or x.label_id.startswith(prefix))
+            and (not aid or seeded_owned(x.label_id, str(aid)))
             and isinstance(x.payload, BlurTrackPayload)
             and x.payload.target == p.target
             and _overlap_ratio(original, x) >= blur_overlap
