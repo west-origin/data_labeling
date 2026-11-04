@@ -30,6 +30,7 @@ from pydantic import ValidationError
 
 from dlp_schema import repo_root
 from dlp_schema.ontology import Ontology, load_ontology
+from dlp_schema.predictor import ModelUnavailableError
 from dlp_schema.testing import FIXED_TIME, make_label
 from dlp_schema.validation import OntologyViolationError
 
@@ -515,6 +516,21 @@ def _arm_tracks_setup(
     return scene, video, evidence, sid
 
 
+def _fake_owl_weights(monkeypatch: pytest.MonkeyPatch) -> None:
+    """OWLv2 가중치 확인을 가짜 경로·버전으로 바꾼다.
+
+    생성자는 경로와 버전만 쓰고 모델은 `run`에서 연다.
+
+    가중치 없는 새 checkout(`make models` 실패)에서도 버전·억제 판정을 검사하게 한다.
+    """
+    from dlp_prelabel.adapters import owl_objects as owl
+
+    def fake_resolve(_root: Path, name: str, *, check_hash: bool = True) -> tuple[Path, str]:
+        return Path(f"/nonexistent/{name}"), f"{name}-000000000000"
+
+    monkeypatch.setattr(owl, "resolve", fake_resolve)
+
+
 @pytest.mark.parametrize("which", ["objects", "tools"])
 def test_wearer_suppression_respects_stages(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, which: str
@@ -544,6 +560,7 @@ def test_wearer_suppression_respects_stages(
                 return []
 
         monkeypatch.setattr(owl, "Owlv2", FakeOwl)
+        _fake_owl_weights(monkeypatch)
     base = load_prelabel_policy(ROOT)
     ws = base.wearer_suppression.model_copy(
         update={"stages": ("body",), "track_share": 0.5, "other_min_area": 0.2}
@@ -551,7 +568,10 @@ def test_wearer_suppression_respects_stages(
     policy = base.model_copy(update={"wearer_suppression": ws})
     cls = mpm.MediaPipeObjects if which == "objects" else owl.OwlObjects
     now = FIXED_TIME
-    plain = cls(ROOT, policy, ontology_version="1.0.0", now=now)
+    try:
+        plain = cls(ROOT, policy, ontology_version="1.0.0", now=now)
+    except ModelUnavailableError as exc:
+        pytest.skip(f"MediaPipe 객체 가중치 없음 (make models): {exc}")
     expected = sorted(x.label_id for x in plain.run(Clip(scene.session_id, sid, video)))
     adapter = cls(ROOT, policy, ontology_version="1.0.0", now=now)
     adapter.set_wearer(evidence)
@@ -614,7 +634,7 @@ def test_prelabel_empty_predictor_is_idempotent(tmp_path: Path) -> None:
     assert calls == ["s1"]
 
 
-def test_owl_version_ignores_scene_timeout() -> None:
+def test_owl_version_ignores_scene_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     """장면이 같고 도구 질의가 같으면 OWLv2 도구 단계 버전도 같아야 한다. 장면 분류 VLM의 시간
     제한은 결과에 영향이 없다.
 
@@ -629,6 +649,7 @@ def test_owl_version_ignores_scene_timeout() -> None:
     q = p.model_copy(
         update={"scene": p.scene.model_copy(update={"timeout_s": p.scene.timeout_s + 1})}
     )
+    _fake_owl_weights(monkeypatch)
     a = OwlObjects(ROOT, p, ontology_version="1.0.0", now=FIXED_TIME)
     b = OwlObjects(ROOT, q, ontology_version="1.0.0", now=FIXED_TIME)
     for o in (a, b):
