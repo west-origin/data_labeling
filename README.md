@@ -9,7 +9,8 @@
 
 현재는 단일 환경의 청소 영상 파일럿을 준비한 단계다. 재학습기는 객체 과제의 YOLOX만 실제 학습기이고 나머지는
 모의 구현(`oracle-stub`)이다. 다중 고객 운영의 인증·격리·복구와 미해결 의존성 취약점은
-[남은 과제](docs/handover/known-issues.md)에 있다.
+[남은 과제](docs/handover/known-issues.md)에 있다. 문제 하나하나의 상태는
+[`docs/handover/issues.yaml`](docs/handover/issues.yaml)이 단일 목록이다.
 
 ## 문서 지도
 
@@ -156,6 +157,7 @@ flowchart LR
 
 ```text
 raw_ingested → privacy_approved → prelabeled → human_verified → split_assigned → exported
+(어느 칸에서든) → withdrawn
 ```
 
 프라이버시 상태 `pending → auto_blurred → approved`는 따로 움직인다. 블러를 고치면 프라이버시 상태만
@@ -220,7 +222,7 @@ raw_ingested → privacy_approved → prelabeled → human_verified → split_as
    uv run dlp console serve
    ```
 
-여기까지 하면 개발 환경이 준비된다. 실제 모델 가중치는 `make models`로 받는다. CVAT는 `make up`에 없으므로
+여기까지 하면 개발 환경이 준비된다. 실제 모델 가중치는 `make models`(안에서 `dlp models fetch`를 부른다)로 받는다. CVAT는 `make up`에 없으므로
 `make cvat-up`으로 따로 띄운다. 새 컴퓨터에 처음부터 설치할 때는 `scripts/install/install.sh`가 위 순서를
 대신 돈다(Mac·Linux·WSL2).
 
@@ -274,7 +276,7 @@ uv run dlp export coco <데이터셋 버전>
 | `retarget` (`dlp_retarget`) | 고객 로봇 리타기팅 | `dlp robot check`, `dlp export lerobot --robot` | `retarget.yaml` |
 | `export` (`dlp_export`) | COCO·구간 JSON·LeRobot 내보내기 | `dlp export coco`, `intervals`, `lerobot` | `export.yaml` |
 | `ops` (`dlp_ops`) | 주간 지표, 원본 접근 감사, 보관 만료 | `dlp ops weekly`, `audit-report`, `retention` | `ops.yaml` |
-| `console` (`dlp_console`) | 브라우저 운영 콘솔(도메인 로직 없음) | `dlp console serve` | `config/console.yaml` |
+| `console` (`dlp_console`) | 브라우저 운영 콘솔. `dlp` 명령을 작업으로 돌리고 DB는 읽기만 한다 | `dlp console serve` | `config/console.yaml` |
 
 패키지 사이 import 허용 범위는 [구조 지도의 의존 표](docs/handover/architecture.md#실제-의존-관계)에 있고,
 `tests/test_import_boundaries.py`가 실제 import와 대조한다. 그 밖의 디렉터리는 다음과 같다.
@@ -333,7 +335,7 @@ docker build --secret id=extra_ca,src=/path/to/ca-bundle.crt -t dlp-mlflow:3.16.
 
 ## 꼭 지킬 약속 5가지
 
-어떤 변경도 아래를 어기면 안 된다. 원문은 [CLAUDE.md "규칙"](CLAUDE.md#규칙)이고, 어떤 규칙이 트리거·테스트로
+어떤 변경도 아래를 어기면 안 된다. 다섯 가지는 요약이고 전부가 아니다. 필수 규칙 전체의 원문은 [CLAUDE.md "규칙"](CLAUDE.md#규칙)이고, 어떤 규칙이 트리거·테스트로
 막히는지는 [불변 조건과 강제 수단](docs/handover/invariants.md)에 있다.
 
 1. **원본은 감사 경로로만, 사람은 승인된 블러본만 본다.** 원본 버킷은 `raw_store`로만 열고 접근은
