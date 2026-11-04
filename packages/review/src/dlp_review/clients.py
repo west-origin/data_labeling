@@ -475,7 +475,7 @@ class LabelStudioClient:
 
         설정을 바꾼 뒤(예: 이벤트 속성 입력란 추가) 이전에 만든 프로젝트에도 새 입력란이
         보이게 한다.
-        Label Studio는 기존 주석이 쓰는 라벨이 새 설정에 없으면 거부한다(HTTP 400) — 라벨을 지우는
+        Label Studio는 기존 주석이 쓰는 라벨이 새 설정에 없으면 거부한다(HTTP 400). 라벨을 지우는
         변경은 새 프로젝트로 해야 한다.
         """
         project = _check(self.http.get(f"/api/projects/{project_id}"))

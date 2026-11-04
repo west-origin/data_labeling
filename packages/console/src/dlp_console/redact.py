@@ -23,7 +23,7 @@ class Redactor:
         """가릴 패턴을 시작 때 한 번 만든다.
 
         Args:
-            raw_bucket: 원본 버킷 이름 (`config/defaults.yaml buckets.raw`).
+            raw_bucket: 원본 버킷 이름 (`config/defaults.yaml`의 원본 버킷 항목).
             env: 비밀값을 찾을 환경 (콘솔 자식 프로세스 환경, `.env` 포함).
         """
         bucket = re.escape(raw_bucket)

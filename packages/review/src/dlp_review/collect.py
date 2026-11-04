@@ -1,4 +1,4 @@
-"""검수 결과 수집.
+"""검수 결과 수집 (검수 생애주기의 수집 단계, `dlp_review` 패키지 docstring).
 
 도구에서 결과를 받아 reconcile하고 DB에 이력으로 쓴다. 한 작업은 한 번만 수집한다
 (세션과 작업 행을 순서대로 잠근다. 같은 작업의 재수집과 회수한 작업의 수집은 None이며, 다른 작업도
@@ -139,8 +139,8 @@ def _seeded_new_id(assignment_id: str, label_id: str) -> str:
     """오류 삽입 과제에서 검수자가 새로 그린 레코드 ID. 배정의 사본 접두사를 붙여 발견 판정을
     그 배정으로 한정한다 (dlp_review.ops.seeding.detected).
 
-    형식: `<seed_new_prefix(배정)>new-<reconcile이 만든 ID의 sha256 앞 16자>` (결정적이라 재수집해도
-    같다). 긴 배정 ID는 접두사를 줄여 128자 안에 둔다 (F-REV-36).
+    형식: `<seed_new_prefix(배정)>new-<reconcile이 만든 ID의 sha256 앞 16자>` (같은 reconcile ID면
+    같은 값이다). 긴 배정 ID는 접두사를 줄여 128자 안에 둔다 (F-REV-36).
     """
     from dlp_review.ops.seeding import seed_new_prefix  # 순환 import를 피한다
 
@@ -179,7 +179,7 @@ def _note_revocations(outcome: ReviewOutcome, requested: list[ReviewTask]) -> No
 
     requested는 요청 전 사본이다. 요청 당시 열려 있던 작업(요청 뒤 revoked)만 다시 만들 대상이다.
     배정이 있으면 배정 ID, 없으면 `verify.reissue_slot`(담당자, 스트림, 도구). 수집한 작업은 결과가
-    이미 이력에 있어 다시 만들지 않는다 — 다시 만든 작업을 수집한 뒤 블러가 또 바뀐 경우도 같다.
+    이미 이력에 있어 다시 만들지 않는다. 다시 만든 작업을 수집한 뒤 블러가 또 바뀐 경우도 같다.
     완료 판정(`verify._direct_reissue`)도 같은 기준이라, 수집한 재작업은 그 뒤 회수 요청을 받아도
     처음 회수한 작업을 다시 만든 것으로 본다.
     """
@@ -218,7 +218,7 @@ def _label_studio_reviewed(
     반환: (검수 항목, 그 주석의 결과 원본). 결과 원본은 AI 결정 읽기(`ai_collect.ls_decisions`)에
     쓴다.
 
-    예외: `TaskError` — 클라이언트 없음, 계정 연결 없음·잘못됨, 검수자 계정의 제출 주석 없음(받지
+    예외: `TaskError`. 클라이언트 없음, 계정 연결 없음·잘못됨, 검수자 계정의 제출 주석 없음(받지
     않은 다른 주석 수를 알린다), 옮길 수 없는 구간(영역 ID·시각·이유).
     """
     ls = setup.label_studio
@@ -359,7 +359,12 @@ def collect_task(
     now: datetime,
     ops_policy: ReviewOpsPolicy | None = None,
 ) -> ReviewOutcome | None:
-    """수집했으면 결과를, 이미 수집했거나 회수한(revoked) 작업이면 None을 돌려준다.
+    """검수 작업 하나를 수집해 라벨 이력에 쓴다. 이미 수집했거나 회수한(revoked) 작업이면 None.
+
+    순서: 세션·작업 잠금 → 비교 기준(보낸 라벨) 정하기 → 도구 결과 읽기·변환 → AI 제안 적용
+    (`ai_collect`) → `reconcile` → 보낸 뒤 바뀐 라벨 빼기(`drop_retracted`) → 새 레코드 삽입·승인
+    기록 → collected 표시 → (블러 변경이면) 승인 해제·회수 요청 → AI 결과 기록 → 배정 마무리 →
+    설명·3D 궤적 따르기.
 
     검수 결과는 작업에 실제로 보낸 라벨(sent_label_ids)과 비교한다. 그 사이 다른 단계가 라벨을
     바꿨어도 보내지 않은 라벨을 검수자가 지운 것으로 보지 않는다.
@@ -373,7 +378,7 @@ def collect_task(
     - reviewer_id: 기록할 검수자 (웹훅이면 `webhook.resolve_reviewer` 결과).
     - now: 수집 시각 (시간대 필수). 새 레코드 `created_at`·검수 시각이 된다.
 
-    예외: `TaskError` — 담당자가 아님, 세션 온톨로지 버전 없음, 도구 클라이언트 없음, 옮길 수 없는
+    예외: `TaskError`. 담당자가 아님, 세션 온톨로지 버전 없음, 도구 클라이언트 없음, 옮길 수 없는
     CVAT 주석·Label Studio 구간, 검수자의 Label Studio 계정 연결 없음·잘못됨, 그 계정이 제출한 주석
     없음. 도구 API 오류는 `clients.ToolError`.
     """

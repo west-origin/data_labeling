@@ -1,11 +1,17 @@
-"""검수 결과를 라벨 이력으로 바꾼다.
+"""검수 결과를 라벨 이력으로 바꾼다 (검수 생애주기의 대조 단계, `dlp_review` 패키지 docstring).
 
 검수 도구에서 돌아온 항목(ReviewedItem)을 검수에 보낸 원래 라벨과 비교한다.
-- 바뀌지 않음: 원래 라벨의 검수 상태만 human_approved로 갱신한다.
+- 바뀌지 않음: 원래 라벨 ID를 `ReviewOutcome.approved`에 넣는다. 수집이 그 라벨의 검수 상태만
+  human_approved로 바꾼다 (`record_review`).
 - 바뀜: 원래 라벨을 parent로 하는 새 human 레코드 (human_corrected).
 - 없어짐: 원래 라벨을 지우는 retracted 레코드 (human_corrected).
 - 새로 생김: parent 없는 새 human 레코드 (human_corrected).
-새 레코드 ID는 (원래 ID, 검수자, 시각, 내용)의 해시라 같은 검수 결과를 다시 수집해도 같다.
+어느 경우에도 원래 레코드의 내용은 바꾸지 않는다.
+
+새 레코드 ID는 (원래 ID, 검수자, 수집 시각, 내용)의 해시다. 같은 입력이면 같은 ID라서 한 수집 안에서
+다시 계산해도(AI 적용 되돌리기, `ai_collect.settle`) 같다. CLI는 수집 시각으로 지금 시각을 넘기므로
+다른 시각의 재수집은 다른 ID를 만든다. 같은 작업을 두 번 수집하지 않는 것은 작업 행의 collected
+상태가 막는다 (`collect.collect_task`).
 
 WP6, ADR 0006·0002(라벨은 덮어쓰지 않는다: 수정은 새 레코드 + parent_label_id).
 파이프라인 위치: `dlp_review.collect.collect_task`가 도구 결과를 변환기(`cvat`·`labelstudio`)로
@@ -190,18 +196,27 @@ def reconcile(
 ) -> ReviewOutcome:
     """검수 도구에서 돌아온 항목을 원래 라벨과 비교해 승인·수정·추가·삭제로 나눈다.
 
-    인자:
-    - normalize: 도구로 보낼 때 적용한 변환 (예: CVAT 좌표 반올림). 비교는 그 결과와 한다.
-    - originals: 작업에 실제로 보낸 원래 라벨 (`ReviewTask.sent_label_ids`로 찾은 레코드).
-      블라인드·이중 작업은 빈 목록이라 돌아온 모든 항목이 "새로 그린 것"이 된다.
-    - reviewed: 도구에서 돌아온 항목.
-    - session_id: 새 레코드의 세션.
-    - ontology_version: 새로 그린 레코드의 온톨로지 버전 (수정·삭제는 원래 라벨의 버전을 잇는다).
-    - reviewer_id: 검수자 ID (작업 담당자). 새 레코드 `verification.reviewer_id`에 남는다.
-    - now: 검수 시각 (시간대 필수). `created_at`·`reviewed_at`과 ID 해시에 쓴다.
+    순수 함수다 (DB·저장소를 쓰지 않는다). 원래 라벨 ID가 없거나 보낸 라벨이 아닌 항목(다른 작업의
+    ID 등)은 새로 그린 것으로 본다. 손 골격의 손 중심 3D 점(world)은 사람 레코드에서 빼고, 2D가
+    보낸 값과 같은 키프레임에만 원래 값을 되살린다 (`keep_unchanged_world`, ADR 0044).
 
-    반환: `ReviewOutcome`. 원래 라벨 중 돌아오지 않은 것은 삭제(retracted) 레코드가 된다.
-    예외: 같은 원래 라벨이 결과에 두 번 나오면 ValueError (검수자가 트랙을 복제한 경우 등).
+    Args:
+        originals: 작업에 실제로 보낸 원래 라벨 (`ReviewTask.sent_label_ids`로 찾은 레코드).
+            블라인드·이중 작업은 빈 목록이라 돌아온 모든 항목이 "새로 그린 것"이 된다.
+        reviewed: 도구에서 돌아온 항목.
+        session_id: 새 레코드의 세션.
+        ontology_version: 새로 그린 레코드의 온톨로지 버전 (수정·삭제는 원래 라벨의 버전을 잇는다).
+        reviewer_id: 검수자 ID (작업 담당자). 새 레코드 `verification.reviewer_id`에 남는다.
+        now: 수집 시각 (시간대 필수). `created_at`·`reviewed_at`과 ID 해시에 쓴다.
+        normalize: 도구로 보낼 때 적용한 변환 (예: CVAT 좌표 배율·반올림 `cvat.quantize`). 승인
+            판정은 원래 라벨이 아니라 이 결과와 비교한다. None이면 원래 라벨 그대로 비교한다.
+
+    Returns:
+        `ReviewOutcome`. 원래 라벨 중 돌아오지 않은 것은 삭제(retracted) 레코드가 된다.
+        `stale`·`revoked` 등 나머지 칸은 비어 있고 `collect`가 채운다.
+
+    Raises:
+        ValueError: 같은 원래 라벨이 결과에 두 번 나올 때 (검수자가 트랙을 복제한 경우 등).
     """
     by_id = {x.label_id: x for x in originals}
     # 비교 기준: 도구로 보낸 형태 (좌표 변환·반올림 왕복 결과)

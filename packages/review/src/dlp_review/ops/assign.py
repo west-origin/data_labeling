@@ -210,7 +210,7 @@ def plan_qa(
     - now: 새 QA 배정 `created_at`.
 
     반환: QA 배정 목록 (ID `derived_id(<표준 배정 ID>, "qa")`, pair_id = 원래 배정). 선임 중
-    원래 담당자가 아닌 사람에게 고르게 준다. 선임이 없거나 원래 담당자뿐이면 담당자가 None이다 —
+    원래 담당자가 아닌 사람에게 고르게 준다. 선임이 없거나 원래 담당자뿐이면 담당자가 None이다.
     그 배정은 작업을 만들지 않고 `runner.assign_reviewer`(`dlp review assign --assignee`)로
     담당자를 정한 뒤 만든다 (F-REV-07). DB에 쓰지 않는다.
     """
@@ -222,8 +222,8 @@ def plan_qa(
         if draw(seed, a.assignment_id, "qa") >= policy.ratios.qa_sample_ratio:
             continue
         # 원래 배정을 복사해 단위·라벨 범위(only/withheld 등)를 그대로 잇고 상태만 새로 연다.
-        # model_copy는 검증하지 않으므로 값은 반드시 enum으로 넣는다. 회귀: 문자열 "open"을 넣어
-        # `status is AssignmentStatus.OPEN` 비교가 거짓이 되고 직렬화 경고가 났다.
+        # model_copy는 검증하지 않으므로 값은 반드시 enum으로 넣는다. 문자열 "open"을 넣으면
+        # `status is AssignmentStatus.OPEN` 비교가 거짓이 되고 직렬화 경고가 난다.
         out.append(
             a.model_copy(
                 update={

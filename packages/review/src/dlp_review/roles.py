@@ -11,7 +11,9 @@ CLAUDE.md 규칙 "원본 버킷 URI를 일반 라벨러 경로에 노출하지 �
 공개 이름:
 - `RawAccessError`: 일반 라벨러 단계에 원본 URI가 섞였다.
 - `bucket_of`: URI → 버킷 이름 (s3://, path-style, virtual-host style URL).
-- `check_stage_uris`: 단계별 URI 검사 (`dlp_review.tasks.create_labeling_tasks`가 부른다).
+- `check_stage_uris`: 단계별 URI 검사. 작업 라벨 작업 생성(`tasks.create_labeling_tasks`의 매체
+  URI, `tasks.label_studio_task_data`의 서명 URL), URL 다시 서명(`refresh`), 회수 전 매체 키 확인
+  (`revoke`)이 부른다.
 - `AccessError`: 원본 접근 권한이 없는 사람에게 블러 검수를 배정하려 했다.
 - `check_privacy_reviewers`: 블러 검수 담당자 권한 검사 (정책 `review.yaml reviewers.privacy`).
 """
@@ -56,7 +58,7 @@ def check_stage_uris(stage: ReviewStage, uris: Iterable[str], raw_bucket: str) -
     - uris: 작업에 들어가는 모든 URI (매체 URI, 서명 URL 등).
     - raw_bucket: 원본 버킷 이름 (보통 `dlp-raw`, 원본 저장소의 `bucket`).
 
-    예외: `RawAccessError` — 원본 버킷을 가리키는 URI가 하나라도 있으면 (목록을 메시지에 담는다).
+    예외: `RawAccessError`. 원본 버킷을 가리키는 URI가 하나라도 있으면 (목록을 메시지에 담는다).
     부작용 없음.
     """
     if stage is ReviewStage.PRIVACY:
@@ -82,7 +84,7 @@ def check_privacy_reviewers(reviewers: Iterable[str | None], allowed: Iterable[s
     - reviewers: 배정하려는 담당자 ID 목록. None(미배정)은 "(미배정)"으로 보고 거부한다.
     - allowed: 원본 접근 권한자 (`config/policies/review.yaml` `reviewers.privacy`).
 
-    예외: `AccessError` — 권한자가 아닌 담당자가 있으면 (정렬된 목록을 메시지에 담는다).
+    예외: `AccessError`. 권한자가 아닌 담당자가 있으면 (정렬된 목록을 메시지에 담는다).
     원본을 읽거나 검수 도구에 올리기 **전에** 불러야 한다 (ADR 0020: 접근 전에 막고 기록).
     """
     denied = sorted({r or "(미배정)" for r in reviewers} - set(allowed))

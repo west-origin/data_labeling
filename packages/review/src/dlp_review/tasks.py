@@ -1,11 +1,15 @@
 # PyAV 타입 스텁이 일부 반환 타입을 비워 두어 이 모듈에서만 해당 경고를 끈다.
 # pyright: reportUnknownMemberType=false
 
-"""세션에서 검수 작업을 만든다.
+"""세션에서 검수 작업을 만든다 (검수 생애주기의 만들기 단계, `dlp_review` 패키지 docstring).
+
+작업마다 `review_tasks` 행(상태 open)에 보낸 라벨 ID(`sent_label_ids`)를 남긴다. 수집
+(`collect.collect_task`)은 이 목록을 비교 기준으로 쓰므로, 그 사이 다른 단계가 라벨을 바꿔도 보내지
+않은 라벨을 검수자가 지운 것으로 보지 않는다.
 
 - 프라이버시 검수 (CVAT, 원본 접근 권한자): 원본 프록시 영상 + 현재 블러 트랙.
 - 작업 라벨 검수 (일반 라벨러): 라벨러 워터마크를 입힌 블러본.
-  - CVAT: 객체·도구 박스 트랙과 키포인트 트랙
+  - CVAT: 객체·도구 박스 트랙과 키포인트 트랙, 모양 모드 마스크(ADR 0059)
   - Label Studio: 시간 구간 라벨, 영상과 장갑·IMU 시계열 동기 재생
   일반 라벨러 경로의 URL은 라벨러 자격 증명(라벨링 버킷 읽기 전용)으로 서명한다. 유효 시간은
   `review.yaml media.signed_url_ttl_s`이고 열린 작업은 `dlp review refresh-urls`가 다시 서명한다.
@@ -281,7 +285,7 @@ def label_studio_task_data(
     실행기·갱신이 도구 작업의 주인을 대조하는 값이다 (`LabelStudioClient.task_owner`).
 
     인자: video_key·csv_key는 라벨링 버킷 키 (`labeling_media_key`, `timeseries_key`).
-    예외: `RawAccessError` — 서명한 URL이 원본 버킷을 가리킨다 (`roles.check_stage_uris`).
+    예외: `RawAccessError`. 서명한 URL이 원본 버킷을 가리킨다 (`roles.check_stage_uris`).
     """
     ttl = setup.media_policy().signed_url_ttl_s
     data = {
@@ -588,8 +592,9 @@ def create_privacy_tasks(
     assignment_id: str | None = None,
     streams: set[str] | None = None,
 ) -> list[ReviewTask]:
-    """select가 없으면 현재 블러 트랙을 넣는다 (배정 방식에 따라 다른 라벨을 넣을 때 쓴다).
+    """블러 검수 작업을 영상 스트림마다 하나씩 CVAT에 만든다.
 
+    select가 없으면 현재 블러 트랙을 넣는다 (배정 방식에 따라 다른 라벨을 넣을 때 select를 준다).
     블러 검수는 원본 영상을 열므로 담당자는 원본 접근 권한자(privacy_reviewers,
     config/policies/review.yaml reviewers.privacy)여야 한다. 원본을 검수 도구에 올리기 **전에**
     grant 감사 기록을 남긴다 (ADR 0020: 접근 전에 기록).
@@ -960,10 +965,12 @@ def create_labeling_tasks(
     streams: set[str] | None = None,
     tools: set[ReviewTool] | None = None,
 ) -> list[ReviewTask]:
-    """select가 없으면 현재 운영 라벨을 넣는다. tools·streams로 만들 작업을 좁힌다.
+    """작업 라벨 검수 작업(일반 라벨러용)을 만든다. 매체는 지금 승인된 블러본뿐이다.
 
+    select가 없으면 현재 운영 라벨을 넣는다. tools·streams로 만들 작업을 좁힌다.
     영상 스트림마다: 현재 블러본을 받아 확인 → 담당자 워터마크 → 라벨링 버킷에 올림 →
-    CVAT 공간 작업(박스·키포인트)과, 바디캠이면 Label Studio 시간 작업(시계열 CSV 포함)을 만든다.
+    CVAT 공간 작업(박스·키포인트 트랙, 모양 모드 마스크)과, 바디캠이면 Label Studio 시간
+    작업(시계열 CSV 포함)을 만든다.
 
     인자:
     - assignee: 담당자 (워터마크 글씨와 매체 경로에 들어간다. CVAT 계정 연결이 있으면 배정한다).

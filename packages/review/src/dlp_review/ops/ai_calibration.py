@@ -163,6 +163,7 @@ def fit_calibration(
 
 
 def _sort_key(key: Key) -> tuple[str, str, str]:
+    """칸 키의 정렬 값 (None은 빈 문자열로 보아 넓은 칸이 먼저 온다)."""
     return key[0], key[1] or "", key[2] or ""
 
 
@@ -186,7 +187,10 @@ class CalibrationEffect:
         """보고용 사전 (값·상한, NaN은 None)."""
 
         def r(rate: Rate) -> dict[str, float | None]:
+            """비율 하나 → {value, upper95, den} (NaN은 None, 소수 6자리)."""
+
             def num(v: float) -> float | None:
+                """NaN(분모 0)은 JSON에 넣을 수 없어 None, 나머지는 소수 6자리로 반올림한다."""
                 return None if math.isnan(v) else round(v, 6)
 
             return {"value": num(rate.value), "upper95": num(rate.upper95), "den": num(rate.den)}
@@ -206,6 +210,7 @@ def _allowed(calibration: AiCalibration | None) -> Callable[[AiRow], bool]:
     """행의 지적이 보정 후에도 보이는가."""
 
     def allowed(r: AiRow) -> bool:
+        """지적(wrong·suspect)이고, 보정이 없거나 판정이 없거나 보정 칸이 그 지적을 허용하면 참."""
         if not r.flagged:
             return False
         if calibration is None or r.verdict is None:
@@ -264,6 +269,7 @@ def cross_checked_effect(
     fitted = [fit_calibration(folds[1 - i], fit, judge_versions, since, until) for i in (0, 1)]
 
     def after(r: AiRow) -> bool:
+        """행 r의 지적이 r을 학습에 쓰지 않은 쪽 보정(다른 반으로 학습)으로도 보이는가."""
         return _allowed(fitted[_fold(r.task_key)])(r)
 
     base = _effect(pool, None)

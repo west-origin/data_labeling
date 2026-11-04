@@ -4,6 +4,16 @@
 끊기면 하나로 잇는다.
 
 규칙 형식은 `relations.yaml rules` 주석 참고. 한 입력에 맞는 규칙이 여럿이면 모두 관계를 낸다.
+
+규칙 하나가 입력 하나에 하는 일:
+1. 입력을 필드 사전으로 바꾼다 (`hand_state_fields`, `contact_fields`). 대상을 모른다는 표시 ID
+   (`unresolved_target_ids`)는 값 없음(None)으로 본다.
+2. `when`의 모든 조건이 맞는지 본다.
+3. `emit` 틀의 `{필드}` 자리를 채운다. 자리에 넣을 값이 없거나 주어·목적어가 비면 관계를 내지
+   않는다.
+구간은 입력 구간(마스터 ms) 그대로다. `derive`가 부르고 DB를 쓰지 않는다.
+
+공개 이름: `RelationDraft`, `hand_state_fields`, `contact_fields`, `apply_rules`, `merge`.
 """
 
 from __future__ import annotations

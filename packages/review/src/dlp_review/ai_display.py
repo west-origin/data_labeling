@@ -647,6 +647,7 @@ def _box_at(p: BoxTrackPayload, t: int) -> tuple[float, float, float, float] | N
     r = (t - a.t_ms) / (b.t_ms - a.t_ms)
 
     def mix(va: float, vb: float) -> float:
+        """a 키프레임 값 va와 b 키프레임 값 vb 사이를 비율 r(0~1)로 선형 보간한다."""
         return va + (vb - va) * r
 
     return (mix(a.x, b.x), mix(a.y, b.y), mix(a.w, b.w), mix(a.h, b.h))

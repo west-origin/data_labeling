@@ -168,6 +168,7 @@ def label_config(o: Ontology, theme: UiTheme | None = None, *, logo_uri: str = "
             raise ValueError(f"review_ui.yaml hotkeys: 원시 동작이 아닌 동사 {unknown}")
 
     def label(n: str) -> str:
+        """라벨 이름 하나의 `<Label>` 줄. 테마가 있으면 색과 (원시 동작이면) 단축키를 붙인다."""
         attrs = f"value={quoteattr(n)}"
         if theme is not None:
             attrs += f' background="{ls_label_color(theme, o, n)}"'
@@ -621,7 +622,7 @@ def from_ls_results(results: list[dict[str, Any]], known_ids: set[str]) -> list[
     반환: `ReviewedItem` 목록. timeserieslabels가 아닌 결과는 건너뛴다. 라벨 컨트롤(`FROM_NAME`)이
     아닌 구간 결과(from_name이 있고 `labels`가 아닌 것: AI 판정 구간 `ai_flags` 등)도 건너뛴다
     (F-AIR-02). from_name이 없는 결과는 이전 형식으로 보고 라벨 구간으로 읽는다.
-    예외: 옮길 수 없는 구간(새로 그린 객체 상태, 알 수 없는 라벨 이름, 페이로드 검증 실패 — 예: 대상
+    예외: 옮길 수 없는 구간(새로 그린 객체 상태, 알 수 없는 라벨 이름, 페이로드 검증 실패. 예: 대상
     ID 없는 도구 접촉, 깨진 메타 JSON)이 하나라도 있으면 그 구간을 모두 적은 `LsFormatError`.
     """
     adapter: TypeAdapter[LabelPayload] = TypeAdapter(LabelPayload)

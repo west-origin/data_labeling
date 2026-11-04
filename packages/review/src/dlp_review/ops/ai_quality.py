@@ -478,6 +478,7 @@ def exposure_stats(
     no_ai = [e for e in shown if e.arm is not AiArm.SHOWN]
 
     def seeded(group: Sequence[AiExposure]) -> Rate:
+        """group 중 오류 삽입 작업의 비율 (개수 비율, 가중치 없음)."""
         hits = sum(1 for e in group if tasks[e.task_key].mode is ReviewMode.SEEDED_ERROR)
         return Rate(hits, len(group))
 

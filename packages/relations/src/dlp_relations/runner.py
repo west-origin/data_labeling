@@ -9,6 +9,9 @@
 붙인다 (n = 지금까지 넣은 같은 내용 레코드 수, 삭제 레코드는 세지 않는다). 새 레코드의 온톨로지
 버전은 세션의 것이다. 검수자가 승인·표본 검증한 레코드는 규칙이 바뀌어도 지우지 않는다 (ADR 0015).
 부작용: DB `label_records`에 새 레코드와 삭제 레코드만 추가한다. 호출자가 트랜잭션을 연다.
+기존 레코드를 고치지 않으며, 지우는 것은 이 모듈이 만든 검수 전(unreviewed) 관계·커버리지뿐이다.
+
+공개 이름: `RelationsSummary`(실행 요약), `run_relations`(진입점).
 """
 
 from __future__ import annotations
@@ -100,8 +103,8 @@ def run_relations(
             children.setdefault(x.parent_label_id, []).append(x)
     current_ids = {x.label_id for x in current_labels(labels)}
     # 새 레코드의 온톨로지 버전은 세션의 것 (DB sessions.ontology_version). 세션에 아직 없으면
-    # 넘겨받은 온톨로지. 예전에는 시각 순 첫 라벨의 버전을 써서, 이관 전 옛 라벨이 앞에 있으면
-    # 새 관계가 옛 온톨로지 버전으로 기록됐다.
+    # 넘겨받은 온톨로지. 기존 라벨의 버전을 쓰면 이관 전 옛 라벨이 섞인 세션에서 새 관계가 옛
+    # 온톨로지 버전으로 기록된다.
     ontology_version = session.ontology_version or ontology.version
 
     desired: set[str] = set()
@@ -118,8 +121,8 @@ def run_relations(
         seen.add(base)
         # 같은 내용의 과거 레코드 ID들 (기본 ID와 `-n` 재삽입본, 그 자식 일부)
         history = sorted(i for i in by_id if i == base or i.startswith(base + "-"))
-        # 그중 삭제 레코드(`<ID>:retracted`)가 아닌 것: 재삽입 번호는 이것만 센다. 예전에는
-        # `<기본>-1:retracted`까지 세어 두 번째 재삽입이 `-2`가 아니라 `-3`이 됐다.
+        # 그중 삭제 레코드(`<ID>:retracted`)가 아닌 것: 재삽입 번호는 이것만 센다
+        # (`<기본>-1:retracted`까지 세면 두 번째 재삽입이 `-2`가 아니라 `-3`이 된다).
         inserted_ids = [i for i in history if not by_id[i].retracted]
         live = [i for i in history if i in current_ids]
         if live:
@@ -165,8 +168,8 @@ def run_relations(
         and by_id[i].verification.state is VerificationState.UNREVIEWED
     ]
     # 삭제 레코드: ID `<원래>:retracted`, parent=원래, 출처는 이번 실행 버전. 공용
-    # `dlp_schema.episode.retractions`로 만든다 (128자를 넘는 ID는 해시로 줄이고 계약 검증을 거친다.
-    # 예전에는 여기서 직접 만들어 긴 세션 ID에서 ID 길이 제한을 넘을 수 있었다)
+    # `dlp_schema.episode.retractions`로 만든다 (128자를 넘는 ID는 해시로 줄이고 계약 검증을
+    # 거친다. 여기서 직접 만들면 긴 세션 ID에서 ID 길이 제한을 넘는다)
     removed = retractions(stale, version, now)
     insert_labels(conn, [*new, *removed])
     summary.inserted, summary.retracted = len(new), len(removed)

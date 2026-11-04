@@ -1,4 +1,4 @@
-"""세션 검수 완료 판정 (`dlp review verify`).
+"""세션 검수 완료 판정 (`dlp review verify`, 검수 생애주기의 마지막 단계).
 
 생애주기의 prelabeled → human_verified 전이를 맡는다. 데이터셋 빌드 후보는 프라이버시 승인 세션
 전체이지만(ADR 0031), 빌드가 split_assigned로 옮기는 것은 이 전이를 거친 세션뿐이다
@@ -31,9 +31,10 @@
   (F-REV-34, ADR 0011 개정. 검수 상태는 그대로라 기본 내보내기에는 들어가지 않는다).
 - 3D 궤적이 지금 2D와 맞다 (review.yaml `verify.require_current_3d`, 기본 참, F-COE-30): 궤적
   따르기가 출처 2D가 바뀌어 지운 3D의 대상(스트림, 개체, 좌표계)에 지금 2D로 계산한 3D가 없는데
-  3D 단계가 올릴 2D 트랙(hand21 손·박스)이 있으면 막고 `dlp prelabel run <세션>`을 안내한다. 검수
-  전인 채 출처 2D가 바뀐 낡은 3D도 같은 안내를 붙인다. 2D를 승인 뒤 고쳤든(물려받은 3D가 지워짐)
-  승인 전에 고쳤든(낡은 3D가 검수 전으로 남음) 같은 판정이다.
+  3D 단계가 올릴 2D 트랙(hand21 손, 팔꿈치·어깨가 보이는 arm3 팔, 박스)이 있으면 막고
+  `dlp prelabel run <세션>`을 안내한다. 검수 전인 채 출처 2D가 바뀐 낡은 3D도 같은 안내를
+  붙인다. 2D를 승인 뒤 고쳤든(물려받은 3D가 지워짐) 승인 전에 고쳤든(낡은 3D가 검수 전으로 남음)
+  같은 판정이다.
 - 손별 행동 타임라인에 빈 시간이 없다 (ADR 0012 "타임라인 공백 0", F-REV-37): 현재 action·gap
   라벨이 있는 손마다, 그 손의 action·gap과 양손 공통 gap(hand None)이 행동 단계가 덮는 구간
   [0, 세션 길이]를 빈틈없이 덮는다. 검수 도구에서 행동을 지우면 그 시간이 비므로 검수자가 행동이나
@@ -49,6 +50,7 @@
 - `automatic_label`: 사람 검수 대상이 아닌 자동 라벨인가 (review.yaml verify.automatic, ADR 0050).
 - `verification_gaps`: 완료를 막는 이유 목록 (읽기만).
 - `timeline_gaps`: 손별 행동 타임라인의 빈 시간 이유 (순수 함수).
+- `trajectory_gaps`: 3D 궤적이 지금 2D와 맞지 않는 이유 (순수 함수).
 - `verify_session`: 조건을 보고 생애주기를 옮긴다 (DB 쓰기, 멱등).
 """
 
@@ -162,7 +164,8 @@ def verification_gaps(
     정책, None이면 저장소의 `privacy.yaml`), automatic(검수 전이어도 막지 않는 자동 라벨 분류,
     None이면 저장소 review.yaml `verify.automatic`, ADR 0050), require_current_3d(3D가 지금 2D와
     맞아야 하는지, None이면 저장소 review.yaml `verify.require_current_3d`, F-COE-30).
-    반환: 이유 문장 목록. 순서는 블러 승인 → 작업 → 매체 회수 → 배정 → 라벨.
+    반환: 이유 문장 목록. 순서는 블러 승인 → 열린 작업 → 매체 회수 → 다시 만들 일·열린 배정 →
+    운영 라벨 없음 → 검수 전 모델 라벨 → 타임라인 빈 시간 → 3D 궤적.
     예외: 세션이 없으면 `get_session`이 던지는 예외.
     부작용 없음 (`sessions`, `review_tasks`, `review_assignments`, `label_records` 조회).
     """

@@ -152,8 +152,8 @@ def judge(
     forced_defects = sum(i in corrected for i in forced)
     if pending:
         return SamplingVerdict(len(kept), defects, pending, None, (), forced_defects)
-    # 회귀: 표본이 모두 사라졌을 때(kept가 빔) 분모를 1로 두어 결함 0 → 합격으로 봐서, 사람이 한
-    # 건도 보지 않은 나머지 라벨이 sample_verified가 됐다. 이제는 불합격(전수 재검수)이다.
+    # 표본이 모두 사라졌으면(kept가 빔) 사람이 한 건도 보지 않았으므로 불합격이다 (분모를 1로 두면
+    # 결함 0 → 합격이 되어 아무도 보지 않은 나머지가 sample_verified가 된다)
     accepted = bool(kept) and defects / len(kept) <= policy.max_defect_ratio and forced_defects == 0
     rest = tuple(
         i

@@ -112,7 +112,7 @@ def resolve_reviewer(
       이메일을 `tasks.label_studio_user_id`로 찾은 값). 담당자 몫만 있어도 된다.
 
     반환: 기록할 검수자 ID (dlp 검수자 ID), 또는 None(수집하지 않음).
-    예외: `ReviewerMismatchError` — 담당자·계정이 맞지 않거나 검수자를 알 수 없을 때.
+    예외: `ReviewerMismatchError`. 담당자·계정이 맞지 않거나 검수자를 알 수 없을 때.
     """
     # 서비스 계정(우리가 올린 주석)이 일으킨 웹훅은 사람 검수가 아니다
     if service_user_id is not None and request.user_id == service_user_id:
@@ -240,12 +240,15 @@ def serve(  # noqa: C901
     logger = logging.getLogger(__name__)
 
     class Handler(BaseHTTPRequestHandler):
+        """요청 하나를 처리한다. POST만 받고 응답 본문은 늘 비어 있으며 연결을 닫는다."""
+
         def setup(self) -> None:
-            # 헤더를 읽기 전부터 유휴 제한을 적용한다.
+            """소켓에 `webhook.request_timeout_s` 유휴 제한을 건다 (헤더를 읽기 전부터)."""
             self.request.settimeout(policy.request_timeout_s)
             super().setup()
 
         def reply(self, status: int) -> None:
+            """본문 없는 응답을 보내고 연결을 닫는다. 503이면 Retry-After를 붙인다."""
             self.send_response(status)
             self.send_header("Content-Length", "0")
             self.send_header("Connection", "close")
@@ -330,13 +333,24 @@ def serve(  # noqa: C901
             """기본 접근 로그에는 인증 정보가 들어갈 수 있어 끈다."""
 
     class LimitedServer(ThreadingHTTPServer):
+        """요청마다 스레드를 띄우되 동시 처리 수를 `webhook.max_workers`로 막는 서버.
+
+        자리가 없으면 핸들러 스레드를 만들지 않고 소켓에 503을 바로 쓰고 닫는다. 자리(세마포어)는
+        스레드가 끝날 때 돌려준다.
+        """
+
         daemon_threads = True
 
         def __init__(self) -> None:
+            """`webhook.bind_host`:port에 묶고 동시 처리 자리 `max_workers`개를 만든다."""
             self.slots = threading.BoundedSemaphore(policy.max_workers)
             super().__init__((policy.bind_host, port), Handler)
 
         def process_request(self, request: Any, client_address: Any) -> None:
+            """자리를 얻으면 스레드로 넘기고, 못 얻으면 503(Retry-After)을 쓰고 연결을 닫는다.
+
+            스레드 시작이 실패하면 얻은 자리를 돌려주고 예외를 다시 던진다.
+            """
             if not self.slots.acquire(blocking=False):
                 try:
                     request.settimeout(policy.request_timeout_s)
@@ -358,6 +372,7 @@ def serve(  # noqa: C901
                 raise
 
         def process_request_thread(self, request: Any, client_address: Any) -> None:
+            """요청을 처리하고, 성공·실패와 무관하게 자리를 돌려준다."""
             try:
                 super().process_request_thread(request, client_address)
             finally:

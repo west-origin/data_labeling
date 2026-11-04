@@ -2,7 +2,16 @@
 
 작용부 샘플마다 같은 시각의 표면 좌표로 바꿔 평면까지 거리와 표면 안 여부를 본다. 거리가
 on_distance_m 이하로 내려오면 접촉을 시작하고 off_distance_m을 넘거나 표면 밖으로 나가면 끝낸다.
+`require_grasp`이면 손이 그 도구를 쥔 구간 밖에서도 끝내고, 작용부 샘플 사이가
+`max_sample_gap_ms`보다 비면 그 앞에서 끝낸다 (F-PAR-57).
 구간 경계는 on 문턱 이하인 첫·마지막 샘플이다 (off 문턱은 잡음에 의한 끊김만 막는다).
+시각은 모두 마스터 ms다 (`Track3D.from_payload`가 스트림 PTS를 바꾼다).
+
+공개 이름:
+- `Track3D`: 계산용 3D 궤적 (시각 정렬, 마스터 ms, m).
+- `SurfaceContact`: 접촉 구간 하나와 커버리지 입력(표면 좌표 점·표면 크기).
+- `surface_frame_at`: 한 시각의 표면 좌표계 (꼭짓점 보간).
+- `tool_surface_contacts`: 작용부 궤적 하나와 표면 하나의 접촉 구간 목록.
 
 정책: `relations.yaml tool_surface`. `derive`가 (도구 작용부, 표면)마다 부르고, 결과는 관계 규칙
 (source=tool_surface)과 커버리지 입력이 된다.

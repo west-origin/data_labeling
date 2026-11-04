@@ -1,5 +1,15 @@
 """관계·커버리지 정책 (config/policies/relations.yaml).
 
+CLI(`dlp_cli.relations_cmds`)가 `load_policy`로 읽어 `runner.run_relations`에 넘긴다. 정책 값은
+코드에 두지 않고 이 파일에서만 읽는다.
+
+공개 이름:
+- `RelationTemplate`, `Rule`: 규칙 하나와 그 규칙이 만드는 관계 틀 (`rules` 절).
+- `ToolSurfacePolicy`: 도구 작용부-표면 접촉 판정 (`tool_surface` 절, `contact`가 쓴다).
+- `CoveragePolicy`: 표면 커버리지 격자·작용부 반지름 (`coverage` 절, `coverage`가 쓴다).
+- `RelationsPolicy`: 파일 전체와 정책 해시(`digest`).
+- `load_policy`: 저장소 루트에서 읽어 검증한다.
+
 `RelationsPolicy.digest`는 파싱·검증된 값(`model_dump`)의 해시라 YAML 주석·키 순서는 영향이 없다.
 관계·커버리지 레코드의 model_version이 `relations-<digest>`다.
 """

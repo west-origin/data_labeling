@@ -6,6 +6,7 @@
 따라서 결과는 이 연결 가정을 포함한 추정치이며 실제 접촉 면적을 보장하지 않는다.
 
 정책: `relations.yaml coverage` (grid_m, footprint_m). `derive`가 (도구, 표면)마다 부른다.
+공개 이름: `coverage_ratio` (0~1, 순수 함수).
 """
 
 from __future__ import annotations

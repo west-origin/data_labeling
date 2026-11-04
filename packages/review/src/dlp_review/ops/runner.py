@@ -22,6 +22,7 @@ WP12, ADR 0014·0015·0023(블러 배정·세대). 이 모듈은 순수 로직(`
 - `FinishResult`, `finish_assignment`: 배정 마무리와 표본 판정.
 - `QualityReport`, `quality_report`: 발견율·이중 일치도·프리라벨 편향.
 - `shown_prelabels`: 표준 검수자에게 실제로 보낸 모델 프리라벨 (블라인드 편향의 기준).
+  마지막 세 줄은 `ops.results`에 정의가 있고 여기서 재수출한다.
 """
 
 from __future__ import annotations
@@ -435,7 +436,7 @@ def create_assignment_tasks(
     도구 선택: 블러 배정 → CVAT 프라이버시 작업, 스트림 있는 작업 라벨 배정 → CVAT,
     세션 단위(시간 라벨) 배정 → Label Studio (세션의 기준 스트림 영상으로 연다).
     담당자 없는 배정은 만들지 않는다: 담당자가 워터마크·라벨링 버킷 경로·검수자 ID가 되므로 자리
-    표시 문자열로 대신하지 않는다 (F-REV-07, 회귀: 예전에는 "unassigned"를 실제 담당자로 넣었다).
+    표시 문자열(예: "unassigned")로 대신하지 않는다 (F-REV-07).
     먼저 `assign_reviewer`(`dlp review assign <배정> --assignee <검수자>`)로 정한다.
     부작용: 작업 생성(`tasks` 함수의 부작용 전부), 배정의 `task_key` 갱신(첫 작업).
     예외: 담당자 없는 배정이면 `TaskError`, 블러 배정의 담당자가 권한자가 아니면 `AccessError`,

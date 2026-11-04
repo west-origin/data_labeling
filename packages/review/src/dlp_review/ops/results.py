@@ -1,6 +1,23 @@
 """수집 후 배정 마무리·표본 판정·검수 품질 보고 (WP12, ADR 0014).
 
-작업 계획·외부 도구 생성은 runner에 둔다. 기존 runner 진입점은 재수출로 유지한다.
+검수 생애주기(`dlp_review` 패키지 docstring)에서 수집 바로 뒤에 온다. `collect.collect_task`가
+작업을 수집한 같은 트랜잭션에서 `finish_assignment`를 부른다. 배정의 작업이 모두 수집되면 배정을
+done으로 두고, 표본 배정이면 `sampling.judge`로 묶음 합격을 정한다.
+- 합격: 보류했던 라벨에 sample_verified를 기록한다 (검수자 ID `sampling:<배정>`). 사람이 직접 보지
+  않은 라벨이지만, 사람이 본 표본의 결함률이 정책 문턱 이하라는 근거로 검수된 상태가 된다.
+- 불합격: 보류 라벨만 다시 보는 재검수 배정(`<배정>:resample`)을 만든다.
+- AI 판정(`ai`)은 이 판정을 엄격하게만 만든다. 계획 때 AI 지적으로 묶음에서 뺀 라벨에 결함이
+  있으면 불합격이고, 합격 뒤에도 늦게 도착한 지적의 보류 라벨은 `<배정>:ai-flagged` 재검수로 보낸다
+  (ADR 0040 I9).
+
+`quality_report`(`dlp review quality`, 운영 지표 `dlp_ops.metrics`)는 끝난 배정으로 오류 삽입
+발견율·이중 일치도·프리라벨 편향을 잰다 (읽기만).
+
+작업 계획·외부 도구 생성은 `runner`에 둔다. `runner`가 이 모듈의 공개 이름을 재수출하므로 호출자는
+`dlp_review.ops.runner`에서 불러도 된다.
+
+공개 이름: `FinishResult`, `finish_assignment`, `QualityReport`, `quality_report`,
+`shown_prelabels`.
 """
 
 from __future__ import annotations
@@ -174,8 +191,8 @@ def finish_assignment(
         if t.assignment_id == a.assignment_id and t.status is not ReviewTaskStatus.REVOKED
     ]
     if not tasks:
-        # 회귀: any([])가 거짓이라 작업이 없는(아직 `dlp review assign` 전인) 배정이 사람 검수 없이
-        # done이 되고, 표본 배정이면 판정까지 돌았다. 작업을 만들고 수집해야만 마무리한다.
+        # 작업이 없는(아직 `dlp review assign` 전인) 배정은 마무리하지 않는다. 아래 any([])는
+        # 거짓이라 이 검사가 없으면 사람 검수 없이 done이 되고, 표본 배정이면 판정까지 돈다.
         return FinishResult()
     if any(t.status is not ReviewTaskStatus.COLLECTED for t in tasks):
         return FinishResult()  # 아직 남은 작업이 있다
@@ -238,8 +255,8 @@ def shown_prelabels(
 ) -> list[LabelRecord]:
     """표준(짝) 배정의 검수자에게 실제로 보낸 모델 프리라벨.
 
-    회귀: 프리라벨 편향을 이력 전체의 모델 레코드(지워진 레코드·이전 모델 버전 포함)로 재서,
-    검수자가 본 적 없는 프리라벨까지 기준에 들어가 편향이 틀렸다.
+    이력 전체의 모델 레코드(지워진 레코드·이전 모델 버전 포함)를 기준으로 쓰면 검수자가 본 적 없는
+    프리라벨까지 들어가 편향이 틀린다. 그래서 작업에 보낸 것만 고른다.
 
     작업마다:
     - `sent_label_ids`가 있으면 그 ID의 레코드 (작업에 실제로 보낸 라벨).

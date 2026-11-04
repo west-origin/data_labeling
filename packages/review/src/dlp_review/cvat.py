@@ -199,8 +199,8 @@ def _check_shape(shape: dict[str, Any], name: str) -> None:
 def _visibility(raw: str, n: int, name: str, shape: dict[str, Any]) -> list[int]:
     """키포인트 모양의 `dlp_visibility` 속성("2,2,1,…")을 점별 가시성 목록으로 바꾼다.
 
-    회귀: 검수자가 점을 더 찍어 가시성 값이 점 수보다 짧으면 `IndexError`가 나 수집이
-    `CvatFormatError`(옮길 수 없는 주석)가 아닌 내부 오류로 멈췄다.
+    검수자가 점을 더 찍으면 가시성 값이 점 수보다 짧아진다. 그 경우도 내부 오류(`IndexError`)가
+    아니라 `CvatFormatError`(옮길 수 없는 주석)로 멈춰 검수자가 고칠 수 있게 한다.
 
     Args:
         raw: 속성 값 (비어 있으면 모든 점이 보임 = 2).
