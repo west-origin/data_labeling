@@ -26,18 +26,13 @@ from dlp_schema.session import LIFECYCLE_ORDER, LifecycleState, Session, StreamK
 
 VIDEO_KINDS = (StreamKind.BODYCAM, StreamKind.THIRD_PERSON)
 
-# 렌더 확인 함수: (세션 ID, 스트림 ID) → 라벨링 버킷에 블러본·렌더 기록이 있는가
-RenderedCheck = Callable[[str, str], bool]
+# 렌더 확인 함수: (연결, 세션 ID, 스트림 ID) → 지금 승인된 블러로 렌더한 블러본이 있는가
+RenderedCheck = Callable[[sa.Connection, str, str], bool]
 
 
 def blurred_key(session_id: str, stream_id: str) -> str:
     """라벨링 버킷의 블러본 키 (`dlp privacy render`가 쓰는 위치, dlp_privacy.rendering)."""
     return f"sessions/{session_id}/blurred/{stream_id}.mp4"
-
-
-def render_record_key(session_id: str, stream_id: str) -> str:
-    """렌더 기록 키 (`<블러본>.render.json`과 같은 이름 규칙)."""
-    return f"sessions/{session_id}/blurred/{stream_id}.render.json"
 
 
 def lifecycle_at_least(state: LifecycleState, target: LifecycleState) -> bool:
@@ -140,7 +135,7 @@ def read_state(conn: sa.Connection, session_id: str, rendered: RenderedCheck) ->
         video_streams=videos,
         detections=detections,
         tasks=list_review_tasks(conn, session_id),
-        rendered={sid: rendered(session_id, sid) for sid in videos},
+        rendered={sid: rendered(conn, session_id, sid) for sid in videos},
         held=active_privacy_hold(conn, session_id) is not None,
         withdrawn=session_id in withdrawn_session_ids(conn),
     )

@@ -18,6 +18,13 @@ from dlp_console.settings import default_settings, load_dotenv
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 
+def url_host(bind: str) -> str:
+    """주소에 넣을 호스트. IPv6 리터럴은 포트와 구분하려고 대괄호로 감싼다 (RFC 3986, F-COE-87)."""
+    if bind in LOCAL_HOSTS:
+        return "localhost"
+    return f"[{bind}]" if ":" in bind else bind
+
+
 class RemoteBindError(ValueError):
     """명시 허용 없이 이 컴퓨터 밖에서 닿는 주소에 묶으려 했다."""
 
@@ -41,7 +48,6 @@ def serve(root: Path, host: str | None, port: int | None, *, allow_remote: bool 
             "믿을 수 있는 사내망에서만, 쓰고 나면 바로 끄세요."
         )
     app = create_app(settings, bind_host=bind)
-    shown = "localhost" if bind in LOCAL_HOSTS else bind
-    print(f"운영 콘솔: http://{shown}:{bind_port}/#token={settings.token}")
+    print(f"운영 콘솔: http://{url_host(bind)}:{bind_port}/#token={settings.token}")
     print(f"작업 디렉터리: {settings.work_dir} (업로드 사본·작업 로그)")
     uvicorn.run(app, host=bind, port=bind_port, log_level="warning", access_log=False)

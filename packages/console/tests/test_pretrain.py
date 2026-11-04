@@ -16,7 +16,7 @@ from dlp_console.steps import ParamError
 from dlp_models.datasets import load_pretrain_objects
 from dlp_schema import repo_root
 
-from .conftest import Api
+from .conftest import Api, FakeServices
 
 # 공식 yolox_s.pth sha256 (config/models.yaml yolox_s_coco_pth와 같다)
 YOLOX_S_SHA = "f55ded7181e1b0c13285c56e7790b8f0e8f8db590fe4edb37f0b7f345c913a30"
@@ -201,3 +201,29 @@ def test_compare_is_disabled_without_trainer(client: Api, tmp_path: Path) -> Non
     assert res.status_code == 400 and "F-COE-74" in res.json()["detail"]
     data = client.get("/api/pretrain").json()
     assert data["gate_passed"] is False and data["compare_trainer"] is None
+
+
+@pytest.mark.parametrize("manifest", [b"[]", b"null", b'"x"', b"3"])
+def test_non_object_manifest_fails_check_f_coe_86(
+    client: Api, tmp_path: Path, manifest: bytes
+) -> None:
+    """F-COE-86: JSON 객체가 아닌 manifest는 500이 아니라 실패한 검사이고 확인은 400이다."""
+    onnx, _model, data = _bundle(tmp_path)
+    files = {
+        "onnx": (onnx.name, onnx.read_bytes(), "application/octet-stream"),
+        "model_manifest": ("model_manifest.json", manifest, "application/json"),
+        "data_manifest": (data.name, data.read_bytes(), "application/json"),
+    }
+    res = client.post("/api/pretrain/check", files=files)
+    assert res.status_code == 200
+    plan = res.json()
+    assert plan["ok"] is False
+    assert [c["name"] for c in plan["checks"] if not c["ok"]] == ["manifest JSON"]
+    assert client.post(f"/api/pretrain/{plan['import_id']}/confirm").status_code == 400
+
+
+def test_confirm_without_plan_is_param_error_f_coe_86(client: Api, services: FakeServices) -> None:
+    """F-COE-86: 검사 결과(plan.json)가 없는 가져오기 확인은 400이다."""
+    import_id, _path = services.imports.new_dir()
+    res = client.post(f"/api/pretrain/{import_id}/confirm")
+    assert res.status_code == 400 and "검사 결과가 없는" in res.json()["detail"]

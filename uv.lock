@@ -918,6 +918,7 @@ source = { editable = "packages/console" }
 dependencies = [
     { name = "dlp-media" },
     { name = "dlp-models" },
+    { name = "dlp-privacy" },
     { name = "dlp-review" },
     { name = "dlp-schema" },
     { name = "fastapi" },
@@ -931,6 +932,7 @@ dependencies = [
 requires-dist = [
     { name = "dlp-media", editable = "packages/media" },
     { name = "dlp-models", editable = "packages/models" },
+    { name = "dlp-privacy", editable = "packages/privacy" },
     { name = "dlp-review", editable = "packages/review" },
     { name = "dlp-schema", editable = "packages/schema" },
     { name = "fastapi", specifier = "==0.162.0" },

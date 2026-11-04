@@ -59,7 +59,11 @@ class ImportStore:
         return plan
 
     def plan(self, import_id: str) -> dict[str, Any]:
-        data: dict[str, Any] = json.loads((self._path(import_id) / "plan.json").read_text("utf-8"))
+        """검사 계획. 검사가 끝나지 않아 plan.json이 없으면 ParamError(400, F-COE-86)."""
+        path = self._path(import_id) / "plan.json"
+        if not path.is_file():
+            raise ParamError(f"검사 결과가 없는 가져오기입니다 (다시 검사하세요): {import_id}")
+        data: dict[str, Any] = json.loads(path.read_text("utf-8"))
         return data
 
     def confirm(self, import_id: str, actor: str) -> dict[str, Any]:

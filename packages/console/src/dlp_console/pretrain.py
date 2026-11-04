@@ -242,14 +242,29 @@ def _dataset_checks(root: Path, data: dict[str, Any]) -> list[Check]:
 def check_bundle(
     root: Path, onnx_path: Path, model_manifest: Path, data_manifest: Path
 ) -> tuple[list[Check], dict[str, Any], dict[str, Any], str]:
-    """세 파일 검사. 반환: (검사 목록, 모델 manifest, 데이터 manifest, ONNX sha256)."""
-    try:
-        model: dict[str, Any] = json.loads(model_manifest.read_text("utf-8"))
-        data: dict[str, Any] = json.loads(data_manifest.read_text("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        return [Check("manifest JSON", False, f"읽지 못함: {exc}")], {}, {}, sha256_file(onnx_path)
+    """세 파일 검사. 반환: (검사 목록, 모델 manifest, 데이터 manifest, ONNX sha256).
+
+    manifest는 올린 파일이라 JSON 객체가 아니면(배열·null·문자열) 실패한 검사 하나로 돌려준다
+    (뒤 검사는 객체를 가정한다, F-COE-86).
+    """
     onnx_sha = sha256_file(onnx_path)
-    checks = [
+    try:
+        model: object = json.loads(model_manifest.read_text("utf-8"))
+        data: object = json.loads(data_manifest.read_text("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        return [Check("manifest JSON", False, f"읽지 못함: {exc}")], {}, {}, onnx_sha
+    kinds = f"모델 {type(model).__name__}, 데이터 {type(data).__name__}"
+    if not isinstance(model, dict) or not isinstance(data, dict):
+        return [Check("manifest JSON", False, f"JSON 객체가 아님: {kinds}")], {}, {}, onnx_sha
+    model_obj, data_obj = cast(dict[str, Any], model), cast(dict[str, Any], data)
+    checks = _bundle_checks(root, model_obj, data_obj, onnx_sha, data_manifest)
+    return checks, model_obj, data_obj, onnx_sha
+
+
+def _bundle_checks(
+    root: Path, model: dict[str, Any], data: dict[str, Any], onnx_sha: str, data_manifest: Path
+) -> list[Check]:
+    return [
         *_kind_checks(model, data),
         *_hash_checks(model, onnx_sha, sha256_file(data_manifest)),
         *_class_checks(root, model, data),
@@ -257,7 +272,6 @@ def check_bundle(
         *_manifest_checks(model),
         base_check(root, model),
     ]
-    return checks, model, data, onnx_sha
 
 
 def _base_entry(model: dict[str, Any], base_name: str, arch: str) -> dict[str, Any]:

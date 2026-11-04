@@ -2,15 +2,26 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 
+from dlp_console import app as console_app
 from dlp_console.settings import ConsoleSettings
 from dlp_fixtures.video import generate_blur_scenario
 from dlp_media.ingest import load_manifest
-from dlp_schema.db.repository import insert_session, set_privacy_state
+from dlp_media.storage import LocalStore, S3Store, blurred_key, sha256_file
+from dlp_privacy.rendering import (
+    RenderMeta,
+    expected_render_hash,
+    invalidate_render,
+    write_render_meta,
+)
+from dlp_schema.db.repository import insert_session, insert_withdrawal, set_privacy_state
+from dlp_schema.lineage import Withdrawal
 from dlp_schema.session import PrivacyState, StreamKind, SyncMethod
 from dlp_schema.testing import make_session
 
@@ -158,6 +169,87 @@ def test_preview_only_after_approval_and_render(client: Api, services: FakeServi
     data = res.json()
     assert data["url"].startswith("https://labeling.example/sessions/s1/blurred/bodycam.mp4")
     assert data["tracks"] == [] and "dlp-raw" not in res.text
+
+
+def test_preview_refused_for_withdrawn_session_f_coe_85(
+    client: Api, services: FakeServices
+) -> None:
+    """F-COE-85: 승인·렌더된 세션이라도 사용 중지 뒤에는 블러본 서명 URL을 내지 않는다."""
+    _add_session(services)
+    with services.engine.begin() as conn:
+        set_privacy_state(conn, "s1", PrivacyState.APPROVED)
+    services.rendered_map[("s1", "bodycam")] = True
+    assert client.get("/api/sessions/s1/preview?stream=bodycam").status_code == 200
+    with services.engine.begin() as conn:
+        insert_withdrawal(conn, Withdrawal(session_id="s1", reason="동의 철회",
+                                           withdrawn_at=datetime.now(UTC)))  # fmt: skip
+    res = client.get("/api/sessions/s1/preview?stream=bodycam")
+    assert res.status_code == 409 and "사용 중지" in res.json()["detail"]
+    assert "labeling.example" not in res.text
+
+
+@pytest.fixture
+def labeling(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> LocalStore:
+    """콘솔의 라벨러 저장소를 로컬 라벨링 버킷으로 바꾼다."""
+    store = LocalStore(tmp_path / "buckets", "dlp-labeling")
+
+    def labeler(_bucket: str, *, public: bool = True) -> LocalStore:
+        return store
+
+    monkeypatch.setattr(S3Store, "labeler_from_env", labeler)
+    return store
+
+
+def _render(services: FakeServices, store: LocalStore, tmp_path: Path, content: bytes) -> None:
+    """`dlp privacy render`처럼 블러본과 지금 블러 라벨·정책의 렌더 기록을 쓴다."""
+    video = tmp_path / "blurred.mp4"
+    video.write_bytes(content)
+    store.put_file(blurred_key("s1", "bodycam"), video, sha256_file(video))
+    with services.engine.connect() as conn:
+        expected = expected_render_hash(conn, "s1", "bodycam", services.privacy_policy)
+    write_render_meta(store, "s1", "bodycam", RenderMeta(expected, sha256_file(video)), tmp_path)
+
+
+def _gate(services: FakeServices) -> bool:
+    """가짜가 아닌 콘솔의 렌더 확인 (`Services.rendered`, 렌더 게이트)."""
+    with services.engine.connect() as conn:
+        return console_app.Services.rendered(services, conn, "s1", "bodycam")
+
+
+def _approved(services: FakeServices) -> None:
+    _add_session(services)
+    with services.engine.begin() as conn:
+        set_privacy_state(conn, "s1", PrivacyState.APPROVED)
+
+
+def test_rendered_needs_a_current_render_record_f_coe_85(
+    services: FakeServices, labeling: LocalStore, tmp_path: Path
+) -> None:
+    """F-COE-85: 렌더 기록이 무효(블러 변경)거나 블러본이 렌더 밖에서 바뀌면 렌더 안 됨이다."""
+    _approved(services)
+    assert _gate(services) is False
+    _render(services, labeling, tmp_path, b"blurred-v1")
+    assert _gate(services) is True
+    invalidate_render(labeling, "s1", "bodycam", "collected:task-1", tmp_path)
+    assert _gate(services) is False
+    _render(services, labeling, tmp_path, b"blurred-v1")
+    other = tmp_path / "other.mp4"
+    other.write_bytes(b"replaced-outside-render")
+    labeling.put_file(blurred_key("s1", "bodycam"), other, sha256_file(other))
+    assert _gate(services) is False
+
+
+def test_rendered_rejects_blur_made_under_old_render_policy_f_coe_85(
+    services: FakeServices, labeling: LocalStore, tmp_path: Path
+) -> None:
+    """F-COE-85: 기록은 유효해도 렌더 정책만 바뀌면 낡은 블러본이라 렌더 안 됨이다."""
+    _approved(services)
+    _render(services, labeling, tmp_path, b"blurred-v1")
+    assert _gate(services) is True
+    policy = services.privacy_policy
+    render = policy.render.model_copy(update={"crf": policy.render.crf + 1})
+    services.privacy_policy = policy.model_copy(update={"render": render})
+    assert _gate(services) is False
 
 
 def test_training_view_without_rounds(client: Api) -> None:

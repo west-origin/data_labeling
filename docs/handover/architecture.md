@@ -51,8 +51,10 @@ Prefect 서비스가 기동된 것만으로 모든 작업이 영속 큐에서 �
 | train | datasets, eval, media, models, prelabel, schema |
 | export | datasets, media, privacy, retarget, schema |
 | ops | privacy, review, schema |
-| console | media, models, review, schema |
+| console | media, models, privacy, review, schema |
 | cli | 나머지 19개 패키지 |
+
+console의 privacy 의존은 블러본 서명 전 렌더 게이트(`assert_render_current`, ADR 0024)뿐이다.
 
 `schema`에는 계약뿐 아니라 DB 구현도 함께 있다. CLI에는 연결 코드 외에 모델 선택·온톨로지 선택도
 남아 있다. 단순한 계층 구조로 가정해 파일을 옮기기 전에 [후속 과제](known-issues.md)를 확인한다.

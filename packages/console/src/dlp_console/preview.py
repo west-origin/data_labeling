@@ -1,8 +1,8 @@
 """결과 보기: 승인·렌더된 블러본 + 라벨 겹쳐 그리기 자료 (ADR 0061 3절).
 
 - 영상은 라벨링 버킷의 블러본만 쓴다. 주소는 라벨러 자격 증명(라벨링 버킷 읽기 전용)으로 서명한다
-  (`S3Store.labeler_from_env`). 블러 승인 전·렌더 전에는 주소를 내지 않는다. 원본 버킷은 읽지
-  않는다.
+  (`S3Store.labeler_from_env`). 사용 중지 세션, 블러 승인 전, 렌더 전·렌더 기록 무효(블러가
+  바뀜)에는 주소를 내지 않는다. 원본 버킷은 읽지 않는다.
 - 겹쳐 그리는 라벨은 운영 라벨(`current_labels`)의 박스 트랙과 손·전신 키포인트 트랙이다. 블러
   트랙은 싣지 않는다 (블러는 이미 영상에 들어가 있다). 좌표는 그 스트림 영상 픽셀, 시각은 스트림
   PTS(ms)다. 화면은 재생 시각에서 가장 가까운 앞 키프레임을 그리는 근사 표시다.
@@ -26,17 +26,26 @@ Signer = Callable[[str], str]
 
 
 class PreviewUnavailableError(RuntimeError):
-    """블러본을 보일 수 없다 (승인 전·렌더 전·모르는 스트림)."""
+    """블러본을 보일 수 없다 (사용 중지·승인 전·렌더 전·모르는 스트림)."""
 
 
 def blurred_url(state: SessionState, stream_id: str, sign: Signer) -> str:
-    """블러본 서명 URL. 예외: PreviewUnavailableError."""
+    """블러본 서명 URL. 예외: PreviewUnavailableError.
+
+    사용 중지 세션은 승인·렌더 상태와 무관하게 거부한다 (동의 철회 뒤 블러본도 내보내지 않는다,
+    F-COE-85). 렌더 여부는 `SessionState.rendered`(같은 연결에서 부른 렌더 게이트
+    `assert_render_current` 결과)를 따른다.
+    """
     if stream_id not in state.video_streams:
         raise PreviewUnavailableError(f"영상 스트림이 아닙니다: {stream_id}")
+    if state.withdrawn:
+        raise PreviewUnavailableError("사용 중지한 세션은 영상을 보일 수 없습니다")
     if state.session.privacy_state is not PrivacyState.APPROVED:
         raise PreviewUnavailableError("블러 승인 전에는 영상을 보일 수 없습니다")
     if not state.rendered.get(stream_id):
-        raise PreviewUnavailableError("블러본을 아직 만들지 않았습니다 (블러본 만들기)")
+        raise PreviewUnavailableError(
+            "블러본이 없거나 블러가 바뀌어 다시 만들어야 합니다 (블러본 만들기)"
+        )
     return sign(blurred_key(state.session.session_id, stream_id))
 
 

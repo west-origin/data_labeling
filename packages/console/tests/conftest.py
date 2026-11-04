@@ -63,7 +63,7 @@ class FakeServices(Services):
         self.rendered_map: dict[tuple[str, str], bool] = {}
         self.reviewers: tuple[str, ...] = ("priv01",)
 
-    def rendered(self, session_id: str, stream_id: str) -> bool:
+    def rendered(self, conn: sa.Connection, session_id: str, stream_id: str) -> bool:
         return self.rendered_map.get((session_id, stream_id), False)
 
     def sign(self, key: str) -> str:

@@ -8,6 +8,7 @@ requires-python = ">=3.12,<3.14"
 dependencies = [
     "dlp-media",
     "dlp-models",
+    "dlp-privacy",
     "dlp-review",
     "dlp-schema",
     "fastapi==0.162.0",

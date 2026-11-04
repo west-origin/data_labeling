@@ -38,7 +38,6 @@ from dlp_console.status import (
     label_counts,
     list_sessions,
     read_state,
-    render_record_key,
     session_view,
     task_view,
     vlm_servers,
@@ -47,6 +46,8 @@ from dlp_console.steps import IDENT, STEPS_BY_ID, ParamError, StepContext, build
 from dlp_console.training import ReportCache, latest_weekly, policy_trainers, rounds
 from dlp_console.upload import UploadForm, prepare_upload, remove_upload
 from dlp_media.storage import S3Store
+from dlp_privacy.policy import load_policy as load_privacy_policy
+from dlp_privacy.rendering import assert_render_current
 from dlp_review.ops.policy import load_policy as load_review_policy
 from dlp_review.ui_theme import load_ui_theme, logo_data_uri
 from dlp_schema.config import load_config
@@ -68,6 +69,8 @@ class Services:
         self.settings = settings
         root = settings.root
         self.buckets = load_config(root / "config" / "defaults.yaml").buckets
+        # 블러본 렌더 게이트의 정책 (CLI와 같은 config/policies/privacy.yaml, 시작 때 한 번)
+        self.privacy_policy = load_privacy_policy(root)
         self.engine = sa.create_engine(settings.env.get("DLP_DATABASE_URL", DEV_DATABASE_URL))
         self.redactor = Redactor(raw_bucket=self.buckets.raw, env=settings.env)
         self.runner = JobRunner(settings, self.redactor)
@@ -80,12 +83,18 @@ class Services:
         self.prefs_dir.mkdir(parents=True, exist_ok=True)
 
     # 라벨링 버킷(블러본) 접근: 라벨러 자격 증명만 (읽기 전용)
-    def rendered(self, session_id: str, stream_id: str) -> bool:
+    def rendered(self, conn: sa.Connection, session_id: str, stream_id: str) -> bool:
+        """블러본이 지금 승인된 블러 라벨·렌더 정책으로 렌더한 것인가 (ADR 0024 게이트).
+
+        서명 URL은 이 게이트를 통과한 스트림에만 낸다. 무효로 덮어쓴 기록, 블러·렌더 정책이 바뀐
+        뒤의 낡은 블러본, 렌더 밖에서 덮어쓴 블러본은 렌더 안 됨이다 (F-COE-85).
+        """
         store = S3Store.labeler_from_env(self.buckets.labeling, public=False)
         try:
-            return store.head(render_record_key(session_id, stream_id)) is not None
-        except Exception:  # 저장소 장애: 렌더 안 됨으로 보이고 단계 버튼이 안내한다
+            assert_render_current(conn, store, session_id, stream_id, self.privacy_policy)
+        except Exception:  # 게이트 불통과(RenderNotCurrentError)·저장소 장애: 단계 버튼이 안내한다
             return False
+        return True
 
     def sign(self, key: str) -> str:
         store = S3Store.labeler_from_env(self.buckets.labeling, public=True)
