@@ -55,10 +55,12 @@ issues:
   - {id: T1, title: 실제 CLI 경로(stub_truth=False)에서 학습 루프가 ModelUnavailableError, severity: high, status: open, kind: code,
      files: [packages/training/src/dlp_train/trainers.py, packages/cli/src/dlp_cli/train_cmds.py], source: docs/handover/training-loop-review.md,
      note: "2026-10-27 objects는 --trainer yolox(ADR 0062)로 정답 없이 학습·평가·배포 로드가 된다 (GPU 실측 전). 기본 학습기 oracle-stub과 나머지 과제는 그대로"}
-  - {id: T2, title: 기존 라벨만 고치면 예제 수가 같아 재학습 생략, severity: high, status: open, kind: code,
-     files: [packages/training/src/dlp_train/loop.py], source: docs/handover/training-loop-review.md}
-  - {id: T3, title: 학습 도중 철회된 세션의 모델이 배포될 수 있음, severity: high, status: open, kind: code,
-     files: [packages/training/src/dlp_train/loop.py, packages/datasets/src/dlp_datasets/lineage.py], source: docs/handover/training-loop-review.md}
+  - {id: T2, title: 기존 라벨만 고치면 예제 수가 같아 재학습 생략, severity: high, status: fixed, kind: code,
+     files: [packages/training/src/dlp_train/loop.py, packages/training/src/dlp_train/extract.py, packages/schema/src/dlp_schema/lineage.py, packages/schema/src/dlp_schema/db/tables.py], source: docs/handover/training-loop-review.md,
+     note: "2026-11-05 수정. 학습 실행에 예제 지문 목록·해시(training_runs, 0026)를 남기고, 직전 지문 중 지금 없는 것이 있으면 수와 상관없이 학습한다. 추가만이면 min_new_examples 규칙. 0026 이전 실행은 개수 규칙(업그레이드 뒤 첫 판단 한 번). 회귀: packages/training/tests/test_loop.py::test_retrains_when_label_contents_change_with_same_count"}
+  - {id: T3, title: 학습 도중 철회된 세션의 모델이 배포될 수 있음, severity: high, status: fixed, kind: code,
+     files: [packages/training/src/dlp_train/loop.py, packages/datasets/src/dlp_datasets/lineage.py], source: docs/handover/training-loop-review.md,
+     note: "2026-11-05 수정. 학습 실행에 실제 학습 세션 ID를 남기고 deploy()(자동·approve·직접 호출)가 세션 행 공유 잠금 아래 withdrawals·생애주기 WITHDRAWN을 확인해 거부한다. 기록 없는 예전 실행은 데이터셋 버전의 train·val 세션 전체로 확인. 이미 배포된 모델의 학습 세션이 나중에 철회되면 표시하는 일은 남음. 회귀: packages/training/tests/test_loop.py::test_deploy_refuses_model_trained_on_withdrawn_session, ::test_deploy_without_recorded_sessions_checks_version_training_splits"}
   - {id: T4, title: "직접 deploy() 호출은 게이트 통과·후보 ID를 검사하지 않음", severity: medium, status: fixed, kind: code,
      files: [packages/training/src/dlp_train/loop.py], source: docs/handover/training-loop-review.md,
      note: "deploy()가 루프 자동 배포·CLI approve·직접 호출 모두에서 _verified_report로 리포트의 후보 ID·게이트 통과·비교 기준을 확인한다. 회귀: packages/training/tests/test_loop.py"}

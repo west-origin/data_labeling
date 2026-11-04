@@ -54,7 +54,8 @@ class TaskTraining(Contract):
     # 더한다. stage prelabel만 쓸 수 있고 이름은 PRELABEL_REPLACEABLE 안이어야 한다
     replaces: tuple[str, ...] = ()
     min_examples: int = Field(ge=1)  # 학습을 시작할 최소 예제 수
-    min_new_examples: int = Field(ge=0)  # 직전 학습(모든 상태) 대비 새로 늘어야 할 예제 수
+    # 직전 학습(모든 상태)에 없던 새 예제의 최소 수. 직전 예제가 바뀌거나 빠지면 보지 않는다
+    min_new_examples: int = Field(ge=0)
     deploy: Literal["auto", "approve"]  # auto: 게이트 통과 시 바로 배포, approve: 사람 승인 대기
     trainer: str  # 기본 학습기 이름 (`trainers.TRAINERS`·`LOADERS`의 키)
     params: dict[str, Any] = Field(default_factory=dict[str, Any])  # 기본 하이퍼파라미터

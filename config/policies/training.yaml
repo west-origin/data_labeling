@@ -32,7 +32,8 @@ mlflow:
 #     (hands·body·objects·tools·closed_tools)이나 접촉 단계 contact만 받는다 (그 밖은 적재 오류,
 #     dlp_train.policy.PRELABEL_REPLACEABLE, F-ETA-27). 마스크(masks)·3D(depth3d)는 Predictor가 아니라 뺄
 #     경로가 없다 (받으면 배포 모델과 기본 단계가 함께 돈다). 프라이버시는 탐지기 합집합이라 빼지 않는다 (비워 둔다)
-#   min_examples: 학습을 시작할 최소 예제 수, min_new_examples: 직전 학습 대비 새로 늘어야 할 예제 수
+#   min_examples: 학습을 시작할 최소 예제 수, min_new_examples: 직전 학습의 예제가 그대로일 때 새로 생겨야
+#     할 예제 수. 직전 예제가 하나라도 바뀌거나 빠지면(정답 수정·철회) 수와 상관없이 학습한다 (T2, ADR 0016 보강)
 #     (직전 = 상태와 상관없이 그 과제의 가장 최근 모델 버전. --force로 무시한다)
 #   deploy: auto(게이트 통과 시 바로 배포) | approve(게이트 통과 후 사람이 `dlp train approve`)
 #     privacy는 approve여야 한다 (검증기가 막는다)

@@ -211,6 +211,7 @@ def cmd_approve(args: argparse.Namespace) -> int:
     `deploy`는 평가 리포트(MLflow 산출물 저장소의 `report_uri`)가 이 모델의 것이고 게이트를
     통과했으며, 적힌 비교 대상 배포 모델이 지금 배포 모델과 같을 때만 배포한다 (라이브러리 직접
     호출도 같은 검사). 그 사이 다른 모델이 배포되었으면 `TrainingError`이며 다시 평가해야 한다.
+    학습 세션 중 지금 사용 중지된 것이 있어도 `TrainingError`다 (그 세션을 뺀 데이터로 다시 학습).
     과제마다 배포 모델은 하나다(이전 배포는 내려간다). 부작용: 한 트랜잭션에서 `model_versions` 상태
     갱신, 커밋 뒤 MLflow 레지스트리 별칭 이동.
     """

@@ -3,10 +3,13 @@
 1. 데이터셋 버전에서 과제 학습 예제를 뽑는다
    (학습·검증 분할만, 운영 라벨만, 자동 원본과의 차이 포함). 버전을 만든 뒤 사용 중지(동의 철회)된
    세션은 뺀다 (골든셋 평가도 golden_sessions가 뺀다).
-2. 누적 확인: 예제 수가 min_examples 미만이거나 직전 학습보다 min_new_examples만큼 늘지 않았으면
-   건너뛴다.
+2. 누적 확인 (`_skip_reason`): 예제 수가 min_examples 미만이면 건너뛴다. 직전 학습(상태와 상관없이
+   가장 최근 모델 버전)의 예제 지문과 비교해, 직전 예제가 하나라도 바뀌거나 빠졌으면 학습하고, 바뀐
+   것 없이 새 예제만 min_new_examples 미만이면(0개 포함) 건너뛴다. 지문이 없는 0026 이전 직전 실행은
+   예제 수 차이로 정한다 (ADR 0016 2026-11-05 보강).
 3. 학습 → 산출물을 학습 산출물 버킷에 올리고(sha256) MLflow 실행에 파라미터·지표·산출물을 남긴다.
-   학습 실행(training_runs)과 모델 버전(model_versions, candidate)을 DB에 쓴다.
+   학습 실행(training_runs, 예제 지문·해시·예제가 나온 세션 포함)과 모델 버전(model_versions,
+   candidate)을 DB에 쓴다.
 4. 골든셋 평가: 후보와 기존 모델(배포 중인 재학습 모델, 없으면 baseline_versions의 DB 예측)을
    골든셋 세션에 메모리에서 돌려 같은 코드로 평가한다. 골든셋 세션에는 아무것도 쓰지 않는다.
    정답은 골든 버전에 고정한 라벨이다 (정답을 고정하지 않은 이전 형식 골든셋은 거부한다, ADR
@@ -15,7 +18,8 @@
    없어 건너뛸 때는 `--from`으로 다시 고정하라고 안내한다. 후보·기존 평가는 골든셋을 한 번 읽은
    같은 결과를 쓴다.
 5. 게이트(config/policies/evaluation.yaml) 통과 → 배포(정책 deploy: auto) 또는 승인 대기(approve).
-   실패 → rejected. 배포하면 이전 배포 모델은 retired가 된다.
+   실패 → rejected. 배포하면 이전 배포 모델은 retired가 된다. 배포(`deploy`)는 학습 세션 중 지금
+   철회된 것이 있으면 거부한다 (학습 도중·승인 대기 중 철회 포함).
 
 WP13, ADR 0016·0019·0025. 진입점: `dlp_cli.train_cmds` (`dlp train run`, `dlp train approve`).
 모델 상태 전이: candidate → rejected | passed | deployed, passed → deployed (승인), deployed →
@@ -46,7 +50,7 @@ from typing import Any, Literal
 
 import sqlalchemy as sa
 
-from dlp_datasets.lineage import register_training_run
+from dlp_datasets.lineage import TRAINING_SPLITS, register_training_run
 from dlp_datasets.snapshot import SnapshotStore
 from dlp_eval.gate import GateDecision, TaskDecision, decide
 from dlp_eval.harness import EvalReport, SessionData, evaluate
@@ -68,6 +72,7 @@ from dlp_eval.runner import (
 )
 from dlp_media.storage import ObjectStore, sha256_file
 from dlp_schema.dataset import DatasetVersion
+from dlp_schema.db.locks import share_lock_sessions
 from dlp_schema.db.repository import (
     get_dataset_version,
     get_golden_set,
@@ -80,13 +85,19 @@ from dlp_schema.db.repository import (
     withdrawn_session_ids,
 )
 from dlp_schema.labels import LabelRecord, Source
-from dlp_schema.lineage import GoldenSet, ModelStatus, ModelVersion, TrainingRun
+from dlp_schema.lineage import (
+    GoldenSet,
+    ModelStatus,
+    ModelVersion,
+    TrainingRun,
+    examples_digest,
+)
 from dlp_schema.predictor import Clip, Predictor
 from dlp_schema.session import LifecycleState, Session, Stream, StreamKind
 from dlp_train.augment import policy_digest
 from dlp_train.base import TrainingError as TrainingError  # 다시 내보냄 (호출자는 여기서 쓴다)
 from dlp_train.extract import load_training_data, matches
-from dlp_train.policy import TrainingPolicy
+from dlp_train.policy import TaskTraining, TrainingPolicy
 from dlp_train.tracking import Tracker
 from dlp_train.trainers import LOADERS, TRAINERS, LoadContext, ModelLoader, Trainer
 
@@ -303,19 +314,14 @@ def run_training_job(  # noqa: C901
         raise TrainingError(f"골든셋 세션이 학습 데이터에 있습니다: {sorted(leaks)[:5]}")
     counts = data.counts()
     result = LoopResult("skipped", "", examples=counts)
+    fingerprints = data.fingerprints()
 
     # 2) 누적 확인 (직전 = 상태와 상관없이 가장 최근 모델 버전, rejected 포함)
-    previous = list_model_versions(conn, job.task)
     n = len(data.examples)
     if not job.force:
-        if n < spec.min_examples:
-            result.reason = f"학습 예제 {n}개 < min_examples {spec.min_examples}"
-            return result
-        if previous and n - previous[-1].train_examples < spec.min_new_examples:
-            result.reason = (
-                f"직전 학습({previous[-1].train_examples}개) 대비 새 예제 "
-                f"{n - previous[-1].train_examples}개 < min_new_examples {spec.min_new_examples}"
-            )
+        skip = _skip_reason(conn, job.task, spec, fingerprints)
+        if skip is not None:
+            result.reason = skip
             return result
     golden = golden_sessions(conn, version.golden_set_version)
     # 정답 고정 근거 (골든 버전에 고정한 정답 라벨 ID 해시). 리포트·MLflow에 남긴다
@@ -368,7 +374,11 @@ def run_training_job(  # noqa: C901
         tracker.log_params(
             mlflow_run,
             {k: json.dumps(v) for k, v in sorted(params.items())}
-            | {"dataset_version": version.version_id, "examples": str(n)}
+            | {
+                "dataset_version": version.version_id,
+                "examples": str(n),
+                "examples_digest": examples_digest(fingerprints),
+            }
             | _augmentation_params(policy, params),
         )
         with tempfile.TemporaryDirectory() as tmp:
@@ -388,6 +398,9 @@ def run_training_job(  # noqa: C901
                     model_version=model_version,
                     mlflow_run_id=mlflow_run,
                     created_at=now,
+                    example_fingerprints=fingerprints,
+                    examples_digest=examples_digest(fingerprints),
+                    train_session_ids=tuple(sorted(data.session_ids)),
                 ),
             )
             candidate_mv = ModelVersion(
@@ -503,6 +516,48 @@ def run_training_job(  # noqa: C901
         tracker.finish(mlflow_run, "FAILED")
         raise
     return result
+
+
+def _skip_reason(
+    conn: sa.Connection, task: Task, spec: TaskTraining, fingerprints: tuple[str, ...]
+) -> str | None:
+    """재학습을 건너뛸 사유. 학습하면 None.
+
+    직전 학습은 상태와 상관없이 이 과제의 가장 최근 모델 버전이다 (거부된 실행도 포함한다. 같은
+    입력으로 거부된 실행은 학습기·파라미터를 바꿔 `--force`로만 다시 돌린다). 지문 비교 규칙:
+    직전 예제가 하나라도 바뀌거나 빠지면(사람의 정답 수정, 사용 중지, 분할 이동) 새 예제 수와
+    상관없이 학습한다. 바뀐 것이 없으면 새 예제가 min_new_examples 이상일 때만 학습한다 (같은
+    입력의 중복 학습과 조금씩 늘 때마다의 재학습을 막는다). 직전 실행에 지문이 없으면(0026 이전)
+    예제 수 차이로 정한다.
+    """
+    n = len(fingerprints)
+    if n < spec.min_examples:
+        return f"학습 예제 {n}개 < min_examples {spec.min_examples}"
+    previous = list_model_versions(conn, task)
+    if not previous:
+        return None
+    last = previous[-1]
+    before = get_training_run(conn, last.run_id).example_fingerprints
+    if before is None:
+        added = n - last.train_examples
+        if added < spec.min_new_examples:
+            return (
+                f"직전 학습({last.train_examples}개, 예제 지문 없음) 대비 새 예제 {added}개 < "
+                f"min_new_examples {spec.min_new_examples}"
+            )
+        return None
+    now_set, before_set = set(fingerprints), set(before)
+    if before_set - now_set:
+        return None
+    added = len(now_set - before_set)
+    if added == 0:
+        return f"학습 예제가 직전 학습({last.model_version})과 같습니다"
+    if added < spec.min_new_examples:
+        return (
+            f"직전 학습({last.model_version}) 예제는 그대로이고 새 예제 {added}개 < "
+            f"min_new_examples {spec.min_new_examples}"
+        )
+    return None
 
 
 def _augmentation_params(policy: TrainingPolicy, params: dict[str, Any]) -> dict[str, str]:
@@ -642,17 +697,51 @@ def withdrawn_sessions(
 ) -> set[str]:
     """학습 분할 세션 중 사용 중지(동의 철회 등)된 세션. 데이터셋 버전을 만든 뒤 철회됐어도 뺀다.
 
-    withdrawals에 있거나 생애주기가 withdrawn인 세션 (ADR 0025). 학습 분할 세션마다 세션을 한 번
-    읽는다.
+    withdrawals에 있거나 생애주기가 withdrawn인 세션 (ADR 0025, `_withdrawn_among`).
     """
+    return _withdrawn_among(
+        conn, {sid for sid, split in version.splits.items() if split in policy.splits}
+    )
+
+
+def _withdrawn_among(conn: sa.Connection, session_ids: set[str]) -> set[str]:
+    """주어진 세션 중 withdrawals에 있거나 생애주기가 withdrawn인 것. 세션마다 한 번 읽는다."""
     withdrawn = withdrawn_session_ids(conn)
-    out: set[str] = set()
-    for sid, split in version.splits.items():
-        if split not in policy.splits:
-            continue
-        if sid in withdrawn or get_session(conn, sid).lifecycle_state is LifecycleState.WITHDRAWN:
-            out.add(sid)
-    return out
+    return {
+        sid
+        for sid in session_ids
+        if sid in withdrawn or get_session(conn, sid).lifecycle_state is LifecycleState.WITHDRAWN
+    }
+
+
+def _check_not_withdrawn(conn: sa.Connection, mv: ModelVersion) -> None:
+    """모델의 학습 세션 중 지금 철회된 것이 있으면 배포를 거부한다 (T3).
+
+    학습 세션은 학습 실행에 남긴 `train_session_ids`다. 없으면(0026 이전 실행) 그 데이터셋 버전의
+    학습·검증 분할 세션 전체로 본다 (실제로 쓴 세션보다 넓지만 놓치지 않는다). 세션 행을 FOR SHARE로
+    잠근 뒤 읽으므로, 확인 전에 커밋된 철회는 보이고 확인 뒤의 철회(`withdraw_session`의 세션 행
+    갱신)는 이 배포가 커밋될 때까지 기다린다.
+
+    Raises:
+        TrainingError: 철회된 학습 세션이 있을 때. 철회 세션을 뺀 데이터로 다시 학습해야 한다.
+    """
+    run = get_training_run(conn, mv.run_id)
+    sessions = (
+        set(run.train_session_ids)
+        if run.train_session_ids is not None
+        else {
+            sid
+            for sid, split in get_dataset_version(conn, run.dataset_version_id).splits.items()
+            if split in TRAINING_SPLITS
+        }
+    )
+    share_lock_sessions(conn, sessions)
+    withdrawn = sorted(_withdrawn_among(conn, sessions))
+    if withdrawn:
+        raise TrainingError(
+            f"{mv.model_version}의 학습 세션 {withdrawn[:5]}이 사용 중지됐습니다. "
+            "배포하지 않습니다 (그 세션을 뺀 새 데이터셋 버전으로 다시 학습하세요)"
+        )
 
 
 def deploy(
@@ -669,8 +758,9 @@ def deploy(
     (`_verified_report`)를 거친다: 평가 리포트(report_uri, artifacts 저장소)가 이 후보의 것이고
     (`model_versions[과제]`가 이 모델 버전) 게이트를 통과했으며(`gate.passed`와 과제 판정이
     참), 적힌 비교 대상 배포 모델이 지금 배포 모델과 같아야 한다 (지금 모델과 비교하지 않았으면
-    다시 평가해야 한다). 판정 시각은 학습 실행 시작 시각이라 비교에 쓰지 않는다. MLflow 등록은
-    DB 커밋 뒤에 register()로 한다.
+    다시 평가해야 한다). 판정 시각은 학습 실행 시작 시각이라 비교에 쓰지 않는다. 학습 세션 중 지금
+    철회된 것이 있으면 거부한다 (`_check_not_withdrawn`: 학습 도중·승인 대기 중 철회도 막는다).
+    MLflow 등록은 DB 커밋 뒤에 register()로 한다.
 
     Args:
         conn: DB 연결 (호출자 트랜잭션).
@@ -684,7 +774,8 @@ def deploy(
         배포 전 상태로 읽은 `ModelVersion` (status 필드는 옛 값이다).
 
     Raises:
-        TrainingError: 모델 버전이 없음, 배포할 수 없는 상태, 게이트 판정 전, 리포트 저장소 없음,
+        TrainingError: 모델 버전이 없음, 배포할 수 없는 상태, 게이트 판정 전, 학습 세션 철회,
+            리포트 저장소 없음,
             리포트 없음·저장된 리포트와 다른 URI, 다른 후보의 리포트, 게이트 판정이 없거나 실패한
             리포트, 리포트에 비교 기준 없음, 비교한 배포 모델이 지금 배포 모델과 다름.
 
@@ -705,6 +796,7 @@ def deploy(
         raise TrainingError(
             f"{model_version}: 판정 때 저장한 평가 리포트({mv.report_uri})와 다른 리포트입니다"
         )
+    _check_not_withdrawn(conn, mv)
     current = list_model_versions(conn, mv.task, ModelStatus.DEPLOYED)
     if artifacts is None:
         raise TrainingError(f"{model_version}: 배포에는 평가 리포트 저장소가 필요합니다")

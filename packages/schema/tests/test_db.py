@@ -908,3 +908,60 @@ def test_update_assignment_validates_contract(values: dict[str, Any]) -> None:
         with pytest.raises(KeyError):
             update_assignment(conn, "missing", assignee="rev01")
     engine.dispose()
+
+
+@pytest.mark.services
+def test_training_run_inputs_roundtrip_and_block_downgrade(pg: sa.Engine) -> None:
+    """학습 실행의 예제 지문·해시·학습 세션(0026, ADR 0016 보강, T2·T3)이 DB 왕복 후 같고, 0026
+    이전 형식 행은 None으로 읽히며, 기록한 실행이 있으면 0026을 되돌릴 수 없다."""
+    from dlp_schema.db.repository import get_training_run, insert_training_run
+    from dlp_schema.lineage import TrainingRun, examples_digest
+
+    fps = ("00aa", "11bb")
+    new = TrainingRun(
+        run_id="run-new", dataset_version_id="ds-0001", model_name="objects",
+        model_version="m-new", created_at=FIXED_TIME, example_fingerprints=fps,
+        examples_digest=examples_digest(fps), train_session_ids=("s001",),
+    )  # fmt: skip
+    old = TrainingRun(
+        run_id="run-old", dataset_version_id="ds-0001", model_name="objects",
+        model_version="m-old", created_at=FIXED_TIME,
+    )  # fmt: skip
+    with pg.begin() as conn:
+        insert_dataset_version(
+            conn,
+            DatasetVersion(
+                version_id="ds-0001", ontology_version="1.0.0", created_at=FIXED_TIME,
+                snapshot_uri="lakefs://dlp/main@abc", splits={"s001": Split.TRAIN},
+            ),
+        )  # fmt: skip
+        insert_training_run(conn, new)
+        insert_training_run(conn, old)
+    with pg.connect() as conn:
+        assert get_training_run(conn, "run-new") == new
+        got_old = get_training_run(conn, "run-old")
+    assert (got_old.example_fingerprints, got_old.train_session_ids) == (None, None)
+    url = pg.url.render_as_string(hide_password=False)
+    pg.dispose()
+    with pytest.raises(RuntimeError, match="0026"):
+        downgrade(url, "0025")
+
+
+def test_training_run_digest_must_match_fingerprints() -> None:
+    """예제 지문과 해시는 함께 있고, 해시는 지문에서 계산한 값이어야 한다 (정답: 직접 계산한
+    sha256)."""
+    import hashlib
+
+    from pydantic import ValidationError
+
+    from dlp_schema.lineage import TrainingRun, examples_digest
+
+    assert examples_digest(["b", "a"]) == hashlib.sha256(b"a\nb").hexdigest()
+    base: dict[str, Any] = {
+        "run_id": "r", "dataset_version_id": "d", "model_name": "m", "model_version": "v",
+        "created_at": FIXED_TIME,
+    }  # fmt: skip
+    with pytest.raises(ValidationError, match="함께"):
+        TrainingRun(**base, example_fingerprints=("a",))
+    with pytest.raises(ValidationError, match="해시와 다릅니다"):
+        TrainingRun(**base, example_fingerprints=("a",), examples_digest="0" * 64)

@@ -23,6 +23,8 @@ WP13, ADR 0016·0025. 변화 종류 판정 자체는 `dlp_schema.history.review_
 
 from __future__ import annotations
 
+import hashlib
+import json
 import tempfile
 from collections import Counter
 from collections.abc import Set
@@ -48,6 +50,22 @@ class Example:
     label: LabelRecord  # 학습에 쓸 레코드 (deleted면 지워진 모델 레코드 = 음성 예제)
     origin: LabelRecord | None  # 처음 모델이 낸 레코드 (사람이 추가한 것은 없음)
 
+    def fingerprint(self) -> str:
+        """학습기가 받는 이 예제 내용 전체의 sha256 앞 16자리 (재학습 판단, ADR 0016 보강).
+
+        입력은 세션·분할·변화 종류와 `label`·`origin` 레코드 전체(ID, 페이로드, 검수 상태, 부모,
+        출처 등)를 키 정렬한 JSON이다. 사람이 정답을 고치거나 검수 상태·분할이 바뀌면 값이 바뀐다.
+        """
+        body = {
+            "session_id": self.session_id,
+            "split": self.split.value,
+            "change": self.change,
+            "label": self.label.model_dump(mode="json"),
+            "origin": None if self.origin is None else self.origin.model_dump(mode="json"),
+        }
+        text = json.dumps(body, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+        return hashlib.sha256(text.encode()).hexdigest()[:16]
+
 
 @dataclass(frozen=True)
 class TrainingData:
@@ -61,6 +79,10 @@ class TrainingData:
     def session_ids(self) -> set[str]:
         """예제가 나온 세션 ID (골든셋 누출 검사에 쓴다)."""
         return {e.session_id for e in self.examples}
+
+    def fingerprints(self) -> tuple[str, ...]:
+        """예제마다 `Example.fingerprint` (정렬). 학습 실행에 남겨 다음 실행과 비교한다."""
+        return tuple(sorted(e.fingerprint() for e in self.examples))
 
     def counts(self) -> dict[str, int]:
         """`<분할>/<변화 종류>` → 예제 수 (키 정렬). MLflow 지표·루프 결과에 남긴다."""

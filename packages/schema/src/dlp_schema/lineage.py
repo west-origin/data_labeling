@@ -19,6 +19,8 @@
 
 from __future__ import annotations
 
+import hashlib
+from collections.abc import Sequence
 from enum import StrEnum
 
 from pydantic import AwareDatetime, Field, model_validator
@@ -63,6 +65,11 @@ class GoldenSet(Contract):
         return self
 
 
+def examples_digest(fingerprints: Sequence[str]) -> str:
+    """예제 지문 목록의 sha256 (정렬 후 줄바꿈으로 이음). 같은 학습 입력인지 한 값으로 비교한다."""
+    return hashlib.sha256("\n".join(sorted(fingerprints)).encode()).hexdigest()
+
+
 class TrainingRun(Contract):
     """학습 실행 하나 (데이터셋 버전 하나에서 모델 하나를 학습).
 
@@ -71,6 +78,15 @@ class TrainingRun(Contract):
     - model_name, model_version: 학습기 이름과 결과 모델 버전 문자열.
     - mlflow_run_id: MLflow 실행 ID. MLflow에 기록하지 않았으면 None.
     - created_at: 실행 시각.
+    - example_fingerprints: 학습기에 넘긴 예제마다의 내용 지문
+      (`dlp_train.extract.Example.fingerprint`, 정렬). 다음 실행이 직전 예제가 바뀌거나
+      빠졌는지, 새 예제가 몇 개인지 이것으로 정한다.
+    - examples_digest: `example_fingerprints`의 sha256 (`examples_digest`). 같은 학습 입력인지 한
+      값으로 보는 감사용이다.
+    - train_session_ids: 실제로 예제가 나온 학습·검증 세션. 배포 직전에 이 세션들의 철회를 다시
+      확인한다.
+    세 값은 Alembic 0026 이전 실행에는 없다 (None, ADR 0016 2026-11-05 보강). 지문과 해시는 함께
+    있거나 함께 없다.
     """
 
     run_id: Identifier
@@ -79,6 +95,25 @@ class TrainingRun(Contract):
     model_version: str
     mlflow_run_id: str | None = None
     created_at: AwareDatetime
+    example_fingerprints: tuple[str, ...] | None = Field(
+        default=None, description="학습 예제 내용 지문 (정렬). None이면 0026 이전 실행"
+    )
+    examples_digest: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$", description="예제 지문 목록의 sha256"
+    )
+    train_session_ids: tuple[Identifier, ...] | None = Field(
+        default=None, description="예제가 나온 학습·검증 세션. None이면 0026 이전 실행"
+    )
+
+    @model_validator(mode="after")
+    def _digest_matches(self) -> TrainingRun:
+        """지문과 해시는 함께 있고, 해시는 지문에서 계산한 값이어야 한다."""
+        fps = self.example_fingerprints
+        if (fps is None) != (self.examples_digest is None):
+            raise ValueError("example_fingerprints와 examples_digest는 함께 있어야 합니다")
+        if fps is not None and examples_digest(fps) != self.examples_digest:
+            raise ValueError("examples_digest가 example_fingerprints의 해시와 다릅니다")
+        return self
 
 
 class ModelStatus(StrEnum):

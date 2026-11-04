@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +25,7 @@ from dlp_eval.harness import EvalReport
 from dlp_eval.policy import load_policy as load_eval_policy
 from dlp_eval.runner import golden_truth_ids, write_report
 from dlp_media.storage import LocalStore, sha256_file
-from dlp_schema.dataset import DatasetVersion
+from dlp_schema.dataset import DatasetVersion, Split
 from dlp_schema.db.migrate import upgrade
 from dlp_schema.db.repository import (
     get_labels,
@@ -45,6 +45,7 @@ from dlp_schema.session import Domain, PrivacyState, Session, Stream, StreamKind
 from dlp_schema.testing import FIXED_TIME, make_label, make_session
 from dlp_train.augment import policy_digest
 from dlp_train.deployed import deployed_predictors
+from dlp_train.extract import TrainingData
 from dlp_train.loop import (
     DEPLOYED_BASELINE,
     LoopResult,
@@ -55,7 +56,7 @@ from dlp_train.loop import (
 )
 from dlp_train.policy import TrainingPolicy, load_policy
 from dlp_train.tracking import MemoryTracker
-from dlp_train.trainers import LoadContext
+from dlp_train.trainers import TRAINERS, LoadContext, Trainer
 
 ROOT = Path(__file__).resolve().parents[3]
 pytestmark = pytest.mark.services
@@ -327,9 +328,9 @@ def test_training_loop_gate_blocks_or_deploys(engine: sa.Engine, tmp_path: Path)
     with engine.connect() as conn:
         assert not list_model_versions(conn, "objects", ModelStatus.DEPLOYED)
 
-    # 2) 새 예제가 없으면 재학습하지 않는다 (force로만)
+    # 2) 예제가 직전 학습(거부된 r1)과 같으면 재학습하지 않는다 (force로만)
     r_skip = run(TrainingJob("objects", "dv1", baseline_versions=BASE), 2)
-    assert r_skip.status == "skipped" and "min_new_examples" in r_skip.reason
+    assert r_skip.status == "skipped" and "직전 학습" in r_skip.reason
 
     # 3) 정확한 후보: 배포 모델이 없으니 DB에 있는 기존(base) 모델 예측과 비교 → 통과 → 배포
     r2 = run(
@@ -695,3 +696,169 @@ def test_direct_deploy_requires_passing_report_of_same_candidate(
     with engine.connect() as conn:
         [deployed] = list_model_versions(conn, "objects", ModelStatus.DEPLOYED)
         assert (deployed.model_version, deployed.report_uri) == ("cand-a", good)
+
+
+# ------------------------------------------------------------ 예제 내용 변화·철회 후 배포 (T2·T3)
+
+
+def _loop_env(
+    engine: sa.Engine, tmp_path: Path
+) -> tuple[Callable[..., LoopResult], Callable[[str], None], LocalStore]:
+    """`populate` 데이터와 dv1을 넣고, 재학습 함수·데이터셋 버전 추가 함수·산출물 저장소를 준다."""
+    policy = small(load_policy(ROOT))
+    snapshots = LocalSnapshotStore(tmp_path / "snapshots")
+    artifacts = LocalStore(tmp_path / "store", "dlp-mlflow")
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"stub")
+    with engine.begin() as conn:
+        populate(conn)
+        build_version(conn, snapshots, "dv1")
+
+    def run(job: TrainingJob, now_s: int, trainers: dict[str, Trainer] | None = None) -> LoopResult:
+        """트랜잭션 하나로 재학습을 돌린다."""
+        with engine.begin() as conn:
+            return run_training_job(
+                conn, job, snapshots=snapshots, artifacts=artifacts, tracker=MemoryTracker(),
+                clips=lambda session, stream, work: video, policy=policy,
+                eval_policy=load_eval_policy(ROOT), now=FIXED_TIME.replace(second=now_s),
+                trainers=trainers, stub_truth=True,
+            )  # fmt: skip
+
+    def build(version_id: str) -> None:
+        """지금 라벨로 데이터셋 버전을 하나 더 만든다."""
+        with engine.begin() as conn:
+            build_version(conn, snapshots, version_id)
+
+    return run, build, artifacts
+
+
+def build_version(conn: sa.Connection, snapshots: LocalSnapshotStore, version_id: str) -> None:
+    """golden-v1을 쓰는 데이터셋 버전을 만든다."""
+    build_dataset_version(
+        conn, snapshots, load_dataset_policy(ROOT), version_id=version_id,
+        ontology_version="1.0.0", golden_set_version="golden-v1", now=FIXED_TIME,
+    )  # fmt: skip
+
+
+def test_retrains_when_label_contents_change_with_same_count(
+    engine: sa.Engine, tmp_path: Path
+) -> None:
+    """T2: 예제 수가 같아도 사람이 정답을 고치면 재학습한다. 같은 예제면 건너뛴다.
+
+    정답: dv1으로 한 번 학습한 뒤 dv1을 다시 돌리면 예제가 같아 건너뛴다. tr0의 bucket 정답을
+    사람이 다시 고쳐 만든 dv2는 예제 수가 24개로 같지만 내용이 바뀌었으므로 학습한다. 아무것도
+    고치지 않고 예제 1개만 더한 dv3은 min_new_examples(5)보다 적게 늘어 건너뛴다.
+    """
+    run, build, _ = _loop_env(engine, tmp_path)
+    r1 = run(TrainingJob("objects", "dv1", params={"jitter_px": 0.0}, baseline_versions=BASE), 1)
+    assert r1.status == "deployed", r1.reason
+    again = run(TrainingJob("objects", "dv1", baseline_versions=BASE), 2)
+    assert again.status == "skipped"
+
+    with engine.begin() as conn:
+        insert_labels(
+            conn,
+            [
+                label("tr0", "h-bucket-2", box("bucket_1", "bucket", dx=10),
+                      parent_label_id="tr0-h-bucket",
+                      verification=reviewed(VerificationState.HUMAN_CORRECTED)),
+            ],
+        )  # fmt: skip
+    build("dv2")
+    r2 = run(TrainingJob("objects", "dv2", params={"jitter_px": 0.0}), 3)
+    assert sum(r2.examples.values()) == 24
+    assert r2.status != "skipped", r2.reason
+
+    with engine.begin() as conn:
+        insert_labels(
+            conn,
+            [label("tr1", "h-cup-2", box("cup_2", "cup", dx=200),
+                   verification=reviewed(VerificationState.HUMAN_CORRECTED))],
+        )  # fmt: skip
+    build("dv3")
+    r3 = run(TrainingJob("objects", "dv3", params={"jitter_px": 0.0}), 4)
+    assert sum(r3.examples.values()) == 25
+    assert r3.status == "skipped" and "min_new_examples" in r3.reason
+
+
+def test_deploy_refuses_model_trained_on_withdrawn_session(
+    engine: sa.Engine, tmp_path: Path
+) -> None:
+    """T3: 학습에 쓴 세션이 그 뒤 철회되면 어느 배포 경로로도 배포하지 않는다.
+
+    정답: (1) 승인 대기(privacy, passed) 모델은 학습 세션 tr0 철회 뒤 `deploy()`(CLI approve와
+    같은 함수)가 거부한다. (2) 학습기가 도는 동안 다른 트랜잭션에서 tr1을 철회하면 루프의 자동
+    배포가 거부되고 그 실행의 기록은 하나도 남지 않는다. 두 경우 모두 배포 모델이 생기지 않는다.
+    """
+    run, _, artifacts = _loop_env(engine, tmp_path)
+    passed = run(TrainingJob("privacy", "dv1", force=True), 1)
+    assert passed.status == "passed", passed.reason
+    with engine.begin() as conn:
+        withdraw_session(conn, "tr0", "consent", FIXED_TIME)
+    with engine.begin() as conn, pytest.raises(TrainingError, match="tr0"):
+        deploy(conn, passed.model_version or "", now=FIXED_TIME, artifacts=artifacts)
+
+    stub = TRAINERS["oracle-stub"]
+
+    class WithdrawingTrainer:
+        """학습 도중 별도 트랜잭션에서 학습 세션 tr1을 철회한다."""
+
+        def train(self, data: TrainingData, params: Mapping[str, Any], out_dir: Path) -> Any:
+            """철회를 커밋한 뒤 stub 학습기로 학습한다."""
+            assert "tr1" in data.session_ids
+            with engine.begin() as other:
+                withdraw_session(other, "tr1", "consent", FIXED_TIME)
+            return stub.train(data, params, out_dir)
+
+    job = TrainingJob("objects", "dv1", params={"jitter_px": 0.0}, baseline_versions=BASE)
+    with pytest.raises(TrainingError, match="tr1"):
+        run(job, 2, trainers={"oracle-stub": WithdrawingTrainer()})  # type: ignore[dict-item]
+    with engine.connect() as conn:
+        assert not list_model_versions(conn, "objects")
+        assert not list_model_versions(conn, "privacy", ModelStatus.DEPLOYED)
+
+
+def test_deploy_without_recorded_sessions_checks_version_training_splits(
+    engine: sa.Engine, tmp_path: Path
+) -> None:
+    """T3: 학습 세션을 기록하지 않은 이전 실행의 모델은 데이터셋 버전의 학습·검증 분할 세션 전체로
+    철회를 확인한다 (보수적으로).
+
+    정답: 분할에 tr0(train)이 있는 dv1의 통과 리포트 후보는 tr0 철회 뒤 거부되고, 철회 전에는 같은
+    리포트로 배포된다.
+    """
+    artifacts = LocalStore(tmp_path / "store", "dlp-mlflow")
+    report = EvalReport("golden-v1", {"objects": "cand-a"}, {}, {})
+    path = tmp_path / "good" / "golden.json"
+    write_report(
+        path,
+        report,
+        GateDecision(True, {"objects": TaskDecision("objects", True)}),
+        {DEPLOYED_BASELINE: None},
+    )
+    artifacts.put_file("good/golden.json", path, sha256_file(path))
+    good = artifacts.uri("good/golden.json")
+    with engine.begin() as conn:
+        register_ontology(conn, load_ontology(ROOT / "config/ontology/v1"))
+        for sid in ("tr0", "gd0"):
+            insert_session(conn, make_session(sid, worker_id=f"w-{sid}", site_id=f"s-{sid}"))
+        insert_dataset_version(
+            conn,
+            DatasetVersion(
+                version_id="dv1",
+                ontology_version="1.0.0",
+                created_at=FIXED_TIME,
+                snapshot_uri="local-snapshot://unused/dv1",
+                splits={"tr0": Split.TRAIN, "gd0": Split.GOLDEN},
+            ),
+        )
+        _register_model(conn, "cand-a", ModelStatus.CANDIDATE, None)
+    with engine.connect() as conn:
+        deploy(conn, "cand-a", now=FIXED_TIME, report_uri=good, artifacts=artifacts)
+        conn.rollback()
+    with engine.begin() as conn:
+        withdraw_session(conn, "tr0", "consent", FIXED_TIME)
+    with engine.begin() as conn, pytest.raises(TrainingError, match="tr0"):
+        deploy(conn, "cand-a", now=FIXED_TIME, report_uri=good, artifacts=artifacts)
+    with engine.connect() as conn:
+        assert not list_model_versions(conn, "objects", ModelStatus.DEPLOYED)

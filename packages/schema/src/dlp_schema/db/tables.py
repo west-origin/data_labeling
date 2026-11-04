@@ -438,6 +438,10 @@ training_runs = sa.Table(
     sa.Column("model_version", sa.String(128), nullable=False),
     sa.Column("mlflow_run_id", sa.String(64), nullable=True),
     sa.Column("created_at", Ts, nullable=False),
+    # 학습 입력 지문·해시와 예제가 나온 세션 (0026, ADR 0016 보강). 이전 실행은 NULL
+    sa.Column("example_fingerprints", Json, nullable=True),
+    sa.Column("examples_digest", sa.String(64), nullable=True),
+    sa.Column("train_session_ids", Json, nullable=True),
 )
 
 # 재학습 모델 레지스트리 (`ModelVersion`, 0007). status·decided_at·report_uri는

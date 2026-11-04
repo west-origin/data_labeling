@@ -1,6 +1,6 @@
 {
   "additionalProperties": false,
-  "description": "학습 실행 하나 (데이터셋 버전 하나에서 모델 하나를 학습).\n\n- run_id: 실행 ID.\n- dataset_version_id: 학습 데이터를 뽑은 데이터셋 버전 (DB FK → dataset_versions).\n- model_name, model_version: 학습기 이름과 결과 모델 버전 문자열.\n- mlflow_run_id: MLflow 실행 ID. MLflow에 기록하지 않았으면 None.\n- created_at: 실행 시각.",
+  "description": "학습 실행 하나 (데이터셋 버전 하나에서 모델 하나를 학습).\n\n- run_id: 실행 ID.\n- dataset_version_id: 학습 데이터를 뽑은 데이터셋 버전 (DB FK → dataset_versions).\n- model_name, model_version: 학습기 이름과 결과 모델 버전 문자열.\n- mlflow_run_id: MLflow 실행 ID. MLflow에 기록하지 않았으면 None.\n- created_at: 실행 시각.\n- example_fingerprints: 학습기에 넘긴 예제마다의 내용 지문\n  (`dlp_train.extract.Example.fingerprint`, 정렬). 다음 실행이 직전 예제가 바뀌거나\n  빠졌는지, 새 예제가 몇 개인지 이것으로 정한다.\n- examples_digest: `example_fingerprints`의 sha256 (`examples_digest`). 같은 학습 입력인지 한\n  값으로 보는 감사용이다.\n- train_session_ids: 실제로 예제가 나온 학습·검증 세션. 배포 직전에 이 세션들의 철회를 다시\n  확인한다.\n세 값은 Alembic 0026 이전 실행에는 없다 (None, ADR 0016 2026-11-05 보강). 지문과 해시는 함께\n있거나 함께 없다.",
   "properties": {
     "created_at": {
       "format": "date-time",
@@ -11,6 +11,36 @@
       "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
       "title": "Dataset Version Id",
       "type": "string"
+    },
+    "example_fingerprints": {
+      "anyOf": [
+        {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "학습 예제 내용 지문 (정렬). None이면 0026 이전 실행",
+      "title": "Example Fingerprints"
+    },
+    "examples_digest": {
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "예제 지문 목록의 sha256",
+      "title": "Examples Digest"
     },
     "mlflow_run_id": {
       "anyOf": [
@@ -36,6 +66,23 @@
       "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
       "title": "Run Id",
       "type": "string"
+    },
+    "train_session_ids": {
+      "anyOf": [
+        {
+          "items": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "예제가 나온 학습·검증 세션. None이면 0026 이전 실행",
+      "title": "Train Session Ids"
     }
   },
   "required": [
