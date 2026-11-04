@@ -1133,3 +1133,6 @@ issues:
   - {id: F-ETA-32, title: "골든 평가 예측(dlp_eval.runner._predictions)이 사람 출처만 빼서 센서 출처 레코드도 모델 예측으로 셈 (버전 * 이면 model_version 없는 센서 레코드까지)", severity: low, status: fixed, kind: code,
      files: [packages/evaluation/src/dlp_eval/runner.py], source: docs/handover/full-inspection-2026-11-04.md,
      note: "주석 검수(P4)에서 발견, 2026-11-04 재현. 예측을 모델 출처(Source.MODEL)로 좁혔다. 회귀: packages/evaluation/tests/test_prediction_source.py::test_sensor_records_are_not_predictions_f_eta_32 (수정 전 실패 확인)"}
+  - {id: F-COE-90, title: "콘솔 올리기 두 경로(/api/upload, /api/pretrain/check)가 처리기 전에 multipart 본문 전체를 임시 파일로 받아, 파일별 상한과 무관하게 임시 디스크를 채울 수 있음", severity: low, status: fixed, kind: code,
+     files: [packages/console/src/dlp_console/app.py, packages/console/src/dlp_console/settings.py, config/console.yaml], source: docs/handover/full-inspection-2026-11-04.md, see: [F-COE-89],
+     note: "문지기 미들웨어가 본문을 읽기 전에 Content-Length를 경로 상한(파일 상한 합 + request_body.multipart_overhead_kb)과 비교해 413, 길이 없음·청크 전송은 411. 회귀: packages/console/tests/test_body_limit.py (413·411 시험은 수정 전 실패 확인)"}

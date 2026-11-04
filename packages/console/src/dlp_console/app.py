@@ -22,6 +22,8 @@
 - 모든 `/api/*` 요청은 `X-Console-Token` 머리글이 시작 때 만든 토큰과 같아야 한다 (401). CSRF를
   막는 방법이다. 다른 사이트의 페이지는 이 머리글을 붙일 수 없고, 콘솔은 CORS를 열지 않는다.
 - Host 머리글은 묶은 주소·localhost만 받는다 (400, DNS 재바인딩 방지, `host_allowed`).
+- 올리기 경로(`/api/upload`, `/api/pretrain/check`)는 본문을 읽기 전에 Content-Length를 경로 전체
+  상한(`body_limits`)과 비교한다. 넘으면 413, 길이가 없으면(청크 전송) 411이다 (F-COE-90).
 - DB는 읽기만 한다. 파이프라인 쓰기는 모두 `dlp` 명령 작업(`JobRunner`)이다. 콘솔이 직접 쓰는
   것은 작업 디렉터리의 파일(업로드 사본, 세션별 화면 기억값, 가져오기 기록, 리포트 캐시)과, 가져오기
   확인 때 Git 밖 `pretrain_import.models_dir`(`data/models/` 아래)에 두는 가중치 사본뿐이다.
@@ -38,7 +40,7 @@ import math
 import os
 import secrets
 import shutil
-from collections.abc import AsyncGenerator, Awaitable, Callable, Generator, Iterable
+from collections.abc import AsyncGenerator, Awaitable, Callable, Generator, Iterable, Mapping
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import Annotated, Any, cast
@@ -56,7 +58,7 @@ from dlp_console.imports import FILES, ImportStore
 from dlp_console.jobs import Job, JobConflictError, JobRunner, JobStatus
 from dlp_console.preview import PreviewUnavailableError, blurred_url, overlay_tracks
 from dlp_console.redact import Redactor
-from dlp_console.settings import ConsoleSettings
+from dlp_console.settings import ConsoleConfig, ConsoleSettings
 from dlp_console.status import (
     SessionState,
     label_counts,
@@ -84,6 +86,7 @@ LOCAL_NAMES = frozenset({"127.0.0.1", "localhost", "::1"})
 WILDCARD_BINDS = frozenset({"0.0.0.0", "::"})
 # DLP_DATABASE_URL이 없을 때 (`dlp` CLI 기본값과 같은 개발 DB, .env.example)
 DEV_DATABASE_URL = "postgresql+psycopg://dlp:dlp-dev-password@localhost:5432/dlp"
+MIB = 1024 * 1024
 
 
 class Services:
@@ -303,6 +306,45 @@ def host_allowed(header: str, bind_host: str, extra: frozenset[str] = frozenset(
     return bound in WILDCARD_BINDS and _is_ip(name)
 
 
+def body_limits(config: ConsoleConfig) -> dict[str, int]:
+    """본문을 읽기 전에 막는 경로별 요청 전체 상한 (바이트, F-COE-90).
+
+    상한은 그 경로 파일 상한의 합 + `request_body.multipart_overhead_kb`다. Starlette 1.3은 처리기
+    전에 multipart 본문 전체를 임시 파일로 받고, 파일 부분의 크기를 막는 설정이 없다
+    (`max_part_size`는 파일 아닌 폼 값만). 그래서 받는 동안의 임시 디스크는 이 상한으로만 지킨다.
+    """
+    overhead = config.request_body.multipart_overhead_kb * 1024
+    pre = config.pretrain_import
+    return {
+        "/api/upload": config.upload.max_mb * MIB + overhead,
+        "/api/pretrain/check": pre.max_mb * MIB + 2 * pre.manifest_max_kb * 1024 + overhead,
+    }
+
+
+def body_refusal(
+    method: str, path: str, headers: Mapping[str, str], config: ConsoleConfig
+) -> JSONResponse | None:
+    """올리기 경로의 POST를 본문을 읽기 전에 거를 응답. 받을 요청이면 None (F-COE-90).
+
+    서버(uvicorn)는 선언한 Content-Length보다 많이 읽지 않으므로 길이 검사가 받는 양의 상한이 된다.
+    청크 전송(`Transfer-Encoding`)은 끝까지 받기 전에는 크기를 알 수 없어 411로 받지 않는다.
+    headers는 소문자 이름으로 찾는 요청 머리글이다 (Starlette `Headers`).
+    """
+    limit = body_limits(config).get(path)
+    if limit is None or method != "POST":
+        return None
+    length = headers.get("content-length")
+    if "transfer-encoding" in headers or length is None:
+        detail = "Content-Length가 필요합니다 (청크 전송은 받지 않습니다)"
+        return JSONResponse({"detail": detail}, status_code=411)
+    if not length.isascii() or not length.isdigit():
+        return JSONResponse({"detail": "Content-Length 값이 잘못되었습니다"}, status_code=400)
+    if int(length) > limit:
+        detail = f"요청 본문이 상한({math.ceil(limit / MIB)} MB, 파일 상한 합 + 여유분)보다 큽니다"
+        return JSONResponse({"detail": detail}, status_code=413)
+    return None
+
+
 def create_app(
     settings: ConsoleSettings,
     services: Services | None = None,
@@ -337,7 +379,9 @@ def create_app(
 
         1. Host 머리글이 허용 이름이 아니면 400 (`host_allowed`). 정적 파일도 같다.
         2. `/api/*`는 `X-Console-Token`이 토큰과 다르거나 없으면 401.
-        3. 통과한 응답에 캐시 금지(`no-store`), MIME 추측 금지, Referer 금지 머리글을 붙인다.
+        3. 올리기 경로는 본문을 읽기 전에 길이를 본다 (411·413, `body_refusal`). 이 미들웨어는
+           본문을 읽지 않으므로 거른 요청의 본문은 임시 파일로 받지 않는다.
+        4. 통과한 응답에 캐시 금지(`no-store`), MIME 추측 금지, Referer 금지 머리글을 붙인다.
            서명 URL·작업 자료가 브라우저 캐시에 남지 않게 한다.
         """
         if not host_allowed(request.headers.get("host") or "", bind_host, extra):
@@ -347,6 +391,9 @@ def create_app(
             token = request.headers.get(TOKEN_HEADER, "").encode("utf-8")
             if not secrets.compare_digest(token, settings.token.encode("utf-8")):
                 return JSONResponse({"detail": "콘솔 토큰이 없거나 틀립니다"}, status_code=401)
+        refusal = body_refusal(request.method, request.url.path, request.headers, settings.config)
+        if refusal is not None:
+            return refusal
         response = await call_next(request)
         response.headers["Cache-Control"] = "no-store"
         response.headers["X-Content-Type-Options"] = "nosniff"
@@ -492,7 +539,7 @@ def _session_routes(app: FastAPI, svc: Services) -> None:
         Raises:
             HTTPException: 같은 세션 작업이 이미 돌면 409 (파일을 받기 전에 확인한다).
             ParamError: 장면이 선택지에 없음, 확장자·크기 상한·폼 값 오류, 이미 올린 사본이
-                있음 (400).
+                있음 (400). 요청 전체 상한은 본문을 받기 전에 문지기가 본다 (411·413, F-COE-90).
         """
         form = UploadForm(
             session_id, worker_id, site_id, domain, consent_version, recorded_at, camera_id, scene,
@@ -631,7 +678,8 @@ def _pretrain_routes(app: FastAPI, svc: Services) -> None:
         저장하고 `ImportStore.check`로 검사·적용 미리보기를 만든다. 작업을 시작하지 않고 설정
         파일도 고치지 않는다. 검사 실패도 200이며 응답의 `ok`·`checks`가 이유를 보인다.
         파일마다 크기 상한(ONNX `pretrain_import.max_mb`, manifest `manifest_max_kb`)을 두어
-        작업 디렉터리 디스크를 지킨다 (F-COE-89).
+        작업 디렉터리 디스크를 지킨다 (F-COE-89). 요청 전체 상한은 본문을 받기 전에 문지기가
+        본다 (411·413, F-COE-90).
 
         Raises:
             ParamError: 한 파일이라도 상한을 넘음 (400, 가져오기 디렉터리째 지운다).

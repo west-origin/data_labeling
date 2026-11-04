@@ -39,6 +39,7 @@ class UploadConfig(Contract):
     """영상 올리기.
 
     - max_mb: 한 파일 상한 (MB, 1 MB = 1024*1024 바이트). 넘으면 받던 파일을 지우고 400.
+      요청 전체는 본문을 받기 전에 이 값 + `request_body` 여유분으로 막는다 (413, F-COE-90).
     - suffixes: 받는 확장자 (소문자, 점 포함. 예: `.mp4`).
     - delete_after_ingest: 수집 작업이 모두 성공하면 올린 사본·준비 사본을 지운다.
     """
@@ -92,7 +93,8 @@ class PretrainImportConfig(Contract):
 
     - models_dir: 가중치를 둘 디렉터리 (저장소 루트 기준 상대 경로, 저장소 안이어야 한다).
     - max_mb: ONNX 한 파일 상한 (MB). manifest_max_kb: manifest JSON 한 파일 상한 (KB).
-      넘으면 그 가져오기 디렉터리를 지우고 400이다 (F-COE-89).
+      넘으면 그 가져오기 디렉터리를 지우고 400이다 (F-COE-89). 요청 전체는 본문을 받기 전에
+      max_mb + manifest 두 개 + `request_body` 여유분으로 막는다 (413, F-COE-90).
     - compare: 골든셋 비교 명령 설정.
     """
 
@@ -100,6 +102,19 @@ class PretrainImportConfig(Contract):
     max_mb: int = Field(ge=1)
     manifest_max_kb: int = Field(ge=1)
     compare: CompareConfig
+
+
+class RequestBodyConfig(Contract):
+    """올리기 경로 본문 전체 상한 (F-COE-90).
+
+    Starlette는 처리기가 돌기 전에 multipart 본문 전체를 임시 파일로 받는다. 그래서 `/api/upload`와
+    `/api/pretrain/check`는 본문을 읽기 전에 Content-Length를 "그 경로 파일 상한의 합 +
+    multipart_overhead_kb"와 비교해 넘으면 413, 길이가 없으면(청크 전송) 411로 받지 않는다.
+
+    - multipart_overhead_kb: 경계 줄·부분 머리글·짧은 폼 값(세션·작업자 ID 등)에 주는 여유 (KB).
+    """
+
+    multipart_overhead_kb: int = Field(default=1024, ge=1, le=64 * 1024)
 
 
 class ConsoleConfig(Contract):
@@ -112,6 +127,7 @@ class ConsoleConfig(Contract):
     jobs: JobsConfig = Field(default_factory=JobsConfig)
     preview: PreviewConfig
     pretrain_import: PretrainImportConfig
+    request_body: RequestBodyConfig = Field(default_factory=RequestBodyConfig)
 
 
 def load_console_config(root: Path) -> ConsoleConfig:

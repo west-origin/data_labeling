@@ -52,3 +52,10 @@ pretrain_import:
   compare:
     trainer: null
     params: {}
+
+# 올리기 요청 본문 전체 상한 (F-COE-90). 콘솔 웹 틀(Starlette)은 처리기보다 먼저 multipart 본문 전체를
+# 임시 파일로 받으므로, /api/upload·/api/pretrain/check는 본문을 읽기 전에 Content-Length를
+# "그 경로 파일 상한의 합(upload.max_mb / pretrain_import.max_mb + manifest_max_kb x 2) + 아래 여유분"과
+# 비교해 넘으면 413으로 받지 않는다. Content-Length 없는 청크 전송은 크기를 미리 알 수 없어 411이다.
+request_body:
+  multipart_overhead_kb: 1024       # 경계 줄·부분 머리글·짧은 폼 값(ID·동의서 판 등) 여유 (KB)
