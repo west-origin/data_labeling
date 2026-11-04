@@ -5,3 +5,4 @@ ts	phase	decision	why	evidence	result
 2026-11-04T03:40:37Z	structure	구조 문서를 pstack how 방식으로 만들기로 함: 탐색 3명(단계 흐름, 데이터 모델·안전 규칙, 사람·AI 고리·운영)이 먼저 읽고 설명자가 합침	한 에이전트가 89k줄을 다 읽으면 얕아져서 각도별로 나눔	how 스킬 references/explorer-prompt.md	running
 2026-11-04T03:40:37Z	inspection	전수 검수를 swarm 10구역으로 시작함(커밋 9979b90, 실행으로 증명한 것만 결함)	interrogate 기준: 돌려서 증명한 것만 남김	scratchpad swarm2/brief.md	running
 2026-11-04T03:40:37Z	frame	pstack 기본 모델(grok·Cursor 슬러그)을 쓸 수 없어 하위 에이전트는 부모 모델을 그대로 씀	Claude Code의 Agent 도구는 Cursor 모델을 지원하지 않음	pstack swarm Phase A step 3 (auto는 model 생략)	decided
+2026-11-04T03:46:37Z	structure	explainer agent writes new root README (teach build-up, Diataxis split)	how skill: explorers then one explainer; user asked pstack over existing README	scratchpad/how/explorer{1,2,3}*.md	running
