@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import contextlib
+import ctypes
 import json
 import os
 import signal
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +18,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from dlp_console.app import create_app
-from dlp_console.jobs import JobConflictError, JobRunner, JobStatus
+from dlp_console.jobs import JobConflictError, JobRunner, JobStatus, group_alive
 from dlp_console.redact import RAW_MASK, SECRET_MASK, Redactor
 from dlp_console.settings import ConsoleSettings, JobsConfig
 
@@ -148,10 +149,108 @@ def _alive(pid: int) -> bool:
     return True
 
 
+def _zombie(pid: int) -> bool:
+    out = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True)
+    return out.stdout.strip().startswith("Z")
+
+
+_PR_SET_CHILD_SUBREAPER = 36
+
+
+@pytest.fixture
+def non_reaping_init() -> Iterator[None]:
+    """고아를 늦게 거두거나 아예 거두지 않는 PID 1(컨테이너) 흉내 (F-COE-91).
+
+    시험 프로세스를 child subreaper로 만들고 거두지 않는다. 그러면 콘솔 자식 그룹의 고아(손주,
+    죽은 앞 콘솔의 자식)가 좀비로 남는다. 리눅스가 아니면 아무것도 하지 않는다 (시험은 그대로 돈다).
+    끝날 때 남은 좀비 자식을 거두고 원래대로 돌린다.
+    """
+    libc = ctypes.CDLL(None, use_errno=True) if os.uname().sysname == "Linux" else None
+    if libc is not None:
+        assert libc.prctl(_PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) == 0
+    try:
+        yield
+    finally:
+        if libc is not None:
+            libc.prctl(_PR_SET_CHILD_SUBREAPER, 0, 0, 0, 0)
+            out = subprocess.run(
+                ["ps", "-A", "-o", "pid=,ppid=,stat="], capture_output=True, text=True
+            ).stdout
+            for pid, ppid, stat in (line.split()[:3] for line in out.splitlines()):
+                if int(ppid) == os.getpid() and stat.startswith("Z"):
+                    with contextlib.suppress(ChildProcessError):
+                        os.waitpid(int(pid), 0)
+
+
+def _exited_unreaped_group() -> subprocess.Popen[bytes]:
+    """끝났지만 아무도 거두지 않은 자식 그룹 (리더 하나, 좀비)."""
+    proc = subprocess.Popen(["true"], start_new_session=True)
+    assert _wait_for(lambda: _zombie(proc.pid))
+    return proc
+
+
+def test_group_alive_ignores_zombie_members() -> None:
+    """F-COE-91: 끝났지만 거두지 않은(좀비) 프로세스만 남은 그룹은 살아 있지 않다."""
+    proc = _exited_unreaped_group()
+    try:
+        assert not group_alive(proc.pid)
+    finally:
+        proc.wait()
+
+
+def test_group_alive_true_for_running_group() -> None:
+    proc = subprocess.Popen(["sleep", "30"], start_new_session=True)
+    try:
+        assert group_alive(proc.pid)
+    finally:
+        proc.kill()
+        proc.wait()
+    assert not group_alive(proc.pid)
+
+
+def test_group_alive_reads_state_past_parenthesised_command_name(tmp_path: Path) -> None:
+    """F-COE-91: 명령 이름에 `)`·공백이 있어도 상태·그룹을 제대로 읽는다 (`/proc/<pid>/stat`)."""
+    odd = tmp_path / "x) Z 1 (y"
+    odd.symlink_to(
+        subprocess.run(["which", "sleep"], capture_output=True, text=True).stdout.strip()
+    )
+    proc = subprocess.Popen([str(odd), "30"], start_new_session=True)
+    try:
+        assert _wait_for(lambda: group_alive(proc.pid), 5)
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_recover_does_not_adopt_zombie_group(settings: ConsoleSettings) -> None:
+    """F-COE-91: 다시 켠 콘솔은 좀비만 남은 그룹을 맡지 않는다 (interrupted, 잠금 풀림)."""
+    proc = _exited_unreaped_group()
+    try:
+        events = settings.work_dir / "jobs.jsonl"
+        created = {
+            "event": "created", "job_id": "j-z", "step": "prelabel", "title": "AI",
+            "session_id": "s1", "lock": "session:s1", "commands": [["prelabel"]],
+            "created_at": "2026-11-04T00:00:00+00:00", "status": "running", "exit_code": None,
+            "failed_command": None, "finished_at": None, "cleanup": [],
+        }  # fmt: skip
+        spawned = {"event": "spawned", "job_id": "j-z", "pid": proc.pid, "pgid": proc.pid}
+        events.write_text(json.dumps(created) + "\n" + json.dumps(spawned) + "\n", "utf-8")
+        runner = _runner(_fast(settings))
+        assert _wait_for(lambda: runner.get("j-z").status is JobStatus.INTERRUPTED)  # type: ignore[union-attr]
+        again = runner.submit("prelabel", "다시", [["sync", "run", "s1"]], lock="session:s1")
+        assert runner.wait(again.job_id, 30).status is JobStatus.SUCCEEDED  # type: ignore[union-attr]
+    finally:
+        proc.wait()
+
+
+@pytest.mark.usefixtures("non_reaping_init")
 def test_sigterm_console_keeps_lock_while_orphan_child_runs(
     settings: ConsoleSettings, tmp_path: Path
 ) -> None:
-    """F-COE-79: SIGTERM으로 죽은 콘솔의 자식이 살아 있으면 다시 켠 콘솔은 같은 잠금을 안 받는다."""
+    """F-COE-79: SIGTERM으로 죽은 콘솔의 자식이 살아 있으면 다시 켠 콘솔은 같은 잠금을 안 받는다.
+
+    F-COE-91: 고아를 거두지 않는 init 아래에서도, 그룹이 좀비만 남으면 끝난 것으로 본다.
+    """
     script = tmp_path / "console.py"
     script.write_text(_CONSOLE, "utf-8")
     pidfile = tmp_path / "grandchild.pid"
@@ -175,6 +274,7 @@ def test_sigterm_console_keeps_lock_while_orphan_child_runs(
         # 남은 자식 그룹이 끝나면 interrupted로 남고 잠금이 풀린다
         os.killpg(job.pgid, signal.SIGKILL)
         assert _wait_for(lambda: runner.get(job.job_id).status is JobStatus.INTERRUPTED)  # type: ignore[union-attr]
+        assert not _alive(grandchild)  # 고아를 물려받은 콘솔은 그 좀비를 거둔다
         again = runner.submit("a", "다시", [["sync", "run", "s1"]], lock="session:s1")
         assert runner.wait(again.job_id, 30).status is JobStatus.SUCCEEDED  # type: ignore[union-attr]
     finally:
@@ -184,18 +284,23 @@ def test_sigterm_console_keeps_lock_while_orphan_child_runs(
                 os.kill(int(pidfile.read_text().strip()), signal.SIGKILL)
 
 
+@pytest.mark.usefixtures("non_reaping_init")
 def test_shutdown_stops_child_group_and_records_interrupted(
     settings: ConsoleSettings, tmp_path: Path
 ) -> None:
-    """F-COE-79: 콘솔 종료(shutdown)는 자식 그룹(손주까지)을 멈추고 작업을 interrupted로 남긴다."""
+    """F-COE-79: 콘솔 종료(shutdown)는 자식 그룹(손주까지)을 멈추고 작업을 interrupted로 남긴다.
+
+    손주가 끝난 뒤 좀비로 남을 수 있어(고아를 거두지 않는 init) 그룹 생존으로 판정한다 (F-COE-91).
+    """
     pidfile = tmp_path / "grandchild.pid"
     settings.dlp_argv = ["/bin/sh", "-c", 'sleep 60 & echo $! > "$0"; wait', str(pidfile)]
     runner = _runner(_fast(settings))
     job = runner.submit("a", "길게", [["x"], ["y"]], lock="session:s1")
     assert _wait_for(lambda: pidfile.is_file() and pidfile.read_text().strip() != "")
-    grandchild = int(pidfile.read_text().strip())
+    pgid = runner.get(job.job_id).pgid  # type: ignore[union-attr]
+    assert pgid is not None and group_alive(pgid)
     runner.shutdown()
-    assert _wait_for(lambda: not _alive(grandchild))
+    assert _wait_for(lambda: not group_alive(pgid))
     done = runner.get(job.job_id)
     assert done is not None and done.status is JobStatus.INTERRUPTED
     events = (settings.work_dir / "jobs.jsonl").read_text("utf-8")
@@ -204,14 +309,19 @@ def test_shutdown_stops_child_group_and_records_interrupted(
     assert _runner(settings).get(job.job_id).status is JobStatus.INTERRUPTED  # type: ignore[union-attr]
 
 
+@pytest.mark.usefixtures("non_reaping_init")
 def test_app_lifespan_shutdown_stops_jobs(services: Any, tmp_path: Path) -> None:
-    """uvicorn 종료(SIGTERM)는 앱 lifespan 종료 → runner.shutdown으로 이어진다."""
+    """uvicorn 종료(SIGTERM)는 앱 lifespan 종료 → runner.shutdown으로 이어진다.
+
+    손주가 좀비로 남을 수 있어 그룹 생존으로 판정한다 (F-COE-91).
+    """
     _fast(services.settings)
     pidfile = tmp_path / "grandchild.pid"
     services.settings.dlp_argv = ["/bin/sh", "-c", 'sleep 60 & echo $! > "$0"; wait', str(pidfile)]
     with TestClient(create_app(services.settings, services)):
         job = services.runner.submit("a", "길게", [["x"]], lock="session:s1")
         assert _wait_for(lambda: pidfile.is_file() and pidfile.read_text().strip() != "")
-    grandchild = int(pidfile.read_text().strip())
-    assert _wait_for(lambda: not _alive(grandchild))
+        pgid = services.runner.get(job.job_id).pgid
+    assert pgid is not None
+    assert _wait_for(lambda: not group_alive(pgid))
     assert services.runner.get(job.job_id).status is JobStatus.INTERRUPTED

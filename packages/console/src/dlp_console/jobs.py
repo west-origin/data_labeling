@@ -8,7 +8,8 @@ ADR 0061 2절. `dlp_console.app`의 `Services`가 하나 만들고, 단계·올�
 - `JobRunner`: 작업 시작·조회·로그 꼬리·종료 처리.
 - `Job`: 작업 하나의 지금 상태 (사건을 접은 값). `JobStatus`: running·succeeded·failed·interrupted.
 - `JobConflictError`: 같은 잠금 키 작업이 이미 돌 때.
-- `group_alive`·`signal_group`: 자식 프로세스 그룹 확인·신호.
+- `group_alive`·`signal_group`: 자식 프로세스 그룹 확인·신호. `reap_group`: 그 그룹의 좀비 중
+  콘솔 자신의 자식 거두기.
 
 동작:
 
@@ -23,12 +24,17 @@ ADR 0061 2절. `dlp_console.app`의 `Services`가 하나 만들고, 단계·올�
   남으면 SIGKILL을 보내고 그 작업을 interrupted로 남긴다.
 - 끝 사건 없이 다음 시작을 맞은 작업: 마지막 자식 그룹이 아직 살아 있으면(SIGKILL 등으로 콘솔만
   죽은 경우) `adopted` 사건을 남기고 실행 중으로 둔다 (잠금 유지). 그 그룹이 끝나면 interrupted로
-  남긴다. 그룹이 없으면 바로 interrupted다 (자식 프로세스 결과는 모른다).
+  남긴다. 그룹이 없으면 바로 interrupted다 (자식 프로세스 결과는 모른다). 좀비(끝났지만 거두지
+  않은 프로세스)만 남은 그룹은 끝난 것으로 본다. 고아를 거두지 않는 init(컨테이너 PID 1) 아래에서
+  좀비가 영영 남아 잠금이 풀리지 않던 문제다 (F-COE-91).
+- 맡은 그룹이 끝나면 그 그룹 좀비 중 콘솔 자신의 자식을 거둔다. 콘솔이 고아를 물려받는 자리
+  (PID 1·subreaper)면 앞 콘솔의 자식이 콘솔 자식이 되고, 거두지 않으면 좀비가 쌓인다.
 - `cleanup`: 모든 명령이 성공했을 때만 지울 파일 (업로드 사본).
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shlex
@@ -41,7 +47,7 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from dlp_console.redact import Redactor
 from dlp_console.settings import ConsoleSettings
@@ -172,6 +178,7 @@ class JobRunner:
             if self._stopping.wait(poll):
                 return  # 콘솔이 꺼진다: 다음 시작이 다시 본다
         with self._lock:
+            reap_group(pgid, keep={proc.pid for proc in self._procs.values()})
             self._interrupt(job_id)
 
     # ── 조회 ──
@@ -374,10 +381,83 @@ class JobRunner:
                 self._procs.pop(job_id, None)
 
 
+class _Proc(NamedTuple):
+    """프로세스 표 한 줄."""
+
+    pid: int
+    ppid: int
+    pgid: int
+    zombie: bool  # 끝났지만 부모가 거두지 않음 (Z, 리눅스 X 포함)
+
+
+def _parse_proc_stat(text: str) -> _Proc | None:
+    """`/proc/<pid>/stat` 한 줄. 명령 이름(괄호 안)에 공백·괄호가 올 수 있어 마지막 `)`로 자른다."""
+    head, sep, rest = text.rpartition(")")
+    fields = rest.split()
+    if not sep or len(fields) < 3:
+        return None
+    try:
+        return _Proc(
+            int(head.split("(", 1)[0]), int(fields[1]), int(fields[2]), fields[0] in ("Z", "X")
+        )
+    except ValueError:
+        return None
+
+
+def _linux_procs() -> list[_Proc]:
+    procs: list[_Proc] = []
+    for entry in os.scandir("/proc"):
+        if not entry.name.isdigit():
+            continue
+        try:
+            text = Path(entry.path, "stat").read_text("utf-8", errors="replace")
+        except OSError:
+            continue  # 읽는 사이 끝난 프로세스
+        if (proc := _parse_proc_stat(text)) is not None:
+            procs.append(proc)
+    return procs
+
+
+def _ps_procs() -> list[_Proc] | None:
+    """macOS 등 `/proc`이 없는 곳: `ps`. 돌리지 못하면 None."""
+    try:
+        out = subprocess.run(
+            ["ps", "-A", "-o", "pid=,ppid=,pgid=,stat="],
+            capture_output=True, text=True, timeout=10, check=True,
+        ).stdout  # fmt: skip
+    except (OSError, subprocess.SubprocessError):
+        return None
+    procs: list[_Proc] = []
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 4 and all(x.isdigit() for x in parts[:3]):
+            procs.append(
+                _Proc(int(parts[0]), int(parts[1]), int(parts[2]), parts[3][0] in ("Z", "X"))
+            )
+    return procs
+
+
+def _procs() -> list[_Proc] | None:
+    """지금 프로세스 표 (리눅스 `/proc`, 없으면 `ps`). 둘 다 안 되면 None."""
+    if Path("/proc/self/stat").is_file():
+        return _linux_procs()
+    return _ps_procs()
+
+
 def group_alive(pgid: int) -> bool:
-    """그 프로세스 그룹에 프로세스가 남아 있는가 (신호 0). 다른 사용자의 그룹이면 있다고 본다."""
+    """그 프로세스 그룹에 좀비가 아닌 프로세스가 남아 있는가.
+
+    신호 0(`killpg`)은 좀비도 있다고 답해서, 고아를 거두지 않는 init 아래에서는 끝난 그룹이 영영
+    살아 있게 된다 (F-COE-91). 그래서 프로세스 표(`/proc`, macOS `ps`)에서 상태를 본다. 표를 못
+    읽을 때만 신호 0으로 되돌아간다 (이때는 좀비를 구분하지 못한다. 다른 사용자의 그룹이면 있다고
+    본다). 기록한 pgid를 다른 그룹이 다시 쓰면(재부팅, 번호 재사용) 살아 있다고 본다. 시작 시각은
+    비교하지 않는다. 그 그룹이 끝나면 풀린다.
+    """
     if pgid <= 1:
         return False
+    procs = _procs()
+    if procs is not None:
+        return any(p.pgid == pgid and not p.zombie for p in procs)
     try:
         os.killpg(pgid, 0)
     except ProcessLookupError:
@@ -385,6 +465,19 @@ def group_alive(pgid: int) -> bool:
     except PermissionError:
         return True
     return True
+
+
+def reap_group(pgid: int, keep: frozenset[int] | set[int] = frozenset()) -> None:
+    """그 그룹의 좀비 중 콘솔 자신의 자식을 거둔다 (`keep`의 pid는 남긴다).
+
+    콘솔이 PID 1이거나 subreaper면 맡은 그룹(앞 콘솔의 자식)이 콘솔 자식이 되고, 거두지 않으면
+    좀비가 쌓인다. `keep`은 `Popen.wait`가 거둘 자식이다 (먼저 거두면 종료 코드를 잃는다).
+    """
+    me = os.getpid()
+    for p in _procs() or ():
+        if p.pgid == pgid and p.zombie and p.ppid == me and p.pid not in keep:
+            with contextlib.suppress(ChildProcessError):
+                os.waitpid(p.pid, os.WNOHANG)
 
 
 def signal_group(pgid: int, sig: signal.Signals) -> None:

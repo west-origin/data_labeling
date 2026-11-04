@@ -1139,3 +1139,6 @@ issues:
   - {id: F-PAR-92, title: "3D 보호 판정이 (개체, 부위, 좌표계) 기준이라, 사람이 직접 검수한 박스 트랙 A의 3D가 번호만 같은 다른 트랙 B의 3D까지 막음 (F-PAR-87의 남은 부분)", severity: low, status: fixed, kind: code,
      files: [packages/prelabel/src/dlp_prelabel/runner.py], source: docs/handover/full-inspection-2026-11-04.md, see: [F-PAR-87],
      note: "보호 키에 출처 계보 뿌리(3D derived_from[0] → 2D parent_label_id)를 더한다. 보호 3D의 계보가 이번 입력에 없으면 예전처럼 같은 (개체, 부위, 좌표계)를 모두 막는다(보수적). 버전 문자열은 그대로라 이미 막힌 세션은 다음 입력 변경 때 반영. 회귀: packages/prelabel/tests/test_runner_lift_lineage.py (수정 전 실패 확인), test_runner_units.py::test_reviewed_box_trajectory_protects_its_source_lineage_not_its_entity_number"}
+  - {id: F-COE-91, title: "콘솔 재시작 뒤 앞 콘솔 자식 그룹이 좀비만 남아도 group_alive(killpg 0)가 살아 있다고 보아 작업이 running으로 남고 같은 세션 재시도가 JobConflictError", severity: medium, status: fixed, kind: code,
+     files: [packages/console/src/dlp_console/jobs.py], source: docs/handover/full-inspection-2026-11-04.md,
+     note: "2026-11-05 외부 검수에서 제보, 재현(상태 Z, group_alive True). 그룹에 좀비가 아닌 프로세스가 있을 때만 산 것으로 본다(/proc, 없으면 ps, 둘 다 없으면 killpg). 물려받은 좀비는 reap_group으로 거둔다. PID 재사용 대비는 문서만. 회귀: packages/console/tests/test_jobs.py::test_group_alive_ignores_zombie_members, ::test_recover_does_not_adopt_zombie_group (거두지 않는 init fixture, 수정 전 5 failed)"}
