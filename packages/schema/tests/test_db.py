@@ -234,13 +234,13 @@ def test_labels_are_immutable_except_review(pg: sa.Engine) -> None:
             conn.execute(sa.text(statement))
 
 
-# TRUNCATE를 막아야 하는 추가 전용 테이블 (0010~0012, 0017, 0021, 0022, 0023, 0024, 0025)
+# TRUNCATE를 막아야 하는 추가 전용 테이블 (0010~0012, 0017, 0021, 0022, 0023, 0024, 0025, 0027)
 APPEND_ONLY_TABLES = (
     "label_records", "raw_access_log", "review_work", "privacy_audits", "retention_decisions",
     "session_lifecycle_events", "privacy_detection_runs", "privacy_holds",
     "description_inheritance", "camera_calibrations", "worker_hand_sizes",
     "trajectory_inheritance", "worker_hand_size_sources", "worker_hand_size_invalidations",
-    "session_camera_assignments", "prelabel_stage_runs",
+    "session_camera_assignments", "prelabel_stage_runs", "scene3d_records",
 )  # fmt: skip
 
 

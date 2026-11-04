@@ -35,6 +35,8 @@
       추정 출처 세션·손 크기 무효 기록·세션 기기 연결, 수정·삭제·TRUNCATE 금지 (0024, ADR 0052).
     - prelabel_stage_runs: 결과 0개를 포함한 프리라벨 단계 실행 기록, 수정·삭제·TRUNCATE 금지
       (0025, ADR 0015 개정, F-PAR-75).
+    - scene3d_records: 청소 전후 3D 비교 산출물(수집·블러 승인·복원·비교) 기록, 수정·삭제·TRUNCATE
+      금지 (0027, ADR 0066).
 
 열 규약
     - 시각(`Ts`)은 모두 `TIMESTAMP WITH TIME ZONE`. 파이썬 쪽도 시간대 있는 datetime만 쓴다.
@@ -831,5 +833,28 @@ session_camera_assignments = sa.Table(
     ),
     sa.Column("camera_id", sa.String(128), nullable=False),
     sa.Column("reason", sa.String(500), nullable=False),
+    sa.Column("created_at", Ts, nullable=False),
+)
+
+# 청소 전후 3D 비교 산출물 기록 (`Scene3dRecord`, ADR 0066, `dlp scene3d …`).
+# 추가만 한다 (0027 트리거).
+# 본문은 버킷의 JSON이다. 사진만 찍은 현장도 있어 sessions 외래 키를 두지 않는다.
+scene3d_records = sa.Table(
+    "scene3d_records",
+    metadata,
+    sa.Column(
+        "record_id",
+        sa.BigInteger().with_variant(sa.Integer(), "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    ),
+    sa.Column("session_id", sa.String(128), nullable=False, index=True),
+    sa.Column("phase", sa.String(16), nullable=True),
+    sa.Column("kind", sa.String(32), nullable=False),
+    sa.Column("model_version", sa.Text(), nullable=True),
+    sa.Column("tag", sa.String(64), nullable=False),
+    sa.Column("bucket", sa.String(16), nullable=False),
+    sa.Column("storage_key", sa.Text(), nullable=False),
+    sa.Column("actor", sa.Text(), nullable=False),
     sa.Column("created_at", Ts, nullable=False),
 )

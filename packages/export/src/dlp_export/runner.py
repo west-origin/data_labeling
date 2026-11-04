@@ -2,9 +2,11 @@
 
 1. 데이터셋 버전에서 세션·라벨을 고른다 (검증 정책, 사용 중지 제외, 블러 라벨 제외). 영상 스트림마다
    지금 프라이버시 승인 상태와 기대 블러본 렌더 해시를 확인한다 (`dlp_export.source.load_source`).
-2. 형식별로 쓴다: coco / intervals / lerobot
+2. 형식별로 쓴다: coco / intervals / lerobot / gr00t
    (lerobot은 격리 환경에서 공식 API로 쓰고 공식 로더로 다시 읽는다). lerobot에 로봇 ID를 주면
    세션 월드 좌표 손을 그 로봇 관절 궤적으로 옮긴 에피소드를 쓴다 (`dlp_export.robot`, ADR 0047).
+   gr00t는 같은 에피소드를 GR00T LeRobot v2.1 배치로 쓰고 `dlp_export.gr00t_check`로 다시 확인한다
+   (ADR 0065).
 3. manifest.json (대상, 일시, 형식, 검증 정책, 세션, 라벨 수, 파일 목록과 sha256)을 넣고, 원본 버킷
    위치가 없는지 확인한다. 작업자·장소·세션·라벨 ID는 내보내기마다 다른 가명으로 바꾼다
    (export.yaml ids, ADR 0027). 내보내기 이력(exports.session_ids)에는 내부 세션 ID를 남기고,
@@ -51,6 +53,8 @@ from dlp_retarget.robot import LoadedRobot, load_robot
 from dlp_datasets.lineage import record_export
 from dlp_datasets.snapshot import SnapshotStore
 from dlp_export.coco import write_coco
+from dlp_export.gr00t import write_gr00t
+from dlp_export.gr00t_check import check_dataset
 from dlp_export.intervals import write_intervals
 from dlp_export.lerobot import Episode, Vocab, build_episode, run_script, write_package
 from dlp_export.policy import ExportPolicy, LeRobotPolicy
@@ -83,11 +87,11 @@ from dlp_schema.labels import CoordinateFrame, LabelRecord, Trajectory3DPayload,
 from dlp_schema.lineage import ExportRecord
 from dlp_schema.ontology import Ontology
 from dlp_schema.review import TrajectoryInheritance
-from dlp_schema.session import LifecycleState, Session, Stream
+from dlp_schema.session import LifecycleState, Stream
 from dlp_schema.trajectory_follow import CAMERA_POSE_REVIEW, is_camera_pose, review_basis
 
 # 지원 형식 (CLI 하위 명령 이름과 같다)
-Format = Literal["coco", "intervals", "lerobot"]
+Format = Literal["coco", "intervals", "lerobot", "gr00t"]
 # 결과 파일에서 내보내기마다 다른 가명으로 바꾸는 ID (ADR 0027)
 PSEUDONYMIZED = ("worker_id", "site_id", "session_id", "label_id")
 
@@ -191,6 +195,78 @@ class _RobotRun:
         return retarget_meta(self.robot, self.policy, self.solver, self.reports)
 
 
+@dataclass
+class BuiltEpisodes:
+    """세션마다 만든 사람 시연 에피소드 (`build_episodes`, LeRobot·GR00T 형식이 함께 쓴다)."""
+
+    items: list[tuple[ExportSession, Path, Episode]]  # (세션, 블러본 로컬 경로, 에피소드), 세션 순
+    sessions: list[dict[str, Any]]  # meta/dlp_episodes.json 행 (가명 세션 ID·분할·손 3D 채움)
+    warnings: list[str]  # 손 3D 채움 비율 경고 (manifest details.warnings)
+    size: tuple[int, int] = (0, 0)  # 처음 넣은 에피소드의 블러본 크기 (모든 에피소드를 이 크기로)
+
+
+def build_episodes(
+    src: ExportSource,
+    policy: ExportPolicy,
+    vocab: Vocab,
+    labeling: ObjectStore,
+    work: Path,
+    ids: Pseudonymizer,
+    run: _RobotRun | None = None,
+) -> BuiltEpisodes:
+    """세션마다 `video_stream` 블러본 하나로 에피소드 하나를 만든다.
+
+    그 스트림이 없는 세션은 건너뛴다.
+
+    블러본만 받는다 (`fetch_blurred`, 지금 승인된 렌더 해시 확인). 로봇 모드(`run`)는 정책이 버린
+    에피소드를 빼고, 그 에피소드는 크기·화면비 기준에 넣지 않는다. 궤적 구간 안 손 3D 채움 비율이
+    `min_hand_points_3d_coverage`보다 낮으면 경고를 남긴다.
+
+    Raises:
+        ExportError: 에피소드끼리 화면비가 `aspect_tolerance` 넘게 다를 때.
+    """
+    lp = policy.lerobot
+    out = BuiltEpisodes([], [], [])
+    size: tuple[int, int] | None = None
+    for es in src.sessions:
+        stream = next((s for s in es.session.streams if s.kind.value == lp.video_stream), None)
+        if stream is None:
+            continue
+        video = fetch_blurred(labeling, es, stream, work)
+        info = probe(video).video
+        assert info is not None
+        ep = build_episode(
+            es.session, stream, build_pts_index(video), (info.width, info.height), es.labels, vocab,
+            lp,
+        )  # fmt: skip
+        sid = ids.session(es.session.session_id)
+        if run is not None and not run.add(es, stream, ep, lp, len(out.sessions), sid):
+            continue  # 정책이 버리기로 한 에피소드 (보고에는 남고 크기·화면비 기준에 넣지 않는다)
+        size = _dataset_size(size, (info.width, info.height), es, lp)
+        out.items.append((es, video, ep))
+        coverage = ep.hand_points_3d_coverage
+        out.sessions.append(
+            {
+                "episode_index": len(out.sessions),
+                "session_id": sid,
+                "split": es.split.value,
+                "stream_id": stream.stream_id,
+                "start_ms": float(ep.times_ms[0]),
+                "frames": len(ep.times_ms),
+                "hand_points_3d_coverage": None if coverage is None else round(coverage, 4),
+            }
+        )
+        if coverage is not None and coverage < lp.min_hand_points_3d_coverage:
+            out.warnings.append(
+                f"{sid}: 궤적 구간 안 손 3D 점이 {coverage:.0%}만 채워짐 (기준 "
+                f"{lp.min_hand_points_3d_coverage:.0%}, 3D 표본 간격이 "
+                f"interp_max_gap_3d_ms {lp.interp_max_gap_3d_ms} ms보다 긴지 확인)"
+            )
+    if size is not None:
+        out.size = size
+    return out
+
+
 def _lerobot(
     root: Path,
     src: ExportSource,
@@ -219,49 +295,12 @@ def _lerobot(
     vocab = Vocab.from_ontology(ontology)
     run = _RobotRun.load(root, robot) if robot is not None else None
     check_hand_parts(ontology, policy.lerobot, run.policy if run is not None else None)
-    episodes: list[tuple[Session, Path, Episode]] = []
-    size: tuple[int, int] | None = None  # 처음 내보내는 에피소드 크기 (모든 에피소드를 이 크기로)
-    sessions: list[dict[str, Any]] = []
-    warnings: list[str] = []
-    for es in src.sessions:
-        stream = next(
-            (s for s in es.session.streams if s.kind.value == policy.lerobot.video_stream), None
-        )
-        if stream is None:
-            continue
-        video = fetch_blurred(labeling, es, stream, work)
-        info = probe(video).video
-        assert info is not None
-        ep = build_episode(
-            es.session, stream, build_pts_index(video), (info.width, info.height), es.labels, vocab,
-            policy.lerobot,
-        )  # fmt: skip
-        sid = ids.session(es.session.session_id)
-        if run is not None and not run.add(es, stream, ep, policy.lerobot, len(sessions), sid):
-            continue  # 정책이 버리기로 한 에피소드 (보고에는 남고 크기·화면비 기준에 넣지 않는다)
-        size = _dataset_size(size, (info.width, info.height), es, policy.lerobot)
-        episodes.append((es.session, video, ep))
-        coverage = ep.hand_points_3d_coverage
-        sessions.append(
-            {
-                "episode_index": len(sessions),
-                "session_id": sid,
-                "split": es.split.value,
-                "stream_id": stream.stream_id,
-                "start_ms": float(ep.times_ms[0]),
-                "frames": len(ep.times_ms),
-                "hand_points_3d_coverage": None if coverage is None else round(coverage, 4),
-            }
-        )
-        if coverage is not None and coverage < policy.lerobot.min_hand_points_3d_coverage:
-            warnings.append(
-                f"{sid}: 궤적 구간 안 손 3D 점이 {coverage:.0%}만 채워짐 (기준 "
-                f"{policy.lerobot.min_hand_points_3d_coverage:.0%}, 3D 표본 간격이 "
-                f"interp_max_gap_3d_ms {policy.lerobot.interp_max_gap_3d_ms} ms보다 긴지 확인)"
-            )
-    if not episodes or size is None:
+    built = build_episodes(src, policy, vocab, labeling, work, ids, run)
+    if not built.items:
         dropped = " (리타기팅 정책이 모든 에피소드를 버렸습니다)" if run and run.reports else ""
         raise ExportError(f"{policy.lerobot.video_stream} 스트림이 있는 세션이 없습니다{dropped}")
+    episodes = [(es.session, video, ep) for es, video, ep in built.items]
+    size, sessions, warnings = built.size, built.sessions, built.warnings
     written = {s.session_id for s, _, _ in episodes}
     override = None
     if run is not None:
@@ -297,14 +336,60 @@ def _lerobot(
     used_ids: set[str] = {lid for _, _, ep in episodes for lid in ep.used}
     if run is not None:
         used_ids |= run.used()
-    used = [
+    return _used_labels(src, written, used_ids), written, details
+
+
+def _used_labels(src: ExportSource, written: set[str], used_ids: set[str]) -> list[LabelRecord]:
+    """결과에 실제로 들어간 라벨 (manifest label_counts).
+
+    쓴 세션의 라벨 중 ID가 used_ids에 있는 것.
+    """
+    return [
         x
         for es in src.sessions
         if es.session.session_id in written
         for x in es.labels
         if x.label_id in used_ids
     ]
-    return used, written, details
+
+
+def _gr00t(
+    src: ExportSource,
+    policy: ExportPolicy,
+    ontology: Ontology,
+    labeling: ObjectStore,
+    out: Path,
+    work: Path,
+    ids: Pseudonymizer,
+) -> tuple[list[LabelRecord], set[str], dict[str, Any]]:
+    """GR00T LeRobot v2.1 (`out/gr00t`, ADR 0065). (내보낸 라벨, 내보낸 세션(내부 ID), 세부 정보).
+
+    에피소드는 lerobot 형식과 같다 (`build_episodes`). 쓴 뒤 `check_dataset`으로 NVIDIA 요구를 다시
+    확인하고,
+    문제가 있으면 올리지 않고 실패한다.
+
+    Raises:
+        ExportError: 손 3D 점이 온톨로지에 없을 때, 쓸 세션이 없을 때, 화면비가 다를 때, 확인에
+        실패했을 때,
+            ffmpeg가 실패했을 때.
+    """
+    vocab = Vocab.from_ontology(ontology)
+    check_hand_parts(ontology, policy.lerobot, None)
+    built = build_episodes(src, policy, vocab, labeling, work, ids)
+    if not built.items:
+        raise ExportError(f"{policy.lerobot.video_stream} 스트림이 있는 세션이 없습니다")
+    dest = out / "gr00t"
+    r = write_gr00t(built.items, built.sessions, policy, vocab, built.size, dest)
+    problems = check_dataset(dest, policy.gr00t.video.ffprobe)
+    if problems:
+        raise ExportError("GR00T 형식 확인 실패: " + "; ".join(problems[:10]))
+    written = {es.session.session_id for es, _, _ in built.items}
+    details: dict[str, Any] = {
+        "episodes": r.episodes, "frames": r.frames, "tasks": r.tasks, "gr00t_check": "ok",
+    }  # fmt: skip
+    if built.warnings:
+        details["warnings"] = built.warnings
+    return _used_labels(src, written, r.used), written, details
 
 
 def check_hand_parts(
@@ -441,7 +526,7 @@ def run_export(  # noqa: C901
             승인·블러 해시 재확인과 manifest 게시 → 생애주기 전이 순으로 연결을 연다.
         root: 저장소 루트 (격리 환경 스크립트 위치).
         version_id: 데이터셋 버전 ID.
-        fmt: "coco" | "intervals" | "lerobot".
+        fmt: "coco" | "intervals" | "lerobot" | "gr00t".
         target: 받는 쪽 이름 (예: 구매자). 이력과 내보내기 ID에 들어간다.
         snapshots: 데이터셋 스냅샷 저장소.
         labeling: 라벨링 버킷 (블러본 읽기 전용).
@@ -507,6 +592,8 @@ def run_export(  # noqa: C901
             )
             details = {"images": r.images, "annotations": r.annotations, "dropped": r.dropped}
             written, used = r.sessions, list(r.labels.values())
+        elif fmt == "gr00t":
+            used, written, details = _gr00t(src, policy, ontology, labeling, out, work, ids)
         else:
             used, written, details = _lerobot(
                 root, src, policy, ontology, labeling, out, work, ids, robot

@@ -20,6 +20,7 @@ from dlp_datasets.build import build_dataset_version
 from dlp_datasets.lineage import session_lineage, withdraw_session
 from dlp_datasets.policy import load_policy as load_dataset_policy
 from dlp_datasets.snapshot import LocalSnapshotStore
+from dlp_export.gr00t_check import check_dataset
 from dlp_export.policy import ExportPolicy
 from dlp_export.pseudonym import Pseudonymizer
 from dlp_export.runner import id_map_key, run_export
@@ -243,6 +244,58 @@ def test_lerobot_export_end_to_end(
     ]  # fmt: skip
     assert all(e["session_id"].startswith("session-") for e in episodes)
     assert list(out.rglob("*.mp4")) and list(out.rglob("data/**/*.parquet"))
+
+
+def test_gr00t_export_end_to_end(
+    engine: sa.Engine, policy: ExportPolicy, ontology: Ontology, tmp_path: Path
+) -> None:
+    """GR00T 내보내기 종단 (ADR 0065): 데이터셋 버전 → `run_export(fmt="gr00t")` → 올린 결과.
+
+    정답: 내보낸 분할의 세션마다 에피소드 하나, 올린 gr00t/ 디렉터리가 `check_dataset`을 통과한다.
+    meta/dlp_episodes.json 세션 ID는 가명이고 info.json splits가 에피소드 분할과 맞는다. manifest
+    형식은 gr00t이고 블러 라벨·검수자 ID·원본 버킷 이름이 결과 어디에도 없다.
+    """
+    snapshots = LocalSnapshotStore(tmp_path / "snap")
+    labeling = LocalStore(tmp_path / "store", "dlp-labeling")
+    datasets = LocalStore(tmp_path / "store", "dlp-datasets")
+    times = vfr_times(np.random.default_rng(5), 800)
+    with engine.begin() as conn:
+        register_ontology(conn, ontology)
+        for i, sid in enumerate(("a", "b")):
+            insert_session(
+                conn,
+                make_session(sid, worker_id=f"w{i}", site_id=f"x{i}").model_copy(
+                    update={"privacy_state": PrivacyState.APPROVED}
+                ),
+            )
+            insert_labels(conn, scenario_labels(sid, times))
+            write_blurred(labeling, sid, times, tmp_path)
+        build_dataset_version(
+            conn, snapshots, load_dataset_policy(ROOT), version_id="dv1",
+            ontology_version="1.0.0", golden_set_version=None, now=FIXED_TIME,
+        )  # fmt: skip
+    r = run_export(
+        engine, root=ROOT, version_id="dv1", fmt="gr00t", target="internal",
+        snapshots=snapshots, labeling=labeling, datasets=datasets, raw_bucket="dlp-raw",
+        policy=policy, ontology=ontology, include_unreviewed=False, splits=None,
+        now=FIXED_TIME,
+    )  # fmt: skip
+    root = tmp_path / "store" / "dlp-datasets" / "exports" / r.record.export_id
+    out = root / "gr00t"
+    assert r.details["gr00t_check"] == "ok"
+    assert check_dataset(out, policy.gr00t.video.ffprobe) == []
+    episodes = json.loads((out / "meta" / "dlp_episodes.json").read_text())
+    assert r.details["episodes"] == len(episodes) == len(r.record.session_ids) >= 1
+    assert {e["session_id"] for e in episodes} == set(r.session_pseudonyms.values())
+    info = json.loads((out / "meta" / "info.json").read_text())
+    for split, span in info["splits"].items():
+        a, b = (int(x) for x in span.split(":"))
+        assert {e["split"] for e in episodes[a:b]} == {split}
+    manifest = json.loads((root / "manifest.json").read_text())
+    assert manifest["format"] == "gr00t"
+    assert not any(k.startswith("blur_track") for k in r.label_counts)
+    text = "".join(p.read_text("utf-8") for p in root.rglob("*") if p.suffix in (".json", ".jsonl"))
+    assert "reviewer-7" not in text and "dlp-raw" not in text
 
 
 @pytest.mark.isolated_env

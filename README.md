@@ -141,7 +141,7 @@ flowchart LR
   C --> D["데이터셋 버전<br/>lakeFS 스냅샷<br/>작업자·장소 단위 분할"]
   D --> T["재학습"]
   T -.->|"게이트 통과 모델"| B
-  D --> E["내보내기<br/>dlp export coco / intervals / lerobot"]
+  D --> E["내보내기<br/>dlp export coco / intervals / lerobot / gr00t"]
 ```
 
 `dlp dataset build`는 `dlp_datasets.splitter`로 세션을 golden·train·val·holdout으로 나눈다. 같은 작업자나 장소가
@@ -274,7 +274,8 @@ uv run dlp export coco <데이터셋 버전>
 | `evaluation` (`dlp_eval`) | 지표, 골든셋 평가, 배포 게이트 | `dlp eval golden` | `evaluation.yaml` |
 | `active` (`dlp_active`) | 액티브 러닝 점수, FiftyOne 연동 | `dlp active rank` | `active.yaml` |
 | `retarget` (`dlp_retarget`) | 고객 로봇 리타기팅 | `dlp robot check`, `dlp export lerobot --robot` | `retarget.yaml` |
-| `export` (`dlp_export`) | COCO·구간 JSON·LeRobot 내보내기 | `dlp export coco`, `intervals`, `lerobot` | `export.yaml` |
+| `export` (`dlp_export`) | COCO·구간 JSON·LeRobot·GR00T(NVIDIA Isaac GR00T N1.7, ADR 0065) 내보내기 | `dlp export coco`, `intervals`, `lerobot`, `gr00t`, `gr00t-check` | `export.yaml` |
+| `scene3d` (`dlp_scene3d`) | 청소 전후 여러 각도 사진의 3D 복원(SfM·3D 가우시안 스플랫)과 물체 이동 비교 (ADR 0066, 실제 GPU 복원은 미검증) | `dlp scene3d ingest`, `reconstruct`, `compare`, `report` | `scene3d.yaml` |
 | `ops` (`dlp_ops`) | 주간 지표, 원본 접근 감사, 보관 만료 | `dlp ops weekly`, `audit-report`, `retention` | `ops.yaml` |
 | `console` (`dlp_console`) | 브라우저 운영 콘솔. `dlp` 명령을 작업으로 돌리고 DB는 읽기만 한다 | `dlp console serve` | `config/console.yaml` |
 

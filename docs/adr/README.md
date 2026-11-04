@@ -71,3 +71,5 @@ ADR은 결정 당시의 이유와 이관 조건을 기록한다. 후속 ADR이 �
 | 0062 | [ADR 0062: 재학습 루프의 실제 학습기 (YOLOX 물건 탐지)와 AI 검수 판정 표시 보정 (제안)](0062-real-retraining-loop.md) |
 | 0063 | [ADR 0063: 의사결정 모델 판정단과 검수 판정 모델 학습 (제안)](0063-decision-model-judge-panel.md) |
 | 0064 | [ADR 0064: 검수 판정 모델 학습 과제 (`aireview`) (제안)](0064-review-judge-training-task.md) |
+| 0065 | [ADR 0065: NVIDIA Isaac GR00T N1.7 미세조정 형식 내보내기 (`dlp export gr00t`)](0065-gr00t-export.md) |
+| 0066 | [ADR 0066: 청소 전후 다각도 사진의 3D 복원과 물체 이동 비교](0066-scene3d-before-after.md) |

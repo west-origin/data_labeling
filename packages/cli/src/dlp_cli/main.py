@@ -52,6 +52,7 @@ from dlp_cli import (
     relations_cmds,
     review_cmds,
     robot_cmds,
+    scene3d_cmds,
     schema_cmds,
     sync_cmds,
     train_cmds,
@@ -149,7 +150,9 @@ def build_parser() -> argparse.ArgumentParser:
     eval_cmds.add_commands(sub)  # dlp eval golden — 골든셋 평가 (WP11)
     train_cmds.add_commands(sub)  # dlp train run|models|approve — 재학습 (WP13)
     active_cmds.add_commands(sub)  # dlp active rank|fiftyone — 액티브 러닝 (WP14)
-    export_cmds.add_commands(sub)  # dlp export coco|intervals|lerobot — 내보내기 (WP15)
+    export_cmds.add_commands(sub)  # dlp export coco|intervals|lerobot|gr00t|gr00t-check (WP15)
+    # 청소 전후 사진 3D 복원·물체 이동 비교: dlp scene3d … (ADR 0066)
+    scene3d_cmds.add_commands(sub)
     robot_cmds.add_commands(sub)  # dlp robot check — 리타기팅 로봇 등록 확인 (ADR 0047)
     ops_cmds.add_commands(sub)  # dlp ops … — 운영 지표·감사·보관 (WP16)
     console_cmds.add_commands(sub)  # dlp console serve — 브라우저 운영 콘솔 (ADR 0061)

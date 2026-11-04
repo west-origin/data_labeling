@@ -1,0 +1,87 @@
+{
+  "additionalProperties": false,
+  "description": "scene3d 산출물 하나의 기록 (추가 전용 표 `scene3d_records`, Alembic 0027).\n\n본문은 bucket·storage_key의 JSON이고 이 기록은 무엇을 어떤 버전으로 만들었는지만 남긴다.\nphase는 단계별 산출물에만 있다 (alignment·change_report는 None). bucket은 `raw`(원본 버킷:\n수집·블러 탐지·승인) 또는 `labeling`. 원본 버킷 키는 원본 접근 권한자만 보는 이 표에만 둔다.\nactor는 사람 승인(privacy_approval)의 검수자, 그 밖은 실행자.",
+  "properties": {
+    "actor": {
+      "title": "Actor",
+      "type": "string"
+    },
+    "bucket": {
+      "enum": [
+        "raw",
+        "labeling"
+      ],
+      "title": "Bucket",
+      "type": "string"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "kind": {
+      "enum": [
+        "capture",
+        "privacy_detection",
+        "privacy_approval",
+        "render",
+        "reconstruction",
+        "alignment",
+        "change_report"
+      ],
+      "title": "Kind",
+      "type": "string"
+    },
+    "model_version": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Model Version"
+    },
+    "phase": {
+      "anyOf": [
+        {
+          "enum": [
+            "before",
+            "after"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Phase"
+    },
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    },
+    "storage_key": {
+      "title": "Storage Key",
+      "type": "string"
+    },
+    "tag": {
+      "title": "Tag",
+      "type": "string"
+    }
+  },
+  "required": [
+    "session_id",
+    "phase",
+    "kind",
+    "model_version",
+    "tag",
+    "bucket",
+    "storage_key",
+    "actor",
+    "created_at"
+  ],
+  "title": "Scene3dRecord",
+  "type": "object"
+}

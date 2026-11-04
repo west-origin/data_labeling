@@ -11,6 +11,7 @@ dependencies = [
     "dlp-schema",
     "numpy>=2.0",
     "opencv-contrib-python-headless>=4.10",
+    "pyarrow>=18.0",
     "pyyaml>=6.0",
 ]
 

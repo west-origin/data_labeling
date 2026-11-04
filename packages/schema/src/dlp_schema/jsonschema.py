@@ -47,6 +47,7 @@ from dlp_schema.review import (
     ReviewTask,
     TrajectoryInheritance,
 )
+from dlp_schema.scene3d import ChangeReport, PhotoCapture, Reconstruction, Scene3dRecord
 from dlp_schema.session import (
     LifecycleEvent,
     PrelabelStageRun,
@@ -96,6 +97,11 @@ CONTRACTS: dict[str, type[BaseModel]] = {
     "ai_review_run": AiReviewRun,
     "ai_exposure": AiExposure,
     "ai_outcome": AiOutcome,
+    # 청소 전후 3D 비교 (ADR 0066). 기록 표는 추가 전용, 본문은 버킷의 JSON
+    "scene3d_record": Scene3dRecord,
+    "scene3d_capture": PhotoCapture,
+    "scene3d_reconstruction": Reconstruction,
+    "scene3d_change_report": ChangeReport,
 }
 
 

@@ -227,3 +227,28 @@ external:
     license: Qwen Research License (비상업)
     training_data: ["공개되지 않음 (모델 카드에 학습 데이터 출처 명시 없음)"]
     commercial: forbidden
+  # ── 청소 전후 사진 3D 복원 (ADR 0066, config/policies/scene3d.yaml reconstruction.sfm_tool·splat_tool).
+  # 학습 가중치가 없는 도구(장면마다 최적화)라 직접 학습 데이터가 없다. 격리 환경 scripts/gsplat-env에서 돈다.
+  # 라이선스 확인 (2026-11-04): colmap/colmap README "The COLMAP library is licensed under the new BSD license"
+  # (단 "thirdparty dependencies ... separately licensed. Building COLMAP with these dependencies may affect
+  # the resulting COLMAP license"), PyPI pycolmap 4.2.1 license BSD-3-Clause. GPU SIFT(SiftGPU)를 넣은 빌드는
+  # 그 라이선스를 따로 확인해야 해 review로 둔다 (CPU SIFT·VLFeat 경로 확인 뒤 allowed로 올린다).
+  colmap:
+    served_by: 격리 환경 scripts/gsplat-env (pycolmap), config/policies/scene3d.yaml reconstruction.sfm_tool
+    license: BSD-3-Clause (COLMAP, 서드파티 의존성은 별도)
+    training_data: []
+    commercial: review
+  # nerfstudio-project/gsplat main/LICENSE: Apache License 2.0 (2026-11-04 확인, PyPI gsplat 1.5.3).
+  gsplat:
+    served_by: 격리 환경 scripts/gsplat-env (GPU), config/policies/scene3d.yaml reconstruction.splat_tool
+    license: Apache-2.0
+    training_data: []
+    commercial: allowed
+  # 쓰지 않는다: graphdeco-inria/gaussian-splatting LICENSE.md "Gaussian-Splatting License" — "may be used
+  # non-commercially, i.e., for research" / "THE USER CANNOT USE, EXPLOIT OR DISTRIBUTE THE SOFTWARE FOR
+  # COMMERCIAL PURPOSES" (2026-11-04 확인). 정책이 고르면 make licenses가 실패한다.
+  graphdeco-inria/gaussian-splatting:
+    served_by: 쓰지 않음 (비상업 라이선스)
+    license: Gaussian-Splatting License (Inria·MPII, 비상업)
+    training_data: []
+    commercial: forbidden

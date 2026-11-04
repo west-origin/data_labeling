@@ -6,7 +6,7 @@
 - `excluded_kinds`에 `blur_track`이 반드시 있어야 한다 (블러 라벨은 어떤 형식에도 내보내지 않는다).
 
 주요 클래스: `ExportPolicy`(최상위), `CocoPolicy`, `IntervalsPolicy`, `LeRobotPolicy`,
-`LeRobotEnv`(격리 환경), `IdsPolicy`(가명).
+`LeRobotEnv`(격리 환경), `Gr00tPolicy`·`Gr00tVideo`(GR00T 형식, ADR 0065), `IdsPolicy`(가명).
 """
 
 from __future__ import annotations
@@ -86,6 +86,32 @@ class LeRobotPolicy(Contract):
         return v
 
 
+class Gr00tVideo(Contract):
+    """export.yaml `gr00t.video`: 블러본 구간을 고정 fps H.264로 다시 인코딩하는 값 (ADR 0065)."""
+
+    ffmpeg: str = Field(min_length=1)  # ffmpeg 실행 파일
+    ffprobe: str = Field(min_length=1)  # 확인(`dlp export gr00t-check`)에 쓰는 ffprobe 실행 파일
+    encoder: Literal["libx264"]  # GR00T 디코더(torchcodec)가 확실히 읽는 H.264만 받는다
+    pix_fmt: Literal["yuv420p"]
+    crf: int = Field(ge=0, le=51)
+    preset: str = Field(min_length=1)
+    gop: int = Field(ge=1)  # 키프레임 간격 (프레임)
+
+
+class Gr00tPolicy(Contract):
+    """export.yaml `gr00t` 절 (GR00T LeRobot v2.1 배치, ADR 0065).
+
+    에피소드 구성(fps·스트림·크기·보간·손 3D 점·팔 3D 점·robot_type)은 `LeRobotPolicy`를 그대로
+    쓴다.
+    """
+
+    chunks_size: int = Field(ge=1)  # info.json chunks_size
+    video_name: str = Field(min_length=1)  # modality.json video 키
+    language: Literal["ko", "en"]  # 프레임 언어 주석 언어 (설명 라벨·온톨로지 `TermName` 이름)
+    idle_action_text: str = Field(min_length=1)  # 덮는 행동이 없는 프레임의 행동 주석 문장
+    video: Gr00tVideo
+
+
 class IdsPolicy(Contract):
     """export.yaml `ids` 절: 작업자·장소·세션·라벨 ID 가명 (ADR 0021·0027)."""
 
@@ -110,6 +136,7 @@ class ExportPolicy(Contract):
     coco: CocoPolicy
     intervals: IntervalsPolicy
     lerobot: LeRobotPolicy
+    gr00t: Gr00tPolicy
     ids: IdsPolicy
 
     @field_validator("label_states")

@@ -1,0 +1,29 @@
+# 청소 전후 사진 3D 복원 격리 환경 (dlp scene3d reconstruct, dlp_scene3d.backends, ADR 0066).
+# 작업공간 멤버가 아니다: PyTorch·CUDA·pycolmap을 본 가상 환경에 넣지 않는다.
+# TODO(real-model): GPU 서버에서 이 디렉터리의 `uv lock`을 만들고 실행을 --locked로 바꾼다. 개발 컨테이너는
+# 디스크가 부족해(약 3.5 GB) 잠금·설치·실측을 하지 않았다 (README.md).
+#
+# 라이선스 (config/models.yaml external): pycolmap BSD-3-Clause(review: GPU SIFT 빌드 확인 전), gsplat
+# Apache-2.0(allowed). Inria 원본 gaussian-splatting은 비상업 라이선스라 의존하지 않는다 (forbidden).
+[project]
+name = "dlp-gsplat-env"
+version = "0"
+requires-python = "==3.12.*"
+dependencies = [
+    "numpy>=2.0,<2.3",
+    "pillow>=10.0",
+    "pycolmap==4.2.1",
+    "gsplat==1.5.3",
+    "torch==2.7.1",
+]
+
+[tool.uv]
+package = false
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }

@@ -53,6 +53,7 @@ from dlp_models.datasets import (
 from dlp_models.registry import fetch, load_registry
 from dlp_prelabel.policy import load_policy as load_prelabel_policy
 from dlp_privacy.policy import load_policy as load_privacy_policy
+from dlp_scene3d.policy import load_policy as load_scene3d_policy
 from dlp_schema import repo_root
 from dlp_train.policy import load_policy as load_training_policy
 
@@ -82,6 +83,8 @@ def used_models(root: Path) -> dict[str, str]:
     - `translate.backend.model` — 설명 영어 번역 모델 (사내 서버, ADR 0043).
     - `training.yolox.base_model`·`training.tasks.<과제>.params.base_model` — 재학습 yolox 학습기의
       출발 가중치 (ADR 0062). 학습 모델이 이 분류를 물려받는다.
+    - `scene3d.reconstruction.sfm_tool|splat_tool`·`scene3d.objects.model|tokenizer` — 청소 전후 3D
+      비교의 SfM·스플랫 도구와 물체 탐지 가중치 (ADR 0066).
 
     인자:
         root: 저장소 루트 (`config/policies/*.yaml`을 읽는다).
@@ -121,6 +124,12 @@ def used_models(root: Path) -> dict[str, str]:
     for task, spec in training.tasks.items():
         if isinstance(base := spec.params.get("base_model"), str):
             used[f"training.tasks.{task}.params.base_model"] = base
+    scene = load_scene3d_policy(root)
+    used["scene3d.reconstruction.sfm_tool"] = scene.reconstruction.sfm_tool
+    used["scene3d.reconstruction.splat_tool"] = scene.reconstruction.splat_tool
+    if scene.objects.detector == "owlv2":
+        used["scene3d.objects.model"] = scene.objects.model
+        used["scene3d.objects.tokenizer"] = scene.objects.tokenizer
     return used
 
 

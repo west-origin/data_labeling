@@ -1,0 +1,443 @@
+{
+  "$defs": {
+    "Alignment": {
+      "additionalProperties": false,
+      "description": "after 장면 좌표 → before 장면 좌표 닮음 변환 `x_b = scale · R · x_a + t`.\n\nrms_m·inlier_threshold_m는 before 좌표 단위(metric이면 미터). accepted가 False면 비교하지\n않는다 (reason에 이유).",
+      "properties": {
+        "accepted": {
+          "title": "Accepted",
+          "type": "boolean"
+        },
+        "inliers": {
+          "minimum": 0,
+          "title": "Inliers",
+          "type": "integer"
+        },
+        "matches": {
+          "minimum": 0,
+          "title": "Matches",
+          "type": "integer"
+        },
+        "model_version": {
+          "title": "Model Version",
+          "type": "string"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        },
+        "rms_m": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Rms M"
+        },
+        "rotation": {
+          "maxItems": 9,
+          "minItems": 9,
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ],
+          "title": "Rotation",
+          "type": "array"
+        },
+        "scale": {
+          "exclusiveMinimum": 0,
+          "title": "Scale",
+          "type": "number"
+        },
+        "translation": {
+          "maxItems": 3,
+          "minItems": 3,
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ],
+          "title": "Translation",
+          "type": "array"
+        }
+      },
+      "required": [
+        "model_version",
+        "scale",
+        "rotation",
+        "translation",
+        "matches",
+        "inliers",
+        "rms_m",
+        "accepted"
+      ],
+      "title": "Alignment",
+      "type": "object"
+    },
+    "ObjectChange": {
+      "additionalProperties": false,
+      "description": "물체 하나의 전후 변화 (모델 출처, 미검수).\n\n위치·이동 벡터는 before 장면 좌표(metric이면 미터). moved·unchanged는 before·after 둘 다,\nremoved는 before만, added는 after만 있다. displacement = after(before 좌표로 옮긴 값) - before.",
+      "properties": {
+        "after_instance_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "After Instance Id"
+        },
+        "after_position": {
+          "anyOf": [
+            {
+              "maxItems": 3,
+              "minItems": 3,
+              "prefixItems": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                }
+              ],
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "After Position"
+        },
+        "before_instance_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Before Instance Id"
+        },
+        "before_position": {
+          "anyOf": [
+            {
+              "maxItems": 3,
+              "minItems": 3,
+              "prefixItems": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                }
+              ],
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Before Position"
+        },
+        "change_id": {
+          "title": "Change Id",
+          "type": "string"
+        },
+        "confidence": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Confidence",
+          "type": "number"
+        },
+        "displacement": {
+          "anyOf": [
+            {
+              "maxItems": 3,
+              "minItems": 3,
+              "prefixItems": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                }
+              ],
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Displacement"
+        },
+        "distance_m": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Distance M"
+        },
+        "kind": {
+          "enum": [
+            "moved",
+            "unchanged",
+            "removed",
+            "added"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "label": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
+          "title": "Label",
+          "type": "string"
+        },
+        "match_cost": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Match Cost"
+        },
+        "review_state": {
+          "const": "unreviewed",
+          "default": "unreviewed",
+          "title": "Review State",
+          "type": "string"
+        },
+        "source": {
+          "const": "model",
+          "default": "model",
+          "title": "Source",
+          "type": "string"
+        }
+      },
+      "required": [
+        "change_id",
+        "kind",
+        "label",
+        "before_instance_id",
+        "after_instance_id",
+        "before_position",
+        "after_position",
+        "displacement",
+        "confidence"
+      ],
+      "title": "ObjectChange",
+      "type": "object"
+    },
+    "ObjectInstance": {
+      "additionalProperties": false,
+      "description": "여러 사진의 탐지로 삼각측량한 물체 하나 (그 단계 장면 좌표).\n\nsize: 상자 대각선 크기 추정 (장면 단위). appearance: 색 히스토그램 (합 1).\nviews: 받쳐 준 사진 수. reproj_px: 받친 사진들의 재투영 오차 RMS.",
+      "properties": {
+        "appearance": {
+          "items": {
+            "type": "number"
+          },
+          "title": "Appearance",
+          "type": "array"
+        },
+        "confidence": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Confidence",
+          "type": "number"
+        },
+        "instance_id": {
+          "title": "Instance Id",
+          "type": "string"
+        },
+        "label": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
+          "title": "Label",
+          "type": "string"
+        },
+        "phase": {
+          "enum": [
+            "before",
+            "after"
+          ],
+          "title": "Phase",
+          "type": "string"
+        },
+        "photo_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Photo Ids",
+          "type": "array"
+        },
+        "position": {
+          "maxItems": 3,
+          "minItems": 3,
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ],
+          "title": "Position",
+          "type": "array"
+        },
+        "reproj_px": {
+          "minimum": 0,
+          "title": "Reproj Px",
+          "type": "number"
+        },
+        "size": {
+          "exclusiveMinimum": 0,
+          "title": "Size",
+          "type": "number"
+        },
+        "views": {
+          "minimum": 2,
+          "title": "Views",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "instance_id",
+        "phase",
+        "label",
+        "position",
+        "size",
+        "appearance",
+        "views",
+        "photo_ids",
+        "reproj_px",
+        "confidence"
+      ],
+      "title": "ObjectInstance",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "세션 하나의 전후 비교 결과 (라벨링 버킷 `changes/<tag>.json`, 덮어쓰지 않는다).",
+  "properties": {
+    "after_reconstruction": {
+      "title": "After Reconstruction",
+      "type": "string"
+    },
+    "alignment": {
+      "$ref": "#/$defs/Alignment"
+    },
+    "before_reconstruction": {
+      "title": "Before Reconstruction",
+      "type": "string"
+    },
+    "changes": {
+      "items": {
+        "$ref": "#/$defs/ObjectChange"
+      },
+      "title": "Changes",
+      "type": "array"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "instances": {
+      "items": {
+        "$ref": "#/$defs/ObjectInstance"
+      },
+      "title": "Instances",
+      "type": "array"
+    },
+    "metric": {
+      "title": "Metric",
+      "type": "boolean"
+    },
+    "model_version": {
+      "title": "Model Version",
+      "type": "string"
+    },
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "session_id",
+    "model_version",
+    "before_reconstruction",
+    "after_reconstruction",
+    "alignment",
+    "metric",
+    "instances",
+    "changes",
+    "created_at"
+  ],
+  "title": "ChangeReport",
+  "type": "object"
+}

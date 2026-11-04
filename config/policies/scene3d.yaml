@@ -1,0 +1,70 @@
+# 청소 전후 다각도 사진의 3D 복원과 물체 이동 비교 정책 (dlp scene3d, ADR 0066).
+# 읽는 곳: dlp_scene3d.policy.load_policy. 각 절의 해시가 그 단계 결과의 모델 버전에 들어간다
+# (절을 바꾸면 그 단계부터 다시 계산한다. 이전 결과는 지우지 않고 새 버전 키로 쓴다).
+version: 1
+
+# 사진 수집 (dlp scene3d ingest). 원본은 원본 버킷에 그대로(불변) 두고 EXIF 방향은 읽을 때 적용한다.
+capture:
+  extensions: [".jpg", ".jpeg", ".png"]
+  min_photos: 8                  # 한 단계(청소 전·후) 사진이 이보다 적으면 수집을 거부한다 (복원 불가)
+  max_photos: 400
+
+# 복원 (dlp scene3d reconstruct). 입력은 승인된 블러 사진뿐이다.
+reconstruction:
+  # 카메라 자세: pycolmap(실제, 격리 환경) | unavailable. 정답을 아는 stub(oracle)은 정책이 아니라
+  # 테스트·--oracle로만 끼운다.
+  # TODO(real-model): pycolmap 연동은 격리 환경(scripts/gsplat-env)에서 실측 전이다.
+  sfm: pycolmap
+  # 스플랫: gsplat(실제, GPU 격리 환경) | init_points(SfM 점으로 초기화한 가우시안만, CPU stub).
+  # TODO(real-model): gsplat 학습은 GPU 서버에서 실측 전이다.
+  splat: gsplat
+  sfm_tool: colmap               # config/models.yaml external 이름 (라이선스 검사 대상)
+  splat_tool: gsplat
+  min_registered_ratio: 0.7      # 자세를 찾은 사진 비율이 이보다 낮으면 복원을 실패로 본다
+  splat_iterations: 7000
+  init_scale: 0.01               # init_points 가우시안 초기 크기 (장면 단위)
+
+# after → before 정렬. 고정 구조(벽·가구)의 3D 점 대응으로 닮음 변환(척도 포함)을 RANSAC으로 찾는다.
+alignment:
+  descriptor_ratio: 0.8          # 기술자 최근접 비율 검사 (낮을수록 엄격)
+  inlier_threshold_m: 0.03       # 변환 뒤 점 거리가 이 이내면 정렬 내점 (before 단위)
+  ransac_iterations: 500
+  seed: 0
+  min_inliers: 12                # 아래 셋 중 하나라도 못 미치면 정렬을 거부하고 비교하지 않는다
+  min_inlier_ratio: 0.3
+  max_rms_m: 0.02
+
+# 사진별 물체 탐지와 다시점 삼각측량.
+objects:
+  # owlv2(실제, CPU ONNX) | unavailable. stub(oracle)은 테스트·--oracle로만.
+  detector: owlv2
+  model: owlv2_onnx
+  tokenizer: owlv2_tokenizer
+  score_threshold: 0.2
+  nms_iou: 0.3
+  # 온톨로지 objects 키 → 영어 질의. 고정 구조(벽·바닥)는 넣지 않는다 (움직이는 물체만)
+  queries:
+    bucket: a bucket
+    trash_bin: a trash bin
+    pillow: a pillow
+    towel: a towel
+    cup: a cup
+    spray_bottle: a spray bottle
+    mop: a mop
+  appearance_bins: [8, 4]        # 색상(H) x 채도(S) 히스토그램 칸 수
+  appearance_crop: 0.6           # 상자 가운데 이 비율만 색을 잰다 (배경 섞임 줄이기)
+  center_tolerance: 0.25         # 다른 사진에 다시 투영한 중심이 상자 대각선의 이 비율 안이면 같은 물체
+  min_views: 3                   # 이보다 적은 사진에서만 보인 물체는 내지 않는다
+  full_views: 6                  # 이만큼 보이면 시점 수로 깎는 신뢰도가 없다
+
+# 전후 물체 대응과 변화 분류.
+change:
+  require_metric: true           # before 복원이 미터 단위가 아니면 비교를 거부한다
+  unchanged_tolerance_m: 0.05    # 이동 거리가 이 이하면 unchanged, 넘으면 moved
+  max_appearance_distance: 0.5   # 색 히스토그램 거리(Hellinger)가 넘으면 같은 물체가 아니다
+  max_size_ratio: 1.6            # 크기 비가 넘으면 같은 물체가 아니다
+  distance_scale_m: 3.0          # 거리 비용을 이 거리에서 1로 자른다
+  weights:
+    appearance: 1.0
+    size: 0.5
+    distance: 0.2

@@ -1,0 +1,27 @@
+[project]
+name = "dlp-scene3d"
+version = "0.1.0"
+description = "청소 전후 다각도 사진의 3D 복원(SfM·가우시안 스플래팅)과 물체 이동 비교 (ADR 0066)"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "dlp-media",
+    "dlp-models",
+    "dlp-privacy",
+    "dlp-schema",
+    "numpy>=2.0",
+    "opencv-contrib-python-headless>=4.10",
+    "pillow>=10.0",
+    "pydantic>=2.0",
+    "pyyaml>=6.0",
+    "scipy>=1.13",
+]
+
+# SfM(pycolmap)과 3D 가우시안 스플래팅(gsplat)은 GPU·큰 휠이 필요해 이 작업공간에 넣지 않는다.
+# 격리 환경 정의는 scripts/gsplat-env/ (ADR 0066).
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dlp_scene3d"]

@@ -338,7 +338,7 @@ def _nan_if_none(value: float | None) -> float:
     return math.nan if value is None else value
 
 
-def _covering(labels: list[LabelRecord], t: float) -> list[LabelRecord]:
+def covering(labels: list[LabelRecord], t: float) -> list[LabelRecord]:
     """시각 t(마스터 ms)를 덮는 구간 라벨 (반열린 [시작, 끝), 길이 0이면 그 시각에서만).
 
     입력 순서(보통 `preferred` 순)를 유지하므로 첫 원소가 먼저 쓸 라벨이다.
@@ -493,7 +493,7 @@ def build_episode(  # noqa: C901
 
     classes = _entity_classes(labels)
 
-    # 시간 구간 라벨 (마스터 시각). 모두 preferred 순이라 _covering의 첫 원소를 쓴다
+    # 시간 구간 라벨 (마스터 시각). 모두 preferred 순이라 covering의 첫 원소를 쓴다
     ordered = preferred(labels)
     hand_states = [x for x in ordered if isinstance(x.payload, HandStatePayload)]
     actions = [x for x in ordered if isinstance(x.payload, ActionPayload)]
@@ -564,7 +564,7 @@ def build_episode(  # noqa: C901
                     filled3d += 1
                     worse(k, 1, got[1])
             # 손 상태와 쥔 도구
-            cur = [x for x in _covering(hand_states, t) if x.payload.hand is hand]  # type: ignore[union-attr]
+            cur = [x for x in covering(hand_states, t) if x.payload.hand is hand]  # type: ignore[union-attr]
             tool_id: str | None = None
             if cur:
                 x = cur[0]
@@ -593,7 +593,7 @@ def build_episode(  # noqa: C901
             tip_base = 2 * n2d + 2 * n3d + hi * 4
             if tool_id is not None:
                 touching = [
-                    x for x in _covering(tool_contacts, t)
+                    x for x in covering(tool_contacts, t)
                     if x.payload.subject_id == tool_id  # type: ignore[union-attr]
                 ]  # fmt: skip
                 tsc[k, hi] = int(bool(touching))
@@ -607,14 +607,14 @@ def build_episode(  # noqa: C901
                         worse(k, 1, got[1])
                         break
             # 행동
-            acts = [x for x in _covering(actions, t) if x.payload.hand is hand]  # type: ignore[union-attr]
+            acts = [x for x in covering(actions, t) if x.payload.hand is hand]  # type: ignore[union-attr]
             if acts:
                 p = acts[0].payload
                 assert isinstance(p, ActionPayload)
                 verb[k, hi] = vocab.verbs.index(p.verb) if p.verb in vocab.verbs else -1
                 worse(k, 3, acts[0])
         # 작업 (손과 무관): task 수준 구간의 ref_id, 없으면 세션 도메인
-        cover = _covering(tasks_lbl, t)
+        cover = covering(tasks_lbl, t)
         if cover:
             worse(k, 5, cover[0])
         seg = cover[0].payload if cover else None
@@ -773,6 +773,15 @@ class PackageOverride:
     robot_type: str
 
 
+def video_size(size: tuple[int, int], lp: LeRobotPolicy) -> tuple[int, int]:
+    """데이터셋 영상 크기 (가로, 세로). `max_width`보다 넓으면 비율을 유지해 줄이고 세로를 짝수로
+    맞춘다 (h264 yuv420p 요구). 그렇지 않으면 그대로 (블러본은 렌더가 이미 짝수로 덧댄다)."""
+    w, h = size
+    if lp.max_width and w > lp.max_width:
+        h, w = round(h * lp.max_width / w / 2) * 2, lp.max_width
+    return w, h
+
+
 def write_package(
     episodes: list[tuple[Session, Path, Episode]],
     policy: ExportPolicy,
@@ -798,9 +807,7 @@ def write_package(
         package.json 경로.
     """
     lp = policy.lerobot
-    w, h = size
-    if lp.max_width and w > lp.max_width:
-        h, w = round(h * lp.max_width / w / 2) * 2, lp.max_width
+    w, h = video_size(size, lp)
     pkg.mkdir(parents=True, exist_ok=True)
     items: list[dict[str, Any]] = []
     for i, (session, video, ep) in enumerate(episodes):

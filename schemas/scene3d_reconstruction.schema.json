@@ -1,0 +1,78 @@
+{
+  "additionalProperties": false,
+  "description": "한 단계의 복원 결과 (라벨링 버킷 `recon/<tag>/`).\n\nmetric: 좌표가 미터인가. SfM만으로는 척도를 모르므로 실제 경로는 척도 기준(크기를 아는 마커 등)\n  없이는 False다. 비교 단계는 정책 `change.require_metric`이면 before가 metric이어야 한다.\nregistered: 자세를 찾은 사진 수 / 전체 사진 수 (`photo_count`).\nsplat_key·points_key·cameras_key: 같은 버킷의 산출물 키.",
+  "properties": {
+    "cameras_key": {
+      "title": "Cameras Key",
+      "type": "string"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "metric": {
+      "title": "Metric",
+      "type": "boolean"
+    },
+    "model_version": {
+      "title": "Model Version",
+      "type": "string"
+    },
+    "phase": {
+      "enum": [
+        "before",
+        "after"
+      ],
+      "title": "Phase",
+      "type": "string"
+    },
+    "photo_count": {
+      "exclusiveMinimum": 0,
+      "title": "Photo Count",
+      "type": "integer"
+    },
+    "point_count": {
+      "minimum": 0,
+      "title": "Point Count",
+      "type": "integer"
+    },
+    "points_key": {
+      "title": "Points Key",
+      "type": "string"
+    },
+    "registered": {
+      "minimum": 0,
+      "title": "Registered",
+      "type": "integer"
+    },
+    "render_tag": {
+      "title": "Render Tag",
+      "type": "string"
+    },
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    },
+    "splat_key": {
+      "title": "Splat Key",
+      "type": "string"
+    }
+  },
+  "required": [
+    "session_id",
+    "phase",
+    "model_version",
+    "render_tag",
+    "metric",
+    "photo_count",
+    "registered",
+    "point_count",
+    "cameras_key",
+    "points_key",
+    "splat_key",
+    "created_at"
+  ],
+  "title": "Reconstruction",
+  "type": "object"
+}

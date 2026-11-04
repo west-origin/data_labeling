@@ -30,6 +30,7 @@ members = [
     "dlp-relations",
     "dlp-retarget",
     "dlp-review",
+    "dlp-scene3d",
     "dlp-schema",
     "dlp-sync",
     "dlp-train",
@@ -691,6 +692,7 @@ dependencies = [
     { name = "dlp-relations" },
     { name = "dlp-retarget" },
     { name = "dlp-review" },
+    { name = "dlp-scene3d" },
     { name = "dlp-schema" },
     { name = "dlp-sync" },
     { name = "dlp-train" },
@@ -734,6 +736,7 @@ requires-dist = [
     { name = "dlp-relations", editable = "packages/relations" },
     { name = "dlp-retarget", editable = "packages/retarget" },
     { name = "dlp-review", editable = "packages/review" },
+    { name = "dlp-scene3d", editable = "packages/scene3d" },
     { name = "dlp-schema", editable = "packages/schema" },
     { name = "dlp-sync", editable = "packages/sync" },
     { name = "dlp-train", editable = "packages/training" },
@@ -883,6 +886,7 @@ dependencies = [
     { name = "dlp-relations" },
     { name = "dlp-retarget" },
     { name = "dlp-review" },
+    { name = "dlp-scene3d" },
     { name = "dlp-schema" },
     { name = "dlp-sync" },
     { name = "dlp-train" },
@@ -906,6 +910,7 @@ requires-dist = [
     { name = "dlp-relations", editable = "packages/relations" },
     { name = "dlp-retarget", editable = "packages/retarget" },
     { name = "dlp-review", editable = "packages/review" },
+    { name = "dlp-scene3d", editable = "packages/scene3d" },
     { name = "dlp-schema", editable = "packages/schema" },
     { name = "dlp-sync", editable = "packages/sync" },
     { name = "dlp-train", editable = "packages/training" },
@@ -992,6 +997,7 @@ dependencies = [
     { name = "dlp-schema" },
     { name = "numpy" },
     { name = "opencv-contrib-python-headless" },
+    { name = "pyarrow" },
     { name = "pyyaml" },
 ]
 
@@ -1004,6 +1010,7 @@ requires-dist = [
     { name = "dlp-schema", editable = "packages/schema" },
     { name = "numpy", specifier = ">=2.0" },
     { name = "opencv-contrib-python-headless", specifier = ">=4.10" },
+    { name = "pyarrow", specifier = ">=18.0" },
     { name = "pyyaml", specifier = ">=6.0" },
 ]
 
@@ -1220,6 +1227,37 @@ requires-dist = [
     { name = "numpy", specifier = ">=2.0" },
     { name = "opencv-contrib-python-headless", specifier = ">=4.10" },
     { name = "pyyaml", specifier = ">=6.0" },
+]
+
+[[package]]
+name = "dlp-scene3d"
+version = "0.1.0"
+source = { editable = "packages/scene3d" }
+dependencies = [
+    { name = "dlp-media" },
+    { name = "dlp-models" },
+    { name = "dlp-privacy" },
+    { name = "dlp-schema" },
+    { name = "numpy" },
+    { name = "opencv-contrib-python-headless" },
+    { name = "pillow" },
+    { name = "pydantic" },
+    { name = "pyyaml" },
+    { name = "scipy" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "dlp-media", editable = "packages/media" },
+    { name = "dlp-models", editable = "packages/models" },
+    { name = "dlp-privacy", editable = "packages/privacy" },
+    { name = "dlp-schema", editable = "packages/schema" },
+    { name = "numpy", specifier = ">=2.0" },
+    { name = "opencv-contrib-python-headless", specifier = ">=4.10" },
+    { name = "pillow", specifier = ">=10.0" },
+    { name = "pydantic", specifier = ">=2.0" },
+    { name = "pyyaml", specifier = ">=6.0" },
+    { name = "scipy", specifier = ">=1.13" },
 ]
 
 [[package]]

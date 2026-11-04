@@ -28,7 +28,7 @@ Prefect 서비스가 기동된 것만으로 모든 작업이 영속 큐에서 �
 | 배정·QA·품질 | [review ops](../../packages/review/src/dlp_review/ops/)(AI 판정 품질 `ai_quality.py`, WP17.8) | 위 검수 정책, `config/defaults.yaml` |
 | 계약·온톨로지·DB | [schema](../../packages/schema/src/dlp_schema/), `db/` | `config/ontology/v1`, `schemas/`는 생성물 |
 | 데이터셋·학습·평가 | [datasets](../../packages/datasets/src/dlp_datasets/), [training](../../packages/training/src/dlp_train/), [evaluation](../../packages/evaluation/src/dlp_eval/) | `dataset.yaml`, `training.yaml`, `evaluation.yaml` |
-| 내보내기·게시 | [export runner](../../packages/export/src/dlp_export/runner.py), 같은 디렉터리의 형식별 모듈 | `config/policies/export.yaml` |
+| 내보내기·게시 | [export runner](../../packages/export/src/dlp_export/runner.py), 같은 디렉터리의 형식별 모듈 (GR00T: `gr00t.py`·확인기 `gr00t_check.py`, ADR 0065) | `config/policies/export.yaml` |
 | 운영 콘솔 (ADR 0061) | [console](../../packages/console/src/dlp_console/)의 `app.py`(API·토큰), `jobs.py`(`dlp` 명령 작업 실행·JSON Lines 기록), `steps.py`·`global_steps.py`(단계 활성 규칙·명령), `status.py`(DB 읽기 전용), `upload.py`(매니페스트), `preview.py`(블러본 서명 URL), `training.py`(회차 그래프 자료), `pretrain.py`·`imports.py`(외부 학습 가중치 가져오기), 화면 `static/`, [CLI](../../packages/cli/src/dlp_cli/console_cmds.py) | `config/console.yaml`, `config/review_ui.yaml`(테마), 안내 [operator-guide.md](operator-guide.md) |
 | 모델·합성 정답·운영·선별 | [models](../../packages/models/src/dlp_models/), [fixtures](../../packages/fixtures/src/dlp_fixtures/), [ops](../../packages/ops/src/dlp_ops/), [active](../../packages/active/src/dlp_active/) | 모델 레지스트리, 각 정책 |
 
@@ -52,7 +52,8 @@ Prefect 서비스가 기동된 것만으로 모든 작업이 영속 큐에서 �
 | export | datasets, media, privacy, retarget, schema |
 | ops | privacy, review, schema |
 | console | media, models, privacy, review, schema |
-| cli | 나머지 19개 패키지 |
+| scene3d | media, models, privacy, schema |
+| cli | 나머지 20개 패키지 |
 
 console의 privacy 의존은 블러본 서명 전 렌더 게이트(`assert_render_current`, ADR 0024)뿐이다.
 
@@ -296,6 +297,16 @@ drop, 설정·URDF 검증(축 단위·직교, 그리퍼, mimic, robot_id 경로)
 관계 도출(YAML 규칙 엔진, `derived_by`=규칙 ID), 도구-표면 접촉(작용부-평면 거리),
 표면 커버리지. `dlp relations run <세션>` (멱등, 규칙 변경 시 차이만 반영). 정책은 `config/policies/relations.yaml`.
 
+### `packages/scene3d/` (`dlp_scene3d`)
+
+청소 전후 다각도 사진의 3D 복원(SfM·3D 가우시안 스플래팅)과 물체 이동 비교 (ADR 0066). `dlp scene3d
+ingest|privacy detect|review|approve|render|reconstruct|compare|report`. 정책 `config/policies/scene3d.yaml`.
+경계: 원본 사진은 감사 원본 저장소로만 읽고, 사진 블러 게이트(`privacy_gate`, `dlp_privacy` 탐지기·블러를
+그대로 씀)를 사람 승인으로 통과한 블러 PNG만 하류(`open_blurred`)가 받는다. SfM(pycolmap)·스플랫(gsplat)은
+격리 환경 `scripts/gsplat-env`에서만 돌고, CPU stub(`OracleSfm`, `InitPointsSplat`, `OracleObjectDetector`)으로
+시험한다. 순수 기하(`geometry`, `objects`, `alignment`, `change`)는 저장소 없이 돈다. 계약은
+`dlp_schema.scene3d`, 산출물 기록은 추가 전용 표 `scene3d_records`(0027). 이동 벡터는 before 장면 좌표(미터)다.
+
 ### `packages/actions/` (`dlp_actions`)
 
 행동 구간 2단 구조: 손목 속도·접촉으로 경계 후보 → VLM이 온톨로지 안에서 분류·설명
@@ -369,7 +380,9 @@ FiftyOne은 선택 설치(`make install-curation`).
 내보내기: COCO, 구간 JSON(`dlp_schema.export`), LeRobot v3.0 에피소드.
 데이터셋 버전 스냅샷에서, 검증 정책 적용, 블러본만. 작업자·장소 ID는 내보내기마다 다른 가명(HMAC). 내보내기 이력은
 올리기 전에 따로 커밋한다. 세션·라벨 ID도 내보내기마다 다른 가명이고(이력에는 내부 ID, 세션 대응표는 내부 경로),
-manifest에 파일 목록과 sha256을 넣는다 (ADR 0027). `dlp export coco|intervals|lerobot`. 정책은 `config/policies/export.yaml`.
+manifest에 파일 목록과 sha256을 넣는다 (ADR 0027). `dlp export coco|intervals|lerobot|gr00t`. 정책은 `config/policies/export.yaml`.
+GR00T는 같은 에피소드를 NVIDIA Isaac GR00T N1.7 미세조정 형식(LeRobot v2.1 + modality.json, H.264 재인코딩)으로 쓰고
+`dlp export gr00t-check`로 확인한다 (ADR 0065).
 온톨로지 한·영 이름을 싣는다(COCO 범주 `name_ko`·`name_en`, 구간 JSON `term_names` 형식 1.2, LeRobot 어휘 `term_names`).
 설명은 언어마다 한 레코드(ko·en)이고 번역의 `source_label_id`도 가명 라벨 ID다 (ADR 0043).
 LeRobot은 격리된 일회용 환경(`scripts/lerobot_write.py`, `scripts/lerobot_check.py`)에서 공식 API로 쓰고 읽는다.
