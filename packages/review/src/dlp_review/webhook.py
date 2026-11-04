@@ -240,7 +240,10 @@ def serve(  # noqa: C901
     logger = logging.getLogger(__name__)
 
     class Handler(BaseHTTPRequestHandler):
-        """요청 하나를 처리한다. POST만 받고 응답 본문은 늘 비어 있으며 연결을 닫는다."""
+        """요청 하나를 처리한다. POST만 처리하고, POST 응답은 본문 없이 연결을 닫는다.
+
+        다른 방법(GET·PUT 등)은 `BaseHTTPRequestHandler` 기본 처리로 501과 HTML 오류 본문을 받는다.
+        """
 
         def setup(self) -> None:
             """소켓에 `webhook.request_timeout_s` 유휴 제한을 건다 (헤더를 읽기 전부터)."""

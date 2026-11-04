@@ -131,8 +131,8 @@ def cmd_review_quality(_ctx: GlobalContext, _p: Params) -> list[list[str]]:
 def cmd_ops_weekly(ctx: GlobalContext, p: Params) -> list[list[str]]:
     """`ops weekly --weeks <주 수> --out <reports/weekly-시각.md>`.
 
-    화면 값: `weeks`(1~52, 기본 8). `dlp ops weekly`는 `.md` 옆에 같은 이름의 `.json`도 쓰고,
-    재학습 화면(`training.latest_weekly`)이 그 JSON을 읽는다.
+    화면 값: `weeks`(1~52, 비었거나 0이면 기본 8). `dlp ops weekly`는 `.md` 옆에 같은 이름의
+    `.json`도 쓰고, 재학습 화면(`training.latest_weekly`)이 그 JSON을 읽는다.
     """
     try:
         weeks = int(p.get("weeks") or 8)
