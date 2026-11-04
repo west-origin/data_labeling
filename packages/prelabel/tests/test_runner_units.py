@@ -116,8 +116,34 @@ def test_new_trajectories_for_reviewed_entity_parts_are_dropped() -> None:
         _traj("new-tip", "hand_right", "index_tip"),
         _traj("new-rag", "rag_01", None),
     ]
-    kept = drop_protected_trajectories(new, current, frozenset())
+    kept = drop_protected_trajectories(new, current, frozenset(), current)
     assert [x.label_id for x in kept] == ["new-tip", "new-rag"]
+
+
+def test_reviewed_box_trajectory_protects_its_source_lineage_not_its_entity_number() -> None:
+    """F-PAR-92: 같은 cup_01이라도 출처 박스 트랙이 다르면 다른 대상이다.
+
+    정답: 직접 검수한 A 궤적은 A(와 A를 사람이 고친 A')에서 새로 계산한 궤적만 막고, 번호만 같은
+    B 궤적은 남긴다. 보호 궤적의 출처가 이번 입력에 없으면(어느 트랙이 같은 개체인지 모름) 예전처럼
+    같은 (개체, 부위, 좌표계)를 모두 막는다.
+    """
+
+    def cup(label_id: str, source: str, **kw: Any) -> LabelRecord:
+        """출처 박스 트랙이 source인 cup_01 중심 궤적."""
+        x = _traj(label_id, "cup_01", None, **kw)
+        assert isinstance(x.payload, Trajectory3DPayload)
+        payload = x.payload.model_copy(update={"derived_from": (source,)})
+        return x.model_copy(update={"payload": payload})
+
+    fixed = _box_track("box-a2", "cup_01", 1.0, provenance=Provenance(source=Source.HUMAN))
+    fixed = fixed.model_copy(update={"parent_label_id": "box-a"})
+    current = [cup("old-a", "box-a", verification=APPROVED)]
+    history = [_box_track("box-a", "cup_01", 1.0, **MODEL), fixed, *current]
+    new = [cup("new-a", "box-a"), cup("new-a2", "box-a2"), cup("new-b", "box-b")]
+    kept = drop_protected_trajectories(new, current, frozenset(), history)
+    assert [x.label_id for x in kept] == ["new-b"]
+    only_b = drop_protected_trajectories([cup("new-b", "box-b")], current, frozenset(), history)
+    assert only_b == []
 
 
 def test_lapsed_inherited_trajectories_do_not_block_or_feed_new_ones() -> None:
@@ -134,7 +160,7 @@ def test_lapsed_inherited_trajectories_do_not_block_or_feed_new_ones() -> None:
     ]
     new = [_traj("new-wrist", "hand_right", "wrist"), _traj("new-tip", "hand_right", "index_tip")]
     lapsed = frozenset({"old-wrist"})
-    kept = drop_protected_trajectories(new, current, lapsed)
+    kept = drop_protected_trajectories(new, current, lapsed, current)
     assert [x.label_id for x in kept] == ["new-wrist"]
     _, cams = pick_world_inputs([*current, kept[0]], "bodycam", lapsed)
     assert sorted(x.label_id for x in cams) == ["new-wrist", "old-tip"]

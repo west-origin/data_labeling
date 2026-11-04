@@ -412,7 +412,7 @@ def test_server_adapter_sends_text_only_and_retries_violations(policy: Translate
     assert first["response_format"]["json_schema"]["name"] == "translation"
     retry = bodies[1]["messages"]
     assert retry[2]["role"] == "assistant" and "Korean" in retry[3]["content"][0]["text"]
-    assert t.version == f"llm-{model}"
+    assert t.version == f"llm-{model}@{policy.backend.fingerprint}"
 
 
 def test_server_adapter_outage_and_persistent_violation(policy: TranslatePolicy) -> None:
@@ -556,3 +556,14 @@ def test_final_write_rechecks_hold_and_withdrawal_under_the_lock(
     assert sorted(s.pending) == sorted(f"{a}-desc" for a in KO)
     with db.connect() as conn:
         assert get_labels(conn, SID) == before
+
+
+def test_server_fingerprint_changes_translator_version_f_par_90(policy: TranslatePolicy) -> None:
+    """같은 모델 이름으로 서버 엔진·양자화·revision만 바꿔도 번역기 버전이 바뀐다 (F-PAR-90)."""
+    from dlp_actions.translators import server_translator_version
+
+    other = policy.model_copy(
+        update={"backend": policy.backend.model_copy(update={"fingerprint": "vllm-awq-int4"})}
+    )
+    assert server_translator_version(other) != server_translator_version(policy)
+    assert other.digest != policy.digest

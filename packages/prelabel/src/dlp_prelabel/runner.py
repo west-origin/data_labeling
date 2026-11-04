@@ -62,7 +62,8 @@ F-PAR-75), 다시 돌릴지는 라벨 이력과 이 기록을 함께 본다. 그
 - 라벨을 덮어쓰지 않는다. 새 레코드와 삭제 레코드(`retractions`)만 추가한다.
 - 버전이 바뀌면 검수 전(UNREVIEWED)인 이전 모델 라벨만 지운다 (`_stale`, ADR 0015). 검수된(승인·표본
   검증) 결과와 사람이 고치거나 만든 결과는 남기고, 새 결과 중 그와 겹치는 것을 버린다. 접촉은 같은
-  손에서 시간이 겹치는 구간, 3D 궤적은 같은 (개체, 부위, 좌표계), 마스크는 같은 프롬프트 트랙이다.
+  손에서 시간이 겹치는 구간, 3D 궤적은 같은 (개체, 부위, 좌표계)와 출처 2D 계보(F-PAR-92), 마스크는
+  같은 프롬프트 트랙이다.
   예외는 궤적 따르기가 지우는 물려받기만 한 3D뿐이다 (CLAUDE.md 규칙, ADR 0051).
 - 3D·월드 단계의 보호 판정과 월드 좌표 입력은 궤적 따르기가 곧 지울 3D(`lapsed_trajectories`, 새로
   계산한 궤적을 이력에 더해 구한다)를 이중 방어로 뺀다. 직접 검수·사람 출처 3D는 그대로 새 3D를
@@ -83,7 +84,7 @@ from __future__ import annotations
 import json
 import re
 import tempfile
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -702,34 +703,81 @@ def _is_wearer(x: LabelRecord) -> bool:
     return (x.provenance.model_version or "").startswith(WEARER_PREFIX)
 
 
-def _trajectory_key(p: Trajectory3DPayload) -> tuple[str, str | None, str]:
-    """3D 궤적의 동일 대상 키 (개체, 부위, 좌표계)."""
-    return (p.entity_id, p.part, p.frame.value)
+# 3D 보호 대상 키: (개체, 부위, 좌표계, 출처 2D 계보 뿌리 라벨 ID)
+_LineageKey = tuple[str, str | None, str, str]
+
+
+def _lineage_root(label_id: str, by_id: Mapping[str, LabelRecord]) -> str:
+    """라벨의 출처 계보 뿌리 ID.
+
+    3D 궤적은 `derived_from` 첫째(월드 → 카메라 좌표 궤적 → 2D 트랙)를, 그 밖은
+    `parent_label_id`(사람 수정)를 거슬러 올라가 사람이 고친 트랙도 원래 트랙과 같은 계보로 본다.
+    이력(by_id)에 없는 ID에서 멈춘다 (순환은 한 바퀴 돌고 멈춘다).
+    """
+    seen: set[str] = set()
+    while label_id not in seen and (x := by_id.get(label_id)) is not None:
+        seen.add(label_id)
+        p = x.payload
+        up = (
+            p.derived_from[0]
+            if isinstance(p, Trajectory3DPayload) and p.derived_from
+            else x.parent_label_id
+        )
+        if up is None:
+            break
+        label_id = up
+    return label_id
+
+
+def _trajectory_key(x: LabelRecord, by_id: Mapping[str, LabelRecord]) -> _LineageKey:
+    """3D 궤적의 보호 대상 키 (개체, 부위, 좌표계, 출처 계보 뿌리). x는 3D 궤적이어야 한다."""
+    p = x.payload
+    assert isinstance(p, Trajectory3DPayload)
+    return (p.entity_id, p.part, p.frame.value, _lineage_root(x.label_id, by_id))
+
+
+def _blocked_keys(wanted: set[_LineageKey], protected: set[_LineageKey]) -> set[_LineageKey]:
+    """wanted 중 보호 3D(그 키가 protected)가 막는 키 (F-PAR-92).
+
+    보호 3D의 계보가 wanted에 있으면 그 계보만 막는다: 박스 번호는 버전마다 다시 매겨 번호가 같은
+    다른 트랙은 다른 개체일 수 있다 (F-PAR-87). 계보가 wanted에 없으면(출처 2D가 사라졌거나 고르지
+    않은 트랙) 어느 새 트랙이 같은 개체인지 모르므로 같은 (개체, 부위, 좌표계)를 모두 막는다.
+    대상마다 트랙이 하나인 경우(손·팔, 번호가 겹치지 않는 박스)는 계보를 보기 전과 같다.
+    """
+    loose = {k[:3] for k in protected - wanted}
+    return {k for k in wanted if k in protected or k[:3] in loose}
 
 
 def drop_protected_trajectories(
-    labels: list[LabelRecord], current: list[LabelRecord], lapsed: frozenset[str]
+    labels: list[LabelRecord],
+    current: list[LabelRecord],
+    lapsed: frozenset[str],
+    history: Sequence[LabelRecord],
 ) -> list[LabelRecord]:
-    """새 3D 궤적 중 같은 (개체, 부위, 좌표계)의 검수된·사람 궤적이 이미 있는 것을 버린다.
+    """새 3D 궤적 중 같은 대상의 검수된·사람 궤적이 이미 있는 것을 버린다.
 
     ADR 0026: 검수된 결과는 지우지 않으므로, 같은 대상의 모델 궤적을 옆에 또 넣으면 중복이 된다.
+    같은 대상은 (개체, 부위, 좌표계)와 출처 2D 계보로 정한다 (`_blocked_keys`, F-PAR-92).
     단 궤적 따르기가 지울 궤적(lapsed)은 막지 않는다: 출처 2D가 바뀌어 물려받음이 끊긴 궤적(ADR
     0048·0050)과, 같은 출처 2D에서 입력이 바뀌어 새로 계산한 궤적이 대신할 물려받기만 한 궤적(ADR
     0051, 호출자가 새 궤적을 더한 이력으로 lapsed를 구한다)이다. 이어지는 궤적 따르기가 그것을
-    지우고 새 궤적이 그 자리를 이어받는다.
+    지우고 새 궤적이 그 자리를 이어받는다. history는 계보를 거슬러 올라갈 세션 이력이다.
     """
-    kept = {
-        _trajectory_key(x.payload)
+    by_id = {x.label_id: x for x in [*history, *current, *labels]}
+    protected = {
+        _trajectory_key(x, by_id)
         for x in current
         if isinstance(x.payload, Trajectory3DPayload)
         and is_protected(x)
         and x.label_id not in lapsed
     }
-    return [
-        x
+    keys = {
+        x.label_id: _trajectory_key(x, by_id)
         for x in labels
-        if not (isinstance(x.payload, Trajectory3DPayload) and _trajectory_key(x.payload) in kept)
-    ]
+        if isinstance(x.payload, Trajectory3DPayload)
+    }
+    blocked = _blocked_keys(set(keys.values()), protected)
+    return [x for x in labels if keys.get(x.label_id) not in blocked]
 
 
 def drop_protected_contacts(
@@ -754,40 +802,46 @@ def drop_protected_contacts(
 
 
 def lift_keys(
-    tracks: list[LabelRecord], hand_points: Sequence[int], arm_points: Sequence[str] = ()
-) -> set[tuple[str, str | None, str]]:
-    """고른 트랙이 3D 단계에서 낼 궤적의 대상 키 (개체, 부위, 좌표계=camera).
+    tracks: list[LabelRecord],
+    by_id: Mapping[str, LabelRecord],
+    hand_points: Sequence[int],
+    arm_points: Sequence[str] = (),
+) -> set[_LineageKey]:
+    """고른 트랙이 3D 단계에서 낼 궤적의 대상 키 (개체, 부위, 좌표계=camera, 트랙 계보 뿌리).
 
     hand21 손 트랙은 정책 hand_points 관절마다, arm3 팔 트랙은 arm_points 점마다(ADR 0058), 박스
-    트랙은 중심(부위 None) 하나다.
+    트랙은 중심(부위 None) 하나다. 계보 뿌리는 by_id(세션 이력)로 사람 수정을 거슬러 구한다.
     """
     camera = CoordinateFrame.CAMERA.value
-    out: set[tuple[str, str | None, str]] = set()
+    out: set[_LineageKey] = set()
     for t in tracks:
-        p = t.payload
+        p, root = t.payload, _lineage_root(t.label_id, by_id)
         if isinstance(p, KeypointTrackPayload) and p.skeleton == "arm3":
-            out |= {(p.entity_id, name, camera) for name in arm_points}
+            out |= {(p.entity_id, name, camera, root) for name in arm_points}
         elif isinstance(p, KeypointTrackPayload):
-            out |= {(p.entity_id, HAND21_NAMES[i], camera) for i in hand_points}
+            out |= {(p.entity_id, HAND21_NAMES[i], camera, root) for i in hand_points}
         elif isinstance(p, BoxTrackPayload):
-            out.add((p.entity_id, None, camera))
+            out.add((p.entity_id, None, camera, root))
     return out
 
 
 def blocked_lift_keys(
+    wanted: set[_LineageKey],
     tracks: list[LabelRecord],
     current: list[LabelRecord],
     inheritance: Sequence[TrajectoryInheritance],
     lapsed: frozenset[str],
-) -> set[tuple[str, str | None, str]]:
-    """새 3D가 들어갈 수 없는 대상 키: 같은 대상에 대체할 수 없는 보호 3D가 있다.
+    by_id: Mapping[str, LabelRecord],
+) -> set[_LineageKey]:
+    """wanted(`lift_keys`) 중 새 3D가 들어갈 수 없는 키: 같은 대상에 대체할 수 없는 보호 3D가 있다.
 
     대체할 수 있는 것은 따르기가 지울 궤적(lapsed)과, 지금 고른 트랙에서 물려받기만 한 궤적이다
     (새로 계산하면 궤적 따르기 규칙 5가 대신하게 한다, ADR 0051). 나머지 보호 3D(직접 검수·
-    기록 뒤 다시 검수·사람 출처, 다른 2D에서 물려받은 것)는 막는다.
+    기록 뒤 다시 검수·사람 출처, 다른 2D에서 물려받은 것)는 막는다. 같은 대상은 출처 계보까지 본다
+    (`_blocked_keys`, F-PAR-92).
     """
     sources = {t.label_id for t in tracks}
-    out: set[tuple[str, str | None, str]] = set()
+    protected: set[_LineageKey] = set()
     for x in current:
         if not isinstance(x.payload, Trajectory3DPayload) or not is_protected(x):
             continue
@@ -796,8 +850,8 @@ def blocked_lift_keys(
         r = active_trajectory_inheritance(x, inheritance)
         if r is not None and r.source_label_id in sources:
             continue
-        out.add(_trajectory_key(x.payload))
-    return out
+        protected.add(_trajectory_key(x, by_id))
+    return _blocked_keys(wanted, protected)
 
 
 def _lift(
@@ -819,8 +873,9 @@ def _lift(
     파라미터(`calibration_repository.session_intrinsics`)와 손 크기 사전값(`session_palm`,
     ADR 0045)의 해시가 들어가, 입력이 바뀌거나 고르는 트랙이 바뀌면(예: 다른 트랙 승인),
     캘리브레이션·작업자 손 크기를 등록하면 다시 만든다. 2D 검수를 물려받기만 한 이전 3D는 새 3D가
-    대신한다 (ADR 0051). 같은 (개체, 부위, 좌표계)에 직접 검수·사람 궤적이 있으면 새 궤적은 버리고
-    (`summary.lift_blocked`), 낼 궤적이 모두 막히면 원본을 받거나 깊이를 돌리지 않는다.
+    대신한다 (ADR 0051). 같은 (개체, 부위, 좌표계)·출처 2D 계보에 직접 검수·사람 궤적이 있으면 새
+    궤적은 버리고 (`summary.lift_blocked`, F-PAR-92: 번호만 같은 다른 박스 트랙은 막지 않는다),
+    낼 궤적이 모두 막히면 원본을 받거나 깊이를 돌리지 않는다.
 
     입력: 기준 스트림(바디캠)의 현재 박스 트랙 전부와, hand21·arm3 키포인트 트랙을 (개체, 트랙
     종류)마다 하나 고른 것 (모델·사람 출처 모두, `pick_lift_tracks`, F-PAR-01·87). 출력 라벨 ID
@@ -853,8 +908,9 @@ def _lift(
     lapsed = _lapsed(conn, session.session_id, history)
     inheritance = get_trajectory_inheritance(conn, session.session_id)
     depth = lifter.policy.depth
-    wanted = lift_keys(tracks, depth.hand_points, depth.arm_points)
-    blocked = wanted & blocked_lift_keys(tracks, current, inheritance, lapsed)
+    by_id = {x.label_id: x for x in history}
+    wanted = lift_keys(tracks, by_id, depth.hand_points, depth.arm_points)
+    blocked = blocked_lift_keys(wanted, tracks, current, inheritance, lapsed, by_id)
     if not tracks or wanted == blocked:
         summary.lift_blocked += len(blocked)
         if stale:
@@ -879,7 +935,7 @@ def _lift(
     # 새 궤적을 이력에 더해 지울 궤적을 구한다: 같은 2D에서 물려받기만 한 이전 궤적은 새 궤적이
     # 대신하므로(규칙 5) 막지 않는다
     kept = drop_protected_trajectories(
-        labels, current, _lapsed(conn, session.session_id, history, labels)
+        labels, current, _lapsed(conn, session.session_id, history, labels), history
     )
     summary.lift_blocked += len(labels) - len(kept)
     insert_labels(conn, [*retractions(stale, version, now), *kept])
@@ -1288,7 +1344,7 @@ class _PoseStage:
             return self._skip(f"자세 표본이 0개입니다 (IMU가 영상 구간을 덮지 않음 등){gone}")
         current = current_labels(history)
         lapsed = _lapsed(self.conn, session.session_id, history, [label])
-        new = drop_protected_trajectories([label], current, lapsed)
+        new = drop_protected_trajectories([label], current, lapsed, history)
         insert_labels(self.conn, [*retractions(stale, version, self.now), *new])
         self._ran(POSE_STAGE, version, len(new))
         self.summary.poses = len(track.samples) if new else 0
@@ -1365,7 +1421,7 @@ class _PoseStage:
                 if lbl is not None:
                     labels.append(lbl)
         labels = drop_protected_trajectories(
-            labels, current, _lapsed(self.conn, session.session_id, history, labels)
+            labels, current, _lapsed(self.conn, session.session_id, history, labels), history
         )
         if stale or labels:
             insert_labels(self.conn, [*retractions(stale, version, self.now), *labels])

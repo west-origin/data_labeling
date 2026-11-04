@@ -36,6 +36,9 @@ class TranslateBackend(Contract):
     model: str = Field(min_length=1)
     # 서버에 등록된 이름이 다르면 그 이름 (None이면 model)
     served_name: str | None = None
+    # 서버 지문(엔진·양자화·가중치 revision). 같은 모델 이름으로 서버만 바꿔도 번역기 버전과 정책
+    # 해시가 달라져 다시 번역한다 (F-PAR-90, aireview backend.fingerprint와 같은 방식)
+    fingerprint: str = Field(min_length=1)
     # 응답 생성 토큰 상한
     max_tokens: int = Field(ge=16)
     # 번역문 글자 수 상한

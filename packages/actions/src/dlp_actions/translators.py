@@ -176,8 +176,13 @@ def retry_text(problems: Sequence[str]) -> str:
 
 
 def server_translator_version(policy: TranslatePolicy) -> str:
-    """사내 서버 번역기의 버전 문자열 `llm-<모델>` (서버에 묻지 않고 정책만으로 정해진다)."""
-    return f"llm-{policy.backend.model}"
+    """사내 서버 번역기의 버전 문자열 `llm-<모델>@<서버 지문>` (정책만으로 정해진다).
+
+    지문(`backend.fingerprint`)을 넣어 같은 모델 이름으로 엔진·양자화·revision만 바꿔도 버전이
+    달라진다 (F-PAR-90).
+    """
+    b = policy.backend
+    return f"llm-{b.model}@{b.fingerprint}"
 
 
 class OpenAICompatibleTranslator:

@@ -119,7 +119,8 @@ def test_internal_url_builds_server_translator(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setenv(translate_cmds.URL_ENV, "http://10.0.0.11:8000")
     translator, code = translate_cmds.make_translator(None, load_policy(ROOT))
     assert code == 0 and translator is not None
-    assert translator.version == f"llm-{load_policy(ROOT).backend.model}"
+    backend = load_policy(ROOT).backend
+    assert translator.version == f"llm-{backend.model}@{backend.fingerprint}"
 
 
 def test_after_actions_never_raises(

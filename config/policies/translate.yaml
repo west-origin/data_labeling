@@ -32,6 +32,9 @@ backend:
   model: Qwen/Qwen3-VL-8B-Instruct
   # 서버에 등록된 모델 이름이 model과 다르면 그 이름 (vLLM --served-model-name 등). null이면 model
   served_name: null
+  # 서버 지문: 엔진·양자화·가중치 revision (services/vlm vlm-aireview 기준). 같은 모델 이름으로 서버를
+  # 바꾸면 이 값을 바꾼다. 번역기 버전 llm-<model>@<fingerprint>와 정책 해시에 들어가 다시 번역한다 (F-PAR-90)
+  fingerprint: vllm-bf16
   max_tokens: 512                 # 응답 생성 토큰 상한
   max_chars: 400                  # 번역문 글자 수 상한 (넘으면 위반으로 다시 묻는다)
   max_retries: 1                  # 응답 위반(JSON 아님·빈 번역·한글 남음·길이 초과) 시 위반을 알려 다시 묻는 횟수
