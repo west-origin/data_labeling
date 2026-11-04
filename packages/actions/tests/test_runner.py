@@ -351,7 +351,8 @@ def test_vlm_outage_aborts_the_session_so_a_rerun_redoes_it(pg: sa.Engine) -> No
         update={"vlm": policy.vlm.model_copy(update={"unavailable_backoff_s": (0.0, 0.0)})}
     )
     down = OpenAICompatibleVlm(
-        "http://vlm", policy.vlm.model, frames=1, max_side=64, timeout_s=1,
+        "http://vlm", policy.vlm.model, fingerprint=policy.vlm.fingerprint, frames=1, max_side=64,
+        timeout_s=1,
         transport=httpx.MockTransport(lambda req: httpx.Response(503)),
     )  # fmt: skip
     with pytest.raises(VlmUnavailableError), pg.begin() as conn:

@@ -85,6 +85,10 @@ class VlmPolicy(Contract):
     default_confidence: float = Field(ge=0, le=1)
     # VLM 모델 이름 (서버에 보낼 model, 라이선스는 config/models.yaml external)
     model: str
+    # 엔진·양자화·가중치 revision 표시 (F-PAR-90). 같은 모델 이름이라도 결과가 달라지므로 VLM
+    # 버전 문자열 `vlm-<model>@<fingerprint>`에 들어간다 (`clients.vlm_version`). 정책 해시에는
+    # 넣지 않는다 (두 번 세지 않고, 서버를 쓰지 않는 stub 버전은 그대로 두려고)
+    fingerprint: str = Field(min_length=1)
     # 요청 하나의 시간 초과 초
     timeout_s: float = Field(gt=0)
     # 서버 오류·시간 초과 뒤 다시 묻기 전 대기(초). 길이가 재시도 횟수다. 결과에 영향이 없어
@@ -126,13 +130,15 @@ class ActionsPolicy(Contract):
         파싱된 값(`model_dump(mode="json")`)을 키 정렬 JSON으로 만들어 해시하므로 YAML
         주석·순서·서식은 영향이 없다. `vlm.unavailable_backoff_s`·`vlm.internal_hosts`는 결과를
         바꾸지 않아 빼고, `prompt_version`은 `stamp`에 따로 붙이므로 뺀다 (해시에 넣으면 첫 틀
-        버전에서도 해시가 바뀌어 모든 세션이 다시 돈다).
+        버전에서도 해시가 바뀌어 모든 세션이 다시 돈다). `vlm.fingerprint`는 결과를 바꾸지만 VLM
+        버전 문자열(`clients.vlm_version`)에 들어가므로 뺀다: 실제 서버 결과의 버전은 그것으로
+        바뀌고, 서버를 쓰지 않는 stub(`oracle-vlm-1`)·기존 해시는 그대로다 (F-PAR-90).
         """
         data = self.model_dump(
             mode="json",
             exclude={
                 "prompt_version": True,
-                "vlm": {"unavailable_backoff_s", "internal_hosts"},
+                "vlm": {"unavailable_backoff_s", "internal_hosts", "fingerprint"},
             },
         )
         content = json.dumps(data, sort_keys=True)

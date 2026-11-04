@@ -18,8 +18,9 @@ ADR 0012(2단 구조), 0015(멱등·검수 보호), 0019(시각 규약), 0024(�
 
 모델 버전 (라벨 `provenance.model_version`, 라벨 ID에는 `version_tag`로 들어간다)
 - 행동: `actions-<stamp>+<VLM 버전>+o<온톨로지 부분 해시>+i<입력 해시>` (`runner`).
-  `stamp`는 `actions.yaml` 해시(백오프·사내 대역 제외)이고 프롬프트 틀 버전이 1이 아니면
-  `+pv<틀 버전>`이 붙는다. VLM 버전은 `vlm-<vlm.model>`(stub은 `oracle-vlm-1`). 온톨로지 부분 해시는
+  `stamp`는 `actions.yaml` 해시(백오프·사내 대역·fingerprint 제외)이고 프롬프트 틀 버전이 1이
+  아니면 `+pv<틀 버전>`이 붙는다. VLM 버전은 `vlm-<vlm.model>@<vlm.fingerprint>`(엔진·양자화·가중치
+  revision, F-PAR-90. stub은 `oracle-vlm-1`). 온톨로지 부분 해시는
   프롬프트가 읽는 범주(`verbs` 전체·`gap_types`)의 내용 해시다. 프롬프트에는 원시 동작만 들어가지만
   해시는 범주 단위라 기술 수준 동사를 덧붙여도 버전이 바뀐다. 입력 해시는 고른 손 트랙·손 상태·
   객체 트랙 라벨 ID 집합의 해시다. 이 넷 중 하나라도 바뀌면 버전이 바뀌어 다음 실행이 다시 만든다.

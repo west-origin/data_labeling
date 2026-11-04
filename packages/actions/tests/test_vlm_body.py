@@ -1,7 +1,7 @@
 """행동 VLM 요청 본문 고정 테스트 (WP17.1, ADR 0040).
 
-행동 단계의 버전 문자열 `vlm-<model>`에는 요청 형식이 들어가지 않는다. 그래서 공통 전송
-(`dlp_models.vlm`)으로 옮기면서 요청 바이트가 조금이라도 바뀌면, 버전은 그대로인데 결과만 조용히
+행동 단계의 버전 문자열 `vlm-<model>@<fingerprint>`에는 요청 형식이 들어가지 않는다. 그래서 공통
+전송(`dlp_models.vlm`)으로 옮기면서 요청 바이트가 조금이라도 바뀌면, 버전은 그대로인데 결과만 조용히
 달라진다. `golden/vlm_body.json`은 리팩토링 **전** 코드(`OpenAICompatibleVlm.complete`)가 보낸
 본문을 그대로 저장한 파일이다. 지금 코드가 같은 입력에서 바이트까지 같은 본문을 보내야 한다.
 
@@ -58,7 +58,10 @@ def _request() -> SegmentRequest:
 
 
 def test_request_body_is_byte_identical_to_pre_refactor(monkeypatch: pytest.MonkeyPatch) -> None:
-    """공통 전송으로 옮긴 뒤에도 요청 본문 바이트와 버전 문자열이 리팩토링 전과 같다."""
+    """공통 전송으로 옮긴 뒤에도 요청 본문 바이트가 리팩토링 전과 같다.
+
+    버전 문자열에는 fingerprint가 붙었지만(F-PAR-90) 본문에는 들어가지 않는다 (골든 그대로).
+    """
 
     def frames(request: SegmentRequest, n: int, max_side: int) -> list[bytes]:
         return list(FRAMES)
@@ -71,10 +74,11 @@ def test_request_body_is_byte_identical_to_pre_refactor(monkeypatch: pytest.Monk
         return httpx.Response(200, json={"choices": [{"message": {"content": "{}"}}]})
 
     client = OpenAICompatibleVlm(
-        "http://vlm", "Qwen/Qwen2.5-VL-7B-Instruct", frames=2, max_side=448, timeout_s=5,
+        "http://vlm", "Qwen/Qwen2.5-VL-7B-Instruct", fingerprint="fp-test", frames=2, max_side=448,
+        timeout_s=5,
         transport=httpx.MockTransport(handler),
     )  # fmt: skip
-    assert client.version == "vlm-Qwen/Qwen2.5-VL-7B-Instruct"
+    assert client.version == "vlm-Qwen/Qwen2.5-VL-7B-Instruct@fp-test"
     assert client.complete(_request(), PROMPT, SCHEMA) == "{}"
     assert seen == [GOLDEN.read_bytes()]
 
@@ -95,8 +99,8 @@ def test_api_key_goes_to_header_only(monkeypatch: pytest.MonkeyPatch) -> None:
 
     for key in ("k-test", None):
         client = OpenAICompatibleVlm(
-            "http://vlm", "Qwen/Qwen2.5-VL-7B-Instruct", frames=2, max_side=448, timeout_s=5,
-            api_key=key, transport=httpx.MockTransport(handler),
+            "http://vlm", "Qwen/Qwen2.5-VL-7B-Instruct", fingerprint="fp-test", frames=2,
+            max_side=448, timeout_s=5, api_key=key, transport=httpx.MockTransport(handler),
         )  # fmt: skip
         client.complete(_request(), PROMPT, SCHEMA)
     with_key, without = seen
@@ -115,7 +119,7 @@ def test_4xx_is_config_error_without_retry(ontology: Ontology) -> None:
         return httpx.Response(401, text="unauthorized")
 
     client = OpenAICompatibleVlm(
-        "http://vlm", "m", frames=1, max_side=64, timeout_s=1,
+        "http://vlm", "m", fingerprint="fp-test", frames=1, max_side=64, timeout_s=1,
         transport=httpx.MockTransport(bad_request),
     )  # fmt: skip
     waits: list[float] = []

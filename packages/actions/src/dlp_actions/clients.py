@@ -4,8 +4,12 @@
 - `OpenAICompatibleVlm`: `/v1/chat/completions`에 프레임(JPEG base64) + 프롬프트 + JSON Schema를
   보낸다. 실제 서버에서 아직 검증하지 않았다 (클래스 docstring의 TODO(real-model) 표시).
   전송·오류 분류는 공통 모듈 `dlp_models.vlm`을 쓴다 (WP17.1, ADR 0040). 요청 본문 바이트는
-  리팩토링 전과 같다 (`packages/actions/tests/test_vlm_body.py`): 버전 문자열 `vlm-<model>`에
-  요청 형식이 들어가지 않으므로 본문이 바뀌면 버전이 그대로인 채 결과만 달라지기 때문이다.
+  리팩토링 전과 같다 (`packages/actions/tests/test_vlm_body.py`): 버전 문자열
+  `vlm-<model>@<fingerprint>`(`vlm_version`)에 요청 형식이 들어가지 않으므로 본문이 바뀌면 버전이
+  그대로인 채 결과만 달라지기 때문이다.
+- `vlm_version`: 서버 VLM의 버전 문자열. 엔진·양자화·가중치 revision
+  (`actions.yaml vlm.fingerprint`)이 들어가 같은 모델 이름으로 서버만 바꿔도
+  `dlp actions run|describe`가 다시 돈다 (F-PAR-90).
 - `sample_frames`: 구간에서 PTS 기준으로 프레임을 고르게 뽑는다.
 
 VLM에는 블러본만 보낸다 (`runner`가 블러본 경로를 넘긴다, ADR 0024).
@@ -171,6 +175,16 @@ def sample_frames(request: SegmentRequest, n: int, max_side: int) -> list[bytes]
     return out
 
 
+def vlm_version(model: str, fingerprint: str) -> str:
+    """서버 VLM의 버전 문자열 `vlm-<model>@<fingerprint>` (서버에 묻지 않고 정책만으로 정해진다).
+
+    fingerprint(엔진·양자화·가중치 revision)를 넣는 이유: 모델 이름이 같아도 결과가 달라지는데
+    정책 해시에는 넣지 않으므로 여기서만 버전을 바꾼다 (F-PAR-90). `+`는 버전 문자열의 부분
+    구분자라 쓰지 않는다.
+    """
+    return f"vlm-{model}@{fingerprint}"
+
+
 class OpenAICompatibleVlm:
     """OpenAI 호환 채팅 API (vLLM 등)로 프레임 여러 장 + 프롬프트를 보내고 JSON 응답을 받는다.
 
@@ -183,14 +197,17 @@ class OpenAICompatibleVlm:
     """
 
     def __init__(
-        self, base_url: str, model: str, *, frames: int, max_side: int, timeout_s: float,
-        api_key: str | None = None, transport: httpx.BaseTransport | None = None,
+        self, base_url: str, model: str, *, fingerprint: str, frames: int, max_side: int,
+        timeout_s: float, api_key: str | None = None,
+        transport: httpx.BaseTransport | None = None,
     ) -> None:  # fmt: skip
         """HTTP 클라이언트를 만든다 (연결은 첫 요청 때).
 
         Args:
             base_url: 서버 주소 (`--vlm-url` 또는 `DLP_VLM_URL`).
-            model: 모델 이름 (`actions.yaml vlm.model`). 버전 문자열 `vlm-<model>`에 들어간다.
+            model: 모델 이름 (`actions.yaml vlm.model`). 서버에 보내고 버전 문자열에 들어간다.
+            fingerprint: 엔진·양자화·가중치 revision (`actions.yaml vlm.fingerprint`). 버전
+                문자열에만 들어가고 요청 본문은 바꾸지 않는다 (`vlm_version`).
             frames: 구간마다 보낼 프레임 수.
             max_side: 프레임 긴 변 상한 픽셀.
             timeout_s: 요청 시간 초과 초.
@@ -198,7 +215,7 @@ class OpenAICompatibleVlm:
                 (본문은 그대로다).
             transport: httpx 전송 계층 (테스트에서 `MockTransport`).
         """
-        self.version = f"vlm-{model}"
+        self.version = vlm_version(model, fingerprint)
         self.model, self.frames, self.max_side = model, frames, max_side
         self.chat = OpenAICompatibleChat(
             base_url, model, timeout_s=timeout_s, api_key=api_key, transport=transport

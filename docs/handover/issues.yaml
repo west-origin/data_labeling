@@ -1121,9 +1121,9 @@ issues:
   - {id: F-PAR-89, title: "장면 분류 VLM(prelabel scene classifier: vlm)이 DLP_VLM_URL의 사내 대역 검사 없이 원본에서 만든 모자이크 프레임을 보냄", severity: medium, status: fixed, kind: code,
      files: [packages/cli/src/dlp_cli/prelabel_cmds.py], source: docs/handover/full-inspection-2026-11-04.md,
      note: "주석 단계(P3)에서 발견. 기본은 classifier: fixed라 운영 영향 없음. 원본을 받기 전에 actions.yaml vlm.internal_hosts로 check_hosts, 밖이면 SystemExit. 회귀: packages/cli/tests/test_prelabel_scene_hosts.py (수정 전 실패 확인)"}
-  - {id: F-PAR-90, title: "행동·설명 VLM 버전이 vlm-<모델 이름>뿐이라 같은 이름으로 엔진·양자화·가중치 revision을 바꿔도 다시 돌지 않음 (AI 검수는 fingerprint로 구분)", severity: low, status: candidate, kind: code,
-     files: [packages/actions/src/dlp_actions/clients.py, config/policies/actions.yaml], source: docs/handover/full-inspection-2026-11-04.md,
-     note: "주석 단계(P3) 코드 읽기로 발견, 실행 재현 전 후보. aireview.yaml backend.fingerprint와 같은 항목을 actions.yaml vlm에 두는 안."}
+  - {id: F-PAR-90, title: "행동·설명 VLM 버전이 vlm-<모델 이름>뿐이라 같은 이름으로 엔진·양자화·가중치 revision을 바꿔도 다시 돌지 않음 (AI 검수는 fingerprint로 구분)", severity: low, status: fixed, kind: code,
+     files: [packages/actions/src/dlp_actions/clients.py, packages/actions/src/dlp_actions/policy.py, config/policies/actions.yaml, packages/cli/src/dlp_cli/actions_cmds.py], source: docs/handover/full-inspection-2026-11-04.md,
+     note: "2026-11-04 수정. actions.yaml vlm.fingerprint(필수, 정책 해시 밖) → 서버 VLM 버전 vlm-<모델>@<fingerprint>. 행동·설명 버전이 바뀌어 서버 결과는 다음 실행에서 한 번 다시 돈다(검수 라벨 보호), stub 버전은 그대로. 회귀: packages/actions/tests/test_actions.py::test_vlm_fingerprint_changes_server_vlm_version_f_par_90, packages/cli/tests/test_actions_run_cmd.py::test_client_version_follows_policy_fingerprint_f_par_90"}
   - {id: F-PAR-91, title: "마스크 프롬프트 트랙 순위 PromptTrack.rank가 confidence 0.0을 1.0으로 보아(or 1.0) 신뢰도 0 트랙이 앞섬", severity: low, status: fixed, kind: code,
      files: [packages/prelabel/src/dlp_prelabel/masks.py], source: docs/handover/full-inspection-2026-11-04.md,
      note: "주석 단계(P3)에서 발견, 2026-11-04 재현. confidence가 None일 때만 1.0, 0.0은 그대로. 회귀: packages/prelabel/tests/test_mask_prompt_rank.py::test_zero_confidence_track_ranks_last_f_par_91 (수정 전 실패 확인)"}

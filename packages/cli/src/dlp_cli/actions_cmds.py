@@ -169,6 +169,7 @@ def _client(vlm_url: str | None, policy: ActionsPolicy) -> tuple[OpenAICompatibl
     client = OpenAICompatibleVlm(
         url,
         vlm.model,
+        fingerprint=vlm.fingerprint,
         frames=vlm.frames_per_segment,
         max_side=vlm.max_side_px,
         timeout_s=vlm.timeout_s,

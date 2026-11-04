@@ -15,10 +15,12 @@ from typing import Any
 import httpx
 import numpy as np
 import pytest
+import yaml
+from pydantic import ValidationError
 
 from dlp_actions.assemble import merge_spans, to_labels
 from dlp_actions.boundaries import boundary_candidates, segments, wrist_series
-from dlp_actions.clients import OpenAICompatibleVlm, OracleVlm
+from dlp_actions.clients import OpenAICompatibleVlm, OracleVlm, vlm_version
 from dlp_actions.pipeline import HandResult, segment_hand
 from dlp_actions.policy import ActionsPolicy, load_policy
 from dlp_actions.runner import vlm_request_count
@@ -303,7 +305,7 @@ def test_openai_compatible_client_sends_frames_and_schema(
         return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(answer)}}]})
 
     client = OpenAICompatibleVlm(
-        "http://vlm", "test-model", frames=4, max_side=128, timeout_s=5,
+        "http://vlm", "test-model", fingerprint="fp-test", frames=4, max_side=128, timeout_s=5,
         transport=httpx.MockTransport(handler),
     )  # fmt: skip
     request = _request(video=video, start_ms=100, end_ms=900)
@@ -336,7 +338,7 @@ def test_vlm_server_errors_back_off_then_abort_not_unknown(ontology: Ontology) -
         return httpx.Response(503, text="busy")
 
     client = OpenAICompatibleVlm(
-        "http://vlm", "test-model", frames=1, max_side=64, timeout_s=1,
+        "http://vlm", "test-model", fingerprint="fp-test", frames=1, max_side=64, timeout_s=1,
         transport=httpx.MockTransport(failing),
     )  # fmt: skip
     with pytest.raises(VlmUnavailableError):
@@ -358,7 +360,7 @@ def test_vlm_server_errors_back_off_then_abort_not_unknown(ontology: Ontology) -
         return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(answer)}}]})
 
     client = OpenAICompatibleVlm(
-        "http://vlm", "test-model", frames=1, max_side=64, timeout_s=1,
+        "http://vlm", "test-model", fingerprint="fp-test", frames=1, max_side=64, timeout_s=1,
         transport=httpx.MockTransport(flaky),
     )  # fmt: skip
     ok = classify(client, _request(), ontology, max_retries=2, backoff_s=(3.0,), sleep=waits.append)
@@ -385,6 +387,38 @@ def test_prompt_version_keeps_existing_model_version(policy: ActionsPolicy) -> N
     assert policy.digest == "6bc9c0790f56" and policy.stamp == policy.digest
     other = policy.model_copy(update={"prompt_version": 2})
     assert other.digest == policy.digest and other.stamp == f"{policy.digest}+pv2"
+
+
+def test_vlm_fingerprint_changes_server_vlm_version_f_par_90(policy: ActionsPolicy) -> None:
+    """F-PAR-90: 같은 모델 이름이라도 엔진·양자화·가중치 revision(`vlm.fingerprint`)이 바뀌면
+    서버 VLM 버전이 바뀌어 `dlp actions run|describe`가 다시 돈다.
+
+    정답 근거: 저장소 actions.yaml의 `vlm.model`·`vlm.fingerprint`. fingerprint는 VLM 버전에만
+    들어가고 정책 해시에는 들어가지 않는다 (stub 버전 `oracle-vlm-1`·기존 해시는 그대로).
+    """
+    vlm = policy.vlm
+    assert vlm.fingerprint == "vllm-bf16"
+    assert vlm_version(vlm.model, vlm.fingerprint) == "vlm-Qwen/Qwen2.5-VL-7B-Instruct@vllm-bf16"
+
+    def client(fingerprint: str) -> OpenAICompatibleVlm:
+        return OpenAICompatibleVlm(
+            "http://vlm", vlm.model, fingerprint=fingerprint, frames=1, max_side=64, timeout_s=1
+        )
+
+    assert client("vllm-bf16").version != client("vllm-awq-int4").version
+    requant = policy.model_copy(update={"vlm": vlm.model_copy(update={"fingerprint": "awq"})})
+    assert requant.digest == policy.digest
+
+
+def test_vlm_fingerprint_is_required_f_par_90() -> None:
+    """F-PAR-90: `vlm.fingerprint`가 없거나 비면 적재 오류다 (빠뜨려 버전이 안 바뀌는 일이 없게)."""
+    data: Any = yaml.safe_load((ROOT / "config/policies/actions.yaml").read_text("utf-8"))
+    del data["vlm"]["fingerprint"]
+    with pytest.raises(ValidationError):
+        ActionsPolicy.model_validate(data)
+    data["vlm"]["fingerprint"] = ""
+    with pytest.raises(ValidationError):
+        ActionsPolicy.model_validate(data)
 
 
 @pytest.mark.parametrize("seed", [0, 3])

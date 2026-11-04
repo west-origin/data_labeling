@@ -43,6 +43,20 @@ def test_client_accepts_internal_address() -> None:
     assert client is not None and code == actions_cmds.OK
 
 
+def test_client_version_follows_policy_fingerprint_f_par_90() -> None:
+    """F-PAR-90: CLI가 만드는 VLM 클라이언트 버전에 `vlm.fingerprint`가 들어가, 같은 모델 이름으로
+    엔진·양자화·가중치를 바꾸면 `dlp actions run|describe`의 버전이 바뀐다."""
+    policy = load_policy(repo_root())
+    requant = policy.model_copy(
+        update={"vlm": policy.vlm.model_copy(update={"fingerprint": "vllm-awq-int4"})}
+    )
+    a, _ = actions_cmds._client("http://10.0.0.11:8000", policy)  # pyright: ignore[reportPrivateUsage]
+    b, _ = actions_cmds._client("http://10.0.0.11:8000", requant)  # pyright: ignore[reportPrivateUsage]
+    assert a is not None and b is not None
+    assert a.version == f"vlm-{policy.vlm.model}@{policy.vlm.fingerprint}"
+    assert b.version == f"vlm-{policy.vlm.model}@vllm-awq-int4" != a.version
+
+
 def test_run_and_describe_exit_5_for_outside_url(monkeypatch: pytest.MonkeyPatch) -> None:
     """run·describe 모두 DB·저장소에 닿기 전에 5로 끝난다."""
 
