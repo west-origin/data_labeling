@@ -3,13 +3,16 @@
 
 ADR 0054. 2026-10-22 첫 실영상 파일럿에서 OWLv2 도구 트랙의 약 69%가 키프레임 하나짜리였고, 손
 트랙은 분당 70여 번 끊기고 프레임마다 떨렸다. 이 모듈은 어댑터가 라벨을 만들기 직전에 적용하는 순수
-함수다 (모델·DB 없음).
+함수다 (모델·DB 없음). 호출자: `adapters.mediapipe_models`(손 평활·끊김 채우기, COCO 객체 거르기),
+`adapters.owl_objects`·`adapters.yolox_tools`(도구 박스 거르기). 정책: `prelabel.yaml`의
+`objects`·`open_vocab_objects`·`closed_vocab_tools`.track_filter, `hands.smoothing`,
+`hands.gap_fill`. 시각은 모두 그 스트림 PTS ms다.
 
 - `filter_tracks`: 객체·도구 박스 트랙. 시작 문턱(start_score) 이상인 탐지가 나온 뒤부터 트랙을 열고
   (그 앞 키프레임은 버림), 남은 키프레임 수·길이가 정책보다 짧으면 버린다. 탐지 문턱(정책
   min_score)은 이 함수가 보지 않는다: 어댑터가 탐지 때 이미 거른 뒤 잇는다 (둘을 합쳐
-  히스테리시스). 프라이버시 탐지에는 쓰지 않는다 (재현 우선, 지우지 않고 표시만:
-  `dlp_privacy.hints`).
+  히스테리시스). 프라이버시 탐지에는 쓰지 않는다 (재현율 우선이라 탐지를 거르거나 지우지 않고
+  오탐 의심은 검수 화면 표시로만 쓴다: `dlp_privacy.hints`, ADR 0054·0055).
 - `OneEuro`·`smooth_hand_frames`: 손 2D를 정규화 좌표(0~1)에서 One Euro 필터로 평활한다 (느릴 때
   강하게, 빠를 때 약하게 → 정지 떨림은 줄고 빠른 동작의 지연은 작다). 끊김(reset_gap_ms 초과) 뒤에는
   새로 시작한다. 손 중심 3D 점(world)은 손 모양이라 그대로 둔다.
@@ -62,9 +65,11 @@ def _alpha(cutoff_hz: float, dt_s: float) -> float:
 
 @dataclass
 class OneEuro:
-    """One Euro 필터 (Casiez 2012) — 값 배열을 한꺼번에 평활한다.
+    """One Euro 필터 (Casiez 2012). 값 배열(예: 손 21관절의 정규화 x, y)을 원소마다 한꺼번에
+    평활한다.
 
-    차단 주파수 = min_cutoff + beta x |변화 속도(평활)|. 속도 단위는 값 단위/초.
+    차단 주파수 = min_cutoff + beta x |변화 속도(평활)|. 속도 단위는 값 단위/초. 상태(직전 값·속도·
+    시각)를 지니므로 한 손 트랙에 하나씩 만든다.
     """
 
     min_cutoff_hz: float
@@ -75,7 +80,11 @@ class OneEuro:
     _t: float | None = None
 
     def __call__(self, t_ms: float, x: NDArray[np.float64]) -> NDArray[np.float64]:
-        """시각 t_ms의 값 x를 평활한 값. 첫 호출이나 시각이 앞서지 않으면 그대로 돌려준다."""
+        """시각 t_ms의 값 x를 평활한 값.
+
+        첫 호출이거나 t_ms가 직전 시각보다 늦지 않으면 x를 그대로 돌려주고 상태를 x에서 새로
+        시작한다 (속도 0).
+        """
         if self._x is None or self._t is None or self._dx is None or t_ms <= self._t:
             self._x, self._dx, self._t = x.copy(), np.zeros_like(x), t_ms
             return x.copy()

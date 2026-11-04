@@ -84,6 +84,11 @@ class _Pass:
         policy: PrelabelPolicy,
         wearer: WearerEvidence | None,
     ) -> None:
+        """detect: 프레임 → 사람 박스. pose: (프레임, 박스) → 관절·점수. wearer: 바디캠 착용자 증거.
+
+        착용자 증거가 있고 정책이 켜 두었을 때만 착용자 자세 억제(`wearer_suppression.stages`에
+        body)와 팔 추정(`arm.enabled`)을 한다. 3인칭 스트림은 증거가 None이라 둘 다 하지 않는다.
+        """
         self.detect, self.pose, self.policy, self.wearer = detect, pose, policy, wearer
         ws = policy.wearer_suppression
         self.suppress = wearer is not None and ws.enabled and "body" in ws.stages
@@ -246,11 +251,13 @@ class RtmPose(WearerAware):
         model = RTMPose(str(self.pose_path), model_input_size=(192, 256), device="cpu")
 
         def detect(bgr: NDArray[np.uint8]) -> NDArray[np.float32]:
+            """BGR 프레임 → 사람 박스 (N, 4) x1, y1, x2, y2 픽셀 (다른 COCO 클래스는 버린다)."""
             # found: (N, 4) x1, y1, x2, y2 픽셀, classes: (N,) COCO 클래스 번호 (0 = 사람, 점수 순)
             found, classes = detector(bgr)
             return np.asarray(found, dtype=np.float32).reshape(-1, 4)[np.asarray(classes) == 0]
 
         def pose(bgr: NDArray[np.uint8], boxes: list[list[float]]) -> tuple[Any, Any]:
+            """BGR 프레임과 사람 박스 → (관절 (N, 17, 2) 픽셀, 점수 (N, 17))."""
             return model(bgr, bboxes=boxes)
 
         # 반올림한 PTS ms가 앞 프레임과 같은 프레임은 건너뛴다: 한 사람 트랙에 같은 시각 키프레임이

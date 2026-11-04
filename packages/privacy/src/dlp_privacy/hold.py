@@ -174,7 +174,7 @@ def invalidate_hold_renders(
 def release_hold(
     conn: sa.Connection, session_id: str, now: datetime, *, reason: str, actor: str
 ) -> PrivacyHoldEvent:
-    """보류를 푼다 (해제 기록만). 승인은 돌려놓지 않는다 — 재승인 절차를 다시 거친다.
+    """보류를 푼다 (해제 기록만). 승인은 돌려놓지 않는다. 재승인 절차를 다시 거친다.
 
     Raises:
         ValueError: 사유·행위자가 비었을 때.

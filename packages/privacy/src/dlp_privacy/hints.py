@@ -1,9 +1,9 @@
 """블러 검수 힌트: 오탐 의심 표시 (ADR 0055). 블러 트랙을 지우거나 바꾸지 않는다.
 
-프라이버시는 재현이 우선이다. 이 모듈은 사람의 블러 검수 화면에 "오탐 의심" 구간을 덧붙여, 검수자가
-누락 위험 구간(`review.ReviewSegment`의 기존 이유)을 먼저 보고 그 다음에 오탐을 빨리 걷어내게 한다.
-힌트는 검수 우선 구간 목록 끝(우선순위 = review_priority 길이)에 붙는 `suspected_false_positive`
-구간이다. 블러 라벨·렌더·승인 판정에는 쓰이지 않는다.
+프라이버시는 재현율(놓치지 않기)이 우선이다. 이 모듈은 사람의 블러 검수 화면에 "오탐 의심" 구간을
+덧붙여, 검수자가 누락 위험 구간(`review.ReviewSegment`의 기존 이유)을 먼저 보고 그 다음에 오탐을
+빨리 걷어내게 한다. 힌트는 검수 우선 구간 목록 끝(우선순위 = review_priority 길이)에 붙는
+`suspected_false_positive` 구간이다. 블러 라벨·렌더·승인 판정에는 쓰이지 않는다.
 
 규칙 (트랙마다, 정책 `privacy.yaml hints`):
 - `no_head` (얼굴만): 키프레임 중 박스(여유 margin) 안에 보이는 RTMPose 머리 관절(코·눈·귀)이
@@ -14,7 +14,7 @@
 - `short_flicker` (모든 대상): 관측 길이가 short_ms 미만 (한두 프레임 깜박임, ADR 0054 2절).
   관측 길이는 화면 안 키프레임의 처음~끝 길이다. 모델 출처 트랙은 탐지 유지(첫 관측 앞·마지막
   관측 뒤 blur_hold_ms, `tracker.track_frames`)를 앞뒤로 뺀다 (F-PMS-46). 영상 처음·끝에 닿아
-  유지가 잘린 모델 트랙은 실제보다 짧게 보여 힌트가 더 붙을 수 있다 (표시만이라 재현에는 무해).
+  유지가 잘린 모델 트랙은 실제보다 짧게 보여 힌트가 더 붙을 수 있다 (표시만이라 재현율에는 무해).
 - `ai_crop_no` (AI 조각 확인을 돌린 트랙, ADR 0056): 사내 VLM이 블러본 조각의 주변 맥락으로 그
   대상이 아니라고 답함 (`dlp_aireview.crops`).
 - `tta_unstable` (TTA를 돌린 트랙): 좌우 뒤집기·배율 변환 화면에서 같은 자리 탐지가 다시 나온
@@ -146,12 +146,14 @@ def face_rules(
     if heads is not None:
 
         def no_head(k: BoxKeyframe) -> bool:
+            """넓힌 얼굴 박스 안에 그 시각(허용 오차 안) RTMPose 머리 관절이 하나도 없다."""
             x0, y0, x1, y1 = _expand(k.x, k.y, k.w, k.h, m)
             return not any(x0 <= hx <= x1 and y0 <= hy <= y1 for hx, hy in heads.near(k.t_ms, tol))
 
         out.append(("no_head", _share(frames, no_head)))
 
     def on_hand(k: BoxKeyframe) -> bool:
+        """얼굴 박스 중심이 그 시각(허용 오차 안) 손 관절 외접 박스(넓힌 것) 안에 있다."""
         cx, cy = k.x + k.w / 2, k.y + k.h / 2
         for b in hands.near(k.t_ms, tol):
             x0, y0, x1, y1 = _expand(*b, m)

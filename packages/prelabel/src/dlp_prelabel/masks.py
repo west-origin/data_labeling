@@ -6,23 +6,30 @@
 
 - 박스 프롬프트: 그 프레임 시각의 박스 키프레임, 없으면 앞뒤 키프레임(둘 다 보이고 간격이
   `box_max_gap_ms` 이하)을 선형 보간한 박스. 착용자 몸 판정(`wearer_suppress.box_frame_is_wearer`,
-  `wearer_suppression` 값)에 걸린 박스 키프레임과, 아래 변이 화면 아래 띠에 닿는 사람 박스
-  (`person_bottom_band`, 손이 안 보이는 시각의 착용자 몸통)는 쓰지 않는다 (착용자 팔·몸통은 객체
-  마스크가 되지 않는다, ADR 0058).
+  `wearer_suppression` 값)에 걸린 박스와, 아래 변이 화면 아래 띠에 닿는 사람 박스
+  (`person_bottom_band`, 손이 보이는지와 무관하게 늘 본다. 손이 안 보여 착용자 증거가 없는 시각의
+  착용자 몸통을 잡으려는 규칙이다)는 쓰지 않는다 (착용자 팔·몸통은 마스크 프롬프트가 아니다, ADR
+  0058·0059).
 - 손 프롬프트: 그 시각(허용 오차 안)의 관측 키프레임(보간 키프레임은 관측이 아니라 뺀다, ADR 0054)
   에서 보이는 관절(visibility 2) 외접 박스를 넓힌 것과 손 안쪽 양성 점(`hand_point_joints` 중 라벨이
   있는 것, visibility 1 이상: 가려진 관절도 넣는다).
-- 검사: 예측 IoU < min_score, 넓이 / 박스 넓이 < min_area_ratio, 넓힌 박스 밖 화소 비율 >
-  max_outside_ratio(새어 나감)이면 그 키프레임을 버리고 사유를 센다. 객체 마스크에서는 같은
-  프레임 손 마스크를 뺀다 (`subtract_hands`). 마스크 외접 박스와 프롬프트 박스의 IoU를 요약에
-  남긴다.
+- 검사 (`check_mask`): 대상 없음, 예측 IoU < min_score, 넓힌 박스 밖 화소 비율 >
+  max_outside_ratio(새어 나감), 넓이 / 박스 넓이 < min_area_ratio이면 그 키프레임을 버리고 사유를
+  센다. 객체 마스크에서는 같은 프레임 손 마스크를 뺀다 (`subtract_hands`, 넓이 검사는 뺀 뒤).
+  마스크 외접 박스와 프롬프트 박스의 IoU를 요약에 남긴다.
 - 출력: 프롬프트 트랙마다 mask_track 하나 (entity·class는 프롬프트 트랙, 손은 `hand_class`),
   `derived_from` = 프롬프트 트랙 라벨 ID, 키프레임마다 COCO RLE와 예측 IoU(`score`), 라벨 신뢰도는
   키프레임 점수 평균. 라벨 ID `<세션>-<스트림>-masks-<version_tag>-<개체>` (같은 entity_id 프롬프트
   트랙이 여럿이면 `<개체>-<트랙 라벨 ID 해시>`, `assign_slots`, F-PAR-74).
 
-파이프라인 위치: `runner._masks`가 입력 트랙을 골라(`pick_mask_tracks`) 부른다. 프라이버시 블러와
-무관하다 (블러는 박스 그대로이고 마스크로 바꾸지 않는다). 시간: 키프레임 시각은 바디캠 PTS ms다.
+`derived_from`은 출처 기록일 뿐이다. 마스크는 프롬프트 트랙의 검수를 물려받지 않고 따로 검수한다
+(3D 궤적과 다르다). 검수된·사람 마스크가 이미 덮는 트랙은 러너가 프롬프트에서 뺀다
+(`runner.blocked_mask_tracks`).
+
+파이프라인 위치: `runner._masks`가 입력 트랙을 골라(`runner.pick_mask_tracks`) `MaskMaker.run`을
+부른다. 이 모듈은 DB에 쓰지 않는다. 프라이버시 블러와 무관하다 (블러는 박스 그대로이고 마스크로
+바꾸지 않는다). 시간: 키프레임 시각은 바디캠 PTS ms다. 키프레임은 모델을 돌린 프레임에만 있고
+보간하지 않는다.
 
 CPU stub: `BoxEllipseSegmenter` (프롬프트 박스에 내접한 타원, CI·합성 시험용).
 """
@@ -437,7 +444,16 @@ def make_masks(
     """영상 프레임을 돌며 frame_stride_ms마다 프롬프트가 있는 프레임에서 마스크를 만든다.
 
     프롬프트가 없는 프레임은 모델을 돌리지 않고 다음 프레임을 본다 (간격 시계는 모델을 돌린
-    프레임에서만 간다).
+    프레임에서만 간다). 프롬프트 트랙 전체의 첫 키프레임 앞 프레임은 건너뛰고, 마지막 키프레임 뒤
+    프레임이 나오면 멈춘다. PTS 반올림으로 시각이 같은 프레임은 하나만 본다 (`strictly_increasing`).
+
+    Args:
+        frames: (스트림 PTS ms, RGB 프레임) 순회.
+        sources: 프롬프트 트랙 (`mask_source`·`assign_slots`를 거친 것).
+        segmenter: 마스크 모델.
+        policy: `prelabel.yaml masks`.
+        wearer: (착용자 증거, 착용자 억제 정책). None이면 착용자 증거 판정을 하지 않는다 (화면 아래
+            띠 규칙은 그대로 본다).
     """
     report = MaskReport()
     out: dict[str, list[MaskKeyframe]] = {}

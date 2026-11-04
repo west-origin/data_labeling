@@ -27,9 +27,9 @@
     - TODO(real-model): 루프 닫힘·묶음 조정이 있는 외부 시각-관성 SLAM 엔진(Basalt, BSD-3)은
       연동하지 않았다. 같은 `CameraPoseEstimator` 어댑터로 붙인다 (ADR 0046 라이선스 조사).
 
-파이프라인 위치: `runner._camera_pose`가 바디캠 영상·IMU·깊이 모델로 부르고 결과를 trajectory3d
-(entity_id="camera", frame=world)로 저장한다 (`pose_label`). 월드 좌표 손 궤적은 `worldframe`이
-만든다. 정책: `prelabel.yaml camera_pose`.
+파이프라인 위치: `runner._PoseStage.camera_pose`가 바디캠 영상·IMU·깊이 모델로 부르고 결과를
+trajectory3d(entity_id="camera", frame=world)로 저장한다 (`pose_label`). 월드 좌표 손 궤적은
+`worldframe`이 만든다. 정책: `prelabel.yaml camera_pose`.
 """
 
 from __future__ import annotations

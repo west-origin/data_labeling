@@ -115,6 +115,7 @@ class YoloxTools(WearerAware):
         sec = policy.closed_vocab_tools
 
         def open_model() -> ToolDetector:
+            """가중치로 ONNX 탐지기를 연다 (`run`이 스트림마다 한 번 부른다)."""
             return Yolox(
                 path,
                 len(sec.classes),

@@ -3,15 +3,18 @@
 `campose`의 카메라 자세(R_wc, p)로 카메라 좌표 표본 X_c를 X_w = R_wc · X_c + p로 바꾼다 (R_wc는
 카메라 → 월드 회전, p는 월드 좌표 카메라 중심, 미터. 규약은 `posemath`). 자세는 표본 시각 양쪽 자세
 표본 사이를 보간한다 (회전 구면 보간, 위치 선형). 양쪽 간격이 `world_frame.max_pose_gap_ms`보다
-크거나 자세 범위 밖이면 그 표본은 바꾸지 않는다 (외삽하지 않는다: 그 사이 머리가 얼마나 움직였는지
-모르므로 지어내지 않는다). 시각은 둘 다 바디캠 PTS ms라 맞춰 볼 필요가 없다 (ADR 0019).
+크거나 자세 범위 밖이면 그 표본은 월드 궤적에서 빠진다 (외삽하지 않는다: 그 사이 머리가 얼마나
+움직였는지 모르므로 지어내지 않는다). 시각은 둘 다 바디캠 PTS ms라 맞춰 볼 필요가 없다 (ADR 0019).
 
-결과는 같은 (개체, 부위)의 새 trajectory3d (frame=world, source_3d=원래 값, derived_from=[카메라
-좌표 궤적 ID, 자세 ID]). 표본 방식(method)은 원래 값, 신뢰도 = 원래 표본 신뢰도(없으면 1) x 보간한
-자세 신뢰도(두 표본 중 낮은 쪽). 원래 카메라 좌표 궤적은 그대로 남는다 (덮어쓰지 않는다).
+결과는 같은 (개체, 부위)의 새 trajectory3d (frame=world, source_3d·intrinsics=원래 값,
+derived_from=[카메라 좌표 궤적 ID, 자세 ID]). 표본 방식(method)과 물리 제약 표시(flags)는 원래 값,
+신뢰도 = 원래 표본 신뢰도(없으면 1) x 그 시각 자세 신뢰도(보간이면 두 자세 표본 중 낮은 쪽). 라벨
+신뢰도는 표본 신뢰도 평균이다. 원래 카메라 좌표 궤적은 그대로 남는다 (덮어쓰지 않는다). 월드 궤적은
+카메라 좌표 궤적처럼 출처 2D 트랙의 검수를 궤적 따르기로 물려받는다 (ADR 0048·0050, 러너가 적용).
 
-파이프라인 위치: `runner._world`가 현재 카메라 자세 하나와 바디캠의 현재 카메라 좌표 궤적((개체,
-부위)마다 하나)으로 부른다. 정책: `prelabel.yaml world_frame`.
+파이프라인 위치: `runner._PoseStage.world`가 현재 카메라 자세 하나와 바디캠의 현재 카메라 좌표
+궤적(`runner.pick_world_inputs`: (개체, 부위)마다 하나, 박스 중심은 출처 박스 트랙마다 하나)으로
+부른다. 이 모듈은 DB에 쓰지 않는다. 정책: `prelabel.yaml world_frame`.
 """
 
 from __future__ import annotations
@@ -34,7 +37,8 @@ def pose_at(
 ) -> tuple[Mat3, Vec3, float] | None:
     """시각 t의 (R_wc, p, 신뢰도). 같은 시각 표본이 있으면 그 값, 두 표본 사이면 보간, 아니면 None.
 
-    poses는 시각 순이어야 한다.
+    poses는 시각 순이어야 한다. 두 표본 간격이 max_gap_ms보다 크거나, t가 첫 표본 앞·마지막 표본
+    뒤면 None이다 (외삽하지 않는다).
     """
     if not poses:
         return None

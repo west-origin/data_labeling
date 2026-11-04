@@ -17,11 +17,17 @@ frame_stride_ms마다 깊이 맵을 만들고, 그 프레임에 있는 손 키�
   모드) 그 캘리브레이션을 쓰지 않고 화각 근사로 떨어지며 표본·궤적 출처도 hfov_approx다
   (`intrinsics_for`, F-PAR-44).
 
-파이프라인 위치: `runner._lift`가 바디캠의 현재 박스 트랙 전부와 hand21 손·arm3 팔 트랙을 (개체,
-트랙 종류)마다 하나씩 골라(`runner.pick_lift_tracks`) 넘겨 부른다. 같은 entity_id 박스
+- 착용자 팔 arm3 트랙(ADR 0058)은 `depth.arm_points`(예: elbow)의 보이는 점만 픽셀 깊이로 올린다.
+- 보간해 채운 키프레임(`interpolated`, `temporal.fill_gaps`)은 관측이 아니다. 올리지 않는다
+  (ADR 0054).
+- 손·팔 3D 물리 제약(`constraints3d`)이 어긴 표본에 `flags`를 남기고 신뢰도를 낮추거나 뺀다.
+
+파이프라인 위치: `runner._lift`가 바디캠의 현재 박스 트랙 전부와, hand21 손·arm3 팔 트랙을 (개체,
+트랙 종류)마다 하나 골라(`runner.pick_lift_tracks`) 넘겨 부른다. 같은 entity_id 박스
 트랙(버전마다 다시 매기는 번호)은 라벨 ID 끝으로 구분한 궤적을 따로 낸다 (`lift_slots`, F-PAR-87).
-결과는 trajectory3d 라벨 (frame=camera, source_3d=mono_depth)이고, 관계 단계(`dlp_relations`)의
-도구-표면 접촉이 쓴다. 정책: `prelabel.yaml depth`, 모델:
+결과는 trajectory3d 라벨 (frame=camera, source_3d=mono_depth, `derived_from`=입력 2D 트랙)이고,
+월드 좌표 단계(`worldframe`)와 관계 단계(`dlp_relations`)의 도구-표면 접촉이 쓴다. 이 모듈은 DB에
+쓰지 않는다 (러너가 쓴다). 정책: `prelabel.yaml depth`, 모델:
 `config/models.yaml depth_metric_indoor_small` (ADR 0010: review).
 시간: 3D 샘플 시각은 바디캠 스트림 PTS ms다 (공간 라벨 규약, ADR 0019).
 """
@@ -348,15 +354,16 @@ def lift_tracks(
     calib: CameraIntrinsics | None,
     policy: DepthPolicy,
 ) -> dict[tuple[str, str | None], list[Trajectory3DSample]]:
-    """(칸, part) → 3D 샘플. tracks는 hand21 키포인트 트랙과 박스 트랙 (칸은 `lift_slots`).
+    """(칸, part) → 3D 샘플. tracks는 hand21·arm3 키포인트 트랙과 박스 트랙 (칸은 `lift_slots`).
 
-    hand21 트랙은 `policy.hand_points` 관절마다 part=관절 이름(예: "wrist", "pinky_tip"), 박스
-    트랙은 화면 밖이 아닌 키프레임의 박스 중심을 part=None으로 올린다. 손 관절은 키프레임에 world가
-    있으면 손 전체 맞춤(`_lift_hand`, ADR 0044), 없으면 관절별 깊이다. 깊이는 키프레임 시각과 PTS가
-    정확히 같은 프레임에서만 읽고, 마지막으로 깊이를 만든 프레임에서 frame_stride_ms가 지나기 전
-    프레임은 건너뛴다 (0이어도 마지막 프레임보다 늦은 프레임만 쓴다: PTS 반올림으로 같은 ms 프레임이
-    이어져도 표본은 시각마다 하나). 깊이가 nan(화면 밖)이거나 [min_depth_m, max_depth_m] 밖이면 그
-    점은 버린다. 표본마다 추정 방식(`Lift3DMethod`)과 신뢰도를 싣는다 (ADR 0045).
+    hand21 트랙은 `policy.hand_points` 관절마다 part=관절 이름(예: "wrist", "pinky_tip"), arm3
+    트랙은 `policy.arm_points` 점마다(보이는 점만, 픽셀 깊이), 박스 트랙은 화면 밖이 아닌 키프레임의
+    박스 중심을 part=None으로 올린다. 보간 키프레임은 올리지 않는다 (ADR 0054). 손 관절은 키프레임에
+    world가 있으면 손 전체 맞춤(`_lift_hand`, ADR 0044), 없으면 관절별 깊이다. 깊이는 키프레임
+    시각과 PTS가 정확히 같은 프레임에서만 읽고, 마지막으로 깊이를 만든 프레임에서 frame_stride_ms가
+    지나기 전 프레임은 건너뛴다 (0이어도 마지막 프레임보다 늦은 프레임만 쓴다: PTS 반올림으로 같은
+    ms 프레임이 이어져도 표본은 시각마다 하나). 깊이가 nan(화면 밖)이거나 [min_depth_m, max_depth_m]
+    밖이면 그 점은 버린다. 표본마다 추정 방식(`Lift3DMethod`)과 신뢰도를 싣는다 (ADR 0045).
 
     Args:
         frames: (스트림 PTS ms, RGB 프레임) 순회 (`common.iter_frames`).
@@ -481,7 +488,7 @@ class DepthLifter:
     name: "depth3d". version: `depth3d-<가중치 버전>+hf5+fe1+ar1+p<정책 해시>` (정책 해시는
     `lift_policy_digest`: depth 절, 초점 추정이 켜졌으면 palm_estimate 절도. hf1: 손 중심 3D 점
     맞춤 판, ADR 0044. hf2: 표본별 방식·신뢰도, ADR 0045. hf3: 궤적마다 입력 트랙 ID
-    `derived_from`, ADR 0048 — 3D가 2D 손 트랙 검수를 물려받는 근거. hf4: 손 모델 자세 회전
+    `derived_from`, ADR 0048. 3D가 2D 손 트랙 검수를 물려받는 근거다. hf4: 손 모델 자세 회전
     다듬기·해상도와 무관한 상대 재투영 문턱, 맞춤 없는 손가락 끝 빼기, 화면비가 다른 캘리브레이션
     거부, F-PAR-40·42·43·44. hf5: 손 3D 물리 제약 표시·신뢰도 낮추기·튄 표본 빼기, 보간 키프레임
     제외, ADR 0054. fe1: 캘리브레이션 없는 세션의 손 크기 초점 거리 추정, ADR 0056. ar1: 착용자 팔
@@ -546,7 +553,8 @@ class DepthLifter:
         Args:
             video: 바디캠 영상 로컬 경로.
             session_id, stream_id: 라벨의 세션·스트림 (바디캠).
-            tracks: 올릴 손·박스 트랙. 키포인트는 (개체, 트랙 종류)마다 하나 (`lift_tracks` 참고).
+            tracks: 올릴 hand21·arm3·박스 트랙. 키포인트는 (개체, 트랙 종류)마다 하나
+                (`lift_tracks` 참고).
             calib: 카메라 내부 파라미터 (세션 또는 등록된 캘리브레이션,
                 `calibration_repository.session_intrinsics`). None이거나 영상과 화면비가 맞지
                 않으면 화각 근사이고 페이로드 intrinsics는 hfov_approx다 (F-PAR-44).

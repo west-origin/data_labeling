@@ -17,6 +17,14 @@
 - `model_version` / `detection_policy_digest`: 탐지 모델 버전 문자열과 그 안의 정책 해시.
 - `used_detectors`: 정책 대상이 실제로 쓰는 탐지기만 고른다.
 
+지키는 규칙 (CLAUDE.md, ADR 0054·0055):
+- 탐지를 버리지 않는다. 시간 거르기(`dlp_prelabel.temporal`)나 오탐 힌트(`hints`)로 탐지를
+  지우거나 바꾸지 않는다. 이 파이프라인이 버리는 것은 정책 대상이 아닌 중간 결과(반사면 영역)뿐이다.
+  오탐 의심은 검수 화면 표시로만 쓴다.
+- 블러는 박스다. 트랙 박스는 합치기·보간·유지·여유로 커지기만 하고 모양 마스크로 바꾸지 않는다.
+- 탐지기는 원본 프레임을 본다. 이 결과는 사람 검수와 승인(`runner.approve_session`)을 거친 뒤에만
+  블러본 렌더에 쓰인다.
+
 주의:
 - 시간: 프레임 시각 `t_ms`는 그 영상의 PTS x time_base x 1000을 반올림한 정수 ms다 (ADR 0019,
   공간 라벨 키프레임은 스트림 PTS 시각). 프레임 번호는 저장하지 않는다.
@@ -132,9 +140,11 @@ def model_version(detectors: dict[str, FrameDetector], policy: PrivacyPolicy) ->
     """탐지 모델 버전 문자열.
 
     형식: `iou-tracker-3+<이름>:<탐지기 버전>,...+p<정책 해시 8자>` (이름순). 이 문자열이
-    blur_track 라벨의 `provenance.model_version`이 되고, `runner.detect_session`은 같은 버전의
-    완료 세대의 활성 버전 집합이 같으면 스트림을 건너뛴다 (멱등). 외부 0건 표시만 남으면
-    DB 완료 기록으로 복구하고 새 검수를 요구한다. 정책 복귀는 새 세대로 탐지한다 (ADR 0033).
+    blur_track 라벨의 `provenance.model_version`이 된다. `runner.detect_session`은 스트림의 최신
+    완료 탐지 세대(`privacy_detection_runs`)에 기록된 버전 집합이 이번 버전 집합(이 버전과 배포된
+    재학습 블러 모델 버전)과 같으면 그 스트림을 건너뛴다 (멱등). 원본 버킷의 결과 0개 표시만 남은
+    구버전은 DB 완료 기록을 새로 남겨 복구하고 새 검수를 요구한다. 과거 정책으로 돌아가도 새 세대로
+    다시 탐지한다 (ADR 0033).
 
     Args:
         detectors: 쓸 수 있는 탐지기. 정책 대상이 쓰는 것만 버전에 들어간다.

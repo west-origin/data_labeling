@@ -1,6 +1,32 @@
-"""승인된 블러본 렌더와 소비자 검증 (WP5, ADR 0024).
+"""승인된 블러본 렌더와 소비자 검증 (렌더 게이트, WP5, ADR 0024·0036).
 
-렌더 입력 해시·파일 해시를 함께 확인한다. 실행 이력·검수 세대 판단은 generation에 둔다.
+블러본은 일반 라벨러·모델이 보는 유일한 영상이다. 이 모듈은 "지금 승인된 블러 라벨로 만든 블러본"만
+나가게 한다. 실행 이력·검수 세대 판단은 `generation`에, 블러 픽셀 처리는 `render`에 있다.
+
+두 해시로 판정한다:
+- `render_hash`: 블러본을 정하는 입력의 해시. 운영 블러 라벨 ID
+  집합(`generation.operational_blur`)과 렌더 정책(`render`, `platform.render_mode`)으로 만든다.
+  라벨은 불변이라 ID 집합이 같으면 블러가 같다.
+- `blurred_sha256`: 렌더한 블러본 파일의 sha256. 렌더 밖에서 파일을 덮어쓴 것을 잡는다.
+둘은 라벨링 버킷의 블러본 옆 렌더 기록(`render_meta_key`, `RenderMeta`)에 남는다. 기록의
+render_hash가 None이면 무효로 둔 기록이다 (`invalidate_render`, 블러 변경·승인 보류).
+
+공개 함수:
+- `render_session` (`dlp privacy render`): 지금 APPROVED인 세션만 렌더한다. 원본은 감사 저장소로
+  받고 블러본·기록은 원본 버킷이 아닌 라벨링 버킷에 쓴다. 입력·파일 해시가 모두 맞으면 다시
+  인코딩하지 않는다 (멱등).
+- `assert_render_current`: 블러본을 읽는 소비자(검수 작업 생성, 행동 VLM, AI 1차 검수, 큐레이션,
+  학습)가 먼저 부르는 게이트. 세션이 지금 APPROVED이고 기록 해시가 지금 운영 블러·렌더 정책의
+  해시와 같아야 한다. 아니면 `RenderNotCurrentError`.
+- `check_fetched`: 받은 블러본 파일의 해시를 게이트가 돌려준 값과 다시 대조한다 (확인과 받기 사이
+  재렌더 방지).
+- `invalidate_render`: 렌더 기록을 무효로 덮어쓴다 (블러본 파일은 남지만 게이트를 통과하지 못한다).
+- `expected_render_hash`, `check_render_meta`, `read_render_meta`, `write_render_meta`: 게이트의
+  부품. 내보내기(`dlp_export.source`)처럼 기대 해시를 미리 계산해 두는 쪽은 `expected_render_hash`와
+  `check_render_meta`로 같은 판정을 한다.
+
+무효화가 빠진 경로가 있어도 게이트는 지금 DB 상태로 해시를 다시 계산하므로 막힌다. 저장소 쓰기는
+DB 트랜잭션 밖 부작용이라 되돌아가지 않는다. 그래서 렌더는 블러본을 먼저 쓰고 기록을 나중에 쓴다.
 """
 
 from __future__ import annotations
@@ -125,8 +151,8 @@ def _render_is_current(
 ) -> bool:
     """입력·객체 메타데이터·실제 바이트 해시가 모두 맞아야 재렌더를 건너뛴다.
 
-    예전 기록/객체에 파일 해시가 없으면 이번 실행에서 다시 렌더해 기록을 보완한다.
-    저장소 연결/권한 오류는 손상으로 숨기지 않고 호출자에게 전달한다.
+    예전 기록이나 객체에 파일 해시가 없으면 이번 실행에서 다시 렌더해 기록을 보완한다.
+    저장소 연결·권한 오류는 손상으로 숨기지 않고 호출자에게 전달한다.
     """
     meta = read_render_meta(labeling, session_id, stream_id, work)
     head = labeling.head(blurred_key(session_id, stream_id))
@@ -242,7 +268,9 @@ def assert_render_current(
     stream_id: str,
     policy: PrivacyPolicy,
 ) -> str | None:
-    """블러본을 읽는 모든 단계(검수 작업·행동 VLM·큐레이션·내보내기)가 먼저 부른다 (ADR 0024).
+    """블러본을 읽는 단계(검수 작업·행동 VLM·AI 1차 검수·큐레이션·학습)가 먼저 부른다 (ADR 0024).
+
+    내보내기는 기대 해시를 미리 계산해 두고 같은 판정을 `check_render_meta`로 한다.
 
     세션이 **지금** 프라이버시 승인 상태이고, 블러본 렌더 기록의 해시가 지금 운영 블러 라벨과
     렌더 정책의 해시와 같아야 한다. 아니면 RenderNotCurrentError. 렌더한 블러본 파일의 sha256을

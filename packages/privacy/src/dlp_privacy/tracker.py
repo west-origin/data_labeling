@@ -14,6 +14,10 @@
 5. 박스에 대상별 여유(margin)를 더하고 화면 안으로 자른다.
 트랙 하나가 blur_track 라벨 하나가 된다. 키프레임은 트랙 구간의 모든 프레임에 둔다.
 
+재현율 우선이라 이 모듈은 탐지를 버리지 않는다. 합칠 곳·이을 트랙이 없는 탐지는 새 트랙을 열고,
+박스는 합집합·외접 박스로 커지기만 한다 (줄이거나 점수로 거르지 않는다). 짧은 깜박임 같은 오탐
+의심은 `hints`가 검수 화면 표시로만 단다 (ADR 0055).
+
 WP5. `pipeline.detect_video`가 쓴다. 이 모듈의 동작을 바꾸면 `pipeline.TRACKER_VERSION`을 올려야
 다시 탐지된다. 정책 값: privacy.yaml `tracker`(iou_match, max_gap_ms), `targets.*.margin`,
 defaults.yaml `privacy.blur_hold_ms`.
@@ -209,6 +213,7 @@ def _nearest(tracks: list[Track], target: str, box: Box) -> Track | None:
     cx, cy = box.x + box.w / 2, box.y + box.h / 2
 
     def dist(tr: Track) -> float:
+        """트랙 마지막 박스 중심과 box 중심 사이 거리의 제곱 (px^2, 순서 비교에만 쓴다)."""
         b = tr.last_box()
         return (b.x + b.w / 2 - cx) ** 2 + (b.y + b.h / 2 - cy) ** 2
 
