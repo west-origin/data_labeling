@@ -358,6 +358,7 @@ def eval_input(
     }
 
     def frames(stream: str, idx: Sequence[int]) -> Iterator[BlurredFrame]:
+        """스트림 블러본에서 프레임 번호 `idx`의 프레임을 번호 순으로 디코드한다 (`frames_for`)."""
         return frames_for(medias[stream], idx)
 
     return RunInput(

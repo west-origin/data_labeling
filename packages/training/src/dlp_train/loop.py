@@ -287,7 +287,7 @@ def run_training_job(  # noqa: C901
         # 증강 설정 해시를 파라미터에 넣어 모델 버전 태그·MLflow에 남긴다 (ADR 0057)
         params["augmentation"] = policy_digest(aug)
 
-    # 1) 학습 예제 (골든셋 세션이 섞이면 멈춘다 — 분할기가 막지만 한 번 더 확인)
+    # 1) 학습 예제 (골든셋 세션이 섞이면 멈춘다. 분할기가 막지만 한 번 더 확인한다)
     version = get_dataset_version(conn, job.dataset_version_id)
     if version.golden_set_version is None:
         raise TrainingError(

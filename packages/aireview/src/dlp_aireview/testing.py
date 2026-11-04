@@ -255,10 +255,14 @@ class FakeOpenAIServer:
         server = self
 
         class Handler(BaseHTTPRequestHandler):
+            """요청을 바깥 `FakeOpenAIServer.handle`로 넘기는 처리기."""
+
             def do_GET(self) -> None:  # http.server 규약 이름
+                """GET 요청 (`/v1/models` 등)을 `handle`로 넘긴다."""
                 server.handle(self, "GET")
 
             def do_POST(self) -> None:
+                """POST 요청 (`/v1/chat/completions` 등)을 `handle`로 넘긴다."""
                 server.handle(self, "POST")
 
             def log_message(self, format: str, *args: Any) -> None:

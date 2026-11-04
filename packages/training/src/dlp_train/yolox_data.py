@@ -16,8 +16,9 @@
   지운 예제 (deleted, 오탐)의 시각도 이미지로 넣어 그 자리를 배경으로 배운다. 화면 밖으로 나간
   부분은 잘라 내고, 짧은 변이 `min_box_px`보다 작은 박스는 뺀다.
 - 학습 분할 이미지는 증강 정책이 있으면 `augment.augment_examples`로 증강본을 더한다 (박스는 같은
-  변환, ADR 0057). 증강 씨앗의 표본 번호는 (세션, 스트림, 시각) 정렬 순서다 (같은 입력이면 같은
-  결과).
+  변환, ADR 0057). 증강 씨앗의 표본 번호는 학습 분할 이미지의 (세션, 스트림, 시각) 정렬 순서다
+  (같은 입력이면 같은 결과). 검증 분할 이미지는 증강하지 않고 번호도 세지 않는다.
+- 좌표 단위: COCO `bbox`([x, y, w, h])와 `area`는 블러본 프레임의 픽셀이다 (소수 셋째 자리 반올림).
 - 배치는 YOLOX 0.3.0 `COCODataset` 규칙: `<root>/annotations/{train,val}.json`, 이미지
   `<root>/{train2017,val2017}/<파일>`. 범주 ID는 classes 순서의 1..C (YOLOX가 정렬한 범주 ID 순으로
   열 번호를 매긴다).
@@ -81,6 +82,9 @@ class CocoStats:
 
 def box_at(keyframes: Sequence[BoxKeyframe], t_ms: int) -> Box | None:
     """시각 t의 박스 (앞뒤 키프레임 선형 보간). 첫 키프레임 전·마지막 뒤·outside 구간이면 None.
+
+    다음 키프레임이 outside이거나 없으면 보간하지 않고 앞 키프레임 박스를 그대로 쓴다. 단위는 픽셀,
+    `t_ms`는 그 스트림의 PTS 시각(ms)이다.
 
     `dlp_aireview.tracks.box_at`과 같은 규칙이다 (패키지 의존을 늘리지 않게 여기 둔다).
     """

@@ -3,6 +3,8 @@
 기본은 127.0.0.1에만 묶는다. 다른 주소는 `allow_remote`가 있어야 하고 경고를 찍는다 (인증은 토큰
 하나, 통신은 암호화되지 않는다). 시작 때 만든 토큰을 실은 콘솔 주소를 한 번 찍는다 (토큰은 로그
 파일에 남기지 않는다. 다시 시작하면 새 토큰이다).
+
+`dlp console serve`(`dlp_cli.console_cmds`)가 `serve`를 부르고 `RemoteBindError`를 안내로 바꾼다.
 """
 
 from __future__ import annotations
@@ -30,7 +32,12 @@ class RemoteBindError(ValueError):
 
 
 def serve(root: Path, host: str | None, port: int | None, *, allow_remote: bool = False) -> None:
-    """콘솔을 띄운다 (Ctrl-C로 끝낸다). 예외: RemoteBindError."""
+    """콘솔을 띄운다 (Ctrl-C로 끝낸다). 예외: RemoteBindError.
+
+    `.env` 값을 이 프로세스의 os.environ에 넣는다 (이미 있는 변수는 그대로). host·port가 None이면
+    `config/console.yaml server`의 값을 쓴다. 작업 디렉터리를 만들고, uvicorn이 끝날 때까지 돌아오지
+    않는다. uvicorn 접근 로그는 끈다.
+    """
     # S3Store 등 라이브러리는 os.environ을 읽으므로 .env 값을 (이미 있는 변수는 그대로 두고) 넣는다
     for key, value in load_dotenv(root / ".env").items():
         os.environ.setdefault(key, value)

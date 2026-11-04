@@ -5,7 +5,11 @@
   바뀜)에는 주소를 내지 않는다. 원본 버킷은 읽지 않는다.
 - 겹쳐 그리는 라벨은 운영 라벨(`current_labels`)의 박스 트랙과 손·전신 키포인트 트랙이다. 블러
   트랙은 싣지 않는다 (블러는 이미 영상에 들어가 있다). 좌표는 그 스트림 영상 픽셀, 시각은 스트림
-  PTS(ms)다. 화면은 재생 시각에서 가장 가까운 앞 키프레임을 그리는 근사 표시다.
+  PTS(ms)다. 화면은 재생 시각에서 가장 가까운 앞 키프레임을 그리는 근사 표시다 (500 ms보다 오래된
+  키프레임은 그리지 않는다, `static/app.js` `frameAt`).
+
+`GET /api/sessions/{세션}/preview`(`dlp_console.app`)가 `blurred_url`과 `overlay_tracks`를 부른다.
+DB는 읽기만 한다.
 """
 
 from __future__ import annotations
@@ -50,6 +54,11 @@ def blurred_url(state: SessionState, stream_id: str, sign: Signer) -> str:
 
 
 def _track(label: LabelRecord) -> dict[str, Any] | None:
+    """라벨 → 화면 트랙 dict. 박스·키포인트 트랙이 아니면 None.
+
+    박스 frames: `[t_ms, x, y, w, h]` (화면 밖 `outside` 키프레임은 뺀다). 키포인트 frames:
+    `[t_ms, [[x, y], …]]` (visibility 0인 점은 뺀다). 좌표는 스트림 영상 픽셀이다.
+    """
     p = label.payload
     if isinstance(p, BoxTrackPayload):
         return {
@@ -73,7 +82,11 @@ def _track(label: LabelRecord) -> dict[str, Any] | None:
 def overlay_tracks(
     conn: sa.Connection, session_id: str, stream_id: str, max_tracks: int
 ) -> dict[str, Any]:
-    """그 스트림의 겹쳐 그릴 트랙 (신뢰도 높은 순 max_tracks개)과 남은 개수."""
+    """그 스트림의 겹쳐 그릴 트랙 (신뢰도 높은 순 max_tracks개)과 남은 개수.
+
+    신뢰도가 없는 라벨(사람이 만든 라벨 등)은 1.0으로 보고 앞에 둔다. 각 트랙에 검수 상태(`state`)와
+    출처(`source`)를 붙인다. 반환: `{"tracks": [...], "hidden": 상한 때문에 뺀 라벨 수}`.
+    """
     history = get_labels(conn, session_id, kinds=["box_track", "keypoint_track"])
     labels = [x for x in current_labels(history) if x.stream_id == stream_id]
     labels.sort(key=lambda x: -(x.confidence if x.confidence is not None else 1.0))

@@ -157,7 +157,7 @@ DESCRIBE_ONTOLOGY = ("verbs", "body_parts", "state_attributes")
 
 
 def describe_version(policy: ActionsPolicy, vlm_version: str, ontology: Ontology) -> str:
-    """설명 버전 `describe-<행동 정책 해시>+<VLM 버전>+o<온톨로지 부분 해시>`.
+    """설명 버전 `describe-<행동 정책 표시 stamp>+<VLM 버전>+o<온톨로지 부분 해시>`.
 
     같은 온톨로지 버전에 draft로 동작·부위·상태 이름을 덧붙이면 프롬프트가 바뀌므로 그 범주의 내용
     해시를 넣어 다시 만든다 (F-PAR-85, `dlp_actions.vlm.ontology_part_digest`).
@@ -465,6 +465,7 @@ def ask_description(
     errors: list[str] = []
 
     def ask(problems: Sequence[str]) -> str:
+        """한 번 묻는다. `problems`(앞 응답의 위반)가 있으면 프롬프트 끝에 붙여 다시 묻는다."""
         prompt = base
         if problems:
             prompt += "\n\n앞 응답이 규칙을 어겼다: " + "; ".join(problems)

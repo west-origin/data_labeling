@@ -1,7 +1,8 @@
 """행동 구간 정책 (config/policies/actions.yaml, WP10, ADR 0012).
 
 - `ActionsPolicy`: 최상위. `stamp`(파싱된 값의 해시 `digest` 12자 + 틀 버전 표시)가 모델
-  버전에 들어간다 (`runner.run_actions`: `actions-<stamp>+<VLM 버전>+i<입력 해시>`). YAML
+  버전에 들어간다 (`runner.run_actions`: `actions-<stamp>+<VLM 버전>+o<온톨로지 부분 해시>+i<입력
+  해시>`, `describe.describe_version`: `describe-<stamp>+<VLM 버전>+o<온톨로지 부분 해시>`). YAML
   주석·서식은 해시에 영향이 없고, 값이 바뀌면 버전이 바뀌어 다음 실행에서 다시 만든다.
 - `BoundaryPolicy`: 1단 경계 후보 (`boundaries.py`)
 - `ToleranceMs`: 평가 허용 오차 (테스트·평가 하네스용, 실행 결과에는 영향 없음)

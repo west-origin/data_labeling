@@ -60,7 +60,7 @@ def cohen_kappa(
 
     Returns:
         -1~1. 표본이 없으면(가중치 합 0 포함) 0.0. pe == 1(두 라벨러가 모든 표본에 같은 한 클래스만
-        씀)이면 완전 일치이므로 1.0 (scikit-learn은 이때 0/0으로 NaN을 낸다 — 이 점만 다르다).
+        씀)이면 완전 일치이므로 1.0 (scikit-learn은 이때 0/0으로 NaN을 낸다. 이 점만 다르다).
     """
     w = [1.0] * len(a) if weights is None else [float(x) for x in weights]
     pairs = list(zip(a, b, w, strict=True))

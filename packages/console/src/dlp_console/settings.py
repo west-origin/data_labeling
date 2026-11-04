@@ -29,38 +29,71 @@ DEFAULT_WORK_DIR = "~/.dlp-console"
 
 
 class ServerConfig(Contract):
+    """`dlp console serve`의 기본 묶을 주소와 포트 (명령 옵션 `--host`·`--port`가 앞선다)."""
+
     host: str = "127.0.0.1"
     port: int = Field(default=8090, ge=1, le=65535)
 
 
 class UploadConfig(Contract):
+    """영상 올리기.
+
+    - max_mb: 한 파일 상한 (MB, 1 MB = 1024*1024 바이트). 넘으면 받던 파일을 지우고 400.
+    - suffixes: 받는 확장자 (소문자, 점 포함. 예: `.mp4`).
+    - delete_after_ingest: 수집 작업이 모두 성공하면 올린 사본·준비 사본을 지운다.
+    """
+
     max_mb: int = Field(ge=1)
     suffixes: tuple[str, ...] = Field(min_length=1)
     delete_after_ingest: bool
 
 
 class LogsConfig(Contract):
+    """작업 로그 꼬리. tail_lines: 화면에 보이는 마지막 줄 수 (10~5000)."""
+
     tail_lines: int = Field(ge=10, le=5000)
 
 
 class JobsConfig(Contract):
-    """자식 `dlp` 프로세스 다루기 (F-COE-79)."""
+    """자식 `dlp` 프로세스 다루기 (F-COE-79).
+
+    - stop_grace_s: 콘솔 종료 때 자식 그룹에 SIGTERM을 보낸 뒤 SIGKILL까지 기다리는 시간 (초).
+    - orphan_poll_s: 앞 콘솔이 남긴 자식 그룹이 끝났는지 보는 간격 (초).
+    """
 
     stop_grace_s: float = Field(default=10.0, gt=0, le=600)
     orphan_poll_s: float = Field(default=2.0, gt=0, le=60)
 
 
 class PreviewConfig(Contract):
+    """결과 보기.
+
+    - signed_url_ttl_s: 블러본 서명 URL 유효 시간 (초, 60초~7일).
+    - max_tracks: 한 번에 그리는 박스·키포인트 트랙 상한 (신뢰도 높은 순).
+    """
+
     signed_url_ttl_s: int = Field(ge=60, le=7 * 24 * 3600)
     max_tracks: int = Field(ge=1)
 
 
 class CompareConfig(Contract):
+    """가져온 가중치의 골든셋 비교 명령 (`dlp train run objects … --trainer`).
+
+    - trainer: 비교에 쓸 학습기 이름. None이면 비교 버튼이 꺼진다 (F-COE-74).
+    - params: `--param 키=값`으로 넘길 값. 값의 `{model_name}`은 가져온 모델 이름으로 바뀐다.
+    """
+
     trainer: str | None = None
     params: dict[str, str] = Field(default_factory=dict[str, str])
 
 
 class PretrainImportConfig(Contract):
+    """외부 가중치 가져오기.
+
+    - models_dir: 가중치를 둘 디렉터리 (저장소 루트 기준 상대 경로, 저장소 안이어야 한다).
+    - compare: 골든셋 비교 명령 설정.
+    """
+
     models_dir: str
     compare: CompareConfig
 
@@ -108,7 +141,8 @@ class ConsoleSettings:
     - work_dir: 작업 디렉터리 (저장소 밖).
     - config: `config/console.yaml`.
     - dlp_argv: `dlp` 명령 접두 (기본 `python -m dlp_cli.main`). 시험은 가짜 명령으로 바꾼다.
-    - env: 자식 프로세스 환경 (os.environ 위에 .env, 이미 있는 변수가 앞선다).
+    - env: 자식 프로세스 환경. `.env` 값 위에 os.environ을 얹는다 (같은 이름이면 이미 있는 환경
+      변수가 이긴다).
     - token: 화면·API 요청 토큰 (시작 때 무작위, 콘솔 URL에 싣는다).
     """
 

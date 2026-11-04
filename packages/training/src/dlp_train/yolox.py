@@ -616,6 +616,7 @@ class YoloxLoader:
         factory = self.detector
 
         def open_model() -> ToolDetector:
+            """학습 ONNX로 탐지기를 연다 (`YoloxTools`가 스트림마다 한 번 부른다)."""
             return factory(onnx, n, prelabel)
 
         predictor = YoloxTools(

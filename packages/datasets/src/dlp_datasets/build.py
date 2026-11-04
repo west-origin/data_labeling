@@ -1,7 +1,8 @@
 """데이터셋 버전 빌드.
 
 1. 후보: 온톨로지 버전이 같고 프라이버시 승인된 세션 (도메인을 주면 그 도메인만).
-2. 사용 중지된 세션은 빼고 excluded_sessions에 적는다.
+2. 1의 조건을 통과한 세션 중 사용 중지된 것(`withdrawals` 기록 또는 생애주기 withdrawn)은 빼고
+   excluded_sessions에 적는다. 1에서 걸러진 세션은 excluded_sessions에 적지 않는다.
 3. 지정한 골든셋 세션은 golden, 다른 확정 골든셋 세션과 골든 쪽 작업자·장소를 공유하는 세션은
    holdout, 나머지는 작업자·장소 단위로 train / val / holdout.
 4. 스냅샷: 포함 세션의 라벨 레코드(정책 include_label_history면 수정 이력 포함, 아니면 현재 라벨만.
@@ -91,7 +92,7 @@ def propose_golden_set(
         seed: 동점 처리 seed.
 
     Returns:
-        제안 세션 ID (정렬). DB에 쓰지 않는다 — 사람이 확정한 뒤 골든셋으로 등록한다.
+        제안 세션 ID (정렬). DB에 쓰지 않는다. 사람이 확정한 뒤 골든셋으로 등록한다.
     """
     withdrawn = withdrawn_session_ids(conn)
     sessions = [get_session(conn, sid) for sid in list_session_ids(conn, ontology_version)]

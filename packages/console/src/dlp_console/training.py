@@ -7,7 +7,11 @@
   학습기면 화면에 "시험용 학습기" 배지를 단다 (정답 좌표를 흔드는 CI용이라 지표가 실제 성능이
   아니다).
 - 수정률 추이: `dlp ops weekly --out`이 쓴 JSON(작업 디렉터리 reports/weekly-*.json) 중 가장 최근
-  것.
+  것. 콘솔은 `--out reports/weekly-<시각>.md`를 주고, `dlp ops weekly`가 그 옆에 같은 이름의
+  `.json`을 쓴다.
+
+`GET /api/training`·`GET /api/pretrain`(`dlp_console.app`)이 `rounds`·`latest_weekly`·
+`policy_trainers`를 부른다. DB는 읽기만 하고, 쓰는 것은 작업 디렉터리의 리포트 캐시뿐이다.
 """
 
 from __future__ import annotations
@@ -33,6 +37,7 @@ ReportFetcher = Callable[[str, Path], None]
 
 
 def is_test_trainer(name: str | None) -> bool:
+    """시험용 학습기(이름이 `TEST_TRAINER_PREFIXES`로 시작)인가. 이름이 없으면 False."""
     return bool(name) and str(name).startswith(TEST_TRAINER_PREFIXES)
 
 
@@ -69,12 +74,16 @@ class ReportCache:
     """평가 리포트 캐시 (작업 디렉터리 cache/reports/<모델 버전>.json)."""
 
     def __init__(self, work_dir: Path, fetch: ReportFetcher) -> None:
+        """`fetch`: report_uri를 로컬 파일로 받는 함수 (앱은 MLflow 산출물 버킷만 받는다)."""
         self.dir = work_dir / "cache" / "reports"
         self.dir.mkdir(parents=True, exist_ok=True)
         self.fetch = fetch
 
     def load(self, mv: ModelVersion) -> dict[str, Any] | None:
-        """그 회차의 리포트. 없거나 받지 못하면 None (화면은 '리포트 없음')."""
+        """그 회차의 리포트. 없거나 받지 못하면 None (화면은 '리포트 없음').
+
+        캐시에 없으면 받아서 캐시에 쓴다. 받기 실패는 캐시에 쓰지 않으므로 다음 요청이 다시 받는다.
+        """
         if mv.report_uri is None:
             return None
         path = self.dir / f"{mv.model_version}.json"
@@ -96,7 +105,10 @@ class ReportCache:
 def rounds(
     conn: sa.Connection, cache: ReportCache, trainers: dict[str, str]
 ) -> list[dict[str, Any]]:
-    """과제별 회차 목록 (등록 순)."""
+    """회차 목록 (등록 순, 모든 과제를 한 목록에). 각 회차에 리포트 요약을 붙인다.
+
+    `trainers`: 과제 → 정책 기본 학습기 (`policy_trainers`, 회차의 `policy_trainer`로 싣는다).
+    """
     out: list[dict[str, Any]] = []
     for mv in list_model_versions(conn):
         report = cache.load(mv)

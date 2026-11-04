@@ -20,6 +20,12 @@ class Redactor:
     """원본 버킷 이름과 비밀값으로 만든 가리개. `apply(text)`로 쓴다."""
 
     def __init__(self, raw_bucket: str, env: Mapping[str, str]) -> None:
+        """가릴 패턴을 시작 때 한 번 만든다.
+
+        Args:
+            raw_bucket: 원본 버킷 이름 (`config/defaults.yaml buckets.raw`).
+            env: 비밀값을 찾을 환경 (콘솔 자식 프로세스 환경, `.env` 포함).
+        """
         bucket = re.escape(raw_bucket)
         # s3://dlp-raw/..., http(s)://host/dlp-raw/..., 경로 속 /dlp-raw/... 를 공백·따옴표 전까지
         self._raw = re.compile(rf"(?:s3://|https?://[^\s'\"]*/|/)?{bucket}(?:/[^\s'\"),]*)?")
@@ -30,7 +36,10 @@ class Redactor:
         self._secrets = sorted(values, key=len, reverse=True)
 
     def apply(self, text: str) -> str:
-        """가린 글."""
+        """비밀값을 먼저, 그다음 원본 위치를 가린 글.
+
+        예: `s3://dlp-raw/sessions/a/bodycam.mp4 오류` → `[원본 위치 숨김] 오류`.
+        """
         for value in self._secrets:
             text = text.replace(value, SECRET_MASK)
         return self._raw.sub(RAW_MASK, text)

@@ -2,10 +2,12 @@
 
 사람 1인칭 에피소드(`lerobot.build_episode`)의 각 프레임 시각에서 세션 월드 좌표 손 점(손목·엄지
 끝·검지 끝, frame=world trajectory3d, ADR 0046)을 읽어 로봇 관절 궤적으로 옮긴다 (`dlp_retarget`).
-영상은 그대로다.
+세 점의 부위 이름은 retarget.yaml `hand_parts`에서 읽고, 로봇 설정의 팔(`arm.hand`) 쪽 손만 쓴다.
+영상은 그대로다. 정책이 버린(drop) 에피소드는 쓰지 않고 보고에만 남긴다 (`runner._RobotRun`).
 
 LeRobot 특징 (로봇 모드):
-- observation.state (float32): 로봇 관절 값 (팔 관절 + 그리퍼, rad, 이름 = URDF 관절 이름).
+- observation.state (float32): 로봇 관절 값 (팔 관절 + 그리퍼, 이름 = URDF 관절 이름). 단위는 회전
+  관절 rad, 직선 관절 m다 (meta/dlp_retarget.json `units`).
 - action (float32): 다음 프레임 관절 값 (마지막은 그대로).
 - observation.human_state (float32): 사람 모드의 observation.state 그대로 (손 2D·카메라 좌표 3D·
   작용부).
@@ -133,6 +135,9 @@ def world_hand_points(
 ) -> tuple[HandPoints, frozenset[str], NDArray[np.int64]]:
     """에피소드 프레임 시각(마스터)마다 그 로봇 팔이 따라갈 손의 월드 좌표 세 점.
 
+    부위마다 `preferred` 순 궤적 중 그 시각에 값이 있는 첫 궤적을 쓴다. 보간 한도는 `gap_ms`
+    (export.yaml `lerobot.interp_max_gap_3d_ms`)다. 좌표 단위는 세션 월드 좌표계의 m다.
+
     Returns:
         (손 점 (세 점 중 하나라도 없으면 그 프레임 세 점 모두 NaN), 쓴 라벨 ID, 프레임별 가장 낮은
         검증 등급 (없음 -1)).
@@ -217,6 +222,7 @@ def robot_arrays(ep: Episode, rob: RobotEpisode) -> dict[str, NDArray[Any]]:
     action = np.concatenate([q[1:], q[-1:]], axis=0)
 
     def col(values: NDArray[Any], dtype: type[np.generic]) -> NDArray[Any]:
+        """(n,) 배열을 LeRobot 특징 모양 (n, 1)과 dtype으로 바꾼다."""
         return values.reshape(-1, 1).astype(dtype)
 
     return {

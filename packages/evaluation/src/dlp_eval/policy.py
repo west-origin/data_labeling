@@ -5,12 +5,13 @@ WP11, ADR 0013·0025·0031. `load_policy(root)`가 YAML을 읽어 `EvaluationPol
 객체를 쓴다.
 
 공개 이름:
-- `Task`·`TASKS` — 평가 과제 이름과 평가 순서. 학습 정책(`dlp_train.policy`)과 러너의 과제 키도
+- `Task`·`TASKS`: 평가 과제 이름과 평가 순서. 학습 정책(`dlp_train.policy`)과 러너의 과제 키도
   이것이다.
-- `TASK_METRICS`·`task_metrics`·`CLASS_METRIC_PREFIXES`·`is_class_metric` — 과제별 평가기가 내는
+- `TASK_METRICS`·`task_metrics`·`CLASS_METRIC_PREFIXES`·`is_class_metric`: 과제별 평가기가 내는
   지표 이름 (게이트 규칙 검사와 하네스 출력 검사에 쓴다).
-- `Tolerances`, `PrivacyEval`, `InterpGaps`, `GateRule`, `EvaluationPolicy` — YAML 절별 모델.
-- `load_policy` — 저장소 루트에서 정책을 읽는다.
+- `Tolerances`, `PrivacyEval`, `InterpGaps`, `ProxyPolicy`, `GateRule`, `EvaluationPolicy`: YAML
+  절별 모델.
+- `load_policy`: 저장소 루트에서 정책을 읽는다.
 
 주의: 이 모델들은 `dlp_schema.common.Contract`(엄격 검증, 모르는 키 거부)를 상속하지만 `schemas/`의
 JSON Schema 생성 대상은 아니다. 그래도 `Field(description=...)` 문자열은 바꾸지 않는다 (다른 계약과

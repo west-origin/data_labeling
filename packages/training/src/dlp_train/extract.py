@@ -11,6 +11,11 @@
   - added: 모델이 놓친 것을 사람이 추가함 (origin 없음)
   - deleted: 모델 라벨을 사람이 지움 (오탐, label = 지운 레코드)
 
+corrected·deleted를 가르려면 스냅샷에 수정 이력이 있어야 한다 (dataset.yaml
+`include_label_history: true`, 지금 기본값). 현재 라벨만 담은 스냅샷이면 모델 원본이 없어 사람이
+고친 라벨은 added로 세고 deleted는 나오지 않는다 (`dlp_schema.history._root`는 이력에 없는
+부모에서 멈춘다).
+
 WP13, ADR 0016·0025. 변화 종류 판정 자체는 `dlp_schema.history.review_changes`가 한다 (액티브 러닝의
 수정률과 같은 코드). 입력은 데이터셋 버전 스냅샷의 labels.jsonl이고(`dlp_datasets.snapshot`), DB에는
 접근하지 않는다. 원본 버킷에도 접근하지 않는다.

@@ -4,8 +4,8 @@
 - `OpenAICompatibleVlm`: `/v1/chat/completions`에 프레임(JPEG base64) + 프롬프트 + JSON Schema를
   보낸다. 실제 서버에서 아직 검증하지 않았다 (클래스 docstring의 TODO(real-model) 표시).
   전송·오류 분류는 공통 모듈 `dlp_models.vlm`을 쓴다 (WP17.1, ADR 0040). 요청 본문 바이트는
-  리팩토링 전과 같다 (`tests/test_vlm_body.py`): 버전 문자열 `vlm-<model>`에 요청 형식이 들어가지
-  않으므로 본문이 바뀌면 버전이 그대로인 채 결과만 달라지기 때문이다.
+  리팩토링 전과 같다 (`packages/actions/tests/test_vlm_body.py`): 버전 문자열 `vlm-<model>`에
+  요청 형식이 들어가지 않으므로 본문이 바뀌면 버전이 그대로인 채 결과만 달라지기 때문이다.
 - `sample_frames`: 구간에서 PTS 기준으로 프레임을 고르게 뽑는다.
 
 VLM에는 블러본만 보낸다 (`runner`가 블러본 경로를 넘긴다, ADR 0024).

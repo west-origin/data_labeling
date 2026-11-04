@@ -89,6 +89,7 @@ def _simple(
     """패치 키 → 페이로드 필드 이름을 그대로 옮기는 갱신 함수."""
 
     def update(p: Any, patch: dict[str, Any], e: Entities, o: Ontology) -> dict[str, Any]:
+        """패치에 있는 키만 페이로드 필드로 옮긴다 (`p`·`e`·`o`는 쓰지 않는다)."""
         return {field: patch[key] for key, field in mapping.items() if key in patch}
 
     return update

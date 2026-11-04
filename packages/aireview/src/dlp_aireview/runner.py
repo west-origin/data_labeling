@@ -5,7 +5,7 @@
          → 판정할 창이 있는 스트림만 `open_blurred` → `plan_session`
          → 기록된 단위(`done_unit_ids`) 제외 → 실행 기록 + started 이벤트
 [생산자] 스트림마다 스레드 하나: 고른 프레임을 순차 디코드하며 단위의 프레임이 다 모이면
-         표식·조각·JPEG를 만들어 제한 큐(작업자 수의 2배, 역압)에 넣는다. 다 쓴 프레임은
+         표식·조각·JPEG를 만들어 제한 큐(작업자 수의 2배, 최소 2, 역압)에 넣는다. 다 쓴 프레임은
          바로 버린다.
 [작업자] `options.workers`개 스레드: `judge_unit`(재시도·부분 수용·단위 안 문맥 초과 분할).
 [기록자] 스레드 하나: `commit_every`개 또는 `commit_interval_s`마다 단위를 쓴다.
@@ -826,6 +826,7 @@ def start_thread(target: Callable[..., None], *args: Any) -> threading.Event:
     finished = threading.Event()
 
     def body() -> None:
+        """`target`을 돌리고, 예외로 끝나도 완료 신호를 켠다."""
         try:
             target(*args)
         finally:
@@ -1183,6 +1184,7 @@ def load_input(
     )
 
     def frames(stream: str, idx: Sequence[int]) -> Iterator[BlurredFrame]:
+        """스트림 블러본에서 프레임 번호 `idx`의 프레임을 번호 순으로 디코드한다 (`frames_for`)."""
         return frames_for(medias[stream], idx)
 
     return RunInput(
@@ -1252,6 +1254,11 @@ def run_from_db(
             streams = list(inp.media)
 
             def check() -> Mapping[str, str]:
+                """렌더 재확인: 세션 상태를 다시 보고 스트림별 지금 렌더 해시를 돌려준다.
+
+                Raises:
+                    SessionNotReadyError: 실행 중 사용 중지·승인 보류가 됐을 때.
+                """
                 with engine.connect() as conn:
                     session = get_session(conn, session_id)
                     problem = session_problem(conn, session, approval=False)

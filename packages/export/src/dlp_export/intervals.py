@@ -7,7 +7,8 @@ JSON Schema는 `schemas/export_intervals.schema.json`(`make schemas`로 생성)�
 - 넣는 라벨: 정책 `intervals.kinds`(행동·구간·손 상태·관계·커버리지 등 시간 구간 라벨).
   박스·키포인트 같은 공간 라벨은 COCO·LeRobot으로 나간다.
 - 시각: `t_start_ms`·`t_end_ms`는 마스터 타임라인 시각(정수 ms, ADR 0019).
-- 작업자·장소·세션·라벨 ID와 페이로드 속 세션 ID(`*_id`)는 가명이다 (ADR 0021·0027).
+- 작업자·장소·세션·라벨 ID와 페이로드 속 세션 ID(`*_id`)는 가명이다 (ADR 0021·0027). 스트림 ID는
+  수집 manifest가 정한 값을 그대로 싣는다.
 - 검수자 ID·검수 시각 같은 내부 정보는 넣지 않고 검증 상태만 남긴다.
 - 온톨로지 한·영 표시 이름(`term_names`, 형식 1.1)을 파일마다 넣는다. 설명 라벨은 언어마다 한
   레코드이고, 영어 번역의 원문 참조(`source_label_id`)는 원문의 가명 라벨 ID로 바꾼다 (ADR 0043).

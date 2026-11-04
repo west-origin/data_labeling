@@ -14,7 +14,8 @@ DB에서 정답·예측을 모아 지표·하위 집단·게이트 리포트를 
   안내한다.
 - 정답 근거와 평가 입력은 같은 읽기에서 만든다: `golden_sessions`를 한 번 읽어 `truth_anchor`와
   `load_golden`·`load_golden_merged`(`sessions=`)에 함께 넘긴다.
-- 예측: 과제별로 지정한 model_version의 레코드 (삭제 레코드 제외). 나중에 검수자가 고쳤어도 모델이
+- 예측: 과제별로 지정한 model_version의 모델 출처 레코드. 삭제를 기록한 레코드(`retracted`) 자체와
+  사람 출처 레코드는 넣지 않는다. 나중에 검수자가 고쳤어도 모델이
   낸 원래 레코드로 평가한다. 버전이 `*`로 끝나면 그 앞부분으로 시작하는 버전의 레코드 중 새
   모델 버전이 지우지(retractions) 않은 것을 평가한다. 검수자가 지우거나 고친 모델 레코드도
   그대로 예측이다 (검수자가 지운 오탐이 사라지면 안 된다).
@@ -326,7 +327,7 @@ def _predictions(
         kinds: 과제의 라벨 종류 (`TASK_KINDS`).
         version: 정확한 모델 버전, 또는 앞부분 + `*`.
         excluded: 비운영 레코드 ID (`non_operational_ids`: 오류 삽입·측정 레코드와 그 후손).
-        model_retracted: 모델 단계가 지운(retractions) 레코드 ID. 앞부분 고르기에서만 쓴다 — 정확한
+        model_retracted: 모델 단계가 지운(retractions) 레코드 ID. 앞부분 고르기에서만 쓴다. 정확한
             버전을 주면 그 버전이 낸 레코드를 나중에 다른 버전이 지웠어도 그대로 평가한다.
 
     Returns:

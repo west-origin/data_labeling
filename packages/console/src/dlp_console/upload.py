@@ -9,6 +9,9 @@
 - 작업: `dlp media prepare <원본> --out <준비 사본> [--display-rotation N]` → `dlp ingest
   <매니페스트>`. 수집이 성공하면 원본 사본·준비 사본을 지운다 (`upload.delete_after_ingest`). 원본은
   원본 버킷에 불변으로 남는다.
+
+`POST /api/upload`(`dlp_console.app`)가 `prepare_upload`로 파일 저장·매니페스트 쓰기·명령 만들기를
+하고 작업을 시작한다. 실패한 올리기는 `remove_upload`로 사본을 지운 뒤 다시 올린다.
 """
 
 from __future__ import annotations
@@ -50,7 +53,15 @@ class UploadForm:
 
 @dataclass(frozen=True)
 class PreparedUpload:
-    """작업에 넘길 값."""
+    """작업에 넘길 값.
+
+    - directory: `<작업 디렉터리>/uploads/<세션>/` (권한 0700).
+    - original: 올린 파일 사본. prepared: `dlp media prepare`가 쓸 준비 사본 경로.
+    - manifest_path: 수집 매니페스트 `session.yaml` (스트림 경로는 디렉터리 기준 `prepared.mp4`).
+    - commands: `media prepare …`, `ingest <매니페스트>` 두 명령.
+    - cleanup: 모두 성공하면 지울 파일 (`delete_after_ingest`가 거짓이면 빈 목록).
+    - scene: 고른 장면 (없으면 None, 세션 기억값으로 남긴다).
+    """
 
     session_id: str
     directory: Path
@@ -63,6 +74,7 @@ class PreparedUpload:
 
 
 def _ident(value: str, name: str) -> str:
+    """앞뒤 공백을 떼고 `IDENT` 모양인지 본다. 아니면 ParamError."""
     text = value.strip()
     if not IDENT.match(text):
         raise ParamError(f"{name} 값이 올바르지 않습니다 (영문·숫자·_.:-, 첫 글자는 영문·숫자)")
@@ -70,6 +82,10 @@ def _ident(value: str, name: str) -> str:
 
 
 def _rotation(value: str) -> int | None:
+    """표시 방향 회전 칸 → 각도. 비었거나 `tag`면 None (영상의 회전 태그를 쓴다).
+
+    0·90·180·270이 아니면 ParamError.
+    """
     text = value.strip()
     if not text or text == "tag":
         return None
@@ -79,7 +95,11 @@ def _rotation(value: str) -> int | None:
 
 
 def build_manifest(form: UploadForm, prepared_name: str) -> SessionManifest:
-    """폼 → 매니페스트 (수집 모델로 검증). 예외: ParamError."""
+    """폼 → 매니페스트 (수집 모델로 검증). 예외: ParamError.
+
+    스트림은 바디캠 하나(`bodycam`)이고 온톨로지는 1.0.0으로 고정한다. 촬영 시각은 시간대가 있는
+    ISO 형식만 받고, 비우면 수집이 영상 creation_time을 쓴다. 카메라 ID는 비워도 된다.
+    """
     consent = form.consent_version.strip()
     if not consent:
         raise ParamError("확인한 동의서 버전을 적어야 합니다 (영상만으로 동의를 추정하지 않습니다)")
@@ -149,7 +169,10 @@ def prepare_upload(
     suffixes: tuple[str, ...],
     delete_after_ingest: bool,
 ) -> PreparedUpload:
-    """파일을 저장하고 매니페스트를 써서 작업 명령을 만든다.
+    """파일을 저장하고 매니페스트를 써서 작업 명령을 만든다 (작업은 시작하지 않는다).
+
+    확장자와 폼 값을 파일을 받기 전에 검사한다. 크기 상한을 넘으면 디렉터리째 지운다. 같은 세션의
+    사본 디렉터리가 이미 있으면 거부한다. 진행 중인 올리기를 덮어쓰지 않으려는 것이다.
 
     예외: ParamError (형식 오류, 이미 올린 세션 디렉터리).
     """

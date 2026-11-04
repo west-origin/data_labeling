@@ -11,7 +11,7 @@
   일은 운영 절차이며 이 모듈이 요청을 보내지는 않는다. 결과의 세션 ID는 가명이므로 내부 대응표
   (`dlp_export.runner.id_map_key`)로 가명을 찾는다.
 - 내보내기와 동시에 일어난 사용 중지는 `dlp_export.runner`의 세션 행 잠금으로 직렬화된다
-  (ADR 0021): 둘 중 먼저 커밋한 쪽이 이긴다.
+  (ADR 0021). 둘 중 먼저 커밋한 쪽이 이긴다.
 - 이미 배포한 검수 작업(라벨러 워터마크 사본, Label Studio 서명 URL, CVAT 작업)은 사용 중지
   트랜잭션이 `review_tasks`에 매체 회수를 요청한다 (outbox, ADR 0039, F-REV-17). 외부 삭제는 커밋
   뒤 `dlp_review.revoke` 실행기가 한다 (`dlp dataset withdraw`가 돌린다). 요청은 `dlp_schema` 저장소
@@ -128,8 +128,8 @@ def withdraw_session(
         actor: 사용 중지를 실행한 사람·단계. 생애주기 기록의 `actor`가 된다 (CLI는
             `--actor` 또는 `DLP_ACTOR`/OS 사용자, 기본값은 호출 경로를 알리는 "withdraw").
     """
-    # 전이 시각·실행자를 함께 남긴다: 동의 철회 대응은 감사 대상이라 "언제·누가"가 필요하다.
-    # (예전에는 둘 다 빠져 기록 시각이 DB 시각, 실행자는 비어 있었다.)
+    # 전이 시각·실행자를 함께 남긴다. 동의 철회 대응은 감사 대상이라 "언제·누가"가 필요하다.
+    # 이미 withdrawn이면 set_lifecycle은 기록하지 않는다(같은 상태 호출은 멱등).
     set_lifecycle(conn, session_id, LifecycleState.WITHDRAWN, at=now, actor=actor)
     if session_id not in withdrawn_session_ids(conn):
         insert_withdrawal(conn, Withdrawal(session_id=session_id, reason=reason, withdrawn_at=now))
@@ -143,7 +143,8 @@ def _request_review_revocations(
     """사용 중지한 세션의 배포된 검수 작업마다 매체 회수를 요청한다. 이번에 요청한 작업 키.
 
     동의를 철회한 영상은 렌더 해시와 무관하게 모두 회수한다 (블러가 맞아도 쓰면 안 된다).
-    같은 매체를 쓰는 작업도 같은 세션이라 함께 요청된다. 블러 검수 작업은 저장소 함수가 거른다.
+    같은 매체를 쓰는 작업도 같은 세션이라 함께 요청된다. 블러 검수 작업은 여기와 저장소 함수
+    (`request_task_revocation`) 양쪽에서 거른다.
     호출자가 세션 행을 이미 잠갔다 (`set_lifecycle`).
     """
     return [

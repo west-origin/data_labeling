@@ -19,7 +19,11 @@ pycocotools로 읽고 평가할 수 있어야 한다 (테스트가 확인).
   주석도 이미지도 만들지 않는다 (F-PAR-63).
 
 시각 규약 (ADR 0019): 박스·키포인트 키프레임 시각은 그 스트림 영상의 PTS 시각이므로 마스터 시각으로
-바꾸지 않고 그대로 블러본 PTS 인덱스에서 찾는다 (3인칭 스트림도 같다). 이미지 `t_ms`도 스트림 시각.
+바꾸지 않고 그대로 블러본 PTS 인덱스에서 찾는다 (3인칭 스트림도 같다). 이미지 `t_ms`도 스트림
+시각이며, 키프레임 시각이 아니라 고른 프레임의 PTS를 반올림한 정수 ms다.
+좌표 단위: `bbox`([x, y, w, h])와 `keypoints`의 x, y는 블러본 프레임의 픽셀 좌표(왼쪽 위 원점)다.
+키포인트 visibility는 COCO 규약(0 라벨 없음, 1 가려짐, 2 보임)이고, 0인 점은 (0, 0, 0)으로 싣는다.
+키포인트 주석의 bbox·area는 보이는 점을 감싸는 최소 사각형에서 계산한다.
 버린 주석 사유(`CocoResult.dropped`): keyframe_between_frames, unknown_class,
 no_visible_keypoints, unsupported_skeleton, mask_size_mismatch.
 """

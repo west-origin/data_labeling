@@ -16,6 +16,9 @@ Colab·Kaggle(scripts/pretrain/objects_pretrain.ipynb)에서 공개 데이터만
 
 우리 데이터(블러본·라벨·골든셋)를 밖으로 내보내는 기능은 없다 (ADR 0060 6절: 2단계는 사내 전용).
 가중치를 읽는 로더·학습기는 만들지 않는다 (dlp_prelabel·dlp_train의 YOLOX 어댑터를 쓴다).
+
+이 모듈은 파일을 읽기만 한다 (설정 YAML, 올린 세 파일). 쓰기는 `dlp_console.imports.ImportStore`가
+한다. 진입점은 `build_plan`이다.
 """
 
 from __future__ import annotations
@@ -60,6 +63,8 @@ DEFAULT_ARCH = "yolox_s"
 
 @dataclass(frozen=True)
 class Check:
+    """검사 하나의 결과 (화면 표의 한 줄). detail은 비교한 값이나 기대 형식이다."""
+
     name: str
     ok: bool
     detail: str
@@ -83,15 +88,18 @@ class ImportPlan:
 
     @property
     def ok(self) -> bool:
+        """모든 검사가 통과하고 라이선스 위반이 없는가. 확인·비교는 이 값이 참일 때만 받는다."""
         return all(c.ok for c in self.checks) and not self.license_problems
 
     def public(self) -> dict[str, Any]:
+        """API 응답·plan.json용 dict (`ok` 포함)."""
         data = asdict(self)
         data["ok"] = self.ok
         return data
 
 
 def sha256_file(path: Path) -> str:
+    """파일의 sha256 (소문자 16진수 64자). 1 MB씩 읽어 큰 ONNX도 메모리에 다 올리지 않는다."""
     h = hashlib.sha256()
     with path.open("rb") as f:
         while chunk := f.read(1024 * 1024):
@@ -216,6 +224,7 @@ def _class_checks(root: Path, model: dict[str, Any], data: dict[str, Any]) -> li
 
 
 def dataset_names(data: dict[str, Any]) -> list[str]:
+    """데이터 manifest `datasets`의 키 (학습 데이터셋 이름, 정렬). 절이 없으면 빈 목록."""
     return sorted(str(k) for k in _dict(data.get("datasets")))
 
 

@@ -9,18 +9,18 @@ ADR 0057(학습 증강), ADR 0062(YOLOX 실제 학습기).
 (`dlp_cli.train_cmds`). 배포된 모델은 `dlp prelabel run`·`dlp privacy detect`가 `deployed`로 붙인다.
 
 하위 모듈:
-- `dlp_train.policy` — `config/policies/training.yaml` 로더 (골든·holdout 분할, 미검수 라벨 금지
+- `dlp_train.policy`: `config/policies/training.yaml` 로더 (골든·holdout 분할, 미검수 라벨 금지
   검증).
-- `dlp_train.extract` — 데이터셋 버전 스냅샷 → 과제별 학습 예제 (자동 원본과 수정본의 차이 포함).
-- `dlp_train.base` — 학습기·로더 인터페이스와 `TrainingError`.
-- `dlp_train.trainers` — 학습기(Trainer)·로더(ModelLoader) 등록부: `oracle-stub`(CI·CPU stub)과
+- `dlp_train.extract`: 데이터셋 버전 스냅샷 → 과제별 학습 예제 (자동 원본과 수정본의 차이 포함).
+- `dlp_train.base`: 학습기·로더 인터페이스와 `TrainingError`.
+- `dlp_train.trainers`: 학습기(Trainer)·로더(ModelLoader) 등록부: `oracle-stub`(CI·CPU stub)과
   `yolox`(고정 클래스 물건 탐지 YOLOX 미세조정, ADR 0062).
-- `dlp_train.yolox` / `dlp_train.yolox_data` — YOLOX 학습기·로더, 학습 예제 → COCO(블러본 키프레임
+- `dlp_train.yolox` / `dlp_train.yolox_data`: YOLOX 학습기·로더, 학습 예제 → COCO(블러본 키프레임
   프레임, 증강) 내보내기. 실제 학습은 격리 환경 `scripts/yolox-train-env`(uv.lock)에서 subprocess로
   돈다. 사람 검수 후 실제 성능 향상은 GPU 학습 서버에서 아직 검증하지 않았다.
-- `dlp_train.tracking` — MLflow REST 기록기와 테스트용 메모리 기록기.
-- `dlp_train.loop` — 한 번의 재학습 실행, 배포·승인 배포, MLflow 등록 정보.
-- `dlp_train.deployed` — 배포 모델을 단계의 기본 어댑터 목록에 끼운다.
+- `dlp_train.tracking`: MLflow REST 기록기와 테스트용 메모리 기록기.
+- `dlp_train.loop`: 한 번의 재학습 실행, 배포·승인 배포, MLflow 등록 정보.
+- `dlp_train.deployed`: 배포 모델을 단계의 기본 어댑터 목록에 끼운다.
 
 주의:
 - 학습 예제는 데이터셋 버전의 학습·검증 분할에서만 뽑는다. 골든·holdout 세션이 섞이면 실패한다.

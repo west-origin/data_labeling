@@ -1,10 +1,33 @@
 """운영 콘솔 웹 앱 (FastAPI, ADR 0061).
 
-- 정적 화면(`static/`)은 토큰 없이 받지만 데이터는 없다. 모든 `/api/*` 요청은 `X-Console-Token`
-  머리글이 시작 때 만든 토큰과 같아야 한다 (CSRF: 다른 사이트는 이 머리글을 붙일 수 없고 CORS를 열지
-  않는다). Host 머리글은 묶은 주소·localhost만 받는다 (DNS 재바인딩 방지).
-- 쓰기는 모두 `dlp` 명령 작업(`JobRunner`)이다. DB는 읽기만 한다.
+`dlp console serve`(`dlp_console.server.serve`)가 `create_app`으로 앱을 만들어 uvicorn에 넘긴다.
+브라우저 화면(`static/app.js`)이 아래 `/api/*` 경로를 부른다. 이 모듈은 요청을 검사하고, 다른 모듈
+(`status`·`steps`·`global_steps`·`upload`·`preview`·`training`·`imports`)의 결과를 JSON으로 묶는다.
+도메인 판정은 하지 않는다.
+
+경로 목록:
+
+- `GET /`: 화면 HTML. `/static/*`: 화면 JS·CSS (토큰 없이 받지만 데이터는 없다).
+- `GET /api/overview`, `GET /api/sessions/{세션}`: 세션 목록·세션 상세 (읽기).
+- `POST /api/sessions/{세션}/steps/{단계}`: 세션 단계 작업 시작.
+- `GET /api/sessions/{세션}/preview`: 블러본 서명 URL과 겹쳐 그릴 트랙.
+- `POST /api/upload`, `DELETE /api/uploads/{세션}`: 영상 올리기 작업 시작, 업로드 사본 지우기.
+- `GET /api/jobs`, `GET /api/jobs/{작업}`: 작업 목록·작업 하나 (로그 꼬리 포함).
+- `POST /api/global/{단계}`, `GET /api/training`: 세션 밖 단계 작업 시작, 재학습 화면 자료.
+- `GET /api/pretrain`, `POST /api/pretrain/check`, `POST /api/pretrain/{가져오기}/confirm`,
+  `POST /api/pretrain/{가져오기}/compare`: 외부 가중치 가져오기.
+
+지키는 경계:
+
+- 모든 `/api/*` 요청은 `X-Console-Token` 머리글이 시작 때 만든 토큰과 같아야 한다 (401). CSRF를
+  막는 방법이다. 다른 사이트의 페이지는 이 머리글을 붙일 수 없고, 콘솔은 CORS를 열지 않는다.
+- Host 머리글은 묶은 주소·localhost만 받는다 (400, DNS 재바인딩 방지, `host_allowed`).
+- DB는 읽기만 한다. 파이프라인 쓰기는 모두 `dlp` 명령 작업(`JobRunner`)이다. 콘솔이 직접 쓰는
+  것은 작업 디렉터리의 파일(업로드 사본, 세션별 화면 기억값, 가져오기 기록, 리포트 캐시)과, 가져오기
+  확인 때 Git 밖 `pretrain_import.models_dir`(`data/models/` 아래)에 두는 가중치 사본뿐이다.
 - 응답에는 원본 위치(스트림 uri·검수 매체 uri)를 싣지 않는다. 로그 꼬리는 `Redactor`로 가린다.
+- 같은 잠금 키(`session:<세션>`, `global:<묶음>`)의 작업이 돌고 있으면 새 작업은 409다.
+- 화면 값 오류(`ParamError`)는 400 JSON `{"detail": …}`으로 바꾼다.
 """
 
 from __future__ import annotations
@@ -63,9 +86,19 @@ DEV_DATABASE_URL = "postgresql+psycopg://dlp:dlp-dev-password@localhost:5432/dlp
 
 
 class Services:
-    """앱이 쓰는 외부 자원 (시험은 가짜로 바꾼다)."""
+    """앱이 쓰는 외부 자원 묶음 (DB 엔진, S3 서명, 작업 실행기, 정책 읽기).
+
+    경로 처리기는 DB 연결·S3 서명·작업 실행을 이 객체로 얻는다. 시험
+    (`packages/console/tests/conftest.py` `FakeServices`)은 이 클래스를 상속해 DB·S3를 바꾼다.
+    """
 
     def __init__(self, settings: ConsoleSettings) -> None:
+        """시작 때 한 번 만든다. 작업 디렉터리 아래 `reports/`, `sessions/`를 만든다.
+
+        `config/defaults.yaml`(버킷 이름)과 `config/policies/privacy.yaml`(렌더 게이트 정책)을 이때
+        읽는다. 콘솔을 다시 시작해야 정책 변경이 렌더 판정에 반영된다. DB 엔진은 연결을 미리 열지
+        않는다 (첫 요청 때 연결한다).
+        """
         self.settings = settings
         root = settings.root
         self.buckets = load_config(root / "config" / "defaults.yaml").buckets
@@ -97,6 +130,12 @@ class Services:
         return True
 
     def sign(self, key: str) -> str:
+        """라벨링 버킷 키의 서명 GET URL (라벨러 자격 증명, 유효 `preview.signed_url_ttl_s`초).
+
+        브라우저가 닿는 주소(`DLP_S3_PUBLIC_ENDPOINT`)로 서명한다. 라벨러 자격 증명은 원본 버킷을
+        읽지 못하므로 잘못된 키를 서명해도 원본은 열리지 않는다. 부르는 쪽(`preview.blurred_url`)이
+        먼저 렌더 게이트를 확인한다.
+        """
         store = S3Store.labeler_from_env(self.buckets.labeling, public=True)
         return store.presign(key, self.settings.config.preview.signed_url_ttl_s)
 
@@ -109,10 +148,16 @@ class Services:
 
     @contextmanager
     def connect(self) -> Generator[sa.Connection]:
+        """DB 연결 하나 (읽기용, 커밋하지 않는다)."""
         with self.engine.connect() as conn:
             yield conn
 
     def privacy_reviewers(self) -> tuple[str, ...]:
+        """검수 정책 `reviewers.privacy`(원본 접근 권한자) 목록. 정책을 못 읽으면 빈 값.
+
+        `DLP_REVIEW_POLICY_FILE`이 있으면 그 파일을, 없으면 `config/policies/review.yaml`을 읽는다.
+        요청마다 다시 읽는다. 블러 검수 담당자 선택지와 단계 활성 판정에 쓴다.
+        """
         selected = self.settings.env.get("DLP_REVIEW_POLICY_FILE")
         try:
             policy = load_review_policy(self.settings.root, Path(selected) if selected else None)
@@ -121,6 +166,7 @@ class Services:
         return tuple(policy.reviewers.privacy)
 
     def scenes(self) -> tuple[str, ...]:
+        """`prelabel.yaml scene.labels`의 장면 이름 (올리기·AI 라벨 단계의 선택지)."""
         data: Any = yaml.safe_load(
             (self.settings.root / "config" / "policies" / "prelabel.yaml").read_text("utf-8")
         )
@@ -128,6 +174,11 @@ class Services:
         return tuple(str(x) for x in cast(list[Any], scene.get("labels") or []))
 
     def prefs(self, session_id: str) -> dict[str, Any]:
+        """세션별 화면 기억값 (`<작업 디렉터리>/sessions/<세션>.json`, 없으면 {}).
+
+        지금은 올릴 때 고른 장면(`scene`)만 담는다. AI 라벨 단계에서 장면을 비우면 이 값을 쓴다.
+        DB에 넣지 않는 콘솔 편의 값이다.
+        """
         path = self.prefs_dir / f"{session_id}.json"
         if not path.is_file():
             return {}
@@ -135,6 +186,7 @@ class Services:
         return data
 
     def save_prefs(self, session_id: str, values: dict[str, Any]) -> None:
+        """기억값에 `values`를 덮어 합쳐 쓴다 (있던 다른 키는 남긴다)."""
         path = self.prefs_dir / f"{session_id}.json"
         path.write_text(
             json.dumps({**self.prefs(session_id), **values}, ensure_ascii=False), "utf-8"
@@ -164,6 +216,7 @@ def job_view(services: Services, job: Job, *, tail: bool = False) -> dict[str, A
 
 
 def _state(services: Services, conn: sa.Connection, session_id: str) -> SessionState:
+    """경로의 세션 ID를 검사하고 세션 상태를 읽는다. 모양이 틀리면 400, 없으면 404."""
     if not IDENT.match(session_id):
         raise HTTPException(400, "세션 ID가 올바르지 않습니다")
     try:
@@ -173,6 +226,7 @@ def _state(services: Services, conn: sa.Connection, session_id: str) -> SessionS
 
 
 def _context(services: Services, state: SessionState) -> StepContext:
+    """단계 활성 판정 입력. 콘솔 작업 기록에서 이 세션의 성공한 단계 ID도 모은다."""
     sid = state.session.session_id
     done = frozenset(j.step for j in services.runner.jobs(sid) if j.status is JobStatus.SUCCEEDED)
     return StepContext(
@@ -187,6 +241,7 @@ def _context(services: Services, state: SessionState) -> StepContext:
 def _submit(
     services: Services, title: str, step: str, commands: list[list[str]], **kw: Any
 ) -> dict[str, Any]:
+    """작업을 시작하고 작업 화면 값을 돌려준다. 같은 잠금 키의 작업이 돌고 있으면 409."""
     try:
         job = services.runner.submit(step, title, commands, **kw)
     except JobConflictError as exc:
@@ -195,6 +250,7 @@ def _submit(
 
 
 def _theme(root: Path) -> dict[str, Any]:
+    """검수 화면 테마(`config/review_ui.yaml`)의 이름·로고·색 모드 (CVAT 테마와 같은 값)."""
     theme = load_ui_theme(root)
     return {
         "name": theme.brand.name,
@@ -220,6 +276,7 @@ def host_name(header: str) -> str:
 
 
 def _is_ip(name: str) -> bool:
+    """IPv4·IPv6 리터럴인가 (도메인 이름이면 False)."""
     try:
         ipaddress.ip_address(name)
     except ValueError:
@@ -260,6 +317,7 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
+        """앱 수명. 시작 때는 할 일이 없고, 끝날 때 돌고 있는 작업을 멈춘다."""
         yield
         # 콘솔 종료(SIGTERM·Ctrl-C → uvicorn 종료): 자식 dlp 그룹을 멈추고 interrupted로 남긴다
         svc.runner.shutdown()
@@ -274,6 +332,13 @@ def create_app(
     async def guard(
         request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
+        """모든 요청의 문지기.
+
+        1. Host 머리글이 허용 이름이 아니면 400 (`host_allowed`). 정적 파일도 같다.
+        2. `/api/*`는 `X-Console-Token`이 토큰과 다르거나 없으면 401.
+        3. 통과한 응답에 캐시 금지(`no-store`), MIME 추측 금지, Referer 금지 머리글을 붙인다.
+           서명 URL·작업 자료가 브라우저 캐시에 남지 않게 한다.
+        """
         if not host_allowed(request.headers.get("host") or "", bind_host, extra):
             return JSONResponse({"detail": "허용하지 않은 Host"}, status_code=400)
         if request.url.path.startswith("/api/"):
@@ -289,6 +354,7 @@ def create_app(
 
     @app.exception_handler(ParamError)
     async def param_error(_request: Request, exc: ParamError) -> JSONResponse:
+        """`ParamError`(화면 값 오류, 막힌 단계) → 400 `{"detail": 한국어 안내}`."""
         return JSONResponse({"detail": str(exc)}, status_code=400)
 
     _session_routes(app, svc)
@@ -298,6 +364,7 @@ def create_app(
 
     @app.get("/")
     def index() -> FileResponse:
+        """`GET /`: 화면 HTML (데이터 없음, 토큰 검사 없음. 토큰은 주소 `#token=`으로 받는다)."""
         return FileResponse(STATIC / "index.html")
 
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
@@ -307,6 +374,12 @@ def create_app(
 def _session_routes(app: FastAPI, svc: Services) -> None:
     @app.get("/api/overview")
     def overview() -> dict[str, Any]:
+        """`GET /api/overview`: 첫 화면 자료. 작업을 시작하지 않는다.
+
+        DB에서 모든 세션의 짧은 값(최근 촬영 먼저)을 읽는다. 함께 싣는 것은 테마, 실행 중 작업,
+        VLM 서버 설정 여부(주소는 빼고), 블러 검수 담당자 선택지, 장면 선택지, 라벨 검수 담당자
+        기본값(`DLP_CONSOLE_LABELER`), 도메인 선택지다. 오류 응답은 401·400(문지기)뿐이다.
+        """
         with svc.connect() as conn:
             sessions = list_sessions(conn)
         running = [job_view(svc, j) for j in svc.runner.jobs() if j.status is JobStatus.RUNNING]
@@ -323,6 +396,15 @@ def _session_routes(app: FastAPI, svc: Services) -> None:
 
     @app.get("/api/sessions/{session_id}")
     def session(session_id: str) -> dict[str, Any]:
+        """`GET /api/sessions/{session_id}`: 세션 상세. 작업을 시작하지 않는다.
+
+        DB에서 세션·탐지 세대·검수 작업·보류·사용 중지·라벨 수를 읽고, 영상 스트림마다 렌더
+        게이트를 확인한다. 응답은 단계 목록(상태·막힌 이유), 검수 작업(도구 주소 포함, 매체 위치
+        제외), 라벨 수, 렌더 여부, 기억값, 이 세션의 최근 작업 20개다.
+
+        Raises:
+            HTTPException: 세션 ID 모양이 틀리면 400, 세션이 없으면 404.
+        """
         with svc.connect() as conn:
             state = _state(svc, conn, session_id)
             counts = label_counts(conn, session_id)
@@ -342,6 +424,19 @@ def _session_routes(app: FastAPI, svc: Services) -> None:
 
     @app.post("/api/sessions/{session_id}/steps/{step_id}")
     async def run_step(session_id: str, step_id: str, request: Request) -> dict[str, Any]:
+        """`POST /api/sessions/{session_id}/steps/{step_id}`: 세션 단계 작업을 시작한다.
+
+        본문은 화면 입력 칸 값의 JSON 객체다 (비어도 된다). `steps.build_command`가 단계 판정과
+        값 검사를 한 뒤 `dlp` 명령을 만든다. AI 라벨(`prelabel`)에서 장면을 비우면 올릴 때 고른
+        장면을 쓴다. 잠금 키는 `session:<세션>`이라 한 세션에는 작업이 하나씩만 돈다.
+
+        Returns:
+            시작한 작업의 화면 값 (`job_view`). 작업은 백그라운드에서 돈다.
+
+        Raises:
+            HTTPException: 세션 ID 400·세션 없음 404·같은 세션 작업 실행 중 409.
+            ParamError: 본문 JSON 오류·모르는 단계·막힌(blocked·skipped) 단계·값 오류 (400).
+        """
         params = await _json_params(request)
         with svc.connect() as conn:
             state = _state(svc, conn, session_id)
@@ -354,6 +449,15 @@ def _session_routes(app: FastAPI, svc: Services) -> None:
 
     @app.get("/api/sessions/{session_id}/preview")
     def preview(session_id: str, stream: str = "bodycam") -> dict[str, Any]:
+        """`GET /api/sessions/{session_id}/preview?stream=…`: 결과 보기 자료 (작업 시작 없음).
+
+        렌더 게이트를 통과한 블러본의 서명 URL과, 그 스트림의 운영 라벨 박스·키포인트 트랙(신뢰도
+        높은 순 `preview.max_tracks`개)을 돌려준다. 원본 버킷은 읽지 않는다.
+
+        Raises:
+            HTTPException: 세션 ID 400·세션 없음 404. 사용 중지·블러 승인 전·렌더 안 됨·영상
+                스트림 아님이면 409 (`PreviewUnavailableError`).
+        """
         with svc.connect() as conn:
             state = _state(svc, conn, session_id)
             try:
@@ -378,6 +482,17 @@ def _session_routes(app: FastAPI, svc: Services) -> None:
         scene: Annotated[str, Form()] = "",
         display_rotation: Annotated[str, Form()] = "",
     ) -> dict[str, Any]:
+        """`POST /api/upload` (multipart): 영상 하나를 받아 준비·수집 작업을 시작한다.
+
+        파일을 `<작업 디렉터리>/uploads/<세션>/`에 저장하고 매니페스트를 쓴 뒤
+        `dlp media prepare` → `dlp ingest` 작업(잠금 `session:<세션>`)을 시작한다. 장면을 고르면
+        세션 기억값에 남긴다. DB에는 직접 쓰지 않는다 (수집 명령이 쓴다).
+
+        Raises:
+            HTTPException: 같은 세션 작업이 이미 돌면 409 (파일을 받기 전에 확인한다).
+            ParamError: 장면이 선택지에 없음, 확장자·크기 상한·폼 값 오류, 이미 올린 사본이
+                있음 (400).
+        """
         form = UploadForm(
             session_id, worker_id, site_id, domain, consent_version, recorded_at, camera_id, scene,
             display_rotation,
@@ -401,6 +516,11 @@ def _session_routes(app: FastAPI, svc: Services) -> None:
 
     @app.delete("/api/uploads/{session_id}")
     def delete_upload(session_id: str) -> dict[str, Any]:
+        """`DELETE /api/uploads/{session_id}`: 그 세션의 업로드 사본 디렉터리를 지운다.
+
+        실패한 올리기를 다시 하려고 쓴다. 원본 버킷·DB는 건드리지 않는다. 응답 `removed`는
+        디렉터리가 있었는지다. 세션 ID 모양 오류는 400, 그 세션 작업이 돌고 있으면 409.
+        """
         # 실행 중 검사와 삭제가 같은 정규화 값을 쓴다 (올리기도 strip한 ID로 잠근다, F-COE-80)
         sid = _ident(session_id, "세션 ID")
         if svc.runner.running(f"session:{sid}") is not None:
@@ -411,10 +531,15 @@ def _session_routes(app: FastAPI, svc: Services) -> None:
 def _job_routes(app: FastAPI, svc: Services) -> None:
     @app.get("/api/jobs")
     def jobs(session: str | None = None) -> list[dict[str, Any]]:
+        """`GET /api/jobs?session=…`: 작업 목록 (새것 먼저 50개, 세션을 주면 그 세션 것만).
+
+        콘솔 작업 기록(`jobs.jsonl`)만 읽는다. 실패·중단 작업에는 마지막 오류 줄과 안내를 붙인다.
+        """
         return [job_view(svc, j) for j in svc.runner.jobs(session)[:50]]
 
     @app.get("/api/jobs/{job_id}")
     def job(job_id: str) -> dict[str, Any]:
+        """`GET /api/jobs/{job_id}`: 작업 하나와 가린 로그 꼬리·경고 줄. 없으면 404."""
         found = svc.runner.get(job_id)
         if found is None:
             raise HTTPException(404, "작업이 없습니다")
@@ -423,12 +548,22 @@ def _job_routes(app: FastAPI, svc: Services) -> None:
 
 def _global_routes(app: FastAPI, svc: Services) -> None:
     def gctx() -> GlobalContext:
+        """요청마다 `training.yaml` 과제 목록을 다시 읽어 세션 밖 단계 입력을 만든다."""
         return GlobalContext(
             reports_dir=svc.reports_dir, train_tasks=tuple(policy_trainers(svc.settings.root))
         )
 
     @app.post("/api/global/{step_id}")
     async def run_global(step_id: str, request: Request) -> dict[str, Any]:
+        """`POST /api/global/{step_id}`: 세션 밖 단계(데이터셋·재학습·배포 승인·평가·리포트) 시작.
+
+        본문 JSON 객체를 `global_steps.build_global`이 `dlp` 명령으로 바꾼다. 잠금 키는
+        `global:<묶음>`이다 (예: 재학습과 배포 승인은 `global:train`을 같이 쓴다).
+
+        Raises:
+            HTTPException: 같은 묶음 작업이 돌고 있으면 409.
+            ParamError: 본문 JSON 오류·모르는 단계·값 오류 (400).
+        """
         params = await _json_params(request)
         try:
             step, commands = build_global(gctx(), step_id, params)
@@ -438,6 +573,12 @@ def _global_routes(app: FastAPI, svc: Services) -> None:
 
     @app.get("/api/training")
     def training() -> dict[str, Any]:
+        """`GET /api/training`: 재학습·성과 화면 자료. 작업을 시작하지 않는다.
+
+        DB `model_versions` 회차와 각 회차의 골든셋 평가 리포트(MLflow 산출물 버킷, 작업 디렉터리에
+        캐시), 골든셋 버전 목록, 가장 최근 주간 지표 JSON, 세션 밖 작업 최근 20개를 돌려준다.
+        리포트를 받지 못한 회차는 `report: null`이다 (오류로 바꾸지 않는다).
+        """
         trainers = policy_trainers(svc.settings.root)
         cache = ReportCache(svc.settings.work_dir, svc.fetch_report)
         with svc.connect() as conn:
@@ -457,6 +598,11 @@ def _pretrain_routes(app: FastAPI, svc: Services) -> None:
 
     @app.get("/api/pretrain")
     def pretrain() -> dict[str, Any]:
+        """`GET /api/pretrain`: 가져오기 화면 자료. 작업을 시작하지 않는다.
+
+        확인한 가져오기 기록(새것 먼저), 비교 학습기 이름(`pretrain_import.compare.trainer`), 그
+        학습기로 돈 objects 회차, 그중 게이트를 통과(passed·deployed)한 회차가 있는지를 돌려준다.
+        """
         trainers = policy_trainers(svc.settings.root)
         cache = ReportCache(svc.settings.work_dir, svc.fetch_report)
         with svc.connect() as conn:
@@ -478,6 +624,12 @@ def _pretrain_routes(app: FastAPI, svc: Services) -> None:
         model_manifest: Annotated[UploadFile, File()],
         data_manifest: Annotated[UploadFile, File()],
     ) -> dict[str, Any]:
+        """`POST /api/pretrain/check` (multipart): 가중치 묶음 세 파일을 받아 검사한다.
+
+        새 가져오기 디렉터리(`<작업 디렉터리>/pretrain/<가져오기 ID>/`)에 ONNX와 두 manifest를
+        저장하고 `ImportStore.check`로 검사·적용 미리보기를 만든다. 작업을 시작하지 않고 설정
+        파일도 고치지 않는다. 검사 실패도 200이며 응답의 `ok`·`checks`가 이유를 보인다.
+        """
         import_id, path = svc.imports.new_dir()
         for name, upload in zip(FILES, (onnx, model_manifest, data_manifest), strict=True):
             with (path / name).open("wb") as f:
@@ -487,11 +639,31 @@ def _pretrain_routes(app: FastAPI, svc: Services) -> None:
 
     @app.post("/api/pretrain/{import_id}/confirm")
     def confirm(import_id: str) -> dict[str, Any]:
+        """`POST /api/pretrain/{import_id}/confirm`: 검사를 통과한 가져오기를 확인한다.
+
+        가중치를 `pretrain_import.models_dir`에 복사(sha256 재확인)하고, 패치 파일과 가져오기 기록
+        (`pretrain_imports.jsonl`, 추가만)을 남긴다. 기록의 actor는 `DLP_ACTOR`, 없으면 `USER`다.
+        Git이 관리하는 설정 파일은 고치지 않고 운영자가 할 명령(`next`)을 돌려준다.
+
+        Raises:
+            ParamError: ID 모양 오류·모르는 가져오기·검사 결과 없음·검사 불통과·같은 자리에 다른
+                파일·복사본 해시 불일치 (400).
+        """
         actor = svc.settings.env.get("DLP_ACTOR") or os.environ.get("USER", "operator")
         return svc.imports.confirm(import_id, actor)
 
     @app.post("/api/pretrain/{import_id}/compare")
     async def run_compare(import_id: str, request: Request) -> dict[str, Any]:
+        """`POST /api/pretrain/{import_id}/compare`: 가져온 가중치의 골든셋 비교 작업을 시작한다.
+
+        본문 `dataset_version`(필수)과 `baseline_versions`(공백으로 나눈 모델 버전, 끝 `*` 허용)를
+        받아 `dlp train run objects <버전> --trainer <비교 학습기> --param …`을 돌린다. `params`
+        값의 `{model_name}`은 가져온 모델 이름으로 바뀐다. 잠금 키는 재학습과 같은 `global:train`.
+
+        Raises:
+            ParamError: 비교 학습기 미설정(F-COE-74)·검사 불통과·값 오류·본문 JSON 오류 (400).
+            HTTPException: 재학습 작업이 이미 돌면 409.
+        """
         params = await _json_params(request)
         if not compare.trainer:
             raise ParamError(
@@ -520,6 +692,7 @@ def _pretrain_routes(app: FastAPI, svc: Services) -> None:
 
 
 def _finite_float(text: str) -> float:
+    """JSON 실수 해석기. 1e400처럼 무한대로 넘치는 값은 ParamError."""
     value = float(text)
     if not math.isfinite(value):
         raise ParamError(f"숫자가 범위를 벗어났습니다: {text}")
@@ -527,6 +700,7 @@ def _finite_float(text: str) -> float:
 
 
 def _reject_constant(text: str) -> Any:
+    """JSON 상수(NaN·Infinity·-Infinity)를 거부한다 (표준 JSON이 아니다)."""
     raise ParamError(f"숫자가 아닙니다: {text}")
 
 
@@ -548,6 +722,7 @@ async def _json_params(request: Request) -> dict[str, Any]:
 
 
 def _ident(value: Any, name: str) -> str:
+    """앞뒤 공백을 떼고 `IDENT` 모양인지 본다. 아니면 ParamError(400)."""
     text = str(value or "").strip()
     if not IDENT.match(text):
         raise ParamError(f"{name} 값이 올바르지 않습니다")

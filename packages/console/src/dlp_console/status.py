@@ -2,7 +2,16 @@
 
 DB는 기존 저장소 함수(`dlp_schema.db.repository`·`review_repository`·`privacy_repository`)로만 읽고
 쓰지 않는다. 화면에 보내는 값에는 원본 위치(스트림 `uri`·`pts_index_uri`, 검수 작업 `media_uri`)를
-넣지 않는다. 렌더 여부는 라벨링 버킷을 라벨러 자격 증명(읽기 전용)으로 HEAD 해서 본다.
+넣지 않는다. 렌더 여부는 호출자가 준 `RenderedCheck`로 본다. 앱(`app.Services.rendered`)은
+라벨러 자격 증명(라벨링 버킷 읽기 전용)으로 렌더 게이트 `assert_render_current`를 부른다. 렌더
+기록의 해시가 지금 운영 블러 라벨·렌더 정책과 같아야 렌더됨이다.
+
+주요 이름:
+
+- `read_state` → `SessionState`: 단계 활성 판정(`dlp_console.steps`)의 입력.
+- `session_view`·`task_view`·`list_sessions`: 화면용 dict (원본 위치 제외).
+- `label_counts`: 화면용 라벨 수 (아래 근사). `vlm_servers`: VLM 서버 설정 여부.
+- `blurred_key`·`tool_url`·`lifecycle_at_least`: 작은 도우미.
 
 라벨 수(`label_counts`)는 화면용 집계라 SQL로 센다: 삭제·오류 삽입·측정 레코드와 다른 레코드의
 parent인 레코드를 뺀다. `current_labels()`와 달리 오류 삽입 레코드의 후손은 빼지 못한다 (근사).
@@ -96,7 +105,13 @@ def session_view(s: Session) -> dict[str, Any]:
 
 @dataclass
 class SessionState:
-    """단계 활성 규칙(`dlp_console.steps`)이 보는 세션 상태."""
+    """단계 활성 규칙(`dlp_console.steps`)이 보는 세션 상태.
+
+    - video_streams: 바디캠·3인칭 영상 스트림 ID (IMU·장갑·오디오 스트림 제외).
+    - tasks: 이 세션의 모든 검수 작업 (회수된 것 포함, 거르기는 `stage_tasks`).
+    - rendered: 영상 스트림 → 렌더 게이트 통과 여부.
+    - held: 사고 대응 승인 보류 중인가. withdrawn: 사용 중지 세션인가.
+    """
 
     session: Session
     video_streams: tuple[str, ...]
@@ -108,12 +123,17 @@ class SessionState:
     withdrawn: bool = False
 
     def stage_tasks(self, stage: ReviewStage) -> list[ReviewTask]:
+        """그 단계의 검수 작업 중 회수(revoked)되지 않은 것 (열림·수집 모두)."""
         return [
             t for t in self.tasks if t.stage is stage and t.status is not ReviewTaskStatus.REVOKED
         ]
 
     def current_privacy_tasks(self) -> list[ReviewTask]:
-        """지금 탐지 세대를 본 블러 검수 작업."""
+        """지금 탐지 세대를 본 블러 검수 작업.
+
+        탐지를 다시 돌려 세대가 바뀌면 앞 세대로 만든 작업은 빠진다. 새 세대로 블러 검수를 다시
+        해야 한다는 뜻이다.
+        """
         return [
             t
             for t in self.stage_tasks(ReviewStage.PRIVACY)

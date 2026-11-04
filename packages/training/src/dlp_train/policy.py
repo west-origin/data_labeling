@@ -7,8 +7,11 @@ WP13, ADR 0016. `load_policy(root)`가 YAML을 읽어 `TrainingPolicy`로 검증
 - 미검수(unreviewed) 상태는 학습 예제가 될 수 없다 (`_reviewed`).
 또 replaces는 실제로 대신할 수 있는 단계 이름만 받는다 (`_known_replaces`, F-ETA-27).
 
-과제 키는 평가 과제(`dlp_eval.policy.Task`)와 같다. 이 정책은 모델 버전 해시에 들어가지 않는다
-(모델 버전 태그는 `loop._short`가 과제·데이터셋 버전·학습기·파라미터·시각으로 만든다).
+과제 키는 평가 과제(`dlp_eval.policy.Task`)와 같다. 정책 파일 전체의 해시는 모델 버전에 넣지 않는다.
+모델 버전 태그는 `loop._short`가 과제·데이터셋 버전·학습기·파라미터·시각으로 만들고, 그 "파라미터"는
+이 정책의 과제 `params`에 `--param`을 덮은 값과 증강 설정 해시(`augmentation`)다. 그 밖의 절
+(`min_examples`, `deploy`, `yolox` 기본값 등)은 태그에 들어가지 않는다. yolox 학습기는 `yolox` 절의
+해시를 산출물 manifest(`yolox_policy_sha256`)에 따로 남긴다.
 """
 
 from __future__ import annotations

@@ -20,6 +20,8 @@
 프레임 특징 (손은 왼손·오른손 순):
 - observation.state (float32): 손 21관절 2D(정규화 x, y, COCO 보임 v: 0 없음·1 가려짐·2 보임)
   + 손 3D 점(카메라 좌표 x, y, z, 있음) + 쥔 도구 작용부 3D(x, y, z, 있음).
+  2D x, y는 블러본 원본 가로·세로 픽셀로 나눈 0~1 값이다. 3D x, y, z는 카메라 좌표계의 m이다.
+  "있음"은 값이 있으면 1, 없으면 0이고, 값이 없는 칸의 좌표는 0이다.
   2D 키포인트는 interp_max_gap_ms, 3D 궤적은 interp_max_gap_3d_ms 안에서만 선형 보간한다.
   프리라벨이 보간해 채운 손 2D 키프레임(`interpolated`, ADR 0054)은 관측이 아니라 키프레임이 없는
   것으로 본다 (F-PAR-63).
@@ -650,7 +652,8 @@ def wearer_arm_features(
 
     손마다 그 스트림의 arm3 트랙(같은 손에 여럿이면 `preferred` 순, 시각마다 값이 있는 첫 것)과
     카메라 좌표 팔 3D(`<손>_arm`, arm_points_3d)를 손과 같은 보간 한도로 읽는다. 값이 없으면 0
-    (v·present 0).
+    (v·present 0). 팔 3D는 부위마다 `preferred` 순 첫 궤적 하나만 본다. 그 궤적에 값이 없는 시각에
+    다음 궤적으로 넘어가지 않는다 (손 3D 점의 `traj_at`과 다르다).
     """
     w, h = size
     k2d, k3d = len(ARM3_JOINTS) * 3, len(policy.arm_points_3d) * 4

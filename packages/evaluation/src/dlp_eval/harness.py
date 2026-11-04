@@ -24,12 +24,24 @@ WP11, ADR 0013·0019·0025. 입력 `SessionData`는 `dlp_eval.runner`(DB) 또는
 (`dlp_train.loop.predict_golden`, 메모리 예측)가 만든다. 이 모듈은 DB·저장소에 접근하지 않는다.
 
 공개 이름:
-- `SessionData` — 세션 하나의 정답·예측·하위 집단 값.
-- `TaskReport`, `EvalReport` — 과제별 지표와 전체·하위 집단 리포트.
+- `SessionData`: 세션 하나의 정답·예측·하위 집단 값.
+- `TaskReport`, `EvalReport`: 과제별 지표와 전체·하위 집단 리포트.
 - `eval_objects`·`eval_keypoints`·`eval_contact`·`eval_actions`·`eval_relations`·`eval_states`·
-  `eval_coverage`·`eval_privacy` — 과제별 평가기. 평가할 정답이 없으면 None.
-- `EVALUATORS` — 과제 → 평가기. `evaluate` — 모든 과제와 하위 집단을 평가한다.
-- `LOWER_IS_BETTER` — 낮을수록 좋은 지표 이름 (게이트·리포트가 쓴다).
+  `eval_coverage`·`eval_privacy`: 과제별 평가기. 평가할 정답이 없으면 None.
+- `EVALUATORS`: 과제 → 평가기. `evaluate`: 모든 과제와 하위 집단을 평가한다.
+- `LOWER_IS_BETTER`: 낮을수록 좋은 지표 이름 (게이트·리포트가 쓴다).
+
+지표 단위와 범위 (리포트 `TaskReport.metrics` 키):
+- 0~1이고 높을수록 좋은 비율: map·ap50·ap75·`ap/<클래스>`·hota·idf1, pck, contact_start_f1·
+  contact_end_f1·grasp_macro_f1, `segment_f1_<문턱>`·temporal_map·boundary_f1·verb_macro_f1,
+  relation_f1, transition_accuracy·transition_precision, blur_recall·blur_precision·
+  `blur_recall/<대상>`.
+- mota: 높을수록 좋고 최댓값 1이다. 놓침·오탐·ID 전환의 합이 정답 수보다 많으면 음수가 된다.
+- 낮을수록 좋은 값(`LOWER_IS_BETTER`): ece(0~1), contact_start_error_ms·contact_end_error_ms
+  (ms, 맞춘 사건의 평균 절대 시각 오차), coverage_abs_error(면적 비율의 절대 차, 0~1).
+- 정의되지 않으면 NaN이다 (예: 맞춘 접촉이 없을 때 오차, 정답 시각에 예측 블러가 없을 때
+  blur_precision, 양 끝을 빼면 경계가 없을 때 boundary_f1, 예측이 없을 때 ece). 게이트의 NaN 규칙은
+  `dlp_eval.gate`에 있다.
 
 공통 규칙: 삭제(retracted) 레코드는 정답·예측 어디에도 쓰지 않는다 (`_payloads`). 정답·예측 필터
 (사람 정답, 모델 버전, 비운영 레코드 제외)는 호출자가 이미 했다고 가정한다.
@@ -131,7 +143,8 @@ def _interp(
 
     Returns:
         t가 키프레임 시각과 같으면 그 값(화면 밖이면 None), 아니면 보간 값 또는 None.
-        키포인트의 visibility 열도 선형 보간된다 (0과 2 사이면 1 같은 중간값 — `> 0` 판정만 쓴다).
+        키포인트의 visibility 열도 선형 보간된다 (0과 2 사이면 1 같은 중간값이다. 호출자는 `> 0`
+        판정만 쓴다).
     """
     times = [k[0] for k in keyframes]
     i = int(np.searchsorted(times, t))

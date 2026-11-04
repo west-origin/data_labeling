@@ -85,7 +85,8 @@ def box_iou(a: Sequence[Box], b: Sequence[Box]) -> NDArray[np.float64]:
 
 @dataclass(frozen=True)
 class ApResult:
-    """COCO AP 결과. 값이 -1.0이면 정의되지 않음 (정답 클래스가 하나도 없음, pycocotools 규약)."""
+    """COCO AP 결과. 값은 0~1(높을수록 좋음)이다. -1.0이면 정의되지 않음 (정답 클래스가 하나도 없음,
+    pycocotools 규약)."""
 
     map: float  # 0.50:0.95
     ap50: float
@@ -101,7 +102,7 @@ def _match(
 
     한 이미지·한 클래스 안의 탐욕 매칭 (pycocotools `evaluateImg`와 같다): IoU 문턱마다 점수가 높은
     예측부터, 아직 안 쓴 정답 중 IoU가 가장 큰 것(문턱 이상)을 가져간다. 동점이면 정답 순서가 뒤인
-    것이 이긴다 (`<`로 비교하므로 같은 값이면 갱신) — pycocotools와 같은 동작이다.
+    것이 이긴다 (`<`로 비교하므로 같은 값이면 갱신). pycocotools와 같은 동작이다.
     """
     tp = np.zeros((len(thresholds), len(dets)), dtype=bool)
     if not gts or not dets:

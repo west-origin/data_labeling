@@ -6,8 +6,8 @@
 
 1. 골든셋 세션의 작업자·장소를 "골든 쪽"으로 묶는다. 그 작업자나 장소가 나오는 다른 세션은
    어느 쪽에도 넣지 않는다 (holdout). 후보에 들지 않은 골든셋 세션(프라이버시 미승인, 다른 온톨로지
-   등)도 골든 쪽 작업자·장소를 정한다 (golden_sessions): 그 세션이 나중에 평가에 쓰여도
-   학습과 겹치지 않게.
+   등)도 `golden_sessions`로 받아 골든 쪽 작업자·장소를 정한다. 그 세션이 나중에 평가에 쓰여도
+   학습과 겹치지 않게 하려는 것이다.
 2. 나머지에서 검증용 작업자를 하나씩 고른다. 작업자를 고르면 그의 장소도 검증 쪽이 된다.
    작업자와 장소가 모두 검증 쪽인 세션은 val, 모두 학습 쪽인 세션은 train, 걸친 세션은 holdout이다.
    매 단계에서 holdout이 가장 적게 늘어나는 작업자를 고르고(같으면 val이 많은 쪽, 그다음 작업자
@@ -62,7 +62,9 @@ def assign_splits(  # noqa: C901
 
     Args:
         sessions: 분할할 후보 세션 (데이터셋에 들어갈 세션 전부).
-        golden_ids: 골든셋 세션 ID. `sessions`에 있는 것은 golden 분할이 된다.
+        golden_ids: 골든셋 세션 ID. `sessions`에 있는 것은 golden 분할이 된다. `sessions`에 없는
+            ID는 무시하며 그 작업자·장소도 막지 않는다. 후보 밖 골든 세션은 `golden_sessions`로
+            넘겨야 한다.
         val_ratio: 골든 쪽을 뺀 나머지(pool) 중 검증 세션 목표 비율 (dataset.yaml `val_ratio`).
         seed: 작업자 후보 순회 순서를 섞는 seed. 고르는 기준(정렬 키)이 작업자 ID로 끝나므로
             결과에는 영향이 없다.
@@ -190,8 +192,12 @@ def propose_golden(
     Returns:
         고른 세션 ID (정렬).
 
-    비용 = (그 작업자 장소들의 전체 세션 수 - 그 작업자 몫) / 그 작업자 몫. 작을수록 holdout을 적게
-    만든다.
+    비용 = (그 작업자 장소들의 전체 세션 수 - 그 작업자 몫) / 그 작업자 몫. "전체 세션"은 도메인과
+    `exclude`를 가리지 않은 `sessions` 전부이고, "그 작업자 몫"은 이 도메인에서 제외되지 않은 그
+    작업자의 세션 수다. 비용이 작을수록 holdout을 적게 만든다. 같은 비용이면 seed 해시 순이다.
+
+    예: 작업자 A가 장소 X에서 세션 2개, X에 다른 작업자 세션이 1개 있으면 A의 비용은 (3 - 2) / 2 =
+    0.5다.
     """
     banned = set(exclude)
     candidates = [s for s in sessions if s.domain.value == domain and s.session_id not in banned]
@@ -201,7 +207,7 @@ def propose_golden(
     site_load = Counter(s.site_id for s in sessions)
 
     def cost(w: str) -> tuple[float, str]:
-        """(작업자 세션 하나당 장소 공유 세션 수, seed 해시) — 작은 것부터 고른다."""
+        """(작업자 세션 하나당 장소 공유 세션 수, seed 해시). 작은 것부터 고른다."""
         own = len(by_worker[w])
         shared = sum(site_load[site] for site in {s.site_id for s in by_worker[w]}) - own
         return (shared / own, _h(seed, w))

@@ -1,7 +1,20 @@
-"""한 손의 행동 구간: 경계 후보 → 후보 구간 VLM 분류 → 병합·채우기 → 라벨 (WP10).
+"""한 손의 행동 구간: 경계 후보 → 후보 구간 VLM 분류 → 병합·채우기 → 라벨 (WP10, ADR 0012).
 
 DB에 쓰지 않고 라벨을 반환한다. 전달받은 VLM 클라이언트는 영상 읽기·외부 통신·재시도를 할 수 있다.
 `runner.run_actions`가 손마다 부르고, 테스트는 정답 라벨로 답하는 `OracleVlm`으로 직접 부른다.
+
+`segment_hand`의 순서
+1. `hand_candidates`: 손목 속도·접촉 구간으로 경계 후보를 만든다 (`boundaries`). 경계는 여기서만
+   정하고 VLM은 바꾸지 않는다.
+2. `boundaries.segments`: 후보로 [start_ms, end_ms]를 빈틈없이 자른다 (`min_segment_ms`보다 짧은
+   조각은 앞 구간에 붙인다).
+3. 구간마다 `vlm.classify`를 한 번 부른다 (요청 수 = 구간 수, 재시도 제외). 응답 위반이 끝내 남으면
+   그 구간은 미상(gap unknown)이고, 서버 장애는 미상으로 두지 않고 올린다.
+4. `assemble.merge_spans`로 같은 분류의 인접 구간을 합치고 `assemble.to_labels`로 action·gap·
+   description 레코드를 만든다.
+
+- `HandResult`: 한 손의 후보·분류 결과·라벨.
+- `segment_count`: 영상·서버 없이 요청 수만 센다 (AI 1차 검수 작업량 추정용).
 """
 
 from __future__ import annotations

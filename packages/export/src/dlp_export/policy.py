@@ -91,7 +91,8 @@ class IdsPolicy(Contract):
 
     pseudonymize: bool  # 거짓이면 내부 ID를 그대로 내보낸다 (내부용 내보내기에만)
     secret_env: str  # 가명 비밀값을 담은 환경 변수 (없으면 실행마다 임의 값)
-    # 개발용 비밀값 (.env.example). env_var가 dev_envs 밖이면 이 값으로 내보내지 않는다
+    # 개발용 비밀값 (.env.example). `env_var` 환경 변수 값이 dev_envs 밖이면 이 값으로
+    # 내보내지 않는다
     dev_secrets: tuple[str, ...]
     env_var: str  # 실행 환경을 알려 주는 환경 변수 이름 (예: DLP_ENV)
     dev_envs: tuple[str, ...] = Field(min_length=1)  # 개발용 비밀값을 허용하는 env_var 값들

@@ -1,6 +1,16 @@
 """작업(job) 실행기: 기존 `dlp <단계>` 명령을 자식 프로세스로 돌리고 상태·로그를 남긴다.
 
-ADR 0061 2절.
+ADR 0061 2절. `dlp_console.app`의 `Services`가 하나 만들고, 단계·올리기·가져오기 비교 경로가
+`JobRunner.submit`으로 작업을 시작한다. 화면은 `jobs`·`get`·`tail`로 상태와 로그를 본다.
+
+주요 이름:
+
+- `JobRunner`: 작업 시작·조회·로그 꼬리·종료 처리.
+- `Job`: 작업 하나의 지금 상태 (사건을 접은 값). `JobStatus`: running·succeeded·failed·interrupted.
+- `JobConflictError`: 같은 잠금 키 작업이 이미 돌 때.
+- `group_alive`·`signal_group`: 자식 프로세스 그룹 확인·신호.
+
+동작:
 
 - 작업 하나는 `dlp` 명령 1개 이상을 차례로 돈다. 앞 명령이 실패(0이 아닌 종료 코드)하면 멈춘다.
 - 상태는 작업 디렉터리 `jobs.jsonl`의 사건(created·started·finished·interrupted)을 추가만 해서
@@ -41,6 +51,8 @@ LAUNCH_FAILED = 127
 
 
 class JobStatus(StrEnum):
+    """작업 상태. running만 잠금을 쥔다. 나머지 셋은 끝난 상태다."""
+
     RUNNING = "running"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
@@ -51,6 +63,7 @@ class JobConflictError(RuntimeError):
     """같은 잠금 키의 작업이 이미 돌고 있다."""
 
     def __init__(self, running: Job) -> None:
+        """`running`: 잠금을 쥐고 있는 작업 (메시지에 제목·ID를 싣는다)."""
         super().__init__(f"이미 실행 중인 작업이 있습니다: {running.title} ({running.job_id})")
         self.running = running
 
@@ -95,6 +108,12 @@ class JobRunner:
     """작업 실행·기록. 스레드 안전 (상태 접기·잠금 확인은 한 잠금 아래)."""
 
     def __init__(self, settings: ConsoleSettings, redactor: Redactor) -> None:
+        """작업 기록을 읽어 상태를 복원한다.
+
+        `<작업 디렉터리>/logs/`를 만들고 `jobs.jsonl`을 접는다. 끝 사건 없이 running으로 남은
+        작업은 `_recover`가 정리한다. 자식 그룹이 살아 있으면 `adopted` 사건을 쓰고 감시 스레드를
+        띄우며, 없으면 `interrupted` 사건을 쓴다. 그래서 생성자도 `jobs.jsonl`에 쓸 수 있다.
+        """
         self.settings = settings
         self.redactor = redactor
         self.events_path = settings.work_dir / "jobs.jsonl"
@@ -165,6 +184,7 @@ class JobRunner:
         return sorted(items, key=lambda j: j.created_at, reverse=True)
 
     def get(self, job_id: str) -> Job | None:
+        """작업 하나 (없으면 None)."""
         with self._lock:
             return self._jobs.get(job_id)
 
@@ -181,6 +201,7 @@ class JobRunner:
             )
 
     def log_path(self, job_id: str) -> Path:
+        """그 작업의 로그 파일 (`logs/<작업 ID>.log`, 가리지 않은 원문). 화면은 `tail`로 본다."""
         return self.logs_dir / f"{job_id}.log"
 
     def tail(self, job_id: str, lines: int | None = None) -> list[str]:
@@ -203,7 +224,26 @@ class JobRunner:
         session_id: str | None = None,
         cleanup: Sequence[Path] = (),
     ) -> Job:
-        """작업을 만들고 바로 시작한다. 예외: 같은 잠금 키가 돌면 JobConflictError."""
+        """작업을 만들고 백그라운드 스레드에서 바로 시작한다.
+
+        잠금 확인과 `created` 사건 기록은 한 잠금 아래에서 한다. 그래서 같은 잠금 키로 동시에 두
+        요청이 와도 하나만 시작한다.
+
+        Args:
+            step: 단계 ID (실패 안내를 고를 때 쓴다).
+            title: 화면 제목.
+            commands: `dlp` 뒤에 붙일 인자 목록들. 차례로 돌고 앞 명령이 실패하면 멈춘다.
+            lock: 잠금 키 (`session:<세션>`, `global:<묶음>`).
+            session_id: 세션 작업이면 그 세션 ID (화면 목록 거르기용).
+            cleanup: 모든 명령이 성공했을 때만 지울 파일.
+
+        Returns:
+            running 상태의 작업.
+
+        Raises:
+            ValueError: 명령이 하나도 없을 때.
+            JobConflictError: 같은 잠금 키 작업이 돌고 있을 때.
+        """
         if not commands:
             raise ValueError("실행할 명령이 없습니다")
         with self._lock:
@@ -264,6 +304,7 @@ class JobRunner:
         return self.get(job_id)
 
     def _run(self, job: Job) -> None:
+        """작업 스레드 본문: 명령을 차례로 돌리고 `finished` 또는 `interrupted` 사건을 남긴다."""
         code, failed = 0, None
         with self.log_path(job.job_id).open("a", encoding="utf-8") as log:
             for i, cmd in enumerate(job.commands):
