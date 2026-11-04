@@ -364,9 +364,9 @@ def _slate(ref: _Reference, target: StreamMedia, policy: SyncPolicy) -> Attempt:
         try:
             refined = _refine_slate(attempt, ref.media.audio, target.audio, quant_ms, policy)
         except FitError as exc:
-            # 오디오 앵커의 드리프트가 상한을 넘는 등 정밀화만 실패했다. 예전에는 이 예외가
-            # `_try`까지 올라가 이미 맞춘 슬레이트 결과까지 신뢰도 0으로 버렸다. 정밀화는 선택
-            # 단계이므로 슬레이트 맞춤으로 물러나고 사유를 보고서에 남긴다.
+            # 오디오 앵커의 드리프트가 상한을 넘는 등 정밀화만 실패했다. 이 예외를 `_try`까지
+            # 올리면 이미 맞춘 슬레이트 결과까지 신뢰도 0으로 버린다. 정밀화는 선택 단계이므로
+            # 슬레이트 맞춤으로 물러나고 사유를 보고서에 남긴다 (ADR 0031 결정 7).
             attempt.reason += f", 오디오 정밀화 실패 ({exc})"
             return attempt
         if refined is not None:

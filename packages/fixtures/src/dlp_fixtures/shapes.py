@@ -8,7 +8,9 @@
 - `labels`: 프롬프트가 될 모델 출처 라벨. 객체 박스 트랙(정답 마스크 외접 박스), 착용자 팔을 덮은
   person 박스 트랙(착용자 몸 판정에 걸린다, ADR 0058), 손 hand21 트랙(관절이 손 모양 안에 있다).
 
-객체가 손과 겹치지 않게 두어 정답 마스크끼리 겹치지 않는다. 키프레임 시각은 그 영상의 PTS ms다.
+컵·양동이 정답 마스크는 손·팔 마스크와 겹치지 않는다. 손은 팔 위에 그리므로 손 마스크와 착용자 팔
+마스크는 손목 둘레에서 조금 겹친다 (기본 크기에서 프레임마다 30 px). 키프레임 시각은 그 영상의 PTS
+ms(round(i * 1000 / 30))다.
 """
 
 from __future__ import annotations
@@ -46,7 +48,14 @@ BACKGROUND = (110, 120, 110)
 
 @dataclass
 class ShapeScenario:
-    """정답 모양 영상과 프롬프트 라벨."""
+    """정답 모양 영상과 프롬프트 라벨.
+
+    Attributes:
+        width, height: 영상 크기 px.
+        frames: (PTS ms, RGB 프레임) 목록.
+        masks: 개체 ID(`cup_01`, `bucket_01`, `wearer_arm`, `left_hand`) → PTS ms → 정답 마스크.
+        labels: 모델 출처 프롬프트 라벨 (박스 트랙 셋, hand21 트랙 하나).
+    """
 
     width: int
     height: int

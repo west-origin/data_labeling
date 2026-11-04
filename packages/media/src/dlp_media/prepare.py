@@ -5,6 +5,17 @@ FFmpeg 자동 회전을 사용하고 프레임 수·정확한 PTS·오디오/데
 `display_rotation`으로 태그 대신 쓸 각도를 직접 준다 (`dlp media prepare --display-rotation`).
 변환 실패나 검증 실패 시 임시 파일을 삭제하며 최종 경로에는 파일을 남기지 않는다.
 진단 명령(media probe와 동일한 로컬 경계)이며 원본 저장소의 감사 접근을 대신하지 않는다.
+
+진입점: `dlp media prepare <원본> --out <사본.mp4>` (`dlp_cli.media_cmds`). 수집(`dlp ingest`)은
+표시 회전 태그가 있는 영상을 거부하므로(`probe.require_upright`), 스마트폰 영상은 이 사본으로
+수집한다. 공간 라벨은 저장된 픽셀 좌표 기준이라 수집 전에 픽셀 방향을 표시 방향으로 맞춰 둔다.
+
+시간: 사본의 프레임 수와 프레임마다의 PTS ms(`PtsIndex.frame_ms`, 정확한 분수)가 원본과 같아야
+한다. 같은 time_base로 인코딩하고(`-enc_time_base`, `-video_track_timescale`) 프레임을 버리거나
+복제하지 않는다(`-fps_mode passthrough`, `-copyts`). 그래서 원본 시각으로 정한 동기화·라벨 시각이
+사본에서도 같은 프레임을 가리킨다.
+
+정책: `config/policies/media.yaml normalize` (crf, preset, threads).
 """
 
 from __future__ import annotations
@@ -24,18 +35,38 @@ from dlp_schema.common import Contract
 
 
 class NormalizePolicy(Contract):
+    """`media.yaml normalize`: 정규화 사본의 libx264 인코딩 설정.
+
+    crf: 화질 (0~51, 낮을수록 좋고 파일이 크다). preset: 인코딩 속도 (fast·veryfast·medium).
+    threads: 인코더 스레드 수.
+    """
+
     crf: int = Field(ge=0, le=51)
     preset: Literal["fast", "veryfast", "medium"]
     threads: int = Field(gt=0)
 
 
 class MediaPolicy(Contract):
+    """`config/policies/media.yaml` 전체.
+
+    version: 정책 형식 버전. normalize: 정규화 사본 인코딩. capture: 촬영 점검 경고 기준.
+    """
+
     version: int
     normalize: NormalizePolicy
     capture: CapturePolicy  # 촬영 점검 경고 기준 (`dlp_media.capture_check`)
 
 
 def load_policy(root: Path) -> NormalizePolicy:
+    """`<root>/config/policies/media.yaml`을 검증해 읽고 `normalize` 절만 돌려준다.
+
+    파일 전체를 `MediaPolicy`로 검증하므로 `capture` 절이 틀려도 실패한다. 촬영 점검 기준은
+    `capture_check.load_capture_policy`가 따로 읽는다.
+
+    Raises:
+        FileNotFoundError: 파일이 없을 때.
+        pydantic.ValidationError: 키가 없거나 모르는 키가 있거나 값이 범위를 벗어날 때.
+    """
     data: Any = yaml.safe_load((root / "config/policies/media.yaml").read_text("utf-8"))
     return MediaPolicy.model_validate(data).normalize
 
@@ -49,12 +80,25 @@ def prepare_video(
     이 사본으로 새 세션을 수집할 수 있다. 이미 라벨링한 세션의 영상을 교체하면 안 된다.
 
     Args:
+        src: 원본 영상 (읽기만 한다).
+        dst: 만들 사본 (.mp4). 이미 있으면 거부한다.
+        settings: `media.yaml normalize`.
         display_rotation: None이면 컨테이너 표시 방향 태그를 따른다. 값이 있으면 태그를 무시하고
             저장된 픽셀을 이 각도(반시계, 90의 배수, 표시 행렬과 같은 규약)만큼 돌린다. 태그가
             장착 방향과 다를 때 사람이 영상을 보고 정한 값이다 (2026-10-22 실영상 파일럿).
 
+    Returns:
+        만든 사본의 `probe` 결과.
+
     Raises:
-        ValueError: display_rotation이 90의 배수가 아닐 때 (그 밖은 아래 검사와 같다).
+        ValueError: display_rotation이나 표시 회전이 90의 배수가 아닐 때, 출력이 .mp4가 아닐 때,
+            비디오 트랙이 없을 때, 홀수 크기일 때, 사본의 프레임 수·PTS·해상도·오디오/데이터
+            트랙·촬영 시각이 원본과 다를 때, 사본에 아직 회전 태그가 남았을 때.
+        FileExistsError: `dst`가 이미 있을 때.
+        subprocess.CalledProcessError: ffmpeg가 실패할 때.
+
+    부작용: `dst`의 상위 디렉터리를 만들고 그 안에 임시 디렉터리를 썼다 지운다. 검증을 모두
+    통과했을 때만 하드 링크로 `dst`를 만든다.
     """
     if display_rotation is not None and display_rotation % 90:
         raise ValueError("display_rotation은 90의 배수여야 합니다")

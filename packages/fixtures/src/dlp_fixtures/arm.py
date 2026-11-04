@@ -58,7 +58,20 @@ class ArmTruth:
 
 @dataclass
 class ArmScenario:
-    """착용자 팔·몸 장면 (모듈 docstring)."""
+    """착용자 팔·몸 장면 (모듈 docstring).
+
+    Attributes:
+        session_id: `arm-<seed 세 자리>`.
+        size: 영상 크기 (너비, 높이) px.
+        frame_times: 스트림 PTS ms (`step_ms` 간격).
+        truth: (PTS ms, 손) → 정답 손목·팔꿈치.
+        hand_labels: 손마다 hand21 트랙 (사람 출처 정답).
+        wearer_poses: PTS ms → 가짜 착용자 COCO17 자세 (좌표 (17, 2), 점수 (17,)).
+        other_box / other_pose / other_person: 다른 사람의 박스 (x, y, w, h), 자세, coco17 트랙.
+        boxes: 객체 단계 박스 트랙 (모델 출처).
+        suppressed: `boxes` 중 억제해야 할 라벨 ID (정답).
+        wearer_box: 착용자 몸을 덮은 사람 박스 (x, y, w, h).
+    """
 
     session_id: str
     size: tuple[int, int]

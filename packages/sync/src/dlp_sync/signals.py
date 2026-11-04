@@ -4,9 +4,9 @@
 - `Series`: 불균일할 수 있는 시계열 (장갑 압력 합 `glove_series`, IMU 가속도 크기 `imu_series`)
 - `glove_pressure_prefixes`: 정책에서 장갑 압력 채널 접두사를 꺼낸다
 
-다른 패키지도 이 모듈을 쓴다: 접촉 프리라벨(`dlp_prelabel.runner`)과 검수 동기 재생
-(`dlp_review.tasks`, `dlp_review.timeseries`)이 `glove_series`·`imu_series`·`Series`를 가져다 쓴다.
-신호 정의를 바꾸면 그쪽 결과도 바뀐다.
+다른 패키지도 이 모듈을 쓴다. 접촉 프리라벨(`dlp_prelabel.runner`), 검수 동기 재생
+(`dlp_review.tasks`, `dlp_review.timeseries`), AI 1차 검수 입력(`dlp_cli.aireview_run_cmds`)이
+`glove_series`·`imu_series`·`Series`를 가져다 쓴다. 신호 정의를 바꾸면 그쪽 결과도 바뀐다.
 """
 
 # PyAV 타입 스텁이 일부 반환 타입을 비워 두어 이 모듈에서만 해당 경고를 끈다.

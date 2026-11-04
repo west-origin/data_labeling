@@ -66,8 +66,15 @@ class RobotModel(Contract):
 
 
 class GripperType(StrEnum):
-    PARALLEL = "parallel"  # 평행 그리퍼: 엄지-검지 끝 거리 → 그리퍼 관절 하나
-    DEXTEROUS = "dexterous"  # 다지 손 (아직 지원하지 않는다)
+    """그리퍼 종류.
+
+    - `parallel`: 평행 그리퍼. 엄지-검지 끝 거리를 그리퍼 관절 하나로 옮긴다
+      (`targets.gripper_values`).
+    - `dexterous`: 다지 손. 값은 있지만 `GripperConfig` 검증이 거부한다 (F-COE-17).
+    """
+
+    PARALLEL = "parallel"
+    DEXTEROUS = "dexterous"
 
 
 class GripperConfig(Contract):
@@ -92,10 +99,16 @@ class GripperConfig(Contract):
 
 
 class PlacementMode(StrEnum):
-    # 로봇 기준을 세션 월드 좌표의 고정 자세에 둔다 (base_xyz, base_yaw_rad)
+    """세션 월드 좌표의 손 점을 로봇 기준 좌표로 옮기는 방식 (식은 `dlp_retarget.targets`).
+
+    - `world_fixed`: 로봇 기준 링크를 세션 월드 좌표의 고정 자세(`base_xyz` m, `base_yaw_rad` rad,
+      z축 둘레 요만)에 둔다. 로봇이 실제 촬영 공간의 한 자리에 서 있다고 보는 방식이다.
+    - `episode_centroid`: 에피소드의 손 잡기 점 평균이 로봇 기준 좌표 `workspace_center`(m)에
+      오도록 옮긴다. 회전은 없다 (월드 X = 로봇 X, 월드 Z = 로봇 Z). 세션마다 월드 원점이 달라도
+      손 동작이 로봇 작업 공간 가운데에 놓인다.
+    """
+
     WORLD_FIXED = "world_fixed"
-    # 에피소드 손 잡기 점 평균이 로봇 기준 좌표 workspace_center에 오도록 옮긴다 (요는 월드 X = 로봇
-    # X)
     EPISODE_CENTROID = "episode_centroid"
 
 
@@ -104,6 +117,9 @@ class Placement(Contract):
 
     position_scale: 위치 배율 (사람 팔 길이 대비 로봇, 1이면 그대로). world_fixed는 로봇 기준 원점,
     episode_centroid는 손 잡기 점 평균을 중심으로 줄인다. 방향(접근·닫힘 축)은 배율과 무관하다.
+    base_xyz (m) / base_yaw_rad (rad): world_fixed에서 세션 월드 좌표의 로봇 기준 자세.
+    workspace_center (m): episode_centroid에서 손 잡기 점 평균을 놓을 로봇 기준 좌표.
+    쓰지 않는 방식의 값은 무시한다.
     """
 
     mode: PlacementMode
@@ -165,13 +181,16 @@ class OrientationMode(StrEnum):
 class IkConfig(Contract):
     """IK 설정 (로봇마다).
 
-    position_tolerance_m / orientation_tolerance_rad: 이 안이면 그 프레임은 도달 가능.
-    orientation_weight: 회전 오차 1 rad를 위치 몇 m로 볼지. smoothness_weight: 반복 걸음을 줄이는
-    추가 감쇠 (직전 해에서 시작하므로 가까운 자세 가지로 수렴). damping: 감쇠 최소제곱 λ.
-    max_iterations:
-    프레임당 반복 수.
-    restarts: 첫 프레임·끊긴 뒤 다시 시작할 때 쓰는 시작점 수 (가운데 + 결정적 난수).
-    velocity_scale: URDF 속도 한계에 곱하는 값 (보수적으로 낮춘다).
+    position_tolerance_m / orientation_tolerance_rad: 위치 오차가 앞의 값 이하이고,
+    (orientation_mode가 none이 아니면) 회전 오차가 뒤의 값 이하일 때 그 프레임은 도달 가능이다.
+    orientation_mode: 맞출 끝단 방향 (`OrientationMode`).
+    orientation_weight: 회전 오차 1 rad를 위치 몇 m로 볼지. smoothness_weight: 목표가 이어지는
+    프레임에서 반복 걸음을 줄이는 추가 감쇠 μ (직전 해에서 시작하므로 가까운 자세 가지로 수렴한다.
+    다시 시작하는 프레임에는 쓰지 않는다). damping: 감쇠 최소제곱 λ.
+    max_iterations: 프레임당 최대 반복 수.
+    restarts: 첫 목표 프레임·목표가 끊긴 뒤 다시 시작할 때 쓰는 시작점 수 (관절 범위 가운데 1개 +
+    결정적 난수 restarts - 1개, 직전 해가 있으면 그것을 하나 더 넣는다, `ik.seeds`).
+    velocity_scale: URDF 속도 한계에 곱하는 값 (0 초과 1 이하, 보수적으로 낮춘다).
     """
 
     position_tolerance_m: float = Field(gt=0)
@@ -236,10 +255,11 @@ def robot_dirs(root: Path, env: dict[str, str] | None = None) -> list[Path]:
 def find_config(robot_id: str, dirs: Sequence[Path]) -> Path:
     """로봇 ID의 설정 파일 (`<ID>.yaml`, 먼저 찾은 디렉터리).
 
+    설정 파일의 실제 위치(심볼릭 링크를 따라간 위치)가 그 디렉터리 바로 안이어야 한다.
+
     Raises:
         RobotError: ID 형식이 틀렸을 때(경로 구분자·`..`로 디렉터리를 벗어나지 못하게), 어느
-        디렉터리에도
-            없을 때.
+            디렉터리에도 없을 때.
     """
     if not _ROBOT_ID_RE.match(robot_id):
         raise RobotError(f"로봇 ID {robot_id!r}: 영숫자로 시작하고 영숫자·_.:-만 씁니다")
@@ -272,9 +292,10 @@ def load_robot_file(path: Path, *, inside_repo: Path | None = None) -> LoadedRob
 
     Raises:
         RobotError: 모델 파일이 없거나 sha256이 다를 때, 저장소 안 설정이 공개 모델이 아닐 때,
-        비공개
-            모델 파일이 저장소 안에 있을 때, 관절 목록이 연쇄와 다를 때, 그리퍼 관절이 없거나 맞지
-            않을 때(`_check_gripper`). UrdfError: URDF가 틀렸을 때.
+            비공개 모델 파일이 저장소 안에 있을 때, 관절 목록이 연쇄와 다를 때, 그리퍼 관절이
+            없거나 맞지 않을 때(`_check_gripper`), 파일 이름과 robot_id가 다를 때(`read_config`).
+        UrdfError: URDF가 틀렸을 때.
+        pydantic.ValidationError: 설정 값이 틀렸을 때.
     """
     cfg = read_config(path)
     in_repo = inside_repo is not None and path.resolve().is_relative_to(inside_repo.resolve())

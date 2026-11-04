@@ -27,9 +27,9 @@ a*·c*(사람 손에서 만든 방향)와 비교한다.
   시작하는 프레임도 예외가 아니다 (직전 프레임은 유지한 값이다): 그렇지 않으면 내보낸 action에 실제
   로봇이 낼 수 없는 한 걸음이 들어간다. 잘린 뒤 남은 오차는 reachable·오차로 드러난다.
 - 첫 목표 프레임과 목표가 끊긴 뒤 다시 시작하는 프레임은 여러 시작점(직전 해(있으면) + 관절 범위
-  가운데 + 결정적 난수 `restarts`개)에서 풀고, 도달 가능한 해 가운데 직전 해에 가장 가까운 것을 쓴다
-  (도달 가능한 해가 없으면 비용이 가장 작은 해). 비용이 거의 같은 해들 사이에서 난수 시작점이
-  이겨 관절이 다른 가지로 뛰는 일을 막는다.
+  가운데 + 결정적 난수 `restarts` - 1개)에서 풀고, 도달 가능한 해 가운데 직전 해에 가장 가까운
+  것을 쓴다 (도달 가능한 해가 없으면 비용이 가장 작은 해). 비용이 거의 같은 해들 사이에서 난수
+  시작점이 이겨 관절이 다른 가지로 뛰는 일을 막는다.
 - 목표가 없는 프레임은 직전 프레임 값을 그대로 두고(첫 목표 전에는 시작 자세 = 관절 범위 가운데)
   오차를 NaN으로 둔다.
 
@@ -51,7 +51,7 @@ from dlp_retarget.targets import Targets
 from dlp_retarget.urdf import Chain
 
 Vec = NDArray[np.float64]
-# 반복을 멈추는 관절 변화 크기 (rad)
+# 반복을 멈추는 관절 변화 크기 (|Δq| 노름, 회전 관절 rad·직선 관절 m)
 _STEP_EPS = 1e-7
 
 
@@ -59,8 +59,10 @@ _STEP_EPS = 1e-7
 class IkProblem:
     """한 에피소드의 IK 문제.
 
-    approach_axis / closing_axis: 끝 링크 좌표의 접근·닫힘 축.
-    times_ms: 프레임 시각 (속도 한계에 쓴다).
+    targets: 프레임별 끝단 목표 (로봇 기준 좌표, `targets.hand_targets`).
+    approach_axis / closing_axis: 끝 링크 좌표의 접근·닫힘 축 (단위 벡터).
+    times_ms: 프레임 시각 ms (에피소드 마스터 시각, 속도 한계의 프레임 간격에만 쓴다).
+    config: 로봇의 IK 설정.
     model_path: 로봇 모델 파일 (mink 풀이기가 MuJoCo로 읽는다, 내장 풀이기는 쓰지 않는다).
     """
 
@@ -77,7 +79,7 @@ class IkProblem:
 class IkSolution:
     """프레임별 결과 (n = 프레임 수). 목표가 없는 프레임의 오차는 NaN, reachable은 거짓."""
 
-    q: NDArray[np.float64]  # (n, dof)
+    q: NDArray[np.float64]  # (n, dof) 회전 관절 rad, 직선 관절 m
     position_error_m: Vec  # (n,)
     orientation_error_rad: Vec  # (n,)
     reachable: NDArray[np.bool_]  # (n,)
@@ -127,7 +129,7 @@ def frame_errors(chain: Chain, q: Vec, goal: Goal, problem: IkProblem) -> tuple[
 def _system(
     chain: Chain, q: Vec, goal: Goal, problem: IkProblem
 ) -> tuple[Vec, NDArray[np.float64]]:
-    """(오차 E, 야코비안 J) — 모듈 설명의 식.
+    """(오차 E, 야코비안 J). 식은 모듈 docstring에 있다.
 
     a x a*는 a를 a*로 돌리는 회전축 방향, 크기 sin(각)이다. 작은 각에서 각속도 ω로 a가 바뀌는 속도는
     ω x a이므로 J의 각속도 행과 같은 단위(rad)로 맞출 수 있다.

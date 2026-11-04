@@ -14,8 +14,12 @@
 - 과제 구간(`SegmentPayload`, 전체 길이)
 신호: 손목 궤적(픽셀, 프레임마다), 장갑 압력 합(100 Hz, 바디캠 시계).
 
-테스트 사용처: `dlp_actions`(경계 재현율, 병합·채우기), `dlp_prelabel`(접촉), `dlp_eval`·
-`dlp_review`·`dlp_export` 등이 정답 라벨을 입력·기준으로 쓴다.
+테스트 사용처: `dlp_actions`(경계 재현율, 병합·채우기), `dlp_prelabel`(접촉), `dlp_relations`,
+`dlp_eval`, `dlp_review`, `dlp_aireview`(`aireview_scene`을 거쳐), `dlp_cli`, 통합 테스트
+`tests/test_end_to_end.py`가 정답 라벨을 입력·기준으로 쓴다.
+
+시각: 모든 정답 시각은 정수 ms다. 바디캠 하나만 있으므로 마스터 타임라인 = 바디캠 PTS다. 키포인트
+트랙의 키프레임 시각은 `frame_times`(round(i * 1000 / 30))와 같다.
 """
 
 from __future__ import annotations
@@ -179,7 +183,8 @@ def generate_action_scenario(
         ontology_version: 라벨의 온톨로지 버전.
 
     Returns:
-        `ActionScenario`.
+        `ActionScenario`. 길이는 단위 수와 난수에 따라 정해진다 (`duration_ms`). 묶음의 옮기다는
+        대상 개체 위치를 옮기므로 다음 행동은 옮긴 자리로 접근한다.
     """
     rng = np.random.default_rng(seed)
     pos = {eid: np.array(p) for eid, _, _, p, _ in ENTITIES}

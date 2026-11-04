@@ -11,7 +11,7 @@
   (+ 선택 크기 오차 `world_scale`, 흔들림 `world_noise_m`). 프리라벨 Oracle stub이 이 트랙을 모델
   라벨처럼 돌려준다 (MediaPipe hand_world_landmarks 흉내).
 - `intrinsics`: 투영에 쓴 내부 파라미터. 기본값은 320x240, 가로 화각 90도 근사와 같다
-  (fx = fy = 160, 주점 중앙) — 캘리브레이션 없는 세션의 기본 근사(`prelabel.yaml depth`)와 맞다.
+  (fx = fy = 160, 주점 중앙). 캘리브레이션 없는 세션의 기본 근사(`prelabel.yaml depth`)와 맞다.
   `focal_px`로 바꿀 수 있다. 손 크기도 `hand_scale`로 바꿀 수 있다 (작업자 손 크기 사전값 시험).
   `resolution_scale`은 영상 크기·초점 거리·주점을 함께 늘린다 (같은 장면의 1080p·4K판, 해상도와
   무관한 맞춤 문턱 시험, F-PAR-43). `world_rotation_deg`는 손 모델 3D 점의 자세를 정답과 그 각도만큼
@@ -140,7 +140,18 @@ class SceneDepth:
 
 @dataclass
 class Hand3DScenario:
-    """정답 3D를 아는 손 시퀀스 (모듈 설명 참고)."""
+    """정답 3D를 아는 손 시퀀스 (모듈 docstring 참고).
+
+    Attributes:
+        session_id: `hand3d-<seed 세 자리>`.
+        hand: 손.
+        intrinsics: 투영에 쓴 정답 내부 파라미터 (px).
+        frame_times: 바디캠 PTS ms (30 fps, round(i * 1000 / 30)).
+        joints_cam: PTS ms → 정답 21관절 카메라 좌표 (21, 3) m.
+        labels: hand21 키포인트 트랙 하나 (2D 투영 + 손 중심 world 점).
+        depth: 합성 메트릭 깊이 모델.
+        width, height: 영상 크기 px.
+    """
 
     session_id: str
     hand: Hand
@@ -205,6 +216,9 @@ def generate_hand3d_scenario(
             배율). 6이면 1920x1440. 장면(3D)은 그대로다.
         world_rotation_deg: 손 중심 3D 점을 손 중심 기준으로 이 각도(도)만큼 돌린다 (축은 시드로
             정하는 무작위 단위 벡터, 프레임마다 같다). 정답 3D·2D는 그대로다.
+
+    Returns:
+        `Hand3DScenario`. 손목은 0.40 m에서 0.55 m 깊이로 멀어지며 돌고, 굽힘은 0.15~0.40 rad다.
     """
     rng = np.random.default_rng(seed)
     w, h = round(320 * resolution_scale), round(240 * resolution_scale)

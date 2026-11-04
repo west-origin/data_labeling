@@ -335,7 +335,11 @@ def _draw_eyes(img: NDArray[np.int16], x: int, y: int, w: int, h: int) -> None:
 
 
 def target_boxes_at(labels: Sequence[LabelRecord], t_ms: int) -> dict[str, BoxKeyframe]:
-    """시각 t_ms의 대상별 정답 박스 (보이는 것만)."""
+    """PTS `t_ms`의 대상별 정답 박스 (보이는 것만).
+
+    키프레임 시각이 `t_ms`와 정확히 같은 것만 본다 (보간하지 않는다). 프레임 시각
+    (`BlurScenario.frame_times`)으로 부른다.
+    """
     out: dict[str, BoxKeyframe] = {}
     for label in labels:
         p = label.payload

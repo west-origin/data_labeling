@@ -100,7 +100,7 @@ class Joint:
 
 
 def _limits(name: str, kind: str, lim: ET.Element | None) -> tuple[float, float, float]:
-    """(하한, 상한, 속도 한계) — 모듈 설명의 관절 한계 규칙.
+    """(하한, 상한, 속도 한계). 규칙은 모듈 docstring의 관절 한계 절이다.
 
     Raises:
         UrdfError: revolute·prismatic에 `<limit>`이나 lower·upper가 없을 때, 하한 > 상한일 때.

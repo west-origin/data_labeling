@@ -13,6 +13,10 @@
 꼭짓점 순서는 corner_0(원점) → corner_1(가로) → corner_2 → corner_3(세로)이다.
 
 `dlp_relations` 테스트가 입력 라벨로 관계·커버리지를 도출해 `truth_relations`·`coverage`와 비교한다.
+`dlp_eval` 테스트도 정답 관계·커버리지를 평가 입력으로 쓴다.
+
+시각: 모든 시각은 정수 ms다. 바디캠 하나뿐이라 시간 구간 라벨의 마스터 시각과 박스·3D 궤적의 PTS
+시각이 같다. 3D 표본 시각은 round(i * 1000 / 30)이다.
 """
 
 from __future__ import annotations

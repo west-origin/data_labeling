@@ -38,7 +38,13 @@ Vec = NDArray[np.float64]
 
 @dataclass(frozen=True)
 class HandPoints:
-    """프레임 시각(ms)과 손 점 (n, 3) 세 개 (세션 월드 좌표 m, 없으면 NaN)."""
+    """프레임 시각과 그 시각의 손 점 (n, 3) 세 개 (세션 월드 좌표 m, 없으면 NaN).
+
+    times_ms는 에피소드 프레임의 마스터 타임라인 시각 ms(실수)다. 3D 궤적 표본은 스트림 PTS
+    시각이므로 호출자(`dlp_export.robot.world_hand_points`)가 마스터 → 스트림 시각으로 바꿔 읽어
+    채운다 (ADR 0019). 여기서는 시각을 속도 한계의 프레임 간격과 `longest_unreachable_ms`에만 쓴다.
+    세 점 중 하나라도 없는 프레임은 세 점 모두 NaN이다.
+    """
 
     times_ms: Vec
     wrist: NDArray[np.float64]
@@ -78,7 +84,7 @@ class RetargetResult:
     """프레임별 결과 (n = 프레임 수)와 보고."""
 
     joint_names: tuple[str, ...]  # 팔 관절 + 그리퍼 관절
-    q: NDArray[np.float64]  # (n, len(joint_names)) rad
+    q: NDArray[np.float64]  # (n, len(joint_names)) 회전 관절은 rad, 직선 관절은 m (URDF 단위)
     target_present: NDArray[np.bool_]
     reachable: NDArray[np.bool_]
     position_error_m: Vec
@@ -88,8 +94,12 @@ class RetargetResult:
 
 
 def retarget_version(robot: LoadedRobot, policy: RetargetPolicy, solver: IkSolver) -> str:
-    """리타기팅 판: `retarget-<풀이기>-<판>+r<로봇 설정 해시>+m<모델 sha256 앞 12자>+p<정책
-    해시>`."""
+    """리타기팅 판 문자열.
+
+    형식은 `retarget-<풀이기 이름>-<풀이기 판>+r<로봇 설정 해시 12자>+m<모델 sha256 앞 12자>+p<정책
+    해시 8자>`다. 풀이기·로봇 설정·모델 파일·정책 중 하나라도 바뀌면 판이 바뀐다. 내보내기
+    manifest에 남는다.
+    """
     return (
         f"retarget-{solver.name}-{solver.version}+r{robot.config.digest()}"
         f"+m{robot.model_sha256[:12]}+p{policy.digest()}"
@@ -97,7 +107,12 @@ def retarget_version(robot: LoadedRobot, policy: RetargetPolicy, solver: IkSolve
 
 
 def max_reach(chain: Chain) -> tuple[Vec, float]:
-    """(첫 움직이는 관절 위치, 그 점에서 끝까지 링크 길이 합) — 어떤 자세로도 넘을 수 없는 거리."""
+    """(첫 움직이는 관절 위치, 그 점에서 끝까지 링크 길이 합). 기준 링크 좌표, m.
+
+    q = 0 자세에서 이어진 움직이는 관절 위치와 끝 위치 사이 거리를 더하고, 직선 관절은 이동 범위의
+    큰 쪽 절댓값을 더한다. 회전은 이웃 관절 사이 거리를 바꾸지 않으므로 끝은 어떤 자세로도 첫
+    관절에서 이 길이보다 멀리 가지 못한다. `frames_out_of_reach`가 이 값을 쓴다.
+    """
     q0 = np.zeros(len(chain.moving))
     f = chain.frames(q0)
     pts = [*f.origins, f.tip[:3, 3]]
@@ -152,7 +167,26 @@ def _stat(values: Vec, fn: str) -> float | None:
 def retarget_episode(
     points: HandPoints, robot: LoadedRobot, policy: RetargetPolicy, solver: IkSolver
 ) -> RetargetResult:
-    """손 점 → 관절 궤적·도달 표시·보고 (모듈 설명)."""
+    """에피소드 하나의 손 점을 로봇 관절 궤적·도달 표시·보고로 옮긴다.
+
+    순서: 손 점 → 끝단 목표(`hand_targets`, 로봇 배치 적용) → 풀이기(`solver.solve`, 팔 관절) →
+    그리퍼 궤적(`_gripper_track`) → 보고(`FeasibilityReport`). 규칙은 모듈 docstring의 정직성
+    규칙을 따른다.
+
+    Args:
+        points: 프레임 시각(마스터 ms)과 손 점.
+        robot: 확인을 마친 로봇 (`robot.load_robot`).
+        policy: `retarget.yaml`. 내보내기 결정(`decision`)에만 쓴다.
+        solver: IK 풀이기 (`DlsIkSolver` 또는 `MinkIkSolver`).
+
+    Returns:
+        `RetargetResult`. DB·파일을 쓰지 않는다 (mink 풀이기만 임시 디렉터리와 하위 프로세스를
+        쓴다).
+
+    Raises:
+        ValueError: 손 점 배열 모양이 다를 때 (`hand_targets`), mink 풀이기에 모델 경로가 없을 때.
+        subprocess.CalledProcessError: mink 스크립트가 실패할 때.
+    """
     cfg = robot.config
     tg = hand_targets(points.wrist, points.thumb, points.index, cfg.arm.placement)
     problem = IkProblem(

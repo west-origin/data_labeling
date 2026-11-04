@@ -23,10 +23,30 @@
 - `generate_arm_scenario` (`arm.py`): 정답 팔꿈치 위치(일부 화면 밖)를 아는 1인칭 착용자 팔과
   가짜 자세 모델 출력(좌우 뒤바뀐 팔 사슬), 착용자 몸·다른 사람·손에 든 도구 박스. 정답 = 팔꿈치
   위치·화면 안 여부, 억제할 박스 (ADR 0058). 메모리에서만 쓴다.
-- `generate_all`: 위 모두를 디렉터리에 쓴다 (`dlp fixtures generate`).
+- `generate_all`: 위 모두를 디렉터리에 쓴다 (`dlp fixtures generate`, `make fixtures`).
+  hand3d·체커보드·팔은 쓰지 않는다.
 
-시간 규약: 라벨 시각은 정수 ms. 시간 구간 라벨은 마스터 타임라인, 공간 라벨 키프레임은 영상 PTS
-(합성 데이터에서는 바디캠 프레임 시각과 같다, ADR 0019). 정답 라벨의 출처는 `Source.HUMAN`이다.
+`__init__`에서 내보내지 않고 모듈에서 바로 가져다 쓰는 생성기 (모두 메모리에서만 쓴다)
+- `generate_camera_motion` (`camera_motion.py`): 정답 카메라 자세·IMU 신호·월드 좌표 손을 아는 머리
+  카메라 움직임 (ADR 0046, 카메라 자세·월드 단계 시험).
+- `hand_points_for_grasp`, `world_hand_labels` 등 (`retarget.py`): 정답 끝단 궤적에서 거꾸로 만든
+  손 점과 월드 좌표 3D 라벨 (ADR 0047, 로봇 리타기팅·내보내기 시험).
+- `generate_shape_scenario` (`shapes.py`): 정답 마스크를 아는 객체·손 영상 (ADR 0059, 마스크 단계
+  시험).
+- `aireview_scene` (`aireview.py`): AI 1차 검수 벤치 입력 (ADR 0040, `dlp aireview bench`).
+
+시간 규약 (ADR 0019)
+- 라벨 시각은 정수 ms다. 프레임 번호로 대신하지 않는다.
+- 시간 구간 라벨(행동, 사이 구간, 손 상태, 관계)은 마스터 타임라인 ms다. 공간 라벨(박스, 키포인트,
+  블러, 3D 궤적)의 키프레임은 그 스트림 영상의 PTS ms다. 합성 데이터는 거의 모두 바디캠(기준
+  스트림) 하나이고 기준 스트림은 오프셋 0·배율 1이라 두 시각이 같다.
+- 동기화 시나리오만 스트림마다 다른 시계를 쓴다. 신호 시각은 그 스트림 자기 시계 ms이고, 정답 시계
+  `ClockTruth`가 master = offset_ms + stream_ms * clock_scale로 마스터 시각과 잇는다.
+- 생성기는 합성 영상의 프레임 PTS를 `round(i * 1000 / fps)`로 정해 쓴다. 영상을 읽는 코드는 이렇게
+  계산하지 않고 PTS 인덱스를 쓴다. 생성기는 정답을 만드는 쪽이라 예외다.
+
+정답 라벨의 출처는 `Source.HUMAN`이다 (검수된 정답처럼 다룬다). 프롬프트·입력 흉내 라벨(팔, 모양,
+AI 검수 장면, 리타기팅 3D)은 `Source.MODEL`이다. 실제 영상·개인정보는 쓰지 않는다.
 """
 
 from __future__ import annotations

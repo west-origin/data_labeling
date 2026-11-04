@@ -89,12 +89,19 @@ class IntrinsicsCalibrationPolicy(Contract):
 
 
 class CalibrationPolicy(Contract):
+    """`config/policies/calibration.yaml` 전체: 정책 형식 버전과 `intrinsics` 절."""
+
     version: int
     intrinsics: IntrinsicsCalibrationPolicy
 
 
 def load_policy(root: Path) -> IntrinsicsCalibrationPolicy:
-    """`<root>/config/policies/calibration.yaml`의 intrinsics 절."""
+    """`<root>/config/policies/calibration.yaml`의 intrinsics 절.
+
+    Raises:
+        FileNotFoundError: 파일이 없을 때.
+        pydantic.ValidationError: 키가 없거나 모르는 키가 있거나 값이 범위를 벗어날 때.
+    """
     data: Any = yaml.safe_load((root / "config/policies/calibration.yaml").read_text("utf-8"))
     return CalibrationPolicy.model_validate(data).intrinsics
 
@@ -207,9 +214,8 @@ def board_tilt_deg(rvec: Any) -> float:
     """보드 법선과 카메라 광축 사이 각도 (도, 0이면 보드가 영상면과 평행).
 
     rvec는 calibrateCamera가 장면마다 돌려준 회전(로드리게스 벡터, 보드 → 카메라)이다. 보드 법선은
-    보드 좌표 Z축이므로 카메라 좌표에서 R의 셋째 열이고, 광축(카메라 Z)과의 각도는 arccos(|R[2,
-    2]|)다.
-    앞뒤 어느 면이 보이든 같은 기울기로 본다 (절댓값).
+    보드 좌표 Z축이므로 카메라 좌표에서 R의 셋째 열이고, 광축(카메라 Z)과의 각도는
+    arccos(|R[2, 2]|)다. 앞뒤 어느 면이 보이든 같은 기울기로 본다 (절댓값).
     """
     rot, _ = cv2.Rodrigues(np.asarray(rvec, np.float64))
     return math.degrees(math.acos(min(1.0, abs(float(rot[2, 2])))))

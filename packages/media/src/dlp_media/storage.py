@@ -3,7 +3,8 @@
 원본은 불변이다. 같은 키에 같은 내용(sha256)을 다시 올리면 건너뛰고, 다른 내용이면 오류를 낸다.
 `ObjectStore` 프로토콜에는 삭제가 없다. 삭제는 `DeletableStore`만 하며, 라벨링 버킷의 일반 라벨러용
 워터마크 사본을 회수 실행기(`dlp_review.revoke`, ADR 0039)가 지울 때만 쓴다. 원본 감사 저장소
-(`dlp_media.audit.AuditedStore`)는 삭제가 없어 원본은 계속 지울 수 없다.
+(`dlp_media.audit.AuditedStore`)는 삭제가 없어 원본은 계속 지울 수 없다. 원본 보관 만료
+(`dlp ops retention`)도 결정을 기록할 뿐 객체를 지우지 않는다.
 
 WP3·WP16, ADR 0003·0020. 모든 단계가 이 프로토콜(`ObjectStore`)로 파일을 주고받는다.
 
@@ -459,7 +460,7 @@ class S3Store:
 
 
 # S3 조건부 쓰기 조각 크기: 이 이하는 PutObject 한 번, 넘으면 이 크기 조각으로 분할 업로드
-# (S3 조각 수 상한 10000 → 최대 약 1.25 TB, 조각 하나를 메모리에 읽는다)
+# (S3 조각 수 상한 10000 → 최대 128 MiB x 10000 ≈ 1.34 TB, 조각 하나를 메모리에 읽는다)
 _PART_SIZE = 128 << 20
 
 

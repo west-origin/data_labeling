@@ -40,7 +40,8 @@ class Targets:
     position: NDArray[np.float64]  # (n, 3) 로봇 기준 좌표 m
     approach: NDArray[np.float64]  # (n, 3) 단위
     closing: NDArray[np.float64]  # (n, 3) 단위
-    opening_m: NDArray[np.float64]  # (n,) 엄지-검지 끝 거리
+    # (n,) 엄지-검지 끝 거리 m. 사람 손 거리 그대로이고 위치 배율을 곱하지 않는다
+    opening_m: NDArray[np.float64]
 
 
 def _rz(yaw: float) -> NDArray[np.float64]:
@@ -63,6 +64,13 @@ def hand_targets(
     placement: Placement,
 ) -> Targets:
     """손 점 (n, 3) 세 개(없는 프레임은 NaN) → 로봇 기준 좌표 목표.
+
+    Args:
+        wrist, thumb, index: 손목·엄지 끝·검지 끝의 세션 월드 좌표 m.
+        placement: 로봇 배치 (`ArmConfig.placement`).
+
+    Returns:
+        `Targets`. 식은 모듈 docstring에 있다. episode_centroid의 평균은 목표가 있는 프레임만 쓴다.
 
     Raises:
         ValueError: 배열 모양이 다를 때.

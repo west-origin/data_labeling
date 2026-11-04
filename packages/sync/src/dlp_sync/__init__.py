@@ -27,7 +27,8 @@
 - `motion_xcorr` (`xcorr.py`): 바디캠 내장 IMU 가속도 크기와 장갑 압력 합의 상호상관.
 
 공개 API
-- `synchronize`: 세션 + 스트림 입력 → 동기화된 세션과 보고서 (DB·저장소 접근 없음, 순수 계산).
+- `synchronize`: 세션 + 스트림 입력 → 동기화된 세션과 보고서. DB·객체 저장소는 쓰지 않는다
+  (QR 슬레이트 검출이 로컬 영상 파일만 읽는다).
 - `apply_manual_adjustment`: 사람이 정한 조정값을 세션에 기록.
 - `SyncReport`: 스트림별 시도한 방법·신뢰도·앵커 (저장소
   `sessions/<세션>/derived/sync_report.json`).

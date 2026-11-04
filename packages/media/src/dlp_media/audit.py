@@ -120,7 +120,8 @@ class AuditedStore:
         purpose: str,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
-        """
+        """감쌀 저장소와 기록 대상을 받는다 (접근은 아직 없다).
+
         Args:
             inner: 실제 원본 저장소 (S3Store·LocalStore).
             sink: 기록 대상.
@@ -184,7 +185,7 @@ class AuditedStore:
 
         Raises:
             TypeError: 감싼 저장소가 서명 URL을 만들 수 없을 때 (LocalStore). 이때는 기록하지
-            않는다.
+                않는다.
         """
         presign: Callable[[str, int], str] | None = getattr(self.inner, "presign", None)
         if presign is None:

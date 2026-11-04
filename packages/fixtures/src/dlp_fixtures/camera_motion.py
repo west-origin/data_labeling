@@ -10,14 +10,13 @@
   `pose_at(t_s)`로 임의 시각의 정답도 얻는다.
 - `frames()`: (PTS ms, 렌더 RGB 프레임). 평면 무늬를 광선-평면 교차로 그린다 (특징점 추적 입력).
 - `depth_at(t_ms, image)`: 그 프레임의 정답 메트릭 깊이 (광축 방향, m). `depth_bias`로 배율 오차를
-넣는다.
+  넣는다.
 - `imu`: IMU 시계(ms)의 가속도(비력, m/s²)·자이로(rad/s), IMU 좌표계. 바디캠 시각 = IMU 시각 +
   `imu_offset_ms` (`Stream.to_master_ms`와 같은 식). IMU → 카메라 회전 `imu_to_camera`(4x4, 이동 0).
   `gyro_bias`, `gyro_noise`, `acc_noise`로 센서 오차를 넣는다.
-- `hand_world[t]`: 월드 좌표 손 6점 (손목, 엄지·검지·중지·약지·새끼 끝) (6, 3) m — 탁자 위를 닦는
-손.
-  `hand_cam[t]`: 같은 점의 카메라 좌표. `camera_labels(...)`: 그것을 3D 단계(`lift3d`) 출력처럼 쓴
-  카메라 좌표 trajectory3d 라벨 (선택 흔들림).
+- `hand_world[t]`: 월드 좌표 손 6점 (손목, 엄지·검지·중지·약지·새끼 끝) (6, 3) m. 탁자 위를 닦는
+  손이다. `hand_cam[t]`: 같은 점의 카메라 좌표. `camera_labels(...)`: 그것을 3D 단계(`lift3d`)
+  출력처럼 쓴 카메라 좌표 trajectory3d 라벨 (선택 흔들림).
 
 테스트 사용처: `dlp_prelabel`(카메라 자세 추정 ATE·RPE, 월드 좌표 손 오차, 러너의 자세·월드 단계).
 """
@@ -114,7 +113,12 @@ class MotionSpec:
 
 @dataclass
 class CameraMotionScenario:
-    """정답 자세를 아는 머리 카메라 시퀀스 (모듈 설명 참고)."""
+    """정답 자세를 아는 머리 카메라 시퀀스 (모듈 docstring 참고).
+
+    시각: `frame_times`와 자세·손 메서드의 `t_ms`는 바디캠 PTS ms(= 마스터), `*_at(t_s)`는 같은
+    시계의 초다. `imu_t_ms`만 IMU 자기 시계 ms이고 바디캠 시각 = IMU 시각 + `imu_offset_ms`다.
+    `imu_to_camera`는 IMU → 카메라 4x4 변환(회전만, 이동 0)을 튜플로 담은 것이다.
+    """
 
     intrinsics: CameraIntrinsics
     frame_times: list[int]
