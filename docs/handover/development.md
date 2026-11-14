@@ -6,7 +6,13 @@
 
 아래는 저장소 자체의 준비 순서다. 실제 고객 데이터가 없는 개발 환경에서 실행한다.
 필요 도구는 Python 3.12, uv, make, Git, Docker/Compose v2, FFmpeg/ffprobe이며 MediaPipe에는
-EGL/GLES 시스템 라이브러리가 필요하다(Ubuntu: `libegl1`, `libgles2`). 잠금 파일은 갱신하지 않는다.
+EGL/GLES 시스템 라이브러리가 필요하다(Ubuntu: `libegl1`, `libgles2`). 이 준비 순서는 잠금 파일(`uv.lock`)을
+바꾸지 않는다 (`uv sync --locked`). 의존성을 바꾸는 작업이면 `uv lock`으로 갱신해 같은 PR에 넣는다.
+
+파이썬은 uv가 고른다: 받아 둔 uv 관리 파이썬이 있으면 그것, 없으면 시스템의 3.12다. CI는
+`uv python install`로 최신 3.12를 받는다. 우분투 24.04의 시스템 파이썬 3.12.3과 3.12.13 둘 다에서
+전체 검사가 통과한다 (2026-11-14). FFmpeg가 없으면 미디어·GR00T 내보내기 시험이 실패가 아니라 건너뛰기로
+나오므로, 결과의 skipped 수를 본다 (CI는 FFmpeg를 설치한다).
 
 ```bash
 make install-curation
@@ -62,6 +68,32 @@ uv run --no-sync dlp pilot check --profile cleaning --models-only
 
 네트워크 차단·인증서 오류는 프록시/CA 설정으로 해결하고 TLS 검증을 끄지 않는다.
 MLflow 이미지 빌드의 추가 CA는 [서비스 설명](../../README.md#서비스와-포트)을 참고한다.
+
+## Docker 없이 돌리기 (이미지를 받을 수 없을 때)
+
+Docker 이미지를 받을 수 없는 환경(요청 제한, 막힌 네트워크)에서도 수집부터 자동 라벨까지는 돈다.
+PostgreSQL만 시스템에 띄우고 저장소는 로컬 폴더를 쓴다. 2026-11-09~10 실영상 실행을 이 방식으로 했다
+([인수 준비 점검](handover-check-2026-11-14.md) 6절).
+
+```bash
+sudo apt-get install -y postgresql              # 이미 있으면 생략
+sudo pg_ctlcluster 16 main start                # 버전·이름은 pg_lsclusters로 확인
+sudo -u postgres psql -c "CREATE ROLE dlp LOGIN PASSWORD 'dlp-dev-password'"   # .env의 개발 계정과 같게
+sudo -u postgres createdb -O dlp dlp
+make env && set -a && . ./.env && set +a        # DLP_DATABASE_URL이 localhost:5432/dlp를 가리킨다
+make db-upgrade
+make models                                     # 실제 모델로 돌릴 때
+
+S="--store local:$PWD/data/local-store"         # 원본·라벨링 버킷 대신 쓰는 폴더 (Git 제외)
+uv run dlp ingest <매니페스트> $S
+uv run dlp sync run <세션> $S
+uv run dlp privacy detect <세션> $S
+uv run dlp prelabel run <세션> $S
+```
+
+되지 않는 것: 검수 도구(CVAT·Label Studio) 작업 생성과 수집, 데이터셋 버전(lakeFS), 학습 기록(MLflow),
+`make test-services`. `make check`는 서비스 없이 돈다. 가중치가 없는 단계는 `dlp prelabel run`이 이유를 알리고
+거부하므로 `--skip <단계>`로 명시해 뺀다. 머신이 재시작되면 PostgreSQL을 다시 띄운다.
 
 ## 검수 도구와 실제 계정 연결
 
@@ -160,6 +192,7 @@ DB 읽기만)과 `dlp ops weekly`의 AI 절로 본다. 판정 모델·프롬프�
 | `make export-models` | 깊이 모델 ONNX 변환 준비 | 큰 다운로드·추가 CPU 환경; 정확도 판정 아님 |
 | `make coverage` | 기본 테스트의 줄 커버리지(모듈별, 실행 안 된 모듈은 0%) | 하한 없음; 서비스 테스트는 `--cov-append`로 합침 |
 | `make review-scope` | 추적 파일별 영역·위험 등급·관련 미해결 문제 수 (reports/review-scope.csv) | 위험 등급 규칙은 scripts/review_scope.py |
+| `make file-map` | 파일마다 역할 한 칸을 모은 [파일 지도](file-map.md)를 다시 만든다 | 파일을 더하거나 맨 위 설명의 첫 문단을 고친 뒤. 일치는 `make contracts`가 검사 |
 | `dlp pilot check` | 선택한 파일럿의 모델·서비스·검수 계정 준비 | 동의·실영상 정확도·사람 검수 완료는 판정하지 않음 |
 
 `pytest` 결과의 passed/failed/skipped/deselected를 함께 기록한다. 성공 종료만으로 모든 모델·도구를
@@ -171,6 +204,10 @@ DB 읽기만)과 `dlp ops weekly`의 AI 절로 본다. 판정 모델·프롬프�
 `docker system df`를 확인한다. 실패 복구에 `make clean`을 쓰면 개발 DB·버킷 볼륨이 삭제된다.
 
 ## 현재 클라우드에만 있는 준비
+
+> 2026-11-14: 이 절은 2026-10의 클라우드 환경(`/workspace`) 기록이다. 그 환경은 더 쓰지 않는다. 지금의
+> 클라우드 세션은 매번 새 컨테이너에서 시작하므로 위 "다른 개발 환경에서 재현"이나 "Docker 없이 돌리기"를
+> 따른다. 아래는 당시 구성을 확인할 때만 본다.
 
 `/workspace/.cloud-onboarding/data-labeling/`은 저장소 밖의 환경별 설치·시작·CA/라이브러리·
 스토리지 설정이다. 해당 파일과 실제 계정 파일은 다른 개발자의 clone에 따라가지 않는다.

@@ -29,7 +29,7 @@ ROOT = repo_root()
 REGISTRY = ROOT / "docs" / "handover" / "issues.yaml"
 DEFECTS = ROOT / "tests" / "test_known_defects.py"
 # F-<영역>: 2026-10-11 전수 검수 영역 6개 + AIR(AI 1차 검수 WP17 후속, 출처 ADR 0040)
-ID_RE = re.compile(r"^(S\d+|R\d+|T\d+|O\d+|A-\d{2}|F-(SCH|REV|PMS|PAR|ETA|COE|AIR)-\d{2})$")
+ID_RE = re.compile(r"^(S\d+|R\d+|T\d+|O\d+|A-\d{2}|F-(SCH|REV|PMS|PAR|ETA|COE|AIR)-\d{2,3})$")
 # 전수 검수 보고(full-review-2026-10-11.md)의 건수 표가 세는 영역
 REPORT_AREAS = ("F-SCH-", "F-REV-", "F-PMS-", "F-PAR-", "F-ETA-", "F-COE-")
 SEVERITY = {"high", "medium", "low"}
@@ -106,7 +106,7 @@ def test_document_ids_are_registered(issues: list[dict[str, Any]]) -> None:
     )
     assert audit == {i for i in known if i.startswith("A-")}
     report = ROOT / "docs/handover/full-review-2026-10-11.md"
-    found = set(re.findall(r"\bF-(?:SCH|REV|PMS|PAR|ETA|COE)-\d{2}\b", report.read_text("utf-8")))
+    found = set(re.findall(r"\bF-(?:SCH|REV|PMS|PAR|ETA|COE)-\d{2,3}\b", report.read_text("utf-8")))
     registered = {i for i in known if i.startswith(REPORT_AREAS)}
     # 보고서의 범위 표기(F-SCH-07~10)는 첫 ID만 잡히므로 "보고서 ⊆ 레지스트리"만 요구한다
     assert found <= registered, f"보고서에만 있는 ID {sorted(found - registered)}"
@@ -166,7 +166,7 @@ def test_registry_counts_in_report_match(issues: list[dict[str, Any]], report: s
         n = sum(1 for i in mine if i["severity"] == sev)
         assert re.search(rf"^\| {ko} \| {n} \|", text, re.M), f"{report}의 {ko} 건수가 {n}이 아님"
     known = {i["id"] for i in issues}
-    found = set(re.findall(r"\bF-[A-Z]{3}-\d{2}\b", text))
+    found = set(re.findall(r"\bF-[A-Z]{3}-\d{2,3}\b", text))
     assert found <= known, f"보고서에만 있는 ID {sorted(found - known)}"
 
 

@@ -2,9 +2,11 @@
 # 실제 모델을 아직 연동하지 못한 곳은 "TODO(real-model)"로 표시하고 필요한 것을 적는다.
 # 저장소 전체에서 찾기: make todo-models
 #
-# 정책 해시: 각 어댑터·단계는 자기 절(hands, body, objects, open_vocab_objects, closed_vocab_tools, depth, contact,
-# wearer_matching)의 "파싱된 값" 해시를 모델 버전에 넣는다 (PrelabelPolicy.digest). 그 절의 값을
-# 바꾸면 다음 실행에서 그 단계가 다시 돌고, 검수 전인 이전 결과만 지운다 (검수·사람 결과는 남는다).
+# 정책 해시: 각 어댑터·단계는 자기 절의 "파싱된 값" 해시를 모델 버전에 넣는다 (PrelabelPolicy.digest).
+# 해시에 들어가는 절: hands, body, arm, objects, open_vocab_objects, closed_vocab_tools, wearer_suppression,
+# depth, palm_estimate(depth와 함께), masks, contact, wearer_matching, camera_pose, world_frame.
+# 그 절의 값을 바꾸면 다음 실행에서 그 단계가 다시 돌고, 검수 전인 이전 결과만 지운다 (검수·사람
+# 결과는 남는다). 기존 절에 키를 더해도 기본값까지 해시에 들어가 모든 세션이 다시 돈다.
 # 주석·키 순서·따옴표는 해시에 영향이 없다. models 절과 timeline_predictors는 해시에 들어가지 않는다.
 #
 # 시간 단위: *_ms 값은 정수 ms. 공간 라벨(손·박스·3D) 쪽 값은 그 스트림 영상 PTS 기준, 접촉 구간은
@@ -106,7 +108,7 @@ objects:
 # frame_stride_ms마다 추론하고, max_gap_ms 안에서 이어지는 탐지를 한 트랙으로 잇는다. 프리라벨은 추론한
 # 시각에만 키프레임을 남기고, 사이는 검수 도구와 접촉 단계(contact.video.box_max_gap_ms)가 보간한다.
 open_vocab_objects:
-  frame_stride_ms: 500      # 추론 간격 (ms). GPU 환경에서는 줄인다. 줄이면 처리 시간이 비례해 는다
+  frame_stride_ms: 500      # 추론 간격 (ms). 줄이면 처리 시간이 비례해 늘고, 이 절의 해시가 바뀌어 모든 세션이 다시 돈다
   min_score: 0.12           # 모든 질의 공통 점수 문턱 (OWLv2 점수는 낮게 나오는 편이라 작다)
   track_iou: 0.3            # 트랙 잇기 IoU 문턱
   max_gap_ms: 1200          # frame_stride_ms보다 커야 트랙이 이어진다 (지금 2.4배)

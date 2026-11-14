@@ -16,6 +16,8 @@ from dlp_export.policy import load_policy as load_export
 from dlp_ops.policy import load_policy as load_ops
 from dlp_prelabel.policy import HAND21_JOINTS
 from dlp_prelabel.policy import load_policy as load_prelabel
+from dlp_privacy.detectors.reflection import REGION_TARGET
+from dlp_privacy.policy import load_policy as load_privacy
 from dlp_review.ops.policy import load_policy as load_review
 from dlp_schema import find_ontology_dir, load_ontology
 
@@ -111,3 +113,18 @@ def test_exported_and_retargeted_hand_points_are_produced_by_prelabel() -> None:
     ontology = load_ontology(find_ontology_dir(ROOT / "config" / "ontology", "1.0.0"))
     assert exported <= made and retargeted <= made
     assert made <= set(ontology.hand_joints)
+
+
+def test_privacy_targets_are_ontology_blur_targets() -> None:
+    """탐지 정책의 블러 대상(`privacy.yaml targets`)은 모두 온톨로지 `privacy_targets`에 있고,
+    오픈 보캐뷸러리 질의가 내는 대상은 정책 대상이거나 반사면 영역(반사 탐지기의 중간 결과)이다.
+
+    사전에 없는 대상은 탐지를 다 돈 뒤 라벨을 저장할 때에야 거부되고(`dlp_schema.validation`), 정책
+    대상이 아닌 질의 결과는 조용히 버려진다 (`dlp_privacy.pipeline.detect_video`). 블러 대상을 더할
+    때 한쪽만 고친 것을 여기서 잡는다.
+    """
+    policy = load_privacy(ROOT)
+    ontology = load_ontology(find_ontology_dir(ROOT / "config" / "ontology", "1.0.0"))
+    assert set(policy.targets) <= set(ontology.privacy_targets)
+    asked = {t for spec in policy.detectors.values() for t in spec.queries.values()}
+    assert asked <= set(policy.targets) | {REGION_TARGET}

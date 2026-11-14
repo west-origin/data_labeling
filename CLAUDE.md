@@ -43,6 +43,8 @@
 - `make install-curation` — FiftyOne(데이터 큐레이션, 약 1 GB) 포함 설치. `make install`을 다시 하면 빠진다
 - `make coverage` — 기본 테스트의 줄 커버리지 (reports/coverage, 하한 없음)
 - `make review-scope` — 전수 검수 범위표 (추적 파일별 위험 등급·관련 미해결 문제 수, reports/review-scope.csv)
+- `make file-map` — 파일마다 역할 한 칸을 모은 `docs/handover/file-map.md` 재생성. 파일을 더하거나 파일 맨 위 설명의
+  첫 문단을 고친 뒤 돌린다 (`make contracts`가 일치 검사, `make check`에 포함)
 - `make cvat-up` / `make cvat-down` / `make cvat-superuser` — CVAT (공식 compose, 고정 버전, UI는 검수 화면 테마를 얹은 이미지)
 - `make ui-theme` — 검수 화면 테마(`config/review_ui.yaml`)를 바꾼 뒤 CVAT 테마 색 파일 재생성 (`make contracts`가 일치 검사, ADR 0038)
 
@@ -169,3 +171,7 @@
   hand21 손목이다 (ADR 0058).
 - 모양 마스크는 프라이버시 블러와 무관하다 (블러는 박스 그대로). 착용자 팔·몸통은 마스크 프롬프트로 쓰지 않는다 (ADR 0058·0059).
 - 코드 주석과 문서는 한국어, 식별자는 영어.
+- 새 파일(파이썬, `config/`·`services/`의 YAML·셸 스크립트)은 맨 위 첫 문단에 그 파일의 역할을 적는다 (파이썬은 모듈
+  docstring, 그 밖은 맨 위 주석). 그 문단이 파일 지도의 한 칸이 된다 (`make file-map`).
+- 푸시한 뒤 CI 결과를 확인한다. 로컬 `make check` 통과는 CI 통과를 대신하지 않는다 (2026-11-04~14 CI 실패를 열흘
+  동안 놓쳤다, `docs/handover/handover-check-2026-11-14.md`).

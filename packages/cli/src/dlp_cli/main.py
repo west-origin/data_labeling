@@ -1,4 +1,5 @@
-"""`dlp` 명령줄 진입점 (WP0).
+"""`dlp` 명령줄 진입점 (WP0): 최상위 파서를 만들고 `<단계>_cmds.py`의 하위 명령을 등록해 실행 함수로
+넘긴다.
 
 `pyproject.toml`의 `[project.scripts]`가 `dlp = dlp_cli.main:main`으로 이 모듈을 가리킨다.
 최상위 파서를 만들고, 각 단계 모듈(`<단계>_cmds.py`)의 `add_commands(sub)`를 불러 하위 명령을

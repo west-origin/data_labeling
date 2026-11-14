@@ -1,4 +1,5 @@
-"""CPU용 stub Predictor.
+"""CPU용 stub Predictor: 정답을 그대로 돌려주는 Oracle*, 미연동 기능의 빈 결과 Unavailable*, 정해 둔
+탐지를 내는 도구 탐지기.
 
 - Oracle*: 정답 라벨을 (흔들림을 넣어) 그대로 돌려준다. 실제 모델 대신 CI와 다른 모듈 개발에 쓴다.
 - Unavailable*: 실제 모델을 아직 연동하지 못한 기능. 빈 결과를 내고 이유를 남긴다.

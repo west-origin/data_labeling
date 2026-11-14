@@ -66,3 +66,12 @@
 - 한계: 서로 다른 두 대상을 잘못 이으면 간격 동안 두 박스의 외접 박스를 블러한다 (과블러, 노출은 아니다).
   간격 사이에 새로 나타났다 사라진 대상은 여전히 놓칠 수 있다 (사람 검수). 트래커 버전이 바뀌었으므로 기존
   세션은 다시 탐지된다 (검수 전 블러만 교체, ADR 0015).
+
+## 보충 (2026-11-14): "GPU 서버에서는 onnxruntime-gpu로 바꾸면 된다"는 지금 코드와 맞지 않는다 (F-PAR-98)
+
+결정 2의 그 문장은 패키지만 바꾸면 된다는 뜻으로 읽히지만, 구현은 세 곳에서 CPU를 고정한다:
+`dlp_models.onnx.OnnxModel`이 `providers=["CPUExecutionProvider"]`로 세션을 만들고, RTMPose(rtmlib)는
+`device="cpu"`, MediaPipe 손·객체는 `Delegate.CPU`다. GPU로 옮기려면 제공자 선택, GPU판 onnxruntime의 선택
+설치, GPU와 CPU 결과를 모델 버전에서 가를지의 결정이 필요하다. 할 일은 `docs/handover/issues.yaml`의
+F-PAR-98에, 모델별 런타임 표는 `docs/handover/architecture.md`의 `packages/models/` 절에 있다.
+

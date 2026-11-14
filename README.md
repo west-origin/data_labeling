@@ -19,8 +19,9 @@
 | 구조를 한눈에 보기 | 이 문서의 [어떻게 동작하나](#어떻게-동작하나) |
 | 인수인계 받기, 기능 상태 확인 | [인수인계 첫 화면](docs/handover/README.md) |
 | 패키지 상세, 의존 표, 용어 전체 | [구조 지도](docs/handover/architecture.md) |
+| 어떤 일을 어느 파일이 하는지 찾기 | [파일 지도](docs/handover/file-map.md) |
 | 다른 컴퓨터에 설치·검사 | [환경 준비](docs/handover/development.md) |
-| 코드 수정, 장애 복구 | [변경 및 복구 안내](docs/handover/change-guide.md) |
+| 코드 수정(결함 고치기·블러 대상 더하기의 순서 포함), 장애 복구 | [변경 및 복구 안내](docs/handover/change-guide.md) |
 | 터미널 없이 브라우저로 운영 | [운영 안내서](docs/handover/operator-guide.md) |
 | 실제 촬영 영상으로 시험 | [청소 영상 파일럿](docs/weekend-video-pilot.md) |
 | 개발 규칙, 요구사항, 결정 이유 | [CLAUDE.md](CLAUDE.md), [제품 계획](docs/labeling-platform-plan.md), [구현 계획](docs/ai-implementation-plan.md), [ADR 목록](docs/adr/README.md) |

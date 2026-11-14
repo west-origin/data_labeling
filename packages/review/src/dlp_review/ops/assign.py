@@ -1,4 +1,5 @@
-"""배정 계획.
+"""배정 계획: 검수 단위마다 표준 배정을 두고 정책 비율대로 블라인드·이중·오류 삽입·QA 배정을 더한다
+(DB를 쓰지 않는다).
 
 검수 단위마다 표준 배정을 두고, 정책 비율대로 블라인드·이중·오류 삽입·QA 배정을 더한다.
 - 비율은 config/defaults.yaml review (blind_task_ratio, double_annotation_ratio,

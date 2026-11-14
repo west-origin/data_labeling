@@ -22,6 +22,7 @@ contracts:
 	uv run dlp ontology validate
 	uv run dlp schema export --check
 	uv run dlp review ui-theme --check
+	uv run python scripts/file_map.py --check
 	@uv run dlp models licenses > /dev/null || (uv run dlp models licenses | grep 위반; exit 1)
 
 # 정책이 쓰는 모델의 라이선스·학습 데이터·상업 사용 분류 표 (판매 실사 자료)
@@ -47,6 +48,11 @@ review-scope:
 # 패키지별 docstring·주석 양 (공개 대상 비율, 빠진 위치는 --list). 문장이 맞는지는 판단하지 않는다.
 doc-coverage:
 	uv run python scripts/doc_coverage.py
+
+# 파일마다 역할 한 문단을 모은 지도(docs/handover/file-map.md)를 다시 만든다. 파일을 더하거나 파일 맨 위
+# 설명의 첫 문단을 고친 뒤 돌린다 (`make contracts`가 일치를 검사한다).
+file-map:
+	uv run python scripts/file_map.py
 
 # 계약 타입(dlp_schema)을 바꾼 뒤 schemas/*.schema.json을 다시 만든다 (직접 편집 금지).
 # 계약 변경은 ADR + Alembic 마이그레이션 + 계약 테스트와 함께 한다.
@@ -84,7 +90,7 @@ db-upgrade: db-migrate
 	uv run dlp ontology register 1.0.0
 
 # 파일이 아닌 명령 대상 (같은 이름의 파일이 있어도 항상 실행)
-.PHONY: install install-curation test-isolated lint fmt typecheck test contracts schemas ui-theme coverage review-scope doc-coverage models export-models todo-models licenses fixtures db-migrate db-upgrade check env up down ps logs health test-services \
+.PHONY: install install-curation test-isolated lint fmt typecheck test contracts schemas ui-theme coverage review-scope doc-coverage file-map models export-models todo-models licenses fixtures db-migrate db-upgrade check env up down ps logs health test-services \
         cvat-up cvat-down cvat-superuser clean
 
 # 작업공간 의존성 설치 (uv.lock 그대로, --locked: 잠금 파일과 pyproject가 어긋나면 실패).

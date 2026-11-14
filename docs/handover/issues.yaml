@@ -3,7 +3,8 @@
 #
 # 필드:
 #   id        S·R(known-issues), T(training-loop-review), O(ontology-structure-review),
-#             A-nn(audit-notes, 재현 전 후보), F-<영역>-nn(2026-10-11 전수 검수). 지우지 않고 status만 바꾼다.
+#             A-nn(audit-notes, 재현 전 후보), F-<영역>-nn(2026-10-11 전수 검수와 그 뒤 발견. 번호는 영역마다
+#             이어 붙이고 99 다음은 세 자리로 간다). 지우지 않고 status만 바꾼다.
 #   title     한 줄 요약
 #   severity  high | medium | low
 #   status    open(확정·미수정) | candidate(재현 전 후보) | fixed(반영) | superseded(다른 ID로 옮김)
@@ -817,7 +818,7 @@ issues:
   # ── 2026-10-22 실영상 첫 파일럿 (iPhone 13, docs/handover/pilot-real-2026-10-22.md) ──
   - {id: F-PMS-31, title: "실영상에서 프라이버시 기본 문턱이 프레임 면적 중앙값 47~81%를 블러로 덮고 블러 트랙 5247개를 내, 블러본으로 라벨링할 수 없고 전수 검수도 비현실적", severity: high, status: open, kind: product,
      files: [config/policies/privacy.yaml, packages/privacy/src/dlp_privacy/detectors/yunet.py, packages/privacy/src/dlp_privacy/detectors/open_vocab.py, packages/privacy/src/dlp_privacy/detectors/codes.py], source: docs/handover/pilot-real-2026-10-22.md,
-     note: "재현율 우선 문턱(detection_threshold 0.3, OWLv2 score_threshold 0.1)이 합성 픽스처에서는 문제가 없었으나 실영상 342 s에서 얼굴 트랙 1671개(합집합 99.5% 시간), 반사 2148개, 블러 키프레임 시각 표본의 면적 합집합 중앙값 0.81(0.5 초과 97.7%)을 냈다. 바로 세운 사본(pilot-real2)도 트랙 5243개, 면적 중앙값 0.47(0.5 초과 35.4%)이다. 얼굴이 거의 없는 1인칭 영상에서 얼굴 블러 표본 24개를 눈으로 본 결과 얼굴은 0개(수도꼭지·싱크·팔·손). 실제 송장 장면은 다른 대상 박스의 합집합으로 덮였지만 codes 탐지기 박스는 바코드 띠만 덮는다(주소 글자는 OWLv2에 기댄다, OCR 없음 TODO). 문턱을 정답 없이 올리면 누락(사고)이 늘어 고치지 않았다. 필요: 같은 장비 실촬영의 대상별 정답 표본으로 문턱·대상별 문턱을 정하고, 코드 박스를 둘러싼 라벨 영역으로 키우거나 OCR을 더한다."}
+     note: "재현율 우선 문턱(detection_threshold 0.3, OWLv2 score_threshold 0.1)이 합성 픽스처에서는 문제가 없었으나 실영상 342 s에서 얼굴 트랙 1671개(합집합 99.5% 시간), 반사 2148개, 블러 키프레임 시각 표본의 면적 합집합 중앙값 0.81(0.5 초과 97.7%)을 냈다. 바로 세운 사본(pilot-real2)도 트랙 5243개, 면적 중앙값 0.47(0.5 초과 35.4%)이다. 얼굴이 거의 없는 1인칭 영상에서 얼굴 블러 표본 24개를 눈으로 본 결과 얼굴은 0개(수도꼭지·싱크·팔·손). 실제 송장 장면은 다른 대상 박스의 합집합으로 덮였지만 codes 탐지기 박스는 바코드 띠만 덮는다(주소 글자는 OWLv2에 기댄다, OCR 없음 TODO). 문턱을 정답 없이 올리면 누락(사고)이 늘어 고치지 않았다. 필요: 같은 장비 실촬영의 대상별 정답 표본으로 문턱·대상별 문턱을 정하고, 코드 박스를 둘러싼 라벨 영역으로 키우거나 OCR을 더한다. 2026-11-10 같은 영상의 다른 구간(바로 세운 1080p 90초)에서도 같다: 블러 트랙 1669개. 26초·14초 구간을 따로 돌리면 336개(반사 206, 얼굴 91)·264개(얼굴 106, 반사 82)이고 화면에 다른 사람은 없다 (handover-check-2026-11-14.md 6절)."}
   - {id: F-PMS-32, title: "SeaweedFS 볼륨 서버의 기본 최소 여유 공간(디스크의 1%)보다 여유가 적으면 S3 쓰기가 InternalError로 실패하고 dlp ingest는 boto 추적만 보여 원인을 알 수 없음", severity: low, status: open, kind: ops,
      files: [services/seaweedfs/entrypoint.sh, packages/media/src/dlp_media/storage.py], source: docs/handover/pilot-real-2026-10-22.md,
      note: "252 GB 디스크에 여유 2.4 GB(1% 미만)일 때 361 MB 업로드가 UploadPart InternalError(재시도 4회)로 실패했다. 서버 기록은 'No writable volumes and no free volumes left'. 여유를 4 GB로 늘리고 docker restart dlp-seaweedfs-1 뒤 성공. 개발 환경 안내(development.md)와 수집 오류 문구에 이 원인을 적거나 -volume.minFreeSpace를 명시한다."}
@@ -850,7 +851,7 @@ issues:
      note: "pilot-real2(0.5x 초광각, 공칭 초점 약 720 px): fx 1767 px(가로 57도), 표본 140, 퍼짐 0.42로 문턱 통과. f = f0·p0/L은 깊이가 화각과 무관하다고 전제하지만 Depth Anything V2 Metric은 학습 화각을 전제로 거리를 낸다. 합성 시험은 정답 깊이라 드러나지 않았다. 기본 enabled false로 바꿨다(ADR 0056 개정). 다시 켜려면 화각을 추정·입력받는 깊이 모델과 체커보드 세션 비교가 필요하다"}
   - {id: F-PAR-66, title: "착용자 팔 골격(arm3)과 착용자 몸 억제의 문턱(arm·wearer_suppression)을 정답 표본 없이 정해 실영상 정확도(팔꿈치 위치·보임 판정, 억제 재현·정밀도)를 모름", severity: medium, status: open, kind: product,
      files: [config/policies/prelabel.yaml, packages/prelabel/src/dlp_prelabel/arm.py, packages/prelabel/src/dlp_prelabel/wearer_suppress.py, packages/schema/src/dlp_schema/wearer_body.py], source: docs/adr/0058-wearer-arm-skeleton-and-wearer-body-suppression.md, see: [F-PAR-60],
-     note: "합성 픽스처(dlp_fixtures.arm)로 규칙만 검사했다. 위험: 손을 맞잡은 대상자 자세를 착용자로 보거나, 머리가 화면 밖인 대상자 박스가 착용자 손목을 담고 화면 아래에 닿으면 억제될 수 있다. RTMPose는 1인칭 착용자 팔꿈치를 화면 안에 그럴듯하게 놓으므로 길이·방향 검사만으로는 틀린 팔꿈치를 다 거르지 못한다. 필요: 같은 장비 실촬영의 팔꿈치·대상자 박스 정답 표본으로 문턱을 다시 정한다 (파일럿 보고서 11절)."}
+     note: "합성 픽스처(dlp_fixtures.arm)로 규칙만 검사했다. 위험: 손을 맞잡은 대상자 자세를 착용자로 보거나, 머리가 화면 밖인 대상자 박스가 착용자 손목을 담고 화면 아래에 닿으면 억제될 수 있다. RTMPose는 1인칭 착용자 팔꿈치를 화면 안에 그럴듯하게 놓으므로 길이·방향 검사만으로는 틀린 팔꿈치를 다 거르지 못한다. 필요: 같은 장비 실촬영의 팔꿈치·대상자 박스 정답 표본으로 문턱을 다시 정한다 (파일럿 보고서 11절). 2026-11-10 실영상 두 구간(26초·14초): 착용자 억제가 자세 프레임 635·454개를 뺀 뒤에도 사람 자세(coco17) 트랙 19·9개(신뢰도 0.31~0.43)가 남았다. 긴 것부터 8개를 프레임에 겹쳐 보니 모두 착용자 자신의 팔·몸통·다리 위였다 (화면에 다른 사람 없음). 팔꿈치가 보인다고 판정한 키프레임은 왼팔 50/106·70/99, 오른팔 101/141·62/105였다 (정답 없음, handover-check-2026-11-14.md 6절)."}
   - {id: F-PAR-67, title: "착용자 팔·억제가 전신·객체·도구 단계 안에서 돌아, 손 트랙을 검수로 고쳐도 팔 골격과 억제 판정을 다시 하지 않음 (단계 버전에 손 입력 해시가 없음)", severity: low, status: open, kind: code,
      files: [packages/prelabel/src/dlp_prelabel/adapters/rtmpose.py, packages/prelabel/src/dlp_prelabel/runner.py], source: docs/adr/0058-wearer-arm-skeleton-and-wearer-body-suppression.md, see: [F-PAR-66],
      note: "정책·가중치가 바뀌면 다시 돈다. 손 트랙 ID를 단계 버전에 넣으면 손 수정 때마다 비싼 전신·도구 단계가 다시 돌아 넣지 않았다. 필요하면 팔 단계를 저장된 자세 후보로 다시 계산하는 별도 단계로 분리한다."}
@@ -877,7 +878,7 @@ issues:
      note: "dlp media prepare --display-rotation <반시계 각도>로 태그 대신 쓸 각도를 준다(FFmpeg 입력 옵션 -display_rotation, 같은 PTS·트랙·해상도 검사). 사람이 영상을 보고 정한다(자동 추정 없음). 옆으로 누운 사본(pilot-real1)과 바로 세운 사본(pilot-real2)의 단계별 결과 차이는 보고서에 있다. 회귀: packages/media/tests/test_prepare.py::test_prepare_display_rotation_overrides_wrong_tag, ::test_prepare_rejects_non_right_angle_override."}
   - {id: F-PAR-60, title: "실영상에서 OWLv2 도구 탐지(min_score 0.12)가 박스 트랙 12414개(81%가 신뢰도 0.2 미만)를 내고, 그 트랙마다 3D 궤적·접촉·관계가 만들어져 하위 단계가 오탐으로 덮임", severity: high, status: open, kind: product,
      files: [config/policies/prelabel.yaml, packages/prelabel/src/dlp_prelabel/adapters/owl_objects.py, packages/prelabel/src/dlp_prelabel/contact.py, config/policies/relations.yaml], source: docs/handover/pilot-real-2026-10-22.md, see: [F-SCH-26, F-PMS-31],
-     note: "342 s 영상(옆으로 누운 사본 pilot-real1)에서 OWLv2 추론 684회에 트랙 12414개(평균 키프레임 약 2개), 부엌에 없는 욕조·변기 솔·기저귀가 수백~천여 개씩. 도구 단계 뒤 3D 궤적이 175 → 6362개로 늘고 영상 접촉 339개·접촉 관계 305개 중 욕조 141·거울 60(싱크를 욕조로 본 것으로 보임, 질의에 sink 없음). 도구 단계 하나가 CPU 104분(3D 다시 계산 포함). 정답이 없어 문턱을 고치지 않았다. 필요: 같은 장비 실촬영 표본으로 질의별 문턱·장면에 맞는 질의 목록, 짧은 트랙·저신뢰 트랙을 3D·접촉 입력에서 거르는 규칙."}
+     note: "342 s 영상(옆으로 누운 사본 pilot-real1)에서 OWLv2 추론 684회에 트랙 12414개(평균 키프레임 약 2개), 부엌에 없는 욕조·변기 솔·기저귀가 수백~천여 개씩. 도구 단계 뒤 3D 궤적이 175 → 6362개로 늘고 영상 접촉 339개·접촉 관계 305개 중 욕조 141·거울 60(싱크를 욕조로 본 것으로 보임, 질의에 sink 없음). 도구 단계 하나가 CPU 104분(3D 다시 계산 포함). 정답이 없어 문턱을 고치지 않았다. 필요: 같은 장비 실촬영 표본으로 질의별 문턱·장면에 맞는 질의 목록, 짧은 트랙·저신뢰 트랙을 3D·접촉 입력에서 거르는 규칙. 2026-11-10 같은 영상의 90초 구간에서도 같다: 박스 트랙 389개, 신뢰도 최고 0.59·중앙값 0.22(0.5 이상 9개), 설거지·택배 장면에 거울 34·대걸레 32·변기 솔 25 (handover-check-2026-11-14.md 6절)."}
   - {id: F-SCH-26, title: "첫 실영상의 가사 장면(설거지·택배 개봉)이 v1 온톨로지 밖이라 객체·작업을 바르게 표시할 어휘가 없음 (그릇·접시·수전·택배 상자·칼/가위, 설거지 작업 없음)", severity: medium, status: open, kind: product,
      files: [config/ontology/v1/objects.yaml, config/ontology/v1/domains_tasks.yaml, config/policies/prelabel.yaml], source: docs/handover/pilot-real-2026-10-22.md, see: [F-PAR-60],
      note: "cleaning 도메인 작업은 바닥·표면·화장실·침상·쓰레기 다섯 가지다. 매니페스트 domain은 가장 가까운 cleaning으로 적었다. 촬영 범위를 온톨로지에 맞추거나(청소·돌봄 장면), 가사 작업·객체를 온톨로지 새 버전으로 더한다(ko·en 이름, 물리 사전값, ADR·이관 필요)."}
@@ -1144,3 +1145,12 @@ issues:
   - {id: F-COE-91, title: "콘솔 재시작 뒤 앞 콘솔 자식 그룹이 좀비만 남아도 group_alive(killpg 0)가 살아 있다고 보아 작업이 running으로 남고 같은 세션 재시도가 JobConflictError", severity: medium, status: fixed, kind: code,
      files: [packages/console/src/dlp_console/jobs.py], source: docs/handover/full-inspection-2026-11-04.md,
      note: "2026-11-05 외부 검수에서 제보, 재현(상태 Z, group_alive True). 그룹에 좀비가 아닌 프로세스가 있을 때만 산 것으로 본다(/proc, 없으면 ps, 둘 다 없으면 killpg). 물려받은 좀비는 reap_group으로 거둔다. PID 재사용 대비는 문서만. 회귀: packages/console/tests/test_jobs.py::test_group_alive_ignores_zombie_members, ::test_recover_does_not_adopt_zombie_group (거두지 않는 init fixture, 수정 전 5 failed)"}
+
+  # ── 인수 준비 점검 2026-11-14 (handover-check-2026-11-14.md) ──
+  - {id: F-PAR-98, title: "모델 추론이 CPU에 고정돼 GPU 서버를 써도 자동 라벨·블러 탐지가 빨라지지 않음 (ONNX Runtime 제공자, rtmlib device, MediaPipe delegate 세 곳)", severity: medium, status: open, kind: product,
+     files: [packages/models/src/dlp_models/onnx.py, packages/prelabel/src/dlp_prelabel/adapters/rtmpose.py, packages/prelabel/src/dlp_prelabel/adapters/mediapipe_models.py, packages/models/pyproject.toml, docs/adr/0009-real-model-registry.md], source: docs/handover/handover-check-2026-11-14.md, see: [F-PAR-60, F-PMS-31],
+     note: "OnnxModel이 providers=[CPUExecutionProvider] 하나로 세션을 만들어 OWLv2·깊이·SAM 2.1·YOLOX가 모두 CPU로 돈다. RTMPose(rtmlib)는 device=cpu, MediaPipe 손·객체는 Delegate.CPU, YuNet은 OpenCV 기본 백엔드다. CPU 4코어에서 90초 영상의 블러 탐지 + 자동 라벨이 34분(영상 길이의 약 23배)이다. ADR 0009의 'GPU 서버에서는 onnxruntime-gpu로 바꾸면 된다'는 이 고정 때문에 그대로는 맞지 않는다. 필요: (1) 장치 설정을 해시되는 정책 절 밖에 두고 기본은 CPU, 요청한 제공자가 없으면 조용히 CPU로 내려가지 말고 멈춘다 (ONNX Runtime은 경고만 낸다). (2) GPU판 onnxruntime은 CPU판과 한 환경에 둘 수 없어 선택 설치(extra)와 잠금 갱신이 필요하다. (3) GPU와 CPU의 결과가 조금 다를 때 모델 버전을 가를지 정한다: 가르면 장치를 바꿀 때 모든 세션이 다시 돌고 프라이버시는 승인이 풀린다, 안 가르면 어느 쪽 결과인지 구분할 수 없다 (소유자 결정, ADR). (4) OWLv2 가중치가 양자화본이라 CUDA에서 얼마나 빨라지는지 실측한다. GPU가 없는 환경에서는 검증할 수 없어 구현하지 않았다."}
+  - {id: F-SCH-35, title: "config/defaults.yaml privacy.extra_targets_v1을 읽는 코드가 없음 (확장 블러 대상은 privacy.yaml의 targets로만 켜진다)", severity: low, status: open, kind: code,
+     files: [config/defaults.yaml, packages/schema/src/dlp_schema/config.py, config/ontology/v1/privacy.yaml], source: docs/handover/handover-check-2026-11-14.md,
+     note: "온톨로지 privacy.yaml 주석이 '확정하면 extra_targets_v1에 적는다'고 안내하지만(같은 주석이 코드가 읽지 않는다고도 밝힌다) 탐지는 config/policies/privacy.yaml의 targets와 탐지기 질의로만 켜진다. 블러 대상을 더하는 순서는 change-guide.md '블러 대상을 하나 더할 때'에 적었다. 키를 지우면 PlatformConfig 계약과 schemas/가 바뀌므로 확장 대상을 정할 때 함께 정리한다."}
+

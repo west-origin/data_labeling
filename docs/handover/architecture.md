@@ -7,13 +7,15 @@
 `dlp`는 CLI 진입점이다. 운영자가 단계별로 실행하며, 검수 도구와 DB·S3·lakeFS·MLflow를 연결한다.
 Prefect 서비스가 기동된 것만으로 모든 작업이 영속 큐에서 자동 재개되는 구조는 아니다.
 먼저 CLI → 단계 실행 함수 → DB 저장소/외부 클라이언트 순서로 읽는다.
+아래 표는 책임별 진입 파일만 적는다. 파일 하나하나의 역할은 [파일 지도](file-map.md)에 있다
+(파일마다 한 칸, 각 파일 맨 위 설명에서 생성).
 
 | 책임 | 진입 파일 또는 디렉터리 | 설정 |
 | --- | --- | --- |
 | 명령 등록·실행 인자 | [CLI main](../../packages/cli/src/dlp_cli/main.py), 같은 디렉터리의 `*_cmds.py` | `.env.example` |
 | 입력 정규화·원본 수집·PTS | [media](../../packages/media/src/dlp_media/)의 `prepare.py`, `ingest.py`, `pts.py` | `config/policies/media.yaml` |
 | 멀티스트림 시각 보정 | [sync pipeline](../../packages/sync/src/dlp_sync/pipeline.py) | `config/policies/sync.yaml` |
-| 탐지·승인·렌더 | [privacy](../../packages/privacy/src/dlp_privacy/)의 `runner.py`, `generation.py`, `rendering.py`, `revocation.py`(블러 변경 뒤 배포 매체 회수 요청), `hold.py`(사고 대응 승인 보류, ADR 0042) | `config/policies/privacy.yaml` |
+| 탐지·승인·렌더 | [privacy](../../packages/privacy/src/dlp_privacy/)의 `runner.py`(세션 단위 실행), `pipeline.py`(영상 하나의 프레임 순회 → 탐지 → 트랙 → 라벨), `tracker.py`, `detectors/`(탐지기와 공장), `generation.py`(검수 세대), `rendering.py`(렌더 게이트: 지금 승인된 블러본인지 확인), `render.py`(블러 픽셀 처리), `revocation.py`(블러 변경 뒤 배포 매체 회수 요청), `hold.py`(사고 대응 승인 보류, ADR 0042) | `config/policies/privacy.yaml` |
 | 자동 라벨 초안 | [prelabel runner](../../packages/prelabel/src/dlp_prelabel/runner.py), `adapters/` | `config/policies/prelabel.yaml`, `config/models.yaml` |
 | 착용자 팔 골격·착용자 몸 억제 (ADR 0058) | [prelabel arm](../../packages/prelabel/src/dlp_prelabel/arm.py)(팔 사슬 고르기·팔꿈치 판정·arm3 트랙), [wearer_suppress](../../packages/prelabel/src/dlp_prelabel/wearer_suppress.py)(객체·도구 박스 억제, 어댑터 공통), [adapters/rtmpose.py](../../packages/prelabel/src/dlp_prelabel/adapters/rtmpose.py)(`body_pass`: 착용자 자세 분리·합성 착용자 박스), 공용 판정 [wearer_body](../../packages/schema/src/dlp_schema/wearer_body.py)(검수 힌트 `dlp_review.object_hints`도 씀), 러너 `wearer_evidence` | `prelabel.yaml wearer_suppression`·`arm`·`depth.arm_points` |
 | 바디캠 자세·세션 월드 좌표 3D (ADR 0046) | [prelabel campose](../../packages/prelabel/src/dlp_prelabel/campose.py)(추정기 어댑터·내장 IMU 시각 오도메트리·자세 라벨), `worldframe.py`(월드 좌표 궤적), 러너 `_PoseStage` | `prelabel.yaml camera_pose`·`world_frame` |
@@ -235,7 +237,20 @@ AI 1차 검수 표시·수집(ADR 0040): `dlp_review.ai_display`(판정 → 검�
 
 ### `packages/models/` (`dlp_models`)
 
-모델 레지스트리(`config/models.yaml`, 해시 확인)와 공용 ONNX 런타임(OWLv2, 메트릭 깊이).
+모델 레지스트리(`config/models.yaml`, 해시 확인)와 공용 ONNX 런타임(`onnx.OnnxModel`: OWLv2, 메트릭 깊이,
+SAM 2.1, YOLOX가 쓴다), 사내 VLM 전송(`vlm`).
+
+추론 런타임은 모델마다 다르고, 지금은 모두 CPU에 고정돼 있다 (GPU 서버를 써도 빨라지지 않는다, F-PAR-98).
+
+| 모델 (쓰는 단계) | 런타임 | 세션·모델을 만드는 곳 | CPU로 고정한 곳 |
+| --- | --- | --- | --- |
+| OWLv2 (블러 탐지, 도구, 검수 힌트, scene3d 물체) | ONNX Runtime | `dlp_models.owlv2.Owlv2` | `dlp_models/onnx.py`의 `providers=["CPUExecutionProvider"]` |
+| 메트릭 깊이 (3D), SAM 2.1 (마스크), YOLOX (고정 클래스 도구·재학습 객체) | ONNX Runtime | `dlp_models.depth`, `sam2`, `yolox` | 같은 곳 |
+| YOLOX-m 사람 탐지 + RTMPose 전신·팔 | rtmlib (ONNX Runtime) | `dlp_prelabel/adapters/rtmpose.py` | 같은 파일의 `device="cpu"` |
+| 손 21관절, COCO 객체 | MediaPipe Tasks | `dlp_prelabel/adapters/mediapipe_models.py` | 같은 파일의 `Delegate.CPU` |
+| YuNet 얼굴 | OpenCV `FaceDetectorYN` | `dlp_privacy/detectors/yunet.py` | OpenCV 기본 백엔드 (PyPI 휠에는 CUDA 백엔드가 없다) |
+
+행동·설명·번역·AI 1차 검수의 VLM은 이 표와 별개로 사내 추론 서버(vLLM, GPU)에 요청한다 ([VLM 서버](vlm-server.md)).
 
 ### `packages/prelabel/` (`dlp_prelabel`)
 

@@ -7,13 +7,15 @@
 아래 테스트 위치는 해당 변경의 검토 시작점이다. 공통 완료 검사는 `make check`이며, 실제
 DB·외부 도구·내보내기 동작을 바꾸면 그 경로의 서비스/격리 환경 검사도 실행한다.
 변경 전에 [구현 계획](../ai-implementation-plan.md)의 해당 WP와 [작업 규칙](../../CLAUDE.md)을 읽는다.
+표는 변경 종류별 시작점만 적는다. 파일 하나하나의 역할은 [파일 지도](file-map.md)에서 찾는다
+(파일마다 한 칸, 코드에서 생성). 자주 하는 변경 두 가지는 표 아래 [순서](#자주-하는-변경의-순서)를 따른다.
 
 | 변경 대상 | 코드·설정 | 영향·확인할 테스트 |
 | --- | --- | --- |
 | 계약/DB/온톨로지 | `schema`, `db/migrations/versions`, `config/ontology` | 모든 소비 패키지. ADR·이관·계약 테스트·`make schemas`/`make contracts` |
 | 영상 회전·PTS·프록시 | `media/prepare.py`, `probe.py`, `proxy.py`, `pts.py` | 공간 좌표·시간·검수 재생. `packages/media/tests`, `tests/test_end_to_end.py` |
-| 모델 파일·어댑터 | `models/registry.py`, `prelabel/adapters`, `config/models.yaml` | 해시·라이선스·라벨 버전·검수 보존. `packages/models/tests`, `packages/prelabel/tests`, `packages/cli/tests/test_pilot.py` |
-| 프라이버시 정책/렌더 | `privacy/generation.py`, `runner.py`, `rendering.py`, `privacy.yaml` | 재검수·재승인·블러 유효성. `packages/privacy/tests`, `packages/schema/tests/test_privacy_detection.py`, `tests/test_review_regressions.py` |
+| 모델 파일·어댑터·추론 런타임 | `models/registry.py`, `models/onnx.py`(ONNX 세션, CPU 고정), `prelabel/adapters`, `privacy/detectors/`, `config/models.yaml` | 해시·라이선스·라벨 버전·검수 보존. `packages/models/tests`, `packages/prelabel/tests`, `packages/cli/tests/test_pilot.py` |
+| 프라이버시 탐지·정책·렌더 | `privacy/pipeline.py`(프레임 순회·라벨), `tracker.py`, `detectors/`, `generation.py`, `runner.py`, `rendering.py`(렌더 게이트), `render.py`(블러 픽셀), `privacy.yaml` | 재검수·재승인·블러 유효성. `packages/privacy/tests`, `packages/schema/tests/test_privacy_detection.py`, `tests/test_review_regressions.py` |
 | 검수 작업/수집/권한 | `review/tasks.py`, `collect.py`, `revoke.py`, `ops/`, `cli/review_config.py`, `privacy/revocation.py` | 세대·담당자·이력·완료 판정·배포 매체 회수(ADR 0039). `packages/review/tests`(`test_revoke.py`), `tests/test_webhook_transaction.py`, `packages/schema/tests/test_review_queries.py`, `tests/test_review_regressions.py` |
 | 동기화/관계/행동 | `sync`, `relations`, `actions`, 각 정책 | 마스터/스트림 시간과 후속 라벨 재생성. 각 패키지 테스트, 종단 테스트 |
 | 학습/평가/배포 | `training/loop.py`, `trainers.py`, `evaluation/gate.py`, 정책 | 골든셋 누수·거절 시 미배포·활성 모델 유일성. training/evaluation 테스트와 DB 서비스 검사 |
@@ -30,6 +32,45 @@ DB·외부 도구·내보내기 동작을 바꾸면 그 경로의 서비스/격�
 
 계약·DB 변경에는 ADR과 필요한 이관을 함께 남긴다. 생성된 `schemas/`는 직접 편집하지 않는다.
 문서·주석만 바꿀 때에도 소스 파일의 docstring이 JSON Schema 설명으로 들어가는지 확인한다.
+
+## 자주 하는 변경의 순서
+
+### 알려진 결함 하나를 고칠 때
+
+1. [`issues.yaml`](issues.yaml)에서 ID를 찾는다. `files`가 고칠 코드, `repro`가 재현 시험(`경로::함수`),
+   `source`가 설명이 있는 문서다. 오래된 보고는 표 한 줄뿐일 수 있다. 그때는 재현 시험의 docstring이
+   가장 정확한 설명이다.
+2. 재현 시험을 돌려 지금도 실패하는지 본다 (`uv run pytest tests/test_known_defects.py -k <함수> -rx`).
+3. 코드를 고친다. 고칠 방식이 여럿이고 문서로 정할 수 없으면(예: 탐지를 버릴지 합칠지) PR에 고른 이유를
+   적고, 계약·DB가 바뀌거나 다른 단계의 결과가 달라지면 ADR을 쓴다.
+4. 재현 시험의 `@pytest.mark.xfail(...)` 표시만 지운다 (그대로 두면 XPASS가 실패로 뜬다). 시험은 그
+   자리에 둬도 되고 패키지 시험으로 옮겨도 된다. 두 선례가 다 있다.
+5. `issues.yaml`: `status: fixed`로 바꾸고 `repro` 줄을 지우고, `note`에 무엇을 고쳤는지와
+   `회귀: <경로>::<함수>`를 적는다. 전수 검수 보고의 건수 표는 상태와 무관하게 세므로 고치지 않는다
+   (`tests/test_issue_registry.py`).
+6. `make check`. DB·외부 도구·내보내기를 건드렸으면 `make test-services`, `make test-isolated`도.
+
+### 블러 대상(온톨로지 항목)을 하나 더할 때
+
+탐지까지 켜려면 사전과 정책 두 곳을 함께 고친다. 예: 차량 번호판.
+
+1. 기준을 먼저 적는다: 무엇을 가리고 무엇은 아닌지 ([온톨로지 검수 안내](../ontology-guide.md) 절차 2).
+2. 사전 `config/ontology/v1/privacy.yaml`에 ID와 `ko`·`en`·`required`를 덧붙인다. 초안(draft) 사전에
+   ID를 덧붙이는 것은 같은 버전으로 된다. 지우거나 뜻을 바꾸면 새 버전과 이관 표가 필요하다 (ADR 0028).
+3. 탐지 정책 `config/policies/privacy.yaml`: `targets`에 그 ID(여유·탐지기)를 더하고, 오픈 보캐뷸러리로
+   찾을 거면 `detectors.open_vocab.queries`에 질의 문장을 더한다. `targets`에 없는 ID의 탐지는 버려지고,
+   사전에 없는 ID는 저장할 때 거부된다 (`tests/test_policy_consistency.py`가 둘의 일치를 본다).
+   `config/defaults.yaml`의 `extra_targets_v1`은 결정 기록용이고 코드가 읽지 않는다.
+4. 사전 항목 수를 적어 둔 시험 상수를 고친다 (`packages/schema/tests/test_ontology.py`의 `V1_TERMS`).
+5. 등록: `make db-upgrade`(= `dlp ontology register 1.0.0`). 덧붙이기면 "appended"가 나온다. 등록 전에
+   탐지를 돌리면 새 대상의 라벨 저장이 거부된다.
+6. 영향을 알고 돌린다. 사전 내용 해시가 바뀌어 검수 화면 프로젝트가 새로 생긴다 (기존 작업은 유지).
+   탐지 정책 해시가 바뀌어 `dlp privacy detect`를 다시 돌린 세션은 승인이 풀리고 블러 검수·승인·렌더를
+   다시 해야 하며, 이미 나간 라벨링 작업은 회수된다 (`privacy.yaml` 머리말, ADR 0039). 진행 중인
+   세션은 돌릴 시점을 정해서 돌린다.
+7. 새 탐지 모델을 들여오면 `config/models.yaml`에 라이선스·학습 데이터·`commercial` 분류를 적고
+   `make licenses`를 통과시킨다 (ADR 0010). 계약 타입이나 DB는 바뀌지 않으므로 Alembic과 `make schemas`는
+   필요 없다.
 
 ## 상태를 보존하는 리팩토링 순서
 

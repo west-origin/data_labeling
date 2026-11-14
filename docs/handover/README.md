@@ -10,6 +10,7 @@
 
 1. [인수 기준](acceptance.md) — 무엇을 끝내야 인수되는지(범위·결과물 형식·검사)부터 알아야 나머지를 읽는 깊이를 정할 수 있다.
 2. [구조 지도](architecture.md) — 코드를 어디서 읽을지, 패키지 의존 표, 상태·시간·원본 경계, 용어와 패키지 상세가 있다.
+   "이 일은 어느 파일인가"는 [파일 지도](file-map.md)에서 찾는다 (파일마다 역할 한 칸).
 3. [불변 조건과 강제 수단](invariants.md) — 어떤 규칙이 트리거·테스트로 막히고 어떤 규칙이 문서뿐인지 알려 준다.
 4. [변경 및 복구 안내](change-guide.md) — 바꿀 때 함께 고칠 파일·테스트와 실패·재시도·잠금의 복구 방법이다.
 5. [CLAUDE.md "규칙" 절](../../CLAUDE.md#규칙) — 라벨 덮어쓰기 금지·원본 노출 금지·분할·라이선스 등 어떤 변경도 어기면 안 되는 약속이다.
@@ -43,23 +44,24 @@ flowchart LR
 감사 경로로 원본을 읽고, 일반 검수자·행동 VLM·큐레이션·내보내기는 승인된 블러본을 사용한다.
 objects 과제만 실제 학습기(yolox, ADR 0062)가 있고 기본 학습기와 나머지 과제는 oracle-stub이다.
 
-## 현재 상태 (마지막 갱신 2026-10-29)
+## 현재 상태 (마지막 갱신 2026-11-14)
 
 | 영역 | 구현·확인된 범위 | 인수자가 추가 확인할 것 |
 | --- | --- | --- |
 | 영상 입력 | 회전 사본 준비, PTS 비교, 수집·프록시·동기화 | 실제 바디캠 코덱·센서 트랙·긴 영상 |
 | 개인정보 처리 | 탐지·원본 전수 검수·승인·블러 렌더·해시 검사, 블러 변경 뒤 배포한 라벨링 매체 회수(ADR 0039) | 현장 누락률, OCR 미구현, CVAT 원본 사본 삭제, 회수 cron 운영 |
-| 손·객체·도구 | 실제 모델 연결, CPU 합성 영상 실행 검사 | 실제 청소 영상의 정확도·수정시간·처리속도 |
+| 손·객체·도구 | 실제 모델 연결, CPU 합성 영상 실행 검사 | 실제 청소 영상의 정확도·수정시간·처리속도. 추론이 CPU에 고정돼 GPU 서버를 써도 빨라지지 않는다 (F-PAR-98, 4코어에서 영상 길이의 약 23배) |
 | 전신·깊이·3D 관계 | 모델/규칙 경로 일부 구현, 합성 테스트. 손목·다섯 손가락 끝 3D(카메라 좌표)를 MediaPipe 손 중심 3D 점 + 2D 투영 + 손바닥 깊이·손 크기 사전값으로 맞춤(ADR 0044, 정답 3D 합성 픽스처 `dlp_fixtures.hand3d`로 흔들림 없음 1 mm·1 px 잡음 2 cm 안 검사), LeRobot state에 6점. 표본마다 방식(hand_fit·point_depth)과 맞춤 품질 신뢰도, 기기 내부 파라미터 등록(`dlp calib intrinsics|import`, 합성 체커보드로 fx 1% 안 복원), 작업자 손 크기(`dlp calib palm|palm-estimate`) (ADR 0045, 절차 [camera-calibration.md](camera-calibration.md)). 부분 수정 손 트랙은 고치지 않은 키프레임의 world 유지. 바디캠 6자유도 자세(내장 IMU 시각 오도메트리: 자이로 적분·가속도 중력 정렬 + 특징점·메트릭 깊이 이동, `dlp_prelabel.campose`)와 세션 월드 좌표 3D 궤적(`frame=world`, `derived_from`)을 `dlp prelabel run`이 만듦 (ADR 0046, 합성 정답 1.5 m 경로 ATE 2~4 mm, 추정기 단위에서 IMU 오프셋 효과 확인·러너는 IMU를 마스터 시각으로 바꿔 넘기는 배선만 SQLite로 확인). 2D 검수를 물려받기만 한 3D는 캘리브레이션·손 크기·정책이 바뀌면 다시 계산해 바꾸고, 되돌린 입력은 다시 만듦 (ADR 0051) | 깊이 모델은 이번 검사에서 생략; 실제 공간 보정과 품질 미입증; 실영상 손가락 끝 정확도·신뢰도 보정 미측정, 왜곡 계수 미적용(F-PAR-28); 자세·월드 좌표 실영상 정확도 미측정(F-PAR-29), 카메라-IMU 외부 파라미터는 매니페스트에 직접(F-PAR-30), 외부 SLAM 엔진(루프 닫힘) 미연동(F-PAR-31) |
 | 사람 검수 | CVAT·Label Studio 수집, 이력, 완료 판정 | 실제 검수 사용성; 고객별 권한 체계 |
 | 행동 분류 | 경계 후보와 외부 VLM 어댑터(공통 전송 `dlp_models.vlm`, 4xx는 종료 5), 모의 테스트 | 실제 VLM 서버; 배포된 행동 모델을 읽는 경로 |
 | 한·영 라벨 (ADR 0043) | 온톨로지 v1 191개 항목(팔 관절 2개는 ADR 0058, 손 마스크 객체 hand는 ADR 0059)의 영어 이름(초안 덧붙이기, `make db-upgrade`로 재등록), 내보내기 한·영 이름(COCO·구간 JSON 1.1·LeRobot 어휘), 한국어 설명의 영어 번역 단계(`dlp translate run\|pending`, `dlp actions run` 뒤 자동, 원문 수정·버전 교체·검수 보호·서버 장애 대기), 설명이 행동 검수를 따름(승인·표본 검증 물려받기, 의미를 고쳤거나 일부·전부 지운 행동의 검수 전 설명 삭제, 3절, F-PAR-15·16 고침), 의미를 고친 행동의 설명 재생성(`dlp actions describe <세션>\|--pending`, 고친 행동 검수를 물려받음, F-PAR-18), 물려받은 뒤 행동이 다시 바뀌면 물려받은 설명도 지우고 다시 만듦(규칙 6, F-PAR-19). 물려받음은 명시 기록 `description_inheritance`(Alembic 0021, 이전 데이터는 예전 추정으로 한 번 백필)로 판정(F-PAR-20), 사람이 쓴 설명의 번역은 쓴 시각의 행동과 비교(F-PAR-22), 재생성 요청은 손마다 의미 필드 전부를 묶어 손 단위 검증(F-PAR-21), 재생성·번역의 쓰기 직전 사용 중지·보류·렌더 재확인(F-PAR-23). stub 번역기·`OracleVlm`·가짜 서버로 검사 | 실제 사내 서버의 번역·재생성 설명 품질(용어집 적중·한글 잔존), 구매자 문서의 형식 1.1 |
 | AI 1차 검수 (WP17) | 결정(ADR 0040)·정책·후보 모델 라이선스 확인, 판정 핵심(계획·프롬프트·응답 재검사·제안·합성 오류 탐지 stub), 서버 점검·처리량 벤치·작업량 추정(`dlp aireview probe\|bench\|estimate`), 추가 전용 AI 표 5개·저장소(Alembic 0019), 실행기·블러본 경계·엔드포인트 묶음·차단기(`dlp aireview run\|status\|show\|waive`, `--pending`), 검수 화면 표시(Label Studio AI 구간·메모·요약·결정 단축키, CVAT 이슈, 노출 기록·대조군 0.1, `review.yaml ai_review` 저장소 값 advisory), 우선순위·표본 제외·표본 합격 뒤 재검수 보호, required 배정 게이트(`dlp review plan` 종료 6), 검수자가 명시적으로 고른 제안 적용(DB의 제안을 다시 검사, 세션 검증에 걸리면 AI 적용만 되돌림)과 결과 기록, 품질 지표(`dlp review quality --ai`: 대조군 기준·표본 가중 지적 정밀도·재현율·층화 ok 놓침률과 상한, `dlp ops weekly` AI 절·경고), 골든 평가(`dlp aireview eval`, DB에 쓰지 않음, 게이트는 경고만). 실제 서버 없이 가짜 서버·stub으로, 화면은 Label Studio 1.23.2·CVAT v2.78.0 실화면으로 검사 | DGX Spark 실측과 대수 결정([VLM 서버](vlm-server.md)), 실서버 골든 게이트·실세션 파일럿(대조군 지표), 파일럿 뒤 required 전환·게이트 차단 결정, 후속 F-AIR-* |
 | 학습·배포 | 예제 추출·MLflow·평가 게이트·배포 흐름, objects 실제 학습기 `yolox`(블러본 COCO·증강·격리 환경 학습·ONNX 묶음·`YoloxTools` 로더, CPU 스모크만 실행, ADR 0062), AI 판정 표시 보정 `dlp aireview calibrate`(대조군, 표시만) | GPU 학습 서버 실측; 나머지 과제는 `oracle-stub`만; 사람 수정 후 성능 향상 미입증 |
-| 내보내기 | COCO·구간 JSON·LeRobot 경로, 게시 전 재검사. LeRobot 격리 환경 검사(사람·로봇 모드) 2026-10-17 통과 | 고객 전달 샘플 |
+| 내보내기 | COCO·구간 JSON·LeRobot 경로, 게시 전 재검사. LeRobot 격리 환경 검사(사람·로봇 모드) 2026-10-17 통과. NVIDIA Isaac GR00T N1.7 미세조정 형식(`dlp export gr00t`, 확인기 `dlp export gr00t-check`, ADR 0065) | 고객 전달 샘플. GR00T는 자체 확인기만 통과했고 NVIDIA 공식 로더로 읽어 보지 않았다 |
 | 로봇 리타기팅 (ADR 0047) | 로봇 등록(`config/robots/<ID>.yaml`, 고객 것은 `DLP_ROBOTS_DIR`, 모델 sha256 확인), 공개 시험 로봇 SO-101(Apache-2.0 URDF), 손 → 끝단 목표·평행 그리퍼, 내장 감쇠 최소제곱 IK(관절·속도 한계)와 격리 환경 mink(MuJoCo) 풀이기, 프레임별 도달 표시·에피소드 보고(지어내지 않음), `dlp export lerobot --robot <ID>`(state = 로봇 관절, `retarget.*`, `meta/dlp_retarget.json`, manifest `robot`). 합성 정답에서 끝단 오차 0.1 mm 미만, 팔 길이 밖 구간 표시. SO-101은 full 모드(롤 포함), 재시작·그리퍼 속도 한계, 설정·URDF 검증, meta에 판정 기준(ADR 0053). 절차 [robot-retargeting.md](robot-retargeting.md) | 3D 궤적은 2D 손·박스 트랙 검수를 물려받고 끊기면 지운다, 카메라 자세는 자동 라벨(ADR 0048·0050, F-COE-19·21·22 고침), 다지 손(F-COE-17), 영상 속 사람 손(F-COE-18), 충돌·동역학·실물 검증(F-COE-20) |
 | 3D 궤적 검수 물려받기 (ADR 0048·0050) | 깊이 3D가 `derived_from`=(2D 손 트랙 또는 박스 트랙)을 남기고(판 `+hf3`), 출처 2D가 사람이 확인한 상태면 카메라·월드 좌표 손 3D와 박스 중심 3D가 상태·검수자·시각을 물려받는다(`dlp_schema.trajectory_follow`, 추가 전용 `trajectory_inheritance`, Alembic 0023). 물려받기만 한 3D의 출처 2D가 바뀌면 궤적 따르기(`trajectory-follow-1`)가 지운다(저장 검증의 두 번째 좁은 예외, F-COE-22). 카메라 자세는 자동 라벨이라 `review.yaml verify.automatic`(기본 `[camera_pose]`)으로 완료 판정을 막지 않는다(F-COE-21). 수집·`dlp review verify`·`dlp prelabel run`에서 적용. 기본 내보내기에 들어가고 manifest `verification_policy.trajectory3d`에 근거(`camera_pose: automatic_unreviewed`, `pose_derived` 등)를 적는다 | 3D 값 자체의 표본 검증(재생 영상 판정) 없음, 같은 상태·검수자·시각 직접 재검수 구분 한계(F-PAR-25와 같음) |
 | 객체 물리 사전값 (ADR 0049) | 온톨로지 객체의 선택 `physical_priors`(재질·촉감·질량 kg·정지 마찰 계수 범위, 상태별 `by_state`, 출처 `prior_estimate`·`prior_literature` 필수), 재질 10·촉감 11 어휘(`physics.yaml`, 용어집 밖), v1 객체 29개(person 제외)에 넓은 추정값. 내보내기에 `measured: false`로 실음(COCO 범주·최상위, 구간 JSON 1.2, LeRobot 어휘). 등록된 초안의 사전값 변경은 `dlp ontology register 1.0.0 --accept-physical-priors`로만(ADR 0053), 내용 해시가 바뀌어 AI 1차 검수 재판정·새 검수 프로젝트, 표 `content_sha256`, LeRobot 접촉 객체 클래스 특징 | 숫자 전문가 검토(F-SCH-16, 초안은 승인 등록으로 교체), 장면별 촉감 라벨·VLM 제안(F-SCH-14), 장갑 기반 파지력·질량 추정(F-SCH-15) |
+| 작업 전후 3D 공간 (ADR 0066) | 전후 다각도 사진 수집, 사진 블러 게이트(사람 승인), SfM·3D 가우시안 스플랫 복원, 전후 정렬, 물체 이동 비교 (`dlp scene3d …`). 합성 방과 CPU stub으로 종단 검사 | 실제 SfM·스플랫은 GPU 격리 환경에서 실측 전, 실사진 미검증 |
 | SaaS 운영 | 개발 서비스·감사·보관 명령 | 인증·테넌트 격리·영속 작업 큐·복구·부하 검증 |
 
 현재 테스트 결과는 [남은 과제](known-issues.md), 확정·후보 문제의 단일 목록은 [레지스트리](issues.yaml)가 기준이다.
@@ -76,9 +78,11 @@ objects 과제만 실제 학습기(yolox, ADR 0062)가 있고 기본 학습기�
 | 2026-10-12 최종 검수 결과 (중간 등급 수정·T4/T5·AI 1차 검수) | [최종 검수 결과](full-review-2026-10-12.md) |
 | 2026-10-15 외부 검수(Codex) 재현 5건·테스트 환경·리팩토링 권고 | [외부 검수 재현](external-review-2026-10-15.md) |
 | 코드를 어디서 읽을지, 상태·시간·원본 경계 | [구조 지도](architecture.md) |
+| 파일 하나하나의 역할 (코드·설정·스크립트 파일마다 한 칸, 코드에서 생성) | [파일 지도](file-map.md), 다시 만들기 `make file-map` |
+| 2026-11-14 인수 준비 점검: CI 복구, 처음 보는 개발자 과제 3건의 결과와 고친 것, 두 번째 실영상 수치 | [인수 준비 점검](handover-check-2026-11-14.md) |
 | 새 개발 환경 재현, 현재 클라우드와의 차이 | [환경 준비](development.md) |
 | VLM 서버(DGX Spark·vLLM) 띄우기, 처리량 실측·대수 결정, Arm64 점검 | [VLM 서버](vlm-server.md) |
-| 변경할 파일·테스트, 실패·재시도·잠금 | [변경 및 복구 안내](change-guide.md) |
+| 변경할 파일·테스트, 자주 하는 변경의 순서(결함 고치기, 블러 대상 더하기), 실패·재시도·잠금 | [변경 및 복구 안내](change-guide.md) |
 | 수정 우선순위·완료 기준·현재 검증 결과 | [남은 과제](known-issues.md) |
 | 사람 검수→재학습→평가→배포의 실제 연결과 구조 결함 | [학습 루프 검사](training-loop-review.md) |
 | 클래스·동작·작업 계층, 버전·의미 검증과 청소 확장 범위 | [온톨로지 구조 검사](ontology-structure-review.md) |
