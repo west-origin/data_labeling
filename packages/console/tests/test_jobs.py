@@ -209,13 +209,21 @@ def test_group_alive_true_for_running_group() -> None:
 
 
 def test_group_alive_reads_state_past_parenthesised_command_name(tmp_path: Path) -> None:
-    """F-COE-91: 명령 이름에 `)`·공백이 있어도 상태·그룹을 제대로 읽는다 (`/proc/<pid>/stat`)."""
+    """F-COE-91: 명령 이름에 `)`·공백이 있어도 상태·그룹을 제대로 읽는다 (`/proc/<pid>/stat`).
+
+    명령 이름은 실행한 파일 이름이라, 그 이름의 파이썬 스크립트를 돌린다. `sleep`에 그 이름의 심볼릭
+    링크를 걸지 않는다: 우분투 26.04의 Rust coreutils는 이름이 다른 링크로 부르면 실행을 거부해 바로
+    끝난다 (CI 러너가 26.04로 바뀐 뒤 이 시험이 실패했다).
+    """
     odd = tmp_path / "x) Z 1 (y"
-    odd.symlink_to(
-        subprocess.run(["which", "sleep"], capture_output=True, text=True).stdout.strip()
-    )
-    proc = subprocess.Popen([str(odd), "30"], start_new_session=True)
+    odd.write_text(f"#!{sys.executable}\nimport time\n\ntime.sleep(30)\n", "utf-8")
+    odd.chmod(0o755)
+    proc = subprocess.Popen([str(odd)], start_new_session=True)
     try:
+        stat = Path(f"/proc/{proc.pid}/stat")
+        if stat.is_file():
+            # 시험의 전제: 리눅스 프로세스 표의 명령 이름에 정말 `)`·공백이 들어 있다
+            assert f"({odd.name})" in stat.read_text("utf-8", errors="replace")
         assert _wait_for(lambda: group_alive(proc.pid), 5)
     finally:
         proc.kill()

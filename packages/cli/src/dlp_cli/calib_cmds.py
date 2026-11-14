@@ -693,7 +693,8 @@ def _add_camera_commands(csub: argparse._SubParsersAction[argparse.ArgumentParse
     asg.add_argument("--until", type=_when, help="녹화 시각 상한 (제외, ISO, 시간대)")
     asg.add_argument("--reason", required=True, help="근거 (예: 촬영 기록부)")
     asg.add_argument("--url", help="DB URL (기본: DLP_DATABASE_URL)")
-    asg.set_defaults(func=cmd_assign)
+    # 기기 뒤에 옵션을 적고 세션 ID를 마지막에 적어도 받는다 (`dlp_cli.main.parse_cli_args`)
+    asg.set_defaults(func=cmd_assign, late_positional="session_ids")
 
 
 def _add_palm_commands(csub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:  # pyright: ignore[reportPrivateUsage]

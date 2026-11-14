@@ -30,6 +30,7 @@ Isaac-GR00T `getting_started/data_preparation.md`, 로더 `lerobot_episode_loade
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 from dataclasses import dataclass
 from fractions import Fraction
@@ -314,7 +315,8 @@ def check_dataset(root: Path, ffprobe: str = "ffprobe") -> list[str]:
         ffprobe: ffprobe 실행 파일 (export.yaml gr00t.video.ffprobe).
 
     Returns:
-        문제 문장 목록 (비면 통과).
+        문제 문장 목록 (비면 통과). ffprobe 실행 파일이 없으면 영상을 확인하지 못한 것도 문제로
+        돌려준다 (확인 없이 통과시키지 않는다).
 
     Raises:
         subprocess.CalledProcessError: ffprobe가 mp4를 읽지 못했을 때.
@@ -326,6 +328,12 @@ def check_dataset(root: Path, ffprobe: str = "ffprobe") -> list[str]:
     if out:
         return out
     out += _check_modality(ds) + _check_lists(ds)
+    probe_videos = shutil.which(ffprobe) is not None
+    if not probe_videos:
+        out.append(
+            f"ffprobe 실행 파일을 찾을 수 없어 영상을 확인하지 못함: {ffprobe} "
+            "(FFmpeg 설치 또는 export.yaml gr00t.video.ffprobe)"
+        )
     first = 0
     for e in range(len(ds.episodes)):
         path = ds.path("data_path", e)
@@ -335,7 +343,7 @@ def check_dataset(root: Path, ffprobe: str = "ffprobe") -> list[str]:
             continue
         t = pq.read_table(path)
         out += _check_schema(ds, t, name) + _check_values(ds, t, name, e, first)
-        for key in _video_keys(ds):
+        for key in _video_keys(ds) if probe_videos else ():
             out += _check_video(ds, key, e, t.num_rows, ffprobe)
         first += t.num_rows
     return out

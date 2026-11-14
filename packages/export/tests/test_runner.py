@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import uuid
 from collections.abc import Iterator
 from datetime import timedelta
@@ -246,6 +247,11 @@ def test_lerobot_export_end_to_end(
     assert list(out.rglob("*.mp4")) and list(out.rglob("data/**/*.parquet"))
 
 
+# 영상은 ffmpeg로 쓰고 ffprobe로 확인한다. 없는 환경에서는 다른 미디어 시험처럼 건너뛴다
+# (CI는 FFmpeg를 설치해 돌린다)
+@pytest.mark.skipif(
+    shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None, reason="FFmpeg 필요"
+)
 def test_gr00t_export_end_to_end(
     engine: sa.Engine, policy: ExportPolicy, ontology: Ontology, tmp_path: Path
 ) -> None:

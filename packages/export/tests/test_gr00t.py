@@ -25,7 +25,13 @@ from dlp_export.lerobot import Vocab, build_episode
 from dlp_export.policy import ExportPolicy
 from dlp_export.pseudonym import Pseudonymizer
 from dlp_export.runner import build_episodes
-from dlp_export.source import ExportSession, ExportSource, label_states, select_labels
+from dlp_export.source import (
+    ExportError,
+    ExportSession,
+    ExportSource,
+    label_states,
+    select_labels,
+)
 from dlp_fixtures.video import write_video
 from dlp_media.pts import build_pts_index
 from dlp_schema.dataset import DatasetVersion, Split
@@ -38,6 +44,12 @@ from .conftest import Scenario, human
 # pyarrow에는 타입 스텁이 없다 (dlp_export.gr00t와 같다)
 # pyright: reportMissingTypeStubs=false, reportUnknownMemberType=false
 # pyright: reportUnknownVariableType=false, reportUnknownArgumentType=false
+
+# 영상은 ffmpeg로 쓰고 ffprobe로 확인한다. 없는 환경에서는 다른 미디어 시험처럼 건너뛴다
+# (CI는 FFmpeg를 설치해 돌린다, .github/workflows/ci.yml)
+needs_ffmpeg = pytest.mark.skipif(
+    shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None, reason="FFmpeg 필요"
+)
 
 WRIST_X = {ms: ms / 1000 for ms in range(100, 700, 100)}  # 오른손 손목 3D x (m), y 0.1, z 0.5
 TASK_EN = "Sweep the floor with a mop"
@@ -109,6 +121,7 @@ def read(dest: Path, name: str) -> Any:
     return json.loads(text)
 
 
+@needs_ffmpeg
 def test_gr00t_export_passes_nvidia_layout_check(
     exported: tuple[Path, Any], policy: ExportPolicy
 ) -> None:
@@ -150,6 +163,7 @@ def test_gr00t_export_passes_nvidia_layout_check(
     assert "reviewer-7" not in text and '"s1"' not in text and "dlp-raw" not in text
 
 
+@needs_ffmpeg
 def test_gr00t_state_action_and_language_follow_labels(
     exported: tuple[Path, Any], policy: ExportPolicy
 ) -> None:
@@ -190,6 +204,7 @@ def gray(i: int) -> int:
     return 28 + (i * 37) % 200
 
 
+@needs_ffmpeg
 def test_gr00t_video_frame_k_is_the_pts_selected_blurred_frame(
     scenario: Scenario, policy: ExportPolicy, ontology: Ontology, tmp_path: Path
 ) -> None:
@@ -254,6 +269,7 @@ def corrupt_task_index(dest: Path) -> None:
     path.write_text("".join(path.read_text().splitlines(keepends=True)[:-1]))
 
 
+@needs_ffmpeg
 @pytest.mark.parametrize(
     ("corrupt", "expected"),
     [
@@ -272,3 +288,19 @@ def test_gr00t_check_rejects_spec_violations(
     corrupt(dest)
     problems = check_dataset(dest, policy.gr00t.video.ffprobe)
     assert any(expected in p for p in problems), problems
+
+
+def test_gr00t_encode_names_the_missing_ffmpeg(policy: ExportPolicy, tmp_path: Path) -> None:
+    """ffmpeg 실행 파일이 없으면 무엇을 고칠지 알려 주는 `ExportError`다 (FFmpeg 없이도 돈다)."""
+    video = policy.gr00t.video.model_copy(update={"ffmpeg": "no-such-ffmpeg-binary"})
+    dest = tmp_path / "out.mp4"
+    with pytest.raises(ExportError, match=r"no-such-ffmpeg-binary.*gr00t\.video\.ffmpeg"):
+        encode_video(tmp_path / "v.mp4", np.zeros(1, np.int64), (64, 48), 30, video, dest)
+    assert not list(tmp_path.iterdir())  # 로그·영상 조각을 남기지 않는다
+
+
+@needs_ffmpeg
+def test_gr00t_check_reports_a_missing_ffprobe(exported: tuple[Path, Any]) -> None:
+    """ffprobe 실행 파일이 없으면 영상을 확인하지 못했다고 알린다 (확인 없이 통과시키지 않는다)."""
+    problems = check_dataset(exported[0], "no-such-ffprobe-binary")
+    assert len(problems) == 1 and "no-such-ffprobe-binary" in problems[0], problems

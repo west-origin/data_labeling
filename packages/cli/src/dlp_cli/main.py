@@ -7,6 +7,8 @@
 
 공개 함수:
 - `build_parser()` — 모든 하위 명령이 등록된 `ArgumentParser`.
+- `parse_cli_args(parser, argv)` — `parse_args`와 같되 옵션 뒤에 온 위치 인자를 파이썬 패치 버전과
+  관계없이 받는다 (`LATE_POSITIONAL`).
 - `main(argv)` — 진입점. 0이면 성공, 그 밖의 값은 실패(명령마다 의미가 다르다).
 
 이 모듈이 직접 구현하는 명령은 하나다.
@@ -159,13 +161,45 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+# 하위 명령이 `set_defaults(late_positional="<dest>")`로 다는 표시의 이름 (`parse_cli_args`)
+LATE_POSITIONAL = "late_positional"
+
+
+def parse_cli_args(
+    parser: argparse.ArgumentParser, argv: Sequence[str] | None = None
+) -> argparse.Namespace:
+    """`parser.parse_args(argv)`와 같되, 옵션 뒤에 온 위치 인자를 파이썬 버전과 관계없이 받는다.
+
+    파이썬 3.12.7·3.13.1 전의 argparse는 `<위치 인자> --옵션 값 <nargs="*" 위치 인자…>` 꼴에서 뒤의
+    위치 인자를 빈 목록으로 먼저 닫고, 남은 값을 "unrecognized arguments"로 거부한다. 우분투 24.04의
+    시스템 파이썬 3.12.3이 여기 든다 (예: `dlp calib assign <기기> --reason R s001 s002`).
+
+    같은 명령줄이 파이썬 패치 버전에 따라 되고 안 되는 일을 없애려고, 다른 위치 인자 뒤에
+    `nargs="*"` 위치 인자를 둔 하위 명령은 `set_defaults(late_positional="<dest>")`로 그 인자를
+    알리고, 여기서 남은 값을 그 인자에 넣는다. 넣는 조건: 그 인자가 비어 있고 남은 값에 옵션 모양
+    (`-`로 시작)이 없을 때. 그 밖의 남은 값은 `parse_args`처럼 인자 오류다. 값을 그대로 넣으므로 그
+    인자에는 `type`·`choices`를 달지 않는다 (`packages/cli/tests/test_main.py`가 모든 하위 명령을
+    훑어 검사한다).
+
+    예외: 인자 오류는 argparse가 `SystemExit(2)`로 끝낸다.
+    """
+    args, extra = parser.parse_known_args(argv)
+    if not extra:
+        return args
+    dest = getattr(args, LATE_POSITIONAL, None)
+    if dest is None or getattr(args, dest) or any(x.startswith("-") for x in extra):
+        parser.error("unrecognized arguments: " + " ".join(extra))
+    setattr(args, dest, list(extra))
+    return args
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """`dlp` 진입점. `argv`가 None이면 `sys.argv[1:]`을 쓴다.
 
     반환: 선택된 하위 명령 실행 함수의 반환값(종료 코드). 인자 오류는 `argparse`가
     `SystemExit(2)`로 끝낸다.
     """
-    args = build_parser().parse_args(argv)
+    args = parse_cli_args(build_parser(), argv)
     return args.func(args)
 
 

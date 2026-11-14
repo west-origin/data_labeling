@@ -1,5 +1,5 @@
 # GitHub Actions CI. 작업 세 개:
-#   check          — 푸시·PR마다: 의존성(+FiftyOne) 설치, 모델 가중치 받기·변환(캐시), `make check`.
+#   check          — 푸시·PR마다: 의존성(+FiftyOne)·FFmpeg 설치, 모델 가중치 받기·변환(캐시), `make check`.
 #   services       — 푸시·PR마다: docker compose 개발 서비스를 띄워 통합 테스트와 LeRobot 격리 테스트.
 #   services-cvat  — 매일·수동 실행 때만: CVAT까지 띄워 서비스 테스트.
 # 비밀값은 쓰지 않는다 (모두 .env.example의 개발값).
@@ -33,8 +33,11 @@ jobs:
           enable-cache: true
       - run: uv python install
       - run: make install-curation   # FiftyOne 연동 테스트까지 돌린다
-      - name: System libraries for MediaPipe (EGL/GLES, CPU inference)
-        run: sudo apt-get update && sudo apt-get install -y libegl1 libgles2
+      # FFmpeg가 없으면 미디어·GR00T 내보내기 시험이 건너뛰어져 통과처럼 보인다. 설치하고 버전을 찍는다
+      - name: System libraries (MediaPipe EGL/GLES, FFmpeg for media and GR00T export tests)
+        run: |
+          sudo apt-get update && sudo apt-get install -y libegl1 libgles2 ffmpeg
+          ffmpeg -version | head -n 1
       # 가중치 캐시 키 = models.yaml + 변환 스크립트 해시. 둘 중 하나가 바뀌면 다시 받는다
       - name: Cache model weights
         uses: actions/cache@v4
@@ -64,6 +67,10 @@ jobs:
       - name: Validate compose file
         # 변수 치환까지 포함해 compose 파일이 해석되는지만 본다 (-q: 출력 없음)
         run: cp .env.example .env && docker compose --env-file .env -f services/docker-compose.yml config -q
+      - name: FFmpeg (GR00T export end-to-end test encodes H.264)
+        run: |
+          sudo apt-get update && sudo apt-get install -y ffmpeg
+          ffmpeg -version | head -n 1
       - name: Start services
         run: make up
       - run: make health
@@ -96,6 +103,10 @@ jobs:
       - run: uv python install
       - run: make install
       - run: cp .env.example .env
+      - name: FFmpeg (GR00T export end-to-end test encodes H.264)
+        run: |
+          sudo apt-get update && sudo apt-get install -y ffmpeg
+          ffmpeg -version | head -n 1
       - name: Start services
         run: make up
       - name: Start CVAT

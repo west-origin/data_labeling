@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import json
 import math
+import shutil
 import subprocess
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -417,8 +418,13 @@ def encode_video(
     (`Episode.frame_index`)로 정해진다.
 
     Raises:
-        ExportError: ffmpeg가 실패했을 때 (stderr 포함).
+        ExportError: ffmpeg 실행 파일이 없을 때, ffmpeg가 실패했을 때 (stderr 포함).
     """
+    if shutil.which(gv.ffmpeg) is None:
+        raise ExportError(
+            f"ffmpeg 실행 파일을 찾을 수 없습니다: {gv.ffmpeg} "
+            "(FFmpeg 설치 또는 config/policies/export.yaml gr00t.video.ffmpeg)"
+        )
     w, h = size
     dest.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
