@@ -1,7 +1,8 @@
 # 공개 시험 로봇: SO-101 6자유도 팔(5관절 + 평행 그리퍼) (ADR 0047, dlp_retarget.robot).
 # 리타기팅 경로·시험에만 쓰는 공개 모델이다. 고객 로봇 설정·설계 파일은 저장소에 넣지 않고 DLP_ROBOTS_DIR
 # (저장소 밖 디렉터리)에 둔다 (docs/handover/robot-retargeting.md). 저장소 안 설정은 model.public: true여야
-# 로더가 받는다.
+# 로더가 받는다. 이 파일은 평행 그리퍼 로봇의 형식이다. 손가락 관절이 있는 다지 손 로봇은 arm.gripper·
+# tip_link·접근·닫힘 축 대신 arm.dexterous_hand를 적는다 (형식과 예시는 같은 문서 2절, ADR 0068).
 robot_id: so101
 display_name: SO-101 (TheRobotStudio, 공개 시험 모델)
 model:

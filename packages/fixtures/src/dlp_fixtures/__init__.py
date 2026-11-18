@@ -31,6 +31,9 @@
   카메라 움직임 (ADR 0046, 카메라 자세·월드 단계 시험).
 - `hand_points_for_grasp`, `world_hand_labels` 등 (`retarget.py`): 정답 끝단 궤적에서 거꾸로 만든
   손 점과 월드 좌표 3D 라벨 (ADR 0047, 로봇 리타기팅·내보내기 시험).
+- `dexterous_hand_urdf`, `write_robot`, `human_points_from_robot` 등 (`dexhand.py`): 직접 쓴 시험용
+  다지 손 로봇(6관절 팔 + 다섯 손가락 x 3관절)의 URDF·설정과, 그 로봇의 손목·손가락 끝 위치에서
+  거꾸로 만든 사람 손 점 (ADR 0068, 다지 손 리타기팅·내보내기 시험). 실제 로봇 모델이 아니다.
 - `generate_shape_scenario` (`shapes.py`): 정답 마스크를 아는 객체·손 영상 (ADR 0059, 마스크 단계
   시험).
 - `aireview_scene` (`aireview.py`): AI 1차 검수 벤치 입력 (ADR 0040, `dlp aireview bench`).

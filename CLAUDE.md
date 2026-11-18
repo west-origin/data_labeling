@@ -74,7 +74,8 @@
 - `packages/models/` (`dlp_models`) — 모델 레지스트리(`config/models.yaml`, 해시 확인)와 공용 ONNX 런타임·사내 VLM 전송.
 - `packages/prelabel/` (`dlp_prelabel`) — 자동 프리라벨(손·객체·전신·도구, 3D·자세·월드 좌표, 접촉, 팔 골격, 마스크).
   `dlp prelabel run <세션>`. 정책 `prelabel.yaml`. 재실행 판정은 단계마다 다르다(상세 문서의 프리라벨 절).
-- `packages/retarget/` (`dlp_retarget`) — 고객 로봇 리타기팅(URDF 기구학·IK, 닿지 못한 프레임은 표시).
+- `packages/retarget/` (`dlp_retarget`) — 고객 로봇 리타기팅(URDF 기구학·IK, 닿지 못한 프레임은 표시). 팔 + 평행 그리퍼,
+  또는 다지 손(손목·손가락 끝 위치 → 팔 관절 + 손가락 관절, 끝 점이 없는 손가락은 유지·표시, ADR 0068).
   `dlp robot check`, `dlp export lerobot --robot`. 정책 `retarget.yaml`. 고객 모델 파일은 저장소 밖 `DLP_ROBOTS_DIR`.
 - `packages/relations/` (`dlp_relations`) — 관계 도출(YAML 규칙)·도구-표면 접촉·표면 커버리지. `dlp relations run`.
   정책 `relations.yaml`.

@@ -172,19 +172,33 @@ def _print_tactile(meta: dict[str, Any] | None) -> None:
 
 
 def _print_retarget(meta: dict[str, Any] | None) -> None:
-    """로봇 리타기팅 요약 (에피소드별 도달 비율·최대 오차·결정)."""
+    """로봇 리타기팅 요약 (에피소드별 도달 비율·최대 오차·결정).
+
+    다지 손 로봇(ADR 0068)은 에피소드 줄 아래에 손가락마다 한 줄씩 더 낸다 (위치 오차는 에피소드
+    줄이 손목, 손가락 줄이 그 손가락 끝).
+    """
     if meta is None:
         return
     sha = meta["model_sha256"][:12]
     print(f"로봇 {meta['robot_id']} (모델 sha256 {sha}, {meta['retarget_version']})")
     for e in meta["episodes"]:
-        err = e["position_error_max_m"]
-        worst = "-" if err is None else f"{err * 1000:.0f} mm"
         reason = f" ({e['reason']})" if e["reason"] else ""
         print(
             f"  {e['session_id']}: 목표 {e['target_fraction']:.0%}, "
-            f"도달 {e['reachable_fraction']:.0%}, 최대 위치 오차 {worst}, {e['decision']}{reason}"
+            f"도달 {e['reachable_fraction']:.0%}, 최대 위치 오차 {_mm(e['position_error_max_m'])}, "
+            f"{e['decision']}{reason}"
         )
+        for f in e.get("fingers", []):
+            print(
+                f"    손가락 {f['human_part']}: 목표 {f['target_fraction']:.0%}, "
+                f"도달 {f['reachable_fraction']:.0%}, 최대 위치 오차 "
+                f"{_mm(f['position_error_max_m'])}, 손 길이 밖 {f['frames_out_of_reach']}프레임"
+            )
+
+
+def _mm(error_m: float | None) -> str:
+    """위치 오차 m → 'N mm' (값이 없으면 '-')."""
+    return "-" if error_m is None else f"{error_m * 1000:.0f} mm"
 
 
 def cmd_gr00t_check(args: argparse.Namespace) -> int:

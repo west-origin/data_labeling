@@ -1,7 +1,9 @@
 # 고객 로봇 등록과 리타기팅 내보내기 절차 (운영자용)
 
-기준: ADR 0046(바디캠 자세·세션 월드 좌표 손 3D), ADR 0047(로봇 리타기팅 내보내기). 고객이 로봇 팔 설계를
-주면 사람 1인칭 손 동작을 그 로봇 관절 궤적으로 옮긴 LeRobot 에피소드를 만든다. 영상은 바꾸지 않는다.
+기준: ADR 0046(바디캠 자세·세션 월드 좌표 손 3D), ADR 0047(로봇 리타기팅 내보내기), ADR 0068(다지 손
+로봇). 고객이 로봇 팔 설계를 주면 사람 1인칭 손 동작을 그 로봇 관절 궤적으로 옮긴 LeRobot 에피소드를
+만든다. 영상은 바꾸지 않는다. 로봇 끝이 평행 그리퍼면 엄지-검지 거리를 그리퍼 관절 하나로, 손가락
+관절이 있는 손(다지 손)이면 손목과 손가락 끝 위치를 팔 관절 + 손가락 관절로 옮긴다.
 
 [인수인계 첫 화면](README.md) · [카메라 캘리브레이션](camera-calibration.md)
 
@@ -13,7 +15,9 @@
 | 끝단(도구 중심점) 링크 | 그리퍼가 물체를 잡는 점에 있는 링크 이름. 없으면 고정 관절로 링크를 하나 더해 달라고 한다 | 손목 링크로 잡으면 수 cm 어긋난다 |
 | 끝단 좌표의 축 | 접근 축(손목 → 집게 끝 방향)과 닫힘 축(집게가 여닫히는 방향)이 끝 링크 좌표에서 무엇인지 | 영점 자세 그림으로 운영자가 정한다 (아래 3) |
 | 팔 관절 목록과 순서 | 기준 링크 → 끝 링크의 움직이는 관절 | URDF에서 읽어 확인받는다 |
-| 그리퍼 | 종류(평행 그리퍼만 지원), 관절 이름, 닫힘·열림 관절 값 | 다지 손은 아직 안 된다 (F-COE-17) |
+| 그리퍼 (평행 그리퍼 로봇) | 관절 이름, 닫힘·열림 관절 값 | 진행 불가 |
+| 다지 손 (손가락 관절이 있는 로봇, ADR 0068) | 팔과 손이 한 URDF에 있어야 한다. 사람 손목에 대응하는 손목 링크, 손가락마다 끝 링크 이름과 사람 손가락(엄지·검지·중지·약지·새끼) 가운데 어느 것에 대응하는지 (1~5개), 로봇 손이 왼손·오른손 어느 쪽 모양인지. 위 "끝단 링크"·"끝단 좌표의 축" 행은 필요 없다 | 손가락 끝 링크가 없으면 고정 관절로 더해 달라고 한다. 연동(mimic) 손가락 관절이 있거나 손가락끼리 관절을 함께 쓰는 손은 지금 안 된다 (F-COE-93) |
+| 손 크기 배율 (다지 손) | 사람 손 대비 로봇 손 크기. 운영자가 정한다 (아래 3의 5) | 1.0으로 먼저 보여 주고 손가락별 `frames_out_of_reach`로 고친다 |
 | 작업 공간·배치 | 로봇 기준을 어디에 둘지, 사람 동작을 몇 배로 줄일지, 작업 중심 | 기본 `episode_centroid` + 배율 0.5로 먼저 보여 준다 |
 | 관절 속도 한계 | URDF limit velocity가 실제와 다르면 실제 값 | URDF 값 x velocity_scale |
 | 관절 값 단위·영점 | 받는 쪽 컨트롤러의 단위(rad·도·0~100 등)와 영점 정의 | 내보내기는 URDF 기준 rad다. 변환은 받는 쪽에서 |
@@ -115,6 +119,75 @@ ik:
 uv run dlp robot check acme_arm
 ```
 
+### 다지 손 로봇 (ADR 0068)
+
+손가락 관절이 있는 손이면 `arm`에 `gripper`·`tip_link`·접근·닫힘 축 대신 `dexterous_hand`를 적는다
+(둘을 함께 적으면 거부). `model`·`base_link`·`placement`는 위와 같다. `$DLP_ROBOTS_DIR/acme_hand.yaml`:
+
+```yaml
+robot_id: acme_hand
+display_name: ACME 6축 팔 + 4지 손 (계약 C-2026-044)
+model:
+  format: urdf
+  path: models/acme_hand/acme_hand.urdf   # 팔과 손이 함께 있는 URDF
+  sha256: <sha256sum으로 잰 값>
+  license: 고객 제공, 학습 데이터 생성 한정 (계약 C-2026-044)
+  source: 고객 전달 2026-11-20, 담당 홍길동
+  public: false
+base_link: base_link
+arm:
+  hand: right                             # 따라갈 작업자 손 (로봇 손과 같은 쪽)
+  joints: [j1, j2, j3, j4, j5, j6]        # 기준 → 손목 링크 연쇄의 움직이는 관절 (손가락 관절은 적지 않는다)
+  placement: {mode: episode_centroid, position_scale: 0.7, workspace_center: [0.45, 0.0, 0.20]}
+  dexterous_hand:
+    wrist_link: palm_link                 # 사람 손목에 대응하는 링크 (원점이 손목 목표를 따라간다)
+    hand_scale: 1.0                       # 사람 (손가락 끝 - 손목) 벡터에 곱하는 배율 (아래 3의 5)
+    fingertip_tolerance_m: 0.01           # 손가락 끝 위치 오차가 이 안이면 그 손가락은 도달
+    fingers:                              # 사람 손가락 끝 부위 → 로봇 손가락 끝 링크 (1~5개, 이 순서로 내보낸다)
+      - {human_part: thumb_tip, tip_link: thumb_tip_link}
+      - {human_part: index_tip, tip_link: index_tip_link}
+      - {human_part: middle_tip, tip_link: middle_tip_link}
+      - {human_part: ring_tip, tip_link: ring_tip_link}
+ik:
+  position_tolerance_m: 0.01              # 손목 위치 오차가 이 안이고 목표가 있는 손가락이 모두 도달이면 프레임 도달
+  wrist_weight: 1.0                       # 손목 오차 가중치 (손가락 끝은 1). 1보다 작으면 손가락 끝을 먼저 맞춘다
+  smoothness_weight: 0.0001               # 팔만 있는 로봇(0.01)보다 작게 (아래 설명)
+  damping: 0.000001                       # 팔만 있는 로봇(0.0001)보다 작게
+  max_iterations: 200
+  restarts: 8
+  velocity_scale: 0.5
+```
+
+- `human_part`는 손가락 끝 3D 궤적의 부위 이름이다 (온톨로지 hand_joints: `thumb_tip`, `index_tip`,
+  `middle_tip`, `ring_tip`, `pinky_tip`). 손목 부위는 `retarget.yaml hand_parts.wrist`에서 읽는다.
+  이름이 온톨로지에 없으면 내보내기 시작 때 거부한다.
+- 손가락 관절은 적지 않는다. 로더가 URDF에서 손목 링크 → 끝 링크 경로의 움직이는 관절을 읽는다.
+  내보내는 관절 순서는 `arm.joints` + 손가락마다(위 순서) 손목 쪽 관절부터다.
+- 대응하지 않은 손가락 등 손목 링크 아래의 나머지 움직이는 관절은 풀지도 내보내지도 않는다.
+  `dlp robot check`가 "풀지 않는 손 관절"로 보이고 meta `dexterous_hand.unmapped_joints`에 남는다.
+  받는 쪽이 그 관절을 어떻게 둘지 정해야 한다.
+- 방향(접근·닫힘 축, `orientation_*`)은 적지 않는다. 손목과 손가락 끝의 위치만 맞춘다. 손바닥 방향과
+  손가락 마디 각은 사람 손과 같다고 볼 수 없다 (F-COE-95): 손가락 끝이 같은 자리에 오는 자세 가운데
+  직전 자세에서 가장 적게 움직인 것이 나온다.
+- `damping`·`smoothness_weight`: 손가락 링크는 수 cm라 팔만 있는 로봇의 값을 그대로 쓰면 반복이 덜
+  수렴해 오차가 남는다 (시험 로봇에서 0.29 mm). 위 값에서 시작한다.
+- `retarget.yaml solver`는 `dls`여야 한다. mink 풀이기는 다지 손을 풀지 않는다 (F-COE-92).
+
+로더가 더 거부하는 것 (이유를 출력한다):
+
+- `wrist_link`·`tip_link`·`base_link`가 URDF에 없음, 끝 링크가 손목 링크 아래에 있지 않음, 손목 링크와
+  같은 끝 링크, 손목 링크에서 끝 링크까지 움직이는 관절이 없음.
+- 손가락 경로의 mimic 관절·floating·planar 관절 (연동 손가락을 독립 관절로 풀면 실제 손이 낼 수 없는
+  관절 조합이 나온다).
+- 두 손가락이 같은 움직이는 관절을 씀 (끝 점이 없는 손가락만 따로 유지할 수 없다).
+- 같은 `human_part`나 같은 `tip_link`를 두 번 씀, 손가락 0개·6개 이상, 0 이하 `hand_scale`·허용 오차.
+
+```bash
+uv run dlp robot check acme_hand
+```
+
+출력의 손가락마다 `영점 자세 손목 → 끝 A m, 손목 → 끝 거리 상한 B m`가 손 배율을 정하는 값이다.
+
 ## 3. 축·배치 정하기
 
 1. `dlp robot check <ID>`가 보이는 영점(q = 0) 자세의 끝 링크 축(기준 좌표)을 본다. 팔을 편 자세에서
@@ -130,6 +203,17 @@ uv run dlp robot check acme_arm
    - `approach`: 롤을 바꿀 관절이 없을 때만. 롤 관절이 있는데 approach면 그 관절 값이 사람 손과 무관한
      IK 부산물로 팔린다.
    - `none`: 방향을 맞출 수 없는 팔 (위치만). 회전 오차는 -1(재지 않음)로 나간다.
+   - 다지 손 로봇에는 이 항목이 없다 (1의 축 정하기도 필요 없다). 배치(2·3)는 같되 옮기는 점이 잡기 점이
+     아니라 손목이다 (`episode_centroid`는 손목 평균을 `workspace_center`에 둔다).
+5. 다지 손의 `hand_scale` (ADR 0068). 손가락 끝 목표 = 손목 목표 + `hand_scale` x (사람 손가락 끝 - 사람
+   손목)이다. 팔 배율 `position_scale`과 따로다 (팔 궤적을 줄여도 손가락 벌림은 로봇 손 크기에 맞춘다).
+   - 시작값: `dlp robot check`의 손가락별 "손목 → 끝 거리 상한" ÷ 그 작업자가 손을 폈을 때 손목 → 그
+     손가락 끝 길이. 손가락마다 다르면 가장 작은 값에서 시작한다 (한 배율을 모든 손가락에 쓴다).
+   - 한 번 내보내 보고의 손가락별 `frames_out_of_reach`를 본다. 0이 아니면 그 프레임은 사람 손가락이
+     로봇 손가락 길이보다 길게 옮겨진 것이니 배율을 줄인다. 배율이 너무 작으면 손가락을 굽힌 자세에서
+     끝 점이 손목에 너무 가까워져 관절 한계에 걸린다 (`frames_out_of_reach`는 0인데 그 손가락의
+     `reachable_fraction`이 낮다).
+   - 배율을 바꾸면 리타기팅 판이 바뀐다. 작업자 손 크기에서 자동으로 정하지 않는다 (F-COE-94).
 
 ## 4. 내보내기
 
@@ -156,6 +240,26 @@ uv run dlp export lerobot <데이터셋 버전> --target acme --robot acme_arm [
 - 도달 비율이 낮은 에피소드를 아예 빼려면 `config/policies/retarget.yaml`에서 `unreachable: drop_episode`와
   `max_unreachable_fraction`·`min_target_fraction`을 정한다 (정책 해시가 판에 들어간다).
 - mink 풀이기(`solver: mink`)는 격리 환경을 받는다 (처음 수십 MB). 결과 판정 규칙은 내장과 같다.
+  다지 손 로봇은 mink로 내보낼 수 없다 (거부한다).
+
+다지 손 로봇(ADR 0068)이면 같은 명령이고 결과가 아래처럼 다르다. 출력은 에피소드 줄(손목 기준) 아래에
+손가락마다 `손가락 <부위>: 목표 a%, 도달 b%, 최대 위치 오차 c mm, 손 길이 밖 N프레임`이 더 나온다.
+
+- `observation.state`·`action` = 팔 관절 + 손가락 관절 (`arm.joints`, 그 뒤 `fingers` 순서로 손가락마다
+  손목 쪽 관절부터).
+- `retarget.target_present`는 손목 목표 유무, `retarget.reachable`은 손목과 목표가 있는 손가락 끝이 모두
+  허용 오차 안, `retarget.position_error_m`은 손목 오차, `retarget.orientation_error_rad`는 늘 -1이다.
+- 손가락별 `retarget.finger_target_present`·`retarget.finger_reachable`·
+  `retarget.finger_position_error_m` (열 순서·이름 = `fingers`의 `human_part`). 손가락 끝 점이 없던
+  프레임은 그 손가락의 `finger_target_present=0`이고 그 관절은 직전 값 그대로다 (한 번도 없었으면 시작
+  자세). 손목 점이 없던 프레임은 `target_present=0`이고 모든 관절이 직전 값이다. 고객 학습에서 이
+  표시로 프레임·손가락을 가리게 안내한다.
+- `meta/dlp_retarget.json`에 `dexterous_hand`(손목 링크, 팔 관절, 손 배율, 손가락 끝 허용 오차, 손가락마다
+  사람 부위 → 끝 링크와 관절, 싣지 않은 손 관절)와 에피소드 보고의 손가락별 통계(`fingers`)가 있다.
+- `unreachable: drop_episode`는 손가락마다도 `min_target_fraction`·`max_unreachable_fraction`을 본다
+  (이유에 손가락이 적힌다).
+- 한 손가락이 닿지 못하는 프레임은 오차를 손목·다른 손가락과 나눠 져 다른 손가락도 허용 오차를 넘을 수
+  있다. `wrist_weight`를 낮추면 손목보다 손가락 끝을 먼저 맞춘다.
 
 ## 5. 품질 확인 (납품 전)
 
@@ -163,8 +267,12 @@ uv run dlp export lerobot <데이터셋 버전> --target acme --robot acme_arm [
    `longest_unreachable_ms`(이어진 미도달 구간의 첫·마지막 프레임 시각 차, 한 프레임이면 0)를 본다. 팔 길이 밖이 많으면 배치·배율을, 속도 한계가 많으면 velocity_scale
    또는 고객의 실제 속도 한계를 다시 정한다.
 2. 고객 시뮬레이터(MuJoCo·Isaac 등)에서 관절 궤적을 재생해 충돌·작업 성공을 본다. 이 플랫폼은 충돌·
-   동역학을 검사하지 않는다 (F-COE-20).
+   동역학을 검사하지 않는다 (F-COE-20). 다지 손은 손가락끼리·손가락과 손바닥의 충돌도 보지 않는다.
 3. 영상 속 손은 사람 손 그대로다 (F-COE-18). 고객 정책 학습이 영상을 쓰면 이 차이를 알린다.
+4. 다지 손 로봇: 보고의 손가락별 `target_fraction`(끝 점이 있던 비율), `reachable_fraction`,
+   `frames_out_of_reach`(손 배율이 큰지)를 본다. 손바닥 방향·손가락 마디 각은 사람 손과 다를 수 있으니
+   (F-COE-95) 고객 시뮬레이터에서 손 모양을 눈으로 확인한다. 다지 손은 합성 정답으로만 검사했고 실제
+   손 로봇에서 돌려 보지 않았다.
 
 ## 문제가 생기면
 
@@ -177,3 +285,11 @@ uv run dlp export lerobot <데이터셋 버전> --target acme --robot acme_arm [
 | `손 부위 [...]가 온톨로지 ... hand_joints에 없습니다` | `export.yaml lerobot.hand_points_3d`나 `retarget.yaml hand_parts`의 이름 오타 |
 | `로봇 ID ...: 영숫자로 시작하고` | `--robot`에 경로를 적었다. 파일 이름(robot_id)만 적는다 |
 | `리타기팅 정책이 모든 에피소드를 버렸습니다` | drop_episode 기준을 어긴 에피소드뿐이다. 보고의 reason을 본다 |
+| `다지 손(dexterous)은 arm.gripper가 아니라 arm.dexterous_hand 절에 적습니다` | `gripper.type: dexterous`로 적었다. 2절의 다지 손 형식으로 고친다 |
+| `arm.gripper와 arm.dexterous_hand를 함께 쓸 수 없습니다` | 로봇 하나에 끝단 하나다. 한쪽만 남긴다 |
+| `손가락 ...(끝 링크 ...)가 손목 링크 ... 아래에 있지 않습니다` | `tip_link`가 `wrist_link`의 자손 링크가 아니다. 링크 이름을 URDF에서 확인한다 |
+| `손가락 ...: ...: mimic 관절(... 종속)은 연쇄에 둘 수 없습니다` | 연동 손가락 관절이 있는 손이다. 지금 지원하지 않는다 (F-COE-93). 그 손가락을 대응에서 빼면 나머지는 풀 수 있다 (뺀 손가락의 관절은 내보내지 않는다) |
+| `손가락 ...와 ...가 관절 ...를 함께 씁니다` | 두 끝 링크가 같은 손가락 위에 있거나 손바닥에 함께 쓰는 관절이 있다. 손가락마다 관절이 따로인 대응만 된다 |
+| `다지 손 로봇은 내장 풀이기(solver: dls)만 풉니다` | `retarget.yaml solver`가 mink다. dls로 내보낸다 (F-COE-92) |
+| 손가락 줄의 `목표`가 에피소드 줄보다 낮거나 0% | 그 프레임에 손목 3D는 있는데 손가락 끝 3D가 없다. 손 맞춤이 실패한 프레임은 손목만 3D로 나오고 손가락 끝은 빠진다 (`prelabel.yaml depth.fingertip_fallback: drop`, ADR 0044). 그 프레임의 손가락 관절은 직전 값(한 번도 없었으면 시작 자세) 그대로 나가고 `retarget.finger_target_present=0`이다 |
+| 손가락마다 `손 길이 밖`이 많음 | `hand_scale`이 로봇 손보다 크다 (3의 5) |

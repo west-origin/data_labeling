@@ -12,6 +12,9 @@ site(z = 접근 축, x = 닫힘 축)를 달아 그 site의 FrameTask(approach �
 수렴할 때까지 미분 IK를 반복한다 (QP 풀이기 daqp). 첫 목표는 관절 범위 가운데에서, 끊긴 뒤는 마지막
 해에서 시작한다. 속도 한계는 여기서 내장 풀이기와 같은 규칙(`ik.limit_step`, 첫 프레임 뺀 모든
 프레임)으로 자른다.
+
+팔 하나 + 평행 그리퍼 로봇만 푼다 (끝 링크 하나의 FrameTask). 다지 손 로봇(ADR 0068)은 지원하지
+않는다: 정책이 mink를 고르면 `hand_ik.make_hand_solver`가 이유와 함께 거부한다 (F-COE-92).
 """
 
 from __future__ import annotations

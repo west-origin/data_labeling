@@ -280,7 +280,7 @@ uv run dlp export coco <데이터셋 버전>
 | `training` (`dlp_train`) | 재학습 루프, 배포 승인 | `dlp train run`, `models`, `approve` | `training.yaml` |
 | `evaluation` (`dlp_eval`) | 지표, 골든셋 평가, 배포 게이트 | `dlp eval golden` | `evaluation.yaml` |
 | `active` (`dlp_active`) | 액티브 러닝 점수, FiftyOne 연동 | `dlp active rank` | `active.yaml` |
-| `retarget` (`dlp_retarget`) | 고객 로봇 리타기팅 | `dlp robot check`, `dlp export lerobot --robot` | `retarget.yaml` |
+| `retarget` (`dlp_retarget`) | 고객 로봇 리타기팅 (팔 + 평행 그리퍼, 손가락 관절이 있는 다지 손은 ADR 0068) | `dlp robot check`, `dlp export lerobot --robot` | `retarget.yaml` |
 | `export` (`dlp_export`) | COCO·구간 JSON·LeRobot·GR00T(NVIDIA Isaac GR00T N1.7, ADR 0065) 내보내기. LeRobot·GR00T 프레임에 촉각장갑 채널(ADR 0069) | `dlp export coco`, `intervals`, `lerobot`, `gr00t`, `gr00t-check` | `export.yaml` |
 | `scene3d` (`dlp_scene3d`) | 청소 전후 여러 각도 사진의 3D 복원(SfM·3D 가우시안 스플랫)과 물체 이동 비교 (ADR 0066, 실제 GPU 복원은 미검증) | `dlp scene3d ingest`, `reconstruct`, `compare`, `report` | `scene3d.yaml` |
 | `ops` (`dlp_ops`) | 주간 지표, 원본 접근 감사, 보관 만료 | `dlp ops weekly`, `audit-report`, `retention` | `ops.yaml` |

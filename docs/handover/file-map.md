@@ -9,7 +9,7 @@
 의존 표는 [구조 지도](architecture.md), 바꿀 때 함께 볼 파일과 시험은
 [변경 및 복구 안내](change-guide.md)에 있다.
 
-파일 662개.
+파일 667개.
 
 ## 목차
 
@@ -182,7 +182,7 @@
 | [`relations_cmds.py`](../../packages/cli/src/dlp_cli/relations_cmds.py) | 관계 도출·커버리지 하위 명령 (WP9, ADR 0011·0026). |
 | [`review_cmds.py`](../../packages/cli/src/dlp_cli/review_cmds.py) | 검수 도구 연동·검수 운영 하위 명령 (WP6·WP12, ADR 0006·0014·0023·0024·0029). |
 | [`review_config.py`](../../packages/cli/src/dlp_cli/review_config.py) | CLI의 검수 정책·설정 선택과 매체 회수 실행 (ADR 0039). |
-| [`robot_cmds.py`](../../packages/cli/src/dlp_cli/robot_cmds.py) | 로봇 등록 확인 하위 명령 (ADR 0047). |
+| [`robot_cmds.py`](../../packages/cli/src/dlp_cli/robot_cmds.py) | 로봇 등록 확인 하위 명령 (ADR 0047·0068). |
 | [`scene3d_cmds.py`](../../packages/cli/src/dlp_cli/scene3d_cmds.py) | 청소 전후 다각도 사진의 3D 복원·물체 이동 비교 하위 명령 (ADR 0066). |
 | [`schema_cmds.py`](../../packages/cli/src/dlp_cli/schema_cmds.py) | 스키마·온톨로지·DB 하위 명령 (WP1, ADR 0002). |
 | [`sync_cmds.py`](../../packages/cli/src/dlp_cli/sync_cmds.py) | 동기화 하위 명령 (WP4, ADR 0004·0022·0028). |
@@ -214,6 +214,7 @@
 | [`test_review_policy.py`](../../packages/cli/tests/test_review_policy.py) | `dlp review` 명령은 고른 검수 정책(`DLP_REVIEW_POLICY_FILE`)을 한 출처로 쓴다 (F-REV-01). |
 | [`test_revoke_cmds.py`](../../packages/cli/tests/test_revoke_cmds.py) | 검수·프라이버시 CLI의 매체 회수 연결 (ADR 0039). |
 | [`test_robot_cmds.py`](../../packages/cli/tests/test_robot_cmds.py) | `dlp robot check` (ADR 0047): 공개 시험 로봇은 통과하고 없는 로봇·틀린 해시는 종료 코드 1. |
+| [`test_robot_hand_cmds.py`](../../packages/cli/tests/test_robot_hand_cmds.py) | `dlp robot check`의 다지 손 로봇 출력과 내보내기 요약의 손가락 줄 (ADR 0068). |
 | [`test_sync_cmds.py`](../../packages/cli/tests/test_sync_cmds.py) | `dlp sync adjust` 명령줄 인자 검사 (F-SCH-27). |
 | [`test_translate_cmds.py`](../../packages/cli/tests/test_translate_cmds.py) | `dlp translate run\|pending`와 `dlp actions run` 끝의 자동 번역 (ADR 0043). |
 
@@ -324,7 +325,7 @@
 | [`lerobot.py`](../../packages/export/src/dlp_export/lerobot.py) | LeRobot 에피소드 (형식 v3.0, 공식 쓰기·읽기 API). |
 | [`policy.py`](../../packages/export/src/dlp_export/policy.py) | 내보내기 정책 (config/policies/export.yaml) 로더와 검증 (WP15, ADR 0018·0021·0027). |
 | [`pseudonym.py`](../../packages/export/src/dlp_export/pseudonym.py) | 내보내기마다 다른 가명: 작업자·장소·세션·라벨 ID (export.yaml ids, ADR 0021·0027·0031). |
-| [`robot.py`](../../packages/export/src/dlp_export/robot.py) | LeRobot 로봇 리타기팅 에피소드 (`dlp export lerobot --robot <ID>`, ADR 0047). |
+| [`robot.py`](../../packages/export/src/dlp_export/robot.py) | LeRobot 로봇 리타기팅 에피소드 (`dlp export lerobot --robot <ID>`, ADR 0047·0068). |
 | [`runner.py`](../../packages/export/src/dlp_export/runner.py) | 내보내기 실행 (`dlp export <형식> <데이터셋 버전>`). |
 | [`source.py`](../../packages/export/src/dlp_export/source.py) | 내보낼 세션과 라벨을 고른다 (모든 형식 공용, WP15, ADR 0018·0021·0024). |
 | [`tactile.py`](../../packages/export/src/dlp_export/tactile.py) | 촉각장갑 채널을 에피소드 프레임 시각에 맞춰 싣는다 (`dlp export lerobot\|gr00t`, ADR 0069). |
@@ -339,6 +340,7 @@
 | [`test_gr00t.py`](../../packages/export/tests/test_gr00t.py) | GR00T LeRobot v2.1 내보내기 (ADR 0065, DB 없이). |
 | [`test_lerobot_official.py`](../../packages/export/tests/test_lerobot_official.py) | LeRobot 공식 쓰기 API로 쓰고 공식 로더(LeRobotDataset)로 다시 읽는다. |
 | [`test_robot.py`](../../packages/export/tests/test_robot.py) | LeRobot 로봇 리타기팅 에피소드 (ADR 0047). 서비스·격리 환경 없이 돈다 (내장 IK 풀이기). |
+| [`test_robot_hand.py`](../../packages/export/tests/test_robot_hand.py) | LeRobot 다지 손 로봇 리타기팅 에피소드 (ADR 0068). 서비스·격리 환경 없이 돈다 (내장 풀이기). |
 | [`test_runner.py`](../../packages/export/tests/test_runner.py) | 데이터셋 버전 → 내보내기 → 이력 (PostgreSQL, make up). |
 | [`test_source_inheritance.py`](../../packages/export/tests/test_source_inheritance.py) | 물려받은 3D의 기본 내보내기 경로를 DB·스냅샷을 거쳐 검사한다 (ADR 0048·0050, F-COE-55). |
 | [`test_tactile.py`](../../packages/export/tests/test_tactile.py) | 촉각장갑 채널 내보내기 (ADR 0069, DB 없이). |
@@ -355,6 +357,7 @@
 | [`arm.py`](../../packages/fixtures/src/dlp_fixtures/arm.py) | 정답을 아는 1인칭 착용자 팔·몸 장면 (ADR 0058). |
 | [`calibration.py`](../../packages/fixtures/src/dlp_fixtures/calibration.py) | 정답 내부 파라미터를 아는 체커보드 캘리브레이션 영상 (ADR 0045, `dlp calib intrinsics` 시험). |
 | [`camera_motion.py`](../../packages/fixtures/src/dlp_fixtures/camera_motion.py) | 정답 자세를 아는 머리 카메라 움직임: 렌더 프레임, 해석적 깊이, IMU 신호, 월드 좌표 손 (ADR 0046). |
+| [`dexhand.py`](../../packages/fixtures/src/dlp_fixtures/dexhand.py) | 직접 쓴 시험용 다지 손 로봇(6관절 팔 + 손바닥 + 다섯 손가락 x 3관절)과 그 설정 (ADR 0068). |
 | [`hand3d.py`](../../packages/fixtures/src/dlp_fixtures/hand3d.py) | 정답 3D를 아는 손 시퀀스: 카메라 좌표 21관절, 그 투영 2D, 손 중심 3D 점, 합성 깊이 (ADR 0044). |
 | [`io.py`](../../packages/fixtures/src/dlp_fixtures/io.py) | 픽스처 파일 입출력: WAV, Parquet, JSONL, JSON (WP2). |
 | [`retarget.py`](../../packages/fixtures/src/dlp_fixtures/retarget.py) | 정답 끝단 궤적을 아는 사람 손 점 (로봇 리타기팅 시험, ADR 0047). |
@@ -591,19 +594,21 @@
 
 | 파일 | 역할 |
 | --- | --- |
-| [`__init__.py`](../../packages/retarget/src/dlp_retarget/__init__.py) | 사람 손 3D → 로봇 관절 궤적 (리타기팅, ADR 0047). |
+| [`__init__.py`](../../packages/retarget/src/dlp_retarget/__init__.py) | 사람 손 3D → 로봇 관절 궤적 (리타기팅, ADR 0047·0068). |
+| [`hand_ik.py`](../../packages/retarget/src/dlp_retarget/hand_ik.py) | 다지 손 역기구학: 손목·손가락 끝 위치를 팔 관절과 손가락 관절로 함께 푼다 (ADR 0068). |
 | [`ik.py`](../../packages/retarget/src/dlp_retarget/ik.py) | 역기구학 풀이기 인터페이스와 내장 감쇠 최소제곱 풀이기 (ADR 0047·0053). |
 | [`mink.py`](../../packages/retarget/src/dlp_retarget/mink.py) | mink(MuJoCo 기반 미분 IK, Apache-2.0) 풀이기 어댑터 (선택, 격리 환경, ADR 0047). |
 | [`policy.py`](../../packages/retarget/src/dlp_retarget/policy.py) | 리타기팅 정책 (`config/policies/retarget.yaml`, ADR 0047). |
-| [`retarget.py`](../../packages/retarget/src/dlp_retarget/retarget.py) | 에피소드 하나를 로봇 관절 궤적으로 옮기고 도달 가능성 보고를 만든다 (ADR 0047). |
-| [`robot.py`](../../packages/retarget/src/dlp_retarget/robot.py) | 로봇 등록: `config/robots/<ID>.yaml` 로더, 모델 파일 sha256 확인 (ADR 0047). |
-| [`targets.py`](../../packages/retarget/src/dlp_retarget/targets.py) | 사람 손 점 → 로봇 끝단 목표와 그리퍼 열림 (ADR 0047). |
-| [`urdf.py`](../../packages/retarget/src/dlp_retarget/urdf.py) | URDF 직렬 연쇄 기구학 (정기구학·야코비안, ADR 0047). |
+| [`retarget.py`](../../packages/retarget/src/dlp_retarget/retarget.py) | 에피소드 하나를 로봇 관절 궤적으로 옮기고 도달 가능성 보고를 만든다 (ADR 0047·0068). |
+| [`robot.py`](../../packages/retarget/src/dlp_retarget/robot.py) | 로봇 등록: `config/robots/<ID>.yaml` 로더, 모델 파일 sha256 확인 (ADR 0047·0068). |
+| [`targets.py`](../../packages/retarget/src/dlp_retarget/targets.py) | 사람 손 점 → 로봇 목표: 끝단·그리퍼 열림(평행 그리퍼), 손목·손가락 끝(다지 손) (ADR 0047·0068). |
+| [`urdf.py`](../../packages/retarget/src/dlp_retarget/urdf.py) | URDF 직렬 연쇄·나무 구조 기구학 (정기구학·야코비안, ADR 0047·0068). |
 
 ### 시험
 
 | 파일 | 역할 |
 | --- | --- |
+| [`test_hand.py`](../../packages/retarget/tests/test_hand.py) | 다지 손 리타기팅 (ADR 0068): 나무 구조 기구학, 다지 손 로봇 등록 검사, 손목·손가락 끝 IK 정확도, 닿지 못한 손가락과 끝 점이 없는 손가락의 표시, 속도 한계. |
 | [`test_mink.py`](../../packages/retarget/tests/test_mink.py) | mink(MuJoCo) 격리 환경 풀이기 (ADR 0047, `@pytest.mark.isolated_env`, `make test-isolated`). |
 | [`test_retarget.py`](../../packages/retarget/tests/test_retarget.py) | 로봇 리타기팅 (ADR 0047): URDF 기구학, 로봇 등록 검사, IK 정확도, 도달하지 못한 구간 표시. |
 
@@ -903,7 +908,7 @@
 | [`policies/prelabel.yaml`](../../config/policies/prelabel.yaml) | 자동 프리라벨 정책 (WP8). 읽는 곳: dlp_prelabel.policy (`dlp prelabel run <세션>`). 실제 모델을 아직 연동하지 못한 곳은 "TODO(real-model)"로 표시하고 필요한 것을 적는다. 저장소 전체에서 찾기: make todo-models |
 | [`policies/privacy.yaml`](../../config/policies/privacy.yaml) | 프라이버시 게이트 정책 (WP5). 유지 시간·렌더 방식·오디오 제거는 config/defaults.yaml privacy를 따른다. |
 | [`policies/relations.yaml`](../../config/policies/relations.yaml) | 관계 도출과 표면 커버리지 정책 (WP9). 관계는 사람이 그리지 않고 이 규칙으로 만든다. 규칙을 바꾸면 `dlp relations run`이 관계를 다시 만든다: 같은 내용은 그대로 두고, 더 이상 나오지 않는 관계는 삭제 레코드로 표시하고, 새 관계만 넣는다. 검수자가 고치거나 지운 관계는 다시 넣지 않는다. 읽는 곳: dlp_relations.policy. 정책 해시(RelationsPolicy.digest, 관계·커버리지 레코드의 model_version "relations-<해시>")는 파싱된 값으로 계산하므로 주석은 해시에 영향이 없다. 검수자가 승인·표본 검증한 관계는 규칙에서 빠져도 지우지 않는다 (ADR 0015). |
-| [`policies/retarget.yaml`](../../config/policies/retarget.yaml) | 로봇 리타기팅 정책 (ADR 0047, dlp_retarget.policy). 읽는 곳: `dlp export lerobot --robot <ID>` (dlp_export.robot). 로봇마다 다른 값(허용 오차, 배치, 그리퍼, IK 가중치)은 로봇 설정 config/robots/<ID>.yaml(또는 DLP_ROBOTS_DIR)에 둔다. 이 파일과 로봇 설정, 모델 파일 sha256은 리타기팅 판(retarget-...+r..+m..+p..)에 들어가 내보내기 manifest에 남는다. |
+| [`policies/retarget.yaml`](../../config/policies/retarget.yaml) | 로봇 리타기팅 정책 (ADR 0047·0068, dlp_retarget.policy). 읽는 곳: `dlp export lerobot --robot <ID>` (dlp_export.robot). 로봇마다 다른 값(허용 오차, 배치, 그리퍼 또는 다지 손, IK 가중치)은 로봇 설정 config/robots/<ID>.yaml(또는 DLP_ROBOTS_DIR)에 둔다. 이 파일과 로봇 설정, 모델 파일 sha256은 리타기팅 판(retarget-...+r..+m..+p..)에 들어가 내보내기 manifest에 남는다. |
 | [`policies/review.yaml`](../../config/policies/review.yaml) | 검수 운영 정책 (WP12). 배정 비율(QA·이중·블라인드·오류 삽입)은 config/defaults.yaml review를 따른다. |
 | [`policies/scene3d.yaml`](../../config/policies/scene3d.yaml) | 청소 전후 다각도 사진의 3D 복원과 물체 이동 비교 정책 (dlp scene3d, ADR 0066). 읽는 곳: dlp_scene3d.policy.load_policy. 각 절의 해시가 그 단계 결과의 모델 버전에 들어간다 (절을 바꾸면 그 단계부터 다시 계산한다. 이전 결과는 지우지 않고 새 버전 키로 쓴다). |
 | [`policies/sync.yaml`](../../config/policies/sync.yaml) | 동기화 정책 (WP4, ADR 0004·0028). 스트림 종류별로 방법을 순서대로 시도하고, 신뢰도가 min_confidence 이상인 첫 결과를 쓴다. |
@@ -911,7 +916,7 @@
 | [`policies/translate.yaml`](../../config/policies/translate.yaml) | 설명 라벨 영어 번역 정책 (ADR 0043). 한국어 설명(description, language=ko) 라벨마다 영어 번역 레코드(language=en)를 따로 만든다. 번역은 원문의 수정이 아니라 별도 운영 라벨이다: parent_label_id를 쓰지 않고 페이로드 source_label_id로 원문 레코드를 가리킨다. 원문이 바뀌면(새 레코드) 검수 전 번역만 지우고 다시 만든다. |
 | [`pretrain/objects.yaml`](../../config/pretrain/objects.yaml) | 공개 데이터셋 1차 학습: 가사·청소·돌봄 객체 고정 클래스 탐지기 (ADR 0060). 읽는 곳: scripts/pretrain/build_objects.py(학습 데이터 만들기), dlp_models.datasets(검사). 학습은 파이프라인 밖(Kaggle·Colab 등)에서 공개 데이터만으로 한다. 우리 데이터는 넣지 않는다. |
 | [`review_ui.yaml`](../../config/review_ui.yaml) | 검수 화면 테마 (CVAT·Label Studio 위에 덧씌우는 모양). dlp_review.ui_theme.load_ui_theme가 읽는다. 화면 모양(색·로고·단축키·영상 높이)만 정한다. 라벨 값, 검수 흐름, 저장 형식은 바꾸지 않는다. 값을 바꾼 뒤: - CVAT: `make ui-theme`으로 services/review-theme/cvat/dlp-tokens.css를 다시 만들고 `make cvat-up` (테마 이미지를 다시 빌드한다). 테스트가 생성 파일과 이 파일의 일치를 검사한다. - Label Studio: 다음 `dlp review create` 때 프로젝트 설정(label_config)이 바뀐 값으로 갱신된다. - CVAT 라벨 색: 다음 `dlp review create` 때 프로젝트 라벨 색이 맞춰진다. 색은 모두 #rrggbb (소문자 또는 대문자 16진수 6자리). |
-| [`robots/so101.yaml`](../../config/robots/so101.yaml) | 공개 시험 로봇: SO-101 6자유도 팔(5관절 + 평행 그리퍼) (ADR 0047, dlp_retarget.robot). 리타기팅 경로·시험에만 쓰는 공개 모델이다. 고객 로봇 설정·설계 파일은 저장소에 넣지 않고 DLP_ROBOTS_DIR (저장소 밖 디렉터리)에 둔다 (docs/handover/robot-retargeting.md). 저장소 안 설정은 model.public: true여야 로더가 받는다. |
+| [`robots/so101.yaml`](../../config/robots/so101.yaml) | 공개 시험 로봇: SO-101 6자유도 팔(5관절 + 평행 그리퍼) (ADR 0047, dlp_retarget.robot). 리타기팅 경로·시험에만 쓰는 공개 모델이다. 고객 로봇 설정·설계 파일은 저장소에 넣지 않고 DLP_ROBOTS_DIR (저장소 밖 디렉터리)에 둔다 (docs/handover/robot-retargeting.md). 저장소 안 설정은 model.public: true여야 로더가 받는다. 이 파일은 평행 그리퍼 로봇의 형식이다. 손가락 관절이 있는 다지 손 로봇은 arm.gripper· tip_link·접근·닫힘 축 대신 arm.dexterous_hand를 적는다 (형식과 예시는 같은 문서 2절, ADR 0068). |
 
 ## scripts
 

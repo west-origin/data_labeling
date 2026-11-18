@@ -4,7 +4,8 @@
    지금 프라이버시 승인 상태와 기대 블러본 렌더 해시를 확인한다 (`dlp_export.source.load_source`).
 2. 형식별로 쓴다: coco / intervals / lerobot / gr00t
    (lerobot은 격리 환경에서 공식 API로 쓰고 공식 로더로 다시 읽는다). lerobot에 로봇 ID를 주면
-   세션 월드 좌표 손을 그 로봇 관절 궤적으로 옮긴 에피소드를 쓴다 (`dlp_export.robot`, ADR 0047).
+   세션 월드 좌표 손을 그 로봇 관절 궤적으로 옮긴 에피소드를 쓴다 (`dlp_export.robot`, ADR 0047.
+   다지 손 로봇은 손가락 관절까지, ADR 0068).
    gr00t는 같은 에피소드를 GR00T LeRobot v2.1 배치로 쓰고 `dlp_export.gr00t_check`로 다시 확인한다
    (ADR 0065). lerobot·gr00t는 세션에 동기화된 촉각장갑 스트림이 있으면 프레임 시각의 장갑 채널
    값을 함께 싣는다 (`dlp_export.tactile`, export.yaml tactile, ADR 0069).
@@ -49,10 +50,12 @@ from pathlib import Path
 from typing import Any, Literal
 
 import sqlalchemy as sa
+from dlp_retarget.hand_ik import HandIkSolver
 from dlp_retarget.ik import IkSolver
 from dlp_retarget.policy import RetargetPolicy
 from dlp_retarget.policy import load_policy as load_retarget_policy
-from dlp_retarget.robot import LoadedRobot, load_robot
+from dlp_retarget.retarget import finger_parts
+from dlp_retarget.robot import AnyRobot, LoadedDexterousRobot
 
 from dlp_datasets.lineage import record_export
 from dlp_datasets.snapshot import SnapshotStore
@@ -64,10 +67,10 @@ from dlp_export.lerobot import Episode, Vocab, build_episode, run_script, write_
 from dlp_export.policy import ExportPolicy, LeRobotPolicy
 from dlp_export.pseudonym import Pseudonymizer
 from dlp_export.robot import (
+    EpisodeRetarget,
     RobotEpisode,
-    make_solver,
+    load_retargeter,
     retarget_meta,
-    retarget_session,
     robot_override,
 )
 from dlp_export.source import (
@@ -144,11 +147,16 @@ def _label_counts(labels: list[LabelRecord]) -> dict[str, int]:
 
 @dataclass
 class _RobotRun:
-    """로봇 리타기팅 내보내기 상태 (`_lerobot` 안에서만): 로봇·정책·풀이기, 에피소드 결과, 보고."""
+    """로봇 리타기팅 내보내기 상태 (`_lerobot` 안에서만): 로봇·정책·풀이기, 에피소드 결과, 보고.
 
-    robot: LoadedRobot
+    로봇은 평행 그리퍼 또는 다지 손이다 (ADR 0068). retarget은 그 종류에 맞는 풀이기를 묶은
+    에피소드 리타기팅 함수다 (`dlp_export.robot.load_retargeter`).
+    """
+
+    robot: AnyRobot
     policy: RetargetPolicy
-    solver: IkSolver
+    solver: IkSolver | HandIkSolver
+    retarget: EpisodeRetarget
     results: list[RobotEpisode] = field(default_factory=list[RobotEpisode])
     reports: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
 
@@ -157,10 +165,11 @@ class _RobotRun:
         """로봇(모델 sha256 확인)·리타기팅 정책·풀이기를 준비한다.
 
         Raises:
-            RobotError: 로봇 설정·모델 확인 실패.
+            RobotError: 로봇 설정·모델 확인 실패, 다지 손 로봇에 mink 풀이기를 고른 정책.
         """
         policy = load_retarget_policy(root)
-        return cls(load_robot(root, robot_id), policy, make_solver(root, policy))
+        r = load_retargeter(root, robot_id, policy)
+        return cls(r.robot, policy, r.solver, r.episode)
 
     def add(
         self,
@@ -178,7 +187,7 @@ class _RobotRun:
         결과에 들어가지 않아 대응표·이력(`exports.session_ids`)·계보에 없으므로, 구매자 파일에
         가명이 있으면 사용 중지 때 되짚을 수 없는 식별자가 남는다.
         """
-        rob = retarget_session(ep, stream, es.labels, self.robot, self.policy, lp, self.solver)
+        rob = self.retarget(ep, stream, es.labels, lp)
         report = rob.result.report
         keep = report.decision == "keep"
         self.reports.append(
@@ -320,7 +329,10 @@ def _lerobot(
     """
     vocab = Vocab.from_ontology(ontology)
     run = _RobotRun.load(root, robot) if robot is not None else None
-    check_hand_parts(ontology, policy.lerobot, run.policy if run is not None else None)
+    if run is None:
+        check_hand_parts(ontology, policy.lerobot, None)
+    else:
+        check_hand_parts(ontology, policy.lerobot, run.policy, run.robot)
     built = build_episodes(src, policy, vocab, labeling, work, ids, run, raw)
     if not built.items:
         dropped = " (리타기팅 정책이 모든 에피소드를 버렸습니다)" if run and run.reports else ""
@@ -430,23 +442,30 @@ def _gr00t(
 
 
 def check_hand_parts(
-    ontology: Ontology, lerobot: LeRobotPolicy, retarget: RetargetPolicy | None
+    ontology: Ontology,
+    lerobot: LeRobotPolicy,
+    retarget: RetargetPolicy | None,
+    robot: AnyRobot | None = None,
 ) -> None:
     """손 3D 점(export.yaml lerobot.hand_points_3d)과 리타기팅 손 부위(retarget.yaml hand_parts)가
     온톨로지 hand_joints에 있는지. 이름이 틀리면 그 열이 아무 경고 없이 전부 빈 값(present 0,
-    신뢰도 -1)으로 팔리므로 내보내기 전에 막는다.
+    신뢰도 -1)으로 팔리므로 내보내기 전에 막는다. 다지 손 로봇이면 로봇 설정의 손가락 끝 부위
+    (`fingers[].human_part`)도 본다 (틀리면 그 손가락이 늘 목표 없음으로 팔린다, ADR 0068).
 
     Raises:
         ExportError: 온톨로지에 없는 부위가 있을 때.
     """
     names = list(lerobot.hand_points_3d)
+    where = "export.yaml lerobot.hand_points_3d, retarget.yaml hand_parts"
     if retarget is not None:
         names += list(retarget.hand_parts.model_dump().values())
+        if isinstance(robot, LoadedDexterousRobot):
+            names += finger_parts(robot, retarget)
+            where += ", 로봇 설정 arm.dexterous_hand.fingers의 human_part"
     unknown = sorted(set(names) - set(ontology.hand_joints))
     if unknown:
         raise ExportError(
-            f"손 부위 {unknown}가 온톨로지 {ontology.version} hand_joints에 없습니다 "
-            "(export.yaml lerobot.hand_points_3d, retarget.yaml hand_parts)"
+            f"손 부위 {unknown}가 온톨로지 {ontology.version} hand_joints에 없습니다 ({where})"
         )
 
 

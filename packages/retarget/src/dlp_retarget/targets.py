@@ -1,5 +1,6 @@
-"""사람 손 점 → 로봇 끝단 목표와 그리퍼 열림 (ADR 0047).
+"""사람 손 점 → 로봇 목표: 끝단·그리퍼 열림(평행 그리퍼), 손목·손가락 끝(다지 손) (ADR 0047·0068).
 
+평행 그리퍼 로봇 (`hand_targets`, ADR 0047).
 손 점 3개(세션 월드 좌표 m, ADR 0046): 손목 W, 엄지 끝 T, 검지 끝 I.
 - 잡기 점 g = (T + I) / 2 → 끝단(도구 중심점) 목표 위치. 평행 그리퍼가 물체를 잡는 점은 두 집게
   사이 가운데이고, 사람이 집을 때 물체는 엄지·검지 끝 사이에 있다.
@@ -19,6 +20,17 @@
 
 손 점이 하나라도 없거나 축을 만들 수 없는 프레임(손목 = 잡기 점, 엄지 = 검지 등 길이 0)은 목표가
 없다 (지어내지 않는다).
+
+다지 손 로봇 (`finger_targets`, ADR 0068).
+손 점: 손목 W와 대응한 손가락 끝 F_i (1~5개, 로봇 설정의 대응 순서).
+- 손목 목표 w_b = 위 배치를 잡기 점 대신 손목에 적용한 점 (world_fixed: s · R_bw (W - base_xyz),
+  episode_centroid: workspace_center + s · (W - W̄), W̄ = 손목이 있는 프레임의 손목 평균). 로봇 손목
+  링크 원점이 따라간다.
+- 손가락 끝 목표 f_b,i = w_b + h · R_bw (F_i - W). h는 손 배율(`hand_scale`)이고 팔 작업 공간 배율
+  s와 따로다: s로 팔 궤적을 줄여도 손가락 끝은 손목에서 로봇 손 크기만큼 떨어진다. 사람 손의
+  방향은 이 벡터들에 그대로 들어 있어 방향 목표를 따로 만들지 않는다.
+- 손목이 없는 프레임은 목표가 없다 (손가락 끝 목표는 손목 목표에서 잰다). 손목은 있고 손가락 끝만
+  없으면 그 손가락만 목표가 없다 (`tip_present`). 없는 점을 다른 점에서 지어내지 않는다.
 """
 
 from __future__ import annotations
@@ -57,6 +69,24 @@ def _unit(v: NDArray[np.float64]) -> NDArray[np.float64]:
         return np.where(n > 1e-9, v / n, np.nan)
 
 
+def placed(
+    points: NDArray[np.float64], present: NDArray[np.bool_], placement: Placement
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """세션 월드 좌표의 점 (n, 3) → (로봇 기준 좌표의 점 (n, 3), 회전 R_bw (3, 3)).
+
+    식은 모듈 docstring의 배치 절이다. 평행 그리퍼 로봇은 잡기 점을, 다지 손 로봇은 손목을 넘긴다.
+    episode_centroid의 평균은 present가 참인 프레임만 쓴다 (없으면 0). 방향 벡터에는 돌려준 R_bw만
+    곱한다 (`v @ R_bwᵀ`).
+    """
+    s = placement.position_scale
+    if placement.mode is PlacementMode.WORLD_FIXED:
+        r_bw = _rz(placement.base_yaw_rad).T
+        return s * (points - np.array(placement.base_xyz)) @ r_bw.T, r_bw
+    r_bw = np.eye(3)
+    center = points[present].mean(axis=0) if present.any() else np.zeros(3)
+    return np.array(placement.workspace_center) + s * (points - center) @ r_bw.T, r_bw
+
+
 def hand_targets(
     wrist: NDArray[np.float64],
     thumb: NDArray[np.float64],
@@ -86,14 +116,7 @@ def hand_targets(
     opening = np.linalg.norm(span, axis=1)
     closing = _unit(span - np.sum(span * approach, axis=1, keepdims=True) * approach)
     present &= ~np.isnan(approach).any(axis=1) & ~np.isnan(closing).any(axis=1)
-    s = placement.position_scale
-    if placement.mode is PlacementMode.WORLD_FIXED:
-        r_bw = _rz(placement.base_yaw_rad).T
-        position = s * (grasp - np.array(placement.base_xyz)) @ r_bw.T
-    else:
-        r_bw = np.eye(3)
-        center = grasp[present].mean(axis=0) if present.any() else np.zeros(3)
-        position = np.array(placement.workspace_center) + s * (grasp - center) @ r_bw.T
+    position, r_bw = placed(grasp, present, placement)
     nan = np.full(3, np.nan)
     return Targets(
         present=present,
@@ -114,3 +137,53 @@ def gripper_values(opening_m: NDArray[np.float64], gripper: GripperConfig) -> ND
     span = gripper.open_distance_m - gripper.closed_distance_m
     frac = np.clip((opening_m - gripper.closed_distance_m) / span, 0.0, 1.0)
     return gripper.closed + frac * (gripper.open - gripper.closed)
+
+
+@dataclass(frozen=True)
+class HandTargets:
+    """다지 손 로봇의 프레임별 목표 (n = 프레임 수, F = 대응한 손가락 수, 로봇 기준 좌표 m).
+
+    present: 손목 목표가 있는 프레임. tip_present: 그 프레임에 그 손가락 끝 목표가 있는가 (손목이
+    없는 프레임은 모두 거짓). 목표가 없는 칸의 값은 NaN이다.
+    """
+
+    present: NDArray[np.bool_]  # (n,)
+    wrist: NDArray[np.float64]  # (n, 3)
+    tips: NDArray[np.float64]  # (n, F, 3)
+    tip_present: NDArray[np.bool_]  # (n, F)
+
+
+def finger_targets(
+    wrist: NDArray[np.float64],
+    tips: NDArray[np.float64],
+    placement: Placement,
+    hand_scale: float,
+) -> HandTargets:
+    """손목 (n, 3)과 손가락 끝 (n, F, 3)(없으면 NaN) → 로봇 기준 좌표의 다지 손 목표.
+
+    Args:
+        wrist: 손목의 세션 월드 좌표 m.
+        tips: 대응한 손가락 끝의 세션 월드 좌표 m (손가락 순서 = 로봇 설정의 대응 순서).
+        placement: 로봇 배치 (`DexterousArmConfig.placement`, 손목에 적용한다).
+        hand_scale: 손 배율 (`DexterousHandConfig.hand_scale`).
+
+    Returns:
+        `HandTargets`. 식은 모듈 docstring의 다지 손 절에 있다.
+
+    Raises:
+        ValueError: 배열 모양이 (n, 3)·(n, F, 3)이 아닐 때.
+    """
+    if wrist.ndim != 2 or wrist.shape[1] != 3 or tips.ndim != 3 or tips.shape[::2] != wrist.shape:
+        raise ValueError("손목은 (n, 3), 손가락 끝은 (n, F, 3)이어야 합니다")
+    present = ~np.isnan(wrist).any(axis=1)
+    position, r_bw = placed(wrist, present, placement)
+    tip_present = present[:, None] & ~np.isnan(tips).any(axis=2)
+    # 손가락 벡터에는 회전만 적용하고 손 배율을 곱한다 (팔 작업 공간 배율과 무관)
+    offsets = (tips - wrist[:, None, :]) @ r_bw.T
+    targets = position[:, None, :] + hand_scale * offsets
+    return HandTargets(
+        present=present,
+        wrist=np.where(present[:, None], position, np.nan),
+        tips=np.where(tip_present[:, :, None], targets, np.nan),
+        tip_present=tip_present,
+    )

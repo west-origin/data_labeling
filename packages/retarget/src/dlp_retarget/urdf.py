@@ -1,8 +1,10 @@
-"""URDF 직렬 연쇄 기구학 (정기구학·야코비안, ADR 0047).
+"""URDF 직렬 연쇄·나무 구조 기구학 (정기구학·야코비안, ADR 0047·0068).
 
 URDF(로봇 설명 XML)에서 관절(종류, 부모·자식 링크, origin xyz·rpy, axis, limit)만 읽는다. 메시·관성·
 충돌 모양은 읽지 않는다 (IK에 필요 없다, 메시 파일이 없어도 된다). 기준 링크에서 끝 링크까지의 직렬
-연쇄(`Chain`)를 만들어 관절 값 q로 끝 링크 자세와 관절 축(기준 좌표)을 계산한다.
+연쇄(`Chain`)를 만들어 관절 값 q로 끝 링크 자세와 관절 축(기준 좌표)을 계산한다. 다지 손처럼 팔
+끝에서 손가락들이 갈라지는 로봇은 끝 링크 여러 개를 관절 값 벡터 하나로 묶은 나무(`Tree`)로 다룬다
+(끝마다 위치와 위치 야코비안, ADR 0068).
 
 지원 관절: revolute, continuous(한계 없음), prismatic, fixed. floating·planar 관절과 `<mimic>`(다른
 관절 값을 따라 움직이는 종속 관절)은 연쇄에 있으면 거부한다 (`UrdfError`). mimic 관절을 독립
@@ -21,6 +23,9 @@ continuous만 위치 한계가 없다 (±inf). 속도 한계(velocity)가 없으
   방향.
 - 정기구학: 기준 링크에서 T = Π_j (origin_j · motion_j(q_j)) 를 차례로 곱하고 끝 링크 안의 추가
   변환(tip_offset)을 곱한다. 결과는 기준 링크 좌표의 끝 링크 자세(4x4)다.
+- 나무(`Tree`): 끝마다 기준 → 끝 연쇄를 만들고 겹치는 앞쪽 관절(팔)을 하나로 합친다. 관절 값 순서는
+  끝 순서대로 처음 나오는 움직이는 관절이다 (끝이 [손목, 손가락 1, 손가락 2, ...]이면 팔 관절 +
+  손가락 1 관절 + 손가락 2 관절 + ...). 끝의 위치는 끝 링크 좌표 원점이다 (tip_offset 없음).
 
 순수 Python + numpy다 (DB·파일 쓰기 없음). 무거운 기구학 라이브러리(Pinocchio, MuJoCo)는 쓰지 않는다
 (MuJoCo는 격리 환경의 mink 풀이기에서만, `dlp_retarget.mink`).
@@ -30,6 +35,7 @@ from __future__ import annotations
 
 import math
 import xml.etree.ElementTree as ET
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -293,11 +299,153 @@ def build_chain(
         if j.kind not in SUPPORTED:
             raise UrdfError(f"{j.name}: 지원하지 않는 관절 종류 {j.kind}")
         if j.mimic is not None:
-            # 종속 관절을 독립 자유도로 풀면 결합 조건(값 = 원 관절 x 배율 + 오프셋)을 어긴다
-            raise UrdfError(f"{j.name}: mimic 관절({j.mimic} 종속)은 팔 연쇄에 둘 수 없습니다")
+            # 종속 관절을 독립 자유도로 풀면 결합 조건(값 = 원 관절 x 배율 + 오프셋)을 어긴다.
+            # 팔 연쇄와 손가락 연쇄(다지 손, ADR 0068) 모두 같다
+            raise UrdfError(f"{j.name}: mimic 관절({j.mimic} 종속)은 연쇄에 둘 수 없습니다")
         path.append(j)
         link = j.parent
         if len(path) > len(joints):
             raise UrdfError("관절 연쇄에 순환이 있습니다")
     offset = np.eye(4) if tip_offset is None else tip_offset
     return Chain(base, tip, tuple(reversed(path)), offset)
+
+
+@dataclass(frozen=True)
+class TreeFrames:
+    """나무 정기구학 결과 (기준 좌표): 끝 링크마다 위치, 움직이는 관절마다 (위치, 축)."""
+
+    tips: NDArray[np.float64]  # (끝 수, 3)
+    origins: NDArray[np.float64]  # (dof, 3)
+    axes: NDArray[np.float64]  # (dof, 3)
+
+
+@dataclass(frozen=True)
+class Tree:
+    """기준 링크에서 끝 링크 여러 개로 갈라지는 나무 (관절 값 벡터 q는 하나, ADR 0068).
+
+    tips: 끝 링크 이름 (만든 순서 그대로). joints: 나무의 모든 관절 (고정 관절 포함), 부모 쪽 관절이
+    자식 쪽보다 앞이다. parents: joints와 같은 순서로, 그 관절의 부모 링크를 자식으로 둔 관절의
+    위치 (기준 링크에 바로 달렸으면 -1). ends: 끝마다 그 끝 링크를 자식으로 둔 관절의 위치 (끝이
+    기준 링크면 -1). on_path: (끝 수, dof) 참이면 그 끝의 기준 → 끝 경로에 그 움직이는 관절이 있다
+    (그 끝의 위치는 참인 관절에만 따른다).
+    """
+
+    base: str
+    tips: tuple[str, ...]
+    joints: tuple[Joint, ...]
+    parents: tuple[int, ...]
+    ends: tuple[int, ...]
+    on_path: NDArray[np.bool_]
+
+    @property
+    def moving(self) -> tuple[Joint, ...]:
+        """움직이는 관절 (q 순서)."""
+        return tuple(j for j in self.joints if j.kind in MOVING)
+
+    @property
+    def names(self) -> tuple[str, ...]:
+        """움직이는 관절 이름 (q 순서)."""
+        return tuple(j.name for j in self.moving)
+
+    @property
+    def lower(self) -> NDArray[np.float64]:
+        """관절 하한 (q 순서)."""
+        return np.array([j.lower for j in self.moving])
+
+    @property
+    def upper(self) -> NDArray[np.float64]:
+        """관절 상한 (q 순서)."""
+        return np.array([j.upper for j in self.moving])
+
+    @property
+    def velocity(self) -> NDArray[np.float64]:
+        """관절 속도 한계 (q 순서)."""
+        return np.array([j.velocity for j in self.moving])
+
+    def frames(self, q: NDArray[np.float64]) -> TreeFrames:
+        """관절 값 q (움직이는 관절 순)로 정기구학.
+
+        관절을 부모 쪽부터 한 번씩만 따라간다 (여러 끝이 함께 쓰는 팔 관절을 끝마다 다시 계산하지
+        않는다). 관절마다 하는 일은 `Chain.frames`와 같다: 부모 링크 좌표에 origin을 곱해 관절
+        좌표를 얻고, 움직이는 관절이면 축·위치를 기준 좌표로 적어 둔 뒤 관절 운동을 곱한다.
+
+        Raises:
+            ValueError: q 길이가 움직이는 관절 수와 다를 때.
+        """
+        dof = self.on_path.shape[1]
+        if q.shape != (dof,):
+            raise ValueError(f"관절 값 {q.shape}: 움직이는 관절 {dof}개와 다릅니다")
+        links: list[Mat4] = []  # joints와 같은 순서: 그 관절의 자식 링크 좌표 (기준 좌표에서)
+        origins = np.zeros((dof, 3))
+        axes = np.zeros((dof, 3))
+        i = 0
+        for j, parent in zip(self.joints, self.parents, strict=True):
+            t = j.origin if parent < 0 else links[parent] @ j.origin
+            if j.kind in MOVING:
+                origins[i] = t[:3, 3]
+                axes[i] = t[:3, :3] @ j.axis
+                if j.kind == "prismatic":
+                    t = t @ transform(np.eye(3), j.axis * q[i])
+                else:
+                    t = t @ transform(_axis_angle(j.axis, float(q[i])), np.zeros(3))
+                i += 1
+            links.append(t)
+        tips = np.array([links[e][:3, 3] if e >= 0 else np.zeros(3) for e in self.ends])
+        return TreeFrames(tips, origins, axes)
+
+    def positions(self, q: NDArray[np.float64]) -> NDArray[np.float64]:
+        """끝 링크마다 위치 (끝 수, 3) (기준 링크 좌표 m)."""
+        return self.frames(q).tips
+
+    def jacobian(self, q: NDArray[np.float64]) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+        """(끝 위치 (끝 수, 3), 위치 야코비안 (3 x 끝 수, dof)).
+
+        야코비안의 행은 끝 순서대로 x, y, z다 (끝 i의 행은 3i ~ 3i + 2). 끝 i의 속도는
+        J[3i:3i+3] · q̇다. 관절 k의 열은 `Chain.jacobian`의 선속도 행과 같다: 회전 관절은 축 x (끝
+        위치 - 관절 위치), 직선 관절은 축. 그 끝의 경로에 없는 관절(다른 손가락의 관절)의 열은
+        0이다.
+        """
+        f = self.frames(q)
+        lever = f.tips[:, None, :] - f.origins[None, :, :]  # (끝 수, dof, 3)
+        lin = np.cross(f.axes[None, :, :], lever)
+        prismatic = np.array([j.kind == "prismatic" for j in self.moving], dtype=np.bool_)
+        lin[:, prismatic, :] = f.axes[prismatic]
+        lin *= self.on_path[:, :, None]
+        return f.tips, lin.transpose(0, 2, 1).reshape(3 * len(self.tips), -1)
+
+
+def build_tree(joints: dict[str, Joint], base: str, tips: Sequence[str]) -> Tree:
+    """기준 링크 → 끝 링크들의 나무를 만든다 (끝마다 `build_chain`, 겹치는 앞쪽 관절은 하나로).
+
+    관절 값 순서(q)는 끝 순서대로, 각 끝의 경로에서 처음 나오는 움직이는 관절을 기준 쪽부터 붙인
+    것이다 (모듈 docstring의 나무 절).
+
+    Raises:
+        UrdfError: 끝이 없거나 같은 끝이 두 번일 때, 끝이 기준 링크로 이어지지 않거나 경로에
+            지원하지 않는 관절·mimic 관절이 있을 때 (`build_chain`).
+    """
+    if not tips:
+        raise UrdfError("나무의 끝 링크가 없습니다")
+    if len(set(tips)) != len(tips):
+        raise UrdfError(f"같은 끝 링크가 두 번 있습니다: {list(tips)}")
+    order: list[Joint] = []
+    place: dict[str, int] = {}  # 관절 이름 → order 안 위치
+    parents: list[int] = []
+    ends: list[int] = []
+    paths: list[tuple[str, ...]] = []
+    for tip in tips:
+        chain = build_chain(joints, base, tip)
+        last = -1
+        for j in chain.joints:
+            if j.name not in place:
+                place[j.name] = len(order)
+                order.append(j)
+                parents.append(last)
+            last = place[j.name]
+        ends.append(last)
+        paths.append(chain.names)
+    column = {j.name: i for i, j in enumerate(j for j in order if j.kind in MOVING)}
+    on_path = np.zeros((len(tips), len(column)), dtype=np.bool_)
+    for i, names in enumerate(paths):
+        on_path[i, [column[n] for n in names]] = True
+    return Tree(base, tuple(tips), tuple(order), tuple(parents), tuple(ends), on_path)

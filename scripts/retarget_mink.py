@@ -3,7 +3,8 @@
     python scripts/retarget_mink.py <problem.json> <solution.json>
 
 `dlp_retarget.mink.MinkIkSolver`가 격리 환경(`scripts/retarget-env`, uv.lock 고정)에서 부른다.
-작업공간 밖이라 `dlp_*` 패키지를 쓰지 않는다 (ruff만 검사, pyright 범위 밖).
+작업공간 밖이라 `dlp_*` 패키지를 쓰지 않는다 (ruff만 검사, pyright 범위 밖). 팔 하나 + 평행 그리퍼
+로봇의 팔 관절만 푼다. 다지 손 로봇(ADR 0068)은 이 스크립트를 부르지 않는다 (호출 전에 거부).
 
 입력 JSON: `urdf`(경로), `base_link`, `tip_link`, `joints`(팔 관절 순서), `approach_axis`·
 `closing_axis`(끝 링크 좌표), `orientation_mode`(none|approach|full), `orientation_weight`,

@@ -19,7 +19,7 @@ Prefect 서비스가 기동된 것만으로 모든 작업이 영속 큐에서 �
 | 자동 라벨 초안 | [prelabel runner](../../packages/prelabel/src/dlp_prelabel/runner.py), `adapters/` | `config/policies/prelabel.yaml`, `config/models.yaml` |
 | 착용자 팔 골격·착용자 몸 억제 (ADR 0058) | [prelabel arm](../../packages/prelabel/src/dlp_prelabel/arm.py)(팔 사슬 고르기·팔꿈치 판정·arm3 트랙), [wearer_suppress](../../packages/prelabel/src/dlp_prelabel/wearer_suppress.py)(객체·도구 박스 억제, 어댑터 공통), [adapters/rtmpose.py](../../packages/prelabel/src/dlp_prelabel/adapters/rtmpose.py)(`body_pass`: 착용자 자세 분리·합성 착용자 박스), 공용 판정 [wearer_body](../../packages/schema/src/dlp_schema/wearer_body.py)(검수 힌트 `dlp_review.object_hints`도 씀), 러너 `wearer_evidence` | `prelabel.yaml wearer_suppression`·`arm`·`depth.arm_points` |
 | 바디캠 자세·세션 월드 좌표 3D (ADR 0046) | [prelabel campose](../../packages/prelabel/src/dlp_prelabel/campose.py)(추정기 어댑터·내장 IMU 시각 오도메트리·자세 라벨), `worldframe.py`(월드 좌표 궤적), 러너 `_PoseStage` | `prelabel.yaml camera_pose`·`world_frame` |
-| 로봇 리타기팅 (ADR 0047) | [retarget](../../packages/retarget/src/dlp_retarget/)(로봇 등록·URDF 기구학·IK·도달 보고), [export robot](../../packages/export/src/dlp_export/robot.py)(LeRobot 로봇 모드), `scripts/retarget_mink.py`(격리 환경 mink) | `config/robots/<ID>.yaml`(고객 것은 `DLP_ROBOTS_DIR`), `config/policies/retarget.yaml`, 절차 [robot-retargeting.md](robot-retargeting.md) |
+| 로봇 리타기팅 (ADR 0047, 다지 손 0068) | [retarget](../../packages/retarget/src/dlp_retarget/)(로봇 등록·URDF 기구학·IK·도달 보고. 다지 손: `robot.py`의 `arm.dexterous_hand` 설정과 구조 검사, `urdf.py`의 나무 `Tree`, `targets.finger_targets`, `hand_ik.py`, `retarget.retarget_hand_episode`), [export robot](../../packages/export/src/dlp_export/robot.py)(LeRobot 로봇 모드, 로봇 종류는 `load_retargeter`가 고른다), `scripts/retarget_mink.py`(격리 환경 mink, 평행 그리퍼만), 시험용 합성 다지 손 로봇 [fixtures dexhand](../../packages/fixtures/src/dlp_fixtures/dexhand.py) | `config/robots/<ID>.yaml`(고객 것은 `DLP_ROBOTS_DIR`), `config/policies/retarget.yaml`, 절차 [robot-retargeting.md](robot-retargeting.md) |
 | 3D 궤적 검수 물려받기 (ADR 0048·0050·0051) | [trajectory_follow](../../packages/schema/src/dlp_schema/trajectory_follow.py)(순수 규칙: 손·박스 중심 물려받기, 끊긴·대체된 물려받은 3D 삭제 계획, `is_camera_pose`), [reviewer_changes](../../packages/schema/src/dlp_schema/reviewer_changes.py)(물려받기만 한 라벨을 뺀 검수 변화: 주간 지표·원본 보관 기산점·액티브 러닝 수정률), 완료 판정의 지금 2D 3D 확인 `verify.trajectory_gaps`, 프리라벨 다시 돌리기 판정 `runner.stage_version`, [trajectory_repository](../../packages/schema/src/dlp_schema/db/trajectory_repository.py)(적용, 기록 `trajectory_inheritance`, 삭제 레코드), [label_validation](../../packages/schema/src/dlp_schema/label_validation.py)(`_TrajectoryExemption`), 호출: 수집 `collect.py`·완료 판정 `verify.py`(자동 라벨 제외)·프리라벨 `runner.py`, 내보내기 `source.py`(끊긴 3D 제외)·`runner.py`(`trajectory_manifest`)·`robot.py`(meta `camera_pose`) | `review.yaml verify.automatic`·`verify.require_current_3d` (규칙 버전 `trajectory-follow-1`은 코드 상수) |
 | 카메라 내부 파라미터·작업자 손 크기 (ADR 0045, 손 크기 출처·무효·세션 기기 연결 0052) | [media calibration](../../packages/media/src/dlp_media/calibration.py)(체커보드·파일), [prelabel palm](../../packages/prelabel/src/dlp_prelabel/palm.py)(손 크기 추정), [등록 저장소](../../packages/schema/src/dlp_schema/db/calibration_repository.py), [CLI](../../packages/cli/src/dlp_cli/calib_cmds.py) | `config/policies/calibration.yaml`, `prelabel.yaml palm_estimate`, 절차 [camera-calibration.md](camera-calibration.md) |
 | 관계·접촉·행동 | [relations](../../packages/relations/src/dlp_relations/), [actions](../../packages/actions/src/dlp_actions/) | 각 단계의 `config/policies/*.yaml` |
@@ -309,6 +309,18 @@ class `hand`·entity `<손>_hand`, `derived_from`은 출처 기록이고 검수�
 고른다(접근 축 둘레 롤 관절이 있으면 full, SO-101은 full). 재시작 프레임·그리퍼에도 속도 한계, 손 목표가 없는 에피소드는
 drop, 설정·URDF 검증(축 단위·직교, 그리퍼, mimic, robot_id 경로) (ADR 0053). `dlp robot check <ID>`,
 `dlp export lerobot --robot <ID>`. 정책은 `config/policies/retarget.yaml`.
+
+다지 손 로봇(ADR 0068, F-COE-17 고침): 로봇 설정의 `arm.dexterous_hand`(손목 링크, 사람 손가락 끝 부위 → 로봇
+손가락 끝 링크 1~5개, `hand_scale`, `fingertip_tolerance_m`)가 있으면 `load_any_robot`이 `LoadedDexterousRobot`을
+낸다 (`load_robot`은 평행 그리퍼만, 설정 타입을 따로 둬 평행 그리퍼 설정 해시·판은 그대로). 손가락 관절은 URDF의
+손목 링크 → 끝 링크 경로에서 읽고, mimic 관절·손가락끼리 함께 쓰는 관절·없는 링크·대응 중복은 이유와 함께 거부한다.
+`urdf.Tree`가 팔 관절을 함께 쓰는 끝 링크 여러 개의 위치와 야코비안을 내고, `targets.finger_targets`가 손목 목표
+(기존 배치)와 손가락 끝 목표(손목 목표 + 손 배율 x 회전한 사람 손가락 벡터)를 만들며, `hand_ik.DlsHandSolver`가
+위치 오차를 쌓아 팔 관절 + 손가락 관절을 감쇠 최소제곱으로 함께 푼다 (관절·속도 한계와 이어 풀기는 `ik`의 규칙,
+방향 목표 없음). 손목이 없는 프레임은 목표가 없고, 끝 점이 없는 손가락은 관절을 유지하고 손가락별 표시로 남긴다.
+`retarget.retarget_hand_episode`가 손가락별 통계가 든 `HandFeasibilityReport`를 내고 `drop_episode`는 손가락마다도
+비율을 본다. 내보내기는 `dlp_export.robot.load_retargeter`가 로봇 종류에 맞는 풀이기와 에피소드 함수를 묶는다
+(다지 손에 `solver: mink`면 거부). 남은 한계는 F-COE-92~96이다.
 
 ### `packages/relations/` (`dlp_relations`)
 

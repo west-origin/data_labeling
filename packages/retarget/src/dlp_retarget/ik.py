@@ -34,6 +34,9 @@ a*·c*(사람 손에서 만든 방향)와 비교한다.
   오차를 NaN으로 둔다.
 
 mink(MuJoCo, Apache-2.0) 풀이기는 격리 환경 어댑터(`dlp_retarget.mink`)로 같은 인터페이스를 따른다.
+여기는 팔 하나 + 평행 그리퍼 로봇의 팔 관절을 푼다. 다지 손 로봇(손목·손가락 끝 위치를 팔 관절과
+손가락 관절로 함께 푼다)은 `dlp_retarget.hand_ik`가 같은 속도 한계(`limit_step`)·시작점(`seeds`)
+규칙으로 푼다 (ADR 0068).
 """
 
 from __future__ import annotations
@@ -48,7 +51,7 @@ from numpy.typing import NDArray
 
 from dlp_retarget.robot import IkConfig, OrientationMode
 from dlp_retarget.targets import Targets
-from dlp_retarget.urdf import Chain
+from dlp_retarget.urdf import Chain, Tree
 
 Vec = NDArray[np.float64]
 # 반복을 멈추는 관절 변화 크기 (|Δq| 노름, 회전 관절 rad·직선 관절 m)
@@ -169,10 +172,11 @@ def _iterate(chain: Chain, q0: Vec, mu: float, goal: Goal, problem: IkProblem) -
     return q
 
 
-def seeds(chain: Chain, count: int) -> list[Vec]:
+def seeds(chain: Chain | Tree, count: int) -> list[Vec]:
     """시작점: 관절 범위 가운데(한계 없는 관절은 0) + 결정적 난수 (count개).
 
     한계가 없는 관절(continuous)은 [-π, π]에서 고른다. 난수 씨앗이 고정이라 같은 입력이면 같은 해다.
+    팔 연쇄와 다지 손 나무(`hand_ik`)가 함께 쓴다 (관절 한계만 읽는다).
     """
     lo, hi = chain.lower, chain.upper
     flo = np.where(np.isfinite(lo), lo, -math.pi)
