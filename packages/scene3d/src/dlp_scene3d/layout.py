@@ -1,4 +1,4 @@
-"""저장소 키 배치와 JSON 읽고 쓰기 (ADR 0066).
+"""저장소 키 배치와 JSON 읽고 쓰기 (ADR 0066, 0067).
 
 원본 버킷(감사 저장소로만 연다): 원본 사진, 원본 쪽 수집 기록, 블러 탐지·승인 기록.
     sessions/<세션>/scene3d/<단계>/photos/<photo_id><확장자>
@@ -13,6 +13,7 @@
     sessions/<세션>/scene3d/<단계>/recon/current.json
     sessions/<세션>/scene3d/changes/<태그>.json, changes/current.json
     sessions/<세션>/scene3d/alignment/<태그>.json
+    sessions/<세션>/scene3d/localization/<태그>.json, localization/current.json   (바디캠 위치 기록)
 
 산출물은 버전 태그 키에 한 번만 쓴다 (`dlp_media.storage.put_immutable`). current·latest·render
 표시만 바뀐다 (이력이 아니라 지금 무엇을 쓰는지 가리킨다).

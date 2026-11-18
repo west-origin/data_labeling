@@ -234,7 +234,7 @@ external:
   # the resulting COLMAP license"), PyPI pycolmap 4.2.1 license BSD-3-Clause. GPU SIFT(SiftGPU)를 넣은 빌드는
   # 그 라이선스를 따로 확인해야 해 review로 둔다 (CPU SIFT·VLFeat 경로 확인 뒤 allowed로 올린다).
   colmap:
-    served_by: 격리 환경 scripts/gsplat-env (pycolmap), config/policies/scene3d.yaml reconstruction.sfm_tool
+    served_by: 격리 환경 scripts/gsplat-env (pycolmap), config/policies/scene3d.yaml reconstruction.sfm_tool·localization.features_tool
     license: BSD-3-Clause (COLMAP, 서드파티 의존성은 별도)
     training_data: []
     commercial: review

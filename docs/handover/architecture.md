@@ -329,13 +329,24 @@ drop, 설정·URDF 검증(축 단위·직교, 그리퍼, mimic, robot_id 경로)
 
 ### `packages/scene3d/` (`dlp_scene3d`)
 
-청소 전후 다각도 사진의 3D 복원(SfM·3D 가우시안 스플래팅)과 물체 이동 비교 (ADR 0066). `dlp scene3d
-ingest|privacy detect|review|approve|render|reconstruct|compare|report`. 정책 `config/policies/scene3d.yaml`.
+청소 전후 다각도 사진의 3D 복원(SfM·3D 가우시안 스플래팅)과 물체 이동 비교 (ADR 0066), 미터 척도·장면 안 바디캠
+위치 추정·전후 갖춤 확인 (ADR 0067). `dlp scene3d
+ingest|privacy detect|review|approve|render|reconstruct|compare|report|localize|status`. 정책 `config/policies/scene3d.yaml`.
 경계: 원본 사진은 감사 원본 저장소로만 읽고, 사진 블러 게이트(`privacy_gate`, `dlp_privacy` 탐지기·블러를
 그대로 씀)를 사람 승인으로 통과한 블러 PNG만 하류(`open_blurred`)가 받는다. SfM(pycolmap)·스플랫(gsplat)은
 격리 환경 `scripts/gsplat-env`에서만 돌고, CPU stub(`OracleSfm`, `InitPointsSplat`, `OracleObjectDetector`)으로
 시험한다. 순수 기하(`geometry`, `objects`, `alignment`, `change`)는 저장소 없이 돈다. 계약은
 `dlp_schema.scene3d`, 산출물 기록은 추가 전용 표 `scene3d_records`(0027). 이동 벡터는 before 장면 좌표(미터)다.
+ADR 0067이 더한 것: (1) 미터 척도 `markers`: 복원이 SfM 뒤 승인된 블러 사진의 ArUco 마커를 삼각측량해 척도를 곱하고
+출처를 `Reconstruction.scale`에 남긴다. 마커가 없거나 불안정하면 지어내지 않고 metric=False다. (2) 장면 안 바디캠
+위치 추정 `dlp scene3d localize` (`localize`, `ego_video`, `pnp`): 그 세션의 지금 승인된 블러본 바디캠에서만 프레임을
+받고(영상 렌더 게이트, 원본 버킷을 열지 않는다) 프레임 특징 ↔ 복원 점 기술자 대응 + PnP로 자세를 before 장면 좌표로
+구한다. 전후 복원과 받아들인 정렬(`pipeline.ensure_alignment`, 비교와 함께 쓴다), 등록된 내부 파라미터가 있어야 하고
+문턱을 못 넘은 프레임은 기록하지 않는다. 결과 `EgoLocalization`은 라벨이 아니다 (라벨링 버킷
+`…/scene3d/localization/<태그>.json`, 기록 종류 `localization`). 읽기는 `current_localization`·`PoseTrack`(보간).
+세션·블러 승인·캘리브레이션을 DB에서 읽기만 한다. 특징 추출만 백엔드다 (실제 `IsolatedFrameFeatures` = 격리 환경
+pycolmap SIFT, stub `OracleFrameFeatures`). (3) `dlp scene3d status` (`status`): 전후가 다 갖춰졌는지, 읽기 전용.
+작업공간 안의 화소 좌표는 OpenCV 규약이고 격리 환경(COLMAP·gsplat) 어댑터가 경계에서 0.5를 옮긴다.
 
 ### `packages/actions/` (`dlp_actions`)
 

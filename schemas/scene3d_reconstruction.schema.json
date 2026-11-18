@@ -1,6 +1,99 @@
 {
+  "$defs": {
+    "SceneScale": {
+      "additionalProperties": false,
+      "description": "복원 좌표의 척도를 어떻게 정했는가 (ADR 0067).\n\nsource: `ScaleSource`. marker(크기를 아는 마커로 정함), sfm(SfM 결과가 이미 미터: 정답 stub),\n  none(정하지 못함: 그 복원은 metric이 아니다).\nfactor: SfM 좌표(카메라 이동·희소 점)에 곱한 배율. marker일 때만 1이 아니다.\nmarker_side_m: 정책이 준 마커 한 변의 실제 길이(m). 마커 척도를 꺼 두었으면 None.\nmarker_factor: 마커가 말하는 배율 = marker_side_m / 복원 단위 변 길이(중앙값). 마커 추정이\n  안정적일 때만 있다. source가 marker면 factor와 같고, sfm이면 확인값이다 (1에 가까워야 한다).\nmarker_ids: 척도 계산·확인에 쓴 마커 ID (오름차순). marker_photos: 그 마커들을 삼각측량하는 데\n  쓴 사진 수 (자세를 찾았고 모서리 재투영이 맞은 사진, 중복 없이).\nside_spread: 복원 단위 변 길이 추정들의 상대 흩어짐 ((최대 - 최소) / 중앙값).\nreason: 마커로 척도를 정하지 못한 이유 (마커 없음, 사진 수 미달, 흩어짐 초과 등). 정했으면 None.",
+      "properties": {
+        "factor": {
+          "exclusiveMinimum": 0,
+          "title": "Factor",
+          "type": "number"
+        },
+        "marker_factor": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Marker Factor"
+        },
+        "marker_ids": {
+          "default": [],
+          "items": {
+            "type": "integer"
+          },
+          "title": "Marker Ids",
+          "type": "array"
+        },
+        "marker_photos": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Marker Photos",
+          "type": "integer"
+        },
+        "marker_side_m": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Marker Side M"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        },
+        "side_spread": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Side Spread"
+        },
+        "source": {
+          "enum": [
+            "marker",
+            "sfm",
+            "none"
+          ],
+          "title": "Source",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "factor"
+      ],
+      "title": "SceneScale",
+      "type": "object"
+    }
+  },
   "additionalProperties": false,
-  "description": "한 단계의 복원 결과 (라벨링 버킷 `recon/<tag>/`).\n\nmetric: 좌표가 미터인가. SfM만으로는 척도를 모르므로 실제 경로는 척도 기준(크기를 아는 마커 등)\n  없이는 False다. 비교 단계는 정책 `change.require_metric`이면 before가 metric이어야 한다.\nregistered: 자세를 찾은 사진 수 / 전체 사진 수 (`photo_count`).\nsplat_key·points_key·cameras_key: 같은 버킷의 산출물 키.",
+  "description": "한 단계의 복원 결과 (라벨링 버킷 `recon/<tag>/`).\n\nmetric: 좌표가 미터인가. SfM만으로는 척도를 모르므로 실제 경로는 척도 기준(크기를 아는 마커)이\n  있어야 True다. 비교 단계는 정책 `change.require_metric`이면 before가 metric이어야 한다.\nregistered: 자세를 찾은 사진 수 / 전체 사진 수 (`photo_count`).\nsplat_key·points_key·cameras_key: 같은 버킷의 산출물 키.\nscale: 척도 출처 (ADR 0067). 그 전에 만든 기록에는 없다 (None).",
   "properties": {
     "cameras_key": {
       "title": "Cameras Key",
@@ -49,6 +142,17 @@
     "render_tag": {
       "title": "Render Tag",
       "type": "string"
+    },
+    "scale": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SceneScale"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     },
     "session_id": {
       "title": "Session Id",

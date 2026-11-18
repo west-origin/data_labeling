@@ -85,6 +85,8 @@ def used_models(root: Path) -> dict[str, str]:
       출발 가중치 (ADR 0062). 학습 모델이 이 분류를 물려받는다.
     - `scene3d.reconstruction.sfm_tool|splat_tool`·`scene3d.objects.model|tokenizer` — 청소 전후 3D
       비교의 SfM·스플랫 도구와 물체 탐지 가중치 (ADR 0066).
+    - `scene3d.localization.features_tool` — 장면 안 바디캠 위치 추정의 프레임 특징 추출 도구
+      (ADR 0067, `features: unavailable`이면 뺀다).
 
     인자:
         root: 저장소 루트 (`config/policies/*.yaml`을 읽는다).
@@ -130,6 +132,8 @@ def used_models(root: Path) -> dict[str, str]:
     if scene.objects.detector == "owlv2":
         used["scene3d.objects.model"] = scene.objects.model
         used["scene3d.objects.tokenizer"] = scene.objects.tokenizer
+    if scene.localization.features != "unavailable":
+        used["scene3d.localization.features_tool"] = scene.localization.features_tool
     return used
 
 

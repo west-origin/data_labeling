@@ -1,0 +1,374 @@
+{
+  "$defs": {
+    "Alignment": {
+      "additionalProperties": false,
+      "description": "after 장면 좌표 → before 장면 좌표 닮음 변환 `x_b = scale · R · x_a + t`.\n\nrms_m·inlier_threshold_m는 before 좌표 단위(metric이면 미터). accepted가 False면 비교하지\n않는다 (reason에 이유).",
+      "properties": {
+        "accepted": {
+          "title": "Accepted",
+          "type": "boolean"
+        },
+        "inliers": {
+          "minimum": 0,
+          "title": "Inliers",
+          "type": "integer"
+        },
+        "matches": {
+          "minimum": 0,
+          "title": "Matches",
+          "type": "integer"
+        },
+        "model_version": {
+          "title": "Model Version",
+          "type": "string"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        },
+        "rms_m": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Rms M"
+        },
+        "rotation": {
+          "maxItems": 9,
+          "minItems": 9,
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ],
+          "title": "Rotation",
+          "type": "array"
+        },
+        "scale": {
+          "exclusiveMinimum": 0,
+          "title": "Scale",
+          "type": "number"
+        },
+        "translation": {
+          "maxItems": 3,
+          "minItems": 3,
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ],
+          "title": "Translation",
+          "type": "array"
+        }
+      },
+      "required": [
+        "model_version",
+        "scale",
+        "rotation",
+        "translation",
+        "matches",
+        "inliers",
+        "rms_m",
+        "accepted"
+      ],
+      "title": "Alignment",
+      "type": "object"
+    },
+    "CameraIntrinsics": {
+      "additionalProperties": false,
+      "description": "카메라 내부 파라미터 (핀홀 모델, 픽셀 단위).\n\n- width, height: 영상 해상도 (px, 양수).\n- fx, fy: 초점 거리 (px).\n- cx, cy: 주점 (px).\n- distortion_model: 왜곡 모델 이름 (기본 \"opencv\").\n- distortion: 그 모델의 왜곡 계수 (예: k1, k2, p1, p2, k3). 비어 있으면 왜곡 없음이다.",
+      "properties": {
+        "cx": {
+          "title": "Cx",
+          "type": "number"
+        },
+        "cy": {
+          "title": "Cy",
+          "type": "number"
+        },
+        "distortion": {
+          "default": [],
+          "items": {
+            "type": "number"
+          },
+          "title": "Distortion",
+          "type": "array"
+        },
+        "distortion_model": {
+          "default": "opencv",
+          "title": "Distortion Model",
+          "type": "string"
+        },
+        "fx": {
+          "title": "Fx",
+          "type": "number"
+        },
+        "fy": {
+          "title": "Fy",
+          "type": "number"
+        },
+        "height": {
+          "exclusiveMinimum": 0,
+          "title": "Height",
+          "type": "integer"
+        },
+        "width": {
+          "exclusiveMinimum": 0,
+          "title": "Width",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "width",
+        "height",
+        "fx",
+        "fy",
+        "cx",
+        "cy"
+      ],
+      "title": "CameraIntrinsics",
+      "type": "object"
+    },
+    "FramePose": {
+      "additionalProperties": false,
+      "description": "바디캠 프레임 한 장의 카메라 자세 (before 장면 좌표, ADR 0067).\n\nt_ms: 그 프레임의 바디캠 PTS 시각 (정수 ms, PTS 인덱스에서 얻는다). 바디캠이 기준 스트림이라\n  마스터 타임라인 시각과 같다.\nreference: 자세를 푼 복원 (before | after). after면 정렬의 닮음 변환으로 before 좌표의 강체\n  자세로 옮긴 값이다.\nrotation·translation: `x_cam = R · x_before + t` (`CameraPose`와 같은 규약, 행 우선 3x3 R).\n  translation의 단위는 before 장면 단위다 (`EgoLocalization.metric`이면 미터). 카메라 중심은\n  `-Rᵀ t`.\nmatches: 그 복원과 맺은 2D-3D 대응 수. inliers: 그중 PnP 내점 수.\nreproj_px: 내점 재투영 오차 RMS (픽셀).",
+      "properties": {
+        "inliers": {
+          "minimum": 4,
+          "title": "Inliers",
+          "type": "integer"
+        },
+        "matches": {
+          "minimum": 4,
+          "title": "Matches",
+          "type": "integer"
+        },
+        "reference": {
+          "enum": [
+            "before",
+            "after"
+          ],
+          "title": "Reference",
+          "type": "string"
+        },
+        "reproj_px": {
+          "minimum": 0,
+          "title": "Reproj Px",
+          "type": "number"
+        },
+        "rotation": {
+          "maxItems": 9,
+          "minItems": 9,
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ],
+          "title": "Rotation",
+          "type": "array"
+        },
+        "t_ms": {
+          "description": "시각(ms). 시간 구간 라벨은 마스터 타임라인, 공간 라벨은 그 스트림 PTS 기준",
+          "minimum": 0,
+          "title": "T Ms",
+          "type": "integer"
+        },
+        "translation": {
+          "maxItems": 3,
+          "minItems": 3,
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ],
+          "title": "Translation",
+          "type": "array"
+        }
+      },
+      "required": [
+        "t_ms",
+        "reference",
+        "rotation",
+        "translation",
+        "matches",
+        "inliers",
+        "reproj_px"
+      ],
+      "title": "FramePose",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "세션 바디캠 영상의 프레임별 카메라 자세 (라벨링 버킷 `localization/<tag>.json`, ADR 0067).\n\n한 번 쓰면 덮어쓰지 않는다. 모델 출처이고 라벨이 아니다. 입력은 그 세션의 지금 승인된 블러본\n바디캠 영상과 전후 복원이다.\nstream_id: 바디캠 스트림. model_version: 특징 추출기 버전과 위치·정렬 정책 절 해시.\nbefore_reconstruction·after_reconstruction: 쓴 복원의 태그.\nalignment_tag·alignment: 쓴 after → before 정렬의 태그와 내용 (받아들인 것만).\nrender_hash: 쓴 블러본 영상의 렌더 해시 (`dlp_privacy.rendering.render_hash`).\n  blurred_sha256: 그 블러본 파일 해시 (이전 형식 렌더 기록이면 None).\nintrinsics: 자세를 풀 때 쓴 바디캠 내부 파라미터 (영상 프레임 크기에 맞춘 값, 왜곡 계수 포함).\n  intrinsics_origin: 그 출처 (`session` 또는 `registry:<calibration_id>`).\nmetric: 자세의 길이 단위가 미터인가 (before 복원의 metric).\nframe_count: 자세를 풀어 본 프레임 수. localized: 문턱을 넘어 자세를 남긴 프레임 수\n  (= poses 수).\nposes: 시각 순 프레임 자세. 문턱을 못 넘은 프레임은 없다 (자세를 지어내지 않는다).",
+  "properties": {
+    "after_reconstruction": {
+      "title": "After Reconstruction",
+      "type": "string"
+    },
+    "alignment": {
+      "$ref": "#/$defs/Alignment"
+    },
+    "alignment_tag": {
+      "title": "Alignment Tag",
+      "type": "string"
+    },
+    "before_reconstruction": {
+      "title": "Before Reconstruction",
+      "type": "string"
+    },
+    "blurred_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Blurred Sha256"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "frame_count": {
+      "minimum": 0,
+      "title": "Frame Count",
+      "type": "integer"
+    },
+    "intrinsics": {
+      "$ref": "#/$defs/CameraIntrinsics"
+    },
+    "intrinsics_origin": {
+      "title": "Intrinsics Origin",
+      "type": "string"
+    },
+    "localized": {
+      "minimum": 0,
+      "title": "Localized",
+      "type": "integer"
+    },
+    "metric": {
+      "title": "Metric",
+      "type": "boolean"
+    },
+    "model_version": {
+      "title": "Model Version",
+      "type": "string"
+    },
+    "poses": {
+      "items": {
+        "$ref": "#/$defs/FramePose"
+      },
+      "title": "Poses",
+      "type": "array"
+    },
+    "render_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Render Hash",
+      "type": "string"
+    },
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    },
+    "stream_id": {
+      "title": "Stream Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "session_id",
+    "stream_id",
+    "model_version",
+    "before_reconstruction",
+    "after_reconstruction",
+    "alignment_tag",
+    "alignment",
+    "render_hash",
+    "intrinsics",
+    "intrinsics_origin",
+    "metric",
+    "frame_count",
+    "localized",
+    "poses",
+    "created_at"
+  ],
+  "title": "EgoLocalization",
+  "type": "object"
+}

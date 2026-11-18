@@ -1,6 +1,6 @@
 {
   "additionalProperties": false,
-  "description": "scene3d 산출물 하나의 기록 (추가 전용 표 `scene3d_records`, Alembic 0027).\n\n본문은 bucket·storage_key의 JSON이고 이 기록은 무엇을 어떤 버전으로 만들었는지만 남긴다.\nphase는 단계별 산출물에만 있다 (alignment·change_report는 None). bucket은 `raw`(원본 버킷:\n수집·블러 탐지·승인) 또는 `labeling`. 원본 버킷 키는 원본 접근 권한자만 보는 이 표에만 둔다.\nactor는 사람 승인(privacy_approval)의 검수자, 그 밖은 실행자.",
+  "description": "scene3d 산출물 하나의 기록 (추가 전용 표 `scene3d_records`, Alembic 0027).\n\n본문은 bucket·storage_key의 JSON이고 이 기록은 무엇을 어떤 버전으로 만들었는지만 남긴다.\nphase는 단계별 산출물에만 있다 (alignment·change_report·localization은 None). kind 열은 문자열\n(VARCHAR(32), 값 제약 없음)이라 종류를 더해도 마이그레이션이 없다. bucket은 `raw`(원본 버킷:\n수집·블러 탐지·승인) 또는 `labeling`. 원본 버킷 키는 원본 접근 권한자만 보는 이 표에만 둔다.\nactor는 사람 승인(privacy_approval)의 검수자, 그 밖은 실행자.",
   "properties": {
     "actor": {
       "title": "Actor",
@@ -27,7 +27,8 @@
         "render",
         "reconstruction",
         "alignment",
-        "change_report"
+        "change_report",
+        "localization"
       ],
       "title": "Kind",
       "type": "string"

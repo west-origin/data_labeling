@@ -131,6 +131,18 @@ def render_key(sid: str, phase: ScenePhase) -> str:
     return f"{phase_prefix(sid, phase)}/blurred/render.json"
 
 
+def gate_marks(raw: ObjectStore, sid: str, phase: ScenePhase) -> tuple[bool, bool]:
+    """(블러 탐지 표시가 있는가, 승인 표시가 있는가). 원본 버킷의 표시 파일이 있는지만 본다.
+
+    내용을 읽지 않는다 (`head`만 쓴다. 감사 저장소는 head를 기록하지 않으므로 아무것도 쓰지 않는다).
+    그래서 승인이 최신 탐지 세대의 것인지는 여기서 알 수 없다. 그 판정은 렌더 단계
+    (`current_approval`)가 하고, 하류는 라벨링 버킷의 렌더 표시(`render_key`)만 믿는다.
+    `dlp scene3d status`가 쓴다 (ADR 0067).
+    """
+    detected = raw.head(_latest_key(sid, phase)) is not None
+    return detected, raw.head(_approved_key(sid, phase)) is not None
+
+
 def load_capture(store: ObjectStore, sid: str, phase: ScenePhase) -> PhotoCapture:
     """수집 기록. 없으면 PrivacyGateError."""
     cap = get_model(store, capture_key(sid, phase), PhotoCapture)

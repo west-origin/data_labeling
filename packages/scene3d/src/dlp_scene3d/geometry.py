@@ -1,13 +1,16 @@
 """순수 기하: 핀홀 카메라, 다시점 삼각측량, 닮음 변환(Umeyama)과 RANSAC, 기술자 대응.
 
-DB·저장소·모델 없이 numpy만 쓴다. 좌표 규약은 `dlp_schema.scene3d` 머리말과 같다 (COLMAP 카메라,
-`x_cam = R x + t`).
+DB·저장소·모델 없이 numpy와 OpenCV의 회전 변환(Rodrigues)만 쓴다. 좌표 규약은
+`dlp_schema.scene3d` 머리말과 같다 (COLMAP 카메라, `x_cam = R x + t`). 닮음 변환을 거친 카메라 자세
+옮기기(`rigid_through_similarity`)와 두 자세 사이 보간(`interpolate_pose`)은 장면 안 바디캠 위치
+추정(ADR 0067)이 쓴다.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
+import cv2
 import numpy as np
 from numpy.typing import NDArray
 
@@ -203,3 +206,91 @@ def match_descriptors(a: F64, b: F64, ratio: float) -> NDArray[np.int64]:
     rows = np.arange(len(a))
     ok = (d[:, 0] < ratio * d[:, 1]) & (i_ba[i_ab[:, 0]] == rows)
     return np.stack([rows[ok], i_ab[ok, 0]], axis=1).astype(np.int64)
+
+
+# 전수 비교에서 한 번에 거리 행렬로 펴는 질의 행 수 (메모리 상한: 행 수 x 자료 수 x 4바이트)
+_MATCH_CHUNK = 256
+
+
+def _two_nearest(
+    query: NDArray[np.float32], data: NDArray[np.float32], data_sq: NDArray[np.float32]
+) -> tuple[F64, F64, NDArray[np.int64]]:
+    """query 각 행의 data 최근접·둘째 최근접 거리와 최근접 번호 (전수 비교, data는 2행 이상)."""
+    n = len(query)
+    d1, d2 = np.empty(n, dtype=np.float64), np.empty(n, dtype=np.float64)
+    i1 = np.empty(n, dtype=np.int64)
+    for start in range(0, n, _MATCH_CHUNK):
+        q = query[start : start + _MATCH_CHUNK]
+        sq = (q * q).sum(axis=1)[:, None] + data_sq[None, :] - 2.0 * (q @ data.T)
+        two = np.argpartition(sq, 1, axis=1)[:, :2]
+        vals = np.take_along_axis(sq, two, axis=1)
+        first = np.argmin(vals, axis=1)
+        rows = np.arange(len(q))
+        stop = start + len(q)
+        d1[start:stop] = np.sqrt(np.maximum(vals[rows, first], 0.0))
+        d2[start:stop] = np.sqrt(np.maximum(vals[rows, 1 - first], 0.0))
+        i1[start:stop] = two[rows, first]
+    return d1, d2, i1
+
+
+@dataclass(frozen=True)
+class DescriptorMatcher:
+    """기술자 한 벌(복원 점)에 여러 질의(프레임 특징)를 차례로 대응시킨다.
+
+    판정은 `match_descriptors`와 같다 (상호 최근접 + 비율 검사). 다른 점은 계산뿐이다: 자료 쪽을 한
+    번만 준비하고 행렬 곱으로 전수 비교한다. SIFT처럼 차원이 큰(128) 기술자는 k-d 트리가 전수
+    비교보다 느려서, 프레임마다 부르는 위치 추정은 이쪽을 쓴다 (ADR 0067). 거리 계산은 float32다.
+    """
+
+    data: NDArray[np.float32]
+    data_sq: NDArray[np.float32]
+
+    @classmethod
+    def build(cls, descriptors: F64) -> DescriptorMatcher:
+        """(N, D) 기술자로 만든다."""
+        data = np.ascontiguousarray(descriptors, dtype=np.float32)
+        return cls(data, (data * data).sum(axis=1))
+
+    def match(self, query: F64, ratio: float) -> NDArray[np.int64]:
+        """(M, 2) [질의 번호, 자료 번호]. 질의나 자료가 2개 미만이면 빈 배열."""
+        if len(query) < 2 or len(self.data) < 2:
+            return np.zeros((0, 2), dtype=np.int64)
+        q = np.ascontiguousarray(query, dtype=np.float32)
+        d1, d2, nearest = _two_nearest(q, self.data, self.data_sq)
+        rows = np.flatnonzero(d1 < ratio * d2)
+        if len(rows) == 0:
+            return np.zeros((0, 2), dtype=np.int64)
+        # 상호 검사는 후보가 된 자료 점만 본다 (그 점에서 가장 가까운 질의가 자기여야 한다)
+        cand = np.unique(nearest[rows])
+        _, _, back = _two_nearest(self.data[cand], q, (q * q).sum(axis=1))
+        mutual = back[np.searchsorted(cand, nearest[rows])] == rows
+        return np.stack([rows[mutual], nearest[rows][mutual]], axis=1).astype(np.int64)
+
+
+def rigid_through_similarity(r_ca: F64, t_ca: F64, a_to_b: Similarity) -> tuple[F64, F64]:
+    """a 좌표의 카메라 자세를 닮음 변환 `x_b = s R_ab x_a + t_ab`로 b 좌표의 강체 자세로 옮긴다.
+
+    `x_cam = R_ca x_a + t_ca`에 `x_a = R_abᵀ (x_b - t_ab) / s`를 넣고, 카메라 좌표의 길이 단위도 b로
+    맞추려고 양변에 s를 곱하면 `s x_cam = R_ca R_abᵀ x_b + (s t_ca - R_ca R_abᵀ t_ab)`다. 그래서
+
+        R_cb = R_ca R_abᵀ,    t_cb = s t_ca - R_cb t_ab
+
+    회전에 s를 곱하지 않는다 (자세는 강체다). 카메라 중심은 `C_b = s R_ab C_a + t_ab`로 옮겨지고,
+    같은 점의 화소 위치는 그대로이며 깊이만 s배가 된다.
+    """
+    r_cb = r_ca @ a_to_b.r.T
+    return r_cb, a_to_b.s * t_ca - r_cb @ a_to_b.t
+
+
+def interpolate_pose(r0: F64, t0: F64, r1: F64, t1: F64, alpha: float) -> tuple[F64, F64]:
+    """두 카메라 자세 사이의 자세 (alpha 0이면 첫째, 1이면 둘째).
+
+    카메라 중심 `C = -Rᵀ t`를 선형으로, 회전을 구면으로(상대 회전의 회전 벡터에 alpha를 곱한다)
+    보간한 뒤 `t = -R C`로 되돌린다. t를 바로 선형 보간하면 회전이 다른 두 자세 사이에서 카메라
+    중심이 직선 위에 있지 않다.
+    """
+    c0, c1 = -r0.T @ t0, -r1.T @ t1
+    rvec, _ = cv2.Rodrigues(r1 @ r0.T)
+    step, _ = cv2.Rodrigues(np.asarray(rvec, dtype=np.float64) * alpha)
+    r = np.asarray(step, dtype=np.float64) @ r0
+    return r, -r @ ((1.0 - alpha) * c0 + alpha * c1)

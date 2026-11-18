@@ -9,7 +9,7 @@
 의존 표는 [구조 지도](architecture.md), 바꿀 때 함께 볼 파일과 시험은
 [변경 및 복구 안내](change-guide.md)에 있다.
 
-파일 667개.
+파일 680개.
 
 ## 목차
 
@@ -183,7 +183,7 @@
 | [`review_cmds.py`](../../packages/cli/src/dlp_cli/review_cmds.py) | 검수 도구 연동·검수 운영 하위 명령 (WP6·WP12, ADR 0006·0014·0023·0024·0029). |
 | [`review_config.py`](../../packages/cli/src/dlp_cli/review_config.py) | CLI의 검수 정책·설정 선택과 매체 회수 실행 (ADR 0039). |
 | [`robot_cmds.py`](../../packages/cli/src/dlp_cli/robot_cmds.py) | 로봇 등록 확인 하위 명령 (ADR 0047·0068). |
-| [`scene3d_cmds.py`](../../packages/cli/src/dlp_cli/scene3d_cmds.py) | 청소 전후 다각도 사진의 3D 복원·물체 이동 비교 하위 명령 (ADR 0066). |
+| [`scene3d_cmds.py`](../../packages/cli/src/dlp_cli/scene3d_cmds.py) | 청소 전후 다각도 사진의 3D 복원·물체 이동 비교와 장면 안 바디캠 위치 추정 하위 명령 (ADR 0066, 0067). |
 | [`schema_cmds.py`](../../packages/cli/src/dlp_cli/schema_cmds.py) | 스키마·온톨로지·DB 하위 명령 (WP1, ADR 0002). |
 | [`sync_cmds.py`](../../packages/cli/src/dlp_cli/sync_cmds.py) | 동기화 하위 명령 (WP4, ADR 0004·0022·0028). |
 | [`train_cmds.py`](../../packages/cli/src/dlp_cli/train_cmds.py) | 재학습 하위 명령 (WP13, ADR 0016·0025). |
@@ -215,6 +215,7 @@
 | [`test_revoke_cmds.py`](../../packages/cli/tests/test_revoke_cmds.py) | 검수·프라이버시 CLI의 매체 회수 연결 (ADR 0039). |
 | [`test_robot_cmds.py`](../../packages/cli/tests/test_robot_cmds.py) | `dlp robot check` (ADR 0047): 공개 시험 로봇은 통과하고 없는 로봇·틀린 해시는 종료 코드 1. |
 | [`test_robot_hand_cmds.py`](../../packages/cli/tests/test_robot_hand_cmds.py) | `dlp robot check`의 다지 손 로봇 출력과 내보내기 요약의 손가락 줄 (ADR 0068). |
+| [`test_scene3d_cmds.py`](../../packages/cli/tests/test_scene3d_cmds.py) | `dlp scene3d …` 오프라인 종단 시험 (로컬 저장소, SQLite 파일 DB, 정답 stub, ADR 0066·0067). |
 | [`test_sync_cmds.py`](../../packages/cli/tests/test_sync_cmds.py) | `dlp sync adjust` 명령줄 인자 검사 (F-SCH-27). |
 | [`test_translate_cmds.py`](../../packages/cli/tests/test_translate_cmds.py) | `dlp translate run\|pending`와 `dlp actions run` 끝의 자동 번역 (ADR 0043). |
 
@@ -361,7 +362,7 @@
 | [`hand3d.py`](../../packages/fixtures/src/dlp_fixtures/hand3d.py) | 정답 3D를 아는 손 시퀀스: 카메라 좌표 21관절, 그 투영 2D, 손 중심 3D 점, 합성 깊이 (ADR 0044). |
 | [`io.py`](../../packages/fixtures/src/dlp_fixtures/io.py) | 픽스처 파일 입출력: WAV, Parquet, JSONL, JSON (WP2). |
 | [`retarget.py`](../../packages/fixtures/src/dlp_fixtures/retarget.py) | 정답 끝단 궤적을 아는 사람 손 점 (로봇 리타기팅 시험, ADR 0047). |
-| [`scene3d.py`](../../packages/fixtures/src/dlp_fixtures/scene3d.py) | 청소 전후 다각도 사진의 합성 정답 (ADR 0066). |
+| [`scene3d.py`](../../packages/fixtures/src/dlp_fixtures/scene3d.py) | 청소 전후 다각도 사진과 그 방을 지나는 바디캠 영상의 합성 정답 (ADR 0066, 0067). |
 | [`sessions.py`](../../packages/fixtures/src/dlp_fixtures/sessions.py) | 작업자·장소·도메인 메타데이터를 가진 가짜 세션 (WP2, WP7 분할 시험용). |
 | [`shapes.py`](../../packages/fixtures/src/dlp_fixtures/shapes.py) | 정답 모양을 아는 합성 영상: 객체·손 마스크 단계(ADR 0059) 시험용 (WP2). |
 | [`sync.py`](../../packages/fixtures/src/dlp_fixtures/sync.py) | 오프셋·드리프트를 아는 다중 스트림 동기화 시나리오 (WP2 → WP4 동기화 테스트). |
@@ -688,27 +689,37 @@
 
 | 파일 | 역할 |
 | --- | --- |
-| [`__init__.py`](../../packages/scene3d/src/dlp_scene3d/__init__.py) | 청소 전후 다각도 사진의 3D 복원과 물체 이동 비교 (ADR 0066). |
+| [`__init__.py`](../../packages/scene3d/src/dlp_scene3d/__init__.py) | 청소 전후 다각도 사진의 3D 복원·물체 이동 비교와 장면 안 바디캠 위치 추정 (ADR 0066, 0067). |
 | [`alignment.py`](../../packages/scene3d/src/dlp_scene3d/alignment.py) | after 장면 → before 장면 정렬 (고정 구조 점의 닮음 변환, 척도 포함). |
-| [`backends.py`](../../packages/scene3d/src/dlp_scene3d/backends.py) | 복원·탐지 백엔드 어댑터와 CPU stub (ADR 0066). |
+| [`backends.py`](../../packages/scene3d/src/dlp_scene3d/backends.py) | 복원·탐지·프레임 특징 백엔드 어댑터와 CPU stub (ADR 0066, 0067). |
 | [`change.py`](../../packages/scene3d/src/dlp_scene3d/change.py) | 전후 물체 대응(헝가리안)과 변화 분류. |
+| [`ego_video.py`](../../packages/scene3d/src/dlp_scene3d/ego_video.py) | 바디캠 블러본 경계: 장면 안 위치 추정이 영상 프레임을 얻는 유일한 길 (ADR 0067). |
 | [`geometry.py`](../../packages/scene3d/src/dlp_scene3d/geometry.py) | 순수 기하: 핀홀 카메라, 다시점 삼각측량, 닮음 변환(Umeyama)과 RANSAC, 기술자 대응. |
-| [`layout.py`](../../packages/scene3d/src/dlp_scene3d/layout.py) | 저장소 키 배치와 JSON 읽고 쓰기 (ADR 0066). |
+| [`layout.py`](../../packages/scene3d/src/dlp_scene3d/layout.py) | 저장소 키 배치와 JSON 읽고 쓰기 (ADR 0066, 0067). |
+| [`localize.py`](../../packages/scene3d/src/dlp_scene3d/localize.py) | 장면 안 바디캠 위치 추정과 위치 기록 읽기 (`dlp scene3d localize`, ADR 0067). |
+| [`markers.py`](../../packages/scene3d/src/dlp_scene3d/markers.py) | 크기를 아는 ArUco 마커로 복원의 미터 척도 정하기 (ADR 0067). |
 | [`objects.py`](../../packages/scene3d/src/dlp_scene3d/objects.py) | 사진별 2D 물체 탐지 → 다시점 3D 물체 (삼각측량과 시점 간 연결). |
 | [`oracle.py`](../../packages/scene3d/src/dlp_scene3d/oracle.py) | 합성 픽스처 정답 파일(truth.json, `dlp_fixtures.scene3d.write_scene_pair`)에서 stub을 만든다. |
 | [`photos.py`](../../packages/scene3d/src/dlp_scene3d/photos.py) | 사진 수집: 원본은 불변으로 원본 버킷에 두고, EXIF 방향은 읽을 때 적용한다 (ADR 0066). |
-| [`pipeline.py`](../../packages/scene3d/src/dlp_scene3d/pipeline.py) | 복원과 전후 비교 실행 (`dlp scene3d reconstruct\|compare\|report`, ADR 0066). |
-| [`policy.py`](../../packages/scene3d/src/dlp_scene3d/policy.py) | 청소 전후 3D 비교 정책 (config/policies/scene3d.yaml). |
+| [`pipeline.py`](../../packages/scene3d/src/dlp_scene3d/pipeline.py) | 복원과 전후 비교 실행 (`dlp scene3d reconstruct\|compare\|report`, ADR 0066·0067). |
+| [`pnp.py`](../../packages/scene3d/src/dlp_scene3d/pnp.py) | 2D-3D 대응에서 카메라 자세 풀기 (PnP RANSAC과 내점 다듬기, ADR 0067). |
+| [`policy.py`](../../packages/scene3d/src/dlp_scene3d/policy.py) | 청소 전후 3D 비교와 장면 안 바디캠 위치 추정 정책 (config/policies/scene3d.yaml). |
 | [`privacy_gate.py`](../../packages/scene3d/src/dlp_scene3d/privacy_gate.py) | 사진 프라이버시 게이트: 탐지 → 사람 승인 → 블러 렌더 → 하류의 블러본 확인 (ADR 0066). |
 | [`scipy_typed.py`](../../packages/scene3d/src/dlp_scene3d/scipy_typed.py) | scipy 호출(헝가리안 할당, k-최근접)의 타입 래퍼. scipy에는 타입 스텁이 없다. |
+| [`status.py`](../../packages/scene3d/src/dlp_scene3d/status.py) | 세션의 전후 3D 공간이 다 갖춰졌는지 보기 (`dlp scene3d status`, ADR 0067). |
 
 ### 시험
 
 | 파일 | 역할 |
 | --- | --- |
+| [`test_ego_geometry.py`](../../packages/scene3d/tests/test_ego_geometry.py) | 위치 추정의 순수 계산 시험: 기술자 대응기, 닮음 변환을 거친 자세, PnP, 내부 파라미터 맞춤, 보간. |
 | [`test_geometry.py`](../../packages/scene3d/tests/test_geometry.py) | 순수 기하·대응·분류 시험 (합성 정답, ADR 0066). |
+| [`test_localize.py`](../../packages/scene3d/tests/test_localize.py) | 장면 안 바디캠 위치 추정 종단 시험 (로컬 저장소, SQLite, CPU stub, ADR 0067). |
+| [`test_marker_scale.py`](../../packages/scene3d/tests/test_marker_scale.py) | 마커로 미터 척도 정하기 시험 (합성 방 사진에 원근에 맞게 그린 ArUco 마커, ADR 0067). |
 | [`test_pipeline.py`](../../packages/scene3d/tests/test_pipeline.py) | 수집 → 블러 승인 → 복원 → 전후 비교 종단 시험 (로컬 저장소, CPU stub, ADR 0066). |
-| [`test_policy_records.py`](../../packages/scene3d/tests/test_policy_records.py) | 정책·라이선스·기록 표 시험 (ADR 0066). |
+| [`test_policy_records.py`](../../packages/scene3d/tests/test_policy_records.py) | 정책·라이선스·기록 표·격리 환경 어댑터 시험 (ADR 0066, 0067). |
+| [`test_status.py`](../../packages/scene3d/tests/test_status.py) | `dlp scene3d status`의 상태 읽기 시험: 전후가 다 갖춰졌는지, 읽기 전용인지 (ADR 0067). |
+| [`world.py`](../../packages/scene3d/tests/world.py) | scene3d 시험 공용 준비: 로컬 저장소의 전후 사진 게이트·복원과, DB에 넣은 바디캠 세션·블러본. |
 
 ## packages/schema
 
@@ -753,7 +764,7 @@
 | [`predictor.py`](../../packages/schema/src/dlp_schema/predictor.py) | 자동 모델의 공통 인터페이스 (`Predictor`): 클립 하나를 받아 라벨 레코드를 내는 모델 어댑터의 규약. |
 | [`review.py`](../../packages/schema/src/dlp_schema/review.py) | 검수 작업: 외부 검수 도구(CVAT, Label Studio)의 작업과 세션·스트림의 대응. |
 | [`reviewer_changes.py`](../../packages/schema/src/dlp_schema/reviewer_changes.py) | 검수자가 직접 낸 검수 변화 (물려받기만 한 라벨 제외, F-COE-23·31·32). |
-| [`scene3d.py`](../../packages/schema/src/dlp_schema/scene3d.py) | 청소 전후 3D 비교의 계약 타입 (ADR 0066). |
+| [`scene3d.py`](../../packages/schema/src/dlp_schema/scene3d.py) | 청소 전후 3D 비교와 장면 안 바디캠 위치의 계약 타입 (ADR 0066, 0067). |
 | [`session.py`](../../packages/schema/src/dlp_schema/session.py) | 세션과 스트림의 계약 타입: 녹화 세션 하나와 그 안의 스트림, 캘리브레이션, 생애주기·프라이버시 상태. |
 | [`testing.py`](../../packages/schema/src/dlp_schema/testing.py) | 테스트용 계약 객체 생성 도우미. 다른 패키지의 테스트에서도 쓴다. |
 | [`trajectory_follow.py`](../../packages/schema/src/dlp_schema/trajectory_follow.py) | 3D 궤적이 그것을 계산한 2D 트랙의 검수 결과를 따른다 (F-COE-19·21·22, ADR 0048·0050·0051·0058). |
@@ -818,6 +829,7 @@
 | [`test_protected_retraction.py`](../../packages/schema/tests/test_protected_retraction.py) | 자동 단계가 사람이 확인한 라벨을 지우지 못하는지 (저장 시점 검사). |
 | [`test_review_queries.py`](../../packages/schema/tests/test_review_queries.py) | 검수 계획 집계의 운영 라벨·부하 규약 회귀 (실제 PostgreSQL). |
 | [`test_review_revocation.py`](../../packages/schema/tests/test_review_revocation.py) | 검수 작업 매체 회수 계약·저장소·마이그레이션 0015 (ADR 0039). 서비스 없이 SQLite로 돈다. |
+| [`test_scene3d_contracts.py`](../../packages/schema/tests/test_scene3d_contracts.py) | 청소 전후 3D·바디캠 위치 계약의 규칙 테스트 (ADR 0066·0067). |
 | [`test_trajectory_follow.py`](../../packages/schema/tests/test_trajectory_follow.py) | 3D 궤적이 그것을 계산한 2D 트랙의 검수를 따른다 (F-COE-19·21·22, ADR 0048·0050). |
 | [`test_wearer_body.py`](../../packages/schema/tests/test_wearer_body.py) | 착용자 몸 판정 규칙 (`dlp_schema.wearer_body`, ADR 0055·0058). |
 
@@ -910,7 +922,7 @@
 | [`policies/relations.yaml`](../../config/policies/relations.yaml) | 관계 도출과 표면 커버리지 정책 (WP9). 관계는 사람이 그리지 않고 이 규칙으로 만든다. 규칙을 바꾸면 `dlp relations run`이 관계를 다시 만든다: 같은 내용은 그대로 두고, 더 이상 나오지 않는 관계는 삭제 레코드로 표시하고, 새 관계만 넣는다. 검수자가 고치거나 지운 관계는 다시 넣지 않는다. 읽는 곳: dlp_relations.policy. 정책 해시(RelationsPolicy.digest, 관계·커버리지 레코드의 model_version "relations-<해시>")는 파싱된 값으로 계산하므로 주석은 해시에 영향이 없다. 검수자가 승인·표본 검증한 관계는 규칙에서 빠져도 지우지 않는다 (ADR 0015). |
 | [`policies/retarget.yaml`](../../config/policies/retarget.yaml) | 로봇 리타기팅 정책 (ADR 0047·0068, dlp_retarget.policy). 읽는 곳: `dlp export lerobot --robot <ID>` (dlp_export.robot). 로봇마다 다른 값(허용 오차, 배치, 그리퍼 또는 다지 손, IK 가중치)은 로봇 설정 config/robots/<ID>.yaml(또는 DLP_ROBOTS_DIR)에 둔다. 이 파일과 로봇 설정, 모델 파일 sha256은 리타기팅 판(retarget-...+r..+m..+p..)에 들어가 내보내기 manifest에 남는다. |
 | [`policies/review.yaml`](../../config/policies/review.yaml) | 검수 운영 정책 (WP12). 배정 비율(QA·이중·블라인드·오류 삽입)은 config/defaults.yaml review를 따른다. |
-| [`policies/scene3d.yaml`](../../config/policies/scene3d.yaml) | 청소 전후 다각도 사진의 3D 복원과 물체 이동 비교 정책 (dlp scene3d, ADR 0066). 읽는 곳: dlp_scene3d.policy.load_policy. 각 절의 해시가 그 단계 결과의 모델 버전에 들어간다 (절을 바꾸면 그 단계부터 다시 계산한다. 이전 결과는 지우지 않고 새 버전 키로 쓴다). |
+| [`policies/scene3d.yaml`](../../config/policies/scene3d.yaml) | 청소 전후 다각도 사진의 3D 복원·물체 이동 비교와 장면 안 바디캠 위치 추정 정책 (dlp scene3d, ADR 0066·0067). 읽는 곳: dlp_scene3d.policy.load_policy. 각 절의 해시가 그 단계 결과의 모델 버전에 들어간다 (절을 바꾸면 그 단계부터 다시 계산한다. 이전 결과는 지우지 않고 새 버전 키로 쓴다). 맨 아래 interpolation 절만 예외다: 위치 기록을 읽을 때만 쓰므로 바꿔도 아무것도 다시 계산하지 않는다. |
 | [`policies/sync.yaml`](../../config/policies/sync.yaml) | 동기화 정책 (WP4, ADR 0004·0028). 스트림 종류별로 방법을 순서대로 시도하고, 신뢰도가 min_confidence 이상인 첫 결과를 쓴다. |
 | [`policies/training.yaml`](../../config/policies/training.yaml) | 재학습 루프 정책 (WP13). 검수 승인 → 데이터셋 버전 → 누적 확인 → 학습 → 골든셋 평가 → 게이트(config/policies/evaluation.yaml) → 배포. 로더: dlp_train.policy.load_policy → TrainingPolicy (모르는 키는 거부, 아래 규칙은 검증기가 막는다). 사용처: dlp train run\|approve(dlp_cli.train_cmds), 배포 모델 붙이기(dlp_train.deployed). 관련 ADR 0016·0025. 이 파일은 모델 버전 해시에 들어가지 않는다 (모델 버전 태그는 과제·데이터셋 버전·학습기·파라미터·시각). |
 | [`policies/translate.yaml`](../../config/policies/translate.yaml) | 설명 라벨 영어 번역 정책 (ADR 0043). 한국어 설명(description, language=ko) 라벨마다 영어 번역 레코드(language=en)를 따로 만든다. 번역은 원문의 수정이 아니라 별도 운영 라벨이다: parent_label_id를 쓰지 않고 페이로드 source_label_id로 원문 레코드를 가리킨다. 원문이 바뀌면(새 레코드) 검수 전 번역만 지우고 다시 만든다. |
@@ -925,6 +937,7 @@
 | [`doc_coverage.py`](../../scripts/doc_coverage.py) | 패키지별 설명(docstring)·주석 양을 센다 (`make doc-coverage`). |
 | [`export_depth_onnx.py`](../../scripts/export_depth_onnx.py) | Depth Anything V2 Metric Indoor Small(공식 Hugging Face 가중치)을 ONNX로 내보낸다. |
 | [`file_map.py`](../../scripts/file_map.py) | 파일 지도 (`make file-map`): 파일마다 역할 한 문단을 모아 docs/handover/file-map.md를 만든다. |
+| [`gsplat-env/extract_frame_features.py`](../../scripts/gsplat-env/extract_frame_features.py) | 바디캠 블러본 프레임 → pycolmap SIFT 특징 → frame_features.npz (격리 환경, ADR 0067). |
 | [`gsplat-env/run_sfm.py`](../../scripts/gsplat-env/run_sfm.py) | 블러 사진 → pycolmap SfM → cameras.json, points.npz (격리 환경, ADR 0066). |
 | [`gsplat-env/train_splat.py`](../../scripts/gsplat-env/train_splat.py) | SfM 결과 + 블러 사진 → gsplat 3D 가우시안 학습 → 3DGS PLY (격리 환경, CUDA, ADR 0066). |
 | [`install/install.sh`](../../scripts/install/install.sh) | 플랫폼 설치 스크립트 (Mac·Linux·Windows WSL2, ADR 0061 7절). |

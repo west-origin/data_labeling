@@ -47,7 +47,13 @@ from dlp_schema.review import (
     ReviewTask,
     TrajectoryInheritance,
 )
-from dlp_schema.scene3d import ChangeReport, PhotoCapture, Reconstruction, Scene3dRecord
+from dlp_schema.scene3d import (
+    ChangeReport,
+    EgoLocalization,
+    PhotoCapture,
+    Reconstruction,
+    Scene3dRecord,
+)
 from dlp_schema.session import (
     LifecycleEvent,
     PrelabelStageRun,
@@ -102,6 +108,8 @@ CONTRACTS: dict[str, type[BaseModel]] = {
     "scene3d_capture": PhotoCapture,
     "scene3d_reconstruction": Reconstruction,
     "scene3d_change_report": ChangeReport,
+    # 장면 안 바디캠 위치 기록 (ADR 0067). 라벨이 아니다 (본문은 라벨링 버킷의 JSON)
+    "scene3d_localization": EgoLocalization,
 }
 
 

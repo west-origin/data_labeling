@@ -94,6 +94,9 @@
 - `packages/export/` (`dlp_export`) — COCO·구간 JSON·LeRobot·GR00T 내보내기. 데이터셋 버전에서, 영상은 블러본만, 내보내기마다
   다른 가명. LeRobot·GR00T 프레임에는 동기화된 촉각장갑 값을 싣는다 (장갑 Parquet만 감사 저장소로 원본 버킷에서 읽고, 동기화
   안 된 장갑은 싣지 않으며, 없는 값은 지어내지 않는다, ADR 0069). `dlp export coco|intervals|lerobot|gr00t`. 정책 `export.yaml`.
+- `packages/scene3d/` (`dlp_scene3d`) — 작업 전후 다각도 사진의 3D 복원(SfM·3D 가우시안 스플랫, 마커 미터 척도)·물체
+  이동 비교, 장면 안 바디캠 위치 추정, 전후 갖춤 확인 (ADR 0066·0067). `dlp scene3d
+  ingest|privacy …|reconstruct|compare|report|localize|status`. 정책 `scene3d.yaml`. 승인된 블러본만 읽는다.
 - `packages/ops/` (`dlp_ops`) — 주간 운영 지표·경고, 원본 접근 감사 리포트, 원본 보관 만료.
   `dlp ops weekly|audit-report|retention ...`. 정책 `ops.yaml`.
 - `config/` — 온톨로지·정책·기본값 YAML. 코드에 값을 하드코딩하지 않는다. 온톨로지 항목은 `ko`·`en` 이름 필수.
@@ -172,6 +175,9 @@
 - 팔꿈치가 화면 밖이거나 판정 검사를 통과하지 못하면 visibility 0으로 두고 위치를 지어내지 않는다. 팔 손목은 같은 손
   hand21 손목이다 (ADR 0058).
 - 모양 마스크는 프라이버시 블러와 무관하다 (블러는 박스 그대로). 착용자 팔·몸통은 마스크 프롬프트로 쓰지 않는다 (ADR 0058·0059).
+- 장면 3D(`dlp scene3d`)는 척도와 자세를 지어내지 않는다. 미터 척도는 크기를 아는 마커가 안정적으로 보일 때만 정하고
+  아니면 `metric=False`와 이유를 남긴다. 바디캠 위치 추정은 전후 복원·받아들인 정렬·등록된 내부 파라미터가 있을 때만
+  돌고, 문턱을 못 넘은 프레임은 기록하지 않는다. 위치 기록은 라벨이 아니다 (ADR 0067).
 - 코드 주석과 문서는 한국어, 식별자는 영어.
 - 새 파일(파이썬, `config/`·`services/`의 YAML·셸 스크립트)은 맨 위 첫 문단에 그 파일의 역할을 적는다 (파이썬은 모듈
   docstring, 그 밖은 맨 위 주석). 그 문단이 파일 지도의 한 칸이 된다 (`make file-map`).

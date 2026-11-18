@@ -73,5 +73,6 @@ ADR은 결정 당시의 이유와 이관 조건을 기록한다. 후속 ADR이 �
 | 0064 | [ADR 0064: 검수 판정 모델 학습 과제 (`aireview`) (제안)](0064-review-judge-training-task.md) |
 | 0065 | [ADR 0065: NVIDIA Isaac GR00T N1.7 미세조정 형식 내보내기 (`dlp export gr00t`)](0065-gr00t-export.md) |
 | 0066 | [ADR 0066: 청소 전후 다각도 사진의 3D 복원과 물체 이동 비교](0066-scene3d-before-after.md) |
+| 0067 | [ADR 0067: 마커로 정하는 미터 척도, 장면 안 바디캠 위치 추정, 전후 갖춤 확인](0067-scene3d-metric-scale-and-ego-localization.md) |
 | 0068 | [ADR 0068: 사람 손목·손가락 끝을 다지 손 로봇의 팔 관절과 손가락 관절로 옮긴다](0068-dexterous-hand-retargeting.md) |
 | 0069 | [ADR 0069: 촉각장갑 채널을 내보내기 에피소드 프레임에 싣기 (`dlp export lerobot\|gr00t`)](0069-tactile-channels-in-exports.md) |

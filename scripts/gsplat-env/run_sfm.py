@@ -1,6 +1,7 @@
 """블러 사진 → pycolmap SfM → cameras.json, points.npz (격리 환경, ADR 0066).
 
-TODO(real-model): 실행해 보지 않았다 (README.md). pycolmap 4.x API 기준.
+TODO(real-model): CPU판 pycolmap 4.2.1로 무늬가 있는 합성 방 그림에서만 돌려 봤다 (README.md).
+GPU 서버의 잠금 환경과 실제 사진에서는 돌려 보지 않았다.
 """
 
 from __future__ import annotations
@@ -51,20 +52,22 @@ def main() -> None:
             }
         )
     (a.out / "cameras.json").write_text(json.dumps(cams), "utf-8")
-    database = pycolmap.Database(str(db))
     desc_cache: dict[int, np.ndarray] = {}
     pts, descs, cols = [], [], []
-    for p in rec.points3D.values():
-        track = []
-        for el in p.track.elements:
-            if el.image_id not in desc_cache:
-                desc_cache[el.image_id] = np.asarray(
-                    database.read_descriptors(el.image_id), dtype=np.float64
-                )
-            track.append(desc_cache[el.image_id][el.point2D_idx])
-        pts.append(np.asarray(p.xyz))
-        descs.append(np.mean(track, axis=0))
-        cols.append(np.asarray(p.color))
+    # pycolmap 4.x: Database는 생성자가 없고 open()으로 연다. read_descriptors는 기술자 묶음
+    # (FeatureDescriptors)을 돌려주며 배열은 그 .data다 (CPU판 4.2.1로 확인, README.md)
+    with pycolmap.Database.open(db) as database:
+        for p in rec.points3D.values():
+            track = []
+            for el in p.track.elements:
+                if el.image_id not in desc_cache:
+                    desc_cache[el.image_id] = np.asarray(
+                        database.read_descriptors(el.image_id).data, dtype=np.float64
+                    )
+                track.append(desc_cache[el.image_id][el.point2D_idx])
+            pts.append(np.asarray(p.xyz))
+            descs.append(np.mean(track, axis=0))
+            cols.append(np.asarray(p.color))
     np.savez(
         a.out / "points.npz",
         points=np.asarray(pts),
