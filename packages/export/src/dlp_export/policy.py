@@ -6,7 +6,8 @@
 - `excluded_kinds`에 `blur_track`이 반드시 있어야 한다 (블러 라벨은 어떤 형식에도 내보내지 않는다).
 
 주요 클래스: `ExportPolicy`(최상위), `CocoPolicy`, `IntervalsPolicy`, `LeRobotPolicy`,
-`LeRobotEnv`(격리 환경), `Gr00tPolicy`·`Gr00tVideo`(GR00T 형식, ADR 0065), `IdsPolicy`(가명).
+`LeRobotEnv`(격리 환경), `Gr00tPolicy`·`Gr00tVideo`(GR00T 형식, ADR 0065), `TactilePolicy`(촉각장갑
+채널, ADR 0069), `IdsPolicy`(가명).
 """
 
 from __future__ import annotations
@@ -112,6 +113,35 @@ class Gr00tPolicy(Contract):
     video: Gr00tVideo
 
 
+class TactilePolicy(Contract):
+    """export.yaml `tactile` 절: 에피소드 프레임에 싣는 촉각장갑 채널 (lerobot·gr00t, ADR 0069)."""
+
+    # 거짓이면 장갑 값을 싣지 않고 원본 버킷의 장갑 Parquet도 읽지 않는다 (기록도 남기지 않는다)
+    enabled: bool
+    # 실을 채널 이름 접두사. 비면 정규화 Parquet의 채널 전부, 있으면 그중 하나로 시작하는 채널만
+    channel_prefixes: tuple[str, ...]
+    # 프레임 시각 앞뒤 장갑 샘플의 간격(마스터 시각 ms)이 이보다 크면 그 프레임 값은 없음이다
+    interp_max_gap_ms: int = Field(ge=1)
+    # 장갑 기록 구간 안 프레임 중 값이 있는 비율이 이보다 낮으면 내보내기 경고를 낸다 (0~1)
+    min_coverage: float = Field(ge=0, le=1)
+
+    @field_validator("channel_prefixes")
+    @classmethod
+    def _prefixes(cls, v: tuple[str, ...]) -> tuple[str, ...]:
+        """빈 접두사·같은 접두사 두 번을 거부한다.
+
+        빈 문자열은 모든 채널과 맞아 "전부"를 뜻하게 되는데, 전부는 목록을 비워 적는다.
+
+        Raises:
+            ValueError: 빈 접두사가 있거나 같은 접두사가 두 번 있을 때.
+        """
+        if any(not p for p in v) or len(set(v)) != len(v):
+            raise ValueError(
+                f"channel_prefixes에 빈 접두사나 같은 접두사가 두 번 있습니다: {list(v)}"
+            )
+        return v
+
+
 class IdsPolicy(Contract):
     """export.yaml `ids` 절: 작업자·장소·세션·라벨 ID 가명 (ADR 0021·0027)."""
 
@@ -137,6 +167,7 @@ class ExportPolicy(Contract):
     intervals: IntervalsPolicy
     lerobot: LeRobotPolicy
     gr00t: Gr00tPolicy
+    tactile: TactilePolicy
     ids: IdsPolicy
 
     @field_validator("label_states")

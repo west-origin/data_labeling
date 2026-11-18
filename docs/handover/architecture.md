@@ -30,7 +30,7 @@ Prefect 서비스가 기동된 것만으로 모든 작업이 영속 큐에서 �
 | 배정·QA·품질 | [review ops](../../packages/review/src/dlp_review/ops/)(AI 판정 품질 `ai_quality.py`, WP17.8) | 위 검수 정책, `config/defaults.yaml` |
 | 계약·온톨로지·DB | [schema](../../packages/schema/src/dlp_schema/), `db/` | `config/ontology/v1`, `schemas/`는 생성물 |
 | 데이터셋·학습·평가 | [datasets](../../packages/datasets/src/dlp_datasets/), [training](../../packages/training/src/dlp_train/), [evaluation](../../packages/evaluation/src/dlp_eval/) | `dataset.yaml`, `training.yaml`, `evaluation.yaml` |
-| 내보내기·게시 | [export runner](../../packages/export/src/dlp_export/runner.py), 같은 디렉터리의 형식별 모듈 (GR00T: `gr00t.py`·확인기 `gr00t_check.py`, ADR 0065) | `config/policies/export.yaml` |
+| 내보내기·게시 | [export runner](../../packages/export/src/dlp_export/runner.py), 같은 디렉터리의 형식별 모듈 (GR00T: `gr00t.py`·확인기 `gr00t_check.py`, ADR 0065), 촉각장갑 채널 [tactile.py](../../packages/export/src/dlp_export/tactile.py)(lerobot·gr00t 프레임 시각의 장갑 값, ADR 0069) | `config/policies/export.yaml`(`tactile` 절), 원본 접근 용도 `config/policies/ops.yaml audit.service_purposes` |
 | 운영 콘솔 (ADR 0061) | [console](../../packages/console/src/dlp_console/)의 `app.py`(API·토큰), `jobs.py`(`dlp` 명령 작업 실행·JSON Lines 기록), `steps.py`·`global_steps.py`(단계 활성 규칙·명령), `status.py`(DB 읽기 전용), `upload.py`(매니페스트), `preview.py`(블러본 서명 URL), `training.py`(회차 그래프 자료), `pretrain.py`·`imports.py`(외부 학습 가중치 가져오기), 화면 `static/`, [CLI](../../packages/cli/src/dlp_cli/console_cmds.py) | `config/console.yaml`, `config/review_ui.yaml`(테마), 안내 [operator-guide.md](operator-guide.md) |
 | 모델·합성 정답·운영·선별 | [models](../../packages/models/src/dlp_models/), [fixtures](../../packages/fixtures/src/dlp_fixtures/), [ops](../../packages/ops/src/dlp_ops/), [active](../../packages/active/src/dlp_active/) | 모델 레지스트리, 각 정책 |
 
@@ -92,7 +92,8 @@ console의 privacy 의존은 블러본 서명 전 렌더 게이트(`assert_rende
 원본 검수자는 `reviewers.privacy`와 CVAT 사용자 연결로 제한한다. 검수 결과는 작업 담당자의 도구
 계정(CVAT job 담당자, Label Studio `label_studio.users` 계정이 만들고 고친 주석)의 것만 받는다.
 일반 검수자·행동 VLM·큐레이션·내보내기는 승인된 블러본을 사용한다. 프라이버시 탐지·서버 내 프리라벨 추론은 감사되는 원본을
-사용한다. `DLP_ACTOR`는 기록용 자기 신고 값이며 인증 체계는 아니다.
+사용한다. 내보내기(lerobot·gr00t)는 영상은 블러본만 쓰고, 촉각장갑 정규화 Parquet(센서 값)만 감사되는 원본 버킷에서
+읽는다 (ADR 0069). `DLP_ACTOR`는 기록용 자기 신고 값이며 인증 체계는 아니다.
 
 탐지·렌더·검수 생성/수집은 세션 행 잠금을 사용한다. 일부 함수는 영상 처리와 외부 API 호출까지
 같은 DB 트랜잭션 안에서 수행하므로 다른 작업을 오래 기다리게 할 수 있다. 원본 접근 감사는
@@ -128,8 +129,9 @@ console의 privacy 의존은 블러본 서명 전 렌더 게이트(`assert_rende
 - **원본 버킷 / 블러본**: 원본 버킷(`config/defaults.yaml buckets.raw`, 기본 `dlp-raw`)은 블러 전 영상·센서
   파일과 그 파생물(프록시·PTS 인덱스 등)이다. 원본 권한자와 서버 내 추론만 감사 저장소
   (`dlp_cli.raw_access.raw_store`)로 읽는다. 블러본은 승인된 블러 라벨로 렌더한 영상으로 라벨링 버킷
-  (`buckets.labeling`)에 있고, 일반 검수자·행동 VLM·AI 1차 검수·큐레이션·학습·내보내기는 이것만 쓴다.
-  "지금 승인된 블러본"은 렌더 해시가 지금 승인과 맞는 것이다.
+  (`buckets.labeling`)에 있고, 일반 검수자·행동 VLM·AI 1차 검수·큐레이션·학습·내보내기는 영상을 이것으로만 받는다.
+  영상이 아닌 센서 파일(장갑·IMU 정규화 Parquet)은 검수 시계열, AI 1차 검수의 장갑 문장, 내보내기의 촉각 채널
+  (ADR 0069)이 같은 감사 저장소로 읽는다. "지금 승인된 블러본"은 렌더 해시가 지금 승인과 맞는 것이다.
 - **`+r<n>`** (`dlp_prelabel.runner.stage_version`): 3D·자세·월드·마스크 단계 버전 끝의 재실행 세대 표시.
   입력이 되돌아와 이전에 낸 적 있는 버전을 다시 만들 때 새 라벨 ID가 이전 것과 겹치지 않게 붙인다. n은 표시를
   뗀 같은 버전으로 이미 쓴(돈) 세대 수다. 다른 단계에는 없다(아래 프리라벨 절의 재실행 판정).
@@ -159,7 +161,8 @@ uv 워크스페이스 멤버. `src/<모듈>/`과 `tests/`를 둔다.
 ### `packages/fixtures/` (`dlp_fixtures`)
 
 정답을 아는 합성 데이터: 가짜 세션, 오프셋·드리프트를 아는 동기화 신호와
-QR 슬레이트 MP4, 위치를 아는 블러 대상 VFR 영상, 경계를 아는 행동 시퀀스(손 키포인트·장갑 압력·정답 라벨).
+QR 슬레이트 MP4, 위치를 아는 블러 대상 VFR 영상, 경계를 아는 행동 시퀀스(손 키포인트·장갑 압력·정답 라벨),
+시계와 채널 신호의 식을 아는 촉각장갑 기록(`tactile.py`, 내보내기 촉각 채널 시험, ADR 0069).
 알고리즘 모듈의 테스트는 이 생성기로 작성하고, 생성기 출력의 정답을 기준으로 판정한다.
 
 ### `packages/media/` (`dlp_media`)
@@ -410,6 +413,14 @@ manifest `verification_policy.trajectory3d`는 3D 검수 근거(2D에서 물려�
 COCO `wearer_arm` 범주, LeRobot `annotation.wearer_arm`(arm3 2D + 팔꿈치 3D, ADR 0058).
 리타기팅이 버린 에피소드 보고에는 세션 가명을 싣지 않는다 (`session_id: null`, F-COE-76).
 COCO에 마스크 `segmentation`(압축 RLE)·`mask_score`·`hand`, 객체 hand 범주가 손 키포인트 범주를 겸한다 (ADR 0059).
+촉각장갑 채널(`tactile.py`, ADR 0069): lerobot·gr00t가 세션의 동기화된 장갑 스트림(glove_left·glove_right) 값을
+에피소드 프레임 시각에 싣는다. 장갑 샘플 시각은 `Stream.to_master_ms`로 마스터 시각으로 옮기고 앞뒤 샘플 사이를 선형
+보간한다. 기록 범위 밖과 샘플 간격이 `tactile.interp_max_gap_ms`를 넘는 프레임은 값 0·표시 0이다. LeRobot은
+`observation.tactile.<손>`(채널 값 + present), GR00T는 `observation.state`의 `<손>_tactile` 구간(modality.json state)과
+`observation.tactile_valid`이고 action에는 없다. 동기화되지 않은 장갑은 싣지 않고 기록한다. 같은 손의 채널 구성이
+세션마다 다르면 거부한다. 장갑 Parquet은 `run_export`의 `raw`(감사 저장소, 용도 `export.lerobot`·`export.gr00t`)로만
+읽고 결과에는 원본 위치가 없다. 채널·장갑 기종·세션별 상태는 `meta/dlp_tactile.json`과 manifest `details.tactile`.
+장갑 스트림이 없는 세션만 내보내면 결과가 전과 같다. 정책은 `export.yaml tactile`.
 
 ### `packages/ops/` (`dlp_ops`)
 

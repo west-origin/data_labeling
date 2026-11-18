@@ -66,6 +66,11 @@ audit:
     - scene3d.ingest
     - scene3d.privacy-detect
     - scene3d.privacy-render
+    # 촉각장갑 채널 내보내기 (ADR 0069): `dlp export lerobot|gr00t`가 동기화된 장갑 스트림의 정규화 Parquet만 읽어
+    # 프레임 시각의 값을 싣는다 (export.yaml tactile.enabled가 켜져 있을 때). 영상은 라벨링 버킷의 승인된 블러본에서만
+    # 얻고, 결과물에는 원본 위치를 넣지 않는다. coco·intervals는 원본을 읽지 않는다.
+    - export.lerobot
+    - export.gr00t
   # 원본을 볼 수 있는 사람 = config/policies/review.yaml reviewers.privacy + 아래
   # 원본 버킷 이름·용도 문자열이 아니라 사람 ID(DLP_ACTOR, 검수 담당자 ID)를 적는다. 예: 감사인, 보안 담당
   raw_viewers: []

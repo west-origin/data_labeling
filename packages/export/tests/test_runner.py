@@ -12,10 +12,13 @@ import uuid
 from collections.abc import Iterator
 from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
 import numpy as np
+import pyarrow.parquet as pq
 import pytest
 import sqlalchemy as sa
+from numpy.typing import NDArray
 
 from dlp_datasets.build import build_dataset_version
 from dlp_datasets.lineage import session_lineage, withdraw_session
@@ -26,12 +29,17 @@ from dlp_export.policy import ExportPolicy
 from dlp_export.pseudonym import Pseudonymizer
 from dlp_export.runner import id_map_key, run_export
 from dlp_export.source import ExportError
+from dlp_fixtures.sync import ClockTruth
+from dlp_fixtures.tactile import generate_glove_truth
 from dlp_fixtures.video import vfr_times
+from dlp_media.audit import AuditedStore, DbAccessSink
 from dlp_media.storage import LocalStore, sha256_file
+from dlp_schema.dataset import Split
 from dlp_schema.db.migrate import upgrade
 from dlp_schema.db.repository import (
     insert_labels,
     insert_session,
+    list_raw_access,
     register_ontology,
     set_privacy_state,
 )
@@ -40,7 +48,20 @@ from dlp_schema.ontology import Ontology
 from dlp_schema.session import PrivacyState
 from dlp_schema.testing import FIXED_TIME, make_session
 
-from .conftest import ROOT, record_render, scenario_labels, write_blurred
+from .conftest import (
+    RAW_BUCKET,
+    ROOT,
+    Glove,
+    assert_glove_values,
+    glove_key,
+    record_render,
+    scenario_labels,
+    write_blurred,
+)
+
+# pyarrow에는 타입 스텁이 없다 (dlp_export.gr00t와 같다)
+# pyright: reportMissingTypeStubs=false, reportUnknownMemberType=false
+# pyright: reportUnknownVariableType=false, reportUnknownArgumentType=false
 
 pytestmark = pytest.mark.services
 
@@ -655,3 +676,225 @@ def test_export_refuses_blurred_video_after_privacy_reopened(
     labeling.put_file("sessions/s0/blurred/bodycam.mp4", other, "0" * 64)
     with pytest.raises(ExportError, match="렌더 기록과 다릅니다"):
         export()
+
+
+# ---------------------------------------------------------------- 촉각장갑 (ADR 0069)
+
+
+def _tactile_dataset(
+    engine: sa.Engine, ontology: Ontology, tmp_path: Path, purpose: str
+) -> tuple[LocalSnapshotStore, LocalStore, LocalStore, AuditedStore, Glove]:
+    """촉각 종단 시험의 데이터셋 버전 dv1과 저장소.
+
+    세션 tacA는 오른손 장갑이 동기화돼 있고(오프셋 +250 ms, 배율 1.01: 영상 시작 뒤 녹화를 시작해
+    영상보다 먼저 끝난다), tacB는 오른손 장갑이 동기화 전이고, tacC는 장갑이 없다. 장갑 Parquet은
+    로컬 원본 버킷에 두고, 내보내기에 넘길 저장소는 DB에 접근 기록을 남기는 감사 저장소다.
+
+    Returns:
+        (스냅샷 저장소, 라벨링 버킷, 데이터셋 버킷, 원본 감사 저장소, tacA의 장갑 정답).
+    """
+    snapshots = LocalSnapshotStore(tmp_path / "snap")
+    labeling = LocalStore(tmp_path / "store", "dlp-labeling")
+    datasets = LocalStore(tmp_path / "store", "dlp-datasets")
+    raw_local = LocalStore(tmp_path / "store", RAW_BUCKET)
+    raw = AuditedStore(raw_local, DbAccessSink(engine), actor="svc-pipeline", purpose=purpose)
+    times = vfr_times(np.random.default_rng(5), 1500)
+    synced = Glove(
+        "glove_right",
+        generate_glove_truth(
+            7, clock=ClockTruth(offset_ms=250.0, clock_scale=1.01), duration_ms=900.0
+        ),
+    )
+    idle = generate_glove_truth(
+        8, clock=ClockTruth(offset_ms=0.0, clock_scale=1.0), duration_ms=1500.0
+    )
+    worn: dict[str, list[Glove]] = {
+        "tacA": [synced],
+        "tacB": [Glove("glove_right", idle, synced=False)],
+        "tacC": [],
+    }
+    with engine.begin() as conn:
+        register_ontology(conn, ontology)
+        for i, (sid, gloves) in enumerate(worn.items()):
+            bodycam = {
+                "stream_id": "bodycam", "kind": "bodycam", "sync_method": "reference",
+                "uri": f"s3://{RAW_BUCKET}/sessions/{sid}/bodycam.mp4",
+            }  # fmt: skip
+            session = make_session(
+                sid, worker_id=f"w{i}", site_id=f"x{i}",
+                streams=[bodycam, *(g.stream(sid) for g in gloves)],
+                calibration={"glove_model": "syn-glove-a"} if gloves else {},
+            )  # fmt: skip
+            insert_session(
+                conn, session.model_copy(update={"privacy_state": PrivacyState.APPROVED})
+            )
+            insert_labels(conn, scenario_labels(sid, times))
+            write_blurred(labeling, sid, times, tmp_path)
+            for g in gloves:
+                g.upload(raw_local, sid, tmp_path)
+        build_dataset_version(
+            conn, snapshots, load_dataset_policy(ROOT), version_id="dv1",
+            ontology_version="1.0.0", golden_set_version=None, now=FIXED_TIME,
+        )  # fmt: skip
+    return snapshots, labeling, datasets, raw, synced
+
+
+def _assert_no_internal_names(root: Path) -> None:
+    """내보내기 폴더의 모든 파일(바이트)에 원본 버킷 이름·장갑 Parquet 키·내부 세션 ID가 없다."""
+    for path in (p for p in root.rglob("*") if p.is_file()):
+        data = path.read_bytes()
+        for needle in (RAW_BUCKET, "derived/", "glove_right", "tacA", "tacB", "tacC"):
+            assert needle.encode() not in data, (path.name, needle)
+
+
+def _frame_times(episode: dict[str, Any], fps: int) -> NDArray[np.float64]:
+    """meta/dlp_episodes.json 행 → 에피소드 프레임의 마스터 시각 (시작 + k/fps)."""
+    return float(episode["start_ms"]) + np.arange(int(episode["frames"])) * 1000.0 / fps
+
+
+@pytest.mark.skipif(
+    shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None, reason="FFmpeg 필요"
+)
+def test_gr00t_export_carries_tactile_end_to_end(
+    engine: sa.Engine, policy: ExportPolicy, ontology: Ontology, tmp_path: Path
+) -> None:
+    """촉각장갑 종단 (ADR 0069): 데이터셋 버전 → `run_export(fmt="gr00t", raw=…)` → 올린 결과.
+
+    정답: 스냅샷에 고정된 동기화 값으로 tacA 에피소드의 right_tactile 구간 값이 정답 신호를 프레임
+    시각에서 읽은 값과 같고(기록 범위 밖 프레임은 없음), tacB(동기화 전)·tacC(장갑 없음)는 값 0·
+    표시 0이다. manifest details.tactile = meta/dlp_tactile.json이고 세션은 가명으로 적힌다. 올린
+    gr00t/가 확인기를 통과한다. 원본 접근 기록에는 tacA의 장갑 Parquet 읽기 한 건만 용도
+    export.gr00t로 남고, 결과 파일 어디에도 원본 버킷 이름·장갑 키·내부 세션 ID가 없다.
+    """
+    snapshots, labeling, datasets, raw, synced = _tactile_dataset(
+        engine, ontology, tmp_path, "export.gr00t"
+    )
+    r = run_export(
+        engine, root=ROOT, version_id="dv1", fmt="gr00t", target="internal",
+        snapshots=snapshots, labeling=labeling, datasets=datasets, raw_bucket=RAW_BUCKET,
+        policy=policy, ontology=ontology, include_unreviewed=False, splits=tuple(Split),
+        now=FIXED_TIME, id_secret=b"k", raw=raw,
+    )  # fmt: skip
+    root = tmp_path / "store" / "dlp-datasets" / "exports" / r.record.export_id
+    out = root / "gr00t"
+    alias = r.session_pseudonyms
+    assert set(r.record.session_ids) == {"tacA", "tacB", "tacC"}
+    assert check_dataset(out, policy.gr00t.video.ffprobe) == []
+    manifest = json.loads((root / "manifest.json").read_text())
+    meta = json.loads((out / "meta" / "dlp_tactile.json").read_text())
+    assert manifest["details"]["tactile"] == meta == r.details["tactile"]
+    assert "gr00t/meta/dlp_tactile.json" in manifest["files"]
+    assert meta["hands"] == {
+        "right": {
+            "channels": [f"pressure_{i}" for i in range(5)],
+            "state_key": "right_tactile",
+            "valid_column": "observation.tactile_valid",
+            "valid_name": "right.tactile",
+        }
+    }
+    assert {s["session_id"]: s["hands"]["right"]["status"] for s in meta["sessions"]} == {
+        alias["tacA"]: "exported", alias["tacB"]: "not_synced", alias["tacC"]: "no_glove",
+    }  # fmt: skip
+    assert any("동기화되지 않아" in w for w in manifest["details"]["warnings"])
+    episodes = {
+        e["session_id"]: e for e in json.loads((out / "meta" / "dlp_episodes.json").read_text())
+    }
+    span = json.loads((out / "meta" / "modality.json").read_text())["state"]["right_tactile"]
+    for sid in ("tacA", "tacB", "tacC"):
+        e = episodes[alias[sid]]
+        t = pq.read_table(out / f"data/chunk-000/episode_{e['episode_index']:06d}.parquet")
+        columns = t.to_pydict()
+        state = np.array(columns["observation.state"])[:, span["start"] : span["end"]]
+        valid = np.array(columns["observation.tactile_valid"])[:, 0]
+        if sid == "tacA":
+            frame_ms = _frame_times(e, policy.lerobot.fps)
+            assert_glove_values(
+                state, valid, synced.truth, frame_ms, policy.tactile.interp_max_gap_ms
+            )
+            assert valid.any() and not valid.all()  # 장갑 기록 범위 밖 프레임이 있다
+        else:
+            assert not state.any() and not valid.any()
+    with engine.connect() as conn:
+        events = list_raw_access(conn)
+    assert [(e.action, e.purpose, e.bucket, e.key, e.session_id, e.actor) for e in events] == [
+        ("read", "export.gr00t", RAW_BUCKET, glove_key("tacA", "glove_right"), "tacA",
+         "svc-pipeline")
+    ]  # fmt: skip
+    _assert_no_internal_names(root)
+
+
+def test_lerobot_export_hands_tactile_features_to_the_writer(
+    engine: sa.Engine,
+    policy: ExportPolicy,
+    ontology: Ontology,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """LeRobot 내보내기가 촉각 특징을 쓰기 묶음에 싣고 기록을 남긴다 (ADR 0069).
+
+    격리 환경 대신 쓰기·읽기 스크립트를 대역으로 바꿔 기본 서비스 테스트로 돈다 (공식 API로 쓰는
+    확인은 `test_tactile.py`의 isolated_env 시험). 정답: 묶음의 특징에 observation.tactile.right가
+    있고, tacA 에피소드의 배열이 정답 신호와 같다. 올린 lerobot/meta/dlp_tactile.json =
+    manifest details.tactile (손의 위치는 LeRobot 특징 이름). 원본 접근 용도는 export.lerobot이다.
+    """
+    from dlp_export import runner
+
+    seen: dict[str, Any] = {}
+
+    def fake_run_script(root: Path, lp: object, script: str, *args: str) -> str:
+        if script == "lerobot_write.py":
+            spec = json.loads(Path(args[0]).read_text())
+            seen["spec"] = spec
+            seen["arrays"] = [dict(np.load(e["npz"])) for e in spec["episodes"]]
+            (Path(args[1]) / "meta").mkdir(parents=True, exist_ok=True)
+            (Path(args[1]) / "meta" / "info.json").write_text(
+                json.dumps({"n": len(spec["episodes"])})
+            )
+            return ""
+        n_eps = json.loads((Path(args[0]) / "meta" / "info.json").read_text())["n"]
+        return json.dumps({"episodes": n_eps, "frames": 1})
+
+    monkeypatch.setattr(runner, "run_script", fake_run_script)
+    snapshots, labeling, datasets, raw, synced = _tactile_dataset(
+        engine, ontology, tmp_path, "export.lerobot"
+    )
+    r = run_export(
+        engine, root=ROOT, version_id="dv1", fmt="lerobot", target="internal",
+        snapshots=snapshots, labeling=labeling, datasets=datasets, raw_bucket=RAW_BUCKET,
+        policy=policy, ontology=ontology, include_unreviewed=False, splits=tuple(Split),
+        now=FIXED_TIME, id_secret=b"k", raw=raw,
+    )  # fmt: skip
+    root = tmp_path / "store" / "dlp-datasets" / "exports" / r.record.export_id
+    out = root / "lerobot"
+    alias = r.session_pseudonyms
+    spec = seen["spec"]
+    assert spec["features"]["observation.tactile.right"]["names"] == [
+        *(f"right.tactile.pressure_{i}" for i in range(5)),
+        "right.tactile.present",
+    ]
+    assert "observation.tactile.left" not in spec["features"]
+    assert spec["frame_arrays"]["observation.tactile.right"] == "tactile_right"
+    rows = json.loads((out / "meta" / "dlp_episodes.json").read_text())
+    for row, package, arrays in zip(rows, spec["episodes"], seen["arrays"], strict=True):
+        assert row["session_id"] == package["session_id"]
+        got = arrays["tactile_right"]
+        if row["session_id"] == alias["tacA"]:
+            frame_ms = _frame_times(row, policy.lerobot.fps)
+            assert_glove_values(
+                got[:, :-1], got[:, -1], synced.truth, frame_ms, policy.tactile.interp_max_gap_ms
+            )
+            assert got[:, -1].any()
+        else:
+            assert not got.any()
+    manifest = json.loads((root / "manifest.json").read_text())
+    meta = json.loads((out / "meta" / "dlp_tactile.json").read_text())
+    assert manifest["details"]["tactile"] == meta == r.details["tactile"]
+    assert "lerobot/meta/dlp_tactile.json" in manifest["files"]
+    assert meta["hands"]["right"]["feature"] == "observation.tactile.right"
+    assert meta["hands"]["right"]["present"] == "right.tactile.present"
+    with engine.connect() as conn:
+        events = list_raw_access(conn)
+    assert [(e.purpose, e.key) for e in events] == [
+        ("export.lerobot", glove_key("tacA", "glove_right"))
+    ]
+    _assert_no_internal_names(root)

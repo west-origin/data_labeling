@@ -34,6 +34,8 @@
 - `generate_shape_scenario` (`shapes.py`): 정답 마스크를 아는 객체·손 영상 (ADR 0059, 마스크 단계
   시험).
 - `aireview_scene` (`aireview.py`): AI 1차 검수 벤치 입력 (ADR 0040, `dlp aireview bench`).
+- `generate_glove_truth` (`tactile.py`): 시계(오프셋·드리프트)와 채널 신호의 식을 아는 촉각장갑
+  기록. 정답 = 어느 마스터 시각에서든 식으로 구한 채널 값 (ADR 0069, 내보내기 촉각 채널 시험).
 
 시간 규약 (ADR 0019)
 - 라벨 시각은 정수 ms다. 프레임 번호로 대신하지 않는다.

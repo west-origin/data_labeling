@@ -67,9 +67,10 @@ flowchart LR
 ```
 
 원본 버킷은 `dlp_cli.raw_access.raw_store`로만 연다. 이 함수는 모든 접근을 `raw_access_log` 표에 남긴다.
-일반 검수자, 행동 분류 VLM, AI 1차 검수, 학습, 내보내기는 블러본만 받는다. 블러본을 쓰는 단계는
+일반 검수자, 행동 분류 VLM, AI 1차 검수, 학습, 내보내기는 영상을 블러본으로만 받는다. 블러본을 쓰는 단계는
 `dlp_privacy.rendering.assert_render_current`로 렌더 해시가 지금 승인과 맞는지 확인한다. 검수 중 블러가 바뀌면
-승인이 풀리고, 이미 나간 라벨링 작업은 회수된다.
+승인이 풀리고, 이미 나간 라벨링 작업은 회수된다. 영상이 아닌 장갑 센서 값(정규화 Parquet)은 원본 버킷에 있어,
+그것을 쓰는 단계(접촉 초안, 검수 시계열, AI 1차 검수의 장갑 문장, 내보내기의 촉각 채널)는 같은 감사 경로로 읽는다.
 
 자동 초안은 서버 안에서 원본으로 추론한다. 사람에게 보여 주지 않으므로 허용된다. 세션 상태(lifecycle)는
 승인 뒤에 돌려야 `prelabeled`로 올라간다.
@@ -151,6 +152,11 @@ flowchart LR
 `dlp export <형식> <데이터셋 버전>`은 기본으로 사람이 만들거나 승인·수정·표본 검증한 라벨만 넣는다. 미검수
 라벨은 `--include-unreviewed`를 줄 때만 넣는다. 블러 라벨, 원본 위치, 검수자 ID는 어떤 형식에도 넣지 않는다.
 작업자 가명은 내보내기마다 다르게 만든다.
+
+`lerobot`과 `gr00t` 에피소드에는 세션의 촉각장갑 값도 프레임마다 실린다. 장갑 샘플 시각을 `dlp sync run`의
+결과로 마스터 시각으로 옮겨 그 프레임 시각의 값을 구한다. 동기화되지 않은 장갑은 싣지 않고 내보내기 기록에
+남긴다. 장갑 기록이 없는 프레임은 값을 지어내지 않고 "없음"으로 표시한다
+([ADR 0069](docs/adr/0069-tactile-channels-in-exports.md)).
 
 ### 세션 상태는 한 방향으로 한 칸씩 간다
 
@@ -275,7 +281,7 @@ uv run dlp export coco <데이터셋 버전>
 | `evaluation` (`dlp_eval`) | 지표, 골든셋 평가, 배포 게이트 | `dlp eval golden` | `evaluation.yaml` |
 | `active` (`dlp_active`) | 액티브 러닝 점수, FiftyOne 연동 | `dlp active rank` | `active.yaml` |
 | `retarget` (`dlp_retarget`) | 고객 로봇 리타기팅 | `dlp robot check`, `dlp export lerobot --robot` | `retarget.yaml` |
-| `export` (`dlp_export`) | COCO·구간 JSON·LeRobot·GR00T(NVIDIA Isaac GR00T N1.7, ADR 0065) 내보내기 | `dlp export coco`, `intervals`, `lerobot`, `gr00t`, `gr00t-check` | `export.yaml` |
+| `export` (`dlp_export`) | COCO·구간 JSON·LeRobot·GR00T(NVIDIA Isaac GR00T N1.7, ADR 0065) 내보내기. LeRobot·GR00T 프레임에 촉각장갑 채널(ADR 0069) | `dlp export coco`, `intervals`, `lerobot`, `gr00t`, `gr00t-check` | `export.yaml` |
 | `scene3d` (`dlp_scene3d`) | 청소 전후 여러 각도 사진의 3D 복원(SfM·3D 가우시안 스플랫)과 물체 이동 비교 (ADR 0066, 실제 GPU 복원은 미검증) | `dlp scene3d ingest`, `reconstruct`, `compare`, `report` | `scene3d.yaml` |
 | `ops` (`dlp_ops`) | 주간 지표, 원본 접근 감사, 보관 만료 | `dlp ops weekly`, `audit-report`, `retention` | `ops.yaml` |
 | `console` (`dlp_console`) | 브라우저 운영 콘솔. `dlp` 명령을 작업으로 돌리고 DB는 읽기만 한다 | `dlp console serve` | `config/console.yaml` |

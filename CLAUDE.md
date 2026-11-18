@@ -90,8 +90,9 @@
   `dlp console serve`. 설정 `config/console.yaml`. 도메인 로직을 두지 않는다.
 - `packages/active/` (`dlp_active`) — 액티브 러닝 세션 점수, FiftyOne 연동(블러본만, 선택 설치).
   `dlp active rank|fiftyone`. 정책 `active.yaml`.
-- `packages/export/` (`dlp_export`) — COCO·구간 JSON·LeRobot 내보내기. 데이터셋 버전에서, 블러본만, 내보내기마다 다른 가명.
-  `dlp export coco|intervals|lerobot`. 정책 `export.yaml`.
+- `packages/export/` (`dlp_export`) — COCO·구간 JSON·LeRobot·GR00T 내보내기. 데이터셋 버전에서, 영상은 블러본만, 내보내기마다
+  다른 가명. LeRobot·GR00T 프레임에는 동기화된 촉각장갑 값을 싣는다 (장갑 Parquet만 감사 저장소로 원본 버킷에서 읽고, 동기화
+  안 된 장갑은 싣지 않으며, 없는 값은 지어내지 않는다, ADR 0069). `dlp export coco|intervals|lerobot|gr00t`. 정책 `export.yaml`.
 - `packages/ops/` (`dlp_ops`) — 주간 운영 지표·경고, 원본 접근 감사 리포트, 원본 보관 만료.
   `dlp ops weekly|audit-report|retention ...`. 정책 `ops.yaml`.
 - `config/` — 온톨로지·정책·기본값 YAML. 코드에 값을 하드코딩하지 않는다. 온톨로지 항목은 `ko`·`en` 이름 필수.

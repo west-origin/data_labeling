@@ -48,6 +48,11 @@
   마다 그 시각에 쓴 라벨의 가장 낮은 검증 등급 (미검수 0, 표본 검증 1, 사람 승인 2,
   사람 수정·작성 3, 라벨 없음 -1).
 - task: 그 시각의 작업(task 수준 구간) ID, 없으면 세션 도메인.
+- observation.tactile.<손> (float32, 장갑을 실은 세션이 있을 때만): 그 프레임 시각의 촉각장갑 채널
+  값 + 끝에 present(값이 있으면 1, 없으면 0이고 값도 0). 장갑 샘플 시각은 그 스트림의 동기화
+  결과로 마스터 시각으로 옮겨 읽는다. 값·보간·없음 규칙은 `dlp_export.tactile`(ADR 0069)에 있고,
+  `write_package`가 사람 모드·로봇 모드 특징 위에 덧붙인다. 채널 이름·장갑 기종은
+  meta/dlp_tactile.json.
 어휘(번호 → ID)는 meta/dlp_vocab.json에 둔다.
 
 시각 규약 (ADR 0019): 에피소드 시각은 마스터 시각이다. 공간 라벨(키포인트·3D 궤적)은 `stream_ms`로
@@ -72,6 +77,7 @@ from numpy.typing import NDArray
 from dlp_export.frames import stream_ms
 from dlp_export.policy import ExportPolicy, LeRobotPolicy
 from dlp_export.pseudonym import Pseudonymizer
+from dlp_export.tactile import TactileData
 from dlp_media.pts import PtsIndex
 from dlp_schema.export import PhysicalPriorTable, physical_prior_table
 from dlp_schema.labels import (
@@ -789,6 +795,7 @@ def write_package(
     pkg: Path,
     ids: Pseudonymizer,
     override: PackageOverride | None = None,
+    tactile: TactileData | None = None,
 ) -> Path:
     """격리 환경의 쓰기 스크립트가 읽을 묶음 (package.json + 에피소드마다 npz).
 
@@ -802,6 +809,8 @@ def write_package(
         pkg: 묶음을 쓸 디렉터리 (만든다).
         ids: 가명 함수 (package.json의 session_id는 가명).
         override: 로봇 모드 특징·배열 (None이면 사람 모드, ADR 0047).
+        tactile: 촉각장갑 값 (episodes와 같은 순서, ADR 0069). 사람 모드·로봇 모드 특징 위에
+            `observation.tactile.<손>`을 덧붙인다. None이거나 실은 손이 없으면 묶음이 그대로다.
 
     Returns:
         package.json 경로.
@@ -828,16 +837,23 @@ def write_package(
         }
         if override is not None:
             arrays.update(override.extra[i])
+        if tactile is not None:
+            arrays.update(tactile.lerobot_arrays(i))
         np.savez(npz, **arrays)  # pyright: ignore[reportArgumentType]
         items.append({"session_id": ids.session(session.session_id), "video": str(video),
                       "npz": str(npz), "tasks": ep.tasks})  # fmt: skip
     feats = features(lp, h, w) if override is None else override.features(h, w)
+    frame_arrays = FRAME_ARRAYS if override is None else override.arrays
+    if tactile is not None:
+        # 촉각 특징은 모드와 무관하게 덧붙인다 (로봇 모드에서도 사람 장갑 값 그대로, ADR 0069)
+        feats = {**feats, **tactile.lerobot_features()}
+        frame_arrays = {**frame_arrays, **tactile.lerobot_frame_arrays()}
     spec = {
         "repo_id": lp.repo_id, "fps": lp.fps, "vcodec": lp.vcodec,
         "robot_type": lp.robot_type if override is None else override.robot_type,
         "width": w, "height": h, "features": feats, "episodes": items,
         "video_key": video_key(lp),
-        "frame_arrays": FRAME_ARRAYS if override is None else override.arrays,
+        "frame_arrays": frame_arrays,
     }  # fmt: skip
     path = pkg / "package.json"
     path.write_text(json.dumps(spec, ensure_ascii=False), "utf-8")

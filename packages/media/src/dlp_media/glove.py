@@ -4,7 +4,8 @@
 
 """촉각장갑 데이터 수집. Parquet·HDF5를 읽어 정규화된 Parquet(t_ms + 채널 열)으로 바꾼다.
 
-원 샘플레이트를 그대로 유지한다. 영상 프레임 시각으로의 리샘플은 동기화 이후 단계에서 한다.
+원 샘플레이트를 그대로 유지한다. 영상 프레임 시각으로의 리샘플은 동기화 이후 단계에서 한다
+(내보내기 에피소드 프레임 시각의 채널 값은 `dlp_export.tactile`, ADR 0069).
 
 WP3, ADR 0003. 수집(`ingest`)이 장갑 스트림(glove_left·glove_right)마다 `read_glove`로 읽어
 원본 버킷 `sessions/<세션>/derived/<스트림>.parquet`에 정규화본을 둔다 (Stream.uri가 가리킨다).

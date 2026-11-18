@@ -11,6 +11,10 @@ dlp_export 테스트 공용 픽스처. 블러본은 `dlp_fixtures.video.vfr_time
   act(사람 승인 행동 200~700 ms), task(사람 작업 구간 0~500 ms) — 기본 검증 정책으로 내보내는 것.
 - blur(블러), seed(오류 삽입), seedfix(오류 삽입의 후손), blind(블라인드 측정) — 어떤 옵션으로도
   내보내면 안 되는 것.
+
+촉각장갑 시험(ADR 0069)용 도우미: `Glove`·`glove_key`는 정답을 아는 장갑 기록
+(`dlp_fixtures.tactile`)을 세션 스트림 계약과 원본 버킷의 정규화 Parquet으로 옮기고,
+`glove_oracle`·`assert_glove_values`는 내보낸 프레임 값을 구현과 따로 구한 정답과 맞춘다.
 """
 
 from __future__ import annotations
@@ -21,8 +25,10 @@ from typing import Any
 
 import numpy as np
 import pytest
+from numpy.typing import NDArray
 
 from dlp_export.policy import ExportPolicy, load_policy
+from dlp_fixtures.tactile import GloveTruth
 from dlp_fixtures.video import vfr_times, write_video
 from dlp_media.storage import LocalStore, sha256_file
 from dlp_privacy.policy import load_policy as load_privacy_policy
@@ -34,6 +40,8 @@ from dlp_schema.testing import FIXED_TIME, make_label, make_session
 
 ROOT = Path(__file__).resolve().parents[3]
 W, H = 64, 48
+# 시험용 원본 버킷 이름 (결과물에 이 이름이 없어야 한다)
+RAW_BUCKET = "dlp-raw"
 
 
 @pytest.fixture(scope="session")
@@ -179,6 +187,92 @@ def record_render(
     digest = render_hash(operational_blur(history, stream), load_privacy_policy(ROOT))
     write_render_meta(labeling, sid, stream, RenderMeta(digest, sha), tmp)
     return digest
+
+
+def glove_key(sid: str, stream_id: str) -> str:
+    """원본 버킷 안 장갑 정규화 Parquet의 키 (`dlp ingest`가 두는 자리)."""
+    return f"sessions/{sid}/derived/{stream_id}.parquet"
+
+
+@dataclass(frozen=True)
+class Glove:
+    """세션에 넣을 장갑 스트림 하나와 그 정답 기록.
+
+    name: 스트림 ID이자 종류 (glove_left, glove_right).
+    truth: 정답 기록 (시계·채널 신호·샘플).
+    synced: 거짓이면 동기화 전 스트림(unsynced, 오프셋 0·배율 1)으로 넣는다.
+    manual_ms: 정답 오프셋 중 이만큼을 사람 미세 조정(`manual_adjustment_ms`)으로 나눠 적는다
+        (자동 오프셋 + 조정 = 정답 오프셋).
+    """
+
+    name: str
+    truth: GloveTruth
+    synced: bool = True
+    manual_ms: float = 0.0
+
+    def stream(self, sid: str) -> dict[str, Any]:
+        """`make_session(streams=[…])`에 넣을 스트림 (위치는 로컬 원본 버킷의 정규화 Parquet)."""
+        clock = self.truth.clock
+        sync: dict[str, Any] = (
+            {
+                "offset_ms": clock.offset_ms - self.manual_ms,
+                "clock_scale": clock.clock_scale,
+                "manual_adjustment_ms": self.manual_ms,
+                "sync_method": "tap_event",
+                "sync_confidence": 0.9,
+            }
+            if self.synced
+            else {}
+        )
+        return {
+            "stream_id": self.name,
+            "kind": self.name,
+            "uri": f"local://{RAW_BUCKET}/{glove_key(sid, self.name)}",
+            "sample_rate_hz": 100.0,
+            **sync,
+        }
+
+    def upload(self, raw: LocalStore, sid: str, tmp: Path) -> None:
+        """정답 기록을 정규화 Parquet으로 원본 버킷에 올린다 (감사 기록을 거치지 않는 준비 단계)."""
+        path = tmp / f"{sid}-{self.name}.parquet"
+        self.truth.write(path)
+        raw.put_file(glove_key(sid, self.name), path, sha256_file(path))
+
+
+def glove_oracle(
+    g: GloveTruth, frame_ms: NDArray[np.float64], max_gap_ms: float
+) -> tuple[NDArray[np.float64], NDArray[np.bool_], NDArray[np.float64]]:
+    """정답: 프레임마다 (채널 값, 값이 있어야 하는가, 허용 오차).
+
+    구현(`frame_values`)과 따로 프레임마다 앞뒤 샘플을 직접 찾는다. 앞뒤에 샘플이 있고 그 간격이
+    한도 안이면 값이 있어야 하고, 정답은 식으로 구한 그 시각의 값이다. 허용 오차는 그 간격에서의
+    선형 보간 오차 상한(+ float32 반올림)이다.
+    """
+    master = g.master_ms
+    values = np.zeros((frame_ms.size, len(g.channels)))
+    valid = np.zeros(frame_ms.size, dtype=bool)
+    tol = np.zeros(frame_ms.size)
+    for k, t in enumerate(frame_ms):
+        before, after = master[master <= t], master[master >= t]
+        if before.size and after.size and after[0] - before[-1] <= max_gap_ms:
+            valid[k] = True
+            values[k] = g.truth(float(t))[0]
+            tol[k] = g.linear_error_bound(float(after[0] - before[-1])) + 1e-5
+    return values, valid, tol
+
+
+def assert_glove_values(
+    values: NDArray[Any],
+    valid: NDArray[Any],
+    g: GloveTruth,
+    frame_ms: NDArray[np.float64],
+    gap: float,
+) -> None:
+    """내보낸 (값, 유효 표시)가 정답과 같다: 유효 프레임은 허용 오차 안, 나머지는 값 0."""
+    want, want_valid, tol = glove_oracle(g, frame_ms, gap)
+    assert np.array_equal(valid.astype(bool), want_valid)
+    assert (np.abs(values - want)[want_valid].max(axis=1) <= tol[want_valid]).all()
+    assert not values[~want_valid].any()
 
 
 @pytest.fixture

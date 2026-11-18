@@ -9,7 +9,8 @@ python scripts/lerobot_check.py <루트> <repo_id>
 출력(표준 출력 JSON 한 줄): 프레임 수, 에피소드 수, fps, 특징 이름, task 목록, 그리고
 처음·가운데·끝 프레임 표본(인덱스, 에피소드, 타임스탬프(초), 영상 크기·평균 밝기, 상태·주석 값(손 3D
 점 방식·내부 파라미터 출처·접촉 객체 클래스 포함),
-로봇 리타기팅 모드(ADR 0047)면 `extra`에 observation.human_state·retarget.* 값).
+로봇 리타기팅 모드(ADR 0047)면 `extra`에 observation.human_state·retarget.* 값,
+촉각장갑 특징(ADR 0069)이 있으면 `extra`에 observation.tactile.<손> 값).
 호출자가 이 값을 기대값(에피소드 수, 주석 값)과 비교해 공식 로더로 읽힘을 확인한다.
 """
 
@@ -65,10 +66,12 @@ def main() -> None:
                 for k in INT_ANNOTATIONS
                 if k in ds.features
             },
+            # 로봇 모드 특징(ADR 0047)과 촉각장갑 특징(ADR 0069, 채널 값 + present). 있을 때만
             "extra": {
                 k: [float(v) for v in x[k].reshape(-1)]
                 for k in sorted(ds.features)
-                if k.startswith("retarget.") or k == "observation.human_state"
+                if k.startswith(("retarget.", "observation.tactile."))
+                or k == "observation.human_state"
             },
         })  # fmt: skip
     print(json.dumps(out))

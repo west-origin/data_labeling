@@ -6,7 +6,8 @@
    (lerobot은 격리 환경에서 공식 API로 쓰고 공식 로더로 다시 읽는다). lerobot에 로봇 ID를 주면
    세션 월드 좌표 손을 그 로봇 관절 궤적으로 옮긴 에피소드를 쓴다 (`dlp_export.robot`, ADR 0047).
    gr00t는 같은 에피소드를 GR00T LeRobot v2.1 배치로 쓰고 `dlp_export.gr00t_check`로 다시 확인한다
-   (ADR 0065).
+   (ADR 0065). lerobot·gr00t는 세션에 동기화된 촉각장갑 스트림이 있으면 프레임 시각의 장갑 채널
+   값을 함께 싣는다 (`dlp_export.tactile`, export.yaml tactile, ADR 0069).
 3. manifest.json (대상, 일시, 형식, 검증 정책, 세션, 라벨 수, 파일 목록과 sha256)을 넣고, 원본 버킷
    위치가 없는지 확인한다. 작업자·장소·세션·라벨 ID는 내보내기마다 다른 가명으로 바꾼다
    (export.yaml ids, ADR 0027). 내보내기 이력(exports.session_ids)에는 내부 세션 ID를 남기고,
@@ -28,8 +29,11 @@
 이력이 실제보다 많은 쪽(미완성 내보내기도 기록)이 안전하다.
 
 DB 쓰기: `exports`(record_export), `session_lifecycle_events`·`sessions`(set_lifecycle).
-저장소 쓰기: 데이터셋 버킷 `exports/<ID>/…`, `internal/export-id-maps/<ID>.json`. 원본 버킷은 읽지도
-쓰지도 않는다 (라벨링·데이터셋 버킷이 원본 버킷이면 바로 실패).
+저장소 쓰기: 데이터셋 버킷 `exports/<ID>/…`, `internal/export-id-maps/<ID>.json`. 원본 버킷에는 쓰지
+않는다 (라벨링·데이터셋 버킷이 원본 버킷이면 바로 실패). 원본 버킷에서 읽는 것은 lerobot·gr00t
+형식의 장갑 정규화 Parquet뿐이고(영상은 늘 라벨링 버킷의 블러본), 호출자가 넘긴 감사 저장소
+(`run_export`의 `raw`, `dlp_cli.raw_access.raw_store`)로만 읽어 접근이 `raw_access_log`에 남는다.
+결과물에 원본 위치가 없는지는 형식과 관계없이 `assert_no_raw`가 본다.
 """
 
 from __future__ import annotations
@@ -75,6 +79,8 @@ from dlp_export.source import (
     load_source,
     walk_files,
 )
+from dlp_export.tactile import TactileCollector, TactileData
+from dlp_media.audit import AuditedStore
 from dlp_media.probe import probe
 from dlp_media.pts import build_pts_index
 from dlp_media.storage import ObjectStore, sha256_file
@@ -201,8 +207,10 @@ class BuiltEpisodes:
 
     items: list[tuple[ExportSession, Path, Episode]]  # (세션, 블러본 로컬 경로, 에피소드), 세션 순
     sessions: list[dict[str, Any]]  # meta/dlp_episodes.json 행 (가명 세션 ID·분할·손 3D 채움)
-    warnings: list[str]  # 손 3D 채움 비율 경고 (manifest details.warnings)
+    warnings: list[str]  # 손 3D 채움 비율·촉각장갑 경고 (manifest details.warnings)
     size: tuple[int, int] = (0, 0)  # 처음 넣은 에피소드의 블러본 크기 (모든 에피소드를 이 크기로)
+    # 촉각장갑 값과 세션 기록 (items와 같은 순서). 장갑 스트림이 있는 세션이 없으면 None (ADR 0069)
+    tactile: TactileData | None = None
 
 
 def build_episodes(
@@ -213,6 +221,7 @@ def build_episodes(
     work: Path,
     ids: Pseudonymizer,
     run: _RobotRun | None = None,
+    raw: AuditedStore | None = None,
 ) -> BuiltEpisodes:
     """세션마다 `video_stream` 블러본 하나로 에피소드 하나를 만든다.
 
@@ -222,11 +231,19 @@ def build_episodes(
     에피소드를 빼고, 그 에피소드는 크기·화면비 기준에 넣지 않는다. 궤적 구간 안 손 3D 채움 비율이
     `min_hand_points_3d_coverage`보다 낮으면 경고를 남긴다.
 
+    촉각장갑 값(ADR 0069): 정책 `tactile.enabled`가 켜져 있으면 내보내는 에피소드마다 그 세션의
+    장갑 스트림을 에피소드 프레임 시각에서 읽어 `tactile`에 담는다 (`TactileCollector`). 동기화된
+    장갑의 정규화 Parquet은 `raw`(원본 버킷 감사 저장소)로만 읽는다. 버린 에피소드의 장갑은 읽지
+    않는다.
+
     Raises:
-        ExportError: 에피소드끼리 화면비가 `aspect_tolerance` 넘게 다를 때.
+        ExportError: 에피소드끼리 화면비가 `aspect_tolerance` 넘게 다를 때. 촉각장갑: 동기화된
+            장갑이 있는데 `raw`가 없을 때, 장갑 Parquet이 없거나 읽을 수 없을 때, 같은 손의 채널
+            구성이 세션마다 다를 때.
     """
     lp = policy.lerobot
     out = BuiltEpisodes([], [], [])
+    tactile = TactileCollector(raw, policy.tactile, work) if policy.tactile.enabled else None
     size: tuple[int, int] | None = None
     for es in src.sessions:
         stream = next((s for s in es.session.streams if s.kind.value == lp.video_stream), None)
@@ -244,6 +261,8 @@ def build_episodes(
             continue  # 정책이 버리기로 한 에피소드 (보고에는 남고 크기·화면비 기준에 넣지 않는다)
         size = _dataset_size(size, (info.width, info.height), es, lp)
         out.items.append((es, video, ep))
+        if tactile is not None:
+            tactile.add(es.session, sid, ep.times_ms)
         coverage = ep.hand_points_3d_coverage
         out.sessions.append(
             {
@@ -264,6 +283,9 @@ def build_episodes(
             )
     if size is not None:
         out.size = size
+    if tactile is not None:
+        out.tactile = tactile.result()
+        out.warnings += tactile.warnings
     return out
 
 
@@ -277,6 +299,7 @@ def _lerobot(
     work: Path,
     ids: Pseudonymizer,
     robot: str | None = None,
+    raw: AuditedStore | None = None,
 ) -> tuple[list[LabelRecord], set[str], dict[str, Any]]:
     """(내보낸 라벨, 내보낸 세션(내부 ID), 세부 정보). 결과 파일의 세션 ID는 가명이다.
 
@@ -284,18 +307,21 @@ def _lerobot(
     격리 환경에서 `out/lerobot`에 쓰고 공식 로더로 다시 읽어 에피소드 수를 확인한 뒤,
     meta/dlp_vocab.json(어휘)과 meta/dlp_episodes.json(에피소드 → 세션 가명·분할·손 3D 채움)을
     덧붙인다. 궤적 구간 안 손 3D 채움 비율이 `min_hand_points_3d_coverage`보다 낮은 에피소드는
-    세부 정보 `warnings`에 남긴다 (manifest details, CLI 출력).
+    세부 정보 `warnings`에 남긴다 (manifest details, CLI 출력). 촉각장갑 스트림이 있는 세션이
+    있으면 프레임 값을 특징으로 싣고(`build_episodes`, `raw`로 읽는다) meta/dlp_tactile.json과
+    세부 정보 `tactile`에 채널·세션별 상태를 남긴다 (ADR 0069, 로봇 모드도 같다).
 
     Raises:
         ExportError: 손 3D 점·리타기팅 손 부위가 온톨로지 hand_joints에 없을 때, 내보내는
             에피소드끼리 화면비가 `aspect_tolerance` 넘게 다를 때(리타기팅 정책이 버린 에피소드는
-            크기·화면비 기준에 넣지 않는다), 쓸 세션이 없을 때, 로더가 읽은 에피소드 수가 다를 때.
+            크기·화면비 기준에 넣지 않는다), 쓸 세션이 없을 때, 로더가 읽은 에피소드 수가 다를 때,
+            촉각장갑 값을 읽을 수 없거나 채널 구성이 세션마다 다를 때.
         subprocess.CalledProcessError: 격리 환경 스크립트가 실패했을 때.
     """
     vocab = Vocab.from_ontology(ontology)
     run = _RobotRun.load(root, robot) if robot is not None else None
     check_hand_parts(ontology, policy.lerobot, run.policy if run is not None else None)
-    built = build_episodes(src, policy, vocab, labeling, work, ids, run)
+    built = build_episodes(src, policy, vocab, labeling, work, ids, run, raw)
     if not built.items:
         dropped = " (리타기팅 정책이 모든 에피소드를 버렸습니다)" if run and run.reports else ""
         raise ExportError(f"{policy.lerobot.video_stream} 스트림이 있는 세션이 없습니다{dropped}")
@@ -306,7 +332,7 @@ def _lerobot(
     if run is not None:
         pairs = [(ep, r) for (_, _, ep), r in zip(episodes, run.results, strict=True)]
         override = robot_override(pairs, policy.lerobot, run.robot)
-    pkg = write_package(episodes, policy, size, work / "lerobot_pkg", ids, override)
+    pkg = write_package(episodes, policy, size, work / "lerobot_pkg", ids, override, built.tactile)
     dest = out / "lerobot"
     # 격리 환경: 공식 API로 쓰고, 공식 로더로 다시 읽어 확인 (JSON을 표준 출력으로 돌려준다)
     run_script(root, policy.lerobot, "lerobot_write.py", str(pkg), str(dest))
@@ -326,6 +352,12 @@ def _lerobot(
     }  # fmt: skip
     if warnings:
         details["warnings"] = warnings
+    if built.tactile is not None:
+        # 촉각장갑 채널·장갑 기종·세션별 상태 (manifest details에도 들어간다, ADR 0069)
+        details["tactile"] = built.tactile.meta("lerobot")
+        (dest / "meta" / "dlp_tactile.json").write_text(
+            json.dumps(details["tactile"], ensure_ascii=False, indent=2), "utf-8"
+        )
     if run is not None:
         # 로봇·모델 sha256·리타기팅 판·에피소드별 도달 가능성 보고 (manifest details에도 들어간다)
         details["retarget"] = run.meta()
@@ -361,25 +393,27 @@ def _gr00t(
     out: Path,
     work: Path,
     ids: Pseudonymizer,
+    raw: AuditedStore | None = None,
 ) -> tuple[list[LabelRecord], set[str], dict[str, Any]]:
     """GR00T LeRobot v2.1 (`out/gr00t`, ADR 0065). (내보낸 라벨, 내보낸 세션(내부 ID), 세부 정보).
 
     에피소드는 lerobot 형식과 같다 (`build_episodes`). 쓴 뒤 `check_dataset`으로 NVIDIA 요구를 다시
     확인하고,
-    문제가 있으면 올리지 않고 실패한다.
+    문제가 있으면 올리지 않고 실패한다. 촉각장갑 스트림이 있는 세션이 있으면 프레임 값을 state
+    구간으로 싣고(`raw`로 읽는다) 세부 정보 `tactile`에 채널·세션별 상태를 남긴다 (ADR 0069).
 
     Raises:
         ExportError: 손 3D 점이 온톨로지에 없을 때, 쓸 세션이 없을 때, 화면비가 다를 때, 확인에
         실패했을 때,
-            ffmpeg가 실패했을 때.
+            ffmpeg가 실패했을 때, 촉각장갑 값을 읽을 수 없거나 채널 구성이 세션마다 다를 때.
     """
     vocab = Vocab.from_ontology(ontology)
     check_hand_parts(ontology, policy.lerobot, None)
-    built = build_episodes(src, policy, vocab, labeling, work, ids)
+    built = build_episodes(src, policy, vocab, labeling, work, ids, raw=raw)
     if not built.items:
         raise ExportError(f"{policy.lerobot.video_stream} 스트림이 있는 세션이 없습니다")
     dest = out / "gr00t"
-    r = write_gr00t(built.items, built.sessions, policy, vocab, built.size, dest)
+    r = write_gr00t(built.items, built.sessions, policy, vocab, built.size, dest, built.tactile)
     problems = check_dataset(dest, policy.gr00t.video.ffprobe)
     if problems:
         raise ExportError("GR00T 형식 확인 실패: " + "; ".join(problems[:10]))
@@ -389,6 +423,9 @@ def _gr00t(
     }  # fmt: skip
     if built.warnings:
         details["warnings"] = built.warnings
+    if built.tactile is not None:
+        # meta/dlp_tactile.json과 같은 내용 (채널·장갑 기종·세션별 상태)
+        details["tactile"] = built.tactile.meta("gr00t")
     return _used_labels(src, written, r.used), written, details
 
 
@@ -518,6 +555,7 @@ def run_export(  # noqa: C901
     now: datetime,
     id_secret: bytes | None = None,
     robot: str | None = None,
+    raw: AuditedStore | None = None,
 ) -> ExportResult:
     """내보내기 하나. DB 트랜잭션은 이 함수가 연다 (이력은 올리기 전에 따로 커밋한다).
 
@@ -542,13 +580,18 @@ def run_export(  # noqa: C901
         id_secret: 작업자·장소·세션·라벨 가명 비밀값 바이트 (CLI가 `check_secret`으로 확인한 뒤
             넘긴다). 없으면 실행마다 임의 값을 써 가명을 재현할 수 없다. 세션 추적용 내부 대응표는
             별도로 남는다 (export.yaml ids).
+        raw: 원본 버킷 감사 저장소 (`dlp_cli.raw_access.raw_store`, 용도 `export.<형식>`). lerobot·
+            gr00t가 동기화된 촉각장갑 스트림의 정규화 Parquet을 읽는 데만 쓴다 (ADR 0069,
+            export.yaml `tactile.enabled`). 다른 형식은 쓰지 않는다. None인데 실을 장갑이 있으면
+            실패한다.
 
     Returns:
         `ExportResult`.
 
     Raises:
-        ExportError: 원본 버킷을 쓰려 할 때, 내보낼 세션이 없을 때, 원본 위치가 결과에 있을 때,
-            내보내는 동안·올리는 동안 사용 중지된 세션이 있을 때, 블러본 문제 등.
+        ExportError: 라벨링·데이터셋 버킷이 원본 버킷일 때, `raw`가 원본 버킷이 아닐 때, 내보낼
+            세션이 없을 때, 원본 위치가 결과에 있을 때, 내보내는 동안·올리는 동안 사용 중지된
+            세션이 있을 때, 블러본·촉각장갑 문제 등.
         ValueError: `record_export`가 버전 밖·사용 중지 세션을 거부할 때.
         OSError 등: 올리기 실패 (이력은 이미 커밋되어 남는다).
 
@@ -557,7 +600,12 @@ def run_export(  # noqa: C901
     새 ID로).
     """
     if labeling.bucket == raw_bucket or datasets.bucket == raw_bucket:
-        raise ExportError("내보내기는 원본 버킷을 읽거나 쓰지 않습니다")
+        raise ExportError(
+            "라벨링·데이터셋 버킷이 원본 버킷입니다. 내보내기는 영상을 원본 버킷에서 읽지 않고 "
+            "원본 버킷에 쓰지 않습니다"
+        )
+    if raw is not None and raw.bucket != raw_bucket:
+        raise ExportError(f"촉각장갑을 읽을 저장소({raw.bucket})가 원본 버킷이 아닙니다")
     if robot is not None and fmt != "lerobot":
         raise ExportError("로봇 리타기팅(--robot)은 lerobot 형식에서만 씁니다")
     privacy = load_privacy_policy(root)
@@ -593,10 +641,10 @@ def run_export(  # noqa: C901
             details = {"images": r.images, "annotations": r.annotations, "dropped": r.dropped}
             written, used = r.sessions, list(r.labels.values())
         elif fmt == "gr00t":
-            used, written, details = _gr00t(src, policy, ontology, labeling, out, work, ids)
+            used, written, details = _gr00t(src, policy, ontology, labeling, out, work, ids, raw)
         else:
             used, written, details = _lerobot(
-                root, src, policy, ontology, labeling, out, work, ids, robot
+                root, src, policy, ontology, labeling, out, work, ids, robot, raw
             )
         if not written:
             raise ExportError(f"{version_id}: 이 형식으로 쓴 세션이 없습니다")

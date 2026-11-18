@@ -6,13 +6,16 @@
 규칙 (CLAUDE.md, ADR 0018·0021):
 - 기본은 사람이 만들거나 승인·수정·표본 검증한 라벨만 넣는다. 미검수는 `--include-unreviewed` 또는
   `config/defaults.yaml export.include_unreviewed`로만 넣는다.
-- 블러 라벨·원본 위치·검수자 ID는 어떤 형식에도 넣지 않는다. 블러본만 쓰고 원본 버킷을 읽거나 쓰지
-  않는다 (`run_export`가 버킷 이름을 비교해 거부).
+- 블러 라벨·원본 위치·검수자 ID는 어떤 형식에도 넣지 않는다. 영상은 블러본만 쓰고 원본 버킷에
+  쓰지 않는다 (`run_export`가 버킷 이름을 비교해 거부).
+- 원본 버킷에서 읽는 것은 lerobot·gr00t의 촉각장갑 정규화 Parquet뿐이다 (ADR 0069). 감사 저장소
+  `raw_store(..., "export.lerobot")`·`raw_store(..., "export.gr00t")`로만 읽어 접근이
+  `raw_access_log`에 남는다. `export.yaml tactile.enabled`가 꺼져 있으면 열지 않는다.
 - 작업자·장소·세션·라벨 ID는 내보내기마다 다른 가명(HMAC, 키 = `DLP_EXPORT_ID_SECRET` + 내보내기
   ID)으로 바꾼다. 개발용 비밀값은 `DLP_ENV=dev`에서만 받는다.
 - 내보내기 이력(`exports`)은 올리기 전에 따로 커밋한다 (`run_export`가 트랜잭션을 연다).
 
-정책 출처: `config/policies/export.yaml`(`ids`, `splits`, `excluded_kinds`, 형식별 설정),
+정책 출처: `config/policies/export.yaml`(`ids`, `splits`, `excluded_kinds`, 형식별 설정, `tactile`),
 `dataset.yaml lakefs`, `config/defaults.yaml`(`buckets`, `export.include_unreviewed`), `--robot`이면
 `retarget.yaml`과 로봇 설정.
 
@@ -28,13 +31,19 @@
     `dlp_export.gr00t_check`로 다시 확인한다. `--target`은 받는 곳 이름(내보내기
     ID와 이력에 들어간다), `--split`(반복) 기본은 정책 `splits`, `--store`(기본 `s3`)는
     라벨링·데이터셋 버킷 지정이다. `--robot`은 lerobot에서만 쓰고 사람 손을 그 로봇 관절 궤적으로
-    옮긴다 (`config/robots/<ID>.yaml` 또는 `DLP_ROBOTS_DIR`, ADR 0047). 원본 버킷: 접근하지 않는다.
+    옮긴다 (`config/robots/<ID>.yaml` 또는 `DLP_ROBOTS_DIR`, ADR 0047). lerobot·gr00t는 세션에
+    동기화된 촉각장갑 스트림이 있으면 프레임마다 그 시각의 장갑 채널 값을 싣고(`dlp_export.tactile`,
+    ADR 0069), 채널·세션별 상태를 meta/dlp_tactile.json과 manifest `details.tactile`에 남긴다.
+    원본 버킷: coco·intervals는 접근하지 않는다. lerobot·gr00t는 동기화된 장갑의 정규화 Parquet만
+    읽는다 (같은 `--store` 지정, 감사 저장소 용도 `export.lerobot`·`export.gr00t`).
     종료 코드: 0 성공, 2 가명 비밀값이 운영 환경에서 개발용 값(`check_secret`). `ExportError`(내보낼
-    세션 없음, 원본 버킷 사용, lerobot이 아닌 형식에 `--robot` 등)는 예외로 1이다.
+    세션 없음, 원본 버킷 사용, lerobot이 아닌 형식에 `--robot`, 장갑 채널 구성이 세션마다 다름
+    등)는 예외로 1이다.
 
 `dlp export gr00t-check <디렉터리>`
     GR00T LeRobot 데이터셋 디렉터리를 NVIDIA 공개 요구(배치·열·modality 구간·주석 번호·H.264 영상
-    프레임 수)로 확인한다 (`dlp_export.gr00t_check.check_dataset`). 종료 코드: 0 통과, 1 문제 있음.
+    프레임 수)로 확인한다 (`dlp_export.gr00t_check.check_dataset`). meta/dlp_tactile.json이 있으면
+    촉각장갑 구간이 그 채널 목록과 맞는지도 본다 (ADR 0069). 종료 코드: 0 통과, 1 문제 있음.
 """
 
 from __future__ import annotations
@@ -48,16 +57,34 @@ from typing import Any
 import sqlalchemy as sa
 
 from dlp_cli.ontology_access import dataset_ontology
+from dlp_cli.raw_access import raw_store
 from dlp_cli.schema_cmds import database_url
 from dlp_datasets.policy import load_policy as load_dataset_policy
 from dlp_datasets.snapshot import LakeFSSnapshotStore
 from dlp_export.gr00t_check import check_dataset
-from dlp_export.policy import load_policy
+from dlp_export.policy import ExportPolicy, load_policy
 from dlp_export.pseudonym import check_secret
 from dlp_export.runner import run_export
+from dlp_media.audit import AuditedStore
 from dlp_media.storage import store_from_spec
 from dlp_schema import load_config, repo_root
 from dlp_schema.dataset import Split
+
+
+def tactile_store(args: argparse.Namespace, policy: ExportPolicy) -> AuditedStore | None:
+    """촉각장갑 Parquet을 읽을 원본 감사 저장소 (ADR 0069). 필요 없으면 None.
+
+    lerobot·gr00t 형식이고 `export.yaml tactile.enabled`가 켜져 있을 때만 연다. 용도는 명령 이름
+    (`export.lerobot`, `export.gr00t`)이고 `ops.yaml audit.service_purposes`에 등록돼 있다. 저장소를
+    여는 것만으로는 접근 기록이 남지 않는다 (장갑 Parquet을 읽을 때마다 남는다).
+    """
+    if not policy.tactile.enabled:
+        return None
+    if args.format == "lerobot":
+        return raw_store(args.store, args.url, "export.lerobot")
+    if args.format == "gr00t":
+        return raw_store(args.store, args.url, "export.gr00t")
+    return None
 
 
 def cmd_export(args: argparse.Namespace) -> int:
@@ -77,7 +104,8 @@ def cmd_export(args: argparse.Namespace) -> int:
     반환: 0 성공, 2 가명 비밀값이 운영 환경에서 개발용 값일 때.
     `ExportError`(내보낼 세션 없음, 원본 버킷 사용 등)는 예외로 끝난다.
     부작용: `exports` 이력 INSERT(별도 커밋), 세션 생애주기 전이, 라벨링 버킷 읽기(블러본),
-    데이터셋 버킷 쓰기. 비밀값이 없으면 임의 비밀값으로 가명을 만들어 되짚을 수 없음을 알린다.
+    데이터셋 버킷 쓰기, lerobot·gr00t면 원본 버킷의 장갑 Parquet 읽기와 그 감사 기록
+    (`tactile_store`). 비밀값이 없으면 임의 비밀값으로 가명을 만들어 되짚을 수 없음을 알린다.
     온톨로지는 데이터셋 버전의 DB 등록 사전을 읽는다.
     """
     root = repo_root()
@@ -112,6 +140,7 @@ def cmd_export(args: argparse.Namespace) -> int:
         now=datetime.now(UTC),
         id_secret=secret.encode() if secret else None,
         robot=args.robot,
+        raw=tactile_store(args, policy),
     )
     engine.dispose()
     n = len(r.record.session_ids)
@@ -123,9 +152,23 @@ def cmd_export(args: argparse.Namespace) -> int:
     for k, n in r.label_counts.items():
         print(f"  {k}: {n}")
     _print_retarget(r.details.get("retarget"))
+    _print_tactile(r.details.get("tactile"))
     for w in r.details.get("warnings", []):
         print(f"경고: {w}")
     return 0
+
+
+def _print_tactile(meta: dict[str, Any] | None) -> None:
+    """촉각장갑 요약 (실은 손의 채널 수, 세션·손 상태별 수). 기록이 없으면 출력하지 않는다."""
+    if meta is None:
+        return
+    hands = ", ".join(f"{h} {len(v['channels'])}채널" for h, v in meta["hands"].items())
+    counts: dict[str, int] = {}
+    for s in meta["sessions"]:
+        for hand in s["hands"].values():
+            counts[hand["status"]] = counts.get(hand["status"], 0) + 1
+    states = ", ".join(f"{k} {n}" for k, n in sorted(counts.items()))
+    print(f"촉각장갑: {hands or '실은 손 없음'} (세션·손 상태: {states})")
 
 
 def _print_retarget(meta: dict[str, Any] | None) -> None:

@@ -31,6 +31,11 @@ parquet 열 (사람 1인칭 시연이라 로봇 고유 감각이 없어 손·팔
 - labels.*: LeRobot 형식 annotation.* 열과 같은 값(손 상태·동사·검증 등급 등)과 labels.dlp_state
   (LeRobot 형식 observation.state 전체, 2D 관절 포함). GR00T는 annotation 접두어를 언어 주석에만
   허락하므로 이름만 바꿨다.
+- 촉각장갑 (ADR 0069, 장갑을 실은 세션이 있을 때만): observation.state 끝에 손마다 그 프레임 시각의
+  장갑 채널 값이 붙고(modality.json state의 `<손>_tactile` 구간), observation.tactile_valid
+  (float32, 손마다 1/0)가 값이 있는지 알린다. 없으면 값도 0이다. action에는 넣지 않으므로
+  (촉각은 관측이지 행동이 아니다) 이때는 state가 action보다 길고 modality.json의 state·action
+  구간이 다르다. 채널 이름·장갑 기종·세션별 상태는 meta/dlp_tactile.json (`dlp_export.tactile`).
 
 언어 문장(`gr00t.language`): 작업은 그 시각 작업 구간의 설명 라벨(같은 언어 원문 또는 현재 원문의
 번역), 없으면 온톨로지 작업 이름, 작업 구간 밖은 도메인 이름이다. 행동은 손마다 그 시각 행동의 설명
@@ -78,6 +83,7 @@ from dlp_export.lerobot import (
 )
 from dlp_export.policy import ExportPolicy, Gr00tPolicy, Gr00tVideo, LeRobotPolicy
 from dlp_export.source import ExportError, ExportSession
+from dlp_export.tactile import VALID_COLUMN, TactileData
 from dlp_schema.dataset import Split
 from dlp_schema.labels import (
     ActionPayload,
@@ -296,15 +302,32 @@ def _scalar(dtype: str) -> dict[str, Any]:
 
 
 def info_features(
-    layout: StateLayout, lp: LeRobotPolicy, gp: Gr00tPolicy, size: tuple[int, int]
+    layout: StateLayout,
+    lp: LeRobotPolicy,
+    gp: Gr00tPolicy,
+    size: tuple[int, int],
+    tactile: TactileData | None = None,
 ) -> dict[str, Any]:
     """info.json `features` (영상 + parquet 열 전부, dtype·shape·names).
 
     Args:
         size: 영상 (가로, 세로) (`video_size`로 줄인 뒤).
+        tactile: 실은 손이 있는 촉각장갑 값 (ADR 0069). observation.state 끝에 채널 열이 붙고
+            observation.tactile_valid가 생긴다. action은 그대로다.
     """
     w, h = size
     n = len(layout.names)
+    touch = tactile.gr00t_names() if tactile is not None else []
+    valid = (
+        {
+            VALID_COLUMN: {
+                "dtype": "float32", "shape": [len(tactile.hands)],
+                "names": tactile.gr00t_valid_names(),
+            }
+        }
+        if tactile is not None
+        else {}
+    )  # fmt: skip
     return {
         video_key(lp): {
             "dtype": "video", "shape": [h, w, 3], "names": ["height", "width", "channels"],
@@ -314,11 +337,14 @@ def info_features(
                 "video.channels": 3, "has_audio": False,
             },
         },
-        "observation.state": {"dtype": "float32", "shape": [n], "names": layout.names},
+        "observation.state": {
+            "dtype": "float32", "shape": [n + len(touch)], "names": [*layout.names, *touch],
+        },
         "observation.hand_valid": {
             "dtype": "float32", "shape": [len(layout.valid)],
             "names": [v.removesuffix(".present") for v in layout.valid],
         },
+        **valid,
         "action": {"dtype": "float32", "shape": [n], "names": layout.names},
         "timestamp": _scalar("float32"),
         "frame_index": _scalar("int64"),
@@ -341,10 +367,21 @@ def episode_table(
     table: TaskTable,
     episode_index: int,
     first_index: int,
+    touch: tuple[NDArray[np.float32], NDArray[np.float32]] | None = None,
 ) -> pa.Table:
-    """에피소드 하나의 parquet 표 (열 순서 = `info_features`의 영상 밖 순서)."""
+    """에피소드 하나의 parquet 표 (열 순서 = `info_features`의 영상 밖 순서).
+
+    Args:
+        touch: 촉각장갑 (state 끝에 붙일 값 (n, 채널 합), 유효 표시 (n, 손 수)) (ADR 0069,
+            `TactileData.gr00t_arrays`). None이면 촉각 열이 없다. action은 촉각을 뺀 state의 다음
+            프레임이다.
+    """
     state, valid = layout.gather(ep, lp)
     action = np.concatenate([state[1:], state[-1:]], axis=0)
+    extra: dict[str, pa.Array] = {}
+    if touch is not None:
+        state = np.hstack([state, touch[0]])
+        extra[VALID_COLUMN] = _list_array(touch[1], pa.float32())
     n = len(ep.times_ms)
     task = np.array([table.index(s) for s in text.task], np.int64)
     act = np.array([table.index(s) for s in text.action], np.int64)
@@ -353,6 +390,7 @@ def episode_table(
     cols: dict[str, pa.Array] = {
         "observation.state": _list_array(state, pa.float32()),
         "observation.hand_valid": _list_array(valid, pa.float32()),
+        **extra,
         "action": _list_array(action, pa.float32()),
         "timestamp": pa.array(np.arange(n, dtype=np.float64) / lp.fps, type=pa.float32()),
         "frame_index": pa.array(np.arange(n, dtype=np.int64)),
@@ -490,6 +528,7 @@ def write_gr00t(
     vocab: Vocab,
     size: tuple[int, int],
     dest: Path,
+    tactile: TactileData | None = None,
 ) -> Gr00tResult:
     """에피소드들을 GR00T LeRobot v2.1 데이터셋으로 쓴다 (배치는 모듈 설명).
 
@@ -500,6 +539,9 @@ def write_gr00t(
         vocab: 어휘 (labels.* 정수 열·문장의 온톨로지 이름).
         size: 블러본 크기 (가로, 세로). `video_size`로 줄여 모든 에피소드 영상에 쓴다.
         dest: 쓸 디렉터리 (만든다).
+        tactile: 촉각장갑 값 (items와 같은 순서, ADR 0069). 실은 손이 있으면 state 구간과
+            observation.tactile_valid를 더하고, 실은 손이 없어도(동기화 안 된 장갑만 있음) 세션
+            기록 meta/dlp_tactile.json은 쓴다. None이면 촉각이 없던 때와 같은 파일을 쓴다.
 
     에피소드 번호는 분할 순(golden, train, val, holdout 중 있는 것)으로 다시 매겨 info.json
     splits가 연속 구간이 되게 한다.
@@ -507,6 +549,8 @@ def write_gr00t(
     lp, gp = policy.lerobot, policy.gr00t
     layout = StateLayout.from_policy(lp)
     out_size = video_size(size, lp)
+    # 실은 손이 없으면 열과 modality.json은 그대로 두고 세션 기록만 쓴다
+    carried = tactile if tactile is not None and tactile.hands else None
     order = sorted(range(len(items)), key=lambda i: list(Split).index(items[i][0].split))
     table = TaskTable()
     used: set[str] = set()
@@ -519,7 +563,8 @@ def write_gr00t(
         chunk = e // gp.chunks_size
         path = dest / DATA_PATH.format(episode_chunk=chunk, episode_index=e)
         path.parent.mkdir(parents=True, exist_ok=True)
-        pq.write_table(episode_table(ep, layout, lp, text, table, e, total), path)
+        touch = carried.gr00t_arrays(i) if carried is not None else None
+        pq.write_table(episode_table(ep, layout, lp, text, table, e, total, touch), path)
         vpath = VIDEO_PATH.format(episode_chunk=chunk, video_key=video_key(lp), episode_index=e)
         encode_video(video, ep.frame_index, out_size, lp.fps, gp.video, dest / vpath)
         n = len(ep.times_ms)
@@ -527,9 +572,12 @@ def write_gr00t(
         meta_rows.append({**sessions[i], "episode_index": e})
         used |= ep.used | text.used
         total += n
-    _write_meta(dest, policy, layout, out_size, table, episodes, [items[i][0].split for i in order])
+    splits = [items[i][0].split for i in order]
+    _write_meta(dest, policy, layout, out_size, table, episodes, splits, carried)
     _write_json(dest / "meta" / "dlp_vocab.json", vocab.as_json())
     _write_json(dest / "meta" / "dlp_episodes.json", meta_rows)
+    if tactile is not None:
+        _write_json(dest / "meta" / "dlp_tactile.json", tactile.meta("gr00t"))
     return Gr00tResult(used, len(items), total, len(table.texts))
 
 
@@ -541,8 +589,13 @@ def _write_meta(
     table: TaskTable,
     episodes: list[dict[str, Any]],
     splits: list[Split],
+    tactile: TactileData | None = None,
 ) -> None:
-    """meta/info.json·episodes.jsonl·tasks.jsonl·modality.json·dlp_gr00t.json."""
+    """meta/info.json·episodes.jsonl·tasks.jsonl·modality.json·dlp_gr00t.json.
+
+    tactile(실은 손이 있는 촉각장갑 값, ADR 0069)이 있으면 modality.json state에 `<손>_tactile`
+    구간을 손·팔 구간 뒤에 잇는다. action 구간은 그대로다.
+    """
     lp, gp = policy.lerobot, policy.gr00t
     meta = dest / "meta"
     meta.mkdir(parents=True, exist_ok=True)
@@ -560,21 +613,24 @@ def _write_meta(
         "splits": _split_ranges(splits),
         "data_path": DATA_PATH,
         "video_path": VIDEO_PATH,
-        "features": info_features(layout, lp, gp, size),
+        "features": info_features(layout, lp, gp, size, tactile),
     }
     _write_json(meta / "info.json", info)
     _write_jsonl(meta / "episodes.jsonl", episodes)
     _write_jsonl(
         meta / "tasks.jsonl", [{"task_index": i, "task": t} for i, t in enumerate(table.texts)]
     )
+    state = layout.modality()
+    if tactile is not None:
+        state = {**state, **tactile.gr00t_modality(len(layout.names))}
     modality = {
-        "state": layout.modality(),
+        "state": state,
         "action": layout.modality(),
         "video": {gp.video_name: {"original_key": video_key(lp)}},
         "annotation": {TASK_KEY: {}, ACTION_KEY: {}},
     }
     _write_json(meta / "modality.json", modality)
-    _write_json(meta / "dlp_gr00t.json", {
+    notes = {
         "state": "hand and wearer-arm 3D points in the camera frame (metres), see info.json names",
         "state_valid": "observation.hand_valid: 1 if the point has a value at that frame, "
         "else 0 (the value is then 0)",
@@ -582,4 +638,12 @@ def _write_meta(
         "relative_action": "use ActionRepresentation.RELATIVE with ActionType.NON_EEF "
         "in the modality config",
         "labels": "labels.* columns use meta/dlp_vocab.json codes (-1 = missing)",
-    })  # fmt: skip
+    }
+    if tactile is not None:
+        notes["tactile"] = (
+            "observation.state also carries tactile glove channels after the 3D points "
+            f"(modality.json state keys ending in _tactile); {VALID_COLUMN}: 1 if the glove has a "
+            "value at that frame, else 0 (the value is then 0). Tactile channels are not part of "
+            "action, so observation.state is longer than action. See meta/dlp_tactile.json"
+        )
+    _write_json(meta / "dlp_gr00t.json", notes)
