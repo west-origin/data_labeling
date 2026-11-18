@@ -76,3 +76,4 @@ ADR은 결정 당시의 이유와 이관 조건을 기록한다. 후속 ADR이 �
 | 0067 | [ADR 0067: 마커로 정하는 미터 척도, 장면 안 바디캠 위치 추정, 전후 갖춤 확인](0067-scene3d-metric-scale-and-ego-localization.md) |
 | 0068 | [ADR 0068: 사람 손목·손가락 끝을 다지 손 로봇의 팔 관절과 손가락 관절로 옮긴다](0068-dexterous-hand-retargeting.md) |
 | 0069 | [ADR 0069: 촉각장갑 채널을 내보내기 에피소드 프레임에 싣기 (`dlp export lerobot\|gr00t`)](0069-tactile-channels-in-exports.md) |
+| 0070 | [ADR 0070: 내보내기 프레임마다 장면 좌표의 바디캠 자세를 싣기 (`dlp export lerobot\|gr00t`)](0070-scene-pose-in-exports.md) |

@@ -1,4 +1,4 @@
-"""`dlp export`의 촉각장갑용 원본 감사 저장소 선택과 요약 출력 (ADR 0069, DB·저장소 없이).
+"""`dlp export`의 촉각장갑용 원본 감사 저장소 선택과 요약 출력 (ADR 0069·0070, DB·저장소 없이).
 
 lerobot·gr00t 형식이고 정책이 켜져 있을 때만 원본 감사 저장소를 연다. 용도는 형식마다 다른 상수
 (`export.lerobot`, `export.gr00t`)이고 `ops.yaml audit.service_purposes`에 등록돼 있어야 월간 감사
@@ -15,6 +15,7 @@ import pytest
 from dlp_cli import export_cmds
 from dlp_cli.main import build_parser
 from dlp_export.policy import load_policy
+from dlp_export.scene import SceneData
 from dlp_export.tactile import TactileData
 from dlp_media.audit import AuditedStore, MemorySink
 from dlp_media.storage import LocalStore
@@ -92,4 +93,21 @@ def test_tactile_summary_line_counts_hands_by_status(capsys: pytest.CaptureFixtu
     export_cmds._print_tactile(None)  # pyright: ignore[reportPrivateUsage]
     assert capsys.readouterr().out == (
         "촉각장갑: right 2채널 (세션·손 상태: exported 1, no_glove 2, not_synced 1)\n"
+    )
+
+
+def test_scene_summary_line_counts_sessions_and_posed_frames(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """장면 좌표 자세 요약 한 줄: 세션 상태별 수와 실은 세션의 자세가 있는 프레임 비율."""
+    sessions = [
+        {"session_id": "session-a", "status": "exported", "frames": 60, "frames_valid": 45},
+        {"session_id": "session-b", "status": "stale"},
+        {"session_id": "session-c", "status": "exported", "frames": 40, "frames_valid": 35},
+    ]
+    data = SceneData([None, None, None], [60, 0, 40], sessions, 500)
+    export_cmds._print_scene(data.meta("lerobot"))  # pyright: ignore[reportPrivateUsage]
+    export_cmds._print_scene(None)  # pyright: ignore[reportPrivateUsage]
+    assert capsys.readouterr().out == (
+        "장면 좌표 자세: 세션 상태 exported 2, stale 1, 자세가 있는 프레임 80%\n"
     )

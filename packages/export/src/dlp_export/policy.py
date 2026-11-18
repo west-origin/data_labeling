@@ -7,7 +7,7 @@
 
 주요 클래스: `ExportPolicy`(최상위), `CocoPolicy`, `IntervalsPolicy`, `LeRobotPolicy`,
 `LeRobotEnv`(격리 환경), `Gr00tPolicy`·`Gr00tVideo`(GR00T 형식, ADR 0065), `TactilePolicy`(촉각장갑
-채널, ADR 0069), `IdsPolicy`(가명).
+채널, ADR 0069), `ScenePolicy`(장면 좌표 바디캠 자세, ADR 0070), `IdsPolicy`(가명).
 """
 
 from __future__ import annotations
@@ -142,6 +142,16 @@ class TactilePolicy(Contract):
         return v
 
 
+class ScenePolicy(Contract):
+    """export.yaml `scene` 절: 에피소드 프레임에 싣는 장면 좌표 바디캠 자세 (ADR 0070).
+
+    보간 간격 상한은 위치 기록을 읽는 규칙이라 `scene3d.yaml interpolation.max_gap_ms`를 쓴다.
+    """
+
+    # 거짓이면 위치 기록을 읽지 않고 자세를 싣지 않는다 (기록도 남기지 않는다)
+    enabled: bool
+
+
 class IdsPolicy(Contract):
     """export.yaml `ids` 절: 작업자·장소·세션·라벨 ID 가명 (ADR 0021·0027)."""
 
@@ -168,6 +178,7 @@ class ExportPolicy(Contract):
     lerobot: LeRobotPolicy
     gr00t: Gr00tPolicy
     tactile: TactilePolicy
+    scene: ScenePolicy
     ids: IdsPolicy
 
     @field_validator("label_states")

@@ -34,6 +34,8 @@
     옮긴다 (`config/robots/<ID>.yaml` 또는 `DLP_ROBOTS_DIR`, ADR 0047). lerobot·gr00t는 세션에
     동기화된 촉각장갑 스트림이 있으면 프레임마다 그 시각의 장갑 채널 값을 싣고(`dlp_export.tactile`,
     ADR 0069), 채널·세션별 상태를 meta/dlp_tactile.json과 manifest `details.tactile`에 남긴다.
+    세션에 지금 쓸 수 있는 장면 안 위치 기록(`dlp scene3d localize`)이 있으면 프레임마다 장면 좌표의
+    바디캠 자세도 싣는다 (`dlp_export.scene`, ADR 0070, meta/dlp_scene.json·`details.scene`).
     원본 버킷: coco·intervals는 접근하지 않는다. lerobot·gr00t는 동기화된 장갑의 정규화 Parquet만
     읽는다 (같은 `--store` 지정, 감사 저장소 용도 `export.lerobot`·`export.gr00t`).
     종료 코드: 0 성공, 2 가명 비밀값이 운영 환경에서 개발용 값(`check_secret`). `ExportError`(내보낼
@@ -153,6 +155,7 @@ def cmd_export(args: argparse.Namespace) -> int:
         print(f"  {k}: {n}")
     _print_retarget(r.details.get("retarget"))
     _print_tactile(r.details.get("tactile"))
+    _print_scene(r.details.get("scene"))
     for w in r.details.get("warnings", []):
         print(f"경고: {w}")
     return 0
@@ -169,6 +172,24 @@ def _print_tactile(meta: dict[str, Any] | None) -> None:
             counts[hand["status"]] = counts.get(hand["status"], 0) + 1
     states = ", ".join(f"{k} {n}" for k, n in sorted(counts.items()))
     print(f"촉각장갑: {hands or '실은 손 없음'} (세션·손 상태: {states})")
+
+
+def _print_scene(meta: dict[str, Any] | None) -> None:
+    """장면 좌표 자세 요약 (세션 상태별 수, 실은 세션의 자세가 있는 프레임 비율).
+
+    기록이 없으면 출력하지 않는다.
+    """
+    if meta is None:
+        return
+    counts: dict[str, int] = {}
+    for s in meta["sessions"]:
+        counts[s["status"]] = counts.get(s["status"], 0) + 1
+    states = ", ".join(f"{k} {n}" for k, n in sorted(counts.items()))
+    shown = [s for s in meta["sessions"] if s["status"] == "exported"]
+    frames = sum(s["frames"] for s in shown)
+    valid = sum(s["frames_valid"] for s in shown)
+    share = f", 자세가 있는 프레임 {valid / frames:.0%}" if frames else ""
+    print(f"장면 좌표 자세: 세션 상태 {states}{share}")
 
 
 def _print_retarget(meta: dict[str, Any] | None) -> None:

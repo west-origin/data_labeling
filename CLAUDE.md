@@ -93,7 +93,8 @@
   `dlp active rank|fiftyone`. 정책 `active.yaml`.
 - `packages/export/` (`dlp_export`) — COCO·구간 JSON·LeRobot·GR00T 내보내기. 데이터셋 버전에서, 영상은 블러본만, 내보내기마다
   다른 가명. LeRobot·GR00T 프레임에는 동기화된 촉각장갑 값을 싣는다 (장갑 Parquet만 감사 저장소로 원본 버킷에서 읽고, 동기화
-  안 된 장갑은 싣지 않으며, 없는 값은 지어내지 않는다, ADR 0069). `dlp export coco|intervals|lerobot|gr00t`. 정책 `export.yaml`.
+  안 된 장갑은 싣지 않으며, 없는 값은 지어내지 않는다, ADR 0069). 장면 안 위치 기록이 있으면 프레임마다 장면 좌표의
+  바디캠 자세도 싣는다 (지금 복원·같은 블러본의 기록만, ADR 0070). `dlp export coco|intervals|lerobot|gr00t`. 정책 `export.yaml`.
 - `packages/scene3d/` (`dlp_scene3d`) — 작업 전후 다각도 사진의 3D 복원(SfM·3D 가우시안 스플랫, 마커 미터 척도)·물체
   이동 비교, 장면 안 바디캠 위치 추정, 전후 갖춤 확인 (ADR 0066·0067). `dlp scene3d
   ingest|privacy …|reconstruct|compare|report|localize|status`. 정책 `scene3d.yaml`. 승인된 블러본만 읽는다.

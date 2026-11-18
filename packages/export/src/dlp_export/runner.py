@@ -8,7 +8,9 @@
    다지 손 로봇은 손가락 관절까지, ADR 0068).
    gr00t는 같은 에피소드를 GR00T LeRobot v2.1 배치로 쓰고 `dlp_export.gr00t_check`로 다시 확인한다
    (ADR 0065). lerobot·gr00t는 세션에 동기화된 촉각장갑 스트림이 있으면 프레임 시각의 장갑 채널
-   값을 함께 싣는다 (`dlp_export.tactile`, export.yaml tactile, ADR 0069).
+   값을 함께 싣는다 (`dlp_export.tactile`, export.yaml tactile, ADR 0069). 세션에 지금 쓸 수 있는
+   장면 안 위치 기록(`dlp scene3d localize`)이 있으면 프레임마다 장면 좌표의 바디캠 자세도 싣는다
+   (`dlp_export.scene`, export.yaml scene, ADR 0070).
 3. manifest.json (대상, 일시, 형식, 검증 정책, 세션, 라벨 수, 파일 목록과 sha256)을 넣고, 원본 버킷
    위치가 없는지 확인한다. 작업자·장소·세션·라벨 ID는 내보내기마다 다른 가명으로 바꾼다
    (export.yaml ids, ADR 0027). 내보내기 이력(exports.session_ids)에는 내부 세션 ID를 남기고,
@@ -73,6 +75,7 @@ from dlp_export.robot import (
     retarget_meta,
     robot_override,
 )
+from dlp_export.scene import SceneCollector, SceneData, SceneSource, StoredScenes
 from dlp_export.source import (
     ExportError,
     ExportSession,
@@ -89,6 +92,7 @@ from dlp_media.pts import build_pts_index
 from dlp_media.storage import ObjectStore, sha256_file
 from dlp_privacy.policy import load_policy as load_privacy_policy
 from dlp_privacy.runner import RenderNotCurrentError, expected_render_hash
+from dlp_scene3d.policy import load_policy as load_scene3d_policy
 from dlp_schema.dataset import Split
 from dlp_schema.db.repository import get_session, set_lifecycle, withdrawn_session_ids
 from dlp_schema.db.tables import sessions as sessions_table
@@ -216,10 +220,13 @@ class BuiltEpisodes:
 
     items: list[tuple[ExportSession, Path, Episode]]  # (세션, 블러본 로컬 경로, 에피소드), 세션 순
     sessions: list[dict[str, Any]]  # meta/dlp_episodes.json 행 (가명 세션 ID·분할·손 3D 채움)
-    warnings: list[str]  # 손 3D 채움 비율·촉각장갑 경고 (manifest details.warnings)
+    warnings: list[str]  # 손 3D 채움 비율·촉각장갑·장면 자세 경고 (manifest details.warnings)
     size: tuple[int, int] = (0, 0)  # 처음 넣은 에피소드의 블러본 크기 (모든 에피소드를 이 크기로)
     # 촉각장갑 값과 세션 기록 (items와 같은 순서). 장갑 스트림이 있는 세션이 없으면 None (ADR 0069)
     tactile: TactileData | None = None
+    # 장면 좌표 바디캠 자세와 세션 기록 (items와 같은 순서). 위치 기록이 있는 세션이 없으면 None
+    # (ADR 0070)
+    scene: SceneData | None = None
 
 
 def build_episodes(
@@ -231,6 +238,7 @@ def build_episodes(
     ids: Pseudonymizer,
     run: _RobotRun | None = None,
     raw: AuditedStore | None = None,
+    scenes: SceneSource | None = None,
 ) -> BuiltEpisodes:
     """세션마다 `video_stream` 블러본 하나로 에피소드 하나를 만든다.
 
@@ -245,6 +253,10 @@ def build_episodes(
     장갑의 정규화 Parquet은 `raw`(원본 버킷 감사 저장소)로만 읽는다. 버린 에피소드의 장갑은 읽지
     않는다.
 
+    장면 좌표 자세(ADR 0070): `scenes`가 있고 정책 `scene.enabled`가 켜져 있으면 내보내는
+    에피소드마다 그 세션의 위치 기록에서 프레임 시각의 자세를 읽어 `scene`에 담는다
+    (`SceneCollector`).
+
     Raises:
         ExportError: 에피소드끼리 화면비가 `aspect_tolerance` 넘게 다를 때. 촉각장갑: 동기화된
             장갑이 있는데 `raw`가 없을 때, 장갑 Parquet이 없거나 읽을 수 없을 때, 같은 손의 채널
@@ -253,6 +265,7 @@ def build_episodes(
     lp = policy.lerobot
     out = BuiltEpisodes([], [], [])
     tactile = TactileCollector(raw, policy.tactile, work) if policy.tactile.enabled else None
+    scene = SceneCollector(scenes) if scenes is not None and policy.scene.enabled else None
     size: tuple[int, int] | None = None
     for es in src.sessions:
         stream = next((s for s in es.session.streams if s.kind.value == lp.video_stream), None)
@@ -272,6 +285,8 @@ def build_episodes(
         out.items.append((es, video, ep))
         if tactile is not None:
             tactile.add(es.session, sid, ep.times_ms)
+        if scene is not None:
+            scene.add(es, sid, ep.times_ms)
         coverage = ep.hand_points_3d_coverage
         out.sessions.append(
             {
@@ -295,6 +310,9 @@ def build_episodes(
     if tactile is not None:
         out.tactile = tactile.result()
         out.warnings += tactile.warnings
+    if scene is not None:
+        out.scene = scene.result()
+        out.warnings += scene.warnings
     return out
 
 
@@ -309,6 +327,7 @@ def _lerobot(
     ids: Pseudonymizer,
     robot: str | None = None,
     raw: AuditedStore | None = None,
+    scenes: SceneSource | None = None,
 ) -> tuple[list[LabelRecord], set[str], dict[str, Any]]:
     """(내보낸 라벨, 내보낸 세션(내부 ID), 세부 정보). 결과 파일의 세션 ID는 가명이다.
 
@@ -318,7 +337,9 @@ def _lerobot(
     덧붙인다. 궤적 구간 안 손 3D 채움 비율이 `min_hand_points_3d_coverage`보다 낮은 에피소드는
     세부 정보 `warnings`에 남긴다 (manifest details, CLI 출력). 촉각장갑 스트림이 있는 세션이
     있으면 프레임 값을 특징으로 싣고(`build_episodes`, `raw`로 읽는다) meta/dlp_tactile.json과
-    세부 정보 `tactile`에 채널·세션별 상태를 남긴다 (ADR 0069, 로봇 모드도 같다).
+    세부 정보 `tactile`에 채널·세션별 상태를 남긴다 (ADR 0069, 로봇 모드도 같다). 위치 기록이 있는
+    세션이 있으면 장면 좌표 자세를 특징으로 싣고 meta/dlp_scene.json과 세부 정보 `scene`을 남긴다
+    (ADR 0070, `scenes`로 찾는다).
 
     Raises:
         ExportError: 손 3D 점·리타기팅 손 부위가 온톨로지 hand_joints에 없을 때, 내보내는
@@ -333,7 +354,7 @@ def _lerobot(
         check_hand_parts(ontology, policy.lerobot, None)
     else:
         check_hand_parts(ontology, policy.lerobot, run.policy, run.robot)
-    built = build_episodes(src, policy, vocab, labeling, work, ids, run, raw)
+    built = build_episodes(src, policy, vocab, labeling, work, ids, run, raw, scenes)
     if not built.items:
         dropped = " (리타기팅 정책이 모든 에피소드를 버렸습니다)" if run and run.reports else ""
         raise ExportError(f"{policy.lerobot.video_stream} 스트림이 있는 세션이 없습니다{dropped}")
@@ -344,7 +365,9 @@ def _lerobot(
     if run is not None:
         pairs = [(ep, r) for (_, _, ep), r in zip(episodes, run.results, strict=True)]
         override = robot_override(pairs, policy.lerobot, run.robot)
-    pkg = write_package(episodes, policy, size, work / "lerobot_pkg", ids, override, built.tactile)
+    pkg = write_package(
+        episodes, policy, size, work / "lerobot_pkg", ids, override, built.tactile, built.scene
+    )
     dest = out / "lerobot"
     # 격리 환경: 공식 API로 쓰고, 공식 로더로 다시 읽어 확인 (JSON을 표준 출력으로 돌려준다)
     run_script(root, policy.lerobot, "lerobot_write.py", str(pkg), str(dest))
@@ -369,6 +392,12 @@ def _lerobot(
         details["tactile"] = built.tactile.meta("lerobot")
         (dest / "meta" / "dlp_tactile.json").write_text(
             json.dumps(details["tactile"], ensure_ascii=False, indent=2), "utf-8"
+        )
+    if built.scene is not None:
+        # 장면 좌표 자세의 뜻·세션별 상태 (manifest details에도 들어간다, ADR 0070)
+        details["scene"] = built.scene.meta("lerobot")
+        (dest / "meta" / "dlp_scene.json").write_text(
+            json.dumps(details["scene"], ensure_ascii=False, indent=2), "utf-8"
         )
     if run is not None:
         # 로봇·모델 sha256·리타기팅 판·에피소드별 도달 가능성 보고 (manifest details에도 들어간다)
@@ -406,6 +435,7 @@ def _gr00t(
     work: Path,
     ids: Pseudonymizer,
     raw: AuditedStore | None = None,
+    scenes: SceneSource | None = None,
 ) -> tuple[list[LabelRecord], set[str], dict[str, Any]]:
     """GR00T LeRobot v2.1 (`out/gr00t`, ADR 0065). (내보낸 라벨, 내보낸 세션(내부 ID), 세부 정보).
 
@@ -413,6 +443,8 @@ def _gr00t(
     확인하고,
     문제가 있으면 올리지 않고 실패한다. 촉각장갑 스트림이 있는 세션이 있으면 프레임 값을 state
     구간으로 싣고(`raw`로 읽는다) 세부 정보 `tactile`에 채널·세션별 상태를 남긴다 (ADR 0069).
+    위치 기록이 있는 세션이 있으면 장면 좌표 자세를 state 구간으로 싣고 세부 정보 `scene`을 남긴다
+    (ADR 0070).
 
     Raises:
         ExportError: 손 3D 점이 온톨로지에 없을 때, 쓸 세션이 없을 때, 화면비가 다를 때, 확인에
@@ -421,11 +453,13 @@ def _gr00t(
     """
     vocab = Vocab.from_ontology(ontology)
     check_hand_parts(ontology, policy.lerobot, None)
-    built = build_episodes(src, policy, vocab, labeling, work, ids, raw=raw)
+    built = build_episodes(src, policy, vocab, labeling, work, ids, raw=raw, scenes=scenes)
     if not built.items:
         raise ExportError(f"{policy.lerobot.video_stream} 스트림이 있는 세션이 없습니다")
     dest = out / "gr00t"
-    r = write_gr00t(built.items, built.sessions, policy, vocab, built.size, dest, built.tactile)
+    r = write_gr00t(
+        built.items, built.sessions, policy, vocab, built.size, dest, built.tactile, built.scene
+    )
     problems = check_dataset(dest, policy.gr00t.video.ffprobe)
     if problems:
         raise ExportError("GR00T 형식 확인 실패: " + "; ".join(problems[:10]))
@@ -438,7 +472,23 @@ def _gr00t(
     if built.tactile is not None:
         # meta/dlp_tactile.json과 같은 내용 (채널·장갑 기종·세션별 상태)
         details["tactile"] = built.tactile.meta("gr00t")
+    if built.scene is not None:
+        # meta/dlp_scene.json과 같은 내용 (자세의 뜻·세션별 상태)
+        details["scene"] = built.scene.meta("gr00t")
     return _used_labels(src, written, r.used), written, details
+
+
+def scene_source(
+    root: Path, labeling: ObjectStore, fmt: str, policy: ExportPolicy
+) -> SceneSource | None:
+    """장면 좌표 자세를 찾을 곳 (ADR 0070). lerobot·gr00t이고 `export.yaml scene.enabled`일 때만.
+
+    위치 기록은 라벨링 버킷에 있다 (원본 버킷을 읽지 않는다). 보간 간격 상한은
+    `scene3d.yaml interpolation.max_gap_ms`다.
+    """
+    if fmt not in ("lerobot", "gr00t") or not policy.scene.enabled:
+        return None
+    return StoredScenes(labeling, load_scene3d_policy(root).interpolation.max_gap_ms)
 
 
 def check_hand_parts(
@@ -660,10 +710,14 @@ def run_export(  # noqa: C901
             details = {"images": r.images, "annotations": r.annotations, "dropped": r.dropped}
             written, used = r.sessions, list(r.labels.values())
         elif fmt == "gr00t":
-            used, written, details = _gr00t(src, policy, ontology, labeling, out, work, ids, raw)
+            scenes = scene_source(root, labeling, fmt, policy)
+            used, written, details = _gr00t(
+                src, policy, ontology, labeling, out, work, ids, raw, scenes
+            )
         else:
+            scenes = scene_source(root, labeling, fmt, policy)
             used, written, details = _lerobot(
-                root, src, policy, ontology, labeling, out, work, ids, robot, raw
+                root, src, policy, ontology, labeling, out, work, ids, robot, raw, scenes
             )
         if not written:
             raise ExportError(f"{version_id}: 이 형식으로 쓴 세션이 없습니다")

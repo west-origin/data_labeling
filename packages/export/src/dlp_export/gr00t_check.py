@@ -25,6 +25,9 @@ Isaac-GR00T `getting_started/data_preparation.md`, 로더 `lerobot_episode_loade
    수와 같으며, 그 구간의 info.json observation.state 이름이 `<손>.tactile.<채널>`이다. 촉각 구간은
    action에 없다. 유효 표시 열(`valid_column`)이 있고 그 손의 이름을 담는다. parquet에서 유효
    표시는 0 또는 1이고, 0인 행은 그 구간 값이 모두 0이다 (없는 값을 채워 넣지 않았다).
+8. 장면 좌표 바디캠 자세 구간 (meta/dlp_scene.json이 있고 자세를 실었을 때만, ADR 0070. 우리 추가
+   파일의 약속이다): 7번과 같은 조건을 `state_key` 구간(이름 = 그 파일의 names)과 유효 표시 열
+   (`valid_column`의 `valid_name`)에 본다.
 """
 
 # pyarrow에는 타입 스텁이 없어 이 모듈에서만 알 수 없는 타입 경고를 끈다 (dlp_media.tables와 같다).
@@ -48,6 +51,8 @@ import pyarrow.parquet as pq
 META_FILES = ("info.json", "episodes.jsonl", "tasks.jsonl", "modality.json")
 # 촉각장갑 채널 설명 (우리 추가 파일, 있을 때만 7번 검사를 한다)
 TACTILE_META = "dlp_tactile.json"
+# 장면 좌표 바디캠 자세 설명 (우리 추가 파일, 있을 때만 8번 검사를 한다)
+SCENE_META = "dlp_scene.json"
 INFO_KEYS = (
     "fps",
     "chunks_size",
@@ -83,6 +88,7 @@ class _Dataset:
     episodes: list[dict[str, Any]]
     tasks: list[dict[str, Any]]
     tactile: dict[str, Any] | None = None  # meta/dlp_tactile.json (없으면 None, ADR 0069)
+    scene: dict[str, Any] | None = None  # meta/dlp_scene.json (없으면 None, ADR 0070)
 
     @property
     def features(self) -> dict[str, Any]:
@@ -104,7 +110,7 @@ def _load(root: Path) -> tuple[_Dataset | None, list[str]]:
     if problems:
         return None, problems
     meta = root / "meta"
-    tactile = meta / TACTILE_META
+    tactile, scene = meta / TACTILE_META, meta / SCENE_META
     try:
         ds = _Dataset(
             root,
@@ -113,6 +119,7 @@ def _load(root: Path) -> tuple[_Dataset | None, list[str]]:
             _read_jsonl(meta / "episodes.jsonl"),
             _read_jsonl(meta / "tasks.jsonl"),
             json.loads(tactile.read_text("utf-8")) if tactile.is_file() else None,
+            json.loads(scene.read_text("utf-8")) if scene.is_file() else None,
         )
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
         return None, [f"메타 JSON을 읽지 못함: {e}"]
@@ -271,14 +278,48 @@ def _check_values(ds: _Dataset, t: pa.Table, name: str, e: int, first: int) -> l
 
 
 @dataclass(frozen=True)
-class _TactileSpan:
-    """dlp_tactile.json의 손 하나: state 구간과 유효 표시 열 안 위치."""
+class _FlaggedSpan:
+    """우리 추가 구간 하나(촉각 손 하나, 장면 자세): state 구간과 유효 표시 열 안 위치."""
 
-    hand: str
+    label: str  # 문제 문장에 쓰는 이름 (손 이름, scene_camera)
     start: int
     end: int
     column: str  # 유효 표시 열 이름
-    index: int  # 그 열 안에서 이 손의 위치
+    index: int  # 그 열 안에서 이 구간의 위치
+
+
+def _flagged_span(
+    ds: _Dataset, where: str, label: str, spec: dict[str, Any], names: list[str], what: str
+) -> _FlaggedSpan | str:
+    """state 구간 하나. 모듈 설명 7·8번의 메타 조건을 어기면 문제 문장을 돌려준다.
+
+    Args:
+        where: 문제 문장 앞머리 (메타 파일과 위치). label: 구간 이름.
+        spec: 그 구간의 메타 (`state_key`, `valid_column`, `valid_name`).
+        names: 그 구간의 observation.state 이름이어야 하는 목록. what: 그 목록을 부르는 말.
+    """
+    key, column, valid_name = (
+        spec.get("state_key"),
+        spec.get("valid_column"),
+        spec.get("valid_name"),
+    )
+    if not (isinstance(key, str) and isinstance(column, str) and isinstance(valid_name, str)):
+        return f"{where}: state_key·valid_column·valid_name이 없음"
+    span = ds.modality.get("state", {}).get(key)
+    if not isinstance(span, dict) or not isinstance(span.get("start"), int):
+        return f"{where}: modality.json state에 구간 {key} 없음"
+    start, end = span["start"], span.get("end")
+    if not isinstance(end, int) or end - start != len(names):
+        return f"{where}: 구간 {key} 길이가 {what} 수 {len(names)}와 다름"
+    state_names = ds.features["observation.state"].get("names") or []
+    if state_names[start:end] != names:
+        return f"{where}: observation.state 이름 {start}:{end}가 {what} 목록과 다름"
+    if key in ds.modality.get("action", {}):
+        return f"{where}: 구간 {key}가 modality.json action에 있음"
+    valid = (ds.features.get(column) or {}).get("names") or []
+    if valid_name not in valid:
+        return f"{where}: info.json {column}에 {valid_name} 없음"
+    return _FlaggedSpan(label, start, end, column, valid.index(valid_name))
 
 
 def _tactile_hands(ds: _Dataset) -> dict[str, dict[str, Any]]:
@@ -289,45 +330,39 @@ def _tactile_hands(ds: _Dataset) -> dict[str, dict[str, Any]]:
     return {str(k): v for k, v in hands.items() if isinstance(v, dict)}
 
 
-def _tactile_span(ds: _Dataset, hand: str, spec: dict[str, Any]) -> _TactileSpan | str:
-    """손 하나의 촉각 구간. 모듈 설명 7번의 메타 조건을 어기면 문제 문장을 돌려준다."""
-    key, column = spec.get("state_key"), spec.get("valid_column")
-    channels = spec.get("channels")
+def _tactile_span(ds: _Dataset, hand: str, spec: dict[str, Any]) -> _FlaggedSpan | str:
+    """손 하나의 촉각 구간 (이름 = `<손>.tactile.<채널>`)."""
     where = f"dlp_tactile.json hands.{hand}"
-    if not (isinstance(key, str) and isinstance(column, str) and isinstance(channels, list)):
-        return f"{where}: state_key·valid_column·channels가 없음"
-    span = ds.modality.get("state", {}).get(key)
-    if not isinstance(span, dict) or not isinstance(span.get("start"), int):
-        return f"{where}: modality.json state에 촉각 구간 {key} 없음"
-    start, end = span["start"], span.get("end")
-    if not isinstance(end, int) or end - start != len(channels):
-        return f"{where}: 구간 {key} 길이가 채널 수 {len(channels)}와 다름"
-    names = ds.features["observation.state"].get("names") or []
-    if names[start:end] != [f"{hand}.tactile.{c}" for c in channels]:
-        return f"{where}: observation.state 이름 {start}:{end}가 채널 목록과 다름"
-    if key in ds.modality.get("action", {}):
-        return f"{where}: 촉각 구간 {key}가 modality.json action에 있음"
-    valid = (ds.features.get(column) or {}).get("names") or []
-    if spec.get("valid_name") not in valid:
-        return f"{where}: info.json {column}에 {spec.get('valid_name')} 없음"
-    return _TactileSpan(hand, start, end, column, valid.index(spec["valid_name"]))
+    channels = spec.get("channels")
+    if not isinstance(channels, list):
+        return f"{where}: channels가 없음"
+    names = [f"{hand}.tactile.{c}" for c in channels]
+    return _flagged_span(ds, where, hand, spec, names, "채널")
 
 
-def _check_tactile(ds: _Dataset) -> tuple[list[_TactileSpan], list[str]]:
-    """(값을 확인할 촉각 구간, 메타 문제). dlp_tactile.json이 없으면 둘 다 비어 있다."""
-    spans: list[_TactileSpan] = []
-    problems: list[str] = []
-    for hand, spec in _tactile_hands(ds).items():
-        got = _tactile_span(ds, hand, spec)
-        if isinstance(got, str):
-            problems.append(got)
-        else:
-            spans.append(got)
-    return spans, problems
+def _scene_span(ds: _Dataset) -> _FlaggedSpan | str | None:
+    """장면 자세 구간. dlp_scene.json이 없거나 자세를 실은 세션이 없으면(state_key 없음) None."""
+    meta = ds.scene
+    if meta is None or "state_key" not in meta:
+        return None
+    names = meta.get("names")
+    if not isinstance(names, list):
+        return "dlp_scene.json: names가 없음"
+    return _flagged_span(ds, "dlp_scene.json", "scene_camera", meta, names, "값 이름")
 
 
-def _check_tactile_values(spans: list[_TactileSpan], t: pa.Table, name: str) -> list[str]:
-    """parquet의 촉각 값: 유효 표시는 0 또는 1이고, 0인 행은 그 구간 값이 모두 0이다."""
+def _check_spans(ds: _Dataset) -> tuple[list[_FlaggedSpan], list[str]]:
+    """(값을 확인할 촉각·장면 자세 구간, 메타 문제). 추가 메타 파일이 없으면 둘 다 비어 있다."""
+    got: list[_FlaggedSpan | str | None] = [
+        _tactile_span(ds, hand, spec) for hand, spec in _tactile_hands(ds).items()
+    ]
+    got.append(_scene_span(ds))
+    spans = [g for g in got if isinstance(g, _FlaggedSpan)]
+    return spans, [g for g in got if isinstance(g, str)]
+
+
+def _check_flagged_values(spans: list[_FlaggedSpan], t: pa.Table, name: str) -> list[str]:
+    """parquet의 추가 구간 값: 유효 표시는 0 또는 1이고, 0인 행은 그 구간 값이 모두 0이다."""
     out: list[str] = []
     if not spans or "observation.state" not in t.column_names:
         return out
@@ -338,12 +373,12 @@ def _check_tactile_values(spans: list[_TactileSpan], t: pa.Table, name: str) -> 
         rows = t.column(span.column).to_pylist()
         flags = [row[span.index] if len(row) > span.index else None for row in rows]
         if any(f not in (0.0, 1.0) for f in flags):
-            out.append(f"{name}: {span.column} {span.hand} 값이 0·1이 아님")
+            out.append(f"{name}: {span.column} {span.label} 값이 0·1이 아님")
         if any(
             f == 0.0 and any(row[span.start : span.end])
             for f, row in zip(flags, state, strict=True)
         ):
-            out.append(f"{name}: {span.hand} 촉각 값이 없다고 표시한 행에 0이 아닌 값이 있음")
+            out.append(f"{name}: {span.label} 값이 없다고 표시한 행에 0이 아닌 값이 있음")
     return out
 
 
@@ -414,8 +449,8 @@ def check_dataset(root: Path, ffprobe: str = "ffprobe") -> list[str]:
     out += _check_info(ds)
     if out:
         return out
-    spans, tactile_problems = _check_tactile(ds)
-    out += _check_modality(ds) + _check_lists(ds) + tactile_problems
+    spans, span_problems = _check_spans(ds)
+    out += _check_modality(ds) + _check_lists(ds) + span_problems
     probe_videos = shutil.which(ffprobe) is not None
     if not probe_videos:
         out.append(
@@ -431,7 +466,7 @@ def check_dataset(root: Path, ffprobe: str = "ffprobe") -> list[str]:
             continue
         t = pq.read_table(path)
         out += _check_schema(ds, t, name) + _check_values(ds, t, name, e, first)
-        out += _check_tactile_values(spans, t, name)
+        out += _check_flagged_values(spans, t, name)
         for key in _video_keys(ds) if probe_videos else ():
             out += _check_video(ds, key, e, t.num_rows, ffprobe)
         first += t.num_rows

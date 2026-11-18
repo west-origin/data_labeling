@@ -53,6 +53,9 @@
   결과로 마스터 시각으로 옮겨 읽는다. 값·보간·없음 규칙은 `dlp_export.tactile`(ADR 0069)에 있고,
   `write_package`가 사람 모드·로봇 모드 특징 위에 덧붙인다. 채널 이름·장갑 기종은
   meta/dlp_tactile.json.
+- observation.scene_camera (float32[8], 위치 기록을 실은 세션이 있을 때만): 그 프레임 시각의 바디캠
+  자세 (그 세션 before 복원의 장면 좌표: 카메라 중심 x·y·z, 카메라 → 장면 사원수 qw·qx·qy·qz) + 끝에
+  present. 규칙은 `dlp_export.scene`(ADR 0070), 뜻·세션별 상태는 meta/dlp_scene.json.
 어휘(번호 → ID)는 meta/dlp_vocab.json에 둔다.
 
 시각 규약 (ADR 0019): 에피소드 시각은 마스터 시각이다. 공간 라벨(키포인트·3D 궤적)은 `stream_ms`로
@@ -77,6 +80,7 @@ from numpy.typing import NDArray
 from dlp_export.frames import stream_ms
 from dlp_export.policy import ExportPolicy, LeRobotPolicy
 from dlp_export.pseudonym import Pseudonymizer
+from dlp_export.scene import SceneData
 from dlp_export.tactile import TactileData
 from dlp_media.pts import PtsIndex
 from dlp_schema.export import PhysicalPriorTable, physical_prior_table
@@ -796,6 +800,7 @@ def write_package(
     ids: Pseudonymizer,
     override: PackageOverride | None = None,
     tactile: TactileData | None = None,
+    scene: SceneData | None = None,
 ) -> Path:
     """격리 환경의 쓰기 스크립트가 읽을 묶음 (package.json + 에피소드마다 npz).
 
@@ -811,6 +816,8 @@ def write_package(
         override: 로봇 모드 특징·배열 (None이면 사람 모드, ADR 0047).
         tactile: 촉각장갑 값 (episodes와 같은 순서, ADR 0069). 사람 모드·로봇 모드 특징 위에
             `observation.tactile.<손>`을 덧붙인다. None이거나 실은 손이 없으면 묶음이 그대로다.
+        scene: 장면 좌표 자세 (episodes와 같은 순서, ADR 0070). 자세를 실은 세션이 있으면
+            `observation.scene_camera`를 덧붙인다. None이거나 실은 세션이 없으면 묶음이 그대로다.
 
     Returns:
         package.json 경로.
@@ -839,6 +846,8 @@ def write_package(
             arrays.update(override.extra[i])
         if tactile is not None:
             arrays.update(tactile.lerobot_arrays(i))
+        if scene is not None and scene.carried:
+            arrays.update(scene.lerobot_arrays(i))
         np.savez(npz, **arrays)  # pyright: ignore[reportArgumentType]
         items.append({"session_id": ids.session(session.session_id), "video": str(video),
                       "npz": str(npz), "tasks": ep.tasks})  # fmt: skip
@@ -848,6 +857,10 @@ def write_package(
         # 촉각 특징은 모드와 무관하게 덧붙인다 (로봇 모드에서도 사람 장갑 값 그대로, ADR 0069)
         feats = {**feats, **tactile.lerobot_features()}
         frame_arrays = {**frame_arrays, **tactile.lerobot_frame_arrays()}
+    if scene is not None and scene.carried:
+        # 장면 좌표 자세도 모드와 무관하게 덧붙인다 (ADR 0070)
+        feats = {**feats, **scene.lerobot_features()}
+        frame_arrays = {**frame_arrays, **scene.lerobot_frame_arrays()}
     spec = {
         "repo_id": lp.repo_id, "fps": lp.fps, "vcodec": lp.vcodec,
         "robot_type": lp.robot_type if override is None else override.robot_type,

@@ -1,7 +1,7 @@
 # 내보내기 정책 (WP15). 미검수 포함 여부의 기본값은 config/defaults.yaml export.include_unreviewed.
 # 읽는 곳: dlp_export.policy.load_policy (`dlp export coco|intervals|lerobot|gr00t`).
 # 관련: ADR 0018(내보내기), 0021(이력 선커밋·가명·LeRobot 격리 환경), 0027(세션·라벨 ID 가명), 0065(GR00T 형식),
-# 0069(촉각장갑 채널).
+# 0069(촉각장갑 채널), 0070(장면 좌표 바디캠 자세).
 # 이 파일은 파싱한 값으로만 쓴다 (텍스트 해시를 쓰지 않으므로 주석을 바꿔도 결과가 같다).
 
 # 정책 파일 형식 버전. 키 구조를 바꿀 때만 올린다.
@@ -128,3 +128,15 @@ tactile:
   interp_max_gap_ms: 50
   # 장갑 기록 구간 안 프레임 중 값이 있는 비율이 이보다 낮은 손은 내보내기가 경고한다 (manifest details.warnings)
   min_coverage: 0.9
+
+# 장면 좌표의 바디캠 자세 (dlp_export.scene, ADR 0070). `dlp export lerobot|gr00t`가 에피소드 프레임마다 그 시각의
+# 카메라 자세(그 세션 before 복원의 장면 좌표, `dlp scene3d localize`의 위치 기록)를 싣는다. coco·intervals에는
+# 싣지 않는다.
+# - 위치 기록이 지금 전후 복원으로 만든 것이고 이 내보내기와 같은 블러본에서 만든 것일 때만 싣는다. 아니면 싣지 않고
+#   manifest details.scene에 상태(stale, other_video)와 경고를 남긴다.
+# - 자세 사이 보간과 그 간격 상한은 위치 기록을 읽는 규칙이라 scene3d.yaml interpolation.max_gap_ms를 쓴다.
+# - 값 없음(위치 기록 밖, 간격 초과, 쓸 위치 기록 없음)은 값 0과 표시 0이다 (lerobot: 특징 끝의 present,
+#   gr00t: observation.scene_camera_valid).
+# - 위치 기록은 라벨링 버킷의 모델 출력이다 (원본 버킷을 읽지 않는다, 사람 검수 없음).
+scene:
+  enabled: true              # false면 위치 기록을 읽지 않고 싣지 않는다 (지금까지의 내보내기와 같다)

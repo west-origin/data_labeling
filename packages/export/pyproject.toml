@@ -1,13 +1,14 @@
 [project]
 name = "dlp-export"
 version = "0.1.0"
-description = "내보내기: COCO, 구간 JSON, LeRobot 에피소드 (데이터셋 버전에서, 검증 정책 적용, 블러본만)"
+description = "내보내기: COCO, 구간 JSON, LeRobot·GR00T 에피소드 (데이터셋 버전에서, 검증 정책 적용, 블러본만, 촉각·장면 자세 포함)"
 requires-python = ">=3.12,<3.14"
 dependencies = [
     "dlp-datasets",
     "dlp-media",
     "dlp-privacy",
     "dlp-retarget",
+    "dlp-scene3d",
     "dlp-schema",
     "numpy>=2.0",
     "opencv-contrib-python-headless>=4.10",

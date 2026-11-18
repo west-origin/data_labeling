@@ -158,6 +158,11 @@ flowchart LR
 남긴다. 장갑 기록이 없는 프레임은 값을 지어내지 않고 "없음"으로 표시한다
 ([ADR 0069](docs/adr/0069-tactile-channels-in-exports.md)).
 
+`dlp scene3d localize`로 바디캠 영상을 전후 사진의 3D 공간 안에 놓은 세션은, 같은 에피소드 프레임에 그 순간의
+카메라 자세(그 세션 before 복원의 장면 좌표: 카메라 중심과 회전 사원수)도 실린다. 그래서 한 행에 영상 프레임,
+손 3D, 촉각 값, 공간 안 카메라 자세가 함께 있다. 위치 기록이 지금 복원과 같은 블러본으로 만든 것이 아니면 싣지
+않는다 ([ADR 0070](docs/adr/0070-scene-pose-in-exports.md)).
+
 ### 세션 상태는 한 방향으로 한 칸씩 간다
 
 세션의 lifecycle은 아래 순서로만 올라간다. 어디서든 `withdrawn`(사용 중지)으로 갈 수 있고 되돌릴 수 없다.
@@ -281,7 +286,7 @@ uv run dlp export coco <데이터셋 버전>
 | `evaluation` (`dlp_eval`) | 지표, 골든셋 평가, 배포 게이트 | `dlp eval golden` | `evaluation.yaml` |
 | `active` (`dlp_active`) | 액티브 러닝 점수, FiftyOne 연동 | `dlp active rank` | `active.yaml` |
 | `retarget` (`dlp_retarget`) | 고객 로봇 리타기팅 (팔 + 평행 그리퍼, 손가락 관절이 있는 다지 손은 ADR 0068) | `dlp robot check`, `dlp export lerobot --robot` | `retarget.yaml` |
-| `export` (`dlp_export`) | COCO·구간 JSON·LeRobot·GR00T(NVIDIA Isaac GR00T N1.7, ADR 0065) 내보내기. LeRobot·GR00T 프레임에 촉각장갑 채널(ADR 0069) | `dlp export coco`, `intervals`, `lerobot`, `gr00t`, `gr00t-check` | `export.yaml` |
+| `export` (`dlp_export`) | COCO·구간 JSON·LeRobot·GR00T(NVIDIA Isaac GR00T N1.7, ADR 0065) 내보내기. LeRobot·GR00T 프레임에 촉각장갑 채널(ADR 0069)과 장면 좌표 바디캠 자세(ADR 0070) | `dlp export coco`, `intervals`, `lerobot`, `gr00t`, `gr00t-check` | `export.yaml` |
 | `scene3d` (`dlp_scene3d`) | 청소 전후 여러 각도 사진의 3D 복원(SfM·3D 가우시안 스플랫)과 물체 이동 비교 (ADR 0066, 실제 GPU 복원은 미검증). 마커로 정하는 미터 척도, 장면 안 바디캠 위치 추정, 전후 갖춤 확인 (ADR 0067, 실사진·실영상 미검증) | `dlp scene3d ingest`, `reconstruct`, `compare`, `report`, `localize`, `status` | `scene3d.yaml` |
 | `ops` (`dlp_ops`) | 주간 지표, 원본 접근 감사, 보관 만료 | `dlp ops weekly`, `audit-report`, `retention` | `ops.yaml` |
 | `console` (`dlp_console`) | 브라우저 운영 콘솔. `dlp` 명령을 작업으로 돌리고 DB는 읽기만 한다 | `dlp console serve` | `config/console.yaml` |

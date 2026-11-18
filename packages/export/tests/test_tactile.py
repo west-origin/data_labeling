@@ -37,6 +37,7 @@ from dlp_export.policy import ExportPolicy, TactilePolicy
 from dlp_export.pseudonym import Pseudonymizer
 from dlp_export.robot import retarget_session, robot_override
 from dlp_export.runner import BuiltEpisodes, build_episodes, run_export
+from dlp_export.scene import SceneSource
 from dlp_export.source import ExportError, ExportSession, ExportSource, label_states, select_labels
 from dlp_export.tactile import TactileData, frame_values, select_channels
 from dlp_fixtures.sync import ClockTruth
@@ -145,9 +146,16 @@ class World:
         return ExportSession(session, split, labels, {"bodycam": digest})
 
     def build(
-        self, *sessions: ExportSession, policy: ExportPolicy | None = None, raw: bool = True
+        self,
+        *sessions: ExportSession,
+        policy: ExportPolicy | None = None,
+        raw: bool = True,
+        scenes: SceneSource | None = None,
     ) -> BuiltEpisodes:
-        """`build_episodes` (세션 ID 순, 가명 사용). raw=False면 원본 저장소를 넘기지 않는다."""
+        """`build_episodes` (세션 ID 순, 가명 사용). raw=False면 원본 저장소를 넘기지 않는다.
+
+        scenes: 장면 좌표 자세를 찾을 곳 (ADR 0070, `test_scene.py`). 없으면 자세를 싣지 않는다.
+        """
         version = DatasetVersion(
             version_id="dv1", ontology_version="1.0.0", created_at=FIXED_TIME,
             snapshot_uri="local-snapshot://x/dv1",
@@ -157,7 +165,7 @@ class World:
         src = ExportSource(version, ordered, label_states(self.policy, False))
         return build_episodes(
             src, policy or self.policy, self.vocab, self.labeling, self.tmp / "work", IDS,
-            raw=self.raw if raw else None,
+            raw=self.raw if raw else None, scenes=scenes,
         )  # fmt: skip
 
     def reads(self) -> list[tuple[str, str, str, str | None]]:

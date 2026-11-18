@@ -9,7 +9,7 @@
 의존 표는 [구조 지도](architecture.md), 바꿀 때 함께 볼 파일과 시험은
 [변경 및 복구 안내](change-guide.md)에 있다.
 
-파일 680개.
+파일 682개.
 
 ## 목차
 
@@ -202,7 +202,7 @@
 | [`test_calib_cmds.py`](../../packages/cli/tests/test_calib_cmds.py) | `dlp calib intrinsics\|import\|assign\|palm\|show` 명령 테스트 (ADR 0045·0052, SQLite 파일 DB). |
 | [`test_calib_palm_estimate.py`](../../packages/cli/tests/test_calib_palm_estimate.py) | `dlp calib palm-estimate\|palm-revoke` 명령 경로 (ADR 0045·0052, F-COE-71, SQLite 파일 DB). |
 | [`test_dataset_build_cmd.py`](../../packages/cli/tests/test_dataset_build_cmd.py) | `dlp dataset build`가 빌드 거절을 traceback 없이 알린다 (F-ETA-31). |
-| [`test_export_cmds.py`](../../packages/cli/tests/test_export_cmds.py) | `dlp export`의 촉각장갑용 원본 감사 저장소 선택과 요약 출력 (ADR 0069, DB·저장소 없이). |
+| [`test_export_cmds.py`](../../packages/cli/tests/test_export_cmds.py) | `dlp export`의 촉각장갑용 원본 감사 저장소 선택과 요약 출력 (ADR 0069·0070, DB·저장소 없이). |
 | [`test_golden_cmds.py`](../../packages/cli/tests/test_golden_cmds.py) | 골든셋 CLI의 정답 고정 (`dlp dataset golden --create\|--from`, `dlp dataset build --golden`, `dlp eval golden`, ADR 0041). |
 | [`test_health.py`](../../packages/cli/tests/test_health.py) | `dlp_cli.health`와 `dlp` 진입점의 단위 테스트 (WP0). |
 | [`test_main.py`](../../packages/cli/tests/test_main.py) | `dlp` 진입점의 인자 해석 (`dlp_cli.main.parse_cli_args`). |
@@ -328,6 +328,7 @@
 | [`pseudonym.py`](../../packages/export/src/dlp_export/pseudonym.py) | 내보내기마다 다른 가명: 작업자·장소·세션·라벨 ID (export.yaml ids, ADR 0021·0027·0031). |
 | [`robot.py`](../../packages/export/src/dlp_export/robot.py) | LeRobot 로봇 리타기팅 에피소드 (`dlp export lerobot --robot <ID>`, ADR 0047·0068). |
 | [`runner.py`](../../packages/export/src/dlp_export/runner.py) | 내보내기 실행 (`dlp export <형식> <데이터셋 버전>`). |
+| [`scene.py`](../../packages/export/src/dlp_export/scene.py) | 장면 좌표의 바디캠 자세를 에피소드 프레임마다 싣는다 (`dlp export lerobot\|gr00t`, ADR 0070). |
 | [`source.py`](../../packages/export/src/dlp_export/source.py) | 내보낼 세션과 라벨을 고른다 (모든 형식 공용, WP15, ADR 0018·0021·0024). |
 | [`tactile.py`](../../packages/export/src/dlp_export/tactile.py) | 촉각장갑 채널을 에피소드 프레임 시각에 맞춰 싣는다 (`dlp export lerobot\|gr00t`, ADR 0069). |
 
@@ -343,6 +344,7 @@
 | [`test_robot.py`](../../packages/export/tests/test_robot.py) | LeRobot 로봇 리타기팅 에피소드 (ADR 0047). 서비스·격리 환경 없이 돈다 (내장 IK 풀이기). |
 | [`test_robot_hand.py`](../../packages/export/tests/test_robot_hand.py) | LeRobot 다지 손 로봇 리타기팅 에피소드 (ADR 0068). 서비스·격리 환경 없이 돈다 (내장 풀이기). |
 | [`test_runner.py`](../../packages/export/tests/test_runner.py) | 데이터셋 버전 → 내보내기 → 이력 (PostgreSQL, make up). |
+| [`test_scene.py`](../../packages/export/tests/test_scene.py) | 장면 좌표 바디캠 자세 내보내기 (ADR 0070, DB 없이). |
 | [`test_source_inheritance.py`](../../packages/export/tests/test_source_inheritance.py) | 물려받은 3D의 기본 내보내기 경로를 DB·스냅샷을 거쳐 검사한다 (ADR 0048·0050, F-COE-55). |
 | [`test_tactile.py`](../../packages/export/tests/test_tactile.py) | 촉각장갑 채널 내보내기 (ADR 0069, DB 없이). |
 
@@ -913,7 +915,7 @@
 | [`policies/calibration.yaml`](../../config/policies/calibration.yaml) | 카메라 내부 파라미터 캘리브레이션 (ADR 0045·0052, dlp_media.calibration, `dlp calib intrinsics\|import`). 체커보드(평평한 판에 붙인, 칸이 정사각형인 인쇄물. 칸 크기는 내부 파라미터에 영향이 없다)를 그 카메라로 여러 위치·기울기에서 찍은 영상에서 OpenCV calibrateCamera로 fx·fy·cx·cy·왜곡 계수를 구한다. 결과는 DB camera_calibrations에 기기 ID로 등록한다. 절차는 docs/handover/camera-calibration.md. |
 | [`policies/dataset.yaml`](../../config/policies/dataset.yaml) | 데이터셋 버전 정책 (WP7). 분할기는 작업자·장소를 누수 방지 단위로 고정해 쓴다. config/defaults.yaml golden_set.split_unit 값을 바꿔도 현재 분할 동작은 바뀌지 않는다. 읽는 곳: dlp_datasets.policy.load_policy (`dlp dataset golden\|build`). 관련: ADR 0007. 이 파일은 파싱한 값으로만 쓴다 (주석을 바꿔도 결과가 같다). |
 | [`policies/evaluation.yaml`](../../config/policies/evaluation.yaml) | 지표와 평가 하네스 정책 (WP11). 골든셋으로 모델을 평가하고 배포 여부를 판정한다. 로더: dlp_eval.policy.load_policy → EvaluationPolicy (모르는 키는 거부한다). 사용처: dlp eval golden(dlp_cli.eval_cmds), 재학습 루프(dlp_train.loop). 관련 ADR 0013·0025. 이 파일은 모델 버전 해시에 들어가지 않는다 (값을 바꿔도 프리라벨 등이 다시 돌지 않는다). 값을 바꾸면 같은 모델이라도 지표·게이트 판정이 달라지므로, 비교하는 두 리포트는 같은 정책으로 만든다. |
-| [`policies/export.yaml`](../../config/policies/export.yaml) | 내보내기 정책 (WP15). 미검수 포함 여부의 기본값은 config/defaults.yaml export.include_unreviewed. 읽는 곳: dlp_export.policy.load_policy (`dlp export coco\|intervals\|lerobot\|gr00t`). 관련: ADR 0018(내보내기), 0021(이력 선커밋·가명·LeRobot 격리 환경), 0027(세션·라벨 ID 가명), 0065(GR00T 형식), 0069(촉각장갑 채널). 이 파일은 파싱한 값으로만 쓴다 (텍스트 해시를 쓰지 않으므로 주석을 바꿔도 결과가 같다). |
+| [`policies/export.yaml`](../../config/policies/export.yaml) | 내보내기 정책 (WP15). 미검수 포함 여부의 기본값은 config/defaults.yaml export.include_unreviewed. 읽는 곳: dlp_export.policy.load_policy (`dlp export coco\|intervals\|lerobot\|gr00t`). 관련: ADR 0018(내보내기), 0021(이력 선커밋·가명·LeRobot 격리 환경), 0027(세션·라벨 ID 가명), 0065(GR00T 형식), 0069(촉각장갑 채널), 0070(장면 좌표 바디캠 자세). 이 파일은 파싱한 값으로만 쓴다 (텍스트 해시를 쓰지 않으므로 주석을 바꿔도 결과가 같다). |
 | [`policies/media.yaml`](../../config/policies/media.yaml) | 로컬 영상 준비. 원본은 보존하고 PTS/오디오/데이터 트랙을 검증한 사본만 출력한다. |
 | [`policies/ops.yaml`](../../config/policies/ops.yaml) | 운영 대시보드와 보안 정책 (WP16). 원본 보관 기간은 config/defaults.yaml retention.raw_retention_days. 읽는 곳: dlp_ops.policy.load_policy (`dlp ops weekly\|audit-report\|retention`). 이 정책은 모델 버전 해시에 들어가지 않으므로 값을 바꿔도 파이프라인 단계가 다시 돌지 않는다 (리포트·경고에만 영향). 알 수 없는 키를 넣으면 로드가 실패한다 (Contract: extra=forbid). 정책 파일 형식 버전. 키 구조를 바꿀 때만 올린다. |
 | [`policies/pilot.yaml`](../../config/policies/pilot.yaml) | 실제 영상 첫 시험의 범위. 임계값은 각 단계의 기존 정책을 그대로 사용한다. |

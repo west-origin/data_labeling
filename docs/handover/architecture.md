@@ -30,7 +30,7 @@ Prefect 서비스가 기동된 것만으로 모든 작업이 영속 큐에서 �
 | 배정·QA·품질 | [review ops](../../packages/review/src/dlp_review/ops/)(AI 판정 품질 `ai_quality.py`, WP17.8) | 위 검수 정책, `config/defaults.yaml` |
 | 계약·온톨로지·DB | [schema](../../packages/schema/src/dlp_schema/), `db/` | `config/ontology/v1`, `schemas/`는 생성물 |
 | 데이터셋·학습·평가 | [datasets](../../packages/datasets/src/dlp_datasets/), [training](../../packages/training/src/dlp_train/), [evaluation](../../packages/evaluation/src/dlp_eval/) | `dataset.yaml`, `training.yaml`, `evaluation.yaml` |
-| 내보내기·게시 | [export runner](../../packages/export/src/dlp_export/runner.py), 같은 디렉터리의 형식별 모듈 (GR00T: `gr00t.py`·확인기 `gr00t_check.py`, ADR 0065), 촉각장갑 채널 [tactile.py](../../packages/export/src/dlp_export/tactile.py)(lerobot·gr00t 프레임 시각의 장갑 값, ADR 0069) | `config/policies/export.yaml`(`tactile` 절), 원본 접근 용도 `config/policies/ops.yaml audit.service_purposes` |
+| 내보내기·게시 | [export runner](../../packages/export/src/dlp_export/runner.py), 같은 디렉터리의 형식별 모듈 (GR00T: `gr00t.py`·확인기 `gr00t_check.py`, ADR 0065), 촉각장갑 채널 [tactile.py](../../packages/export/src/dlp_export/tactile.py)(lerobot·gr00t 프레임 시각의 장갑 값, ADR 0069), 장면 좌표 바디캠 자세 [scene.py](../../packages/export/src/dlp_export/scene.py)(위치 기록에서 프레임 시각의 카메라 자세, ADR 0070) | `config/policies/export.yaml`(`tactile`·`scene` 절, 보간 한도는 `scene3d.yaml interpolation`), 원본 접근 용도 `config/policies/ops.yaml audit.service_purposes` |
 | 운영 콘솔 (ADR 0061) | [console](../../packages/console/src/dlp_console/)의 `app.py`(API·토큰), `jobs.py`(`dlp` 명령 작업 실행·JSON Lines 기록), `steps.py`·`global_steps.py`(단계 활성 규칙·명령), `status.py`(DB 읽기 전용), `upload.py`(매니페스트), `preview.py`(블러본 서명 URL), `training.py`(회차 그래프 자료), `pretrain.py`·`imports.py`(외부 학습 가중치 가져오기), 화면 `static/`, [CLI](../../packages/cli/src/dlp_cli/console_cmds.py) | `config/console.yaml`, `config/review_ui.yaml`(테마), 안내 [operator-guide.md](operator-guide.md) |
 | 모델·합성 정답·운영·선별 | [models](../../packages/models/src/dlp_models/), [fixtures](../../packages/fixtures/src/dlp_fixtures/), [ops](../../packages/ops/src/dlp_ops/), [active](../../packages/active/src/dlp_active/) | 모델 레지스트리, 각 정책 |
 
@@ -51,7 +51,7 @@ Prefect 서비스가 기동된 것만으로 모든 작업이 영속 큐에서 �
 | aireview | eval, media, models, privacy, schema |
 | review | eval, media, privacy, schema, sync |
 | train | datasets, eval, media, models, prelabel, schema |
-| export | datasets, media, privacy, retarget, schema |
+| export | datasets, media, privacy, retarget, scene3d, schema |
 | ops | privacy, review, schema |
 | console | media, models, privacy, review, schema |
 | scene3d | media, models, privacy, schema |
@@ -444,6 +444,13 @@ COCO에 마스크 `segmentation`(압축 RLE)·`mask_score`·`hand`, 객체 hand 
 세션마다 다르면 거부한다. 장갑 Parquet은 `run_export`의 `raw`(감사 저장소, 용도 `export.lerobot`·`export.gr00t`)로만
 읽고 결과에는 원본 위치가 없다. 채널·장갑 기종·세션별 상태는 `meta/dlp_tactile.json`과 manifest `details.tactile`.
 장갑 스트림이 없는 세션만 내보내면 결과가 전과 같다. 정책은 `export.yaml tactile`.
+장면 좌표 바디캠 자세(`scene.py`, ADR 0070): lerobot·gr00t가 세션의 위치 기록(`dlp scene3d localize`, 라벨링 버킷)에서
+에피소드 프레임 시각의 카메라 자세를 싣는다. 값은 카메라 중심 x·y·z와 카메라 → 장면 회전 사원수 qw·qx·qy·qz(그 세션
+before 복원의 좌표, 세션마다 다른 좌표계)다. 프레임 시각은 위치 기록 스트림 시각으로 옮겨 `PoseTrack.at`으로 보간하고
+(한도 `scene3d.yaml interpolation.max_gap_ms`), 기록 밖·간격 초과는 값 0·표시 0이다. 기록이 지금 복원으로 만든 것이고
+이 내보내기와 같은 블러본(렌더 해시)에서 만든 것일 때만 싣는다. LeRobot은 `observation.scene_camera`, GR00T는
+`observation.state` 끝(촉각 뒤)의 `scene_camera` 구간과 `observation.scene_camera_valid`이고 action에는 없다. 결과에
+태그·렌더 해시를 넣지 않는다 (가명 규칙). 뜻·세션별 상태는 `meta/dlp_scene.json`과 manifest `details.scene`.
 
 ### `packages/ops/` (`dlp_ops`)
 
