@@ -27,7 +27,7 @@ from numpy.typing import NDArray
 
 from dlp_export.gr00t import StateLayout, write_gr00t
 from dlp_export.gr00t_check import check_dataset
-from dlp_export.lerobot import write_package
+from dlp_export.lerobot import run_script, write_package
 from dlp_export.policy import ExportPolicy
 from dlp_export.runner import BuiltEpisodes
 from dlp_export.scene import (
@@ -455,3 +455,28 @@ def test_gr00t_carries_the_pose_after_tactile_and_the_check_guards_it(world: Wor
         corrupt(broken)
         problems = check_dataset(broken, world.policy.gr00t.video.ffprobe)
         assert any(expected in p for p in problems), problems
+
+
+@pytest.mark.isolated_env
+def test_official_lerobot_loader_reads_the_scene_camera_feature(world: World) -> None:
+    """격리 환경의 LeRobot 공식 쓰기 API가 장면 자세 특징을 받고 공식 로더가 같은 값을 준다.
+
+    격리 환경(PyTorch CPU판)을 받으므로 `make test-isolated`에서만 돈다 (촉각 특징과 같은 방식).
+    정답: 로더의 특징 목록에 observation.scene_camera가 있고, 표본 프레임 값이 묶음의 배열과 같다.
+    """
+    lp = world.policy.lerobot
+    es = world.session("s1")
+    built = world.build(es, scenes=FakeScenes({"s1": record_for(es)}))
+    assert built.scene is not None
+    episodes = [(e.session, video, ep) for e, video, ep in built.items]
+    pkg = write_package(
+        episodes, world.policy, built.size, world.tmp / "pkg", IDS, None, None, built.scene
+    )
+    dest = world.tmp / "lerobot"
+    run_script(ROOT, lp, "lerobot_write.py", str(pkg), str(dest))
+    check = json.loads(run_script(ROOT, lp, "lerobot_check.py", str(dest), lp.repo_id))
+    assert check["episodes"] == 1 and check["frames"] == len(built.items[0][2].times_ms)
+    assert FEATURE in check["features"]
+    arrays = built.scene.lerobot_arrays(0)["scene_camera"]
+    for sample in check["samples"]:
+        assert np.allclose(sample["extra"][FEATURE], arrays[sample["index"]], atol=1e-6)

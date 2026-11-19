@@ -112,8 +112,9 @@
 
 아닌 것과 모르는 것:
 
-- **LeRobot 공식 쓰기·읽기 API로 촉각 특징을 써 보지 못했다.** 이 환경이 격리 환경의 PyTorch CPU판을 받지 못한다.
-  시험은 있다 (`test_tactile.py::test_official_lerobot_loader_reads_tactile_features`, isolated_env). (F-COE-97)
+- (2026-11-19 바로잡음) LeRobot 공식 쓰기·읽기 API로 촉각 특징을 쓰고 읽는 시험
+  (`test_tactile.py::test_official_lerobot_loader_reads_tactile_features`, isolated_env)은 구현 환경에서는 PyTorch CPU판을
+  받지 못해 돌리지 못했지만, CI의 서비스 작업(`make test-isolated`)에서 2026-11-18 푸시부터 돌아 통과한다.
 - **GR00T 자체 로더·통계 생성기로 읽어 보지 않았다** (ADR 0065와 같다). state와 action의 키가 다른 데이터셋을 받는지는
   문서로만 판단했다. (F-COE-97)
 - **로봇 모드(`--robot`)는 묶음까지만.** 같은 촉각 특징(사람 장갑 값, 두 손)을 로봇 특징 위에 덧붙인다

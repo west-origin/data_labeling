@@ -190,9 +190,9 @@
 - 사람 왼손을 오른손 모양 로봇 손에 옮기는 것(거울상)은 다루지 않는다. 손가락 끝 배치가 거울상이라
   맞는 자세가 없거나 손바닥이 뒤집힌 자세로 풀릴 수 있다 (시험하지 않았다). `arm.hand`를 로봇 손과
   같은 쪽으로 둔다.
-- 격리 환경 시험(`make test-isolated`: LeRobot 공식 쓰기·읽기)은 이 작업 환경에서 PyTorch CPU 휠을 받지
-  못해 돌리지 못했다. 다지 손 묶음을 공식 로더로 읽는 시험
-  (`test_official_lerobot_loader_reads_hand_robot_episode`)은 써 두었지만 실행 전이다.
+- (2026-11-19 바로잡음) 다지 손 묶음을 LeRobot 공식 쓰기 API로 쓰고 공식 로더로 읽는 시험
+  (`test_official_lerobot_loader_reads_hand_robot_episode`, isolated_env)은 구현 환경에서는 PyTorch CPU 휠을 받지 못해
+  돌리지 못했지만, CI의 서비스 작업(`make test-isolated`)에서 2026-11-18 푸시부터 돌아 통과한다.
 
 ## 결과
 
