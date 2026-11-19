@@ -451,6 +451,9 @@ before 복원의 좌표, 세션마다 다른 좌표계)다. 프레임 시각은 
 이 내보내기와 같은 블러본(렌더 해시)에서 만든 것일 때만 싣는다. LeRobot은 `observation.scene_camera`, GR00T는
 `observation.state` 끝(촉각 뒤)의 `scene_camera` 구간과 `observation.scene_camera_valid`이고 action에는 없다. 결과에
 태그·렌더 해시를 넣지 않는다 (가명 규칙). 뜻·세션별 상태는 `meta/dlp_scene.json`과 manifest `details.scene`.
+전후 3D 장면 파일(소유자 결정 2026-11-18): 지금 복원이 있는 단계마다 `scene/<가명 세션>/<단계>/points.ply`(희소 점 + 색,
+기술자 뺌)·`splat.ply`와 받아들인 정렬의 `alignment.json`을 결과 루트에 쓴다 (`StoredScenes.files`가 받아 두고
+`SceneData.write_files`가 옮긴다). 위치 기록이 없어도 복원이 있으면 싣는다. 사진·사진별 카메라·물체 변화 보고는 싣지 않는다.
 
 ### `packages/ops/` (`dlp_ops`)
 

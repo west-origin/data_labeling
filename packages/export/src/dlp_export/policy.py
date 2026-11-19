@@ -148,7 +148,7 @@ class ScenePolicy(Contract):
     보간 간격 상한은 위치 기록을 읽는 규칙이라 `scene3d.yaml interpolation.max_gap_ms`를 쓴다.
     """
 
-    # 거짓이면 위치 기록을 읽지 않고 자세를 싣지 않는다 (기록도 남기지 않는다)
+    # 거짓이면 위치 기록·장면 파일을 읽지 않고 자세·장면 파일을 싣지 않는다 (기록도 남기지 않는다)
     enabled: bool
 
 

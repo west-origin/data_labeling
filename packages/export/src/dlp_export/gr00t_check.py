@@ -27,7 +27,8 @@ Isaac-GR00T `getting_started/data_preparation.md`, 로더 `lerobot_episode_loade
    표시는 0 또는 1이고, 0인 행은 그 구간 값이 모두 0이다 (없는 값을 채워 넣지 않았다).
 8. 장면 좌표 바디캠 자세 구간 (meta/dlp_scene.json이 있고 자세를 실었을 때만, ADR 0070. 우리 추가
    파일의 약속이다): 7번과 같은 조건을 `state_key` 구간(이름 = 그 파일의 names)과 유효 표시 열
-   (`valid_column`의 `valid_name`)에 본다.
+   (`valid_column`의 `valid_name`)에 본다. 세션 기록의 `scene_files`가 가리키는 3D 장면 파일이
+   데이터셋 안에 있다.
 """
 
 # pyarrow에는 타입 스텁이 없어 이 모듈에서만 알 수 없는 타입 경고를 끈다 (dlp_media.tables와 같다).
@@ -351,6 +352,28 @@ def _scene_span(ds: _Dataset) -> _FlaggedSpan | str | None:
     return _flagged_span(ds, "dlp_scene.json", "scene_camera", meta, names, "값 이름")
 
 
+def _scene_file_paths(item: object) -> list[str]:
+    """scene_files 한 칸이 가리키는 경로 (정렬은 문자열, 단계는 points·splat, 없음은 None)."""
+    if isinstance(item, str):
+        return [item]
+    if isinstance(item, dict):
+        return [str(v) for k, v in item.items() if k in ("points", "splat") and isinstance(v, str)]
+    return []
+
+
+def _check_scene_files(ds: _Dataset) -> list[str]:
+    """dlp_scene.json 세션 기록의 scene_files가 가리키는 파일이 데이터셋 안에 있는가."""
+    out: list[str] = []
+    for session in (ds.scene or {}).get("sessions") or []:
+        files = session.get("scene_files") if isinstance(session, dict) else None
+        if not isinstance(files, dict):
+            continue
+        for item in files.values():
+            missing = [p for p in _scene_file_paths(item) if not (ds.root / p).is_file()]
+            out += [f"dlp_scene.json: 장면 파일 {p} 없음" for p in missing]
+    return out
+
+
 def _check_spans(ds: _Dataset) -> tuple[list[_FlaggedSpan], list[str]]:
     """(값을 확인할 촉각·장면 자세 구간, 메타 문제). 추가 메타 파일이 없으면 둘 다 비어 있다."""
     got: list[_FlaggedSpan | str | None] = [
@@ -450,7 +473,7 @@ def check_dataset(root: Path, ffprobe: str = "ffprobe") -> list[str]:
     if out:
         return out
     spans, span_problems = _check_spans(ds)
-    out += _check_modality(ds) + _check_lists(ds) + span_problems
+    out += _check_modality(ds) + _check_lists(ds) + span_problems + _check_scene_files(ds)
     probe_videos = shutil.which(ffprobe) is not None
     if not probe_videos:
         out.append(

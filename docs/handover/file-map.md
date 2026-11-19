@@ -328,7 +328,7 @@
 | [`pseudonym.py`](../../packages/export/src/dlp_export/pseudonym.py) | 내보내기마다 다른 가명: 작업자·장소·세션·라벨 ID (export.yaml ids, ADR 0021·0027·0031). |
 | [`robot.py`](../../packages/export/src/dlp_export/robot.py) | LeRobot 로봇 리타기팅 에피소드 (`dlp export lerobot --robot <ID>`, ADR 0047·0068). |
 | [`runner.py`](../../packages/export/src/dlp_export/runner.py) | 내보내기 실행 (`dlp export <형식> <데이터셋 버전>`). |
-| [`scene.py`](../../packages/export/src/dlp_export/scene.py) | 장면 좌표의 바디캠 자세를 에피소드 프레임마다 싣는다 (`dlp export lerobot\|gr00t`, ADR 0070). |
+| [`scene.py`](../../packages/export/src/dlp_export/scene.py) | 장면 좌표의 바디캠 자세와 전후 3D 장면 파일을 싣는다 (`dlp export lerobot\|gr00t`, ADR 0070). |
 | [`source.py`](../../packages/export/src/dlp_export/source.py) | 내보낼 세션과 라벨을 고른다 (모든 형식 공용, WP15, ADR 0018·0021·0024). |
 | [`tactile.py`](../../packages/export/src/dlp_export/tactile.py) | 촉각장갑 채널을 에피소드 프레임 시각에 맞춰 싣는다 (`dlp export lerobot\|gr00t`, ADR 0069). |
 

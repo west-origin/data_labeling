@@ -265,7 +265,7 @@ def build_episodes(
     lp = policy.lerobot
     out = BuiltEpisodes([], [], [])
     tactile = TactileCollector(raw, policy.tactile, work) if policy.tactile.enabled else None
-    scene = SceneCollector(scenes) if scenes is not None and policy.scene.enabled else None
+    scene = SceneCollector(scenes, work) if scenes is not None and policy.scene.enabled else None
     size: tuple[int, int] | None = None
     for es in src.sessions:
         stream = next((s for s in es.session.streams if s.kind.value == lp.video_stream), None)
@@ -399,6 +399,8 @@ def _lerobot(
         (dest / "meta" / "dlp_scene.json").write_text(
             json.dumps(details["scene"], ensure_ascii=False, indent=2), "utf-8"
         )
+        # 전후 3D 장면 파일 (scene/<가명 세션>/…, 소유자 결정 2026-11-18)
+        built.scene.write_files(dest)
     if run is not None:
         # 로봇·모델 sha256·리타기팅 판·에피소드별 도달 가능성 보고 (manifest details에도 들어간다)
         details["retarget"] = run.meta()
@@ -481,14 +483,14 @@ def _gr00t(
 def scene_source(
     root: Path, labeling: ObjectStore, fmt: str, policy: ExportPolicy
 ) -> SceneSource | None:
-    """장면 좌표 자세를 찾을 곳 (ADR 0070). lerobot·gr00t이고 `export.yaml scene.enabled`일 때만.
+    """장면 좌표 자세·3D 장면 파일을 찾을 곳 (ADR 0070). lerobot·gr00t이고 `scene.enabled`일 때만.
 
-    위치 기록은 라벨링 버킷에 있다 (원본 버킷을 읽지 않는다). 보간 간격 상한은
+    위치 기록과 복원은 라벨링 버킷에 있다 (원본 버킷을 읽지 않는다). 보간 간격 상한은
     `scene3d.yaml interpolation.max_gap_ms`다.
     """
     if fmt not in ("lerobot", "gr00t") or not policy.scene.enabled:
         return None
-    return StoredScenes(labeling, load_scene3d_policy(root).interpolation.max_gap_ms)
+    return StoredScenes(labeling, load_scene3d_policy(root))
 
 
 def check_hand_parts(

@@ -570,7 +570,8 @@ def write_gr00t(
             기록 meta/dlp_tactile.json은 쓴다. None이면 촉각이 없던 때와 같은 파일을 쓴다.
         scene: 장면 좌표 자세 (items와 같은 순서, ADR 0070). 자세를 실은 세션이 있으면 state 구간과
             observation.scene_camera_valid를 더하고, 없어도(위치 기록이 모두 낡음) 세션 기록
-            meta/dlp_scene.json은 쓴다. None이면 이 기능이 없던 때와 같은 파일을 쓴다.
+            meta/dlp_scene.json은 쓴다. 전후 3D 장면 파일은 `scene/<가명 세션>/`에 쓴다. None이면
+            이 기능이 없던 때와 같은 파일을 쓴다.
 
     에피소드 번호는 분할 순(golden, train, val, holdout 중 있는 것)으로 다시 매겨 info.json
     splits가 연속 구간이 되게 한다.
@@ -611,6 +612,7 @@ def write_gr00t(
         _write_json(dest / "meta" / "dlp_tactile.json", tactile.meta("gr00t"))
     if scene is not None:
         _write_json(dest / "meta" / "dlp_scene.json", scene.meta("gr00t"))
+        scene.write_files(dest)  # 전후 3D 장면 파일 (scene/<가명 세션>/…)
     return Gr00tResult(used, len(items), total, len(table.texts))
 
 

@@ -6,8 +6,9 @@
 선형·회전 구면 보간이 정답과 정확히 같으므로, 내보낸 값이 "그 프레임 시각의 정답 자세"인지 식으로
 판정한다. 값이 있어야 하는 프레임은 구현과 따로 시각만 보고 정한다 (`expected_valid`).
 
-위치 기록은 대역(`FakeScenes`)이 돌려준다. 기록이 지금 복원으로 만든 것인지는 `dlp_scene3d` 시험이
-본다 (`packages/scene3d/tests/test_localize.py`).
+위치 기록과 전후 3D 장면 파일은 대역(`FakeScenes`)이 돌려준다. 기록이 지금 복원으로 만든 것인지는
+`dlp_scene3d` 시험이 본다 (`packages/scene3d/tests/test_localize.py`). 장면 파일은 정답 점·색·스플랫
+바이트를 알고 넣어, 결과의 PLY를 다시 읽어 같은지 본다.
 """
 
 from __future__ import annotations
@@ -33,14 +34,18 @@ from dlp_export.scene import (
     FEATURE,
     NAMES,
     Found,
+    PhaseFiles,
+    SceneFiles,
     StoredScenes,
     quaternion_wxyz,
 )
 from dlp_export.source import ExportSession
 from dlp_media.storage import LocalStore
-from dlp_schema.scene3d import EgoLocalization
+from dlp_scene3d.policy import load_policy as load_scene3d_policy
+from dlp_schema.scene3d import Alignment, EgoLocalization
 from dlp_schema.testing import FIXED_TIME
 
+from .conftest import ROOT
 from .test_tactile import IDS, World, left_glove, right_glove, world
 
 # pyarrow에는 타입 스텁이 없다 (dlp_export.gr00t와 같다)
@@ -132,15 +137,76 @@ def record_for(
 
 @dataclass
 class FakeScenes:
-    """위치 기록 대역: 세션 ID → 기록·"stale" (없으면 "none")."""
+    """위치 기록·장면 파일 대역: 세션 ID → 기록·"stale"(없으면 "none"), 장면 파일(없으면 빈 것)."""
 
     found: dict[str, Found] = field(default_factory=dict[str, Found])
+    scene_files: dict[str, SceneFiles] = field(default_factory=dict[str, SceneFiles])
     max_gap_ms: int = MAX_GAP_MS
     asked: list[str] = field(default_factory=list[str])
 
     def find(self, session_id: str) -> Found:
         self.asked.append(session_id)
         return self.found.get(session_id, "none")
+
+    def files(self, session_id: str, work: Path) -> SceneFiles:
+        return self.scene_files.get(session_id, SceneFiles())
+
+
+@dataclass(frozen=True)
+class PhaseTruth:
+    """장면 파일 한 단계의 정답: 넣은 점·색·스플랫 바이트와 대역이 돌려줄 `PhaseFiles`."""
+
+    files: PhaseFiles
+    points: F64
+    colors: NDArray[np.uint8]
+    splat: bytes
+
+
+def phase_truth(tmp: Path, name: str, n: int, *, metric: bool = True) -> PhaseTruth:
+    """복원 한 단계의 파일 (점 npz에 정렬용 기술자도 넣는다. 결과에는 빠져야 한다)."""
+    rng = np.random.default_rng(len(name) + n)
+    points = rng.normal(size=(n, 3))
+    colors = rng.integers(0, 256, (n, 3), dtype=np.uint8)
+    folder = tmp / "recon" / name
+    folder.mkdir(parents=True)
+    np.savez(
+        folder / "points.npz", points=points, descriptors=rng.normal(size=(n, 128)), colors=colors
+    )
+    splat = b"ply\nformat binary_little_endian 1.0\nelement vertex 0\nend_header\n" + name.encode()
+    (folder / "splat.ply").write_bytes(splat)
+    files = PhaseFiles(
+        folder / "points.npz", folder / "splat.ply", metric, "marker" if metric else "none", n,
+        "scene3d-recon-2+test",
+    )  # fmt: skip
+    return PhaseTruth(files, points, colors, splat)
+
+
+ALIGNMENT = Alignment.model_validate({
+    "model_version": "scene3d-align-1+p0", "scale": 1.25,
+    "rotation": [0.0, -1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+    "translation": [0.1, 0.2, -0.3], "matches": 200, "inliers": 180, "rms_m": 0.004,
+    "accepted": True, "reason": None,
+})  # fmt: skip
+
+
+def read_points_ply(path: Path) -> tuple[F64, NDArray[np.uint8]]:
+    """결과의 points.ply를 읽는다 (구현과 따로, 머리말을 읽고 이진 행을 푼다)."""
+    data = path.read_bytes()
+    end = data.index(b"end_header\n") + len(b"end_header\n")
+    header = data[:end].decode("ascii").splitlines()
+    assert header[:2] == ["ply", "format binary_little_endian 1.0"]
+    count = int(header[2].split()[-1])
+    assert header[3:9] == [
+        "property float x", "property float y", "property float z",
+        "property uchar red", "property uchar green", "property uchar blue",
+    ]  # fmt: skip
+    rows = np.frombuffer(
+        data[end:],
+        dtype=[("x", "<f4"), ("y", "<f4"), ("z", "<f4"), ("r", "u1"), ("g", "u1"), ("b", "u1")],
+    )
+    assert rows.size == count
+    xyz = np.stack([rows["x"], rows["y"], rows["z"]], axis=1).astype(np.float64)
+    return xyz, np.stack([rows["r"], rows["g"], rows["b"]], axis=1)
 
 
 def times_of(built: BuiltEpisodes, i: int) -> F64:
@@ -238,10 +304,67 @@ def test_without_localizations_the_export_is_unchanged(world: World, policy: Exp
     assert stale is not None and not stale.carried
 
 
-def test_stored_scenes_without_a_record_is_none(tmp_path: Path) -> None:
-    """라벨링 버킷에 위치 기록이 없으면 "none"이다 (원본 버킷을 열지 않는다)."""
-    scenes = StoredScenes(LocalStore(tmp_path / "store", "dlp-labeling"), MAX_GAP_MS)
+def test_stored_scenes_without_records_has_nothing(tmp_path: Path) -> None:
+    """라벨링 버킷에 위치 기록·복원이 없으면 "none"과 빈 장면 파일이다 (원본 버킷을 열지 않는다)."""
+    scenes = StoredScenes(LocalStore(tmp_path / "store", "dlp-labeling"), load_scene3d_policy(ROOT))
     assert scenes.find("s1") == "none"
+    assert scenes.max_gap_ms == load_scene3d_policy(ROOT).interpolation.max_gap_ms
+    assert not scenes.files("s1", tmp_path / "work").any
+
+
+def test_scene_files_are_written_per_session_under_pseudonyms(world: World) -> None:
+    """전후 점·스플랫·정렬이 결과 `scene/<가명 세션>/`에 쓰인다 (위치 기록 없는 세션도 파일은).
+
+    정답: 점 PLY를 다시 읽으면 넣은 점(float32)·색과 같고 기술자는 없다. 스플랫은 바이트가 같다.
+    정렬은 두 단계가 다 있는 세션에만 있다. 한 단계만 있는 세션은 경고한다. 경로에 내부 세션 ID가
+    없다.
+    """
+    s1, s2 = world.session("s1"), world.session("s2")
+    b1, a1 = phase_truth(world.tmp, "s1-before", 40), phase_truth(world.tmp, "s1-after", 25)
+    b2 = phase_truth(world.tmp, "s2-before", 10, metric=False)
+    scenes = FakeScenes(
+        found={"s1": record_for(s1)},
+        scene_files={"s1": SceneFiles(b1.files, a1.files, ALIGNMENT), "s2": SceneFiles(b2.files)},
+    )
+    built = world.build(s1, s2, scenes=scenes)
+    assert built.scene is not None
+    p1, p2 = IDS.session("s1"), IDS.session("s2")
+    first, second = built.scene.sessions
+    assert first["status"] == "exported" and second["status"] == "no_localization"
+    assert first["scene_files"]["alignment"] == f"scene/{p1}/alignment.json"
+    assert first["scene_files"]["before"] == {
+        "points": f"scene/{p1}/before/points.ply", "splat": f"scene/{p1}/before/splat.ply",
+        "point_count": 40, "metric": True, "scale_source": "marker",
+        "reconstruction_model_version": "scene3d-recon-2+test",
+    }  # fmt: skip
+    assert second["scene_files"]["after"] is None and second["scene_files"]["alignment"] is None
+    assert second["scene_files"]["before"]["metric"] is False
+    assert built.warnings == [
+        f"{p2}: 3D 장면 파일이 before만 있음 (전후가 모두 있어야 한다, dlp scene3d status)"
+    ]
+    dest = world.tmp / "out"
+    built.scene.write_files(dest)
+    for sid, truth in ((p1, b1), (p2, b2)):
+        xyz, rgb = read_points_ply(dest / "scene" / sid / "before" / "points.ply")
+        assert np.allclose(xyz, truth.points.astype(np.float32)) and np.array_equal(
+            rgb, truth.colors
+        )
+        assert (dest / "scene" / sid / "before" / "splat.ply").read_bytes() == truth.splat
+    xyz, _ = read_points_ply(dest / "scene" / p1 / "after" / "points.ply")
+    assert np.allclose(xyz, a1.points.astype(np.float32))
+    alignment = json.loads((dest / "scene" / p1 / "alignment.json").read_text("utf-8"))
+    assert alignment["scale"] == 1.25 and alignment["translation"] == [0.1, 0.2, -0.3]
+    assert alignment["rotation"] == list(ALIGNMENT.rotation)
+    assert alignment["maps"].startswith("x_before = scale * R x_after + t")
+    written = sorted(p.relative_to(dest).as_posix() for p in dest.rglob("*") if p.is_file())
+    assert written == sorted([
+        f"scene/{p1}/after/points.ply", f"scene/{p1}/after/splat.ply",
+        f"scene/{p1}/alignment.json",
+        f"scene/{p1}/before/points.ply", f"scene/{p1}/before/splat.ply",
+        f"scene/{p2}/before/points.ply", f"scene/{p2}/before/splat.ply",
+    ])  # fmt: skip
+    assert not any(part in ("s1", "s2") for path in written for part in path.split("/"))
+    assert not built.scene.carried or built.scene.episodes[1] is None  # s2는 자세 없이 파일만
 
 
 def test_lerobot_package_carries_the_scene_feature(world: World) -> None:
@@ -288,6 +411,10 @@ def _clear_scene_flags(dest: Path) -> None:
     pq.write_table(t.set_column(i, t.field(i), pa.array(zeros, type=t.field(i).type)), path)
 
 
+def _drop_scene_file(dest: Path) -> None:
+    next(dest.glob("scene/*/after/splat.ply")).unlink()
+
+
 @needs_ffmpeg
 def test_gr00t_carries_the_pose_after_tactile_and_the_check_guards_it(world: World) -> None:
     """GR00T: 자세가 촉각 구간 뒤 `scene_camera` 구간(50:57)에 실리고 확인기를 통과한다.
@@ -295,7 +422,9 @@ def test_gr00t_carries_the_pose_after_tactile_and_the_check_guards_it(world: Wor
     action은 손·팔 구간(42)만이다. 구간을 action에 넣거나 표시를 지우면 확인기가 알린다.
     """
     es = world.session("s1", [right_glove(), left_glove()])
-    built = world.build(es, scenes=FakeScenes({"s1": record_for(es)}))
+    before, after = phase_truth(world.tmp, "before", 12), phase_truth(world.tmp, "after", 8)
+    files = {"s1": SceneFiles(before.files, after.files, ALIGNMENT)}
+    built = world.build(es, scenes=FakeScenes({"s1": record_for(es)}, files))
     dest = _gr00t(world, built, "gr00t")
     assert check_dataset(dest, world.policy.gr00t.video.ffprobe) == []
     base = len(StateLayout.from_policy(world.policy.lerobot).names)
@@ -315,9 +444,12 @@ def test_gr00t_carries_the_pose_after_tactile_and_the_check_guards_it(world: Wor
     assert np.allclose(state[:, 50:57], want[:, :7]) and np.array_equal(valid, want[:, 7])
     meta = json.loads((dest / "meta" / "dlp_scene.json").read_text("utf-8"))
     assert meta == built.scene.meta("gr00t") and meta["format"] == "dlp-scene"
+    sid = IDS.session("s1")
+    assert (dest / "scene" / sid / "after" / "splat.ply").read_bytes() == after.splat
     for corrupt, expected in (
         (_scene_in_action, "구간 scene_camera가 modality.json action에 있음"),
         (_clear_scene_flags, "scene_camera 값이 없다고 표시한 행에 0이 아닌 값"),
+        (_drop_scene_file, f"장면 파일 scene/{sid}/after/splat.ply 없음"),
     ):
         broken = _gr00t(world, built, f"broken-{corrupt.__name__}")
         corrupt(broken)

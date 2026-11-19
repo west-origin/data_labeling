@@ -161,7 +161,8 @@ flowchart LR
 `dlp scene3d localize`로 바디캠 영상을 전후 사진의 3D 공간 안에 놓은 세션은, 같은 에피소드 프레임에 그 순간의
 카메라 자세(그 세션 before 복원의 장면 좌표: 카메라 중심과 회전 사원수)도 실린다. 그래서 한 행에 영상 프레임,
 손 3D, 촉각 값, 공간 안 카메라 자세가 함께 있다. 위치 기록이 지금 복원과 같은 블러본으로 만든 것이 아니면 싣지
-않는다 ([ADR 0070](docs/adr/0070-scene-pose-in-exports.md)).
+않는다 ([ADR 0070](docs/adr/0070-scene-pose-in-exports.md)). 같은 결과의 `scene/<세션 가명>/`에는 그 세션의 전후
+3D 공간 파일(희소 점 PLY, 3D 가우시안 스플랫 PLY, after → before 정렬)이 함께 들어간다.
 
 ### 세션 상태는 한 방향으로 한 칸씩 간다
 

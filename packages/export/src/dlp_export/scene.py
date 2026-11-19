@@ -1,4 +1,4 @@
-"""장면 좌표의 바디캠 자세를 에피소드 프레임마다 싣는다 (`dlp export lerobot|gr00t`, ADR 0070).
+"""장면 좌표의 바디캠 자세와 전후 3D 장면 파일을 싣는다 (`dlp export lerobot|gr00t`, ADR 0070).
 
 세션의 위치 기록(`dlp scene3d localize`, ADR 0067: 바디캠 프레임별 카메라 자세, 그 세션 before
 복원의 장면 좌표)에서 에피소드 프레임 시각(`Episode.times_ms`, 마스터)의 자세를 읽는다. 프레임
@@ -29,6 +29,17 @@
   중심 = -Rᵀ t.
 - 두 형식 모두 `meta/dlp_scene.json`(`SceneData.meta`)과 manifest `details.scene`.
 
+전후 3D 장면 파일 (소유자 결정 2026-11-18, ADR 0070 보충)
+- 세션마다 지금 복원(`current_reconstruction_record`: 지금 승인된 블러 사진으로 만든 것)이 있는
+  단계(before·after)의 희소 점과 3D 가우시안 스플랫을 결과 루트의 `scene/<가명 세션>/<단계>/`에
+  싣는다: `points.ply`(점 x·y·z + 색, 정렬용 기술자는 빼고 PLY로 바꾼다), `splat.ply`(복원이 쓴
+  파일 그대로). 두 단계가 다 있고 받아들인 정렬 기록이 있으면 `scene/<가명 세션>/alignment.json`
+  (after → before 닮음 변환 `x_before = s R x_after + t`)도 싣는다. before 파일이 자세의 좌표계다.
+- 위치 기록이 없어도 복원이 있으면 싣는다 (그 세션은 자세 없이 파일만). 사진·사진별 카메라·물체
+  변화 보고는 싣지 않는다. 디렉터리 이름은 내보내기마다 다른 가명이다.
+- 파일은 라벨링 버킷에서 작업 디렉터리로 받아 두었다가(`SceneCollector.add`) 결과를 쓸 때 옮긴다
+  (`SceneData.write_files`). 원본 버킷을 읽지 않는다.
+
 흐름: `runner.build_episodes`가 세션마다 `SceneCollector.add`를 부르고, 끝에 `result()`의
 `SceneData`를 `lerobot.write_package`·`gr00t.write_gr00t`에 넘긴다. 위치 기록이 있는 세션이
 하나도 없으면 `result()`는 None이고 결과물은 이 기능이 없던 때와 같다.
@@ -36,8 +47,11 @@
 
 from __future__ import annotations
 
+import json
 import math
+import shutil
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal, Protocol
 
 import numpy as np
@@ -46,14 +60,21 @@ from numpy.typing import NDArray
 from dlp_export.frames import stream_ms
 from dlp_export.source import ExportSession
 from dlp_media.storage import ObjectStore
+from dlp_scene3d.layout import get_model
 from dlp_scene3d.localize import PoseTrack, current_localization, stored_localization
-from dlp_scene3d.pipeline import Scene3dError
-from dlp_schema.scene3d import EgoLocalization
+from dlp_scene3d.pipeline import (
+    Scene3dError,
+    alignment_key,
+    alignment_tag,
+    current_reconstruction_record,
+)
+from dlp_scene3d.policy import Scene3dPolicy
+from dlp_schema.scene3d import Alignment, EgoLocalization, ScenePhase
 from dlp_schema.session import Stream
 
 # meta/dlp_scene.json 형식 이름과 판 (판 규칙은 dlp-tactile과 같다: 필드를 더하면 부 버전)
 FORMAT = "dlp-scene"
-FORMAT_VERSION = "1.0"
+FORMAT_VERSION = "1.1"  # 1.1: 전후 3D 장면 파일(scene/)과 세션별 scene_files를 더했다
 # LeRobot 특징·npz 배열·GR00T state 키·유효 표시 열과 그 안 이름
 FEATURE = "observation.scene_camera"
 NPZ_KEY = "scene_camera"
@@ -99,6 +120,16 @@ _SOURCE = (
     "Model output (bodycam feature matching and PnP against the 3D reconstruction, computed on "
     "the approved blurred video), not reviewed by a person."
 )
+_FILES = (
+    "scene/<session_id>/before|after/points.ply: sparse SfM points (x, y, z float32, red, green, "
+    "blue uint8) of the 3D reconstruction from that phase's photos (taken before and after the "
+    "work). splat.ply: the 3D Gaussian splat of the same reconstruction. Both are built only from "
+    "the privacy-approved blurred photos. The 'before' files are in the pose frame above; the "
+    "'after' files are in their own frame, and scene/<session_id>/alignment.json maps them to the "
+    "'before' frame: x_before = scale * R x_after + t (R row-major 3x3). Units as in 'units' "
+    "(per phase: sessions[].scene_files.<phase>.metric)."
+)
+_PHASES: tuple[ScenePhase, ScenePhase] = ("before", "after")
 
 
 def quaternion_wxyz(r: NDArray[np.float64]) -> NDArray[np.float64]:
@@ -126,8 +157,47 @@ def quaternion_wxyz(r: NDArray[np.float64]) -> NDArray[np.float64]:
     return -out if out[0] < 0 else out
 
 
+@dataclass(frozen=True)
+class PhaseFiles:
+    """복원 하나(before 또는 after)에서 받아 둔 파일과 그 복원의 성질.
+
+    Attributes:
+        points_npz: 복원의 희소 점 npz (`points` (N, 3), `colors` (N, 3) uint8, `descriptors`).
+        splat: 3D 가우시안 스플랫 PLY.
+        metric: 좌표가 미터인가 (`Reconstruction.metric`).
+        scale_source: 척도 출처 (`SceneScale.source`, 예전 기록이면 None).
+        point_count: 희소 점 수.
+        model_version: 복원의 모델 버전 (세션마다 정해지는 값이 아니다).
+    """
+
+    points_npz: Path
+    splat: Path
+    metric: bool
+    scale_source: str | None
+    point_count: int
+    model_version: str
+
+
+@dataclass(frozen=True)
+class SceneFiles:
+    """세션 하나의 전후 3D 장면 파일 (지금 복원이 없는 단계는 None)."""
+
+    before: PhaseFiles | None = None
+    after: PhaseFiles | None = None
+    alignment: Alignment | None = None  # after → before, 받아들인 정렬만
+
+    @property
+    def any(self) -> bool:
+        """실을 파일이 있는가."""
+        return self.before is not None or self.after is not None
+
+    def phase(self, phase: ScenePhase) -> PhaseFiles | None:
+        """단계의 파일."""
+        return self.before if phase == "before" else self.after
+
+
 class SceneSource(Protocol):
-    """세션의 위치 기록을 찾는 곳 (`StoredScenes`, 시험은 대역)."""
+    """세션의 위치 기록과 3D 장면 파일을 찾는 곳 (`StoredScenes`, 시험은 대역)."""
 
     @property
     def max_gap_ms(self) -> int:
@@ -138,18 +208,27 @@ class SceneSource(Protocol):
         """지금 쓸 수 있는 위치 기록. 없으면 "none", 지금 복원으로 만든 것이 아니면 "stale"."""
         ...
 
+    def files(self, session_id: str, work: Path) -> SceneFiles:
+        """지금 복원의 장면 파일을 work 아래로 받는다 (없는 단계는 None)."""
+        ...
+
 
 @dataclass(frozen=True)
 class StoredScenes:
-    """라벨링 버킷의 위치 기록 (`dlp_scene3d.localize`).
+    """라벨링 버킷의 위치 기록과 복원 (`dlp_scene3d`).
 
     Attributes:
-        labeling: 라벨링 버킷 저장소 (위치 기록·복원 기록을 읽는다).
-        max_gap_ms: `scene3d.yaml interpolation.max_gap_ms`.
+        labeling: 라벨링 버킷 저장소 (위치 기록·복원 기록·장면 파일을 읽는다, 쓰지 않는다).
+        policy: scene3d 정책 (보간 한도 `interpolation.max_gap_ms`, 정렬 기록 키의 정렬 판).
     """
 
     labeling: ObjectStore
-    max_gap_ms: int
+    policy: Scene3dPolicy
+
+    @property
+    def max_gap_ms(self) -> int:
+        """`scene3d.yaml interpolation.max_gap_ms`."""
+        return self.policy.interpolation.max_gap_ms
 
     def find(self, session_id: str) -> Found:
         """`SceneSource.find`. 복원이 바뀌었거나 낡아 기록과 맞지 않으면 "stale"이다."""
@@ -159,6 +238,66 @@ class StoredScenes:
             return current_localization(self.labeling, session_id)
         except Scene3dError:
             return "stale"
+
+    def files(self, session_id: str, work: Path) -> SceneFiles:
+        """`SceneSource.files`. 정렬은 이미 계산해 둔 기록만 읽는다 (여기서 계산·쓰기 없음)."""
+        found: dict[ScenePhase, PhaseFiles] = {}
+        tags: dict[ScenePhase, str] = {}
+        for phase in _PHASES:
+            try:
+                tag, rec = current_reconstruction_record(self.labeling, session_id, phase)
+            except Scene3dError:
+                continue  # 복원이 없거나 지금 블러 사진과 다르다
+            (work / phase).mkdir(parents=True, exist_ok=True)
+            npz, splat = work / phase / "points.npz", work / phase / "splat.ply"
+            self.labeling.get_file(rec.points_key, npz)
+            self.labeling.get_file(rec.splat_key, splat)
+            source = rec.scale.source if rec.scale is not None else None
+            found[phase] = PhaseFiles(
+                npz, splat, rec.metric, source, rec.point_count, rec.model_version
+            )
+            tags[phase] = tag
+        alignment = None
+        if len(tags) == 2:
+            key = alignment_key(
+                session_id, alignment_tag(self.policy, tags["before"], tags["after"])
+            )
+            record = get_model(self.labeling, key, Alignment)
+            alignment = record if record is not None and record.accepted else None
+        return SceneFiles(found.get("before"), found.get("after"), alignment)
+
+
+def write_points_ply(path: Path, points: NDArray[np.float64], colors: NDArray[np.uint8]) -> None:
+    """희소 점을 이진 PLY로 쓴다 (x·y·z float32, red·green·blue uint8, 리틀 엔디언)."""
+    rows = np.empty(
+        len(points),
+        dtype=[("x", "<f4"), ("y", "<f4"), ("z", "<f4"), ("r", "u1"), ("g", "u1"), ("b", "u1")],
+    )
+    for i, axis in enumerate(("x", "y", "z")):
+        rows[axis] = points[:, i]
+    for i, channel in enumerate(("r", "g", "b")):
+        rows[channel] = colors[:, i]
+    header = (
+        "ply\nformat binary_little_endian 1.0\n"
+        f"element vertex {len(points)}\n"
+        "property float x\nproperty float y\nproperty float z\n"
+        "property uchar red\nproperty uchar green\nproperty uchar blue\nend_header\n"
+    )
+    path.write_bytes(header.encode("ascii") + rows.tobytes())
+
+
+def alignment_json(alignment: Alignment) -> dict[str, Any]:
+    """정렬 기록 → 받는 쪽 alignment.json (after → before 닮음 변환)."""
+    return {
+        "maps": "x_before = scale * R x_after + t (R row-major 3x3, before scene units)",
+        "scale": alignment.scale,
+        "rotation": list(alignment.rotation),
+        "translation": list(alignment.translation),
+        "inliers": alignment.inliers,
+        "matches": alignment.matches,
+        "rms": alignment.rms_m,
+        "model_version": alignment.model_version,
+    }
 
 
 @dataclass(frozen=True)
@@ -204,14 +343,16 @@ class SceneData:
         episodes: 에피소드마다(`BuiltEpisodes.items`와 같은 순서) 자세. 쓸 위치 기록이 없던
             세션은 None (전부 없음으로 채운다).
         frames: 에피소드마다 프레임 수.
-        sessions: 세션 기록 (가명 세션 ID, 상태, 실었으면 미터 여부·채움 수).
+        sessions: 세션 기록 (가명 세션 ID, 상태, 실었으면 미터 여부·채움 수, 장면 파일).
         max_gap_ms: 적용한 보간 간격 상한.
+        files: 에피소드마다 받아 둔 전후 3D 장면 파일 (`write_files`가 결과에 옮긴다).
     """
 
     episodes: list[ScenePoses | None]
     frames: list[int]
     sessions: list[dict[str, Any]]
     max_gap_ms: int
+    files: list[SceneFiles] = field(default_factory=list[SceneFiles])
 
     @property
     def carried(self) -> bool:
@@ -253,6 +394,34 @@ class SceneData:
         p = self._poses(i)
         return np.ascontiguousarray(p.values), p.valid[:, None].astype(np.float32)
 
+    # 장면 파일 --------------------------------------------------------------------------------
+
+    def write_files(self, dest: Path) -> None:
+        """받아 둔 전후 3D 장면 파일을 결과 루트 `dest/scene/<가명 세션>/`에 쓴다.
+
+        점은 PLY(x·y·z + 색)로 바꾸고 정렬용 기술자는 뺀다. 스플랫은 그대로 옮긴다. 정렬은 두 단계가
+        다 있을 때만 alignment.json으로 쓴다. 경로는 세션 기록의 `scene_files`와 같다.
+        """
+        if not self.files:
+            return  # 장면 파일을 받지 않은 기록 (요약·시험용)
+        for report, files in zip(self.sessions, self.files, strict=True):
+            root = dest / "scene" / str(report["session_id"])
+            for phase in _PHASES:
+                pf = files.phase(phase)
+                if pf is None:
+                    continue
+                out = root / phase
+                out.mkdir(parents=True, exist_ok=True)
+                with np.load(pf.points_npz) as npz:
+                    points = np.asarray(npz["points"], dtype=np.float64).reshape(-1, 3)
+                    colors = np.asarray(npz["colors"], dtype=np.uint8).reshape(-1, 3)
+                write_points_ply(out / "points.ply", points, colors)
+                shutil.copyfile(pf.splat, out / "splat.ply")
+            if files.alignment is not None and files.before is not None and files.after is not None:
+                (root / "alignment.json").write_text(
+                    json.dumps(alignment_json(files.alignment), indent=2), "utf-8"
+                )
+
     # 기록 ------------------------------------------------------------------------------------
 
     def meta(self, fmt: Literal["lerobot", "gr00t"]) -> dict[str, Any]:
@@ -279,6 +448,7 @@ class SceneData:
             "interp_max_gap_ms": self.max_gap_ms,
             "names": list(NAMES),
             **where,
+            "scene_files": _FILES,
             "sessions": self.sessions,
         }
 
@@ -288,12 +458,15 @@ class SceneCollector:
     """세션마다 위치 기록을 찾아 프레임 자세를 모은다 (`runner.build_episodes`).
 
     Attributes:
-        source: 위치 기록을 찾는 곳 (`StoredScenes`).
+        source: 위치 기록과 장면 파일을 찾는 곳 (`StoredScenes`).
+        work: 작업 디렉터리 (`work/scene/<가명 세션>/<단계>/`에 장면 파일을 받는다).
         warnings: 내보내기 경고 (manifest details.warnings, 세션은 가명으로 적는다).
     """
 
     source: SceneSource
+    work: Path
     warnings: list[str] = field(default_factory=list[str])
+    _files: list[SceneFiles] = field(default_factory=list[SceneFiles])
     _episodes: list[ScenePoses | None] = field(default_factory=list[ScenePoses | None])
     _frames: list[int] = field(default_factory=list[int])
     _sessions: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
@@ -312,21 +485,56 @@ class SceneCollector:
             frame_ms: 에피소드 프레임 시각 (`Episode.times_ms`, 마스터 ms).
         """
         found = self.source.find(es.session.session_id)
+        files = self.source.files(es.session.session_id, self.work / "scene" / sid)
         poses: ScenePoses | None = None
         if found == "none":
             report: dict[str, Any] = {"status": "no_localization"}
         else:
-            self._found += 1
             poses, report = self._use(es, sid, found, frame_ms)
+        self._found += found != "none" or files.any
+        if files.any:
+            report["scene_files"] = self._file_report(sid, files)
         self._episodes.append(poses)
         self._frames.append(int(frame_ms.size))
         self._sessions.append({"session_id": sid, **report})
+        self._files.append(files)
 
     def result(self) -> SceneData | None:
         """모은 값. 위치 기록이 있는 세션이 하나도 없으면 None (결과물이 예전과 같다)."""
         if self._found == 0:
             return None
-        return SceneData(self._episodes, self._frames, self._sessions, self.source.max_gap_ms)
+        return SceneData(
+            self._episodes, self._frames, self._sessions, self.source.max_gap_ms, self._files
+        )
+
+    def _file_report(self, sid: str, files: SceneFiles) -> dict[str, Any]:
+        """세션 기록의 `scene_files` (결과 루트 기준 경로, 단계별 성질).
+
+        한 단계만 있으면 경고한다 (전후가 모두 있어야 한다).
+        """
+        out: dict[str, Any] = {}
+        for phase in _PHASES:
+            pf = files.phase(phase)
+            out[phase] = None
+            if pf is not None:
+                out[phase] = {
+                    "points": f"scene/{sid}/{phase}/points.ply",
+                    "splat": f"scene/{sid}/{phase}/splat.ply",
+                    "point_count": pf.point_count,
+                    "metric": pf.metric,
+                    "scale_source": pf.scale_source,
+                    "reconstruction_model_version": pf.model_version,
+                }
+        both = files.before is not None and files.after is not None
+        out["alignment"] = (
+            f"scene/{sid}/alignment.json" if both and files.alignment is not None else None
+        )
+        if not both:
+            have = "before" if files.before is not None else "after"
+            self.warnings.append(
+                f"{sid}: 3D 장면 파일이 {have}만 있음 (전후가 모두 있어야 한다, dlp scene3d status)"
+            )
+        return out
 
     def _use(
         self,

@@ -1,12 +1,14 @@
 # ADR 0070: 내보내기 프레임마다 장면 좌표의 바디캠 자세를 싣기 (`dlp export lerobot|gr00t`)
 
+> 보충 (2026-11-18, 소유자 결정): 전후 3D 장면 파일(희소 점·가우시안 스플랫·정렬)도 싣는다. 아래 "보충" 절.
+
 - 상태: 채택 (구현됨. 합성 정답으로만 확인. LeRobot 공식 쓰기·읽기 API와 GR00T 자체 로더로 읽는 확인은 아직)
 - 날짜: 2026-11-18
 - 관련: ADR 0067(장면 안 바디캠 위치 추정, 이 결정의 입력), 0069(촉각장갑 채널, 같은 방식으로 싣는다),
   0066(전후 3D 복원), 0065(GR00T 형식), 0047(로봇 모드), 0027(내보내기마다 다른 가명), 0019(시각 규약)
 - 계약 변경: 없음 (`dlp_schema` 그대로, `make schemas` 대상 없음). 정책 `config/policies/export.yaml scene` 절과
-  `dlp_export.policy.ScenePolicy`를 더했다. 구매자에게 주는 새 파일 `meta/dlp_scene.json`(형식 `dlp-scene`, 판 1.0)이
-  생겼다. 패키지 의존 `export → scene3d`를 더했다 (`docs/handover/architecture.md` 의존 표).
+  `dlp_export.policy.ScenePolicy`를 더했다. 구매자에게 주는 새 파일 `meta/dlp_scene.json`(형식 `dlp-scene`, 판 1.1:
+  1.0에 장면 파일 목록을 더했다)과 `scene/<가명 세션>/…` 장면 파일이 생겼다. 패키지 의존 `export → scene3d`를 더했다 (`docs/handover/architecture.md` 의존 표).
 
 ## 배경
 
@@ -67,6 +69,8 @@
 | manifest `details.warnings` | 낡은 기록, 다른 블러본의 기록, 자세가 하나도 없음 | `SceneCollector` |
 | `export.yaml scene` | `enabled` | `ScenePolicy` |
 | 보간 한도 | `scene3d.yaml interpolation.max_gap_ms` | `runner.scene_source` |
+| `scene/<가명 세션>/before\|after/points.ply`·`splat.ply`, `alignment.json` | 전후 희소 점(x·y·z float32 + 색), 3D 가우시안 스플랫(복원 파일 그대로), after → before 닮음 변환 | `StoredScenes.files`·`SceneData.write_files` |
+| 세션 기록 `scene_files` | 단계별 경로·점 수·미터 여부·척도 출처·복원 모델 버전, 정렬 경로 | `SceneCollector` |
 
 ## 지금 되는 것과 아닌 것
 
@@ -76,13 +80,12 @@
 다른 블러본의 기록, 기록 없음은 싣지 않고 상태·경고로 남으며 결과에 내부 ID·태그·렌더 해시가 없다. 위치 기록이 없으면
 장면 기록이 없다. LeRobot 묶음과 GR00T 데이터셋(촉각 뒤 구간, 확인기 통과, 깨뜨린 데이터셋 거부).
 
-아닌 것과 모르는 것 (F-COE-100, F-COE-101):
+아닌 것과 모르는 것 (F-COE-100, 장면 파일은 보충 절에서 고침: F-COE-101):
 
 - LeRobot 공식 쓰기·읽기 API와 GR00T 자체 로더로 이 특징을 읽어 보지 않았다 (촉각과 같은 사정, F-COE-97).
 - 위치 기록을 데이터셋 버전에 고정하지 않는다. 내보낼 때 라벨링 버킷의 지금 기록을 읽고, 쓴 기록의 태그는 결과에
   남기지 않는다 (가명 규칙). 다시 추정하면 같은 데이터셋 버전에서 다른 값이 나올 수 있다.
-- 장면 자체(희소 점, 가우시안 스플랫)는 내보내지 않는다. 받는 쪽은 세션마다의 장면 좌표계 자세만 받는다. 집 안 3D
-  복원을 납품물에 넣을지는 개인정보·제품 결정이라 소유자가 정한다.
+- (보충에서 바뀜) 처음에는 장면 자체를 내보내지 않았다. 소유자가 싣기로 정해 같은 날 더했다 (아래 보충 절).
 - 손 3D를 장면 좌표로 옮긴 값은 싣지 않는다 (받는 쪽이 위 식으로 옮긴다). 장면이 미터가 아닌 세션은 옮길 수 없다.
 - 위치 기록 자체의 한계(실영상 미검증, 프레임마다 따로 풂, 세션당 공간 하나)는 ADR 0067·F-PAR-93~99 그대로다.
 
@@ -93,3 +96,32 @@
 - 기존 형식의 결과: 위치 기록이 없는 세션만 내보내면 바뀌지 않는다. 있으면 LeRobot 특징 하나, GR00T state 7칸과
   표시 열 하나가 늘어난다.
 - 시험: `packages/export/tests/test_scene.py`, `packages/cli/tests/test_export_cmds.py`(요약 줄).
+
+## 보충 (2026-11-18, 소유자 결정): 전후 3D 장면 파일도 싣는다
+
+처음 결정은 자세만 싣고 장면 자체(집 안 전체의 3D 복원)는 개인정보·제품 판단이 필요해 뺐다 (그때의 F-COE-101). 소유자가
+"다 넣어"로 정했다. 데이터는 당분간 판매하지 않고 사내 모델 개발에 쓰지만 내보내기 규칙(블러본만, 가명, 원본 위치 없음)은
+그대로다 (ADR 0058).
+
+1. **싣는 것.** 세션마다 지금 복원이 있는 단계(before·after)의 `scene/<가명 세션>/<단계>/points.ply`(희소 SfM 점 x·y·z
+   float32와 색, 이진 PLY)와 `splat.ply`(복원이 쓴 3D 가우시안 스플랫 그대로). 두 단계가 다 있고 받아들인 정렬 기록이
+   있으면 `scene/<가명 세션>/alignment.json`(after → before 닮음 변환 `x_before = s R x_after + t`). before 파일이 자세의
+   좌표계다. after 파일은 정렬로 옮기지 않고 그대로 둔다 (스플랫의 크기·회전·색 계수를 함께 바꿔야 해 받는 쪽이 한다).
+2. **지금 복원만.** `current_reconstruction_record`가 받아 주는 복원(지금 승인된 블러 사진으로 만든 것)만 싣는다. 사진을
+   다시 블러하면 그 단계는 다시 복원할 때까지 빠진다. 정렬은 이미 계산해 둔 기록만 읽는다 (내보내기가 계산하거나
+   라벨링 버킷에 쓰지 않는다).
+3. **위치 기록과 따로.** 위치 기록이 없거나 낡은 세션도 복원이 있으면 파일은 싣는다 (그 세션은 자세 없이 파일만). 한
+   단계만 있으면 경고한다 (전후가 모두 있어야 한다는 요구, `dlp scene3d status`로 채운다).
+4. **싣지 않는 것.** 블러 사진, 사진별 카메라 자세(사진 ID가 세션마다 고정된 값이다), 점의 정렬용 기술자, 물체 변화 보고
+   (사람 검수 전 모델 출력이라 미검수 라벨처럼 기본 내보내기에 넣지 않는다, `dlp scene3d report`로 본다).
+5. **기록.** 세션 기록에 `scene_files`(단계별 경로·점 수·미터 여부·척도 출처·복원 모델 버전, 정렬 경로). meta 판은 1.1.
+   GR00T 확인기 8번이 목록의 파일이 데이터셋 안에 있는지 본다. LeRobot은 공식 로더 확인 뒤에 파일을 더한다 (로더는
+   `scene/`를 읽지 않는다).
+6. **알아 둘 것.** 내보내기마다 가명이 달라도 같은 세션의 장면 파일은 바이트가 같아 sha256으로 같은 세션임을 알 수 있다
+   (블러본 영상도 같은 사정). 장면 파일은 클 수 있다 (실제 스플랫은 수백 MB). 장면은 승인된 블러 사진으로만 만들지만
+   집 안 구조가 3D로 남는다는 점은 그대로다.
+
+시험: `packages/export/tests/test_scene.py::test_scene_files_are_written_per_session_under_pseudonyms`(점 PLY를 다시 읽어
+넣은 점·색과 같고 기술자가 없음, 스플랫 바이트 같음, 정렬 값, 가명 경로, 한 단계 경고),
+`::test_gr00t_carries_the_pose_after_tactile_and_the_check_guards_it`(GR00T에 파일이 실리고 지우면 확인기가 알림),
+`::test_stored_scenes_without_records_has_nothing`.
