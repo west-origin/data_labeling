@@ -37,8 +37,10 @@
 
 `dlp ops retention-decide <session_id> extend|delete [--until YYYY-MM-DD] --reason TEXT [--url URL]`
     보관 연장·삭제 결정을 `retention_decisions`에 기록한다 (결정자 `current_actor()`). `extend`는
-    `--until`이 필요하고 `delete`는 없어야 한다 (틀리면 `ValidationError`로 1). 실제 삭제는 이
-    명령이 하지 않는다 (`RETENTION_NOTE`). 종료 코드: 0.
+    `--until`이 필요하고 `delete`는 없어야 한다 (틀리면 `ValidationError`로 1). `delete`는 그 세션
+    블러 검수 작업이 CVAT에 올린 원본 사본을 지운다 (요청은 결정과 같은 커밋, 삭제는 커밋 뒤
+    회수 실행기, ADR 0071). 원본 버킷의 원본 삭제는 이 명령이 하지 않는다 (`RETENTION_NOTE`).
+    종료 코드: 0, CVAT에 닿지 않아 삭제 대기가 남으면 4 (`dlp review revoke --pending`이 다시 한다).
 
 `dlp ops log-work <session_id> --reviewer ID --stage privacy|labeling|qa --minutes M
 [--video-ms MS] [--task-key KEY] [--at ISO] [--url URL]`
@@ -76,7 +78,12 @@ from pathlib import Path
 import sqlalchemy as sa
 
 from dlp_cli.raw_access import raw_store
-from dlp_cli.review_config import ai_display_config, load_review_policy
+from dlp_cli.review_config import (
+    ai_display_config,
+    load_review_policy,
+    print_revocations,
+    run_revocations,
+)
 from dlp_cli.schema_cmds import database_url
 from dlp_eval import proxy as proxy_mod
 from dlp_eval.policy import load_policy as load_eval_policy
@@ -95,6 +102,7 @@ from dlp_schema.db.repository import (
     insert_privacy_audit,
     insert_retention_decision,
     insert_review_work,
+    request_session_raw_copy_purges,
 )
 from dlp_schema.episode import current_labels
 from dlp_schema.ops import PrivacyAuditRecord, RetentionDecision, ReviewWork
@@ -220,7 +228,13 @@ def cmd_retention_decide(args: argparse.Namespace) -> int:
         args.reason: 결정 이유 (필수).
 
     결정자는 `current_actor()`(`DLP_ACTOR` 또는 OS 사용자)다.
-    부작용: 세션이 있는지 확인한 뒤 `retention_decisions` INSERT. 원본은 지우지 않는다.
+    부작용: 세션이 있는지 확인한 뒤 `retention_decisions` INSERT. `delete`면 같은 트랜잭션에서 그
+    세션 블러 검수 작업의 CVAT 원본 사본 삭제를 요청하고(사유 `raw-copy:retention-delete:<결정자>`,
+    ADR 0071), 커밋 뒤 회수 실행기(`run_revocations`)로 CVAT 작업을 지운다. 원본 버킷의 원본은
+    지우지 않는다 (운영 절차).
+
+    반환: 0, 도구에 닿지 않아 삭제 대기가 남으면 `REVOCATION_PENDING_EXIT`(4, 결정은 이미
+    커밋됐다. `dlp review revoke <세션>` 또는 cron `--pending`이 이어서 지운다).
     """
     d = RetentionDecision(
         decision_id=uuid.uuid4().hex,
@@ -232,12 +246,25 @@ def cmd_retention_decide(args: argparse.Namespace) -> int:
         decided_at=datetime.now(UTC),
     )
     engine = _engine(args)
+    purges: list[str] = []
     with engine.begin() as conn:
         get_session(conn, d.session_id)  # 없으면 오류
         insert_retention_decision(conn, d)
-    engine.dispose()
+        if d.decision == "delete":
+            reason = f"retention-delete:{d.decided_by}"
+            purges = request_session_raw_copy_purges(
+                conn, d.session_id, reason=reason, at=d.decided_at
+            )
     print(f"{d.session_id}: {d.decision} {d.until or ''} ({d.decided_by})")
-    return 0
+    if d.decision != "delete":
+        engine.dispose()
+        return 0
+    # 요청은 위 커밋에 있다. CVAT 작업은 커밋 뒤에 지운다 (닿지 않으면 대기로 남는다)
+    report = run_revocations(engine, d.session_id, url=args.url, purpose="ops.retention-decide")
+    engine.dispose()
+    if purges:
+        print(f"CVAT 원본 사본 삭제 요청 {len(purges)}개: {', '.join(purges)}")
+    return print_revocations(report, d.session_id)
 
 
 def _aware(text: str) -> datetime:

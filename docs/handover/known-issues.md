@@ -105,7 +105,7 @@ P(틀린 라벨 | AI ok)다.
 | ID | 확인된 문제·관련 코드 | 완료 기준 |
 | --- | --- | --- |
 | S1 | 인증/테넌트 경계 미구현. [raw_access](../../packages/cli/src/dlp_cli/raw_access.py)의 `DLP_ACTOR`는 자기 신고 | 인증 주체와 감사 연결; 고객별 DB·객체·검수 도구 권한 경계와 다른 고객 접근 거부 검사 |
-| S2 | CVAT 원본 사본 자동 삭제 없음. [review tasks](../../packages/review/src/dlp_review/tasks.py), [ops](../../packages/ops/src/dlp_ops/). 삭제 수단은 ADR 0039의 `CvatClient.delete_task`·`task_snapshot`을 다시 쓸 수 있다 | 보관 만료·사용 중지 시 도구 사본까지 삭제, 실패 재시도·증거 기록. 파일럿은 권한자가 수동 확인 |
+| S2 / 반영 (2026-11-19) | CVAT 원본 사본 자동 삭제 없음 → [ADR 0071](../adr/0071-raw-copy-purge-in-review-tools.md): 사용 중지·보관 삭제 결정이 블러 검수 작업의 CVAT 원본 사본 삭제를 요청하고 회수 실행기가 지운다 | 보관 만료·사용 중지 시 도구 사본까지 삭제, 실패 재시도(`dlp review revoke --pending`)·증거(`review_tasks` 요청·삭제 확인 시각). 원본 버킷의 원본 삭제는 운영 절차 |
 | S3 | FiftyOne GraphQL 의존성 2건 미패치(아래 상세) | 호환 패치 후 실제 서버 import·기동·관련 보안 회귀·감사 재실행; 해결 전 해당 GUI 외부 제공 보류 |
 | S4 | `commercial: review` 모델 사용 허용은 법적 검토 완료가 아님. [모델 목록](../../config/models.yaml) | 모델별 가중치/학습 데이터 조건에 대한 상업 이용 결론을 기록하고 실제 사용할 정책에 반영 |
 | S5 | 영속 작업 큐·백업 복구·장기 부하 검증 미완료. [webhook](../../packages/review/src/dlp_review/webhook.py), 개발 Compose | 중단 재개·사건 재전달·복원·부하 목표와 실제 검증 기록. 파일럿 수동 운영과 분리 |
@@ -120,6 +120,10 @@ FiftyOne 1.22.1이 요구하는 Strawberry GraphQL 0.316.0에는
 패치 0.327.2로 강제 변경해 본 결과 FiftyOne 서버의 `strawberry.extensions.Extension` import가
 실패했다. 임시 override는 철회했으며 잠금 파일은 0.316.0이다. 설치 성공이나 CLI import만으로
 호환 패치가 됐다고 판정하지 않는다. [ADR 0036](../adr/0036-model-cache-and-render-recovery.md) 참고.
+
+2026-11-19 재확인: PyPI 최신 FiftyOne 1.22.1도 Strawberry 0.317.0 미만을 요구해 아직 올릴 수 없다. 그동안 우리 코드가
+FiftyOne 앱(GraphQL) 서버를 띄우지 않는 것을 [tests/test_fiftyone_server_guard.py](../../tests/test_fiftyone_server_guard.py)가
+지킨다 (`launch_app`·`fiftyone.server` 사용 금지). 사람도 `fiftyone app launch`로 직접 띄우지 않는다.
 
 ## 다음 리팩토링의 우선순위
 

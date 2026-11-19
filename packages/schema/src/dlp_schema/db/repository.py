@@ -109,6 +109,12 @@ from dlp_schema.db.review_repository import (
     pending_revocations as pending_revocations,
 )
 from dlp_schema.db.review_repository import (
+    request_raw_copy_purge as request_raw_copy_purge,
+)
+from dlp_schema.db.review_repository import (
+    request_session_raw_copy_purges as request_session_raw_copy_purges,
+)
+from dlp_schema.db.review_repository import (
     request_task_revocation as request_task_revocation,
 )
 from dlp_schema.db.review_repository import (

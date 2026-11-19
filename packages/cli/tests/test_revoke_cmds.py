@@ -22,7 +22,7 @@ import pytest
 import sqlalchemy
 import yaml
 
-from dlp_cli import dataset_cmds, privacy_cmds, review_cmds, review_config
+from dlp_cli import dataset_cmds, ops_cmds, privacy_cmds, review_cmds, review_config
 from dlp_cli.review_config import REVOCATION_PENDING_EXIT
 from dlp_media.storage import LocalStore, blurred_key, sha256_file
 from dlp_privacy.pipeline import StreamResult
@@ -539,7 +539,9 @@ def test_dataset_withdraw_requests_and_runs_revocation_after_commit(
     """F-REV-17: `dlp dataset withdraw`는 사용 중지와 같은 커밋에 배포된 작업 회수를 요청하고, 커밋
     뒤 실행기를 돌려 라벨링 버킷 사본을 지운다. 도구가 없으면 도구 작업은 대기로 남아 종료 코드 4다.
 
-    블러 검수 작업은 회수 대상이 아니다. 회수할 작업이 없는 세션은 실행기 설정을 만들지 않고 0이다.
+    블러 검수 작업은 블러 변경 회수 대상이 아니지만, 사용 중지하면 CVAT 원본 사본 삭제가 요청된다
+    (사유 `raw-copy:withdrawn:<행위자>`, 라벨링 버킷 사본이 없어 매체는 요청과 함께 완료, ADR 0071).
+    회수할 작업이 없는 세션은 실행기 설정을 만들지 않고 0이다.
     """
     uri = _media(tmp_path, "s001", "bodycam")
     with _engine(url).begin() as conn:
@@ -550,16 +552,50 @@ def test_dataset_withdraw_requests_and_runs_revocation_after_commit(
     args = argparse.Namespace(session_id="s001", reason="동의 철회", actor="dpo01", url=url)
     assert dataset_cmds.cmd_withdraw(args) == REVOCATION_PENDING_EXIT
     out = capsys.readouterr().out
-    assert "검수 작업 1개 회수 요청: cvat:2" in out and "회수 대기 1개" in out
+    assert "검수 작업 2개 회수 요청: cvat:2, cvat:1" in out and "회수 대기 2개" in out
     with _engine(url).connect() as conn:
         task = get_review_task(conn, "cvat:2")
         assert task.revoke_reason == "withdrawn:dpo01" and task.media_revoked_at is not None
-        assert get_review_task(conn, "cvat:1").revoke_requested_at is None
+        privacy = get_review_task(conn, "cvat:1")
+        assert privacy.revoke_reason == "raw-copy:withdrawn:dpo01"
+        assert privacy.media_revoked_at is not None and privacy.tool_revoked_at is None
     assert _labeling(tmp_path).head("sessions/s001/review/labeler01/bodycam.mp4") is None
     no_setup = Mock(side_effect=AssertionError("회수할 작업이 없으면 설정을 만들지 않는다"))
     monkeypatch.setattr(review_config, "review_setup", no_setup)
     args = argparse.Namespace(session_id="s002", reason="동의 철회", actor="dpo01", url=url)
     assert dataset_cmds.cmd_withdraw(args) == 0
+
+
+def test_retention_delete_decision_purges_the_cvat_raw_copy_after_commit(
+    url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """S2, ADR 0071: `dlp ops retention-decide <세션> delete`는 결정과 같은 커밋에 그 세션 블러
+    검수 작업의 CVAT 원본 사본 삭제를 요청하고, 커밋 뒤 회수 실행기를 돌린다. 도구가 없으면 대기로
+    남아 종료 코드 4다 (cron `dlp review revoke --pending`이 다시 한다). `extend`는 아무것도
+    요청하지 않고, 라벨링 작업(블러본 사본)은 보관 삭제 결정으로 회수하지 않는다.
+    """
+    uri = _media(tmp_path, "s001", "bodycam")
+    with _engine(url).begin() as conn:
+        insert_review_task(conn, _task("cvat:2", "s001", uri, None))
+        insert_review_task(conn, _privacy_task("cvat:1", "s001", tmp_path))
+    monkeypatch.setattr(ops_cmds, "sa", _AwareSqlalchemy())
+    monkeypatch.setattr(review_config, "review_setup", _revocation_only(tmp_path))
+    extend = argparse.Namespace(
+        session_id="s001", decision="extend", until="2027-01-01", reason="연장", url=url
+    )
+    assert ops_cmds.cmd_retention_decide(extend) == 0
+    with _engine(url).connect() as conn:
+        assert get_review_task(conn, "cvat:1").revoke_requested_at is None
+    args = argparse.Namespace(
+        session_id="s001", decision="delete", until=None, reason="만료", url=url
+    )
+    assert ops_cmds.cmd_retention_decide(args) == REVOCATION_PENDING_EXIT
+    assert "CVAT 원본 사본 삭제 요청 1개: cvat:1" in capsys.readouterr().out
+    with _engine(url).connect() as conn:
+        privacy = get_review_task(conn, "cvat:1")
+        assert (privacy.revoke_reason or "").startswith("raw-copy:retention-delete:")
+        assert privacy.media_revoked_at is not None and privacy.tool_revoked_at is None
+        assert get_review_task(conn, "cvat:2").revoke_requested_at is None
 
 
 def test_dataset_withdraw_deletes_timeseries_csv_after_all_tasks_were_already_revoked(

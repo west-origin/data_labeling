@@ -3,7 +3,8 @@
 매체 회수 outbox(ADR 0039): `request_task_revocation`(요청), `mark_task_media_revoked`·
 `mark_task_tool_revoked`(완료 표시), `pending_revocations`(대기 조회). 요청은 블러를 바꾼
 트랜잭션에서 세션 잠금 아래에, 완료 표시는 실행기(`dlp_review.revoke`)가 확인한 뒤 짧은
-트랜잭션에서 쓴다.
+트랜잭션에서 쓴다. 블러 검수 작업의 CVAT 원본 사본 삭제(ADR 0071)는 같은 outbox를 쓰되
+`request_raw_copy_purge`·`request_session_raw_copy_purges`로만 요청한다 (사유 머리말 `raw-copy:`).
 """
 
 from datetime import datetime
@@ -13,6 +14,7 @@ from sqlalchemy.exc import NoResultFound
 
 from dlp_schema.db.tables import review_assignments, review_tasks
 from dlp_schema.review import (
+    RAW_COPY_REASON,
     AssignmentStatus,
     ReviewAssignment,
     ReviewStage,
@@ -121,6 +123,68 @@ def request_task_revocation(
         )
     )
     return result.rowcount == 1
+
+
+def request_raw_copy_purge(
+    conn: sa.Connection, task_key: str, *, reason: str, at: datetime
+) -> bool:
+    """블러 검수 작업이 도구(CVAT)에 올린 원본 사본의 삭제를 요청한다 (outbox, ADR 0071).
+
+    아직 요청이 없는 블러 검수 작업만 바꾼다. 사유는 `raw-copy:<reason>`으로 남고, 열린 작업은
+    revoked로, 수집한 작업은 상태를 둔다. 블러 검수 작업은 원본 프록시를 도구에 바로 올려 라벨링
+    버킷 사본이 없으므로 매체 완료 표시(`media_revoked_at`)를 요청과 함께 남긴다: 실행기는 도구
+    작업만 지운다. 원본 버킷의 원본 프록시는 지우지 않는다 (원본 보관 절차의 몫).
+
+    Returns:
+        이번에 요청을 남겼으면 True (이미 요청했거나 블러 검수 작업이 아니거나 없으면 False).
+
+    Raises:
+        ValueError: at에 시간대가 없거나 사유가 비었을 때.
+    """
+    if not reason:
+        raise ValueError("원본 사본 삭제 요청에는 사유가 있어야 합니다")
+    when = _aware(at)
+    result = conn.execute(
+        review_tasks.update()
+        .where(
+            review_tasks.c.task_key == task_key,
+            review_tasks.c.revoke_requested_at.is_(None),
+            review_tasks.c.stage == ReviewStage.PRIVACY.value,
+        )
+        .values(
+            revoke_requested_at=when,
+            revoke_reason=f"{RAW_COPY_REASON}{reason}",
+            media_revoked_at=when,
+            status=sa.case(
+                (
+                    review_tasks.c.status == ReviewTaskStatus.OPEN.value,
+                    ReviewTaskStatus.REVOKED.value,
+                ),
+                else_=review_tasks.c.status,
+            ),
+        )
+    )
+    return result.rowcount == 1
+
+
+def request_session_raw_copy_purges(
+    conn: sa.Connection, session_id: str, *, reason: str, at: datetime
+) -> list[str]:
+    """세션의 블러 검수 작업마다 원본 사본 삭제를 요청한다. 이번에 요청한 작업 키 (만든 순).
+
+    세션 사용 중지(`dlp dataset withdraw`)와 원본 보관 삭제 결정(`dlp ops retention-decide …
+    delete`)이 부른다 (ADR 0071). 다시 불러도 이미 요청한 작업은 바뀌지 않는다 (멱등).
+    """
+    rows = conn.execute(
+        sa.select(review_tasks.c.task_key)
+        .where(
+            review_tasks.c.session_id == session_id,
+            review_tasks.c.stage == ReviewStage.PRIVACY.value,
+            review_tasks.c.revoke_requested_at.is_(None),
+        )
+        .order_by(review_tasks.c.created_at, review_tasks.c.task_key)
+    ).scalars()
+    return [k for k in rows if request_raw_copy_purge(conn, k, reason=reason, at=at)]
 
 
 def mark_task_media_revoked(

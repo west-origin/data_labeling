@@ -74,6 +74,27 @@ def test_review_task_revocation_rules(overrides: dict[str, Any], message: str) -
         ReviewTask.model_validate(_values(**overrides))
 
 
+def test_privacy_task_carries_revocation_fields_only_for_raw_copy_purge() -> None:
+    """블러 검수 작업은 원본 사본 삭제(사유 `raw-copy:`, ADR 0071)에만 회수 필드를 가진다.
+
+    렌더 해시는 여전히 없어야 하고, 다른 사유(블러 변경 회수)의 요청은 거부한다.
+    """
+    privacy = {"stage": "privacy", "render_hash": None, "label_kinds": ("blur_track",)}
+    purge = {
+        "status": "revoked", "revoke_requested_at": LATER,
+        "revoke_reason": "raw-copy:withdrawn:dpo01", "media_revoked_at": LATER,
+    }  # fmt: skip
+    task = ReviewTask.model_validate(_values(**privacy, **purge))
+    assert task.revoke_reason == "raw-copy:withdrawn:dpo01"
+    for wrong in (
+        {**purge, "revoke_reason": "sweep"},
+        {**purge, "render_hash": HASH},
+        {"status": "collected", "revoke_note": "x"},
+    ):
+        with pytest.raises(ValidationError, match="블러 검수 작업"):
+            ReviewTask.model_validate(_values(**{**privacy, **wrong}))
+
+
 def test_review_task_revocation_fields_roundtrip() -> None:
     """요청·완료 표시가 있는 회수 작업과 구 작업(None)이 JSON 왕복에서 같다."""
     revoked = ReviewTask.model_validate(

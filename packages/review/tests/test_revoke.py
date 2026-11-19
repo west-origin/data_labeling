@@ -65,6 +65,7 @@ from dlp_schema.db.repository import (
     mark_review_task_collected,
     pending_revocations,
     register_ontology,
+    request_session_raw_copy_purges,
     request_task_revocation,
 )
 from dlp_schema.labels import BlurTrackPayload, BoxKeyframe, LabelRecord
@@ -743,6 +744,47 @@ def test_executor_never_deletes_a_tool_task_owned_by_another_row(
             assert mark_tool_gone(conn, key, note="CVAT·LS 재설치", actor="ops", now=NOW)
     assert _run(engine, labeling, cvat, ls).complete
     assert cvat.tasks == {2} and ls.tasks == {3}  # 남의 작업은 끝까지 그대로
+
+
+def test_raw_copy_purge_deletes_only_the_privacy_cvat_task_without_a_snapshot(
+    engine: sa.Engine,
+    seven: dict[str, ReviewTask],
+    stores: tuple[LocalStore, LocalStore],
+) -> None:
+    """S2, ADR 0071: 블러 검수 작업(원본 프록시를 CVAT에 올림)의 원본 사본 삭제.
+
+    블러 변경 회수(`request_task_revocation`)는 여전히 블러 검수 작업을 고르지 않는다. 원본 사본
+    삭제 요청은 `raw-copy:` 사유로 남고 매체 완료가 함께 표시된다 (라벨링 버킷 사본이 없다).
+    실행기는 저장소를 건드리지 않고 CVAT 작업만 지운다: 주인 대조의 담당자 자리는 작업 이름의
+    `privacy`이고 스냅숏은 남기지 않는다. 다시 요청해도 새 요청은 없다.
+    """
+    _, labeling = stores
+    with engine.begin() as conn:
+        assert not request_task_revocation(conn, "cvat:1", reason="sweep", at=NOW)
+        reason = "retention-delete:ops"
+        assert request_session_raw_copy_purges(conn, SID, reason=reason, at=NOW) == ["cvat:1"]
+        assert request_session_raw_copy_purges(conn, SID, reason="again", at=NOW) == []
+    task = _status(engine, "cvat:1")
+    assert task.revoke_reason == "raw-copy:retention-delete:ops"
+    assert task.media_revoked_at == NOW and task.tool_revoked_at is None
+    calls = Calls()
+    cvat = FakeTool("cvat", calls, {1, 2})
+    report = _run(engine, RecordingStore(labeling, calls), cvat, None)
+    assert report.errors == [] and report.tools_done == ["cvat:1"] and report.pending == []
+    assert [c[1] for c in calls if c[0] == "cvat"] == ["owner", "unassign", "delete"]
+    assert not [c for c in calls if c[0] == "s3"]  # 라벨링 버킷·원본 프록시는 그대로
+    assert cvat.tasks == {2}  # 다른 작업(회수 요청 없음)은 그대로
+    assert labeling.head(snapshot_key(seven["blur"])) is None
+    assert _status(engine, "cvat:1").tool_revoked_at == NOW
+    # 주인이 다르면(같은 번호의 남의 작업) 지우지 않고 대기로 남는다
+    with engine.begin() as conn:
+        conn.execute(
+            sa.text("UPDATE review_tasks SET tool_revoked_at=NULL WHERE task_key='cvat:1'")
+        )
+    cvat = FakeTool("cvat", Calls(), {1})
+    cvat.owners[1] = TaskOwner(SID, "bodycam", "labeler01", f"{SID}/bodycam/labeler01")
+    again = _run(engine, labeling, cvat, None)
+    assert cvat.tasks == {1} and again.pending == ["cvat:1"]
 
 
 def test_mark_tool_gone_needs_note_and_records_actor(

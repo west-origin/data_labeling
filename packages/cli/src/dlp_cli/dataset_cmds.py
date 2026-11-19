@@ -259,9 +259,11 @@ def cmd_withdraw(args: argparse.Namespace) -> int:
     """`dlp dataset withdraw <세션> --reason`: 세션을 사용 중지한다.
 
     부작용: 한 트랜잭션에서 세션 생애주기를 `withdrawn`으로 바꾸고, 아직 기록이 없으면 `withdrawals`
-    INSERT (다시 실행해도 기록은 하나, 멱등), 그 세션의 배포된 검수 작업(블러 검수 제외)에 매체 회수
-    요청(사유 `withdrawn:<행위자>`). 커밋 뒤 회수 실행기(`review_config.run_revocations`)로 라벨링
-    버킷 사본·검수 시계열 CSV → CVAT → Label Studio 작업을 지운다 (도구에 닿지 않으면 대기로 남는다.
+    INSERT (다시 실행해도 기록은 하나, 멱등), 그 세션의 배포된 검수 작업에 매체 회수 요청(사유
+    `withdrawn:<행위자>`, 블러 검수 작업은 CVAT 원본 사본 삭제 `raw-copy:withdrawn:<행위자>`,
+    ADR 0071).
+    커밋 뒤 회수 실행기(`review_config.run_revocations`)로 라벨링 버킷 사본·검수 시계열 CSV → CVAT →
+    Label Studio 작업을 지운다 (도구에 닿지 않으면 대기로 남는다.
     CSV는 새로 요청한 작업이 없어도, 즉 모든 작업의 회수가 이미 끝났어도 지운다). 이미 만든
     스냅샷·내보내기는 바꾸지 않으며(불변), 그 목록을 "이미 들어간 곳"으로 출력해 사람이 후속
     조치(재학습·구매자 삭제 요청)를 판단하게 한다.

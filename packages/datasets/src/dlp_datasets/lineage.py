@@ -17,8 +17,9 @@
   트랜잭션이 `review_tasks`에 매체 회수를 요청한다 (outbox, ADR 0039, F-REV-17). 외부 삭제는 커밋
   뒤 `dlp_review.revoke` 실행기가 한다 (`dlp dataset withdraw`가 돌린다). 요청은 `dlp_schema` 저장소
   함수(`request_task_revocation`)로만 쓴다 (의존 표: datasets → schema). 블러 검수 작업(원본 접근
-  권한자 화면)은 회수 대상이 아니라 남는다. 사용 중지한 세션에는 새 검수 작업을 만들지 않는다
-  (`dlp_review.tasks`).
+  권한자 화면)은 블러 변경 회수 대상이 아니지만, 사용 중지하면 CVAT에 올린 원본 사본을 지우도록 같은
+  outbox에 `raw-copy:` 사유로 요청한다 (`request_session_raw_copy_purges`, ADR 0071). 사용 중지한
+  세션에는 새 검수 작업을 만들지 않는다 (`dlp_review.tasks`).
 
 진입점: `dlp dataset withdraw <세션> <이유>`(`withdraw_session`),
 `dlp lineage <세션>`(`session_lineage`).
@@ -45,6 +46,7 @@ from dlp_schema.db.repository import (
     list_golden_sets,
     list_review_tasks,
     list_training_runs,
+    request_session_raw_copy_purges,
     request_task_revocation,
     set_lifecycle,
     withdrawn_session_ids,
@@ -144,17 +146,20 @@ def _request_review_revocations(
     """사용 중지한 세션의 배포된 검수 작업마다 매체 회수를 요청한다. 이번에 요청한 작업 키.
 
     동의를 철회한 영상은 렌더 해시와 무관하게 모두 회수한다 (블러가 맞아도 쓰면 안 된다).
-    같은 매체를 쓰는 작업도 같은 세션이라 함께 요청된다. 블러 검수 작업은 여기와 저장소 함수
-    (`request_task_revocation`) 양쪽에서 거른다.
+    같은 매체를 쓰는 작업도 같은 세션이라 함께 요청된다. 블러 검수 작업은 블러 변경 회수
+    (`request_task_revocation`)에서 거르고, 대신 CVAT에 올린 원본 사본의 삭제를 요청한다
+    (`request_session_raw_copy_purges`, 사유 `raw-copy:withdrawn:<행위자>`, ADR 0071).
     호출자가 세션 행을 이미 잠갔다 (`set_lifecycle`).
     """
-    return [
+    reason = f"withdrawn:{actor}"
+    labeling = [
         t.task_key
         for t in list_review_tasks(conn, session_id)
         if t.stage is not ReviewStage.PRIVACY
         and t.revoke_requested_at is None
-        and request_task_revocation(conn, t.task_key, reason=f"withdrawn:{actor}", at=now)
+        and request_task_revocation(conn, t.task_key, reason=reason, at=now)
     ]
+    return labeling + request_session_raw_copy_purges(conn, session_id, reason=reason, at=now)
 
 
 def register_training_run(conn: sa.Connection, run: TrainingRun) -> None:

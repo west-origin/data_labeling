@@ -45,6 +45,12 @@ class ReviewTool(StrEnum):
     LABEL_STUDIO = "label_studio"
 
 
+# 블러 검수 작업(원본 프록시를 CVAT에 올린 것)의 회수 사유 머리말 (ADR 0071). 블러 검수 작업은 이
+# 사유로만 회수 필드를 가진다: 블러가 바뀐 매체 회수(ADR 0039)와 달리 원본 사본 자체를 도구에서
+# 지우는 요청이다 (세션 사용 중지, 원본 보관 삭제 결정).
+RAW_COPY_REASON = "raw-copy:"
+
+
 class ReviewStage(StrEnum):
     """검수 단계. 프라이버시 검수는 원본 접근 권한자만, 작업 라벨 검수는 블러본만 본다.
 
@@ -290,9 +296,11 @@ class ReviewTask(Contract):
 
         Raises:
             ValueError: 회수 상태인데 요청·사유가 없거나 수집 시각이 있음, 열린 작업에 요청이 있음,
-                요청 없이 완료 표시가 있음, 사유 없는 요청, 블러 검수 작업에 렌더 해시·회수 필드.
+                요청 없이 완료 표시가 있음, 사유 없는 요청, 블러 검수 작업에 렌더 해시가 있거나
+                원본 사본 삭제(`RAW_COPY_REASON`, ADR 0071)가 아닌 회수 필드.
         """
         requested = self.revoke_requested_at is not None
+        raw_copy = (self.revoke_reason or "").startswith(RAW_COPY_REASON)
         rules = (
             (
                 self.status is ReviewTaskStatus.REVOKED
@@ -313,11 +321,17 @@ class ReviewTask(Contract):
                 self.stage is ReviewStage.PRIVACY
                 and (
                     self.render_hash is not None
-                    or requested
-                    or self.revoke_reason is not None
-                    or self.revoke_note is not None
+                    or (
+                        not raw_copy
+                        and (
+                            requested
+                            or self.revoke_reason is not None
+                            or self.revoke_note is not None
+                        )
+                    )
                 ),
-                "블러 검수 작업에는 렌더 해시·회수 필드가 없어야 합니다",
+                "블러 검수 작업에는 렌더 해시가 없어야 하고, 회수 필드는 원본 사본 삭제"
+                f"({RAW_COPY_REASON})에만 씁니다",
             ),
         )
         for broken, message in rules:

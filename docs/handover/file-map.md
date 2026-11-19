@@ -9,7 +9,7 @@
 의존 표는 [구조 지도](architecture.md), 바꿀 때 함께 볼 파일과 시험은
 [변경 및 복구 안내](change-guide.md)에 있다.
 
-파일 682개.
+파일 683개.
 
 ## 목차
 
@@ -979,6 +979,7 @@
 | [`test_aireview_panel.py`](../../tests/test_aireview_panel.py) | 판정단 종단 회귀: 두 판정 모델 실행 → 검수 운영의 불일치 사유 (ADR 0063, 서비스 불필요). |
 | [`test_doc_test_refs.py`](../../tests/test_doc_test_refs.py) | 인수인계 문서가 인용하는 시험 이름이 실제로 있는지 (F-COE-35). |
 | [`test_end_to_end.py`](../../tests/test_end_to_end.py) | 종단 검증 (계획서 "종단 검증"). |
+| [`test_fiftyone_server_guard.py`](../../tests/test_fiftyone_server_guard.py) | 우리 코드는 FiftyOne 웹 서버(GraphQL)를 띄우지 않는다 (S3 완화, ADR 0036). |
 | [`test_file_map.py`](../../tests/test_file_map.py) | 파일 지도 생성기(scripts/file_map.py) 검사. |
 | [`test_fp_hints.py`](../../tests/test_fp_hints.py) | 오탐 의심 힌트(`dlp_privacy.hints`, `dlp_review.object_hints`)와 TTA(`geometry.tta_tracks`). |
 | [`test_import_boundaries.py`](../../tests/test_import_boundaries.py) | 패키지 import 경계 검사 (외주 리팩토링의 경계 고정). |

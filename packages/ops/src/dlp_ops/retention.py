@@ -11,9 +11,10 @@
 유효하다. 사용 중지된 세션은 기간과 무관하게 삭제 대상으로 보인다. 삭제 결정을 기록하면 더 알리지
 않는다. 원본 삭제 자체는 사람이 결정을 기록한 뒤 운영 절차로 한다.
 
-주의: 검수 도구(CVAT)에 블러 검수용으로 올린 원본 프록시는 이 명령이 찾거나 지우지 않는다.
-원본을 지울 때 그 세션의 원본 검수 작업(CVAT 작업·데이터)도 운영 절차에서 함께 지운다
-(RETENTION_NOTE).
+검수 도구(CVAT)에 블러 검수용으로 올린 원본 프록시는 삭제 결정(`dlp ops retention-decide …
+delete`)과 세션 사용 중지(`dlp dataset withdraw`)가 지운다 (ADR 0071: `raw-copy:` 회수 요청 → 회수
+실행기, 닿지 않으면 `dlp review revoke --pending`이 다시 한다). 원본 버킷의 원본 삭제는 운영
+절차다 (RETENTION_NOTE).
 
 상태 값(`Status`):
 - `ok` — 만료까지 `alert_days_before`일보다 많이 남음.
@@ -57,8 +58,8 @@ REVIEW_STATES = (
 )
 # 만료·사용 중지·삭제 결정 세션이 있을 때 `dlp ops retention`이 덧붙이는 운영 절차 안내
 RETENTION_NOTE = (
-    "검수 도구(CVAT)에 올린 원본 프록시는 이 명령이 지우지 않는다: "
-    "원본을 지울 때 그 세션의 원본 검수 작업도 함께 지운다"
+    "원본 버킷의 원본은 이 명령이 지우지 않는다 (운영 절차). CVAT에 올린 블러 검수용 원본 사본은 "
+    "dlp ops retention-decide <세션> delete가 지운다 (남으면 dlp review revoke --pending)"
 )
 # 보관 상태 (의미는 모듈 docstring의 "상태 값")
 Status = Literal["ok", "due_soon", "expired", "extended", "delete_decided", "withdrawn"]

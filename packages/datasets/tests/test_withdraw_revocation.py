@@ -4,8 +4,10 @@
 
 정답 근거: 사용 중지 트랜잭션이 그 세션의 비프라이버시 검수 작업 중 회수 요청이 없는 것마다
 `withdrawn:<행위자>` 사유로 요청을 남긴다 (열린 작업은 revoked, 수집한 작업은 상태를 두고 요청만).
-블러 검수 작업(원본 권한자 화면)과 이미 요청된 작업·다른 세션의 작업은 그대로다. 다시 불러도 새로
-요청하지 않는다. 외부 삭제는 커밋 뒤 회수 실행기 몫이다 (`dlp dataset withdraw`가 돌린다).
+블러 검수 작업(원본 권한자 화면)에는 CVAT 원본 사본 삭제를 `raw-copy:withdrawn:<행위자>`로 요청하고
+매체 완료를 함께 표시한다 (라벨링 버킷 사본이 없다, ADR 0071). 이미 요청된 작업·다른 세션의 작업은
+그대로다. 다시 불러도 새로 요청하지 않는다. 외부 삭제는 커밋 뒤 회수 실행기 몫이다
+(`dlp dataset withdraw`가 돌린다).
 """
 
 from __future__ import annotations
@@ -78,15 +80,19 @@ def test_withdraw_requests_revocation_of_deployed_review_tasks(engine: sa.Engine
     with engine.begin() as conn:
         lineage = withdraw_session(conn, "s001", "동의 철회", NOW, actor="dpo01")
     assert lineage.lifecycle is LifecycleState.WITHDRAWN
-    assert lineage.revocations == ["cvat:1", "label_studio:2", "cvat:3"]
+    assert lineage.revocations == ["cvat:1", "label_studio:2", "cvat:3", "cvat:4"]
     with engine.connect() as conn:
         tasks = {k: get_review_task(conn, k) for k in ("cvat:1", "label_studio:2", "cvat:3")}
         for task in tasks.values():
             assert task.revoke_requested_at == NOW and task.revoke_reason == "withdrawn:dpo01"
         assert tasks["cvat:1"].status is ReviewTaskStatus.REVOKED
         assert tasks["cvat:3"].status is ReviewTaskStatus.COLLECTED
-        # 블러 검수 작업, 이미 요청된 작업, 다른 세션의 작업은 그대로다
-        assert get_review_task(conn, "cvat:4").revoke_requested_at is None
+        # 블러 검수 작업은 원본 사본 삭제 요청 (열린 작업은 revoked, 매체 완료는 요청과 함께)
+        privacy = get_review_task(conn, "cvat:4")
+        assert privacy.revoke_reason == "raw-copy:withdrawn:dpo01"
+        assert privacy.status is ReviewTaskStatus.REVOKED and privacy.media_revoked_at == NOW
+        assert privacy.tool_revoked_at is None
+        # 이미 요청된 작업, 다른 세션의 작업은 그대로다
         assert get_review_task(conn, "cvat:5").revoke_reason == "sweep"
         assert get_review_task(conn, "cvat:6").revoke_requested_at is None
         # 계보 조회는 회수 요청을 만들지 않는다 (사용 중지 결과에만 있다)

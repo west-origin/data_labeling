@@ -35,6 +35,12 @@ LOCKED) 같은 작업의 스냅숏·삭제가 겹치지 않게 한다. "NULL인 
 스냅숏: 라벨링 버킷 `sessions/<세션>/revoked/<도구>-<외부 ID>.json`. 라벨러가 진행 중이던 주석을
 보존한다 (자동으로 이어받지는 않는다). 영상·서명 URL은 담지 않는다.
 
+블러 검수 작업의 원본 사본 삭제(ADR 0071, 사유 `raw-copy:`): 세션 사용 중지·원본 보관 삭제 결정이
+요청을 남긴다 (`request_session_raw_copy_purges`). 라벨링 버킷 사본이 없어 요청과 함께 매체 완료가
+표시되고, 이 실행기는 도구 단계만 한다. 주인 대조의 담당자 자리는 작업 이름의 `privacy`다
+(`tasks.create_privacy_tasks`, 고아 정리 `orphans._owns`와 같다). 스냅숏은 남기지 않는다: 원본을 본
+검수자의 주석이고, 수집한 블러는 이미 DB에 있으며, 사용 중지·삭제 결정은 사본을 줄이려는 것이다.
+
 공개 이름:
 - `RevocationReport`, `RevocationIncompleteError`: 실행 결과와 "대기가 남았다" 예외.
 - `timeseries_sessions`: 시계열 CSV를 확인해 지울 사용 중지 세션.
@@ -334,10 +340,12 @@ def _owner_mismatch(task: ReviewTask, owner: TaskOwner) -> str | None:
     세션·담당자는 같아야 하고, 스트림은 도구가 담을 때만(CVAT) 비교한다. 모르는 칸(None)은 다르다고
     본다 (실패 쪽으로 닫는다).
     """
+    # 블러 검수 작업 이름의 담당자 자리는 `privacy`다 (`tasks.create_privacy_tasks`)
+    who = "privacy" if task.stage is ReviewStage.PRIVACY else task.assignee
     same = (
         owner.session_id == task.session_id
         and owner.assignee is not None
-        and owner.assignee == task.assignee
+        and owner.assignee == who
         and owner.stream_id in (None, task.stream_id)
     )
     if same:
@@ -378,7 +386,9 @@ def _revoke_tool_task(
                 except _TOOL_ERRORS as exc:
                     report.warnings.append(f"{task.task_key}: 배정 해제 실패 ({exc})")
             try:
-                written = _write_snapshot(labeling, task, client, clock)
+                # 블러 검수 작업(원본 사본 삭제, ADR 0071)은 스냅숏을 남기지 않는다 (모듈 설명)
+                privacy = task.stage is ReviewStage.PRIVACY
+                written = None if privacy else _write_snapshot(labeling, task, client, clock)
             except (*_TOOL_ERRORS, *_STORE_ERRORS) as exc:
                 report.warnings.append(f"{task.task_key}: 스냅숏 실패, 삭제는 계속 ({exc})")
             else:

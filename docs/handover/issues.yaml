@@ -24,10 +24,12 @@ issues:
   # ── 외부 서비스 제공 전 해결할 과제 (known-issues.md) ──
   - {id: S1, title: 인증·테넌트 경계 미구현 (DLP_ACTOR는 자기 신고), severity: high, status: open, kind: product,
      files: [packages/cli/src/dlp_cli/raw_access.py], source: docs/handover/known-issues.md}
-  - {id: S2, title: CVAT 원본 사본 자동 삭제 없음, severity: high, status: open, kind: product,
-     files: [packages/review/src/dlp_review/tasks.py, packages/ops/src/dlp_ops/retention.py], source: docs/handover/known-issues.md}
+  - {id: S2, title: CVAT 원본 사본 자동 삭제 없음, severity: high, status: fixed, kind: product,
+     files: [packages/review/src/dlp_review/tasks.py, packages/ops/src/dlp_ops/retention.py, packages/review/src/dlp_review/revoke.py, packages/schema/src/dlp_schema/db/review_repository.py, packages/datasets/src/dlp_datasets/lineage.py, packages/cli/src/dlp_cli/ops_cmds.py], source: docs/adr/0071-raw-copy-purge-in-review-tools.md,
+     note: "2026-11-19 ADR 0071로 고침. 세션 사용 중지(dlp dataset withdraw)와 원본 보관 삭제 결정(dlp ops retention-decide <세션> delete)이 같은 트랜잭션에서 블러 검수 작업의 CVAT 원본 사본 삭제를 요청하고(review_tasks outbox, 사유 raw-copy:…, 매체 완료는 요청과 함께), 커밋 뒤 ADR 0039 회수 실행기가 CVAT 작업을 지운다 (주인 대조의 담당자 자리 privacy, 스냅숏 없음). 닿지 않으면 대기로 남고 dlp review revoke --pending이 다시 한다. 증거는 review_tasks의 요청 시각·사유·도구 삭제 확인 시각. 원본 버킷의 원본 삭제는 여전히 운영 절차다. 회귀: packages/review/tests/test_revoke.py::test_raw_copy_purge_deletes_only_the_privacy_cvat_task_without_a_snapshot, packages/cli/tests/test_revoke_cmds.py::test_retention_delete_decision_purges_the_cvat_raw_copy_after_commit, packages/datasets/tests/test_withdraw_revocation.py::test_withdraw_requests_revocation_of_deployed_review_tasks"}
   - {id: S3, title: FiftyOne GraphQL 의존성 취약점 2건 미패치, severity: high, status: open, kind: ops,
-     files: [pyproject.toml, uv.lock], source: docs/handover/known-issues.md}
+     files: [pyproject.toml, uv.lock, tests/test_fiftyone_server_guard.py], source: docs/handover/known-issues.md,
+     note: "2026-11-19 재확인: PyPI 최신 FiftyOne 1.22.1이 strawberry-graphql>=0.315.7,<0.317.0을 요구하고 0.316.x 보안 패치판이 없어 잠금 파일을 올릴 수 없다 (패치는 0.327.2 이상). 완화: 우리 코드는 FiftyOne 앱(GraphQL) 서버를 띄우지 않는다. tests/test_fiftyone_server_guard.py가 패키지 소스·스크립트의 launch_app·fiftyone.server·fiftyone.app 사용을 막는다. 사람도 fiftyone app launch로 직접 띄우지 않는다. FiftyOne이 0.327.2 이상을 받는 판을 내면 잠금 파일을 올리고 서버 기동·보안 회귀를 확인한 뒤 닫는다."}
   - {id: S4, title: "commercial: review 모델의 상업 이용 법적 결론 없음", severity: high, status: open, kind: product,
      files: [config/models.yaml], source: docs/handover/known-issues.md}
   - {id: S5, title: 영속 작업 큐·백업 복구·장기 부하 검증 미완료, severity: medium, status: open, kind: ops,
