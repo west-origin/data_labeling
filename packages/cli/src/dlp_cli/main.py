@@ -139,7 +139,8 @@ def build_parser() -> argparse.ArgumentParser:
     sync_cmds.add_commands(sub)  # dlp sync run|adjust — 멀티스트림 동기화 (WP4)
     # 프라이버시 게이트: dlp privacy detect|approve|render|audit-sample|hold (WP5, hold는 ADR 0042)
     privacy_cmds.add_commands(sub)
-    # 모델 가중치 받기·변환과 라이선스 검사: dlp models fetch|export|licenses (ADR 0009·0010)
+    # 모델 가중치 받기·변환, 라이선스 검사, 추론 장치 확인: dlp models fetch|export|licenses|device
+    # (ADR 0009·0010·0072)
     models_cmds.add_commands(sub)
     review_cmds.add_commands(sub)  # dlp review … — 검수 도구 연동·운영 (WP6, WP12)
     dataset_cmds.add_commands(sub)  # dlp dataset … / dlp lineage — 데이터셋·계보 (WP7)

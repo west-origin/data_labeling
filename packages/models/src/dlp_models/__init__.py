@@ -8,7 +8,9 @@ AI 1차 검수 `dlp aireview`, 모델 받기 `make models`)가
 모듈:
 - `registry`: `config/models.yaml` 로더, 가중치 경로·해시 확인(`resolve`), 내려받기(`fetch`),
   상업 사용 분류 검사(`ModelRegistry.violations`, `make licenses`).
-- `onnx`: ONNX Runtime CPU 세션의 얇은 타입 래퍼(`OnnxModel`).
+- `onnx`: ONNX Runtime 세션의 얇은 타입 래퍼(`OnnxModel`, 기본 CPU).
+- `device`: 추론 장치 선택(`DLP_INFERENCE_DEVICE` cpu | auto | cuda, ADR 0072).
+- `onnx_bytes`: onnx 패키지 없이 만드는 아주 작은 ONNX(장치 확인·시험 대역).
 - `owlv2`: OWLv2 오픈 보캐뷸러리 탐지(텍스트 질의 → 박스). 전처리·후처리(NMS) 포함.
 - `yolox`: YOLOX 고정 클래스 탐지(공개 데이터 미세조정 도구 탐지기, ADR 0060). letterbox·격자
   디코드·클래스별 NMS 포함.

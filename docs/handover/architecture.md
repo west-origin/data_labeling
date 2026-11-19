@@ -242,17 +242,20 @@ AI 1차 검수 표시·수집(ADR 0040): `dlp_review.ai_display`(판정 → 검�
 ### `packages/models/` (`dlp_models`)
 
 모델 레지스트리(`config/models.yaml`, 해시 확인)와 공용 ONNX 런타임(`onnx.OnnxModel`: OWLv2, 메트릭 깊이,
-SAM 2.1, YOLOX가 쓴다), 사내 VLM 전송(`vlm`).
+SAM 2.1, YOLOX가 쓴다), 추론 장치 선택(`device`, `dlp models device`로 확인), 사내 VLM 전송(`vlm`).
 
-추론 런타임은 모델마다 다르고, 지금은 모두 CPU에 고정돼 있다 (GPU 서버를 써도 빨라지지 않는다, F-PAR-98).
+추론 런타임은 모델마다 다르다. ONNX Runtime 모델은 환경 변수 `DLP_INFERENCE_DEVICE`(cpu | auto | cuda, 기본 cpu)로
+장치를 고르고(`dlp_models.device`, ADR 0072), GPU를 골랐는데 세션이 CUDA를 받지 못하면 멈춘다. 장치는 모델 버전에
+넣지 않는다. GPU에서 얼마나 빨라지는지는 아직 재지 않았다 (F-PAR-98). GPU 서버 준비는 [개발 안내](development.md)
+"GPU 서버".
 
-| 모델 (쓰는 단계) | 런타임 | 세션·모델을 만드는 곳 | CPU로 고정한 곳 |
+| 모델 (쓰는 단계) | 런타임 | 세션·모델을 만드는 곳 | 장치 |
 | --- | --- | --- | --- |
-| OWLv2 (블러 탐지, 도구, 검수 힌트, scene3d 물체) | ONNX Runtime | `dlp_models.owlv2.Owlv2` | `dlp_models/onnx.py`의 `providers=["CPUExecutionProvider"]` |
+| OWLv2 (블러 탐지, 도구, 검수 힌트, scene3d 물체) | ONNX Runtime | `dlp_models.owlv2.Owlv2` | `dlp_models/onnx.py`의 `OnnxModel`이 `DLP_INFERENCE_DEVICE`로 고른다 |
 | 메트릭 깊이 (3D), SAM 2.1 (마스크), YOLOX (고정 클래스 도구·재학습 객체) | ONNX Runtime | `dlp_models.depth`, `sam2`, `yolox` | 같은 곳 |
-| YOLOX-m 사람 탐지 + RTMPose 전신·팔 | rtmlib (ONNX Runtime) | `dlp_prelabel/adapters/rtmpose.py` | 같은 파일의 `device="cpu"` |
-| 손 21관절, COCO 객체 | MediaPipe Tasks | `dlp_prelabel/adapters/mediapipe_models.py` | 같은 파일의 `Delegate.CPU` |
-| YuNet 얼굴 | OpenCV `FaceDetectorYN` | `dlp_privacy/detectors/yunet.py` | OpenCV 기본 백엔드 (PyPI 휠에는 CUDA 백엔드가 없다) |
+| YOLOX-m 사람 탐지 + RTMPose 전신·팔 | rtmlib (ONNX Runtime) | `dlp_prelabel/adapters/rtmpose.py` | 같은 파일에서 `DLP_INFERENCE_DEVICE`로 고른 `device` |
+| 손 21관절, COCO 객체 | MediaPipe Tasks | `dlp_prelabel/adapters/mediapipe_models.py` | CPU 고정 (`Delegate.CPU`, 리눅스 GPU 위임은 EGL·드라이버가 따로 필요) |
+| YuNet 얼굴 | OpenCV `FaceDetectorYN` | `dlp_privacy/detectors/yunet.py` | CPU (OpenCV 기본 백엔드, PyPI 휠에는 CUDA 백엔드가 없다) |
 
 행동·설명·번역·AI 1차 검수의 VLM은 이 표와 별개로 사내 추론 서버(vLLM, GPU)에 요청한다 ([VLM 서버](vlm-server.md)).
 

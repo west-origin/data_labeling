@@ -268,7 +268,7 @@ Spark에서 파이프라인 일부(프리라벨·프라이버시 탐지·VLM 클
 | uv·Python 3.12 (aarch64) | `uv python install`, `make install` | — |
 | PyAV, OpenCV(contrib headless), pyarrow, h5py 휠 | `make install` 성공 | 소스 빌드 |
 | onnxruntime CPU (aarch64) | `make check`의 모델 테스트 | — |
-| onnxruntime-gpu (aarch64 CUDA, Blackwell) | `make models` 뒤 OWLv2·깊이 실행 | PyPI 휠이 없을 수 있다: NGC 컨테이너 또는 CPU 경로 |
+| onnxruntime-gpu (aarch64 CUDA, Blackwell) | `make install-gpu`, `DLP_INFERENCE_DEVICE=cuda UV_NO_SYNC=1 uv run dlp models device` (ADR 0072) | 1.30.0은 PyPI에 manylinux_2_34 aarch64 휠이 있다(CUDA 13·cuDNN 9, 2026-11-19 확인). 그 GPU를 지원하지 않으면 NGC 컨테이너 또는 CPU 경로 |
 | MediaPipe Linux aarch64 휠, rtmlib | 프리라벨 손·전신 테스트 | CPU 경로, 컨테이너 |
 | FiftyOne 내장 MongoDB (arm64) | `make install-curation`, 큐레이션 테스트 | 외부 MongoDB |
 | `scripts/lerobot-env/uv.lock` | `make test-isolated` | 그 디렉터리에서 `uv lock`으로 arm64 재잠금 |

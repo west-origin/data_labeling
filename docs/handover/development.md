@@ -163,6 +163,30 @@ serve|assign|register-webhooks|refresh-urls|plan|qa|quality`, 작업의 CVAT 계
 )
 ```
 
+## GPU 서버
+
+자동 라벨·블러 탐지의 ONNX Runtime 모델(OWLv2, 메트릭 깊이, SAM 2.1, YOLOX, 전신 자세)은 기본 CPU로 돈다.
+GPU 서버에서는 환경 변수 `DLP_INFERENCE_DEVICE`(cpu | auto | cuda)로 GPU를 고른다 (ADR 0072). MediaPipe 손·객체와
+YuNet 얼굴은 GPU를 골라도 CPU 그대로다.
+
+```bash
+make install-gpu                       # make install 뒤 onnxruntime을 같은 판의 onnxruntime-gpu[cuda,cudnn]으로 교체
+export UV_NO_SYNC=1                    # uv run이 잠금 파일대로 CPU판을 다시 깔지 않게
+export DLP_INFERENCE_DEVICE=cuda       # GPU를 못 쓰면 멈춘다 (auto: GPU판이면 GPU, CPU판이면 CPU)
+uv run dlp models device               # 고른 장치와 실제로 잡힌 실행 제공자 (CUDAExecutionProvider가 있어야 한다)
+```
+
+- 필요한 것: CUDA 13을 지원하는 NVIDIA 드라이버. onnxruntime-gpu 1.30.0은 CUDA 13·cuDNN 9용이고, `[cuda,cudnn]`이
+  그 라이브러리를 pip로 함께 받는다 (시스템에 깐 CUDA도 찾는다). PyPI에 리눅스 x86_64·aarch64 휠이 있다.
+- GPU를 골랐는데 세션이 CUDA를 받지 못하면(드라이버·라이브러리 판이 맞지 않음) 명령이 `[추론 장치]` 또는 `DeviceError`로
+  멈춘다. ONNX Runtime은 경고만 내고 CPU로 돌기 때문에 일부러 멈추게 했다.
+- `dlp prelabel run`과 `dlp privacy detect`는 맨 앞에 `추론 장치: …` 한 줄을 출력한다. 장치는 모델 버전에 들어가지 않아,
+  CPU로 돌린 세션을 GPU로 다시 돌리지 않는다.
+- `make install`을 다시 하면 CPU판으로 돌아간다 (그 뒤 `make install-gpu`를 다시 한다). 운영 콘솔은 `.env`의
+  `DLP_INFERENCE_DEVICE`를 자식 명령에 넘긴다.
+- 아직 실제 GPU에서 돌려 보지 않았다. 처음 돌릴 때 같은 영상 구간의 블러 탐지·자동 라벨 시간을 CPU와 비교해
+  F-PAR-98에 남긴다.
+
 ## VLM 서버
 
 행동 분류(`dlp actions run`)와 AI 1차 검수(`dlp aireview`, WP17)는 사내 OpenAI 호환 VLM 서버가 필요하다.

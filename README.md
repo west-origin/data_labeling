@@ -282,7 +282,7 @@ uv run dlp export coco <데이터셋 버전>
 | `aireview` (`dlp_aireview`) | AI 1차 검수 판정(참고용) | `dlp aireview run`, `status`, `show` | `aireview.yaml` |
 | `review` (`dlp_review`) | CVAT·Label Studio 작업, 수집, 검수 운영 | `dlp review create`, `collect`, `verify`, `plan` | `review.yaml`, `config/review_ui.yaml` |
 | `datasets` (`dlp_datasets`) | 데이터셋 버전, 분할, 골든셋, 사용 중지 | `dlp dataset build`, `golden`, `withdraw` | `dataset.yaml` |
-| `models` (`dlp_models`) | 모델 레지스트리, ONNX 런타임 | `dlp models fetch`, `licenses` | `config/models.yaml` |
+| `models` (`dlp_models`) | 모델 레지스트리, ONNX 런타임, 추론 장치 선택(ADR 0072) | `dlp models fetch`, `licenses`, `device` | `config/models.yaml` |
 | `training` (`dlp_train`) | 재학습 루프, 배포 승인 | `dlp train run`, `models`, `approve` | `training.yaml` |
 | `evaluation` (`dlp_eval`) | 지표, 골든셋 평가, 배포 게이트 | `dlp eval golden` | `evaluation.yaml` |
 | `active` (`dlp_active`) | 액티브 러닝 점수, FiftyOne 연동 | `dlp active rank` | `active.yaml` |

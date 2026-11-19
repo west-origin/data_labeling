@@ -14,7 +14,7 @@ DB·외부 도구·내보내기 동작을 바꾸면 그 경로의 서비스/격�
 | --- | --- | --- |
 | 계약/DB/온톨로지 | `schema`, `db/migrations/versions`, `config/ontology` | 모든 소비 패키지. ADR·이관·계약 테스트·`make schemas`/`make contracts` |
 | 영상 회전·PTS·프록시 | `media/prepare.py`, `probe.py`, `proxy.py`, `pts.py` | 공간 좌표·시간·검수 재생. `packages/media/tests`, `tests/test_end_to_end.py` |
-| 모델 파일·어댑터·추론 런타임 | `models/registry.py`, `models/onnx.py`(ONNX 세션, CPU 고정), `prelabel/adapters`, `privacy/detectors/`, `config/models.yaml` | 해시·라이선스·라벨 버전·검수 보존. `packages/models/tests`, `packages/prelabel/tests`, `packages/cli/tests/test_pilot.py` |
+| 모델 파일·어댑터·추론 런타임 | `models/registry.py`, `models/onnx.py`(ONNX 세션), `models/device.py`(추론 장치 `DLP_INFERENCE_DEVICE`, ADR 0072), `prelabel/adapters`, `privacy/detectors/`, `config/models.yaml` | 해시·라이선스·라벨 버전·검수 보존. `packages/models/tests`, `packages/prelabel/tests`, `packages/cli/tests/test_pilot.py` |
 | 프라이버시 탐지·정책·렌더 | `privacy/pipeline.py`(프레임 순회·라벨), `tracker.py`, `detectors/`, `generation.py`, `runner.py`, `rendering.py`(렌더 게이트), `render.py`(블러 픽셀), `privacy.yaml` | 재검수·재승인·블러 유효성. `packages/privacy/tests`, `packages/schema/tests/test_privacy_detection.py`, `tests/test_review_regressions.py` |
 | 검수 작업/수집/권한 | `review/tasks.py`, `collect.py`, `revoke.py`, `ops/`, `cli/review_config.py`, `privacy/revocation.py` | 세대·담당자·이력·완료 판정·배포 매체 회수(ADR 0039). `packages/review/tests`(`test_revoke.py`), `tests/test_webhook_transaction.py`, `packages/schema/tests/test_review_queries.py`, `tests/test_review_regressions.py` |
 | 동기화/관계/행동 | `sync`, `relations`, `actions`, 각 정책 | 마스터/스트림 시간과 후속 라벨 재생성. 각 패키지 테스트, 종단 테스트 |

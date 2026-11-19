@@ -78,3 +78,4 @@ ADR은 결정 당시의 이유와 이관 조건을 기록한다. 후속 ADR이 �
 | 0069 | [ADR 0069: 촉각장갑 채널을 내보내기 에피소드 프레임에 싣기 (`dlp export lerobot\|gr00t`)](0069-tactile-channels-in-exports.md) |
 | 0070 | [ADR 0070: 내보내기 프레임마다 장면 좌표의 바디캠 자세를 싣기 (`dlp export lerobot\|gr00t`)](0070-scene-pose-in-exports.md) |
 | 0071 | [ADR 0071: 블러 검수용으로 CVAT에 올린 원본 사본을 사용 중지·보관 삭제 결정 때 지운다](0071-raw-copy-purge-in-review-tools.md) |
+| 0072 | [ADR 0072: 추론 장치를 환경 변수로 고르고, GPU를 골랐으면 조용히 CPU로 내려가지 않는다](0072-inference-device-selection.md) |

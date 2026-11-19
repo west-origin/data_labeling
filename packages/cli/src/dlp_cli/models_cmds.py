@@ -1,4 +1,4 @@
-"""모델 가중치 내려받기·변환과 라이선스 검사 (`config/models.yaml`, ADR 0009·0010).
+"""모델 가중치 받기·변환, 라이선스 검사, 추론 장치 확인 (`config/models.yaml`, ADR 0009·0010·0072).
 
 가중치는 저장소에 넣지 않고 `data/models/`에 받는다. 라벨링 데이터를 판매할 수 있으므로 가중치가
 비상업(`forbidden`)이면 쓰지 않는다 (ADR 0010). 새 모델을 정책에 넣으면 `config/models.yaml`에
@@ -20,6 +20,13 @@
     `scripts/export_*.py`를 실행한다. 변환 결과의 해시는 확인하지 않는다. 종료 코드: 0, 변환
     스크립트 실패는 `subprocess.CalledProcessError`로 1.
 
+`dlp models device`
+    추론 장치 설정(`DLP_INFERENCE_DEVICE` cpu | auto | cuda, 기본 cpu, ADR 0072)을 확인한다. 이
+    환경의 onnxruntime이 쓸 수 있는 실행 제공자와 고른 장치를 출력하고, 아주 작은 Identity 모델
+    (`dlp_models.onnx_bytes`)로 세션을 열어 실제로 잡힌 실행 제공자를 보인다. GPU 서버 설치
+    확인용이다. 종료 코드: 0, 1 값이 틀렸거나 GPU를 골랐는데 CUDA 실행 제공자가 없거나 세션이
+    CUDA를 받지 못함.
+
 `dlp models licenses`
     레지스트리의 모든 모델과 공개 데이터셋(`config/external_datasets.yaml`)의 라이선스·상업 사용
     표를 Markdown으로 출력한다 (`make licenses`, `make contracts`·`make check`에 포함). 위반은
@@ -32,14 +39,17 @@
 - `used_models(root)` — 정책 YAML(privacy·prelabel·actions·aireview·translate·training)이 실제로
   쓰는 모델을 "쓰는 곳 → 모델 이름"으로 모은다. `tests/test_model_licenses.py`와 `dlp pilot check`도
   이 함수를 쓴다.
-- `cmd_fetch`, `cmd_export`, `cmd_licenses`, `add_commands` — 실행 함수와 등록.
+- `cmd_fetch`, `cmd_export`, `cmd_licenses`, `cmd_device`, `add_commands` — 실행 함수와 등록.
 """
 
 from __future__ import annotations
 
 import argparse
 import subprocess
+import tempfile
 from pathlib import Path
+
+import numpy as np
 
 from dlp_actions.policy import load_policy as load_actions_policy
 from dlp_actions.translate_policy import load_policy as load_translate_policy
@@ -50,6 +60,9 @@ from dlp_models.datasets import (
     load_pretrain_objects,
     pretrain_violations,
 )
+from dlp_models.device import DeviceError, available_providers, describe
+from dlp_models.onnx import OnnxModel
+from dlp_models.onnx_bytes import identity_onnx
 from dlp_models.registry import fetch, load_registry
 from dlp_prelabel.policy import load_policy as load_prelabel_policy
 from dlp_privacy.policy import load_policy as load_privacy_policy
@@ -220,8 +233,33 @@ def cmd_export(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_device(args: argparse.Namespace) -> int:
+    """`dlp models device`: 추론 장치 설정을 확인한다 (ADR 0072).
+
+    반환: 0, 설정이 틀렸거나 GPU를 골랐는데 쓸 수 없으면 1 (`DeviceError`).
+    부작용: 임시 디렉터리에 Identity ONNX를 쓰고 세션을 연다. DB·버킷에는 접근하지 않는다.
+    """
+    del args
+    print(f"쓸 수 있는 실행 제공자: {', '.join(available_providers())}")
+    try:
+        print(describe())
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "identity.onnx"
+            path.write_bytes(identity_onnx((1, 4)))
+            model = OnnxModel(path)
+            x = np.arange(4, dtype=np.float32).reshape(1, 4)
+            if not np.array_equal(model.run(["y"], {"x": x})[0], x):
+                print("[실패] Identity 모델의 출력이 입력과 다릅니다")
+                return 1
+    except DeviceError as exc:
+        print(f"[실패] {exc}")
+        return 1
+    print(f"세션 확인: 실제 실행 제공자 {', '.join(model.providers)}")
+    return 0
+
+
 def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:  # pyright: ignore[reportPrivateUsage]
-    """`models fetch|licenses|export` 하위 명령을 등록한다."""
+    """`models fetch|licenses|export|device` 하위 명령을 등록한다."""
     models = sub.add_parser("models", help="모델 가중치")
     msub = models.add_subparsers(dest="models_command", required=True)
     fetch_p = msub.add_parser("fetch", help="config/models.yaml의 가중치를 받고 해시를 확인")
@@ -231,3 +269,5 @@ def add_commands(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> No
     lic.set_defaults(func=cmd_licenses)
     export = msub.add_parser("export", help="공개 ONNX가 없는 모델을 공식 가중치에서 변환")
     export.set_defaults(func=cmd_export)
+    device = msub.add_parser("device", help="추론 장치(DLP_INFERENCE_DEVICE)가 잡히는지 확인")
+    device.set_defaults(func=cmd_device)

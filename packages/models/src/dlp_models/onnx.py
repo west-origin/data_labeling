@@ -1,8 +1,9 @@
-"""ONNX Runtime 세션의 얇은 타입 래퍼 (onnxruntime에는 타입 스텁이 없다). CPU 실행.
+"""ONNX Runtime 세션의 얇은 타입 래퍼 (onnxruntime에는 타입 스텁이 없다). 기본 CPU 실행.
 
-`owlv2.Owlv2`와 `depth.MetricDepth`가 쓴다. CI·개발 환경은 GPU가 없다고 보고 실행 제공자를
-`CPUExecutionProvider` 하나로 고정한다. GPU 서버에서 쓰려면 이 래퍼에 제공자 선택을 더해야 한다.
-관련: WP8, ADR 0009.
+`owlv2.Owlv2`, `depth.MetricDepth`, SAM2·YOLOX 어댑터가 쓴다. 실행 제공자는
+`device.inference_device`(`DLP_INFERENCE_DEVICE`, 기본 cpu)가 고른다: cpu면 `CPUExecutionProvider`
+하나, cuda면 CUDA 다음에 CPU (ADR 0072). GPU를 골랐는데 세션이 CUDA를 받지 못하면 멈춘다. CI·개발
+환경은 GPU가 없어 지금까지와 같이 CPU로 돈다. 관련: WP8, ADR 0009.
 
 - `OnnxModel`: 모델 파일을 열어 두고 `run(출력 이름, 입력)`으로 추론한다. 출력은 모두 float32 배열로
   바꾼다.
@@ -20,9 +21,11 @@ import numpy as np
 import onnxruntime as ort
 from numpy.typing import NDArray
 
+from dlp_models.device import check_session, inference_device, onnx_providers, prepare
+
 
 class OnnxModel:
-    """CPU용 ONNX Runtime 추론 세션.
+    """ONNX Runtime 추론 세션 (장치는 `DLP_INFERENCE_DEVICE`, 기본 CPU).
 
     생성할 때 모델 파일을 읽어 그래프를 준비하므로(수백 MB면 수 초) 프레임마다 만들지 말고 한 번
     만들어 재사용한다.
@@ -39,13 +42,20 @@ class OnnxModel:
         Raises:
             onnxruntime 예외: 파일이 없거나 ONNX 형식이 아닐 때 (호출자는 `resolve`로 먼저
             확인한다).
+            DeviceError: `DLP_INFERENCE_DEVICE` 값이 틀렸거나 cuda인데 쓸 수 없을 때.
         """
         options = ort.SessionOptions()
         if threads:
             options.intra_op_num_threads = threads
-        self._session = ort.InferenceSession(
-            str(model), options, providers=["CPUExecutionProvider"]
-        )
+        device = inference_device()
+        prepare(device)
+        self._session = ort.InferenceSession(str(model), options, providers=onnx_providers(device))
+        check_session(device, self.providers, Path(model).name)
+
+    @property
+    def providers(self) -> list[str]:
+        """이 세션이 실제로 쓰는 실행 제공자 (앞이 먼저 쓰인다)."""
+        return [str(p) for p in self._session.get_providers()]
 
     def run(
         self, outputs: list[str], feeds: dict[str, NDArray[np.generic]]

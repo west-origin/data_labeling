@@ -49,6 +49,8 @@ from dlp_cli.ontology_access import session_ontology
 from dlp_cli.raw_access import raw_store
 from dlp_cli.schema_cmds import database_url
 from dlp_media.storage import ObjectStore, store_from_spec
+from dlp_models.device import DeviceError
+from dlp_models.device import describe as describe_device
 from dlp_models.vlm import OpenAICompatibleChat
 from dlp_prelabel.adapters.mediapipe_models import MediaPipeHands, MediaPipeObjects
 from dlp_prelabel.adapters.owl_objects import OwlObjects
@@ -96,11 +98,18 @@ def cmd_run(args: argparse.Namespace) -> int:
     4. OWLv2가 있으면 장면을 정한다 (`_scene`).
     5. `run_prelabel`이 스트림·모델마다 라벨을 쓰고 요약을 돌려준다.
 
-    반환: 성공 0, 선택한 모델 미준비 1.
+    반환: 성공 0, 선택한 모델 미준비 1, 추론 장치 설정 오류 1 (`DLP_INFERENCE_DEVICE`, 쓰기 전에
+    멈춘다).
     부작용: 한 트랜잭션에서 `label_records` INSERT(철회 레코드 포함)·세션 생애주기 갱신,
     원본 버킷 읽기(감사 기록). 온톨로지는 세션 버전의 DB 등록 사전을 읽는다.
     """
     root = repo_root()
+    # 추론 장치(ADR 0072)를 먼저 확인하고 출력에 남긴다 (어느 장치로 돌렸는지 구분하는 기록)
+    try:
+        print(describe_device())
+    except DeviceError as exc:
+        print(f"[추론 장치] {exc}")
+        return 1
     policy = load_policy(root)
     ontology = session_ontology(args.url, args.session_id)
     now = datetime.now(UTC)

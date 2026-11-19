@@ -90,13 +90,21 @@ db-upgrade: db-migrate
 	uv run dlp ontology register 1.0.0
 
 # 파일이 아닌 명령 대상 (같은 이름의 파일이 있어도 항상 실행)
-.PHONY: install install-curation test-isolated lint fmt typecheck test contracts schemas ui-theme coverage review-scope doc-coverage file-map models export-models todo-models licenses fixtures db-migrate db-upgrade check env up down ps logs health test-services \
+.PHONY: install install-curation install-gpu test-isolated lint fmt typecheck test contracts schemas ui-theme coverage review-scope doc-coverage file-map models export-models todo-models licenses fixtures db-migrate db-upgrade check env up down ps logs health test-services \
         cvat-up cvat-down cvat-superuser clean
 
 # 작업공간 의존성 설치 (uv.lock 그대로, --locked: 잠금 파일과 pyproject가 어긋나면 실패).
 # 선택 그룹(curation)은 빠진다 — FiftyOne이 필요하면 make install-curation.
 install:
 	uv sync --locked
+
+# GPU 서버(NVIDIA 드라이버가 CUDA 13을 지원) 설치, ADR 0072: make install 뒤 onnxruntime CPU판을 같은 판의
+# GPU판으로 바꾼다 (두 판은 같은 onnxruntime 모듈을 깔아 한 환경에 함께 둘 수 없다). CUDA 13·cuDNN 9
+# 라이브러리는 pip로 함께 받는다. 이 뒤로는 uv run이 잠금 파일대로 CPU판을 다시 깔지 않게 UV_NO_SYNC=1을
+# 둔다. make install을 다시 하면 CPU판으로 돌아간다. 확인: DLP_INFERENCE_DEVICE=cuda UV_NO_SYNC=1 uv run dlp models device
+ORT_VERSION_CMD = uv run --no-sync python -c 'import importlib.metadata as m; print(m.version("onnxruntime"))'
+install-gpu: install
+	v=$$($(ORT_VERSION_CMD)) && uv pip uninstall onnxruntime && uv pip install "onnxruntime-gpu[cuda,cudnn]==$$v"
 
 # 격리된 일회용 환경을 받는 테스트 (LeRobot 공식 쓰기·읽기, PyTorch CPU판 약 1.5 GB, 처음 한 번 수 분).
 # 환경은 scripts/lerobot-env/uv.lock에 고정한다. 일부 테스트(내보내기 종단)는 DB가 필요하다: make up 먼저.

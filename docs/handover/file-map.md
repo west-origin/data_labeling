@@ -9,7 +9,7 @@
 의존 표는 [구조 지도](architecture.md), 바꿀 때 함께 볼 파일과 시험은
 [변경 및 복구 안내](change-guide.md)에 있다.
 
-파일 683개.
+파일 687개.
 
 ## 목차
 
@@ -172,7 +172,7 @@
 | [`hints_cmds.py`](../../packages/cli/src/dlp_cli/hints_cmds.py) | 오탐 의심 힌트 하위 명령 `dlp review hints <세션>` (ADR 0055·0056). |
 | [`main.py`](../../packages/cli/src/dlp_cli/main.py) | `dlp` 명령줄 진입점 (WP0): 최상위 파서를 만들고 `<단계>_cmds.py`의 하위 명령을 등록해 실행 함수로 넘긴다. |
 | [`media_cmds.py`](../../packages/cli/src/dlp_cli/media_cmds.py) | 미디어·수집 하위 명령 (WP3, ADR 0003). |
-| [`models_cmds.py`](../../packages/cli/src/dlp_cli/models_cmds.py) | 모델 가중치 내려받기·변환과 라이선스 검사 (`config/models.yaml`, ADR 0009·0010). |
+| [`models_cmds.py`](../../packages/cli/src/dlp_cli/models_cmds.py) | 모델 가중치 받기·변환, 라이선스 검사, 추론 장치 확인 (`config/models.yaml`, ADR 0009·0010·0072). |
 | [`ontology_access.py`](../../packages/cli/src/dlp_cli/ontology_access.py) | CLI에서 세션·데이터셋 버전에 맞는 등록 사전을 읽는다. 연결은 항상 닫는다. |
 | [`ops_cmds.py`](../../packages/cli/src/dlp_cli/ops_cmds.py) | 운영 대시보드와 보안 하위 명령 (WP16, ADR 0020·0021). |
 | [`pilot_cmds.py`](../../packages/cli/src/dlp_cli/pilot_cmds.py) | 실제 영상 파일럿의 실행 전 준비 검사 (`dlp pilot check`). |
@@ -202,6 +202,7 @@
 | [`test_calib_cmds.py`](../../packages/cli/tests/test_calib_cmds.py) | `dlp calib intrinsics\|import\|assign\|palm\|show` 명령 테스트 (ADR 0045·0052, SQLite 파일 DB). |
 | [`test_calib_palm_estimate.py`](../../packages/cli/tests/test_calib_palm_estimate.py) | `dlp calib palm-estimate\|palm-revoke` 명령 경로 (ADR 0045·0052, F-COE-71, SQLite 파일 DB). |
 | [`test_dataset_build_cmd.py`](../../packages/cli/tests/test_dataset_build_cmd.py) | `dlp dataset build`가 빌드 거절을 traceback 없이 알린다 (F-ETA-31). |
+| [`test_device_cmds.py`](../../packages/cli/tests/test_device_cmds.py) | 추론 장치 설정(`DLP_INFERENCE_DEVICE`, ADR 0072)을 명령이 확인하고 출력에 남긴다. |
 | [`test_export_cmds.py`](../../packages/cli/tests/test_export_cmds.py) | `dlp export`의 촉각장갑용 원본 감사 저장소 선택과 요약 출력 (ADR 0069·0070, DB·저장소 없이). |
 | [`test_golden_cmds.py`](../../packages/cli/tests/test_golden_cmds.py) | 골든셋 CLI의 정답 고정 (`dlp dataset golden --create\|--from`, `dlp dataset build --golden`, `dlp eval golden`, ADR 0041). |
 | [`test_health.py`](../../packages/cli/tests/test_health.py) | `dlp_cli.health`와 `dlp` 진입점의 단위 테스트 (WP0). |
@@ -437,7 +438,9 @@
 | [`__init__.py`](../../packages/models/src/dlp_models/__init__.py) | 모델 가중치 레지스트리와 공용 런타임. |
 | [`datasets.py`](../../packages/models/src/dlp_models/datasets.py) | 공개 데이터셋 목록과 1차 학습 설정 검사 (config/external_datasets.yaml, ADR 0060). |
 | [`depth.py`](../../packages/models/src/dlp_models/depth.py) | 단안 메트릭 깊이 (Depth Anything V2 Metric Indoor Small, ONNX Runtime, CPU)와 2D→3D 변환. |
-| [`onnx.py`](../../packages/models/src/dlp_models/onnx.py) | ONNX Runtime 세션의 얇은 타입 래퍼 (onnxruntime에는 타입 스텁이 없다). CPU 실행. |
+| [`device.py`](../../packages/models/src/dlp_models/device.py) | 추론 장치 선택: 환경 변수 `DLP_INFERENCE_DEVICE` (cpu \| auto \| cuda, 기본 cpu, ADR 0072). |
+| [`onnx.py`](../../packages/models/src/dlp_models/onnx.py) | ONNX Runtime 세션의 얇은 타입 래퍼 (onnxruntime에는 타입 스텁이 없다). 기본 CPU 실행. |
+| [`onnx_bytes.py`](../../packages/models/src/dlp_models/onnx_bytes.py) | 아주 작은 ONNX 모델 바이트를 onnx 패키지 없이 만든다 (protobuf 형식을 직접 쓴다). |
 | [`owlv2.py`](../../packages/models/src/dlp_models/owlv2.py) | OWLv2 오픈 보캐뷸러리 탐지 (ONNX Runtime, CPU). 텍스트 질의로 임의의 대상을 찾는다. |
 | [`registry.py`](../../packages/models/src/dlp_models/registry.py) | 모델 가중치 레지스트리 (config/models.yaml). |
 | [`sam2.py`](../../packages/models/src/dlp_models/sam2.py) | SAM 2.1 박스·점 프롬프트 분할 (ONNX, CPU, ADR 0059). |
@@ -449,6 +452,7 @@
 | 파일 | 역할 |
 | --- | --- |
 | [`test_datasets.py`](../../packages/models/tests/test_datasets.py) | 공개 데이터셋 목록·1차 학습 설정 검사 (`dlp_models.datasets`, ADR 0060). |
+| [`test_device.py`](../../packages/models/tests/test_device.py) | 추론 장치 선택 `DLP_INFERENCE_DEVICE` (ADR 0072, F-PAR-98). |
 | [`test_models.py`](../../packages/models/tests/test_models.py) | dlp_models 단위 테스트: 레지스트리(목록·라이선스·해시), OWLv2·메트릭 깊이 전후처리. |
 | [`test_vlm.py`](../../packages/models/tests/test_vlm.py) | OpenAI 호환 VLM 공통 전송(`dlp_models.vlm`) 테스트 (WP17.1). |
 | [`test_yolox.py`](../../packages/models/tests/test_yolox.py) | YOLOX 전·후처리 단위 테스트 (`dlp_models.yolox`, ADR 0060). 가중치 없이 합성 배열로 정답을 계산한다. |

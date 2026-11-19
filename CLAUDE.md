@@ -41,6 +41,8 @@
 - `uv run dlp console serve` — 브라우저 운영 콘솔 (기본 127.0.0.1:8090, 토큰 주소 출력, 작업 기록은 `DLP_CONSOLE_DIR`,
   기본 ~/.dlp-console). 새 컴퓨터 설치는 `scripts/install/install.sh` (Mac·Linux·WSL2, ADR 0061)
 - `make install-curation` — FiftyOne(데이터 큐레이션, 약 1 GB) 포함 설치. `make install`을 다시 하면 빠진다
+- `make install-gpu` — GPU 서버: onnxruntime을 같은 판의 GPU판으로 바꿔 깐다. 이후 `UV_NO_SYNC=1`, 장치는
+  `DLP_INFERENCE_DEVICE`(cpu | auto | cuda, 기본 cpu), 확인은 `uv run dlp models device` (ADR 0072)
 - `make coverage` — 기본 테스트의 줄 커버리지 (reports/coverage, 하한 없음)
 - `make review-scope` — 전수 검수 범위표 (추적 파일별 위험 등급·관련 미해결 문제 수, reports/review-scope.csv)
 - `make file-map` — 파일마다 역할 한 칸을 모은 `docs/handover/file-map.md` 재생성. 파일을 더하거나 파일 맨 위 설명의

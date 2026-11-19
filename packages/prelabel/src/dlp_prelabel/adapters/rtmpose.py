@@ -31,6 +31,7 @@ import cv2
 import numpy as np
 from numpy.typing import NDArray
 
+from dlp_models.device import check_session, inference_device, prepare
 from dlp_models.registry import resolve
 from dlp_prelabel.arm import (
     ArmFrame,
@@ -202,6 +203,11 @@ def body_pass(
     return p.out
 
 
+def _providers(tool: Any) -> list[str]:
+    """rtmlib 도구(onnxruntime 백엔드)의 세션이 실제로 쓰는 실행 제공자 (ADR 0072)."""
+    return [str(name) for name in tool.session.get_providers()]
+
+
 class RtmPose(WearerAware):
     """전신 포즈 어댑터 (name="body"). 바디캠에서는 착용자 팔 골격 arm3도 낸다 (ADR 0058).
 
@@ -240,15 +246,21 @@ class RtmPose(WearerAware):
         # rtmlib은 무겁고 onnxruntime 세션을 바로 만들므로 실제로 돌릴 때만 불러온다
         from rtmlib import YOLOX, RTMPose
 
+        # 장치는 DLP_INFERENCE_DEVICE (기본 cpu, ADR 0072). 모델 버전에는 넣지 않는다
+        device = inference_device()
+        prepare(device)
         bp = self.policy.body
         detector = YOLOX(
             str(self.detector_path),
             model_input_size=(640, 640),
             det_mode="multiclass",
             score_thr=bp.detector_score,
-            device="cpu",
+            device=device,
         )
-        model = RTMPose(str(self.pose_path), model_input_size=(192, 256), device="cpu")
+        model = RTMPose(str(self.pose_path), model_input_size=(192, 256), device=device)
+        # GPU를 골랐는데 CUDA를 받지 못한 세션은 조용히 CPU로 돌지 않게 멈춘다
+        check_session(device, _providers(detector), self.detector_path.name)
+        check_session(device, _providers(model), self.pose_path.name)
 
         def detect(bgr: NDArray[np.uint8]) -> NDArray[np.float32]:
             """BGR 프레임 → 사람 박스 (N, 4) x1, y1, x2, y2 픽셀 (다른 COCO 클래스는 버린다)."""

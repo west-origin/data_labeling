@@ -75,3 +75,6 @@
 설치, GPU와 CPU 결과를 모델 버전에서 가를지의 결정이 필요하다. 할 일은 `docs/handover/issues.yaml`의
 F-PAR-98에, 모델별 런타임 표는 `docs/handover/architecture.md`의 `packages/models/` 절에 있다.
 
+2026-11-19: ONNX Runtime 두 곳(`OnnxModel`, RTMPose)의 장치 선택을 ADR 0072로 넣었다. 기본은 여전히 CPU이고,
+GPU판은 `make install-gpu`로 바꿔 깐다. MediaPipe는 CPU 그대로다.
+

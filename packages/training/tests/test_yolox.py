@@ -24,6 +24,7 @@ import numpy as np
 import pytest
 
 from dlp_fixtures.video import write_video
+from dlp_models.onnx_bytes import constant_onnx
 from dlp_prelabel.policy import load_policy as load_prelabel_policy
 from dlp_schema.dataset import Split
 from dlp_schema.history import Change
@@ -371,48 +372,7 @@ def test_base_weights_license_and_file_checks(tmp_path: Path) -> None:
             yolox_mod.base_weights(ROOT, "yolox_s_coco_pth")
 
 
-# ---------------------------------------------------------------- 로더 (아주 작은 ONNX)
-
-
-def _varint(n: int) -> bytes:
-    out = bytearray()
-    while True:
-        b, n = n & 0x7F, n >> 7
-        out.append(b | 0x80 if n else b)
-        if not n:
-            return bytes(out)
-
-
-def _field(no: int, data: bytes) -> bytes:
-    """길이 구분 필드 (wire type 2)."""
-    return _varint(no << 3 | 2) + _varint(len(data)) + data
-
-
-def _int(no: int, v: int) -> bytes:
-    """varint 필드 (wire type 0)."""
-    return _varint(no << 3) + _varint(v)
-
-
-def _value_info(name: str, shape: tuple[int, ...]) -> bytes:
-    """ValueInfoProto (float 텐서)."""
-    dims = b"".join(_field(1, _int(1, d)) for d in shape)
-    return _field(1, name.encode()) + _field(2, _field(1, _int(1, 1) + _field(2, dims)))
-
-
-def tiny_onnx(output: np.ndarray[Any, Any], size: int) -> bytes:
-    """입력 images (1, 3, size, size)를 무시하고 상수 output을 내는 ONNX (Identity 하나, opset 13).
-
-    onnx 패키지 없이 protobuf 형식을 직접 쓴다 (ModelProto 7 graph·8 opset_import, GraphProto 1
-    node· 5 initializer·11 input·12 output, TensorProto 1 dims·2 data_type·8 name·9 raw_data).
-    """
-    raw = np.ascontiguousarray(output, dtype="<f4")
-    init = b"".join(_int(1, d) for d in raw.shape) + _int(2, 1) + _field(8, b"const")
-    init += _field(9, raw.tobytes())
-    node = _field(1, b"const") + _field(2, b"output") + _field(4, b"Identity")
-    graph = _field(1, node) + _field(2, b"tiny") + _field(5, init)
-    graph += _field(11, _value_info("images", (1, 3, size, size)))
-    graph += _field(12, _value_info("output", raw.shape))
-    return _int(1, 8) + _field(7, graph) + _field(8, _field(1, b"") + _int(2, 13))
+# ------------------------------------------------ 로더 (아주 작은 ONNX, dlp_models.onnx_bytes)
 
 
 def _bundle(tmp_path: Path, **manifest_overrides: Any) -> Path:
@@ -428,7 +388,7 @@ def _bundle(tmp_path: Path, **manifest_overrides: Any) -> Path:
     row = 14 * (size // 8) + 14
     out[0, row, :5] = (0.0, 0.0, math.log(8.0), math.log(8.0), 0.95)
     out[0, row, 5 + sec.classes.index("bucket")] = 0.95
-    onnx = tiny_onnx(out, size)
+    onnx = constant_onnx(out, size)
     manifest: dict[str, Any] = {
         "kind": yolox_mod.MANIFEST_KIND,
         "format": yolox_mod.MANIFEST_FORMAT,

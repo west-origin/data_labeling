@@ -83,6 +83,8 @@ from dlp_cli.review_config import print_revocations, run_revocations
 from dlp_cli.schema_cmds import database_url
 from dlp_media.audit import current_actor
 from dlp_media.storage import STORE_ERRORS, ObjectStore, store_from_spec
+from dlp_models.device import DeviceError
+from dlp_models.device import describe as describe_device
 from dlp_privacy.audit import (
     AuditResult,
     audit_candidates,
@@ -137,7 +139,8 @@ def cmd_detect(args: argparse.Namespace) -> int:
         args.url: DB URL.
 
     반환: 0. 탐지기가 없는 대상은 실패가 아니라 "전수 검수 필요"로 출력만 한다. 커밋 뒤 회수
-    대기가 남으면 `REVOCATION_PENDING_EXIT`(4).
+    대기가 남으면 `REVOCATION_PENDING_EXIT`(4). 추론 장치 설정 오류(`DLP_INFERENCE_DEVICE`, ADR
+    0072)는 아무것도 하지 않고 1.
     부작용: 한 트랜잭션에서 `label_records`에 `blur_track` 추가(이전 모델 버전의 미검수 라벨은
     철회), 세션 프라이버시 상태 갱신, 블러가 바뀐 스트림의 라벨링 작업 회수 요청(ADR 0039),
     라벨링 버킷의 이전 블러본 렌더 기록 무효화(ADR 0024), 원본 버킷 읽기와 쓰기(검수 우선 구간
@@ -146,6 +149,12 @@ def cmd_detect(args: argparse.Namespace) -> int:
     `DLP_REVIEW_POLICY_FILE`은 읽지 않으므로 그 파일 오류도 매체 삭제를 막지 않는다).
     """
     root = repo_root()
+    # 추론 장치(ADR 0072)를 먼저 확인하고 출력에 남긴다 (어느 장치로 돌렸는지 구분하는 기록)
+    try:
+        print(describe_device())
+    except DeviceError as exc:
+        print(f"[추론 장치] {exc}")
+        return 1
     policy = load_policy(root)
     raw = raw_store(args.store, args.url, "privacy.detect")
     detectors, missing = build_detectors(policy, root)
